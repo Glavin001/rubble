@@ -1,25 +1,36 @@
-//! `rubble3d` -- Main facade crate for 3D physics simulation.
+//! `rubble3d` — Public API facade for the rubble 3D physics engine.
 //!
-//! Orchestrates the full physics pipeline: broadphase, narrowphase,
-//! contact persistence, and solver. CPU-only reference implementation.
+//! Orchestrates the full simulation pipeline:
+//! broadphase (LBVH) → narrowphase → solver.
+
+use std::collections::HashSet;
 
 use glam::{Mat3, Quat, Vec3, Vec4};
-use rubble_math::*;
-use std::collections::{HashMap, HashSet};
+use rubble_broadphase3d::{find_plane_pairs, Lbvh};
+use rubble_math::{
+    Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
+    FLAG_STATIC, SHAPE_BOX, SHAPE_CAPSULE, SHAPE_SPHERE,
+};
+use rubble_narrowphase3d::{
+    box_box, capsule_capsule, plane_box, plane_sphere, reduce_manifold, sphere_box,
+    sphere_capsule, sphere_sphere, ContactPersistence,
+};
+use rubble_shapes3d::{
+    compute_box_aabb, compute_capsule_aabb, compute_sphere_aabb, BoxData, CapsuleData, Plane,
+    SphereData,
+};
+use rubble_solver3d::{Solver3D, SolverParams};
 
 // ---------------------------------------------------------------------------
-// Configuration
+// SimConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for the 3D physics simulation.
+/// Top-level simulation configuration.
 pub struct SimConfig {
     pub gravity: Vec3,
     pub dt: f32,
     pub solver_iterations: u32,
-    pub beta: f32,
-    pub k_start: f32,
-    pub warmstart_decay: f32,
-    pub friction_default: f32,
+    pub max_bodies: usize,
 }
 
 impl Default for SimConfig {
@@ -28,20 +39,17 @@ impl Default for SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
             solver_iterations: 5,
-            beta: 10.0,
-            k_start: 1e4,
-            warmstart_decay: 0.95,
-            friction_default: 0.5,
+            max_bodies: 65536,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Shape description
+// ShapeDesc
 // ---------------------------------------------------------------------------
 
-/// Description of a collision shape.
-#[derive(Debug, Clone)]
+/// Describes a collision shape for body creation.
+#[derive(Debug, Clone, Copy)]
 pub enum ShapeDesc {
     Sphere { radius: f32 },
     Box { half_extents: Vec3 },
@@ -49,32 +57,95 @@ pub enum ShapeDesc {
 }
 
 // ---------------------------------------------------------------------------
-// Rigid body description
+// RigidBodyDesc
 // ---------------------------------------------------------------------------
 
-/// Description for creating a new rigid body.
+/// Descriptor for creating a rigid body.
 pub struct RigidBodyDesc {
-    pub shape: ShapeDesc,
     pub position: Vec3,
     pub rotation: Quat,
     pub linear_velocity: Vec3,
     pub angular_velocity: Vec3,
-    /// Mass of the body. 0 means static (infinite mass).
+    /// Mass of the body. Use 0 for static bodies.
     pub mass: f32,
     pub friction: f32,
+    pub shape: ShapeDesc,
+}
+
+impl Default for RigidBodyDesc {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            mass: 1.0,
+            friction: 0.5,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Handle allocator
+// Inertia computation
 // ---------------------------------------------------------------------------
 
-/// Generational index allocator for body handles.
-struct HandleAllocator {
+/// Compute the inverse inertia tensor for a shape given its mass.
+/// Returns `Mat3::ZERO` for static bodies (mass <= 0).
+fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
+    if mass <= 0.0 {
+        return Mat3::ZERO;
+    }
+    let diag = match shape {
+        ShapeDesc::Sphere { radius } => {
+            // I = 2/5 * m * r^2  (each diagonal)
+            let i = (2.0 / 5.0) * mass * radius * radius;
+            Vec3::splat(i)
+        }
+        ShapeDesc::Box { half_extents } => {
+            // Full extents: w=2*hx, h=2*hy, d=2*hz
+            let w = 2.0 * half_extents.x;
+            let h = 2.0 * half_extents.y;
+            let d = 2.0 * half_extents.z;
+            // Ixx = m/12 * (h^2 + d^2), Iyy = m/12 * (w^2 + d^2), Izz = m/12 * (w^2 + h^2)
+            Vec3::new(
+                mass / 12.0 * (h * h + d * d),
+                mass / 12.0 * (w * w + d * d),
+                mass / 12.0 * (w * w + h * h),
+            )
+        }
+        ShapeDesc::Capsule {
+            half_height,
+            radius,
+        } => {
+            // Approximate as cylinder: height = 2*half_height, radius = radius
+            let r2 = radius * radius;
+            let full_h = 2.0 * half_height;
+            let h2 = full_h * full_h;
+            // Ixx = Izz = m/12 * (3*r^2 + h^2), Iyy = m/2 * r^2
+            Vec3::new(
+                mass / 12.0 * (3.0 * r2 + h2),
+                mass / 2.0 * r2,
+                mass / 12.0 * (3.0 * r2 + h2),
+            )
+        }
+    };
+
+    // Inverse of a diagonal inertia tensor.
+    Mat3::from_diagonal(Vec3::new(1.0 / diag.x, 1.0 / diag.y, 1.0 / diag.z))
+}
+
+// ---------------------------------------------------------------------------
+// GenerationalIndexAllocator
+// ---------------------------------------------------------------------------
+
+/// Generational index allocator for stable body handles.
+struct GenerationalIndexAllocator {
     generations: Vec<u32>,
     free_list: Vec<u32>,
 }
 
-impl HandleAllocator {
+impl GenerationalIndexAllocator {
     fn new() -> Self {
         Self {
             generations: Vec::new(),
@@ -93,373 +164,78 @@ impl HandleAllocator {
         }
     }
 
-    fn dealloc(&mut self, h: BodyHandle) {
-        if self.is_valid(h) {
-            self.generations[h.index as usize] += 1;
-            self.free_list.push(h.index);
+    fn dealloc(&mut self, handle: BodyHandle) -> bool {
+        let idx = handle.index as usize;
+        if idx >= self.generations.len() {
+            return false;
         }
-    }
-
-    fn is_valid(&self, h: BodyHandle) -> bool {
-        let idx = h.index as usize;
-        idx < self.generations.len() && self.generations[idx] == h.generation
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Contact persistence
-// ---------------------------------------------------------------------------
-
-/// Tracks contacts across frames for warm-starting and collision event generation.
-struct ContactPersistence {
-    previous_pairs: HashSet<(u32, u32)>,
-    cached_lambdas: HashMap<(u32, u32, u32), (f32, f32, f32)>,
-}
-
-impl ContactPersistence {
-    fn new() -> Self {
-        Self {
-            previous_pairs: HashSet::new(),
-            cached_lambdas: HashMap::new(),
+        if self.generations[idx] != handle.generation {
+            return false;
         }
+        self.generations[idx] += 1;
+        self.free_list.push(handle.index);
+        true
     }
 
-    fn update(
-        &mut self,
-        contacts: &mut [Contact3D],
-        handles: &[BodyHandle],
-    ) -> Vec<CollisionEvent> {
-        let mut events = Vec::new();
-        let mut current_pairs = HashSet::new();
-
-        for c in contacts.iter_mut() {
-            let pair = (c.body_a.min(c.body_b), c.body_a.max(c.body_b));
-            current_pairs.insert(pair);
-
-            let key = (pair.0, pair.1, c.feature_id);
-            if let Some(&(ln, lt1, lt2)) = self.cached_lambdas.get(&key) {
-                c.lambda_n = ln;
-                c.lambda_t1 = lt1;
-                c.lambda_t2 = lt2;
-            }
-        }
-
-        for &pair in &current_pairs {
-            if !self.previous_pairs.contains(&pair) {
-                let ha = if (pair.0 as usize) < handles.len() {
-                    handles[pair.0 as usize]
-                } else {
-                    continue;
-                };
-                let hb = if (pair.1 as usize) < handles.len() {
-                    handles[pair.1 as usize]
-                } else {
-                    continue;
-                };
-                events.push(CollisionEvent::Started {
-                    body_a: ha,
-                    body_b: hb,
-                });
-            }
-        }
-
-        for &pair in &self.previous_pairs {
-            if !current_pairs.contains(&pair) {
-                let ha = if (pair.0 as usize) < handles.len() {
-                    handles[pair.0 as usize]
-                } else {
-                    continue;
-                };
-                let hb = if (pair.1 as usize) < handles.len() {
-                    handles[pair.1 as usize]
-                } else {
-                    continue;
-                };
-                events.push(CollisionEvent::Ended {
-                    body_a: ha,
-                    body_b: hb,
-                });
-            }
-        }
-
-        self.cached_lambdas.clear();
-        for c in contacts.iter() {
-            let pair = (c.body_a.min(c.body_b), c.body_a.max(c.body_b));
-            let key = (pair.0, pair.1, c.feature_id);
-            self.cached_lambdas
-                .insert(key, (c.lambda_n, c.lambda_t1, c.lambda_t2));
-        }
-
-        self.previous_pairs = current_pairs;
-        events
+    fn is_valid(&self, handle: BodyHandle) -> bool {
+        let idx = handle.index as usize;
+        idx < self.generations.len() && self.generations[idx] == handle.generation
     }
-}
-
-// ---------------------------------------------------------------------------
-// Inline narrowphase (since rubble-narrowphase3d is a stub)
-// ---------------------------------------------------------------------------
-
-fn make_contact3d(
-    body_a: u32,
-    body_b: u32,
-    point: Vec3,
-    normal: Vec3,
-    depth: f32,
-) -> Contact3D {
-    Contact3D {
-        point: Vec4::new(point.x, point.y, point.z, depth),
-        normal: Vec4::new(normal.x, normal.y, normal.z, 0.0),
-        body_a,
-        body_b,
-        feature_id: 0,
-        _pad: 0,
-        lambda_n: 0.0,
-        lambda_t1: 0.0,
-        lambda_t2: 0.0,
-        penalty_k: 0.0,
-    }
-}
-
-fn sphere_sphere(
-    pos_a: Vec3,
-    rad_a: f32,
-    pos_b: Vec3,
-    rad_b: f32,
-    body_a: u32,
-    body_b: u32,
-) -> Vec<Contact3D> {
-    let d = pos_b - pos_a;
-    let dist = d.length();
-    let r_sum = rad_a + rad_b;
-    if dist >= r_sum || dist < 1e-10 {
-        return vec![];
-    }
-    let normal = d / dist;
-    let depth = -(r_sum - dist);
-    let point = pos_a + normal * (rad_a + depth * 0.5);
-    vec![make_contact3d(body_a, body_b, point, normal, depth)]
-}
-
-fn sphere_box(
-    sphere_pos: Vec3,
-    radius: f32,
-    box_pos: Vec3,
-    box_rot: Quat,
-    half: Vec3,
-    body_a: u32,
-    body_b: u32,
-) -> Vec<Contact3D> {
-    let rot_inv = box_rot.conjugate();
-    let local = rot_inv * (sphere_pos - box_pos);
-    let closest = local.clamp(-half, half);
-    let diff = local - closest;
-    let dist_sq = diff.length_squared();
-    if dist_sq >= radius * radius {
-        return vec![];
-    }
-    let dist = dist_sq.sqrt().max(1e-10);
-    let normal_local = diff / dist;
-    let normal = box_rot * normal_local;
-    let closest_world = box_pos + box_rot * closest;
-    let depth = -(radius - dist);
-    vec![make_contact3d(body_a, body_b, closest_world, normal, depth)]
-}
-
-fn box_box(
-    pos_a: Vec3,
-    rot_a: Quat,
-    half_a: Vec3,
-    pos_b: Vec3,
-    rot_b: Quat,
-    half_b: Vec3,
-    body_a: u32,
-    body_b: u32,
-) -> Vec<Contact3D> {
-    // SAT with 15 axes: 3 from A, 3 from B, 9 edge cross products
-    let mat_a = Mat3::from_quat(rot_a);
-    let mat_b = Mat3::from_quat(rot_b);
-    let d = pos_b - pos_a;
-
-    let axes_a = [mat_a.x_axis, mat_a.y_axis, mat_a.z_axis];
-    let axes_b = [mat_b.x_axis, mat_b.y_axis, mat_b.z_axis];
-    let halves_a = [half_a.x, half_a.y, half_a.z];
-    let halves_b = [half_b.x, half_b.y, half_b.z];
-
-    let mut min_overlap = f32::MAX;
-    let mut min_axis = Vec3::ZERO;
-
-    // Test face axes
-    for axes in [&axes_a, &axes_b] {
-        for &axis in axes.iter() {
-            let proj_a: f32 = (0..3).map(|i| halves_a[i] * axes_a[i].dot(axis).abs()).sum();
-            let proj_b: f32 = (0..3).map(|i| halves_b[i] * axes_b[i].dot(axis).abs()).sum();
-            let dist = d.dot(axis).abs();
-            let overlap = proj_a + proj_b - dist;
-            if overlap <= 0.0 {
-                return vec![];
-            }
-            if overlap < min_overlap {
-                min_overlap = overlap;
-                min_axis = if d.dot(axis) >= 0.0 { axis } else { -axis };
-            }
-        }
-    }
-
-    // Test edge cross-product axes
-    for i in 0..3 {
-        for j in 0..3 {
-            let axis = axes_a[i].cross(axes_b[j]);
-            let len = axis.length();
-            if len < 1e-6 {
-                continue; // parallel edges
-            }
-            let axis = axis / len;
-            let proj_a: f32 = (0..3).map(|k| halves_a[k] * axes_a[k].dot(axis).abs()).sum();
-            let proj_b: f32 = (0..3).map(|k| halves_b[k] * axes_b[k].dot(axis).abs()).sum();
-            let dist = d.dot(axis).abs();
-            let overlap = proj_a + proj_b - dist;
-            if overlap <= 0.0 {
-                return vec![];
-            }
-            if overlap < min_overlap {
-                min_overlap = overlap;
-                min_axis = if d.dot(axis) >= 0.0 { axis } else { -axis };
-            }
-        }
-    }
-
-    let depth = -min_overlap;
-    let contact_point = (pos_a + pos_b) * 0.5;
-    vec![make_contact3d(
-        body_a,
-        body_b,
-        contact_point,
-        min_axis,
-        depth,
-    )]
-}
-
-fn sphere_plane(
-    sphere_pos: Vec3,
-    radius: f32,
-    plane: &rubble_shapes3d::Plane,
-    body_idx: u32,
-    plane_body_idx: u32,
-) -> Vec<Contact3D> {
-    let dist = sphere_pos.dot(plane.normal) - plane.distance;
-    if dist >= radius {
-        return vec![];
-    }
-    let depth = -(radius - dist);
-    let point = sphere_pos - plane.normal * dist;
-    vec![make_contact3d(
-        body_idx,
-        plane_body_idx,
-        point,
-        plane.normal,
-        depth,
-    )]
-}
-
-fn box_plane(
-    box_pos: Vec3,
-    box_rot: Quat,
-    half: Vec3,
-    plane: &rubble_shapes3d::Plane,
-    body_idx: u32,
-    plane_body_idx: u32,
-) -> Vec<Contact3D> {
-    // Find the vertex most penetrating the plane
-    let rot_mat = Mat3::from_quat(box_rot);
-    let mut deepest_depth = 0.0_f32;
-    let mut deepest_point = Vec3::ZERO;
-    let mut found = false;
-
-    for i in 0..8u32 {
-        let x = if i & 1 == 0 { -half.x } else { half.x };
-        let y = if i & 2 == 0 { -half.y } else { half.y };
-        let z = if i & 4 == 0 { -half.z } else { half.z };
-        let local = Vec3::new(x, y, z);
-        let world = box_pos + rot_mat * local;
-        let dist = world.dot(plane.normal) - plane.distance;
-        if dist < deepest_depth || !found {
-            if dist < 0.0 || !found {
-                deepest_depth = dist;
-                deepest_point = world;
-                found = true;
-            }
-        }
-    }
-
-    if deepest_depth >= 0.0 {
-        return vec![];
-    }
-
-    let depth = deepest_depth;
-    vec![make_contact3d(
-        body_idx,
-        plane_body_idx,
-        deepest_point,
-        plane.normal,
-        depth,
-    )]
 }
 
 // ---------------------------------------------------------------------------
 // World
 // ---------------------------------------------------------------------------
 
-/// The main 3D physics world.
+/// The main 3D physics world. Add bodies, step the simulation, query results.
 pub struct World {
     config: SimConfig,
-    allocator: HandleAllocator,
-
-    // Body data (parallel arrays)
     states: Vec<RigidBodyState3D>,
-    shapes: Vec<ShapeDesc>,
-    frictions: Vec<f32>,
+    props: Vec<RigidBodyProps3D>,
     inv_inertias: Vec<Mat3>,
-    handles: Vec<BodyHandle>,
-    active: Vec<bool>,
-
-    // Pipeline components
+    shapes: Vec<ShapeDesc>,
+    spheres: Vec<SphereData>,
+    boxes: Vec<BoxData>,
+    capsules: Vec<CapsuleData>,
+    planes: Vec<Plane>,
+    allocator: GenerationalIndexAllocator,
+    solver: Solver3D,
     persistence: ContactPersistence,
-    solver: rubble_solver3d::Solver3D,
-
-    // Events
+    prev_pairs: HashSet<(u32, u32)>,
     events: Vec<CollisionEvent>,
-
-    // Planes
-    planes: Vec<rubble_shapes3d::Plane>,
+    /// Tracks which slot indices are alive (not removed).
+    alive: Vec<bool>,
 }
 
 impl World {
     /// Create a new physics world with the given configuration.
     pub fn new(config: SimConfig) -> Self {
-        let solver_params = rubble_solver3d::SolverParams {
+        let solver = Solver3D::new(SolverParams {
             iterations: config.solver_iterations,
-            beta: config.beta,
-            k_start: config.k_start,
-            warmstart_decay: config.warmstart_decay,
-        };
+            ..Default::default()
+        });
+        let persistence = ContactPersistence::new(0.95);
         Self {
-            solver: rubble_solver3d::Solver3D::new(solver_params),
             config,
-            allocator: HandleAllocator::new(),
             states: Vec::new(),
-            shapes: Vec::new(),
-            frictions: Vec::new(),
+            props: Vec::new(),
             inv_inertias: Vec::new(),
-            handles: Vec::new(),
-            active: Vec::new(),
-            persistence: ContactPersistence::new(),
-            events: Vec::new(),
+            shapes: Vec::new(),
+            spheres: Vec::new(),
+            boxes: Vec::new(),
+            capsules: Vec::new(),
             planes: Vec::new(),
+            allocator: GenerationalIndexAllocator::new(),
+            solver,
+            persistence,
+            prev_pairs: HashSet::new(),
+            events: Vec::new(),
+            alive: Vec::new(),
         }
     }
 
-    /// Add a rigid body to the world and return its handle.
-    pub fn add_body(&mut self, desc: RigidBodyDesc) -> BodyHandle {
+    /// Add a rigid body to the world. Returns a stable handle.
+    pub fn add_body(&mut self, desc: &RigidBodyDesc) -> BodyHandle {
         let handle = self.allocator.alloc();
         let idx = handle.index as usize;
 
@@ -477,280 +253,448 @@ impl World {
             desc.angular_velocity,
         );
 
-        let inv_inertia = if desc.mass > 0.0 {
-            compute_inv_inertia(&desc.shape, desc.mass)
-        } else {
-            Mat3::ZERO
+        let inv_inertia = compute_inertia(&desc.shape, desc.mass);
+
+        let flags = if desc.mass <= 0.0 { FLAG_STATIC } else { 0 };
+
+        let (shape_type, shape_index) = match &desc.shape {
+            ShapeDesc::Sphere { radius } => {
+                let si = self.spheres.len() as u32;
+                self.spheres.push(SphereData {
+                    radius: *radius,
+                    _pad: [0.0; 3],
+                });
+                (SHAPE_SPHERE, si)
+            }
+            ShapeDesc::Box { half_extents } => {
+                let si = self.boxes.len() as u32;
+                self.boxes.push(BoxData {
+                    half_extents: half_extents.extend(0.0),
+                });
+                (SHAPE_BOX, si)
+            }
+            ShapeDesc::Capsule {
+                half_height,
+                radius,
+            } => {
+                let si = self.capsules.len() as u32;
+                self.capsules.push(CapsuleData {
+                    half_height: *half_height,
+                    radius: *radius,
+                    _pad: [0.0; 2],
+                });
+                (SHAPE_CAPSULE, si)
+            }
         };
 
-        // Ensure arrays are large enough
+        let prop =
+            RigidBodyProps3D::new(inv_inertia, desc.friction, shape_type, shape_index, flags);
+
+        // Ensure arrays are large enough for this index.
         if idx >= self.states.len() {
-            self.states.resize(
-                idx + 1,
-                RigidBodyState3D::new(Vec3::ZERO, 0.0, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
-            );
-            self.shapes.resize(idx + 1, ShapeDesc::Sphere { radius: 1.0 });
-            self.frictions.resize(idx + 1, 0.5);
+            self.states.resize(idx + 1, bytemuck::Zeroable::zeroed());
+            self.props.resize(idx + 1, bytemuck::Zeroable::zeroed());
             self.inv_inertias.resize(idx + 1, Mat3::ZERO);
-            self.handles.resize(idx + 1, BodyHandle::new(0, u32::MAX));
-            self.active.resize(idx + 1, false);
+            self.shapes.resize(idx + 1, ShapeDesc::Sphere { radius: 0.5 });
+            self.alive.resize(idx + 1, false);
         }
 
         self.states[idx] = state;
-        self.shapes[idx] = desc.shape;
-        self.frictions[idx] = desc.friction;
+        self.props[idx] = prop;
         self.inv_inertias[idx] = inv_inertia;
-        self.handles[idx] = handle;
-        self.active[idx] = true;
+        self.shapes[idx] = desc.shape;
+        self.alive[idx] = true;
 
         handle
     }
 
-    /// Remove a body from the world.
-    pub fn remove_body(&mut self, handle: BodyHandle) {
-        if self.allocator.is_valid(handle) {
-            let idx = handle.index as usize;
-            self.active[idx] = false;
-            self.allocator.dealloc(handle);
+    /// Remove a body from the world. Returns `true` if it was successfully removed.
+    pub fn remove_body(&mut self, handle: BodyHandle) -> bool {
+        if !self.allocator.is_valid(handle) {
+            return false;
         }
+        let idx = handle.index as usize;
+        self.alive[idx] = false;
+        self.states[idx] = bytemuck::Zeroable::zeroed();
+        self.props[idx] = bytemuck::Zeroable::zeroed();
+        self.inv_inertias[idx] = Mat3::ZERO;
+        self.allocator.dealloc(handle);
+        true
     }
 
-    /// Return the number of active bodies.
-    pub fn body_count(&self) -> u32 {
-        self.active.iter().filter(|&&a| a).count() as u32
+    /// Number of currently alive bodies.
+    pub fn body_count(&self) -> usize {
+        self.alive.iter().filter(|&&a| a).count()
     }
 
-    /// Add a static ground plane.
+    /// Get the position of a body, if the handle is valid.
+    pub fn get_position(&self, handle: BodyHandle) -> Option<Vec3> {
+        if !self.allocator.is_valid(handle) {
+            return None;
+        }
+        Some(self.states[handle.index as usize].position())
+    }
+
+    /// Get the orientation of a body, if the handle is valid.
+    pub fn get_rotation(&self, handle: BodyHandle) -> Option<Quat> {
+        if !self.allocator.is_valid(handle) {
+            return None;
+        }
+        Some(self.states[handle.index as usize].quat())
+    }
+
+    /// Get the linear velocity of a body, if the handle is valid.
+    pub fn get_velocity(&self, handle: BodyHandle) -> Option<Vec3> {
+        if !self.allocator.is_valid(handle) {
+            return None;
+        }
+        Some(self.states[handle.index as usize].linear_velocity())
+    }
+
+    /// Set the position of a body.
+    pub fn set_position(&mut self, handle: BodyHandle, pos: Vec3) {
+        if !self.allocator.is_valid(handle) {
+            return;
+        }
+        let idx = handle.index as usize;
+        let im = self.states[idx].inv_mass();
+        self.states[idx].position_inv_mass = Vec4::new(pos.x, pos.y, pos.z, im);
+    }
+
+    /// Set the linear velocity of a body.
+    pub fn set_velocity(&mut self, handle: BodyHandle, vel: Vec3) {
+        if !self.allocator.is_valid(handle) {
+            return;
+        }
+        let idx = handle.index as usize;
+        self.states[idx].lin_vel = vel.extend(0.0);
+    }
+
+    /// Add an infinite half-space plane to the world.
     pub fn add_plane(&mut self, normal: Vec3, distance: f32) {
-        self.planes.push(rubble_shapes3d::Plane { normal, distance });
+        self.planes.push(Plane {
+            normal: normal.normalize(),
+            distance,
+        });
     }
 
-    /// Step the simulation forward by one dt.
+    /// Advance the simulation by one time step.
+    ///
+    /// Pipeline: compute AABBs -> LBVH broadphase -> plane broadphase ->
+    /// narrowphase contacts -> persistence (warm start) -> solver -> event detection.
     pub fn step(&mut self) {
-        let dt = self.config.dt;
-        let gravity = self.config.gravity;
-
-        // Collect active body indices
-        let active_indices: Vec<usize> = (0..self.states.len())
-            .filter(|&i| self.active[i])
-            .collect();
-
-        if active_indices.is_empty() {
+        let n = self.states.len();
+        if n == 0 {
             return;
         }
 
-        // Build index mapping: active_slot -> original_index
-        let _n = active_indices.len();
-        let mut index_to_slot: Vec<usize> = vec![usize::MAX; self.states.len()];
-        for (slot, &orig) in active_indices.iter().enumerate() {
+        // Collect indices of alive bodies.
+        let alive_indices: Vec<usize> = (0..n).filter(|&i| self.alive[i]).collect();
+        if alive_indices.is_empty() {
+            return;
+        }
+
+        // Build mapping from original index -> compact slot for the solver.
+        let mut index_to_slot: Vec<usize> = vec![usize::MAX; n];
+        for (slot, &orig) in alive_indices.iter().enumerate() {
             index_to_slot[orig] = slot;
         }
 
-        // Collect states into a compact array for the solver
+        // Build compact arrays for the solver.
+        // We append one extra "virtual static body" at the end for plane contacts.
         let mut compact_states: Vec<RigidBodyState3D> =
-            active_indices.iter().map(|&i| self.states[i]).collect();
-        let compact_inv_inertias: Vec<Mat3> =
-            active_indices.iter().map(|&i| self.inv_inertias[i]).collect();
+            alive_indices.iter().map(|&i| self.states[i]).collect();
+        let mut compact_inv_inertias: Vec<Mat3> =
+            alive_indices.iter().map(|&i| self.inv_inertias[i]).collect();
 
-        // 1. Compute AABBs
-        let aabbs: Vec<Aabb3D> = active_indices
+        // Virtual static body for plane contacts (inv_mass = 0 means static).
+        let plane_body_slot = compact_states.len() as u32;
+        compact_states.push(RigidBodyState3D::new(
+            Vec3::ZERO,
+            0.0, // inv_mass = 0 => static
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ));
+        compact_inv_inertias.push(Mat3::ZERO);
+
+        // 1. Compute AABBs for all alive bodies (in compact indexing).
+        let aabbs: Vec<Aabb3D> = alive_indices
             .iter()
-            .map(|&i| compute_aabb(&self.shapes[i], self.states[i].position(), self.states[i].quat()))
+            .map(|&i| {
+                let pos = self.states[i].position();
+                let rot = self.states[i].quat();
+                match &self.shapes[i] {
+                    ShapeDesc::Sphere { radius } => compute_sphere_aabb(pos, *radius),
+                    ShapeDesc::Box { half_extents } => compute_box_aabb(pos, rot, *half_extents),
+                    ShapeDesc::Capsule {
+                        half_height,
+                        radius,
+                    } => compute_capsule_aabb(pos, rot, *half_height, *radius),
+                }
+            })
             .collect();
 
-        // 2. Broadphase
-        let lbvh = rubble_broadphase3d::Lbvh::build(&aabbs);
-        let bp_result = lbvh.find_overlapping_pairs(&aabbs);
+        // 2. Build LBVH and find broad-phase pairs (slot indices).
+        let lbvh = Lbvh::build(&aabbs);
+        let broad_result = lbvh.find_overlapping_pairs(&aabbs);
 
-        // 3. Narrowphase
-        let mut contacts = Vec::new();
+        // 3. Find plane pairs (slot indices).
+        let plane_pairs = find_plane_pairs(&self.planes, &aabbs);
 
-        // Body-body pairs
-        for pair in &bp_result.pairs {
-            let slot_a = pair[0] as usize;
-            let slot_b = pair[1] as usize;
-            let orig_a = active_indices[slot_a];
-            let orig_b = active_indices[slot_b];
+        // 4. Generate narrow-phase contacts for body-body pairs.
+        let mut all_contacts: Vec<Contact3D> = Vec::new();
 
-            let new_contacts = narrowphase_pair(
-                &self.shapes[orig_a],
-                self.states[orig_a].position(),
-                self.states[orig_a].quat(),
-                &self.shapes[orig_b],
-                self.states[orig_b].position(),
-                self.states[orig_b].quat(),
-                slot_a as u32,
-                slot_b as u32,
-            );
-            contacts.extend(new_contacts);
+        for &[slot_a, slot_b] in &broad_result.pairs {
+            let orig_a = alive_indices[slot_a as usize];
+            let orig_b = alive_indices[slot_b as usize];
+            let contacts =
+                self.generate_pair_contacts(orig_a, orig_b, slot_a, slot_b);
+            all_contacts.extend(contacts);
         }
 
-        // Plane-body contacts
-        for (slot, &orig) in active_indices.iter().enumerate() {
+        // 5. Generate narrow-phase contacts for plane-body pairs.
+        for &(plane_idx, slot_idx) in &plane_pairs {
+            let orig = alive_indices[slot_idx as usize];
+            // Skip static bodies for plane contacts.
             if self.states[orig].inv_mass() <= 0.0 {
                 continue;
             }
-            for plane in &self.planes {
-                let plane_contacts = narrowphase_plane(
-                    &self.shapes[orig],
-                    self.states[orig].position(),
-                    self.states[orig].quat(),
-                    plane,
-                    slot as u32,
-                );
-                contacts.extend(plane_contacts);
-            }
+            let plane = &self.planes[plane_idx];
+            let pos = self.states[orig].position();
+            let rot = self.states[orig].quat();
+
+            // Use the virtual static body (plane_body_slot) as body_a,
+            // and the dynamic body's slot as body_b. The solver sees
+            // inv_mass=0 for the plane body, so only the dynamic body moves.
+            let body_slot = slot_idx;
+            let contacts = match &self.shapes[orig] {
+                ShapeDesc::Sphere { radius } => {
+                    plane_sphere(plane.normal, plane.distance, pos, *radius, plane_body_slot, body_slot)
+                }
+                ShapeDesc::Box { half_extents } => {
+                    let raw = plane_box(
+                        plane.normal,
+                        plane.distance,
+                        pos,
+                        rot,
+                        *half_extents,
+                        plane_body_slot,
+                        body_slot,
+                    );
+                    reduce_manifold(&raw)
+                }
+                ShapeDesc::Capsule {
+                    half_height,
+                    radius,
+                } => {
+                    // Approximate capsule-plane as sphere-plane at endpoints + center.
+                    let axis = rot * Vec3::Y;
+                    let tip_lo = pos - axis * *half_height;
+                    let tip_hi = pos + axis * *half_height;
+                    let mut contacts = plane_sphere(
+                        plane.normal,
+                        plane.distance,
+                        tip_lo,
+                        *radius,
+                        plane_body_slot,
+                        body_slot,
+                    );
+                    contacts.extend(plane_sphere(
+                        plane.normal,
+                        plane.distance,
+                        tip_hi,
+                        *radius,
+                        plane_body_slot,
+                        body_slot,
+                    ));
+                    contacts.extend(plane_sphere(
+                        plane.normal,
+                        plane.distance,
+                        pos,
+                        *radius,
+                        plane_body_slot,
+                        body_slot,
+                    ));
+                    reduce_manifold(&contacts)
+                }
+            };
+            all_contacts.extend(contacts);
         }
 
-        // 4. Contact persistence
-        let compact_handles: Vec<BodyHandle> =
-            active_indices.iter().map(|&i| self.handles[i]).collect();
-        let new_events = self.persistence.update(&mut contacts, &compact_handles);
-        self.events.extend(new_events);
+        // 6. Contact persistence (warm starting).
+        let (warm_contacts, persistence_events) = self.persistence.update(all_contacts);
+        let mut contacts = warm_contacts;
 
-        // 5. Solve
+        // 7. Detect collision events via pair tracking.
+        let curr_pairs: HashSet<(u32, u32)> = contacts
+            .iter()
+            .map(|c| (c.body_a.min(c.body_b), c.body_a.max(c.body_b)))
+            .collect();
+
+        // Emit Started/Ended events not already captured by persistence.
+        // Persistence already handles this, so just forward those events.
+        self.events.extend(persistence_events);
+
+        self.prev_pairs = curr_pairs;
+
+        // 8. Run solver.
         self.solver.solve(
-            dt,
-            gravity,
+            self.config.dt,
+            self.config.gravity,
             &mut compact_states,
             &compact_inv_inertias,
             &mut contacts,
         );
 
-        // Write back
-        for (slot, &orig) in active_indices.iter().enumerate() {
+        // Write compact states back to the original arrays.
+        for (slot, &orig) in alive_indices.iter().enumerate() {
             self.states[orig] = compact_states[slot];
         }
     }
 
-    /// Get the position of a body by handle.
-    pub fn get_body_position(&self, handle: BodyHandle) -> Option<Vec3> {
-        if self.allocator.is_valid(handle) && self.active[handle.index as usize] {
-            Some(self.states[handle.index as usize].position())
-        } else {
-            None
-        }
-    }
-
-    /// Get the linear velocity of a body by handle.
-    pub fn get_body_velocity(&self, handle: BodyHandle) -> Option<Vec3> {
-        if self.allocator.is_valid(handle) && self.active[handle.index as usize] {
-            Some(self.states[handle.index as usize].linear_velocity())
-        } else {
-            None
-        }
-    }
-
-    /// Drain all pending collision events.
-    pub fn drain_collision_events(&mut self) -> Vec<CollisionEvent> {
+    /// Drain all collision events accumulated since the last drain.
+    pub fn drain_events(&mut self) -> Vec<CollisionEvent> {
         std::mem::take(&mut self.events)
     }
-}
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
 
-fn compute_inv_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
-    if mass <= 0.0 {
-        return Mat3::ZERO;
-    }
-    match shape {
-        ShapeDesc::Sphere { radius } => {
-            let i = 2.0 / 5.0 * mass * radius * radius;
-            Mat3::from_diagonal(Vec3::splat(1.0 / i))
-        }
-        ShapeDesc::Box { half_extents } => {
-            let h = *half_extents;
-            let ix = mass / 3.0 * (h.y * h.y + h.z * h.z);
-            let iy = mass / 3.0 * (h.x * h.x + h.z * h.z);
-            let iz = mass / 3.0 * (h.x * h.x + h.y * h.y);
-            Mat3::from_diagonal(Vec3::new(1.0 / ix, 1.0 / iy, 1.0 / iz))
-        }
-        ShapeDesc::Capsule {
-            half_height,
-            radius,
-        } => {
-            // Approximate as cylinder
-            let r2 = radius * radius;
-            let h = half_height * 2.0;
-            let ix = mass * (3.0 * r2 + h * h) / 12.0;
-            let iy = mass * r2 / 2.0;
-            Mat3::from_diagonal(Vec3::new(1.0 / ix, 1.0 / iy, 1.0 / ix))
-        }
-    }
-}
+    /// Generate narrow-phase contacts between two bodies.
+    /// `orig_a`/`orig_b` are indices into self.shapes/states,
+    /// `slot_a`/`slot_b` are compact indices used in the contact body_a/body_b fields.
+    fn generate_pair_contacts(
+        &self,
+        orig_a: usize,
+        orig_b: usize,
+        slot_a: u32,
+        slot_b: u32,
+    ) -> Vec<Contact3D> {
+        let pos_a = self.states[orig_a].position();
+        let rot_a = self.states[orig_a].quat();
+        let pos_b = self.states[orig_b].position();
+        let rot_b = self.states[orig_b].quat();
 
-fn compute_aabb(shape: &ShapeDesc, position: Vec3, rotation: Quat) -> Aabb3D {
-    match shape {
-        ShapeDesc::Sphere { radius } => rubble_shapes3d::compute_sphere_aabb(position, *radius),
-        ShapeDesc::Box { half_extents } => {
-            rubble_shapes3d::compute_box_aabb(position, rotation, *half_extents)
-        }
-        ShapeDesc::Capsule {
-            half_height,
-            radius,
-        } => rubble_shapes3d::compute_capsule_aabb(position, rotation, *half_height, *radius),
-    }
-}
-
-fn narrowphase_pair(
-    shape_a: &ShapeDesc,
-    pos_a: Vec3,
-    rot_a: Quat,
-    shape_b: &ShapeDesc,
-    pos_b: Vec3,
-    rot_b: Quat,
-    body_a: u32,
-    body_b: u32,
-) -> Vec<Contact3D> {
-    match (shape_a, shape_b) {
-        (ShapeDesc::Sphere { radius: ra }, ShapeDesc::Sphere { radius: rb }) => {
-            sphere_sphere(pos_a, *ra, pos_b, *rb, body_a, body_b)
-        }
-        (ShapeDesc::Sphere { radius }, ShapeDesc::Box { half_extents }) => {
-            sphere_box(pos_a, *radius, pos_b, rot_b, *half_extents, body_a, body_b)
-        }
-        (ShapeDesc::Box { half_extents }, ShapeDesc::Sphere { radius }) => {
-            // Swap and reverse normal
-            let mut contacts =
-                sphere_box(pos_b, *radius, pos_a, rot_a, *half_extents, body_b, body_a);
-            for c in &mut contacts {
-                std::mem::swap(&mut c.body_a, &mut c.body_b);
-                c.normal = (-c.normal.truncate()).extend(0.0);
+        match (&self.shapes[orig_a], &self.shapes[orig_b]) {
+            (ShapeDesc::Sphere { radius: ra }, ShapeDesc::Sphere { radius: rb }) => {
+                sphere_sphere(pos_a, *ra, pos_b, *rb, slot_a, slot_b)
             }
-            contacts
+            (ShapeDesc::Sphere { radius }, ShapeDesc::Box { half_extents }) => {
+                sphere_box(pos_a, *radius, pos_b, rot_b, *half_extents, slot_a, slot_b)
+            }
+            (ShapeDesc::Box { half_extents }, ShapeDesc::Sphere { radius }) => {
+                let mut contacts =
+                    sphere_box(pos_b, *radius, pos_a, rot_a, *half_extents, slot_b, slot_a);
+                for c in &mut contacts {
+                    std::mem::swap(&mut c.body_a, &mut c.body_b);
+                    c.normal = Vec4::new(-c.normal.x, -c.normal.y, -c.normal.z, 0.0);
+                }
+                contacts
+            }
+            (ShapeDesc::Box { half_extents: ha }, ShapeDesc::Box { half_extents: hb }) => {
+                box_box(pos_a, rot_a, *ha, pos_b, rot_b, *hb, slot_a, slot_b)
+            }
+            (ShapeDesc::Sphere { radius }, ShapeDesc::Capsule { half_height, radius: cr }) => {
+                sphere_capsule(pos_a, *radius, pos_b, rot_b, *half_height, *cr, slot_a, slot_b)
+            }
+            (ShapeDesc::Capsule { half_height, radius: cr }, ShapeDesc::Sphere { radius }) => {
+                let mut contacts = sphere_capsule(
+                    pos_b, *radius, pos_a, rot_a, *half_height, *cr, slot_b, slot_a,
+                );
+                for c in &mut contacts {
+                    std::mem::swap(&mut c.body_a, &mut c.body_b);
+                    c.normal = Vec4::new(-c.normal.x, -c.normal.y, -c.normal.z, 0.0);
+                }
+                contacts
+            }
+            (
+                ShapeDesc::Capsule {
+                    half_height: hh_a,
+                    radius: ra,
+                },
+                ShapeDesc::Capsule {
+                    half_height: hh_b,
+                    radius: rb,
+                },
+            ) => capsule_capsule(
+                pos_a, rot_a, *hh_a, *ra, pos_b, rot_b, *hh_b, *rb, slot_a, slot_b,
+            ),
+            (ShapeDesc::Box { half_extents }, ShapeDesc::Capsule { half_height, radius }) => {
+                // Approximate box-capsule as sphere_box at capsule endpoints + center.
+                let axis = rot_b * Vec3::Y;
+                let tip_a = pos_b + axis * *half_height;
+                let tip_b = pos_b - axis * *half_height;
+                let mut contacts = Vec::new();
+                contacts.extend(sphere_box(
+                    tip_a,
+                    *radius,
+                    pos_a,
+                    rot_a,
+                    *half_extents,
+                    slot_b,
+                    slot_a,
+                ));
+                contacts.extend(sphere_box(
+                    tip_b,
+                    *radius,
+                    pos_a,
+                    rot_a,
+                    *half_extents,
+                    slot_b,
+                    slot_a,
+                ));
+                contacts.extend(sphere_box(
+                    pos_b,
+                    *radius,
+                    pos_a,
+                    rot_a,
+                    *half_extents,
+                    slot_b,
+                    slot_a,
+                ));
+                for c in &mut contacts {
+                    std::mem::swap(&mut c.body_a, &mut c.body_b);
+                    c.normal = Vec4::new(-c.normal.x, -c.normal.y, -c.normal.z, 0.0);
+                }
+                reduce_manifold(&contacts)
+            }
+            (ShapeDesc::Capsule { half_height, radius }, ShapeDesc::Box { half_extents }) => {
+                let axis = rot_a * Vec3::Y;
+                let tip_a = pos_a + axis * *half_height;
+                let tip_b = pos_a - axis * *half_height;
+                let mut contacts = Vec::new();
+                contacts.extend(sphere_box(
+                    tip_a,
+                    *radius,
+                    pos_b,
+                    rot_b,
+                    *half_extents,
+                    slot_a,
+                    slot_b,
+                ));
+                contacts.extend(sphere_box(
+                    tip_b,
+                    *radius,
+                    pos_b,
+                    rot_b,
+                    *half_extents,
+                    slot_a,
+                    slot_b,
+                ));
+                contacts.extend(sphere_box(
+                    pos_a,
+                    *radius,
+                    pos_b,
+                    rot_b,
+                    *half_extents,
+                    slot_a,
+                    slot_b,
+                ));
+                reduce_manifold(&contacts)
+            }
         }
-        (
-            ShapeDesc::Box {
-                half_extents: ha,
-            },
-            ShapeDesc::Box {
-                half_extents: hb,
-            },
-        ) => box_box(pos_a, rot_a, *ha, pos_b, rot_b, *hb, body_a, body_b),
-        _ => vec![], // Capsule combinations not yet implemented
-    }
-}
-
-fn narrowphase_plane(
-    shape: &ShapeDesc,
-    pos: Vec3,
-    rot: Quat,
-    plane: &rubble_shapes3d::Plane,
-    body_idx: u32,
-) -> Vec<Contact3D> {
-    // Use a special "plane body" index that won't conflict.
-    // We treat plane contacts with body_a = body_idx, body_b = body_idx
-    // but with a special normal from the plane.
-    match shape {
-        ShapeDesc::Sphere { radius } => {
-            sphere_plane(pos, *radius, plane, body_idx, body_idx)
-        }
-        ShapeDesc::Box { half_extents } => {
-            box_plane(pos, rot, *half_extents, plane, body_idx, body_idx)
-        }
-        _ => vec![],
     }
 }
 
@@ -766,161 +710,251 @@ mod tests {
     fn test_world_new() {
         let world = World::new(SimConfig::default());
         assert_eq!(world.body_count(), 0);
+        assert!(world.planes.is_empty());
+        assert!(world.events.is_empty());
     }
 
     #[test]
-    fn test_single_body_falls() {
+    fn test_add_remove_body() {
         let mut world = World::new(SimConfig::default());
-        let handle = world.add_body(RigidBodyDesc {
-            shape: ShapeDesc::Sphere { radius: 0.5 },
-            position: Vec3::new(0.0, 10.0, 0.0),
-            rotation: Quat::IDENTITY,
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
+        let handle = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(1.0, 2.0, 3.0),
             mass: 1.0,
-            friction: 0.5,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+            ..Default::default()
+        });
+        assert_eq!(world.body_count(), 1);
+        assert_eq!(world.get_position(handle), Some(Vec3::new(1.0, 2.0, 3.0)));
+
+        let removed = world.remove_body(handle);
+        assert!(removed);
+        assert_eq!(world.body_count(), 0);
+        assert_eq!(world.get_position(handle), None);
+
+        // Double-remove should fail.
+        assert!(!world.remove_body(handle));
+    }
+
+    #[test]
+    fn test_handle_allocator() {
+        let mut alloc = GenerationalIndexAllocator::new();
+
+        let h1 = alloc.alloc();
+        assert_eq!(h1.index, 0);
+        assert_eq!(h1.generation, 0);
+        assert!(alloc.is_valid(h1));
+
+        let h2 = alloc.alloc();
+        assert_eq!(h2.index, 1);
+        assert_eq!(h2.generation, 0);
+        assert!(alloc.is_valid(h2));
+
+        // Dealloc h1.
+        assert!(alloc.dealloc(h1));
+        assert!(!alloc.is_valid(h1));
+
+        // Re-alloc should reuse index 0 with bumped generation.
+        let h3 = alloc.alloc();
+        assert_eq!(h3.index, 0);
+        assert_eq!(h3.generation, 1);
+        assert!(alloc.is_valid(h3));
+
+        // Old handle with generation 0 should be invalid.
+        assert!(!alloc.is_valid(h1));
+    }
+
+    #[test]
+    fn test_single_body_gravity() {
+        let mut world = World::new(SimConfig {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            dt: 1.0 / 60.0,
+            solver_iterations: 5,
+            max_bodies: 1024,
         });
 
-        let start_y = world.get_body_position(handle).unwrap().y;
+        let handle = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 10.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+            ..Default::default()
+        });
 
+        // Step ~60 times (approx 1 second).
         for _ in 0..60 {
             world.step();
         }
 
-        let end_y = world.get_body_position(handle).unwrap().y;
+        let pos = world.get_position(handle).unwrap();
+        // After 1 second of free-fall: y ~ 10 - 0.5 * 9.81 * 1^2 ~ 5.095
         assert!(
-            end_y < start_y,
-            "Body should fall under gravity: start_y={start_y}, end_y={end_y}"
+            pos.y < 10.0,
+            "Body should have fallen: y = {}",
+            pos.y
+        );
+        assert!(
+            pos.y > 0.0,
+            "Body should not have fallen too far: y = {}",
+            pos.y
+        );
+        let expected_y = 10.0 - 0.5 * 9.81 * 1.0;
+        assert!(
+            (pos.y - expected_y).abs() < 1.0,
+            "Body y={} should be near expected y={} (tolerance 1.0)",
+            pos.y,
+            expected_y
         );
     }
 
     #[test]
-    fn test_floor_and_box() {
-        let mut world = World::new(SimConfig::default());
-
-        // Static floor (mass = 0)
-        let _floor = world.add_body(RigidBodyDesc {
-            shape: ShapeDesc::Box {
-                half_extents: Vec3::new(10.0, 0.5, 10.0),
-            },
-            position: Vec3::new(0.0, -0.5, 0.0),
-            rotation: Quat::IDENTITY,
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
-            mass: 0.0,
-            friction: 0.5,
+    fn test_two_body_collision() {
+        let mut world = World::new(SimConfig {
+            gravity: Vec3::ZERO,
+            dt: 1.0 / 60.0,
+            solver_iterations: 10,
+            max_bodies: 1024,
         });
 
-        // Dynamic box above floor
-        let box_handle = world.add_body(RigidBodyDesc {
-            shape: ShapeDesc::Sphere { radius: 0.5 },
-            position: Vec3::new(0.0, 2.0, 0.0),
-            rotation: Quat::IDENTITY,
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
+        let h1 = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(-2.0, 0.0, 0.0),
+            linear_velocity: Vec3::new(5.0, 0.0, 0.0),
             mass: 1.0,
-            friction: 0.5,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
         });
 
+        let h2 = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(2.0, 0.0, 0.0),
+            linear_velocity: Vec3::new(-5.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        });
+
+        // Step enough times for them to collide and resolve.
         for _ in 0..120 {
             world.step();
         }
 
-        let y = world.get_body_position(box_handle).unwrap().y;
-        // The sphere should have settled near the floor (y ~ 0.5, sphere radius)
-        // Allow generous tolerance since this is a reference CPU solver
+        let p1 = world.get_position(h1).unwrap();
+        let p2 = world.get_position(h2).unwrap();
+        let dist = (p2 - p1).length();
+
+        // Two spheres of radius 1.0 should not overlap significantly after collision.
         assert!(
-            y > -2.0 && y < 5.0,
-            "Box should settle near floor, got y={y}"
+            dist >= 1.5,
+            "Bodies should not overlap significantly: distance = {}",
+            dist
         );
     }
 
     #[test]
-    fn test_add_and_remove_bodies() {
+    fn test_body_count() {
         let mut world = World::new(SimConfig::default());
 
-        let h1 = world.add_body(RigidBodyDesc {
-            shape: ShapeDesc::Sphere { radius: 0.5 },
-            position: Vec3::ZERO,
-            rotation: Quat::IDENTITY,
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
-            mass: 1.0,
-            friction: 0.5,
-        });
-        assert_eq!(world.body_count(), 1);
-
-        let h2 = world.add_body(RigidBodyDesc {
-            shape: ShapeDesc::Sphere { radius: 0.5 },
-            position: Vec3::new(5.0, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
-            mass: 1.0,
-            friction: 0.5,
-        });
-        assert_eq!(world.body_count(), 2);
+        let h1 = world.add_body(&RigidBodyDesc::default());
+        let _h2 = world.add_body(&RigidBodyDesc::default());
+        let h3 = world.add_body(&RigidBodyDesc::default());
+        assert_eq!(world.body_count(), 3);
 
         world.remove_body(h1);
-        assert_eq!(world.body_count(), 1);
-        assert!(world.get_body_position(h1).is_none());
-        assert!(world.get_body_position(h2).is_some());
-
-        // Step should not panic with removed bodies
-        world.step();
-
-        // Re-use the freed slot
-        let h3 = world.add_body(RigidBodyDesc {
-            shape: ShapeDesc::Sphere { radius: 0.5 },
-            position: Vec3::new(10.0, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
-            mass: 1.0,
-            friction: 0.5,
-        });
         assert_eq!(world.body_count(), 2);
-        // h3 reuses index 0 but with generation 1
-        assert_eq!(h3.index, 0);
-        assert_eq!(h3.generation, 1);
-        // Old handle h1 is still invalid
-        assert!(world.get_body_position(h1).is_none());
+
+        world.remove_body(h3);
+        assert_eq!(world.body_count(), 1);
     }
 
     #[test]
-    fn test_collision_events() {
-        let mut world = World::new(SimConfig::default());
-
-        // Two overlapping spheres
-        let _h1 = world.add_body(RigidBodyDesc {
-            shape: ShapeDesc::Sphere { radius: 1.0 },
-            position: Vec3::new(0.0, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
-            mass: 1.0,
-            friction: 0.5,
+    fn test_plane_collision() {
+        let mut world = World::new(SimConfig {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            dt: 1.0 / 60.0,
+            solver_iterations: 10,
+            max_bodies: 1024,
         });
 
-        let _h2 = world.add_body(RigidBodyDesc {
-            shape: ShapeDesc::Sphere { radius: 1.0 },
-            position: Vec3::new(1.0, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
+        // Ground plane at y=0.
+        world.add_plane(Vec3::Y, 0.0);
+
+        let handle = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 5.0, 0.0),
             mass: 1.0,
-            friction: 0.5,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+            ..Default::default()
         });
 
-        world.step();
-        let events = world.drain_collision_events();
-        let started_count = events
-            .iter()
-            .filter(|e| matches!(e, CollisionEvent::Started { .. }))
-            .count();
+        // Run for several seconds of simulation time.
+        for _ in 0..300 {
+            world.step();
+        }
+
+        let pos = world.get_position(handle).unwrap();
+        // The sphere (radius 0.5) should rest on the plane at approximately y >= 0.
         assert!(
-            started_count > 0,
-            "Should have at least one Started event for overlapping spheres"
+            pos.y >= -0.5,
+            "Sphere should not fall through the plane: y = {}",
+            pos.y
         );
+        assert!(
+            pos.y < 5.0,
+            "Sphere should have fallen from its starting position: y = {}",
+            pos.y
+        );
+    }
+
+    #[test]
+    fn test_compute_inertia_sphere() {
+        let shape = ShapeDesc::Sphere { radius: 1.0 };
+        let inv_i = compute_inertia(&shape, 5.0);
+        // I = 2/5 * 5 * 1 = 2.0 per diagonal, inv = 0.5
+        let expected = 0.5;
+        let cols = inv_i.to_cols_array_2d();
+        assert!((cols[0][0] - expected).abs() < 1e-6);
+        assert!((cols[1][1] - expected).abs() < 1e-6);
+        assert!((cols[2][2] - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_inertia_static() {
+        let shape = ShapeDesc::Sphere { radius: 1.0 };
+        let inv_i = compute_inertia(&shape, 0.0);
+        assert_eq!(inv_i, Mat3::ZERO);
+    }
+
+    #[test]
+    fn test_set_position_and_velocity() {
+        let mut world = World::new(SimConfig::default());
+        let handle = world.add_body(&RigidBodyDesc {
+            position: Vec3::ZERO,
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+            ..Default::default()
+        });
+
+        world.set_position(handle, Vec3::new(10.0, 20.0, 30.0));
+        assert_eq!(
+            world.get_position(handle),
+            Some(Vec3::new(10.0, 20.0, 30.0))
+        );
+
+        world.set_velocity(handle, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(world.get_velocity(handle), Some(Vec3::new(1.0, 2.0, 3.0)));
+    }
+
+    #[test]
+    fn test_get_rotation() {
+        let mut world = World::new(SimConfig::default());
+        let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        let handle = world.add_body(&RigidBodyDesc {
+            rotation: rot,
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+            ..Default::default()
+        });
+
+        let got = world.get_rotation(handle).unwrap();
+        assert!((got.x - rot.x).abs() < 1e-6);
+        assert!((got.y - rot.y).abs() < 1e-6);
+        assert!((got.z - rot.z).abs() < 1e-6);
+        assert!((got.w - rot.w).abs() < 1e-6);
     }
 }
