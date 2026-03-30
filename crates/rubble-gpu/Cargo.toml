@@ -5,13 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-rust-gpu = ["dep:spirv-std"]
+rust-gpu = []
 
 [dependencies]
 bytemuck.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
-spirv-std = { version = "0.9", optional = true }
 
 [dev-dependencies]
 rand.workspace = true

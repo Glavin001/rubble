@@ -5,9 +5,8 @@ use bytemuck::Pod;
 use std::marker::PhantomData;
 
 pub struct GpuContext {
-    pub device: Option<wgpu::Device>,
-    pub queue: Option<wgpu::Queue>,
-    pub cpu_fallback: bool,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
 }
 
 impl GpuContext {
@@ -22,44 +21,30 @@ impl GpuContext {
                 force_fallback_adapter: false,
                 compatible_surface: None,
             })
-            .await;
+            .await
+            .expect("failed to request adapter");
 
-        match adapter {
-            Ok(adapter) => {
-                let (device, queue) = adapter
-                    .request_device(&wgpu::DeviceDescriptor {
-                        label: Some("rubble-device"),
-                        required_features: wgpu::Features::empty(),
-                        required_limits: wgpu::Limits::default(),
-                        memory_hints: wgpu::MemoryHints::Performance,
-                        trace: wgpu::Trace::default(),
-                    })
-                    .await
-                    .expect("failed to create device");
-                Self {
-                    device: Some(device),
-                    queue: Some(queue),
-                    cpu_fallback: false,
-                }
-            }
-            Err(_) => Self {
-                device: None,
-                queue: None,
-                cpu_fallback: true,
-            },
-        }
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("rubble-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::default(),
+            })
+            .await
+            .expect("failed to create device");
+
+        Self { device, queue }
     }
 }
 
 pub fn test_gpu_context() -> GpuContext {
-    pollster::block_on(GpuContext::new_with_backends(
-        wgpu::Backends::NOOP | wgpu::Backends::all(),
-    ))
+    pollster::block_on(GpuContext::new_with_backends(wgpu::Backends::all()))
 }
 
 pub struct GpuBuffer<T: Pod + Copy> {
-    buffer: Option<wgpu::Buffer>,
-    cpu_data: Vec<T>,
+    buffer: wgpu::Buffer,
     len: u32,
     capacity: u32,
     usage: wgpu::BufferUsages,
@@ -72,17 +57,14 @@ impl<T: Pod + Copy> GpuBuffer<T> {
         let usage = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
             | wgpu::BufferUsages::COPY_SRC;
-        let buffer = ctx.device.as_ref().map(|device| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("rubble-gpu-buffer"),
-                size: (cap as usize * std::mem::size_of::<T>()) as u64,
-                usage,
-                mapped_at_creation: false,
-            })
+        let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rubble-gpu-buffer"),
+            size: (cap as usize * std::mem::size_of::<T>()) as u64,
+            usage,
+            mapped_at_creation: false,
         });
         Self {
             buffer,
-            cpu_data: Vec::with_capacity(cap as usize),
             len: 0,
             capacity: cap,
             usage,
@@ -92,39 +74,32 @@ impl<T: Pod + Copy> GpuBuffer<T> {
 
     pub fn upload(&mut self, ctx: &GpuContext, data: &[T]) {
         self.grow_if_needed(ctx, data.len());
-        if let (Some(queue), Some(buffer)) = (&ctx.queue, &self.buffer) {
-            queue.write_buffer(buffer, 0, bytemuck::cast_slice(data));
-        }
-        self.cpu_data.clear();
-        self.cpu_data.extend_from_slice(data);
+        ctx.queue
+            .write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
         self.len = data.len() as u32;
     }
 
     pub fn download(&self, ctx: &GpuContext) -> Vec<T> {
-        if ctx.cpu_fallback || self.buffer.is_none() {
-            return self.cpu_data.clone();
-        }
-        let device = ctx.device.as_ref().expect("device missing");
-        let queue = ctx.queue.as_ref().expect("queue missing");
-        let buffer = self.buffer.as_ref().expect("buffer missing");
         let byte_len = self.len as u64 * std::mem::size_of::<T>() as u64;
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rubble-staging"),
             size: byte_len.max(1),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         if byte_len > 0 {
-            encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, byte_len);
+            encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, byte_len);
         }
-        queue.submit(std::iter::once(encoder.finish()));
+        ctx.queue.submit(std::iter::once(encoder.finish()));
         let slice = staging.slice(..byte_len);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |res| {
             tx.send(res).ok();
         });
-        let _ = device.poll(wgpu::PollType::Wait);
+        let _ = ctx.device.poll(wgpu::PollType::Wait);
         rx.recv()
             .expect("map callback dropped")
             .expect("map failed");
@@ -153,25 +128,21 @@ impl<T: Pod + Copy> GpuBuffer<T> {
         while new_cap < required {
             new_cap *= 2;
         }
-        if let Some(device) = &ctx.device {
-            let new_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("rubble-gpu-buffer-grow"),
-                size: (new_cap * std::mem::size_of::<T>()) as u64,
-                usage: self.usage,
-                mapped_at_creation: false,
-            });
-            if self.len > 0 {
-                if let (Some(old), Some(queue)) = (&self.buffer, &ctx.queue) {
-                    let bytes = self.len as u64 * std::mem::size_of::<T>() as u64;
-                    let mut encoder =
-                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                    encoder.copy_buffer_to_buffer(old, 0, &new_buffer, 0, bytes);
-                    queue.submit(std::iter::once(encoder.finish()));
-                }
-            }
-            self.buffer = Some(new_buffer);
+        let new_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rubble-gpu-buffer-grow"),
+            size: (new_cap * std::mem::size_of::<T>()) as u64,
+            usage: self.usage,
+            mapped_at_creation: false,
+        });
+        if self.len > 0 {
+            let bytes = self.len as u64 * std::mem::size_of::<T>() as u64;
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            encoder.copy_buffer_to_buffer(&self.buffer, 0, &new_buffer, 0, bytes);
+            ctx.queue.submit(std::iter::once(encoder.finish()));
         }
-        self.cpu_data.reserve(new_cap - self.capacity as usize);
+        self.buffer = new_buffer;
         self.capacity = new_cap as u32;
     }
 }
@@ -210,76 +181,74 @@ pub fn round_up_workgroups(total: u32, workgroup_size: u32) -> u32 {
 }
 
 pub fn run_mul2_kernel(ctx: &GpuContext, input: &[f32]) -> Vec<f32> {
-    if ctx.cpu_fallback {
-        let mut out = input.to_vec();
-        for v in &mut out {
-            *v *= 2.0;
-        }
-        return out;
-    }
-
     let mut buffer = GpuBuffer::<f32>::new(ctx, input.len());
     buffer.upload(ctx, input);
 
-    let device = ctx.device.as_ref().expect("device missing");
-    let queue = ctx.queue.as_ref().expect("queue missing");
-    let raw = buffer.buffer.as_ref().expect("buffer missing");
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("mul2"),
-        source: wgpu::ShaderSource::Wgsl(
-            "@group(0) @binding(0) var<storage,read_write> data: array<f32>;
+    let shader = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mul2"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@group(0) @binding(0) var<storage,read_write> data: array<f32>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  let i = gid.x;
  if (i < arrayLength(&data)) { data[i] = data[i] * 2.0; }
 }"
-            .into(),
-        ),
-    });
-    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("mul2-bgl"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
-    });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("mul2-pl"),
-        bind_group_layouts: &[&layout],
-        push_constant_ranges: &[],
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("mul2-pipeline"),
-        layout: Some(&pipeline_layout),
-        module: &shader,
-        entry_point: Some("main"),
-        cache: None,
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-    });
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                .into(),
+            ),
+        });
+    let layout = ctx
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mul2-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+    let pipeline_layout = ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mul2-pl"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+    let pipeline = ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mul2-pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            cache: None,
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+    let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("mul2-bg"),
         layout: &layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
-            resource: raw.as_entire_binding(),
+            resource: buffer.buffer.as_entire_binding(),
         }],
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.dispatch_workgroups(round_up_workgroups(input.len() as u32, 64), 1, 1);
     }
-    queue.submit(std::iter::once(encoder.finish()));
+    ctx.queue.submit(std::iter::once(encoder.finish()));
     buffer.download(ctx)
 }
 
