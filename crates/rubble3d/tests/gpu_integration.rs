@@ -330,3 +330,44 @@ fn gpu_add_remove_body_stability() {
     assert!(pos2.y < 5.0, "GPU: h2 should have fallen: y = {}", pos2.y);
     assert!(pos2.y.is_finite(), "GPU: h2 position not finite");
 }
+
+#[test]
+fn gpu_empty_world_step() {
+    let mut world = gpu_world(SimConfig::default());
+    assert_eq!(world.body_count(), 0);
+    // Stepping an empty world should not crash or panic.
+    for _ in 0..10 {
+        world.step();
+    }
+    assert_eq!(world.body_count(), 0);
+}
+
+#[test]
+fn gpu_high_velocity_stability() {
+    let mut world = gpu_world(SimConfig {
+        gravity: Vec3::ZERO,
+        ..Default::default()
+    });
+
+    let h = world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        linear_velocity: Vec3::new(500.0, -300.0, 200.0),
+        shape: ShapeDesc::Sphere { radius: 0.5 },
+        ..Default::default()
+    });
+
+    for _ in 0..120 {
+        world.step();
+    }
+
+    let pos = world.get_position(h).unwrap();
+    let vel = world.get_velocity(h).unwrap();
+    assert!(
+        pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite(),
+        "High-velocity body position diverged: {pos}"
+    );
+    assert!(
+        vel.x.is_finite() && vel.y.is_finite() && vel.z.is_finite(),
+        "High-velocity body velocity diverged: {vel}"
+    );
+}

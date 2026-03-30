@@ -6,6 +6,7 @@
 
 use glam::Vec2;
 use rubble2d::{RigidBodyDesc2D, ShapeDesc2D, SimConfig2D, World2D};
+use std::f32::consts::FRAC_PI_6;
 
 /// Helper to create a GPU-backed 2D world.
 fn gpu_world(config: SimConfig2D) -> World2D {
@@ -301,4 +302,67 @@ fn gpu_2d_add_remove_body() {
         pos2.y
     );
     assert!(pos2.y.is_finite(), "GPU 2D: h2 position not finite");
+}
+
+#[test]
+fn gpu_2d_empty_world_step() {
+    let mut world = gpu_world(SimConfig2D::default());
+    assert_eq!(world.body_count(), 0);
+    // Stepping an empty world should not crash or panic.
+    for _ in 0..10 {
+        world.step();
+    }
+    assert_eq!(world.body_count(), 0);
+}
+
+#[test]
+fn gpu_2d_get_angle() {
+    let mut world = gpu_world(SimConfig2D::default());
+    let h = world.add_body(&RigidBodyDesc2D {
+        x: 0.0,
+        y: 0.0,
+        angle: FRAC_PI_6,
+        shape: ShapeDesc2D::Rect {
+            half_extents: Vec2::new(1.0, 0.5),
+        },
+        ..Default::default()
+    });
+
+    let angle = world.get_angle(h).unwrap();
+    assert!(
+        (angle - FRAC_PI_6).abs() < 0.01,
+        "Initial angle should be PI/6, got {angle}"
+    );
+}
+
+#[test]
+fn gpu_2d_high_velocity_stability() {
+    let mut world = gpu_world(SimConfig2D {
+        gravity: Vec2::ZERO,
+        ..Default::default()
+    });
+
+    let h = world.add_body(&RigidBodyDesc2D {
+        x: 0.0,
+        y: 0.0,
+        vx: 500.0,
+        vy: -300.0,
+        shape: ShapeDesc2D::Circle { radius: 0.5 },
+        ..Default::default()
+    });
+
+    for _ in 0..120 {
+        world.step();
+    }
+
+    let pos = world.get_position(h).unwrap();
+    let vel = world.get_velocity(h).unwrap();
+    assert!(
+        pos.x.is_finite() && pos.y.is_finite(),
+        "High-velocity body position diverged: {pos}"
+    );
+    assert!(
+        vel.x.is_finite() && vel.y.is_finite(),
+        "High-velocity body velocity diverged: {vel}"
+    );
 }

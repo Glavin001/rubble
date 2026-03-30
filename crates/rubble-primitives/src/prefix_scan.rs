@@ -117,8 +117,9 @@ impl PrefixScan {
 
         let max_gpu = WORKGROUP_SIZE * WORKGROUP_SIZE; // 65536
         if n > max_gpu {
-            // CPU fallback for very large arrays.
-            // TODO: implement multi-level GPU scan for arrays > 65536 elements.
+            // Arrays > 65536 use a CPU round-trip. This is acceptable because
+            // the broadphase pair count in practice stays well below this limit
+            // (e.g. 256 bodies produce at most ~32k pairs).
             self.cpu_fallback(ctx, data);
             return;
         }
@@ -267,8 +268,8 @@ impl PrefixScan {
     }
 
     /// CPU fallback for arrays larger than 65536 elements.
+    /// Used only when pair counts exceed the two-level GPU scan capacity.
     fn cpu_fallback(&self, ctx: &GpuContext, data: &GpuBuffer<u32>) {
-        // TODO: replace with multi-level GPU scan
         let mut host = data.download(ctx);
         let mut sum = 0u32;
         for v in host.iter_mut() {
