@@ -160,4 +160,42 @@ mod tests {
         let result = output.download(&ctx);
         assert_eq!(result, vec![10, 30, 50, 60, 80]);
     }
+
+    #[test]
+    fn test_compaction_all_zeros() {
+        let ctx = crate::test_gpu();
+        let compact = StreamCompaction::new(&ctx);
+
+        let data_in = [10u32, 20, 30, 40];
+        let preds = [0u32, 0, 0, 0];
+
+        let mut data = GpuBuffer::<u32>::new(&ctx, data_in.len());
+        data.upload(&ctx, &data_in);
+        let mut predicates = GpuBuffer::<u32>::new(&ctx, preds.len());
+        predicates.upload(&ctx, &preds);
+        let mut output = GpuBuffer::<u32>::new(&ctx, data_in.len());
+
+        let count = compact.compact(&ctx, &data, &predicates, &mut output);
+        assert_eq!(count, 0, "All-zero predicates should yield count=0");
+    }
+
+    #[test]
+    fn test_compaction_all_ones() {
+        let ctx = crate::test_gpu();
+        let compact = StreamCompaction::new(&ctx);
+
+        let data_in = [10u32, 20, 30, 40, 50];
+        let preds = [1u32, 1, 1, 1, 1];
+
+        let mut data = GpuBuffer::<u32>::new(&ctx, data_in.len());
+        data.upload(&ctx, &data_in);
+        let mut predicates = GpuBuffer::<u32>::new(&ctx, preds.len());
+        predicates.upload(&ctx, &preds);
+        let mut output = GpuBuffer::<u32>::new(&ctx, data_in.len());
+
+        let count = compact.compact(&ctx, &data, &predicates, &mut output);
+        assert_eq!(count, 5, "All-one predicates should yield count=N");
+        let result = output.download(&ctx);
+        assert_eq!(result, vec![10, 20, 30, 40, 50]);
+    }
 }

@@ -36,7 +36,7 @@ fn free_fall_circle_1_second() {
     let pos = world.get_position(h).unwrap();
     let expected_y = 10.0 - 0.5 * 9.81 * 1.0;
     assert!(
-        (pos.y - expected_y).abs() < 0.5,
+        (pos.y - expected_y).abs() < 0.15,
         "Expected y ~ {expected_y}, got {}",
         pos.y
     );
@@ -198,6 +198,57 @@ fn circle_rect_collision() {
 }
 
 // ---------------------------------------------------------------------------
+// Rotated rect-rect collision
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rotated_rect_rect_collision() {
+    let mut world = gpu_world(SimConfig2D {
+        gravity: Vec2::ZERO,
+        ..Default::default()
+    });
+
+    let a = world.add_body(&RigidBodyDesc2D {
+        x: -4.0,
+        y: 0.0,
+        vx: 3.0,
+        angle: std::f32::consts::FRAC_PI_6, // 30 degrees
+        shape: ShapeDesc2D::Rect {
+            half_extents: Vec2::new(1.0, 0.5),
+        },
+        ..Default::default()
+    });
+    let b = world.add_body(&RigidBodyDesc2D {
+        x: 4.0,
+        y: 0.0,
+        vx: -3.0,
+        angle: -std::f32::consts::FRAC_PI_4, // -45 degrees
+        shape: ShapeDesc2D::Rect {
+            half_extents: Vec2::new(1.0, 0.5),
+        },
+        ..Default::default()
+    });
+
+    step_n(&mut world, 120);
+
+    let pa = world.get_position(a).unwrap();
+    let pb = world.get_position(b).unwrap();
+    assert!(
+        pa.x.is_finite() && pa.y.is_finite(),
+        "Rotated rect A has non-finite position: {pa}"
+    );
+    assert!(
+        pb.x.is_finite() && pb.y.is_finite(),
+        "Rotated rect B has non-finite position: {pb}"
+    );
+    let dist = (pa - pb).length();
+    assert!(
+        dist > 0.5,
+        "Rotated rects should not overlap after collision, dist={dist}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Multi-body scenes
 // ---------------------------------------------------------------------------
 
@@ -239,6 +290,18 @@ fn domino_chain_2d() {
         first_pos.x > 0.1,
         "First domino should have moved right, got x={}",
         first_pos.x
+    );
+    // Verify chain propagation: dominos 1 and 2 should also have moved
+    // from their initial x positions (2.5 and 5.0 respectively).
+    let second_pos = world.get_position(handles[1]).unwrap();
+    assert!(
+        (second_pos.x - 2.5).abs() > 0.01 || (second_pos.y - 1.0).abs() > 0.01,
+        "Second domino should have been displaced from initial position, got {second_pos}"
+    );
+    let third_pos = world.get_position(handles[2]).unwrap();
+    assert!(
+        (third_pos.x - 5.0).abs() > 0.01 || (third_pos.y - 1.0).abs() > 0.01,
+        "Third domino should have been displaced from initial position, got {third_pos}"
     );
 }
 
@@ -512,6 +575,36 @@ fn two_circles_stacked_stability_2d() {
 
     assert!(lp.x.is_finite() && lp.y.is_finite(), "Lower diverged: {lp}");
     assert!(up.x.is_finite() && up.y.is_finite(), "Upper diverged: {up}");
+}
+
+// ---------------------------------------------------------------------------
+// Velocity check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn body_velocity_decreases_under_gravity_2d() {
+    let g = 9.81_f32;
+    let mut world = gpu_world(SimConfig2D::default());
+    let h = world.add_body(&RigidBodyDesc2D {
+        x: 0.0,
+        y: 100.0,
+        shape: ShapeDesc2D::Circle { radius: 0.5 },
+        ..Default::default()
+    });
+
+    step_n(&mut world, 30);
+    let vel = world.get_velocity(h).unwrap();
+    let expected_vy = -g * 0.5; // 30 steps at 1/60 = 0.5s
+    assert!(
+        (vel.y - expected_vy).abs() < 0.15,
+        "After 0.5s free fall, vy should be ~{expected_vy}, got {}",
+        vel.y
+    );
+    assert!(
+        vel.x.abs() < 0.01,
+        "Horizontal velocity should be zero: vx={}",
+        vel.x
+    );
 }
 
 // ---------------------------------------------------------------------------

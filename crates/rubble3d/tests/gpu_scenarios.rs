@@ -35,7 +35,7 @@ fn free_fall_sphere_1_second() {
     let pos = world.get_position(h).unwrap();
     let expected_y = 10.0 - 0.5 * 9.81 * 1.0; // 5.095
     assert!(
-        (pos.y - expected_y).abs() < 0.5,
+        (pos.y - expected_y).abs() < 0.15,
         "Expected y ~ {expected_y}, got {} (error={})",
         pos.y,
         (pos.y - expected_y).abs()
@@ -72,7 +72,7 @@ fn free_fall_box_matches_sphere() {
     );
     let expected_y = 20.0 - 0.5 * 9.81;
     assert!(
-        (sp.y - expected_y).abs() < 0.5,
+        (sp.y - expected_y).abs() < 0.15,
         "Free-fall y should be ~{expected_y}, got {}",
         sp.y
     );
@@ -422,12 +422,12 @@ fn projectile_motion() {
 
     let pos = world.get_position(h).unwrap();
     assert!(
-        (pos.x - 3.535).abs() < 0.5,
+        (pos.x - 3.535).abs() < 0.15,
         "Projectile x should be ~3.54, got {}",
         pos.x
     );
     assert!(
-        (pos.y - 2.268).abs() < 0.5,
+        (pos.y - 2.268).abs() < 0.15,
         "Projectile y should be ~2.27, got {}",
         pos.y
     );
@@ -829,6 +829,80 @@ fn superposition_gravity_plus_horizontal_velocity() {
             p1.x
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Box-box collision
+// ---------------------------------------------------------------------------
+
+#[test]
+fn box_box_collision_separates() {
+    let mut world = gpu_world(SimConfig {
+        gravity: Vec3::ZERO,
+        ..Default::default()
+    });
+
+    let a = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(-3.0, 0.0, 0.0),
+        linear_velocity: Vec3::new(3.0, 0.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::splat(1.0),
+        },
+        ..Default::default()
+    });
+    let b = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(3.0, 0.0, 0.0),
+        linear_velocity: Vec3::new(-3.0, 0.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::splat(1.0),
+        },
+        ..Default::default()
+    });
+
+    step_n(&mut world, 120);
+
+    let pa = world.get_position(a).unwrap();
+    let pb = world.get_position(b).unwrap();
+    assert!(pa.x.is_finite() && pb.x.is_finite());
+    let dist = (pa - pb).length();
+    assert!(
+        dist > 1.5,
+        "Boxes should have separated after collision, dist={dist}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Body at rest (short-term velocity check)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn body_velocity_decreases_under_gravity() {
+    // A sphere in free fall for 30 steps should have a well-defined velocity
+    // close to g*t. This validates velocity extraction from the AVBD solver.
+    let g = 9.81_f32;
+    let mut world = gpu_world(SimConfig::default());
+    let h = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 100.0, 0.0),
+        shape: ShapeDesc::Sphere { radius: 0.5 },
+        ..Default::default()
+    });
+
+    step_n(&mut world, 30);
+    let vel = world.get_velocity(h).unwrap();
+    let expected_vy = -g * 0.5; // 30 steps at 1/60 = 0.5s
+    assert!(
+        (vel.y - expected_vy).abs() < 0.15,
+        "After 0.5s free fall, vy should be ~{expected_vy}, got {}",
+        vel.y
+    );
+    assert!(
+        vel.x.abs() < 0.01 && vel.z.abs() < 0.01,
+        "Horizontal velocity should be zero: vx={}, vz={}",
+        vel.x,
+        vel.z
+    );
 }
 
 // ---------------------------------------------------------------------------
