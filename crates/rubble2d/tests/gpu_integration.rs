@@ -9,7 +9,7 @@ use rubble2d::{RigidBodyDesc2D, ShapeDesc2D, SimConfig2D, World2D};
 
 /// Helper to create a GPU-backed 2D world.
 fn gpu_world(config: SimConfig2D) -> World2D {
-    World2D::new_gpu(config).expect(
+    World2D::new(config).expect(
         "FATAL: No GPU adapter found. Install mesa-vulkan-drivers for lavapipe software Vulkan.",
     )
 }
@@ -17,7 +17,7 @@ fn gpu_world(config: SimConfig2D) -> World2D {
 #[test]
 fn gpu_2d_world_creation() {
     let world = gpu_world(SimConfig2D::default());
-    assert!(world.has_gpu());
+    // GPU is always active now
     assert_eq!(world.body_count(), 0);
 }
 
@@ -258,49 +258,6 @@ fn gpu_2d_rect_free_fall() {
         pos.y
     );
     assert!(pos.y > -20.0, "GPU 2D: Rect fell too far: y = {}", pos.y);
-}
-
-#[test]
-fn gpu_2d_cpu_gravity_agreement() {
-    let make_config = || SimConfig2D {
-        gravity: Vec2::new(0.0, -9.81),
-        dt: 1.0 / 60.0,
-        solver_iterations: 5,
-        max_bodies: 256,
-    };
-
-    let desc = RigidBodyDesc2D {
-        x: 0.0,
-        y: 10.0,
-        mass: 1.0,
-        shape: ShapeDesc2D::Circle { radius: 0.5 },
-        ..Default::default()
-    };
-
-    let mut cpu_world = World2D::new(make_config());
-    let cpu_h = cpu_world.add_body(&desc);
-
-    let mut gpu_w = gpu_world(make_config());
-    let gpu_h = gpu_w.add_body(&desc);
-
-    for _ in 0..60 {
-        cpu_world.step();
-        gpu_w.step();
-    }
-
-    let cpu_pos = cpu_world.get_position(cpu_h).unwrap();
-    let gpu_pos = gpu_w.get_position(gpu_h).unwrap();
-
-    let diff = (cpu_pos - gpu_pos).length();
-    assert!(
-        diff < 3.0,
-        "GPU and CPU 2D results differ too much: cpu={:?}, gpu={:?}, diff={}",
-        cpu_pos,
-        gpu_pos,
-        diff
-    );
-    assert!(cpu_pos.y < 10.0, "CPU 2D body didn't fall");
-    assert!(gpu_pos.y < 10.0, "GPU 2D body didn't fall");
 }
 
 #[test]

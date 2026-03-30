@@ -6,19 +6,11 @@ edition = "2021"
 [dependencies]
 rubble-math = { workspace = true }
 rubble-gpu = { workspace = true }
-rubble-primitives = { workspace = true }
 rubble-shapes3d = { workspace = true }
-rubble-broadphase3d = { workspace = true }
-rubble-narrowphase3d = { workspace = true }
-rubble-solver3d = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
-thiserror = { workspace = true }
 pollster = { workspace = true }
 wgpu = { workspace = true }
-
-[build-dependencies]
-spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu" }
 
 [dev-dependencies]
 pollster = { workspace = true }

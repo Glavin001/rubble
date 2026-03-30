@@ -158,9 +158,10 @@ fn circle_rect_test(
         ca_fwd * normal_local.x - sa_fwd * normal_local.y,
         sa_fwd * normal_local.x + ca_fwd * normal_local.y,
     );
-    let contact_point = circle_pos - normal_world * (radius + depth * 0.5);
-    // Normal from body_a (circle) toward body_b (rect)
-    emit_contact_2d(contact_point, normal_world, depth, body_circle, body_rect, max_contacts);
+    // Negate normal: geometric normal points rect→circle (B→A), but convention is A→B
+    let normal_ab = -normal_world;
+    let contact_point = circle_pos + normal_ab * (radius + depth * 0.5);
+    emit_contact_2d(contact_point, normal_ab, depth, body_circle, body_rect, max_contacts);
 }
 
 @compute @workgroup_size(64)

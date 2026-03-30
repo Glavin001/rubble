@@ -85,8 +85,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let pos_a = bodies[a].position_inv_mass.xyz;
     let pos_b = bodies[b].position_inv_mass.xyz;
-    let old_pos_a = old_states[a].position_inv_mass.xyz;
-    let old_pos_b = old_states[b].position_inv_mass.xyz;
 
     // Contact offsets (from body centers to contact point)
     let r_a = cp - pos_a;
@@ -108,31 +106,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Penetration depth (recomputed from current positions)
-    let depth = c.point.w + dot(pos_b - pos_a, normal) - dot(old_pos_b - old_pos_a, normal);
+    // Use contact depth directly (computed at predicted positions by narrowphase)
+    let depth = c.point.w;
     if depth >= 0.0 {
         return; // no penetration
     }
 
-    // --- AVBD: velocity-level solve with averaged velocities ---
+    // --- AVBD: velocity-level solve using current velocities ---
     let v_a = bodies[a].lin_vel.xyz;
     let v_b = bodies[b].lin_vel.xyz;
     let w_a = bodies[a].ang_vel.xyz;
     let w_b = bodies[b].ang_vel.xyz;
 
-    let v_old_a = old_states[a].lin_vel.xyz;
-    let v_old_b = old_states[b].lin_vel.xyz;
-    let w_old_a = old_states[a].ang_vel.xyz;
-    let w_old_b = old_states[b].ang_vel.xyz;
+    // Keep old_states binding alive (dispatch provides it)
+    let _keep = old_states[0].position_inv_mass.x;
 
-    // Averaged velocities (the "AV" in AVBD)
-    let v_avg_a = 0.5 * (v_old_a + v_a);
-    let v_avg_b = 0.5 * (v_old_b + v_b);
-    let w_avg_a = 0.5 * (w_old_a + w_a);
-    let w_avg_b = 0.5 * (w_old_b + w_b);
-
-    // Relative velocity at contact point using averaged velocities
-    let v_rel = (v_avg_b + cross(w_avg_b, r_b)) - (v_avg_a + cross(w_avg_a, r_a));
+    // Relative velocity at contact point
+    let v_rel = (v_b + cross(w_b, r_b)) - (v_a + cross(w_a, r_a));
     let v_n = dot(v_rel, normal);
 
     // Baumgarte stabilization: add position correction term

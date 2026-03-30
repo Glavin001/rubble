@@ -68,8 +68,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let pos_a = bodies[a].position_inv_mass.xy;
     let pos_b = bodies[b].position_inv_mass.xy;
-    let old_pos_a = old_states[a].position_inv_mass.xy;
-    let old_pos_b = old_states[b].position_inv_mass.xy;
 
     // Contact offsets (from body centers to contact point)
     let r_a = cp - pos_a;
@@ -86,33 +84,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Penetration depth (recomputed from current positions)
-    let depth = c.point.z + dot(pos_b - pos_a, normal) - dot(old_pos_b - old_pos_a, normal);
+    // Use contact depth directly (computed at predicted positions by narrowphase)
+    let depth = c.point.z;
     if depth >= 0.0 {
         return; // no penetration
     }
 
-    // --- AVBD: velocity-level solve with averaged velocities ---
+    // --- AVBD: velocity-level solve using current velocities ---
     let v_a = bodies[a].lin_vel.xy;
     let v_b = bodies[b].lin_vel.xy;
     let w_a = bodies[a].lin_vel.z;
     let w_b = bodies[b].lin_vel.z;
 
-    let v_old_a = old_states[a].lin_vel.xy;
-    let v_old_b = old_states[b].lin_vel.xy;
-    let w_old_a = old_states[a].lin_vel.z;
-    let w_old_b = old_states[b].lin_vel.z;
-
-    // Averaged velocities (the "AV" in AVBD)
-    let v_avg_a = 0.5 * (v_old_a + v_a);
-    let v_avg_b = 0.5 * (v_old_b + v_b);
-    let w_avg_a = 0.5 * (w_old_a + w_a);
-    let w_avg_b = 0.5 * (w_old_b + w_b);
+    // Keep old_states binding alive (dispatch provides it)
+    let _keep = old_states[0].position_inv_mass.x;
 
     // Velocity at contact point: v + omega x r (in 2D: omega * perp(r))
     // perp(r) = (-r.y, r.x), so v_contact = v + omega * (-r.y, r.x)
-    let v_contact_a = v_avg_a + w_avg_a * vec2<f32>(-r_a.y, r_a.x);
-    let v_contact_b = v_avg_b + w_avg_b * vec2<f32>(-r_b.y, r_b.x);
+    let v_contact_a = v_a + w_a * vec2<f32>(-r_a.y, r_a.x);
+    let v_contact_b = v_b + w_b * vec2<f32>(-r_b.y, r_b.x);
     let v_rel = v_contact_b - v_contact_a;
     let v_n = dot(v_rel, normal);
 

@@ -1,8 +1,9 @@
 /// WGSL source for the velocity extraction shader.
 ///
-/// Computes new linear and angular velocities from position/orientation changes:
-///   v_new = (pos_new - pos_old) / dt
-///   omega_new = 2 * (q_new * conj(q_old)).xyz / dt
+/// Recomputes positions from the AVBD-solved velocities:
+///   pos_new = pos_old + dt * v_solved
+/// This ensures the solver's velocity corrections are reflected in positions.
+/// Angular velocity is extracted from orientation delta.
 pub const EXTRACT_VELOCITY_WGSL: &str = r#"
 struct Body {
     position_inv_mass: vec4<f32>,
@@ -50,13 +51,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return; // static body
     }
 
-    let inv_dt = 1.0 / params.dt;
+    let dt = params.dt;
 
-    // Linear velocity: v = (pos_new - pos_old) / dt
-    let pos_new = bodies[idx].position_inv_mass.xyz;
+    // The AVBD solver modified velocities. Recompute position from
+    // old position + dt * solved velocity, so impulses actually move bodies.
+    let v_solved = bodies[idx].lin_vel.xyz;
     let pos_old = old_states[idx].position_inv_mass.xyz;
-    let v_new = (pos_new - pos_old) * inv_dt;
-    bodies[idx].lin_vel = vec4<f32>(v_new, 0.0);
+    let pos_new = pos_old + dt * v_solved;
+    bodies[idx].position_inv_mass = vec4<f32>(pos_new, inv_mass);
+    // Linear velocity is already correct (v_solved from predict + solver impulses)
 
     // Angular velocity: omega = 2 * (q_new * conj(q_old)).xyz / dt
     let q_new = bodies[idx].orientation;
@@ -64,7 +67,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dq = qmul(q_new, qconj(q_old));
     // Ensure shortest path (positive w)
     let sign = select(-1.0, 1.0, dq.w >= 0.0);
-    let omega_new = dq.xyz * sign * 2.0 * inv_dt;
+    let omega_new = dq.xyz * sign * 2.0 / dt;
     bodies[idx].ang_vel = vec4<f32>(omega_new, 0.0);
 }
 "#;

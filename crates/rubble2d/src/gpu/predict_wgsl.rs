@@ -1,8 +1,9 @@
 /// WGSL source for the 2D prediction shader.
 ///
-/// Computes predicted positions: x_tilde = pos + dt*vel + dt^2*gravity.
-/// Also integrates angle: angle_tilde = angle + dt*omega.
-/// Copies current state to old_states for velocity extraction.
+/// 1. Saves current state to old_states (for velocity extraction later).
+/// 2. Integrates velocity with gravity: v' = v + dt * g
+/// 3. Predicts position: x_tilde = pos + dt * v'
+/// 4. Stores BOTH updated velocity AND predicted position for the solver.
 pub const PREDICT_2D_WGSL: &str = r#"
 // ---------- Types matching rubble-math RigidBodyState2D (64 bytes) ----------
 
@@ -50,12 +51,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dt = params.dt;
     let gravity = params.gravity.xy;
 
-    // Position prediction: x_tilde = pos + dt*vel + dt^2 * gravity
-    let x_tilde = pos + dt * vel + dt * dt * gravity;
+    // Integrate velocity with gravity: v' = v + dt * g
+    let new_vel = vel + dt * gravity;
+
+    // Position prediction: x_tilde = pos + dt * v'
+    let x_tilde = pos + dt * new_vel;
 
     // Angle prediction: angle_tilde = angle + dt * omega
     let angle_tilde = angle + dt * omega;
 
+    // Store predicted position AND gravity-integrated velocity
     bodies[idx].position_inv_mass = vec4<f32>(x_tilde, angle_tilde, inv_mass);
+    bodies[idx].lin_vel = vec4<f32>(new_vel, omega, 0.0);
 }
 "#;

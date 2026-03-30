@@ -7,12 +7,6 @@ members = [
     "crates/rubble-primitives",
     "crates/rubble-shapes3d",
     "crates/rubble-shapes2d",
-    "crates/rubble-broadphase3d",
-    "crates/rubble-broadphase2d",
-    "crates/rubble-narrowphase3d",
-    "crates/rubble-narrowphase2d",
-    "crates/rubble-solver3d",
-    "crates/rubble-solver2d",
     "crates/rubble3d",
     "crates/rubble2d",
 ]
@@ -31,11 +25,5 @@ rubble-gpu = { path = "crates/rubble-gpu" }
 rubble-primitives = { path = "crates/rubble-primitives" }
 rubble-shapes3d = { path = "crates/rubble-shapes3d" }
 rubble-shapes2d = { path = "crates/rubble-shapes2d" }
-rubble-broadphase3d = { path = "crates/rubble-broadphase3d" }
-rubble-broadphase2d = { path = "crates/rubble-broadphase2d" }
-rubble-narrowphase3d = { path = "crates/rubble-narrowphase3d" }
-rubble-narrowphase2d = { path = "crates/rubble-narrowphase2d" }
-rubble-solver3d = { path = "crates/rubble-solver3d" }
-rubble-solver2d = { path = "crates/rubble-solver2d" }
 rubble3d = { path = "crates/rubble3d" }
 rubble2d = { path = "crates/rubble2d" }

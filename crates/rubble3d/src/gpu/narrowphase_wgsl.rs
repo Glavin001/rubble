@@ -166,9 +166,9 @@ fn sphere_box_test(
         depth = -(min_dist + radius);
     }
 
-    let normal_world = quat_rotate(box_rot, normal_local);
-    let contact_point = sphere_pos - normal_world * (radius + depth * 0.5);
-    // Normal from body_a (sphere) to body_b (box): we want normal pointing from A to B
+    // Negate normal: geometric normal points box→sphere (B→A), but convention is A→B
+    let normal_world = -quat_rotate(box_rot, normal_local);
+    let contact_point = sphere_pos + normal_world * (radius + depth * 0.5);
     emit_contact(contact_point, normal_world, depth, body_sphere, body_box, max_contacts);
 }
 

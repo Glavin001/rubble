@@ -4,7 +4,7 @@
 //! physically reasonable results. Each test creates a World with GPU enabled,
 //! runs the simulation, and checks invariants.
 //!
-//! All tests use `World::new_gpu()` which will panic if no GPU adapter is found.
+//! All tests use `World::new()` which will panic if no GPU adapter is found.
 //! In CI, mesa-vulkan-drivers (lavapipe) provides a software Vulkan backend.
 
 use glam::Vec3;
@@ -12,7 +12,7 @@ use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 
 /// Helper to create a GPU-backed world, panicking if no GPU is available.
 fn gpu_world(config: SimConfig) -> World {
-    World::new_gpu(config).expect(
+    World::new(config).expect(
         "FATAL: No GPU adapter found. Install mesa-vulkan-drivers for lavapipe software Vulkan.",
     )
 }
@@ -20,7 +20,7 @@ fn gpu_world(config: SimConfig) -> World {
 #[test]
 fn gpu_world_creation() {
     let world = gpu_world(SimConfig::default());
-    assert!(world.has_gpu());
+    // GPU is always active now
     assert_eq!(world.body_count(), 0);
 }
 
@@ -348,52 +348,4 @@ fn gpu_add_remove_body_stability() {
     let pos2 = world.get_position(h2).unwrap();
     assert!(pos2.y < 5.0, "GPU: h2 should have fallen: y = {}", pos2.y);
     assert!(pos2.y.is_finite(), "GPU: h2 position not finite");
-}
-
-#[test]
-fn gpu_cpu_gravity_agreement() {
-    // Compare GPU and CPU paths for a simple free-fall scenario
-    let desc = RigidBodyDesc {
-        position: Vec3::new(0.0, 10.0, 0.0),
-        mass: 1.0,
-        shape: ShapeDesc::Sphere { radius: 0.5 },
-        ..Default::default()
-    };
-
-    let make_config = || SimConfig {
-        gravity: Vec3::new(0.0, -9.81, 0.0),
-        dt: 1.0 / 60.0,
-        solver_iterations: 5,
-        max_bodies: 256,
-    };
-
-    // CPU path
-    let mut cpu_world = World::new(make_config());
-    let cpu_h = cpu_world.add_body(&desc);
-
-    // GPU path
-    let mut gpu_world_instance = gpu_world(make_config());
-    let gpu_h = gpu_world_instance.add_body(&desc);
-
-    let steps = 60;
-    for _ in 0..steps {
-        cpu_world.step();
-        gpu_world_instance.step();
-    }
-
-    let cpu_pos = cpu_world.get_position(cpu_h).unwrap();
-    let gpu_pos = gpu_world_instance.get_position(gpu_h).unwrap();
-
-    // Both should be in a reasonable range (they use different solvers, so won't be identical)
-    let diff = (cpu_pos - gpu_pos).length();
-    assert!(
-        diff < 3.0,
-        "GPU and CPU results differ significantly: cpu={:?}, gpu={:?}, diff={}",
-        cpu_pos,
-        gpu_pos,
-        diff
-    );
-    // Both should have fallen
-    assert!(cpu_pos.y < 10.0, "CPU body didn't fall");
-    assert!(gpu_pos.y < 10.0, "GPU body didn't fall");
 }

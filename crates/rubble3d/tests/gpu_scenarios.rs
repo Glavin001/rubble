@@ -10,9 +10,8 @@ use glam::Vec3;
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 
 fn gpu_world(config: SimConfig) -> World {
-    World::new_gpu(config).expect(
-        "FATAL: No GPU adapter found. Install mesa-vulkan-drivers for lavapipe.",
-    )
+    World::new(config)
+        .expect("FATAL: No GPU adapter found. Install mesa-vulkan-drivers for lavapipe.")
 }
 
 fn gpu_world_default() -> World {
@@ -994,96 +993,4 @@ fn gpu_teleport_and_simulate() {
         "Should have fallen from teleported position, got y={}",
         pos.y
     );
-}
-
-// ---------------------------------------------------------------------------
-// CPU-GPU agreement
-// ---------------------------------------------------------------------------
-
-#[test]
-fn gpu_cpu_free_fall_agreement() {
-    let make_config = || SimConfig {
-        gravity: Vec3::new(0.0, -9.81, 0.0),
-        dt: 1.0 / 60.0,
-        solver_iterations: 5,
-        max_bodies: 256,
-    };
-
-    let mut cpu_world = World::new(make_config());
-    let mut gpu_world = World::new_gpu(make_config()).unwrap();
-
-    let ch = cpu_world.add_body(&RigidBodyDesc {
-        position: Vec3::new(0.0, 20.0, 0.0),
-        shape: ShapeDesc::Sphere { radius: 0.5 },
-        ..Default::default()
-    });
-    let gh = gpu_world.add_body(&RigidBodyDesc {
-        position: Vec3::new(0.0, 20.0, 0.0),
-        shape: ShapeDesc::Sphere { radius: 0.5 },
-        ..Default::default()
-    });
-
-    for _ in 0..60 {
-        cpu_world.step();
-        gpu_world.step();
-    }
-
-    let cp = cpu_world.get_position(ch).unwrap();
-    let gp = gpu_world.get_position(gh).unwrap();
-    assert!(
-        (cp - gp).length() < 2.0,
-        "CPU pos={cp} vs GPU pos={gp} should be close in free fall"
-    );
-}
-
-#[test]
-fn gpu_cpu_collision_agreement() {
-    let make_config = || SimConfig {
-        gravity: Vec3::ZERO,
-        dt: 1.0 / 60.0,
-        solver_iterations: 5,
-        max_bodies: 256,
-    };
-
-    let mut cpu_world = World::new(make_config());
-    let mut gpu_world = World::new_gpu(make_config()).unwrap();
-
-    // Same collision setup on both
-    let ca = cpu_world.add_body(&RigidBodyDesc {
-        position: Vec3::new(-3.0, 0.0, 0.0),
-        linear_velocity: Vec3::new(3.0, 0.0, 0.0),
-        shape: ShapeDesc::Sphere { radius: 1.0 },
-        ..Default::default()
-    });
-    let cb = cpu_world.add_body(&RigidBodyDesc {
-        position: Vec3::new(3.0, 0.0, 0.0),
-        linear_velocity: Vec3::new(-3.0, 0.0, 0.0),
-        shape: ShapeDesc::Sphere { radius: 1.0 },
-        ..Default::default()
-    });
-
-    let ga = gpu_world.add_body(&RigidBodyDesc {
-        position: Vec3::new(-3.0, 0.0, 0.0),
-        linear_velocity: Vec3::new(3.0, 0.0, 0.0),
-        shape: ShapeDesc::Sphere { radius: 1.0 },
-        ..Default::default()
-    });
-    let gb = gpu_world.add_body(&RigidBodyDesc {
-        position: Vec3::new(3.0, 0.0, 0.0),
-        linear_velocity: Vec3::new(-3.0, 0.0, 0.0),
-        shape: ShapeDesc::Sphere { radius: 1.0 },
-        ..Default::default()
-    });
-
-    for _ in 0..120 {
-        cpu_world.step();
-        gpu_world.step();
-    }
-
-    // Both should have collided and separated
-    let cpu_dist = (cpu_world.get_position(ca).unwrap() - cpu_world.get_position(cb).unwrap()).length();
-    let gpu_dist = (gpu_world.get_position(ga).unwrap() - gpu_world.get_position(gb).unwrap()).length();
-
-    assert!(cpu_dist > 1.5, "CPU bodies should have separated");
-    assert!(gpu_dist > 1.5, "GPU bodies should have separated");
 }

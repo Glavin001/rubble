@@ -1,8 +1,10 @@
 /// WGSL source for the prediction shader.
 ///
-/// Computes predicted positions: x_tilde = pos + dt*vel + dt^2*gravity.
-/// Also integrates orientation: q_tilde = normalize(q + 0.5 * dt * omega_quat * q).
-/// Copies current state to old_states for velocity extraction.
+/// 1. Saves current state to old_states (for velocity extraction later).
+/// 2. Integrates velocity with gravity: v' = v + dt * g
+/// 3. Predicts position: x_tilde = pos + dt * v'
+/// 4. Integrates orientation: q_tilde = normalize(q + 0.5 * dt * omega_quat * q)
+/// 5. Stores updated velocity AND predicted position for the solver.
 pub const PREDICT_WGSL: &str = r#"
 // ---------- Types matching rubble-math Rust layouts ----------
 
@@ -59,9 +61,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dt = params.dt;
     let gravity = params.gravity.xyz;
 
-    // Position prediction: x_tilde = pos + dt*vel + dt^2 * gravity
-    let x_tilde = pos + dt * vel + dt * dt * gravity;
+    // Integrate velocity with gravity: v' = v + dt * g
+    let new_vel = vel + dt * gravity;
+
+    // Position prediction: x_tilde = pos + dt * v'
+    let x_tilde = pos + dt * new_vel;
     bodies[idx].position_inv_mass = vec4<f32>(x_tilde, inv_mass);
+
+    // Store gravity-integrated velocity so AVBD solver has correct baseline
+    bodies[idx].lin_vel = vec4<f32>(new_vel, 0.0);
 
     // Orientation prediction: q_tilde = normalize(q + 0.5 * dt * omega_quat * q)
     let q = body.orientation;
