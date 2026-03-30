@@ -105,6 +105,36 @@ mod tests {
     }
 
     #[test]
+    fn test_rect_aabb_rotated_30() {
+        let angle = std::f32::consts::FRAC_PI_6; // 30 degrees
+        let he = Vec2::new(2.0, 0.5);
+        let aabb = compute_rect_aabb(Vec2::ZERO, angle, he);
+
+        let cos = angle.cos().abs();
+        let sin = angle.sin().abs();
+        // wx = |cos30|*hx + |sin30|*hy = cos*2 + sin*0.5
+        // wy = |sin30|*hx + |cos30|*hy = sin*2 + cos*0.5
+        let wx = cos * 2.0 + sin * 0.5;
+        let wy = sin * 2.0 + cos * 0.5;
+        let expected_min = Vec2::new(-wx, -wy);
+        let expected_max = Vec2::new(wx, wy);
+
+        let eps = 1e-4;
+        assert!(
+            (aabb.min_point() - expected_min).length() < eps,
+            "min: {:?} vs expected {:?}",
+            aabb.min_point(),
+            expected_min
+        );
+        assert!(
+            (aabb.max_point() - expected_max).length() < eps,
+            "max: {:?} vs expected {:?}",
+            aabb.max_point(),
+            expected_max
+        );
+    }
+
+    #[test]
     fn capsule2d_aabb() {
         // Vertical capsule (angle = 0).
         let aabb = compute_capsule2d_aabb(Vec2::ZERO, 0.0, 1.0, 0.5);

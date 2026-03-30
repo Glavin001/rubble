@@ -380,6 +380,40 @@ mod tests {
     }
 
     #[test]
+    fn test_box_aabb_rotated_30_y() {
+        let angle = std::f32::consts::FRAC_PI_6; // 30 degrees
+        let rot = Quat::from_rotation_y(angle);
+        let he = Vec3::new(2.0, 1.0, 0.5);
+        let aabb = compute_box_aabb(Vec3::ZERO, rot, he);
+
+        let cos = angle.cos().abs();
+        let sin = angle.sin().abs();
+        // For Y-axis rotation, the rotation matrix mixes X and Z:
+        //   world_hx = |cos|*hx + |sin|*hz
+        //   world_hy = hy  (Y is unaffected)
+        //   world_hz = |sin|*hx + |cos|*hz
+        let expected_hx = cos * 2.0 + sin * 0.5;
+        let expected_hy = 1.0;
+        let expected_hz = sin * 2.0 + cos * 0.5;
+        let expected_min = Vec3::new(-expected_hx, -expected_hy, -expected_hz);
+        let expected_max = Vec3::new(expected_hx, expected_hy, expected_hz);
+
+        let eps = 1e-5;
+        assert!(
+            (aabb.min_point() - expected_min).length() < eps,
+            "min: {:?} vs {:?}",
+            aabb.min_point(),
+            expected_min
+        );
+        assert!(
+            (aabb.max_point() - expected_max).length() < eps,
+            "max: {:?} vs {:?}",
+            aabb.max_point(),
+            expected_max
+        );
+    }
+
+    #[test]
     fn capsule_aabb_vertical() {
         // Vertical capsule (identity rotation, Y-axis aligned).
         let aabb = compute_capsule_aabb(Vec3::ZERO, Quat::IDENTITY, 1.0, 0.5);

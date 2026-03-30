@@ -503,4 +503,41 @@ mod tests {
         assert_eq!(lbvh.leaf_count, 1);
         assert!(lbvh.find_overlapping_pairs(&aabbs).pairs.is_empty());
     }
+
+    #[test]
+    fn test_identical_positions_2d() {
+        // All bodies at the same position produce degenerate (identical) Morton codes.
+        // The LBVH must still build correctly and find all N*(N-1)/2 overlapping pairs.
+        let n = 4;
+        let aabbs: Vec<Aabb2D> = (0..n).map(|_| make_circle_aabb(0.0, 0.0, 1.0)).collect();
+        let lbvh = Lbvh::build(&aabbs);
+        let result = lbvh.find_overlapping_pairs(&aabbs);
+
+        let expected_pair_count = n * (n - 1) / 2;
+        assert_eq!(
+            result.pairs.len(),
+            expected_pair_count,
+            "Expected {} pairs for {} identical bodies, got {}",
+            expected_pair_count,
+            n,
+            result.pairs.len()
+        );
+
+        // Verify all pairs are canonical (a < b) and unique.
+        for pair in &result.pairs {
+            assert!(
+                pair[0] < pair[1],
+                "pair not canonically ordered: {:?}",
+                pair
+            );
+        }
+        let mut sorted = result.pairs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            expected_pair_count,
+            "duplicate pairs detected"
+        );
+    }
 }

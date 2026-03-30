@@ -330,4 +330,59 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_radix_sort_values_follow_keys() {
+        let ctx = crate::test_gpu();
+        let sort = RadixSort::new(&ctx);
+
+        // Simple LCG pseudo-random
+        let mut rng_state = 99999u64;
+        let mut rand_vals: Vec<u32> = Vec::with_capacity(500);
+        for _ in 0..500 {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            rand_vals.push((rng_state >> 33) as u32);
+        }
+
+        // Values encode the original index so we can verify pairing.
+        let values_data: Vec<u32> = (0..500).collect();
+
+        // Build a lookup from key -> original index (handle duplicate keys).
+        let original_pairs: Vec<(u32, u32)> = rand_vals
+            .iter()
+            .copied()
+            .zip(values_data.iter().copied())
+            .collect();
+
+        let mut keys = GpuBuffer::<u32>::new(&ctx, 500);
+        keys.upload(&ctx, &rand_vals);
+        let mut values = GpuBuffer::<u32>::new(&ctx, 500);
+        values.upload(&ctx, &values_data);
+
+        sort.sort(&ctx, &mut keys, &mut values);
+
+        let result_keys = keys.download(&ctx);
+        let result_values = values.download(&ctx);
+
+        // Verify each (key, value) pair in the output matches an original pair.
+        // The value encodes the original index, so result_keys[i] must equal
+        // the original key at that original index.
+        for i in 0..result_keys.len() {
+            let sorted_key = result_keys[i];
+            let original_index = result_values[i] as usize;
+            assert!(
+                original_index < original_pairs.len(),
+                "Value {} at sorted position {} is out of range",
+                original_index,
+                i
+            );
+            assert_eq!(
+                sorted_key, original_pairs[original_index].0,
+                "At sorted position {}: key {} doesn't match original key {} for original index {}",
+                i, sorted_key, original_pairs[original_index].0, original_index
+            );
+        }
+    }
 }
