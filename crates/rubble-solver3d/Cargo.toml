@@ -1,0 +1,9 @@
+[package]
+name = "rubble-solver3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+rubble-math = { path = "../rubble-math" }

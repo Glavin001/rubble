@@ -1,0 +1,11 @@
+[package]
+name = "rubble-broadphase3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rubble-math = { path = "../rubble-math" }
+
+[dev-dependencies]
+glam.workspace = true

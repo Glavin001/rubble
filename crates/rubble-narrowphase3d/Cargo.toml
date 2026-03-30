@@ -1,0 +1,10 @@
+[package]
+name = "rubble-narrowphase3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+rubble-math = { path = "../rubble-math" }
+rubble-shapes3d = { path = "../rubble-shapes3d" }

@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      WGPU_BACKEND: vulkan
+      XDG_RUNTIME_DIR: /tmp/xdg
+      VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+          mkdir -p "$XDG_RUNTIME_DIR"
+      - name: Vulkan info (lavapipe)
+        run: vulkaninfo --summary
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test workspace and capture output
+        run: |
+          set -o pipefail
+          cargo test --workspace --all-targets --all-features 2>&1 | tee test-output.txt
+      - name: Parse test results
+        run: |
+          python - <<'PY'
+          import re, pathlib
+          text = pathlib.Path('test-output.txt').read_text()
+          matches = re.findall(r'test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', text)
+          total_pass = sum(int(m[1]) for m in matches)
+          total_fail = sum(int(m[2]) for m in matches)
+          total_ignored = sum(int(m[3]) for m in matches)
+          summary = f"Parsed test suites: {len(matches)}\\nTotal passed: {total_pass}\\nTotal failed: {total_fail}\\nTotal ignored: {total_ignored}"
+          print(summary)
+          pathlib.Path('test-summary.txt').write_text(summary + "\n")
+          if total_fail:
+              raise SystemExit('Failing tests detected while parsing output.')
+          PY
+      - name: Publish job summary
+        run: cat test-summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-logs
+          path: |
+            test-output.txt
+            test-summary.txt
