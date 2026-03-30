@@ -11,7 +11,8 @@
 - `rubble-broadphase3d`: pair generation from AABB overlap.
 - `rubble-narrowphase3d`: contact generation (current implementation includes sphere-sphere).
 - `rubble-solver3d`: iterative position solver + integration.
-- `rubble3d`: end-to-end world orchestration, handles, events, and invariants-focused tests.
+- `rubble3d`: end-to-end 3D world orchestration, handles, events, raycast/overlap queries, and invariants-focused tests.
+- `rubble-shapes2d`/`rubble-broadphase2d`/`rubble-narrowphase2d`/`rubble-solver2d`/`rubble2d`: 2D pipeline baseline and facade world.
 
 ## Running tests with CPU Vulkan (lavapipe)
 
@@ -26,7 +27,7 @@ This repository treats unavailable GPU backends as a test failure condition.
 
 ## Current known limitations (documented by design)
 
-- This implementation currently includes a verified end-to-end 3D sphere/box baseline pipeline and contact events, but does not yet implement the complete AVBD feature matrix from the full long-form specification (e.g. full convex-convex SAT manifold clipping, graph coloring AVBD kernels, and 2D crate family).
+- This implementation currently includes verified end-to-end 3D and baseline 2D pipelines with events and invariants tests, but does not yet implement the complete AVBD feature matrix from the full long-form specification (e.g. full convex-convex SAT manifold clipping and graph coloring AVBD kernels).
 - The solver is an iterative positional baseline tuned for stability/invariant tests, not yet a full SIGGRAPH 2025 AVBD implementation.
 - Determinism remains best-effort and can vary across drivers/hardware due to GPU backend behavior.
 

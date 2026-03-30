@@ -1,0 +1,8 @@
+[package]
+name = "rubble-broadphase2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rubble-shapes2d = { path = "../rubble-shapes2d" }

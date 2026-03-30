@@ -15,7 +15,7 @@ impl GpuContext {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: true,
+                force_fallback_adapter: false,
                 compatible_surface: None,
             })
             .await

@@ -8,6 +8,11 @@ members = [
   "crates/rubble-narrowphase3d",
   "crates/rubble-solver3d",
   "crates/rubble3d",
+  "crates/rubble-shapes2d",
+  "crates/rubble-broadphase2d",
+  "crates/rubble-narrowphase2d",
+  "crates/rubble-solver2d",
+  "crates/rubble2d",
 ]
 resolver = "2"
 

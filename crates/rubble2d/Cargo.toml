@@ -1,0 +1,12 @@
+[package]
+name = "rubble2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+rubble-shapes2d = { path = "../rubble-shapes2d" }
+rubble-broadphase2d = { path = "../rubble-broadphase2d" }
+rubble-narrowphase2d = { path = "../rubble-narrowphase2d" }
+rubble-solver2d = { path = "../rubble-solver2d" }

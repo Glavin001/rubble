@@ -34,6 +34,20 @@ pub struct RigidBodyDesc {
     pub mass: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Ray {
+    pub origin: Vec3,
+    pub dir: Vec3,
+    pub max_dist: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayHit {
+    pub body: BodyHandle,
+    pub toi: f32,
+    pub point: Vec3,
+}
+
 pub struct World {
     config: SimConfig,
     states: Vec<RigidBodyState3D>,
@@ -196,10 +210,78 @@ impl World {
         self.live.len() as u32
     }
 
+    pub fn overlap_aabb(&self, aabb: Aabb3D) -> Vec<BodyHandle> {
+        let mut out = Vec::new();
+        for &idx in &self.live {
+            let s = self.states[idx as usize];
+            let shape = &self.shapes[idx as usize];
+            let b = compute_aabb(shape, s.position_inv_mass.truncate(), s.orientation);
+            if rubble_broadphase3d::intersects(&aabb, &b) {
+                out.push(BodyHandle {
+                    index: idx,
+                    generation: self.generations[idx as usize],
+                });
+            }
+        }
+        out
+    }
+
+    pub fn raycast(&self, ray: Ray) -> Option<RayHit> {
+        self.raycast_batch(&[ray]).into_iter().next().flatten()
+    }
+
+    pub fn raycast_batch(&self, rays: &[Ray]) -> Vec<Option<RayHit>> {
+        rays.iter()
+            .map(|ray| {
+                let mut best: Option<RayHit> = None;
+                for &idx in &self.live {
+                    let shape = &self.shapes[idx as usize];
+                    let pos = self.states[idx as usize].position_inv_mass.truncate();
+                    if let ShapeDesc::Sphere { radius } = shape {
+                        if let Some(toi) =
+                            ray_sphere(ray.origin, ray.dir, ray.max_dist, pos, *radius)
+                        {
+                            let candidate = RayHit {
+                                body: BodyHandle {
+                                    index: idx,
+                                    generation: self.generations[idx as usize],
+                                },
+                                toi,
+                                point: ray.origin + ray.dir * toi,
+                            };
+                            if best.map(|b| candidate.toi < b.toi).unwrap_or(true) {
+                                best = Some(candidate);
+                            }
+                        }
+                    }
+                }
+                best
+            })
+            .collect()
+    }
+
     fn is_valid(&self, handle: BodyHandle) -> bool {
         self.live.contains(&handle.index)
             && self.generations.get(handle.index as usize).copied() == Some(handle.generation)
     }
+}
+
+fn ray_sphere(origin: Vec3, dir: Vec3, max_dist: f32, center: Vec3, radius: f32) -> Option<f32> {
+    let oc = origin - center;
+    let a = dir.length_squared();
+    let b = 2.0 * oc.dot(dir);
+    let c = oc.length_squared() - radius * radius;
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    let sqrt_disc = disc.sqrt();
+    let t0 = (-b - sqrt_disc) / (2.0 * a);
+    let t1 = (-b + sqrt_disc) / (2.0 * a);
+    [t0, t1]
+        .into_iter()
+        .filter(|t| *t >= 0.0 && *t <= max_dist)
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
 }
 
 #[cfg(test)]
@@ -264,6 +346,38 @@ mod tests {
         assert!(ended
             .iter()
             .any(|e| matches!(e, CollisionEvent::Ended { .. })));
+    }
+
+    #[test]
+    fn raycast_and_overlap_queries_work() {
+        let mut world = World::new(SimConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        let sphere = world.add_body(RigidBodyDesc {
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            position: Vec3::new(5.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            linear_velocity: Vec3::ZERO,
+            mass: 1.0,
+        });
+        let hit = world
+            .raycast(Ray {
+                origin: Vec3::ZERO,
+                dir: Vec3::X,
+                max_dist: 10.0,
+            })
+            .expect("ray should hit");
+        assert_eq!(hit.body.index, sphere.index);
+        assert_relative_eq!(hit.toi, 4.0, epsilon = 1e-5);
+
+        let query = Aabb3D {
+            min: Vec3::new(4.1, -1.0, -1.0).extend(0.0),
+            max: Vec3::new(6.0, 1.0, 1.0).extend(0.0),
+        };
+        let overlaps = world.overlap_aabb(query);
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!(overlaps[0].index, sphere.index);
     }
 
     #[test]

@@ -729,6 +729,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "rubble-broadphase2d"
+version = "0.1.0"
+dependencies = [
+ "rubble-shapes2d",
+]
+
+[[package]]
 name = "rubble-broadphase3d"
 version = "0.1.0"
 dependencies = [
@@ -756,9 +763,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubble-narrowphase2d"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "rubble-shapes2d",
+]
+
+[[package]]
 name = "rubble-narrowphase3d"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "glam",
  "rubble-math",
  "rubble-shapes3d",
@@ -769,6 +785,13 @@ name = "rubble-primitives"
 version = "0.1.0"
 dependencies = [
  "rand",
+]
+
+[[package]]
+name = "rubble-shapes2d"
+version = "0.1.0"
+dependencies = [
+ "glam",
 ]
 
 [[package]]
@@ -783,11 +806,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubble-solver2d"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "rubble-narrowphase2d",
+]
+
+[[package]]
 name = "rubble-solver3d"
 version = "0.1.0"
 dependencies = [
  "glam",
  "rubble-math",
+]
+
+[[package]]
+name = "rubble2d"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "rubble-broadphase2d",
+ "rubble-narrowphase2d",
+ "rubble-shapes2d",
+ "rubble-solver2d",
 ]
 
 [[package]]

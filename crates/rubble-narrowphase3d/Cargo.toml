@@ -8,3 +8,6 @@ license.workspace = true
 glam.workspace = true
 rubble-math = { path = "../rubble-math" }
 rubble-shapes3d = { path = "../rubble-shapes3d" }
+
+[dev-dependencies]
+approx.workspace = true
