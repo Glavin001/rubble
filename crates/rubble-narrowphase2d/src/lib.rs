@@ -57,24 +57,55 @@ pub fn circle_rect(
     let sin = rect_angle.sin();
     let d = circle_pos - rect_pos;
     let local = Vec2::new(cos * d.x + sin * d.y, -sin * d.x + cos * d.y);
-    let closest = local.clamp(-half, half);
-    let diff = local - closest;
+    let clamped = local.clamp(-half, half);
+    let diff = local - clamped;
     let dist_sq = diff.length_squared();
-    if dist_sq >= radius * radius {
-        return vec![];
+
+    let (outward_local, depth, contact_local);
+    if dist_sq > 1e-8 {
+        // Circle center is outside the rect (standard case)
+        let dist = dist_sq.sqrt();
+        if dist >= radius {
+            return vec![];
+        }
+        outward_local = diff / dist; // points from rect surface toward circle
+        depth = -(radius - dist);
+        contact_local = clamped;
+    } else {
+        // Circle center is inside the rect — find nearest face to push out.
+        let dx_pos = half.x - local.x;
+        let dx_neg = local.x + half.x;
+        let dy_pos = half.y - local.y;
+        let dy_neg = local.y + half.y;
+        let min_dist = dx_pos.min(dx_neg).min(dy_pos).min(dy_neg);
+        if min_dist == dx_pos {
+            outward_local = Vec2::X;
+            contact_local = Vec2::new(half.x, local.y);
+        } else if min_dist == dx_neg {
+            outward_local = Vec2::NEG_X;
+            contact_local = Vec2::new(-half.x, local.y);
+        } else if min_dist == dy_pos {
+            outward_local = Vec2::Y;
+            contact_local = Vec2::new(local.x, half.y);
+        } else {
+            outward_local = Vec2::NEG_Y;
+            contact_local = Vec2::new(local.x, -half.y);
+        }
+        depth = -(radius + min_dist);
     }
-    let dist = dist_sq.sqrt().max(1e-10);
-    let normal_local = diff / dist;
+
+    // Negate normal: solver convention is normal from body_a (circle) toward body_b (rect).
+    // outward_local points from rect toward circle, so we negate it.
+    let normal_local = -outward_local;
     let normal = Vec2::new(
         cos * normal_local.x - sin * normal_local.y,
         sin * normal_local.x + cos * normal_local.y,
     );
     let closest_world = rect_pos
         + Vec2::new(
-            cos * closest.x - sin * closest.y,
-            sin * closest.x + cos * closest.y,
+            cos * contact_local.x - sin * contact_local.y,
+            sin * contact_local.x + cos * contact_local.y,
         );
-    let depth = -(radius - dist);
     vec![make_contact2d(body_a, body_b, closest_world, normal, depth)]
 }
 

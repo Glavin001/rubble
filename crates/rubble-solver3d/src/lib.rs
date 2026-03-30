@@ -200,13 +200,31 @@ impl Solver3D {
                 let r_a = cp - bodies[a].position();
                 let r_b = cp - bodies[b].position();
 
+                // Inverse inertia tensors for rotational effective mass.
+                let inv_inertia_a = if a < inv_inertias.len() {
+                    inv_inertias[a]
+                } else {
+                    glam::Mat3::ZERO
+                };
+                let inv_inertia_b = if b < inv_inertias.len() {
+                    inv_inertias[b]
+                } else {
+                    glam::Mat3::ZERO
+                };
+
+                // Effective inverse mass including rotational contribution:
+                // w_eff = inv_m_a + inv_m_b + (inv_I_a * (r_a × n)) · (r_a × n) + (inv_I_b * (r_b × n)) · (r_b × n)
+                let rn_a = r_a.cross(normal);
+                let rn_b = r_b.cross(normal);
+                let w_rot_a = (inv_inertia_a * rn_a).dot(rn_a);
+                let w_rot_b = (inv_inertia_b * rn_b).dot(rn_b);
+                let w_eff = w_sum + w_rot_a + w_rot_b;
+                if w_eff <= 0.0 {
+                    continue;
+                }
+
                 // Penetration depth: project relative displacement onto normal.
                 // depth < 0 means penetrating (bodies overlap).
-                // We compute: depth = dot((pos_b + r_b) - (pos_a + r_a), normal) + stored_depth
-                // But the contact point and depth are already computed by the
-                // narrow-phase. We recompute violation from current positions:
-                // separation = dot(pos_b - pos_a, normal) - original_separation
-                // For simplicity, use the stored depth and adjust for position changes.
                 let depth = c.depth() + (bodies[b].position() - bodies[a].position()).dot(normal)
                     - (old_positions[b] - old_positions[a]).dot(normal);
 
@@ -219,7 +237,9 @@ impl Solver3D {
                 let lambda_n = contacts[ci].lambda_n;
 
                 // Effective correction magnitude with AL penalty.
-                let correction = (-depth * penalty + lambda_n) / (w_sum * penalty + penalty);
+                // Use w_eff (includes rotational mass) and XPBD-style compliance
+                // regularization (+1.0) to prevent overcorrection on deep penetration.
+                let correction = (-depth * penalty + lambda_n) / (w_eff * penalty + 1.0);
                 let correction = correction.max(0.0);
 
                 // Apply position correction.
@@ -240,19 +260,12 @@ impl Solver3D {
 
                 // ---- Rotational correction ----
                 // Apply torque-like correction from contact offset.
-                let inv_inertia_a = if a < inv_inertias.len() {
-                    inv_inertias[a]
-                } else {
-                    glam::Mat3::ZERO
-                };
-                let inv_inertia_b = if b < inv_inertias.len() {
-                    inv_inertias[b]
-                } else {
-                    glam::Mat3::ZERO
-                };
+                // Damping factor (0.1) prevents energy injection from angular corrections,
+                // matching the 2D solver behavior.
+                let rot_damping = 0.1_f32;
 
                 if im_a > 0.0 {
-                    let torque_a = r_a.cross(normal) * correction;
+                    let torque_a = rn_a * correction * rot_damping;
                     let delta_omega_a = inv_inertia_a * torque_a;
                     let q = bodies[a].quat();
                     let dq = Quat::from_xyzw(
@@ -266,7 +279,7 @@ impl Solver3D {
                     bodies[a].orientation = Vec4::new(q_new.x, q_new.y, q_new.z, q_new.w);
                 }
                 if im_b > 0.0 {
-                    let torque_b = r_b.cross(normal) * correction;
+                    let torque_b = rn_b * correction * rot_damping;
                     let delta_omega_b = inv_inertia_b * torque_b;
                     let q = bodies[b].quat();
                     let dq = Quat::from_xyzw(

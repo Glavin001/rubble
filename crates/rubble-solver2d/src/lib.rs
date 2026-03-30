@@ -165,6 +165,19 @@ impl Solver2D {
                 let r_a = cp - bodies[a].position();
                 let r_b = cp - bodies[b].position();
 
+                // 2D cross product r × n (scalar in 2D)
+                let rn_a = r_a.x * normal.y - r_a.y * normal.x;
+                let rn_b = r_b.x * normal.y - r_b.y * normal.x;
+
+                // Effective inverse mass including rotational contribution.
+                // inv_I is approximated as inv_mass (same as used in rotational correction).
+                let w_rot_a = im_a * rn_a * rn_a;
+                let w_rot_b = im_b * rn_b * rn_b;
+                let w_eff = w_sum + w_rot_a + w_rot_b;
+                if w_eff <= 0.0 {
+                    continue;
+                }
+
                 // Recompute penetration depth from current positions.
                 let depth = c.depth() + (bodies[b].position() - bodies[a].position()).dot(normal)
                     - (old_positions[b] - old_positions[a]).dot(normal);
@@ -176,7 +189,9 @@ impl Solver2D {
                 // ---- Normal correction ----
                 let penalty = contacts[ci].penalty_k;
                 let lambda_n = contacts[ci].lambda_n;
-                let correction = (-depth * penalty + lambda_n) / (w_sum * penalty + penalty);
+                // XPBD-style compliance regularization prevents overcorrection
+                // on deep penetration. The +1.0 term acts as compliance α̃.
+                let correction = (-depth * penalty + lambda_n) / (w_eff * penalty + 1.0);
                 let correction = correction.max(0.0);
 
                 if im_a > 0.0 {

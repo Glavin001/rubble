@@ -79,7 +79,7 @@ pub fn sphere_box(
     }
 
     if dist_sq < 1e-12 {
-        // Sphere center is inside box -- find closest face for separation
+        // Sphere center is inside box -- find closest face for separation.
         let face_dists = [
             half.x - local.x.abs(),
             half.y - local.y.abs(),
@@ -90,20 +90,24 @@ pub fn sphere_box(
             .enumerate()
             .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .unwrap();
-        let mut normal_local = Vec3::ZERO;
+        // outward_local points from box face toward sphere (outward from box)
+        let mut outward_local = Vec3::ZERO;
         match min_axis {
-            0 => normal_local.x = if local.x >= 0.0 { 1.0 } else { -1.0 },
-            1 => normal_local.y = if local.y >= 0.0 { 1.0 } else { -1.0 },
-            _ => normal_local.z = if local.z >= 0.0 { 1.0 } else { -1.0 },
+            0 => outward_local.x = if local.x >= 0.0 { 1.0 } else { -1.0 },
+            1 => outward_local.y = if local.y >= 0.0 { 1.0 } else { -1.0 },
+            _ => outward_local.z = if local.z >= 0.0 { 1.0 } else { -1.0 },
         }
-        let normal = box_rot * normal_local;
+        // Negate: solver convention is normal from body_a (sphere) toward body_b (box)
+        let normal = box_rot * (-outward_local);
         let point = box_pos + box_rot * closest;
         let depth = -(radius + min_dist);
         return vec![make_contact(body_a, body_b, point, normal, depth)];
     }
 
     let dist = dist_sq.sqrt();
-    let normal_local = diff / dist;
+    // diff points from box surface toward sphere (from B to A).
+    // Negate for solver convention (normal from A to B).
+    let normal_local = -diff / dist;
     let normal = box_rot * normal_local;
     let point = box_pos + box_rot * closest;
     let depth = -(radius - dist);
@@ -595,8 +599,8 @@ mod tests {
         );
         assert_eq!(contacts.len(), 1);
         let c = &contacts[0];
-        // Normal should point roughly along +X (from box face toward sphere)
-        assert!(c.contact_normal().x > 0.9);
+        // Normal should point roughly along -X (from sphere toward box, solver convention)
+        assert!(c.contact_normal().x < -0.9);
         assert!(c.depth() < 0.0); // penetrating
     }
 
