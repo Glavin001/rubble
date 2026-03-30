@@ -1,0 +1,4 @@
+[profile.ci]
+# Produce JUnit XML for GitHub Actions test reporting
+[profile.ci.junit]
+path = "junit.xml"
