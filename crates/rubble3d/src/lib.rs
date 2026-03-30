@@ -2,6 +2,10 @@
 //!
 //! Orchestrates the full simulation pipeline:
 //! broadphase (LBVH) → narrowphase → solver.
+//!
+//! Optionally dispatches the entire pipeline on the GPU via [`gpu::GpuPipeline`].
+
+pub mod gpu;
 
 use std::collections::HashSet;
 
@@ -188,6 +192,9 @@ impl GenerationalIndexAllocator {
 // ---------------------------------------------------------------------------
 
 /// The main 3D physics world. Add bodies, step the simulation, query results.
+///
+/// When created with [`World::new_gpu`], the simulation step dispatches
+/// compute shaders on the GPU. Otherwise it falls back to the CPU solver.
 pub struct World {
     config: SimConfig,
     states: Vec<RigidBodyState3D>,
@@ -205,6 +212,8 @@ pub struct World {
     events: Vec<CollisionEvent>,
     /// Tracks which slot indices are alive (not removed).
     alive: Vec<bool>,
+    /// Optional GPU pipeline. When `Some`, [`step`] dispatches on the GPU.
+    gpu_pipeline: Option<gpu::GpuPipeline>,
 }
 
 impl World {
@@ -231,7 +240,46 @@ impl World {
             prev_pairs: HashSet::new(),
             events: Vec::new(),
             alive: Vec::new(),
+            gpu_pipeline: None,
         }
+    }
+
+    /// Create a new physics world backed by GPU compute shaders.
+    ///
+    /// The GPU context is created synchronously (blocking). If no GPU adapter
+    /// is available, returns an error.
+    pub fn new_gpu(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
+        let ctx = pollster::block_on(rubble_gpu::GpuContext::new())?;
+        let pipeline = gpu::GpuPipeline::new(ctx, config.max_bodies);
+
+        let solver = Solver3D::new(SolverParams {
+            iterations: config.solver_iterations,
+            ..Default::default()
+        });
+        let persistence = ContactPersistence::new(0.95);
+        Ok(Self {
+            config,
+            states: Vec::new(),
+            props: Vec::new(),
+            inv_inertias: Vec::new(),
+            shapes: Vec::new(),
+            spheres: Vec::new(),
+            boxes: Vec::new(),
+            capsules: Vec::new(),
+            planes: Vec::new(),
+            allocator: GenerationalIndexAllocator::new(),
+            solver,
+            persistence,
+            prev_pairs: HashSet::new(),
+            events: Vec::new(),
+            alive: Vec::new(),
+            gpu_pipeline: Some(pipeline),
+        })
+    }
+
+    /// Returns `true` if this world has an active GPU pipeline.
+    pub fn has_gpu(&self) -> bool {
+        self.gpu_pipeline.is_some()
     }
 
     /// Add a rigid body to the world. Returns a stable handle.
@@ -381,9 +429,65 @@ impl World {
 
     /// Advance the simulation by one time step.
     ///
+    /// If a GPU pipeline is present, dispatches the physics step on the GPU.
+    /// Otherwise falls back to the CPU solver.
+    ///
     /// Pipeline: compute AABBs -> LBVH broadphase -> plane broadphase ->
     /// narrowphase contacts -> persistence (warm start) -> solver -> event detection.
     pub fn step(&mut self) {
+        if self.gpu_pipeline.is_some() {
+            self.step_gpu();
+            return;
+        }
+        self.step_cpu();
+    }
+
+    /// GPU-accelerated simulation step.
+    fn step_gpu(&mut self) {
+        let n = self.states.len();
+        if n == 0 {
+            return;
+        }
+
+        let alive_indices: Vec<usize> = (0..n).filter(|&i| self.alive[i]).collect();
+        if alive_indices.is_empty() {
+            return;
+        }
+
+        // Build compact arrays for GPU upload
+        let compact_states: Vec<RigidBodyState3D> =
+            alive_indices.iter().map(|&i| self.states[i]).collect();
+        let compact_props: Vec<RigidBodyProps3D> =
+            alive_indices.iter().map(|&i| self.props[i]).collect();
+        let num_bodies = compact_states.len() as u32;
+
+        let pipeline = self.gpu_pipeline.as_mut().unwrap();
+
+        // Upload body states, props, and shape data to GPU.
+        // AABBs are computed on the GPU via the AABB compute shader.
+        pipeline.upload(
+            &compact_states,
+            &compact_props,
+            &self.spheres,
+            &self.boxes,
+            self.config.gravity,
+            self.config.dt,
+            self.config.solver_iterations,
+        );
+
+        // Run GPU step
+        let results = pipeline.step(num_bodies, self.config.solver_iterations);
+
+        // Write results back to original arrays
+        for (slot, &orig) in alive_indices.iter().enumerate() {
+            if slot < results.len() {
+                self.states[orig] = results[slot];
+            }
+        }
+    }
+
+    /// CPU-only simulation step (original path).
+    fn step_cpu(&mut self) {
         let n = self.states.len();
         if n == 0 {
             return;

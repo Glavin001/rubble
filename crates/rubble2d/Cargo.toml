@@ -13,6 +13,8 @@ rubble-narrowphase2d = { workspace = true }
 rubble-solver2d = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
 thiserror = { workspace = true }
 
 [build-dependencies]

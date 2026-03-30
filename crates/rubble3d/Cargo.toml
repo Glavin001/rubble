@@ -14,6 +14,8 @@ rubble-solver3d = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
+pollster = { workspace = true }
+wgpu = { workspace = true }
 
 [build-dependencies]
 spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu" }

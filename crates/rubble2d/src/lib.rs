@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod gpu;
+
 use std::collections::HashSet;
 
 use glam::{Vec2, Vec4};
@@ -159,6 +161,7 @@ pub struct World2D {
     persistence: ContactPersistence2D,
     prev_pairs: HashSet<(u32, u32)>,
     events: Vec<CollisionEvent>,
+    gpu_pipeline: Option<gpu::GpuPipeline2D>,
 }
 
 impl World2D {
@@ -180,7 +183,41 @@ impl World2D {
             persistence: ContactPersistence2D::new(),
             prev_pairs: HashSet::new(),
             events: Vec::new(),
+            gpu_pipeline: None,
         }
+    }
+
+    /// Create a new 2D physics world backed by GPU compute shaders.
+    ///
+    /// The GPU context is created synchronously (blocking). If no GPU adapter
+    /// is available, returns an error.
+    pub fn new_gpu(config: SimConfig2D) -> Result<Self, rubble_gpu::GpuError> {
+        let ctx = pollster::block_on(rubble_gpu::GpuContext::new())?;
+        let pipeline = gpu::GpuPipeline2D::new(ctx, config.max_bodies);
+
+        let solver = Solver2D::new(SolverParams {
+            iterations: config.solver_iterations,
+            ..SolverParams::default()
+        });
+        Ok(Self {
+            config,
+            states: Vec::new(),
+            shapes: Vec::new(),
+            circles: Vec::new(),
+            rects: Vec::new(),
+            capsules: Vec::new(),
+            allocator: GenerationalIndexAllocator::new(),
+            solver,
+            persistence: ContactPersistence2D::new(),
+            prev_pairs: HashSet::new(),
+            events: Vec::new(),
+            gpu_pipeline: Some(pipeline),
+        })
+    }
+
+    /// Returns `true` if this world has an active GPU pipeline.
+    pub fn has_gpu(&self) -> bool {
+        self.gpu_pipeline.is_some()
     }
 
     /// Add a rigid body to the world. Returns a stable handle.
@@ -286,8 +323,116 @@ impl World2D {
         s.lin_vel = Vec4::new(vel.x, vel.y, omega, 0.0);
     }
 
-    /// Advance the simulation by one time step (broadphase -> narrowphase -> solve).
+    /// Advance the simulation by one time step.
+    ///
+    /// If a GPU pipeline is present, dispatches the physics step on the GPU.
+    /// Otherwise falls back to the CPU solver.
     pub fn step(&mut self) {
+        if self.gpu_pipeline.is_some() {
+            self.step_gpu();
+            return;
+        }
+        self.step_cpu();
+    }
+
+    /// GPU-accelerated simulation step.
+    fn step_gpu(&mut self) {
+        if self.states.is_empty() {
+            return;
+        }
+
+        // Collect indices of live bodies.
+        let alive_indices: Vec<usize> = (0..self.states.len())
+            .filter(|&i| self.allocator.alive.get(i).copied().unwrap_or(false))
+            .collect();
+
+        if alive_indices.is_empty() {
+            return;
+        }
+
+        // Build compact arrays for GPU upload.
+        let compact_states: Vec<RigidBodyState2D> =
+            alive_indices.iter().map(|&i| self.states[i]).collect();
+
+        // Build shape info array for GPU.
+        // For 2D we don't have a separate BodyProps; we derive from ShapeDesc2D.
+        let mut shape_info_data: Vec<gpu::ShapeInfo> = Vec::with_capacity(alive_indices.len());
+        let mut gpu_circles: Vec<CircleData> = Vec::new();
+        let mut gpu_rects: Vec<RectData> = Vec::new();
+
+        for &i in &alive_indices {
+            match &self.shapes[i] {
+                ShapeDesc2D::Circle { radius } => {
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 0, // SHAPE_CIRCLE
+                        shape_index: gpu_circles.len() as u32,
+                    });
+                    gpu_circles.push(CircleData {
+                        radius: *radius,
+                        _pad: [0.0; 3],
+                    });
+                }
+                ShapeDesc2D::Rect { half_extents } => {
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 1, // SHAPE_RECT
+                        shape_index: gpu_rects.len() as u32,
+                    });
+                    gpu_rects.push(RectData {
+                        half_extents: Vec4::new(half_extents.x, half_extents.y, 0.0, 0.0),
+                    });
+                }
+                ShapeDesc2D::Capsule { radius, .. } => {
+                    // Approximate capsule as circle on GPU
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 0, // SHAPE_CIRCLE
+                        shape_index: gpu_circles.len() as u32,
+                    });
+                    gpu_circles.push(CircleData {
+                        radius: *radius,
+                        _pad: [0.0; 3],
+                    });
+                }
+            }
+        }
+
+        // Ensure at least one element in shape buffers so GPU buffers are valid.
+        if gpu_circles.is_empty() {
+            gpu_circles.push(CircleData {
+                radius: 0.0,
+                _pad: [0.0; 3],
+            });
+        }
+        if gpu_rects.is_empty() {
+            gpu_rects.push(RectData {
+                half_extents: Vec4::ZERO,
+            });
+        }
+
+        let num_bodies = compact_states.len() as u32;
+        let pipeline = self.gpu_pipeline.as_mut().unwrap();
+
+        pipeline.upload(
+            &compact_states,
+            &shape_info_data,
+            &gpu_circles,
+            &gpu_rects,
+            self.config.gravity,
+            self.config.dt,
+            self.config.solver_iterations,
+        );
+
+        let results = pipeline.step(num_bodies, self.config.solver_iterations);
+
+        // Write results back to original arrays.
+        for (slot, &orig) in alive_indices.iter().enumerate() {
+            if slot < results.len() {
+                self.states[orig] = results[slot];
+            }
+        }
+    }
+
+    /// CPU-only simulation step (original path).
+    fn step_cpu(&mut self) {
         let dt = self.config.dt;
         let gravity = self.config.gravity;
 
