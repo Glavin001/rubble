@@ -35,9 +35,14 @@ jobs:
           sudo apt-get install -y mesa-vulkan-drivers
       - name: Run tests
         env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           WGPU_BACKEND: vulkan
-        run: cargo test --workspace
+        run: |
+          # Find the lavapipe ICD file (name varies by distro/version)
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo test --workspace
 
   fmt:
     name: Format

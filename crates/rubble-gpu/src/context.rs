@@ -17,14 +17,27 @@ impl GpuContext {
             display: Default::default(),
         });
 
-        let adapter = instance
+        let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|_| GpuError::NoAdapter)?;
+        {
+            Ok(adapter) => adapter,
+            Err(_) => {
+                // Fallback: try software adapter (e.g. lavapipe in CI)
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: true,
+                    })
+                    .await
+                    .map_err(|_| GpuError::NoAdapter)?
+            }
+        };
 
         let (device, queue) = adapter.request_device(&Default::default()).await?;
 
