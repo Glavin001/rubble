@@ -116,6 +116,7 @@ pub fn sphere_box(
 
 /// Box vs Box using SAT (Separating Axis Theorem) with up to 15 axes.
 /// Returns 0 or 1 contacts (simplified: single contact at penetration midpoint).
+#[allow(clippy::too_many_arguments)]
 pub fn box_box(
     pos_a: Vec3,
     rot_a: Quat,
@@ -175,9 +176,9 @@ pub fn box_box(
     }
 
     // 9 edge-edge cross products
-    for i in 0..3 {
-        for j in 0..3 {
-            if !test_axis(axes_a[i].cross(axes_b[j])) {
+    for aa in &axes_a {
+        for ab in &axes_b {
+            if !test_axis(aa.cross(*ab)) {
                 return vec![];
             }
         }
@@ -209,6 +210,7 @@ fn closest_point_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
 }
 
 /// Sphere vs Capsule. Returns 0 or 1 contacts.
+#[allow(clippy::too_many_arguments)]
 pub fn sphere_capsule(
     sphere_pos: Vec3,
     radius: f32,
@@ -276,6 +278,7 @@ fn closest_points_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec
 }
 
 /// Capsule vs Capsule. Returns 0 or 1 contacts.
+#[allow(clippy::too_many_arguments)]
 pub fn capsule_capsule(
     pos_a: Vec3,
     rot_a: Quat,

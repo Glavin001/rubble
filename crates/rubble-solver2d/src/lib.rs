@@ -145,6 +145,7 @@ impl Solver2D {
         // -----------------------------------------------------------------
         // 3. Position-based Gauss-Seidel iterations
         // -----------------------------------------------------------------
+        #[allow(clippy::needless_range_loop)]
         for _iter in 0..self.params.iterations {
             for ci in 0..contacts.len() {
                 let c = &contacts[ci];

@@ -72,7 +72,7 @@ impl ComputeKernel {
 
 /// Round up `total` to the next multiple of `workgroup_size`, then divide.
 pub fn round_up_workgroups(total: u32, workgroup_size: u32) -> u32 {
-    (total + workgroup_size - 1) / workgroup_size
+    total.div_ceil(workgroup_size)
 }
 
 #[cfg(test)]

@@ -83,6 +83,7 @@ pub fn circle_rect(
 /// Tests all 4 separating axes (2 from each rectangle's orientation), finds the
 /// axis of minimum penetration, and generates a contact point at the midpoint
 /// between the two rectangle centers.
+#[allow(clippy::too_many_arguments)]
 pub fn rect_rect(
     pos_a: Vec2,
     angle_a: f32,

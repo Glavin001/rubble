@@ -143,7 +143,7 @@ fn karras_node(sorted_codes: &[u32], i: usize) -> (usize, usize, usize) {
         if t == 1 {
             break;
         }
-        t = (t + 1) / 2;
+        t = t.div_ceil(2);
     }
 
     (range_left, range_right, range_left + s)
@@ -338,7 +338,7 @@ impl Lbvh {
         let mut stack: Vec<LbvhChild> = Vec::with_capacity(64);
 
         for leaf_idx in 0..n {
-            let body_i = self.sorted_indices[leaf_idx] as u32;
+            let body_i = self.sorted_indices[leaf_idx];
             let aabb_i = &leaf_aabbs[leaf_idx];
 
             stack.clear();
@@ -348,7 +348,7 @@ impl Lbvh {
                 match child {
                     LbvhChild::Leaf(j) => {
                         if j != leaf_idx {
-                            let body_j = self.sorted_indices[j] as u32;
+                            let body_j = self.sorted_indices[j];
                             if body_i < body_j && aabb_overlap(aabb_i, &leaf_aabbs[j]) {
                                 pairs.push([body_i, body_j]);
                             }
