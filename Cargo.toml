@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/rubble-math",
     "crates/rubble-gpu",
-    "crates/rubble-shaders",
     "crates/rubble-primitives",
     "crates/rubble-shapes3d",
     "crates/rubble-shapes2d",

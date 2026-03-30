@@ -17,7 +17,6 @@ fn gpu_world(config: SimConfig2D) -> World2D {
 #[test]
 fn gpu_2d_world_creation() {
     let world = gpu_world(SimConfig2D::default());
-    // GPU is always active now
     assert_eq!(world.body_count(), 0);
 }
 

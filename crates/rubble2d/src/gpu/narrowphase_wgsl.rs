@@ -164,6 +164,73 @@ fn circle_rect_test(
     emit_contact_2d(contact_point, normal_ab, depth, body_circle, body_rect, max_contacts);
 }
 
+fn rect_rect_test(
+    pos_a: vec2<f32>, angle_a: f32, he_a: vec2<f32>,
+    pos_b: vec2<f32>, angle_b: f32, he_b: vec2<f32>,
+    body_a: u32, body_b: u32,
+    max_contacts: u32,
+) {
+    // SAT with 4 face-normal axes (2 per rect)
+    let ca_a = cos(angle_a);
+    let sa_a = sin(angle_a);
+    let ca_b = cos(angle_b);
+    let sa_b = sin(angle_b);
+
+    let axis_a0 = vec2<f32>(ca_a, sa_a);  // local X of A
+    let axis_a1 = vec2<f32>(-sa_a, ca_a); // local Y of A
+    let axis_b0 = vec2<f32>(ca_b, sa_b);  // local X of B
+    let axis_b1 = vec2<f32>(-sa_b, ca_b); // local Y of B
+
+    let d = pos_b - pos_a;
+    var min_depth = -1e30;
+    var best_normal = vec2<f32>(0.0, 1.0);
+
+    // Helper arrays for iteration
+    let axes = array<vec2<f32>, 4>(axis_a0, axis_a1, axis_b0, axis_b1);
+    let he_a_arr = array<f32, 2>(he_a.x, he_a.y);
+    let he_b_arr = array<f32, 2>(he_b.x, he_b.y);
+
+    // Test axes from A (indices 0, 1)
+    for (var i = 0u; i < 2u; i = i + 1u) {
+        let axis = axes[i];
+        let proj_a = he_a_arr[i];
+        let proj_b = abs(dot(axis_b0, axis)) * he_b_arr[0]
+                   + abs(dot(axis_b1, axis)) * he_b_arr[1];
+        let center_proj = dot(d, axis);
+        let overlap = proj_a + proj_b - abs(center_proj);
+        if overlap < 0.0 {
+            return; // separated
+        }
+        let depth = -overlap;
+        if depth > min_depth {
+            min_depth = depth;
+            best_normal = axis * select(1.0, -1.0, center_proj < 0.0);
+        }
+    }
+
+    // Test axes from B (indices 2, 3 -> mapped to he_b index 0, 1)
+    for (var i = 0u; i < 2u; i = i + 1u) {
+        let axis = axes[i + 2u];
+        let proj_a = abs(dot(axis_a0, axis)) * he_a_arr[0]
+                   + abs(dot(axis_a1, axis)) * he_a_arr[1];
+        let proj_b = he_b_arr[i];
+        let center_proj = dot(d, axis);
+        let overlap = proj_a + proj_b - abs(center_proj);
+        if overlap < 0.0 {
+            return; // separated
+        }
+        let depth = -overlap;
+        if depth > min_depth {
+            min_depth = depth;
+            best_normal = axis * select(1.0, -1.0, center_proj < 0.0);
+        }
+    }
+
+    // Contact point: midpoint adjusted by normal and depth
+    let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
+    emit_contact_2d(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
@@ -197,7 +264,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let rb = circles[shape_infos[b].shape_index].radius;
         let ha = rects[shape_infos[a].shape_index].half_extents.xy;
         circle_rect_test(pos_b, rb, pos_a, angle_a, ha, b, a, max_contacts);
+    } else if st_a == SHAPE_RECT && st_b == SHAPE_RECT {
+        let ha = rects[shape_infos[a].shape_index].half_extents.xy;
+        let hb = rects[shape_infos[b].shape_index].half_extents.xy;
+        rect_rect_test(pos_a, angle_a, ha, pos_b, angle_b, hb, a, b, max_contacts);
     }
-    // Rect-rect not yet implemented on GPU for 2D.
 }
 "#;

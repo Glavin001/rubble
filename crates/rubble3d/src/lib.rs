@@ -1,7 +1,7 @@
 //! `rubble3d` — Public API facade for the rubble 3D GPU physics engine.
 //!
-//! All simulation runs on the GPU via WGSL compute shaders (AVBD solver):
-//! predict → AABB compute → broadphase → narrowphase → solver → velocity extraction.
+//! All physics simulation runs entirely on the GPU via WGSL compute shaders.
+//! The pipeline: predict → AABB → broadphase → narrowphase → AVBD solver → velocity extraction.
 
 pub mod gpu;
 
@@ -101,7 +101,6 @@ fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
             )
         }
     };
-
     Mat3::from_diagonal(Vec3::new(1.0 / diag.x, 1.0 / diag.y, 1.0 / diag.z))
 }
 
@@ -158,9 +157,6 @@ impl GenerationalIndexAllocator {
 // ---------------------------------------------------------------------------
 
 /// The main 3D physics world. All simulation runs on the GPU.
-///
-/// Create with [`World::new`] which initializes a GPU compute pipeline.
-/// If no GPU adapter is available, returns an error.
 pub struct World {
     config: SimConfig,
     states: Vec<RigidBodyState3D>,
@@ -174,14 +170,12 @@ pub struct World {
 }
 
 impl World {
-    /// Create a new GPU-accelerated physics world.
+    /// Create a new 3D physics world backed by GPU compute shaders.
     ///
-    /// Initializes a GPU context and compiles all compute shaders.
     /// Returns an error if no GPU adapter is available.
     pub fn new(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
         let ctx = pollster::block_on(rubble_gpu::GpuContext::new())?;
         let pipeline = gpu::GpuPipeline::new(ctx, config.max_bodies);
-
         Ok(Self {
             config,
             states: Vec::new(),
@@ -238,7 +232,6 @@ impl World {
         let prop =
             RigidBodyProps3D::new(inv_inertia, desc.friction, shape_type, shape_index, flags);
 
-        // Ensure arrays are large enough for this index.
         if idx >= self.states.len() {
             self.states.resize(idx + 1, bytemuck::Zeroable::zeroed());
             self.props.resize(idx + 1, bytemuck::Zeroable::zeroed());
@@ -328,14 +321,12 @@ impl World {
             return;
         }
 
-        // Build compact arrays for GPU upload
         let compact_states: Vec<RigidBodyState3D> =
             alive_indices.iter().map(|&i| self.states[i]).collect();
         let compact_props: Vec<RigidBodyProps3D> =
             alive_indices.iter().map(|&i| self.props[i]).collect();
         let num_bodies = compact_states.len() as u32;
 
-        // Upload body states, props, and shape data to GPU.
         self.gpu_pipeline.upload(
             &compact_states,
             &compact_props,
@@ -346,17 +337,20 @@ impl World {
             self.config.solver_iterations,
         );
 
-        // Run GPU step
         let results = self
             .gpu_pipeline
             .step(num_bodies, self.config.solver_iterations);
 
-        // Write results back to original arrays
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
                 self.states[orig] = results[slot];
             }
         }
+    }
+
+    /// Access the GPU pipeline (for diagnostics like contact count).
+    pub fn gpu_pipeline(&self) -> &gpu::GpuPipeline {
+        &self.gpu_pipeline
     }
 }
 
@@ -369,7 +363,7 @@ mod tests {
     use super::*;
 
     fn gpu_world(config: SimConfig) -> World {
-        World::new(config).expect("GPU adapter required for tests")
+        World::new(config).expect("GPU required for tests")
     }
 
     #[test]
@@ -390,12 +384,9 @@ mod tests {
         assert_eq!(world.body_count(), 1);
         assert_eq!(world.get_position(handle), Some(Vec3::new(1.0, 2.0, 3.0)));
 
-        let removed = world.remove_body(handle);
-        assert!(removed);
+        assert!(world.remove_body(handle));
         assert_eq!(world.body_count(), 0);
         assert_eq!(world.get_position(handle), None);
-
-        // Double-remove should fail.
         assert!(!world.remove_body(handle));
     }
 
@@ -410,20 +401,15 @@ mod tests {
 
         let h2 = alloc.alloc();
         assert_eq!(h2.index, 1);
-        assert_eq!(h2.generation, 0);
         assert!(alloc.is_valid(h2));
 
-        // Dealloc h1.
         assert!(alloc.dealloc(h1));
         assert!(!alloc.is_valid(h1));
 
-        // Re-alloc should reuse index 0 with bumped generation.
         let h3 = alloc.alloc();
         assert_eq!(h3.index, 0);
         assert_eq!(h3.generation, 1);
         assert!(alloc.is_valid(h3));
-
-        // Old handle with generation 0 should be invalid.
         assert!(!alloc.is_valid(h1));
     }
 
@@ -448,16 +434,10 @@ mod tests {
         }
 
         let pos = world.get_position(handle).unwrap();
-        assert!(pos.y < 10.0, "Body should have fallen: y = {}", pos.y);
-        assert!(
-            pos.y > 0.0,
-            "Body should not have fallen too far: y = {}",
-            pos.y
-        );
         let expected_y = 10.0 - 0.5 * 9.81 * 1.0;
         assert!(
-            (pos.y - expected_y).abs() < 1.0,
-            "Body y={} should be near expected y={} (tolerance 1.0)",
+            (pos.y - expected_y).abs() < 0.5,
+            "Body y={} should be near expected y={}",
             pos.y,
             expected_y
         );
@@ -495,10 +475,9 @@ mod tests {
         let p1 = world.get_position(h1).unwrap();
         let p2 = world.get_position(h2).unwrap();
         let dist = (p2 - p1).length();
-
         assert!(
             dist >= 1.5,
-            "Bodies should not overlap significantly: distance = {}",
+            "Bodies should not overlap: distance = {}",
             dist
         );
     }

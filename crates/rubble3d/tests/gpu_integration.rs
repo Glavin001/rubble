@@ -3,9 +3,6 @@
 //! These tests verify that the GPU compute pipeline (AVBD solver) produces
 //! physically reasonable results. Each test creates a World with GPU enabled,
 //! runs the simulation, and checks invariants.
-//!
-//! All tests use `World::new()` which will panic if no GPU adapter is found.
-//! In CI, mesa-vulkan-drivers (lavapipe) provides a software Vulkan backend.
 
 use glam::Vec3;
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
@@ -20,7 +17,6 @@ fn gpu_world(config: SimConfig) -> World {
 #[test]
 fn gpu_world_creation() {
     let world = gpu_world(SimConfig::default());
-    // GPU is always active now
     assert_eq!(world.body_count(), 0);
 }
 
@@ -47,7 +43,6 @@ fn gpu_single_body_free_fall() {
     }
 
     let pos = world.get_position(h).unwrap();
-    // After 1 second of free fall: y ~ 10 - 0.5*9.81*1 = 5.095
     let t = steps as f32 * dt;
     let expected_y = 10.0 - 0.5 * 9.81 * t * t;
     assert!(pos.y < 10.0, "GPU: Body should have fallen: y = {}", pos.y);
@@ -58,7 +53,6 @@ fn gpu_single_body_free_fall() {
         expected_y,
         (pos.y - expected_y).abs()
     );
-    // X and Z should remain near zero
     assert!(pos.x.abs() < 0.1, "GPU: X drift = {}", pos.x);
     assert!(pos.z.abs() < 0.1, "GPU: Z drift = {}", pos.z);
 }
@@ -72,7 +66,6 @@ fn gpu_static_body_does_not_move() {
         max_bodies: 256,
     });
 
-    // Static body (mass = 0)
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(5.0, 5.0, 5.0),
         mass: 0.0,
@@ -101,7 +94,6 @@ fn gpu_two_sphere_collision() {
         max_bodies: 256,
     });
 
-    // Two spheres approaching each other
     let h1 = world.add_body(&RigidBodyDesc {
         position: Vec3::new(-2.0, 0.0, 0.0),
         linear_velocity: Vec3::new(5.0, 0.0, 0.0),
@@ -126,7 +118,6 @@ fn gpu_two_sphere_collision() {
     let p2 = world.get_position(h2).unwrap();
     let dist = (p2 - p1).length();
 
-    // After collision, spheres should be separated
     assert!(
         dist >= 1.5,
         "GPU: Spheres should not overlap: distance = {}",
@@ -175,7 +166,6 @@ fn gpu_multiple_bodies_no_crash() {
         max_bodies: 256,
     });
 
-    // Add 10 bodies at different positions
     let mut handles = Vec::new();
     for i in 0..10 {
         let h = world.add_body(&RigidBodyDesc {
@@ -187,12 +177,10 @@ fn gpu_multiple_bodies_no_crash() {
         handles.push(h);
     }
 
-    // Run 60 steps without crashing
     for _ in 0..60 {
         world.step();
     }
 
-    // All bodies should have finite positions
     for h in &handles {
         let pos = world.get_position(*h).unwrap();
         assert!(
@@ -212,7 +200,6 @@ fn gpu_sphere_box_collision() {
         max_bodies: 256,
     });
 
-    // Sphere approaching a static box
     let _box_h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(3.0, 0.0, 0.0),
         mass: 0.0, // static
@@ -235,7 +222,6 @@ fn gpu_sphere_box_collision() {
     }
 
     let pos = world.get_position(sphere_h).unwrap();
-    // Sphere should not be inside the box
     assert!(
         pos.x.is_finite(),
         "GPU: Sphere position is not finite: {:?}",
@@ -295,13 +281,11 @@ fn gpu_velocity_preserved_without_collision() {
     let pos = world.get_position(h).unwrap();
     let vel = world.get_velocity(h).unwrap();
 
-    // After 1 second at 3 m/s, should be near x=3
     assert!(
         (pos.x - 3.0).abs() < 1.0,
         "GPU: Expected x~3.0, got {}",
         pos.x
     );
-    // Velocity should be roughly preserved
     assert!(
         (vel.x - 3.0).abs() < 1.0,
         "GPU: Expected vx~3.0, got {}",
@@ -329,7 +313,6 @@ fn gpu_add_remove_body_stability() {
         world.step();
     }
 
-    // Add another body mid-simulation
     let h2 = world.add_body(&RigidBodyDesc {
         position: Vec3::new(5.0, 5.0, 0.0),
         mass: 1.0,
@@ -337,14 +320,12 @@ fn gpu_add_remove_body_stability() {
         ..Default::default()
     });
 
-    // Remove the first body
     world.remove_body(h1);
 
     for _ in 0..30 {
         world.step();
     }
 
-    // h2 should have fallen
     let pos2 = world.get_position(h2).unwrap();
     assert!(pos2.y < 5.0, "GPU: h2 should have fallen: y = {}", pos2.y);
     assert!(pos2.y.is_finite(), "GPU: h2 position not finite");

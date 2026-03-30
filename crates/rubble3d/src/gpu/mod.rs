@@ -6,14 +6,12 @@
 mod avbd_solve_wgsl;
 mod broadphase_pairs_wgsl;
 mod extract_velocity_wgsl;
-mod morton_codes_wgsl;
 mod narrowphase_wgsl;
 mod predict_wgsl;
 
 pub use avbd_solve_wgsl::AVBD_SOLVE_WGSL;
 pub use broadphase_pairs_wgsl::BROADPHASE_PAIRS_WGSL;
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
-pub use morton_codes_wgsl::MORTON_CODES_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
 

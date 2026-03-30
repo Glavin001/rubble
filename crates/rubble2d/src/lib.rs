@@ -1,7 +1,7 @@
 //! `rubble2d` — Public API facade for the rubble 2D GPU physics engine.
 //!
-//! All simulation runs on the GPU via WGSL compute shaders (AVBD solver):
-//! predict → AABB compute → broadphase → narrowphase → solver → velocity extraction.
+//! All physics simulation runs entirely on the GPU via WGSL compute shaders.
+//! The pipeline: predict → AABB → broadphase → narrowphase → AVBD solver → velocity extraction.
 
 pub mod gpu;
 
@@ -80,6 +80,7 @@ impl Default for RigidBodyDesc2D {
 // GenerationalIndexAllocator
 // ---------------------------------------------------------------------------
 
+/// Generational index allocator for stable body handles.
 struct GenerationalIndexAllocator {
     generations: Vec<u32>,
     alive: Vec<bool>,
@@ -143,14 +144,12 @@ pub struct World2D {
 }
 
 impl World2D {
-    /// Create a new GPU-accelerated 2D physics world.
+    /// Create a new 2D physics world backed by GPU compute shaders.
     ///
-    /// Initializes a GPU context and compiles all compute shaders.
     /// Returns an error if no GPU adapter is available.
     pub fn new(config: SimConfig2D) -> Result<Self, rubble_gpu::GpuError> {
         let ctx = pollster::block_on(rubble_gpu::GpuContext::new())?;
         let pipeline = gpu::GpuPipeline2D::new(ctx, config.max_bodies);
-
         Ok(Self {
             config,
             states: Vec::new(),
@@ -275,10 +274,10 @@ impl World2D {
             return;
         }
 
+        // Build compact arrays for GPU upload.
         let compact_states: Vec<RigidBodyState2D> =
             alive_indices.iter().map(|&i| self.states[i]).collect();
 
-        // Build shape info for GPU
         let mut shape_info_data: Vec<gpu::ShapeInfo> = Vec::with_capacity(alive_indices.len());
         let mut gpu_circles: Vec<CircleData> = Vec::new();
         let mut gpu_rects: Vec<RectData> = Vec::new();
@@ -287,7 +286,7 @@ impl World2D {
             match &self.shapes[i] {
                 ShapeDesc2D::Circle { radius } => {
                     shape_info_data.push(gpu::ShapeInfo {
-                        shape_type: 0,
+                        shape_type: 0, // SHAPE_CIRCLE
                         shape_index: gpu_circles.len() as u32,
                     });
                     gpu_circles.push(CircleData {
@@ -297,7 +296,7 @@ impl World2D {
                 }
                 ShapeDesc2D::Rect { half_extents } => {
                     shape_info_data.push(gpu::ShapeInfo {
-                        shape_type: 1,
+                        shape_type: 1, // SHAPE_RECT
                         shape_index: gpu_rects.len() as u32,
                     });
                     gpu_rects.push(RectData {
@@ -307,6 +306,7 @@ impl World2D {
             }
         }
 
+        // Ensure at least one element in shape buffers so GPU buffers are valid.
         if gpu_circles.is_empty() {
             gpu_circles.push(CircleData {
                 radius: 0.0,
@@ -341,6 +341,11 @@ impl World2D {
             }
         }
     }
+
+    /// Access the GPU pipeline (for diagnostics like contact count).
+    pub fn gpu_pipeline(&self) -> &gpu::GpuPipeline2D {
+        &self.gpu_pipeline
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,12 +357,16 @@ mod tests {
     use super::*;
 
     fn gpu_world(config: SimConfig2D) -> World2D {
-        World2D::new(config).expect("GPU adapter required for tests")
+        World2D::new(config).expect("GPU required for tests")
+    }
+
+    fn gpu_world_default() -> World2D {
+        gpu_world(SimConfig2D::default())
     }
 
     #[test]
     fn test_world2d_new() {
-        let world = gpu_world(SimConfig2D::default());
+        let world = gpu_world_default();
         assert_eq!(world.body_count(), 0);
         assert!(world.states.is_empty());
         assert_eq!(world.config.gravity, Vec2::new(0.0, -9.81));
@@ -368,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_add_remove_body() {
-        let mut world = gpu_world(SimConfig2D::default());
+        let mut world = gpu_world_default();
 
         let h = world.add_body(&RigidBodyDesc2D {
             x: 1.0,
@@ -386,7 +395,6 @@ mod tests {
         assert_eq!(world.body_count(), 0);
         assert_eq!(world.get_position(h), None);
 
-        // Double remove should fail.
         assert!(!world.remove_body(h));
     }
 
@@ -409,7 +417,6 @@ mod tests {
         assert_eq!(h2.index, 0);
         assert_eq!(h2.generation, 1);
         assert!(alloc.is_alive(h2));
-
         assert!(!alloc.is_alive(h0));
         assert_eq!(alloc.live_count(), 2);
     }
@@ -439,11 +446,11 @@ mod tests {
         let expected_y = 10.0 - 0.5 * 9.81 * 1.0;
         let error = (pos.y - expected_y).abs();
         assert!(
-            error < 1.0,
+            error < 0.5,
             "Expected y ~ {expected_y}, got {}, error {error}",
             pos.y
         );
-        assert!(pos.x.abs() < 0.1, "X should remain ~0, got {}", pos.x);
+        assert!(pos.x.abs() < 1e-6, "X should remain ~0, got {}", pos.x);
     }
 
     #[test]
@@ -478,17 +485,16 @@ mod tests {
 
         let pos_a = world.get_position(h_a).unwrap();
         let pos_b = world.get_position(h_b).unwrap();
-
-        let dist = (pos_b - pos_a).length();
+        let dist = (pos_b.x - pos_a.x).abs();
         assert!(
             dist >= 1.5,
-            "Bodies should be separated (dist={dist}), not overlapping"
+            "Bodies should be separated (dist={dist}), not heavily overlapping"
         );
     }
 
     #[test]
     fn test_body_count() {
-        let mut world = gpu_world(SimConfig2D::default());
+        let mut world = gpu_world_default();
         assert_eq!(world.body_count(), 0);
 
         let h1 = world.add_body(&RigidBodyDesc2D::default());
