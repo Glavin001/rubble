@@ -1,0 +1,22 @@
+[package]
+name = "rubble2d"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rubble-math = { workspace = true }
+rubble-gpu = { workspace = true }
+rubble-primitives = { workspace = true }
+rubble-shapes2d = { workspace = true }
+rubble-broadphase2d = { workspace = true }
+rubble-narrowphase2d = { workspace = true }
+rubble-solver2d = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu" }
+
+[dev-dependencies]
+pollster = { workspace = true }
