@@ -19,7 +19,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext};
 use rubble_math::{Aabb2D, Contact2D, RigidBodyState2D};
-use rubble_shapes2d::{CircleData, RectData};
+use rubble_shapes2d::{CircleData, ConvexPolygonData, ConvexVertex2D, RectData};
 
 const WORKGROUP_SIZE: u32 = 64;
 
@@ -95,15 +95,32 @@ struct SimParams2D {
     _pad:              u32,
 };
 
-const SHAPE_CIRCLE: u32 = 0u;
-const SHAPE_RECT:   u32 = 1u;
+const SHAPE_CIRCLE:         u32 = 0u;
+const SHAPE_RECT:           u32 = 1u;
+const SHAPE_CONVEX_POLYGON: u32 = 2u;
 
-@group(0) @binding(0) var<storage, read>       bodies:      array<Body2D>;
-@group(0) @binding(1) var<storage, read>       shape_infos: array<ShapeInfo>;
-@group(0) @binding(2) var<storage, read>       circles:     array<CircleData>;
-@group(0) @binding(3) var<storage, read>       rects:       array<RectDataGpu>;
-@group(0) @binding(4) var<storage, read_write> aabbs:       array<Aabb2D>;
-@group(0) @binding(5) var<uniform>             params:      SimParams2D;
+struct ConvexPolyInfo {
+    vertex_offset: u32,
+    vertex_count:  u32,
+    _pad0:         u32,
+    _pad1:         u32,
+};
+
+struct ConvexVert2D {
+    x: f32,
+    y: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read>       bodies:        array<Body2D>;
+@group(0) @binding(1) var<storage, read>       shape_infos:   array<ShapeInfo>;
+@group(0) @binding(2) var<storage, read>       circles:       array<CircleData>;
+@group(0) @binding(3) var<storage, read>       rects:         array<RectDataGpu>;
+@group(0) @binding(4) var<storage, read_write> aabbs:         array<Aabb2D>;
+@group(0) @binding(5) var<uniform>             params:        SimParams2D;
+@group(0) @binding(6) var<storage, read>       convex_polys:  array<ConvexPolyInfo>;
+@group(0) @binding(7) var<storage, read>       convex_verts:  array<ConvexVert2D>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -133,8 +150,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let ey = abs(sa * he.x) + abs(ca * he.y);
         aabb_min = pos - vec2<f32>(ex, ey);
         aabb_max = pos + vec2<f32>(ex, ey);
+    } else if st == SHAPE_CONVEX_POLYGON {
+        let poly = convex_polys[si];
+        let ca = cos(angle);
+        let sa = sin(angle);
+        var mn = vec2<f32>(1e30, 1e30);
+        var mx = vec2<f32>(-1e30, -1e30);
+        for (var vi = 0u; vi < poly.vertex_count; vi = vi + 1u) {
+            let cv = convex_verts[poly.vertex_offset + vi];
+            let local_v = vec2<f32>(cv.x, cv.y);
+            let world_v = pos + vec2<f32>(ca * local_v.x - sa * local_v.y, sa * local_v.x + ca * local_v.y);
+            mn = min(mn, world_v);
+            mx = max(mx, world_v);
+        }
+        aabb_min = mn;
+        aabb_max = mx;
     } else {
-        // Capsule/other: generous default AABB
+        // Unknown shape: generous default AABB
         aabb_min = pos - vec2<f32>(2.0, 2.0);
         aabb_max = pos + vec2<f32>(2.0, 2.0);
     }
@@ -178,6 +210,8 @@ pub struct GpuPipeline2D {
     pair_count: GpuAtomicCounter,
     circles: GpuBuffer<CircleData>,
     rects: GpuBuffer<RectData>,
+    convex_polys: GpuBuffer<ConvexPolygonData>,
+    convex_verts: GpuBuffer<ConvexVertex2D>,
     shape_infos: GpuBuffer<ShapeInfo>,
 
     // Uniform buffer (shaders expect `var<uniform>`)
@@ -206,6 +240,8 @@ impl GpuPipeline2D {
         let pair_count = GpuAtomicCounter::new(&ctx);
         let circles = GpuBuffer::new(&ctx, max_bodies.max(1));
         let rects = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let convex_polys = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let convex_verts = GpuBuffer::new(&ctx, (max_bodies * 8).max(1));
         let shape_infos = GpuBuffer::new(&ctx, max_bodies);
 
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -232,6 +268,8 @@ impl GpuPipeline2D {
             pair_count,
             circles,
             rects,
+            convex_polys,
+            convex_verts,
             shape_infos,
             params_uniform,
         }
@@ -251,6 +289,8 @@ impl GpuPipeline2D {
         shape_info_data: &[ShapeInfo],
         circle_data: &[CircleData],
         rect_data: &[RectData],
+        poly_data: &[ConvexPolygonData],
+        poly_verts: &[ConvexVertex2D],
         gravity: Vec2,
         dt: f32,
         solver_iterations: u32,
@@ -264,6 +304,12 @@ impl GpuPipeline2D {
         }
         if !rect_data.is_empty() {
             self.rects.upload(&self.ctx, rect_data);
+        }
+        if !poly_data.is_empty() {
+            self.convex_polys.upload(&self.ctx, poly_data);
+        }
+        if !poly_verts.is_empty() {
+            self.convex_verts.upload(&self.ctx, poly_verts);
         }
 
         self.aabbs.grow_if_needed(&self.ctx, states.len());
@@ -383,6 +429,14 @@ impl GpuPipeline2D {
                         binding: 5,
                         resource: self.params_uniform.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.convex_polys.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.convex_verts.buffer().as_entire_binding(),
+                    },
                 ],
             });
         self.run_pass("aabb_2d", &self.aabb_kernel, &bg, num_bodies);
@@ -468,6 +522,14 @@ impl GpuPipeline2D {
                     wgpu::BindGroupEntry {
                         binding: 8,
                         resource: self.params_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: self.convex_polys.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: self.convex_verts.buffer().as_entire_binding(),
                     },
                 ],
             });

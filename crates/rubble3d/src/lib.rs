@@ -7,9 +7,10 @@ pub mod gpu;
 
 use glam::{Mat3, Quat, Vec3, Vec4};
 use rubble_math::{
-    BodyHandle, RigidBodyProps3D, RigidBodyState3D, FLAG_STATIC, SHAPE_BOX, SHAPE_SPHERE,
+    BodyHandle, RigidBodyProps3D, RigidBodyState3D, FLAG_STATIC, SHAPE_BOX, SHAPE_CONVEX_HULL,
+    SHAPE_SPHERE,
 };
-use rubble_shapes3d::{BoxData, SphereData};
+use rubble_shapes3d::{BoxData, ConvexHullData, ConvexVertex3D, SphereData};
 
 // ---------------------------------------------------------------------------
 // SimConfig
@@ -39,10 +40,18 @@ impl Default for SimConfig {
 // ---------------------------------------------------------------------------
 
 /// Describes a collision shape for body creation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ShapeDesc {
-    Sphere { radius: f32 },
-    Box { half_extents: Vec3 },
+    Sphere {
+        radius: f32,
+    },
+    Box {
+        half_extents: Vec3,
+    },
+    /// Convex hull defined by up to 64 vertices in local space.
+    ConvexHull {
+        vertices: Vec<Vec3>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +107,21 @@ fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
                 mass / 12.0 * (h * h + d * d),
                 mass / 12.0 * (w * w + d * d),
                 mass / 12.0 * (w * w + h * h),
+            )
+        }
+        ShapeDesc::ConvexHull { vertices } => {
+            // Approximate inertia using bounding box of the vertices.
+            let mut min = Vec3::splat(f32::MAX);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for &v in vertices {
+                min = min.min(v);
+                max = max.max(v);
+            }
+            let size = max - min;
+            Vec3::new(
+                mass / 12.0 * (size.y * size.y + size.z * size.z),
+                mass / 12.0 * (size.x * size.x + size.z * size.z),
+                mass / 12.0 * (size.x * size.x + size.y * size.y),
             )
         }
     };
@@ -164,6 +188,8 @@ pub struct World {
     shapes: Vec<ShapeDesc>,
     spheres: Vec<SphereData>,
     boxes: Vec<BoxData>,
+    convex_hulls: Vec<ConvexHullData>,
+    convex_vertices: Vec<ConvexVertex3D>,
     allocator: GenerationalIndexAllocator,
     alive: Vec<bool>,
     gpu_pipeline: gpu::GpuPipeline,
@@ -183,6 +209,8 @@ impl World {
             shapes: Vec::new(),
             spheres: Vec::new(),
             boxes: Vec::new(),
+            convex_hulls: Vec::new(),
+            convex_vertices: Vec::new(),
             allocator: GenerationalIndexAllocator::new(),
             alive: Vec::new(),
             gpu_pipeline: pipeline,
@@ -227,6 +255,30 @@ impl World {
                 });
                 (SHAPE_BOX, si)
             }
+            ShapeDesc::ConvexHull { vertices } => {
+                let si = self.convex_hulls.len() as u32;
+                let vertex_offset = self.convex_vertices.len() as u32;
+                let vertex_count = vertices.len().min(64) as u32;
+                for v in vertices.iter().take(64) {
+                    self.convex_vertices.push(ConvexVertex3D {
+                        x: v.x,
+                        y: v.y,
+                        z: v.z,
+                        _pad: 0.0,
+                    });
+                }
+                self.convex_hulls.push(ConvexHullData {
+                    vertex_offset,
+                    vertex_count,
+                    face_offset: 0,
+                    face_count: 0,
+                    edge_offset: 0,
+                    edge_count: 0,
+                    gauss_map_offset: 0,
+                    gauss_map_count: 0,
+                });
+                (SHAPE_CONVEX_HULL, si)
+            }
         };
 
         let prop =
@@ -242,7 +294,7 @@ impl World {
 
         self.states[idx] = state;
         self.props[idx] = prop;
-        self.shapes[idx] = desc.shape;
+        self.shapes[idx] = desc.shape.clone();
         self.alive[idx] = true;
 
         handle
@@ -332,6 +384,8 @@ impl World {
             &compact_props,
             &self.spheres,
             &self.boxes,
+            &self.convex_hulls,
+            &self.convex_vertices,
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,

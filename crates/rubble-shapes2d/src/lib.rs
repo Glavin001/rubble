@@ -38,6 +38,17 @@ pub struct ConvexPolygonData {
     pub _pad: [u32; 2],
 }
 
+/// GPU-compatible vertex for 2D convex polygon (padded to 16 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ConvexVertex2D {
+    pub x: f32,
+    pub y: f32,
+    pub _pad: [f32; 2],
+}
+
+pub const MAX_CONVEX_POLYGON_VERTICES: usize = 64;
+
 // ---------------------------------------------------------------------------
 // AABB computation (CPU reference)
 // ---------------------------------------------------------------------------
@@ -66,6 +77,21 @@ pub fn compute_capsule2d_aabb(center: Vec2, angle: f32, half_height: f32, radius
     let r = Vec2::splat(radius);
     let min = a.min(b) - r;
     let max = a.max(b) + r;
+    Aabb2D::new(min, max)
+}
+
+pub fn compute_convex_polygon_aabb(center: Vec2, angle: f32, vertices: &[Vec2]) -> Aabb2D {
+    if vertices.is_empty() {
+        return Aabb2D::new(center, center);
+    }
+    let (sin, cos) = angle.sin_cos();
+    let mut min = Vec2::splat(f32::MAX);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    for &v in vertices {
+        let world = center + Vec2::new(cos * v.x - sin * v.y, sin * v.x + cos * v.y);
+        min = min.min(world);
+        max = max.max(world);
+    }
     Aabb2D::new(min, max)
 }
 
@@ -131,6 +157,46 @@ mod tests {
             "max: {:?} vs expected {:?}",
             aabb.max_point(),
             expected_max
+        );
+    }
+
+    #[test]
+    fn convex_polygon_aabb_square() {
+        // A unit square centered at origin, no rotation
+        let verts = vec![
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(1.0, -1.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(-1.0, 1.0),
+        ];
+        let aabb = compute_convex_polygon_aabb(Vec2::ZERO, 0.0, &verts);
+        let eps = 1e-5;
+        assert!((aabb.min_point() - Vec2::new(-1.0, -1.0)).length() < eps);
+        assert!((aabb.max_point() - Vec2::new(1.0, 1.0)).length() < eps);
+    }
+
+    #[test]
+    fn convex_polygon_aabb_rotated_triangle() {
+        // Equilateral triangle, rotated 90 degrees
+        let verts = vec![
+            Vec2::new(0.0, 1.0),
+            Vec2::new(-0.866, -0.5),
+            Vec2::new(0.866, -0.5),
+        ];
+        let aabb =
+            compute_convex_polygon_aabb(Vec2::new(3.0, 0.0), std::f32::consts::FRAC_PI_2, &verts);
+        // After 90 degree rotation: x←-y, y←x
+        // Rotated verts: (-1, 0), (0.5, -0.866), (0.5, 0.866) + center (3, 0)
+        let eps = 0.01;
+        assert!(
+            (aabb.min_point().x - 2.0).abs() < eps,
+            "min x: {}",
+            aabb.min_point().x
+        );
+        assert!(
+            (aabb.max_point().x - 3.5).abs() < eps,
+            "max x: {}",
+            aabb.max_point().x
         );
     }
 

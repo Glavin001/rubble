@@ -371,3 +371,236 @@ fn gpu_high_velocity_stability() {
         "High-velocity body velocity diverged: {vel}"
     );
 }
+
+#[test]
+fn gpu_convex_hull_free_fall() {
+    let dt = 1.0 / 60.0;
+    let mut world = gpu_world(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt,
+        solver_iterations: 5,
+        max_bodies: 256,
+    });
+
+    // Tetrahedron vertices
+    let verts = vec![
+        Vec3::new(1.0, 0.0, -0.707),
+        Vec3::new(-1.0, 0.0, -0.707),
+        Vec3::new(0.0, 1.0, 0.707),
+        Vec3::new(0.0, -1.0, 0.707),
+    ];
+
+    let h = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 10.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::ConvexHull { vertices: verts },
+        ..Default::default()
+    });
+
+    for _ in 0..60 {
+        world.step();
+    }
+
+    let pos = world.get_position(h).unwrap();
+    assert!(
+        pos.y < 10.0,
+        "Convex hull should have fallen: y = {}",
+        pos.y
+    );
+    assert!(pos.y > -20.0, "Convex hull fell too far: y = {}", pos.y);
+    assert!(pos.x.abs() < 0.5, "X drift: {}", pos.x);
+    assert!(pos.z.abs() < 0.5, "Z drift: {}", pos.z);
+}
+
+#[test]
+fn gpu_convex_hull_hull_collision() {
+    let mut world = gpu_world(SimConfig {
+        gravity: Vec3::ZERO,
+        dt: 1.0 / 60.0,
+        solver_iterations: 10,
+        max_bodies: 256,
+    });
+
+    // Two cube hulls approaching each other
+    let cube_verts = vec![
+        Vec3::new(-0.5, -0.5, -0.5),
+        Vec3::new(0.5, -0.5, -0.5),
+        Vec3::new(0.5, 0.5, -0.5),
+        Vec3::new(-0.5, 0.5, -0.5),
+        Vec3::new(-0.5, -0.5, 0.5),
+        Vec3::new(0.5, -0.5, 0.5),
+        Vec3::new(0.5, 0.5, 0.5),
+        Vec3::new(-0.5, 0.5, 0.5),
+    ];
+
+    let h1 = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(-2.0, 0.0, 0.0),
+        linear_velocity: Vec3::new(5.0, 0.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::ConvexHull {
+            vertices: cube_verts.clone(),
+        },
+        ..Default::default()
+    });
+
+    let h2 = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(2.0, 0.0, 0.0),
+        linear_velocity: Vec3::new(-5.0, 0.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::ConvexHull {
+            vertices: cube_verts,
+        },
+        ..Default::default()
+    });
+
+    for _ in 0..120 {
+        world.step();
+    }
+
+    let p1 = world.get_position(h1).unwrap();
+    let p2 = world.get_position(h2).unwrap();
+    assert!(
+        p1.is_finite() && p2.is_finite(),
+        "Hull positions should be finite: {p1}, {p2}"
+    );
+    // After collision, they should have separated
+    let dist = (p2 - p1).length();
+    assert!(dist > 0.5, "Hulls should have separated: dist = {dist}");
+}
+
+#[test]
+fn gpu_sphere_hull_collision() {
+    let mut world = gpu_world(SimConfig {
+        gravity: Vec3::ZERO,
+        dt: 1.0 / 60.0,
+        solver_iterations: 10,
+        max_bodies: 256,
+    });
+
+    let cube_verts = vec![
+        Vec3::new(-1.0, -1.0, -1.0),
+        Vec3::new(1.0, -1.0, -1.0),
+        Vec3::new(1.0, 1.0, -1.0),
+        Vec3::new(-1.0, 1.0, -1.0),
+        Vec3::new(-1.0, -1.0, 1.0),
+        Vec3::new(1.0, -1.0, 1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(-1.0, 1.0, 1.0),
+    ];
+
+    // Static hull
+    let _hull_h = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(3.0, 0.0, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::ConvexHull {
+            vertices: cube_verts,
+        },
+        ..Default::default()
+    });
+
+    // Moving sphere
+    let sphere_h = world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        linear_velocity: Vec3::new(5.0, 0.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::Sphere { radius: 0.5 },
+        ..Default::default()
+    });
+
+    for _ in 0..120 {
+        world.step();
+    }
+
+    let pos = world.get_position(sphere_h).unwrap();
+    assert!(pos.x.is_finite(), "Sphere position should be finite: {pos}");
+}
+
+#[test]
+fn gpu_box_hull_collision() {
+    let mut world = gpu_world(SimConfig {
+        gravity: Vec3::ZERO,
+        dt: 1.0 / 60.0,
+        solver_iterations: 10,
+        max_bodies: 256,
+    });
+
+    let cube_verts = vec![
+        Vec3::new(-0.5, -0.5, -0.5),
+        Vec3::new(0.5, -0.5, -0.5),
+        Vec3::new(0.5, 0.5, -0.5),
+        Vec3::new(-0.5, 0.5, -0.5),
+        Vec3::new(-0.5, -0.5, 0.5),
+        Vec3::new(0.5, -0.5, 0.5),
+        Vec3::new(0.5, 0.5, 0.5),
+        Vec3::new(-0.5, 0.5, 0.5),
+    ];
+
+    // Static box
+    let _box_h = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(3.0, 0.0, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        },
+        ..Default::default()
+    });
+
+    // Moving hull
+    let hull_h = world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        linear_velocity: Vec3::new(5.0, 0.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::ConvexHull {
+            vertices: cube_verts,
+        },
+        ..Default::default()
+    });
+
+    for _ in 0..120 {
+        world.step();
+    }
+
+    let pos = world.get_position(hull_h).unwrap();
+    assert!(
+        pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite(),
+        "Hull position should be finite: {pos}"
+    );
+}
+
+#[test]
+fn gpu_convex_hull_static_no_move() {
+    let mut world = gpu_world(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 60.0,
+        solver_iterations: 5,
+        max_bodies: 256,
+    });
+
+    let verts = vec![
+        Vec3::new(-1.0, -1.0, -1.0),
+        Vec3::new(1.0, -1.0, -1.0),
+        Vec3::new(1.0, 1.0, -1.0),
+        Vec3::new(-1.0, 1.0, -1.0),
+        Vec3::new(-1.0, -1.0, 1.0),
+        Vec3::new(1.0, -1.0, 1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(-1.0, 1.0, 1.0),
+    ];
+
+    let h = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 5.0, 0.0),
+        mass: 0.0, // static
+        shape: ShapeDesc::ConvexHull { vertices: verts },
+        ..Default::default()
+    });
+
+    for _ in 0..60 {
+        world.step();
+    }
+
+    let pos = world.get_position(h).unwrap();
+    assert!(
+        (pos - Vec3::new(0.0, 5.0, 0.0)).length() < 0.01,
+        "Static hull moved: {pos}"
+    );
+}

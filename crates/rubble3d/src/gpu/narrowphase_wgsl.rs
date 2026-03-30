@@ -60,8 +60,27 @@ struct SimParams {
     _pad:              u32,
 };
 
-const SHAPE_SPHERE: u32 = 0u;
-const SHAPE_BOX:    u32 = 1u;
+const SHAPE_SPHERE:      u32 = 0u;
+const SHAPE_BOX:         u32 = 1u;
+const SHAPE_CONVEX_HULL: u32 = 3u;
+
+struct ConvexHullInfo {
+    vertex_offset: u32,
+    vertex_count:  u32,
+    face_offset:   u32,
+    face_count:    u32,
+    edge_offset:   u32,
+    edge_count:    u32,
+    gauss_map_offset: u32,
+    gauss_map_count:  u32,
+};
+
+struct ConvexVert {
+    x: f32,
+    y: f32,
+    z: f32,
+    _pad: f32,
+};
 
 @group(0) @binding(0) var<storage, read>       bodies:        array<Body>;
 @group(0) @binding(1) var<storage, read>       props:         array<BodyProps>;
@@ -72,6 +91,8 @@ const SHAPE_BOX:    u32 = 1u;
 @group(0) @binding(6) var<storage, read_write> contacts:      array<Contact>;
 @group(0) @binding(7) var<storage, read_write> contact_count: atomic<u32>;
 @group(0) @binding(8) var<uniform>             params:        SimParams;
+@group(0) @binding(9) var<storage, read>       convex_hulls:  array<ConvexHullInfo>;
+@group(0) @binding(10) var<storage, read>      convex_verts:  array<ConvexVert>;
 
 // Quaternion rotation of a vector: q * v * conj(q)
 fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
@@ -241,6 +262,260 @@ fn box_box_test(
     emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
 }
 
+// Get a world-space vertex from a convex hull
+fn hull_world_vert(hull_si: u32, vi: u32, pos: vec3<f32>, rot: vec4<f32>) -> vec3<f32> {
+    let hull = convex_hulls[hull_si];
+    let cv = convex_verts[hull.vertex_offset + vi];
+    return pos + quat_rotate(rot, vec3<f32>(cv.x, cv.y, cv.z));
+}
+
+// Project a convex hull onto an axis and return (min, max)
+fn hull_project(hull_si: u32, pos: vec3<f32>, rot: vec4<f32>, axis: vec3<f32>) -> vec2<f32> {
+    let hull = convex_hulls[hull_si];
+    var mn = 1e30;
+    var mx = -1e30;
+    for (var i = 0u; i < hull.vertex_count; i = i + 1u) {
+        let wv = hull_world_vert(hull_si, i, pos, rot);
+        let p = dot(wv, axis);
+        mn = min(mn, p);
+        mx = max(mx, p);
+    }
+    return vec2<f32>(mn, mx);
+}
+
+// SAT test between two convex hulls using face normals derived from edges.
+// Returns true if contact was emitted.
+fn hull_hull_test(
+    pos_a: vec3<f32>, rot_a: vec4<f32>, si_a: u32,
+    pos_b: vec3<f32>, rot_b: vec4<f32>, si_b: u32,
+    body_a: u32, body_b: u32,
+    max_contacts: u32,
+) {
+    let hull_a = convex_hulls[si_a];
+    let hull_b = convex_hulls[si_b];
+    let d = pos_b - pos_a;
+
+    var min_depth = -1e30;
+    var best_normal = vec3<f32>(0.0, 1.0, 0.0);
+
+    // Test edge normals from hull A
+    let na = hull_a.vertex_count;
+    for (var i = 0u; i < na; i = i + 1u) {
+        let v0 = hull_world_vert(si_a, i, pos_a, rot_a);
+        let v1 = hull_world_vert(si_a, (i + 1u) % na, pos_a, rot_a);
+        let v2 = hull_world_vert(si_a, (i + 2u) % na, pos_a, rot_a);
+        let edge1 = v1 - v0;
+        let edge2 = v2 - v0;
+        var axis = cross(edge1, edge2);
+        let len2 = dot(axis, axis);
+        if len2 < 1e-12 {
+            continue;
+        }
+        axis = axis / sqrt(len2);
+        // Ensure axis points from A toward B
+        if dot(axis, d) < 0.0 {
+            axis = -axis;
+        }
+        let proj_a = hull_project(si_a, pos_a, rot_a, axis);
+        let proj_b = hull_project(si_b, pos_b, rot_b, axis);
+        let overlap = min(proj_a.y, proj_b.y) - max(proj_a.x, proj_b.x);
+        if overlap < 0.0 {
+            return; // separated
+        }
+        let depth = -overlap;
+        if depth > min_depth {
+            min_depth = depth;
+            best_normal = axis;
+        }
+    }
+
+    // Test edge normals from hull B
+    let nb = hull_b.vertex_count;
+    for (var i = 0u; i < nb; i = i + 1u) {
+        let v0 = hull_world_vert(si_b, i, pos_b, rot_b);
+        let v1 = hull_world_vert(si_b, (i + 1u) % nb, pos_b, rot_b);
+        let v2 = hull_world_vert(si_b, (i + 2u) % nb, pos_b, rot_b);
+        let edge1 = v1 - v0;
+        let edge2 = v2 - v0;
+        var axis = cross(edge1, edge2);
+        let len2 = dot(axis, axis);
+        if len2 < 1e-12 {
+            continue;
+        }
+        axis = axis / sqrt(len2);
+        if dot(axis, d) < 0.0 {
+            axis = -axis;
+        }
+        let proj_a = hull_project(si_a, pos_a, rot_a, axis);
+        let proj_b = hull_project(si_b, pos_b, rot_b, axis);
+        let overlap = min(proj_a.y, proj_b.y) - max(proj_a.x, proj_b.x);
+        if overlap < 0.0 {
+            return;
+        }
+        let depth = -overlap;
+        if depth > min_depth {
+            min_depth = depth;
+            best_normal = axis;
+        }
+    }
+
+    let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
+    emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+}
+
+// SAT test: sphere vs convex hull
+fn sphere_hull_test(
+    sphere_pos: vec3<f32>, radius: f32,
+    hull_pos: vec3<f32>, hull_rot: vec4<f32>, hull_si: u32,
+    body_sphere: u32, body_hull: u32,
+    max_contacts: u32,
+) {
+    let hull = convex_hulls[hull_si];
+    // Find closest vertex to sphere center
+    var closest_dist2 = 1e30;
+    var closest_vert = hull_pos;
+    for (var i = 0u; i < hull.vertex_count; i = i + 1u) {
+        let wv = hull_world_vert(hull_si, i, hull_pos, hull_rot);
+        let d2 = dot(wv - sphere_pos, wv - sphere_pos);
+        if d2 < closest_dist2 {
+            closest_dist2 = d2;
+            closest_vert = wv;
+        }
+    }
+
+    // Test axis from sphere center to closest vertex
+    let d = closest_vert - sphere_pos;
+    let dist = sqrt(dot(d, d));
+    if dist < 1e-12 {
+        return;
+    }
+    let axis = d / dist;
+
+    // Project sphere
+    let sp_center = dot(sphere_pos, axis);
+    let sp_min = sp_center - radius;
+    let sp_max = sp_center + radius;
+
+    // Project hull
+    let hp = hull_project(hull_si, hull_pos, hull_rot, axis);
+
+    let overlap = min(sp_max, hp.y) - max(sp_min, hp.x);
+    if overlap < 0.0 {
+        return;
+    }
+
+    // Also test face normals from hull
+    let n = hull.vertex_count;
+    for (var i = 0u; i < n; i = i + 1u) {
+        let v0 = hull_world_vert(hull_si, i, hull_pos, hull_rot);
+        let v1 = hull_world_vert(hull_si, (i + 1u) % n, hull_pos, hull_rot);
+        let v2 = hull_world_vert(hull_si, (i + 2u) % n, hull_pos, hull_rot);
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+        var face_axis = cross(e1, e2);
+        let len2 = dot(face_axis, face_axis);
+        if len2 < 1e-12 {
+            continue;
+        }
+        face_axis = face_axis / sqrt(len2);
+        let spc = dot(sphere_pos, face_axis);
+        let s_min = spc - radius;
+        let s_max = spc + radius;
+        let h_proj = hull_project(hull_si, hull_pos, hull_rot, face_axis);
+        let face_overlap = min(s_max, h_proj.y) - max(s_min, h_proj.x);
+        if face_overlap < 0.0 {
+            return;
+        }
+    }
+
+    let depth = -overlap;
+    let normal = select(axis, -axis, dot(axis, sphere_pos - hull_pos) > 0.0);
+    let contact_point = sphere_pos + normal * (radius + depth * 0.5);
+    emit_contact(contact_point, normal, depth, body_sphere, body_hull, max_contacts);
+}
+
+// SAT test: box vs convex hull
+// Treats the box as having 3 face-normal axes and tests hull edge normals too.
+fn box_hull_test(
+    box_pos: vec3<f32>, box_rot: vec4<f32>, half_ext: vec3<f32>,
+    hull_pos: vec3<f32>, hull_rot: vec4<f32>, hull_si: u32,
+    body_box: u32, body_hull: u32,
+    max_contacts: u32,
+) {
+    let box_axes = array<vec3<f32>, 3>(
+        quat_rotate(box_rot, vec3<f32>(1.0, 0.0, 0.0)),
+        quat_rotate(box_rot, vec3<f32>(0.0, 1.0, 0.0)),
+        quat_rotate(box_rot, vec3<f32>(0.0, 0.0, 1.0)),
+    );
+    let he_arr = array<f32, 3>(half_ext.x, half_ext.y, half_ext.z);
+    let d = hull_pos - box_pos;
+
+    var min_depth = -1e30;
+    var best_normal = vec3<f32>(0.0, 1.0, 0.0);
+
+    // Test 3 box face axes
+    for (var i = 0u; i < 3u; i = i + 1u) {
+        let axis = box_axes[i];
+        // Project box: half-extent along this axis
+        let proj_box = he_arr[i];
+        // Project hull
+        let hp = hull_project(hull_si, hull_pos, hull_rot, axis);
+        let box_center = dot(box_pos, axis);
+        let box_min = box_center - proj_box;
+        let box_max = box_center + proj_box;
+        let overlap = min(box_max, hp.y) - max(box_min, hp.x);
+        if overlap < 0.0 {
+            return;
+        }
+        let depth = -overlap;
+        if depth > min_depth {
+            min_depth = depth;
+            let center_proj = dot(d, axis);
+            best_normal = axis * select(1.0, -1.0, center_proj < 0.0);
+        }
+    }
+
+    // Test hull face normals
+    let hull = convex_hulls[hull_si];
+    let n = hull.vertex_count;
+    for (var i = 0u; i < n; i = i + 1u) {
+        let v0 = hull_world_vert(hull_si, i, hull_pos, hull_rot);
+        let v1 = hull_world_vert(hull_si, (i + 1u) % n, hull_pos, hull_rot);
+        let v2 = hull_world_vert(hull_si, (i + 2u) % n, hull_pos, hull_rot);
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+        var axis = cross(e1, e2);
+        let len2 = dot(axis, axis);
+        if len2 < 1e-12 {
+            continue;
+        }
+        axis = axis / sqrt(len2);
+        if dot(axis, d) < 0.0 {
+            axis = -axis;
+        }
+        // Project box onto this axis
+        let proj_box = abs(dot(box_axes[0], axis)) * he_arr[0]
+                     + abs(dot(box_axes[1], axis)) * he_arr[1]
+                     + abs(dot(box_axes[2], axis)) * he_arr[2];
+        let box_center = dot(box_pos, axis);
+        let box_min = box_center - proj_box;
+        let box_max = box_center + proj_box;
+        let hp = hull_project(hull_si, hull_pos, hull_rot, axis);
+        let overlap = min(box_max, hp.y) - max(box_min, hp.x);
+        if overlap < 0.0 {
+            return;
+        }
+        let depth = -overlap;
+        if depth > min_depth {
+            min_depth = depth;
+            best_normal = axis;
+        }
+    }
+
+    let contact_point = (box_pos + hull_pos) * 0.5 + best_normal * min_depth * 0.5;
+    emit_contact(contact_point, best_normal, min_depth, body_box, body_hull, max_contacts);
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
@@ -278,7 +553,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let ha = boxes[props[a].shape_index].half_extents.xyz;
         let hb = boxes[props[b].shape_index].half_extents.xyz;
         box_box_test(pos_a, rot_a, ha, pos_b, rot_b, hb, a, b, max_contacts);
+    } else if st_a == SHAPE_CONVEX_HULL && st_b == SHAPE_CONVEX_HULL {
+        hull_hull_test(pos_a, rot_a, props[a].shape_index, pos_b, rot_b, props[b].shape_index, a, b, max_contacts);
+    } else if st_a == SHAPE_SPHERE && st_b == SHAPE_CONVEX_HULL {
+        let ra = spheres[props[a].shape_index].radius;
+        sphere_hull_test(pos_a, ra, pos_b, rot_b, props[b].shape_index, a, b, max_contacts);
+    } else if st_a == SHAPE_CONVEX_HULL && st_b == SHAPE_SPHERE {
+        let rb = spheres[props[b].shape_index].radius;
+        sphere_hull_test(pos_b, rb, pos_a, rot_a, props[a].shape_index, b, a, max_contacts);
+    } else if st_a == SHAPE_BOX && st_b == SHAPE_CONVEX_HULL {
+        let ha = boxes[props[a].shape_index].half_extents.xyz;
+        box_hull_test(pos_a, rot_a, ha, pos_b, rot_b, props[b].shape_index, a, b, max_contacts);
+    } else if st_a == SHAPE_CONVEX_HULL && st_b == SHAPE_BOX {
+        let hb = boxes[props[b].shape_index].half_extents.xyz;
+        box_hull_test(pos_b, rot_b, hb, pos_a, rot_a, props[a].shape_index, b, a, max_contacts);
     }
-    // Other combinations (capsule, convex hull) are not yet implemented on GPU.
 }
 "#;

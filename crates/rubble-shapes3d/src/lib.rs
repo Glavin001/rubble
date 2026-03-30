@@ -155,6 +155,30 @@ pub fn compute_capsule_aabb(center: Vec3, rotation: Quat, half_height: f32, radi
     Aabb3D::new(min, max)
 }
 
+/// GPU-compatible vertex for 3D convex hull (padded to 16 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ConvexVertex3D {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub _pad: f32,
+}
+
+pub fn compute_convex_hull_aabb(center: Vec3, rotation: Quat, vertices: &[Vec3]) -> Aabb3D {
+    if vertices.is_empty() {
+        return Aabb3D::new(center, center);
+    }
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for &v in vertices {
+        let world = center + rotation * v;
+        min = min.min(world);
+        max = max.max(world);
+    }
+    Aabb3D::new(min, max)
+}
+
 // ---------------------------------------------------------------------------
 // Compound shapes
 // ---------------------------------------------------------------------------
@@ -422,6 +446,49 @@ mod tests {
         let eps = 1e-5;
         assert!((aabb.min_point() - expected_min).length() < eps);
         assert!((aabb.max_point() - expected_max).length() < eps);
+    }
+
+    #[test]
+    fn convex_hull_aabb_cube() {
+        // A cube with half-extent 1 centered at origin, axis-aligned
+        let verts = vec![
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+        ];
+        let aabb = compute_convex_hull_aabb(Vec3::ZERO, Quat::IDENTITY, &verts);
+        let eps = 1e-5;
+        assert!((aabb.min_point() - Vec3::new(-1.0, -1.0, -1.0)).length() < eps);
+        assert!((aabb.max_point() - Vec3::new(1.0, 1.0, 1.0)).length() < eps);
+    }
+
+    #[test]
+    fn convex_hull_aabb_offset_and_rotated() {
+        // A unit cube offset by (5, 0, 0), rotated 45 degrees around Y
+        let verts = vec![
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+        ];
+        let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        let center = Vec3::new(5.0, 0.0, 0.0);
+        let aabb = compute_convex_hull_aabb(center, rot, &verts);
+        let s = std::f32::consts::SQRT_2; // rotated cube extent in X/Z
+        let eps = 1e-4;
+        assert!((aabb.min_point().x - (5.0 - s)).abs() < eps);
+        assert!((aabb.max_point().x - (5.0 + s)).abs() < eps);
+        assert!((aabb.min_point().y - (-1.0)).abs() < eps);
+        assert!((aabb.max_point().y - 1.0).abs() < eps);
     }
 
     #[test]

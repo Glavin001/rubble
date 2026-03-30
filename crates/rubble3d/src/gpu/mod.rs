@@ -19,7 +19,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext};
 use rubble_math::{Aabb3D, Contact3D, RigidBodyProps3D, RigidBodyState3D};
-use rubble_shapes3d::{BoxData, SphereData};
+use rubble_shapes3d::{BoxData, ConvexHullData, ConvexVertex3D, SphereData};
 
 const WORKGROUP_SIZE: u32 = 64;
 
@@ -92,15 +92,36 @@ struct SimParams {
     _pad:              u32,
 };
 
-const SHAPE_SPHERE: u32 = 0u;
-const SHAPE_BOX:    u32 = 1u;
+const SHAPE_SPHERE:      u32 = 0u;
+const SHAPE_BOX:         u32 = 1u;
+const SHAPE_CONVEX_HULL: u32 = 3u;
 
-@group(0) @binding(0) var<storage, read>       bodies:  array<Body>;
-@group(0) @binding(1) var<storage, read>       props:   array<BodyProps>;
-@group(0) @binding(2) var<storage, read>       spheres: array<SphereData>;
-@group(0) @binding(3) var<storage, read>       boxes:   array<BoxDataGpu>;
-@group(0) @binding(4) var<storage, read_write> aabbs:   array<Aabb>;
-@group(0) @binding(5) var<uniform>             params:  SimParams;
+struct ConvexHullInfo {
+    vertex_offset: u32,
+    vertex_count:  u32,
+    face_offset:   u32,
+    face_count:    u32,
+    edge_offset:   u32,
+    edge_count:    u32,
+    gauss_map_offset: u32,
+    gauss_map_count:  u32,
+};
+
+struct ConvexVert {
+    x: f32,
+    y: f32,
+    z: f32,
+    _pad: f32,
+};
+
+@group(0) @binding(0) var<storage, read>       bodies:       array<Body>;
+@group(0) @binding(1) var<storage, read>       props:        array<BodyProps>;
+@group(0) @binding(2) var<storage, read>       spheres:      array<SphereData>;
+@group(0) @binding(3) var<storage, read>       boxes:        array<BoxDataGpu>;
+@group(0) @binding(4) var<storage, read_write> aabbs:        array<Aabb>;
+@group(0) @binding(5) var<uniform>             params:       SimParams;
+@group(0) @binding(6) var<storage, read>       convex_hulls: array<ConvexHullInfo>;
+@group(0) @binding(7) var<storage, read>       convex_verts: array<ConvexVert>;
 
 fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     let u = q.xyz;
@@ -137,8 +158,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let extent = ax + ay + az;
         aabb_min = pos - extent;
         aabb_max = pos + extent;
+    } else if st == SHAPE_CONVEX_HULL {
+        let hull = convex_hulls[si];
+        var mn = vec3<f32>(1e30, 1e30, 1e30);
+        var mx = vec3<f32>(-1e30, -1e30, -1e30);
+        for (var vi = 0u; vi < hull.vertex_count; vi = vi + 1u) {
+            let cv = convex_verts[hull.vertex_offset + vi];
+            let local_v = vec3<f32>(cv.x, cv.y, cv.z);
+            let world_v = pos + quat_rotate(rot, local_v);
+            mn = min(mn, world_v);
+            mx = max(mx, world_v);
+        }
+        aabb_min = mn;
+        aabb_max = mx;
     } else {
-        // Capsule/other: generous default AABB
+        // Unknown shape: generous default AABB
         aabb_min = pos - vec3<f32>(2.0, 2.0, 2.0);
         aabb_max = pos + vec3<f32>(2.0, 2.0, 2.0);
     }
@@ -183,6 +217,8 @@ pub struct GpuPipeline {
     pair_count: GpuAtomicCounter,
     spheres: GpuBuffer<SphereData>,
     boxes: GpuBuffer<BoxData>,
+    convex_hulls: GpuBuffer<ConvexHullData>,
+    convex_vertices: GpuBuffer<ConvexVertex3D>,
 
     // Uniform buffer (shaders expect `var<uniform>`)
     params_uniform: wgpu::Buffer,
@@ -211,6 +247,8 @@ impl GpuPipeline {
         let pair_count = GpuAtomicCounter::new(&ctx);
         let spheres = GpuBuffer::new(&ctx, max_bodies.max(1));
         let boxes = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let convex_hulls = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let convex_vertices = GpuBuffer::new(&ctx, (max_bodies * 8).max(1));
 
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SimParams uniform"),
@@ -237,6 +275,8 @@ impl GpuPipeline {
             pair_count,
             spheres,
             boxes,
+            convex_hulls,
+            convex_vertices,
             params_uniform,
         }
     }
@@ -255,6 +295,8 @@ impl GpuPipeline {
         props: &[RigidBodyProps3D],
         sphere_data: &[SphereData],
         box_data: &[BoxData],
+        hull_data: &[ConvexHullData],
+        hull_vertices: &[ConvexVertex3D],
         gravity: Vec3,
         dt: f32,
         solver_iterations: u32,
@@ -268,6 +310,12 @@ impl GpuPipeline {
         }
         if !box_data.is_empty() {
             self.boxes.upload(&self.ctx, box_data);
+        }
+        if !hull_data.is_empty() {
+            self.convex_hulls.upload(&self.ctx, hull_data);
+        }
+        if !hull_vertices.is_empty() {
+            self.convex_vertices.upload(&self.ctx, hull_vertices);
         }
 
         self.aabbs.grow_if_needed(&self.ctx, states.len());
@@ -387,6 +435,14 @@ impl GpuPipeline {
                         binding: 5,
                         resource: self.params_uniform.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.convex_hulls.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.convex_vertices.buffer().as_entire_binding(),
+                    },
                 ],
             });
         self.run_pass("aabb", &self.aabb_kernel, &bg, num_bodies);
@@ -472,6 +528,14 @@ impl GpuPipeline {
                     wgpu::BindGroupEntry {
                         binding: 8,
                         resource: self.params_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: self.convex_hulls.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: self.convex_vertices.buffer().as_entire_binding(),
                     },
                 ],
             });

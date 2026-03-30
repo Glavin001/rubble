@@ -366,3 +366,224 @@ fn gpu_2d_high_velocity_stability() {
         "High-velocity body velocity diverged: {vel}"
     );
 }
+
+#[test]
+fn gpu_2d_convex_polygon_free_fall() {
+    let dt = 1.0 / 60.0;
+    let mut world = gpu_world(SimConfig2D {
+        gravity: Vec2::new(0.0, -9.81),
+        dt,
+        solver_iterations: 5,
+        max_bodies: 256,
+    });
+
+    // Pentagon
+    let verts: Vec<Vec2> = (0..5)
+        .map(|i| {
+            let angle = i as f32 * std::f32::consts::TAU / 5.0;
+            Vec2::new(angle.cos(), angle.sin())
+        })
+        .collect();
+
+    let h = world.add_body(&RigidBodyDesc2D {
+        x: 0.0,
+        y: 10.0,
+        mass: 1.0,
+        shape: ShapeDesc2D::ConvexPolygon { vertices: verts },
+        ..Default::default()
+    });
+
+    for _ in 0..60 {
+        world.step();
+    }
+
+    let pos = world.get_position(h).unwrap();
+    assert!(pos.y < 10.0, "Polygon should have fallen: y = {}", pos.y);
+    assert!(pos.y > -20.0, "Polygon fell too far: y = {}", pos.y);
+    assert!(pos.x.abs() < 0.5, "X drift: {}", pos.x);
+}
+
+#[test]
+fn gpu_2d_poly_poly_collision() {
+    let mut world = gpu_world(SimConfig2D {
+        gravity: Vec2::ZERO,
+        dt: 1.0 / 60.0,
+        solver_iterations: 10,
+        max_bodies: 256,
+    });
+
+    // Two squares as convex polygons
+    let square_verts = vec![
+        Vec2::new(-0.5, -0.5),
+        Vec2::new(0.5, -0.5),
+        Vec2::new(0.5, 0.5),
+        Vec2::new(-0.5, 0.5),
+    ];
+
+    let h1 = world.add_body(&RigidBodyDesc2D {
+        x: -2.0,
+        y: 0.0,
+        vx: 5.0,
+        mass: 1.0,
+        shape: ShapeDesc2D::ConvexPolygon {
+            vertices: square_verts.clone(),
+        },
+        ..Default::default()
+    });
+
+    let h2 = world.add_body(&RigidBodyDesc2D {
+        x: 2.0,
+        y: 0.0,
+        vx: -5.0,
+        mass: 1.0,
+        shape: ShapeDesc2D::ConvexPolygon {
+            vertices: square_verts,
+        },
+        ..Default::default()
+    });
+
+    for _ in 0..120 {
+        world.step();
+    }
+
+    let p1 = world.get_position(h1).unwrap();
+    let p2 = world.get_position(h2).unwrap();
+    assert!(
+        p1.is_finite() && p2.is_finite(),
+        "Polygon positions should be finite: {p1}, {p2}"
+    );
+    let dist = (p2 - p1).length();
+    assert!(dist > 0.3, "Polygons should have separated: dist = {dist}");
+}
+
+#[test]
+fn gpu_2d_circle_poly_collision() {
+    let mut world = gpu_world(SimConfig2D {
+        gravity: Vec2::ZERO,
+        dt: 1.0 / 60.0,
+        solver_iterations: 10,
+        max_bodies: 256,
+    });
+
+    let square_verts = vec![
+        Vec2::new(-1.0, -1.0),
+        Vec2::new(1.0, -1.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(-1.0, 1.0),
+    ];
+
+    // Static polygon
+    let _poly_h = world.add_body(&RigidBodyDesc2D {
+        x: 3.0,
+        y: 0.0,
+        mass: 0.0,
+        shape: ShapeDesc2D::ConvexPolygon {
+            vertices: square_verts,
+        },
+        ..Default::default()
+    });
+
+    // Moving circle
+    let circle_h = world.add_body(&RigidBodyDesc2D {
+        x: 0.0,
+        y: 0.0,
+        vx: 5.0,
+        mass: 1.0,
+        shape: ShapeDesc2D::Circle { radius: 0.5 },
+        ..Default::default()
+    });
+
+    for _ in 0..120 {
+        world.step();
+    }
+
+    let pos = world.get_position(circle_h).unwrap();
+    assert!(
+        pos.x.is_finite() && pos.y.is_finite(),
+        "Circle position should be finite: {pos}"
+    );
+}
+
+#[test]
+fn gpu_2d_rect_poly_collision() {
+    let mut world = gpu_world(SimConfig2D {
+        gravity: Vec2::ZERO,
+        dt: 1.0 / 60.0,
+        solver_iterations: 10,
+        max_bodies: 256,
+    });
+
+    let triangle_verts = vec![
+        Vec2::new(0.0, 1.0),
+        Vec2::new(-0.866, -0.5),
+        Vec2::new(0.866, -0.5),
+    ];
+
+    // Static rect
+    let _rect_h = world.add_body(&RigidBodyDesc2D {
+        x: 3.0,
+        y: 0.0,
+        mass: 0.0,
+        shape: ShapeDesc2D::Rect {
+            half_extents: Vec2::new(1.0, 1.0),
+        },
+        ..Default::default()
+    });
+
+    // Moving polygon
+    let poly_h = world.add_body(&RigidBodyDesc2D {
+        x: 0.0,
+        y: 0.0,
+        vx: 5.0,
+        mass: 1.0,
+        shape: ShapeDesc2D::ConvexPolygon {
+            vertices: triangle_verts,
+        },
+        ..Default::default()
+    });
+
+    for _ in 0..120 {
+        world.step();
+    }
+
+    let pos = world.get_position(poly_h).unwrap();
+    assert!(
+        pos.x.is_finite() && pos.y.is_finite(),
+        "Polygon position should be finite: {pos}"
+    );
+}
+
+#[test]
+fn gpu_2d_convex_polygon_static_no_move() {
+    let mut world = gpu_world(SimConfig2D {
+        gravity: Vec2::new(0.0, -9.81),
+        dt: 1.0 / 60.0,
+        solver_iterations: 5,
+        max_bodies: 256,
+    });
+
+    let verts = vec![
+        Vec2::new(-1.0, -1.0),
+        Vec2::new(1.0, -1.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(-1.0, 1.0),
+    ];
+
+    let h = world.add_body(&RigidBodyDesc2D {
+        x: 0.0,
+        y: 5.0,
+        mass: 0.0,
+        shape: ShapeDesc2D::ConvexPolygon { vertices: verts },
+        ..Default::default()
+    });
+
+    for _ in 0..60 {
+        world.step();
+    }
+
+    let pos = world.get_position(h).unwrap();
+    assert!(
+        (pos - Vec2::new(0.0, 5.0)).length() < 0.01,
+        "Static polygon moved: {pos}"
+    );
+}

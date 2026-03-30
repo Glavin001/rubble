@@ -7,7 +7,7 @@ pub mod gpu;
 
 use glam::{Vec2, Vec4};
 use rubble_math::{BodyHandle, RigidBodyState2D};
-use rubble_shapes2d::{CircleData, RectData};
+use rubble_shapes2d::{CircleData, ConvexPolygonData, ConvexVertex2D, RectData};
 
 // ---------------------------------------------------------------------------
 // SimConfig2D
@@ -37,10 +37,18 @@ impl Default for SimConfig2D {
 // ---------------------------------------------------------------------------
 
 /// User-facing shape descriptor for adding bodies.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ShapeDesc2D {
-    Circle { radius: f32 },
-    Rect { half_extents: Vec2 },
+    Circle {
+        radius: f32,
+    },
+    Rect {
+        half_extents: Vec2,
+    },
+    /// Convex polygon defined by up to 64 vertices in local space (CCW winding).
+    ConvexPolygon {
+        vertices: Vec<Vec2>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +198,7 @@ impl World2D {
         }
 
         self.states[idx] = state;
-        self.shapes[idx] = desc.shape;
+        self.shapes[idx] = desc.shape.clone();
 
         handle
     }
@@ -281,6 +289,8 @@ impl World2D {
         let mut shape_info_data: Vec<gpu::ShapeInfo> = Vec::with_capacity(alive_indices.len());
         let mut gpu_circles: Vec<CircleData> = Vec::new();
         let mut gpu_rects: Vec<RectData> = Vec::new();
+        let mut gpu_convex_polys: Vec<ConvexPolygonData> = Vec::new();
+        let mut gpu_convex_verts: Vec<ConvexVertex2D> = Vec::new();
 
         for &i in &alive_indices {
             match &self.shapes[i] {
@@ -303,6 +313,26 @@ impl World2D {
                         half_extents: Vec4::new(half_extents.x, half_extents.y, 0.0, 0.0),
                     });
                 }
+                ShapeDesc2D::ConvexPolygon { vertices } => {
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 2, // SHAPE_CONVEX_POLYGON
+                        shape_index: gpu_convex_polys.len() as u32,
+                    });
+                    let vertex_offset = gpu_convex_verts.len() as u32;
+                    let vertex_count = vertices.len().min(64) as u32;
+                    for v in vertices.iter().take(64) {
+                        gpu_convex_verts.push(ConvexVertex2D {
+                            x: v.x,
+                            y: v.y,
+                            _pad: [0.0; 2],
+                        });
+                    }
+                    gpu_convex_polys.push(ConvexPolygonData {
+                        vertex_offset,
+                        vertex_count,
+                        _pad: [0; 2],
+                    });
+                }
             }
         }
 
@@ -318,6 +348,20 @@ impl World2D {
                 half_extents: Vec4::ZERO,
             });
         }
+        if gpu_convex_polys.is_empty() {
+            gpu_convex_polys.push(ConvexPolygonData {
+                vertex_offset: 0,
+                vertex_count: 0,
+                _pad: [0; 2],
+            });
+        }
+        if gpu_convex_verts.is_empty() {
+            gpu_convex_verts.push(ConvexVertex2D {
+                x: 0.0,
+                y: 0.0,
+                _pad: [0.0; 2],
+            });
+        }
 
         let num_bodies = compact_states.len() as u32;
 
@@ -326,6 +370,8 @@ impl World2D {
             &shape_info_data,
             &gpu_circles,
             &gpu_rects,
+            &gpu_convex_polys,
+            &gpu_convex_verts,
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,
