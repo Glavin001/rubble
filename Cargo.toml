@@ -28,7 +28,7 @@ glam = { version = "0.30", features = ["bytemuck"] }
 thiserror = "2"
 smallvec = "1"
 serde = { version = "1", features = ["derive"] }
-wgpu = "26"
+wgpu = { version = "26", features = ["noop"] }
 pollster = "0.4"
 rand = "0.9"
 approx = "0.5"

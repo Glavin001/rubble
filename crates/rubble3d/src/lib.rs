@@ -3,7 +3,7 @@ use rubble_broadphase3d::overlap_pairs;
 use rubble_math::{Aabb3D, BodyHandle, CollisionEvent, RigidBodyState3D};
 use rubble_narrowphase3d::generate_contacts;
 use rubble_shapes3d::{compute_aabb, ShapeDesc};
-use rubble_solver3d::{integrate, solve_contacts, SolverParams};
+use rubble_solver3d::{greedy_graph_coloring, integrate, solve_contacts, SolverParams};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
@@ -57,6 +57,7 @@ pub struct World {
     live: HashSet<u32>,
     prev_contact_pairs: HashSet<(u32, u32)>,
     events: Vec<CollisionEvent>,
+    last_colors: Vec<u32>,
 }
 
 impl World {
@@ -70,6 +71,7 @@ impl World {
             live: HashSet::new(),
             prev_contact_pairs: HashSet::new(),
             events: Vec::new(),
+            last_colors: Vec::new(),
         }
     }
 
@@ -144,12 +146,15 @@ impl World {
                 .collect::<Vec<_>>(),
             &compact_shapes,
         );
+        self.last_colors = greedy_graph_coloring(&contacts, compact_states.len() as u32);
+
         solve_contacts(
             &mut compact_states,
             &contacts,
             SolverParams {
                 iterations: self.config.solver_iterations,
                 baumgarte: 0.2,
+                ..SolverParams::default()
             },
         );
 
@@ -208,6 +213,10 @@ impl World {
 
     pub fn body_count(&self) -> u32 {
         self.live.len() as u32
+    }
+
+    pub fn last_graph_colors(&self) -> &[u32] {
+        &self.last_colors
     }
 
     pub fn overlap_aabb(&self, aabb: Aabb3D) -> Vec<BodyHandle> {
@@ -378,6 +387,32 @@ mod tests {
         let overlaps = world.overlap_aabb(query);
         assert_eq!(overlaps.len(), 1);
         assert_eq!(overlaps[0].index, sphere.index);
+    }
+
+    #[test]
+    fn coloring_assigns_distinct_contacting_bodies() {
+        let mut world = World::new(SimConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+        world.add_body(RigidBodyDesc {
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            position: Vec3::new(0.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            linear_velocity: Vec3::ZERO,
+            mass: 1.0,
+        });
+        world.add_body(RigidBodyDesc {
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            position: Vec3::new(1.5, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            linear_velocity: Vec3::ZERO,
+            mass: 1.0,
+        });
+        world.step();
+        let colors = world.last_graph_colors();
+        assert_eq!(colors.len(), 2);
+        assert_ne!(colors[0], colors[1]);
     }
 
     #[test]
