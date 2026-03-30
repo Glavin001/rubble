@@ -142,12 +142,7 @@ pub fn compute_box_aabb(center: Vec3, rotation: Quat, half_extents: Vec3) -> Aab
     Aabb3D::new(center - world_half, center + world_half)
 }
 
-pub fn compute_capsule_aabb(
-    center: Vec3,
-    rotation: Quat,
-    half_height: f32,
-    radius: f32,
-) -> Aabb3D {
+pub fn compute_capsule_aabb(center: Vec3, rotation: Quat, half_height: f32, radius: f32) -> Aabb3D {
     // The capsule's local axis is Y. Transform the local up vector to world space.
     let local_axis = Vec3::Y * half_height;
     let world_axis = rotation * local_axis;

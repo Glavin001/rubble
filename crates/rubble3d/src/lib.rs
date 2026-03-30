@@ -8,12 +8,12 @@ use std::collections::HashSet;
 use glam::{Mat3, Quat, Vec3, Vec4};
 use rubble_broadphase3d::{find_plane_pairs, Lbvh};
 use rubble_math::{
-    Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
-    FLAG_STATIC, SHAPE_BOX, SHAPE_CAPSULE, SHAPE_SPHERE,
+    Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D, FLAG_STATIC,
+    SHAPE_BOX, SHAPE_CAPSULE, SHAPE_SPHERE,
 };
 use rubble_narrowphase3d::{
-    box_box, capsule_capsule, plane_box, plane_sphere, reduce_manifold, sphere_box,
-    sphere_capsule, sphere_sphere, ContactPersistence,
+    box_box, capsule_capsule, plane_box, plane_sphere, reduce_manifold, sphere_box, sphere_capsule,
+    sphere_sphere, ContactPersistence,
 };
 use rubble_shapes3d::{
     compute_box_aabb, compute_capsule_aabb, compute_sphere_aabb, BoxData, CapsuleData, Plane,
@@ -295,7 +295,8 @@ impl World {
             self.states.resize(idx + 1, bytemuck::Zeroable::zeroed());
             self.props.resize(idx + 1, bytemuck::Zeroable::zeroed());
             self.inv_inertias.resize(idx + 1, Mat3::ZERO);
-            self.shapes.resize(idx + 1, ShapeDesc::Sphere { radius: 0.5 });
+            self.shapes
+                .resize(idx + 1, ShapeDesc::Sphere { radius: 0.5 });
             self.alive.resize(idx + 1, false);
         }
 
@@ -404,8 +405,10 @@ impl World {
         // We append one extra "virtual static body" at the end for plane contacts.
         let mut compact_states: Vec<RigidBodyState3D> =
             alive_indices.iter().map(|&i| self.states[i]).collect();
-        let mut compact_inv_inertias: Vec<Mat3> =
-            alive_indices.iter().map(|&i| self.inv_inertias[i]).collect();
+        let mut compact_inv_inertias: Vec<Mat3> = alive_indices
+            .iter()
+            .map(|&i| self.inv_inertias[i])
+            .collect();
 
         // Virtual static body for plane contacts (inv_mass = 0 means static).
         let plane_body_slot = compact_states.len() as u32;
@@ -448,8 +451,7 @@ impl World {
         for &[slot_a, slot_b] in &broad_result.pairs {
             let orig_a = alive_indices[slot_a as usize];
             let orig_b = alive_indices[slot_b as usize];
-            let contacts =
-                self.generate_pair_contacts(orig_a, orig_b, slot_a, slot_b);
+            let contacts = self.generate_pair_contacts(orig_a, orig_b, slot_a, slot_b);
             all_contacts.extend(contacts);
         }
 
@@ -469,9 +471,14 @@ impl World {
             // inv_mass=0 for the plane body, so only the dynamic body moves.
             let body_slot = slot_idx;
             let contacts = match &self.shapes[orig] {
-                ShapeDesc::Sphere { radius } => {
-                    plane_sphere(plane.normal, plane.distance, pos, *radius, plane_body_slot, body_slot)
-                }
+                ShapeDesc::Sphere { radius } => plane_sphere(
+                    plane.normal,
+                    plane.distance,
+                    pos,
+                    *radius,
+                    plane_body_slot,
+                    body_slot,
+                ),
                 ShapeDesc::Box { half_extents } => {
                     let raw = plane_box(
                         plane.normal,
@@ -596,12 +603,38 @@ impl World {
             (ShapeDesc::Box { half_extents: ha }, ShapeDesc::Box { half_extents: hb }) => {
                 box_box(pos_a, rot_a, *ha, pos_b, rot_b, *hb, slot_a, slot_b)
             }
-            (ShapeDesc::Sphere { radius }, ShapeDesc::Capsule { half_height, radius: cr }) => {
-                sphere_capsule(pos_a, *radius, pos_b, rot_b, *half_height, *cr, slot_a, slot_b)
-            }
-            (ShapeDesc::Capsule { half_height, radius: cr }, ShapeDesc::Sphere { radius }) => {
+            (
+                ShapeDesc::Sphere { radius },
+                ShapeDesc::Capsule {
+                    half_height,
+                    radius: cr,
+                },
+            ) => sphere_capsule(
+                pos_a,
+                *radius,
+                pos_b,
+                rot_b,
+                *half_height,
+                *cr,
+                slot_a,
+                slot_b,
+            ),
+            (
+                ShapeDesc::Capsule {
+                    half_height,
+                    radius: cr,
+                },
+                ShapeDesc::Sphere { radius },
+            ) => {
                 let mut contacts = sphere_capsule(
-                    pos_b, *radius, pos_a, rot_a, *half_height, *cr, slot_b, slot_a,
+                    pos_b,
+                    *radius,
+                    pos_a,
+                    rot_a,
+                    *half_height,
+                    *cr,
+                    slot_b,
+                    slot_a,
                 );
                 for c in &mut contacts {
                     std::mem::swap(&mut c.body_a, &mut c.body_b);
@@ -621,7 +654,13 @@ impl World {
             ) => capsule_capsule(
                 pos_a, rot_a, *hh_a, *ra, pos_b, rot_b, *hh_b, *rb, slot_a, slot_b,
             ),
-            (ShapeDesc::Box { half_extents }, ShapeDesc::Capsule { half_height, radius }) => {
+            (
+                ShapeDesc::Box { half_extents },
+                ShapeDesc::Capsule {
+                    half_height,
+                    radius,
+                },
+            ) => {
                 // Approximate box-capsule as sphere_box at capsule endpoints + center.
                 let axis = rot_b * Vec3::Y;
                 let tip_a = pos_b + axis * *half_height;
@@ -660,7 +699,13 @@ impl World {
                 }
                 reduce_manifold(&contacts)
             }
-            (ShapeDesc::Capsule { half_height, radius }, ShapeDesc::Box { half_extents }) => {
+            (
+                ShapeDesc::Capsule {
+                    half_height,
+                    radius,
+                },
+                ShapeDesc::Box { half_extents },
+            ) => {
                 let axis = rot_a * Vec3::Y;
                 let tip_a = pos_a + axis * *half_height;
                 let tip_b = pos_a - axis * *half_height;
@@ -786,11 +831,7 @@ mod tests {
 
         let pos = world.get_position(handle).unwrap();
         // After 1 second of free-fall: y ~ 10 - 0.5 * 9.81 * 1^2 ~ 5.095
-        assert!(
-            pos.y < 10.0,
-            "Body should have fallen: y = {}",
-            pos.y
-        );
+        assert!(pos.y < 10.0, "Body should have fallen: y = {}", pos.y);
         assert!(
             pos.y > 0.0,
             "Body should not have fallen too far: y = {}",

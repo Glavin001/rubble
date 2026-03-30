@@ -22,19 +22,18 @@ impl ComputeKernel {
     /// WGSL via naga before being loaded.
     pub fn from_spirv(ctx: &GpuContext, spirv_bytes: &[u8], entry_point: &str) -> Self {
         let opts = naga::front::spv::Options::default();
-        let module = naga::front::spv::parse_u8_slice(spirv_bytes, &opts)
-            .expect("failed to parse SPIR-V");
+        let module =
+            naga::front::spv::parse_u8_slice(spirv_bytes, &opts).expect("failed to parse SPIR-V");
 
         let mut validator =
             naga::valid::Validator::new(naga::valid::ValidationFlags::all(), Default::default());
-        let info = validator.validate(&module).expect("SPIR-V validation failed");
+        let info = validator
+            .validate(&module)
+            .expect("SPIR-V validation failed");
 
-        let wgsl = naga::back::wgsl::write_string(
-            &module,
-            &info,
-            naga::back::wgsl::WriterFlags::empty(),
-        )
-        .expect("failed to convert SPIR-V to WGSL");
+        let wgsl =
+            naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+                .expect("failed to convert SPIR-V to WGSL");
 
         Self::from_wgsl(ctx, &wgsl, entry_point)
     }

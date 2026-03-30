@@ -49,12 +49,7 @@ impl RigidBodyState3D {
     ) -> Self {
         Self {
             position_inv_mass: Vec4::new(position.x, position.y, position.z, inv_mass),
-            orientation: Vec4::new(
-                orientation.x,
-                orientation.y,
-                orientation.z,
-                orientation.w,
-            ),
+            orientation: Vec4::new(orientation.x, orientation.y, orientation.z, orientation.w),
             lin_vel: lin_vel.extend(0.0),
             ang_vel: ang_vel.extend(0.0),
         }
@@ -366,12 +361,7 @@ impl BvhNode {
         }
     }
 
-    pub fn internal(
-        aabb_min: glam::Vec3,
-        aabb_max: glam::Vec3,
-        left: i32,
-        right: i32,
-    ) -> Self {
+    pub fn internal(aabb_min: glam::Vec3, aabb_max: glam::Vec3, left: i32, right: i32) -> Self {
         Self {
             aabb_min: aabb_min.extend(0.0),
             aabb_max: aabb_max.extend(0.0),
@@ -590,7 +580,10 @@ mod tests {
 
     #[test]
     fn bytemuck_round_trip_aabb() {
-        let aabb = Aabb3D::new(glam::Vec3::new(-1.0, -2.0, -3.0), glam::Vec3::new(1.0, 2.0, 3.0));
+        let aabb = Aabb3D::new(
+            glam::Vec3::new(-1.0, -2.0, -3.0),
+            glam::Vec3::new(1.0, 2.0, 3.0),
+        );
         let bytes = bytemuck::bytes_of(&aabb);
         let back: &Aabb3D = from_bytes(bytes);
         assert_eq!(back.min_point(), glam::Vec3::new(-1.0, -2.0, -3.0));

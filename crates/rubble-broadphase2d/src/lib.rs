@@ -48,10 +48,7 @@ pub fn compute_scene_aabb(aabbs: &[Aabb2D]) -> Aabb2D {
 
 #[inline]
 fn aabb_overlap(a: &Aabb2D, b: &Aabb2D) -> bool {
-    a.min.x <= b.max.x
-        && a.max.x >= b.min.x
-        && a.min.y <= b.max.y
-        && a.max.y >= b.min.y
+    a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y
 }
 
 #[inline]
@@ -134,17 +131,13 @@ fn karras_node(sorted_codes: &[u32], i: usize) -> (usize, usize, usize) {
 
     let delta_node = delta(sorted_codes, range_left, range_right);
     let mut s: usize = 0;
-    let mut t = ((range_right - range_left + 1) as u64)
-        .next_power_of_two() as usize
-        / 2;
+    let mut t = ((range_right - range_left + 1) as u64).next_power_of_two() as usize / 2;
     if t == 0 {
         t = 1;
     }
     loop {
         let candidate = range_left + s + t;
-        if candidate < range_right
-            && delta(sorted_codes, range_left, candidate) > delta_node
-        {
+        if candidate < range_right && delta(sorted_codes, range_left, candidate) > delta_node {
             s += t;
         }
         if t == 1 {
@@ -411,13 +404,7 @@ mod tests {
 
     #[test]
     fn test_morton_2d_distinct() {
-        let positions = [
-            (0.0, 0.0),
-            (1.0, 0.0),
-            (0.0, 1.0),
-            (1.0, 1.0),
-            (0.5, 0.5),
-        ];
+        let positions = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)];
         let codes: Vec<u32> = positions
             .iter()
             .map(|&(x, y)| morton_encode_2d(x, y))
@@ -493,7 +480,8 @@ mod tests {
         lbvh_pairs.sort();
 
         assert_eq!(
-            lbvh_pairs, bf_pairs,
+            lbvh_pairs,
+            bf_pairs,
             "LBVH ({}) vs brute force ({}) mismatch",
             lbvh_pairs.len(),
             bf_pairs.len()

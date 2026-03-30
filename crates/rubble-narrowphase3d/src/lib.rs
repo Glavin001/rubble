@@ -126,16 +126,8 @@ pub fn box_box(
     body_a: u32,
     body_b: u32,
 ) -> Vec<Contact3D> {
-    let axes_a = [
-        rot_a * Vec3::X,
-        rot_a * Vec3::Y,
-        rot_a * Vec3::Z,
-    ];
-    let axes_b = [
-        rot_b * Vec3::X,
-        rot_b * Vec3::Y,
-        rot_b * Vec3::Z,
-    ];
+    let axes_a = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
+    let axes_b = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
 
     let d = pos_b - pos_a;
     let half_a_arr = [half_a.x, half_a.y, half_a.z];
@@ -570,14 +562,7 @@ mod tests {
     // 1. sphere_sphere overlapping
     #[test]
     fn test_sphere_sphere_overlap() {
-        let contacts = sphere_sphere(
-            Vec3::ZERO,
-            1.0,
-            Vec3::new(1.5, 0.0, 0.0),
-            1.0,
-            0,
-            1,
-        );
+        let contacts = sphere_sphere(Vec3::ZERO, 1.0, Vec3::new(1.5, 0.0, 0.0), 1.0, 0, 1);
         assert_eq!(contacts.len(), 1);
         let c = &contacts[0];
         assert!(approx_vec3(c.contact_normal(), Vec3::new(1.0, 0.0, 0.0)));
@@ -587,14 +572,7 @@ mod tests {
     // 2. sphere_sphere separated
     #[test]
     fn test_sphere_sphere_separated() {
-        let contacts = sphere_sphere(
-            Vec3::ZERO,
-            1.0,
-            Vec3::new(3.0, 0.0, 0.0),
-            1.0,
-            0,
-            1,
-        );
+        let contacts = sphere_sphere(Vec3::ZERO, 1.0, Vec3::new(3.0, 0.0, 0.0), 1.0, 0, 1);
         assert_eq!(contacts.len(), 0);
     }
 
@@ -699,14 +677,7 @@ mod tests {
     // 8. plane_sphere on plane
     #[test]
     fn test_plane_sphere_on_plane() {
-        let contacts = plane_sphere(
-            Vec3::Y,
-            0.0,
-            Vec3::new(0.0, 0.5, 0.0),
-            1.0,
-            0,
-            1,
-        );
+        let contacts = plane_sphere(Vec3::Y, 0.0, Vec3::new(0.0, 0.5, 0.0), 1.0, 0, 1);
         assert_eq!(contacts.len(), 1);
         let c = &contacts[0];
         assert!(approx_eq(c.depth(), -0.5));
@@ -716,14 +687,7 @@ mod tests {
     // 9. plane_sphere above
     #[test]
     fn test_plane_sphere_above() {
-        let contacts = plane_sphere(
-            Vec3::Y,
-            0.0,
-            Vec3::new(0.0, 2.0, 0.0),
-            1.0,
-            0,
-            1,
-        );
+        let contacts = plane_sphere(Vec3::Y, 0.0, Vec3::new(0.0, 2.0, 0.0), 1.0, 0, 1);
         assert_eq!(contacts.len(), 0);
     }
 
@@ -817,7 +781,9 @@ mod tests {
             if body_a.index == 2 && body_b.index == 3
         )));
         // No Ended events since (0,1) is still there
-        assert!(!events2.iter().any(|e| matches!(e, CollisionEvent::Ended { .. })));
+        assert!(!events2
+            .iter()
+            .any(|e| matches!(e, CollisionEvent::Ended { .. })));
 
         // Frame 3: only bodies 2,3 remain; bodies 0,1 separated
         let c3 = make_contact(2, 3, Vec3::X, Vec3::Y, -0.2);

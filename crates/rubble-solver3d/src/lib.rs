@@ -260,8 +260,8 @@ impl Solver3D {
                         -0.5 * delta_omega_a.z,
                         0.0,
                     ) * q;
-                    let q_new = Quat::from_xyzw(q.x + dq.x, q.y + dq.y, q.z + dq.z, q.w + dq.w)
-                        .normalize();
+                    let q_new =
+                        Quat::from_xyzw(q.x + dq.x, q.y + dq.y, q.z + dq.z, q.w + dq.w).normalize();
                     bodies[a].orientation = Vec4::new(q_new.x, q_new.y, q_new.z, q_new.w);
                 }
                 if im_b > 0.0 {
@@ -274,8 +274,8 @@ impl Solver3D {
                         0.5 * delta_omega_b.z,
                         0.0,
                     ) * q;
-                    let q_new = Quat::from_xyzw(q.x + dq.x, q.y + dq.y, q.z + dq.z, q.w + dq.w)
-                        .normalize();
+                    let q_new =
+                        Quat::from_xyzw(q.x + dq.x, q.y + dq.y, q.z + dq.z, q.w + dq.w).normalize();
                     bodies[b].orientation = Vec4::new(q_new.x, q_new.y, q_new.z, q_new.w);
                 }
 
@@ -355,8 +355,7 @@ impl Solver3D {
             let dq = q_new * q_old_inv;
             // Ensure positive w for shortest path.
             let sign = if dq.w < 0.0 { -1.0 } else { 1.0 };
-            let omega_new =
-                Vec3::new(dq.x * sign, dq.y * sign, dq.z * sign) * 2.0 * inv_dt;
+            let omega_new = Vec3::new(dq.x * sign, dq.y * sign, dq.z * sign) * 2.0 * inv_dt;
             body.ang_vel = omega_new.extend(0.0);
         }
     }
@@ -441,20 +440,20 @@ mod tests {
             Mat3::from_diagonal(Vec3::splat(1.0)),
         ];
         // Contact at midpoint, normal pointing from A to B, depth = -0.1 (penetrating).
-        let mut contacts = vec![make_contact(
-            0,
-            1,
-            Vec3::new(0.0, 0.45, 0.0),
-            Vec3::Y,
-            -0.1,
-        )];
+        let mut contacts = vec![make_contact(0, 1, Vec3::new(0.0, 0.45, 0.0), Vec3::Y, -0.1)];
 
         let solver = Solver3D::new(SolverParams {
             iterations: 1,
             ..Default::default()
         });
         let initial_gap = (bodies[1].position() - bodies[0].position()).dot(Vec3::Y);
-        solver.solve(1.0 / 60.0, Vec3::ZERO, &mut bodies, &inv_inertias, &mut contacts);
+        solver.solve(
+            1.0 / 60.0,
+            Vec3::ZERO,
+            &mut bodies,
+            &inv_inertias,
+            &mut contacts,
+        );
         let final_gap = (bodies[1].position() - bodies[0].position()).dot(Vec3::Y);
 
         // After solving, the bodies should be farther apart.
@@ -493,8 +492,8 @@ mod tests {
         // Two stacked bodies: bottom is static (inv_mass=0), top is dynamic.
         // Gravity pulls top body down, contact pushes it up.
         let mut bodies = vec![
-            make_body(Vec3::new(0.0, 0.0, 0.0), 0.0),  // static floor
-            make_body(Vec3::new(0.0, 1.0, 0.0), 1.0),   // dynamic box
+            make_body(Vec3::new(0.0, 0.0, 0.0), 0.0), // static floor
+            make_body(Vec3::new(0.0, 1.0, 0.0), 1.0), // dynamic box
         ];
         let inv_inertias = vec![Mat3::ZERO, Mat3::from_diagonal(Vec3::splat(1.0))];
         let gravity = Vec3::new(0.0, -9.81, 0.0);
@@ -560,7 +559,13 @@ mod tests {
                 slope_normal,
                 -0.01,
             )];
-            solver.solve(dt, gravity, &mut bodies_friction, &inv_inertias, &mut contacts);
+            solver.solve(
+                dt,
+                gravity,
+                &mut bodies_friction,
+                &inv_inertias,
+                &mut contacts,
+            );
         }
         let y_disp_friction = (bodies_friction[1].position().y - start_pos.y).abs();
 

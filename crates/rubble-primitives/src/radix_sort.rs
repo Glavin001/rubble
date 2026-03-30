@@ -108,12 +108,7 @@ impl RadixSort {
     }
 
     /// Sort key-value pairs by key (ascending). Keys in `keys` buffer, values in `values` buffer.
-    pub fn sort(
-        &self,
-        ctx: &GpuContext,
-        keys: &mut GpuBuffer<u32>,
-        values: &mut GpuBuffer<u32>,
-    ) {
+    pub fn sort(&self, ctx: &GpuContext, keys: &mut GpuBuffer<u32>, values: &mut GpuBuffer<u32>) {
         let n = keys.len();
         if n <= 1 {
             return;
@@ -307,7 +302,9 @@ mod tests {
         let mut rng_state = 12345u64;
         let mut rand_vals: Vec<u32> = Vec::with_capacity(1000);
         for _ in 0..1000 {
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             rand_vals.push((rng_state >> 33) as u32);
         }
 

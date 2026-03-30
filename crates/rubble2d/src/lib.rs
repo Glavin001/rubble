@@ -206,8 +206,12 @@ impl World2D {
 
         // Grow storage if needed (slots may be reused via free list).
         if idx >= self.states.len() {
-            self.states.resize(idx + 1, RigidBodyState2D::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
-            self.shapes.resize(idx + 1, ShapeDesc2D::Circle { radius: 0.0 });
+            self.states.resize(
+                idx + 1,
+                RigidBodyState2D::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            );
+            self.shapes
+                .resize(idx + 1, ShapeDesc2D::Circle { radius: 0.0 });
         }
 
         self.states[idx] = state;
@@ -336,30 +340,28 @@ impl World2D {
                 (ShapeDesc2D::Circle { radius: ra }, ShapeDesc2D::Circle { radius: rb }) => {
                     circle_circle(pos_a, *ra, pos_b, *rb, idx_a as u32, idx_b as u32)
                 }
-                (
-                    ShapeDesc2D::Circle { radius },
-                    ShapeDesc2D::Rect { half_extents },
-                ) => circle_rect(
-                    pos_a,
-                    *radius,
-                    pos_b,
-                    angle_b,
-                    *half_extents,
-                    idx_a as u32,
-                    idx_b as u32,
-                ),
-                (
-                    ShapeDesc2D::Rect { half_extents },
-                    ShapeDesc2D::Circle { radius },
-                ) => circle_rect(
-                    pos_b,
-                    *radius,
-                    pos_a,
-                    angle_a,
-                    *half_extents,
-                    idx_b as u32,
-                    idx_a as u32,
-                ),
+                (ShapeDesc2D::Circle { radius }, ShapeDesc2D::Rect { half_extents }) => {
+                    circle_rect(
+                        pos_a,
+                        *radius,
+                        pos_b,
+                        angle_b,
+                        *half_extents,
+                        idx_a as u32,
+                        idx_b as u32,
+                    )
+                }
+                (ShapeDesc2D::Rect { half_extents }, ShapeDesc2D::Circle { radius }) => {
+                    circle_rect(
+                        pos_b,
+                        *radius,
+                        pos_a,
+                        angle_a,
+                        *half_extents,
+                        idx_b as u32,
+                        idx_a as u32,
+                    )
+                }
                 (
                     ShapeDesc2D::Rect { half_extents: ha },
                     ShapeDesc2D::Rect { half_extents: hb },

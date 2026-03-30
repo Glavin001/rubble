@@ -165,8 +165,7 @@ impl Solver2D {
                 let r_b = cp - bodies[b].position();
 
                 // Recompute penetration depth from current positions.
-                let depth = c.depth()
-                    + (bodies[b].position() - bodies[a].position()).dot(normal)
+                let depth = c.depth() + (bodies[b].position() - bodies[a].position()).dot(normal)
                     - (old_positions[b] - old_positions[a]).dot(normal);
 
                 if depth >= 0.0 {
@@ -238,8 +237,7 @@ impl Solver2D {
                 let b = c.body_b as usize;
                 let normal = c.contact_normal();
 
-                let depth = c.depth()
-                    + (bodies[b].position() - bodies[a].position()).dot(normal)
+                let depth = c.depth() + (bodies[b].position() - bodies[a].position()).dot(normal)
                     - (old_positions[b] - old_positions[a]).dot(normal);
 
                 if depth < 0.0 {
@@ -327,17 +325,8 @@ mod tests {
 
     #[test]
     fn test_2d_penetration_decreases() {
-        let mut bodies = vec![
-            make_body_2d(0.0, 0.0, 1.0),
-            make_body_2d(0.0, 0.9, 1.0),
-        ];
-        let mut contacts = vec![make_contact_2d(
-            0,
-            1,
-            Vec2::new(0.0, 0.45),
-            Vec2::Y,
-            -0.1,
-        )];
+        let mut bodies = vec![make_body_2d(0.0, 0.0, 1.0), make_body_2d(0.0, 0.9, 1.0)];
+        let mut contacts = vec![make_contact_2d(0, 1, Vec2::new(0.0, 0.45), Vec2::Y, -0.1)];
 
         let solver = Solver2D::new(SolverParams {
             iterations: 1,

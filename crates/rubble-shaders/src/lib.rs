@@ -1,7 +1,8 @@
 #![cfg_attr(target_arch = "spirv", no_std)]
+#![allow(unexpected_cfgs)]
 
-use spirv_std::spirv;
 use spirv_std::glam::UVec3;
+use spirv_std::spirv;
 
 /// Trivial test kernel: multiply each element by 2.
 #[spirv(compute(threads(64)))]

@@ -150,17 +150,13 @@ fn karras_node(sorted_codes: &[u32], i: usize) -> (usize, usize, usize) {
     // Find split position.
     let delta_node = delta(sorted_codes, range_left, range_right);
     let mut s: usize = 0;
-    let mut t = ((range_right - range_left + 1) as u64)
-        .next_power_of_two() as usize
-        / 2;
+    let mut t = ((range_right - range_left + 1) as u64).next_power_of_two() as usize / 2;
     if t == 0 {
         t = 1;
     }
     loop {
         let candidate = range_left + s + t;
-        if candidate < range_right
-            && delta(sorted_codes, range_left, candidate) > delta_node
-        {
+        if candidate < range_right && delta(sorted_codes, range_left, candidate) > delta_node {
             s += t;
         }
         if t == 1 {
@@ -226,9 +222,21 @@ impl Lbvh {
         let scene_min = scene.min_point();
         let scene_extent = scene.max_point() - scene_min;
         let inv_extent = Vec3::new(
-            if scene_extent.x > 1e-10 { 1.0 / scene_extent.x } else { 0.0 },
-            if scene_extent.y > 1e-10 { 1.0 / scene_extent.y } else { 0.0 },
-            if scene_extent.z > 1e-10 { 1.0 / scene_extent.z } else { 0.0 },
+            if scene_extent.x > 1e-10 {
+                1.0 / scene_extent.x
+            } else {
+                0.0
+            },
+            if scene_extent.y > 1e-10 {
+                1.0 / scene_extent.y
+            } else {
+                0.0
+            },
+            if scene_extent.z > 1e-10 {
+                1.0 / scene_extent.z
+            } else {
+                0.0
+            },
         );
 
         // 2. Morton codes for centroids.
@@ -403,10 +411,7 @@ impl Lbvh {
 /// Test each body's AABB against each plane's half-space.
 ///
 /// Returns `(plane_index, body_index)` for each body whose AABB straddles the plane.
-pub fn find_plane_pairs(
-    planes: &[rubble_shapes3d::Plane],
-    aabbs: &[Aabb3D],
-) -> Vec<(usize, u32)> {
+pub fn find_plane_pairs(planes: &[rubble_shapes3d::Plane], aabbs: &[Aabb3D]) -> Vec<(usize, u32)> {
     let mut results = Vec::new();
     for (pi, plane) in planes.iter().enumerate() {
         let n = plane.normal;
@@ -476,8 +481,7 @@ mod tests {
     #[test]
     fn test_morton_code_half() {
         let v = (0.5_f32 * 1023.0) as u32;
-        let expected =
-            (expand_bits_10(v) << 2) | (expand_bits_10(v) << 1) | expand_bits_10(v);
+        let expected = (expand_bits_10(v) << 2) | (expand_bits_10(v) << 1) | expand_bits_10(v);
         assert_eq!(morton_encode_3d(0.5, 0.5, 0.5), expected);
     }
 
@@ -594,7 +598,8 @@ mod tests {
         lbvh_pairs.sort();
 
         assert_eq!(
-            lbvh_pairs, bf_pairs,
+            lbvh_pairs,
+            bf_pairs,
             "LBVH ({}) vs brute force ({}) mismatch",
             lbvh_pairs.len(),
             bf_pairs.len()
