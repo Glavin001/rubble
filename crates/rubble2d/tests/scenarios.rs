@@ -144,9 +144,8 @@ fn head_on_circle_collision_emits_event() {
     for _ in 0..60 {
         world.step();
         for event in world.drain_events() {
-            match event {
-                rubble_math::CollisionEvent::Started { .. } => got_started = true,
-                _ => {}
+            if let rubble_math::CollisionEvent::Started { .. } = event {
+                got_started = true;
             }
         }
     }
