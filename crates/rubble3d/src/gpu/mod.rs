@@ -23,7 +23,7 @@ use rubble_math::{
     Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
 };
 use rubble_shapes3d::{BoxData, CapsuleData, ConvexHullData, ConvexVertex3D, SphereData};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const WORKGROUP_SIZE: u32 = 64;
 
@@ -48,6 +48,14 @@ pub struct SimParamsGpu {
 pub struct GpuPair {
     pub a: u32,
     pub b: u32,
+}
+
+/// Solve range for graph-colored dispatch: (offset, count) into the sorted contact buffer.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct SolveRangeGpu {
+    pub offset: u32,
+    pub count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,8 +265,9 @@ pub struct GpuPipeline {
     convex_vertices: GpuBuffer<ConvexVertex3D>,
     planes: GpuBuffer<Vec4>,
 
-    // Uniform buffer (shaders expect `var<uniform>`)
+    // Uniform buffers
     params_uniform: wgpu::Buffer,
+    solve_range_uniform: wgpu::Buffer,
 }
 
 impl GpuPipeline {
@@ -295,6 +304,13 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        let solve_range_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SolveRange uniform"),
+            size: std::mem::size_of::<SolveRangeGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             ctx,
             predict_kernel,
@@ -317,6 +333,7 @@ impl GpuPipeline {
             convex_vertices,
             planes,
             params_uniform,
+            solve_range_uniform,
         }
     }
 
@@ -379,12 +396,8 @@ impl GpuPipeline {
             .write_buffer(&self.params_uniform, 0, bytemuck::bytes_of(&params));
     }
 
-    /// Run the full GPU physics step and download updated states.
-    pub fn step(&mut self, num_bodies: u32, solver_iterations: u32) -> Vec<RigidBodyState3D> {
-        if num_bodies == 0 {
-            return Vec::new();
-        }
-
+    /// Run predict → AABB → broadphase → narrowphase (shared by both step variants).
+    fn run_detection(&mut self, num_bodies: u32) {
         self.contact_count.reset(&self.ctx);
         self.pair_count.reset(&self.ctx);
 
@@ -407,9 +420,44 @@ impl GpuPipeline {
         }
 
         self.dispatch_narrowphase(num_bodies);
+    }
 
+    /// Graph-colored AVBD solve: download contacts, color them so no two
+    /// same-color contacts share a body, sort by color, re-upload, then
+    /// dispatch one GPU pass per color group per iteration.
+    fn run_colored_solve(&mut self, solver_iterations: u32, contacts: &mut Vec<Contact3D>) {
+        if contacts.is_empty() {
+            return;
+        }
+
+        // Color contacts: two contacts conflict if they share a body
+        let color_groups = color_contacts(contacts);
+
+        // Re-upload sorted contacts and update count
+        self.contacts.upload(&self.ctx, contacts);
+        self.contact_count.write(&self.ctx, contacts.len() as u32);
+
+        // For each iteration, dispatch each color group sequentially
         for _ in 0..solver_iterations {
-            self.dispatch_solve(num_bodies);
+            for &(offset, count) in &color_groups {
+                self.dispatch_solve_range(offset, count);
+            }
+        }
+    }
+
+    /// Run the full GPU physics step and download updated states.
+    pub fn step(&mut self, num_bodies: u32, solver_iterations: u32) -> Vec<RigidBodyState3D> {
+        if num_bodies == 0 {
+            return Vec::new();
+        }
+
+        self.run_detection(num_bodies);
+
+        let count = self.contact_count.read(&self.ctx) as usize;
+        if count > 0 {
+            let mut contacts = self.contacts.download(&self.ctx);
+            contacts.truncate(count);
+            self.run_colored_solve(solver_iterations, &mut contacts);
         }
 
         self.dispatch_extract(num_bodies);
@@ -428,46 +476,29 @@ impl GpuPipeline {
             return (Vec::new(), Vec::new());
         }
 
-        self.contact_count.reset(&self.ctx);
-        self.pair_count.reset(&self.ctx);
+        self.run_detection(num_bodies);
 
-        self.dispatch_predict(num_bodies);
-        self.dispatch_aabb(num_bodies);
-
-        // LBVH broadphase
-        self.aabbs.set_len(num_bodies);
-        let gpu_aabbs = self.aabbs.download(&self.ctx);
-        let bvh = lbvh::Lbvh::build(&gpu_aabbs);
-        let overlap_pairs = bvh.find_overlapping_pairs(&gpu_aabbs);
-
-        if !overlap_pairs.is_empty() {
-            let gpu_pairs: Vec<GpuPair> = overlap_pairs
-                .iter()
-                .map(|p| GpuPair { a: p[0], b: p[1] })
-                .collect();
-            self.pairs.upload(&self.ctx, &gpu_pairs);
-            self.pair_count.write(&self.ctx, gpu_pairs.len() as u32);
-        }
-
-        self.dispatch_narrowphase(num_bodies);
-
-        // Warm-start: download contacts, apply cached lambdas, re-upload
-        if let Some(prev) = warm_contacts {
-            let count = self.contact_count.read(&self.ctx) as usize;
-            if count > 0 {
-                let mut contacts = self.contacts.download(&self.ctx);
-                contacts.truncate(count);
-                warm_start_contacts_3d(&mut contacts, prev);
-                self.contacts.upload(&self.ctx, &contacts);
+        let count = self.contact_count.read(&self.ctx) as usize;
+        let mut contacts = if count > 0 {
+            let mut c = self.contacts.download(&self.ctx);
+            c.truncate(count);
+            // Warm-start: apply cached lambdas from previous frame
+            if let Some(prev) = warm_contacts {
+                warm_start_contacts_3d(&mut c, prev);
             }
-        }
+            c
+        } else {
+            Vec::new()
+        };
 
-        for _ in 0..solver_iterations {
-            self.dispatch_solve(num_bodies);
-        }
+        self.run_colored_solve(solver_iterations, &mut contacts);
 
-        // Download contacts after solve (lambdas are updated)
-        let final_contacts = self.download_contacts();
+        // Download contacts after solve (lambdas are updated by GPU)
+        let final_contacts = if !contacts.is_empty() {
+            self.download_contacts()
+        } else {
+            Vec::new()
+        };
 
         self.dispatch_extract(num_bodies);
         let states = self.body_states.download(&self.ctx);
@@ -645,11 +676,16 @@ impl GpuPipeline {
         self.run_pass("narrowphase", &self.narrowphase_kernel, &bg, num_pairs);
     }
 
-    fn dispatch_solve(&self, _num_bodies: u32) {
-        let num_contacts = self.contact_count.read(&self.ctx);
-        if num_contacts == 0 {
+    fn dispatch_solve_range(&self, offset: u32, count: u32) {
+        if count == 0 {
             return;
         }
+        // Write solve range uniform
+        let range = SolveRangeGpu { offset, count };
+        self.ctx
+            .queue
+            .write_buffer(&self.solve_range_uniform, 0, bytemuck::bytes_of(&range));
+
         let bg = self
             .ctx
             .device
@@ -681,9 +717,13 @@ impl GpuPipeline {
                         binding: 5,
                         resource: self.contact_count.buffer().as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.solve_range_uniform.as_entire_binding(),
+                    },
                 ],
             });
-        self.run_pass("avbd_solve", &self.solve_kernel, &bg, num_contacts);
+        self.run_pass("avbd_solve", &self.solve_kernel, &bg, count);
     }
 
     fn dispatch_extract(&self, num_bodies: u32) {
@@ -733,6 +773,88 @@ impl GpuPipeline {
         }
         self.ctx.queue.submit(Some(encoder.finish()));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Contact graph coloring
+// ---------------------------------------------------------------------------
+
+/// Color contacts so no two same-color contacts share a body.
+/// Sorts `contacts` in-place by color and returns (offset, count) for each color group.
+fn color_contacts(contacts: &mut Vec<Contact3D>) -> Vec<(u32, u32)> {
+    let n = contacts.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Build body → contact index list
+    let mut body_contacts: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, c) in contacts.iter().enumerate() {
+        body_contacts.entry(c.body_a).or_default().push(i);
+        body_contacts.entry(c.body_b).or_default().push(i);
+    }
+
+    // Build contact adjacency: two contacts conflict if they share a body
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for indices in body_contacts.values() {
+        for i in 0..indices.len() {
+            for j in (i + 1)..indices.len() {
+                adj[indices[i]].push(indices[j]);
+                adj[indices[j]].push(indices[i]);
+            }
+        }
+    }
+
+    // Greedy coloring
+    let mut colors: Vec<u32> = vec![u32::MAX; n];
+    let mut num_colors: u32 = 0;
+    for ci in 0..n {
+        let mut used: Vec<u32> = adj[ci]
+            .iter()
+            .filter_map(|&nb| {
+                if colors[nb] != u32::MAX {
+                    Some(colors[nb])
+                } else {
+                    None
+                }
+            })
+            .collect();
+        used.sort_unstable();
+        used.dedup();
+        let mut c = 0u32;
+        for &u in &used {
+            if c == u {
+                c += 1;
+            } else {
+                break;
+            }
+        }
+        colors[ci] = c;
+        num_colors = num_colors.max(c + 1);
+    }
+
+    // Sort contacts by color (stable sort preserves order within each color)
+    let mut indexed: Vec<(u32, Contact3D)> =
+        colors.iter().copied().zip(contacts.drain(..)).collect();
+    indexed.sort_by_key(|(color, _)| *color);
+
+    // Rebuild contacts in sorted order and compute group boundaries
+    let mut groups = Vec::with_capacity(num_colors as usize);
+    contacts.reserve(n);
+    let mut cur_offset = 0u32;
+    for color in 0..num_colors {
+        let count = indexed[cur_offset as usize..]
+            .iter()
+            .take_while(|(c, _)| *c == color)
+            .count() as u32;
+        if count > 0 {
+            groups.push((cur_offset, count));
+            cur_offset += count;
+        }
+    }
+    *contacts = indexed.into_iter().map(|(_, c)| c).collect();
+
+    groups
 }
 
 // ---------------------------------------------------------------------------

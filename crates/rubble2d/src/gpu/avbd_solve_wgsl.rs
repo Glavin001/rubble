@@ -3,6 +3,10 @@
 /// Operates on velocities directly. For each contact, computes the velocity
 /// constraint violation using averaged velocities, then applies impulses.
 /// 2D: 3 DOF per body (x, y, angle).
+///
+/// Supports graph-colored dispatch: contacts are sorted by color group,
+/// and `solve_range` provides (offset, count) so each dispatch processes
+/// only contacts of one color (no two share a body → no data races).
 pub const AVBD_SOLVE_2D_WGSL: &str = r#"
 // ---------- Types ----------
 
@@ -34,11 +38,17 @@ struct SimParams2D {
     _pad:              u32,
 };
 
+struct SolveRange {
+    offset: u32,
+    count:  u32,
+};
+
 @group(0) @binding(0) var<storage, read_write> bodies:            array<Body2D>;
 @group(0) @binding(1) var<storage, read>       old_states:        array<Body2D>;
 @group(0) @binding(2) var<storage, read_write> contacts:          array<Contact2D>;
 @group(0) @binding(3) var<uniform>             params:            SimParams2D;
 @group(0) @binding(4) var<storage, read>       contact_count_buf: array<u32>;
+@group(0) @binding(5) var<uniform>             solve_range:       SolveRange;
 
 // 2D cross product: r x n = r.x*n.y - r.y*n.x (scalar)
 fn cross2d(a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -47,7 +57,11 @@ fn cross2d(a: vec2<f32>, b: vec2<f32>) -> f32 {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let ci = gid.x;
+    let local_idx = gid.x;
+    if local_idx >= solve_range.count {
+        return;
+    }
+    let ci = local_idx + solve_range.offset;
     let num_contacts = contact_count_buf[0];
     if ci >= num_contacts {
         return;
@@ -142,6 +156,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     contacts[ci].lambda_n = max(lambda_old + penalty * (-depth), 0.0);
 
     // --- Friction (tangential impulse) ---
+    let mu = 0.5; // friction coefficient
     let v_rel_current_a = v_a + w_a * vec2<f32>(-r_a.y, r_a.x);
     let v_rel_current_b = v_b + w_b * vec2<f32>(-r_b.y, r_b.x);
     let v_rel_current = v_rel_current_b - v_rel_current_a;
@@ -149,7 +164,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tang_len = length(v_tangent);
     if tang_len > 1e-8 {
         let tang_dir = v_tangent / tang_len;
-        let mu = 0.5; // friction coefficient
         let max_tang_impulse = mu * impulse_clamped;
         let tang_impulse = min(tang_len / w_eff, max_tang_impulse);
 
