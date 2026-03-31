@@ -42,7 +42,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_limits: wgpu::Limits {
-                    max_storage_buffers_per_shader_stage: 12,
+                    max_storage_buffers_per_shader_stage: 16,
                     ..wgpu::Limits::downlevel_defaults()
                 },
                 ..Default::default()

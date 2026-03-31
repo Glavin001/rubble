@@ -28,6 +28,7 @@ fn gpu_single_body_free_fall() {
         dt,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc {
@@ -64,6 +65,7 @@ fn gpu_static_body_does_not_move() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc {
@@ -92,6 +94,7 @@ fn gpu_two_sphere_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h1 = world.add_body(&RigidBodyDesc {
@@ -133,6 +136,7 @@ fn gpu_box_free_fall() {
         dt,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc {
@@ -164,6 +168,7 @@ fn gpu_multiple_bodies_no_crash() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let mut handles = Vec::new();
@@ -198,6 +203,7 @@ fn gpu_sphere_box_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let _box_h = world.add_body(&RigidBodyDesc {
@@ -236,6 +242,7 @@ fn gpu_zero_gravity_no_drift() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc {
@@ -264,6 +271,7 @@ fn gpu_velocity_preserved_without_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc {
@@ -300,6 +308,7 @@ fn gpu_add_remove_body_stability() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h1 = world.add_body(&RigidBodyDesc {
@@ -380,6 +389,7 @@ fn gpu_convex_hull_free_fall() {
         dt,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     // Tetrahedron vertices
@@ -419,6 +429,7 @@ fn gpu_convex_hull_hull_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     // Two cube hulls approaching each other
@@ -475,6 +486,7 @@ fn gpu_sphere_hull_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let cube_verts = vec![
@@ -522,6 +534,7 @@ fn gpu_box_hull_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let cube_verts = vec![
@@ -574,6 +587,7 @@ fn gpu_convex_hull_static_no_move() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let verts = vec![

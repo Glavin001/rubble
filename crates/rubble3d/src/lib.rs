@@ -7,10 +7,10 @@ pub mod gpu;
 
 use glam::{Mat3, Quat, Vec3, Vec4};
 use rubble_math::{
-    BodyHandle, RigidBodyProps3D, RigidBodyState3D, FLAG_STATIC, SHAPE_BOX, SHAPE_CONVEX_HULL,
-    SHAPE_SPHERE,
+    BodyHandle, CollisionEvent, RigidBodyProps3D, RigidBodyState3D, FLAG_STATIC, SHAPE_BOX,
+    SHAPE_CAPSULE, SHAPE_CONVEX_HULL, SHAPE_PLANE, SHAPE_SPHERE,
 };
-use rubble_shapes3d::{BoxData, ConvexHullData, ConvexVertex3D, SphereData};
+use rubble_shapes3d::{BoxData, CapsuleData, ConvexHullData, ConvexVertex3D, SphereData};
 
 // ---------------------------------------------------------------------------
 // SimConfig
@@ -22,6 +22,14 @@ pub struct SimConfig {
     pub dt: f32,
     pub solver_iterations: u32,
     pub max_bodies: usize,
+    /// Augmented Lagrangian stiffness ramp rate.
+    pub beta: f32,
+    /// Initial penalty stiffness for contacts.
+    pub k_start: f32,
+    /// Decay factor for warm-started dual variables across steps.
+    pub warmstart_decay: f32,
+    /// Default friction coefficient for bodies without explicit friction.
+    pub friction_default: f32,
 }
 
 impl Default for SimConfig {
@@ -31,6 +39,10 @@ impl Default for SimConfig {
             dt: 1.0 / 60.0,
             solver_iterations: 5,
             max_bodies: 65536,
+            beta: 10.0,
+            k_start: 1e4,
+            warmstart_decay: 0.95,
+            friction_default: 0.5,
         }
     }
 }
@@ -48,9 +60,18 @@ pub enum ShapeDesc {
     Box {
         half_extents: Vec3,
     },
+    Capsule {
+        half_height: f32,
+        radius: f32,
+    },
     /// Convex hull defined by up to 64 vertices in local space.
     ConvexHull {
         vertices: Vec<Vec3>,
+    },
+    /// Infinite plane (always static). Normal points into the free half-space.
+    Plane {
+        normal: Vec3,
+        distance: f32,
     },
 }
 
@@ -109,8 +130,21 @@ fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
                 mass / 12.0 * (w * w + h * h),
             )
         }
+        ShapeDesc::Capsule {
+            half_height,
+            radius,
+        } => {
+            // Capsule inertia = cylinder + 2 hemispheres
+            let h = 2.0 * half_height;
+            let r2 = radius * radius;
+            let cyl_mass = mass * h / (h + (4.0 / 3.0) * radius);
+            let cap_mass = mass - cyl_mass;
+            let iy = cyl_mass * r2 / 2.0 + cap_mass * 2.0 * r2 / 5.0;
+            let ix = cyl_mass * (3.0 * r2 + h * h) / 12.0
+                + cap_mass * (2.0 * r2 / 5.0 + h * h / 4.0 + 3.0 * h * radius / 8.0);
+            Vec3::new(ix, iy, ix)
+        }
         ShapeDesc::ConvexHull { vertices } => {
-            // Approximate inertia using bounding box of the vertices.
             let mut min = Vec3::splat(f32::MAX);
             let mut max = Vec3::splat(f32::NEG_INFINITY);
             for &v in vertices {
@@ -123,6 +157,10 @@ fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
                 mass / 12.0 * (size.x * size.x + size.z * size.z),
                 mass / 12.0 * (size.x * size.x + size.y * size.y),
             )
+        }
+        ShapeDesc::Plane { .. } => {
+            // Planes are always static, so this shouldn't be called with mass > 0
+            Vec3::splat(1.0)
         }
     };
     Mat3::from_diagonal(Vec3::new(1.0 / diag.x, 1.0 / diag.y, 1.0 / diag.z))
@@ -188,11 +226,16 @@ pub struct World {
     shapes: Vec<ShapeDesc>,
     spheres: Vec<SphereData>,
     boxes: Vec<BoxData>,
+    capsules: Vec<CapsuleData>,
     convex_hulls: Vec<ConvexHullData>,
     convex_vertices: Vec<ConvexVertex3D>,
+    /// Plane data stored as Vec4(nx, ny, nz, distance)
+    planes: Vec<Vec4>,
     allocator: GenerationalIndexAllocator,
     alive: Vec<bool>,
     gpu_pipeline: gpu::GpuPipeline,
+    contact_persistence: gpu::ContactPersistence3D,
+    collision_events: Vec<CollisionEvent>,
 }
 
 impl World {
@@ -209,11 +252,15 @@ impl World {
             shapes: Vec::new(),
             spheres: Vec::new(),
             boxes: Vec::new(),
+            capsules: Vec::new(),
             convex_hulls: Vec::new(),
             convex_vertices: Vec::new(),
+            planes: Vec::new(),
             allocator: GenerationalIndexAllocator::new(),
             alive: Vec::new(),
             gpu_pipeline: pipeline,
+            contact_persistence: gpu::ContactPersistence3D::new(),
+            collision_events: Vec::new(),
         })
     }
 
@@ -255,6 +302,18 @@ impl World {
                 });
                 (SHAPE_BOX, si)
             }
+            ShapeDesc::Capsule {
+                half_height,
+                radius,
+            } => {
+                let si = self.capsules.len() as u32;
+                self.capsules.push(CapsuleData {
+                    half_height: *half_height,
+                    radius: *radius,
+                    _pad: [0.0; 2],
+                });
+                (SHAPE_CAPSULE, si)
+            }
             ShapeDesc::ConvexHull { vertices } => {
                 let si = self.convex_hulls.len() as u32;
                 let vertex_offset = self.convex_vertices.len() as u32;
@@ -278,6 +337,12 @@ impl World {
                     gauss_map_count: 0,
                 });
                 (SHAPE_CONVEX_HULL, si)
+            }
+            ShapeDesc::Plane { normal, distance } => {
+                let si = self.planes.len() as u32;
+                self.planes
+                    .push(Vec4::new(normal.x, normal.y, normal.z, *distance));
+                (SHAPE_PLANE, si)
             }
         };
 
@@ -384,20 +449,248 @@ impl World {
             &compact_props,
             &self.spheres,
             &self.boxes,
+            &self.capsules,
             &self.convex_hulls,
             &self.convex_vertices,
+            &self.planes,
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,
         );
 
-        let results = self
-            .gpu_pipeline
-            .step(num_bodies, self.config.solver_iterations);
+        let prev = self.contact_persistence.prev_contacts();
+        let warm = if prev.is_empty() { None } else { Some(prev) };
+        let (results, new_contacts) =
+            self.gpu_pipeline
+                .step_with_contacts(num_bodies, self.config.solver_iterations, warm);
+
+        // Update persistence and generate collision events
+        let events = self.contact_persistence.update(&new_contacts);
+        self.collision_events.extend(events);
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
                 self.states[orig] = results[slot];
+            }
+        }
+    }
+
+    /// Mark a body as kinematic (moves via set_position/set_velocity, not physics).
+    pub fn set_body_kinematic(&mut self, handle: BodyHandle, kinematic: bool) {
+        if !self.allocator.is_valid(handle) {
+            return;
+        }
+        let idx = handle.index as usize;
+        if kinematic {
+            self.props[idx].flags |= rubble_math::FLAG_KINEMATIC;
+        } else {
+            self.props[idx].flags &= !rubble_math::FLAG_KINEMATIC;
+        }
+    }
+
+    /// Drain collision events from the last step.
+    pub fn drain_collision_events(&mut self) -> Vec<CollisionEvent> {
+        std::mem::take(&mut self.collision_events)
+    }
+
+    /// Cast a ray and return the closest hit (handle, t parameter, hit normal).
+    /// `origin` is the ray start, `direction` is the ray direction (need not be normalized).
+    /// `max_t` is the maximum ray parameter to test.
+    pub fn raycast(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_t: f32,
+    ) -> Option<(BodyHandle, f32, Vec3)> {
+        let dir_len = direction.length();
+        if dir_len < 1e-12 {
+            return None;
+        }
+        let dir = direction / dir_len;
+
+        let mut best_t = max_t * dir_len;
+        let mut best_handle = None;
+        let mut best_normal = Vec3::ZERO;
+
+        for (idx, alive) in self.alive.iter().enumerate() {
+            if !*alive {
+                continue;
+            }
+            let state = &self.states[idx];
+            let pos = state.position();
+
+            if let Some((t, normal)) = self.ray_shape_test(origin, dir, pos, state, idx) {
+                if t >= 0.0 && t < best_t {
+                    best_t = t;
+                    let gen = self.allocator.generations[idx];
+                    best_handle = Some(BodyHandle::new(idx as u32, gen));
+                    best_normal = normal;
+                }
+            }
+        }
+
+        best_handle.map(|h| (h, best_t / dir_len, best_normal))
+    }
+
+    fn ray_shape_test(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        pos: Vec3,
+        _state: &RigidBodyState3D,
+        idx: usize,
+    ) -> Option<(f32, Vec3)> {
+        match &self.shapes[idx] {
+            ShapeDesc::Sphere { radius } => {
+                // Ray-sphere intersection
+                let oc = origin - pos;
+                let b = oc.dot(dir);
+                let c = oc.dot(oc) - radius * radius;
+                let disc = b * b - c;
+                if disc < 0.0 {
+                    return None;
+                }
+                let t = -b - disc.sqrt();
+                if t < 0.0 {
+                    return None;
+                }
+                let hit = origin + dir * t;
+                let normal = (hit - pos).normalize();
+                Some((t, normal))
+            }
+            ShapeDesc::Box { half_extents } => {
+                // Ray-AABB intersection (axis-aligned, ignoring rotation for simplicity)
+                let q = _state.quat();
+                let inv_q = q.conjugate();
+                let local_origin = inv_q * (origin - pos);
+                let local_dir = inv_q * dir;
+                let he = *half_extents;
+
+                let mut tmin = f32::NEG_INFINITY;
+                let mut tmax = f32::INFINITY;
+                let mut normal_idx = 0usize;
+                let mut normal_sign = 1.0f32;
+
+                for i in 0..3 {
+                    let o = [local_origin.x, local_origin.y, local_origin.z][i];
+                    let d = [local_dir.x, local_dir.y, local_dir.z][i];
+                    let h = [he.x, he.y, he.z][i];
+
+                    if d.abs() < 1e-12 {
+                        if o < -h || o > h {
+                            return None;
+                        }
+                        continue;
+                    }
+                    let t1 = (-h - o) / d;
+                    let t2 = (h - o) / d;
+                    let (t_near, t_far) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                    if t_near > tmin {
+                        tmin = t_near;
+                        normal_idx = i;
+                        normal_sign = if d > 0.0 { -1.0 } else { 1.0 };
+                    }
+                    tmax = tmax.min(t_far);
+                    if tmin > tmax {
+                        return None;
+                    }
+                }
+
+                if tmin < 0.0 {
+                    return None;
+                }
+                let mut local_normal = Vec3::ZERO;
+                match normal_idx {
+                    0 => local_normal.x = normal_sign,
+                    1 => local_normal.y = normal_sign,
+                    _ => local_normal.z = normal_sign,
+                }
+                let world_normal = q * local_normal;
+                Some((tmin, world_normal))
+            }
+            ShapeDesc::Plane { normal, distance } => {
+                let denom = normal.dot(dir);
+                if denom.abs() < 1e-12 {
+                    return None;
+                }
+                let t = (*distance - normal.dot(origin)) / denom;
+                if t >= 0.0 {
+                    Some((t, *normal))
+                } else {
+                    None
+                }
+            }
+            _ => None, // Capsule and ConvexHull raycast: could be added later
+        }
+    }
+
+    /// Query all bodies whose AABB overlaps the given axis-aligned bounding box.
+    pub fn overlap_aabb(&self, query_min: Vec3, query_max: Vec3) -> Vec<BodyHandle> {
+        let mut result = Vec::new();
+        for (idx, alive) in self.alive.iter().enumerate() {
+            if !*alive {
+                continue;
+            }
+            let state = &self.states[idx];
+            let pos = state.position();
+            let (body_min, body_max) = self.compute_aabb(pos, state, idx);
+
+            // AABB overlap test
+            if body_min.x <= query_max.x
+                && body_max.x >= query_min.x
+                && body_min.y <= query_max.y
+                && body_max.y >= query_min.y
+                && body_min.z <= query_max.z
+                && body_max.z >= query_min.z
+            {
+                let gen = self.allocator.generations[idx];
+                result.push(BodyHandle::new(idx as u32, gen));
+            }
+        }
+        result
+    }
+
+    fn compute_aabb(&self, pos: Vec3, state: &RigidBodyState3D, idx: usize) -> (Vec3, Vec3) {
+        match &self.shapes[idx] {
+            ShapeDesc::Sphere { radius } => {
+                let r = Vec3::splat(*radius);
+                (pos - r, pos + r)
+            }
+            ShapeDesc::Box { half_extents } => {
+                let q = state.quat();
+                let he = *half_extents;
+                let ax = (q * Vec3::new(he.x, 0.0, 0.0)).abs();
+                let ay = (q * Vec3::new(0.0, he.y, 0.0)).abs();
+                let az = (q * Vec3::new(0.0, 0.0, he.z)).abs();
+                let extent = ax + ay + az;
+                (pos - extent, pos + extent)
+            }
+            ShapeDesc::Capsule {
+                half_height,
+                radius,
+            } => {
+                let q = state.quat();
+                let axis = q * Vec3::new(0.0, *half_height, 0.0);
+                let a = pos + axis;
+                let b = pos - axis;
+                let r = Vec3::splat(*radius);
+                (a.min(b) - r, a.max(b) + r)
+            }
+            ShapeDesc::ConvexHull { vertices } => {
+                let q = state.quat();
+                let mut mn = Vec3::splat(f32::MAX);
+                let mut mx = Vec3::splat(f32::NEG_INFINITY);
+                for v in vertices {
+                    let wv = pos + q * *v;
+                    mn = mn.min(wv);
+                    mx = mx.max(wv);
+                }
+                (mn, mx)
+            }
+            ShapeDesc::Plane { normal, distance } => {
+                let center = *normal * *distance;
+                let big = Vec3::splat(1e4);
+                (center - big, center + big)
             }
         }
     }
@@ -474,6 +767,7 @@ mod tests {
             dt: 1.0 / 60.0,
             solver_iterations: 5,
             max_bodies: 1024,
+            ..Default::default()
         });
 
         let handle = world.add_body(&RigidBodyDesc {
@@ -504,6 +798,7 @@ mod tests {
             dt: 1.0 / 60.0,
             solver_iterations: 10,
             max_bodies: 1024,
+            ..Default::default()
         });
 
         let h1 = world.add_body(&RigidBodyDesc {

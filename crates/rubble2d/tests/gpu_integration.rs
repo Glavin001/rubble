@@ -29,6 +29,7 @@ fn gpu_2d_free_fall() {
         dt,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc2D {
@@ -69,6 +70,7 @@ fn gpu_2d_static_body_immovable() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc2D {
@@ -98,6 +100,7 @@ fn gpu_2d_two_circle_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h1 = world.add_body(&RigidBodyDesc2D {
@@ -140,6 +143,7 @@ fn gpu_2d_zero_gravity_no_drift() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc2D {
@@ -169,6 +173,7 @@ fn gpu_2d_velocity_preserved() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc2D {
@@ -200,6 +205,7 @@ fn gpu_2d_multiple_bodies_stability() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let mut handles = Vec::new();
@@ -235,6 +241,7 @@ fn gpu_2d_rect_free_fall() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h = world.add_body(&RigidBodyDesc2D {
@@ -267,6 +274,7 @@ fn gpu_2d_add_remove_body() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let h1 = world.add_body(&RigidBodyDesc2D {
@@ -375,6 +383,7 @@ fn gpu_2d_convex_polygon_free_fall() {
         dt,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     // Pentagon
@@ -410,6 +419,7 @@ fn gpu_2d_poly_poly_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     // Two squares as convex polygons
@@ -463,6 +473,7 @@ fn gpu_2d_circle_poly_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let square_verts = vec![
@@ -511,6 +522,7 @@ fn gpu_2d_rect_poly_collision() {
         dt: 1.0 / 60.0,
         solver_iterations: 10,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let triangle_verts = vec![
@@ -560,6 +572,7 @@ fn gpu_2d_convex_polygon_static_no_move() {
         dt: 1.0 / 60.0,
         solver_iterations: 5,
         max_bodies: 256,
+        ..Default::default()
     });
 
     let verts = vec![

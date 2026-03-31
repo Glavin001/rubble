@@ -21,6 +21,8 @@ pub const SHAPE_SPHERE: u32 = 0;
 pub const SHAPE_BOX: u32 = 1;
 pub const SHAPE_CAPSULE: u32 = 2;
 pub const SHAPE_CONVEX_HULL: u32 = 3;
+pub const SHAPE_PLANE: u32 = 4;
+pub const SHAPE_COMPOUND: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // 3D rigid body state -- 4 x vec4 = 64 bytes
@@ -407,6 +409,60 @@ impl Ord for BodyHandle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Graph coloring for solver ordering
+// ---------------------------------------------------------------------------
+
+/// Greedy graph coloring on body adjacency from contact pairs.
+/// Returns `(color_per_body, num_colors)`. Bodies with the same color share no contacts.
+///
+/// This is used to partition solver iterations: contacts between bodies of the
+/// same color can be solved in parallel without data races.
+pub fn greedy_coloring(num_bodies: usize, contact_pairs: &[(u32, u32)]) -> (Vec<u32>, u32) {
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_bodies];
+    for &(a, b) in contact_pairs {
+        let a = a as usize;
+        let b = b as usize;
+        if a < num_bodies && b < num_bodies && a != b {
+            adj[a].push(b);
+            adj[b].push(a);
+        }
+    }
+
+    let mut colors: Vec<u32> = vec![u32::MAX; num_bodies];
+    let mut num_colors: u32 = 0;
+
+    for body in 0..num_bodies {
+        let mut used = Vec::new();
+        for &nb in &adj[body] {
+            if colors[nb] != u32::MAX {
+                used.push(colors[nb]);
+            }
+        }
+        used.sort_unstable();
+        used.dedup();
+
+        let mut c = 0u32;
+        for &u in &used {
+            if c == u {
+                c += 1;
+            } else {
+                break;
+            }
+        }
+        colors[body] = c;
+        if c + 1 > num_colors {
+            num_colors = c + 1;
+        }
+    }
+
+    if num_bodies > 0 && num_colors == 0 {
+        num_colors = 1;
+    }
+
+    (colors, num_colors)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CollisionEvent {
     Started {
@@ -676,6 +732,35 @@ mod tests {
         assert_eq!(SHAPE_BOX, 1);
         assert_eq!(SHAPE_CAPSULE, 2);
         assert_eq!(SHAPE_CONVEX_HULL, 3);
+    }
+
+    #[test]
+    fn test_greedy_coloring_triangle() {
+        // 3 bodies, all touching each other: need 3 colors.
+        let pairs = vec![(0, 1), (1, 2), (0, 2)];
+        let (colors, num) = greedy_coloring(3, &pairs);
+        assert_eq!(num, 3);
+        assert_ne!(colors[0], colors[1]);
+        assert_ne!(colors[1], colors[2]);
+        assert_ne!(colors[0], colors[2]);
+    }
+
+    #[test]
+    fn test_greedy_coloring_chain() {
+        // A-B-C chain: A touches B, B touches C, but A and C don't touch.
+        let pairs = vec![(0, 1), (1, 2)];
+        let (colors, num) = greedy_coloring(3, &pairs);
+        assert_eq!(num, 2);
+        assert_ne!(colors[0], colors[1]);
+        assert_ne!(colors[1], colors[2]);
+        assert_eq!(colors[0], colors[2]); // A and C can share a color
+    }
+
+    #[test]
+    fn test_greedy_coloring_no_contacts() {
+        let (colors, num) = greedy_coloring(5, &[]);
+        assert_eq!(num, 1);
+        assert!(colors.iter().all(|&c| c == 0));
     }
 
     #[test]

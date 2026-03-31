@@ -6,6 +6,7 @@
 mod avbd_solve_wgsl;
 mod broadphase_pairs_wgsl;
 mod extract_velocity_wgsl;
+pub mod lbvh;
 mod narrowphase_wgsl;
 mod predict_wgsl;
 
@@ -16,10 +17,13 @@ pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{Vec3, Vec4};
 use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext};
-use rubble_math::{Aabb3D, Contact3D, RigidBodyProps3D, RigidBodyState3D};
-use rubble_shapes3d::{BoxData, ConvexHullData, ConvexVertex3D, SphereData};
+use rubble_math::{
+    Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
+};
+use rubble_shapes3d::{BoxData, CapsuleData, ConvexHullData, ConvexVertex3D, SphereData};
+use std::collections::HashSet;
 
 const WORKGROUP_SIZE: u32 = 64;
 
@@ -94,7 +98,9 @@ struct SimParams {
 
 const SHAPE_SPHERE:      u32 = 0u;
 const SHAPE_BOX:         u32 = 1u;
+const SHAPE_CAPSULE:     u32 = 2u;
 const SHAPE_CONVEX_HULL: u32 = 3u;
+const SHAPE_PLANE:       u32 = 4u;
 
 struct ConvexHullInfo {
     vertex_offset: u32,
@@ -114,6 +120,15 @@ struct ConvexVert {
     _pad: f32,
 };
 
+struct CapsuleDataGpu {
+    half_height: f32,
+    radius: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+
+// Plane stored as vec4(nx, ny, nz, distance)
+
 @group(0) @binding(0) var<storage, read>       bodies:       array<Body>;
 @group(0) @binding(1) var<storage, read>       props:        array<BodyProps>;
 @group(0) @binding(2) var<storage, read>       spheres:      array<SphereData>;
@@ -122,6 +137,8 @@ struct ConvexVert {
 @group(0) @binding(5) var<uniform>             params:       SimParams;
 @group(0) @binding(6) var<storage, read>       convex_hulls: array<ConvexHullInfo>;
 @group(0) @binding(7) var<storage, read>       convex_verts: array<ConvexVert>;
+@group(0) @binding(8) var<storage, read>       capsules:     array<CapsuleDataGpu>;
+@group(0) @binding(9) var<storage, read>       plane_data:   array<vec4<f32>>;
 
 fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     let u = q.xyz;
@@ -158,6 +175,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let extent = ax + ay + az;
         aabb_min = pos - extent;
         aabb_max = pos + extent;
+    } else if st == SHAPE_CAPSULE {
+        let cap = capsules[si];
+        let hh = cap.half_height;
+        let r = cap.radius;
+        // Capsule axis is local Y. Rotate to world space.
+        let world_axis = quat_rotate(rot, vec3<f32>(0.0, hh, 0.0));
+        let a = pos + world_axis;
+        let b = pos - world_axis;
+        let rv = vec3<f32>(r, r, r);
+        aabb_min = min(a, b) - rv;
+        aabb_max = max(a, b) + rv;
     } else if st == SHAPE_CONVEX_HULL {
         let hull = convex_hulls[si];
         var mn = vec3<f32>(1e30, 1e30, 1e30);
@@ -171,8 +199,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         aabb_min = mn;
         aabb_max = mx;
+    } else if st == SHAPE_PLANE {
+        // Plane: huge AABB so it pairs with everything
+        let pdata = plane_data[si];
+        let n = pdata.xyz;
+        let d = pdata.w;
+        // Center the AABB on the plane's nearest point to origin
+        let center = n * d;
+        aabb_min = center - vec3<f32>(1e4, 1e4, 1e4);
+        aabb_max = center + vec3<f32>(1e4, 1e4, 1e4);
     } else {
-        // Unknown shape: generous default AABB
         aabb_min = pos - vec3<f32>(2.0, 2.0, 2.0);
         aabb_max = pos + vec3<f32>(2.0, 2.0, 2.0);
     }
@@ -201,7 +237,6 @@ pub struct GpuPipeline {
     // Kernels
     predict_kernel: ComputeKernel,
     aabb_kernel: ComputeKernel,
-    pairs_kernel: ComputeKernel,
     narrowphase_kernel: ComputeKernel,
     solve_kernel: ComputeKernel,
     extract_kernel: ComputeKernel,
@@ -217,8 +252,10 @@ pub struct GpuPipeline {
     pair_count: GpuAtomicCounter,
     spheres: GpuBuffer<SphereData>,
     boxes: GpuBuffer<BoxData>,
+    capsules: GpuBuffer<CapsuleData>,
     convex_hulls: GpuBuffer<ConvexHullData>,
     convex_vertices: GpuBuffer<ConvexVertex3D>,
+    planes: GpuBuffer<Vec4>,
 
     // Uniform buffer (shaders expect `var<uniform>`)
     params_uniform: wgpu::Buffer,
@@ -232,7 +269,6 @@ impl GpuPipeline {
 
         let predict_kernel = ComputeKernel::from_wgsl(&ctx, PREDICT_WGSL, "main");
         let aabb_kernel = ComputeKernel::from_wgsl(&ctx, AABB_COMPUTE_WGSL, "main");
-        let pairs_kernel = ComputeKernel::from_wgsl(&ctx, BROADPHASE_PAIRS_WGSL, "main");
         let narrowphase_kernel = ComputeKernel::from_wgsl(&ctx, NARROWPHASE_WGSL, "main");
         let solve_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_SOLVE_WGSL, "main");
         let extract_kernel = ComputeKernel::from_wgsl(&ctx, EXTRACT_VELOCITY_WGSL, "main");
@@ -247,8 +283,10 @@ impl GpuPipeline {
         let pair_count = GpuAtomicCounter::new(&ctx);
         let spheres = GpuBuffer::new(&ctx, max_bodies.max(1));
         let boxes = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let capsules = GpuBuffer::new(&ctx, max_bodies.max(1));
         let convex_hulls = GpuBuffer::new(&ctx, max_bodies.max(1));
         let convex_vertices = GpuBuffer::new(&ctx, (max_bodies * 8).max(1));
+        let planes = GpuBuffer::new(&ctx, 16);
 
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SimParams uniform"),
@@ -261,7 +299,6 @@ impl GpuPipeline {
             ctx,
             predict_kernel,
             aabb_kernel,
-            pairs_kernel,
             narrowphase_kernel,
             solve_kernel,
             extract_kernel,
@@ -275,8 +312,10 @@ impl GpuPipeline {
             pair_count,
             spheres,
             boxes,
+            capsules,
             convex_hulls,
             convex_vertices,
+            planes,
             params_uniform,
         }
     }
@@ -295,8 +334,10 @@ impl GpuPipeline {
         props: &[RigidBodyProps3D],
         sphere_data: &[SphereData],
         box_data: &[BoxData],
+        capsule_data: &[CapsuleData],
         hull_data: &[ConvexHullData],
         hull_vertices: &[ConvexVertex3D],
+        plane_data: &[Vec4],
         gravity: Vec3,
         dt: f32,
         solver_iterations: u32,
@@ -311,11 +352,17 @@ impl GpuPipeline {
         if !box_data.is_empty() {
             self.boxes.upload(&self.ctx, box_data);
         }
+        if !capsule_data.is_empty() {
+            self.capsules.upload(&self.ctx, capsule_data);
+        }
         if !hull_data.is_empty() {
             self.convex_hulls.upload(&self.ctx, hull_data);
         }
         if !hull_vertices.is_empty() {
             self.convex_vertices.upload(&self.ctx, hull_vertices);
+        }
+        if !plane_data.is_empty() {
+            self.planes.upload(&self.ctx, plane_data);
         }
 
         self.aabbs.grow_if_needed(&self.ctx, states.len());
@@ -343,7 +390,22 @@ impl GpuPipeline {
 
         self.dispatch_predict(num_bodies);
         self.dispatch_aabb(num_bodies);
-        self.dispatch_broadphase(num_bodies);
+
+        // LBVH broadphase: download AABBs, build tree on CPU, upload pairs
+        self.aabbs.set_len(num_bodies);
+        let gpu_aabbs = self.aabbs.download(&self.ctx);
+        let bvh = lbvh::Lbvh::build(&gpu_aabbs);
+        let overlap_pairs = bvh.find_overlapping_pairs(&gpu_aabbs);
+
+        if !overlap_pairs.is_empty() {
+            let gpu_pairs: Vec<GpuPair> = overlap_pairs
+                .iter()
+                .map(|p| GpuPair { a: p[0], b: p[1] })
+                .collect();
+            self.pairs.upload(&self.ctx, &gpu_pairs);
+            self.pair_count.write(&self.ctx, gpu_pairs.len() as u32);
+        }
+
         self.dispatch_narrowphase(num_bodies);
 
         for _ in 0..solver_iterations {
@@ -352,6 +414,64 @@ impl GpuPipeline {
 
         self.dispatch_extract(num_bodies);
         self.body_states.download(&self.ctx)
+    }
+
+    /// Run the full GPU physics step with warm-starting support.
+    /// Returns (updated_states, new_contacts) so the caller can track persistence.
+    pub fn step_with_contacts(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        warm_contacts: Option<&[Contact3D]>,
+    ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
+        if num_bodies == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        self.contact_count.reset(&self.ctx);
+        self.pair_count.reset(&self.ctx);
+
+        self.dispatch_predict(num_bodies);
+        self.dispatch_aabb(num_bodies);
+
+        // LBVH broadphase
+        self.aabbs.set_len(num_bodies);
+        let gpu_aabbs = self.aabbs.download(&self.ctx);
+        let bvh = lbvh::Lbvh::build(&gpu_aabbs);
+        let overlap_pairs = bvh.find_overlapping_pairs(&gpu_aabbs);
+
+        if !overlap_pairs.is_empty() {
+            let gpu_pairs: Vec<GpuPair> = overlap_pairs
+                .iter()
+                .map(|p| GpuPair { a: p[0], b: p[1] })
+                .collect();
+            self.pairs.upload(&self.ctx, &gpu_pairs);
+            self.pair_count.write(&self.ctx, gpu_pairs.len() as u32);
+        }
+
+        self.dispatch_narrowphase(num_bodies);
+
+        // Warm-start: download contacts, apply cached lambdas, re-upload
+        if let Some(prev) = warm_contacts {
+            let count = self.contact_count.read(&self.ctx) as usize;
+            if count > 0 {
+                let mut contacts = self.contacts.download(&self.ctx);
+                contacts.truncate(count);
+                warm_start_contacts_3d(&mut contacts, prev);
+                self.contacts.upload(&self.ctx, &contacts);
+            }
+        }
+
+        for _ in 0..solver_iterations {
+            self.dispatch_solve(num_bodies);
+        }
+
+        // Download contacts after solve (lambdas are updated)
+        let final_contacts = self.download_contacts();
+
+        self.dispatch_extract(num_bodies);
+        let states = self.body_states.download(&self.ctx);
+        (states, final_contacts)
     }
 
     /// Reference to the GPU context.
@@ -443,42 +563,17 @@ impl GpuPipeline {
                         binding: 7,
                         resource: self.convex_vertices.buffer().as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: self.capsules.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: self.planes.buffer().as_entire_binding(),
+                    },
                 ],
             });
         self.run_pass("aabb", &self.aabb_kernel, &bg, num_bodies);
-    }
-
-    fn dispatch_broadphase(&self, num_bodies: u32) {
-        let total_pairs = num_bodies * num_bodies.saturating_sub(1) / 2;
-        if total_pairs == 0 {
-            return;
-        }
-        let bg = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("broadphase"),
-                layout: self.pairs_kernel.bind_group_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.aabbs.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.pairs.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.pair_count.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.params_uniform.as_entire_binding(),
-                    },
-                ],
-            });
-        self.run_pass("broadphase", &self.pairs_kernel, &bg, total_pairs);
     }
 
     fn dispatch_narrowphase(&self, _num_bodies: u32) {
@@ -536,6 +631,14 @@ impl GpuPipeline {
                     wgpu::BindGroupEntry {
                         binding: 10,
                         resource: self.convex_vertices.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: self.capsules.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: self.planes.buffer().as_entire_binding(),
                     },
                 ],
             });
@@ -629,5 +732,111 @@ impl GpuPipeline {
             pass.dispatch_workgroups(round_up_workgroups(thread_count, WORKGROUP_SIZE), 1, 1);
         }
         self.ctx.queue.submit(Some(encoder.finish()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Warm-starting helpers
+// ---------------------------------------------------------------------------
+
+/// Match new contacts against previous-frame contacts and copy cached lambdas.
+fn warm_start_contacts_3d(new_contacts: &mut [Contact3D], prev_contacts: &[Contact3D]) {
+    let dist_thresh_sq: f32 = 0.01 * 0.01; // 1cm matching threshold
+    let decay: f32 = 0.95;
+
+    for nc in new_contacts.iter_mut() {
+        let np = nc.contact_point();
+        let mut best_dist_sq = f32::MAX;
+        let mut best_idx: Option<usize> = None;
+
+        for (i, pc) in prev_contacts.iter().enumerate() {
+            // Match by body pair
+            let same_pair = (pc.body_a == nc.body_a && pc.body_b == nc.body_b)
+                || (pc.body_a == nc.body_b && pc.body_b == nc.body_a);
+            if !same_pair {
+                continue;
+            }
+            let d2 = (pc.contact_point() - np).length_squared();
+            if d2 < best_dist_sq {
+                best_dist_sq = d2;
+                best_idx = Some(i);
+            }
+        }
+
+        if let Some(idx) = best_idx {
+            if best_dist_sq < dist_thresh_sq {
+                nc.lambda_n = prev_contacts[idx].lambda_n * decay;
+                nc.lambda_t1 = prev_contacts[idx].lambda_t1 * decay;
+                nc.lambda_t2 = prev_contacts[idx].lambda_t2 * decay;
+                nc.penalty_k = prev_contacts[idx].penalty_k;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contact persistence + collision events
+// ---------------------------------------------------------------------------
+
+/// Tracks contacts frame-to-frame for warm-starting and collision events.
+pub struct ContactPersistence3D {
+    prev_contacts: Vec<Contact3D>,
+}
+
+impl ContactPersistence3D {
+    pub fn new() -> Self {
+        Self {
+            prev_contacts: Vec::new(),
+        }
+    }
+
+    /// Update with new contacts. Returns collision events (Started / Ended).
+    pub fn update(&mut self, new_contacts: &[Contact3D]) -> Vec<CollisionEvent> {
+        let mut events = Vec::new();
+
+        let prev_pairs: HashSet<(u32, u32)> = self
+            .prev_contacts
+            .iter()
+            .map(|c| (c.body_a.min(c.body_b), c.body_a.max(c.body_b)))
+            .collect();
+
+        let new_pairs: HashSet<(u32, u32)> = new_contacts
+            .iter()
+            .map(|c| (c.body_a.min(c.body_b), c.body_a.max(c.body_b)))
+            .collect();
+
+        // Started: in new but not in prev
+        for &(a, b) in &new_pairs {
+            if !prev_pairs.contains(&(a, b)) {
+                events.push(CollisionEvent::Started {
+                    body_a: BodyHandle::new(a, 0),
+                    body_b: BodyHandle::new(b, 0),
+                });
+            }
+        }
+
+        // Ended: in prev but not in new
+        for &(a, b) in &prev_pairs {
+            if !new_pairs.contains(&(a, b)) {
+                events.push(CollisionEvent::Ended {
+                    body_a: BodyHandle::new(a, 0),
+                    body_b: BodyHandle::new(b, 0),
+                });
+            }
+        }
+
+        self.prev_contacts = new_contacts.to_vec();
+        events
+    }
+
+    /// Get previous frame's contacts (for warm-starting).
+    pub fn prev_contacts(&self) -> &[Contact3D] {
+        &self.prev_contacts
+    }
+}
+
+impl Default for ContactPersistence3D {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -6,8 +6,8 @@
 pub mod gpu;
 
 use glam::{Vec2, Vec4};
-use rubble_math::{BodyHandle, RigidBodyState2D};
-use rubble_shapes2d::{CircleData, ConvexPolygonData, ConvexVertex2D, RectData};
+use rubble_math::{BodyHandle, CollisionEvent, RigidBodyState2D};
+use rubble_shapes2d::{CapsuleData2D, CircleData, ConvexPolygonData, ConvexVertex2D, RectData};
 
 // ---------------------------------------------------------------------------
 // SimConfig2D
@@ -19,6 +19,14 @@ pub struct SimConfig2D {
     pub dt: f32,
     pub solver_iterations: u32,
     pub max_bodies: usize,
+    /// Augmented Lagrangian stiffness ramp rate.
+    pub beta: f32,
+    /// Initial penalty stiffness for contacts.
+    pub k_start: f32,
+    /// Decay factor for warm-started dual variables across steps.
+    pub warmstart_decay: f32,
+    /// Default friction coefficient for bodies without explicit friction.
+    pub friction_default: f32,
 }
 
 impl Default for SimConfig2D {
@@ -28,6 +36,10 @@ impl Default for SimConfig2D {
             dt: 1.0 / 60.0,
             solver_iterations: 5,
             max_bodies: 65536,
+            beta: 10.0,
+            k_start: 1e4,
+            warmstart_decay: 0.95,
+            friction_default: 0.5,
         }
     }
 }
@@ -48,6 +60,11 @@ pub enum ShapeDesc2D {
     /// Convex polygon defined by up to 64 vertices in local space (CCW winding).
     ConvexPolygon {
         vertices: Vec<Vec2>,
+    },
+    /// 2D capsule: a line segment with radius (oriented along local Y axis).
+    Capsule {
+        half_height: f32,
+        radius: f32,
     },
 }
 
@@ -149,6 +166,8 @@ pub struct World2D {
     shapes: Vec<ShapeDesc2D>,
     allocator: GenerationalIndexAllocator,
     gpu_pipeline: gpu::GpuPipeline2D,
+    contact_persistence: gpu::ContactPersistence2D,
+    collision_events: Vec<CollisionEvent>,
 }
 
 impl World2D {
@@ -164,6 +183,8 @@ impl World2D {
             shapes: Vec::new(),
             allocator: GenerationalIndexAllocator::new(),
             gpu_pipeline: pipeline,
+            contact_persistence: gpu::ContactPersistence2D::new(),
+            collision_events: Vec::new(),
         })
     }
 
@@ -291,6 +312,7 @@ impl World2D {
         let mut gpu_rects: Vec<RectData> = Vec::new();
         let mut gpu_convex_polys: Vec<ConvexPolygonData> = Vec::new();
         let mut gpu_convex_verts: Vec<ConvexVertex2D> = Vec::new();
+        let mut gpu_capsules: Vec<CapsuleData2D> = Vec::new();
 
         for &i in &alive_indices {
             match &self.shapes[i] {
@@ -333,6 +355,20 @@ impl World2D {
                         _pad: [0; 2],
                     });
                 }
+                ShapeDesc2D::Capsule {
+                    half_height,
+                    radius,
+                } => {
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 3, // SHAPE_CAPSULE
+                        shape_index: gpu_capsules.len() as u32,
+                    });
+                    gpu_capsules.push(CapsuleData2D {
+                        half_height: *half_height,
+                        radius: *radius,
+                        _pad: [0.0; 2],
+                    });
+                }
             }
         }
 
@@ -362,6 +398,13 @@ impl World2D {
                 _pad: [0.0; 2],
             });
         }
+        if gpu_capsules.is_empty() {
+            gpu_capsules.push(CapsuleData2D {
+                half_height: 0.0,
+                radius: 0.0,
+                _pad: [0.0; 2],
+            });
+        }
 
         let num_bodies = compact_states.len() as u32;
 
@@ -372,20 +415,190 @@ impl World2D {
             &gpu_rects,
             &gpu_convex_polys,
             &gpu_convex_verts,
+            &gpu_capsules,
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,
         );
 
-        let results = self
-            .gpu_pipeline
-            .step(num_bodies, self.config.solver_iterations);
+        let prev = self.contact_persistence.prev_contacts();
+        let warm = if prev.is_empty() { None } else { Some(prev) };
+        let (results, new_contacts) =
+            self.gpu_pipeline
+                .step_with_contacts(num_bodies, self.config.solver_iterations, warm);
+
+        let events = self.contact_persistence.update(&new_contacts);
+        self.collision_events.extend(events);
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
                 self.states[orig] = results[slot];
             }
         }
+    }
+
+    /// Drain collision events from the last step.
+    pub fn drain_collision_events(&mut self) -> Vec<CollisionEvent> {
+        std::mem::take(&mut self.collision_events)
+    }
+
+    /// Cast a 2D ray and return the closest hit (handle, t parameter, hit normal).
+    pub fn raycast(
+        &self,
+        origin: Vec2,
+        direction: Vec2,
+        max_t: f32,
+    ) -> Option<(BodyHandle, f32, Vec2)> {
+        let dir_len = direction.length();
+        if dir_len < 1e-12 {
+            return None;
+        }
+        let dir = direction / dir_len;
+
+        let mut best_t = max_t * dir_len;
+        let mut best_handle = None;
+        let mut best_normal = Vec2::ZERO;
+
+        for (idx, &alive) in self.allocator.alive.iter().enumerate() {
+            if !alive {
+                continue;
+            }
+            let state = &self.states[idx];
+            let pos = state.position();
+
+            if let Some((t, normal)) = self.ray_shape_test(origin, dir, pos, idx) {
+                if t >= 0.0 && t < best_t {
+                    best_t = t;
+                    best_handle =
+                        Some(BodyHandle::new(idx as u32, self.allocator.generations[idx]));
+                    best_normal = normal;
+                }
+            }
+        }
+
+        best_handle.map(|h| (h, best_t / dir_len, best_normal))
+    }
+
+    fn ray_shape_test(
+        &self,
+        origin: Vec2,
+        dir: Vec2,
+        pos: Vec2,
+        idx: usize,
+    ) -> Option<(f32, Vec2)> {
+        match &self.shapes[idx] {
+            ShapeDesc2D::Circle { radius } => {
+                let oc = origin - pos;
+                let b = oc.dot(dir);
+                let c = oc.dot(oc) - radius * radius;
+                let disc = b * b - c;
+                if disc < 0.0 {
+                    return None;
+                }
+                let t = -b - disc.sqrt();
+                if t < 0.0 {
+                    return None;
+                }
+                let hit = origin + dir * t;
+                let normal = (hit - pos).normalize();
+                Some((t, normal))
+            }
+            ShapeDesc2D::Rect { half_extents } => {
+                let angle = self.states[idx].angle();
+                let (sin, cos) = (-angle).sin_cos();
+                let local_origin = Vec2::new(
+                    cos * (origin.x - pos.x) - sin * (origin.y - pos.y),
+                    sin * (origin.x - pos.x) + cos * (origin.y - pos.y),
+                );
+                let local_dir = Vec2::new(cos * dir.x - sin * dir.y, sin * dir.x + cos * dir.y);
+                let he = *half_extents;
+
+                let mut tmin = f32::NEG_INFINITY;
+                let mut tmax = f32::INFINITY;
+                let mut normal_idx = 0usize;
+                let mut normal_sign = 1.0f32;
+
+                for i in 0..2 {
+                    let o = [local_origin.x, local_origin.y][i];
+                    let d = [local_dir.x, local_dir.y][i];
+                    let h = [he.x, he.y][i];
+
+                    if d.abs() < 1e-12 {
+                        if o < -h || o > h {
+                            return None;
+                        }
+                        continue;
+                    }
+                    let t1 = (-h - o) / d;
+                    let t2 = (h - o) / d;
+                    let (t_near, t_far) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                    if t_near > tmin {
+                        tmin = t_near;
+                        normal_idx = i;
+                        normal_sign = if d > 0.0 { -1.0 } else { 1.0 };
+                    }
+                    tmax = tmax.min(t_far);
+                    if tmin > tmax {
+                        return None;
+                    }
+                }
+
+                if tmin < 0.0 {
+                    return None;
+                }
+                let local_normal = if normal_idx == 0 {
+                    Vec2::new(normal_sign, 0.0)
+                } else {
+                    Vec2::new(0.0, normal_sign)
+                };
+                let (sin_fwd, cos_fwd) = angle.sin_cos();
+                let world_normal = Vec2::new(
+                    cos_fwd * local_normal.x - sin_fwd * local_normal.y,
+                    sin_fwd * local_normal.x + cos_fwd * local_normal.y,
+                );
+                Some((tmin, world_normal))
+            }
+            _ => None, // Capsule and ConvexPolygon raycast: could be added later
+        }
+    }
+
+    /// Query all bodies whose AABB overlaps the given axis-aligned bounding box.
+    pub fn overlap_aabb(&self, query_min: Vec2, query_max: Vec2) -> Vec<BodyHandle> {
+        let mut result = Vec::new();
+        for (idx, &alive) in self.allocator.alive.iter().enumerate() {
+            if !alive {
+                continue;
+            }
+            let state = &self.states[idx];
+            let pos = state.position();
+            let (body_min, body_max) = self.compute_body_aabb(pos, state, idx);
+
+            if body_min.x <= query_max.x
+                && body_max.x >= query_min.x
+                && body_min.y <= query_max.y
+                && body_max.y >= query_min.y
+            {
+                result.push(BodyHandle::new(idx as u32, self.allocator.generations[idx]));
+            }
+        }
+        result
+    }
+
+    fn compute_body_aabb(&self, pos: Vec2, state: &RigidBodyState2D, idx: usize) -> (Vec2, Vec2) {
+        let aabb = match &self.shapes[idx] {
+            ShapeDesc2D::Circle { radius } => rubble_shapes2d::compute_circle_aabb(pos, *radius),
+            ShapeDesc2D::Rect { half_extents } => {
+                rubble_shapes2d::compute_rect_aabb(pos, state.angle(), *half_extents)
+            }
+            ShapeDesc2D::ConvexPolygon { vertices } => {
+                rubble_shapes2d::compute_convex_polygon_aabb(pos, state.angle(), vertices)
+            }
+            ShapeDesc2D::Capsule {
+                half_height,
+                radius,
+            } => rubble_shapes2d::compute_capsule2d_aabb(pos, state.angle(), *half_height, *radius),
+        };
+        (aabb.min_point(), aabb.max_point())
     }
 
     /// Access the GPU pipeline (for diagnostics like contact count).
@@ -474,6 +687,7 @@ mod tests {
             dt: 1.0 / 60.0,
             solver_iterations: 5,
             max_bodies: 1024,
+            ..Default::default()
         });
 
         let h = world.add_body(&RigidBodyDesc2D {
@@ -506,6 +720,7 @@ mod tests {
             dt: 1.0 / 60.0,
             solver_iterations: 10,
             max_bodies: 1024,
+            ..Default::default()
         });
 
         let h_a = world.add_body(&RigidBodyDesc2D {

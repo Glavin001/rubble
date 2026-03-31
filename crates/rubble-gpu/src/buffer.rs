@@ -73,6 +73,11 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         result
     }
 
+    /// Set the logical length (for buffers populated by GPU compute shaders).
+    pub fn set_len(&mut self, len: u32) {
+        self.len = len;
+    }
+
     /// Number of elements currently stored.
     pub fn len(&self) -> u32 {
         self.len
@@ -187,6 +192,12 @@ impl GpuAtomicCounter {
     pub fn reset(&self, ctx: &GpuContext) {
         ctx.queue
             .write_buffer(&self.buffer, 0, bytemuck::bytes_of(&0u32));
+    }
+
+    /// Write a specific value to the counter.
+    pub fn write(&self, ctx: &GpuContext, value: u32) {
+        ctx.queue
+            .write_buffer(&self.buffer, 0, bytemuck::bytes_of(&value));
     }
 
     /// Read the counter value back from the GPU.
