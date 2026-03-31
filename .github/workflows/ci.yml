@@ -10,7 +10,6 @@ jobs:
     env:
       WGPU_BACKEND: vulkan
       XDG_RUNTIME_DIR: /tmp/xdg
-      VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
@@ -18,6 +17,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
           mkdir -p "$XDG_RUNTIME_DIR"
+          ls -lah /usr/share/vulkan/icd.d
+
+          ICD_JSON=""
+          if [ -f /usr/share/vulkan/icd.d/lvp_icd.json ]; then
+            ICD_JSON=/usr/share/vulkan/icd.d/lvp_icd.json
+          elif [ -f /usr/share/vulkan/icd.d/lvp_icd.x86_64.json ]; then
+            ICD_JSON=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          else
+            ICD_JSON=$(ls /usr/share/vulkan/icd.d/*.json | head -n 1)
+          fi
+
+          echo "VK_ICD_FILENAMES=$ICD_JSON" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$ICD_JSON" >> "$GITHUB_ENV"
+          echo "Using ICD JSON: $ICD_JSON"
       - name: Vulkan info (lavapipe)
         run: vulkaninfo --summary
       - uses: dtolnay/rust-toolchain@stable
