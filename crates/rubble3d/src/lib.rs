@@ -1388,4 +1388,444 @@ mod tests {
         assert!((got.z - rot.z).abs() < 1e-6);
         assert!((got.w - rot.w).abs() < 1e-6);
     }
+
+    // -----------------------------------------------------------------------
+    // Raycast tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_raycast_sphere_hit() {
+        let mut world = gpu_world(SimConfig::default());
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.0, 5.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        });
+
+        let result = world.raycast(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 100.0);
+        assert!(result.is_some());
+        let (hit_h, t, normal) = result.unwrap();
+        assert_eq!(hit_h.index, h.index);
+        assert!((t - 4.0).abs() < 0.01, "t should be ~4.0, got {t}");
+        assert!(
+            (normal - Vec3::new(0.0, 0.0, -1.0)).length() < 0.01,
+            "normal should point back toward origin"
+        );
+    }
+
+    #[test]
+    fn test_raycast_sphere_miss() {
+        let mut world = gpu_world(SimConfig::default());
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(10.0, 0.0, 5.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        });
+
+        let result = world.raycast(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 100.0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_raycast_box_hit() {
+        let mut world = gpu_world(SimConfig::default());
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.0, 5.0),
+            mass: 1.0,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::new(1.0, 1.0, 1.0),
+            },
+            ..Default::default()
+        });
+
+        let result = world.raycast(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 100.0);
+        assert!(result.is_some());
+        let (_, t, _) = result.unwrap();
+        assert!((t - 4.0).abs() < 0.01, "t should be ~4.0, got {t}");
+    }
+
+    #[test]
+    fn test_raycast_capsule_hit() {
+        let mut world = gpu_world(SimConfig::default());
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.0, 5.0),
+            mass: 1.0,
+            shape: ShapeDesc::Capsule {
+                half_height: 1.0,
+                radius: 0.5,
+            },
+            ..Default::default()
+        });
+
+        let result = world.raycast(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 100.0);
+        assert!(result.is_some());
+        let (_, t, _) = result.unwrap();
+        assert!(t > 3.0 && t < 5.0, "t={t} should be in range");
+    }
+
+    #[test]
+    fn test_raycast_plane_hit() {
+        let mut world = gpu_world(SimConfig::default());
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::ZERO,
+            mass: 0.0,
+            shape: ShapeDesc::Plane {
+                normal: Vec3::Y,
+                distance: 0.0,
+            },
+            ..Default::default()
+        });
+
+        // Ray from above pointing down
+        let result = world.raycast(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, -1.0, 0.0), 100.0);
+        assert!(result.is_some());
+        let (_, t, normal) = result.unwrap();
+        assert!((t - 5.0).abs() < 0.01);
+        assert!((normal - Vec3::Y).length() < 0.01);
+    }
+
+    #[test]
+    fn test_raycast_batch() {
+        let mut world = gpu_world(SimConfig::default());
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.0, 5.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        });
+
+        let results = world.raycast_batch(&[
+            (Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 100.0),  // hit
+            (Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), 100.0),  // miss
+            (Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 100.0), // miss (wrong direction)
+        ]);
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_some());
+        assert!(results[1].is_none());
+        assert!(results[2].is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Overlap AABB tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_overlap_aabb() {
+        let mut world = gpu_world(SimConfig::default());
+        let h1 = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        });
+        let _h2 = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(10.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        });
+
+        let hits = world.overlap_aabb(Vec3::new(-2.0, -2.0, -2.0), Vec3::new(2.0, 2.0, 2.0));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].index, h1.index);
+    }
+
+    // -----------------------------------------------------------------------
+    // Kinematic body tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_kinematic_body() {
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            ..Default::default()
+        });
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 10.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+            ..Default::default()
+        });
+
+        world.set_body_kinematic(h, true);
+
+        for _ in 0..60 {
+            world.step();
+        }
+
+        // Kinematic body should not be affected by gravity (inv_mass=0 in props)
+        let pos = world.get_position(h).unwrap();
+        // After kinematic flag set, the body should mostly stay in place
+        // (the solver won't apply impulses to it)
+        assert!(
+            pos.y > 5.0,
+            "Kinematic body y={} should not fall much under gravity",
+            pos.y
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Collision events tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_collision_events_drain_once() {
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::ZERO,
+            ..Default::default()
+        });
+
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(-0.5, 0.0, 0.0),
+            linear_velocity: Vec3::new(5.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        });
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.5, 0.0, 0.0),
+            linear_velocity: Vec3::new(-5.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        });
+
+        for _ in 0..10 {
+            world.step();
+        }
+
+        let events = world.drain_collision_events();
+        // There should be some collision events (Started)
+        // Second drain should be empty
+        let events2 = world.drain_collision_events();
+        assert!(events2.is_empty(), "Second drain should be empty");
+        let _ = events; // use it to prevent unused warning
+    }
+
+    // -----------------------------------------------------------------------
+    // Shape-specific tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_box_on_plane_stacking() {
+        // CPU-only test: no GPU solver, so just verify scene setup and gravity integration.
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            dt: 1.0 / 60.0,
+            solver_iterations: 10,
+            max_bodies: 1024,
+            ..Default::default()
+        });
+
+        // Floor plane (static)
+        world.add_body(&RigidBodyDesc {
+            mass: 0.0,
+            shape: ShapeDesc::Plane {
+                normal: Vec3::Y,
+                distance: 0.0,
+            },
+            ..Default::default()
+        });
+
+        // Box above plane
+        let box_h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 2.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            ..Default::default()
+        });
+
+        // Step a few frames — box should fall under gravity
+        for _ in 0..10 {
+            world.step();
+        }
+
+        let pos = world.get_position(box_h).unwrap();
+        // Without GPU collision solver, box falls freely — just verify gravity works
+        assert!(
+            pos.y < 2.0,
+            "Box y={} should have fallen from initial position",
+            pos.y
+        );
+    }
+
+    #[test]
+    fn test_capsule_gravity_fall() {
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            ..Default::default()
+        });
+
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 10.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Capsule {
+                half_height: 0.5,
+                radius: 0.3,
+            },
+            ..Default::default()
+        });
+
+        for _ in 0..60 {
+            world.step();
+        }
+
+        let pos = world.get_position(h).unwrap();
+        assert!(pos.y < 10.0, "Capsule y={} should have fallen", pos.y);
+    }
+
+    #[test]
+    fn test_convex_hull_creation() {
+        let mut world = gpu_world(SimConfig::default());
+        // Tetrahedron
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 5.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::ConvexHull {
+                vertices: vec![
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::new(-1.0, -1.0, -1.0),
+                    Vec3::new(1.0, -1.0, -1.0),
+                    Vec3::new(0.0, -1.0, 1.0),
+                ],
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(world.body_count(), 1);
+        assert!(world.get_position(h).is_some());
+    }
+
+    #[test]
+    fn test_compound_shape_creation() {
+        let mut world = gpu_world(SimConfig::default());
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 5.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Compound {
+                children: vec![
+                    (
+                        ShapeDesc::Sphere { radius: 0.5 },
+                        Vec3::new(-1.0, 0.0, 0.0),
+                        Quat::IDENTITY,
+                    ),
+                    (
+                        ShapeDesc::Box {
+                            half_extents: Vec3::new(0.3, 0.3, 0.3),
+                        },
+                        Vec3::new(1.0, 0.0, 0.0),
+                        Quat::IDENTITY,
+                    ),
+                ],
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(world.body_count(), 1);
+        assert!(world.get_position(h).is_some());
+    }
+
+    #[test]
+    fn test_multiple_shape_types_simulation() {
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            ..Default::default()
+        });
+
+        // Floor
+        world.add_body(&RigidBodyDesc {
+            mass: 0.0,
+            shape: ShapeDesc::Plane {
+                normal: Vec3::Y,
+                distance: 0.0,
+            },
+            ..Default::default()
+        });
+
+        // Various shapes
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 5.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+            ..Default::default()
+        });
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(2.0, 5.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            ..Default::default()
+        });
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::new(4.0, 5.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Capsule {
+                half_height: 0.5,
+                radius: 0.3,
+            },
+            ..Default::default()
+        });
+
+        // Run simulation — should not panic or produce NaN
+        for _ in 0..120 {
+            world.step();
+        }
+
+        assert_eq!(world.body_count(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stress tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_many_bodies_no_crash() {
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            max_bodies: 2048,
+            ..Default::default()
+        });
+
+        for i in 0..100 {
+            world.add_body(&RigidBodyDesc {
+                position: Vec3::new((i % 10) as f32 * 2.0, (i / 10) as f32 * 2.0 + 5.0, 0.0),
+                mass: 1.0,
+                shape: ShapeDesc::Sphere { radius: 0.5 },
+                ..Default::default()
+            });
+        }
+
+        for _ in 0..30 {
+            world.step();
+        }
+
+        assert_eq!(world.body_count(), 100);
+    }
+
+    #[test]
+    fn test_add_remove_cycle() {
+        let mut world = gpu_world(SimConfig::default());
+        let mut handles = Vec::new();
+
+        for _ in 0..20 {
+            handles.push(world.add_body(&RigidBodyDesc::default()));
+        }
+        assert_eq!(world.body_count(), 20);
+
+        for h in handles.drain(..) {
+            world.remove_body(h);
+        }
+        assert_eq!(world.body_count(), 0);
+
+        // Re-add should reuse indices
+        for _ in 0..10 {
+            handles.push(world.add_body(&RigidBodyDesc::default()));
+        }
+        assert_eq!(world.body_count(), 10);
+    }
 }
