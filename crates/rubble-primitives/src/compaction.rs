@@ -27,33 +27,46 @@ fn scatter(
 "#;
 
 /// GPU-accelerated stream compaction.
-pub struct StreamCompaction {
-    scan: crate::PrefixScan,
+///
+/// Given a data buffer and a predicate buffer (0/1 per element), produces a
+/// compacted output containing only elements where predicate == 1.
+pub struct GpuStreamCompaction {
+    scan: crate::InternalPrefixScan,
     scatter_kernel: ComputeKernel,
+    max_elements: usize,
 }
 
-impl StreamCompaction {
-    pub fn new(ctx: &GpuContext) -> Self {
-        let scan = crate::PrefixScan::new(ctx);
+impl GpuStreamCompaction {
+    /// Create a new stream compaction instance supporting up to `max_elements`.
+    pub fn new(ctx: &GpuContext, max_elements: usize) -> Self {
+        let scan = crate::InternalPrefixScan::new(ctx);
         let scatter_kernel = ComputeKernel::from_wgsl(ctx, SCATTER_WGSL, "scatter");
         Self {
             scan,
             scatter_kernel,
+            max_elements,
         }
     }
 
-    /// Given predicates (0 or 1 per element), compact `data` to only elements where
-    /// predicate == 1, writing results to `output`. Returns count of surviving elements.
+    /// Maximum number of elements this instance supports.
+    pub fn max_elements(&self) -> usize {
+        self.max_elements
+    }
+
+    /// Compact `data` using `predicates` (0 or 1 per element).
+    ///
+    /// Returns `(output_buffer, count)` where `output_buffer` contains only the
+    /// elements where predicate == 1, and `count` is the number of surviving elements.
     pub fn compact(
         &self,
         ctx: &GpuContext,
         data: &GpuBuffer<u32>,
         predicates: &GpuBuffer<u32>,
-        output: &mut GpuBuffer<u32>,
-    ) -> u32 {
+    ) -> (GpuBuffer<u32>, u32) {
         let n = data.len();
         if n == 0 {
-            return 0;
+            let empty = GpuBuffer::<u32>::new(ctx, 1);
+            return (empty, 0);
         }
 
         // Copy predicates to an offsets buffer (scan will modify in-place)
@@ -69,12 +82,12 @@ impl StreamCompaction {
         let count = offsets_data[n as usize - 1] + pred_data[n as usize - 1];
 
         if count == 0 {
-            return 0;
+            let empty = GpuBuffer::<u32>::new(ctx, 1);
+            return (empty, 0);
         }
 
-        // Ensure output is large enough and set its length
-        output.grow_if_needed(ctx, count as usize);
-        // Upload dummy data to set the length correctly
+        // Create output buffer
+        let mut output = GpuBuffer::<u32>::new(ctx, count as usize);
         output.upload(ctx, &vec![0u32; count as usize]);
 
         // Params uniform
@@ -132,7 +145,7 @@ impl StreamCompaction {
             ctx.queue.submit(Some(encoder.finish()));
         }
 
-        count
+        (output, count)
     }
 }
 
@@ -143,7 +156,7 @@ mod tests {
     #[test]
     fn test_compaction() {
         let ctx = crate::test_gpu();
-        let compact = StreamCompaction::new(&ctx);
+        let compact = GpuStreamCompaction::new(&ctx, 256);
 
         let data_in = [10u32, 20, 30, 40, 50, 60, 70, 80];
         let preds = [1u32, 0, 1, 0, 1, 1, 0, 1];
@@ -152,9 +165,8 @@ mod tests {
         data.upload(&ctx, &data_in);
         let mut predicates = GpuBuffer::<u32>::new(&ctx, preds.len());
         predicates.upload(&ctx, &preds);
-        let mut output = GpuBuffer::<u32>::new(&ctx, data_in.len());
 
-        let count = compact.compact(&ctx, &data, &predicates, &mut output);
+        let (output, count) = compact.compact(&ctx, &data, &predicates);
 
         assert_eq!(count, 5);
         let result = output.download(&ctx);
@@ -164,7 +176,7 @@ mod tests {
     #[test]
     fn test_compaction_all_zeros() {
         let ctx = crate::test_gpu();
-        let compact = StreamCompaction::new(&ctx);
+        let compact = GpuStreamCompaction::new(&ctx, 256);
 
         let data_in = [10u32, 20, 30, 40];
         let preds = [0u32, 0, 0, 0];
@@ -173,16 +185,15 @@ mod tests {
         data.upload(&ctx, &data_in);
         let mut predicates = GpuBuffer::<u32>::new(&ctx, preds.len());
         predicates.upload(&ctx, &preds);
-        let mut output = GpuBuffer::<u32>::new(&ctx, data_in.len());
 
-        let count = compact.compact(&ctx, &data, &predicates, &mut output);
+        let (_output, count) = compact.compact(&ctx, &data, &predicates);
         assert_eq!(count, 0, "All-zero predicates should yield count=0");
     }
 
     #[test]
     fn test_compaction_all_ones() {
         let ctx = crate::test_gpu();
-        let compact = StreamCompaction::new(&ctx);
+        let compact = GpuStreamCompaction::new(&ctx, 256);
 
         let data_in = [10u32, 20, 30, 40, 50];
         let preds = [1u32, 1, 1, 1, 1];
@@ -191,9 +202,8 @@ mod tests {
         data.upload(&ctx, &data_in);
         let mut predicates = GpuBuffer::<u32>::new(&ctx, preds.len());
         predicates.upload(&ctx, &preds);
-        let mut output = GpuBuffer::<u32>::new(&ctx, data_in.len());
 
-        let count = compact.compact(&ctx, &data, &predicates, &mut output);
+        let (output, count) = compact.compact(&ctx, &data, &predicates);
         assert_eq!(count, 5, "All-one predicates should yield count=N");
         let result = output.download(&ctx);
         assert_eq!(result, vec![10, 20, 30, 40, 50]);

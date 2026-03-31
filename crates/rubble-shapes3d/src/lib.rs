@@ -180,6 +180,85 @@ pub fn compute_convex_hull_aabb(center: Vec3, rotation: Quat, vertices: &[Vec3])
 }
 
 // ---------------------------------------------------------------------------
+// Gauss Map precomputation
+// ---------------------------------------------------------------------------
+
+/// Gauss Map entry: an edge-edge pair that can produce a valid separating axis.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GaussMapEntry {
+    /// Index of first edge (encoded as vertex index of edge start).
+    pub edge_a: u32,
+    /// Index of second edge (encoded as vertex index of edge start).
+    pub edge_b: u32,
+    pub _pad: [u32; 2],
+}
+
+/// Precompute a conservative Gauss Map for a convex hull.
+///
+/// Given a set of vertices and face definitions (vertex indices + face normal),
+/// this enumerates all edge pairs from distinct faces and filters out degenerate
+/// pairs where the cross product of the two edge directions is near-zero (parallel
+/// edges), since those cannot produce a valid separating axis.
+///
+/// Returns valid edge-edge pairs that can be used to prune SAT edge-edge axes.
+pub fn precompute_gauss_map(vertices: &[Vec3], faces: &[(Vec<u32>, Vec3)]) -> Vec<GaussMapEntry> {
+    // Collect all directed edges from faces.
+    // Each edge is (start_vertex_index, end_vertex_index, face_index).
+    let mut edges: Vec<(u32, u32, usize)> = Vec::new();
+    for (fi, (indices, _normal)) in faces.iter().enumerate() {
+        let n = indices.len();
+        for i in 0..n {
+            let a = indices[i];
+            let b = indices[(i + 1) % n];
+            edges.push((a, b, fi));
+        }
+    }
+
+    let mut result = Vec::new();
+    let parallel_threshold = 1e-6_f32;
+
+    // For each pair of edges from different faces, check if they are non-parallel.
+    for i in 0..edges.len() {
+        let (a0, a1, face_i) = edges[i];
+        let dir_a = vertices[a1 as usize] - vertices[a0 as usize];
+        let len_a_sq = dir_a.length_squared();
+        if len_a_sq < 1e-12 {
+            continue; // degenerate edge
+        }
+
+        for edge_b in &edges[(i + 1)..] {
+            let (b0, b1, face_j) = *edge_b;
+            // Skip edges from the same face
+            if face_i == face_j {
+                continue;
+            }
+
+            let dir_b = vertices[b1 as usize] - vertices[b0 as usize];
+            let len_b_sq = dir_b.length_squared();
+            if len_b_sq < 1e-12 {
+                continue; // degenerate edge
+            }
+
+            // Check if cross product is non-degenerate (edges are not parallel)
+            let cross = dir_a.cross(dir_b);
+            let cross_len_sq = cross.length_squared();
+
+            // Normalize: cross_len^2 / (|a|^2 * |b|^2) > threshold^2
+            if cross_len_sq > parallel_threshold * parallel_threshold * len_a_sq * len_b_sq {
+                result.push(GaussMapEntry {
+                    edge_a: a0,
+                    edge_b: b0,
+                    _pad: [0; 2],
+                });
+            }
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Compound shapes
 // ---------------------------------------------------------------------------
 
@@ -190,6 +269,32 @@ pub struct CompoundChild {
     pub local_position: Vec3,
     pub local_rotation: Quat,
     pub local_aabb: Aabb3D,
+}
+
+/// GPU-compatible compound child descriptor (48 bytes, repr(C)).
+/// Stored in the compound_children GPU buffer.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct CompoundChildGpu {
+    /// Local position relative to compound body (x, y, z, 0)
+    pub local_position: Vec4,
+    /// Local rotation quaternion (x, y, z, w)
+    pub local_rotation: Vec4,
+    /// shape_type, shape_index, padding
+    pub shape_type: u32,
+    pub shape_index: u32,
+    pub _pad: [u32; 2],
+}
+
+/// GPU-compatible compound shape descriptor (8 bytes, repr(C)).
+/// Stored in the compound_shapes GPU buffer.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct CompoundShapeGpu {
+    /// Offset into the compound_children buffer.
+    pub child_offset: u32,
+    /// Number of children.
+    pub child_count: u32,
 }
 
 #[derive(Debug, Clone)]

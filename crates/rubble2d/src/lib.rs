@@ -156,6 +156,141 @@ impl GenerationalIndexAllocator {
 }
 
 // ---------------------------------------------------------------------------
+// 2D raycast helpers
+// ---------------------------------------------------------------------------
+
+/// Ray-capsule intersection in 2D. Capsule = segment(ep_a, ep_b) + radius.
+fn ray_capsule_2d(
+    origin: Vec2,
+    dir: Vec2,
+    ep_a: Vec2,
+    ep_b: Vec2,
+    radius: f32,
+) -> Option<(f32, Vec2)> {
+    // Test both endpoint circles and the rectangle between them
+    let mut best: Option<(f32, Vec2)> = None;
+
+    // Test circle at ep_a
+    if let Some((t, n)) = ray_circle_2d(origin, dir, ep_a, radius) {
+        if t >= 0.0 && best.is_none_or(|(bt, _)| t < bt) {
+            best = Some((t, n));
+        }
+    }
+    // Test circle at ep_b
+    if let Some((t, n)) = ray_circle_2d(origin, dir, ep_b, radius) {
+        if t >= 0.0 && best.is_none_or(|(bt, _)| t < bt) {
+            best = Some((t, n));
+        }
+    }
+
+    // Test the rectangle (slab) between endpoints
+    let seg = ep_b - ep_a;
+    let seg_len = seg.length();
+    if seg_len > 1e-8 {
+        let seg_dir = seg / seg_len;
+        let seg_normal = Vec2::new(-seg_dir.y, seg_dir.x);
+
+        // Two planes at distance ±radius from the segment line
+        let d = seg_normal.dot(ep_a);
+        for &sign in &[1.0f32, -1.0] {
+            let plane_n = seg_normal * sign;
+            let plane_d = d * sign + radius;
+            let denom = plane_n.dot(dir);
+            if denom.abs() < 1e-12 {
+                continue;
+            }
+            let t = (plane_d - plane_n.dot(origin)) / denom;
+            if t < 0.0 {
+                continue;
+            }
+            // Check that hit point is between ep_a and ep_b along segment
+            let hit = origin + dir * t;
+            let proj = seg_dir.dot(hit - ep_a);
+            if proj >= 0.0 && proj <= seg_len && best.is_none_or(|(bt, _)| t < bt) {
+                best = Some((t, plane_n));
+            }
+        }
+    }
+
+    best
+}
+
+/// Ray-circle intersection in 2D.
+fn ray_circle_2d(origin: Vec2, dir: Vec2, center: Vec2, radius: f32) -> Option<(f32, Vec2)> {
+    let oc = origin - center;
+    let b = oc.dot(dir);
+    let c = oc.dot(oc) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let t = -b - disc.sqrt();
+    if t < 0.0 {
+        return None;
+    }
+    let hit = origin + dir * t;
+    let normal = (hit - center).normalize();
+    Some((t, normal))
+}
+
+/// Ray-convex polygon intersection in 2D using slab method on edges.
+fn ray_convex_polygon_2d(origin: Vec2, dir: Vec2, verts: &[Vec2]) -> Option<(f32, Vec2)> {
+    let n = verts.len();
+    if n < 3 {
+        return None;
+    }
+
+    let mut tmin = f32::NEG_INFINITY;
+    let mut tmax = f32::INFINITY;
+    let mut best_normal = Vec2::ZERO;
+
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let edge = verts[j] - verts[i];
+        // Outward normal (for CCW winding)
+        let normal = Vec2::new(edge.y, -edge.x);
+        let normal_len = normal.length();
+        if normal_len < 1e-12 {
+            continue;
+        }
+        let normal = normal / normal_len;
+
+        let denom = normal.dot(dir);
+        let dist = normal.dot(verts[i] - origin);
+
+        if denom.abs() < 1e-12 {
+            // Ray parallel to edge
+            if dist < 0.0 {
+                return None; // Outside this edge
+            }
+            continue;
+        }
+
+        let t = dist / denom;
+        if denom < 0.0 {
+            // Entering
+            if t > tmin {
+                tmin = t;
+                best_normal = normal;
+            }
+        } else {
+            // Leaving
+            tmax = tmax.min(t);
+        }
+
+        if tmin > tmax {
+            return None;
+        }
+    }
+
+    if tmin >= 0.0 && tmin <= tmax {
+        Some((tmin, best_normal))
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // World2D
 // ---------------------------------------------------------------------------
 
@@ -164,6 +299,8 @@ pub struct World2D {
     config: SimConfig2D,
     states: Vec<RigidBodyState2D>,
     shapes: Vec<ShapeDesc2D>,
+    frictions: Vec<f32>,
+    flags: Vec<u32>,
     allocator: GenerationalIndexAllocator,
     gpu_pipeline: gpu::GpuPipeline2D,
     contact_persistence: gpu::ContactPersistence2D,
@@ -181,6 +318,8 @@ impl World2D {
             config,
             states: Vec::new(),
             shapes: Vec::new(),
+            frictions: Vec::new(),
+            flags: Vec::new(),
             allocator: GenerationalIndexAllocator::new(),
             gpu_pipeline: pipeline,
             contact_persistence: gpu::ContactPersistence2D::new(),
@@ -209,6 +348,12 @@ impl World2D {
 
         let idx = handle.index as usize;
 
+        let body_flags = if desc.mass <= 0.0 {
+            rubble_math::FLAG_STATIC
+        } else {
+            0u32
+        };
+
         if idx >= self.states.len() {
             self.states.resize(
                 idx + 1,
@@ -216,10 +361,14 @@ impl World2D {
             );
             self.shapes
                 .resize(idx + 1, ShapeDesc2D::Circle { radius: 0.0 });
+            self.frictions.resize(idx + 1, 0.5);
+            self.flags.resize(idx + 1, 0);
         }
 
         self.states[idx] = state;
         self.shapes[idx] = desc.shape.clone();
+        self.frictions[idx] = desc.friction;
+        self.flags[idx] = body_flags;
 
         handle
     }
@@ -232,6 +381,8 @@ impl World2D {
         let idx = handle.index as usize;
         self.states[idx] = RigidBodyState2D::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         self.shapes[idx] = ShapeDesc2D::Circle { radius: 0.0 };
+        self.frictions[idx] = 0.0;
+        self.flags[idx] = 0;
         self.allocator.deallocate(handle)
     }
 
@@ -289,6 +440,47 @@ impl World2D {
         s.lin_vel = Vec4::new(vel.x, vel.y, omega, 0.0);
     }
 
+    /// Set the angular velocity of a body.
+    pub fn set_angular_velocity(&mut self, handle: BodyHandle, omega: f32) {
+        if !self.allocator.is_alive(handle) {
+            return;
+        }
+        let idx = handle.index as usize;
+        let s = &mut self.states[idx];
+        let vel = s.linear_velocity();
+        s.lin_vel = Vec4::new(vel.x, vel.y, omega, 0.0);
+    }
+
+    /// Mark a body as kinematic (moves via set_position/set_velocity, not physics).
+    pub fn set_body_kinematic(&mut self, handle: BodyHandle, kinematic: bool) {
+        if !self.allocator.is_alive(handle) {
+            return;
+        }
+        let idx = handle.index as usize;
+        if kinematic {
+            self.flags[idx] |= rubble_math::FLAG_KINEMATIC;
+            // Kinematic bodies have zero inverse mass for solver
+            let s = &mut self.states[idx];
+            let pos = s.position();
+            let angle = s.angle();
+            let vel = s.linear_velocity();
+            let omega = s.angular_velocity();
+            *s = RigidBodyState2D::new(pos.x, pos.y, angle, 0.0, vel.x, vel.y, omega);
+        } else {
+            self.flags[idx] &= !rubble_math::FLAG_KINEMATIC;
+        }
+    }
+
+    /// Cast multiple rays and return results for each.
+    pub fn raycast_batch(
+        &self,
+        rays: &[(Vec2, Vec2, f32)], // (origin, direction, max_t)
+    ) -> Vec<Option<(BodyHandle, f32, Vec2)>> {
+        rays.iter()
+            .map(|&(origin, dir, max_t)| self.raycast(origin, dir, max_t))
+            .collect()
+    }
+
     /// Advance the simulation by one time step on the GPU.
     pub fn step(&mut self) {
         if self.states.is_empty() {
@@ -304,8 +496,15 @@ impl World2D {
         }
 
         // Build compact arrays for GPU upload.
-        let compact_states: Vec<RigidBodyState2D> =
-            alive_indices.iter().map(|&i| self.states[i]).collect();
+        let compact_states: Vec<RigidBodyState2D> = alive_indices
+            .iter()
+            .map(|&i| {
+                let mut s = self.states[i];
+                // Pack friction into _pad0.x for the GPU solver
+                s._pad0 = Vec4::new(self.frictions[i], 0.0, 0.0, 0.0);
+                s
+            })
+            .collect();
 
         let mut shape_info_data: Vec<gpu::ShapeInfo> = Vec::with_capacity(alive_indices.len());
         let mut gpu_circles: Vec<CircleData> = Vec::new();
@@ -558,7 +757,29 @@ impl World2D {
                 );
                 Some((tmin, world_normal))
             }
-            _ => None, // Capsule and ConvexPolygon raycast: could be added later
+            ShapeDesc2D::Capsule {
+                half_height,
+                radius,
+            } => {
+                let angle = self.states[idx].angle();
+                let (sin_a, cos_a) = angle.sin_cos();
+                // Capsule axis is local Y, endpoints = pos ± half_height * local_Y_rotated
+                let axis = Vec2::new(-sin_a * half_height, cos_a * half_height);
+                let ep_a = pos + axis;
+                let ep_b = pos - axis;
+                // Find closest point on segment to ray, then do ray-circle test
+                ray_capsule_2d(origin, dir, ep_a, ep_b, *radius)
+            }
+            ShapeDesc2D::ConvexPolygon { vertices } => {
+                let angle = self.states[idx].angle();
+                let (sin_a, cos_a) = angle.sin_cos();
+                // Transform vertices to world space, then ray-polygon test
+                let world_verts: Vec<Vec2> = vertices
+                    .iter()
+                    .map(|v| pos + Vec2::new(cos_a * v.x - sin_a * v.y, sin_a * v.x + cos_a * v.y))
+                    .collect();
+                ray_convex_polygon_2d(origin, dir, &world_verts)
+            }
         }
     }
 

@@ -7,10 +7,14 @@ pub mod gpu;
 
 use glam::{Mat3, Quat, Vec3, Vec4};
 use rubble_math::{
-    BodyHandle, CollisionEvent, RigidBodyProps3D, RigidBodyState3D, FLAG_STATIC, SHAPE_BOX,
-    SHAPE_CAPSULE, SHAPE_CONVEX_HULL, SHAPE_PLANE, SHAPE_SPHERE,
+    Aabb3D as MathAabb3D, BodyHandle, CollisionEvent, RigidBodyProps3D, RigidBodyState3D,
+    FLAG_STATIC, SHAPE_BOX, SHAPE_CAPSULE, SHAPE_COMPOUND, SHAPE_CONVEX_HULL, SHAPE_PLANE,
+    SHAPE_SPHERE,
 };
-use rubble_shapes3d::{BoxData, CapsuleData, ConvexHullData, ConvexVertex3D, SphereData};
+use rubble_shapes3d::{
+    BoxData, CapsuleData, CompoundChild, CompoundChildGpu, CompoundShape, CompoundShapeGpu,
+    ConvexHullData, ConvexVertex3D, SphereData,
+};
 
 // ---------------------------------------------------------------------------
 // SimConfig
@@ -72,6 +76,11 @@ pub enum ShapeDesc {
     Plane {
         normal: Vec3,
         distance: f32,
+    },
+    /// Compound shape: a collection of child shapes with local transforms.
+    /// Each child is (ShapeDesc, local_position, local_rotation).
+    Compound {
+        children: Vec<(ShapeDesc, Vec3, Quat)>,
     },
 }
 
@@ -162,8 +171,62 @@ fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
             // Planes are always static, so this shouldn't be called with mass > 0
             Vec3::splat(1.0)
         }
+        ShapeDesc::Compound { children } => {
+            // Approximate compound inertia using bounding box of all child shapes.
+            let mut min = Vec3::splat(f32::MAX);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for (child_shape, local_pos, _local_rot) in children {
+                // Simple approximation: use child position + rough extent
+                let extent = match child_shape {
+                    ShapeDesc::Sphere { radius } => Vec3::splat(*radius),
+                    ShapeDesc::Box { half_extents } => *half_extents,
+                    ShapeDesc::Capsule {
+                        half_height,
+                        radius,
+                    } => Vec3::new(*radius, *half_height + *radius, *radius),
+                    _ => Vec3::splat(1.0),
+                };
+                min = min.min(*local_pos - extent);
+                max = max.max(*local_pos + extent);
+            }
+            let size = max - min;
+            Vec3::new(
+                mass / 12.0 * (size.y * size.y + size.z * size.z),
+                mass / 12.0 * (size.x * size.x + size.z * size.z),
+                mass / 12.0 * (size.x * size.x + size.y * size.y),
+            )
+        }
     };
     Mat3::from_diagonal(Vec3::new(1.0 / diag.x, 1.0 / diag.y, 1.0 / diag.z))
+}
+
+/// Compute the local AABB for a child shape at a given local offset and rotation.
+fn compute_child_local_aabb(shape: &ShapeDesc, local_pos: Vec3, local_rot: Quat) -> MathAabb3D {
+    match shape {
+        ShapeDesc::Sphere { radius } => {
+            let r = Vec3::splat(*radius);
+            MathAabb3D::new(local_pos - r, local_pos + r)
+        }
+        ShapeDesc::Box { half_extents } => {
+            rubble_shapes3d::compute_box_aabb(local_pos, local_rot, *half_extents)
+        }
+        ShapeDesc::Capsule {
+            half_height,
+            radius,
+        } => rubble_shapes3d::compute_capsule_aabb(local_pos, local_rot, *half_height, *radius),
+        ShapeDesc::ConvexHull { vertices } => {
+            rubble_shapes3d::compute_convex_hull_aabb(local_pos, local_rot, vertices)
+        }
+        ShapeDesc::Plane { normal, distance } => {
+            let center = *normal * *distance + local_pos;
+            let big = Vec3::splat(1e4);
+            MathAabb3D::new(center - big, center + big)
+        }
+        ShapeDesc::Compound { .. } => {
+            // Nested compound -- shouldn't happen, use a default AABB
+            MathAabb3D::new(local_pos - Vec3::ONE, local_pos + Vec3::ONE)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +278,215 @@ impl GenerationalIndexAllocator {
 }
 
 // ---------------------------------------------------------------------------
+// 3D raycast helpers
+// ---------------------------------------------------------------------------
+
+/// Ray-sphere intersection.
+fn ray_sphere_3d(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<(f32, Vec3)> {
+    let oc = origin - center;
+    let b = oc.dot(dir);
+    let c = oc.dot(oc) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let t = -b - disc.sqrt();
+    if t < 0.0 {
+        return None;
+    }
+    let hit = origin + dir * t;
+    let normal = (hit - center).normalize();
+    Some((t, normal))
+}
+
+/// Ray-capsule intersection in 3D. Capsule = segment(ep_a, ep_b) + radius.
+fn ray_capsule_3d(
+    origin: Vec3,
+    dir: Vec3,
+    ep_a: Vec3,
+    ep_b: Vec3,
+    radius: f32,
+) -> Option<(f32, Vec3)> {
+    let mut best: Option<(f32, Vec3)> = None;
+
+    // Test sphere at each endpoint
+    for &ep in &[ep_a, ep_b] {
+        if let Some((t, n)) = ray_sphere_3d(origin, dir, ep, radius) {
+            if t >= 0.0 && best.is_none_or(|(bt, _)| t < bt) {
+                best = Some((t, n));
+            }
+        }
+    }
+
+    // Test infinite cylinder along segment axis
+    let seg = ep_b - ep_a;
+    let seg_len_sq = seg.dot(seg);
+    if seg_len_sq > 1e-12 {
+        let seg_dir = seg / seg_len_sq.sqrt();
+        // Project ray onto plane perpendicular to segment
+        let oc = origin - ep_a;
+        let d_perp = dir - seg_dir * dir.dot(seg_dir);
+        let oc_perp = oc - seg_dir * oc.dot(seg_dir);
+
+        let a = d_perp.dot(d_perp);
+        let b = 2.0 * oc_perp.dot(d_perp);
+        let c = oc_perp.dot(oc_perp) - radius * radius;
+
+        if a > 1e-12 {
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let t = (-b - disc.sqrt()) / (2.0 * a);
+                if t >= 0.0 {
+                    let hit = origin + dir * t;
+                    let proj = seg_dir.dot(hit - ep_a);
+                    if proj >= 0.0 && proj <= seg_len_sq.sqrt() && best.is_none_or(|(bt, _)| t < bt)
+                    {
+                        // Normal: from closest point on axis to hit point
+                        let axis_point = ep_a + seg_dir * proj;
+                        let normal = (hit - axis_point).normalize();
+                        best = Some((t, normal));
+                    }
+                }
+            }
+        }
+    }
+
+    best
+}
+
+/// Ray-convex hull intersection in 3D using slab method on face planes.
+fn ray_convex_hull_3d(origin: Vec3, dir: Vec3, verts: &[Vec3]) -> Option<(f32, Vec3)> {
+    if verts.len() < 4 {
+        return None;
+    }
+
+    // Compute convex hull face planes from vertices using brute-force triangulation
+    // For simplicity, use the face normals approach: test ray against each triangle face
+    // of a simple convex hull (triangulated from centroid).
+    let _centroid: Vec3 = verts.iter().copied().sum::<Vec3>() / verts.len() as f32;
+
+    let mut tmin = f32::NEG_INFINITY;
+    let mut tmax = f32::INFINITY;
+    let mut best_normal = Vec3::ZERO;
+
+    // For each pair of adjacent vertices, form a triangle with centroid and test as a slab
+    // This is a simplified approach: use support-function based slab test
+    // For each face normal direction, project hull and test
+    // Simplest correct approach: build face normals from vertex triplets
+    for i in 0..verts.len() {
+        for j in (i + 1)..verts.len() {
+            for k in (j + 1)..verts.len() {
+                let v0 = verts[i];
+                let v1 = verts[j];
+                let v2 = verts[k];
+                let normal = (v1 - v0).cross(v2 - v0);
+                let len = normal.length();
+                if len < 1e-8 {
+                    continue;
+                }
+                let normal = normal / len;
+
+                // Check if this is actually a face (all other verts on one side)
+                let d = normal.dot(v0);
+                let mut all_behind = true;
+                for (idx, &v) in verts.iter().enumerate() {
+                    if idx == i || idx == j || idx == k {
+                        continue;
+                    }
+                    if normal.dot(v) > d + 1e-6 {
+                        all_behind = false;
+                        break;
+                    }
+                }
+                if !all_behind {
+                    continue;
+                }
+
+                // This is a face. Do slab test.
+                let denom = normal.dot(dir);
+                let dist = d - normal.dot(origin);
+
+                if denom.abs() < 1e-12 {
+                    if dist < -1e-6 {
+                        return None;
+                    }
+                    continue;
+                }
+
+                let t = dist / denom;
+                if denom < 0.0 {
+                    if t > tmin {
+                        tmin = t;
+                        best_normal = normal;
+                    }
+                } else {
+                    tmax = tmax.min(t);
+                }
+
+                if tmin > tmax {
+                    return None;
+                }
+            }
+        }
+    }
+
+    if tmin >= 0.0 && tmin <= tmax {
+        Some((tmin, best_normal))
+    } else {
+        None
+    }
+}
+
+/// Ray-AABB intersection in local space, returns result in world space.
+fn ray_aabb_3d(
+    local_origin: Vec3,
+    local_dir: Vec3,
+    half_extents: Vec3,
+    world_rot: Quat,
+) -> Option<(f32, Vec3)> {
+    let mut tmin = f32::NEG_INFINITY;
+    let mut tmax = f32::INFINITY;
+    let mut normal_idx = 0usize;
+    let mut normal_sign = 1.0f32;
+
+    let he = [half_extents.x, half_extents.y, half_extents.z];
+    let lo = [local_origin.x, local_origin.y, local_origin.z];
+    let ld = [local_dir.x, local_dir.y, local_dir.z];
+
+    for i in 0..3 {
+        if ld[i].abs() < 1e-12 {
+            if lo[i] < -he[i] || lo[i] > he[i] {
+                return None;
+            }
+            continue;
+        }
+        let t1 = (-he[i] - lo[i]) / ld[i];
+        let t2 = (he[i] - lo[i]) / ld[i];
+        let (t_near, t_far) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+        if t_near > tmin {
+            tmin = t_near;
+            normal_idx = i;
+            normal_sign = if ld[i] > 0.0 { -1.0 } else { 1.0 };
+        }
+        tmax = tmax.min(t_far);
+        if tmin > tmax {
+            return None;
+        }
+    }
+
+    if tmin < 0.0 {
+        return None;
+    }
+    let mut local_normal = Vec3::ZERO;
+    match normal_idx {
+        0 => local_normal.x = normal_sign,
+        1 => local_normal.y = normal_sign,
+        _ => local_normal.z = normal_sign,
+    }
+    Some((tmin, world_rot * local_normal))
+}
+
+// ---------------------------------------------------------------------------
 // World
 // ---------------------------------------------------------------------------
 
@@ -231,6 +503,10 @@ pub struct World {
     convex_vertices: Vec<ConvexVertex3D>,
     /// Plane data stored as Vec4(nx, ny, nz, distance)
     planes: Vec<Vec4>,
+    compound_shapes: Vec<CompoundShapeGpu>,
+    compound_children: Vec<CompoundChildGpu>,
+    /// CPU-side compound shape data for pair expansion.
+    compound_shapes_cpu: Vec<CompoundShape>,
     allocator: GenerationalIndexAllocator,
     alive: Vec<bool>,
     gpu_pipeline: gpu::GpuPipeline,
@@ -256,6 +532,9 @@ impl World {
             convex_hulls: Vec::new(),
             convex_vertices: Vec::new(),
             planes: Vec::new(),
+            compound_shapes: Vec::new(),
+            compound_children: Vec::new(),
+            compound_shapes_cpu: Vec::new(),
             allocator: GenerationalIndexAllocator::new(),
             alive: Vec::new(),
             gpu_pipeline: pipeline,
@@ -343,6 +622,117 @@ impl World {
                 self.planes
                     .push(Vec4::new(normal.x, normal.y, normal.z, *distance));
                 (SHAPE_PLANE, si)
+            }
+            ShapeDesc::Compound { children } => {
+                let compound_shape_index = self.compound_shapes.len() as u32;
+                let child_offset = self.compound_children.len() as u32;
+                let mut compound_children_cpu = Vec::new();
+
+                for (child_shape, local_pos, local_rot) in children {
+                    // Add each child's shape data to the appropriate buffer
+                    let (child_shape_type, child_shape_index) = match child_shape {
+                        ShapeDesc::Sphere { radius } => {
+                            let si = self.spheres.len() as u32;
+                            self.spheres.push(SphereData {
+                                radius: *radius,
+                                _pad: [0.0; 3],
+                            });
+                            (SHAPE_SPHERE, si)
+                        }
+                        ShapeDesc::Box { half_extents } => {
+                            let si = self.boxes.len() as u32;
+                            self.boxes.push(BoxData {
+                                half_extents: half_extents.extend(0.0),
+                            });
+                            (SHAPE_BOX, si)
+                        }
+                        ShapeDesc::Capsule {
+                            half_height,
+                            radius,
+                        } => {
+                            let si = self.capsules.len() as u32;
+                            self.capsules.push(CapsuleData {
+                                half_height: *half_height,
+                                radius: *radius,
+                                _pad: [0.0; 2],
+                            });
+                            (SHAPE_CAPSULE, si)
+                        }
+                        ShapeDesc::ConvexHull { vertices } => {
+                            let si = self.convex_hulls.len() as u32;
+                            let vertex_offset = self.convex_vertices.len() as u32;
+                            let vertex_count = vertices.len().min(64) as u32;
+                            for v in vertices.iter().take(64) {
+                                self.convex_vertices.push(ConvexVertex3D {
+                                    x: v.x,
+                                    y: v.y,
+                                    z: v.z,
+                                    _pad: 0.0,
+                                });
+                            }
+                            self.convex_hulls.push(ConvexHullData {
+                                vertex_offset,
+                                vertex_count,
+                                face_offset: 0,
+                                face_count: 0,
+                                edge_offset: 0,
+                                edge_count: 0,
+                                gauss_map_offset: 0,
+                                gauss_map_count: 0,
+                            });
+                            (SHAPE_CONVEX_HULL, si)
+                        }
+                        ShapeDesc::Plane { normal, distance } => {
+                            let si = self.planes.len() as u32;
+                            self.planes
+                                .push(Vec4::new(normal.x, normal.y, normal.z, *distance));
+                            (SHAPE_PLANE, si)
+                        }
+                        ShapeDesc::Compound { .. } => {
+                            // Nested compounds not supported; skip
+                            continue;
+                        }
+                    };
+
+                    // Compute local AABB for this child
+                    let local_aabb = compute_child_local_aabb(child_shape, *local_pos, *local_rot);
+
+                    // Add GPU-side compound child entry
+                    self.compound_children.push(CompoundChildGpu {
+                        local_position: local_pos.extend(0.0),
+                        local_rotation: Vec4::new(
+                            local_rot.x,
+                            local_rot.y,
+                            local_rot.z,
+                            local_rot.w,
+                        ),
+                        shape_type: child_shape_type,
+                        shape_index: child_shape_index,
+                        _pad: [0; 2],
+                    });
+
+                    // Build CPU-side compound child for BVH + pair expansion
+                    compound_children_cpu.push(CompoundChild {
+                        shape_type: child_shape_type,
+                        shape_index: child_shape_index,
+                        local_position: *local_pos,
+                        local_rotation: *local_rot,
+                        local_aabb,
+                    });
+                }
+
+                let child_count = compound_children_cpu.len() as u32;
+
+                self.compound_shapes.push(CompoundShapeGpu {
+                    child_offset,
+                    child_count,
+                });
+
+                // Build CPU-side CompoundShape with BVH
+                let compound = CompoundShape::new(compound_children_cpu);
+                self.compound_shapes_cpu.push(compound);
+
+                (SHAPE_COMPOUND, compound_shape_index)
             }
         };
 
@@ -453,6 +843,8 @@ impl World {
             &self.convex_hulls,
             &self.convex_vertices,
             &self.planes,
+            &self.compound_shapes,
+            &self.compound_children,
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,
@@ -530,6 +922,16 @@ impl World {
         }
 
         best_handle.map(|h| (h, best_t / dir_len, best_normal))
+    }
+
+    /// Cast multiple rays and return results for each.
+    pub fn raycast_batch(
+        &self,
+        rays: &[(Vec3, Vec3, f32)], // (origin, direction, max_t)
+    ) -> Vec<Option<(BodyHandle, f32, Vec3)>> {
+        rays.iter()
+            .map(|&(origin, dir, max_t)| self.raycast(origin, dir, max_t))
+            .collect()
     }
 
     fn ray_shape_test(
@@ -620,7 +1022,77 @@ impl World {
                     None
                 }
             }
-            _ => None, // Capsule and ConvexHull raycast: could be added later
+            ShapeDesc::Capsule {
+                half_height,
+                radius,
+            } => {
+                let q = _state.quat();
+                let axis = q * Vec3::new(0.0, *half_height, 0.0);
+                let ep_a = pos + axis;
+                let ep_b = pos - axis;
+                ray_capsule_3d(origin, dir, ep_a, ep_b, *radius)
+            }
+            ShapeDesc::ConvexHull { vertices } => {
+                let q = _state.quat();
+                let world_verts: Vec<Vec3> = vertices.iter().map(|v| pos + q * *v).collect();
+                ray_convex_hull_3d(origin, dir, &world_verts)
+            }
+            ShapeDesc::Compound { children } => {
+                let q = _state.quat();
+                let mut best: Option<(f32, Vec3)> = None;
+                for (child_shape, child_pos, child_rot) in children {
+                    let child_world_pos = pos + q * *child_pos;
+                    let child_world_rot = q * *child_rot;
+                    let child_state = RigidBodyState3D::new(
+                        child_world_pos,
+                        0.0,
+                        child_world_rot,
+                        Vec3::ZERO,
+                        Vec3::ZERO,
+                    );
+                    // Create a temporary index for the child (we need a shape to test)
+                    let child_result = match child_shape {
+                        ShapeDesc::Sphere { radius } => {
+                            ray_sphere_3d(origin, dir, child_world_pos, *radius)
+                        }
+                        ShapeDesc::Box { half_extents } => {
+                            // Reuse existing box raycast logic
+                            let inv_q = child_world_rot.conjugate();
+                            let local_origin = inv_q * (origin - child_world_pos);
+                            let local_dir = inv_q * dir;
+                            ray_aabb_3d(local_origin, local_dir, *half_extents, child_world_rot)
+                        }
+                        ShapeDesc::Capsule {
+                            half_height,
+                            radius,
+                        } => {
+                            let axis = child_world_rot * Vec3::new(0.0, *half_height, 0.0);
+                            ray_capsule_3d(
+                                origin,
+                                dir,
+                                child_world_pos + axis,
+                                child_world_pos - axis,
+                                *radius,
+                            )
+                        }
+                        ShapeDesc::ConvexHull { vertices } => {
+                            let wv: Vec<Vec3> = vertices
+                                .iter()
+                                .map(|v| child_world_pos + child_world_rot * *v)
+                                .collect();
+                            ray_convex_hull_3d(origin, dir, &wv)
+                        }
+                        _ => None,
+                    };
+                    if let Some((t, n)) = child_result {
+                        if t >= 0.0 && best.is_none_or(|(bt, _)| t < bt) {
+                            best = Some((t, n));
+                        }
+                    }
+                    let _ = child_state; // suppress unused warning
+                }
+                best
+            }
         }
     }
 
@@ -691,6 +1163,20 @@ impl World {
                 let center = *normal * *distance;
                 let big = Vec3::splat(1e4);
                 (center - big, center + big)
+            }
+            ShapeDesc::Compound { children } => {
+                let q = state.quat();
+                let mut mn = Vec3::splat(f32::MAX);
+                let mut mx = Vec3::splat(f32::NEG_INFINITY);
+                for (child_shape, local_pos, local_rot) in children {
+                    let child_world_pos = pos + q * *local_pos;
+                    let child_world_rot = q * *local_rot;
+                    let child_aabb =
+                        compute_child_local_aabb(child_shape, child_world_pos, child_world_rot);
+                    mn = mn.min(child_aabb.min_point());
+                    mx = mx.max(child_aabb.max_point());
+                }
+                (mn, mx)
             }
         }
     }

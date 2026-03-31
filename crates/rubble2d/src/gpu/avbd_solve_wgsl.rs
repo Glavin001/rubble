@@ -156,7 +156,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     contacts[ci].lambda_n = max(lambda_old + penalty * (-depth), 0.0);
 
     // --- Friction (tangential impulse) ---
-    let mu = 0.5; // friction coefficient
+    // Per-body friction stored in _pad0.x; average the two bodies
+    let mu = (bodies[a]._pad0.x + bodies[b]._pad0.x) * 0.5;
     let v_rel_current_a = v_a + w_a * vec2<f32>(-r_a.y, r_a.x);
     let v_rel_current_b = v_b + w_b * vec2<f32>(-r_b.y, r_b.x);
     let v_rel_current = v_rel_current_b - v_rel_current_a;

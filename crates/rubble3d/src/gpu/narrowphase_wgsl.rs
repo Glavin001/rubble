@@ -260,7 +260,197 @@ fn sphere_box_test(
     emit_contact(contact_point, normal_world, depth, body_sphere, body_box, max_contacts);
 }
 
-// ---------- Box-Box (full 15-axis SAT) ----------
+// ---------- Sutherland-Hodgman polygon clipping ----------
+
+// Clip polygon (up to 8 verts) against a single plane (points on positive side kept).
+// Returns new vertex count.
+fn clip_polygon_against_plane(
+    verts: ptr<function, array<vec3<f32>, 8>>,
+    count: u32,
+    plane_normal: vec3<f32>,
+    plane_dist: f32,
+) -> u32 {
+    var out: array<vec3<f32>, 8>;
+    var out_count = 0u;
+    if count == 0u { return 0u; }
+
+    for (var i = 0u; i < count; i = i + 1u) {
+        let j = (i + 1u) % count;
+        let vi = (*verts)[i];
+        let vj = (*verts)[j];
+        let di = dot(plane_normal, vi) - plane_dist;
+        let dj = dot(plane_normal, vj) - plane_dist;
+
+        if di >= 0.0 {
+            // Current vertex is inside
+            if out_count < 8u {
+                out[out_count] = vi;
+                out_count = out_count + 1u;
+            }
+            if dj < 0.0 {
+                // Next is outside, emit intersection
+                let t = di / (di - dj);
+                if out_count < 8u {
+                    out[out_count] = vi + (vj - vi) * t;
+                    out_count = out_count + 1u;
+                }
+            }
+        } else if dj >= 0.0 {
+            // Current outside, next inside, emit intersection
+            let t = di / (di - dj);
+            if out_count < 8u {
+                out[out_count] = vi + (vj - vi) * t;
+                out_count = out_count + 1u;
+            }
+        }
+    }
+
+    for (var i = 0u; i < out_count; i = i + 1u) {
+        (*verts)[i] = out[i];
+    }
+    return out_count;
+}
+
+// Get 4 vertices of a box face in world space.
+// face_idx 0..5: +X, -X, +Y, -Y, +Z, -Z
+fn get_box_face_vertices(
+    he: vec3<f32>,
+    axes: array<vec3<f32>, 3>,
+    pos: vec3<f32>,
+    face_idx: u32,
+) -> array<vec3<f32>, 4> {
+    // Determine which axis and sign
+    let axis_i = face_idx / 2u;
+    let sign = select(1.0, -1.0, (face_idx & 1u) != 0u);
+
+    // Two tangent axes
+    let t0_i = (axis_i + 1u) % 3u;
+    let t1_i = (axis_i + 2u) % 3u;
+
+    let he_arr = array<f32, 3>(he.x, he.y, he.z);
+
+    let center = pos + axes[axis_i] * (sign * he_arr[axis_i]);
+    let u = axes[t0_i] * he_arr[t0_i];
+    let v = axes[t1_i] * he_arr[t1_i];
+
+    // Wind CCW when viewed from outside (along +normal direction)
+    return array<vec3<f32>, 4>(
+        center - u - v,
+        center + u - v,
+        center + u + v,
+        center - u + v,
+    );
+}
+
+// Get outward normal of a box face
+fn get_box_face_normal(axes: array<vec3<f32>, 3>, face_idx: u32) -> vec3<f32> {
+    let axis_i = face_idx / 2u;
+    let sign = select(1.0, -1.0, (face_idx & 1u) != 0u);
+    return axes[axis_i] * sign;
+}
+
+// ---------- Manifold reduction (area maximisation) ----------
+
+// Reduce up to 8 contact points to at most 4, preserving area coverage.
+// Returns count of output contacts (up to 4). Results written to out_points/out_depths.
+fn reduce_manifold(
+    points: ptr<function, array<vec3<f32>, 8>>,
+    depths: ptr<function, array<f32, 8>>,
+    count: u32,
+    normal: vec3<f32>,
+    out_points: ptr<function, array<vec3<f32>, 4>>,
+    out_depths: ptr<function, array<f32, 4>>,
+) -> u32 {
+    if count <= 4u {
+        let c = min(count, 4u);
+        for (var i = 0u; i < c; i = i + 1u) {
+            (*out_points)[i] = (*points)[i];
+            (*out_depths)[i] = (*depths)[i];
+        }
+        return c;
+    }
+
+    // 1. Pick deepest point (most negative depth = most penetrating)
+    var idx0 = 0u;
+    var best_d = (*depths)[0];
+    for (var i = 1u; i < count; i = i + 1u) {
+        if (*depths)[i] < best_d {
+            best_d = (*depths)[i];
+            idx0 = i;
+        }
+    }
+
+    // 2. Pick point farthest from idx0
+    var idx1 = 0u;
+    var best_dist2 = -1.0;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let dd = (*points)[i] - (*points)[idx0];
+        let d2 = dot(dd, dd);
+        if d2 > best_dist2 {
+            best_dist2 = d2;
+            idx1 = i;
+        }
+    }
+
+    // 3. Pick point maximizing triangle area with (idx0, idx1)
+    var idx2 = 0u;
+    var best_area = -1.0;
+    let e01 = (*points)[idx1] - (*points)[idx0];
+    for (var i = 0u; i < count; i = i + 1u) {
+        if i == idx0 || i == idx1 { continue; }
+        let e0i = (*points)[i] - (*points)[idx0];
+        let cr = cross(e01, e0i);
+        let area = abs(dot(cr, normal));
+        if area > best_area {
+            best_area = area;
+            idx2 = i;
+        }
+    }
+
+    // 4. Pick point maximizing quadrilateral area (on opposite side of triangle edge 0->1)
+    var idx3 = 0u;
+    var best_area2 = -1.0;
+    // Signed area direction of triangle 0,1,2
+    let tri_sign = dot(cross((*points)[idx1] - (*points)[idx0], (*points)[idx2] - (*points)[idx0]), normal);
+    for (var i = 0u; i < count; i = i + 1u) {
+        if i == idx0 || i == idx1 || i == idx2 { continue; }
+        // We want the point on the opposite side of the line idx0->idx1 from idx2
+        let e0i = (*points)[i] - (*points)[idx0];
+        let side = dot(cross(e01, e0i), normal);
+        // Opposite side means sign differs from tri_sign
+        if side * tri_sign >= 0.0 { continue; }
+        let area = abs(side);
+        if area > best_area2 {
+            best_area2 = area;
+            idx3 = i;
+        }
+    }
+    // If no point on opposite side, just pick farthest remaining
+    if best_area2 < 0.0 {
+        var best_fd = -1.0;
+        for (var i = 0u; i < count; i = i + 1u) {
+            if i == idx0 || i == idx1 || i == idx2 { continue; }
+            let dd = (*points)[i] - (*points)[idx0];
+            let fd = dot(dd, dd);
+            if fd > best_fd {
+                best_fd = fd;
+                idx3 = i;
+            }
+        }
+    }
+
+    (*out_points)[0] = (*points)[idx0];
+    (*out_points)[1] = (*points)[idx1];
+    (*out_points)[2] = (*points)[idx2];
+    (*out_points)[3] = (*points)[idx3];
+    (*out_depths)[0] = (*depths)[idx0];
+    (*out_depths)[1] = (*depths)[idx1];
+    (*out_depths)[2] = (*depths)[idx2];
+    (*out_depths)[3] = (*depths)[idx3];
+    return 4u;
+}
+
+// ---------- Box-Box (full 15-axis SAT + Sutherland-Hodgman clipping) ----------
 
 fn box_box_test(
     pos_a: vec3<f32>, rot_a: vec4<f32>, he_a: vec3<f32>,
@@ -282,6 +472,8 @@ fn box_box_test(
     let d = pos_b - pos_a;
     var min_depth = -1e30;
     var best_normal = vec3<f32>(0.0, 1.0, 0.0);
+    var best_axis_type = 0u; // 0=face_a, 1=face_b, 2=edge
+    var best_face_idx = 0u;
 
     let he_arr_a = array<f32, 3>(he_a.x, he_a.y, he_a.z);
     let he_arr_b = array<f32, 3>(he_b.x, he_b.y, he_b.z);
@@ -300,6 +492,9 @@ fn box_box_test(
         if depth > min_depth {
             min_depth = depth;
             best_normal = axis * select(1.0, -1.0, center_proj < 0.0);
+            best_axis_type = 0u;
+            // face_idx: sign determines which face. +axis -> face 2*i, -axis -> face 2*i+1
+            best_face_idx = i * 2u + select(0u, 1u, center_proj < 0.0);
         }
     }
     for (var i = 0u; i < 3u; i = i + 1u) {
@@ -315,10 +510,14 @@ fn box_box_test(
         if depth > min_depth {
             min_depth = depth;
             best_normal = axis * select(1.0, -1.0, center_proj < 0.0);
+            best_axis_type = 1u;
+            best_face_idx = i * 2u + select(0u, 1u, center_proj < 0.0);
         }
     }
 
     // 9 edge-edge cross product axes
+    var best_edge_a = 0u;
+    var best_edge_b = 0u;
     for (var i = 0u; i < 3u; i = i + 1u) {
         for (var j = 0u; j < 3u; j = j + 1u) {
             var axis = cross(axes_a[i], axes_b[j]);
@@ -338,12 +537,155 @@ fn box_box_test(
             if depth > min_depth {
                 min_depth = depth;
                 best_normal = axis * select(1.0, -1.0, center_proj < 0.0);
+                best_axis_type = 2u;
+                best_edge_a = i;
+                best_edge_b = j;
             }
         }
     }
 
-    let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
-    emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+    // Ensure normal points from A to B
+    if dot(best_normal, d) < 0.0 {
+        best_normal = -best_normal;
+    }
+
+    // ----- Edge-edge: single contact point -----
+    if best_axis_type == 2u {
+        // Find closest points between the two edges
+        let sign_a = select(1.0, -1.0, dot(axes_a[best_edge_a], best_normal) < 0.0);
+        let sign_b = select(1.0, -1.0, dot(axes_b[best_edge_b], best_normal) > 0.0);
+        // Edge center on each box face
+        let t0a = (best_edge_a + 1u) % 3u;
+        let t1a = (best_edge_a + 2u) % 3u;
+        let t0b = (best_edge_b + 1u) % 3u;
+        let t1b = (best_edge_b + 2u) % 3u;
+        let he_aa = array<f32, 3>(he_a.x, he_a.y, he_a.z);
+        let he_bb = array<f32, 3>(he_b.x, he_b.y, he_b.z);
+        // Midpoint of edge on A: project onto the two non-edge axes to get edge center
+        let edge_mid_a = pos_a
+            + axes_a[t0a] * (he_aa[t0a] * select(1.0, -1.0, dot(axes_a[t0a], best_normal) < 0.0))
+            + axes_a[t1a] * (he_aa[t1a] * select(1.0, -1.0, dot(axes_a[t1a], best_normal) < 0.0));
+        let edge_mid_b = pos_b
+            + axes_b[t0b] * (he_bb[t0b] * select(1.0, -1.0, dot(axes_b[t0b], best_normal) > 0.0))
+            + axes_b[t1b] * (he_bb[t1b] * select(1.0, -1.0, dot(axes_b[t1b], best_normal) > 0.0));
+        let edge_a_start = edge_mid_a - axes_a[best_edge_a] * he_aa[best_edge_a];
+        let edge_a_end   = edge_mid_a + axes_a[best_edge_a] * he_aa[best_edge_a];
+        let edge_b_start = edge_mid_b - axes_b[best_edge_b] * he_bb[best_edge_b];
+        let edge_b_end   = edge_mid_b + axes_b[best_edge_b] * he_bb[best_edge_b];
+        let pts = closest_points_segments(edge_a_start, edge_a_end, edge_b_start, edge_b_end);
+        let contact_point = (pts[0] + pts[1]) * 0.5;
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        return;
+    }
+
+    // ----- Face contact: Sutherland-Hodgman clipping -----
+
+    // Determine reference and incident faces
+    var ref_axes: array<vec3<f32>, 3>;
+    var inc_axes: array<vec3<f32>, 3>;
+    var ref_he: vec3<f32>;
+    var inc_he: vec3<f32>;
+    var ref_pos: vec3<f32>;
+    var inc_pos: vec3<f32>;
+
+    if best_axis_type == 0u {
+        // Reference face on A
+        ref_axes = axes_a;
+        inc_axes = axes_b;
+        ref_he = he_a;
+        inc_he = he_b;
+        ref_pos = pos_a;
+        inc_pos = pos_b;
+    } else {
+        // Reference face on B
+        ref_axes = axes_b;
+        inc_axes = axes_a;
+        ref_he = he_b;
+        inc_he = he_a;
+        ref_pos = pos_b;
+        inc_pos = pos_a;
+    }
+
+    // Reference face normal (same as best_normal direction)
+    let ref_normal = best_normal;
+
+    // Find reference face index on ref body: face most aligned with ref_normal
+    var ref_face = 0u;
+    var best_dot_ref = -1.0;
+    for (var i = 0u; i < 6u; i = i + 1u) {
+        let fn_i = get_box_face_normal(ref_axes, i);
+        let dd = dot(fn_i, ref_normal);
+        if dd > best_dot_ref {
+            best_dot_ref = dd;
+            ref_face = i;
+        }
+    }
+
+    // Find incident face: most anti-aligned with ref_normal on the incident body
+    var inc_face = 0u;
+    var best_dot_inc = 1.0;
+    for (var i = 0u; i < 6u; i = i + 1u) {
+        let fn_i = get_box_face_normal(inc_axes, i);
+        let dd = dot(fn_i, ref_normal);
+        if dd < best_dot_inc {
+            best_dot_inc = dd;
+            inc_face = i;
+        }
+    }
+
+    // Get incident face vertices as the clipping polygon
+    let inc_verts = get_box_face_vertices(inc_he, inc_axes, inc_pos, inc_face);
+    var clip_poly: array<vec3<f32>, 8>;
+    clip_poly[0] = inc_verts[0];
+    clip_poly[1] = inc_verts[1];
+    clip_poly[2] = inc_verts[2];
+    clip_poly[3] = inc_verts[3];
+    var clip_count = 4u;
+
+    // Get reference face vertices to build side planes
+    let ref_verts = get_box_face_vertices(ref_he, ref_axes, ref_pos, ref_face);
+    let ref_face_normal = get_box_face_normal(ref_axes, ref_face);
+
+    // Clip against 4 side planes of reference face
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let j = (i + 1u) % 4u;
+        let edge = ref_verts[j] - ref_verts[i];
+        // Side plane normal points inward (into the face)
+        let side_normal = cross(ref_face_normal, edge);
+        let side_len = length(side_normal);
+        if side_len < 1e-12 { continue; }
+        let sn = side_normal / side_len;
+        let side_dist = dot(sn, ref_verts[i]);
+        clip_count = clip_polygon_against_plane(&clip_poly, clip_count, sn, side_dist);
+    }
+
+    if clip_count == 0u { return; }
+
+    // Keep only points below reference plane (penetrating)
+    let ref_plane_dist = dot(ref_face_normal, ref_verts[0]);
+    var final_points: array<vec3<f32>, 8>;
+    var final_depths: array<f32, 8>;
+    var final_count = 0u;
+
+    for (var i = 0u; i < clip_count; i = i + 1u) {
+        let sep = dot(ref_face_normal, clip_poly[i]) - ref_plane_dist;
+        if sep <= 0.0 {
+            final_points[final_count] = clip_poly[i];
+            final_depths[final_count] = sep; // negative = penetrating
+            final_count = final_count + 1u;
+        }
+    }
+
+    if final_count == 0u { return; }
+
+    // Reduce to at most 4 contacts
+    var out_points: array<vec3<f32>, 4>;
+    var out_depths: array<f32, 4>;
+    let emit_count = reduce_manifold(&final_points, &final_depths, final_count, ref_face_normal, &out_points, &out_depths);
+
+    for (var i = 0u; i < emit_count; i = i + 1u) {
+        emit_contact(out_points[i], best_normal, out_depths[i], body_a, body_b, max_contacts);
+    }
 }
 
 // ---------- Sphere-Capsule ----------
@@ -512,7 +854,23 @@ fn hull_project(hull_si: u32, pos: vec3<f32>, rot: vec4<f32>, axis: vec3<f32>) -
     return vec2<f32>(mn, mx);
 }
 
-// ---------- Hull-Hull SAT ----------
+// ---------- Hull-Hull SAT + clipping ----------
+
+// Get the support vertex index on a hull along a direction
+fn hull_support_idx(si: u32, pos: vec3<f32>, rot: vec4<f32>, dir: vec3<f32>) -> u32 {
+    let hull = convex_hulls[si];
+    var best_i = 0u;
+    var best_d = -1e30;
+    for (var i = 0u; i < hull.vertex_count; i = i + 1u) {
+        let wv = hull_world_vert(si, i, pos, rot);
+        let dd = dot(wv, dir);
+        if dd > best_d {
+            best_d = dd;
+            best_i = i;
+        }
+    }
+    return best_i;
+}
 
 fn hull_hull_test(
     pos_a: vec3<f32>, rot_a: vec4<f32>, si_a: u32,
@@ -526,6 +884,11 @@ fn hull_hull_test(
 
     var min_depth = -1e30;
     var best_normal = vec3<f32>(0.0, 1.0, 0.0);
+    var best_from_a = true;
+    var best_face_v0 = 0u;
+    var best_face_v1 = 0u;
+    var best_face_v2 = 0u;
+    var best_is_edge = false;
 
     let na = hull_a.vertex_count;
     for (var i = 0u; i < na; i = i + 1u) {
@@ -545,6 +908,11 @@ fn hull_hull_test(
         if depth > min_depth {
             min_depth = depth;
             best_normal = axis;
+            best_from_a = true;
+            best_face_v0 = i;
+            best_face_v1 = (i + 1u) % na;
+            best_face_v2 = (i + 2u) % na;
+            best_is_edge = false;
         }
     }
 
@@ -566,11 +934,118 @@ fn hull_hull_test(
         if depth > min_depth {
             min_depth = depth;
             best_normal = axis;
+            best_from_a = false;
+            best_face_v0 = i;
+            best_face_v1 = (i + 1u) % nb;
+            best_face_v2 = (i + 2u) % nb;
+            best_is_edge = false;
         }
     }
 
-    let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
-    emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+    // Ensure normal points from A to B
+    if dot(best_normal, d) < 0.0 {
+        best_normal = -best_normal;
+    }
+
+    // Build reference face polygon (the 3-vertex triangle from the SAT face)
+    // and clip incident hull's closest face against it.
+
+    // Reference face: use the triangle that generated the best_normal
+    var ref_si: u32;
+    var ref_pos: vec3<f32>;
+    var ref_rot: vec4<f32>;
+    var inc_si: u32;
+    var inc_pos: vec3<f32>;
+    var inc_rot: vec4<f32>;
+
+    if best_from_a {
+        ref_si = si_a; ref_pos = pos_a; ref_rot = rot_a;
+        inc_si = si_b; inc_pos = pos_b; inc_rot = rot_b;
+    } else {
+        ref_si = si_b; ref_pos = pos_b; ref_rot = rot_b;
+        inc_si = si_a; inc_pos = pos_a; inc_rot = rot_a;
+    }
+
+    // Reference face: 3 vertices forming the face
+    let rv0 = hull_world_vert(ref_si, best_face_v0, ref_pos, ref_rot);
+    let rv1 = hull_world_vert(ref_si, best_face_v1, ref_pos, ref_rot);
+    let rv2 = hull_world_vert(ref_si, best_face_v2, ref_pos, ref_rot);
+
+    // Reference face normal (recompute to ensure correct orientation)
+    var ref_normal = cross(rv1 - rv0, rv2 - rv0);
+    let rn_len = length(ref_normal);
+    if rn_len < 1e-12 {
+        // Degenerate face, fall back to single contact
+        let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        return;
+    }
+    ref_normal = ref_normal / rn_len;
+    if dot(ref_normal, best_normal) < 0.0 {
+        ref_normal = -ref_normal;
+    }
+
+    // Build incident face: find the support vertex on the incident hull most
+    // anti-aligned with best_normal, then build a small fan around it
+    let inc_hull = convex_hulls[inc_si];
+    let inc_n = inc_hull.vertex_count;
+    let support_i = hull_support_idx(inc_si, inc_pos, inc_rot, -best_normal);
+
+    // Use 3 consecutive vertices around support as incident polygon (triangle)
+    var clip_poly: array<vec3<f32>, 8>;
+    let ic0 = support_i;
+    let ic1 = (support_i + 1u) % inc_n;
+    let ic2 = (support_i + inc_n - 1u) % inc_n;
+    clip_poly[0] = hull_world_vert(inc_si, ic2, inc_pos, inc_rot);
+    clip_poly[1] = hull_world_vert(inc_si, ic0, inc_pos, inc_rot);
+    clip_poly[2] = hull_world_vert(inc_si, ic1, inc_pos, inc_rot);
+    var clip_count = 3u;
+
+    // Clip against 3 side planes of the reference triangle
+    let ref_tri = array<vec3<f32>, 3>(rv0, rv1, rv2);
+    for (var i = 0u; i < 3u; i = i + 1u) {
+        let j = (i + 1u) % 3u;
+        let edge = ref_tri[j] - ref_tri[i];
+        let side_normal = cross(ref_normal, edge);
+        let side_len = length(side_normal);
+        if side_len < 1e-12 { continue; }
+        let sn = side_normal / side_len;
+        let side_dist = dot(sn, ref_tri[i]);
+        clip_count = clip_polygon_against_plane(&clip_poly, clip_count, sn, side_dist);
+    }
+
+    if clip_count == 0u { return; }
+
+    // Filter: keep points below reference plane
+    let ref_plane_dist = dot(ref_normal, rv0);
+    var final_points: array<vec3<f32>, 8>;
+    var final_depths: array<f32, 8>;
+    var final_count = 0u;
+
+    for (var i = 0u; i < clip_count; i = i + 1u) {
+        let sep = dot(ref_normal, clip_poly[i]) - ref_plane_dist;
+        if sep <= 0.0 {
+            final_points[final_count] = clip_poly[i];
+            final_depths[final_count] = sep;
+            final_count = final_count + 1u;
+        }
+    }
+
+    if final_count == 0u {
+        // Fallback: single contact at midpoint
+        let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        return;
+    }
+
+    // Reduce to at most 4 contacts
+    var out_points: array<vec3<f32>, 4>;
+    var out_depths: array<f32, 4>;
+    let emit_count = reduce_manifold(&final_points, &final_depths, final_count, best_normal, &out_points, &out_depths);
+
+    for (var i = 0u; i < emit_count; i = i + 1u) {
+        emit_contact(out_points[i], best_normal, out_depths[i], body_a, body_b, max_contacts);
+    }
 }
 
 // ---------- Sphere-Hull ----------

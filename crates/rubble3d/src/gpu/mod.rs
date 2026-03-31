@@ -22,7 +22,10 @@ use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer
 use rubble_math::{
     Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
 };
-use rubble_shapes3d::{BoxData, CapsuleData, ConvexHullData, ConvexVertex3D, SphereData};
+use rubble_shapes3d::{
+    BoxData, CapsuleData, CompoundChildGpu, CompoundShapeGpu, ConvexHullData, ConvexVertex3D,
+    SphereData,
+};
 use std::collections::{HashMap, HashSet};
 
 const WORKGROUP_SIZE: u32 = 64;
@@ -217,8 +220,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         aabb_min = center - vec3<f32>(1e4, 1e4, 1e4);
         aabb_max = center + vec3<f32>(1e4, 1e4, 1e4);
     } else {
-        aabb_min = pos - vec3<f32>(2.0, 2.0, 2.0);
-        aabb_max = pos + vec3<f32>(2.0, 2.0, 2.0);
+        // SHAPE_COMPOUND or unknown: use a conservative large AABB.
+        // The CPU-side compound expansion will handle precise child overlap testing.
+        aabb_min = pos - vec3<f32>(100.0, 100.0, 100.0);
+        aabb_max = pos + vec3<f32>(100.0, 100.0, 100.0);
     }
 
     aabbs[idx].min_pt = vec4<f32>(aabb_min, 0.0);
@@ -264,6 +269,10 @@ pub struct GpuPipeline {
     convex_hulls: GpuBuffer<ConvexHullData>,
     convex_vertices: GpuBuffer<ConvexVertex3D>,
     planes: GpuBuffer<Vec4>,
+
+    // Compound shape data (for CPU-side pair expansion)
+    compound_shapes_data: Vec<CompoundShapeGpu>,
+    compound_children_data: Vec<CompoundChildGpu>,
 
     // Uniform buffers
     params_uniform: wgpu::Buffer,
@@ -332,6 +341,8 @@ impl GpuPipeline {
             convex_hulls,
             convex_vertices,
             planes,
+            compound_shapes_data: Vec::new(),
+            compound_children_data: Vec::new(),
             params_uniform,
             solve_range_uniform,
         }
@@ -355,10 +366,15 @@ impl GpuPipeline {
         hull_data: &[ConvexHullData],
         hull_vertices: &[ConvexVertex3D],
         plane_data: &[Vec4],
+        compound_shapes: &[CompoundShapeGpu],
+        compound_children: &[CompoundChildGpu],
         gravity: Vec3,
         dt: f32,
         solver_iterations: u32,
     ) {
+        // Store compound data for CPU-side pair expansion
+        self.compound_shapes_data = compound_shapes.to_vec();
+        self.compound_children_data = compound_children.to_vec();
         self.body_states.upload(&self.ctx, states);
         self.old_states.upload(&self.ctx, states);
         self.body_props.upload(&self.ctx, props);
@@ -397,7 +413,11 @@ impl GpuPipeline {
     }
 
     /// Run predict → AABB → broadphase → narrowphase (shared by both step variants).
-    fn run_detection(&mut self, num_bodies: u32) {
+    ///
+    /// When a broadphase pair involves a compound shape (SHAPE_COMPOUND = 5),
+    /// the pair is expanded on the CPU into individual child-vs-body pairs.
+    /// This avoids adding compound-specific bindings/logic to the GPU narrowphase.
+    fn run_detection(&mut self, num_bodies: u32) -> Vec<Contact3D> {
         self.contact_count.reset(&self.ctx);
         self.pair_count.reset(&self.ctx);
 
@@ -410,16 +430,179 @@ impl GpuPipeline {
         let bvh = lbvh::Lbvh::build(&gpu_aabbs);
         let overlap_pairs = bvh.find_overlapping_pairs(&gpu_aabbs);
 
+        let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
+
         if !overlap_pairs.is_empty() {
-            let gpu_pairs: Vec<GpuPair> = overlap_pairs
-                .iter()
-                .map(|p| GpuPair { a: p[0], b: p[1] })
-                .collect();
-            self.pairs.upload(&self.ctx, &gpu_pairs);
-            self.pair_count.write(&self.ctx, gpu_pairs.len() as u32);
+            // Download props to identify compound shapes
+            self.body_props.set_len(num_bodies);
+            let props = self.body_props.download(&self.ctx);
+            // Also download states for compound child world position computation
+            self.body_states.set_len(num_bodies);
+            let states = self.body_states.download(&self.ctx);
+
+            let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
+
+            for p in &overlap_pairs {
+                let a = p[0];
+                let b = p[1];
+                let st_a = props[a as usize].shape_type;
+                let st_b = props[b as usize].shape_type;
+
+                let a_is_compound = st_a == rubble_math::SHAPE_COMPOUND;
+                let b_is_compound = st_b == rubble_math::SHAPE_COMPOUND;
+
+                if !a_is_compound && !b_is_compound {
+                    // Neither is compound, pass through to GPU narrowphase
+                    non_compound_pairs.push(GpuPair { a, b });
+                } else {
+                    // At least one is compound: generate contacts on CPU.
+                    self.generate_compound_contacts_cpu(
+                        a,
+                        b,
+                        &props,
+                        &states,
+                        &mut cpu_compound_contacts,
+                    );
+                }
+            }
+
+            if !non_compound_pairs.is_empty() {
+                self.pairs.upload(&self.ctx, &non_compound_pairs);
+                self.pair_count
+                    .write(&self.ctx, non_compound_pairs.len() as u32);
+            }
         }
 
         self.dispatch_narrowphase(num_bodies);
+
+        cpu_compound_contacts
+    }
+
+    /// Generate contacts on the CPU for pairs involving compound shapes.
+    /// For each child of the compound, compute a sphere-based proximity test
+    /// and emit contacts using the parent body index (so the solver applies forces
+    /// to the correct rigid body).
+    fn generate_compound_contacts_cpu(
+        &self,
+        body_a: u32,
+        body_b: u32,
+        props: &[RigidBodyProps3D],
+        states: &[RigidBodyState3D],
+        out: &mut Vec<Contact3D>,
+    ) {
+        let st_a = props[body_a as usize].shape_type;
+        let st_b = props[body_b as usize].shape_type;
+        let si_a = props[body_a as usize].shape_index;
+        let si_b = props[body_b as usize].shape_index;
+
+        let pos_a = states[body_a as usize].position();
+        let rot_a = states[body_a as usize].quat();
+        let pos_b = states[body_b as usize].position();
+        let rot_b = states[body_b as usize].quat();
+
+        let a_is_compound = st_a == rubble_math::SHAPE_COMPOUND;
+        let b_is_compound = st_b == rubble_math::SHAPE_COMPOUND;
+
+        // Collect children for body A
+        let children_a: Vec<(Vec3, glam::Quat, u32, u32)> = if a_is_compound {
+            self.get_compound_children_world(si_a, pos_a, rot_a)
+        } else {
+            vec![(pos_a, rot_a, st_a, si_a)]
+        };
+
+        // Collect children for body B
+        let children_b: Vec<(Vec3, glam::Quat, u32, u32)> = if b_is_compound {
+            self.get_compound_children_world(si_b, pos_b, rot_b)
+        } else {
+            vec![(pos_b, rot_b, st_b, si_b)]
+        };
+
+        // For each child pair, compute a simple sphere-based proximity test
+        // and emit a contact if overlapping.
+        for &(child_pos_a, _child_rot_a, child_st_a, child_si_a) in &children_a {
+            for &(child_pos_b, _child_rot_b, child_st_b, child_si_b) in &children_b {
+                let ext_a = self.child_extent(child_st_a, child_si_a);
+                let ext_b = self.child_extent(child_st_b, child_si_b);
+
+                let diff = child_pos_b - child_pos_a;
+                let sum_ext = ext_a + ext_b;
+
+                // Quick sphere overlap check
+                if diff.length_squared() > sum_ext * sum_ext {
+                    continue;
+                }
+
+                let dist = diff.length();
+                if dist < 1e-12 {
+                    continue;
+                }
+                let normal = diff / dist;
+                let depth = dist - sum_ext;
+                if depth > 0.0 {
+                    continue;
+                }
+                let point = child_pos_a + normal * (ext_a + depth * 0.5);
+
+                out.push(Contact3D {
+                    point: Vec4::new(point.x, point.y, point.z, depth),
+                    normal: Vec4::new(normal.x, normal.y, normal.z, 0.0),
+                    body_a,
+                    body_b,
+                    feature_id: 0,
+                    _pad: 0,
+                    lambda_n: 0.0,
+                    lambda_t1: 0.0,
+                    lambda_t2: 0.0,
+                    penalty_k: 1e4,
+                });
+            }
+        }
+    }
+
+    /// Get world-space positions/rotations of compound children.
+    fn get_compound_children_world(
+        &self,
+        compound_index: u32,
+        parent_pos: Vec3,
+        parent_rot: glam::Quat,
+    ) -> Vec<(Vec3, glam::Quat, u32, u32)> {
+        if (compound_index as usize) >= self.compound_shapes_data.len() {
+            return vec![];
+        }
+        let compound = &self.compound_shapes_data[compound_index as usize];
+        let mut result = Vec::with_capacity(compound.child_count as usize);
+        for i in 0..compound.child_count {
+            let ci = (compound.child_offset + i) as usize;
+            if ci >= self.compound_children_data.len() {
+                break;
+            }
+            let child = &self.compound_children_data[ci];
+            let local_pos = child.local_position.truncate();
+            let local_rot = glam::Quat::from_xyzw(
+                child.local_rotation.x,
+                child.local_rotation.y,
+                child.local_rotation.z,
+                child.local_rotation.w,
+            );
+            let world_pos = parent_pos + parent_rot * local_pos;
+            let world_rot = parent_rot * local_rot;
+            result.push((world_pos, world_rot, child.shape_type, child.shape_index));
+        }
+        result
+    }
+
+    /// Get a rough bounding radius for a child shape based on its type.
+    fn child_extent(&self, shape_type: u32, _shape_index: u32) -> f32 {
+        // Conservative estimate per shape type. Actual dimensions could be
+        // looked up from CPU-side shape buffers for higher accuracy.
+        match shape_type {
+            0 => 1.0, // SHAPE_SPHERE
+            1 => 1.5, // SHAPE_BOX
+            2 => 1.5, // SHAPE_CAPSULE
+            3 => 2.0, // SHAPE_CONVEX_HULL
+            4 => 1e4, // SHAPE_PLANE
+            _ => 2.0,
+        }
     }
 
     /// Graph-colored AVBD solve: download contacts, color them so no two
@@ -451,12 +634,21 @@ impl GpuPipeline {
             return Vec::new();
         }
 
-        self.run_detection(num_bodies);
+        let compound_contacts = self.run_detection(num_bodies);
 
-        let count = self.contact_count.read(&self.ctx) as usize;
-        if count > 0 {
-            let mut contacts = self.contacts.download(&self.ctx);
-            contacts.truncate(count);
+        let gpu_count = self.contact_count.read(&self.ctx) as usize;
+        let mut contacts = if gpu_count > 0 {
+            let mut c = self.contacts.download(&self.ctx);
+            c.truncate(gpu_count);
+            c
+        } else {
+            Vec::new()
+        };
+
+        // Merge CPU-generated compound contacts with GPU narrowphase contacts
+        contacts.extend(compound_contacts);
+
+        if !contacts.is_empty() {
             self.run_colored_solve(solver_iterations, &mut contacts);
         }
 
@@ -476,20 +668,24 @@ impl GpuPipeline {
             return (Vec::new(), Vec::new());
         }
 
-        self.run_detection(num_bodies);
+        let compound_contacts = self.run_detection(num_bodies);
 
-        let count = self.contact_count.read(&self.ctx) as usize;
-        let mut contacts = if count > 0 {
+        let gpu_count = self.contact_count.read(&self.ctx) as usize;
+        let mut contacts = if gpu_count > 0 {
             let mut c = self.contacts.download(&self.ctx);
-            c.truncate(count);
-            // Warm-start: apply cached lambdas from previous frame
-            if let Some(prev) = warm_contacts {
-                warm_start_contacts_3d(&mut c, prev);
-            }
+            c.truncate(gpu_count);
             c
         } else {
             Vec::new()
         };
+
+        // Merge CPU-generated compound contacts with GPU narrowphase contacts
+        contacts.extend(compound_contacts);
+
+        // Warm-start: apply cached lambdas from previous frame
+        if let Some(prev) = warm_contacts {
+            warm_start_contacts_3d(&mut contacts, prev);
+        }
 
         self.run_colored_solve(solver_iterations, &mut contacts);
 

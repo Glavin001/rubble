@@ -1,4 +1,4 @@
-//! GPU-accelerated radix sort for u32 key-value pairs.
+//! GPU-accelerated radix sort for 32-bit key-value pairs.
 
 use rubble_gpu::{ComputeKernel, GpuBuffer, GpuContext};
 
@@ -6,6 +6,14 @@ const WORKGROUP_SIZE: u32 = 256;
 const RADIX_BITS: u32 = 4;
 const RADIX_BUCKETS: u32 = 1 << RADIX_BITS; // 16
 const NUM_PASSES: u32 = 32 / RADIX_BITS; // 8
+
+/// A key-value pair for radix sort. Key is used for ordering, value is carried along.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RadixSortEntry {
+    pub key: u32,
+    pub value: u32,
+}
 
 /// Per-block histogram: each workgroup counts occurrences of each radix digit
 /// in its block, writing to histograms[bucket * num_blocks + workgroup_id].
@@ -88,32 +96,74 @@ fn scatter(
 }
 "#;
 
-/// GPU-accelerated radix sort for u32 key-value pairs.
-pub struct RadixSort {
+/// GPU-accelerated radix sort for 32-bit key-value pairs.
+///
+/// Sorts [`RadixSortEntry`] elements by key in ascending order using a 4-bit-per-pass
+/// radix sort (8 passes total for 32-bit keys).
+pub struct GpuRadixSort {
     histogram_kernel: ComputeKernel,
     scatter_kernel: ComputeKernel,
-    prefix_scan: crate::PrefixScan,
+    prefix_scan: crate::InternalPrefixScan,
+    max_elements: usize,
 }
 
-impl RadixSort {
-    pub fn new(ctx: &GpuContext) -> Self {
+impl GpuRadixSort {
+    /// Create a new radix sort instance supporting up to `max_elements` entries.
+    pub fn new(ctx: &GpuContext, max_elements: usize) -> Self {
         let histogram_kernel = ComputeKernel::from_wgsl(ctx, HISTOGRAM_WGSL, "histogram");
         let scatter_kernel = ComputeKernel::from_wgsl(ctx, SCATTER_WGSL, "scatter");
-        let prefix_scan = crate::PrefixScan::new(ctx);
+        let prefix_scan = crate::InternalPrefixScan::new(ctx);
         Self {
             histogram_kernel,
             scatter_kernel,
             prefix_scan,
+            max_elements,
         }
     }
 
-    /// Sort key-value pairs by key (ascending). Keys in `keys` buffer, values in `values` buffer.
-    pub fn sort(&self, ctx: &GpuContext, keys: &mut GpuBuffer<u32>, values: &mut GpuBuffer<u32>) {
-        let n = keys.len();
+    /// Maximum number of elements this instance supports.
+    pub fn max_elements(&self) -> usize {
+        self.max_elements
+    }
+
+    /// Sort entries in-place by key (ascending).
+    pub fn sort(&self, ctx: &GpuContext, entries: &mut GpuBuffer<RadixSortEntry>) {
+        let n = entries.len();
         if n <= 1 {
             return;
         }
 
+        // Download entries and split into separate key/value arrays for the shader.
+        let host_entries = entries.download(ctx);
+        let keys_data: Vec<u32> = host_entries.iter().map(|e| e.key).collect();
+        let values_data: Vec<u32> = host_entries.iter().map(|e| e.value).collect();
+
+        let mut keys = GpuBuffer::<u32>::new(ctx, n as usize);
+        keys.upload(ctx, &keys_data);
+        let mut values = GpuBuffer::<u32>::new(ctx, n as usize);
+        values.upload(ctx, &values_data);
+
+        self.sort_key_value(ctx, &mut keys, &mut values);
+
+        // Recombine into entries buffer
+        let sorted_keys = keys.download(ctx);
+        let sorted_values = values.download(ctx);
+        let sorted_entries: Vec<RadixSortEntry> = sorted_keys
+            .iter()
+            .zip(sorted_values.iter())
+            .map(|(&k, &v)| RadixSortEntry { key: k, value: v })
+            .collect();
+        entries.upload(ctx, &sorted_entries);
+    }
+
+    /// Internal sort on separate key/value buffers.
+    fn sort_key_value(
+        &self,
+        ctx: &GpuContext,
+        keys: &mut GpuBuffer<u32>,
+        values: &mut GpuBuffer<u32>,
+    ) {
+        let n = keys.len();
         let num_blocks = rubble_gpu::round_up_workgroups(n, WORKGROUP_SIZE);
         let hist_size = (RADIX_BUCKETS * num_blocks) as usize;
 
@@ -197,8 +247,6 @@ impl RadixSort {
             }
 
             // Pass 2: Exclusive prefix scan on histograms (flattened)
-            // The histograms layout is: [bucket0_block0, bucket0_block1, ..., bucket1_block0, ...]
-            // A prefix scan over this gives the global write offset for each (bucket, block) pair.
             self.prefix_scan.exclusive_scan(ctx, &histograms);
 
             // Pass 3: Scatter
@@ -250,12 +298,9 @@ impl RadixSort {
             }
         }
 
-        // After NUM_PASSES passes with ping-pong, the final result location depends
-        // on the last pass index (NUM_PASSES - 1). Even passes write to tmp, odd
-        // passes write to keys/values. NUM_PASSES=8, last pass=7 (odd), so result
-        // is already in keys/values. If NUM_PASSES were odd, we'd need to copy back.
+        // After NUM_PASSES (8) passes with ping-pong, last pass index = 7 (odd),
+        // so the result is already in keys/values. If NUM_PASSES were odd, we'd copy back.
         if NUM_PASSES % 2 == 1 {
-            // Last pass was even, result is in tmp -- copy back.
             let byte_len = (n as usize * std::mem::size_of::<u32>()) as u64;
             let mut encoder = ctx
                 .device
@@ -274,20 +319,24 @@ mod tests {
     #[test]
     fn test_radix_sort_simple() {
         let ctx = crate::test_gpu();
-        let sort = RadixSort::new(&ctx);
+        let sort = GpuRadixSort::new(&ctx, 1024);
 
-        let input_keys = [5u32, 3, 8, 1, 4];
-        let input_values = [50u32, 30, 80, 10, 40];
+        let input = [
+            RadixSortEntry { key: 5, value: 50 },
+            RadixSortEntry { key: 3, value: 30 },
+            RadixSortEntry { key: 8, value: 80 },
+            RadixSortEntry { key: 1, value: 10 },
+            RadixSortEntry { key: 4, value: 40 },
+        ];
 
-        let mut keys = GpuBuffer::<u32>::new(&ctx, input_keys.len());
-        keys.upload(&ctx, &input_keys);
-        let mut values = GpuBuffer::<u32>::new(&ctx, input_values.len());
-        values.upload(&ctx, &input_values);
+        let mut buf = GpuBuffer::<RadixSortEntry>::new(&ctx, input.len());
+        buf.upload(&ctx, &input);
 
-        sort.sort(&ctx, &mut keys, &mut values);
+        sort.sort(&ctx, &mut buf);
 
-        let result_keys = keys.download(&ctx);
-        let result_values = values.download(&ctx);
+        let result = buf.download(&ctx);
+        let result_keys: Vec<u32> = result.iter().map(|e| e.key).collect();
+        let result_values: Vec<u32> = result.iter().map(|e| e.value).collect();
 
         assert_eq!(result_keys, vec![1, 3, 4, 5, 8]);
         assert_eq!(result_values, vec![10, 30, 40, 50, 80]);
@@ -296,37 +345,36 @@ mod tests {
     #[test]
     fn test_radix_sort_random() {
         let ctx = crate::test_gpu();
-        let sort = RadixSort::new(&ctx);
+        let sort = GpuRadixSort::new(&ctx, 1024);
 
         // Simple LCG pseudo-random
         let mut rng_state = 12345u64;
-        let mut rand_vals: Vec<u32> = Vec::with_capacity(1000);
-        for _ in 0..1000 {
+        let mut entries: Vec<RadixSortEntry> = Vec::with_capacity(1000);
+        for i in 0..1000u32 {
             rng_state = rng_state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            rand_vals.push((rng_state >> 33) as u32);
+            entries.push(RadixSortEntry {
+                key: (rng_state >> 33) as u32,
+                value: i,
+            });
         }
 
-        let values_data: Vec<u32> = (0..1000).collect();
+        let mut buf = GpuBuffer::<RadixSortEntry>::new(&ctx, entries.len());
+        buf.upload(&ctx, &entries);
 
-        let mut keys = GpuBuffer::<u32>::new(&ctx, 1000);
-        keys.upload(&ctx, &rand_vals);
-        let mut values = GpuBuffer::<u32>::new(&ctx, 1000);
-        values.upload(&ctx, &values_data);
+        sort.sort(&ctx, &mut buf);
 
-        sort.sort(&ctx, &mut keys, &mut values);
+        let result = buf.download(&ctx);
 
-        let result_keys = keys.download(&ctx);
-
-        // Verify sorted
-        for i in 1..result_keys.len() {
+        // Verify sorted ascending by key
+        for i in 1..result.len() {
             assert!(
-                result_keys[i - 1] <= result_keys[i],
+                result[i - 1].key <= result[i].key,
                 "Not sorted at index {}: {} > {}",
                 i,
-                result_keys[i - 1],
-                result_keys[i]
+                result[i - 1].key,
+                result[i].key
             );
         }
     }
@@ -334,54 +382,44 @@ mod tests {
     #[test]
     fn test_radix_sort_values_follow_keys() {
         let ctx = crate::test_gpu();
-        let sort = RadixSort::new(&ctx);
+        let sort = GpuRadixSort::new(&ctx, 1024);
 
         // Simple LCG pseudo-random
         let mut rng_state = 99999u64;
-        let mut rand_vals: Vec<u32> = Vec::with_capacity(500);
-        for _ in 0..500 {
+        let mut entries: Vec<RadixSortEntry> = Vec::with_capacity(500);
+        for i in 0..500u32 {
             rng_state = rng_state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            rand_vals.push((rng_state >> 33) as u32);
+            entries.push(RadixSortEntry {
+                key: (rng_state >> 33) as u32,
+                value: i,
+            });
         }
 
-        // Values encode the original index so we can verify pairing.
-        let values_data: Vec<u32> = (0..500).collect();
+        let original_entries = entries.clone();
 
-        // Build a lookup from key -> original index (handle duplicate keys).
-        let original_pairs: Vec<(u32, u32)> = rand_vals
-            .iter()
-            .copied()
-            .zip(values_data.iter().copied())
-            .collect();
+        let mut buf = GpuBuffer::<RadixSortEntry>::new(&ctx, entries.len());
+        buf.upload(&ctx, &entries);
 
-        let mut keys = GpuBuffer::<u32>::new(&ctx, 500);
-        keys.upload(&ctx, &rand_vals);
-        let mut values = GpuBuffer::<u32>::new(&ctx, 500);
-        values.upload(&ctx, &values_data);
+        sort.sort(&ctx, &mut buf);
 
-        sort.sort(&ctx, &mut keys, &mut values);
+        let result = buf.download(&ctx);
 
-        let result_keys = keys.download(&ctx);
-        let result_values = values.download(&ctx);
-
-        // Verify each (key, value) pair in the output matches an original pair.
-        // The value encodes the original index, so result_keys[i] must equal
-        // the original key at that original index.
-        for i in 0..result_keys.len() {
-            let sorted_key = result_keys[i];
-            let original_index = result_values[i] as usize;
+        // Verify each (key, value) pair: value encodes the original index,
+        // so result[i].key must match original_entries[result[i].value].key
+        for (i, entry) in result.iter().enumerate() {
+            let original_index = entry.value as usize;
             assert!(
-                original_index < original_pairs.len(),
+                original_index < original_entries.len(),
                 "Value {} at sorted position {} is out of range",
                 original_index,
                 i
             );
             assert_eq!(
-                sorted_key, original_pairs[original_index].0,
+                entry.key, original_entries[original_index].key,
                 "At sorted position {}: key {} doesn't match original key {} for original index {}",
-                i, sorted_key, original_pairs[original_index].0, original_index
+                i, entry.key, original_entries[original_index].key, original_index
             );
         }
     }

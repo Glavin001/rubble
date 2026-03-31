@@ -135,7 +135,7 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
     }
 }
 
-/// Double-buffered ping-pong wrapper around two [`GpuBuffer`]s.
+/// Double-buffered GPU storage for ping-pong patterns.
 pub struct PingPongBuffer<T: bytemuck::Pod> {
     buffers: [GpuBuffer<T>; 2],
     current: usize,
@@ -167,6 +167,14 @@ impl<T: bytemuck::Pod> PingPongBuffer<T> {
 
     pub fn swap(&mut self) {
         self.current = 1 - self.current;
+    }
+
+    pub fn upload(&mut self, ctx: &GpuContext, data: &[T]) {
+        self.buffers[self.current].upload(ctx, data);
+    }
+
+    pub fn download(&self, ctx: &GpuContext) -> Vec<T> {
+        self.buffers[self.current].download(ctx)
     }
 }
 
@@ -272,6 +280,35 @@ mod tests {
         // After swap, old current is now "next"
         let result = pp.next().download(&ctx);
         assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_ping_pong_upload_swap() {
+        let ctx = crate::test_gpu();
+        let mut pp = PingPongBuffer::<u32>::new(&ctx, 4);
+
+        // Upload data to the current buffer
+        let data = [1u32, 2, 3, 4];
+        pp.upload(&ctx, &data);
+
+        // Before swap: current has the data
+        assert_eq!(pp.download(&ctx), data);
+
+        // Swap buffers
+        pp.swap();
+
+        // After swap: current is the other (empty) buffer, next has the data
+        assert!(pp.current().is_empty());
+        let from_next = pp.next().download(&ctx);
+        assert_eq!(from_next, data);
+
+        // Upload different data to the new current
+        let data2 = [5u32, 6, 7, 8];
+        pp.upload(&ctx, &data2);
+        assert_eq!(pp.download(&ctx), data2);
+
+        // The two buffers hold different data
+        assert_ne!(pp.current().download(&ctx), pp.next().download(&ctx));
     }
 
     #[test]
