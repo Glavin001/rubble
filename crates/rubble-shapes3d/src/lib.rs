@@ -630,6 +630,60 @@ mod tests {
     }
 
     #[test]
+    fn gauss_map_cube_non_empty() {
+        // A cube has 6 faces × 4 edges = 24 directed edges.
+        // Non-parallel edge pairs from different faces should produce entries.
+        let verts = vec![
+            Vec3::new(-1.0, -1.0, -1.0), // 0
+            Vec3::new(1.0, -1.0, -1.0),  // 1
+            Vec3::new(1.0, 1.0, -1.0),   // 2
+            Vec3::new(-1.0, 1.0, -1.0),  // 3
+            Vec3::new(-1.0, -1.0, 1.0),  // 4
+            Vec3::new(1.0, -1.0, 1.0),   // 5
+            Vec3::new(1.0, 1.0, 1.0),    // 6
+            Vec3::new(-1.0, 1.0, 1.0),   // 7
+        ];
+        // 6 faces of the cube (CCW winding from outside)
+        let faces: Vec<(Vec<u32>, Vec3)> = vec![
+            (vec![0, 3, 2, 1], Vec3::new(0.0, 0.0, -1.0)),  // -Z
+            (vec![4, 5, 6, 7], Vec3::new(0.0, 0.0, 1.0)),   // +Z
+            (vec![0, 1, 5, 4], Vec3::new(0.0, -1.0, 0.0)),  // -Y
+            (vec![2, 3, 7, 6], Vec3::new(0.0, 1.0, 0.0)),   // +Y
+            (vec![0, 4, 7, 3], Vec3::new(-1.0, 0.0, 0.0)),  // -X
+            (vec![1, 2, 6, 5], Vec3::new(1.0, 0.0, 0.0)),   // +X
+        ];
+        let entries = precompute_gauss_map(&verts, &faces);
+        // A cube should produce non-parallel edge pairs (edges from different faces
+        // that are perpendicular). The exact count depends on pruning, but should be > 0.
+        assert!(
+            !entries.is_empty(),
+            "Cube should produce Gauss Map entries"
+        );
+        // Each entry should reference valid vertex indices
+        for e in &entries {
+            assert!((e.edge_a as usize) < verts.len());
+            assert!((e.edge_b as usize) < verts.len());
+        }
+    }
+
+    #[test]
+    fn gauss_map_empty_for_no_faces() {
+        let verts = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
+        let faces: Vec<(Vec<u32>, Vec3)> = vec![];
+        let entries = precompute_gauss_map(&verts, &faces);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn gauss_map_single_face_no_entries() {
+        // Only one face — no cross-face edge pairs.
+        let verts = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
+        let faces = vec![(vec![0u32, 1, 2], Vec3::Z)];
+        let entries = precompute_gauss_map(&verts, &faces);
+        assert!(entries.is_empty(), "Single face should produce no edge-edge pairs");
+    }
+
+    #[test]
     fn compound_bvh_node_count() {
         // 20 children should produce 19 internal nodes.
         let children: Vec<CompoundChild> = (0..20)
