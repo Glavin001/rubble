@@ -428,6 +428,7 @@ impl GpuPipeline2D {
 
         let count = self.contact_count.read(&self.ctx) as usize;
         if count > 0 {
+            self.contacts.set_len(count as u32);
             let mut contacts = self.contacts.download(&self.ctx);
             contacts.truncate(count);
             self.run_colored_solve(solver_iterations, &mut contacts);
@@ -453,6 +454,7 @@ impl GpuPipeline2D {
 
         let count = self.contact_count.read(&self.ctx) as usize;
         let mut contacts = if count > 0 {
+            self.contacts.set_len(count as u32);
             let mut c = self.contacts.download(&self.ctx);
             c.truncate(count);
             // Warm-start: apply cached lambdas from previous frame
@@ -489,11 +491,12 @@ impl GpuPipeline2D {
     }
 
     /// Download contacts from GPU.
-    pub fn download_contacts(&self) -> Vec<Contact2D> {
+    pub fn download_contacts(&mut self) -> Vec<Contact2D> {
         let count = self.contact_count.read(&self.ctx) as usize;
         if count == 0 {
             return Vec::new();
         }
+        self.contacts.set_len(count as u32);
         let all = self.contacts.download(&self.ctx);
         all.into_iter().take(count).collect()
     }

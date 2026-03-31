@@ -638,6 +638,7 @@ impl GpuPipeline {
 
         let gpu_count = self.contact_count.read(&self.ctx) as usize;
         let mut contacts = if gpu_count > 0 {
+            self.contacts.set_len(gpu_count as u32);
             let mut c = self.contacts.download(&self.ctx);
             c.truncate(gpu_count);
             c
@@ -672,6 +673,7 @@ impl GpuPipeline {
 
         let gpu_count = self.contact_count.read(&self.ctx) as usize;
         let mut contacts = if gpu_count > 0 {
+            self.contacts.set_len(gpu_count as u32);
             let mut c = self.contacts.download(&self.ctx);
             c.truncate(gpu_count);
             c
@@ -712,11 +714,12 @@ impl GpuPipeline {
     }
 
     /// Download contacts from GPU.
-    pub fn download_contacts(&self) -> Vec<Contact3D> {
+    pub fn download_contacts(&mut self) -> Vec<Contact3D> {
         let count = self.contact_count.read(&self.ctx) as usize;
         if count == 0 {
             return Vec::new();
         }
+        self.contacts.set_len(count as u32);
         let all = self.contacts.download(&self.ctx);
         all.into_iter().take(count).collect()
     }

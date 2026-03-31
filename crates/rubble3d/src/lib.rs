@@ -1610,7 +1610,6 @@ mod tests {
 
     #[test]
     fn test_box_on_plane_stacking() {
-        // CPU-only test: no GPU solver, so just verify scene setup and gravity integration.
         let mut world = gpu_world(SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
@@ -1639,16 +1638,15 @@ mod tests {
             ..Default::default()
         });
 
-        // Step a few frames — box should fall under gravity
-        for _ in 0..10 {
+        for _ in 0..120 {
             world.step();
         }
 
         let pos = world.get_position(box_h).unwrap();
-        // Without GPU collision solver, box falls freely — just verify gravity works
+        // Box should settle near y=0.5 (half_extent above plane at y=0)
         assert!(
-            pos.y < 2.0,
-            "Box y={} should have fallen from initial position",
+            pos.y > -0.5 && pos.y < 2.0,
+            "Box y={} should settle near plane (expected ~0.5)",
             pos.y
         );
     }
