@@ -574,3 +574,191 @@ impl GpuLbvh {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rubble_gpu::GpuBuffer;
+    use rubble_math::Aabb3D;
+
+    fn ctx() -> GpuContext {
+        crate::test_gpu()
+    }
+
+    fn aabb(min: [f32; 3], max: [f32; 3]) -> Aabb3D {
+        Aabb3D::new(Vec3::from(min), Vec3::from(max))
+    }
+
+    #[test]
+    fn single_body_returns_no_pairs() {
+        let ctx = ctx();
+        let mut lbvh = GpuLbvh::new(&ctx, 16);
+        let aabbs = vec![aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])];
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 1);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query(&ctx, &buf, 1);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn two_overlapping_bodies() {
+        let ctx = ctx();
+        let mut lbvh = GpuLbvh::new(&ctx, 16);
+        let aabbs = vec![
+            aabb([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),
+            aabb([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]),
+        ];
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 2);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query(&ctx, &buf, 2);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], [0, 1]);
+    }
+
+    #[test]
+    fn two_separated_bodies_no_pairs() {
+        let ctx = ctx();
+        let mut lbvh = GpuLbvh::new(&ctx, 16);
+        let aabbs = vec![
+            aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            aabb([5.0, 5.0, 5.0], [6.0, 6.0, 6.0]),
+        ];
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 2);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query(&ctx, &buf, 2);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn three_bodies_partial_overlap() {
+        let ctx = ctx();
+        let mut lbvh = GpuLbvh::new(&ctx, 16);
+        // A overlaps B, B overlaps C, A does NOT overlap C
+        let aabbs = vec![
+            aabb([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),  // A
+            aabb([1.5, 1.5, 1.5], [3.5, 3.5, 3.5]),  // B
+            aabb([3.0, 3.0, 3.0], [5.0, 5.0, 5.0]),  // C
+        ];
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 3);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query(&ctx, &buf, 3);
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&[0, 1]));
+        assert!(pairs.contains(&[1, 2]));
+        // A-C should NOT be a pair
+        assert!(!pairs.contains(&[0, 2]));
+    }
+
+    #[test]
+    fn all_overlapping_returns_all_pairs() {
+        let ctx = ctx();
+        let mut lbvh = GpuLbvh::new(&ctx, 16);
+        // All overlap each other (big box)
+        let aabbs = vec![
+            aabb([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]),
+            aabb([1.0, 1.0, 1.0], [11.0, 11.0, 11.0]),
+            aabb([2.0, 2.0, 2.0], [12.0, 12.0, 12.0]),
+            aabb([3.0, 3.0, 3.0], [13.0, 13.0, 13.0]),
+        ];
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 4);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query(&ctx, &buf, 4);
+        // 4 choose 2 = 6 pairs
+        assert_eq!(pairs.len(), 6);
+    }
+
+    #[test]
+    fn no_duplicate_pairs() {
+        let ctx = ctx();
+        let mut lbvh = GpuLbvh::new(&ctx, 16);
+        let aabbs = vec![
+            aabb([0.0, 0.0, 0.0], [5.0, 5.0, 5.0]),
+            aabb([1.0, 1.0, 1.0], [6.0, 6.0, 6.0]),
+            aabb([2.0, 2.0, 2.0], [7.0, 7.0, 7.0]),
+        ];
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 3);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query(&ctx, &buf, 3);
+        // All pairs should be unique and ordered (a < b)
+        for p in &pairs {
+            assert!(p[0] < p[1], "pair should be ordered: {:?}", p);
+        }
+        let mut deduped = pairs.clone();
+        deduped.dedup();
+        assert_eq!(pairs.len(), deduped.len(), "no duplicates expected");
+    }
+
+    #[test]
+    fn build_and_query_raw_works() {
+        let ctx = ctx();
+        let mut lbvh = GpuLbvh::new(&ctx, 16);
+        let aabbs = vec![
+            aabb([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),
+            aabb([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]),
+        ];
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 2);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query_raw(&ctx, buf.buffer(), &aabbs, 2);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], [0, 1]);
+    }
+
+    #[test]
+    fn many_bodies_stress() {
+        let ctx = ctx();
+        let n = 64;
+        let mut lbvh = GpuLbvh::new(&ctx, n);
+        // Line of non-overlapping unit cubes along X
+        let aabbs: Vec<Aabb3D> = (0..n)
+            .map(|i| {
+                let x = i as f32 * 3.0; // gap of 2 between each
+                aabb([x, 0.0, 0.0], [x + 1.0, 1.0, 1.0])
+            })
+            .collect();
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, n);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query(&ctx, &buf, n as u32);
+        assert!(pairs.is_empty(), "separated bodies should have no pairs, got {}", pairs.len());
+    }
+
+    #[test]
+    fn touching_aabbs_overlap() {
+        let ctx = ctx();
+        let mut lbvh = GpuLbvh::new(&ctx, 16);
+        // Edge-touching (min.x of B == max.x of A)
+        let aabbs = vec![
+            aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            aabb([1.0, 0.0, 0.0], [2.0, 1.0, 1.0]),
+        ];
+        let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 2);
+        buf.upload(&ctx, &aabbs);
+        let pairs = lbvh.build_and_query(&ctx, &buf, 2);
+        // Touching AABBs satisfy <=/>= so they overlap
+        assert_eq!(pairs.len(), 1);
+    }
+
+    #[test]
+    fn karras_tree_build_correctness() {
+        // Test CPU tree build directly with known Morton codes
+        let codes = vec![0u32, 1, 2, 3];
+        let indices = vec![0u32, 1, 2, 3];
+        let aabbs = vec![
+            aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            aabb([1.0, 0.0, 0.0], [2.0, 1.0, 1.0]),
+            aabb([2.0, 0.0, 0.0], [3.0, 1.0, 1.0]),
+            aabb([3.0, 0.0, 0.0], [4.0, 1.0, 1.0]),
+        ];
+        let (nodes, leaf_aabbs) = build_tree_cpu(&codes, &indices, &aabbs);
+
+        // 4 leaves → 3 internal nodes
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(leaf_aabbs.len(), 4);
+
+        // Root node AABB should encompass all leaves
+        let root = &nodes[0];
+        assert!(root.aabb_min[0] <= 0.0);
+        assert!(root.aabb_max[0] >= 4.0);
+        assert!(root.aabb_min[1] <= 0.0);
+        assert!(root.aabb_max[1] >= 1.0);
+    }
+}
