@@ -4,14 +4,11 @@
 //! predict → AABB compute → broadphase → narrowphase → AVBD solver → velocity extraction.
 
 mod avbd_solve_wgsl;
-mod broadphase_pairs_wgsl;
 mod extract_velocity_wgsl;
-pub mod lbvh;
 mod narrowphase_wgsl;
 mod predict_wgsl;
 
 pub use avbd_solve_wgsl::AVBD_SOLVE_WGSL;
-pub use broadphase_pairs_wgsl::BROADPHASE_PAIRS_WGSL;
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
@@ -24,6 +21,7 @@ use rubble_gpu::{
 use rubble_math::{
     Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
 };
+use rubble_primitives::GpuLbvh;
 use rubble_shapes3d::{
     BoxData, CapsuleData, CompoundChildGpu, CompoundShapeGpu, ConvexHullData, ConvexVertex3D,
     SphereData,
@@ -70,206 +68,6 @@ pub struct SolveRangeGpu {
 const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 32);
 const _: () = assert!(std::mem::size_of::<GpuPair>() == 8);
 const _: () = assert!(std::mem::size_of::<SolveRangeGpu>() == 8);
-
-// ---------------------------------------------------------------------------
-// GPU raycast types
-// ---------------------------------------------------------------------------
-
-/// A ray to be tested on the GPU. 32 bytes.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct GpuRay {
-    /// xyz = origin, w = max_t
-    pub origin: [f32; 4],
-    /// xyz = direction (normalized), w = 0
-    pub direction: [f32; 4],
-}
-
-/// Result of a GPU raycast. 32 bytes.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct GpuRayHit {
-    pub t: f32,
-    pub normal_x: f32,
-    pub normal_y: f32,
-    pub normal_z: f32,
-    pub body_index: u32,
-    pub hit: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
-}
-
-const _: () = assert!(std::mem::size_of::<GpuRay>() == 32);
-const _: () = assert!(std::mem::size_of::<GpuRayHit>() == 32);
-
-// ---------------------------------------------------------------------------
-// Raycast compute shader
-// ---------------------------------------------------------------------------
-
-const RAYCAST_WGSL: &str = r#"
-struct Body {
-    position_inv_mass: vec4<f32>,
-    orientation:       vec4<f32>,
-    lin_vel:           vec4<f32>,
-    ang_vel:           vec4<f32>,
-};
-
-struct BodyProps {
-    inv_inertia_row0: vec4<f32>,
-    inv_inertia_row1: vec4<f32>,
-    inv_inertia_row2: vec4<f32>,
-    friction:         f32,
-    shape_type:       u32,
-    shape_index:      u32,
-    flags:            u32,
-};
-
-struct SphereData {
-    radius: f32,
-    _pad0: f32, _pad1: f32, _pad2: f32,
-};
-
-struct BoxDataGpu {
-    half_extents: vec4<f32>,
-};
-
-struct Ray {
-    origin: vec4<f32>,
-    direction: vec4<f32>,
-};
-
-struct RayHit {
-    t: f32,
-    normal_x: f32,
-    normal_y: f32,
-    normal_z: f32,
-    body_index: u32,
-    hit: u32,
-    _pad0: u32,
-    _pad1: u32,
-};
-
-@group(0) @binding(0) var<storage, read> bodies: array<Body>;
-@group(0) @binding(1) var<storage, read> props: array<BodyProps>;
-@group(0) @binding(2) var<storage, read> spheres: array<SphereData>;
-@group(0) @binding(3) var<storage, read> boxes_data: array<BoxDataGpu>;
-@group(0) @binding(4) var<storage, read> rays: array<Ray>;
-@group(0) @binding(5) var<storage, read_write> hits: array<RayHit>;
-@group(0) @binding(6) var<uniform> params: vec4<u32>;
-
-fn quat_rotate_rc(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
-    let u = q.xyz;
-    let s = q.w;
-    return 2.0 * dot(u, v) * u + (s * s - dot(u, u)) * v + 2.0 * s * cross(u, v);
-}
-
-fn quat_conjugate(q: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(-q.x, -q.y, -q.z, q.w);
-}
-
-fn ray_sphere(origin: vec3<f32>, dir: vec3<f32>, center: vec3<f32>, radius: f32) -> vec2<f32> {
-    let oc = origin - center;
-    let b = dot(oc, dir);
-    let c = dot(oc, oc) - radius * radius;
-    let disc = b * b - c;
-    if disc < 0.0 { return vec2<f32>(1e30, 0.0); }
-    let t = -b - sqrt(disc);
-    if t < 0.0 { return vec2<f32>(1e30, 0.0); }
-    return vec2<f32>(t, 1.0);
-}
-
-fn ray_box(origin: vec3<f32>, dir: vec3<f32>, pos: vec3<f32>, rot: vec4<f32>, he: vec3<f32>) -> vec3<f32> {
-    let inv_rot = quat_conjugate(rot);
-    let local_o = quat_rotate_rc(inv_rot, origin - pos);
-    let local_d = quat_rotate_rc(inv_rot, dir);
-    var tmin = -1e30;
-    var tmax = 1e30;
-    var best_axis = 0u;
-    var best_sign = 1.0;
-    for (var i = 0u; i < 3u; i = i + 1u) {
-        let o_i = select(select(local_o.z, local_o.y, i == 1u), local_o.x, i == 0u);
-        let d_i = select(select(local_d.z, local_d.y, i == 1u), local_d.x, i == 0u);
-        let h_i = select(select(he.z, he.y, i == 1u), he.x, i == 0u);
-        if abs(d_i) < 1e-12 {
-            if o_i < -h_i || o_i > h_i { return vec3<f32>(1e30, 0.0, 0.0); }
-            continue;
-        }
-        let t1 = (-h_i - o_i) / d_i;
-        let t2 = (h_i - o_i) / d_i;
-        let t_near = min(t1, t2);
-        let t_far = max(t1, t2);
-        if t_near > tmin {
-            tmin = t_near;
-            best_axis = i;
-            best_sign = select(1.0, -1.0, d_i > 0.0);
-        }
-        tmax = min(tmax, t_far);
-        if tmin > tmax { return vec3<f32>(1e30, 0.0, 0.0); }
-    }
-    if tmin < 0.0 { return vec3<f32>(1e30, 0.0, 0.0); }
-    return vec3<f32>(tmin, f32(best_axis), best_sign);
-}
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let ray_idx = gid.x;
-    let num_rays = params.x;
-    let num_bodies = params.y;
-    if ray_idx >= num_rays { return; }
-
-    let ray = rays[ray_idx];
-    let origin = ray.origin.xyz;
-    let dir = ray.direction.xyz;
-    let max_t = ray.origin.w;
-
-    var best_t = max_t;
-    var best_body = 0u;
-    var best_normal = vec3<f32>(0.0, 1.0, 0.0);
-    var found_hit = false;
-
-    for (var bi = 0u; bi < num_bodies; bi = bi + 1u) {
-        let pos = bodies[bi].position_inv_mass.xyz;
-        let rot = bodies[bi].orientation;
-        let st = props[bi].shape_type;
-        let si = props[bi].shape_index;
-
-        if st == 0u {
-            let r = spheres[si].radius;
-            let result = ray_sphere(origin, dir, pos, r);
-            if result.y > 0.5 && result.x < best_t && result.x >= 0.0 {
-                best_t = result.x;
-                best_body = bi;
-                let hit_pt = origin + dir * result.x;
-                best_normal = normalize(hit_pt - pos);
-                found_hit = true;
-            }
-        } else if st == 1u {
-            let he = boxes_data[si].half_extents.xyz;
-            let result = ray_box(origin, dir, pos, rot, he);
-            if result.x < best_t && result.x >= 0.0 {
-                best_t = result.x;
-                best_body = bi;
-                var local_n = vec3<f32>(0.0);
-                let axis = u32(result.y);
-                if axis == 0u { local_n.x = result.z; }
-                else if axis == 1u { local_n.y = result.z; }
-                else { local_n.z = result.z; }
-                best_normal = quat_rotate_rc(rot, local_n);
-                found_hit = true;
-            }
-        }
-    }
-
-    hits[ray_idx].t = best_t;
-    hits[ray_idx].normal_x = best_normal.x;
-    hits[ray_idx].normal_y = best_normal.y;
-    hits[ray_idx].normal_z = best_normal.z;
-    hits[ray_idx].body_index = best_body;
-    hits[ray_idx].hit = select(0u, 1u, found_hit);
-    hits[ray_idx]._pad0 = 0u;
-    hits[ray_idx]._pad1 = 0u;
-}
-"#;
 
 // ---------------------------------------------------------------------------
 // AABB compute shader
@@ -490,11 +288,8 @@ pub struct GpuPipeline {
     params_uniform: wgpu::Buffer,
     solve_range_uniform: wgpu::Buffer,
 
-    // Raycast infrastructure
-    raycast_kernel: ComputeKernel,
-    rays_buffer: GpuBuffer<GpuRay>,
-    hits_buffer: GpuBuffer<GpuRayHit>,
-    raycast_params: wgpu::Buffer,
+    // GPU broadphase
+    gpu_lbvh: GpuLbvh,
 }
 
 impl GpuPipeline {
@@ -538,15 +333,7 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
-        let raycast_kernel = ComputeKernel::from_wgsl(&ctx, RAYCAST_WGSL, "main");
-        let rays_buffer = GpuBuffer::new(&ctx, 1024);
-        let hits_buffer = GpuBuffer::new(&ctx, 1024);
-        let raycast_params = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("raycast params"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let gpu_lbvh = GpuLbvh::new(&ctx, max_bodies);
 
         Self {
             ctx,
@@ -574,10 +361,7 @@ impl GpuPipeline {
             compound_shapes_cpu: Vec::new(),
             params_uniform,
             solve_range_uniform,
-            raycast_kernel,
-            rays_buffer,
-            hits_buffer,
-            raycast_params,
+            gpu_lbvh,
         }
     }
 
@@ -659,11 +443,9 @@ impl GpuPipeline {
         self.dispatch_predict(num_bodies);
         self.dispatch_aabb(num_bodies);
 
-        // LBVH broadphase: download AABBs, build tree on CPU, upload pairs
+        // GPU LBVH broadphase: Morton codes + radix sort on GPU, tree build CPU, pair finding GPU
         self.aabbs.set_len(num_bodies);
-        let gpu_aabbs = self.aabbs.download(&self.ctx);
-        let bvh = lbvh::Lbvh::build(&gpu_aabbs);
-        let overlap_pairs = bvh.find_overlapping_pairs(&gpu_aabbs);
+        let overlap_pairs = self.gpu_lbvh.build_and_query(&self.ctx, &self.aabbs, num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
 
@@ -1131,71 +913,6 @@ impl GpuPipeline {
     ///
     /// Each ray is tested against all bodies (sphere and box shapes only).
     /// Results are downloaded synchronously.
-    pub fn raycast_batch_gpu(
-        &mut self,
-        rays: &[GpuRay],
-        num_bodies: u32,
-    ) -> Vec<GpuRayHit> {
-        if rays.is_empty() || num_bodies == 0 {
-            return Vec::new();
-        }
-        let num_rays = rays.len() as u32;
-        self.rays_buffer.upload(&self.ctx, rays);
-        self.hits_buffer.grow_if_needed(&self.ctx, rays.len());
-        self.hits_buffer.set_len(num_rays);
-        // Upload zeros to hits buffer
-        let zeros = vec![GpuRayHit {
-            t: 0.0, normal_x: 0.0, normal_y: 0.0, normal_z: 0.0,
-            body_index: 0, hit: 0, _pad0: 0, _pad1: 0,
-        }; rays.len()];
-        self.hits_buffer.upload(&self.ctx, &zeros);
-
-        let params_data: [u32; 4] = [num_rays, num_bodies, 0, 0];
-        self.ctx.queue.write_buffer(
-            &self.raycast_params,
-            0,
-            bytemuck::cast_slice(&params_data),
-        );
-
-        let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raycast"),
-            layout: self.raycast_kernel.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.body_states.current().buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.body_props.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.spheres.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.boxes.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.rays_buffer.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: self.hits_buffer.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: self.raycast_params.as_entire_binding(),
-                },
-            ],
-        });
-        self.run_pass("raycast", &self.raycast_kernel, &bg, num_rays);
-
-        self.hits_buffer.download(&self.ctx)
-    }
-
     // -----------------------------------------------------------------------
     // Private dispatch helpers
     // -----------------------------------------------------------------------

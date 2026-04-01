@@ -1827,4 +1827,171 @@ mod tests {
         }
         assert_eq!(world.body_count(), 10);
     }
+
+    // -----------------------------------------------------------------------
+    // Integration tests: compound, convex hull, and overflow recovery
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compound_compound_collision() {
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::ZERO,
+            dt: 1.0 / 60.0,
+            solver_iterations: 10,
+            max_bodies: 1024,
+            ..Default::default()
+        });
+
+        // Compound shape: 4 spheres in a 2x2 grid on the XY plane
+        let make_compound = || ShapeDesc::Compound {
+            children: vec![
+                (ShapeDesc::Sphere { radius: 0.3 }, Vec3::new(-0.5, -0.5, 0.0), Quat::IDENTITY),
+                (ShapeDesc::Sphere { radius: 0.3 }, Vec3::new(0.5, -0.5, 0.0), Quat::IDENTITY),
+                (ShapeDesc::Sphere { radius: 0.3 }, Vec3::new(-0.5, 0.5, 0.0), Quat::IDENTITY),
+                (ShapeDesc::Sphere { radius: 0.3 }, Vec3::new(0.5, 0.5, 0.0), Quat::IDENTITY),
+            ],
+        };
+
+        let h1 = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(-1.5, 0.0, 0.0),
+            linear_velocity: Vec3::new(5.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: make_compound(),
+            ..Default::default()
+        });
+
+        let h2 = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(1.5, 0.0, 0.0),
+            linear_velocity: Vec3::new(-5.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: make_compound(),
+            ..Default::default()
+        });
+
+        for _ in 0..30 {
+            world.step();
+        }
+
+        let p1 = world.get_position(h1).unwrap();
+        let p2 = world.get_position(h2).unwrap();
+        let dist = (p2 - p1).length();
+
+        assert!(p1.x.is_finite() && p1.y.is_finite() && p1.z.is_finite(),
+            "Body 1 position should be finite: {:?}", p1);
+        assert!(p2.x.is_finite() && p2.y.is_finite() && p2.z.is_finite(),
+            "Body 2 position should be finite: {:?}", p2);
+        assert!(
+            dist >= 0.5,
+            "Compound bodies should separate after collision: distance = {}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_hull_hull_edge_collision() {
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::ZERO,
+            dt: 1.0 / 60.0,
+            solver_iterations: 10,
+            max_bodies: 1024,
+            ..Default::default()
+        });
+
+        // Cube vertices at +/-1.0
+        let cube_verts = vec![
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        ];
+
+        let h1 = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(-2.5, 0.0, 0.0),
+            linear_velocity: Vec3::new(3.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::ConvexHull {
+                vertices: cube_verts.clone(),
+            },
+            ..Default::default()
+        });
+
+        let h2 = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(2.5, 0.0, 0.0),
+            linear_velocity: Vec3::new(-3.0, 0.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::ConvexHull {
+                vertices: cube_verts,
+            },
+            ..Default::default()
+        });
+
+        for _ in 0..60 {
+            world.step();
+        }
+
+        let p1 = world.get_position(h1).unwrap();
+        let p2 = world.get_position(h2).unwrap();
+        let dist = (p2 - p1).length();
+
+        assert!(p1.x.is_finite() && p1.y.is_finite() && p1.z.is_finite(),
+            "Hull 1 position should be finite: {:?}", p1);
+        assert!(p2.x.is_finite() && p2.y.is_finite() && p2.z.is_finite(),
+            "Hull 2 position should be finite: {:?}", p2);
+        assert!(
+            dist > 0.9,
+            "Convex hull bodies should not overlap: distance = {}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_many_bodies_overflow_recovery() {
+        let mut world = gpu_world(SimConfig {
+            gravity: Vec3::ZERO,
+            dt: 1.0 / 60.0,
+            solver_iterations: 5,
+            max_bodies: 2048,
+            ..Default::default()
+        });
+
+        // Create 50 sphere bodies packed into a 3x3x3 cube.
+        // Use a simple deterministic pattern to spread them out.
+        let mut handles = Vec::new();
+        for i in 0..50u32 {
+            // Deterministic pseudo-random positions within [-1.5, 1.5]
+            let x = ((i * 7 + 3) % 30) as f32 / 10.0 - 1.5;
+            let y = ((i * 13 + 5) % 30) as f32 / 10.0 - 1.5;
+            let z = ((i * 19 + 11) % 30) as f32 / 10.0 - 1.5;
+            let h = world.add_body(&RigidBodyDesc {
+                position: Vec3::new(x, y, z),
+                mass: 1.0,
+                shape: ShapeDesc::Sphere { radius: 0.5 },
+                ..Default::default()
+            });
+            handles.push(h);
+        }
+
+        assert_eq!(world.body_count(), 50);
+
+        // Step the simulation — many overlapping spheres will generate
+        // a large number of contacts, exercising buffer overflow recovery.
+        for _ in 0..10 {
+            world.step();
+        }
+
+        // Verify all positions are finite (no NaN or Inf)
+        for (i, h) in handles.iter().enumerate() {
+            let pos = world.get_position(*h).unwrap();
+            assert!(
+                pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite(),
+                "Body {} has non-finite position: {:?}",
+                i,
+                pos
+            );
+        }
+    }
 }

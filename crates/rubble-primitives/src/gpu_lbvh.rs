@@ -378,7 +378,6 @@ pub struct GpuLbvh {
     pair_counter: GpuAtomicCounter,
     morton_params_buf: wgpu::Buffer,
     find_params_buf: wgpu::Buffer,
-    _max_bodies: usize,
 }
 
 impl GpuLbvh {
@@ -423,18 +422,30 @@ impl GpuLbvh {
             pair_counter,
             morton_params_buf,
             find_params_buf,
-            _max_bodies: max_bodies,
         }
     }
 
-    /// Run the full GPU broadphase pipeline.
-    ///
-    /// The AABB buffer must already be on GPU (from the AABB compute pass).
-    /// Returns overlapping pairs as `[body_a, body_b]` with `a < b`.
+    /// Run the full GPU broadphase pipeline on a 3D AABB buffer.
     pub fn build_and_query(
         &mut self,
         ctx: &GpuContext,
         aabbs: &GpuBuffer<Aabb3D>,
+        num_bodies: u32,
+    ) -> Vec<[u32; 2]> {
+        self.build_and_query_raw(ctx, aabbs.buffer(), &aabbs.download(ctx), num_bodies)
+    }
+
+    /// Run the full GPU broadphase pipeline on any AABB buffer.
+    ///
+    /// `aabb_buf` is the raw GPU buffer (must have the same layout as `array<Aabb>` in WGSL:
+    /// each element is `{min_pt: vec4<f32>, max_pt: vec4<f32>}`).
+    /// `cpu_aabbs` are the same AABBs on CPU (used for scene bounds computation).
+    /// Both `Aabb3D` and `Aabb2D` satisfy this layout (32 bytes, Vec4 min + Vec4 max).
+    pub fn build_and_query_raw(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        cpu_aabbs: &[Aabb3D],
         num_bodies: u32,
     ) -> Vec<[u32; 2]> {
         if num_bodies <= 1 {
@@ -442,11 +453,10 @@ impl GpuLbvh {
         }
         let n = num_bodies as usize;
 
-        // Step 0: Download AABBs to compute scene bounds for Morton normalization.
-        let cpu_aabbs = aabbs.download(ctx);
+        // Step 0: Compute scene bounds from CPU-side AABBs for Morton normalization.
         let mut scene_min = Vec3::splat(f32::MAX);
         let mut scene_max = Vec3::splat(f32::NEG_INFINITY);
-        for aabb in &cpu_aabbs {
+        for aabb in cpu_aabbs {
             scene_min = scene_min.min(aabb.min_point());
             scene_max = scene_max.max(aabb.max_point());
         }
@@ -476,7 +486,7 @@ impl GpuLbvh {
             label: Some("morton"),
             layout: self.morton_kernel.bind_group_layout(),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: aabbs.buffer().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: aabb_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: self.morton_keys.buffer().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: self.body_indices.buffer().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: self.morton_params_buf.as_entire_binding() },
@@ -491,34 +501,32 @@ impl GpuLbvh {
         }
         ctx.queue.submit(Some(encoder.finish()));
 
-        // Step 2: Radix sort Morton codes (keys) with body indices (values)
-        // Combine into RadixSortEntry, sort, then split back
+        // Step 2: Radix sort Morton codes on GPU
         let keys = self.morton_keys.download(ctx);
         let vals = self.body_indices.download(ctx);
-        let mut entries: Vec<RadixSortEntry> = keys.iter().zip(vals.iter())
+        let entries: Vec<RadixSortEntry> = keys.iter().zip(vals.iter())
             .map(|(&k, &v)| RadixSortEntry { key: k, value: v })
             .collect();
         let mut sort_buf = GpuBuffer::<RadixSortEntry>::new(ctx, n);
         sort_buf.upload(ctx, &entries);
         self.radix_sort.sort(ctx, &mut sort_buf);
-        entries = sort_buf.download(ctx);
+        let entries = sort_buf.download(ctx);
 
         let sorted_codes: Vec<u32> = entries.iter().map(|e| e.key).collect();
         let sorted_indices: Vec<u32> = entries.iter().map(|e| e.value).collect();
 
-        // Step 3: Build Karras tree on CPU
-        let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, &cpu_aabbs);
+        // Step 3: Build Karras tree on CPU (tree build is lightweight; sort was the expensive part)
+        let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, cpu_aabbs);
         if gpu_nodes.is_empty() {
             return Vec::new();
         }
 
         // Step 4: Upload tree + sorted data for GPU pair finding
         self.internal_nodes.upload(ctx, &gpu_nodes);
-        let leaf_aabb_data: Vec<Aabb3D> = leaf_aabbs.to_vec();
-        self.leaf_aabbs_sorted.upload(ctx, &leaf_aabb_data);
+        self.leaf_aabbs_sorted.upload(ctx, &leaf_aabbs);
         self.sorted_indices_buf.upload(ctx, &sorted_indices);
 
-        // Step 5: Find pairs on GPU
+        // Step 5: Find pairs on GPU via parallel BVH traversal
         self.pair_counter.reset(ctx);
         let max_pairs = (n * 8) as u32;
         self.pairs_out.grow_if_needed(ctx, max_pairs as usize);

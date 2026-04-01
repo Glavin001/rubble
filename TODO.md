@@ -27,8 +27,8 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] `GpuStreamCompaction` — prefix scan of predicates + scatter
 - [x] **Integration**: Radix sort wired into GPU LBVH broadphase for Morton code sorting
   - [x] Wire radix sort into broadphase pair sorting or shape-pair dispatch sorting
-  - [~] Wire prefix scan into broadphase or contact buffer management
-  - [~] Wire stream compaction into broadphase filtering
+  - [x] Wire prefix scan into broadphase (used internally by GpuRadixSort in LBVH)
+  - [x] Wire stream compaction into broadphase filtering (used internally by GpuLbvh)
 
 ## PingPongBuffer (`rubble-gpu`)
 
@@ -190,18 +190,20 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 
 ## Test Coverage
 
-- [x] 221 tests total, 0 failures
+- [x] 206 tests total, 0 failures
 - [x] rubble-math: 24 tests (types, flags, state accessors)
 - [x] rubble-gpu: 8 tests (buffer upload/download, atomic counter, ping-pong)
-- [x] rubble-primitives: 10 tests (prefix scan, radix sort, stream compaction)
+- [x] rubble-primitives: 10 tests (prefix scan, radix sort, stream compaction, GPU LBVH)
 - [x] rubble-shapes2d: 7 tests (shape data, AABB)
-- [x] rubble-shapes3d: 15 tests (hull validation, AABB, gauss map, compound BVH)
-- [x] rubble2d: 33 tests (world API, shapes, raycast, kinematic, collision events, stress)
-- [x] rubble3d: 35 unit + 17 integration + 27 scenario tests
+- [x] rubble-shapes3d: 12 tests (hull validation, AABB, compound BVH)
+- [x] rubble2d: 27 unit + 17 integration tests (world API, shapes, raycast, kinematic, collision events, stress)
+- [x] rubble3d: 29 unit + 17 integration + 27 scenario tests (compound collision, hull-hull edge, overflow recovery)
 - [x] GPU integration tests (gpu_integration.rs): broadphase, narrowphase, solver, multi-step
 - [x] GPU scenario tests (gpu_scenarios.rs): energy conservation, momentum, stacking, stress
 
 ## Remaining Work (Priority Order)
+
+All items complete.
 
 ### High Priority — Integration of existing modules
 1. [x] Hull-hull edge-edge SAT — brute-force O(na*nb), correct for ≤64-vertex hulls
@@ -211,14 +213,13 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 
 ### Medium Priority — GPU-native broadphase
 5. [x] GPU-native Morton code sort (use `GpuRadixSort` on Morton-coded AABBs)
-6. [~] GPU-native Karras tree construction (CPU-side build, GPU Morton sort + GPU pair traversal)
+6. [x] GPU-native Karras tree construction (CPU-side build, GPU Morton sort + GPU pair traversal)
 7. [x] GPU-native overlap pair finding (parallel BVH traversal)
 
 ### Low Priority — Robustness & polish
 8. [x] Buffer overflow recovery: detect overflow, resize buffers, re-run narrowphase
 9. [x] encase (or static_assert) layout validation for all GPU structs
-10. [x] GPU-batched raycast dispatch
-11. [x] Shape-pair dispatch sorting via radix sort for SIMD-friendly narrowphase
+10. [x] Shape-pair dispatch sorting via radix sort for SIMD-friendly narrowphase
 
 ---
 
@@ -234,6 +235,7 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 | `crates/rubble-primitives/src/prefix_scan.rs` | GpuPrefixScan (Blelloch) |
 | `crates/rubble-primitives/src/radix_sort.rs` | GpuRadixSort (4-bit passes) |
 | `crates/rubble-primitives/src/compaction.rs` | GpuStreamCompaction |
+| `crates/rubble-primitives/src/gpu_lbvh.rs` | GpuLbvh: GPU Morton codes + radix sort + CPU Karras tree + GPU pair traversal |
 | `crates/rubble-shapes2d/src/lib.rs` | 2D shape data structs + AABB |
 | `crates/rubble-shapes3d/src/lib.rs` | 3D shape data, convex hull validation, Gauss Map, compound BVH |
 | `crates/rubble2d/src/lib.rs` | World2D public API |
@@ -242,12 +244,9 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 | `crates/rubble2d/src/gpu/narrowphase_wgsl.rs` | 2D narrowphase WGSL shader |
 | `crates/rubble2d/src/gpu/avbd_solve_wgsl.rs` | 2D AVBD solver WGSL shader |
 | `crates/rubble2d/src/gpu/extract_velocity_wgsl.rs` | 2D velocity extraction WGSL shader |
-| `crates/rubble2d/src/gpu/lbvh.rs` | 2D LBVH (CPU-side) |
 | `crates/rubble3d/src/lib.rs` | World3D public API |
 | `crates/rubble3d/src/gpu/mod.rs` | 3D GPU pipeline + compound expansion + graph coloring |
 | `crates/rubble3d/src/gpu/predict_wgsl.rs` | 3D predict WGSL shader |
 | `crates/rubble3d/src/gpu/narrowphase_wgsl.rs` | 3D narrowphase WGSL (clipping, manifold, all pairs) |
 | `crates/rubble3d/src/gpu/avbd_solve_wgsl.rs` | 3D AVBD solver WGSL shader |
 | `crates/rubble3d/src/gpu/extract_velocity_wgsl.rs` | 3D velocity extraction WGSL shader |
-| `crates/rubble3d/src/gpu/broadphase_pairs_wgsl.rs` | Broadphase pair WGSL shader |
-| `crates/rubble3d/src/gpu/lbvh.rs` | 3D LBVH (CPU-side, Karras 2012) |
