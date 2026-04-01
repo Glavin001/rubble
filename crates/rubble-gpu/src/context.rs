@@ -45,10 +45,15 @@ impl GpuContext {
             }
         };
 
+        // Clamp requested limits to what the adapter actually supports.
+        // SwiftShader (used in CI/testing) may support fewer storage buffers.
+        let adapter_limits = adapter.limits();
+        let desired_storage_buffers: u32 = 16;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_limits: wgpu::Limits {
-                    max_storage_buffers_per_shader_stage: 16,
+                    max_storage_buffers_per_shader_stage: desired_storage_buffers
+                        .min(adapter_limits.max_storage_buffers_per_shader_stage),
                     ..wgpu::Limits::downlevel_defaults()
                 },
                 ..Default::default()

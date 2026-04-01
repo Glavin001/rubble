@@ -37,7 +37,7 @@ pub struct SimParams2DGpu {
     pub dt: f32,
     pub num_bodies: u32,
     pub solver_iterations: u32,
-    pub _pad: u32,
+    pub pair_count: u32,
 }
 
 /// Broadphase pair (two body indices).
@@ -386,7 +386,7 @@ impl GpuPipeline2D {
             dt,
             num_bodies: states.len() as u32,
             solver_iterations,
-            _pad: 0,
+            pair_count: 0,
         };
         self.ctx
             .queue
@@ -414,7 +414,7 @@ impl GpuPipeline2D {
             num_bodies,
         );
 
-        if !overlap_pairs.is_empty() {
+        let pair_count = if !overlap_pairs.is_empty() {
             // Download shape info for sorting pairs by shape type
             self.shape_infos.set_len(num_bodies);
             let shape_info = self.shape_infos.download(&self.ctx);
@@ -438,11 +438,15 @@ impl GpuPipeline2D {
                 (lo << 16) | hi
             });
 
+            let count = gpu_pairs.len() as u32;
             self.pairs.upload(&self.ctx, &gpu_pairs);
-            self.pair_count.write(&self.ctx, gpu_pairs.len() as u32);
-        }
+            self.pair_count.write(&self.ctx, count);
+            count
+        } else {
+            0
+        };
 
-        self.dispatch_narrowphase(num_bodies);
+        self.dispatch_narrowphase(num_bodies, pair_count);
 
         // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
         let contact_count_val = self.contact_count.read(&self.ctx);
@@ -453,7 +457,7 @@ impl GpuPipeline2D {
             self.contacts.grow_if_needed(&self.ctx, new_cap);
             // Reset counter and re-run narrowphase
             self.contact_count.reset(&self.ctx);
-            self.dispatch_narrowphase(num_bodies);
+            self.dispatch_narrowphase(num_bodies, pair_count);
         }
     }
 
@@ -566,6 +570,125 @@ impl GpuPipeline2D {
     }
 
     // -----------------------------------------------------------------------
+    // Async variants for WASM/WebGPU (buffer mapping requires async)
+    // -----------------------------------------------------------------------
+
+    #[cfg(target_arch = "wasm32")]
+    async fn run_detection_async(&mut self, num_bodies: u32) {
+        self.contact_count.reset(&self.ctx);
+        self.pair_count.reset(&self.ctx);
+
+        self.dispatch_predict(num_bodies);
+        self.dispatch_aabb(num_bodies);
+
+        self.aabbs.set_len(num_bodies);
+        let gpu_aabbs = self.aabbs.download_async(&self.ctx).await;
+        // Brute-force AABB overlap (fine for typical web demo sizes)
+        let mut overlap_pairs: Vec<[u32; 2]> = Vec::new();
+        for i in 0..gpu_aabbs.len() {
+            for j in (i + 1)..gpu_aabbs.len() {
+                let a = &gpu_aabbs[i];
+                let b = &gpu_aabbs[j];
+                if a.min.x <= b.max.x
+                    && a.max.x >= b.min.x
+                    && a.min.y <= b.max.y
+                    && a.max.y >= b.min.y
+                {
+                    overlap_pairs.push([i as u32, j as u32]);
+                }
+            }
+        }
+
+        let pair_count = if !overlap_pairs.is_empty() {
+            // Download shape info for sorting pairs by shape type
+            self.shape_infos.set_len(num_bodies);
+            let shape_info = self.shape_infos.download_async(&self.ctx).await;
+
+            let mut gpu_pairs: Vec<GpuPair> = overlap_pairs
+                .iter()
+                .map(|p| GpuPair { a: p[0], b: p[1] })
+                .collect();
+
+            gpu_pairs.sort_unstable_by_key(|pair| {
+                let st_a = shape_info[pair.a as usize].shape_type;
+                let st_b = shape_info[pair.b as usize].shape_type;
+                let (lo, hi) = if st_a <= st_b {
+                    (st_a, st_b)
+                } else {
+                    (st_b, st_a)
+                };
+                (lo << 16) | hi
+            });
+
+            let count = gpu_pairs.len() as u32;
+            self.pairs.upload(&self.ctx, &gpu_pairs);
+            self.pair_count.write(&self.ctx, count);
+            count
+        } else {
+            0
+        };
+
+        self.dispatch_narrowphase(num_bodies, pair_count);
+
+        // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
+        let contact_count_val = self.contact_count.read_async(&self.ctx).await;
+        let capacity = self.contacts.capacity();
+        if contact_count_val > capacity {
+            let new_cap = (contact_count_val as usize) * 2;
+            self.contacts.grow_if_needed(&self.ctx, new_cap);
+            self.contact_count.reset(&self.ctx);
+            self.dispatch_narrowphase(num_bodies, pair_count);
+        }
+    }
+
+    /// Async version of `step_with_contacts` for WASM/WebGPU.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn step_with_contacts_async(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        warm_contacts: Option<&[Contact2D]>,
+    ) -> (Vec<RigidBodyState2D>, Vec<Contact2D>) {
+        if num_bodies == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        self.run_detection_async(num_bodies).await;
+
+        let count = self.contact_count.read_async(&self.ctx).await as usize;
+        let mut contacts = if count > 0 {
+            self.contacts.set_len(count as u32);
+            let mut c = self.contacts.download_async(&self.ctx).await;
+            c.truncate(count);
+            if let Some(prev) = warm_contacts {
+                warm_start_contacts_2d(&mut c, prev);
+            }
+            c
+        } else {
+            Vec::new()
+        };
+
+        self.run_colored_solve(solver_iterations, &mut contacts);
+
+        let final_contacts = if !contacts.is_empty() {
+            let cnt = self.contact_count.read_async(&self.ctx).await as usize;
+            if cnt > 0 {
+                self.contacts.set_len(cnt as u32);
+                let all = self.contacts.download_async(&self.ctx).await;
+                all.into_iter().take(cnt).collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        self.dispatch_extract(num_bodies);
+        let states = self.body_states.download_async(&self.ctx).await;
+        (states, final_contacts)
+    }
+
+    // -----------------------------------------------------------------------
     // Private dispatch helpers
     // -----------------------------------------------------------------------
 
@@ -643,11 +766,15 @@ impl GpuPipeline2D {
         self.run_pass("aabb_2d", &self.aabb_kernel, &bg, num_bodies);
     }
 
-    fn dispatch_narrowphase(&self, _num_bodies: u32) {
-        let num_pairs = self.pair_count.read(&self.ctx);
+    fn dispatch_narrowphase(&self, _num_bodies: u32, num_pairs: u32) {
         if num_pairs == 0 {
             return;
         }
+        // Write pair_count into the params uniform (offset 28 = last field)
+        self.ctx
+            .queue
+            .write_buffer(&self.params_uniform, 28, &num_pairs.to_le_bytes());
+
         let bg = self
             .ctx
             .device
@@ -669,38 +796,34 @@ impl GpuPipeline2D {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: self.pair_count.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
                         resource: self.circles.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 5,
+                        binding: 4,
                         resource: self.rects.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 6,
+                        binding: 5,
                         resource: self.contacts.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 7,
+                        binding: 6,
                         resource: self.contact_count.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 8,
+                        binding: 7,
                         resource: self.params_uniform.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 9,
+                        binding: 8,
                         resource: self.convex_polys.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 10,
+                        binding: 9,
                         resource: self.convex_verts.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 11,
+                        binding: 10,
                         resource: self.capsules.buffer().as_entire_binding(),
                     },
                 ],

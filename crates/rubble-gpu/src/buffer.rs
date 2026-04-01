@@ -73,6 +73,52 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         result
     }
 
+    /// Download the buffer contents asynchronously (required for WASM/WebGPU).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn download_async(&self, ctx: &GpuContext) -> Vec<T> {
+        if self.len == 0 {
+            return Vec::new();
+        }
+
+        let byte_len = (self.len as usize * std::mem::size_of::<T>()) as u64;
+
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GpuBuffer staging (async)"),
+            size: byte_len,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, byte_len);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done_clone = done.clone();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            result.unwrap();
+            done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+            crate::yield_now().await;
+        }
+
+        let mapped = slice.get_mapped_range();
+        // In WebGPU/WASM, mapped ranges may not be aligned for T.
+        // Allocate a properly-aligned Vec<T> and copy bytes into it.
+        let elem_count = mapped.len() / std::mem::size_of::<T>();
+        let mut result = vec![T::zeroed(); elem_count];
+        let dst_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut result);
+        dst_bytes.copy_from_slice(&mapped[..dst_bytes.len()]);
+        drop(mapped);
+        staging.unmap();
+        result
+    }
+
     /// Set the logical length (for buffers populated by GPU compute shaders).
     pub fn set_len(&mut self, len: u32) {
         self.len = len;
@@ -176,6 +222,17 @@ impl<T: bytemuck::Pod> PingPongBuffer<T> {
     pub fn download(&self, ctx: &GpuContext) -> Vec<T> {
         self.buffers[self.current].download(ctx)
     }
+
+    /// Set the logical length of the current buffer.
+    pub fn set_len(&mut self, len: u32) {
+        self.buffers[self.current].set_len(len);
+    }
+
+    /// Async download (required for WASM/WebGPU).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn download_async(&self, ctx: &GpuContext) -> Vec<T> {
+        self.buffers[self.current].download_async(ctx).await
+    }
 }
 
 /// A single `atomic<u32>` counter on the GPU.
@@ -234,6 +291,43 @@ impl GpuAtomicCounter {
         drop(mapped);
         staging.unmap();
         value
+    }
+
+    /// Read the counter value asynchronously (required for WASM/WebGPU).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn read_async(&self, ctx: &GpuContext) -> u32 {
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GpuAtomicCounter staging (async)"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, 4);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done_clone = done.clone();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            result.unwrap();
+            done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+            crate::yield_now().await;
+        }
+
+        let mapped = slice.get_mapped_range();
+        // Avoid alignment issues: copy 4 bytes manually
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&mapped[..4]);
+        drop(mapped);
+        staging.unmap();
+        u32::from_le_bytes(bytes)
     }
 
     /// Reference to the underlying wgpu buffer.

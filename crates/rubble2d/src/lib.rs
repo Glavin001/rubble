@@ -645,6 +645,141 @@ impl World2D {
         }
     }
 
+    /// Advance the simulation by one time step (async, for WASM/WebGPU).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn step_async(&mut self) {
+        if self.states.is_empty() {
+            return;
+        }
+
+        let alive_indices: Vec<usize> = (0..self.states.len())
+            .filter(|&i| self.allocator.alive.get(i).copied().unwrap_or(false))
+            .collect();
+
+        if alive_indices.is_empty() {
+            return;
+        }
+
+        let compact_states: Vec<RigidBodyState2D> = alive_indices
+            .iter()
+            .map(|&i| {
+                let mut s = self.states[i];
+                s._pad0 = Vec4::new(self.frictions[i], 0.0, 0.0, 0.0);
+                s
+            })
+            .collect();
+
+        let mut shape_info_data: Vec<gpu::ShapeInfo> = Vec::with_capacity(alive_indices.len());
+        let mut gpu_circles: Vec<CircleData> = Vec::new();
+        let mut gpu_rects: Vec<RectData> = Vec::new();
+        let mut gpu_convex_polys: Vec<ConvexPolygonData> = Vec::new();
+        let mut gpu_convex_verts: Vec<ConvexVertex2D> = Vec::new();
+        let mut gpu_capsules: Vec<CapsuleData2D> = Vec::new();
+
+        for &i in &alive_indices {
+            match &self.shapes[i] {
+                ShapeDesc2D::Circle { radius } => {
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 0,
+                        shape_index: gpu_circles.len() as u32,
+                    });
+                    gpu_circles.push(CircleData {
+                        radius: *radius,
+                        _pad: [0.0; 3],
+                    });
+                }
+                ShapeDesc2D::Rect { half_extents } => {
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 1,
+                        shape_index: gpu_rects.len() as u32,
+                    });
+                    gpu_rects.push(RectData {
+                        half_extents: Vec4::new(half_extents.x, half_extents.y, 0.0, 0.0),
+                    });
+                }
+                ShapeDesc2D::ConvexPolygon { vertices } => {
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 2,
+                        shape_index: gpu_convex_polys.len() as u32,
+                    });
+                    gpu_convex_polys.push(ConvexPolygonData {
+                        vertex_offset: gpu_convex_verts.len() as u32,
+                        vertex_count: vertices.len() as u32,
+                        _pad: [0; 2],
+                    });
+                    for v in vertices {
+                        gpu_convex_verts.push(ConvexVertex2D {
+                            x: v.x,
+                            y: v.y,
+                            _pad: [0.0; 2],
+                        });
+                    }
+                }
+                ShapeDesc2D::Capsule {
+                    half_height,
+                    radius,
+                } => {
+                    shape_info_data.push(gpu::ShapeInfo {
+                        shape_type: 3,
+                        shape_index: gpu_capsules.len() as u32,
+                    });
+                    gpu_capsules.push(CapsuleData2D {
+                        half_height: *half_height,
+                        radius: *radius,
+                        _pad: [0.0; 2],
+                    });
+                }
+            }
+        }
+
+        if gpu_circles.is_empty() {
+            gpu_circles.push(CircleData { radius: 0.0, _pad: [0.0; 3] });
+        }
+        if gpu_rects.is_empty() {
+            gpu_rects.push(RectData { half_extents: Vec4::ZERO });
+        }
+        if gpu_convex_polys.is_empty() {
+            gpu_convex_polys.push(ConvexPolygonData { vertex_offset: 0, vertex_count: 0, _pad: [0; 2] });
+        }
+        if gpu_convex_verts.is_empty() {
+            gpu_convex_verts.push(ConvexVertex2D { x: 0.0, y: 0.0, _pad: [0.0; 2] });
+        }
+        if gpu_capsules.is_empty() {
+            gpu_capsules.push(CapsuleData2D { half_height: 0.0, radius: 0.0, _pad: [0.0; 2] });
+        }
+
+        let num_bodies = compact_states.len() as u32;
+
+        self.gpu_pipeline.upload(
+            &compact_states,
+            &shape_info_data,
+            &gpu_circles,
+            &gpu_rects,
+            &gpu_convex_polys,
+            &gpu_convex_verts,
+            &gpu_capsules,
+            self.config.gravity,
+            self.config.dt,
+            self.config.solver_iterations,
+        );
+
+        let prev = self.contact_persistence.prev_contacts();
+        let warm = if prev.is_empty() { None } else { Some(prev) };
+        let (results, new_contacts) = self
+            .gpu_pipeline
+            .step_with_contacts_async(num_bodies, self.config.solver_iterations, warm)
+            .await;
+
+        let events = self.contact_persistence.update(&new_contacts);
+        self.collision_events.extend(events);
+
+        for (slot, &orig) in alive_indices.iter().enumerate() {
+            if slot < results.len() {
+                self.states[orig] = results[slot];
+            }
+        }
+    }
+
     /// Drain collision events from the last step.
     pub fn drain_collision_events(&mut self) -> Vec<CollisionEvent> {
         std::mem::take(&mut self.collision_events)

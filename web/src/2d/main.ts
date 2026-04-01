@@ -139,9 +139,20 @@ function draw() {
 // FPS tracking
 let frameCount = 0;
 let lastFpsTime = performance.now();
+let stepCount = 0;
 
-function loop_() {
-  world.step();
+// Cached data for test hooks (avoids borrow conflicts during async step)
+let cachedPositions = new Float32Array(0);
+let cachedAngles = new Float32Array(0);
+
+async function loop_() {
+  await world.step();
+  stepCount++;
+
+  // Cache data after step completes (world is no longer borrowed)
+  cachedPositions = new Float32Array(world.get_positions());
+  cachedAngles = new Float32Array(world.get_angles());
+
   draw();
 
   frameCount++;
@@ -151,6 +162,12 @@ function loop_() {
     bodiesEl.textContent = `Bodies: ${world.body_count()}`;
     frameCount = 0;
     lastFpsTime = now;
+  }
+
+  // Update test hooks
+  if (window.__rubble_test) {
+    window.__rubble_test.stepCount = stepCount;
+    window.__rubble_test.bodyCount = world.body_count();
   }
 
   requestAnimationFrame(loop_);
@@ -202,11 +219,29 @@ async function main() {
     }
   });
 
+  // Expose test hooks
+  window.__rubble_test = {
+    ready: true,
+    stepCount: 0,
+    bodyCount: world.body_count(),
+    getPositions: () => cachedPositions,
+    getAngles: () => cachedAngles,
+    error: null,
+  };
+
   document.getElementById("loading")!.style.display = "none";
   loop_();
 }
 
 main().catch((e) => {
+  window.__rubble_test = {
+    ready: false,
+    stepCount: 0,
+    bodyCount: 0,
+    getPositions: () => new Float32Array(0),
+    getAngles: () => new Float32Array(0),
+    error: e.message || String(e),
+  };
   document.getElementById("loading")!.textContent =
     `Failed to initialize: ${e.message}. WebGPU required.`;
   console.error(e);

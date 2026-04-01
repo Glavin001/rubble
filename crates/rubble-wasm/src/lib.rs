@@ -142,7 +142,10 @@ impl PhysicsWorld2D {
     }
 
     /// Step the simulation forward by one time step.
-    pub fn step(&mut self) {
+    pub async fn step(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.world.step_async().await;
+        #[cfg(not(target_arch = "wasm32"))]
         self.world.step();
     }
 
@@ -352,7 +355,10 @@ impl PhysicsWorld3D {
     }
 
     /// Step the simulation forward by one time step.
-    pub fn step(&mut self) {
+    pub async fn step(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.world.step_async().await;
+        #[cfg(not(target_arch = "wasm32"))]
         self.world.step();
     }
 

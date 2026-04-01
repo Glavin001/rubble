@@ -877,6 +877,60 @@ impl World {
         }
     }
 
+    /// Advance the simulation by one time step (async, for WASM/WebGPU).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn step_async(&mut self) {
+        let n = self.states.len();
+        if n == 0 {
+            return;
+        }
+
+        let alive_indices: Vec<usize> = (0..n).filter(|&i| self.alive[i]).collect();
+        if alive_indices.is_empty() {
+            return;
+        }
+
+        let compact_states: Vec<RigidBodyState3D> =
+            alive_indices.iter().map(|&i| self.states[i]).collect();
+        let compact_props: Vec<RigidBodyProps3D> =
+            alive_indices.iter().map(|&i| self.props[i]).collect();
+        let num_bodies = compact_states.len() as u32;
+
+        self.gpu_pipeline.upload(
+            &compact_states,
+            &compact_props,
+            &self.spheres,
+            &self.boxes,
+            &self.capsules,
+            &self.convex_hulls,
+            &self.convex_vertices,
+            &self.planes,
+            &self.compound_shapes,
+            &self.compound_children,
+            &self.compound_shapes_cpu,
+            self.config.gravity,
+            self.config.dt,
+            self.config.solver_iterations,
+        );
+
+        let prev = self.contact_persistence.prev_contacts();
+        let warm = if prev.is_empty() { None } else { Some(prev) };
+        let (results, new_contacts) = self
+            .gpu_pipeline
+            .step_with_contacts_async(num_bodies, self.config.solver_iterations, warm)
+            .await;
+
+        // Update persistence and generate collision events
+        let events = self.contact_persistence.update(&new_contacts);
+        self.collision_events.extend(events);
+
+        for (slot, &orig) in alive_indices.iter().enumerate() {
+            if slot < results.len() {
+                self.states[orig] = results[slot];
+            }
+        }
+    }
+
     /// Mark a body as kinematic (moves via set_position/set_velocity, not physics).
     pub fn set_body_kinematic(&mut self, handle: BodyHandle, kinematic: bool) {
         if !self.allocator.is_valid(handle) {
