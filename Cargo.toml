@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rubble-math",
+    "crates/rubble-gpu",
+    "crates/rubble-primitives",
+    "crates/rubble-shapes3d",
+    "crates/rubble-shapes2d",
+    "crates/rubble3d",
+    "crates/rubble2d",
+]
+
+[workspace.dependencies]
+glam = { version = "0.29", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+wgpu = "29"
+pollster = "0.4"
+thiserror = "2"
+naga = { version = "29", features = ["spv-in", "wgsl-out"] }
+
+# Internal crates
+rubble-math = { path = "crates/rubble-math" }
+rubble-gpu = { path = "crates/rubble-gpu" }
+rubble-primitives = { path = "crates/rubble-primitives" }
+rubble-shapes3d = { path = "crates/rubble-shapes3d" }
+rubble-shapes2d = { path = "crates/rubble-shapes2d" }
+rubble3d = { path = "crates/rubble3d" }
+rubble2d = { path = "crates/rubble2d" }

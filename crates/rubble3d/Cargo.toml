@@ -1,0 +1,16 @@
+[package]
+name = "rubble3d"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rubble-math = { workspace = true }
+rubble-gpu = { workspace = true }
+rubble-shapes3d = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+wgpu = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "rubble-primitives"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rubble-gpu = { workspace = true }
+bytemuck = { workspace = true }
+wgpu = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
