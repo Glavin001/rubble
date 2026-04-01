@@ -124,10 +124,10 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 ### Gauss Map (Edge-Edge Pruning)
 - [x] `precompute_gauss_map()` in rubble-shapes3d — enumerates non-parallel edge pairs
 - [x] `gauss_map_offset` / `gauss_map_count` fields in `ConvexHullData`
-- [x] **Wired in**: Gauss Map entries computed on body creation, uploaded, used in hull-hull SAT
+- [x] **Wired in**: Gauss Map entries computed on body creation, uploaded to GPU buffer
   - [x] Call `precompute_gauss_map()` when adding convex hull bodies
   - [x] Upload Gauss Map entries to GPU buffer
-  - [x] Use in hull-hull SAT to prune edge-edge axes
+  - [~] Hull-hull SAT uses brute-force O(na*nb) edge-edge (correct for ≤64-vertex hulls; Minkowski face pruning possible future optimization)
 
 ### Compound Shapes
 - [x] CPU-side pair expansion in `run_detection()` — when broadphase pair involves compound, expand on CPU
@@ -210,7 +210,7 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 ## Remaining Work (Priority Order)
 
 ### High Priority — Integration of existing modules
-1. [x] Wire `precompute_gauss_map()` into convex hull body creation, upload entries, use in hull-hull SAT
+1. [x] Wire `precompute_gauss_map()` into convex hull body creation, upload entries to GPU (hull-hull uses brute-force edge-edge, correct for ≤64 verts)
 2. [x] Wire `GpuRadixSort` into broadphase pair sorting (sort by shape-type key for batched dispatch)
 3. [x] Use `PingPongBuffer` for body state double-buffering in predict→solve→extract
 4. [x] Use compound BVH for child culling in `generate_compound_contacts_cpu()`
