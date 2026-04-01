@@ -79,8 +79,8 @@ struct ConvexHullInfo {
     face_count:    u32,
     edge_offset:   u32,
     edge_count:    u32,
-    gauss_map_offset: u32,
-    gauss_map_count:  u32,
+    _pad0: u32,
+    _pad1: u32,
 };
 
 struct ConvexVert {
@@ -103,15 +103,6 @@ struct ConvexVert {
 @group(0) @binding(10) var<storage, read>      convex_verts:  array<ConvexVert>;
 @group(0) @binding(11) var<storage, read>      capsules:      array<CapsuleDataGpu>;
 @group(0) @binding(12) var<storage, read>      plane_data:    array<vec4<f32>>;
-
-struct GaussMapEntry {
-    edge_a: u32,
-    edge_b: u32,
-    _pad0: u32,
-    _pad1: u32,
-};
-
-@group(0) @binding(13) var<storage, read>      gauss_map:     array<GaussMapEntry>;
 
 // ---------- Helpers ----------
 
@@ -954,9 +945,6 @@ fn hull_hull_test(
     // Cross-hull edge-edge axes: brute-force O(na*nb).
     // With max 64 vertices per hull, this is at most 4096 iterations —
     // fast enough on GPU and simpler than Minkowski face pruning.
-    // (The gauss_map buffer stores intra-hull edge pairs for future
-    //  Minkowski face test pruning, but is not used here yet.)
-    let _gm_keep = arrayLength(&gauss_map);  // keep binding alive
     for (var i = 0u; i < na; i = i + 1u) {
         let ea0 = hull_world_vert(si_a, i, pos_a, rot_a);
         let ea1 = hull_world_vert(si_a, (i + 1u) % na, pos_a, rot_a);

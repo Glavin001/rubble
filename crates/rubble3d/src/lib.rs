@@ -503,7 +503,6 @@ pub struct World {
     convex_vertices: Vec<ConvexVertex3D>,
     /// Plane data stored as Vec4(nx, ny, nz, distance)
     planes: Vec<Vec4>,
-    gauss_map_entries: Vec<rubble_shapes3d::GaussMapEntry>,
     compound_shapes: Vec<CompoundShapeGpu>,
     compound_children: Vec<CompoundChildGpu>,
     /// CPU-side compound shape data for pair expansion.
@@ -533,7 +532,6 @@ impl World {
             convex_hulls: Vec::new(),
             convex_vertices: Vec::new(),
             planes: Vec::new(),
-            gauss_map_entries: Vec::new(),
             compound_shapes: Vec::new(),
             compound_children: Vec::new(),
             compound_shapes_cpu: Vec::new(),
@@ -607,42 +605,6 @@ impl World {
                         _pad: 0.0,
                     });
                 }
-                let gauss_map_offset = self.gauss_map_entries.len() as u32;
-                let n_verts = vertices.len().min(64);
-                let mut faces: Vec<(Vec<u32>, Vec3)> = Vec::new();
-                for i in 0..n_verts {
-                    for j in (i + 1)..n_verts {
-                        for k in (j + 1)..n_verts {
-                            let v0 = vertices[i];
-                            let v1 = vertices[j];
-                            let v2 = vertices[k];
-                            let normal = (v1 - v0).cross(v2 - v0);
-                            let len = normal.length();
-                            if len < 1e-8 {
-                                continue;
-                            }
-                            let normal = normal / len;
-                            let d = normal.dot(v0);
-                            let all_behind =
-                                vertices.iter().enumerate().all(|(idx, &v)| {
-                                    idx == i
-                                        || idx == j
-                                        || idx == k
-                                        || normal.dot(v) <= d + 1e-6
-                                });
-                            if all_behind {
-                                faces.push((
-                                    vec![i as u32, j as u32, k as u32],
-                                    normal,
-                                ));
-                            }
-                        }
-                    }
-                }
-                let entries =
-                    rubble_shapes3d::precompute_gauss_map(vertices, &faces);
-                let gauss_map_count = entries.len() as u32;
-                self.gauss_map_entries.extend(entries);
                 self.convex_hulls.push(ConvexHullData {
                     vertex_offset,
                     vertex_count,
@@ -650,8 +612,8 @@ impl World {
                     face_count: 0,
                     edge_offset: 0,
                     edge_count: 0,
-                    gauss_map_offset,
-                    gauss_map_count,
+                    _pad0: 0,
+                    _pad1: 0,
                 });
                 (SHAPE_CONVEX_HULL, si)
             }
@@ -708,46 +670,6 @@ impl World {
                                     _pad: 0.0,
                                 });
                             }
-                            let gauss_map_offset =
-                                self.gauss_map_entries.len() as u32;
-                            let n_verts = vertices.len().min(64);
-                            let mut faces: Vec<(Vec<u32>, Vec3)> = Vec::new();
-                            for i in 0..n_verts {
-                                for j in (i + 1)..n_verts {
-                                    for k in (j + 1)..n_verts {
-                                        let v0 = vertices[i];
-                                        let v1 = vertices[j];
-                                        let v2 = vertices[k];
-                                        let normal = (v1 - v0).cross(v2 - v0);
-                                        let len = normal.length();
-                                        if len < 1e-8 {
-                                            continue;
-                                        }
-                                        let normal = normal / len;
-                                        let d = normal.dot(v0);
-                                        let all_behind = vertices
-                                            .iter()
-                                            .enumerate()
-                                            .all(|(idx, &v)| {
-                                                idx == i
-                                                    || idx == j
-                                                    || idx == k
-                                                    || normal.dot(v) <= d + 1e-6
-                                            });
-                                        if all_behind {
-                                            faces.push((
-                                                vec![i as u32, j as u32, k as u32],
-                                                normal,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            let entries = rubble_shapes3d::precompute_gauss_map(
-                                vertices, &faces,
-                            );
-                            let gauss_map_count = entries.len() as u32;
-                            self.gauss_map_entries.extend(entries);
                             self.convex_hulls.push(ConvexHullData {
                                 vertex_offset,
                                 vertex_count,
@@ -755,8 +677,8 @@ impl World {
                                 face_count: 0,
                                 edge_offset: 0,
                                 edge_count: 0,
-                                gauss_map_offset,
-                                gauss_map_count,
+                                _pad0: 0,
+                                _pad1: 0,
                             });
                             (SHAPE_CONVEX_HULL, si)
                         }
@@ -924,7 +846,6 @@ impl World {
             &self.compound_shapes,
             &self.compound_children,
             &self.compound_shapes_cpu,
-            &self.gauss_map_entries,
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,

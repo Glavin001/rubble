@@ -39,8 +39,8 @@ pub struct ConvexHullData {
     pub face_count: u32,
     pub edge_offset: u32,
     pub edge_count: u32,
-    pub gauss_map_offset: u32,
-    pub gauss_map_count: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 #[repr(C)]
@@ -177,85 +177,6 @@ pub fn compute_convex_hull_aabb(center: Vec3, rotation: Quat, vertices: &[Vec3])
         max = max.max(world);
     }
     Aabb3D::new(min, max)
-}
-
-// ---------------------------------------------------------------------------
-// Gauss Map precomputation
-// ---------------------------------------------------------------------------
-
-/// Gauss Map entry: an edge-edge pair that can produce a valid separating axis.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct GaussMapEntry {
-    /// Index of first edge (encoded as vertex index of edge start).
-    pub edge_a: u32,
-    /// Index of second edge (encoded as vertex index of edge start).
-    pub edge_b: u32,
-    pub _pad: [u32; 2],
-}
-
-/// Precompute a conservative Gauss Map for a convex hull.
-///
-/// Given a set of vertices and face definitions (vertex indices + face normal),
-/// this enumerates all edge pairs from distinct faces and filters out degenerate
-/// pairs where the cross product of the two edge directions is near-zero (parallel
-/// edges), since those cannot produce a valid separating axis.
-///
-/// Returns valid edge-edge pairs that can be used to prune SAT edge-edge axes.
-pub fn precompute_gauss_map(vertices: &[Vec3], faces: &[(Vec<u32>, Vec3)]) -> Vec<GaussMapEntry> {
-    // Collect all directed edges from faces.
-    // Each edge is (start_vertex_index, end_vertex_index, face_index).
-    let mut edges: Vec<(u32, u32, usize)> = Vec::new();
-    for (fi, (indices, _normal)) in faces.iter().enumerate() {
-        let n = indices.len();
-        for i in 0..n {
-            let a = indices[i];
-            let b = indices[(i + 1) % n];
-            edges.push((a, b, fi));
-        }
-    }
-
-    let mut result = Vec::new();
-    let parallel_threshold = 1e-6_f32;
-
-    // For each pair of edges from different faces, check if they are non-parallel.
-    for i in 0..edges.len() {
-        let (a0, a1, face_i) = edges[i];
-        let dir_a = vertices[a1 as usize] - vertices[a0 as usize];
-        let len_a_sq = dir_a.length_squared();
-        if len_a_sq < 1e-12 {
-            continue; // degenerate edge
-        }
-
-        for edge_b in &edges[(i + 1)..] {
-            let (b0, b1, face_j) = *edge_b;
-            // Skip edges from the same face
-            if face_i == face_j {
-                continue;
-            }
-
-            let dir_b = vertices[b1 as usize] - vertices[b0 as usize];
-            let len_b_sq = dir_b.length_squared();
-            if len_b_sq < 1e-12 {
-                continue; // degenerate edge
-            }
-
-            // Check if cross product is non-degenerate (edges are not parallel)
-            let cross = dir_a.cross(dir_b);
-            let cross_len_sq = cross.length_squared();
-
-            // Normalize: cross_len^2 / (|a|^2 * |b|^2) > threshold^2
-            if cross_len_sq > parallel_threshold * parallel_threshold * len_a_sq * len_b_sq {
-                result.push(GaussMapEntry {
-                    edge_a: a0,
-                    edge_b: b0,
-                    _pad: [0; 2],
-                });
-            }
-        }
-    }
-
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -429,7 +350,6 @@ const _: () = assert!(std::mem::size_of::<CapsuleData>() == 16);
 const _: () = assert!(std::mem::size_of::<ConvexHullData>() == 32);
 const _: () = assert!(std::mem::size_of::<Plane>() == 16);
 const _: () = assert!(std::mem::size_of::<ConvexVertex3D>() == 16);
-const _: () = assert!(std::mem::size_of::<GaussMapEntry>() == 16);
 const _: () = assert!(std::mem::size_of::<CompoundChildGpu>() == 48);
 const _: () = assert!(std::mem::size_of::<CompoundShapeGpu>() == 8);
 
@@ -641,60 +561,6 @@ mod tests {
         let eps = 1e-5;
         assert!((world.min_point() - Vec3::new(-3.0, -1.0, -1.0)).length() < eps);
         assert!((world.max_point() - Vec3::new(3.0, 1.0, 1.0)).length() < eps);
-    }
-
-    #[test]
-    fn gauss_map_cube_non_empty() {
-        // A cube has 6 faces × 4 edges = 24 directed edges.
-        // Non-parallel edge pairs from different faces should produce entries.
-        let verts = vec![
-            Vec3::new(-1.0, -1.0, -1.0), // 0
-            Vec3::new(1.0, -1.0, -1.0),  // 1
-            Vec3::new(1.0, 1.0, -1.0),   // 2
-            Vec3::new(-1.0, 1.0, -1.0),  // 3
-            Vec3::new(-1.0, -1.0, 1.0),  // 4
-            Vec3::new(1.0, -1.0, 1.0),   // 5
-            Vec3::new(1.0, 1.0, 1.0),    // 6
-            Vec3::new(-1.0, 1.0, 1.0),   // 7
-        ];
-        // 6 faces of the cube (CCW winding from outside)
-        let faces: Vec<(Vec<u32>, Vec3)> = vec![
-            (vec![0, 3, 2, 1], Vec3::new(0.0, 0.0, -1.0)), // -Z
-            (vec![4, 5, 6, 7], Vec3::new(0.0, 0.0, 1.0)),  // +Z
-            (vec![0, 1, 5, 4], Vec3::new(0.0, -1.0, 0.0)), // -Y
-            (vec![2, 3, 7, 6], Vec3::new(0.0, 1.0, 0.0)),  // +Y
-            (vec![0, 4, 7, 3], Vec3::new(-1.0, 0.0, 0.0)), // -X
-            (vec![1, 2, 6, 5], Vec3::new(1.0, 0.0, 0.0)),  // +X
-        ];
-        let entries = precompute_gauss_map(&verts, &faces);
-        // A cube should produce non-parallel edge pairs (edges from different faces
-        // that are perpendicular). The exact count depends on pruning, but should be > 0.
-        assert!(!entries.is_empty(), "Cube should produce Gauss Map entries");
-        // Each entry should reference valid vertex indices
-        for e in &entries {
-            assert!((e.edge_a as usize) < verts.len());
-            assert!((e.edge_b as usize) < verts.len());
-        }
-    }
-
-    #[test]
-    fn gauss_map_empty_for_no_faces() {
-        let verts = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
-        let faces: Vec<(Vec<u32>, Vec3)> = vec![];
-        let entries = precompute_gauss_map(&verts, &faces);
-        assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn gauss_map_single_face_no_entries() {
-        // Only one face — no cross-face edge pairs.
-        let verts = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
-        let faces = vec![(vec![0u32, 1, 2], Vec3::Z)];
-        let entries = precompute_gauss_map(&verts, &faces);
-        assert!(
-            entries.is_empty(),
-            "Single face should produce no edge-edge pairs"
-        );
     }
 
     #[test]

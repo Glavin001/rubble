@@ -26,7 +26,7 @@ use rubble_math::{
 };
 use rubble_shapes3d::{
     BoxData, CapsuleData, CompoundChildGpu, CompoundShapeGpu, ConvexHullData, ConvexVertex3D,
-    GaussMapEntry, SphereData,
+    SphereData,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -330,8 +330,8 @@ struct ConvexHullInfo {
     face_count:    u32,
     edge_offset:   u32,
     edge_count:    u32,
-    gauss_map_offset: u32,
-    gauss_map_count:  u32,
+    _pad0: u32,
+    _pad1: u32,
 };
 
 struct ConvexVert {
@@ -479,7 +479,6 @@ pub struct GpuPipeline {
     convex_hulls: GpuBuffer<ConvexHullData>,
     convex_vertices: GpuBuffer<ConvexVertex3D>,
     planes: GpuBuffer<Vec4>,
-    gauss_map: GpuBuffer<GaussMapEntry>,
 
     // Compound shape data (for CPU-side pair expansion)
     compound_shapes_data: Vec<CompoundShapeGpu>,
@@ -524,7 +523,6 @@ impl GpuPipeline {
         let convex_hulls = GpuBuffer::new(&ctx, max_bodies.max(1));
         let convex_vertices = GpuBuffer::new(&ctx, (max_bodies * 8).max(1));
         let planes = GpuBuffer::new(&ctx, 16);
-        let gauss_map = GpuBuffer::new(&ctx, (max_bodies * 64).max(1));
 
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SimParams uniform"),
@@ -571,7 +569,6 @@ impl GpuPipeline {
             convex_hulls,
             convex_vertices,
             planes,
-            gauss_map,
             compound_shapes_data: Vec::new(),
             compound_children_data: Vec::new(),
             compound_shapes_cpu: Vec::new(),
@@ -605,7 +602,6 @@ impl GpuPipeline {
         compound_shapes: &[CompoundShapeGpu],
         compound_children: &[CompoundChildGpu],
         compound_shapes_cpu: &[rubble_shapes3d::CompoundShape],
-        gauss_map_data: &[GaussMapEntry],
         gravity: Vec3,
         dt: f32,
         solver_iterations: u32,
@@ -635,9 +631,6 @@ impl GpuPipeline {
         }
         if !plane_data.is_empty() {
             self.planes.upload(&self.ctx, plane_data);
-        }
-        if !gauss_map_data.is_empty() {
-            self.gauss_map.upload(&self.ctx, gauss_map_data);
         }
 
         self.aabbs.grow_if_needed(&self.ctx, states.len());
@@ -1348,10 +1341,6 @@ impl GpuPipeline {
                     wgpu::BindGroupEntry {
                         binding: 12,
                         resource: self.planes.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 13,
-                        resource: self.gauss_map.buffer().as_entire_binding(),
                     },
                 ],
             });

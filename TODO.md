@@ -52,7 +52,6 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] Plane (stored as `Vec4(nx, ny, nz, distance)`)
 - [x] Compound shape (`CompoundShape`, `CompoundShapeGpu`, `CompoundChildGpu`)
 - [x] AABB computation for all shapes (both CPU-side and GPU shader)
-- [x] `GaussMapEntry` struct and `precompute_gauss_map()` function
 
 ## Pipeline — Predict
 
@@ -121,13 +120,8 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
   3. Pick point maximizing triangle area
   4. Pick point on opposite side maximizing quadrilateral area
 
-### Gauss Map (Edge-Edge Pruning)
-- [x] `precompute_gauss_map()` in rubble-shapes3d — enumerates non-parallel edge pairs
-- [x] `gauss_map_offset` / `gauss_map_count` fields in `ConvexHullData`
-- [x] **Wired in**: Gauss Map entries computed on body creation, uploaded to GPU buffer
-  - [x] Call `precompute_gauss_map()` when adding convex hull bodies
-  - [x] Upload Gauss Map entries to GPU buffer
-  - [~] Hull-hull SAT uses brute-force O(na*nb) edge-edge (correct for ≤64-vertex hulls; Minkowski face pruning possible future optimization)
+### Hull-Hull Edge-Edge SAT
+- [x] Brute-force O(na*nb) edge-edge axes in hull_hull_test — correct and fast for ≤64-vertex hulls (at most 4096 iterations on GPU)
 
 ### Compound Shapes
 - [x] CPU-side pair expansion in `run_detection()` — when broadphase pair involves compound, expand on CPU
@@ -210,7 +204,7 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 ## Remaining Work (Priority Order)
 
 ### High Priority — Integration of existing modules
-1. [x] Wire `precompute_gauss_map()` into convex hull body creation, upload entries to GPU (hull-hull uses brute-force edge-edge, correct for ≤64 verts)
+1. [x] Hull-hull edge-edge SAT — brute-force O(na*nb), correct for ≤64-vertex hulls
 2. [x] Wire `GpuRadixSort` into broadphase pair sorting (sort by shape-type key for batched dispatch)
 3. [x] Use `PingPongBuffer` for body state double-buffering in predict→solve→extract
 4. [x] Use compound BVH for child culling in `generate_compound_contacts_cpu()`
