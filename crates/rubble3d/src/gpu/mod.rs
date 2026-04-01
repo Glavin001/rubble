@@ -365,10 +365,19 @@ impl GpuPipeline {
         }
     }
 
-    /// Try to create a GPU pipeline. Returns None if no GPU adapter is available.
-    pub fn try_new(max_bodies: usize) -> Option<Self> {
-        let ctx = pollster::block_on(GpuContext::new()).ok()?;
+    /// Try to create a GPU pipeline (async). Returns None if no GPU adapter is available.
+    pub async fn try_new_async(max_bodies: usize) -> Option<Self> {
+        let ctx = GpuContext::new().await.ok()?;
         Some(Self::new(ctx, max_bodies))
+    }
+
+    /// Try to create a GPU pipeline. Returns None if no GPU adapter is available.
+    /// Not available on WASM targets — use [`try_new_async`](Self::try_new_async) instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn try_new(max_bodies: usize) -> Option<Self> {
+        pollster::block_on(GpuContext::new())
+            .ok()
+            .map(|ctx| Self::new(ctx, max_bodies))
     }
 
     /// Upload body data from CPU arrays to GPU buffers and set simulation params.

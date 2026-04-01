@@ -2,3 +2,8 @@
 Cargo.lock
 *.spv
 .claude/
+
+# Web build artifacts
+web/node_modules/
+web/dist/
+web/src/wasm/

@@ -515,11 +515,11 @@ pub struct World {
 }
 
 impl World {
-    /// Create a new 3D physics world backed by GPU compute shaders.
+    /// Create a new 3D physics world backed by GPU compute shaders (async).
     ///
-    /// Returns an error if no GPU adapter is available.
-    pub fn new(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
-        let ctx = pollster::block_on(rubble_gpu::GpuContext::new())?;
+    /// Use this constructor in WASM/browser environments where blocking is not allowed.
+    pub async fn new_async(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
+        let ctx = rubble_gpu::GpuContext::new().await?;
         let pipeline = gpu::GpuPipeline::new(ctx, config.max_bodies);
         Ok(Self {
             config,
@@ -541,6 +541,15 @@ impl World {
             contact_persistence: gpu::ContactPersistence3D::new(),
             collision_events: Vec::new(),
         })
+    }
+
+    /// Create a new 3D physics world backed by GPU compute shaders.
+    ///
+    /// Returns an error if no GPU adapter is available.
+    /// Not available on WASM targets — use [`new_async`](Self::new_async) instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
+        pollster::block_on(Self::new_async(config))
     }
 
     /// Add a rigid body to the world. Returns a stable handle.

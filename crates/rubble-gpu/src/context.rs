@@ -9,8 +9,14 @@ pub struct GpuContext {
 impl GpuContext {
     /// Request a high-performance GPU adapter and create a device + queue.
     pub async fn new() -> Result<Self, GpuError> {
+        let backends = if cfg!(target_arch = "wasm32") {
+            wgpu::Backends::BROWSER_WEBGPU
+        } else {
+            wgpu::Backends::VULKAN
+        };
+
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             memory_budget_thresholds: Default::default(),
             backend_options: Default::default(),
