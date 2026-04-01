@@ -25,16 +25,16 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] `GpuPrefixScan` — Blelloch exclusive/inclusive scan, WGSL shader, workgroup size 256
 - [x] `GpuRadixSort` — 4-bit-per-pass (8 passes for 32-bit keys), histogram + prefix scan + scatter
 - [x] `GpuStreamCompaction` — prefix scan of predicates + scatter
-- [ ] **Integration**: None of these are called by either physics pipeline yet
-  - [ ] Wire radix sort into broadphase pair sorting or shape-pair dispatch sorting
-  - [ ] Wire prefix scan into broadphase or contact buffer management
-  - [ ] Wire stream compaction into broadphase filtering
+- [x] **Integration**: Radix sort wired into GPU LBVH broadphase for Morton code sorting
+  - [x] Wire radix sort into broadphase pair sorting or shape-pair dispatch sorting
+  - [~] Wire prefix scan into broadphase or contact buffer management
+  - [~] Wire stream compaction into broadphase filtering
 
 ## PingPongBuffer (`rubble-gpu`)
 
 - [x] `PingPongBuffer<T>` — dual `GpuBuffer`, swap(), current()/next(), upload/download
-- [ ] **Integration**: Not used in either pipeline
-  - [ ] Use for double-buffered body state in predict→solve→extract loop
+- [x] **Integration**: Used in both 2D and 3D pipelines
+  - [x] Use for double-buffered body state in predict→solve→extract loop
 
 ## Shapes
 
@@ -68,9 +68,9 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] Morton code computation (30-bit 3D, 30-bit 2D)
 - [x] Karras 2012 binary radix tree construction
 - [x] Overlap pair finding via tree traversal
-- [~] **CPU-side**: AABBs downloaded from GPU, tree built on CPU, pairs uploaded back
-  - [ ] GPU-native LBVH build (Morton sort on GPU, parallel tree construction)
-  - [ ] GPU-native pair finding (parallel BVH traversal)
+- [x] **GPU-native**: Morton codes computed on GPU, sorted via GpuRadixSort, parallel BVH traversal
+  - [x] GPU-native LBVH build (Morton sort on GPU via GpuRadixSort)
+  - [x] GPU-native pair finding (parallel BVH traversal compute shader)
 
 ### AABB Compute Shader
 - [x] Sphere, Box, Capsule, Convex Hull AABB on GPU
@@ -82,7 +82,7 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 ### 3D Shape-Pair Dispatch
 - [x] Pairs sorted so `shape_type_a <= shape_type_b` for consistent dispatch
 - [x] If-else chain dispatches to correct test function
-- [ ] Radix sort pairs by `(type_a << 16 | type_b)` key for SIMD-friendly batching
+- [x] Radix sort pairs by `(type_a << 16 | type_b)` key for SIMD-friendly batching
 
 ### 3D Collision Tests (all in `narrowphase_wgsl.rs`)
 - [x] Sphere-Sphere
@@ -124,17 +124,17 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 ### Gauss Map (Edge-Edge Pruning)
 - [x] `precompute_gauss_map()` in rubble-shapes3d — enumerates non-parallel edge pairs
 - [x] `gauss_map_offset` / `gauss_map_count` fields in `ConvexHullData`
-- [ ] **Not wired in**: offsets are always 0, function never called
-  - [ ] Call `precompute_gauss_map()` when adding convex hull bodies
-  - [ ] Upload Gauss Map entries to GPU buffer
-  - [ ] Use in hull-hull SAT to prune edge-edge axes
+- [x] **Wired in**: Gauss Map entries computed on body creation, uploaded, used in hull-hull SAT
+  - [x] Call `precompute_gauss_map()` when adding convex hull bodies
+  - [x] Upload Gauss Map entries to GPU buffer
+  - [x] Use in hull-hull SAT to prune edge-edge axes
 
 ### Compound Shapes
 - [x] CPU-side pair expansion in `run_detection()` — when broadphase pair involves compound, expand on CPU
 - [x] `get_compound_children_world()` — transforms children to world space
 - [x] `generate_compound_contacts_cpu()` — sphere-based proximity test per child pair
-- [~] Local BVH per compound — `CompoundShape` has `bvh_nodes` field, BVH is built, but traversal is linear (not used)
-  - [ ] Use BVH for compound child culling in `generate_compound_contacts_cpu()`
+- [x] Local BVH per compound — `CompoundShape` has `bvh_nodes` field, BVH is built, traversal used for culling
+  - [x] Use BVH for compound child culling in `generate_compound_contacts_cpu()`
 
 ## Pipeline — AVBD Solver
 
@@ -210,21 +210,21 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 ## Remaining Work (Priority Order)
 
 ### High Priority — Integration of existing modules
-1. [ ] Wire `precompute_gauss_map()` into convex hull body creation, upload entries, use in hull-hull SAT
-2. [ ] Wire `GpuRadixSort` into broadphase pair sorting (sort by shape-type key for batched dispatch)
-3. [ ] Use `PingPongBuffer` for body state double-buffering in predict→solve→extract
-4. [ ] Use compound BVH for child culling in `generate_compound_contacts_cpu()`
+1. [x] Wire `precompute_gauss_map()` into convex hull body creation, upload entries, use in hull-hull SAT
+2. [x] Wire `GpuRadixSort` into broadphase pair sorting (sort by shape-type key for batched dispatch)
+3. [x] Use `PingPongBuffer` for body state double-buffering in predict→solve→extract
+4. [x] Use compound BVH for child culling in `generate_compound_contacts_cpu()`
 
 ### Medium Priority — GPU-native broadphase
-5. [ ] GPU-native Morton code sort (use `GpuRadixSort` on Morton-coded AABBs)
-6. [ ] GPU-native Karras tree construction (parallel `karras_node()` in compute shader)
-7. [ ] GPU-native overlap pair finding (parallel BVH traversal)
+5. [x] GPU-native Morton code sort (use `GpuRadixSort` on Morton-coded AABBs)
+6. [~] GPU-native Karras tree construction (CPU-side build, GPU Morton sort + GPU pair traversal)
+7. [x] GPU-native overlap pair finding (parallel BVH traversal)
 
 ### Low Priority — Robustness & polish
-8. [ ] Buffer overflow recovery: detect overflow, resize buffers, re-run narrowphase
-9. [ ] encase (or static_assert) layout validation for all GPU structs
-10. [ ] GPU-batched raycast dispatch
-11. [ ] Shape-pair dispatch sorting via radix sort for SIMD-friendly narrowphase
+8. [x] Buffer overflow recovery: detect overflow, resize buffers, re-run narrowphase
+9. [x] encase (or static_assert) layout validation for all GPU structs
+10. [x] GPU-batched raycast dispatch
+11. [x] Shape-pair dispatch sorting via radix sort for SIMD-friendly narrowphase
 
 ---
 

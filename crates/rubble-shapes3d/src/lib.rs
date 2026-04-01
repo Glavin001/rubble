@@ -420,6 +420,20 @@ fn compute_combined_aabb(children: &[CompoundChild], indices: &[usize]) -> (Vec3
 }
 
 // ---------------------------------------------------------------------------
+// Compile-time GPU layout validation
+// ---------------------------------------------------------------------------
+
+const _: () = assert!(std::mem::size_of::<SphereData>() == 16);
+const _: () = assert!(std::mem::size_of::<BoxData>() == 16);
+const _: () = assert!(std::mem::size_of::<CapsuleData>() == 16);
+const _: () = assert!(std::mem::size_of::<ConvexHullData>() == 32);
+const _: () = assert!(std::mem::size_of::<Plane>() == 16);
+const _: () = assert!(std::mem::size_of::<ConvexVertex3D>() == 16);
+const _: () = assert!(std::mem::size_of::<GaussMapEntry>() == 16);
+const _: () = assert!(std::mem::size_of::<CompoundChildGpu>() == 48);
+const _: () = assert!(std::mem::size_of::<CompoundShapeGpu>() == 8);
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -1,10 +1,12 @@
 //! `rubble-primitives` -- GPU-accelerated prefix scan, radix sort, and stream compaction.
 
 mod compaction;
+pub mod gpu_lbvh;
 mod prefix_scan;
 mod radix_sort;
 
 pub use compaction::GpuStreamCompaction;
+pub use gpu_lbvh::{BroadPair, BvhNodeGpu, GpuLbvh};
 pub use prefix_scan::GpuPrefixScan;
 pub use radix_sort::{GpuRadixSort, RadixSortEntry};
 

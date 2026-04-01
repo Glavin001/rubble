@@ -104,6 +104,15 @@ struct ConvexVert {
 @group(0) @binding(11) var<storage, read>      capsules:      array<CapsuleDataGpu>;
 @group(0) @binding(12) var<storage, read>      plane_data:    array<vec4<f32>>;
 
+struct GaussMapEntry {
+    edge_a: u32,
+    edge_b: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(13) var<storage, read>      gauss_map:     array<GaussMapEntry>;
+
 // ---------- Helpers ----------
 
 fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
@@ -939,6 +948,33 @@ fn hull_hull_test(
             best_face_v1 = (i + 1u) % nb;
             best_face_v2 = (i + 2u) % nb;
             best_is_edge = false;
+        }
+    }
+
+    // Cross-hull edge-edge axes (brute-force O(na*nb))
+    for (var i = 0u; i < na; i = i + 1u) {
+        let ea0 = hull_world_vert(si_a, i, pos_a, rot_a);
+        let ea1 = hull_world_vert(si_a, (i + 1u) % na, pos_a, rot_a);
+        let dir_a = ea1 - ea0;
+        for (var j = 0u; j < nb; j = j + 1u) {
+            let eb0 = hull_world_vert(si_b, j, pos_b, rot_b);
+            let eb1 = hull_world_vert(si_b, (j + 1u) % nb, pos_b, rot_b);
+            let dir_b = eb1 - eb0;
+            var axis = cross(dir_a, dir_b);
+            let len2 = dot(axis, axis);
+            if len2 < 1e-12 { continue; }
+            axis = axis / sqrt(len2);
+            if dot(axis, d) < 0.0 { axis = -axis; }
+            let proj_a = hull_project(si_a, pos_a, rot_a, axis);
+            let proj_b = hull_project(si_b, pos_b, rot_b, axis);
+            let overlap = min(proj_a.y, proj_b.y) - max(proj_a.x, proj_b.x);
+            if overlap < 0.0 { return; }
+            let depth = -overlap;
+            if depth > min_depth {
+                min_depth = depth;
+                best_normal = axis;
+                best_is_edge = true;
+            }
         }
     }
 
