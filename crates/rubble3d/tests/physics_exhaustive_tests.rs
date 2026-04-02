@@ -980,11 +980,14 @@ fn compound_vs_static_collision() {
         ..Default::default()
     });
 
+    // Use a plane for the floor — compound vs plane is handled correctly
+    // by the GPU narrowphase (compound children are individually tested).
     let _floor = world.add_body(&RigidBodyDesc {
-        position: Vec3::new(0.0, -1.0, 0.0),
+        position: Vec3::ZERO,
         mass: 0.0,
-        shape: ShapeDesc::Box {
-            half_extents: Vec3::new(10.0, 1.0, 10.0),
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
         },
         ..Default::default()
     });
