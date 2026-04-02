@@ -8,6 +8,7 @@ members = [
     "crates/rubble-shapes2d",
     "crates/rubble3d",
     "crates/rubble2d",
+    "crates/rubble-wasm",
 ]
 
 [workspace.dependencies]
@@ -17,6 +18,14 @@ wgpu = "29"
 pollster = "0.4"
 thiserror = "2"
 naga = { version = "29", features = ["spv-in", "wgsl-out"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+console_error_panic_hook = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 # Internal crates
 rubble-math = { path = "crates/rubble-math" }

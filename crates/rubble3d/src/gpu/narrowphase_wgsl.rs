@@ -63,7 +63,7 @@ struct SimParams {
     dt:                f32,
     num_bodies:        u32,
     solver_iterations: u32,
-    _pad:              u32,
+    pair_count:        u32,
 };
 
 const SHAPE_SPHERE:      u32 = 0u;
@@ -90,19 +90,26 @@ struct ConvexVert {
     _pad: f32,
 };
 
+struct PlaneParams {
+    num_planes: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    planes: array<vec4<f32>, 16>,
+};
+
 @group(0) @binding(0) var<storage, read>       bodies:        array<Body>;
 @group(0) @binding(1) var<storage, read>       props:         array<BodyProps>;
 @group(0) @binding(2) var<storage, read>       pairs:         array<Pair>;
-@group(0) @binding(3) var<storage, read>       pair_count_in: array<u32>;
-@group(0) @binding(4) var<storage, read>       spheres:       array<SphereData>;
-@group(0) @binding(5) var<storage, read>       boxes:         array<BoxDataGpu>;
-@group(0) @binding(6) var<storage, read_write> contacts:      array<Contact>;
-@group(0) @binding(7) var<storage, read_write> contact_count: atomic<u32>;
-@group(0) @binding(8) var<uniform>             params:        SimParams;
-@group(0) @binding(9) var<storage, read>       convex_hulls:  array<ConvexHullInfo>;
-@group(0) @binding(10) var<storage, read>      convex_verts:  array<ConvexVert>;
-@group(0) @binding(11) var<storage, read>      capsules:      array<CapsuleDataGpu>;
-@group(0) @binding(12) var<storage, read>      plane_data:    array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read>       spheres:       array<SphereData>;
+@group(0) @binding(4) var<storage, read>       boxes:         array<BoxDataGpu>;
+@group(0) @binding(5) var<storage, read_write> contacts:      array<Contact>;
+@group(0) @binding(6) var<storage, read_write> contact_count: atomic<u32>;
+@group(0) @binding(7) var<uniform>             params:        SimParams;
+@group(0) @binding(8) var<storage, read>       convex_hulls:  array<ConvexHullInfo>;
+@group(0) @binding(9) var<storage, read>       convex_verts:  array<ConvexVert>;
+@group(0) @binding(10) var<storage, read>      capsules:      array<CapsuleDataGpu>;
+@group(0) @binding(11) var<uniform>            plane_params:  PlaneParams;
 
 // ---------- Helpers ----------
 
@@ -1220,7 +1227,7 @@ fn box_hull_test(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
-    let num_pairs = pair_count_in[0];
+    let num_pairs = params.pair_count;
     if pi >= num_pairs {
         return;
     }
@@ -1272,7 +1279,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         sphere_hull_test(p1, ra, p2, r2, i2, b1, b2, max_contacts);
     } else if s1 == SHAPE_SPHERE && s2 == SHAPE_PLANE {
         let ra = spheres[i1].radius;
-        let pd = plane_data[i2];
+        let pd = plane_params.planes[i2];
         plane_sphere_test(pd.xyz, pd.w, p1, ra, b2, b1, max_contacts);
     } else if s1 == SHAPE_BOX && s2 == SHAPE_BOX {
         let ha = boxes[i1].half_extents.xyz;
@@ -1287,7 +1294,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         box_hull_test(p1, r1, ha, p2, r2, i2, b1, b2, max_contacts);
     } else if s1 == SHAPE_BOX && s2 == SHAPE_PLANE {
         let ha = boxes[i1].half_extents.xyz;
-        let pd = plane_data[i2];
+        let pd = plane_params.planes[i2];
         plane_box_test(pd.xyz, pd.w, p1, r1, ha, b2, b1, max_contacts);
     } else if s1 == SHAPE_CAPSULE && s2 == SHAPE_CAPSULE {
         let ca = capsules[i1];
@@ -1298,12 +1305,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         capsule_hull_test(p1, r1, cap.half_height, cap.radius, p2, r2, i2, b1, b2, max_contacts);
     } else if s1 == SHAPE_CAPSULE && s2 == SHAPE_PLANE {
         let cap = capsules[i1];
-        let pd = plane_data[i2];
+        let pd = plane_params.planes[i2];
         plane_capsule_test(pd.xyz, pd.w, p1, r1, cap.half_height, cap.radius, b2, b1, max_contacts);
     } else if s1 == SHAPE_CONVEX_HULL && s2 == SHAPE_CONVEX_HULL {
         hull_hull_test(p1, r1, i1, p2, r2, i2, b1, b2, max_contacts);
     } else if s1 == SHAPE_CONVEX_HULL && s2 == SHAPE_PLANE {
-        let pd = plane_data[i2];
+        let pd = plane_params.planes[i2];
         plane_hull_test(pd.xyz, pd.w, p1, r1, i1, b2, b1, max_contacts);
     }
     // SHAPE_PLANE vs SHAPE_PLANE: no collision

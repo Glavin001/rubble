@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rubble - GPU Physics Engine</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    h1 {
+      font-size: 3rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(135deg, #ff6b35, #f7c948);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      font-size: 1.1rem;
+      color: #888;
+      margin-bottom: 3rem;
+    }
+    .demos {
+      display: flex;
+      gap: 2rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    a.card {
+      display: block;
+      width: 320px;
+      padding: 2rem;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 12px;
+      text-decoration: none;
+      color: #e0e0e0;
+      transition: border-color 0.2s, transform 0.2s;
+    }
+    a.card:hover {
+      border-color: #ff6b35;
+      transform: translateY(-4px);
+    }
+    .card h2 { font-size: 1.4rem; margin-bottom: 0.5rem; }
+    .card p { font-size: 0.9rem; color: #888; line-height: 1.5; }
+    .card .tag {
+      display: inline-block;
+      margin-top: 1rem;
+      padding: 0.25rem 0.75rem;
+      background: #2a2a2a;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      color: #aaa;
+    }
+    .footer {
+      margin-top: 4rem;
+      font-size: 0.8rem;
+      color: #555;
+    }
+    .footer a { color: #ff6b35; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <h1>Rubble</h1>
+  <p class="subtitle">GPU-accelerated physics engine running in your browser via WebGPU + WASM</p>
+
+  <div class="demos">
+    <a class="card" href="src/2d/index.html">
+      <h2>2D Physics Demo</h2>
+      <p>Circles and rectangles bouncing under gravity with real-time collision detection. Rendered on HTML5 Canvas.</p>
+      <span class="tag">Canvas 2D</span>
+      <span class="tag">WebGPU Compute</span>
+    </a>
+
+    <a class="card" href="src/3d/index.html">
+      <h2>3D Physics Demo</h2>
+      <p>Spheres and boxes falling onto a ground plane with full rigid body dynamics. Rendered with Three.js WebGPU.</p>
+      <span class="tag">Three.js</span>
+      <span class="tag">WebGPU Compute + Render</span>
+    </a>
+  </div>
+
+  <p class="footer">
+    Powered by <a href="https://github.com/Glavin001/rubble">Rubble</a> &mdash;
+    Rust + wgpu + WASM
+  </p>
+</body>
+</html>

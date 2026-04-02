@@ -59,7 +59,7 @@ pub struct SimParamsGpu {
     pub dt: f32,
     pub num_bodies: u32,
     pub solver_iterations: u32,
-    pub _pad: u32,
+    pub pair_count: u32,
 }
 
 /// Broadphase pair (two body indices).
@@ -76,6 +76,19 @@ pub struct GpuPair {
 pub struct SolveRangeGpu {
     pub offset: u32,
     pub count: u32,
+}
+
+/// Uniform buffer layout for plane data in the narrowphase shader.
+/// Uses a uniform binding instead of storage to stay within the
+/// `maxStorageBuffersPerShaderStage` limit on constrained adapters (e.g. SwiftShader).
+const MAX_PLANES: usize = 16;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct PlaneParamsGpu {
+    pub num_planes: u32,
+    pub _pad: [u32; 3],
+    pub planes: [[f32; 4]; MAX_PLANES],
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +317,8 @@ pub struct GpuPipeline {
     // Uniform buffers
     params_uniform: wgpu::Buffer,
     solve_range_uniform: wgpu::Buffer,
+    /// Uniform buffer for plane data in narrowphase (avoids a storage binding).
+    plane_params_uniform: wgpu::Buffer,
 
     // GPU broadphase
     gpu_lbvh: GpuLbvh,
@@ -350,6 +365,13 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        let plane_params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PlaneParams uniform"),
+            size: std::mem::size_of::<PlaneParamsGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let gpu_lbvh = GpuLbvh::new(&ctx, max_bodies);
 
         Self {
@@ -378,14 +400,24 @@ impl GpuPipeline {
             compound_shapes_cpu: Vec::new(),
             params_uniform,
             solve_range_uniform,
+            plane_params_uniform,
             gpu_lbvh,
         }
     }
 
-    /// Try to create a GPU pipeline. Returns None if no GPU adapter is available.
-    pub fn try_new(max_bodies: usize) -> Option<Self> {
-        let ctx = pollster::block_on(GpuContext::new()).ok()?;
+    /// Try to create a GPU pipeline (async). Returns None if no GPU adapter is available.
+    pub async fn try_new_async(max_bodies: usize) -> Option<Self> {
+        let ctx = GpuContext::new().await.ok()?;
         Some(Self::new(ctx, max_bodies))
+    }
+
+    /// Try to create a GPU pipeline. Returns None if no GPU adapter is available.
+    /// Not available on WASM targets — use [`try_new_async`](Self::try_new_async) instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn try_new(max_bodies: usize) -> Option<Self> {
+        pollster::block_on(GpuContext::new())
+            .ok()
+            .map(|ctx| Self::new(ctx, max_bodies))
     }
 
     /// Upload body data from CPU arrays to GPU buffers and set simulation params.
@@ -434,6 +466,21 @@ impl GpuPipeline {
             self.planes.upload(&self.ctx, plane_data);
         }
 
+        // Write plane data as a uniform for the narrowphase (avoids a storage binding)
+        {
+            let mut pp = PlaneParamsGpu {
+                num_planes: plane_data.len().min(MAX_PLANES) as u32,
+                _pad: [0; 3],
+                planes: [[0.0; 4]; MAX_PLANES],
+            };
+            for (i, pd) in plane_data.iter().enumerate().take(MAX_PLANES) {
+                pp.planes[i] = [pd.x, pd.y, pd.z, pd.w];
+            }
+            self.ctx
+                .queue
+                .write_buffer(&self.plane_params_uniform, 0, bytemuck::bytes_of(&pp));
+        }
+
         self.aabbs.grow_if_needed(&self.ctx, states.len());
 
         let params = SimParamsGpu {
@@ -441,7 +488,7 @@ impl GpuPipeline {
             dt,
             num_bodies: states.len() as u32,
             solver_iterations,
-            _pad: 0,
+            pair_count: 0,
         };
         self.ctx
             .queue
@@ -467,6 +514,7 @@ impl GpuPipeline {
             .build_and_query(&self.ctx, &self.aabbs, num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
+        let mut pair_count: u32 = 0;
 
         if !overlap_pairs.is_empty() {
             // Download props to identify compound shapes
@@ -516,13 +564,14 @@ impl GpuPipeline {
                     };
                     (lo << 16) | hi
                 });
+                let count = non_compound_pairs.len() as u32;
                 self.pairs.upload(&self.ctx, &non_compound_pairs);
-                self.pair_count
-                    .write(&self.ctx, non_compound_pairs.len() as u32);
+                self.pair_count.write(&self.ctx, count);
+                pair_count = count;
             }
         }
 
-        self.dispatch_narrowphase(num_bodies);
+        self.dispatch_narrowphase(num_bodies, pair_count);
 
         // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
         let contact_count_val = self.contact_count.read(&self.ctx);
@@ -533,7 +582,7 @@ impl GpuPipeline {
             self.contacts.grow_if_needed(&self.ctx, new_cap);
             // Reset counter and re-run narrowphase
             self.contact_count.reset(&self.ctx);
-            self.dispatch_narrowphase(num_bodies);
+            self.dispatch_narrowphase(num_bodies, pair_count);
         }
 
         cpu_compound_contacts
@@ -948,6 +997,160 @@ impl GpuPipeline {
         all.into_iter().take(count).collect()
     }
 
+    /// Async version of `run_detection` for WASM/WebGPU.
+    #[cfg(target_arch = "wasm32")]
+    async fn run_detection_async(&mut self, num_bodies: u32) -> Vec<Contact3D> {
+        self.contact_count.reset(&self.ctx);
+        self.pair_count.reset(&self.ctx);
+
+        self.dispatch_predict(num_bodies);
+        self.dispatch_aabb(num_bodies);
+
+        // LBVH broadphase: download AABBs, build tree on CPU, upload pairs
+        self.aabbs.set_len(num_bodies);
+        let gpu_aabbs = self.aabbs.download_async(&self.ctx).await;
+        // Brute-force AABB overlap (fine for typical web demo sizes)
+        let mut overlap_pairs: Vec<[u32; 2]> = Vec::new();
+        for i in 0..gpu_aabbs.len() {
+            for j in (i + 1)..gpu_aabbs.len() {
+                let a = &gpu_aabbs[i];
+                let b = &gpu_aabbs[j];
+                if a.min.x <= b.max.x
+                    && a.max.x >= b.min.x
+                    && a.min.y <= b.max.y
+                    && a.max.y >= b.min.y
+                    && a.min.z <= b.max.z
+                    && a.max.z >= b.min.z
+                {
+                    overlap_pairs.push([i as u32, j as u32]);
+                }
+            }
+        }
+
+        let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
+        let mut pair_count: u32 = 0;
+
+        if !overlap_pairs.is_empty() {
+            // Download props to identify compound shapes
+            self.body_props.set_len(num_bodies);
+            let props = self.body_props.download_async(&self.ctx).await;
+            // Also download states for compound child world position computation
+            self.body_states.set_len(num_bodies);
+            let states = self.body_states.download_async(&self.ctx).await;
+
+            let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
+
+            for p in &overlap_pairs {
+                let a = p[0];
+                let b = p[1];
+                let st_a = props[a as usize].shape_type;
+                let st_b = props[b as usize].shape_type;
+
+                let a_is_compound = st_a == rubble_math::SHAPE_COMPOUND;
+                let b_is_compound = st_b == rubble_math::SHAPE_COMPOUND;
+
+                if !a_is_compound && !b_is_compound {
+                    // Neither is compound, pass through to GPU narrowphase
+                    non_compound_pairs.push(GpuPair { a, b });
+                } else {
+                    // At least one is compound: generate contacts on CPU.
+                    self.generate_compound_contacts_cpu(
+                        a,
+                        b,
+                        &props,
+                        &states,
+                        &mut cpu_compound_contacts,
+                    );
+                }
+            }
+
+            if !non_compound_pairs.is_empty() {
+                // Sort pairs by (shape_type_a << 16 | shape_type_b) for GPU coherence
+                non_compound_pairs.sort_unstable_by_key(|pair| {
+                    let st_a = props[pair.a as usize].shape_type;
+                    let st_b = props[pair.b as usize].shape_type;
+                    let (lo, hi) = if st_a <= st_b {
+                        (st_a, st_b)
+                    } else {
+                        (st_b, st_a)
+                    };
+                    (lo << 16) | hi
+                });
+                let count = non_compound_pairs.len() as u32;
+                self.pairs.upload(&self.ctx, &non_compound_pairs);
+                self.pair_count.write(&self.ctx, count);
+                pair_count = count;
+            }
+        }
+
+        self.dispatch_narrowphase(num_bodies, pair_count);
+
+        // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
+        let contact_count_val = self.contact_count.read_async(&self.ctx).await;
+        let capacity = self.contacts.capacity();
+        if contact_count_val > capacity {
+            let new_cap = (contact_count_val as usize) * 2;
+            self.contacts.grow_if_needed(&self.ctx, new_cap);
+            self.contact_count.reset(&self.ctx);
+            self.dispatch_narrowphase(num_bodies, pair_count);
+        }
+
+        cpu_compound_contacts
+    }
+
+    /// Async version of `step_with_contacts` for WASM/WebGPU.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn step_with_contacts_async(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        warm_contacts: Option<&[Contact3D]>,
+    ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
+        if num_bodies == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        let compound_contacts = self.run_detection_async(num_bodies).await;
+
+        let gpu_count = self.contact_count.read_async(&self.ctx).await as usize;
+        let mut contacts = if gpu_count > 0 {
+            self.contacts.set_len(gpu_count as u32);
+            let mut c = self.contacts.download_async(&self.ctx).await;
+            c.truncate(gpu_count);
+            c
+        } else {
+            Vec::new()
+        };
+
+        // Merge CPU-generated compound contacts with GPU narrowphase contacts
+        contacts.extend(compound_contacts);
+
+        // Warm-start: apply cached lambdas from previous frame
+        if let Some(prev) = warm_contacts {
+            warm_start_contacts_3d(&mut contacts, prev);
+        }
+
+        self.run_colored_solve(solver_iterations, &mut contacts);
+
+        // Download contacts after solve (lambdas are updated by GPU)
+        let final_contacts = if !contacts.is_empty() {
+            let cnt = self.contact_count.read_async(&self.ctx).await as usize;
+            if cnt > 0 {
+                self.contacts.set_len(cnt as u32);
+                let all = self.contacts.download_async(&self.ctx).await;
+                all.into_iter().take(cnt).collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        self.dispatch_extract(num_bodies);
+        let states = self.body_states.download_async(&self.ctx).await;
+        (states, final_contacts)
+    }
+
     // -----------------------------------------------------------------------
     // Private dispatch helpers
     // -----------------------------------------------------------------------
@@ -1030,11 +1233,15 @@ impl GpuPipeline {
         self.run_pass("aabb", &self.aabb_kernel, &bg, num_bodies);
     }
 
-    fn dispatch_narrowphase(&self, _num_bodies: u32) {
-        let num_pairs = self.pair_count.read(&self.ctx);
+    fn dispatch_narrowphase(&self, _num_bodies: u32, num_pairs: u32) {
         if num_pairs == 0 {
             return;
         }
+        // Write pair_count into the params uniform (offset 28 = last field)
+        self.ctx
+            .queue
+            .write_buffer(&self.params_uniform, 28, &num_pairs.to_le_bytes());
+
         let bg = self
             .ctx
             .device
@@ -1056,43 +1263,39 @@ impl GpuPipeline {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: self.pair_count.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
                         resource: self.spheres.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 5,
+                        binding: 4,
                         resource: self.boxes.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 6,
+                        binding: 5,
                         resource: self.contacts.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 7,
+                        binding: 6,
                         resource: self.contact_count.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 8,
+                        binding: 7,
                         resource: self.params_uniform.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 9,
+                        binding: 8,
                         resource: self.convex_hulls.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 10,
+                        binding: 9,
                         resource: self.convex_vertices.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 11,
+                        binding: 10,
                         resource: self.capsules.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: self.planes.buffer().as_entire_binding(),
+                        binding: 11,
+                        resource: self.plane_params_uniform.as_entire_binding(),
                     },
                 ],
             });

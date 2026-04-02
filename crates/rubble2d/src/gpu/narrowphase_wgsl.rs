@@ -51,7 +51,7 @@ struct SimParams2D {
     dt:                f32,
     num_bodies:        u32,
     solver_iterations: u32,
-    _pad:              u32,
+    pair_count:        u32,
 };
 
 const SHAPE_CIRCLE:         u32 = 0u;
@@ -83,15 +83,14 @@ struct CapsuleData2DGpu {
 @group(0) @binding(0) var<storage, read>       bodies:        array<Body2D>;
 @group(0) @binding(1) var<storage, read>       shape_infos:   array<ShapeInfo>;
 @group(0) @binding(2) var<storage, read>       pairs:         array<Pair>;
-@group(0) @binding(3) var<storage, read>       pair_count_in: array<u32>;
-@group(0) @binding(4) var<storage, read>       circles:       array<CircleData>;
-@group(0) @binding(5) var<storage, read>       rects:         array<RectDataGpu>;
-@group(0) @binding(6) var<storage, read_write> contacts:      array<Contact2D>;
-@group(0) @binding(7) var<storage, read_write> contact_count: atomic<u32>;
-@group(0) @binding(8) var<uniform>             params:        SimParams2D;
-@group(0) @binding(9) var<storage, read>       convex_polys:  array<ConvexPolyInfo>;
-@group(0) @binding(10) var<storage, read>      convex_verts:  array<ConvexVert2D>;
-@group(0) @binding(11) var<storage, read>      capsules_2d:   array<CapsuleData2DGpu>;
+@group(0) @binding(3) var<storage, read>       circles:       array<CircleData>;
+@group(0) @binding(4) var<storage, read>       rects:         array<RectDataGpu>;
+@group(0) @binding(5) var<storage, read_write> contacts:      array<Contact2D>;
+@group(0) @binding(6) var<storage, read_write> contact_count: atomic<u32>;
+@group(0) @binding(7) var<uniform>             params:        SimParams2D;
+@group(0) @binding(8) var<storage, read>       convex_polys:  array<ConvexPolyInfo>;
+@group(0) @binding(9) var<storage, read>       convex_verts:  array<ConvexVert2D>;
+@group(0) @binding(10) var<storage, read>      capsules_2d:   array<CapsuleData2DGpu>;
 
 fn emit_contact_2d(
     point: vec2<f32>,
@@ -654,7 +653,7 @@ fn capsule_poly_test(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
-    let num_pairs = pair_count_in[0];
+    let num_pairs = params.pair_count;
     if pi >= num_pairs {
         return;
     }

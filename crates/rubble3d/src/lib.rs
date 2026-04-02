@@ -516,11 +516,11 @@ pub struct World {
 }
 
 impl World {
-    /// Create a new 3D physics world backed by GPU compute shaders.
+    /// Create a new 3D physics world backed by GPU compute shaders (async).
     ///
-    /// Returns an error if no GPU adapter is available.
-    pub fn new(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
-        let ctx = pollster::block_on(rubble_gpu::GpuContext::new())?;
+    /// Use this constructor in WASM/browser environments where blocking is not allowed.
+    pub async fn new_async(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
+        let ctx = rubble_gpu::GpuContext::new().await?;
         let pipeline = gpu::GpuPipeline::new(ctx, config.max_bodies);
         Ok(Self {
             config,
@@ -542,6 +542,15 @@ impl World {
             contact_persistence: gpu::ContactPersistence3D::new(),
             collision_events: Vec::new(),
         })
+    }
+
+    /// Create a new 3D physics world backed by GPU compute shaders.
+    ///
+    /// Returns an error if no GPU adapter is available.
+    /// Not available on WASM targets — use [`new_async`](Self::new_async) instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
+        pollster::block_on(Self::new_async(config))
     }
 
     /// Add a rigid body to the world. Returns a stable handle.
@@ -874,6 +883,60 @@ impl World {
         let (results, new_contacts) =
             self.gpu_pipeline
                 .step_with_contacts(num_bodies, self.config.solver_iterations, warm);
+
+        // Update persistence and generate collision events
+        let events = self.contact_persistence.update(&new_contacts);
+        self.collision_events.extend(events);
+
+        for (slot, &orig) in alive_indices.iter().enumerate() {
+            if slot < results.len() {
+                self.states[orig] = results[slot];
+            }
+        }
+    }
+
+    /// Advance the simulation by one time step (async, for WASM/WebGPU).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn step_async(&mut self) {
+        let n = self.states.len();
+        if n == 0 {
+            return;
+        }
+
+        let alive_indices: Vec<usize> = (0..n).filter(|&i| self.alive[i]).collect();
+        if alive_indices.is_empty() {
+            return;
+        }
+
+        let compact_states: Vec<RigidBodyState3D> =
+            alive_indices.iter().map(|&i| self.states[i]).collect();
+        let compact_props: Vec<RigidBodyProps3D> =
+            alive_indices.iter().map(|&i| self.props[i]).collect();
+        let num_bodies = compact_states.len() as u32;
+
+        self.gpu_pipeline.upload(
+            &compact_states,
+            &compact_props,
+            &self.spheres,
+            &self.boxes,
+            &self.capsules,
+            &self.convex_hulls,
+            &self.convex_vertices,
+            &self.planes,
+            &self.compound_shapes,
+            &self.compound_children,
+            &self.compound_shapes_cpu,
+            self.config.gravity,
+            self.config.dt,
+            self.config.solver_iterations,
+        );
+
+        let prev = self.contact_persistence.prev_contacts();
+        let warm = if prev.is_empty() { None } else { Some(prev) };
+        let (results, new_contacts) = self
+            .gpu_pipeline
+            .step_with_contacts_async(num_bodies, self.config.solver_iterations, warm)
+            .await;
 
         // Update persistence and generate collision events
         let events = self.contact_persistence.update(&new_contacts);

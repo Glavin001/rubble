@@ -80,3 +80,64 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  wasm-build:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build WASM package
+        run: wasm-pack build crates/rubble-wasm --target web --out-dir ../../web/src/wasm
+      - name: Install web dependencies
+        run: cd web && npm ci
+      - name: Type-check TypeScript
+        run: cd web && npx tsc --noEmit
+      - name: Build web project
+        run: cd web && npx vite build
+      - name: Upload web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+
+  e2e:
+    name: E2E Tests (Playwright + SwiftShader)
+    needs: wasm-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        run: cd web && npm ci
+      - name: Install Playwright Chromium
+        run: cd web && npx playwright install chromium
+      - name: Download web build
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+      - name: Run Playwright tests
+        env:
+          CI: "true"
+        run: cd web && npx playwright test --reporter=line
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-results
+          path: web/test-results/
