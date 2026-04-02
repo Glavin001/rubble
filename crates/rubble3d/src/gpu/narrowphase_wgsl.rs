@@ -889,6 +889,8 @@ fn hull_hull_test(
     var best_face_v1 = 0u;
     var best_face_v2 = 0u;
     var best_is_edge = false;
+    var best_edge_i = 0u;
+    var best_edge_j = 0u;
 
     let na = hull_a.vertex_count;
     for (var i = 0u; i < na; i = i + 1u) {
@@ -967,6 +969,8 @@ fn hull_hull_test(
                 min_depth = depth;
                 best_normal = axis;
                 best_is_edge = true;
+                best_edge_i = i;
+                best_edge_j = j;
             }
         }
     }
@@ -974,6 +978,18 @@ fn hull_hull_test(
     // Ensure normal points from A to B
     if dot(best_normal, d) < 0.0 {
         best_normal = -best_normal;
+    }
+
+    // Edge-edge: emit single contact from closest points on the two edges
+    if best_is_edge {
+        let ea0 = hull_world_vert(si_a, best_edge_i, pos_a, rot_a);
+        let ea1 = hull_world_vert(si_a, (best_edge_i + 1u) % na, pos_a, rot_a);
+        let eb0 = hull_world_vert(si_b, best_edge_j, pos_b, rot_b);
+        let eb1 = hull_world_vert(si_b, (best_edge_j + 1u) % nb, pos_b, rot_b);
+        let pts = closest_points_segments(ea0, ea1, eb0, eb1);
+        let contact_point = (pts[0] + pts[1]) * 0.5;
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        return;
     }
 
     // Build reference face polygon (the 3-vertex triangle from the SAT face)
