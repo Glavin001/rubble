@@ -887,6 +887,11 @@ impl World {
     }
 
     /// Mark a body as kinematic (moves via set_position/set_velocity, not physics).
+    ///
+    /// When kinematic, `inv_mass` is set to 0 so the GPU predict shader
+    /// skips gravity integration and the solver treats it as immovable.
+    /// The original `inv_mass` is saved in `props.inv_inertia_row0.w`
+    /// (padding) so it can be restored when the body is made dynamic again.
     pub fn set_body_kinematic(&mut self, handle: BodyHandle, kinematic: bool) {
         if !self.allocator.is_valid(handle) {
             return;
@@ -894,8 +899,20 @@ impl World {
         let idx = handle.index as usize;
         if kinematic {
             self.props[idx].flags |= rubble_math::FLAG_KINEMATIC;
+            // Save original inv_mass and zero it out so GPU skips this body.
+            let inv_mass = self.states[idx].inv_mass();
+            if inv_mass > 0.0 {
+                self.props[idx].inv_inertia_row0.w = inv_mass;
+                self.states[idx].position_inv_mass.w = 0.0;
+            }
         } else {
             self.props[idx].flags &= !rubble_math::FLAG_KINEMATIC;
+            // Restore original inv_mass from saved value.
+            let saved = self.props[idx].inv_inertia_row0.w;
+            if saved > 0.0 {
+                self.states[idx].position_inv_mass.w = saved;
+                self.props[idx].inv_inertia_row0.w = 0.0;
+            }
         }
     }
 
