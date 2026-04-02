@@ -198,6 +198,15 @@ impl PhysicsWorld2D {
     pub fn handle_count(&self) -> u32 {
         self.handles.len() as u32
     }
+
+    /// Per-phase wall-clock timings (ms) from the last `step()` call.
+    ///
+    /// Returns 7 floats in fixed order:
+    ///   [0] upload, [1] predict+aabb, [2] broadphase, [3] narrowphase,
+    ///   [4] contact_fetch, [5] solve, [6] extract
+    pub fn last_step_timings_ms(&self) -> Vec<f32> {
+        self.world.last_step_timings().as_array().to_vec()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -404,5 +413,14 @@ impl PhysicsWorld3D {
     /// Total number of handles.
     pub fn handle_count(&self) -> u32 {
         self.handles.len() as u32
+    }
+
+    /// Per-phase wall-clock timings (ms) from the last `step()` call.
+    ///
+    /// Returns 7 floats in fixed order:
+    ///   [0] upload, [1] predict+aabb, [2] broadphase, [3] narrowphase,
+    ///   [4] contact_fetch, [5] solve, [6] extract
+    pub fn last_step_timings_ms(&self) -> Vec<f32> {
+        self.world.last_step_timings().as_array().to_vec()
     }
 }

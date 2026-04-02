@@ -12,6 +12,7 @@ glam = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
 wgpu = { workspace = true }
+web-time = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

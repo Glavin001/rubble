@@ -81,6 +81,20 @@ jobs:
           sudo apt-get install -y mesa-vulkan-drivers
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  viewer-build:
+    name: Viewer Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Build native viewer examples
+        run: cargo build -p rubble-viewer --examples --release
+
   wasm-build:
     name: WASM Build
     runs-on: ubuntu-latest

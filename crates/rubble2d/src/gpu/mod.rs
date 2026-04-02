@@ -551,6 +551,121 @@ impl GpuPipeline2D {
         (states, final_contacts)
     }
 
+    /// Timed version of `step_with_contacts` that populates per-phase timings.
+    pub fn step_with_contacts_timed(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        warm_contacts: Option<&[Contact2D]>,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) -> (Vec<RigidBodyState2D>, Vec<Contact2D>) {
+        use std::time::Instant;
+
+        if num_bodies == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        self.run_detection_timed(num_bodies, timings);
+
+        let t_cf = Instant::now();
+        let count = self.contact_count.read(&self.ctx) as usize;
+        let mut contacts = if count > 0 {
+            self.contacts.set_len(count as u32);
+            let mut c = self.contacts.download(&self.ctx);
+            c.truncate(count);
+            if let Some(prev) = warm_contacts {
+                warm_start_contacts_2d(&mut c, prev);
+            }
+            c
+        } else {
+            Vec::new()
+        };
+        timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
+
+        let t_solve = Instant::now();
+        self.run_colored_solve(solver_iterations, &mut contacts);
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
+
+        let final_contacts = if !contacts.is_empty() {
+            self.download_contacts()
+        } else {
+            Vec::new()
+        };
+
+        let t_ext = Instant::now();
+        self.dispatch_extract(num_bodies);
+        let states = self.body_states.download(&self.ctx);
+        self.body_states.swap();
+        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+
+        (states, final_contacts)
+    }
+
+    fn run_detection_timed(&mut self, num_bodies: u32, timings: &mut rubble_gpu::StepTimingsMs) {
+        use std::time::Instant;
+
+        self.contact_count.reset(&self.ctx);
+        self.pair_count.reset(&self.ctx);
+
+        let t0 = Instant::now();
+        self.dispatch_predict(num_bodies);
+        self.dispatch_aabb(num_bodies);
+        timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
+
+        let t1 = Instant::now();
+        self.aabbs.set_len(num_bodies);
+        let aabb2d_data = self.aabbs.download(&self.ctx);
+        let cpu_aabbs_3d: &[rubble_math::Aabb3D] = bytemuck::cast_slice(&aabb2d_data);
+        let overlap_pairs = self.gpu_lbvh.build_and_query_raw(
+            &self.ctx,
+            self.aabbs.buffer(),
+            cpu_aabbs_3d,
+            num_bodies,
+        );
+
+        let pair_count = if !overlap_pairs.is_empty() {
+            self.shape_infos.set_len(num_bodies);
+            let shape_info = self.shape_infos.download(&self.ctx);
+
+            let mut gpu_pairs: Vec<GpuPair> = overlap_pairs
+                .iter()
+                .map(|p| GpuPair { a: p[0], b: p[1] })
+                .collect();
+
+            gpu_pairs.sort_unstable_by_key(|pair| {
+                let st_a = shape_info[pair.a as usize].shape_type;
+                let st_b = shape_info[pair.b as usize].shape_type;
+                let (lo, hi) = if st_a <= st_b {
+                    (st_a, st_b)
+                } else {
+                    (st_b, st_a)
+                };
+                (lo << 16) | hi
+            });
+
+            let count = gpu_pairs.len() as u32;
+            self.pairs.upload(&self.ctx, &gpu_pairs);
+            self.pair_count.write(&self.ctx, count);
+            count
+        } else {
+            0
+        };
+        timings.broadphase_ms = t1.elapsed().as_secs_f32() * 1000.0;
+
+        let t2 = Instant::now();
+        self.dispatch_narrowphase(num_bodies, pair_count);
+
+        let contact_count_val = self.contact_count.read(&self.ctx);
+        let capacity = self.contacts.capacity();
+        if contact_count_val > capacity {
+            let new_cap = (contact_count_val as usize) * 2;
+            self.contacts.grow_if_needed(&self.ctx, new_cap);
+            self.contact_count.reset(&self.ctx);
+            self.dispatch_narrowphase(num_bodies, pair_count);
+        }
+        timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
+    }
+
     /// Reference to the GPU context.
     pub fn context(&self) -> &GpuContext {
         &self.ctx
@@ -577,16 +692,25 @@ impl GpuPipeline2D {
     // -----------------------------------------------------------------------
 
     #[cfg(target_arch = "wasm32")]
-    async fn run_detection_async(&mut self, num_bodies: u32) {
+    async fn run_detection_async(
+        &mut self,
+        num_bodies: u32,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) {
+        use rubble_gpu::web_time::Instant;
+
         self.contact_count.reset(&self.ctx);
         self.pair_count.reset(&self.ctx);
 
+        let t0 = Instant::now();
         self.dispatch_predict(num_bodies);
         self.dispatch_aabb(num_bodies);
 
         self.aabbs.set_len(num_bodies);
         let gpu_aabbs = self.aabbs.download_async(&self.ctx).await;
-        // Brute-force AABB overlap (fine for typical web demo sizes)
+        timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
+
+        let t1 = Instant::now();
         let mut overlap_pairs: Vec<[u32; 2]> = Vec::new();
         for i in 0..gpu_aabbs.len() {
             for j in (i + 1)..gpu_aabbs.len() {
@@ -603,7 +727,6 @@ impl GpuPipeline2D {
         }
 
         let pair_count = if !overlap_pairs.is_empty() {
-            // Download shape info for sorting pairs by shape type
             self.shape_infos.set_len(num_bodies);
             let shape_info = self.shape_infos.download_async(&self.ctx).await;
 
@@ -630,10 +753,11 @@ impl GpuPipeline2D {
         } else {
             0
         };
+        timings.broadphase_ms = t1.elapsed().as_secs_f32() * 1000.0;
 
+        let t2 = Instant::now();
         self.dispatch_narrowphase(num_bodies, pair_count);
 
-        // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
         let contact_count_val = self.contact_count.read_async(&self.ctx).await;
         let capacity = self.contacts.capacity();
         if contact_count_val > capacity {
@@ -642,6 +766,7 @@ impl GpuPipeline2D {
             self.contact_count.reset(&self.ctx);
             self.dispatch_narrowphase(num_bodies, pair_count);
         }
+        timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
     }
 
     /// Async version of `step_with_contacts` for WASM/WebGPU.
@@ -651,13 +776,17 @@ impl GpuPipeline2D {
         num_bodies: u32,
         solver_iterations: u32,
         warm_contacts: Option<&[Contact2D]>,
+        timings: &mut rubble_gpu::StepTimingsMs,
     ) -> (Vec<RigidBodyState2D>, Vec<Contact2D>) {
+        use rubble_gpu::web_time::Instant;
+
         if num_bodies == 0 {
             return (Vec::new(), Vec::new());
         }
 
-        self.run_detection_async(num_bodies).await;
+        self.run_detection_async(num_bodies, timings).await;
 
+        let t_cf = Instant::now();
         let count = self.contact_count.read_async(&self.ctx).await as usize;
         let mut contacts = if count > 0 {
             self.contacts.set_len(count as u32);
@@ -670,7 +799,9 @@ impl GpuPipeline2D {
         } else {
             Vec::new()
         };
+        timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
+        let t_solve = Instant::now();
         self.run_colored_solve(solver_iterations, &mut contacts);
 
         let final_contacts = if !contacts.is_empty() {
@@ -685,9 +816,13 @@ impl GpuPipeline2D {
         } else {
             Vec::new()
         };
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
+        let t_ext = Instant::now();
         self.dispatch_extract(num_bodies);
         let states = self.body_states.download_async(&self.ctx).await;
+        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+
         (states, final_contacts)
     }
 
