@@ -658,7 +658,7 @@ mod tests {
     use rubble_gpu::GpuBuffer;
     use rubble_math::Aabb3D;
 
-    fn ctx() -> GpuContext {
+    fn try_ctx() -> Option<GpuContext> {
         crate::test_gpu()
     }
 
@@ -668,7 +668,10 @@ mod tests {
 
     #[test]
     fn single_body_returns_no_pairs() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         let aabbs = vec![aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])];
         let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 1);
@@ -679,7 +682,10 @@ mod tests {
 
     #[test]
     fn two_overlapping_bodies() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         let aabbs = vec![
             aabb([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),
@@ -694,7 +700,10 @@ mod tests {
 
     #[test]
     fn two_separated_bodies_no_pairs() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         let aabbs = vec![
             aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
@@ -708,7 +717,10 @@ mod tests {
 
     #[test]
     fn three_bodies_partial_overlap() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         // A overlaps B, B overlaps C, A does NOT overlap C
         let aabbs = vec![
@@ -728,7 +740,10 @@ mod tests {
 
     #[test]
     fn all_overlapping_returns_all_pairs() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         // All overlap each other (big box)
         let aabbs = vec![
@@ -746,7 +761,10 @@ mod tests {
 
     #[test]
     fn no_duplicate_pairs() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         let aabbs = vec![
             aabb([0.0, 0.0, 0.0], [5.0, 5.0, 5.0]),
@@ -767,7 +785,10 @@ mod tests {
 
     #[test]
     fn build_and_query_raw_works() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         let aabbs = vec![
             aabb([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),
@@ -782,7 +803,10 @@ mod tests {
 
     #[test]
     fn many_bodies_stress() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let n = 64;
         let mut lbvh = GpuLbvh::new(&ctx, n);
         // Line of non-overlapping unit cubes along X
@@ -804,7 +828,10 @@ mod tests {
 
     #[test]
     fn touching_aabbs_overlap() {
-        let ctx = ctx();
+        let Some(ctx) = try_ctx() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         // Edge-touching (min.x of B == max.x of A)
         let aabbs = vec![

@@ -451,6 +451,14 @@ impl World2D {
         s.lin_vel = Vec4::new(vel.x, vel.y, omega, 0.0);
     }
 
+    /// Get the angular velocity of a body.
+    pub fn get_angular_velocity(&self, handle: BodyHandle) -> Option<f32> {
+        if !self.allocator.is_alive(handle) {
+            return None;
+        }
+        Some(self.states[handle.index as usize].angular_velocity())
+    }
+
     /// Mark a body as kinematic (moves via set_position/set_velocity, not physics).
     pub fn set_body_kinematic(&mut self, handle: BodyHandle, kinematic: bool) {
         if !self.allocator.is_alive(handle) {
@@ -836,17 +844,28 @@ impl World2D {
 mod tests {
     use super::*;
 
-    fn gpu_world(config: SimConfig2D) -> World2D {
-        World2D::new(config).expect("GPU required for tests")
+    fn try_gpu_world(config: SimConfig2D) -> Option<World2D> {
+        World2D::new(config).ok()
     }
 
-    fn gpu_world_default() -> World2D {
-        gpu_world(SimConfig2D::default())
+    macro_rules! gpu_world {
+        ($config:expr) => {
+            match try_gpu_world($config) {
+                Some(w) => w,
+                None => {
+                    eprintln!("SKIP: No GPU adapter found");
+                    return;
+                }
+            }
+        };
+        () => {
+            gpu_world!(SimConfig2D::default())
+        };
     }
 
     #[test]
     fn test_world2d_new() {
-        let world = gpu_world_default();
+        let world = gpu_world!();
         assert_eq!(world.body_count(), 0);
         assert!(world.states.is_empty());
         assert_eq!(world.config.gravity, Vec2::new(0.0, -9.81));
@@ -857,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_add_remove_body() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
 
         let h = world.add_body(&RigidBodyDesc2D {
             x: 1.0,
@@ -903,7 +922,7 @@ mod tests {
 
     #[test]
     fn test_gravity_fall_2d() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             dt: 1.0 / 60.0,
             solver_iterations: 5,
@@ -936,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_two_body_collision_2d() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::ZERO,
             dt: 1.0 / 60.0,
             solver_iterations: 10,
@@ -976,7 +995,7 @@ mod tests {
 
     #[test]
     fn test_body_count() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         assert_eq!(world.body_count(), 0);
 
         let h1 = world.add_body(&RigidBodyDesc2D::default());
@@ -1004,7 +1023,7 @@ mod tests {
 
     #[test]
     fn test_raycast_circle_hit() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         world.add_body(&RigidBodyDesc2D {
             x: 5.0,
             y: 0.0,
@@ -1020,7 +1039,7 @@ mod tests {
 
     #[test]
     fn test_raycast_circle_miss() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         world.add_body(&RigidBodyDesc2D {
             x: 5.0,
             y: 5.0,
@@ -1034,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_raycast_rect_hit() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         world.add_body(&RigidBodyDesc2D {
             x: 3.0,
             y: 0.0,
@@ -1052,7 +1071,7 @@ mod tests {
 
     #[test]
     fn test_raycast_capsule_hit() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         world.add_body(&RigidBodyDesc2D {
             x: 4.0,
             y: 0.0,
@@ -1071,7 +1090,7 @@ mod tests {
 
     #[test]
     fn test_raycast_convex_polygon_hit() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         // Triangle centered at (5,0)
         world.add_body(&RigidBodyDesc2D {
             x: 5.0,
@@ -1092,7 +1111,7 @@ mod tests {
 
     #[test]
     fn test_raycast_batch() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         world.add_body(&RigidBodyDesc2D {
             x: 3.0,
             y: 0.0,
@@ -1125,7 +1144,7 @@ mod tests {
 
     #[test]
     fn test_overlap_aabb() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         let h = world.add_body(&RigidBodyDesc2D {
             x: 0.0,
             y: 0.0,
@@ -1147,7 +1166,7 @@ mod tests {
 
     #[test]
     fn test_kinematic_body_no_gravity() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             ..Default::default()
         });
@@ -1177,7 +1196,7 @@ mod tests {
 
     #[test]
     fn test_collision_events_drain_once() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::ZERO,
             ..Default::default()
         });
@@ -1220,7 +1239,7 @@ mod tests {
 
     #[test]
     fn test_set_position_and_velocity() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::ZERO,
             ..Default::default()
         });
@@ -1238,7 +1257,7 @@ mod tests {
 
     #[test]
     fn test_set_angular_velocity() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::ZERO,
             ..Default::default()
         });
@@ -1255,7 +1274,7 @@ mod tests {
 
     #[test]
     fn test_get_angle() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         let h = world.add_body(&RigidBodyDesc2D {
             angle: 1.5,
             mass: 1.0,
@@ -1274,7 +1293,7 @@ mod tests {
 
     #[test]
     fn test_rect_creation_and_step() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             ..Default::default()
         });
@@ -1296,7 +1315,7 @@ mod tests {
 
     #[test]
     fn test_capsule_creation_and_step() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             ..Default::default()
         });
@@ -1319,7 +1338,7 @@ mod tests {
 
     #[test]
     fn test_convex_polygon_creation() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         let h = world.add_body(&RigidBodyDesc2D {
             x: 0.0,
             y: 0.0,
@@ -1344,7 +1363,7 @@ mod tests {
 
     #[test]
     fn test_static_body_no_motion() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             ..Default::default()
         });
@@ -1372,7 +1391,7 @@ mod tests {
 
     #[test]
     fn test_zero_gravity_constant_velocity() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::ZERO,
             ..Default::default()
         });
@@ -1398,7 +1417,7 @@ mod tests {
 
     #[test]
     fn test_many_bodies_no_crash() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             max_bodies: 1024,
             ..Default::default()
@@ -1421,7 +1440,7 @@ mod tests {
 
     #[test]
     fn test_add_remove_cycle() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         let mut handles = Vec::new();
         for i in 0..20 {
             handles.push(world.add_body(&RigidBodyDesc2D {
@@ -1449,7 +1468,7 @@ mod tests {
 
     #[test]
     fn test_friction_coefficient_stored() {
-        let mut world = gpu_world_default();
+        let mut world = gpu_world!();
         let h = world.add_body(&RigidBodyDesc2D {
             mass: 1.0,
             friction: 0.8,
@@ -1463,7 +1482,7 @@ mod tests {
 
     #[test]
     fn test_multiple_shape_types_simulation() {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             ..Default::default()
         });

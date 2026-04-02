@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 [dev-dependencies]
 pollster = { workspace = true }
 rubble-math = { workspace = true }
+wgpu = { workspace = true }
