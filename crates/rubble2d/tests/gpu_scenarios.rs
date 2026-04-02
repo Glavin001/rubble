@@ -7,8 +7,13 @@
 use glam::Vec2;
 use rubble2d::{RigidBodyDesc2D, ShapeDesc2D, SimConfig2D, World2D};
 
-fn gpu_world(config: SimConfig2D) -> World2D {
-    World2D::new(config).expect("GPU required for scenario tests")
+macro_rules! gpu_world {
+    ($config:expr) => {
+        match World2D::new($config) {
+            Ok(w) => w,
+            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+        }
+    };
 }
 
 fn step_n(world: &mut World2D, n: usize) {
@@ -23,7 +28,7 @@ fn step_n(world: &mut World2D, n: usize) {
 
 #[test]
 fn free_fall_circle_1_second() {
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
     let h = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
         y: 10.0,
@@ -45,7 +50,7 @@ fn free_fall_circle_1_second() {
 
 #[test]
 fn free_fall_rect_matches_circle() {
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
     let circle = world.add_body(&RigidBodyDesc2D {
         x: -3.0,
         y: 20.0,
@@ -79,7 +84,7 @@ fn zero_gravity_no_motion() {
         gravity: Vec2::ZERO,
         ..Default::default()
     };
-    let mut world = gpu_world(config);
+    let mut world = gpu_world!(config);
     let h = world.add_body(&RigidBodyDesc2D {
         x: 5.0,
         y: 5.0,
@@ -98,7 +103,7 @@ fn zero_gravity_no_motion() {
 
 #[test]
 fn static_body_does_not_fall() {
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
     let h = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
         y: 10.0,
@@ -125,7 +130,7 @@ fn static_body_does_not_fall() {
 
 #[test]
 fn rect_rect_collision() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -163,7 +168,7 @@ fn rect_rect_collision() {
 
 #[test]
 fn circle_rect_collision() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -203,7 +208,7 @@ fn circle_rect_collision() {
 
 #[test]
 fn rotated_rect_rect_collision() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -256,7 +261,7 @@ fn rotated_rect_rect_collision() {
 fn domino_chain_2d() {
     // Line up rects, push the first one. Verify no NaN/crashes and
     // the first domino moves in the push direction.
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         ..Default::default()
     });
@@ -309,7 +314,7 @@ fn domino_chain_2d() {
 fn circle_pile_stability() {
     // Multiple circles dropped near each other — verify collision handling
     // doesn't produce NaN/Inf values over a moderate simulation.
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let handles: Vec<_> = (0..3)
         .map(|i| {
@@ -336,7 +341,7 @@ fn circle_pile_stability() {
 
 #[test]
 fn symmetric_collision_preserves_symmetry_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -383,7 +388,7 @@ fn symmetric_collision_preserves_symmetry_2d() {
 fn long_simulation_2d_no_divergence() {
     // Long simulation with multiple bodies under gravity.
     // Verify all positions remain finite (no NaN/Inf).
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let handles: Vec<_> = (0..8)
         .map(|i| {
@@ -418,7 +423,7 @@ fn long_simulation_2d_no_divergence() {
 
 #[test]
 fn remove_body_mid_simulation_2d() {
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let a = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
@@ -449,7 +454,7 @@ fn projectile_motion_2d() {
     let vx = speed * angle.cos();
     let vy = speed * angle.sin();
 
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
     let h = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
         y: 0.0,
@@ -482,7 +487,7 @@ fn projectile_motion_2d() {
 fn circle_bounce_off_floor_2d() {
     // Circle dropped onto a static rect floor. Verify the collision is detected
     // (contact count > 0 at some point), and positions remain finite.
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let _floor = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
@@ -520,7 +525,7 @@ fn circle_bounce_off_floor_2d() {
 
 #[test]
 fn teleport_and_simulate_2d() {
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let h = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
@@ -553,7 +558,7 @@ fn teleport_and_simulate_2d() {
 fn two_circles_stacked_stability_2d() {
     // Two circles at different heights under gravity. After short sim,
     // all positions remain finite.
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let lower = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
@@ -584,7 +589,7 @@ fn two_circles_stacked_stability_2d() {
 #[test]
 fn body_velocity_decreases_under_gravity_2d() {
     let g = 9.81_f32;
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
     let h = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
         y: 100.0,
@@ -620,7 +625,7 @@ fn energy_conserved_during_free_fall_2d() {
     let y0 = 100.0_f32;
     let initial_energy = mass * g * y0;
 
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let h = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
@@ -651,7 +656,7 @@ fn energy_does_not_increase_on_bounce_2d() {
     let y0 = 10.0_f32;
     let initial_energy = mass * g * y0;
 
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let _floor = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
@@ -693,7 +698,7 @@ fn total_momentum_conserved_in_collision_2d() {
     let v_b = Vec2::new(-2.0, -1.0);
     let initial_momentum = m_a * v_a + m_b * v_b;
 
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -732,7 +737,7 @@ fn total_momentum_conserved_in_collision_2d() {
 #[test]
 fn gravity_produces_linear_velocity_increase_2d() {
     let g = 9.81_f32;
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
     let h = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
         y: 100.0,
@@ -761,7 +766,7 @@ fn gravity_produces_linear_velocity_increase_2d() {
 
 #[test]
 fn vertical_drop_preserves_horizontal_position_2d() {
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
     let h = world.add_body(&RigidBodyDesc2D {
         x: 7.0,
         y: 50.0,
@@ -783,7 +788,7 @@ fn vertical_drop_preserves_horizontal_position_2d() {
 #[test]
 fn bodies_never_overlap_after_settling_2d() {
     let r = 0.5_f32;
-    let mut world = gpu_world(SimConfig2D::default());
+    let mut world = gpu_world!(SimConfig2D::default());
 
     let _floor = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
@@ -828,7 +833,7 @@ fn heavier_body_deflects_less_in_collision_2d() {
     let m_light = 1.0_f32;
     let v0 = 3.0_f32;
 
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -873,7 +878,7 @@ fn kinetic_energy_constant_in_zero_gravity_no_collision_2d() {
     let v0 = Vec2::new(3.0, -1.0);
     let initial_ke = 0.5 * mass * v0.length_squared();
 
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -911,7 +916,7 @@ fn center_of_mass_velocity_constant_in_zero_gravity_2d() {
     let v3 = Vec2::new(0.0, -3.0);
     let initial_com_vel = (m1 * v1 + m2 * v2 + m3 * v3) / total_mass;
 
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -960,7 +965,7 @@ fn center_of_mass_velocity_constant_in_zero_gravity_2d() {
 
 #[test]
 fn static_body_unaffected_by_dynamic_collision_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         ..Default::default()
     });
@@ -998,7 +1003,7 @@ fn static_body_unaffected_by_dynamic_collision_2d() {
 fn superposition_gravity_plus_horizontal_velocity_2d() {
     let vx = 5.0_f32;
 
-    let mut w1 = gpu_world(SimConfig2D::default());
+    let mut w1 = gpu_world!(SimConfig2D::default());
     let proj = w1.add_body(&RigidBodyDesc2D {
         x: 0.0,
         y: 50.0,
@@ -1007,7 +1012,7 @@ fn superposition_gravity_plus_horizontal_velocity_2d() {
         ..Default::default()
     });
 
-    let mut w2 = gpu_world(SimConfig2D::default());
+    let mut w2 = gpu_world!(SimConfig2D::default());
     let drop = w2.add_body(&RigidBodyDesc2D {
         x: 0.0,
         y: 50.0,

@@ -6,8 +6,13 @@
 use glam::Vec3;
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 
-fn gpu_world(config: SimConfig) -> World {
-    World::new(config).expect("GPU required for performance tests")
+macro_rules! gpu_world {
+    ($config:expr) => {
+        match World::new($config) {
+            Ok(w) => w,
+            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+        }
+    };
 }
 
 fn step_n(world: &mut World, n: usize) {
@@ -22,7 +27,7 @@ fn step_n(world: &mut World, n: usize) {
 
 #[test]
 fn sustained_1000_steps_single_body() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -46,7 +51,7 @@ fn sustained_1000_steps_single_body() {
 
 #[test]
 fn sustained_500_steps_with_contacts() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 8,
@@ -123,7 +128,7 @@ fn scale_256_bodies() {
 }
 
 fn run_body_count_test(count: usize) {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -185,7 +190,7 @@ fn run_body_count_test(count: usize) {
 
 #[test]
 fn dynamic_add_remove_during_simulation() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -248,7 +253,7 @@ fn dynamic_add_remove_during_simulation() {
 #[test]
 fn many_contacts_trigger_overflow_recovery() {
     // Create many overlapping bodies to trigger contact buffer overflow.
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -301,7 +306,7 @@ fn many_contacts_trigger_overflow_recovery() {
 
 #[test]
 fn high_velocity_impact_on_wall() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 120.0,
         solver_iterations: 15,
@@ -336,7 +341,7 @@ fn high_velocity_impact_on_wall() {
 #[test]
 fn tunneling_prevention_fast_sphere() {
     // Fast sphere should still collide (not tunnel through) a thick wall.
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -378,7 +383,7 @@ fn tunneling_prevention_fast_sphere() {
 
 #[test]
 fn bodies_far_apart_no_interaction() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -420,7 +425,7 @@ fn bodies_far_apart_no_interaction() {
 
 #[test]
 fn many_static_bodies_no_crash() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -464,7 +469,7 @@ fn many_static_bodies_no_crash() {
 
 #[test]
 fn warm_starting_long_simulation() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 8,
@@ -507,7 +512,7 @@ fn warm_starting_long_simulation() {
 
 #[test]
 fn all_static_bodies_no_crash() {
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
 
     for i in 0..10 {
         world.add_body(&RigidBodyDesc {
@@ -528,7 +533,7 @@ fn all_static_bodies_no_crash() {
 
 #[test]
 fn negative_x_gravity() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(-9.81, 0.0, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -559,7 +564,7 @@ fn negative_x_gravity() {
 
 #[test]
 fn diagonal_gravity() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(-5.0, -5.0, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,

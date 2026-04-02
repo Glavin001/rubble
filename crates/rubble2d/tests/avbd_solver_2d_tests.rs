@@ -6,8 +6,13 @@
 use glam::Vec2;
 use rubble2d::{RigidBodyDesc2D, ShapeDesc2D, SimConfig2D, World2D};
 
-fn gpu_world(config: SimConfig2D) -> World2D {
-    World2D::new(config).expect("GPU required for 2D AVBD solver tests")
+macro_rules! gpu_world {
+    ($config:expr) => {
+        match World2D::new($config) {
+            Ok(w) => w,
+            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+        }
+    };
 }
 
 fn step_n(world: &mut World2D, n: usize) {
@@ -22,7 +27,7 @@ fn step_n(world: &mut World2D, n: usize) {
 
 #[test]
 fn momentum_2d_equal_mass_head_on() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 120.0,
         solver_iterations: 20,
@@ -61,7 +66,7 @@ fn momentum_2d_equal_mass_head_on() {
 
 #[test]
 fn momentum_2d_unequal_mass() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 120.0,
         solver_iterations: 20,
@@ -107,7 +112,7 @@ fn momentum_2d_unequal_mass() {
 
 #[test]
 fn energy_2d_does_not_increase_collision() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 120.0,
         solver_iterations: 20,
@@ -153,7 +158,7 @@ fn gravitational_pe_to_ke_2d() {
     let g = 9.81f32;
     let dt = 1.0 / 60.0;
 
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -g),
         dt,
         solver_iterations: 5,
@@ -192,7 +197,7 @@ fn solver_iterations_improve_2d() {
     let mut results = Vec::new();
 
     for &iters in &[2u32, 5, 10, 20] {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             dt: 1.0 / 60.0,
             solver_iterations: iters,
@@ -234,7 +239,7 @@ fn solver_iterations_improve_2d() {
 
 #[test]
 fn friction_2d_slows_sliding() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -277,7 +282,7 @@ fn friction_2d_slows_sliding() {
 
 #[test]
 fn zero_friction_2d_preserves_sliding() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -324,7 +329,7 @@ fn zero_friction_2d_preserves_sliding() {
 
 #[test]
 fn extreme_mass_ratio_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 15,
@@ -358,7 +363,7 @@ fn extreme_mass_ratio_2d() {
 
 #[test]
 fn many_contacts_2d_stability() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -397,7 +402,7 @@ fn many_contacts_2d_stability() {
 
 #[test]
 fn very_small_dt_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 10000.0,
         solver_iterations: 3,
@@ -421,7 +426,7 @@ fn very_small_dt_2d() {
 
 #[test]
 fn large_dt_2d_bounded() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 0.1,
         solver_iterations: 10,
@@ -458,7 +463,7 @@ fn large_dt_2d_bounded() {
 
 #[test]
 fn angular_velocity_preserved_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -492,7 +497,7 @@ fn angular_velocity_preserved_2d() {
 
 #[test]
 fn circle_circle_collision_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -526,7 +531,7 @@ fn circle_circle_collision_2d() {
 
 #[test]
 fn rect_rect_collision_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -565,7 +570,7 @@ fn rect_rect_collision_2d() {
 
 #[test]
 fn circle_rect_collision_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -600,7 +605,7 @@ fn circle_rect_collision_2d() {
 
 #[test]
 fn capsule_2d_free_fall() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -627,7 +632,7 @@ fn capsule_2d_free_fall() {
 
 #[test]
 fn capsule_circle_collision_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -663,7 +668,7 @@ fn capsule_circle_collision_2d() {
 
 #[test]
 fn convex_polygon_collision_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -710,7 +715,7 @@ fn convex_polygon_collision_2d() {
 
 #[test]
 fn circle_stack_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 15,
@@ -750,7 +755,7 @@ fn circle_stack_2d() {
 
 #[test]
 fn rect_stack_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 15,
@@ -795,7 +800,7 @@ fn rect_stack_2d() {
 
 #[test]
 fn stress_32_circles_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 8,
@@ -834,7 +839,7 @@ fn stress_32_circles_2d() {
 
 #[test]
 fn stress_mixed_shapes_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 8,
@@ -887,7 +892,7 @@ fn stress_mixed_shapes_2d() {
 
 #[test]
 fn collision_events_2d_generated() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -930,7 +935,7 @@ fn collision_events_2d_generated() {
 fn repeated_2d_simulation_consistent() {
     let mut results = Vec::new();
     for _ in 0..2 {
-        let mut world = gpu_world(SimConfig2D {
+        let mut world = gpu_world!(SimConfig2D {
             gravity: Vec2::new(0.0, -9.81),
             dt: 1.0 / 60.0,
             solver_iterations: 5,
@@ -962,7 +967,7 @@ fn repeated_2d_simulation_consistent() {
 
 #[test]
 fn domino_chain_2d() {
-    let mut world = gpu_world(SimConfig2D {
+    let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
         solver_iterations: 10,

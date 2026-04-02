@@ -7,8 +7,13 @@
 use glam::{Quat, Vec3};
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 
-fn gpu_world(config: SimConfig) -> World {
-    World::new(config).expect("GPU required for exhaustive physics tests")
+macro_rules! gpu_world {
+    ($config:expr) => {
+        match World::new($config) {
+            Ok(w) => w,
+            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+        }
+    };
 }
 
 fn step_n(world: &mut World, n: usize) {
@@ -23,7 +28,7 @@ fn step_n(world: &mut World, n: usize) {
 
 #[test]
 fn two_sphere_stack_on_floor() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 15,
@@ -77,7 +82,7 @@ fn two_sphere_stack_on_floor() {
 
 #[test]
 fn box_stack_three_high() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 15,
@@ -137,7 +142,7 @@ fn box_stack_three_high() {
 
 #[test]
 fn domino_chain_propagation() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -188,7 +193,7 @@ fn domino_chain_propagation() {
 fn newtons_cradle_three_balls() {
     // Three identical spheres in a line. Hit the first one.
     // The last one should move, middle should stay approximately still.
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 120.0,
         solver_iterations: 20,
@@ -244,7 +249,7 @@ fn newtons_cradle_three_balls() {
 #[test]
 fn box_rotation_from_torque() {
     // A box with initial angular velocity should rotate.
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -275,7 +280,7 @@ fn box_rotation_from_torque() {
 #[test]
 fn spinning_sphere_free_fall() {
     // A spinning sphere in gravity should fall normally while spinning.
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -317,7 +322,7 @@ fn spinning_sphere_free_fall() {
 
 #[test]
 fn sphere_capsule_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -357,7 +362,7 @@ fn sphere_capsule_collision() {
 
 #[test]
 fn box_capsule_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -394,7 +399,7 @@ fn box_capsule_collision() {
 
 #[test]
 fn capsule_capsule_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -434,7 +439,7 @@ fn capsule_capsule_collision() {
 
 #[test]
 fn hull_capsule_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -486,7 +491,7 @@ fn hull_capsule_collision() {
 
 #[test]
 fn sphere_on_plane_does_not_fall_through() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -523,7 +528,7 @@ fn sphere_on_plane_does_not_fall_through() {
 
 #[test]
 fn box_on_plane_stable() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -562,7 +567,7 @@ fn box_on_plane_stable() {
 
 #[test]
 fn collision_events_generated_on_impact() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -606,7 +611,7 @@ fn collision_events_generated_on_impact() {
 
 #[test]
 fn kinematic_body_not_affected_by_gravity() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -634,7 +639,7 @@ fn kinematic_body_not_affected_by_gravity() {
 
 #[test]
 fn kinematic_body_pushes_dynamic() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -673,7 +678,7 @@ fn kinematic_body_pushes_dynamic() {
 
 #[test]
 fn raycast_hits_sphere() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -697,7 +702,7 @@ fn raycast_hits_sphere() {
 
 #[test]
 fn raycast_misses_behind() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -716,7 +721,7 @@ fn raycast_misses_behind() {
 
 #[test]
 fn raycast_batch_multiple_hits() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -753,7 +758,7 @@ fn raycast_batch_multiple_hits() {
 
 #[test]
 fn overlap_aabb_finds_bodies() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -788,7 +793,7 @@ fn overlap_aabb_finds_bodies() {
 
 #[test]
 fn rotated_box_box_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -836,7 +841,7 @@ fn rotated_box_box_collision() {
 
 #[test]
 fn stress_64_bodies_mixed_shapes() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 8,
@@ -894,7 +899,7 @@ fn stress_64_bodies_mixed_shapes() {
 
 #[test]
 fn stress_128_spheres_rain() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -940,7 +945,7 @@ fn stress_128_spheres_rain() {
 
 #[test]
 fn compound_shape_free_fall() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -976,7 +981,7 @@ fn compound_shape_free_fall() {
 
 #[test]
 fn compound_vs_static_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
         solver_iterations: 10,
@@ -1029,7 +1034,7 @@ fn compound_vs_static_collision() {
 
 #[test]
 fn set_velocity_applies_correctly() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 5,
@@ -1057,7 +1062,7 @@ fn set_velocity_applies_correctly() {
 
 #[test]
 fn set_angular_velocity_applies_correctly() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         dt: 1.0 / 60.0,
         solver_iterations: 5,

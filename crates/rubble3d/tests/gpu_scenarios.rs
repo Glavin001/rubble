@@ -7,8 +7,13 @@
 use glam::Vec3;
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 
-fn gpu_world(config: SimConfig) -> World {
-    World::new(config).expect("GPU required for scenario tests")
+macro_rules! gpu_world {
+    ($config:expr) => {
+        match World::new($config) {
+            Ok(w) => w,
+            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+        }
+    };
 }
 
 fn step_n(world: &mut World, n: usize) {
@@ -23,7 +28,7 @@ fn step_n(world: &mut World, n: usize) {
 
 #[test]
 fn free_fall_sphere_1_second() {
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 10.0, 0.0),
         shape: ShapeDesc::Sphere { radius: 0.5 },
@@ -46,7 +51,7 @@ fn free_fall_sphere_1_second() {
 
 #[test]
 fn free_fall_box_matches_sphere() {
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
     let sphere = world.add_body(&RigidBodyDesc {
         position: Vec3::new(-2.0, 20.0, 0.0),
         shape: ShapeDesc::Sphere { radius: 0.5 },
@@ -80,7 +85,7 @@ fn free_fall_box_matches_sphere() {
 
 #[test]
 fn zero_gravity_no_motion() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -106,7 +111,7 @@ fn zero_gravity_no_motion() {
 fn sphere_bounces_off_ground_box() {
     // Sphere dropped onto static box floor. Verify the collision produces a bounce
     // (velocity reversal), even though sustained resting contact isn't fully solved.
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
 
     let _floor = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, -1.0, 0.0),
@@ -144,7 +149,7 @@ fn sphere_bounces_off_ground_box() {
 
 #[test]
 fn static_body_does_not_fall() {
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 10.0, 0.0),
         mass: 0.0,
@@ -170,7 +175,7 @@ fn static_body_does_not_fall() {
 
 #[test]
 fn symmetric_collision_preserves_symmetry() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -209,7 +214,7 @@ fn symmetric_collision_preserves_symmetry() {
 
 #[test]
 fn heavy_vs_light_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -247,7 +252,7 @@ fn heavy_vs_light_collision() {
 
 #[test]
 fn box_sphere_mixed_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -288,7 +293,7 @@ fn box_sphere_mixed_collision() {
 fn three_sphere_pileup_stability() {
     // Three spheres in a column should interact via the broadphase/narrowphase
     // without crashing or producing NaN values.
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
 
     let handles: Vec<_> = (0..3)
         .map(|i| {
@@ -315,7 +320,7 @@ fn three_sphere_pileup_stability() {
 
 #[test]
 fn remove_body_mid_simulation() {
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
 
     let a = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 5.0, 0.0),
@@ -340,7 +345,7 @@ fn remove_body_mid_simulation() {
 
 #[test]
 fn add_body_mid_simulation() {
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
 
     let a = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 10.0, 0.0),
@@ -370,7 +375,7 @@ fn add_body_mid_simulation() {
 
 #[test]
 fn teleport_and_simulate() {
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 10.0, 0.0),
         shape: ShapeDesc::Sphere { radius: 0.5 },
@@ -410,7 +415,7 @@ fn projectile_motion() {
     let vx = speed * angle.cos();
     let vy = speed * angle.sin();
 
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::ZERO,
         linear_velocity: Vec3::new(vx, vy, 0.0),
@@ -444,7 +449,7 @@ fn energy_conserved_during_free_fall() {
     let y0 = 100.0_f32;
     let initial_energy = mass * g * y0;
 
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
 
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, y0, 0.0),
@@ -474,7 +479,7 @@ fn energy_does_not_increase_on_bounce() {
     let y0 = 10.0_f32;
     let initial_energy = mass * g * y0;
 
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
 
     let _floor = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, -1.0, 0.0),
@@ -514,7 +519,7 @@ fn total_momentum_conserved_in_collision() {
     let v_b = Vec3::new(-2.0, -1.0, 0.0);
     let initial_momentum = m_a * v_a + m_b * v_b;
 
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -549,7 +554,7 @@ fn total_momentum_conserved_in_collision() {
 #[test]
 fn gravity_produces_linear_velocity_increase() {
     let g = 9.81_f32;
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 100.0, 0.0),
         shape: ShapeDesc::Sphere { radius: 0.5 },
@@ -578,7 +583,7 @@ fn gravity_produces_linear_velocity_increase() {
 
 #[test]
 fn vertical_drop_preserves_horizontal_position() {
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(7.0, 50.0, -3.0),
         shape: ShapeDesc::Sphere { radius: 0.5 },
@@ -600,7 +605,7 @@ fn vertical_drop_preserves_horizontal_position() {
 #[test]
 fn bodies_never_overlap_after_settling() {
     let r = 0.5_f32;
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -638,7 +643,7 @@ fn heavier_body_deflects_less_in_collision() {
     let m_light = 1.0_f32;
     let v0 = 3.0_f32;
 
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -681,7 +686,7 @@ fn kinetic_energy_constant_in_zero_gravity_no_collision() {
     let v0 = Vec3::new(3.0, -1.0, 2.0);
     let initial_ke = 0.5 * mass * v0.length_squared();
 
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -717,7 +722,7 @@ fn center_of_mass_velocity_constant_in_zero_gravity() {
     let v3 = Vec3::new(0.0, -3.0, 1.0);
     let initial_com_vel = (m1 * v1 + m2 * v2 + m3 * v3) / total_mass;
 
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -760,7 +765,7 @@ fn center_of_mass_velocity_constant_in_zero_gravity() {
 
 #[test]
 fn static_body_unaffected_by_dynamic_collision() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -794,7 +799,7 @@ fn static_body_unaffected_by_dynamic_collision() {
 fn superposition_gravity_plus_horizontal_velocity() {
     let vx = 5.0_f32;
 
-    let mut w1 = gpu_world(SimConfig::default());
+    let mut w1 = gpu_world!(SimConfig::default());
     let proj = w1.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 50.0, 0.0),
         linear_velocity: Vec3::new(vx, 0.0, 0.0),
@@ -802,7 +807,7 @@ fn superposition_gravity_plus_horizontal_velocity() {
         ..Default::default()
     });
 
-    let mut w2 = gpu_world(SimConfig::default());
+    let mut w2 = gpu_world!(SimConfig::default());
     let drop = w2.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 50.0, 0.0),
         shape: ShapeDesc::Sphere { radius: 0.5 },
@@ -837,7 +842,7 @@ fn superposition_gravity_plus_horizontal_velocity() {
 
 #[test]
 fn box_box_collision_separates() {
-    let mut world = gpu_world(SimConfig {
+    let mut world = gpu_world!(SimConfig {
         gravity: Vec3::ZERO,
         ..Default::default()
     });
@@ -882,7 +887,7 @@ fn body_velocity_decreases_under_gravity() {
     // A sphere in free fall for 30 steps should have a well-defined velocity
     // close to g*t. This validates velocity extraction from the AVBD solver.
     let g = 9.81_f32;
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::new(0.0, 100.0, 0.0),
         shape: ShapeDesc::Sphere { radius: 0.5 },
@@ -913,7 +918,7 @@ fn body_velocity_decreases_under_gravity() {
 fn long_simulation_no_divergence() {
     // Long simulation with multiple bodies under gravity.
     // Verify all positions remain finite (no NaN/Inf).
-    let mut world = gpu_world(SimConfig::default());
+    let mut world = gpu_world!(SimConfig::default());
 
     let handles: Vec<_> = (0..5)
         .map(|i| {

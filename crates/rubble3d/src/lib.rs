@@ -1214,19 +1214,29 @@ impl World {
 mod tests {
     use super::*;
 
-    fn gpu_world(config: SimConfig) -> World {
-        World::new(config).expect("GPU required for tests")
+    fn try_gpu_world(config: SimConfig) -> Option<World> {
+        World::new(config).ok()
+    }
+
+    macro_rules! gpu_world {
+        ($config:expr) => {
+            match try_gpu_world($config) {
+                Some(w) => w,
+                None => { eprintln!("SKIP: No GPU adapter found"); return; }
+            }
+        };
+        () => { gpu_world!(SimConfig::default()) };
     }
 
     #[test]
     fn test_world_new() {
-        let world = gpu_world(SimConfig::default());
+        let world = gpu_world!(SimConfig::default());
         assert_eq!(world.body_count(), 0);
     }
 
     #[test]
     fn test_add_remove_body() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         let handle = world.add_body(&RigidBodyDesc {
             position: Vec3::new(1.0, 2.0, 3.0),
             mass: 1.0,
@@ -1267,7 +1277,7 @@ mod tests {
 
     #[test]
     fn test_single_body_gravity() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
             solver_iterations: 5,
@@ -1298,7 +1308,7 @@ mod tests {
 
     #[test]
     fn test_two_body_collision() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::ZERO,
             dt: 1.0 / 60.0,
             solver_iterations: 10,
@@ -1338,7 +1348,7 @@ mod tests {
 
     #[test]
     fn test_body_count() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
 
         let h1 = world.add_body(&RigidBodyDesc::default());
         let _h2 = world.add_body(&RigidBodyDesc::default());
@@ -1372,7 +1382,7 @@ mod tests {
 
     #[test]
     fn test_set_position_and_velocity() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         let handle = world.add_body(&RigidBodyDesc {
             position: Vec3::ZERO,
             mass: 1.0,
@@ -1392,7 +1402,7 @@ mod tests {
 
     #[test]
     fn test_get_rotation() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
         let handle = world.add_body(&RigidBodyDesc {
             rotation: rot,
@@ -1414,7 +1424,7 @@ mod tests {
 
     #[test]
     fn test_raycast_sphere_hit() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         let h = world.add_body(&RigidBodyDesc {
             position: Vec3::new(0.0, 0.0, 5.0),
             mass: 1.0,
@@ -1435,7 +1445,7 @@ mod tests {
 
     #[test]
     fn test_raycast_sphere_miss() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         world.add_body(&RigidBodyDesc {
             position: Vec3::new(10.0, 0.0, 5.0),
             mass: 1.0,
@@ -1449,7 +1459,7 @@ mod tests {
 
     #[test]
     fn test_raycast_box_hit() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         world.add_body(&RigidBodyDesc {
             position: Vec3::new(0.0, 0.0, 5.0),
             mass: 1.0,
@@ -1467,7 +1477,7 @@ mod tests {
 
     #[test]
     fn test_raycast_capsule_hit() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         world.add_body(&RigidBodyDesc {
             position: Vec3::new(0.0, 0.0, 5.0),
             mass: 1.0,
@@ -1486,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_raycast_plane_hit() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         world.add_body(&RigidBodyDesc {
             position: Vec3::ZERO,
             mass: 0.0,
@@ -1507,7 +1517,7 @@ mod tests {
 
     #[test]
     fn test_raycast_batch() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         world.add_body(&RigidBodyDesc {
             position: Vec3::new(0.0, 0.0, 5.0),
             mass: 1.0,
@@ -1532,7 +1542,7 @@ mod tests {
 
     #[test]
     fn test_overlap_aabb() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         let h1 = world.add_body(&RigidBodyDesc {
             position: Vec3::new(0.0, 0.0, 0.0),
             mass: 1.0,
@@ -1557,7 +1567,7 @@ mod tests {
 
     #[test]
     fn test_kinematic_body() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             ..Default::default()
         });
@@ -1591,7 +1601,7 @@ mod tests {
 
     #[test]
     fn test_collision_events_drain_once() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::ZERO,
             ..Default::default()
         });
@@ -1629,7 +1639,7 @@ mod tests {
 
     #[test]
     fn test_box_on_plane_stacking() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
             solver_iterations: 10,
@@ -1672,7 +1682,7 @@ mod tests {
 
     #[test]
     fn test_capsule_gravity_fall() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             ..Default::default()
         });
@@ -1697,7 +1707,7 @@ mod tests {
 
     #[test]
     fn test_convex_hull_creation() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         // Tetrahedron
         let h = world.add_body(&RigidBodyDesc {
             position: Vec3::new(0.0, 5.0, 0.0),
@@ -1719,7 +1729,7 @@ mod tests {
 
     #[test]
     fn test_compound_shape_creation() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         let h = world.add_body(&RigidBodyDesc {
             position: Vec3::new(0.0, 5.0, 0.0),
             mass: 1.0,
@@ -1748,7 +1758,7 @@ mod tests {
 
     #[test]
     fn test_multiple_shape_types_simulation() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             ..Default::default()
         });
@@ -1802,7 +1812,7 @@ mod tests {
 
     #[test]
     fn test_many_bodies_no_crash() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             max_bodies: 2048,
             ..Default::default()
@@ -1826,7 +1836,7 @@ mod tests {
 
     #[test]
     fn test_add_remove_cycle() {
-        let mut world = gpu_world(SimConfig::default());
+        let mut world = gpu_world!(SimConfig::default());
         let mut handles = Vec::new();
 
         for _ in 0..20 {
@@ -1852,7 +1862,7 @@ mod tests {
 
     #[test]
     fn test_compound_compound_collision() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::ZERO,
             dt: 1.0 / 60.0,
             solver_iterations: 10,
@@ -1929,7 +1939,7 @@ mod tests {
 
     #[test]
     fn test_hull_hull_edge_collision() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::ZERO,
             dt: 1.0 / 60.0,
             solver_iterations: 10,
@@ -1996,7 +2006,7 @@ mod tests {
 
     #[test]
     fn test_many_bodies_overflow_recovery() {
-        let mut world = gpu_world(SimConfig {
+        let mut world = gpu_world!(SimConfig {
             gravity: Vec3::ZERO,
             dt: 1.0 / 60.0,
             solver_iterations: 5,

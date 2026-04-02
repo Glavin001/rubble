@@ -86,20 +86,32 @@ impl GpuContext {
     }
 }
 
-/// Create a [`GpuContext`] for tests. Panics with a clear message if no GPU
-/// adapter is found.
+/// Try to create a [`GpuContext`] for tests. Returns `None` if no GPU
+/// adapter is found (e.g. in CI without Vulkan drivers).
 #[cfg(test)]
-pub fn test_gpu() -> GpuContext {
-    pollster::block_on(GpuContext::new()).expect(
-        "FATAL: No GPU adapter found. Install mesa-vulkan-drivers for lavapipe software Vulkan.",
-    )
+pub fn test_gpu() -> Option<GpuContext> {
+    pollster::block_on(GpuContext::new()).ok()
+}
+
+/// Macro to skip a test when no GPU adapter is available.
+#[macro_export]
+macro_rules! skip_no_gpu {
+    () => {
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU adapter found");
+            return;
+        };
+    };
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn test_gpu_context() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU adapter found");
+            return;
+        };
         // If we got here, device and queue are valid.
         let _ = ctx.device.features();
         let _ = ctx.queue;
