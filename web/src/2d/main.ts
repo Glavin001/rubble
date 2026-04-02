@@ -21,6 +21,17 @@ const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 const fpsEl = document.getElementById("fps")!;
 const bodiesEl = document.getElementById("bodies")!;
+const timingsEl = document.getElementById("timings")!;
+
+const TIMING_LABELS = [
+  ["Upload",      "(CPU)"],
+  ["Predict",     "(GPU)"],
+  ["Broadphase",  "(CPU)"],
+  ["Narrowphase", "(GPU)"],
+  ["Contacts",    "(GPU>CPU)"],
+  ["Solve",       "(GPU)"],
+  ["Extract",     "(GPU)"],
+] as const;
 
 function resize() {
   canvas.width = window.innerWidth;
@@ -140,10 +151,26 @@ function draw() {
 let frameCount = 0;
 let lastFpsTime = performance.now();
 let stepCount = 0;
+let lastRenderMs = 0;
 
 // Cached data for test hooks (avoids borrow conflicts during async step)
 let cachedPositions = new Float32Array(0);
 let cachedAngles = new Float32Array(0);
+
+function formatTimings(timings: Float32Array, renderMs: number): string {
+  const total = timings.reduce((a, b) => a + b, 0);
+  const lines: string[] = [`Step: ${total.toFixed(2)} ms`];
+  for (let i = 0; i < TIMING_LABELS.length; i++) {
+    const [name, tag] = TIMING_LABELS[i];
+    const ms = timings[i] ?? 0;
+    const pct = total > 0 ? ((ms / total) * 100) : 0;
+    lines.push(
+      `  ${name.padEnd(11)} ${tag.padEnd(8)} ${ms.toFixed(2).padStart(6)} ms ${pct.toFixed(0).padStart(3)}%`
+    );
+  }
+  lines.push(`Render      (JS)     ${renderMs.toFixed(2).padStart(6)} ms`);
+  return lines.join("\n");
+}
 
 async function loop_() {
   await world.step();
@@ -153,13 +180,19 @@ async function loop_() {
   cachedPositions = new Float32Array(world.get_positions());
   cachedAngles = new Float32Array(world.get_angles());
 
+  const t0 = performance.now();
   draw();
+  lastRenderMs = performance.now() - t0;
 
   frameCount++;
   const now = performance.now();
   if (now - lastFpsTime >= 1000) {
     fpsEl.textContent = `FPS: ${frameCount}`;
     bodiesEl.textContent = `Bodies: ${world.body_count()}`;
+    timingsEl.textContent = formatTimings(
+      new Float32Array(world.last_step_timings_ms()),
+      lastRenderMs,
+    );
     frameCount = 0;
     lastFpsTime = now;
   }

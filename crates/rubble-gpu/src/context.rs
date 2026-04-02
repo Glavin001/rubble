@@ -45,7 +45,7 @@ impl GpuContext {
         let backends = if cfg!(target_arch = "wasm32") {
             wgpu::Backends::BROWSER_WEBGPU
         } else {
-            wgpu::Backends::VULKAN
+            wgpu::Backends::PRIMARY
         };
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {

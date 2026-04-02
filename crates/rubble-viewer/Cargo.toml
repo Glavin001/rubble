@@ -1,0 +1,23 @@
+[package]
+name = "rubble-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "Native winit+wgpu viewer for the Rubble GPU physics engine"
+
+[dependencies]
+rubble2d = { workspace = true }
+rubble3d = { workspace = true }
+rubble-math = { workspace = true }
+rubble-gpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+winit = { workspace = true }
+egui = "0.34"
+egui-wgpu = "0.34"
+egui-winit = "0.34"
+stacker = "0.1"
+
+[dev-dependencies]
+rand = "0.9"

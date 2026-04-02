@@ -305,6 +305,7 @@ pub struct World2D {
     gpu_pipeline: gpu::GpuPipeline2D,
     contact_persistence: gpu::ContactPersistence2D,
     collision_events: Vec<CollisionEvent>,
+    last_step_timings: rubble_gpu::StepTimingsMs,
 }
 
 impl World2D {
@@ -324,6 +325,7 @@ impl World2D {
             gpu_pipeline: pipeline,
             contact_persistence: gpu::ContactPersistence2D::new(),
             collision_events: Vec::new(),
+            last_step_timings: rubble_gpu::StepTimingsMs::default(),
         })
     }
 
@@ -500,7 +502,12 @@ impl World2D {
 
     /// Advance the simulation by one time step on the GPU.
     pub fn step(&mut self) {
+        use std::time::Instant;
+
+        let mut timings = rubble_gpu::StepTimingsMs::default();
+
         if self.states.is_empty() {
+            self.last_step_timings = timings;
             return;
         }
 
@@ -509,6 +516,7 @@ impl World2D {
             .collect();
 
         if alive_indices.is_empty() {
+            self.last_step_timings = timings;
             return;
         }
 
@@ -624,6 +632,7 @@ impl World2D {
 
         let num_bodies = compact_states.len() as u32;
 
+        let t_upload = Instant::now();
         self.gpu_pipeline.upload(
             &compact_states,
             &shape_info_data,
@@ -636,12 +645,16 @@ impl World2D {
             self.config.dt,
             self.config.solver_iterations,
         );
+        timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
         let prev = self.contact_persistence.prev_contacts();
         let warm = if prev.is_empty() { None } else { Some(prev) };
-        let (results, new_contacts) =
-            self.gpu_pipeline
-                .step_with_contacts(num_bodies, self.config.solver_iterations, warm);
+        let (results, new_contacts) = self.gpu_pipeline.step_with_contacts_timed(
+            num_bodies,
+            self.config.solver_iterations,
+            warm,
+            &mut timings,
+        );
 
         let events = self.contact_persistence.update(&new_contacts);
         self.collision_events.extend(events);
@@ -651,12 +664,19 @@ impl World2D {
                 self.states[orig] = results[slot];
             }
         }
+
+        self.last_step_timings = timings;
     }
 
     /// Advance the simulation by one time step (async, for WASM/WebGPU).
     #[cfg(target_arch = "wasm32")]
     pub async fn step_async(&mut self) {
+        use rubble_gpu::web_time::Instant;
+
+        let mut timings = rubble_gpu::StepTimingsMs::default();
+
         if self.states.is_empty() {
+            self.last_step_timings = timings;
             return;
         }
 
@@ -665,6 +685,7 @@ impl World2D {
             .collect();
 
         if alive_indices.is_empty() {
+            self.last_step_timings = timings;
             return;
         }
 
@@ -775,6 +796,7 @@ impl World2D {
 
         let num_bodies = compact_states.len() as u32;
 
+        let t_upload = Instant::now();
         self.gpu_pipeline.upload(
             &compact_states,
             &shape_info_data,
@@ -787,12 +809,18 @@ impl World2D {
             self.config.dt,
             self.config.solver_iterations,
         );
+        timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
         let prev = self.contact_persistence.prev_contacts();
         let warm = if prev.is_empty() { None } else { Some(prev) };
         let (results, new_contacts) = self
             .gpu_pipeline
-            .step_with_contacts_async(num_bodies, self.config.solver_iterations, warm)
+            .step_with_contacts_async(
+                num_bodies,
+                self.config.solver_iterations,
+                warm,
+                &mut timings,
+            )
             .await;
 
         let events = self.contact_persistence.update(&new_contacts);
@@ -803,11 +831,18 @@ impl World2D {
                 self.states[orig] = results[slot];
             }
         }
+
+        self.last_step_timings = timings;
     }
 
     /// Drain collision events from the last step.
     pub fn drain_collision_events(&mut self) -> Vec<CollisionEvent> {
         std::mem::take(&mut self.collision_events)
+    }
+
+    /// Per-phase wall-clock timings from the most recent `step_async` call.
+    pub fn last_step_timings(&self) -> &rubble_gpu::StepTimingsMs {
+        &self.last_step_timings
     }
 
     /// Cast a 2D ray and return the closest hit (handle, t parameter, hit normal).

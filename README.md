@@ -95,6 +95,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 On Linux, CI installs `mesa-vulkan-drivers` for Clippy as well so GPU-linked crates behave like the test job.
 
+## Native Viewer
+
+The `rubble-viewer` crate provides a native desktop window (winit + wgpu) for real-time physics visualization — no browser or WASM needed.
+
+```bash
+cargo run -p rubble-viewer --example demo_3d --release
+cargo run -p rubble-viewer --example demo_2d --release
+```
+
+Controls (3D): left-drag to orbit, right-drag to pan, scroll to zoom. Controls (2D): left-drag to pan, scroll to zoom.
+
+See [crates/rubble-viewer/examples/](crates/rubble-viewer/examples/) for the demo source.
+
 ## Web and WASM (optional)
 
 The canonical production build is **[web/build.sh](web/build.sh)** — same script as **CI** and **Vercel** (`npm ci` plus `npm run build:all`). Granular steps live in [web/package.json](web/package.json) (`wasm`, `build`, `build:all`). **wasm-pack** comes from that package’s [devDependencies](web/package.json), not `cargo install`.

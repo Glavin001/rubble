@@ -976,6 +976,147 @@ impl GpuPipeline {
         (states, final_contacts)
     }
 
+    /// Timed version of `step_with_contacts` that populates per-phase timings.
+    pub fn step_with_contacts_timed(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        warm_contacts: Option<&[Contact3D]>,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
+        use std::time::Instant;
+
+        if num_bodies == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        let compound_contacts = self.run_detection_timed(num_bodies, timings);
+
+        let t_cf = Instant::now();
+        let gpu_count = self.contact_count.read(&self.ctx) as usize;
+        let mut contacts = if gpu_count > 0 {
+            self.contacts.set_len(gpu_count as u32);
+            let mut c = self.contacts.download(&self.ctx);
+            c.truncate(gpu_count);
+            c
+        } else {
+            Vec::new()
+        };
+        contacts.extend(compound_contacts);
+
+        if let Some(prev) = warm_contacts {
+            warm_start_contacts_3d(&mut contacts, prev);
+        }
+        timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
+
+        let t_solve = Instant::now();
+        self.run_colored_solve(solver_iterations, &mut contacts);
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
+
+        let final_contacts = if !contacts.is_empty() {
+            self.download_contacts()
+        } else {
+            Vec::new()
+        };
+
+        let t_ext = Instant::now();
+        self.dispatch_extract(num_bodies);
+        let states = self.body_states.download(&self.ctx);
+        self.body_states.swap();
+        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+
+        (states, final_contacts)
+    }
+
+    fn run_detection_timed(
+        &mut self,
+        num_bodies: u32,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) -> Vec<Contact3D> {
+        use std::time::Instant;
+
+        self.contact_count.reset(&self.ctx);
+        self.pair_count.reset(&self.ctx);
+
+        let t0 = Instant::now();
+        self.dispatch_predict(num_bodies);
+        self.dispatch_aabb(num_bodies);
+        timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
+
+        let t1 = Instant::now();
+        self.aabbs.set_len(num_bodies);
+        let overlap_pairs = self
+            .gpu_lbvh
+            .build_and_query(&self.ctx, &self.aabbs, num_bodies);
+
+        let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
+        let mut pair_count: u32 = 0;
+
+        if !overlap_pairs.is_empty() {
+            self.body_props.set_len(num_bodies);
+            let props = self.body_props.download(&self.ctx);
+            self.body_states.current_mut().set_len(num_bodies);
+            let states = self.body_states.download(&self.ctx);
+
+            let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
+
+            for p in &overlap_pairs {
+                let a = p[0];
+                let b = p[1];
+                let st_a = props[a as usize].shape_type;
+                let st_b = props[b as usize].shape_type;
+
+                let a_is_compound = st_a == rubble_math::SHAPE_COMPOUND;
+                let b_is_compound = st_b == rubble_math::SHAPE_COMPOUND;
+
+                if !a_is_compound && !b_is_compound {
+                    non_compound_pairs.push(GpuPair { a, b });
+                } else {
+                    self.generate_compound_contacts_cpu(
+                        a,
+                        b,
+                        &props,
+                        &states,
+                        &mut cpu_compound_contacts,
+                    );
+                }
+            }
+
+            if !non_compound_pairs.is_empty() {
+                non_compound_pairs.sort_unstable_by_key(|pair| {
+                    let st_a = props[pair.a as usize].shape_type;
+                    let st_b = props[pair.b as usize].shape_type;
+                    let (lo, hi) = if st_a <= st_b {
+                        (st_a, st_b)
+                    } else {
+                        (st_b, st_a)
+                    };
+                    (lo << 16) | hi
+                });
+                let count = non_compound_pairs.len() as u32;
+                self.pairs.upload(&self.ctx, &non_compound_pairs);
+                self.pair_count.write(&self.ctx, count);
+                pair_count = count;
+            }
+        }
+        timings.broadphase_ms = t1.elapsed().as_secs_f32() * 1000.0;
+
+        let t2 = Instant::now();
+        self.dispatch_narrowphase(num_bodies, pair_count);
+
+        let contact_count_val = self.contact_count.read(&self.ctx);
+        let capacity = self.contacts.capacity();
+        if contact_count_val > capacity {
+            let new_cap = (contact_count_val as usize) * 2;
+            self.contacts.grow_if_needed(&self.ctx, new_cap);
+            self.contact_count.reset(&self.ctx);
+            self.dispatch_narrowphase(num_bodies, pair_count);
+        }
+        timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
+
+        cpu_compound_contacts
+    }
+
     /// Reference to the GPU context.
     pub fn context(&self) -> &GpuContext {
         &self.ctx
@@ -999,17 +1140,25 @@ impl GpuPipeline {
 
     /// Async version of `run_detection` for WASM/WebGPU.
     #[cfg(target_arch = "wasm32")]
-    async fn run_detection_async(&mut self, num_bodies: u32) -> Vec<Contact3D> {
+    async fn run_detection_async(
+        &mut self,
+        num_bodies: u32,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) -> Vec<Contact3D> {
+        use rubble_gpu::web_time::Instant;
+
         self.contact_count.reset(&self.ctx);
         self.pair_count.reset(&self.ctx);
 
+        let t0 = Instant::now();
         self.dispatch_predict(num_bodies);
         self.dispatch_aabb(num_bodies);
 
-        // LBVH broadphase: download AABBs, build tree on CPU, upload pairs
         self.aabbs.set_len(num_bodies);
         let gpu_aabbs = self.aabbs.download_async(&self.ctx).await;
-        // Brute-force AABB overlap (fine for typical web demo sizes)
+        timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
+
+        let t1 = Instant::now();
         let mut overlap_pairs: Vec<[u32; 2]> = Vec::new();
         for i in 0..gpu_aabbs.len() {
             for j in (i + 1)..gpu_aabbs.len() {
@@ -1031,10 +1180,8 @@ impl GpuPipeline {
         let mut pair_count: u32 = 0;
 
         if !overlap_pairs.is_empty() {
-            // Download props to identify compound shapes
             self.body_props.set_len(num_bodies);
             let props = self.body_props.download_async(&self.ctx).await;
-            // Also download states for compound child world position computation
             self.body_states.set_len(num_bodies);
             let states = self.body_states.download_async(&self.ctx).await;
 
@@ -1050,10 +1197,8 @@ impl GpuPipeline {
                 let b_is_compound = st_b == rubble_math::SHAPE_COMPOUND;
 
                 if !a_is_compound && !b_is_compound {
-                    // Neither is compound, pass through to GPU narrowphase
                     non_compound_pairs.push(GpuPair { a, b });
                 } else {
-                    // At least one is compound: generate contacts on CPU.
                     self.generate_compound_contacts_cpu(
                         a,
                         b,
@@ -1065,7 +1210,6 @@ impl GpuPipeline {
             }
 
             if !non_compound_pairs.is_empty() {
-                // Sort pairs by (shape_type_a << 16 | shape_type_b) for GPU coherence
                 non_compound_pairs.sort_unstable_by_key(|pair| {
                     let st_a = props[pair.a as usize].shape_type;
                     let st_b = props[pair.b as usize].shape_type;
@@ -1082,10 +1226,11 @@ impl GpuPipeline {
                 pair_count = count;
             }
         }
+        timings.broadphase_ms = t1.elapsed().as_secs_f32() * 1000.0;
 
+        let t2 = Instant::now();
         self.dispatch_narrowphase(num_bodies, pair_count);
 
-        // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
         let contact_count_val = self.contact_count.read_async(&self.ctx).await;
         let capacity = self.contacts.capacity();
         if contact_count_val > capacity {
@@ -1094,6 +1239,7 @@ impl GpuPipeline {
             self.contact_count.reset(&self.ctx);
             self.dispatch_narrowphase(num_bodies, pair_count);
         }
+        timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
 
         cpu_compound_contacts
     }
@@ -1105,13 +1251,17 @@ impl GpuPipeline {
         num_bodies: u32,
         solver_iterations: u32,
         warm_contacts: Option<&[Contact3D]>,
+        timings: &mut rubble_gpu::StepTimingsMs,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
+        use rubble_gpu::web_time::Instant;
+
         if num_bodies == 0 {
             return (Vec::new(), Vec::new());
         }
 
-        let compound_contacts = self.run_detection_async(num_bodies).await;
+        let compound_contacts = self.run_detection_async(num_bodies, timings).await;
 
+        let t_cf = Instant::now();
         let gpu_count = self.contact_count.read_async(&self.ctx).await as usize;
         let mut contacts = if gpu_count > 0 {
             self.contacts.set_len(gpu_count as u32);
@@ -1122,17 +1272,16 @@ impl GpuPipeline {
             Vec::new()
         };
 
-        // Merge CPU-generated compound contacts with GPU narrowphase contacts
         contacts.extend(compound_contacts);
 
-        // Warm-start: apply cached lambdas from previous frame
         if let Some(prev) = warm_contacts {
             warm_start_contacts_3d(&mut contacts, prev);
         }
+        timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
+        let t_solve = Instant::now();
         self.run_colored_solve(solver_iterations, &mut contacts);
 
-        // Download contacts after solve (lambdas are updated by GPU)
         let final_contacts = if !contacts.is_empty() {
             let cnt = self.contact_count.read_async(&self.ctx).await as usize;
             if cnt > 0 {
@@ -1145,9 +1294,13 @@ impl GpuPipeline {
         } else {
             Vec::new()
         };
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
+        let t_ext = Instant::now();
         self.dispatch_extract(num_bodies);
         let states = self.body_states.download_async(&self.ctx).await;
+        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+
         (states, final_contacts)
     }
 
