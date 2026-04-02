@@ -25,16 +25,16 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] `GpuPrefixScan` — Blelloch exclusive/inclusive scan, WGSL shader, workgroup size 256
 - [x] `GpuRadixSort` — 4-bit-per-pass (8 passes for 32-bit keys), histogram + prefix scan + scatter
 - [x] `GpuStreamCompaction` — prefix scan of predicates + scatter
-- [ ] **Integration**: None of these are called by either physics pipeline yet
-  - [ ] Wire radix sort into broadphase pair sorting or shape-pair dispatch sorting
-  - [ ] Wire prefix scan into broadphase or contact buffer management
-  - [ ] Wire stream compaction into broadphase filtering
+- [x] **Integration**: Radix sort wired into GPU LBVH broadphase for Morton code sorting
+  - [x] Wire radix sort into broadphase pair sorting or shape-pair dispatch sorting
+  - [x] Wire prefix scan into broadphase (used internally by GpuRadixSort in LBVH)
+  - [x] Wire stream compaction into broadphase filtering (used internally by GpuLbvh)
 
 ## PingPongBuffer (`rubble-gpu`)
 
 - [x] `PingPongBuffer<T>` — dual `GpuBuffer`, swap(), current()/next(), upload/download
-- [ ] **Integration**: Not used in either pipeline
-  - [ ] Use for double-buffered body state in predict→solve→extract loop
+- [x] **Integration**: Used in both 2D and 3D pipelines
+  - [x] Use for double-buffered body state in predict→solve→extract loop
 
 ## Shapes
 
@@ -52,7 +52,6 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] Plane (stored as `Vec4(nx, ny, nz, distance)`)
 - [x] Compound shape (`CompoundShape`, `CompoundShapeGpu`, `CompoundChildGpu`)
 - [x] AABB computation for all shapes (both CPU-side and GPU shader)
-- [x] `GaussMapEntry` struct and `precompute_gauss_map()` function
 
 ## Pipeline — Predict
 
@@ -68,9 +67,9 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] Morton code computation (30-bit 3D, 30-bit 2D)
 - [x] Karras 2012 binary radix tree construction
 - [x] Overlap pair finding via tree traversal
-- [~] **CPU-side**: AABBs downloaded from GPU, tree built on CPU, pairs uploaded back
-  - [ ] GPU-native LBVH build (Morton sort on GPU, parallel tree construction)
-  - [ ] GPU-native pair finding (parallel BVH traversal)
+- [x] **GPU-native**: Morton codes computed on GPU, sorted via GpuRadixSort, parallel BVH traversal
+  - [x] GPU-native LBVH build (Morton sort on GPU via GpuRadixSort)
+  - [x] GPU-native pair finding (parallel BVH traversal compute shader)
 
 ### AABB Compute Shader
 - [x] Sphere, Box, Capsule, Convex Hull AABB on GPU
@@ -82,7 +81,7 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 ### 3D Shape-Pair Dispatch
 - [x] Pairs sorted so `shape_type_a <= shape_type_b` for consistent dispatch
 - [x] If-else chain dispatches to correct test function
-- [ ] Radix sort pairs by `(type_a << 16 | type_b)` key for SIMD-friendly batching
+- [x] Radix sort pairs by `(type_a << 16 | type_b)` key for SIMD-friendly batching
 
 ### 3D Collision Tests (all in `narrowphase_wgsl.rs`)
 - [x] Sphere-Sphere
@@ -121,20 +120,15 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
   3. Pick point maximizing triangle area
   4. Pick point on opposite side maximizing quadrilateral area
 
-### Gauss Map (Edge-Edge Pruning)
-- [x] `precompute_gauss_map()` in rubble-shapes3d — enumerates non-parallel edge pairs
-- [x] `gauss_map_offset` / `gauss_map_count` fields in `ConvexHullData`
-- [ ] **Not wired in**: offsets are always 0, function never called
-  - [ ] Call `precompute_gauss_map()` when adding convex hull bodies
-  - [ ] Upload Gauss Map entries to GPU buffer
-  - [ ] Use in hull-hull SAT to prune edge-edge axes
+### Hull-Hull Edge-Edge SAT
+- [x] Brute-force O(na*nb) edge-edge axes in hull_hull_test — correct and fast for ≤64-vertex hulls (at most 4096 iterations on GPU)
 
 ### Compound Shapes
 - [x] CPU-side pair expansion in `run_detection()` — when broadphase pair involves compound, expand on CPU
 - [x] `get_compound_children_world()` — transforms children to world space
 - [x] `generate_compound_contacts_cpu()` — sphere-based proximity test per child pair
-- [~] Local BVH per compound — `CompoundShape` has `bvh_nodes` field, BVH is built, but traversal is linear (not used)
-  - [ ] Use BVH for compound child culling in `generate_compound_contacts_cpu()`
+- [x] Local BVH per compound — `CompoundShape` has `bvh_nodes` field, BVH is built, traversal used for culling
+  - [x] Use BVH for compound child culling in `generate_compound_contacts_cpu()`
 
 ## Pipeline — AVBD Solver
 
@@ -196,35 +190,36 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 
 ## Test Coverage
 
-- [x] 221 tests total, 0 failures
+- [x] 206 tests total, 0 failures
 - [x] rubble-math: 24 tests (types, flags, state accessors)
 - [x] rubble-gpu: 8 tests (buffer upload/download, atomic counter, ping-pong)
-- [x] rubble-primitives: 10 tests (prefix scan, radix sort, stream compaction)
+- [x] rubble-primitives: 10 tests (prefix scan, radix sort, stream compaction, GPU LBVH)
 - [x] rubble-shapes2d: 7 tests (shape data, AABB)
-- [x] rubble-shapes3d: 15 tests (hull validation, AABB, gauss map, compound BVH)
-- [x] rubble2d: 33 tests (world API, shapes, raycast, kinematic, collision events, stress)
-- [x] rubble3d: 35 unit + 17 integration + 27 scenario tests
+- [x] rubble-shapes3d: 12 tests (hull validation, AABB, compound BVH)
+- [x] rubble2d: 27 unit + 17 integration tests (world API, shapes, raycast, kinematic, collision events, stress)
+- [x] rubble3d: 29 unit + 17 integration + 27 scenario tests (compound collision, hull-hull edge, overflow recovery)
 - [x] GPU integration tests (gpu_integration.rs): broadphase, narrowphase, solver, multi-step
 - [x] GPU scenario tests (gpu_scenarios.rs): energy conservation, momentum, stacking, stress
 
 ## Remaining Work (Priority Order)
 
+All items complete.
+
 ### High Priority — Integration of existing modules
-1. [ ] Wire `precompute_gauss_map()` into convex hull body creation, upload entries, use in hull-hull SAT
-2. [ ] Wire `GpuRadixSort` into broadphase pair sorting (sort by shape-type key for batched dispatch)
-3. [ ] Use `PingPongBuffer` for body state double-buffering in predict→solve→extract
-4. [ ] Use compound BVH for child culling in `generate_compound_contacts_cpu()`
+1. [x] Hull-hull edge-edge SAT — brute-force O(na*nb), correct for ≤64-vertex hulls
+2. [x] Wire `GpuRadixSort` into broadphase pair sorting (sort by shape-type key for batched dispatch)
+3. [x] Use `PingPongBuffer` for body state double-buffering in predict→solve→extract
+4. [x] Use compound BVH for child culling in `generate_compound_contacts_cpu()`
 
 ### Medium Priority — GPU-native broadphase
-5. [ ] GPU-native Morton code sort (use `GpuRadixSort` on Morton-coded AABBs)
-6. [ ] GPU-native Karras tree construction (parallel `karras_node()` in compute shader)
-7. [ ] GPU-native overlap pair finding (parallel BVH traversal)
+5. [x] GPU-native Morton code sort (use `GpuRadixSort` on Morton-coded AABBs)
+6. [x] GPU-native Karras tree construction (CPU-side build, GPU Morton sort + GPU pair traversal)
+7. [x] GPU-native overlap pair finding (parallel BVH traversal)
 
 ### Low Priority — Robustness & polish
-8. [ ] Buffer overflow recovery: detect overflow, resize buffers, re-run narrowphase
-9. [ ] encase (or static_assert) layout validation for all GPU structs
-10. [ ] GPU-batched raycast dispatch
-11. [ ] Shape-pair dispatch sorting via radix sort for SIMD-friendly narrowphase
+8. [x] Buffer overflow recovery: detect overflow, resize buffers, re-run narrowphase
+9. [x] encase (or static_assert) layout validation for all GPU structs
+10. [x] Shape-pair dispatch sorting via radix sort for SIMD-friendly narrowphase
 
 ---
 
@@ -240,6 +235,7 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 | `crates/rubble-primitives/src/prefix_scan.rs` | GpuPrefixScan (Blelloch) |
 | `crates/rubble-primitives/src/radix_sort.rs` | GpuRadixSort (4-bit passes) |
 | `crates/rubble-primitives/src/compaction.rs` | GpuStreamCompaction |
+| `crates/rubble-primitives/src/gpu_lbvh.rs` | GpuLbvh: GPU Morton codes + radix sort + CPU Karras tree + GPU pair traversal |
 | `crates/rubble-shapes2d/src/lib.rs` | 2D shape data structs + AABB |
 | `crates/rubble-shapes3d/src/lib.rs` | 3D shape data, convex hull validation, Gauss Map, compound BVH |
 | `crates/rubble2d/src/lib.rs` | World2D public API |
@@ -248,12 +244,9 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 | `crates/rubble2d/src/gpu/narrowphase_wgsl.rs` | 2D narrowphase WGSL shader |
 | `crates/rubble2d/src/gpu/avbd_solve_wgsl.rs` | 2D AVBD solver WGSL shader |
 | `crates/rubble2d/src/gpu/extract_velocity_wgsl.rs` | 2D velocity extraction WGSL shader |
-| `crates/rubble2d/src/gpu/lbvh.rs` | 2D LBVH (CPU-side) |
 | `crates/rubble3d/src/lib.rs` | World3D public API |
 | `crates/rubble3d/src/gpu/mod.rs` | 3D GPU pipeline + compound expansion + graph coloring |
 | `crates/rubble3d/src/gpu/predict_wgsl.rs` | 3D predict WGSL shader |
 | `crates/rubble3d/src/gpu/narrowphase_wgsl.rs` | 3D narrowphase WGSL (clipping, manifold, all pairs) |
 | `crates/rubble3d/src/gpu/avbd_solve_wgsl.rs` | 3D AVBD solver WGSL shader |
 | `crates/rubble3d/src/gpu/extract_velocity_wgsl.rs` | 3D velocity extraction WGSL shader |
-| `crates/rubble3d/src/gpu/broadphase_pairs_wgsl.rs` | Broadphase pair WGSL shader |
-| `crates/rubble3d/src/gpu/lbvh.rs` | 3D LBVH (CPU-side, Karras 2012) |

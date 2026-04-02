@@ -6,6 +6,9 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
 
+mod layout_validation;
+use layout_validation::assert_gpu_layout;
+
 // ---------------------------------------------------------------------------
 // Body flags
 // ---------------------------------------------------------------------------
@@ -474,6 +477,20 @@ pub enum CollisionEvent {
         body_b: BodyHandle,
     },
 }
+
+// ---------------------------------------------------------------------------
+// Compile-time GPU layout validation
+// ---------------------------------------------------------------------------
+
+assert_gpu_layout!(RigidBodyState3D, 64, 16);
+assert_gpu_layout!(RigidBodyState2D, 64, 16);
+assert_gpu_layout!(RigidBodyProps3D, 64, 4);
+assert_gpu_layout!(Contact3D, 64, 4);
+assert_gpu_layout!(Contact2D, 64, 4);
+assert_gpu_layout!(Aabb3D, 32, 16);
+assert_gpu_layout!(Aabb2D, 32, 16);
+assert_gpu_layout!(BvhNode, 48, 4);
+assert_gpu_layout!(BodyHandle, 8, 4);
 
 // ---------------------------------------------------------------------------
 // Tests

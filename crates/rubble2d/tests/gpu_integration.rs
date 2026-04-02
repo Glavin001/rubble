@@ -224,12 +224,19 @@ fn gpu_2d_multiple_bodies_stability() {
         world.step();
     }
 
+    let initial_y = 5.0_f32;
     for h in &handles {
         let pos = world.get_position(*h).unwrap();
         assert!(
             pos.x.is_finite() && pos.y.is_finite(),
             "GPU 2D: Non-finite position: {:?}",
             pos
+        );
+        assert!(
+            pos.y < initial_y,
+            "GPU 2D: Dynamic body should have fallen due to gravity: y = {} (started at {})",
+            pos.y,
+            initial_y
         );
     }
 }
@@ -373,6 +380,12 @@ fn gpu_2d_high_velocity_stability() {
         vel.x.is_finite() && vel.y.is_finite(),
         "High-velocity body velocity diverged: {vel}"
     );
+    let pos_magnitude = pos.length();
+    assert!(
+        pos_magnitude > 10.0,
+        "High-velocity body should have moved significantly from origin: magnitude = {}",
+        pos_magnitude
+    );
 }
 
 #[test]
@@ -464,6 +477,16 @@ fn gpu_2d_poly_poly_collision() {
     );
     let dist = (p2 - p1).length();
     assert!(dist > 0.3, "Polygons should have separated: dist = {dist}");
+    let init_p1 = Vec2::new(-2.0, 0.0);
+    let init_p2 = Vec2::new(2.0, 0.0);
+    assert!(
+        (p1 - init_p1).length() > 0.1,
+        "Polygon 1 should have moved from initial position: {p1}"
+    );
+    assert!(
+        (p2 - init_p2).length() > 0.1,
+        "Polygon 2 should have moved from initial position: {p2}"
+    );
 }
 
 #[test]

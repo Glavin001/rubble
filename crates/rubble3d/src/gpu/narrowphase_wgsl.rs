@@ -79,8 +79,8 @@ struct ConvexHullInfo {
     face_count:    u32,
     edge_offset:   u32,
     edge_count:    u32,
-    gauss_map_offset: u32,
-    gauss_map_count:  u32,
+    _pad0: u32,
+    _pad1: u32,
 };
 
 struct ConvexVert {
@@ -889,6 +889,8 @@ fn hull_hull_test(
     var best_face_v1 = 0u;
     var best_face_v2 = 0u;
     var best_is_edge = false;
+    var best_edge_i = 0u;
+    var best_edge_j = 0u;
 
     let na = hull_a.vertex_count;
     for (var i = 0u; i < na; i = i + 1u) {
@@ -942,9 +944,52 @@ fn hull_hull_test(
         }
     }
 
+    // Cross-hull edge-edge axes: brute-force O(na*nb).
+    // With max 64 vertices per hull, this is at most 4096 iterations —
+    // fast enough on GPU and simpler than Minkowski face pruning.
+    for (var i = 0u; i < na; i = i + 1u) {
+        let ea0 = hull_world_vert(si_a, i, pos_a, rot_a);
+        let ea1 = hull_world_vert(si_a, (i + 1u) % na, pos_a, rot_a);
+        let dir_a = ea1 - ea0;
+        for (var j = 0u; j < nb; j = j + 1u) {
+            let eb0 = hull_world_vert(si_b, j, pos_b, rot_b);
+            let eb1 = hull_world_vert(si_b, (j + 1u) % nb, pos_b, rot_b);
+            let dir_b = eb1 - eb0;
+            var axis = cross(dir_a, dir_b);
+            let len2 = dot(axis, axis);
+            if len2 < 1e-12 { continue; }
+            axis = axis / sqrt(len2);
+            if dot(axis, d) < 0.0 { axis = -axis; }
+            let proj_a = hull_project(si_a, pos_a, rot_a, axis);
+            let proj_b = hull_project(si_b, pos_b, rot_b, axis);
+            let overlap = min(proj_a.y, proj_b.y) - max(proj_a.x, proj_b.x);
+            if overlap < 0.0 { return; }
+            let depth = -overlap;
+            if depth > min_depth {
+                min_depth = depth;
+                best_normal = axis;
+                best_is_edge = true;
+                best_edge_i = i;
+                best_edge_j = j;
+            }
+        }
+    }
+
     // Ensure normal points from A to B
     if dot(best_normal, d) < 0.0 {
         best_normal = -best_normal;
+    }
+
+    // Edge-edge: emit single contact from closest points on the two edges
+    if best_is_edge {
+        let ea0 = hull_world_vert(si_a, best_edge_i, pos_a, rot_a);
+        let ea1 = hull_world_vert(si_a, (best_edge_i + 1u) % na, pos_a, rot_a);
+        let eb0 = hull_world_vert(si_b, best_edge_j, pos_b, rot_b);
+        let eb1 = hull_world_vert(si_b, (best_edge_j + 1u) % nb, pos_b, rot_b);
+        let pts = closest_points_segments(ea0, ea1, eb0, eb1);
+        let contact_point = (pts[0] + pts[1]) * 0.5;
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        return;
     }
 
     // Build reference face polygon (the 3-vertex triangle from the SAT face)

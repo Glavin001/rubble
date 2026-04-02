@@ -96,6 +96,16 @@ pub fn compute_convex_polygon_aabb(center: Vec2, angle: f32, vertices: &[Vec2]) 
 }
 
 // ---------------------------------------------------------------------------
+// Compile-time GPU layout validation
+// ---------------------------------------------------------------------------
+
+const _: () = assert!(std::mem::size_of::<CircleData>() == 16);
+const _: () = assert!(std::mem::size_of::<RectData>() == 16);
+const _: () = assert!(std::mem::size_of::<CapsuleData2D>() == 16);
+const _: () = assert!(std::mem::size_of::<ConvexPolygonData>() == 16);
+const _: () = assert!(std::mem::size_of::<ConvexVertex2D>() == 16);
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

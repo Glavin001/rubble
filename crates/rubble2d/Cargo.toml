@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 rubble-math = { workspace = true }
 rubble-gpu = { workspace = true }
+rubble-primitives = { workspace = true }
 rubble-shapes2d = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }

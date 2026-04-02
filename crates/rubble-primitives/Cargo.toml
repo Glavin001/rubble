@@ -5,8 +5,10 @@ edition = "2021"
 
 [dependencies]
 rubble-gpu = { workspace = true }
+rubble-math = { workspace = true }
 bytemuck = { workspace = true }
 wgpu = { workspace = true }
+glam = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

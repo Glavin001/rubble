@@ -4,22 +4,22 @@
 //! predict -> AABB compute -> broadphase -> narrowphase -> AVBD solver -> velocity extraction.
 
 mod avbd_solve_wgsl;
-mod broadphase_pairs_wgsl;
 mod extract_velocity_wgsl;
-pub mod lbvh;
 mod narrowphase_wgsl;
 mod predict_wgsl;
 
 pub use avbd_solve_wgsl::AVBD_SOLVE_2D_WGSL;
-pub use broadphase_pairs_wgsl::BROADPHASE_PAIRS_2D_WGSL;
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_2D_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_2D_WGSL;
 pub use predict_wgsl::PREDICT_2D_WGSL;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
-use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext};
+use rubble_gpu::{
+    round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext, PingPongBuffer,
+};
 use rubble_math::{Aabb2D, BodyHandle, CollisionEvent, Contact2D, RigidBodyState2D};
+use rubble_primitives::GpuLbvh;
 use rubble_shapes2d::{CapsuleData2D, CircleData, ConvexPolygonData, ConvexVertex2D, RectData};
 use std::collections::{HashMap, HashSet};
 
@@ -63,6 +63,14 @@ pub struct SolveRangeGpu {
     pub offset: u32,
     pub count: u32,
 }
+
+// ---------------------------------------------------------------------------
+// Compile-time GPU layout validation
+// ---------------------------------------------------------------------------
+
+const _: () = assert!(std::mem::size_of::<SimParams2DGpu>() == 32);
+const _: () = assert!(std::mem::size_of::<GpuPair>() == 8);
+const _: () = assert!(std::mem::size_of::<SolveRangeGpu>() == 8);
 
 // ---------------------------------------------------------------------------
 // AABB compute shader (inline)
@@ -231,7 +239,7 @@ pub struct GpuPipeline2D {
     extract_kernel: ComputeKernel,
 
     // Storage buffers
-    body_states: GpuBuffer<RigidBodyState2D>,
+    body_states: PingPongBuffer<RigidBodyState2D>,
     old_states: GpuBuffer<RigidBodyState2D>,
     aabbs: GpuBuffer<Aabb2D>,
     contacts: GpuBuffer<Contact2D>,
@@ -248,6 +256,9 @@ pub struct GpuPipeline2D {
     // Uniform buffers
     params_uniform: wgpu::Buffer,
     solve_range_uniform: wgpu::Buffer,
+
+    // GPU broadphase
+    gpu_lbvh: GpuLbvh,
 }
 
 impl GpuPipeline2D {
@@ -262,7 +273,7 @@ impl GpuPipeline2D {
         let solve_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_SOLVE_2D_WGSL, "main");
         let extract_kernel = ComputeKernel::from_wgsl(&ctx, EXTRACT_VELOCITY_2D_WGSL, "main");
 
-        let body_states = GpuBuffer::new(&ctx, max_bodies);
+        let body_states = PingPongBuffer::new(&ctx, max_bodies);
         let old_states = GpuBuffer::new(&ctx, max_bodies);
         let aabbs = GpuBuffer::new(&ctx, max_bodies);
         let contacts = GpuBuffer::new(&ctx, max_contacts);
@@ -290,6 +301,8 @@ impl GpuPipeline2D {
             mapped_at_creation: false,
         });
 
+        let gpu_lbvh = GpuLbvh::new(&ctx, max_bodies);
+
         Self {
             ctx,
             predict_kernel,
@@ -312,6 +325,7 @@ impl GpuPipeline2D {
             shape_infos,
             params_uniform,
             solve_range_uniform,
+            gpu_lbvh,
         }
     }
 
@@ -378,22 +392,60 @@ impl GpuPipeline2D {
         self.dispatch_predict(num_bodies);
         self.dispatch_aabb(num_bodies);
 
-        // LBVH broadphase: download AABBs, build tree on CPU, upload pairs
+        // GPU LBVH broadphase: Morton codes + radix sort on GPU, tree build CPU, pair finding GPU.
+        // Aabb2D and Aabb3D have identical memory layout (Vec4 min + Vec4 max), so we
+        // reinterpret the downloaded Aabb2D slice as Aabb3D for GpuLbvh scene bounds.
         self.aabbs.set_len(num_bodies);
-        let gpu_aabbs = self.aabbs.download(&self.ctx);
-        let bvh = lbvh::Lbvh2D::build(&gpu_aabbs);
-        let overlap_pairs = bvh.find_overlapping_pairs(&gpu_aabbs);
+        let aabb2d_data = self.aabbs.download(&self.ctx);
+        let cpu_aabbs_3d: &[rubble_math::Aabb3D] = bytemuck::cast_slice(&aabb2d_data);
+        let overlap_pairs = self.gpu_lbvh.build_and_query_raw(
+            &self.ctx,
+            self.aabbs.buffer(),
+            cpu_aabbs_3d,
+            num_bodies,
+        );
 
         if !overlap_pairs.is_empty() {
-            let gpu_pairs: Vec<GpuPair> = overlap_pairs
+            // Download shape info for sorting pairs by shape type
+            self.shape_infos.set_len(num_bodies);
+            let shape_info = self.shape_infos.download(&self.ctx);
+
+            let mut gpu_pairs: Vec<GpuPair> = overlap_pairs
                 .iter()
                 .map(|p| GpuPair { a: p[0], b: p[1] })
                 .collect();
+
+            // Sort pairs by (shape_type_a << 16 | shape_type_b) for SIMD-friendly
+            // narrowphase dispatch. Bodies with the same shape-pair type are grouped
+            // together, improving GPU warp/wavefront coherence.
+            gpu_pairs.sort_unstable_by_key(|pair| {
+                let st_a = shape_info[pair.a as usize].shape_type;
+                let st_b = shape_info[pair.b as usize].shape_type;
+                let (lo, hi) = if st_a <= st_b {
+                    (st_a, st_b)
+                } else {
+                    (st_b, st_a)
+                };
+                (lo << 16) | hi
+            });
+
             self.pairs.upload(&self.ctx, &gpu_pairs);
             self.pair_count.write(&self.ctx, gpu_pairs.len() as u32);
         }
 
         self.dispatch_narrowphase(num_bodies);
+
+        // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
+        let contact_count_val = self.contact_count.read(&self.ctx);
+        let capacity = self.contacts.capacity();
+        if contact_count_val > capacity {
+            // Grow contacts buffer to 2x the needed size
+            let new_cap = (contact_count_val as usize) * 2;
+            self.contacts.grow_if_needed(&self.ctx, new_cap);
+            // Reset counter and re-run narrowphase
+            self.contact_count.reset(&self.ctx);
+            self.dispatch_narrowphase(num_bodies);
+        }
     }
 
     /// Graph-colored AVBD solve: download contacts, color them so no two
@@ -435,7 +487,9 @@ impl GpuPipeline2D {
         }
 
         self.dispatch_extract(num_bodies);
-        self.body_states.download(&self.ctx)
+        let states = self.body_states.download(&self.ctx);
+        self.body_states.swap();
+        states
     }
 
     /// Run the full GPU 2D physics step with warm-starting support.
@@ -477,6 +531,7 @@ impl GpuPipeline2D {
 
         self.dispatch_extract(num_bodies);
         let states = self.body_states.download(&self.ctx);
+        self.body_states.swap();
         (states, final_contacts)
     }
 
@@ -515,7 +570,7 @@ impl GpuPipeline2D {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -540,7 +595,7 @@ impl GpuPipeline2D {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -593,7 +648,7 @@ impl GpuPipeline2D {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -663,7 +718,7 @@ impl GpuPipeline2D {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -700,7 +755,7 @@ impl GpuPipeline2D {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,

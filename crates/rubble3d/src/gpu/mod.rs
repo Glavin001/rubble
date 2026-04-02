@@ -4,24 +4,24 @@
 //! predict → AABB compute → broadphase → narrowphase → AVBD solver → velocity extraction.
 
 mod avbd_solve_wgsl;
-mod broadphase_pairs_wgsl;
 mod extract_velocity_wgsl;
-pub mod lbvh;
 mod narrowphase_wgsl;
 mod predict_wgsl;
 
 pub use avbd_solve_wgsl::AVBD_SOLVE_WGSL;
-pub use broadphase_pairs_wgsl::BROADPHASE_PAIRS_WGSL;
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
-use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext};
+use rubble_gpu::{
+    round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext, PingPongBuffer,
+};
 use rubble_math::{
     Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
 };
+use rubble_primitives::GpuLbvh;
 use rubble_shapes3d::{
     BoxData, CapsuleData, CompoundChildGpu, CompoundShapeGpu, ConvexHullData, ConvexVertex3D,
     SphereData,
@@ -60,6 +60,14 @@ pub struct SolveRangeGpu {
     pub offset: u32,
     pub count: u32,
 }
+
+// ---------------------------------------------------------------------------
+// Compile-time GPU layout validation
+// ---------------------------------------------------------------------------
+
+const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 32);
+const _: () = assert!(std::mem::size_of::<GpuPair>() == 8);
+const _: () = assert!(std::mem::size_of::<SolveRangeGpu>() == 8);
 
 // ---------------------------------------------------------------------------
 // AABB compute shader
@@ -120,8 +128,8 @@ struct ConvexHullInfo {
     face_count:    u32,
     edge_offset:   u32,
     edge_count:    u32,
-    gauss_map_offset: u32,
-    gauss_map_count:  u32,
+    _pad0: u32,
+    _pad1: u32,
 };
 
 struct ConvexVert {
@@ -255,7 +263,7 @@ pub struct GpuPipeline {
     extract_kernel: ComputeKernel,
 
     // Storage buffers
-    body_states: GpuBuffer<RigidBodyState3D>,
+    body_states: PingPongBuffer<RigidBodyState3D>,
     body_props: GpuBuffer<RigidBodyProps3D>,
     old_states: GpuBuffer<RigidBodyState3D>,
     aabbs: GpuBuffer<Aabb3D>,
@@ -273,10 +281,15 @@ pub struct GpuPipeline {
     // Compound shape data (for CPU-side pair expansion)
     compound_shapes_data: Vec<CompoundShapeGpu>,
     compound_children_data: Vec<CompoundChildGpu>,
+    /// CPU-side compound shapes with BVH data for broadphase culling.
+    compound_shapes_cpu: Vec<rubble_shapes3d::CompoundShape>,
 
     // Uniform buffers
     params_uniform: wgpu::Buffer,
     solve_range_uniform: wgpu::Buffer,
+
+    // GPU broadphase
+    gpu_lbvh: GpuLbvh,
 }
 
 impl GpuPipeline {
@@ -291,7 +304,7 @@ impl GpuPipeline {
         let solve_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_SOLVE_WGSL, "main");
         let extract_kernel = ComputeKernel::from_wgsl(&ctx, EXTRACT_VELOCITY_WGSL, "main");
 
-        let body_states = GpuBuffer::new(&ctx, max_bodies);
+        let body_states = PingPongBuffer::new(&ctx, max_bodies);
         let body_props = GpuBuffer::new(&ctx, max_bodies);
         let old_states = GpuBuffer::new(&ctx, max_bodies);
         let aabbs = GpuBuffer::new(&ctx, max_bodies);
@@ -320,6 +333,8 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        let gpu_lbvh = GpuLbvh::new(&ctx, max_bodies);
+
         Self {
             ctx,
             predict_kernel,
@@ -343,8 +358,10 @@ impl GpuPipeline {
             planes,
             compound_shapes_data: Vec::new(),
             compound_children_data: Vec::new(),
+            compound_shapes_cpu: Vec::new(),
             params_uniform,
             solve_range_uniform,
+            gpu_lbvh,
         }
     }
 
@@ -368,6 +385,7 @@ impl GpuPipeline {
         plane_data: &[Vec4],
         compound_shapes: &[CompoundShapeGpu],
         compound_children: &[CompoundChildGpu],
+        compound_shapes_cpu: &[rubble_shapes3d::CompoundShape],
         gravity: Vec3,
         dt: f32,
         solver_iterations: u32,
@@ -375,6 +393,7 @@ impl GpuPipeline {
         // Store compound data for CPU-side pair expansion
         self.compound_shapes_data = compound_shapes.to_vec();
         self.compound_children_data = compound_children.to_vec();
+        self.compound_shapes_cpu = compound_shapes_cpu.to_vec();
         self.body_states.upload(&self.ctx, states);
         self.old_states.upload(&self.ctx, states);
         self.body_props.upload(&self.ctx, props);
@@ -424,11 +443,11 @@ impl GpuPipeline {
         self.dispatch_predict(num_bodies);
         self.dispatch_aabb(num_bodies);
 
-        // LBVH broadphase: download AABBs, build tree on CPU, upload pairs
+        // GPU LBVH broadphase: Morton codes + radix sort on GPU, tree build CPU, pair finding GPU
         self.aabbs.set_len(num_bodies);
-        let gpu_aabbs = self.aabbs.download(&self.ctx);
-        let bvh = lbvh::Lbvh::build(&gpu_aabbs);
-        let overlap_pairs = bvh.find_overlapping_pairs(&gpu_aabbs);
+        let overlap_pairs = self
+            .gpu_lbvh
+            .build_and_query(&self.ctx, &self.aabbs, num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
 
@@ -437,7 +456,7 @@ impl GpuPipeline {
             self.body_props.set_len(num_bodies);
             let props = self.body_props.download(&self.ctx);
             // Also download states for compound child world position computation
-            self.body_states.set_len(num_bodies);
+            self.body_states.current_mut().set_len(num_bodies);
             let states = self.body_states.download(&self.ctx);
 
             let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
@@ -467,6 +486,19 @@ impl GpuPipeline {
             }
 
             if !non_compound_pairs.is_empty() {
+                // Sort pairs by (shape_type_a << 16 | shape_type_b) for SIMD-friendly
+                // narrowphase dispatch. Bodies with the same shape-pair type are grouped
+                // together, improving GPU warp/wavefront coherence.
+                non_compound_pairs.sort_unstable_by_key(|pair| {
+                    let st_a = props[pair.a as usize].shape_type;
+                    let st_b = props[pair.b as usize].shape_type;
+                    let (lo, hi) = if st_a <= st_b {
+                        (st_a, st_b)
+                    } else {
+                        (st_b, st_a)
+                    };
+                    (lo << 16) | hi
+                });
                 self.pairs.upload(&self.ctx, &non_compound_pairs);
                 self.pair_count
                     .write(&self.ctx, non_compound_pairs.len() as u32);
@@ -474,6 +506,18 @@ impl GpuPipeline {
         }
 
         self.dispatch_narrowphase(num_bodies);
+
+        // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
+        let contact_count_val = self.contact_count.read(&self.ctx);
+        let capacity = self.contacts.capacity();
+        if contact_count_val > capacity {
+            // Grow contacts buffer to 2x the needed size
+            let new_cap = (contact_count_val as usize) * 2;
+            self.contacts.grow_if_needed(&self.ctx, new_cap);
+            // Reset counter and re-run narrowphase
+            self.contact_count.reset(&self.ctx);
+            self.dispatch_narrowphase(num_bodies);
+        }
 
         cpu_compound_contacts
     }
@@ -517,46 +561,206 @@ impl GpuPipeline {
             vec![(pos_b, rot_b, st_b, si_b)]
         };
 
-        // For each child pair, compute a simple sphere-based proximity test
-        // and emit a contact if overlapping.
-        for &(child_pos_a, _child_rot_a, child_st_a, child_si_a) in &children_a {
-            for &(child_pos_b, _child_rot_b, child_st_b, child_si_b) in &children_b {
-                let ext_a = self.child_extent(child_st_a, child_si_a);
-                let ext_b = self.child_extent(child_st_b, child_si_b);
+        // Try BVH-accelerated culling when compound shapes have BVH data.
+        let bvh_b = if b_is_compound {
+            self.compound_shapes_cpu
+                .get(si_b as usize)
+                .filter(|cs| cs.bvh_nodes.len() >= 2)
+        } else {
+            None
+        };
+        let bvh_a = if a_is_compound {
+            self.compound_shapes_cpu
+                .get(si_a as usize)
+                .filter(|cs| cs.bvh_nodes.len() >= 2)
+        } else {
+            None
+        };
 
-                let diff = child_pos_b - child_pos_a;
-                let sum_ext = ext_a + ext_b;
-
-                // Quick sphere overlap check
-                if diff.length_squared() > sum_ext * sum_ext {
-                    continue;
+        // Build candidate child-pair indices using BVH when possible.
+        let candidate_pairs: Vec<(usize, usize)> = if bvh_b.is_some() || bvh_a.is_some() {
+            let mut pairs = Vec::new();
+            if let Some(cs_b) = bvh_b {
+                let inv_rot_b = rot_b.conjugate();
+                for (idx_a, &(child_pos_a, _, child_st_a, child_si_a)) in
+                    children_a.iter().enumerate()
+                {
+                    let ext_a = self.child_extent(child_st_a, child_si_a);
+                    let world_min_a = child_pos_a - Vec3::splat(ext_a);
+                    let world_max_a = child_pos_a + Vec3::splat(ext_a);
+                    let local_min =
+                        Self::transform_aabb_to_local(world_min_a, world_max_a, pos_b, inv_rot_b);
+                    let local_max = Self::transform_aabb_to_local_max(
+                        world_min_a,
+                        world_max_a,
+                        pos_b,
+                        inv_rot_b,
+                    );
+                    for idx_b in Self::traverse_compound_bvh(&cs_b.bvh_nodes, local_min, local_max)
+                    {
+                        if idx_b < children_b.len() {
+                            pairs.push((idx_a, idx_b));
+                        }
+                    }
                 }
-
-                let dist = diff.length();
-                if dist < 1e-12 {
-                    continue;
+            } else if let Some(cs_a) = bvh_a {
+                let inv_rot_a = rot_a.conjugate();
+                for (idx_b, &(child_pos_b, _, child_st_b, child_si_b)) in
+                    children_b.iter().enumerate()
+                {
+                    let ext_b = self.child_extent(child_st_b, child_si_b);
+                    let world_min_b = child_pos_b - Vec3::splat(ext_b);
+                    let world_max_b = child_pos_b + Vec3::splat(ext_b);
+                    let local_min =
+                        Self::transform_aabb_to_local(world_min_b, world_max_b, pos_a, inv_rot_a);
+                    let local_max = Self::transform_aabb_to_local_max(
+                        world_min_b,
+                        world_max_b,
+                        pos_a,
+                        inv_rot_a,
+                    );
+                    for idx_a in Self::traverse_compound_bvh(&cs_a.bvh_nodes, local_min, local_max)
+                    {
+                        if idx_a < children_a.len() {
+                            pairs.push((idx_a, idx_b));
+                        }
+                    }
                 }
-                let normal = diff / dist;
-                let depth = dist - sum_ext;
-                if depth > 0.0 {
-                    continue;
+            }
+            pairs
+        } else {
+            // Fallback: O(n*m) brute-force when no BVH is available.
+            let mut all_pairs = Vec::with_capacity(children_a.len() * children_b.len());
+            for idx_a in 0..children_a.len() {
+                for idx_b in 0..children_b.len() {
+                    all_pairs.push((idx_a, idx_b));
                 }
-                let point = child_pos_a + normal * (ext_a + depth * 0.5);
+            }
+            all_pairs
+        };
 
-                out.push(Contact3D {
-                    point: Vec4::new(point.x, point.y, point.z, depth),
-                    normal: Vec4::new(normal.x, normal.y, normal.z, 0.0),
-                    body_a,
-                    body_b,
-                    feature_id: 0,
-                    _pad: 0,
-                    lambda_n: 0.0,
-                    lambda_t1: 0.0,
-                    lambda_t2: 0.0,
-                    penalty_k: 1e4,
-                });
+        // Test candidate child pairs with sphere-based proximity.
+        for (idx_a, idx_b) in candidate_pairs {
+            let (child_pos_a, _, child_st_a, child_si_a) = children_a[idx_a];
+            let (child_pos_b, _, child_st_b, child_si_b) = children_b[idx_b];
+
+            let ext_a = self.child_extent(child_st_a, child_si_a);
+            let ext_b = self.child_extent(child_st_b, child_si_b);
+
+            let diff = child_pos_b - child_pos_a;
+            let sum_ext = ext_a + ext_b;
+
+            if diff.length_squared() > sum_ext * sum_ext {
+                continue;
+            }
+
+            let dist = diff.length();
+            if dist < 1e-12 {
+                continue;
+            }
+            let normal = diff / dist;
+            let depth = dist - sum_ext;
+            if depth > 0.0 {
+                continue;
+            }
+            let point = child_pos_a + normal * (ext_a + depth * 0.5);
+
+            out.push(Contact3D {
+                point: Vec4::new(point.x, point.y, point.z, depth),
+                normal: Vec4::new(normal.x, normal.y, normal.z, 0.0),
+                body_a,
+                body_b,
+                feature_id: 0,
+                _pad: 0,
+                lambda_n: 0.0,
+                lambda_t1: 0.0,
+                lambda_t2: 0.0,
+                penalty_k: 1e4,
+            });
+        }
+    }
+
+    /// Traverse a compound shape's BVH to find child indices whose local AABBs
+    /// overlap the given query AABB (in the compound's local space).
+    fn traverse_compound_bvh(
+        bvh_nodes: &[rubble_math::BvhNode],
+        query_min: Vec3,
+        query_max: Vec3,
+    ) -> Vec<usize> {
+        let mut result = Vec::new();
+        if bvh_nodes.is_empty() {
+            return result;
+        }
+        let root = (bvh_nodes.len() - 1) as i32;
+        let mut stack = vec![root];
+        while let Some(idx) = stack.pop() {
+            if idx < 0 {
+                result.push((-idx - 1) as usize);
+                continue;
+            }
+            let node = &bvh_nodes[idx as usize];
+            let node_min = node.aabb_min.truncate();
+            let node_max = node.aabb_max.truncate();
+            if node_min.x <= query_max.x
+                && node_max.x >= query_min.x
+                && node_min.y <= query_max.y
+                && node_max.y >= query_min.y
+                && node_min.z <= query_max.z
+                && node_max.z >= query_min.z
+            {
+                stack.push(node.left);
+                stack.push(node.right);
             }
         }
+        result
+    }
+
+    /// Transform a world-space AABB to a compound's local space (min corner).
+    fn transform_aabb_to_local(
+        world_min: Vec3,
+        world_max: Vec3,
+        parent_pos: Vec3,
+        inv_parent_rot: glam::Quat,
+    ) -> Vec3 {
+        let corners = [
+            Vec3::new(world_min.x, world_min.y, world_min.z),
+            Vec3::new(world_max.x, world_min.y, world_min.z),
+            Vec3::new(world_min.x, world_max.y, world_min.z),
+            Vec3::new(world_min.x, world_min.y, world_max.z),
+            Vec3::new(world_max.x, world_max.y, world_min.z),
+            Vec3::new(world_max.x, world_min.y, world_max.z),
+            Vec3::new(world_min.x, world_max.y, world_max.z),
+            Vec3::new(world_max.x, world_max.y, world_max.z),
+        ];
+        let mut local_min = Vec3::splat(f32::MAX);
+        for &c in &corners {
+            local_min = local_min.min(inv_parent_rot * (c - parent_pos));
+        }
+        local_min
+    }
+
+    /// Transform a world-space AABB to a compound's local space (max corner).
+    fn transform_aabb_to_local_max(
+        world_min: Vec3,
+        world_max: Vec3,
+        parent_pos: Vec3,
+        inv_parent_rot: glam::Quat,
+    ) -> Vec3 {
+        let corners = [
+            Vec3::new(world_min.x, world_min.y, world_min.z),
+            Vec3::new(world_max.x, world_min.y, world_min.z),
+            Vec3::new(world_min.x, world_max.y, world_min.z),
+            Vec3::new(world_min.x, world_min.y, world_max.z),
+            Vec3::new(world_max.x, world_max.y, world_min.z),
+            Vec3::new(world_max.x, world_min.y, world_max.z),
+            Vec3::new(world_min.x, world_max.y, world_max.z),
+            Vec3::new(world_max.x, world_max.y, world_max.z),
+        ];
+        let mut local_max = Vec3::splat(f32::MIN);
+        for &c in &corners {
+            local_max = local_max.max(inv_parent_rot * (c - parent_pos));
+        }
+        local_max
     }
 
     /// Get world-space positions/rotations of compound children.
@@ -654,7 +858,9 @@ impl GpuPipeline {
         }
 
         self.dispatch_extract(num_bodies);
-        self.body_states.download(&self.ctx)
+        let states = self.body_states.download(&self.ctx);
+        self.body_states.swap();
+        states
     }
 
     /// Run the full GPU physics step with warm-starting support.
@@ -700,6 +906,7 @@ impl GpuPipeline {
 
         self.dispatch_extract(num_bodies);
         let states = self.body_states.download(&self.ctx);
+        self.body_states.swap();
         (states, final_contacts)
     }
 
@@ -738,7 +945,7 @@ impl GpuPipeline {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -763,7 +970,7 @@ impl GpuPipeline {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -820,7 +1027,7 @@ impl GpuPipeline {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -894,7 +1101,7 @@ impl GpuPipeline {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -935,7 +1142,7 @@ impl GpuPipeline {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
