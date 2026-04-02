@@ -342,7 +342,10 @@ mod tests {
 
     #[test]
     fn test_buffer_upload_download() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut buf = GpuBuffer::<f32>::new(&ctx, 4);
         let data = [1.0f32, 2.0, 3.0, 4.0];
         buf.upload(&ctx, &data);
@@ -352,7 +355,10 @@ mod tests {
 
     #[test]
     fn test_buffer_grow() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut buf = GpuBuffer::<f32>::new(&ctx, 4);
         let data = [1.0f32, 2.0, 3.0, 4.0];
         buf.upload(&ctx, &data);
@@ -366,7 +372,10 @@ mod tests {
 
     #[test]
     fn test_ping_pong() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut pp = PingPongBuffer::<f32>::new(&ctx, 4);
         let data = [10.0f32, 20.0, 30.0, 40.0];
         pp.current_mut().upload(&ctx, &data);
@@ -378,7 +387,10 @@ mod tests {
 
     #[test]
     fn test_ping_pong_upload_swap() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut pp = PingPongBuffer::<u32>::new(&ctx, 4);
 
         // Upload data to the current buffer
@@ -407,7 +419,10 @@ mod tests {
 
     #[test]
     fn test_atomic_counter() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let counter = GpuAtomicCounter::new(&ctx);
         counter.reset(&ctx);
 

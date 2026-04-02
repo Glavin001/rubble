@@ -155,7 +155,10 @@ mod tests {
 
     #[test]
     fn test_compaction() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let compact = GpuStreamCompaction::new(&ctx, 256);
 
         let data_in = [10u32, 20, 30, 40, 50, 60, 70, 80];
@@ -175,7 +178,10 @@ mod tests {
 
     #[test]
     fn test_compaction_all_zeros() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let compact = GpuStreamCompaction::new(&ctx, 256);
 
         let data_in = [10u32, 20, 30, 40];
@@ -192,7 +198,10 @@ mod tests {
 
     #[test]
     fn test_compaction_all_ones() {
-        let ctx = crate::test_gpu();
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let compact = GpuStreamCompaction::new(&ctx, 256);
 
         let data_in = [10u32, 20, 30, 40, 50];

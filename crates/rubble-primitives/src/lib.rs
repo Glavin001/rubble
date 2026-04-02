@@ -14,8 +14,6 @@ pub use radix_sort::{GpuRadixSort, RadixSortEntry};
 pub(crate) use prefix_scan::InternalPrefixScan;
 
 #[cfg(test)]
-fn test_gpu() -> rubble_gpu::GpuContext {
-    pollster::block_on(rubble_gpu::GpuContext::new()).expect(
-        "FATAL: No GPU adapter found. Install mesa-vulkan-drivers for lavapipe software Vulkan.",
-    )
+fn test_gpu() -> Option<rubble_gpu::GpuContext> {
+    pollster::block_on(rubble_gpu::GpuContext::new()).ok()
 }

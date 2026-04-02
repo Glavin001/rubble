@@ -8,3 +8,8 @@ crate-type = ["lib"]
 
 [dependencies]
 spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu" }
+
+# For build-time SPIR-V compilation (used by consuming crates)
+[build-dependencies]
+# spirv-builder would go here when the rust-gpu toolchain is installed:
+# spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu" }

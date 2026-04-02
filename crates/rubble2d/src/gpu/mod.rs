@@ -1,7 +1,10 @@
 //! GPU compute pipeline for 2D physics simulation using AVBD solver.
 //!
-//! Orchestrates the full simulation step on the GPU using WGSL compute shaders:
+//! Orchestrates the full simulation step on the GPU using compute shaders:
 //! predict -> AABB compute -> broadphase -> narrowphase -> AVBD solver -> velocity extraction.
+//!
+//! Supports WGSL (default) and rust-gpu/SPIR-V shader backends. See `rubble3d::gpu`
+//! module docs for details on multi-GPU target support via the `spirv` feature.
 
 mod avbd_solve_wgsl;
 mod extract_velocity_wgsl;
