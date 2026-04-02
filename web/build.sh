@@ -1,18 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Full web build: npm ci + npm run build:all (WASM via wasm-pack + TypeScript + Vite).
+# Intended to be the only command CI, Vercel, and docs use for producing web/dist.
+# Run from repository root: ./web/build.sh  (or: bash web/build.sh)
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-echo "==> Building WASM package..."
-cd "$PROJECT_ROOT"
-wasm-pack build crates/rubble-wasm --target web --out-dir ../../web/src/wasm
-
-echo "==> Installing web dependencies..."
+if [[ -f "${HOME}/.cargo/env" ]]; then
+  # shellcheck source=/dev/null
+  . "${HOME}/.cargo/env"
+fi
 cd "$SCRIPT_DIR"
 npm ci
-
-echo "==> Building web project..."
-npm run build
-
-echo "==> Done! Output in web/dist/"
+npm run build:all
+echo "==> Done. Output: web/dist/"
