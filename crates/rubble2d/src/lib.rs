@@ -451,6 +451,14 @@ impl World2D {
         s.lin_vel = Vec4::new(vel.x, vel.y, omega, 0.0);
     }
 
+    /// Get the angular velocity of a body.
+    pub fn get_angular_velocity(&self, handle: BodyHandle) -> Option<f32> {
+        if !self.allocator.is_alive(handle) {
+            return None;
+        }
+        Some(self.states[handle.index as usize].angular_velocity())
+    }
+
     /// Mark a body as kinematic (moves via set_position/set_velocity, not physics).
     pub fn set_body_kinematic(&mut self, handle: BodyHandle, kinematic: bool) {
         if !self.allocator.is_alive(handle) {

@@ -1,7 +1,24 @@
 //! GPU compute pipeline for 3D physics simulation using AVBD solver.
 //!
-//! Orchestrates the full simulation step on the GPU using WGSL compute shaders:
+//! Orchestrates the full simulation step on the GPU using compute shaders:
 //! predict → AABB compute → broadphase → narrowphase → AVBD solver → velocity extraction.
+//!
+//! ## Shader Backends
+//!
+//! The pipeline supports two shader compilation paths:
+//!
+//! 1. **WGSL** (default): Inline WGSL string constants compiled at runtime via wgpu.
+//!    Zero build-time dependencies. Works on all wgpu-supported platforms.
+//!
+//! 2. **rust-gpu / SPIR-V** (via `spirv` feature): Physics kernels written in Rust
+//!    (see `rubble-shaders` crate), compiled to SPIR-V by `rust-gpu`, loaded via
+//!    `ComputeKernel::from_spirv()`. Enables multi-GPU target support — the same
+//!    Rust shader source produces SPIR-V that runs on Vulkan, Metal (via MoltenVK),
+//!    and DX12 (via vkd3d) without per-vendor shader maintenance.
+//!
+//! The narrowphase uses WGSL in both modes (heavy use of atomics and shape dispatch).
+//! The performance-critical AVBD solver, predict, and extract kernels are available
+//! in both WGSL and rust-gpu variants.
 
 mod avbd_solve_wgsl;
 mod extract_velocity_wgsl;

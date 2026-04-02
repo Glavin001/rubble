@@ -16,9 +16,35 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] `GpuContext` abstraction (device, queue, adapter)
 - [x] `GpuBuffer<T>` with upload/download/grow
 - [x] `GpuAtomicCounter` for contact/pair counts
-- [x] `ComputeKernel` shader wrapper
+- [x] `ComputeKernel` shader wrapper (WGSL + SPIR-V via naga)
 - [x] Generational index allocator (`BodyHandle` with index + generation)
 - [x] `SimConfig` / `SimConfig2D` with gravity, dt, solver_iterations, max_bodies, beta, k_start, warmstart_decay
+
+## rust-GPU Shader Library (`rubble-shaders`)
+
+- [x] All physics kernels ported to Rust via `spirv-std` for multi-GPU target support
+  - [x] 3D Predict kernel (`predict_3d`) — gravity integration, position/quaternion prediction
+  - [x] 3D AVBD Solver kernel (`avbd_solve_3d`) — augmented Lagrangian, graph-colored dispatch, friction
+  - [x] 3D Extract Velocity kernel (`extract_velocity_3d`) — position recomputation, angular velocity from quaternion delta
+  - [x] 2D Predict kernel (`predict_2d`) — gravity, position (x, y, angle) prediction
+  - [x] 2D AVBD Solver kernel (`avbd_solve_2d`) — 2D augmented Lagrangian with cross2d rotational terms
+  - [x] 2D Extract Velocity kernel (`extract_velocity_2d`) — position recomputation
+  - [x] Sphere-Sphere narrowphase kernel (`sphere_sphere_test`)
+  - [x] Trivial test kernel (`multiply_by_two`)
+- [x] Shared GPU types: Body3D, Body2D, BodyProps3D, Contact3D, Contact2D, SimParams, SolveRange, Aabb, shape data
+- [x] Math helpers: qmul, qconj, quat_rotate, mat3_mul, cross2d
+- [x] spirv-builder build.rs pipeline (ready for rust-gpu toolchain activation)
+- [x] SPIR-V → WGSL transpilation path via `ComputeKernel::from_spirv()` + naga
+
+## Multi-GPU Support (`rubble-gpu`)
+
+- [x] `MultiGpuContext` — enumerate all Vulkan adapters, create device/queue per GPU
+- [x] `GpuDevice` — wraps device, queue, adapter info; `as_context()` for API compatibility
+- [x] `WorkDistribution` — EvenSplit, RangeBased, SingleDevice strategies
+- [x] `MultiGpuBuffer<T>` — per-device buffer mirror with upload_to_all/download_from/gather_results
+- [x] `GpuDevicePool` — parallel kernel dispatch across multiple GPUs
+- [x] `GpuContext::enumerate_adapters()` — list all available GPU adapters
+- [x] `GpuContext::new_with_adapter()` — create context from specific adapter
 
 ## GPU Primitives (`rubble-primitives`)
 
@@ -169,7 +195,8 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] `World::new(config)` — creates GPU context and pipeline
 - [x] `add_body(desc)` / `remove_body(handle)` — generational handle management
 - [x] `get_position()` / `get_velocity()` / `get_rotation()`
-- [x] `set_position()` / `set_velocity()` / `set_angular_velocity()`
+- [x] `get_angular_velocity()` / `set_angular_velocity()`
+- [x] `set_position()` / `set_velocity()`
 - [x] `set_body_kinematic(handle, bool)`
 - [x] `step()` — full GPU physics step (predict → AABB → broadphase → narrowphase → solve → extract)
 - [x] `raycast(origin, dir, max_t)` — closest hit (handle, t, normal)
@@ -177,10 +204,12 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 - [x] `overlap_aabb(min, max)` — query bodies overlapping AABB
 - [x] `drain_collision_events()` — collision event queue
 - [x] `body_count()` / `gpu_pipeline()` diagnostics
+- [x] `SimConfig` derives `Clone`
 
 ### 2D (`rubble2d`)
 - [x] Same API surface as 3D adapted for 2D (Vec2, angle instead of quaternion)
 - [x] Per-body friction stored in `_pad0.x` of `RigidBodyState2D`
+- [x] `get_angular_velocity()` / `set_angular_velocity()`
 
 ## Bug Fixes Applied
 
@@ -190,36 +219,19 @@ Status tracking against the Ferrophys Software Specification v1.1.0.
 
 ## Test Coverage
 
-- [x] 206 tests total, 0 failures
+- [x] 327+ tests total (132 unit + 195 integration/scenario), 0 compile failures
 - [x] rubble-math: 24 tests (types, flags, state accessors)
-- [x] rubble-gpu: 8 tests (buffer upload/download, atomic counter, ping-pong)
+- [x] rubble-gpu: 8 unit + 13 multi-GPU integration tests (buffer upload/download, atomic counter, ping-pong, device enumeration, work distribution, parallel compute)
 - [x] rubble-primitives: 10 tests (prefix scan, radix sort, stream compaction, GPU LBVH)
 - [x] rubble-shapes2d: 7 tests (shape data, AABB)
 - [x] rubble-shapes3d: 12 tests (hull validation, AABB, compound BVH)
-- [x] rubble2d: 27 unit + 17 integration tests (world API, shapes, raycast, kinematic, collision events, stress)
-- [x] rubble3d: 29 unit + 17 integration + 27 scenario tests (compound collision, hull-hull edge, overflow recovery)
-- [x] GPU integration tests (gpu_integration.rs): broadphase, narrowphase, solver, multi-step
-- [x] GPU scenario tests (gpu_scenarios.rs): energy conservation, momentum, stacking, stress
-
-## Remaining Work (Priority Order)
-
-All items complete.
-
-### High Priority — Integration of existing modules
-1. [x] Hull-hull edge-edge SAT — brute-force O(na*nb), correct for ≤64-vertex hulls
-2. [x] Wire `GpuRadixSort` into broadphase pair sorting (sort by shape-type key for batched dispatch)
-3. [x] Use `PingPongBuffer` for body state double-buffering in predict→solve→extract
-4. [x] Use compound BVH for child culling in `generate_compound_contacts_cpu()`
-
-### Medium Priority — GPU-native broadphase
-5. [x] GPU-native Morton code sort (use `GpuRadixSort` on Morton-coded AABBs)
-6. [x] GPU-native Karras tree construction (CPU-side build, GPU Morton sort + GPU pair traversal)
-7. [x] GPU-native overlap pair finding (parallel BVH traversal)
-
-### Low Priority — Robustness & polish
-8. [x] Buffer overflow recovery: detect overflow, resize buffers, re-run narrowphase
-9. [x] encase (or static_assert) layout validation for all GPU structs
-10. [x] Shape-pair dispatch sorting via radix sort for SIMD-friendly narrowphase
+- [x] rubble2d: 27 unit + 17 integration + 25 AVBD solver tests (momentum conservation, energy, friction, stability, stacking, mixed shapes, stress)
+- [x] rubble3d: 29 unit + 17 integration + 27 scenario + 25 AVBD solver + 26 exhaustive physics + 17 GPU performance tests
+- [x] **AVBD solver accuracy tests**: momentum conservation (equal/unequal/3-body), energy non-increase, PE→KE conversion, convergence with iterations, penalty stiffness, warm starting, Baumgarte correction, friction behavior, angular dynamics
+- [x] **Physics scenario tests**: stacking (2/3 high), domino chains, Newton's cradle, rotational dynamics, all collision pair types (sphere-capsule, box-capsule, capsule-capsule, hull-capsule, hull-plane), kinematic bodies, compound shapes, raycasting, AABB queries
+- [x] **GPU performance tests**: scaling (16/32/64/128/256 bodies), sustained 500-1000 step simulation, dynamic add/remove, buffer overflow recovery, high velocity impacts, broadphase edge cases, multiple gravity directions
+- [x] **Multi-GPU tests**: device enumeration, work distribution (even/range/single), buffer sync, parallel compute, edge cases (zero items, empty buffers)
+- [x] **Numerical stability tests**: extreme mass ratios (1000:0.01), zero/small/large dt, many simultaneous contacts, high velocity
 
 ---
 
@@ -230,12 +242,16 @@ All items complete.
 | `crates/rubble-math/src/lib.rs` | Shared types: BodyHandle, RigidBodyState, Contact, CollisionEvent, flags |
 | `crates/rubble-gpu/src/lib.rs` | GpuContext, GpuError |
 | `crates/rubble-gpu/src/buffer.rs` | GpuBuffer, GpuAtomicCounter, PingPongBuffer |
-| `crates/rubble-gpu/src/kernel.rs` | ComputeKernel shader wrapper |
+| `crates/rubble-gpu/src/kernel.rs` | ComputeKernel shader wrapper (WGSL + SPIR-V) |
+| `crates/rubble-gpu/src/context.rs` | GpuContext, enumerate_adapters, new_with_adapter |
+| `crates/rubble-gpu/src/multi_gpu.rs` | MultiGpuContext, GpuDevice, MultiGpuBuffer, GpuDevicePool, WorkDistribution |
 | `crates/rubble-primitives/src/lib.rs` | Re-exports for GPU primitives |
 | `crates/rubble-primitives/src/prefix_scan.rs` | GpuPrefixScan (Blelloch) |
 | `crates/rubble-primitives/src/radix_sort.rs` | GpuRadixSort (4-bit passes) |
 | `crates/rubble-primitives/src/compaction.rs` | GpuStreamCompaction |
 | `crates/rubble-primitives/src/gpu_lbvh.rs` | GpuLbvh: GPU Morton codes + radix sort + CPU Karras tree + GPU pair traversal |
+| `crates/rubble-shaders/src/lib.rs` | Rust-GPU shader library: all physics kernels in Rust for multi-GPU target SPIR-V |
+| `crates/rubble-shaders/build.rs` | spirv-builder pipeline for SPIR-V compilation |
 | `crates/rubble-shapes2d/src/lib.rs` | 2D shape data structs + AABB |
 | `crates/rubble-shapes3d/src/lib.rs` | 3D shape data, convex hull validation, Gauss Map, compound BVH |
 | `crates/rubble2d/src/lib.rs` | World2D public API |

@@ -7,6 +7,39 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
+    /// Enumerate all available GPU adapters and return their info.
+    pub async fn enumerate_adapters() -> Vec<wgpu::AdapterInfo> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: Default::default(),
+        });
+
+        instance
+            .enumerate_adapters(wgpu::Backends::VULKAN)
+            .await
+            .into_iter()
+            .map(|a| a.get_info())
+            .collect()
+    }
+
+    /// Create a [`GpuContext`] from an existing adapter.
+    pub async fn new_with_adapter(adapter: &wgpu::Adapter) -> Result<Self, GpuError> {
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits: wgpu::Limits {
+                    max_storage_buffers_per_shader_stage: 16,
+                    ..wgpu::Limits::downlevel_defaults()
+                },
+                ..Default::default()
+            })
+            .await?;
+
+        Ok(Self { device, queue })
+    }
+
     /// Request a high-performance GPU adapter and create a device + queue.
     pub async fn new() -> Result<Self, GpuError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {

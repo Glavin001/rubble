@@ -21,6 +21,7 @@ use rubble_shapes3d::{
 // ---------------------------------------------------------------------------
 
 /// Top-level simulation configuration.
+#[derive(Clone)]
 pub struct SimConfig {
     pub gravity: Vec3,
     pub dt: f32,
@@ -814,6 +815,23 @@ impl World {
         }
         let idx = handle.index as usize;
         self.states[idx].lin_vel = vel.extend(0.0);
+    }
+
+    /// Get the angular velocity of a body.
+    pub fn get_angular_velocity(&self, handle: BodyHandle) -> Option<Vec3> {
+        if !self.allocator.is_valid(handle) {
+            return None;
+        }
+        Some(self.states[handle.index as usize].angular_velocity())
+    }
+
+    /// Set the angular velocity of a body.
+    pub fn set_angular_velocity(&mut self, handle: BodyHandle, omega: Vec3) {
+        if !self.allocator.is_valid(handle) {
+            return;
+        }
+        let idx = handle.index as usize;
+        self.states[idx].ang_vel = omega.extend(0.0);
     }
 
     /// Advance the simulation by one time step on the GPU.
