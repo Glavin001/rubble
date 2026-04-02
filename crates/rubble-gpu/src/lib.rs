@@ -30,9 +30,7 @@ pub(crate) async fn yield_now() {
             .unwrap()
             .dyn_into()
             .unwrap();
-        set_timeout
-            .call2(&global, &resolve, &0.into())
-            .unwrap();
+        set_timeout.call2(&global, &resolve, &0.into()).unwrap();
     });
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }

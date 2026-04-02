@@ -733,19 +733,36 @@ impl World2D {
         }
 
         if gpu_circles.is_empty() {
-            gpu_circles.push(CircleData { radius: 0.0, _pad: [0.0; 3] });
+            gpu_circles.push(CircleData {
+                radius: 0.0,
+                _pad: [0.0; 3],
+            });
         }
         if gpu_rects.is_empty() {
-            gpu_rects.push(RectData { half_extents: Vec4::ZERO });
+            gpu_rects.push(RectData {
+                half_extents: Vec4::ZERO,
+            });
         }
         if gpu_convex_polys.is_empty() {
-            gpu_convex_polys.push(ConvexPolygonData { vertex_offset: 0, vertex_count: 0, _pad: [0; 2] });
+            gpu_convex_polys.push(ConvexPolygonData {
+                vertex_offset: 0,
+                vertex_count: 0,
+                _pad: [0; 2],
+            });
         }
         if gpu_convex_verts.is_empty() {
-            gpu_convex_verts.push(ConvexVertex2D { x: 0.0, y: 0.0, _pad: [0.0; 2] });
+            gpu_convex_verts.push(ConvexVertex2D {
+                x: 0.0,
+                y: 0.0,
+                _pad: [0.0; 2],
+            });
         }
         if gpu_capsules.is_empty() {
-            gpu_capsules.push(CapsuleData2D { half_height: 0.0, radius: 0.0, _pad: [0.0; 2] });
+            gpu_capsules.push(CapsuleData2D {
+                half_height: 0.0,
+                radius: 0.0,
+                _pad: [0.0; 2],
+            });
         }
 
         let num_bodies = compact_states.len() as u32;

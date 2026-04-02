@@ -260,6 +260,7 @@ impl PhysicsWorld3D {
     }
 
     /// Add a dynamic box. Returns handle index.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_box(
         &mut self,
         x: f32,
