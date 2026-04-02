@@ -3,9 +3,7 @@
 //! These tests verify device enumeration, work distribution, buffer
 //! synchronization, and parallel compute dispatch across multiple GPUs.
 
-use rubble_gpu::{
-    GpuBuffer, GpuContext, MultiGpuBuffer, MultiGpuContext, WorkDistribution,
-};
+use rubble_gpu::{GpuBuffer, GpuContext, MultiGpuBuffer, MultiGpuContext, WorkDistribution};
 
 fn try_multi_gpu() -> Option<MultiGpuContext> {
     pollster::block_on(MultiGpuContext::new()).ok()
@@ -30,7 +28,9 @@ fn enumerate_at_least_one_device() {
     }
     assert!(!infos.is_empty());
     for info in &infos {
-        assert!(!info.name.is_empty() || info.device == 0 || true, "Adapter info should be populated");
+        // Verify adapter info is accessible (doesn't panic)
+        let _name = &info.name;
+        let _backend = info.backend;
     }
 }
 
@@ -156,7 +156,11 @@ fn multi_gpu_buffer_upload_download() {
     // Download from each device and verify
     for dev_idx in 0..ctx.device_count() {
         let result = buf.download_from(&ctx, dev_idx);
-        assert_eq!(result.len(), data.len(), "Device {dev_idx}: length mismatch");
+        assert_eq!(
+            result.len(),
+            data.len(),
+            "Device {dev_idx}: length mismatch"
+        );
         for (i, (&expected, &actual)) in data.iter().zip(result.iter()).enumerate() {
             assert!(
                 (expected - actual).abs() < 1e-6,

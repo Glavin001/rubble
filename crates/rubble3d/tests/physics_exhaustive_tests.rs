@@ -11,7 +11,10 @@ macro_rules! gpu_world {
     ($config:expr) => {
         match World::new($config) {
             Ok(w) => w,
-            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+            Err(_) => {
+                eprintln!("SKIP: No GPU adapter found");
+                return;
+            }
         }
     };
 }
@@ -63,7 +66,10 @@ fn two_sphere_stack_on_floor() {
     let pos_bottom = world.get_position(bottom).unwrap();
     let pos_top = world.get_position(top).unwrap();
 
-    assert!(pos_bottom.is_finite(), "Bottom sphere diverged: {pos_bottom}");
+    assert!(
+        pos_bottom.is_finite(),
+        "Bottom sphere diverged: {pos_bottom}"
+    );
     assert!(pos_top.is_finite(), "Top sphere diverged: {pos_top}");
     // Top should be above bottom
     assert!(
@@ -115,15 +121,8 @@ fn box_stack_three_high() {
 
     for (i, &h) in handles.iter().enumerate() {
         let pos = world.get_position(h).unwrap();
-        assert!(
-            pos.is_finite(),
-            "Box {i} in stack diverged: {pos}"
-        );
-        assert!(
-            pos.y > -3.0,
-            "Box {i} fell through floor: y={}",
-            pos.y
-        );
+        assert!(pos.is_finite(), "Box {i} in stack diverged: {pos}");
+        assert!(pos.y > -3.0, "Box {i} fell through floor: y={}", pos.y);
     }
 
     // Boxes should be roughly stacked (each above the previous)
@@ -258,7 +257,7 @@ fn box_rotation_from_torque() {
 
     let h = world.add_body(&RigidBodyDesc {
         position: Vec3::ZERO,
-        angular_velocity: Vec3::new(0.0, 3.14, 0.0), // ~180 deg/s
+        angular_velocity: Vec3::new(0.0, std::f32::consts::PI, 0.0), // ~180 deg/s
         mass: 1.0,
         shape: ShapeDesc::Box {
             half_extents: Vec3::new(1.0, 0.5, 0.3),
@@ -519,11 +518,7 @@ fn sphere_on_plane_does_not_fall_through() {
 
     let pos = world.get_position(sphere).unwrap();
     assert!(pos.is_finite(), "Sphere on plane diverged: {pos}");
-    assert!(
-        pos.y > -2.0,
-        "Sphere fell through plane: y={}",
-        pos.y
-    );
+    assert!(pos.y > -2.0, "Sphere fell through plane: y={}", pos.y);
 }
 
 #[test]
@@ -694,10 +689,7 @@ fn raycast_hits_sphere() {
     assert!(result.is_some(), "Ray should hit sphere");
     let (hit_handle, t, _normal) = result.unwrap();
     assert_eq!(hit_handle, h, "Hit wrong body");
-    assert!(
-        (t - 4.0).abs() < 0.5,
-        "Hit distance should be ~4.0: t={t}"
-    );
+    assert!((t - 4.0).abs() < 0.5, "Hit distance should be ~4.0: t={t}");
 }
 
 #[test]
@@ -1021,11 +1013,7 @@ fn compound_vs_static_collision() {
 
     let pos = world.get_position(compound).unwrap();
     assert!(pos.is_finite(), "Compound vs floor diverged: {pos}");
-    assert!(
-        pos.y > -3.0,
-        "Compound fell through floor: y={}",
-        pos.y
-    );
+    assert!(pos.y > -3.0, "Compound fell through floor: y={}", pos.y);
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,7 +1064,7 @@ fn set_angular_velocity_applies_correctly() {
         ..Default::default()
     });
 
-    world.set_angular_velocity(h, Vec3::new(0.0, 6.28, 0.0));
+    world.set_angular_velocity(h, Vec3::new(0.0, std::f32::consts::TAU, 0.0));
     step_n(&mut world, 30);
 
     let rot = world.get_rotation(h).unwrap();

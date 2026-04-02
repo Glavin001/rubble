@@ -144,14 +144,12 @@ impl MultiGpuContext {
                 }
                 result
             }
-            WorkDistribution::RangeBased { ranges } => {
-                ranges
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| r.start < r.end)
-                    .map(|(i, r)| (i, r.start, r.end - r.start))
-                    .collect()
-            }
+            WorkDistribution::RangeBased { ranges } => ranges
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.start < r.end)
+                .map(|(i, r)| (i, r.start, r.end - r.start))
+                .collect(),
             WorkDistribution::SingleDevice(idx) => {
                 vec![(*idx, 0, total_items)]
             }
@@ -222,11 +220,7 @@ impl<T: bytemuck::Pod> MultiGpuBuffer<T> {
     ///
     /// `ranges` contains `(device_index, offset, count)` triples. Each device's
     /// portion is placed at the correct offset in the output vector.
-    pub fn gather_results(
-        &self,
-        ctx: &MultiGpuContext,
-        ranges: &[(usize, u32, u32)],
-    ) -> Vec<T> {
+    pub fn gather_results(&self, ctx: &MultiGpuContext, ranges: &[(usize, u32, u32)]) -> Vec<T> {
         if ranges.is_empty() {
             return Vec::new();
         }
@@ -277,20 +271,22 @@ impl GpuDevicePool {
             let in_buf = input.buffer_on(dev_idx);
             let out_buf = output.buffer_on(dev_idx);
 
-            let bind_group = gpu_ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: kernel.bind_group_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: in_buf.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: out_buf.buffer().as_entire_binding(),
-                    },
-                ],
-            });
+            let bind_group = gpu_ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: kernel.bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: in_buf.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: out_buf.buffer().as_entire_binding(),
+                        },
+                    ],
+                });
 
             let mut encoder = gpu_ctx
                 .device
@@ -319,7 +315,10 @@ mod tests {
 
     #[test]
     fn test_enumerate_devices() {
-        let Some(ctx) = try_multi_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = try_multi_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         assert!(
             ctx.device_count() >= 1,
             "Should discover at least one GPU device"
@@ -328,7 +327,10 @@ mod tests {
 
     #[test]
     fn test_multi_gpu_context_creation() {
-        let Some(ctx) = try_multi_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = try_multi_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         for i in 0..ctx.device_count() {
             let dev = ctx.device(i);
             assert_eq!(dev.device_index, i);
@@ -341,7 +343,10 @@ mod tests {
 
     #[test]
     fn test_multi_gpu_buffer_sync() {
-        let Some(ctx) = try_multi_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = try_multi_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let mut multi_buf = MultiGpuBuffer::<f32>::new(&ctx, 8);
 
         let data = [1.0f32, 2.0, 3.0, 4.0];
@@ -356,7 +361,10 @@ mod tests {
 
     #[test]
     fn test_work_distribution_even() {
-        let Some(ctx) = try_multi_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = try_multi_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let n = ctx.device_count() as u32;
 
         // Test even split with 100 items.
@@ -400,7 +408,10 @@ mod tests {
 
     #[test]
     fn test_parallel_compute() {
-        let Some(ctx) = try_multi_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = try_multi_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
 
         let wgsl = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;

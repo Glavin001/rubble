@@ -318,7 +318,10 @@ mod tests {
 
     #[test]
     fn test_radix_sort_simple() {
-        let Some(ctx) = crate::test_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let sort = GpuRadixSort::new(&ctx, 1024);
 
         let input = [
@@ -344,7 +347,10 @@ mod tests {
 
     #[test]
     fn test_radix_sort_random() {
-        let Some(ctx) = crate::test_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let sort = GpuRadixSort::new(&ctx, 1024);
 
         // Simple LCG pseudo-random
@@ -381,7 +387,10 @@ mod tests {
 
     #[test]
     fn test_radix_sort_values_follow_keys() {
-        let Some(ctx) = crate::test_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let sort = GpuRadixSort::new(&ctx, 1024);
 
         // Simple LCG pseudo-random

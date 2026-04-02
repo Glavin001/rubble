@@ -390,7 +390,10 @@ mod tests {
 
     #[test]
     fn test_prefix_scan_ones() {
-        let Some(ctx) = crate::test_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let scan = GpuPrefixScan::new(&ctx, 256);
 
         let input: Vec<u32> = vec![1; 256];
@@ -406,7 +409,10 @@ mod tests {
 
     #[test]
     fn test_prefix_scan_mixed() {
-        let Some(ctx) = crate::test_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let scan = GpuPrefixScan::new(&ctx, 256);
 
         let input = [3u32, 1, 4, 1, 5, 9, 2, 6];
@@ -421,7 +427,10 @@ mod tests {
 
     #[test]
     fn test_inclusive_scan_ones() {
-        let Some(ctx) = crate::test_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let scan = GpuPrefixScan::new(&ctx, 256);
 
         let input: Vec<u32> = vec![1; 256];
@@ -437,7 +446,10 @@ mod tests {
 
     #[test]
     fn test_inclusive_scan_mixed() {
-        let Some(ctx) = crate::test_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
         let scan = GpuPrefixScan::new(&ctx, 256);
 
         let input = [3u32, 1, 4, 1, 5, 9, 2, 6];

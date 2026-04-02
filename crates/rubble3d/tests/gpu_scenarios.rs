@@ -11,7 +11,10 @@ macro_rules! gpu_world {
     ($config:expr) => {
         match World::new($config) {
             Ok(w) => w,
-            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+            Err(_) => {
+                eprintln!("SKIP: No GPU adapter found");
+                return;
+            }
         }
     };
 }

@@ -10,7 +10,10 @@ macro_rules! gpu_world {
     ($config:expr) => {
         match World::new($config) {
             Ok(w) => w,
-            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+            Err(_) => {
+                eprintln!("SKIP: No GPU adapter found");
+                return;
+            }
         }
     };
 }
@@ -70,11 +73,7 @@ fn sustained_500_steps_with_contacts() {
     let mut handles = Vec::new();
     for i in 0..10 {
         let h = world.add_body(&RigidBodyDesc {
-            position: Vec3::new(
-                (i % 5) as f32 * 3.0 - 6.0,
-                3.0 + (i / 5) as f32 * 3.0,
-                0.0,
-            ),
+            position: Vec3::new((i % 5) as f32 * 3.0 - 6.0, 3.0 + (i / 5) as f32 * 3.0, 0.0),
             mass: 1.0,
             shape: ShapeDesc::Sphere { radius: 1.0 },
             ..Default::default()
@@ -212,11 +211,7 @@ fn dynamic_add_remove_during_simulation() {
     for frame in 0..180 {
         if frame < 60 && frame % 5 == 0 {
             let h = world.add_body(&RigidBodyDesc {
-                position: Vec3::new(
-                    (active_handles.len() as f32) * 3.0 - 15.0,
-                    5.0,
-                    0.0,
-                ),
+                position: Vec3::new((active_handles.len() as f32) * 3.0 - 15.0, 5.0, 0.0),
                 mass: 1.0,
                 shape: ShapeDesc::Sphere { radius: 0.5 },
                 ..Default::default()
@@ -239,10 +234,7 @@ fn dynamic_add_remove_during_simulation() {
 
     for &h in &active_handles {
         let pos = world.get_position(h).unwrap();
-        assert!(
-            pos.is_finite(),
-            "Dynamic add/remove body diverged: {pos}"
-        );
+        assert!(pos.is_finite(), "Dynamic add/remove body diverged: {pos}");
     }
 }
 
@@ -275,11 +267,7 @@ fn many_contacts_trigger_overflow_recovery() {
     for x in 0..8 {
         for z in 0..8 {
             let h = world.add_body(&RigidBodyDesc {
-                position: Vec3::new(
-                    x as f32 * 1.5 - 5.0,
-                    2.0,
-                    z as f32 * 1.5 - 5.0,
-                ),
+                position: Vec3::new(x as f32 * 1.5 - 5.0, 2.0, z as f32 * 1.5 - 5.0),
                 mass: 1.0,
                 shape: ShapeDesc::Sphere { radius: 0.8 },
                 ..Default::default()
@@ -370,11 +358,7 @@ fn tunneling_prevention_fast_sphere() {
     let pos = world.get_position(sphere).unwrap();
     assert!(pos.is_finite(), "Fast sphere diverged: {pos}");
     // Should not tunnel completely through 4-unit thick wall
-    assert!(
-        pos.x < 10.0,
-        "Sphere may have tunneled: x={}",
-        pos.x
-    );
+    assert!(pos.x < 10.0, "Sphere may have tunneled: x={}", pos.x);
 }
 
 // ---------------------------------------------------------------------------
@@ -457,10 +441,7 @@ fn many_static_bodies_no_crash() {
     step_n(&mut world, 120);
 
     let pos = world.get_position(sphere).unwrap();
-    assert!(
-        pos.is_finite(),
-        "Sphere with many statics diverged: {pos}"
-    );
+    assert!(pos.is_finite(), "Sphere with many statics diverged: {pos}");
 }
 
 // ---------------------------------------------------------------------------
@@ -550,16 +531,8 @@ fn negative_x_gravity() {
     step_n(&mut world, 60);
 
     let pos = world.get_position(h).unwrap();
-    assert!(
-        pos.x < 10.0,
-        "Should fall in -X direction: x={}",
-        pos.x
-    );
-    assert!(
-        pos.y.abs() < 0.01,
-        "No Y drift with X gravity: y={}",
-        pos.y
-    );
+    assert!(pos.x < 10.0, "Should fall in -X direction: x={}", pos.x);
+    assert!(pos.y.abs() < 0.01, "No Y drift with X gravity: y={}", pos.y);
 }
 
 #[test]

@@ -93,17 +93,6 @@ pub fn test_gpu() -> Option<GpuContext> {
     pollster::block_on(GpuContext::new()).ok()
 }
 
-/// Macro to skip a test when no GPU adapter is available.
-#[macro_export]
-macro_rules! skip_no_gpu {
-    () => {
-        let Some(ctx) = crate::test_gpu() else {
-            eprintln!("SKIP: No GPU adapter found");
-            return;
-        };
-    };
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

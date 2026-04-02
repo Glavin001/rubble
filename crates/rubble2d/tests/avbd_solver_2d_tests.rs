@@ -10,7 +10,10 @@ macro_rules! gpu_world {
     ($config:expr) => {
         match World2D::new($config) {
             Ok(w) => w,
-            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+            Err(_) => {
+                eprintln!("SKIP: No GPU adapter found");
+                return;
+            }
         }
     };
 }
@@ -749,7 +752,11 @@ fn circle_stack_2d() {
     for (i, &h) in handles.iter().enumerate() {
         let pos = world.get_position(h).unwrap();
         assert!(pos.is_finite(), "2D stack circle {i} diverged: {pos}");
-        assert!(pos.y > -3.0, "2D stack circle {i} fell through: y={}", pos.y);
+        assert!(
+            pos.y > -3.0,
+            "2D stack circle {i} fell through: y={}",
+            pos.y
+        );
     }
 }
 

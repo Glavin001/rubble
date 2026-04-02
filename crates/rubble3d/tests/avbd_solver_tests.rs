@@ -11,7 +11,10 @@ macro_rules! gpu_world {
     ($config:expr) => {
         match World::new($config) {
             Ok(w) => w,
-            Err(_) => { eprintln!("SKIP: No GPU adapter found"); return; }
+            Err(_) => {
+                eprintln!("SKIP: No GPU adapter found");
+                return;
+            }
         }
     };
 }
@@ -417,19 +420,9 @@ fn warm_starting_reduces_jitter() {
     for (i, &h) in handles.iter().enumerate() {
         let pos = world.get_position(h).unwrap();
         let vel = world.get_velocity(h).unwrap();
-        assert!(
-            pos.is_finite(),
-            "Sphere {i} position diverged: {pos}"
-        );
-        assert!(
-            vel.is_finite(),
-            "Sphere {i} velocity diverged: {vel}"
-        );
-        assert!(
-            pos.y > -10.0,
-            "Sphere {i} fell through floor: y={}",
-            pos.y
-        );
+        assert!(pos.is_finite(), "Sphere {i} position diverged: {pos}");
+        assert!(vel.is_finite(), "Sphere {i} velocity diverged: {vel}");
+        assert!(pos.y > -10.0, "Sphere {i} fell through floor: y={}", pos.y);
     }
 }
 
@@ -519,10 +512,7 @@ fn friction_slows_sliding_sphere() {
     step_n(&mut world, 120);
 
     let vel = world.get_velocity(sphere).unwrap();
-    assert!(
-        vel.x.is_finite(),
-        "Velocity diverged: {vel}"
-    );
+    assert!(vel.x.is_finite(), "Velocity diverged: {vel}");
     // Friction should slow it down (allow for numerical effects)
     assert!(
         vel.x < initial_vx + 2.0,
@@ -564,10 +554,7 @@ fn zero_friction_allows_sliding() {
     step_n(&mut world, 120);
 
     let vel = world.get_velocity(sphere).unwrap();
-    assert!(
-        vel.x.is_finite(),
-        "Velocity diverged: {vel}"
-    );
+    assert!(vel.x.is_finite(), "Velocity diverged: {vel}");
     // With zero friction, horizontal velocity should be roughly preserved
     // (contact normal is vertical, so normal impulse doesn't affect horizontal)
     assert!(
@@ -694,10 +681,7 @@ fn zero_dt_does_not_crash() {
 
     let pos = world.get_position(h).unwrap();
     // With dt=0, position should not change
-    assert!(
-        pos.is_finite(),
-        "Zero dt produced non-finite result: {pos}"
-    );
+    assert!(pos.is_finite(), "Zero dt produced non-finite result: {pos}");
 }
 
 #[test]
@@ -722,8 +706,15 @@ fn very_small_dt_stability() {
     step_n(&mut world, 600); // 0.06 seconds
 
     let pos = world.get_position(h).unwrap();
-    assert!(pos.is_finite(), "Small dt produced non-finite result: {pos}");
-    assert!(pos.y < 10.0, "Should have fallen with small dt: y={}", pos.y);
+    assert!(
+        pos.is_finite(),
+        "Small dt produced non-finite result: {pos}"
+    );
+    assert!(
+        pos.y < 10.0,
+        "Should have fallen with small dt: y={}",
+        pos.y
+    );
 }
 
 #[test]
@@ -863,10 +854,7 @@ fn graph_coloring_no_data_races_chain() {
     // Just verify no crashes or NaN from coloring
     for (i, &h) in handles.iter().enumerate() {
         let pos = world.get_position(h).unwrap();
-        assert!(
-            pos.is_finite(),
-            "Chain sphere {i} diverged: {pos}"
-        );
+        assert!(pos.is_finite(), "Chain sphere {i} diverged: {pos}");
     }
 }
 
@@ -1109,4 +1097,3 @@ fn repeated_simulation_consistent() {
         diff
     );
 }
-

@@ -852,10 +852,15 @@ mod tests {
         ($config:expr) => {
             match try_gpu_world($config) {
                 Some(w) => w,
-                None => { eprintln!("SKIP: No GPU adapter found"); return; }
+                None => {
+                    eprintln!("SKIP: No GPU adapter found");
+                    return;
+                }
             }
         };
-        () => { gpu_world!(SimConfig2D::default()) };
+        () => {
+            gpu_world!(SimConfig2D::default())
+        };
     }
 
     #[test]

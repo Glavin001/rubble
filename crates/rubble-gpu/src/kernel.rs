@@ -82,7 +82,10 @@ mod tests {
 
     #[test]
     fn test_compute_kernel_wgsl() {
-        let Some(ctx) = crate::test_gpu() else { eprintln!("SKIP: No GPU"); return; };
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
 
         let wgsl = r#"
 @group(0) @binding(0) var<storage, read_write> data: array<f32>;
