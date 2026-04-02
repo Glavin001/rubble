@@ -1845,10 +1845,26 @@ mod tests {
         // Compound shape: 4 spheres in a 2x2 grid on the XY plane
         let make_compound = || ShapeDesc::Compound {
             children: vec![
-                (ShapeDesc::Sphere { radius: 0.3 }, Vec3::new(-0.5, -0.5, 0.0), Quat::IDENTITY),
-                (ShapeDesc::Sphere { radius: 0.3 }, Vec3::new(0.5, -0.5, 0.0), Quat::IDENTITY),
-                (ShapeDesc::Sphere { radius: 0.3 }, Vec3::new(-0.5, 0.5, 0.0), Quat::IDENTITY),
-                (ShapeDesc::Sphere { radius: 0.3 }, Vec3::new(0.5, 0.5, 0.0), Quat::IDENTITY),
+                (
+                    ShapeDesc::Sphere { radius: 0.3 },
+                    Vec3::new(-0.5, -0.5, 0.0),
+                    Quat::IDENTITY,
+                ),
+                (
+                    ShapeDesc::Sphere { radius: 0.3 },
+                    Vec3::new(0.5, -0.5, 0.0),
+                    Quat::IDENTITY,
+                ),
+                (
+                    ShapeDesc::Sphere { radius: 0.3 },
+                    Vec3::new(-0.5, 0.5, 0.0),
+                    Quat::IDENTITY,
+                ),
+                (
+                    ShapeDesc::Sphere { radius: 0.3 },
+                    Vec3::new(0.5, 0.5, 0.0),
+                    Quat::IDENTITY,
+                ),
             ],
         };
 
@@ -1876,10 +1892,16 @@ mod tests {
         let p2 = world.get_position(h2).unwrap();
         let dist = (p2 - p1).length();
 
-        assert!(p1.x.is_finite() && p1.y.is_finite() && p1.z.is_finite(),
-            "Body 1 position should be finite: {:?}", p1);
-        assert!(p2.x.is_finite() && p2.y.is_finite() && p2.z.is_finite(),
-            "Body 2 position should be finite: {:?}", p2);
+        assert!(
+            p1.x.is_finite() && p1.y.is_finite() && p1.z.is_finite(),
+            "Body 1 position should be finite: {:?}",
+            p1
+        );
+        assert!(
+            p2.x.is_finite() && p2.y.is_finite() && p2.z.is_finite(),
+            "Body 2 position should be finite: {:?}",
+            p2
+        );
         assert!(
             dist >= 0.5,
             "Compound bodies should separate after collision: distance = {}",
@@ -1937,10 +1959,16 @@ mod tests {
         let p2 = world.get_position(h2).unwrap();
         let dist = (p2 - p1).length();
 
-        assert!(p1.x.is_finite() && p1.y.is_finite() && p1.z.is_finite(),
-            "Hull 1 position should be finite: {:?}", p1);
-        assert!(p2.x.is_finite() && p2.y.is_finite() && p2.z.is_finite(),
-            "Hull 2 position should be finite: {:?}", p2);
+        assert!(
+            p1.x.is_finite() && p1.y.is_finite() && p1.z.is_finite(),
+            "Hull 1 position should be finite: {:?}",
+            p1
+        );
+        assert!(
+            p2.x.is_finite() && p2.y.is_finite() && p2.z.is_finite(),
+            "Hull 2 position should be finite: {:?}",
+            p2
+        );
         assert!(
             dist > 0.9,
             "Convex hull bodies should not overlap: distance = {}",

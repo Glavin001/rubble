@@ -33,7 +33,7 @@ pub struct BroadPair {
 pub struct BvhNodeGpu {
     pub aabb_min: [f32; 4],
     pub aabb_max: [f32; 4],
-    pub left: i32,  // negative → leaf index -(i+1)
+    pub left: i32, // negative → leaf index -(i+1)
     pub right: i32,
     pub _pad0: u32,
     pub _pad1: u32,
@@ -218,7 +218,11 @@ fn delta(codes: &[u32], i: usize, j: usize) -> i32 {
 fn karras_node(codes: &[u32], i: usize) -> (usize, usize, usize) {
     let n = codes.len();
     let d_left = if i == 0 { -1 } else { delta(codes, i, i - 1) };
-    let d_right = if i + 1 >= n { -1 } else { delta(codes, i, i + 1) };
+    let d_right = if i + 1 >= n {
+        -1
+    } else {
+        delta(codes, i, i + 1)
+    };
     let d: i32 = if d_right > d_left { 1 } else { -1 };
     let delta_min = if d > 0 { d_left } else { d_right };
 
@@ -327,7 +331,13 @@ fn build_tree_cpu(
         combined
     }
     if num_internal > 0 {
-        refit(0, &internal_left, &internal_right, &mut internal_aabbs, &leaf_aabbs);
+        refit(
+            0,
+            &internal_left,
+            &internal_right,
+            &mut internal_aabbs,
+            &leaf_aabbs,
+        );
     }
 
     // Convert to GPU format
@@ -343,8 +353,18 @@ fn build_tree_cpu(
             };
             let aabb = internal_aabbs[i];
             BvhNodeGpu {
-                aabb_min: [aabb.min_point().x, aabb.min_point().y, aabb.min_point().z, 0.0],
-                aabb_max: [aabb.max_point().x, aabb.max_point().y, aabb.max_point().z, 0.0],
+                aabb_min: [
+                    aabb.min_point().x,
+                    aabb.min_point().y,
+                    aabb.min_point().z,
+                    0.0,
+                ],
+                aabb_max: [
+                    aabb.max_point().x,
+                    aabb.max_point().y,
+                    aabb.max_point().z,
+                    0.0,
+                ],
                 left: left_val,
                 right: right_val,
                 _pad0: 0,
@@ -461,9 +481,21 @@ impl GpuLbvh {
             scene_max = scene_max.max(aabb.max_point());
         }
         let extent = scene_max - scene_min;
-        let inv_x = if extent.x > 1e-10 { 1.0 / extent.x } else { 0.0 };
-        let inv_y = if extent.y > 1e-10 { 1.0 / extent.y } else { 0.0 };
-        let inv_z = if extent.z > 1e-10 { 1.0 / extent.z } else { 0.0 };
+        let inv_x = if extent.x > 1e-10 {
+            1.0 / extent.x
+        } else {
+            0.0
+        };
+        let inv_y = if extent.y > 1e-10 {
+            1.0 / extent.y
+        } else {
+            0.0
+        };
+        let inv_z = if extent.z > 1e-10 {
+            1.0 / extent.z
+        } else {
+            0.0
+        };
 
         // Step 1: Compute Morton codes on GPU
         let params = MortonParams {
@@ -476,7 +508,8 @@ impl GpuLbvh {
             inv_extent_z: inv_z,
             _pad: 0,
         };
-        ctx.queue.write_buffer(&self.morton_params_buf, 0, bytemuck::bytes_of(&params));
+        ctx.queue
+            .write_buffer(&self.morton_params_buf, 0, bytemuck::bytes_of(&params));
         self.morton_keys.grow_if_needed(ctx, n);
         self.body_indices.grow_if_needed(ctx, n);
         self.morton_keys.set_len(num_bodies);
@@ -486,15 +519,32 @@ impl GpuLbvh {
             label: Some("morton"),
             layout: self.morton_kernel.bind_group_layout(),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: aabb_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.morton_keys.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.body_indices.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.morton_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: aabb_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.morton_keys.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.body_indices.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.morton_params_buf.as_entire_binding(),
+                },
             ],
         });
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("morton"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("morton"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(self.morton_kernel.pipeline());
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(round_up_workgroups(num_bodies, WG), 1, 1);
@@ -504,7 +554,9 @@ impl GpuLbvh {
         // Step 2: Radix sort Morton codes on GPU
         let keys = self.morton_keys.download(ctx);
         let vals = self.body_indices.download(ctx);
-        let entries: Vec<RadixSortEntry> = keys.iter().zip(vals.iter())
+        let entries: Vec<RadixSortEntry> = keys
+            .iter()
+            .zip(vals.iter())
             .map(|(&k, &v)| RadixSortEntry { key: k, value: v })
             .collect();
         let mut sort_buf = GpuBuffer::<RadixSortEntry>::new(ctx, n);
@@ -532,23 +584,47 @@ impl GpuLbvh {
         self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
 
         let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
-        ctx.queue.write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
+        ctx.queue
+            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
 
         let bg2 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("find_pairs"),
             layout: self.find_pairs_kernel.bind_group_layout(),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.leaf_aabbs_sorted.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.sorted_indices_buf.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.internal_nodes.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.pairs_out.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.pair_counter.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: self.find_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.sorted_indices_buf.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.internal_nodes.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.pairs_out.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.pair_counter.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.find_params_buf.as_entire_binding(),
+                },
             ],
         });
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("find_pairs"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("find_pairs"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(self.find_pairs_kernel.pipeline());
             pass.set_bind_group(0, &bg2, &[]);
             pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
@@ -562,7 +638,8 @@ impl GpuLbvh {
         self.pairs_out.set_len(pair_count);
         let pairs = self.pairs_out.download(ctx);
 
-        let mut result: Vec<[u32; 2]> = pairs.iter()
+        let mut result: Vec<[u32; 2]> = pairs
+            .iter()
             .take(pair_count as usize)
             .map(|p| {
                 let (a, b) = if p.a < p.b { (p.a, p.b) } else { (p.b, p.a) };
@@ -635,9 +712,9 @@ mod tests {
         let mut lbvh = GpuLbvh::new(&ctx, 16);
         // A overlaps B, B overlaps C, A does NOT overlap C
         let aabbs = vec![
-            aabb([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),  // A
-            aabb([1.5, 1.5, 1.5], [3.5, 3.5, 3.5]),  // B
-            aabb([3.0, 3.0, 3.0], [5.0, 5.0, 5.0]),  // C
+            aabb([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]), // A
+            aabb([1.5, 1.5, 1.5], [3.5, 3.5, 3.5]), // B
+            aabb([3.0, 3.0, 3.0], [5.0, 5.0, 5.0]), // C
         ];
         let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 3);
         buf.upload(&ctx, &aabbs);
@@ -718,7 +795,11 @@ mod tests {
         let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, n);
         buf.upload(&ctx, &aabbs);
         let pairs = lbvh.build_and_query(&ctx, &buf, n as u32);
-        assert!(pairs.is_empty(), "separated bodies should have no pairs, got {}", pairs.len());
+        assert!(
+            pairs.is_empty(),
+            "separated bodies should have no pairs, got {}",
+            pairs.len()
+        );
     }
 
     #[test]

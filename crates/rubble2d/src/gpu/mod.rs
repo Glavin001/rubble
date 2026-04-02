@@ -259,7 +259,6 @@ pub struct GpuPipeline2D {
 
     // GPU broadphase
     gpu_lbvh: GpuLbvh,
-
 }
 
 impl GpuPipeline2D {

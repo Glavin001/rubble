@@ -445,7 +445,9 @@ impl GpuPipeline {
 
         // GPU LBVH broadphase: Morton codes + radix sort on GPU, tree build CPU, pair finding GPU
         self.aabbs.set_len(num_bodies);
-        let overlap_pairs = self.gpu_lbvh.build_and_query(&self.ctx, &self.aabbs, num_bodies);
+        let overlap_pairs = self
+            .gpu_lbvh
+            .build_and_query(&self.ctx, &self.aabbs, num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
 
@@ -586,9 +588,16 @@ impl GpuPipeline {
                     let ext_a = self.child_extent(child_st_a, child_si_a);
                     let world_min_a = child_pos_a - Vec3::splat(ext_a);
                     let world_max_a = child_pos_a + Vec3::splat(ext_a);
-                    let local_min = Self::transform_aabb_to_local(world_min_a, world_max_a, pos_b, inv_rot_b);
-                    let local_max = Self::transform_aabb_to_local_max(world_min_a, world_max_a, pos_b, inv_rot_b);
-                    for idx_b in Self::traverse_compound_bvh(&cs_b.bvh_nodes, local_min, local_max) {
+                    let local_min =
+                        Self::transform_aabb_to_local(world_min_a, world_max_a, pos_b, inv_rot_b);
+                    let local_max = Self::transform_aabb_to_local_max(
+                        world_min_a,
+                        world_max_a,
+                        pos_b,
+                        inv_rot_b,
+                    );
+                    for idx_b in Self::traverse_compound_bvh(&cs_b.bvh_nodes, local_min, local_max)
+                    {
                         if idx_b < children_b.len() {
                             pairs.push((idx_a, idx_b));
                         }
@@ -602,9 +611,16 @@ impl GpuPipeline {
                     let ext_b = self.child_extent(child_st_b, child_si_b);
                     let world_min_b = child_pos_b - Vec3::splat(ext_b);
                     let world_max_b = child_pos_b + Vec3::splat(ext_b);
-                    let local_min = Self::transform_aabb_to_local(world_min_b, world_max_b, pos_a, inv_rot_a);
-                    let local_max = Self::transform_aabb_to_local_max(world_min_b, world_max_b, pos_a, inv_rot_a);
-                    for idx_a in Self::traverse_compound_bvh(&cs_a.bvh_nodes, local_min, local_max) {
+                    let local_min =
+                        Self::transform_aabb_to_local(world_min_b, world_max_b, pos_a, inv_rot_a);
+                    let local_max = Self::transform_aabb_to_local_max(
+                        world_min_b,
+                        world_max_b,
+                        pos_a,
+                        inv_rot_a,
+                    );
+                    for idx_a in Self::traverse_compound_bvh(&cs_a.bvh_nodes, local_min, local_max)
+                    {
                         if idx_a < children_a.len() {
                             pairs.push((idx_a, idx_b));
                         }
@@ -701,7 +717,10 @@ impl GpuPipeline {
 
     /// Transform a world-space AABB to a compound's local space (min corner).
     fn transform_aabb_to_local(
-        world_min: Vec3, world_max: Vec3, parent_pos: Vec3, inv_parent_rot: glam::Quat,
+        world_min: Vec3,
+        world_max: Vec3,
+        parent_pos: Vec3,
+        inv_parent_rot: glam::Quat,
     ) -> Vec3 {
         let corners = [
             Vec3::new(world_min.x, world_min.y, world_min.z),
@@ -722,7 +741,10 @@ impl GpuPipeline {
 
     /// Transform a world-space AABB to a compound's local space (max corner).
     fn transform_aabb_to_local_max(
-        world_min: Vec3, world_max: Vec3, parent_pos: Vec3, inv_parent_rot: glam::Quat,
+        world_min: Vec3,
+        world_max: Vec3,
+        parent_pos: Vec3,
+        inv_parent_rot: glam::Quat,
     ) -> Vec3 {
         let corners = [
             Vec3::new(world_min.x, world_min.y, world_min.z),
@@ -909,10 +931,6 @@ impl GpuPipeline {
         all.into_iter().take(count).collect()
     }
 
-    /// Batch raycast on GPU. Returns hits for each ray.
-    ///
-    /// Each ray is tested against all bodies (sphere and box shapes only).
-    /// Results are downloaded synchronously.
     // -----------------------------------------------------------------------
     // Private dispatch helpers
     // -----------------------------------------------------------------------

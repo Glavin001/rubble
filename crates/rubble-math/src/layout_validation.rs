@@ -8,11 +8,7 @@ macro_rules! assert_gpu_layout {
         const _: () = {
             assert!(
                 std::mem::size_of::<$ty>() == $expected_size,
-                concat!(
-                    "GPU layout mismatch: ",
-                    stringify!($ty),
-                    " size mismatch"
-                )
+                concat!("GPU layout mismatch: ", stringify!($ty), " size mismatch")
             );
             assert!(
                 std::mem::align_of::<$ty>() >= $expected_align,
