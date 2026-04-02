@@ -90,21 +90,13 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: Install wasm-pack
-        run: cargo install wasm-pack
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Build WASM package
-        run: wasm-pack build crates/rubble-wasm --target web --out-dir ../../web/src/wasm
-      - name: Install web dependencies
-        run: cd web && npm ci
-      - name: Type-check TypeScript
-        run: cd web && npx tsc --noEmit
-      - name: Build web project
-        run: cd web && npx vite build
+      - name: Install web dependencies and build (WASM + Vite)
+        run: ./web/build.sh
       - name: Upload web build
         uses: actions/upload-artifact@v4
         with:

@@ -1,6 +1,6 @@
 # Rubble GPU Physics Engine — Implementation Checklist
 
-Status tracking against the Ferrophys Software Specification v1.1.0.
+Status tracking against the Rubble Software Specification v1.1.0.
 
 ## Legend
 - [x] Done and working
