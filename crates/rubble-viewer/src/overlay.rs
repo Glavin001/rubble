@@ -192,16 +192,12 @@ pub fn draw_panel(
                         ui.label(
                             egui::RichText::new("Render").color(egui::Color32::from_gray(210)),
                         );
-                        ui.label(
-                            egui::RichText::new("(GPU)").color(egui::Color32::from_gray(140)),
-                        );
+                        ui.label(egui::RichText::new("(GPU)").color(egui::Color32::from_gray(140)));
                         ui.label(
                             egui::RichText::new(format!("{render_ms:.2} ms"))
                                 .color(egui::Color32::from_gray(210)),
                         );
-                        ui.label(
-                            egui::RichText::new("-").color(egui::Color32::from_gray(170)),
-                        );
+                        ui.label(egui::RichText::new("-").color(egui::Color32::from_gray(170)));
                         ui.end_row();
                     });
 

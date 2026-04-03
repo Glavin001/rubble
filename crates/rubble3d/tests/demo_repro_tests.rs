@@ -3,8 +3,8 @@ mod support;
 use glam::Vec3;
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 use support::{
-    add_tracked_body, collect_reports, should_skip_known_failure, try_world, SceneReport3D,
-    TrackedBody3D,
+    add_tracked_body, collect_reports_with_debug_trace, scene_report, try_world,
+    DebugTraceConfig3D, SceneReport3D, TrackedBody3D,
 };
 
 fn box_desc(
@@ -32,8 +32,6 @@ fn demo_world(max_bodies: usize) -> Option<(World, Vec3)> {
     let gravity = Vec3::new(0.0, -9.81, 0.0);
     let world = try_world(SimConfig {
         gravity,
-        dt: 1.0 / 60.0,
-        solver_iterations: 5,
         max_bodies,
         ..Default::default()
     })?;
@@ -145,20 +143,103 @@ fn tail_max_abs_vertical_speed(reports: &[SceneReport3D]) -> f32 {
         .fold(0.0, f32::max)
 }
 
+fn adjacent_pairs(last_body_index: usize) -> Vec<(usize, usize)> {
+    (0..last_body_index)
+        .map(|body_idx| (body_idx, body_idx + 1))
+        .collect()
+}
+
+fn stack_trace_config() -> DebugTraceConfig3D {
+    DebugTraceConfig3D {
+        scene: "demo_stack",
+        run_id: "demo_stack_trace",
+        sample_bodies: vec![0, 1, 5, 10],
+        monitored_pairs: adjacent_pairs(10),
+    }
+}
+
+fn stack_ratio_trace_config() -> DebugTraceConfig3D {
+    DebugTraceConfig3D {
+        scene: "demo_stack_ratio",
+        run_id: "demo_stack_ratio_trace",
+        sample_bodies: vec![0, 1, 2, 4],
+        monitored_pairs: adjacent_pairs(4),
+    }
+}
+
+fn pyramid_trace_config(
+    world: &World,
+    tracked: &[TrackedBody3D],
+    gravity: Vec3,
+) -> DebugTraceConfig3D {
+    let initial = scene_report(world, tracked, gravity, 0);
+    let dynamic_indices: Vec<usize> = initial
+        .bodies
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, body)| (body.mass > 0.0).then_some(idx))
+        .collect();
+
+    let apex = dynamic_indices
+        .iter()
+        .copied()
+        .max_by(|&lhs, &rhs| {
+            initial.bodies[lhs]
+                .position
+                .y
+                .total_cmp(&initial.bodies[rhs].position.y)
+        })
+        .unwrap_or(1);
+    let base_center = dynamic_indices
+        .iter()
+        .copied()
+        .min_by(|&lhs, &rhs| {
+            let lhs_body = &initial.bodies[lhs];
+            let rhs_body = &initial.bodies[rhs];
+            let lhs_metric =
+                lhs_body.position.y * 0.25 + lhs_body.position.x.abs() + lhs_body.position.z.abs();
+            let rhs_metric =
+                rhs_body.position.y * 0.25 + rhs_body.position.x.abs() + rhs_body.position.z.abs();
+            lhs_metric.total_cmp(&rhs_metric)
+        })
+        .unwrap_or(1);
+    let target_mid_y =
+        (initial.bodies[apex].position.y + initial.bodies[base_center].position.y) * 0.5;
+    let mid_center = dynamic_indices
+        .iter()
+        .copied()
+        .min_by(|&lhs, &rhs| {
+            let lhs_body = &initial.bodies[lhs];
+            let rhs_body = &initial.bodies[rhs];
+            let lhs_metric = (lhs_body.position.y - target_mid_y).abs()
+                + 0.25 * (lhs_body.position.x.abs() + lhs_body.position.z.abs());
+            let rhs_metric = (rhs_body.position.y - target_mid_y).abs()
+                + 0.25 * (rhs_body.position.x.abs() + rhs_body.position.z.abs());
+            lhs_metric.total_cmp(&rhs_metric)
+        })
+        .unwrap_or(base_center);
+
+    let mut sample_bodies = vec![0, base_center, mid_center, apex];
+    sample_bodies.sort_unstable();
+    sample_bodies.dedup();
+
+    DebugTraceConfig3D {
+        scene: "demo_pyramid",
+        run_id: "demo_pyramid_trace",
+        sample_bodies,
+        monitored_pairs: vec![(0, base_center)],
+    }
+}
+
 #[test]
 fn demo_stack_settles_without_support_loss_or_ejection_3d() {
-    if should_skip_known_failure(
-        "demo_stack_settles_without_support_loss_or_ejection_3d",
-        "the demo 3D stack still sinks through support contacts and ejects upward under the default solver settings",
-    ) {
-        return;
-    }
     let Some((mut world, tracked, gravity)) = build_demo_stack_scene() else {
         eprintln!("SKIP: No GPU adapter found");
         return;
     };
 
-    let reports = collect_reports(&mut world, &tracked, gravity, 480);
+    let trace = stack_trace_config();
+    let reports = collect_reports_with_debug_trace(&mut world, &tracked, gravity, 480, &trace);
     let window = &reports[180..];
     let mut min_bottom_y = f32::INFINITY;
     let mut min_gap = f32::INFINITY;
@@ -192,18 +273,13 @@ fn demo_stack_settles_without_support_loss_or_ejection_3d() {
 
 #[test]
 fn demo_stack_ratio_settles_without_persistent_vertical_oscillation_3d() {
-    if should_skip_known_failure(
-        "demo_stack_ratio_settles_without_persistent_vertical_oscillation_3d",
-        "the demo 3D stack-ratio scene still keeps vertically oscillating instead of converging to rest",
-    ) {
-        return;
-    }
     let Some((mut world, tracked, gravity)) = build_demo_stack_ratio_scene() else {
         eprintln!("SKIP: No GPU adapter found");
         return;
     };
 
-    let reports = collect_reports(&mut world, &tracked, gravity, 720);
+    let trace = stack_ratio_trace_config();
+    let reports = collect_reports_with_debug_trace(&mut world, &tracked, gravity, 720, &trace);
     let window = &reports[360..];
     let mut lowest_min = f32::INFINITY;
     let mut lowest_max = f32::NEG_INFINITY;
@@ -241,18 +317,13 @@ fn demo_stack_ratio_settles_without_persistent_vertical_oscillation_3d() {
 
 #[test]
 fn demo_pyramid_stays_supported_by_floor_without_exploding_3d() {
-    if should_skip_known_failure(
-        "demo_pyramid_stays_supported_by_floor_without_exploding_3d",
-        "the demo 3D pyramid still leaks through the floor and develops explosion-like velocity spikes",
-    ) {
-        return;
-    }
     let Some((mut world, tracked, gravity)) = build_demo_pyramid_scene() else {
         eprintln!("SKIP: No GPU adapter found");
         return;
     };
 
-    let reports = collect_reports(&mut world, &tracked, gravity, 360);
+    let trace = pyramid_trace_config(&world, &tracked, gravity);
+    let reports = collect_reports_with_debug_trace(&mut world, &tracked, gravity, 360, &trace);
     let window = &reports[120..];
     let min_center_y = reports
         .iter()

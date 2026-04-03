@@ -13,7 +13,7 @@ use rubble_shapes3d::{
     CapsuleData, CompoundChild, CompoundChildGpu, CompoundShape, CompoundShapeGpu, ConvexHullData,
     ConvexVertex3D, SphereData,
 };
-use support::{cube_hull, octagon_hull, should_skip_known_failure};
+use support::{cube_hull, octagon_hull};
 
 const INITIAL_PENALTY: f32 = 1.0e4;
 
@@ -33,38 +33,6 @@ struct PairCase3D {
     a: BodySpec3D,
     b: BodySpec3D,
     expect_contact: bool,
-}
-
-impl PairCase3D {
-    fn known_failure_reason(&self) -> Option<&'static str> {
-        match self.name {
-            "sphere-capsule-contact" => {
-                Some("3D sphere-capsule narrowphase is currently missing this overlap")
-            }
-            "sphere-hull-contact" => {
-                Some("3D sphere-hull narrowphase is currently missing this overlap")
-            }
-            "box-capsule-contact" => {
-                Some("3D box-capsule narrowphase is currently missing this overlap")
-            }
-            "capsule-capsule-contact" => {
-                Some("3D capsule-capsule narrowphase is currently missing this overlap")
-            }
-            "capsule-hull-contact" => {
-                Some("3D capsule-hull narrowphase is currently missing this overlap")
-            }
-            "hull-hull-contact" => {
-                Some("3D hull-hull narrowphase is currently missing this overlap")
-            }
-            "compound-sphere-contact" => {
-                Some("3D compound contact path currently emits unstable feature ids here")
-            }
-            "compound-sphere-miss" => {
-                Some("3D compound contact path currently reports a false positive overlap here")
-            }
-            _ => None,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -1162,11 +1130,6 @@ fn contact_cases_3d() -> Vec<PairCase3D> {
 fn pair_matrix_contacts_match_geometry_3d() {
     let mut failures = Vec::new();
     for case in contact_cases_3d() {
-        if let Some(reason) = case.known_failure_reason() {
-            if should_skip_known_failure(case.name, reason) {
-                continue;
-            }
-        }
         let Some((states, contacts)) = run_pair_case(&case) else {
             eprintln!("SKIP: No GPU adapter found");
             return;

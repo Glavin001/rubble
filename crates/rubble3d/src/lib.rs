@@ -42,11 +42,11 @@ impl Default for SimConfig {
         Self {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
-            solver_iterations: 5,
+            solver_iterations: 20,
             max_bodies: 65536,
-            beta: 10.0,
+            beta: 1.0e4,
             k_start: 1e4,
-            warmstart_decay: 0.95,
+            warmstart_decay: 0.999,
             friction_default: 0.5,
         }
     }
@@ -1044,6 +1044,12 @@ impl World {
     /// Per-phase wall-clock timings from the most recent `step_async` call.
     pub fn last_step_timings(&self) -> &rubble_gpu::StepTimingsMs {
         &self.last_step_timings
+    }
+
+    /// Debug-only contact snapshot from the most recent step.
+    #[doc(hidden)]
+    pub fn debug_contacts(&self) -> &[rubble_math::Contact3D] {
+        self.contact_persistence.prev_contacts()
     }
 
     /// Cast a ray and return the closest hit (handle, t parameter, hit normal).

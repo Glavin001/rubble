@@ -2,10 +2,18 @@
 
 use glam::{Mat3, Quat, Vec3};
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
-use rubble_math::BodyHandle;
-use std::fmt;
+use rubble_math::{BodyHandle, Contact3D};
+use std::{
+    collections::HashSet,
+    fmt,
+    fs::OpenOptions,
+    io::Write,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub const RUN_KNOWN_FAILURES_ENV: &str = "RUBBLE_RUN_KNOWN_FAILURES";
+const DEBUG_LOG_PATH: &str = "/Users/glavin/Development/rubble/.cursor/debug-543c9a.log";
+const DEBUG_SESSION_ID: &str = "543c9a";
 
 pub fn run_known_failures() -> bool {
     std::env::var_os(RUN_KNOWN_FAILURES_ENV).is_some()
@@ -186,6 +194,14 @@ pub struct SceneReport3D {
     pub bodies: Vec<BodySnapshot3D>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DebugTraceConfig3D {
+    pub scene: &'static str,
+    pub run_id: &'static str,
+    pub sample_bodies: Vec<usize>,
+    pub monitored_pairs: Vec<(usize, usize)>,
+}
+
 impl fmt::Display for SceneReport3D {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
@@ -247,6 +263,352 @@ pub fn collect_reports(
         world.step();
         reports.push(scene_report(world, bodies, gravity, step + 1));
     }
+    reports
+}
+
+fn timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn json_f32(value: f32) -> String {
+    if value.is_finite() {
+        format!("{value:.6}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn append_debug_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data_json: String,
+) {
+    let line = format!(
+        "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}",
+        DEBUG_SESSION_ID,
+        json_escape(run_id),
+        json_escape(hypothesis_id),
+        json_escape(location),
+        json_escape(message),
+        data_json,
+        timestamp_millis(),
+    );
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(DEBUG_LOG_PATH)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+fn current_contact_keys(contacts: &[Contact3D]) -> HashSet<(u32, u32, u32)> {
+    contacts
+        .iter()
+        .map(|contact| {
+            (
+                contact.body_a.min(contact.body_b),
+                contact.body_a.max(contact.body_b),
+                contact.feature_id,
+            )
+        })
+        .collect()
+}
+
+fn sample_bodies_json(report: &SceneReport3D, sample_bodies: &[usize]) -> String {
+    let mut entries = Vec::new();
+    for &body_idx in sample_bodies {
+        if let Some(body) = report.bodies.get(body_idx) {
+            entries.push(format!(
+                "{{\"index\":{},\"label\":\"{}\",\"pos\":[{},{},{}],\"vel\":[{},{},{}],\"speed\":{},\"mass\":{}}}",
+                body_idx,
+                json_escape(body.label),
+                json_f32(body.position.x),
+                json_f32(body.position.y),
+                json_f32(body.position.z),
+                json_f32(body.linear_velocity.x),
+                json_f32(body.linear_velocity.y),
+                json_f32(body.linear_velocity.z),
+                json_f32(body.linear_velocity.length()),
+                json_f32(body.mass),
+            ));
+        }
+    }
+    format!("[{}]", entries.join(","))
+}
+
+fn monitored_pairs_json(contacts: &[Contact3D], monitored_pairs: &[(usize, usize)]) -> String {
+    let mut entries = Vec::new();
+    for &(body_a, body_b) in monitored_pairs {
+        let pair_a = body_a.min(body_b) as u32;
+        let pair_b = body_a.max(body_b) as u32;
+        let pair_contacts: Vec<&Contact3D> = contacts
+            .iter()
+            .filter(|contact| {
+                let a = contact.body_a.min(contact.body_b);
+                let b = contact.body_a.max(contact.body_b);
+                a == pair_a && b == pair_b
+            })
+            .collect();
+
+        let mut feature_ids: Vec<u32> = pair_contacts
+            .iter()
+            .map(|contact| contact.feature_id)
+            .collect();
+        feature_ids.sort_unstable();
+        feature_ids.dedup();
+        let feature_ids_json = feature_ids
+            .iter()
+            .take(8)
+            .map(|feature_id| feature_id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let count = pair_contacts.len();
+        let avg_normal_y = if count > 0 {
+            pair_contacts
+                .iter()
+                .map(|contact| contact.normal.y)
+                .sum::<f32>()
+                / count as f32
+        } else {
+            0.0
+        };
+        let min_depth = pair_contacts
+            .iter()
+            .map(|contact| contact.point.w)
+            .fold(f32::INFINITY, f32::min);
+        let max_depth = pair_contacts
+            .iter()
+            .map(|contact| contact.point.w)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let max_lambda_n = pair_contacts
+            .iter()
+            .map(|contact| contact.lambda.x.abs())
+            .fold(0.0, f32::max);
+        let max_penalty_n = pair_contacts
+            .iter()
+            .map(|contact| contact.penalty.x)
+            .fold(0.0, f32::max);
+        let sticking_count = pair_contacts
+            .iter()
+            .filter(|contact| contact.flags & rubble_math::CONTACT_FLAG_STICKING != 0)
+            .count();
+
+        entries.push(format!(
+            "{{\"a\":{},\"b\":{},\"count\":{},\"featureIds\":[{}],\"avgNormalY\":{},\"minDepth\":{},\"maxDepth\":{},\"maxLambdaN\":{},\"maxPenaltyN\":{},\"stickingCount\":{}}}",
+            pair_a,
+            pair_b,
+            count,
+            feature_ids_json,
+            json_f32(avg_normal_y),
+            json_f32(min_depth),
+            json_f32(max_depth),
+            json_f32(max_lambda_n),
+            json_f32(max_penalty_n),
+            sticking_count,
+        ));
+    }
+    format!("[{}]", entries.join(","))
+}
+
+fn trace_step_json(
+    scene: &str,
+    report: &SceneReport3D,
+    contacts: &[Contact3D],
+    prev_keys: &HashSet<(u32, u32, u32)>,
+    sample_bodies: &[usize],
+    monitored_pairs: &[(usize, usize)],
+    timings: &rubble_gpu::StepTimingsMs,
+) -> (String, HashSet<(u32, u32, u32)>) {
+    let current_keys = current_contact_keys(contacts);
+    let persistent_keys = current_keys.intersection(prev_keys).count();
+    let unique_pairs: HashSet<(u32, u32)> = contacts
+        .iter()
+        .map(|contact| {
+            (
+                contact.body_a.min(contact.body_b),
+                contact.body_a.max(contact.body_b),
+            )
+        })
+        .collect();
+
+    let mut centers: Vec<f32> = report
+        .bodies
+        .iter()
+        .filter(|body| body.mass > 0.0)
+        .map(|body| body.position.y)
+        .collect();
+    centers.sort_by(f32::total_cmp);
+    let min_gap = centers
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .fold(f32::INFINITY, f32::min);
+    let lowest_center_y = centers.first().copied().unwrap_or(0.0);
+    let highest_center_y = centers.last().copied().unwrap_or(0.0);
+    let max_abs_vertical_speed = report
+        .bodies
+        .iter()
+        .filter(|body| body.mass > 0.0)
+        .map(|body| body.linear_velocity.y.abs())
+        .fold(0.0, f32::max);
+    let floor_contact_count = contacts
+        .iter()
+        .filter(|contact| contact.body_a == 0 || contact.body_b == 0)
+        .count();
+    let floor_pair_count = unique_pairs
+        .iter()
+        .filter(|(body_a, body_b)| *body_a == 0 || *body_b == 0)
+        .count();
+    let max_lambda_n = contacts
+        .iter()
+        .map(|contact| contact.lambda.x.abs())
+        .fold(0.0, f32::max);
+    let max_penalty_n = contacts
+        .iter()
+        .map(|contact| contact.penalty.x)
+        .fold(0.0, f32::max);
+    let min_depth = contacts
+        .iter()
+        .map(|contact| contact.point.w)
+        .fold(f32::INFINITY, f32::min);
+    let max_depth = contacts
+        .iter()
+        .map(|contact| contact.point.w)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let avg_abs_normal_y = if contacts.is_empty() {
+        0.0
+    } else {
+        contacts
+            .iter()
+            .map(|contact| contact.normal.y.abs())
+            .sum::<f32>()
+            / contacts.len() as f32
+    };
+
+    let json = format!(
+        "{{\"scene\":\"{}\",\"step\":{},\"contactCount\":{},\"uniquePairs\":{},\"persistentKeys\":{},\"newKeys\":{},\"floorContactCount\":{},\"floorPairCount\":{},\"minDepth\":{},\"maxDepth\":{},\"avgAbsNormalY\":{},\"maxLambdaN\":{},\"maxPenaltyN\":{},\"lowestCenterY\":{},\"highestCenterY\":{},\"minGap\":{},\"maxAbsVerticalSpeed\":{},\"maxSpeed\":{},\"minHeight\":{},\"sampleBodies\":{},\"monitoredPairs\":{},\"timings\":{{\"uploadMs\":{},\"predictAabbMs\":{},\"broadphaseMs\":{},\"narrowphaseMs\":{},\"solveMs\":{},\"extractMs\":{}}}}}",
+        json_escape(scene),
+        report.step,
+        contacts.len(),
+        unique_pairs.len(),
+        persistent_keys,
+        current_keys.len().saturating_sub(persistent_keys),
+        floor_contact_count,
+        floor_pair_count,
+        json_f32(min_depth),
+        json_f32(max_depth),
+        json_f32(avg_abs_normal_y),
+        json_f32(max_lambda_n),
+        json_f32(max_penalty_n),
+        json_f32(lowest_center_y),
+        json_f32(highest_center_y),
+        json_f32(min_gap),
+        json_f32(max_abs_vertical_speed),
+        json_f32(report.metrics.max_speed),
+        json_f32(report.metrics.min_height),
+        sample_bodies_json(report, sample_bodies),
+        monitored_pairs_json(contacts, monitored_pairs),
+        json_f32(timings.upload_ms),
+        json_f32(timings.predict_aabb_ms),
+        json_f32(timings.broadphase_ms),
+        json_f32(timings.narrowphase_ms),
+        json_f32(timings.solve_ms),
+        json_f32(timings.extract_ms),
+    );
+
+    (json, current_keys)
+}
+
+pub fn collect_reports_with_debug_trace(
+    world: &mut World,
+    bodies: &[TrackedBody3D],
+    gravity: Vec3,
+    steps: usize,
+    trace: &DebugTraceConfig3D,
+) -> Vec<SceneReport3D> {
+    let mut reports = Vec::with_capacity(steps);
+    let mut prev_keys = HashSet::new();
+    let initial = scene_report(world, bodies, gravity, 0);
+    let monitored_pairs = trace
+        .monitored_pairs
+        .iter()
+        .map(|(body_a, body_b)| format!("{{\"a\":{},\"b\":{}}}", body_a, body_b))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // #region agent log
+    append_debug_log(
+        trace.run_id,
+        "H1,H2,H3,H4",
+        "crates/rubble3d/tests/support/mod.rs:collect_reports_with_debug_trace:start",
+        "trace_start",
+        format!(
+            "{{\"scene\":\"{}\",\"steps\":{},\"sampleBodies\":{},\"monitoredPairs\":[{}]}}",
+            json_escape(trace.scene),
+            steps,
+            sample_bodies_json(&initial, &trace.sample_bodies),
+            monitored_pairs,
+        ),
+    );
+    // #endregion
+
+    for step in 0..steps {
+        world.step();
+        let report = scene_report(world, bodies, gravity, step + 1);
+        let contacts = world.debug_contacts();
+        let (step_json, current_keys) = trace_step_json(
+            trace.scene,
+            &report,
+            contacts,
+            &prev_keys,
+            &trace.sample_bodies,
+            &trace.monitored_pairs,
+            world.last_step_timings(),
+        );
+
+        // #region agent log
+        append_debug_log(
+            trace.run_id,
+            "H1,H2,H3,H4",
+            "crates/rubble3d/tests/support/mod.rs:collect_reports_with_debug_trace:step",
+            "scene_step",
+            step_json,
+        );
+        // #endregion
+
+        prev_keys = current_keys;
+        reports.push(report);
+    }
+
+    if let Some(last) = reports.last() {
+        // #region agent log
+        append_debug_log(
+            trace.run_id,
+            "H2,H4",
+            "crates/rubble3d/tests/support/mod.rs:collect_reports_with_debug_trace:end",
+            "trace_end",
+            format!(
+                "{{\"scene\":\"{}\",\"finalStep\":{},\"maxSpeed\":{},\"minHeight\":{},\"sampleBodies\":{}}}",
+                json_escape(trace.scene),
+                last.step,
+                json_f32(last.metrics.max_speed),
+                json_f32(last.metrics.min_height),
+                sample_bodies_json(last, &trace.sample_bodies),
+            ),
+        );
+        // #endregion
+    }
+
     reports
 }
 

@@ -3,8 +3,7 @@ mod support;
 use glam::{Quat, Vec3};
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig};
 use support::{
-    add_tracked_body, collect_reports, cube_hull, scene_report, should_skip_known_failure, step_n,
-    try_world, TrackedBody3D,
+    add_tracked_body, collect_reports, cube_hull, scene_report, step_n, try_world, TrackedBody3D,
 };
 
 fn discrete_ballistic_position(
@@ -459,12 +458,6 @@ fn run_slide_scene_3d(friction: f32) -> Option<(f32, f32, f32)> {
 
 #[test]
 fn friction_strength_monotonically_reduces_slip_3d() {
-    if should_skip_known_failure(
-        "friction_strength_monotonically_reduces_slip_3d",
-        "friction ordering is currently inverted for some 3D sliding scenes",
-    ) {
-        return;
-    }
     let low = run_slide_scene_3d(0.0);
     let medium = run_slide_scene_3d(0.4);
     let high = run_slide_scene_3d(1.0);
@@ -490,12 +483,6 @@ fn friction_strength_monotonically_reduces_slip_3d() {
 
 #[test]
 fn resting_box_stays_quiet_on_floor_3d() {
-    if should_skip_known_failure(
-        "resting_box_stays_quiet_on_floor_3d",
-        "3D resting contacts still exhibit large solver-driven drift before stabilizing",
-    ) {
-        return;
-    }
     let gravity = Vec3::new(0.0, -9.81, 0.0);
     let mut world = match try_world(SimConfig {
         gravity,
@@ -712,12 +699,6 @@ fn same_hardware_replay_is_deterministic_3d() {
 
 #[test]
 fn compound_shape_stays_supported_without_exploding_3d() {
-    if should_skip_known_failure(
-        "compound_shape_stays_supported_without_exploding_3d",
-        "compound contacts can still inject runaway spin in the current 3D solver path",
-    ) {
-        return;
-    }
     let gravity = Vec3::new(0.0, -9.81, 0.0);
     let mut world = match try_world(SimConfig {
         gravity,

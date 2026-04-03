@@ -47,14 +47,17 @@ struct Solve6 {
     ang: vec3<f32>,
 };
 
+const CONTACT_MARGIN: f32 = 0.01;
+
 @group(0) @binding(0) var<storage, read_write> bodies:            array<Body>;
 @group(0) @binding(1) var<storage, read>       inertial_states:   array<Body>;
 @group(0) @binding(2) var<storage, read>       props:             array<BodyProps>;
 @group(0) @binding(3) var<storage, read>       contacts:          array<Contact>;
 @group(0) @binding(4) var<storage, read>       body_order:        array<u32>;
 @group(0) @binding(5) var<uniform>             params:            SimParams;
-@group(0) @binding(6) var<storage, read>       contact_count_buf: array<u32>;
-@group(0) @binding(7) var<uniform>             solve_range:       SolveRange;
+@group(0) @binding(6) var<storage, read>       body_contact_ranges: array<vec2<u32>>;
+@group(0) @binding(7) var<storage, read>       body_contact_indices: array<u32>;
+@group(0) @binding(8) var<uniform>             solve_range:       SolveRange;
 
 fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(
@@ -288,9 +291,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     rhs[4] = (i_world[1][0] * rot_delta.x + i_world[1][1] * rot_delta.y + i_world[1][2] * rot_delta.z) / dt2;
     rhs[5] = (i_world[2][0] * rot_delta.x + i_world[2][1] * rot_delta.y + i_world[2][2] * rot_delta.z) / dt2;
 
-    let num_contacts = contact_count_buf[0];
-    for (var ci = 0u; ci < num_contacts; ci = ci + 1u) {
-        let c = contacts[ci];
+    let contact_range = body_contact_ranges[body_idx];
+    let range_end = contact_range.x + contact_range.y;
+    for (var slot = contact_range.x; slot < range_end; slot = slot + 1u) {
+        let c = contacts[body_contact_indices[slot]];
         let is_a = c.body_a == body_idx;
         let is_b = c.body_b == body_idx;
         if !is_a && !is_b {
@@ -309,9 +313,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let normal = c.normal.xyz;
         let tangent1 = normalize(c.tangent.xyz);
         let tangent2 = normalize(cross(normal, tangent1));
-        let c_n = dot(normal, separation);
-        let c_t1 = dot(tangent1, separation);
-        let c_t2 = dot(tangent2, separation);
         let lambda_n = c.lambda.x;
         let lambda_t1 = c.lambda.y;
         let lambda_t2 = c.lambda.z;
@@ -319,6 +320,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let k_t1 = c.penalty.y;
         let k_t2 = c.penalty.z;
         let mu = sqrt(max(props[c.body_a].friction * props[c.body_b].friction, 0.0));
+        let c_n = dot(normal, separation) + CONTACT_MARGIN;
+        let c_t1 = dot(tangent1, separation);
+        let c_t2 = dot(tangent2, separation);
         let f_n = min(k_n * c_n + lambda_n, 0.0);
         var tang = vec2<f32>(k_t1 * c_t1 + lambda_t1, k_t2 * c_t2 + lambda_t2);
         let tang_limit = mu * abs(f_n);
@@ -387,6 +391,7 @@ struct Contact {
 };
 
 const CONTACT_FLAG_STICKING: u32 = 1u;
+const CONTACT_MARGIN: f32 = 0.01;
 
 struct SimParams {
     gravity: vec4<f32>,
@@ -413,12 +418,29 @@ fn quat_conj(q: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(-q.x, -q.y, -q.z, q.w);
 }
 
+fn quat_normalize(q: vec4<f32>) -> vec4<f32> {
+    return q / max(length(q), 1e-12);
+}
+
 fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     let u = q.xyz;
     let s = q.w;
     return 2.0 * dot(u, v) * u
          + (s * s - dot(u, u)) * v
          + 2.0 * s * cross(u, v);
+}
+
+fn rotation_delta_vec(current: vec4<f32>, reference: vec4<f32>) -> vec3<f32> {
+    var dq = quat_mul(current, quat_conj(reference));
+    if dq.w < 0.0 {
+        dq = -dq;
+    }
+    let imag_len = length(dq.xyz);
+    if imag_len < 1e-8 {
+        return 2.0 * dq.xyz;
+    }
+    let angle = 2.0 * atan2(imag_len, dq.w);
+    return dq.xyz / imag_len * angle;
 }
 
 @compute @workgroup_size(64)
@@ -432,8 +454,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c = contacts[ci];
     let pos_a = bodies[c.body_a].position_inv_mass.xyz;
     let pos_b = bodies[c.body_b].position_inv_mass.xyz;
-    let q_a = normalize(bodies[c.body_a].orientation);
-    let q_b = normalize(bodies[c.body_b].orientation);
+    let q_a = quat_normalize(bodies[c.body_a].orientation);
+    let q_b = quat_normalize(bodies[c.body_b].orientation);
     let r_a = quat_rotate(q_a, c.local_anchor_a.xyz);
     let r_b = quat_rotate(q_b, c.local_anchor_b.xyz);
     let world_a = pos_a + r_a;
@@ -442,8 +464,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let normal = c.normal.xyz;
     let tangent1 = normalize(c.tangent.xyz);
     let tangent2 = normalize(cross(normal, tangent1));
-
-    let c_n = dot(normal, separation);
+    let geom_c_n = dot(normal, separation);
+    let c_n = geom_c_n + CONTACT_MARGIN;
     let c_t1 = dot(tangent1, separation);
     let c_t2 = dot(tangent2, separation);
     let lambda_n = min(c.penalty.x * c_n + c.lambda.x, 0.0);
@@ -472,7 +494,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         next_penalty.z = min(c.penalty.z + beta * abs(c_t2), max_penalty);
     }
 
-    contacts[ci].point = vec4<f32>((world_a + world_b) * 0.5, c_n);
+    contacts[ci].point = vec4<f32>((world_a + world_b) * 0.5, geom_c_n);
     contacts[ci].lambda = vec4<f32>(lambda_n, tang.x, tang.y, 0.0);
     contacts[ci].penalty = next_penalty;
     contacts[ci].flags = flags;

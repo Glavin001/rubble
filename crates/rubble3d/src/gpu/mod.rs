@@ -354,6 +354,8 @@ pub struct GpuPipeline {
     convex_vertices: GpuBuffer<ConvexVertex3D>,
     planes: GpuBuffer<Vec4>,
     body_order: GpuBuffer<u32>,
+    body_contact_ranges: GpuBuffer<[u32; 2]>,
+    body_contact_indices: GpuBuffer<u32>,
     active_body_flags: GpuBuffer<u32>,
     lbvh_subset_aabbs: GpuBuffer<Aabb3D>,
 
@@ -366,6 +368,11 @@ pub struct GpuPipeline {
     // Compound shape data (for CPU-side pair expansion)
     compound_shapes_data: Vec<CompoundShapeGpu>,
     compound_children_data: Vec<CompoundChildGpu>,
+    sphere_data_cpu: Vec<SphereData>,
+    box_data_cpu: Vec<BoxData>,
+    capsule_data_cpu: Vec<CapsuleData>,
+    convex_hulls_cpu: Vec<ConvexHullData>,
+    convex_vertices_cpu: Vec<ConvexVertex3D>,
     /// CPU-side compound shapes with BVH data for broadphase culling.
     compound_shapes_cpu: Vec<rubble_shapes3d::CompoundShape>,
     plane_data_cpu: Vec<Vec4>,
@@ -384,7 +391,7 @@ pub struct GpuPipeline {
     aabb_bg_cache: CachedBindGroup<[u64; 9]>,
     narrowphase_bg_cache: CachedBindGroup<[u64; 9]>,
     free_motion_bg_cache: CachedBindGroup<[u64; 4]>,
-    primal_bg_cache: CachedBindGroupVec<[u64; 6]>,
+    primal_bg_cache: CachedBindGroupVec<[u64; 8]>,
     dual_bg_cache: CachedBindGroup<[u64; 3]>,
     extract_bg_cache: CachedBindGroup<[u64; 3]>,
 
@@ -423,6 +430,8 @@ impl GpuPipeline {
         let convex_vertices = GpuBuffer::new(&ctx, (max_bodies * 8).max(1));
         let planes = GpuBuffer::new(&ctx, 16);
         let body_order = GpuBuffer::new(&ctx, max_bodies);
+        let body_contact_ranges = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let body_contact_indices = GpuBuffer::new(&ctx, (max_contacts * 2).max(1));
         let active_body_flags = GpuBuffer::new(&ctx, max_bodies.max(1));
         let lbvh_subset_aabbs = GpuBuffer::new(&ctx, max_bodies.max(1));
 
@@ -468,6 +477,8 @@ impl GpuPipeline {
             convex_vertices,
             planes,
             body_order,
+            body_contact_ranges,
+            body_contact_indices,
             active_body_flags,
             lbvh_subset_aabbs,
             cached_body_graph: Vec::new(),
@@ -476,6 +487,11 @@ impl GpuPipeline {
             cached_color_num_bodies: 0,
             compound_shapes_data: Vec::new(),
             compound_children_data: Vec::new(),
+            sphere_data_cpu: Vec::new(),
+            box_data_cpu: Vec::new(),
+            capsule_data_cpu: Vec::new(),
+            convex_hulls_cpu: Vec::new(),
+            convex_vertices_cpu: Vec::new(),
             compound_shapes_cpu: Vec::new(),
             plane_data_cpu: Vec::new(),
             body_props_cpu: Vec::new(),
@@ -540,6 +556,11 @@ impl GpuPipeline {
         // Store compound data for CPU-side pair expansion
         self.compound_shapes_data = compound_shapes.to_vec();
         self.compound_children_data = compound_children.to_vec();
+        self.sphere_data_cpu = sphere_data.to_vec();
+        self.box_data_cpu = box_data.to_vec();
+        self.capsule_data_cpu = capsule_data.to_vec();
+        self.convex_hulls_cpu = hull_data.to_vec();
+        self.convex_vertices_cpu = hull_vertices.to_vec();
         self.compound_shapes_cpu = compound_shapes_cpu.to_vec();
         self.plane_data_cpu = plane_data.to_vec();
         self.body_props_cpu = props.to_vec();
@@ -950,7 +971,8 @@ impl GpuPipeline {
             let world_b = point - normal * depth * 0.5;
             let local_a = rot_a.conjugate() * (world_a - pos_a);
             let local_b = rot_b.conjugate() * (world_b - pos_b);
-            let feature_id = (((idx_a as u32) & 0xFFFF) << 16) | ((idx_b as u32) & 0xFFFF);
+            let feature_id =
+                0x4100_0000u32 | (((idx_a as u32) & 0xFF) << 8) | ((idx_b as u32) & 0xFF);
 
             out.push(Contact3D {
                 point: Vec4::new(point.x, point.y, point.z, depth),
@@ -1088,16 +1110,37 @@ impl GpuPipeline {
         result
     }
 
-    /// Get a rough bounding radius for a child shape based on its type.
-    fn child_extent(&self, shape_type: u32, _shape_index: u32) -> f32 {
-        // Conservative estimate per shape type. Actual dimensions could be
-        // looked up from CPU-side shape buffers for higher accuracy.
+    /// Get a conservative bounding radius for a child shape.
+    fn child_extent(&self, shape_type: u32, shape_index: u32) -> f32 {
         match shape_type {
-            0 => 1.0, // SHAPE_SPHERE
-            1 => 1.5, // SHAPE_BOX
-            2 => 1.5, // SHAPE_CAPSULE
-            3 => 2.0, // SHAPE_CONVEX_HULL
-            4 => 1e4, // SHAPE_PLANE
+            0 => self
+                .sphere_data_cpu
+                .get(shape_index as usize)
+                .map(|sphere| sphere.radius)
+                .unwrap_or(1.0),
+            1 => self
+                .box_data_cpu
+                .get(shape_index as usize)
+                .map(|box_data| box_data.half_extents.truncate().length())
+                .unwrap_or(1.5),
+            2 => self
+                .capsule_data_cpu
+                .get(shape_index as usize)
+                .map(|capsule| capsule.half_height + capsule.radius)
+                .unwrap_or(1.5),
+            3 => self
+                .convex_hulls_cpu
+                .get(shape_index as usize)
+                .map(|hull| {
+                    let start = hull.vertex_offset as usize;
+                    let end = start + hull.vertex_count as usize;
+                    self.convex_vertices_cpu[start..end]
+                        .iter()
+                        .map(|vertex| Vec3::new(vertex.x, vertex.y, vertex.z).length())
+                        .fold(0.0, f32::max)
+                })
+                .unwrap_or(2.0),
+            4 => 1e4,
             _ => 2.0,
         }
     }
@@ -1129,9 +1172,15 @@ impl GpuPipeline {
                 self.cached_color_groups = color_groups.clone();
                 (body_order, color_groups)
             };
+        let (body_contact_ranges, body_contact_indices) =
+            build_body_contact_adjacency(num_bodies, contacts);
         self.contacts.upload(&self.ctx, contacts);
         self.contact_count.write(&self.ctx, contacts.len() as u32);
         self.body_order.upload(&self.ctx, &body_order);
+        self.body_contact_ranges
+            .upload(&self.ctx, &body_contact_ranges);
+        self.body_contact_indices
+            .upload(&self.ctx, &body_contact_indices);
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
         let _ = self.dual_bind_group();
@@ -1292,13 +1341,13 @@ impl GpuPipeline {
 
         let t_solve = Instant::now();
         self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
-        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let final_contacts = if !contacts.is_empty() {
             self.download_contacts()
         } else {
             Vec::new()
         };
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let t_ext = Instant::now();
         self.dispatch_extract(num_bodies);
@@ -2007,7 +2056,7 @@ impl GpuPipeline {
 
     fn narrowphase_bind_group(&mut self) -> &wgpu::BindGroup {
         let key = [
-            self.old_states.byte_size(),
+            self.body_states_cache_key(),
             self.body_props.byte_size(),
             self.pairs.byte_size(),
             self.spheres.byte_size(),
@@ -2038,7 +2087,7 @@ impl GpuPipeline {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.old_states.buffer().as_entire_binding(),
+                        resource: self.body_states.current().buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -2134,6 +2183,8 @@ impl GpuPipeline {
             self.body_props.byte_size(),
             self.contacts.byte_size(),
             self.body_order.byte_size(),
+            self.body_contact_ranges.byte_size(),
+            self.body_contact_indices.byte_size(),
             range_count as u64,
         ];
         if self.primal_bg_cache.key.as_ref() != Some(&key) {
@@ -2176,10 +2227,14 @@ impl GpuPipeline {
                         },
                         wgpu::BindGroupEntry {
                             binding: 6,
-                            resource: self.contact_count.buffer().as_entire_binding(),
+                            resource: self.body_contact_ranges.buffer().as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 7,
+                            resource: self.body_contact_indices.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
                             resource: self.solve_range_buffers[idx].as_entire_binding(),
                         },
                     ],
@@ -2417,6 +2472,40 @@ fn color_bodies(num_bodies: u32, contacts: &[Contact3D]) -> (Vec<u32>, Vec<(u32,
     (body_order, groups)
 }
 
+fn build_body_contact_adjacency(
+    num_bodies: u32,
+    contacts: &[Contact3D],
+) -> (Vec<[u32; 2]>, Vec<u32>) {
+    let mut counts = vec![0u32; num_bodies as usize];
+    for contact in contacts {
+        counts[contact.body_a as usize] += 1;
+        counts[contact.body_b as usize] += 1;
+    }
+
+    let mut ranges = vec![[0u32; 2]; num_bodies as usize];
+    let mut offset = 0u32;
+    for (body_idx, &count) in counts.iter().enumerate() {
+        ranges[body_idx] = [offset, count];
+        offset += count;
+    }
+
+    let mut write_heads: Vec<u32> = ranges.iter().map(|range| range[0]).collect();
+    let mut indices = vec![0u32; offset as usize];
+    for (contact_idx, contact) in contacts.iter().enumerate() {
+        let contact_idx = contact_idx as u32;
+
+        let head_a = &mut write_heads[contact.body_a as usize];
+        indices[*head_a as usize] = contact_idx;
+        *head_a += 1;
+
+        let head_b = &mut write_heads[contact.body_b as usize];
+        indices[*head_b as usize] = contact_idx;
+        *head_b += 1;
+    }
+
+    (ranges, indices)
+}
+
 fn body_graph_key_3d(contacts: &[Contact3D]) -> Vec<(u32, u32)> {
     let mut pairs: Vec<(u32, u32)> = contacts
         .iter()
@@ -2450,9 +2539,6 @@ fn warm_start_contacts_3d(
 
     for nc in new_contacts.iter_mut() {
         let feature_prefix = nc.feature_id & 0xFF00_0000;
-        if feature_prefix == 0x3200_0000 {
-            continue;
-        }
         let key = (
             nc.body_a.min(nc.body_b),
             nc.body_a.max(nc.body_b),
@@ -2460,12 +2546,14 @@ fn warm_start_contacts_3d(
         );
         if let Some(prev) = prev_by_key.get(&key) {
             nc.lambda = prev.lambda * (alpha * gamma);
-            nc.penalty = prev.penalty * gamma;
-            nc.flags = prev.flags;
+            if feature_prefix != 0x3200_0000 {
+                nc.penalty = prev.penalty * gamma;
+                nc.flags = prev.flags;
 
-            if prev.flags & rubble_math::CONTACT_FLAG_STICKING != 0 {
-                nc.local_anchor_a = prev.local_anchor_a;
-                nc.local_anchor_b = prev.local_anchor_b;
+                if prev.flags & rubble_math::CONTACT_FLAG_STICKING != 0 {
+                    nc.local_anchor_a = prev.local_anchor_a;
+                    nc.local_anchor_b = prev.local_anchor_b;
+                }
             }
         }
     }

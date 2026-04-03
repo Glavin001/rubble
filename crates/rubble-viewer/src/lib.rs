@@ -6,9 +6,14 @@ pub mod renderer;
 use camera::{Camera2D, OrbitCamera};
 use glam::{Quat, Vec2, Vec3};
 use renderer::{model_matrix, palette_color, static_color, DrawList, InstanceData, Renderer};
-use rubble_math::BodyHandle;
-use std::sync::Arc;
-use std::time::Instant;
+use rubble_math::{BodyHandle, Contact3D};
+use std::{
+    collections::HashSet,
+    fs::OpenOptions,
+    io::Write,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -22,6 +27,8 @@ const CONTROLS_3D: &[&str] = &[
 ];
 
 const CONTROLS_2D: &[&str] = &["Pan view: left drag", "Zoom view: mouse wheel"];
+const DEBUG_LOG_PATH: &str = "/Users/glavin/Development/rubble/.cursor/debug-543c9a.log";
+const DEBUG_SESSION_ID: &str = "543c9a";
 
 // ---------------------------------------------------------------------------
 // Shape tracking (mirrors rubble-wasm bookkeeping)
@@ -68,6 +75,75 @@ impl Scene2D {
             descs: Vec::new(),
         }
     }
+}
+
+fn timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn json_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+fn json_f32(value: f32) -> String {
+    if value.is_finite() {
+        format!("{value:.4}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn append_debug_log(
+    location: &str,
+    message: &str,
+    run_id: &str,
+    hypothesis_id: &str,
+    data_json: &str,
+) {
+    let payload = format!(
+        "{{\"sessionId\":\"{}\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
+        DEBUG_SESSION_ID,
+        json_escape(run_id),
+        json_escape(hypothesis_id),
+        json_escape(location),
+        json_escape(message),
+        data_json,
+        timestamp_millis(),
+    );
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(DEBUG_LOG_PATH)
+    {
+        let _ = file.write_all(payload.as_bytes());
+    }
+}
+
+fn contact_workload_summary(contacts: &[Contact3D]) -> (usize, usize, f32) {
+    let mut pairs = HashSet::with_capacity(contacts.len());
+    let mut max_depth = 0.0_f32;
+    for contact in contacts {
+        let a = contact.body_a.min(contact.body_b);
+        let b = contact.body_a.max(contact.body_b);
+        pairs.insert((a, b));
+        max_depth = max_depth.max(contact.depth());
+    }
+    (contacts.len(), pairs.len(), max_depth)
 }
 
 fn shape_info_3d(shape: &rubble3d::ShapeDesc) -> ShapeInfo3D {
@@ -281,9 +357,12 @@ struct State3D {
     mouse_pressed: bool,
     right_pressed: bool,
     last_mouse: Option<(f64, f64)>,
+    frame_index: u64,
     frame_count: u32,
     fps: f32,
     fps_instant: Instant,
+    scene_epoch: u32,
+    last_redraw_started: Instant,
     render_ms: f32,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
@@ -343,9 +422,12 @@ impl ApplicationHandler for App3D {
             mouse_pressed: false,
             right_pressed: false,
             last_mouse: None,
+            frame_index: 0,
             frame_count: 0,
             fps: 0.0,
             fps_instant: Instant::now(),
+            scene_epoch: 0,
+            last_redraw_started: Instant::now(),
             render_ms: 0.0,
             egui_ctx,
             egui_state,
@@ -437,9 +519,62 @@ impl App3D {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                state.world.step();
-                let timings = *state.world.last_step_timings();
+                let redraw_gap_ms = state.last_redraw_started.elapsed().as_secs_f32() * 1000.0;
+                state.last_redraw_started = Instant::now();
+                let frame_start = state.last_redraw_started;
+                state.frame_index += 1;
+                let should_log = state.frame_index <= 5 || state.frame_index % 30 == 0;
+                let run_id = format!(
+                    "viewer3d-scene{}-epoch{}",
+                    state.current_scene, state.scene_epoch
+                );
 
+                let t_step = Instant::now();
+                state.world.step();
+                let step_wall_ms = t_step.elapsed().as_secs_f32() * 1000.0;
+                let timings = *state.world.last_step_timings();
+                let timings_arr = timings.as_array();
+                let step_stage_ms: f32 = timings_arr.iter().sum();
+                let broadphase_arr = timings.broadphase_breakdown.as_array();
+                let contacts = state.world.debug_contacts();
+                let (contact_count, pair_count, max_depth) = contact_workload_summary(contacts);
+
+                // #region agent log
+                if should_log {
+                    append_debug_log(
+                        "crates/rubble-viewer/src/lib.rs:redraw-step",
+                        "viewer 3d physics perf",
+                        &run_id,
+                        "H1_H3",
+                        &format!(
+                            "{{\"scene\":\"{}\",\"frame\":{},\"bodyCount\":{},\"contactCount\":{},\"pairCount\":{},\"maxDepth\":{},\"stepWallMs\":{},\"stepStageMs\":{},\"stepUnaccountedMs\":{},\"uploadMs\":{},\"predictMs\":{},\"broadphaseMs\":{},\"narrowphaseMs\":{},\"contactsStageMs\":{},\"solveMs\":{},\"extractMs\":{},\"bpBoundsMs\":{},\"bpSortMs\":{},\"bpBuildMs\":{},\"bpTraverseMs\":{},\"bpReadbackMs\":{}}}",
+                            json_escape(&state.scene_names[state.current_scene]),
+                            state.frame_index,
+                            state.world.body_count(),
+                            contact_count,
+                            pair_count,
+                            json_f32(max_depth),
+                            json_f32(step_wall_ms),
+                            json_f32(step_stage_ms),
+                            json_f32((step_wall_ms - step_stage_ms).max(0.0)),
+                            json_f32(timings_arr[0]),
+                            json_f32(timings_arr[1]),
+                            json_f32(timings_arr[2]),
+                            json_f32(timings_arr[3]),
+                            json_f32(timings_arr[4]),
+                            json_f32(timings_arr[5]),
+                            json_f32(timings_arr[6]),
+                            json_f32(broadphase_arr[0]),
+                            json_f32(broadphase_arr[1]),
+                            json_f32(broadphase_arr[2]),
+                            json_f32(broadphase_arr[3]),
+                            json_f32(broadphase_arr[4]),
+                        ),
+                    );
+                }
+                // #endregion
+
+                let t_prepare = Instant::now();
                 state.draw_list.clear();
                 for (i, handle) in state.handles.iter().enumerate() {
                     let pos = state.world.get_position(*handle).unwrap_or(Vec3::ZERO);
@@ -478,6 +613,7 @@ impl App3D {
                         ShapeInfo3D::Plane => {}
                     }
                 }
+                let prepare_ms = t_prepare.elapsed().as_secs_f32() * 1000.0;
 
                 state.frame_count += 1;
                 let elapsed = state.fps_instant.elapsed();
@@ -487,6 +623,7 @@ impl App3D {
                     state.fps_instant = Instant::now();
                 }
 
+                let t_ui = Instant::now();
                 let raw_input = state.egui_state.take_egui_input(&state.window);
                 let mut selected_scene = state.current_scene;
                 let mut reset_requested = false;
@@ -511,6 +648,12 @@ impl App3D {
                     state.handles = handles;
                     state.shapes = shapes;
                     state.current_scene = selected_scene;
+                    state.scene_epoch = state.scene_epoch.saturating_add(1);
+                    state.frame_index = 0;
+                    state.frame_count = 0;
+                    state.fps = 0.0;
+                    state.fps_instant = Instant::now();
+                    state.last_redraw_started = Instant::now();
                 }
                 state
                     .egui_state
@@ -518,6 +661,7 @@ impl App3D {
                 let primitives = state
                     .egui_ctx
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
+                let ui_ms = t_ui.elapsed().as_secs_f32() * 1000.0;
 
                 let size = state.window.inner_size();
                 let sd = egui_wgpu::ScreenDescriptor {
@@ -539,6 +683,30 @@ impl App3D {
                     &sd,
                 );
                 state.render_ms = t_render.elapsed().as_secs_f32() * 1000.0;
+                let frame_wall_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+
+                // #region agent log
+                if should_log {
+                    append_debug_log(
+                        "crates/rubble-viewer/src/lib.rs:redraw-frame",
+                        "viewer 3d frame perf",
+                        &run_id,
+                        "H2_H4",
+                        &format!(
+                            "{{\"scene\":\"{}\",\"frame\":{},\"fps\":{},\"redrawGapMs\":{},\"prepareMs\":{},\"uiMs\":{},\"renderMs\":{},\"frameWallMs\":{},\"frameUnaccountedMs\":{}}}",
+                            json_escape(&state.scene_names[state.current_scene]),
+                            state.frame_index,
+                            json_f32(state.fps),
+                            json_f32(redraw_gap_ms),
+                            json_f32(prepare_ms),
+                            json_f32(ui_ms),
+                            json_f32(state.render_ms),
+                            json_f32(frame_wall_ms),
+                            json_f32((frame_wall_ms - step_wall_ms - prepare_ms - ui_ms - state.render_ms).max(0.0)),
+                        ),
+                    );
+                }
+                // #endregion
 
                 state.window.request_redraw();
             }
