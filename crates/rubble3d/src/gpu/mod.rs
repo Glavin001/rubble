@@ -1172,19 +1172,17 @@ impl GpuPipeline {
                 self.cached_color_groups = color_groups.clone();
                 (body_order, color_groups)
             };
-        let (body_contact_ranges, body_contact_indices) =
-            build_body_contact_adjacency(num_bodies, contacts);
+        let adjacency = build_body_contact_adjacency(num_bodies, contacts);
         self.contacts.upload(&self.ctx, contacts);
         self.contact_count.write(&self.ctx, contacts.len() as u32);
         self.body_order.upload(&self.ctx, &body_order);
         self.body_contact_ranges
-            .upload(&self.ctx, &body_contact_ranges);
+            .upload(&self.ctx, &adjacency.ranges);
         self.body_contact_indices
-            .upload(&self.ctx, &body_contact_indices);
+            .upload(&self.ctx, &adjacency.indices);
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
         let _ = self.dual_bind_group();
-
         let contact_count = contacts.len() as u32;
         let primal_bind_groups = &self.primal_bg_cache.bind_groups;
         let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
@@ -1195,25 +1193,29 @@ impl GpuPipeline {
                 label: Some("avbd_solve_batch_3d"),
             });
         for _ in 0..solver_iterations {
-            for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
-                if count == 0 {
-                    continue;
-                }
+            {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("avbd_primal_3d"),
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(self.primal_kernel.pipeline());
-                pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
-                pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
+                for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
+                    if count == 0 {
+                        continue;
+                    }
+                    pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
+                    pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
+                }
             }
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("avbd_dual_3d"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(self.dual_kernel.pipeline());
-            pass.set_bind_group(0, dual_bind_group, &[]);
-            pass.dispatch_workgroups(round_up_workgroups(contact_count, WORKGROUP_SIZE), 1, 1);
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_dual_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.dual_kernel.pipeline());
+                pass.set_bind_group(0, dual_bind_group, &[]);
+                pass.dispatch_workgroups(round_up_workgroups(contact_count, WORKGROUP_SIZE), 1, 1);
+            }
         }
         self.ctx.queue.submit(Some(encoder.finish()));
     }
@@ -2472,10 +2474,12 @@ fn color_bodies(num_bodies: u32, contacts: &[Contact3D]) -> (Vec<u32>, Vec<(u32,
     (body_order, groups)
 }
 
-fn build_body_contact_adjacency(
-    num_bodies: u32,
-    contacts: &[Contact3D],
-) -> (Vec<[u32; 2]>, Vec<u32>) {
+struct BodyContactAdjacency3D {
+    ranges: Vec<[u32; 2]>,
+    indices: Vec<u32>,
+}
+
+fn build_body_contact_adjacency(num_bodies: u32, contacts: &[Contact3D]) -> BodyContactAdjacency3D {
     let mut counts = vec![0u32; num_bodies as usize];
     for contact in contacts {
         counts[contact.body_a as usize] += 1;
@@ -2503,7 +2507,7 @@ fn build_body_contact_adjacency(
         *head_b += 1;
     }
 
-    (ranges, indices)
+    BodyContactAdjacency3D { ranges, indices }
 }
 
 fn body_graph_key_3d(contacts: &[Contact3D]) -> Vec<(u32, u32)> {

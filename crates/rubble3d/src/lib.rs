@@ -1046,12 +1046,6 @@ impl World {
         &self.last_step_timings
     }
 
-    /// Debug-only contact snapshot from the most recent step.
-    #[doc(hidden)]
-    pub fn debug_contacts(&self) -> &[rubble_math::Contact3D] {
-        self.contact_persistence.prev_contacts()
-    }
-
     /// Cast a ray and return the closest hit (handle, t parameter, hit normal).
     /// `origin` is the ray start, `direction` is the ray direction (need not be normalized).
     /// `max_t` is the maximum ray parameter to test.
