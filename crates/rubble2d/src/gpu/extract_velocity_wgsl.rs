@@ -11,11 +11,9 @@ struct Body2D {
 };
 
 struct SimParams2D {
-    gravity:           vec4<f32>,
-    dt:                f32,
-    num_bodies:        u32,
-    solver_iterations: u32,
-    _pad:              u32,
+    gravity: vec4<f32>,
+    solver:  vec4<f32>,
+    counts:  vec4<u32>,
 };
 
 @group(0) @binding(0) var<storage, read_write> bodies:     array<Body2D>;
@@ -25,7 +23,7 @@ struct SimParams2D {
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    if idx >= params.num_bodies {
+    if idx >= params.counts.x {
         return;
     }
 
@@ -34,7 +32,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return; // static body
     }
 
-    let dt = params.dt;
+    let dt = params.solver.x;
     if dt <= 1e-12 {
         return;
     }

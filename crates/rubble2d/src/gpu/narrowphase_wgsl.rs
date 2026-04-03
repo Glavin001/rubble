@@ -45,11 +45,9 @@ struct Contact2D {
 };
 
 struct SimParams2D {
-    gravity:           vec4<f32>,
-    dt:                f32,
-    num_bodies:        u32,
-    solver_iterations: u32,
-    pair_count:        u32,
+    gravity: vec4<f32>,
+    solver:  vec4<f32>,
+    counts:  vec4<u32>,
 };
 
 const SHAPE_CIRCLE:         u32 = 0u;
@@ -125,7 +123,8 @@ fn emit_contact_2d(
     contacts[slot].point  = vec4<f32>(point.x, point.y, depth, 0.0);
     contacts[slot].normal = vec4<f32>(normal.x, normal.y, tangent.x, tangent.y);
     contacts[slot].local_anchors = vec4<f32>(local_a.x, local_a.y, local_b.x, local_b.y);
-    contacts[slot].lambda_penalty = vec4<f32>(0.0, 0.0, 1e4, 1e4);
+    let k_start = params.solver.z;
+    contacts[slot].lambda_penalty = vec4<f32>(0.0, 0.0, k_start, k_start);
     contacts[slot].body_a = body_a;
     contacts[slot].body_b = body_b;
     contacts[slot].feature_id = feature_id;
@@ -789,7 +788,7 @@ fn capsule_poly_test(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
-    let num_pairs = params.pair_count;
+    let num_pairs = params.counts.z;
     if pi >= num_pairs {
         return;
     }
@@ -807,7 +806,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let si_a = shape_infos[a].shape_index;
     let si_b = shape_infos[b].shape_index;
 
-    let max_contacts = params.num_bodies * 8u;
+    let max_contacts = params.counts.x * 8u;
 
     // Sort shape types so s1 <= s2 for consistent dispatch
     var s1 = st_a;

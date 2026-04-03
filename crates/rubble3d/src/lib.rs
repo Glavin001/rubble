@@ -495,6 +495,7 @@ fn ray_aabb_3d(
 pub struct World {
     config: SimConfig,
     states: Vec<RigidBodyState3D>,
+    prev_warmstart_states: Vec<RigidBodyState3D>,
     props: Vec<RigidBodyProps3D>,
     shapes: Vec<ShapeDesc>,
     spheres: Vec<SphereData>,
@@ -526,6 +527,7 @@ impl World {
         Ok(Self {
             config,
             states: Vec::new(),
+            prev_warmstart_states: Vec::new(),
             props: Vec::new(),
             shapes: Vec::new(),
             spheres: Vec::new(),
@@ -753,6 +755,8 @@ impl World {
 
         if idx >= self.states.len() {
             self.states.resize(idx + 1, bytemuck::Zeroable::zeroed());
+            self.prev_warmstart_states
+                .resize(idx + 1, bytemuck::Zeroable::zeroed());
             self.props.resize(idx + 1, bytemuck::Zeroable::zeroed());
             self.shapes
                 .resize(idx + 1, ShapeDesc::Sphere { radius: 0.5 });
@@ -760,6 +764,7 @@ impl World {
         }
 
         self.states[idx] = state;
+        self.prev_warmstart_states[idx] = state;
         self.props[idx] = prop;
         self.shapes[idx] = desc.shape.clone();
         self.alive[idx] = true;
@@ -775,6 +780,7 @@ impl World {
         let idx = handle.index as usize;
         self.alive[idx] = false;
         self.states[idx] = bytemuck::Zeroable::zeroed();
+        self.prev_warmstart_states[idx] = bytemuck::Zeroable::zeroed();
         self.props[idx] = bytemuck::Zeroable::zeroed();
         self.allocator.dealloc(handle);
         true
@@ -817,6 +823,7 @@ impl World {
         let idx = handle.index as usize;
         let im = self.states[idx].inv_mass();
         self.states[idx].position_inv_mass = Vec4::new(pos.x, pos.y, pos.z, im);
+        self.prev_warmstart_states[idx].position_inv_mass = self.states[idx].position_inv_mass;
     }
 
     /// Set the linear velocity of a body.
@@ -826,6 +833,7 @@ impl World {
         }
         let idx = handle.index as usize;
         self.states[idx].lin_vel = vel.extend(0.0);
+        self.prev_warmstart_states[idx].lin_vel = self.states[idx].lin_vel;
     }
 
     /// Get the angular velocity of a body.
@@ -843,6 +851,7 @@ impl World {
         }
         let idx = handle.index as usize;
         self.states[idx].ang_vel = omega.extend(0.0);
+        self.prev_warmstart_states[idx].ang_vel = self.states[idx].ang_vel;
     }
 
     /// Advance the simulation by one time step on the GPU.
@@ -865,6 +874,10 @@ impl World {
 
         let compact_states: Vec<RigidBodyState3D> =
             alive_indices.iter().map(|&i| self.states[i]).collect();
+        let compact_prev_states: Vec<RigidBodyState3D> = alive_indices
+            .iter()
+            .map(|&i| self.prev_warmstart_states[i])
+            .collect();
         let compact_props: Vec<RigidBodyProps3D> =
             alive_indices.iter().map(|&i| self.props[i]).collect();
         let num_bodies = compact_states.len() as u32;
@@ -872,6 +885,7 @@ impl World {
         let t_upload = Instant::now();
         self.gpu_pipeline.upload(
             &compact_states,
+            &compact_prev_states,
             &compact_props,
             &self.spheres,
             &self.boxes,
@@ -885,6 +899,9 @@ impl World {
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,
+            self.config.beta,
+            self.config.k_start,
+            self.config.warmstart_decay,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
@@ -902,6 +919,7 @@ impl World {
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
+                self.prev_warmstart_states[orig] = compact_states[slot];
                 self.states[orig] = results[slot];
             }
         }
@@ -930,6 +948,10 @@ impl World {
 
         let compact_states: Vec<RigidBodyState3D> =
             alive_indices.iter().map(|&i| self.states[i]).collect();
+        let compact_prev_states: Vec<RigidBodyState3D> = alive_indices
+            .iter()
+            .map(|&i| self.prev_warmstart_states[i])
+            .collect();
         let compact_props: Vec<RigidBodyProps3D> =
             alive_indices.iter().map(|&i| self.props[i]).collect();
         let num_bodies = compact_states.len() as u32;
@@ -937,6 +959,7 @@ impl World {
         let t_upload = Instant::now();
         self.gpu_pipeline.upload(
             &compact_states,
+            &compact_prev_states,
             &compact_props,
             &self.spheres,
             &self.boxes,
@@ -950,6 +973,9 @@ impl World {
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,
+            self.config.beta,
+            self.config.k_start,
+            self.config.warmstart_decay,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
@@ -970,6 +996,7 @@ impl World {
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
+                self.prev_warmstart_states[orig] = compact_states[slot];
                 self.states[orig] = results[slot];
             }
         }
@@ -995,6 +1022,7 @@ impl World {
             if inv_mass > 0.0 {
                 self.props[idx].inv_inertia_row0.w = inv_mass;
                 self.states[idx].position_inv_mass.w = 0.0;
+                self.prev_warmstart_states[idx].position_inv_mass.w = 0.0;
             }
         } else {
             self.props[idx].flags &= !rubble_math::FLAG_KINEMATIC;
@@ -1002,6 +1030,7 @@ impl World {
             let saved = self.props[idx].inv_inertia_row0.w;
             if saved > 0.0 {
                 self.states[idx].position_inv_mass.w = saved;
+                self.prev_warmstart_states[idx].position_inv_mass.w = saved;
                 self.props[idx].inv_inertia_row0.w = 0.0;
             }
         }

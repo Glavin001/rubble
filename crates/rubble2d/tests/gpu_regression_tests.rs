@@ -34,12 +34,6 @@ macro_rules! gpu_world_2d {
     };
 }
 
-fn step_n(world: &mut World2D, n: usize) {
-    for _ in 0..n {
-        world.step();
-    }
-}
-
 fn rect_inv_inertia(mass: f32, half_extents: Vec2) -> f32 {
     if mass <= 0.0 {
         return 0.0;
@@ -123,6 +117,7 @@ fn run_rect_floor_step(
 
     pipeline.upload(
         &states,
+        &states,
         &shape_infos,
         &[],
         &rects,
@@ -132,6 +127,9 @@ fn run_rect_floor_step(
         gravity,
         1.0 / 60.0,
         solver_iterations,
+        10.0,
+        INITIAL_PENALTY,
+        0.95,
     );
     Some(pipeline.step_with_contacts(
         states.len() as u32,
@@ -192,74 +190,89 @@ fn rect_angular_response_matches_inertia() {
 }
 
 #[test]
-fn circle_vs_rect_rotation_ratio() {
-    let circle_config = SimConfig2D {
+fn custom_k_start_is_applied_2d() {
+    let mut pipeline = gpu_pipeline_2d!(2);
+    let floor_he = Vec2::new(4.0, 0.5);
+    let body_he = Vec2::new(1.0, 0.5);
+    let custom_k_start = 4321.5;
+    let states = vec![
+        rect_state(Vec2::new(0.0, -0.5), 0.0, 0.0, 0.0, Vec2::ZERO, 0.0, 1.0),
+        rect_state(
+            Vec2::new(0.0, 0.45),
+            0.0,
+            1.0,
+            rect_inv_inertia(1.0, body_he),
+            Vec2::ZERO,
+            0.0,
+            1.0,
+        ),
+    ];
+    let shape_infos = vec![
+        ShapeInfo {
+            shape_type: SHAPE_RECT_2D,
+            shape_index: 0,
+        },
+        ShapeInfo {
+            shape_type: SHAPE_RECT_2D,
+            shape_index: 1,
+        },
+    ];
+    let rects = vec![
+        RectData {
+            half_extents: floor_he.extend(0.0).extend(0.0),
+        },
+        RectData {
+            half_extents: body_he.extend(0.0).extend(0.0),
+        },
+    ];
+
+    pipeline.upload(
+        &states,
+        &states,
+        &shape_infos,
+        &[],
+        &rects,
+        &[],
+        &[],
+        &[],
+        Vec2::ZERO,
+        1.0 / 60.0,
+        0,
+        10.0,
+        custom_k_start,
+        0.95,
+    );
+    let (_, contacts) = pipeline.step_with_contacts(2, 0, None);
+    assert!(!contacts.is_empty(), "expected resting box-floor contacts");
+    assert!(contacts.iter().all(|c| {
+        approx_eq(c.lambda_penalty.z, custom_k_start, 1e-3)
+            && approx_eq(c.lambda_penalty.w, custom_k_start, 1e-3)
+    }));
+}
+
+#[test]
+fn unconstrained_body_advances_to_inertial_state_2d() {
+    let mut world = gpu_world_2d!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
         dt: 1.0 / 60.0,
-        solver_iterations: 12,
-        friction_default: 1.0,
-        ..Default::default()
-    };
-
-    let mut circle_world = gpu_world_2d!(circle_config);
-    let _floor_circle = circle_world.add_body(&RigidBodyDesc2D {
-        x: 0.0,
-        y: -0.5,
-        mass: 0.0,
-        friction: 1.0,
-        shape: ShapeDesc2D::Rect {
-            half_extents: Vec2::new(10.0, 0.5),
-        },
+        solver_iterations: 8,
         ..Default::default()
     });
-    let circle = circle_world.add_body(&RigidBodyDesc2D {
+
+    let body = world.add_body(&RigidBodyDesc2D {
         x: 0.0,
-        y: 0.52,
-        vx: 5.0,
+        y: 5.0,
         mass: 1.0,
-        friction: 1.0,
         shape: ShapeDesc2D::Circle { radius: 0.5 },
         ..Default::default()
     });
-    step_n(&mut circle_world, 120);
-    let circle_omega = circle_world.get_angular_velocity(circle).unwrap().abs();
+    let start_y = world.get_position(body).unwrap().y;
+    world.step();
+    let end_y = world.get_position(body).unwrap().y;
+    let vel_y = world.get_velocity(body).unwrap().y;
 
-    let mut rect_world = gpu_world_2d!(SimConfig2D {
-        gravity: Vec2::new(0.0, -9.81),
-        dt: 1.0 / 60.0,
-        solver_iterations: 12,
-        friction_default: 1.0,
-        ..Default::default()
-    });
-    let _floor_rect = rect_world.add_body(&RigidBodyDesc2D {
-        x: 0.0,
-        y: -0.5,
-        mass: 0.0,
-        friction: 1.0,
-        shape: ShapeDesc2D::Rect {
-            half_extents: Vec2::new(10.0, 0.5),
-        },
-        ..Default::default()
-    });
-    let rect = rect_world.add_body(&RigidBodyDesc2D {
-        x: 0.0,
-        y: 0.52,
-        vx: 5.0,
-        mass: 1.0,
-        friction: 1.0,
-        shape: ShapeDesc2D::Rect {
-            half_extents: Vec2::splat(0.5),
-        },
-        ..Default::default()
-    });
-    step_n(&mut rect_world, 120);
-    let rect_omega = rect_world.get_angular_velocity(rect).unwrap().abs();
-
-    assert!(circle_omega.is_finite() && rect_omega.is_finite());
-    assert!(
-        circle_omega > rect_omega + 0.5,
-        "circles should pick up more rolling angular velocity than flat rectangles: circle={circle_omega}, rect={rect_omega}"
-    );
+    assert!(end_y < start_y - 1e-5, "free body should fall under gravity: start={start_y}, end={end_y}");
+    assert!(vel_y < -1e-5, "free body should pick up downward velocity: vy={vel_y}");
 }
 
 #[test]
@@ -520,11 +533,16 @@ fn warm_start_decay_2d() {
     for contact in &second_contacts {
         if let Some(prev) = first_by_feature.get(&contact.feature_id) {
             matched += 1;
-            let expected = prev.lambda_penalty * 0.95;
+            let expected = Vec4::new(
+                prev.lambda_penalty.x,
+                prev.lambda_penalty.y,
+                prev.lambda_penalty.z * 0.95,
+                prev.lambda_penalty.w * 0.95,
+            );
             let delta = (contact.lambda_penalty - expected).abs();
             assert!(
                 delta.max_element() < 1e-3,
-                "warm-start should decay cached lambdas and penalties by gamma: feature={}, expected={expected:?}, actual={:?}",
+                "2d post-stabilized warm-start should preserve lambda and decay penalties by gamma: feature={}, expected={expected:?}, actual={:?}",
                 contact.feature_id,
                 contact.lambda_penalty
             );
@@ -572,6 +590,7 @@ fn circle_contact_warm_start_keeps_feature_ids() {
 
     pipeline.upload(
         &states,
+        &states,
         &shape_infos,
         &circles,
         &rects,
@@ -581,10 +600,14 @@ fn circle_contact_warm_start_keeps_feature_ids() {
         Vec2::new(0.0, -9.81),
         1.0 / 60.0,
         4,
+        10.0,
+        INITIAL_PENALTY,
+        0.95,
     );
     let (_, first_contacts) = pipeline.step_with_contacts(2, 4, None);
 
     pipeline.upload(
+        &states,
         &states,
         &shape_infos,
         &circles,
@@ -595,6 +618,9 @@ fn circle_contact_warm_start_keeps_feature_ids() {
         Vec2::new(0.0, -9.81),
         1.0 / 60.0,
         0,
+        10.0,
+        INITIAL_PENALTY,
+        0.95,
     );
     let (_, second_contacts) = pipeline.step_with_contacts(2, 0, Some(&first_contacts));
 

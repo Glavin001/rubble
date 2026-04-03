@@ -46,6 +46,8 @@ use rubble_shapes3d::{
 };
 use std::collections::{HashMap, HashSet};
 const WORKGROUP_SIZE: u32 = 64;
+const AVBD_WARMSTART_ALPHA: f32 = 0.99;
+const MAX_CONTACT_PENALTY: f32 = 1.0e6;
 
 #[derive(Default)]
 struct CachedBindGroup<K> {
@@ -68,10 +70,8 @@ struct CachedBindGroupVec<K> {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SimParamsGpu {
     pub gravity: [f32; 4],
-    pub dt: f32,
-    pub num_bodies: u32,
-    pub solver_iterations: u32,
-    pub pair_count: u32,
+    pub solver: [f32; 4], // (dt, beta, k_start, max_penalty)
+    pub counts: [u32; 4], // (num_bodies, solver_iterations, pair_count, flags)
 }
 
 /// Broadphase pair (two body indices).
@@ -107,7 +107,7 @@ pub struct PlaneParamsGpu {
 // Compile-time GPU layout validation
 // ---------------------------------------------------------------------------
 
-const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 32);
+const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 48);
 const _: () = assert!(std::mem::size_of::<GpuPair>() == 8);
 const _: () = assert!(std::mem::size_of::<SolveRangeGpu>() == 8);
 
@@ -150,11 +150,9 @@ struct Aabb {
 };
 
 struct SimParams {
-    gravity:           vec4<f32>,
-    dt:                f32,
-    num_bodies:        u32,
-    solver_iterations: u32,
-    _pad:              u32,
+    gravity: vec4<f32>,
+    solver:  vec4<f32>,
+    counts:  vec4<u32>,
 };
 
 const SHAPE_SPHERE:      u32 = 0u;
@@ -212,7 +210,7 @@ fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    if idx >= params.num_bodies {
+    if idx >= params.counts.x {
         return;
     }
 
@@ -281,6 +279,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+const FREE_MOTION_WGSL: &str = r#"
+struct Body {
+    position_inv_mass: vec4<f32>,
+    orientation:       vec4<f32>,
+    lin_vel:           vec4<f32>,
+    ang_vel:           vec4<f32>,
+};
+
+struct SimParams {
+    gravity: vec4<f32>,
+    solver:  vec4<f32>,
+    counts:  vec4<u32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> bodies:          array<Body>;
+@group(0) @binding(1) var<storage, read>       inertial_states: array<Body>;
+@group(0) @binding(2) var<storage, read>       active_bodies:   array<u32>;
+@group(0) @binding(3) var<uniform>             params:          SimParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.counts.x {
+        return;
+    }
+    if active_bodies[idx] == 0u {
+        bodies[idx] = inertial_states[idx];
+    }
+}
+"#;
+
 // ---------------------------------------------------------------------------
 // GpuPipeline
 // ---------------------------------------------------------------------------
@@ -301,6 +330,7 @@ pub struct GpuPipeline {
     predict_kernel: ComputeKernel,
     aabb_kernel: ComputeKernel,
     narrowphase_kernel: ComputeKernel,
+    free_motion_kernel: ComputeKernel,
     primal_kernel: ComputeKernel,
     dual_kernel: ComputeKernel,
     extract_kernel: ComputeKernel,
@@ -309,6 +339,7 @@ pub struct GpuPipeline {
     body_states: PingPongBuffer<RigidBodyState3D>,
     body_props: GpuBuffer<RigidBodyProps3D>,
     old_states: GpuBuffer<RigidBodyState3D>,
+    prev_step_states: GpuBuffer<RigidBodyState3D>,
     inertial_states: GpuBuffer<RigidBodyState3D>,
     aabbs: GpuBuffer<Aabb3D>,
     contacts: GpuBuffer<Contact3D>,
@@ -322,6 +353,7 @@ pub struct GpuPipeline {
     convex_vertices: GpuBuffer<ConvexVertex3D>,
     planes: GpuBuffer<Vec4>,
     body_order: GpuBuffer<u32>,
+    active_body_flags: GpuBuffer<u32>,
     lbvh_subset_aabbs: GpuBuffer<Aabb3D>,
 
     // Cached body coloring for steady-state contact graphs.
@@ -338,15 +370,18 @@ pub struct GpuPipeline {
     body_props_cpu: Vec<RigidBodyProps3D>,
 
     // Uniform buffers
+    sim_params: SimParamsGpu,
+    warmstart_decay: f32,
     params_uniform: wgpu::Buffer,
     solve_range_buffers: Vec<wgpu::Buffer>,
     /// Uniform buffer for plane data in narrowphase (avoids a storage binding).
     plane_params_uniform: wgpu::Buffer,
 
     // Cached bind groups (reused while backing buffers stay stable).
-    predict_bg_cache: CachedBindGroup<[u64; 2]>,
+    predict_bg_cache: CachedBindGroup<[u64; 4]>,
     aabb_bg_cache: CachedBindGroup<[u64; 9]>,
     narrowphase_bg_cache: CachedBindGroup<[u64; 9]>,
+    free_motion_bg_cache: CachedBindGroup<[u64; 4]>,
     primal_bg_cache: CachedBindGroupVec<[u64; 6]>,
     dual_bg_cache: CachedBindGroup<[u64; 3]>,
     extract_bg_cache: CachedBindGroup<[u64; 2]>,
@@ -364,6 +399,7 @@ impl GpuPipeline {
         let predict_kernel = ComputeKernel::from_wgsl(&ctx, PREDICT_WGSL, "main");
         let aabb_kernel = ComputeKernel::from_wgsl(&ctx, AABB_COMPUTE_WGSL, "main");
         let narrowphase_kernel = ComputeKernel::from_wgsl(&ctx, NARROWPHASE_WGSL, "main");
+        let free_motion_kernel = ComputeKernel::from_wgsl(&ctx, FREE_MOTION_WGSL, "main");
         let primal_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_PRIMAL_WGSL, "main");
         let dual_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_DUAL_WGSL, "main");
         let extract_kernel = ComputeKernel::from_wgsl(&ctx, EXTRACT_VELOCITY_WGSL, "main");
@@ -371,6 +407,7 @@ impl GpuPipeline {
         let body_states = PingPongBuffer::new(&ctx, max_bodies);
         let body_props = GpuBuffer::new(&ctx, max_bodies);
         let old_states = GpuBuffer::new(&ctx, max_bodies);
+        let prev_step_states = GpuBuffer::new(&ctx, max_bodies);
         let inertial_states = GpuBuffer::new(&ctx, max_bodies);
         let aabbs = GpuBuffer::new(&ctx, max_bodies);
         let contacts = GpuBuffer::new(&ctx, max_contacts);
@@ -384,6 +421,7 @@ impl GpuPipeline {
         let convex_vertices = GpuBuffer::new(&ctx, (max_bodies * 8).max(1));
         let planes = GpuBuffer::new(&ctx, 16);
         let body_order = GpuBuffer::new(&ctx, max_bodies);
+        let active_body_flags = GpuBuffer::new(&ctx, max_bodies.max(1));
         let lbvh_subset_aabbs = GpuBuffer::new(&ctx, max_bodies.max(1));
 
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -407,12 +445,14 @@ impl GpuPipeline {
             predict_kernel,
             aabb_kernel,
             narrowphase_kernel,
+            free_motion_kernel,
             primal_kernel,
             dual_kernel,
             extract_kernel,
             body_states,
             body_props,
             old_states,
+            prev_step_states,
             inertial_states,
             aabbs,
             contacts,
@@ -426,6 +466,7 @@ impl GpuPipeline {
             convex_vertices,
             planes,
             body_order,
+            active_body_flags,
             lbvh_subset_aabbs,
             cached_body_graph: Vec::new(),
             cached_body_order: Vec::new(),
@@ -435,12 +476,19 @@ impl GpuPipeline {
             compound_children_data: Vec::new(),
             compound_shapes_cpu: Vec::new(),
             body_props_cpu: Vec::new(),
+            sim_params: SimParamsGpu {
+                gravity: [0.0; 4],
+                solver: [0.0, 10.0, 1.0e4, MAX_CONTACT_PENALTY],
+                counts: [0, 0, 0, 0],
+            },
+            warmstart_decay: 0.95,
             params_uniform,
             solve_range_buffers: Vec::new(),
             plane_params_uniform,
             predict_bg_cache: CachedBindGroup::default(),
             aabb_bg_cache: CachedBindGroup::default(),
             narrowphase_bg_cache: CachedBindGroup::default(),
+            free_motion_bg_cache: CachedBindGroup::default(),
             primal_bg_cache: CachedBindGroupVec::default(),
             dual_bg_cache: CachedBindGroup::default(),
             extract_bg_cache: CachedBindGroup::default(),
@@ -468,6 +516,7 @@ impl GpuPipeline {
     pub fn upload(
         &mut self,
         states: &[RigidBodyState3D],
+        prev_step_states: &[RigidBodyState3D],
         props: &[RigidBodyProps3D],
         sphere_data: &[SphereData],
         box_data: &[BoxData],
@@ -481,6 +530,9 @@ impl GpuPipeline {
         gravity: Vec3,
         dt: f32,
         solver_iterations: u32,
+        beta: f32,
+        k_start: f32,
+        warmstart_decay: f32,
     ) {
         // Store compound data for CPU-side pair expansion
         self.compound_shapes_data = compound_shapes.to_vec();
@@ -489,6 +541,7 @@ impl GpuPipeline {
         self.body_props_cpu = props.to_vec();
         self.body_states.upload(&self.ctx, states);
         self.old_states.upload(&self.ctx, states);
+        self.prev_step_states.upload(&self.ctx, prev_step_states);
         self.inertial_states.upload(&self.ctx, states);
         self.body_props.upload(&self.ctx, props);
 
@@ -528,16 +581,15 @@ impl GpuPipeline {
 
         self.aabbs.grow_if_needed(&self.ctx, states.len());
 
-        let params = SimParamsGpu {
+        self.warmstart_decay = warmstart_decay;
+        self.sim_params = SimParamsGpu {
             gravity: [gravity.x, gravity.y, gravity.z, 0.0],
-            dt,
-            num_bodies: states.len() as u32,
-            solver_iterations,
-            pair_count: 0,
+            solver: [dt, beta, k_start, MAX_CONTACT_PENALTY],
+            counts: [states.len() as u32, solver_iterations, 0, 0],
         };
         self.ctx
             .queue
-            .write_buffer(&self.params_uniform, 0, bytemuck::bytes_of(&params));
+            .write_buffer(&self.params_uniform, 0, bytemuck::bytes_of(&self.sim_params));
     }
 
     /// Run predict → AABB → broadphase → narrowphase (shared by both step variants).
@@ -550,7 +602,7 @@ impl GpuPipeline {
         self.pair_count.reset(&self.ctx);
 
         self.dispatch_predict(num_bodies);
-        self.snapshot_inertial_states(num_bodies);
+        self.snapshot_prev_step_states(num_bodies);
         self.dispatch_aabb(num_bodies);
 
         // GPU LBVH broadphase: Morton codes + radix sort on GPU, tree build CPU, pair finding GPU
@@ -791,7 +843,12 @@ impl GpuPipeline {
                 local_anchor_a: Vec4::new(local_a.x, local_a.y, local_a.z, 0.0),
                 local_anchor_b: Vec4::new(local_b.x, local_b.y, local_b.z, 0.0),
                 lambda: Vec4::ZERO,
-                penalty: Vec4::new(1e4, 1e4, 1e4, 0.0),
+                penalty: Vec4::new(
+                    self.sim_params.solver[2],
+                    self.sim_params.solver[2],
+                    self.sim_params.solver[2],
+                    0.0,
+                ),
                 body_a,
                 body_b,
                 feature_id,
@@ -936,6 +993,7 @@ impl GpuPipeline {
         solver_iterations: u32,
         contacts: &mut Vec<Contact3D>,
     ) {
+        self.apply_free_motion(num_bodies, contacts);
         if contacts.is_empty() {
             return;
         }
@@ -1056,7 +1114,7 @@ impl GpuPipeline {
 
         // Warm-start: apply cached lambdas from previous frame
         if let Some(prev) = warm_contacts {
-            warm_start_contacts_3d(&mut contacts, prev);
+            warm_start_contacts_3d(&mut contacts, prev, self.warmstart_decay, AVBD_WARMSTART_ALPHA);
         }
 
         self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
@@ -1103,7 +1161,7 @@ impl GpuPipeline {
         contacts.extend(compound_contacts);
 
         if let Some(prev) = warm_contacts {
-            warm_start_contacts_3d(&mut contacts, prev);
+            warm_start_contacts_3d(&mut contacts, prev, self.warmstart_decay, AVBD_WARMSTART_ALPHA);
         }
         timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
@@ -1138,7 +1196,7 @@ impl GpuPipeline {
 
         let t0 = Instant::now();
         self.dispatch_predict(num_bodies);
-        self.snapshot_inertial_states(num_bodies);
+        self.snapshot_prev_step_states(num_bodies);
         self.dispatch_aabb(num_bodies);
         timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
 
@@ -1367,7 +1425,7 @@ impl GpuPipeline {
 
         let t0 = Instant::now();
         self.dispatch_predict(num_bodies);
-        self.snapshot_inertial_states(num_bodies);
+        self.snapshot_prev_step_states(num_bodies);
         self.dispatch_aabb(num_bodies);
 
         self.aabbs.set_len(num_bodies);
@@ -1475,7 +1533,7 @@ impl GpuPipeline {
         contacts.extend(compound_contacts);
 
         if let Some(prev) = warm_contacts {
-            warm_start_contacts_3d(&mut contacts, prev);
+            warm_start_contacts_3d(&mut contacts, prev, self.warmstart_decay, AVBD_WARMSTART_ALPHA);
         }
         timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
@@ -1542,7 +1600,12 @@ impl GpuPipeline {
     }
 
     fn predict_bind_group(&mut self) -> &wgpu::BindGroup {
-        let key = [self.body_states_cache_key(), self.old_states.byte_size()];
+        let key = [
+            self.body_states_cache_key(),
+            self.old_states.byte_size(),
+            self.inertial_states.byte_size(),
+            self.prev_step_states.byte_size(),
+        ];
         if self.predict_bg_cache.key.as_ref() != Some(&key) {
             let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("predict"),
@@ -1558,6 +1621,14 @@ impl GpuPipeline {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
+                        resource: self.inertial_states.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.prev_step_states.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
                         resource: self.params_uniform.as_entire_binding(),
                     },
                 ],
@@ -1635,7 +1706,7 @@ impl GpuPipeline {
 
     fn narrowphase_bind_group(&mut self) -> &wgpu::BindGroup {
         let key = [
-            self.body_states_cache_key(),
+            self.old_states.byte_size(),
             self.body_props.byte_size(),
             self.pairs.byte_size(),
             self.spheres.byte_size(),
@@ -1652,7 +1723,7 @@ impl GpuPipeline {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.body_states.current().buffer().as_entire_binding(),
+                        resource: self.old_states.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -1704,6 +1775,42 @@ impl GpuPipeline {
             self.narrowphase_bg_cache.bind_group = Some(bg);
         }
         self.narrowphase_bg_cache.bind_group.as_ref().unwrap()
+    }
+
+    fn free_motion_bind_group(&mut self) -> &wgpu::BindGroup {
+        let key = [
+            self.body_states_cache_key(),
+            self.inertial_states.byte_size(),
+            self.active_body_flags.byte_size(),
+            self.params_uniform.size(),
+        ];
+        if self.free_motion_bg_cache.key.as_ref() != Some(&key) {
+            let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("free_motion"),
+                layout: self.free_motion_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.body_states.current().buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.inertial_states.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.active_body_flags.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.params_uniform.as_entire_binding(),
+                    },
+                ],
+            });
+            self.free_motion_bg_cache.key = Some(key);
+            self.free_motion_bg_cache.bind_group = Some(bg);
+        }
+        self.free_motion_bg_cache.bind_group.as_ref().unwrap()
     }
 
     fn sync_primal_bind_groups(&mut self, range_count: usize) {
@@ -1789,6 +1896,10 @@ impl GpuPipeline {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
+                        resource: self.params_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
                         resource: self.contact_count.buffer().as_entire_binding(),
                     },
                 ],
@@ -1826,22 +1937,22 @@ impl GpuPipeline {
         self.extract_bg_cache.bind_group.as_ref().unwrap()
     }
 
-    fn snapshot_inertial_states(&mut self, num_bodies: u32) {
-        self.inertial_states
+    fn snapshot_prev_step_states(&mut self, num_bodies: u32) {
+        self.prev_step_states
             .grow_if_needed(&self.ctx, num_bodies as usize);
-        self.inertial_states.set_len(num_bodies);
+        self.prev_step_states.set_len(num_bodies);
 
         let byte_len = num_bodies as u64 * std::mem::size_of::<RigidBodyState3D>() as u64;
         let mut encoder = self
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("snapshot_inertial_3d"),
+                label: Some("snapshot_prev_step_3d"),
             });
         encoder.copy_buffer_to_buffer(
-            self.body_states.current().buffer(),
+            self.old_states.buffer(),
             0,
-            self.inertial_states.buffer(),
+            self.prev_step_states.buffer(),
             0,
             byte_len,
         );
@@ -1860,14 +1971,26 @@ impl GpuPipeline {
         self.run_pass("aabb", &self.aabb_kernel, bg, num_bodies);
     }
 
+    fn apply_free_motion(&mut self, num_bodies: u32, contacts: &[Contact3D]) {
+        let mut active = vec![0u32; num_bodies as usize];
+        for c in contacts {
+            active[c.body_a as usize] = 1;
+            active[c.body_b as usize] = 1;
+        }
+        self.active_body_flags.upload(&self.ctx, &active);
+        let _ = self.free_motion_bind_group();
+        let bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
+        self.run_pass("free_motion", &self.free_motion_kernel, bg, num_bodies);
+    }
+
     fn dispatch_narrowphase(&mut self, _num_bodies: u32, num_pairs: u32) {
         if num_pairs == 0 {
             return;
         }
-        // Write pair_count into the params uniform (offset 28 = last field)
+        self.sim_params.counts[2] = num_pairs;
         self.ctx
             .queue
-            .write_buffer(&self.params_uniform, 28, &num_pairs.to_le_bytes());
+            .write_buffer(&self.params_uniform, 0, bytemuck::bytes_of(&self.sim_params));
 
         let _ = self.narrowphase_bind_group();
         let bg = self.narrowphase_bg_cache.bind_group.as_ref().unwrap();
@@ -1955,10 +2078,13 @@ fn body_graph_key_3d(contacts: &[Contact3D]) -> Vec<(u32, u32)> {
 // Warm-starting helpers
 // ---------------------------------------------------------------------------
 
-/// Match new contacts against previous-frame contacts and copy cached lambdas.
-fn warm_start_contacts_3d(new_contacts: &mut [Contact3D], prev_contacts: &[Contact3D]) {
-    let gamma: f32 = 0.95;
-
+/// Match new contacts against previous-frame contacts and copy cached dual state.
+fn warm_start_contacts_3d(
+    new_contacts: &mut [Contact3D],
+    prev_contacts: &[Contact3D],
+    gamma: f32,
+    alpha: f32,
+) {
     let prev_by_key: HashMap<(u32, u32, u32), &Contact3D> = prev_contacts
         .iter()
         .map(|c| ((c.body_a.min(c.body_b), c.body_a.max(c.body_b), c.feature_id), c))
@@ -1967,7 +2093,7 @@ fn warm_start_contacts_3d(new_contacts: &mut [Contact3D], prev_contacts: &[Conta
     for nc in new_contacts.iter_mut() {
         let key = (nc.body_a.min(nc.body_b), nc.body_a.max(nc.body_b), nc.feature_id);
         if let Some(prev) = prev_by_key.get(&key) {
-            nc.lambda = prev.lambda * gamma;
+            nc.lambda = prev.lambda * (alpha * gamma);
             nc.penalty = prev.penalty * gamma;
             nc.flags = prev.flags;
 

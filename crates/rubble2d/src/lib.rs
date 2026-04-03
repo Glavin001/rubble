@@ -345,6 +345,7 @@ fn ray_convex_polygon_2d(origin: Vec2, dir: Vec2, verts: &[Vec2]) -> Option<(f32
 pub struct World2D {
     config: SimConfig2D,
     states: Vec<RigidBodyState2D>,
+    prev_warmstart_states: Vec<RigidBodyState2D>,
     shapes: Vec<ShapeDesc2D>,
     frictions: Vec<f32>,
     inv_inertias: Vec<f32>,
@@ -366,6 +367,7 @@ impl World2D {
         Ok(Self {
             config,
             states: Vec::new(),
+            prev_warmstart_states: Vec::new(),
             shapes: Vec::new(),
             frictions: Vec::new(),
             inv_inertias: Vec::new(),
@@ -420,6 +422,10 @@ impl World2D {
                 idx + 1,
                 RigidBodyState2D::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
             );
+            self.prev_warmstart_states.resize(
+                idx + 1,
+                RigidBodyState2D::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            );
             self.shapes
                 .resize(idx + 1, ShapeDesc2D::Circle { radius: 0.0 });
             self.frictions.resize(idx + 1, 0.5);
@@ -428,6 +434,7 @@ impl World2D {
         }
 
         self.states[idx] = state;
+        self.prev_warmstart_states[idx] = state;
         self.shapes[idx] = desc.shape.clone();
         self.frictions[idx] = desc.friction;
         self.inv_inertias[idx] = inv_inertia;
@@ -443,6 +450,7 @@ impl World2D {
         }
         let idx = handle.index as usize;
         self.states[idx] = RigidBodyState2D::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        self.prev_warmstart_states[idx] = RigidBodyState2D::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         self.shapes[idx] = ShapeDesc2D::Circle { radius: 0.0 };
         self.frictions[idx] = 0.0;
         self.inv_inertias[idx] = 0.0;
@@ -491,6 +499,7 @@ impl World2D {
         let vel = s.linear_velocity();
         let omega = s.angular_velocity();
         *s = RigidBodyState2D::new(pos.x, pos.y, angle, im, vel.x, vel.y, omega);
+        self.prev_warmstart_states[idx] = *s;
     }
 
     /// Set the linear velocity of a body.
@@ -502,6 +511,7 @@ impl World2D {
         let s = &mut self.states[idx];
         let omega = s.angular_velocity();
         s.lin_vel = Vec4::new(vel.x, vel.y, omega, 0.0);
+        self.prev_warmstart_states[idx].lin_vel = s.lin_vel;
     }
 
     /// Set the angular velocity of a body.
@@ -513,6 +523,7 @@ impl World2D {
         let s = &mut self.states[idx];
         let vel = s.linear_velocity();
         s.lin_vel = Vec4::new(vel.x, vel.y, omega, 0.0);
+        self.prev_warmstart_states[idx].lin_vel = s.lin_vel;
     }
 
     /// Get the angular velocity of a body.
@@ -538,6 +549,7 @@ impl World2D {
             let vel = s.linear_velocity();
             let omega = s.angular_velocity();
             *s = RigidBodyState2D::new(pos.x, pos.y, angle, 0.0, vel.x, vel.y, omega);
+            self.prev_warmstart_states[idx] = *s;
         } else {
             self.flags[idx] &= !rubble_math::FLAG_KINEMATIC;
         }
@@ -579,6 +591,14 @@ impl World2D {
             .map(|&i| {
                 let mut s = self.states[i];
                 // Pack friction and inverse inertia into the padded lane used by the GPU solver.
+                s._pad0 = Vec4::new(self.frictions[i], self.inv_inertias[i], 0.0, 0.0);
+                s
+            })
+            .collect();
+        let compact_prev_states: Vec<RigidBodyState2D> = alive_indices
+            .iter()
+            .map(|&i| {
+                let mut s = self.prev_warmstart_states[i];
                 s._pad0 = Vec4::new(self.frictions[i], self.inv_inertias[i], 0.0, 0.0);
                 s
             })
@@ -688,6 +708,7 @@ impl World2D {
         let t_upload = Instant::now();
         self.gpu_pipeline.upload(
             &compact_states,
+            &compact_prev_states,
             &shape_info_data,
             &gpu_circles,
             &gpu_rects,
@@ -697,6 +718,9 @@ impl World2D {
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,
+            self.config.beta,
+            self.config.k_start,
+            self.config.warmstart_decay,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
@@ -714,6 +738,7 @@ impl World2D {
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
+                self.prev_warmstart_states[orig] = compact_states[slot];
                 self.states[orig] = results[slot];
             }
         }
@@ -746,6 +771,14 @@ impl World2D {
             .iter()
             .map(|&i| {
                 let mut s = self.states[i];
+                s._pad0 = Vec4::new(self.frictions[i], self.inv_inertias[i], 0.0, 0.0);
+                s
+            })
+            .collect();
+        let compact_prev_states: Vec<RigidBodyState2D> = alive_indices
+            .iter()
+            .map(|&i| {
+                let mut s = self.prev_warmstart_states[i];
                 s._pad0 = Vec4::new(self.frictions[i], self.inv_inertias[i], 0.0, 0.0);
                 s
             })
@@ -852,6 +885,7 @@ impl World2D {
         let t_upload = Instant::now();
         self.gpu_pipeline.upload(
             &compact_states,
+            &compact_prev_states,
             &shape_info_data,
             &gpu_circles,
             &gpu_rects,
@@ -861,6 +895,9 @@ impl World2D {
             self.config.gravity,
             self.config.dt,
             self.config.solver_iterations,
+            self.config.beta,
+            self.config.k_start,
+            self.config.warmstart_decay,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
@@ -881,6 +918,7 @@ impl World2D {
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
+                self.prev_warmstart_states[orig] = compact_states[slot];
                 self.states[orig] = results[slot];
             }
         }

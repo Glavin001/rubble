@@ -23,11 +23,9 @@ struct Contact2D {
 };
 
 struct SimParams2D {
-    gravity:           vec4<f32>,
-    dt:                f32,
-    num_bodies:        u32,
-    solver_iterations: u32,
-    pair_count:        u32,
+    gravity: vec4<f32>,
+    solver:  vec4<f32>,
+    counts:  vec4<u32>,
 };
 
 struct SolveRange {
@@ -99,7 +97,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let inertial_pos = inertial_states[body_idx].position_inv_mass.xy;
     let inertial_angle = inertial_states[body_idx].position_inv_mass.z;
 
-    let dt2 = params.dt * params.dt;
+    let dt = params.solver.x;
+    let dt2 = dt * dt;
     let mass = 1.0 / inv_mass;
     let inertia = 1.0 / inv_inertia;
 
@@ -143,7 +142,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let k_n = c.lambda_penalty.z;
         let k_t = c.lambda_penalty.w;
 
-        let mu = 0.5 * (bodies[c.body_a]._pad0.x + bodies[c.body_b]._pad0.x);
+        let mu = sqrt(max(bodies[c.body_a]._pad0.x * bodies[c.body_b]._pad0.x, 0.0));
         let f_n = min(k_n * c_n + lambda_n, 0.0);
         let tang_limit = mu * abs(f_n);
         let f_t = clamp(k_t * c_t + lambda_t, -tang_limit, tang_limit);
@@ -194,11 +193,9 @@ struct Contact2D {
 };
 
 struct SimParams2D {
-    gravity:           vec4<f32>,
-    dt:                f32,
-    num_bodies:        u32,
-    solver_iterations: u32,
-    pair_count:        u32,
+    gravity: vec4<f32>,
+    solver:  vec4<f32>,
+    counts:  vec4<u32>,
 };
 
 const CONTACT_FLAG_STICKING: u32 = 1u;
@@ -218,7 +215,7 @@ fn rotate2d(v: vec2<f32>, angle: f32) -> vec2<f32> {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ci = gid.x;
     let num_contacts = contact_count_buf[0];
-    let _keep_params = params.dt;
+    let _keep_params = params.solver.x;
     if ci >= num_contacts {
         return;
     }
@@ -243,7 +240,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lambda_t_old = c.lambda_penalty.y;
     let k_n = c.lambda_penalty.z;
     let k_t = c.lambda_penalty.w;
-    let mu = 0.5 * (bodies[c.body_a]._pad0.x + bodies[c.body_b]._pad0.x);
+    let mu = sqrt(max(bodies[c.body_a]._pad0.x * bodies[c.body_b]._pad0.x, 0.0));
+    let beta = params.solver.y;
+    let max_penalty = params.solver.w;
 
     let lambda_n = min(k_n * c_n + lambda_n_old, 0.0);
     let tang_limit = mu * abs(lambda_n);
@@ -251,14 +250,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var next_k_n = k_n;
     if lambda_n < -1e-6 && c_n < -1e-5 {
-        next_k_n = min(k_n + 25.0 * abs(c_n), 1e6);
+        next_k_n = min(k_n + beta * abs(c_n), max_penalty);
     }
 
     var next_k_t = k_t;
     var flags = 0u;
     if tang_limit > 0.0 && abs(lambda_t) < tang_limit * 0.98 && abs(c_t) < 2e-3 {
         flags = CONTACT_FLAG_STICKING;
-        next_k_t = min(k_t + 25.0 * abs(c_t), 1e6);
+        next_k_t = min(k_t + beta * abs(c_t), max_penalty);
     }
 
     contacts[ci].point = vec4<f32>((world_a + world_b) * 0.5, c_n, 0.0);

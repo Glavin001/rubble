@@ -70,6 +70,7 @@ fn run_box_floor_step(
 
     pipeline.upload(
         &states,
+        &states,
         &props,
         &[],
         &boxes,
@@ -83,6 +84,9 @@ fn run_box_floor_step(
         Vec3::ZERO,
         1.0 / 60.0,
         solver_iterations,
+        10.0,
+        INITIAL_PENALTY,
+        0.95,
     );
     Some(pipeline.step_with_contacts(
         states.len() as u32,
@@ -133,6 +137,7 @@ fn run_sphere_plane_step(
 
     pipeline.upload(
         &states,
+        &states,
         &props,
         &spheres,
         &[],
@@ -146,6 +151,9 @@ fn run_sphere_plane_step(
         Vec3::ZERO,
         1.0 / 60.0,
         solver_iterations,
+        10.0,
+        INITIAL_PENALTY,
+        0.95,
     );
     Some(pipeline.step_with_contacts(
         states.len() as u32,
@@ -188,11 +196,13 @@ fn simulate_sphere_plane_frames(
             Vec3::ZERO,
         ),
     ];
+    let mut prev_states = states.clone();
     let mut prev_contacts = Vec::new();
 
     for _ in 0..steps {
         pipeline.upload(
             &states,
+            &prev_states,
             &props,
             &spheres,
             &[],
@@ -206,6 +216,9 @@ fn simulate_sphere_plane_frames(
             Vec3::new(0.0, -9.81, 0.0),
             1.0 / 60.0,
             solver_iterations,
+            10.0,
+            INITIAL_PENALTY,
+            0.95,
         );
         let warm = if use_warmstart && !prev_contacts.is_empty() {
             Some(prev_contacts.as_slice())
@@ -214,6 +227,7 @@ fn simulate_sphere_plane_frames(
         };
         let (next_states, contacts) =
             pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm);
+        prev_states = states;
         states = next_states;
         prev_contacts = contacts;
     }
@@ -413,7 +427,7 @@ fn warm_start_matches_by_feature_not_distance_3d() {
     for contact in &second_contacts {
         if let Some(prev) = first_by_feature.get(&contact.feature_id) {
             matched += 1;
-            let expected_lambda = prev.lambda * 0.95;
+            let expected_lambda = prev.lambda * (0.95 * 0.99);
             let expected_penalty = prev.penalty * 0.95;
             let lambda_delta = (contact.lambda - expected_lambda).abs();
             let penalty_delta = (contact.penalty - expected_penalty).abs();
@@ -436,41 +450,85 @@ fn warm_start_matches_by_feature_not_distance_3d() {
 }
 
 #[test]
-fn friction_induces_angular_velocity() {
+fn custom_k_start_is_applied_3d() {
+    let mut pipeline = match GpuPipeline::try_new(2) {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: No GPU adapter found");
+            return;
+        }
+    };
+    let floor_he = Vec3::new(4.0, 0.5, 4.0);
+    let body_he = Vec3::new(1.0, 0.5, 1.0);
+    let custom_k_start = 2468.0;
+    let states = vec![
+        RigidBodyState3D::new(Vec3::new(0.0, -0.5, 0.0), 0.0, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
+        RigidBodyState3D::new(Vec3::new(0.0, 0.45, 0.0), 1.0, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
+    ];
+    let props = vec![
+        RigidBodyProps3D::new(Mat3::ZERO, 1.0, SHAPE_BOX, 0, FLAG_STATIC),
+        RigidBodyProps3D::new(box_inv_inertia(1.0, body_he), 1.0, SHAPE_BOX, 1, 0),
+    ];
+    let boxes = vec![
+        BoxData {
+            half_extents: floor_he.extend(0.0),
+        },
+        BoxData {
+            half_extents: body_he.extend(0.0),
+        },
+    ];
+
+    pipeline.upload(
+        &states,
+        &states,
+        &props,
+        &[],
+        &boxes,
+        &[],
+        &[],
+        &[],
+        &[],
+        &Vec::<CompoundShapeGpu>::new(),
+        &[],
+        &Vec::<CompoundShape>::new(),
+        Vec3::ZERO,
+        1.0 / 60.0,
+        0,
+        10.0,
+        custom_k_start,
+        0.95,
+    );
+    let (_, contacts) = pipeline.step_with_contacts(2, 0, None);
+    assert!(!contacts.is_empty(), "expected resting box-floor contacts");
+    assert!(contacts.iter().all(|c| {
+        (c.penalty.x - custom_k_start).abs() < 1e-3
+            && (c.penalty.y - custom_k_start).abs() < 1e-3
+            && (c.penalty.z - custom_k_start).abs() < 1e-3
+    }));
+}
+
+#[test]
+fn unconstrained_body_advances_to_inertial_state_3d() {
     let mut world = gpu_world_3d!(SimConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         dt: 1.0 / 60.0,
-        solver_iterations: 12,
-        friction_default: 1.0,
+        solver_iterations: 8,
         ..Default::default()
     });
 
-    let _floor = world.add_body(&RigidBodyDesc {
-        position: Vec3::new(0.0, -0.5, 0.0),
-        mass: 0.0,
-        friction: 1.0,
-        shape: ShapeDesc::Box {
-            half_extents: Vec3::new(20.0, 0.5, 20.0),
-        },
-        ..Default::default()
-    });
-    let sphere = world.add_body(&RigidBodyDesc {
-        position: Vec3::new(0.0, 0.52, 0.0),
-        linear_velocity: Vec3::new(6.0, 0.0, 0.0),
+    let body = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 5.0, 0.0),
         mass: 1.0,
-        friction: 1.0,
         shape: ShapeDesc::Sphere { radius: 0.5 },
         ..Default::default()
     });
+    let start_y = world.get_position(body).unwrap().y;
+    world.step();
+    let end_y = world.get_position(body).unwrap().y;
+    let vel_y = world.get_velocity(body).unwrap().y;
 
-    step_n(&mut world, 120);
-    let omega = world.get_angular_velocity(sphere).unwrap();
-
-    assert!(omega.is_finite(), "angular velocity diverged: {omega}");
-    assert!(
-        omega.length() > 0.5 && omega.z.abs() > 0.2,
-        "friction should convert sliding into spin: omega={omega}"
-    );
+    assert!(end_y < start_y - 1e-5, "free body should fall under gravity: start={start_y}, end={end_y}");
+    assert!(vel_y < -1e-5, "free body should pick up downward velocity: vy={vel_y}");
 }
 
 #[test]

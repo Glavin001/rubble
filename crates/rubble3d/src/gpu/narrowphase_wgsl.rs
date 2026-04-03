@@ -60,11 +60,9 @@ struct Contact {
 };
 
 struct SimParams {
-    gravity:           vec4<f32>,
-    dt:                f32,
-    num_bodies:        u32,
-    solver_iterations: u32,
-    pair_count:        u32,
+    gravity: vec4<f32>,
+    solver:  vec4<f32>,
+    counts:  vec4<u32>,
 };
 
 const SHAPE_SPHERE:      u32 = 0u;
@@ -159,7 +157,8 @@ fn emit_contact(
     contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
     contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
     contacts[slot].lambda = vec4<f32>(0.0);
-    contacts[slot].penalty = vec4<f32>(1e4, 1e4, 1e4, 0.0);
+    let k_start = params.solver.z;
+    contacts[slot].penalty = vec4<f32>(k_start, k_start, k_start, 0.0);
     contacts[slot].body_a = body_a;
     contacts[slot].body_b = body_b;
     contacts[slot].feature_id = feature_id;
@@ -194,7 +193,8 @@ fn emit_plane_contact(
     contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
     contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
     contacts[slot].lambda = vec4<f32>(0.0);
-    contacts[slot].penalty = vec4<f32>(1e4, 1e4, 1e4, 0.0);
+    let k_start = params.solver.z;
+    contacts[slot].penalty = vec4<f32>(k_start, k_start, k_start, 0.0);
     contacts[slot].body_a = body_dynamic;
     contacts[slot].body_b = body_plane;
     contacts[slot].feature_id = feature_id;
@@ -1296,7 +1296,7 @@ fn box_hull_test(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
-    let num_pairs = params.pair_count;
+    let num_pairs = params.counts.z;
     if pi >= num_pairs {
         return;
     }
@@ -1314,7 +1314,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let si_a = props[a].shape_index;
     let si_b = props[b].shape_index;
 
-    let max_contacts = params.num_bodies * 8u;
+    let max_contacts = params.counts.x * 8u;
 
     // Order: ensure st_a <= st_b for consistent dispatch
     var s1 = st_a; var s2 = st_b;
