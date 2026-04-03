@@ -16,3 +16,5 @@ web-time = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
+parry3d = "0.17"
+nalgebra = "0.33"

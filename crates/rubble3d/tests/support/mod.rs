@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod parry_oracle;
+
 use glam::{Mat3, Quat, Vec3};
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 use rubble_math::BodyHandle;
