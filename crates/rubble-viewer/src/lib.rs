@@ -21,10 +21,7 @@ const CONTROLS_3D: &[&str] = &[
     "Zoom camera: mouse wheel",
 ];
 
-const CONTROLS_2D: &[&str] = &[
-    "Pan view: left drag",
-    "Zoom view: mouse wheel",
-];
+const CONTROLS_2D: &[&str] = &["Pan view: left drag", "Zoom view: mouse wheel"];
 
 // ---------------------------------------------------------------------------
 // Shape tracking (mirrors rubble-wasm bookkeeping)
@@ -425,8 +422,10 @@ impl App3D {
                 if event.state == ElementState::Pressed
                     && event.logical_key == Key::Character("r".into()) =>
             {
-                let (world, handles, shapes) =
-                    build_world_3d(self.viewer.gravity, &self.viewer.scenes[state.current_scene]);
+                let (world, handles, shapes) = build_world_3d(
+                    self.viewer.gravity,
+                    &self.viewer.scenes[state.current_scene],
+                );
                 state.world = world;
                 state.handles = handles;
                 state.shapes = shapes;
@@ -807,8 +806,10 @@ impl App2D {
                 if event.state == ElementState::Pressed
                     && event.logical_key == Key::Character("r".into()) =>
             {
-                let (world, handles, shapes) =
-                    build_world_2d(self.viewer.gravity, &self.viewer.scenes[state.current_scene]);
+                let (world, handles, shapes) = build_world_2d(
+                    self.viewer.gravity,
+                    &self.viewer.scenes[state.current_scene],
+                );
                 state.world = world;
                 state.handles = handles;
                 state.shapes = shapes;

@@ -1,5 +1,5 @@
-use rand::Rng;
 use glam::{Quat, Vec3};
+use rand::Rng;
 use rubble3d::{RigidBodyDesc, ShapeDesc};
 use rubble_viewer::Viewer3D;
 
@@ -126,8 +126,10 @@ fn scene_static_friction() -> Vec<RigidBodyDesc> {
     for i in 0..=10 {
         let friction = i as f32 / 10.0 * 0.25 + 0.25;
         let z_offset = -10.0 + i as f32 * 2.0;
-        let position =
-            ramp_position + ramp_tangent * -12.0 + Vec3::new(0.0, 0.0, z_offset) + ramp_normal * 1.05;
+        let position = ramp_position
+            + ramp_tangent * -12.0
+            + Vec3::new(0.0, 0.0, z_offset)
+            + ramp_normal * 1.05;
         descs.push(box_desc(
             position.x, position.y, position.z, 1.0, 1.0, 1.0, 1.0, friction,
         ));

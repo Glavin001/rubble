@@ -1,5 +1,5 @@
-use rand::Rng;
 use glam::Vec2;
+use rand::Rng;
 use rubble2d::{RigidBodyDesc2D, ShapeDesc2D};
 use rubble_viewer::Viewer2D;
 use std::f32::consts::PI;
@@ -106,15 +106,7 @@ fn scene_dynamic_friction() -> Vec<RigidBodyDesc2D> {
 fn scene_static_friction() -> Vec<RigidBodyDesc2D> {
     let mut descs = vec![rect_desc(0.0, 0.0, 100.0, 1.0, PI / 6.0, 0.0, 1.0)];
     for y in 0..=10 {
-        descs.push(rect_desc(
-            0.0,
-            y as f32 + 1.0,
-            5.0,
-            0.5,
-            PI / 6.0,
-            1.0,
-            1.0,
-        ));
+        descs.push(rect_desc(0.0, y as f32 + 1.0, 5.0, 0.5, PI / 6.0, 1.0, 1.0));
     }
     descs
 }
@@ -201,7 +193,15 @@ fn scene_cards() -> Vec<RigidBodyDesc2D> {
 fn scene_stack() -> Vec<RigidBodyDesc2D> {
     let mut descs = vec![rect_desc(0.0, 0.0, 100.0, 1.0, 0.0, 0.0, 0.5)];
     for i in 0..20 {
-        descs.push(rect_desc(0.0, i as f32 * 2.0 + 1.0, 1.0, 1.0, 0.0, 1.0, 0.5));
+        descs.push(rect_desc(
+            0.0,
+            i as f32 * 2.0 + 1.0,
+            1.0,
+            1.0,
+            0.0,
+            1.0,
+            0.5,
+        ));
     }
     descs
 }
