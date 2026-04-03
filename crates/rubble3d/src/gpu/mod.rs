@@ -47,7 +47,7 @@ use rubble_shapes3d::{
     BoxData, CapsuleData, CompoundChildGpu, CompoundShapeGpu, ConvexHullData, ConvexVertex3D,
     SphereData,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 const WORKGROUP_SIZE: u32 = 64;
 const AVBD_WARMSTART_ALPHA: f32 = 0.99;
 const MAX_CONTACT_PENALTY: f32 = 1.0e6;
@@ -720,7 +720,7 @@ impl GpuPipeline {
         } else {
             pair_thread_count =
                 self.gpu_lbvh
-                    .query_on_device_raw(&self.ctx, self.aabbs.buffer(), num_bodies);
+                    .query_on_device_gpu(&self.ctx, self.aabbs.buffer(), num_bodies);
         }
 
         if requires_cpu_pair_stage {
@@ -1237,14 +1237,14 @@ impl GpuPipeline {
     /// Run the full GPU physics step with warm-starting support.
     /// Returns (updated_states, new_contacts) so the caller can track persistence.
     ///
-    /// When `warm_contacts` is `Some`, uses the legacy CPU warmstart path.
-    /// When `warm_contacts` is `None`, uses GPU-side warmstart against the
-    /// internally maintained `prev_contacts` buffer from the previous frame.
+    /// Warmstarting is handled entirely on GPU using the internally maintained
+    /// `prev_contacts` buffer from the previous frame. The `warm_contacts` parameter
+    /// is accepted for API compatibility but ignored — GPU warmstart is always used.
     pub fn step_with_contacts(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        warm_contacts: Option<&[Contact3D]>,
+        _warm_contacts: Option<&[Contact3D]>,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
         if num_bodies == 0 {
             return (Vec::new(), Vec::new());
@@ -1255,8 +1255,7 @@ impl GpuPipeline {
         let gpu_count = self.contact_count.read(&self.ctx) as usize;
 
         // GPU warmstart: match new contacts against prev-frame contacts on GPU
-        // before downloading. This avoids the CPU HashMap warmstart overhead.
-        if warm_contacts.is_none() && gpu_count > 0 {
+        if gpu_count > 0 {
             self.contacts.set_len(gpu_count as u32);
             self.dispatch_gpu_warmstart(gpu_count as u32);
         }
@@ -1272,16 +1271,6 @@ impl GpuPipeline {
 
         // Merge CPU-generated compound contacts with GPU narrowphase contacts
         contacts.extend(compound_contacts);
-
-        // Legacy CPU warmstart path (when caller provides explicit prev contacts)
-        if let Some(prev) = warm_contacts {
-            warm_start_contacts_3d(
-                &mut contacts,
-                prev,
-                self.warmstart_decay,
-                AVBD_WARMSTART_ALPHA,
-            );
-        }
 
         self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
 
@@ -1308,7 +1297,7 @@ impl GpuPipeline {
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        warm_contacts: Option<&[Contact3D]>,
+        _warm_contacts: Option<&[Contact3D]>,
         timings: &mut rubble_gpu::StepTimingsMs,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
         use std::time::Instant;
@@ -1323,7 +1312,7 @@ impl GpuPipeline {
         let gpu_count = self.contact_count.read(&self.ctx) as usize;
 
         // GPU warmstart before download
-        if warm_contacts.is_none() && gpu_count > 0 {
+        if gpu_count > 0 {
             self.contacts.set_len(gpu_count as u32);
             self.dispatch_gpu_warmstart(gpu_count as u32);
         }
@@ -1337,16 +1326,6 @@ impl GpuPipeline {
             Vec::new()
         };
         contacts.extend(compound_contacts);
-
-        // Legacy CPU warmstart path
-        if let Some(prev) = warm_contacts {
-            warm_start_contacts_3d(
-                &mut contacts,
-                prev,
-                self.warmstart_decay,
-                AVBD_WARMSTART_ALPHA,
-            );
-        }
         timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
         let t_solve = Instant::now();
@@ -2569,50 +2548,6 @@ fn body_graph_key_3d(contacts: &[Contact3D]) -> Vec<(u32, u32)> {
     pairs.sort_unstable();
     pairs.dedup();
     pairs
-}
-
-// ---------------------------------------------------------------------------
-// Warm-starting helpers
-// ---------------------------------------------------------------------------
-
-/// Match new contacts against previous-frame contacts and copy cached dual state.
-fn warm_start_contacts_3d(
-    new_contacts: &mut [Contact3D],
-    prev_contacts: &[Contact3D],
-    gamma: f32,
-    alpha: f32,
-) {
-    let prev_by_key: HashMap<(u32, u32, u32), &Contact3D> = prev_contacts
-        .iter()
-        .map(|c| {
-            (
-                (c.body_a.min(c.body_b), c.body_a.max(c.body_b), c.feature_id),
-                c,
-            )
-        })
-        .collect();
-
-    for nc in new_contacts.iter_mut() {
-        let feature_prefix = nc.feature_id & 0xFF00_0000;
-        if feature_prefix == 0x3200_0000 {
-            continue;
-        }
-        let key = (
-            nc.body_a.min(nc.body_b),
-            nc.body_a.max(nc.body_b),
-            nc.feature_id,
-        );
-        if let Some(prev) = prev_by_key.get(&key) {
-            nc.lambda = prev.lambda * (alpha * gamma);
-            nc.penalty = prev.penalty * gamma;
-            nc.flags = prev.flags;
-
-            if prev.flags & rubble_math::CONTACT_FLAG_STICKING != 0 {
-                nc.local_anchor_a = prev.local_anchor_a;
-                nc.local_anchor_b = prev.local_anchor_b;
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
