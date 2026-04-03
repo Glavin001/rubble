@@ -21,6 +21,7 @@
 //! in both WGSL and rust-gpu variants.
 
 mod avbd_solve_wgsl;
+mod coloring_wgsl;
 mod extract_velocity_wgsl;
 mod narrowphase_wgsl;
 mod predict_wgsl;
@@ -39,8 +40,7 @@ use rubble_gpu::{
     GpuContext, PingPongBuffer,
 };
 use rubble_math::{
-    greedy_coloring, Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D,
-    RigidBodyState3D,
+    Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
 };
 use rubble_primitives::GpuLbvh;
 use rubble_shapes3d::{
@@ -357,6 +357,8 @@ pub struct GpuPipeline {
     dual_kernel: ComputeKernel,
     extract_kernel: ComputeKernel,
     warmstart_kernel: ComputeKernel,
+    coloring_reset_kernel: ComputeKernel,
+    coloring_step_kernel: ComputeKernel,
 
     // Storage buffers
     body_states: PingPongBuffer<RigidBodyState3D>,
@@ -378,6 +380,13 @@ pub struct GpuPipeline {
     body_order: GpuBuffer<u32>,
     active_body_flags: GpuBuffer<u32>,
     lbvh_subset_aabbs: GpuBuffer<Aabb3D>,
+
+    // GPU graph coloring buffers
+    body_colors: GpuBuffer<u32>,
+    body_priorities: GpuBuffer<u32>,
+    coloring_uncolored: GpuAtomicCounter,
+    coloring_params_buf: wgpu::Buffer,
+    coloring_step_frame: u32,
 
     // Persistent contact buffers for GPU-side warmstarting
     prev_contacts: GpuBuffer<Contact3D>,
@@ -434,6 +443,16 @@ impl GpuPipeline {
         let dual_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_DUAL_WGSL, "main");
         let extract_kernel = ComputeKernel::from_wgsl(&ctx, EXTRACT_VELOCITY_WGSL, "main");
         let warmstart_kernel = ComputeKernel::from_wgsl(&ctx, WARMSTART_MATCH_WGSL, "main");
+        let coloring_reset_kernel = ComputeKernel::from_wgsl(
+            &ctx,
+            coloring_wgsl::COLORING_RESET_WGSL,
+            "main",
+        );
+        let coloring_step_kernel = ComputeKernel::from_wgsl(
+            &ctx,
+            coloring_wgsl::COLORING_STEP_WGSL,
+            "main",
+        );
 
         let body_states = PingPongBuffer::new(&ctx, max_bodies);
         let body_props = GpuBuffer::new(&ctx, max_bodies);
@@ -469,6 +488,15 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        let body_colors: GpuBuffer<u32> = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let body_priorities: GpuBuffer<u32> = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let coloring_uncolored = GpuAtomicCounter::new(&ctx);
+        let coloring_params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("coloring params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let prev_contacts: GpuBuffer<Contact3D> = GpuBuffer::new(&ctx, max_contacts);
         let warmstart_params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("WarmstartParams uniform"),
@@ -489,6 +517,8 @@ impl GpuPipeline {
             dual_kernel,
             extract_kernel,
             warmstart_kernel,
+            coloring_reset_kernel,
+            coloring_step_kernel,
             body_states,
             body_props,
             old_states,
@@ -508,6 +538,11 @@ impl GpuPipeline {
             body_order,
             active_body_flags,
             lbvh_subset_aabbs,
+            body_colors,
+            body_priorities,
+            coloring_uncolored,
+            coloring_params_buf,
+            coloring_step_frame: 0,
             prev_contacts,
             prev_contact_count: 0,
             warmstart_params_uniform,
@@ -668,10 +703,9 @@ impl GpuPipeline {
         let has_compounds = self.body_props_cpu[..num_bodies as usize]
             .iter()
             .any(|prop| prop.shape_type == rubble_math::SHAPE_COMPOUND);
-        let has_planes = self.body_props_cpu[..num_bodies as usize]
-            .iter()
-            .any(|prop| prop.shape_type == rubble_math::SHAPE_PLANE);
-        let requires_cpu_pair_stage = has_compounds || has_planes;
+        // Planes go through GPU LBVH broadphase (their large AABB handles pairing).
+        // Only compound shapes still require CPU pair expansion.
+        let requires_cpu_pair_stage = has_compounds;
         self.aabbs.set_len(num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
@@ -1168,6 +1202,8 @@ impl GpuPipeline {
             return;
         }
 
+        // GPU graph coloring: bodies colored on GPU, order built from downloaded colors.
+        // Caching still applies: if the contact graph hasn't changed, reuse previous coloring.
         let graph_key = body_graph_key_3d(contacts);
         let (body_order, color_groups) =
             if self.cached_color_num_bodies == num_bodies && self.cached_body_graph == graph_key {
@@ -1176,7 +1212,7 @@ impl GpuPipeline {
                     self.cached_color_groups.clone(),
                 )
             } else {
-                let (body_order, color_groups) = color_bodies(num_bodies, contacts);
+                let (body_order, color_groups) = self.gpu_color_bodies(num_bodies, contacts);
                 self.cached_color_num_bodies = num_bodies;
                 self.cached_body_graph = graph_key;
                 self.cached_body_order = body_order.clone();
@@ -1392,10 +1428,9 @@ impl GpuPipeline {
         let has_compounds = self.body_props_cpu[..num_bodies as usize]
             .iter()
             .any(|prop| prop.shape_type == rubble_math::SHAPE_COMPOUND);
-        let has_planes = self.body_props_cpu[..num_bodies as usize]
-            .iter()
-            .any(|prop| prop.shape_type == rubble_math::SHAPE_PLANE);
-        let requires_cpu_pair_stage = has_compounds || has_planes;
+        // Planes go through GPU LBVH broadphase (their large AABB handles pairing).
+        // Only compound shapes still require CPU pair expansion.
+        let requires_cpu_pair_stage = has_compounds;
         self.aabbs.set_len(num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
@@ -1723,10 +1758,9 @@ impl GpuPipeline {
         let has_compounds = self.body_props_cpu[..num_bodies as usize]
             .iter()
             .any(|prop| prop.shape_type == rubble_math::SHAPE_COMPOUND);
-        let has_planes = self.body_props_cpu[..num_bodies as usize]
-            .iter()
-            .any(|prop| prop.shape_type == rubble_math::SHAPE_PLANE);
-        let requires_cpu_pair_stage = has_compounds || has_planes;
+        // Planes go through GPU LBVH broadphase (their large AABB handles pairing).
+        // Only compound shapes still require CPU pair expansion.
+        let requires_cpu_pair_stage = has_compounds;
         self.aabbs.set_len(num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
@@ -2418,6 +2452,133 @@ impl GpuPipeline {
         self.run_pass("extract_vel", &self.extract_kernel, bg, num_bodies);
     }
 
+    /// Run GPU graph coloring: color bodies so no two adjacent bodies share a color.
+    /// Returns (body_order, color_groups) — same format as CPU `color_bodies`.
+    fn gpu_color_bodies(&mut self, num_bodies: u32, contacts: &[Contact3D]) -> (Vec<u32>, Vec<(u32, u32)>) {
+        if contacts.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        self.coloring_step_frame = self.coloring_step_frame.wrapping_add(1);
+
+        // Upload contacts to GPU for the coloring step kernel to read
+        // (contacts are already on GPU from narrowphase, but we need them in the
+        // contacts buffer which may have been re-uploaded after compound merge)
+        let contact_count = contacts.len() as u32;
+
+        // Grow coloring buffers if needed
+        self.body_colors.grow_if_needed(&self.ctx, num_bodies as usize);
+        self.body_priorities.grow_if_needed(&self.ctx, num_bodies as usize);
+
+        // Phase 1: Reset — mark all bodies uncolored, assign random priorities
+        {
+            let params: [u32; 4] = [num_bodies, contact_count, self.coloring_step_frame, 0];
+            self.ctx.queue.write_buffer(
+                &self.coloring_params_buf,
+                0,
+                bytemuck::cast_slice(&params),
+            );
+            let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("coloring_reset"),
+                layout: self.coloring_reset_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.body_colors.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.body_priorities.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.coloring_params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            self.run_pass("coloring_reset", &self.coloring_reset_kernel, &bg, num_bodies);
+        }
+
+        // Phase 2: Iterative Luby coloring
+        let max_iterations = 64u32; // safe upper bound; typically converges in ~10
+        let mut current_color = 0u32;
+        for _ in 0..max_iterations {
+            self.coloring_uncolored.reset(&self.ctx);
+
+            let params: [u32; 4] = [num_bodies, contact_count, current_color, 0];
+            self.ctx.queue.write_buffer(
+                &self.coloring_params_buf,
+                0,
+                bytemuck::cast_slice(&params),
+            );
+
+            let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("coloring_step"),
+                layout: self.coloring_step_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.body_colors.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.body_priorities.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.coloring_uncolored.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.coloring_params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            self.run_pass("coloring_step", &self.coloring_step_kernel, &bg, num_bodies);
+
+            current_color += 1;
+
+            // Check if all bodies are colored
+            let remaining = self.coloring_uncolored.read(&self.ctx);
+            if remaining == 0 {
+                break;
+            }
+        }
+
+        // Phase 3: Download colors and build body_order / color_groups on CPU
+        // (This is a small download: just u32 per body, much cheaper than contacts)
+        self.body_colors.set_len(num_bodies);
+        let colors = self.body_colors.download(&self.ctx);
+        let num_colors = current_color;
+
+        let mut active = vec![false; num_bodies as usize];
+        for c in contacts {
+            active[c.body_a as usize] = true;
+            active[c.body_b as usize] = true;
+        }
+
+        let mut body_order = Vec::new();
+        let mut groups = Vec::new();
+        for color in 0..num_colors {
+            let offset = body_order.len() as u32;
+            for (body_idx, &body_color) in colors.iter().enumerate() {
+                if active[body_idx] && body_color == color {
+                    body_order.push(body_idx as u32);
+                }
+            }
+            let count = body_order.len() as u32 - offset;
+            if count > 0 {
+                groups.push((offset, count));
+            }
+        }
+
+        (body_order, groups)
+    }
+
     /// Dispatch GPU warmstart: match new contacts against prev-frame contacts on GPU.
     fn dispatch_gpu_warmstart(&mut self, new_count: u32) {
         if self.prev_contact_count == 0 || new_count == 0 {
@@ -2524,41 +2685,8 @@ impl GpuPipeline {
 }
 
 // ---------------------------------------------------------------------------
-// Body graph coloring
+// Body graph key for coloring cache
 // ---------------------------------------------------------------------------
-
-/// Color active bodies so no two bodies in the same color share a contact.
-fn color_bodies(num_bodies: u32, contacts: &[Contact3D]) -> (Vec<u32>, Vec<(u32, u32)>) {
-    if contacts.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    let contact_pairs: Vec<(u32, u32)> = contacts.iter().map(|c| (c.body_a, c.body_b)).collect();
-    let (colors, num_colors) = greedy_coloring(num_bodies as usize, &contact_pairs);
-
-    let mut active = vec![false; num_bodies as usize];
-    for c in contacts {
-        active[c.body_a as usize] = true;
-        active[c.body_b as usize] = true;
-    }
-
-    let mut body_order = Vec::new();
-    let mut groups = Vec::new();
-    for color in 0..num_colors {
-        let offset = body_order.len() as u32;
-        for (body_idx, &body_color) in colors.iter().enumerate() {
-            if active[body_idx] && body_color == color {
-                body_order.push(body_idx as u32);
-            }
-        }
-        let count = body_order.len() as u32 - offset;
-        if count > 0 {
-            groups.push((offset, count));
-        }
-    }
-
-    (body_order, groups)
-}
 
 fn body_graph_key_3d(contacts: &[Contact3D]) -> Vec<(u32, u32)> {
     let mut pairs: Vec<(u32, u32)> = contacts
