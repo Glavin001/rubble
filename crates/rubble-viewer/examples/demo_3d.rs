@@ -6,7 +6,7 @@ fn main() {
     viewer.add_ground_plane(0.0);
 
     let mut rng = rand::rng();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         let x = (rng.random::<f32>() - 0.5) * 12.0;
         let y = 3.0 + rng.random::<f32>() * 15.0;
         let z = (rng.random::<f32>() - 0.5) * 12.0;

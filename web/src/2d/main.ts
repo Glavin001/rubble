@@ -11,6 +11,8 @@ const COLORS = [
   "#ff6f69", "#ffcc5c", "#88d8b0", "#c3aed6", "#ffd166",
 ];
 
+const DEMO_SEED = 0x2d5eed;
+
 let world: PhysicsWorld2D;
 let shapeTypes: Uint32Array;
 let shapeSizes: Float32Array;
@@ -33,12 +35,32 @@ const TIMING_LABELS = [
   ["Extract",     "(GPU)"],
 ] as const;
 
+const BROADPHASE_LABELS = [
+  ["Bounds",   "(CPU)"],
+  ["Sort",     "(GPU)"],
+  ["Build",    "(CPU+GPU)"],
+  ["Traverse", "(GPU)"],
+  ["Readback", "(CPU)"],
+] as const;
+
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
 }
 window.addEventListener("resize", resize);
 resize();
+
+function createRng(seed: number) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const rng = createRng(DEMO_SEED);
 
 // Convert physics coords to screen coords
 function toScreen(px: number, py: number): [number, number] {
@@ -61,28 +83,49 @@ function toPhysics(sx: number, sy: number): [number, number] {
 }
 
 function randomColor(): string {
-  return COLORS[Math.floor(Math.random() * COLORS.length)];
+  return COLORS[Math.floor(rng() * COLORS.length)];
 }
 
 function spawnRandomBody(px: number, py: number) {
-  const isCircle = Math.random() > 0.4;
+  const isCircle = rng() > 0.4;
   if (isCircle) {
-    const r = 0.3 + Math.random() * 0.5;
+    const r = 0.3 + rng() * 0.5;
     world.add_circle(px, py, r, 1.0);
   } else {
-    const hw = 0.3 + Math.random() * 0.5;
-    const hh = 0.3 + Math.random() * 0.5;
-    const angle = Math.random() * Math.PI;
+    const hw = 0.3 + rng() * 0.5;
+    const hh = 0.3 + rng() * 0.5;
+    const angle = rng() * Math.PI;
     world.add_rect(px, py, hw, hh, angle, 1.0);
   }
   bodyColors.push(randomColor());
   updateShapeCache();
+  ensureBodyStateBuffers();
 }
 
 function updateShapeCache() {
   shapeTypes = new Uint32Array(world.get_shape_types());
   shapeSizes = new Float32Array(world.get_shape_sizes());
   shapeSizeOffsets = new Uint32Array(world.get_shape_size_offsets());
+}
+
+function ensureBodyStateBuffers() {
+  const handleCount = world.handle_count();
+  if (cachedPositions.length !== handleCount * 2) {
+    cachedPositions = new Float32Array(handleCount * 2);
+  }
+  if (cachedAngles.length !== handleCount) {
+    cachedAngles = new Float32Array(handleCount);
+  }
+}
+
+function syncBodyStateCache() {
+  ensureBodyStateBuffers();
+  if (cachedPositions.length > 0) {
+    world.copy_positions_into(cachedPositions);
+  }
+  if (cachedAngles.length > 0) {
+    world.copy_angles_into(cachedAngles);
+  }
 }
 
 function draw() {
@@ -93,13 +136,10 @@ function draw() {
   ctx.fillStyle = "#111";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const positions = new Float32Array(world.get_positions());
-  const angles = new Float32Array(world.get_angles());
-
   for (let i = 0; i < shapeTypes.length; i++) {
-    const px = positions[i * 2];
-    const py = positions[i * 2 + 1];
-    const angle = angles[i];
+    const px = cachedPositions[i * 2];
+    const py = cachedPositions[i * 2 + 1];
+    const angle = cachedAngles[i];
     const type_ = shapeTypes[i];
     const sizeOff = shapeSizeOffsets[i];
     const [sx, sy] = toScreen(px, py);
@@ -156,8 +196,19 @@ let lastRenderMs = 0;
 // Cached data for test hooks (avoids borrow conflicts during async step)
 let cachedPositions = new Float32Array(0);
 let cachedAngles = new Float32Array(0);
+let cachedTimings = new Float32Array(TIMING_LABELS.length);
+let cachedBroadphase = new Float32Array(BROADPHASE_LABELS.length);
 
-function formatTimings(timings: Float32Array, renderMs: number): string {
+function syncTimingCache() {
+  world.copy_last_step_timings_into(cachedTimings);
+  world.copy_last_broadphase_breakdown_into(cachedBroadphase);
+}
+
+function formatTimings(
+  timings: Float32Array,
+  broadphase: Float32Array,
+  renderMs: number,
+): string {
   const total = timings.reduce((a, b) => a + b, 0);
   const lines: string[] = [`Step: ${total.toFixed(2)} ms`];
   for (let i = 0; i < TIMING_LABELS.length; i++) {
@@ -167,6 +218,20 @@ function formatTimings(timings: Float32Array, renderMs: number): string {
     lines.push(
       `  ${name.padEnd(11)} ${tag.padEnd(8)} ${ms.toFixed(2).padStart(6)} ms ${pct.toFixed(0).padStart(3)}%`
     );
+    if (name === "Broadphase") {
+      const bpTotal = broadphase.reduce((a, b) => a + b, 0);
+      for (let j = 0; j < BROADPHASE_LABELS.length; j++) {
+        const bpMs = broadphase[j] ?? 0;
+        if (bpMs <= 0) {
+          continue;
+        }
+        const [bpName, bpTag] = BROADPHASE_LABELS[j];
+        const bpPct = bpTotal > 0 ? ((bpMs / bpTotal) * 100) : 0;
+        lines.push(
+          `    ${bpName.padEnd(9)} ${bpTag.padEnd(10)} ${bpMs.toFixed(2).padStart(6)} ms ${bpPct.toFixed(0).padStart(3)}%`
+        );
+      }
+    }
   }
   lines.push(`Render      (Canvas) ${renderMs.toFixed(2).padStart(6)} ms`);
   return lines.join("\n");
@@ -177,8 +242,7 @@ async function loop_() {
   stepCount++;
 
   // Cache data after step completes (world is no longer borrowed)
-  cachedPositions = new Float32Array(world.get_positions());
-  cachedAngles = new Float32Array(world.get_angles());
+  syncBodyStateCache();
 
   const t0 = performance.now();
   draw();
@@ -187,12 +251,10 @@ async function loop_() {
   frameCount++;
   const now = performance.now();
   if (now - lastFpsTime >= 1000) {
+    syncTimingCache();
     fpsEl.textContent = `FPS: ${frameCount}`;
     bodiesEl.textContent = `Bodies: ${world.body_count()}`;
-    timingsEl.textContent = formatTimings(
-      new Float32Array(world.last_step_timings_ms()),
-      lastRenderMs,
-    );
+    timingsEl.textContent = formatTimings(cachedTimings, cachedBroadphase, lastRenderMs);
     frameCount = 0;
     lastFpsTime = now;
   }
@@ -235,20 +297,31 @@ async function main() {
   );
   bodyColors.push("#333");
 
-  // Spawn initial bodies
-  for (let i = 0; i < 50; i++) {
-    const px = 3 + Math.random() * (WORLD_W - 6);
-    const py = 10 + Math.random() * 15;
-    spawnRandomBody(px, py);
+  // Spawn a repeatable grid so browser/native timings compare the same scene.
+  // 40×25 = 1_000 dynamic bodies; spacing tuned to WORLD_W/H.
+  const columns = 40;
+  const rows = 25;
+  const xStart = 4.0;
+  const yStart = 6.5;
+  const xSpacing = 34 / 39;
+  const ySpacing = 21 / 24;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < columns; col++) {
+      const px = xStart + col * xSpacing;
+      const py = yStart + row * ySpacing;
+      spawnRandomBody(px, py);
+    }
   }
 
   updateShapeCache();
+  syncBodyStateCache();
+  syncTimingCache();
 
   // Click to spawn
   canvas.addEventListener("click", (e) => {
     const [px, py] = toPhysics(e.clientX, e.clientY);
     for (let i = 0; i < 5; i++) {
-      spawnRandomBody(px + (Math.random() - 0.5) * 2, py + (Math.random() - 0.5) * 2);
+      spawnRandomBody(px + (rng() - 0.5) * 2, py + (rng() - 0.5) * 2);
     }
   });
 

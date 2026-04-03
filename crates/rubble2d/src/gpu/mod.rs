@@ -824,6 +824,10 @@ impl GpuPipeline2D {
         if count == 0 {
             return Vec::new();
         }
+        self.download_contacts_exact(count)
+    }
+
+    fn download_contacts_exact(&mut self, count: usize) -> Vec<Contact2D> {
         self.contacts.set_len(count as u32);
         let all = self.contacts.download(&self.ctx);
         all.into_iter().take(count).collect()
@@ -915,9 +919,7 @@ impl GpuPipeline2D {
         let t_cf = Instant::now();
         let count = self.contact_count.read_async(&self.ctx).await as usize;
         let mut contacts = if count > 0 {
-            self.contacts.set_len(count as u32);
-            let mut c = self.contacts.download_async(&self.ctx).await;
-            c.truncate(count);
+            let mut c = self.download_contacts_exact_async(count).await;
             if let Some(prev) = warm_contacts {
                 warm_start_contacts_2d(
                     &mut c,
@@ -937,14 +939,7 @@ impl GpuPipeline2D {
         self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
 
         let final_contacts = if !contacts.is_empty() {
-            let cnt = self.contact_count.read_async(&self.ctx).await as usize;
-            if cnt > 0 {
-                self.contacts.set_len(cnt as u32);
-                let all = self.contacts.download_async(&self.ctx).await;
-                all.into_iter().take(cnt).collect()
-            } else {
-                Vec::new()
-            }
+            self.download_contacts_exact_async(contacts.len()).await
         } else {
             Vec::new()
         };
@@ -959,6 +954,17 @@ impl GpuPipeline2D {
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
 
         (states, final_contacts)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn download_contacts_exact_async(&mut self, count: usize) -> Vec<Contact2D> {
+        if count == 0 {
+            return Vec::new();
+        }
+        self.contacts.set_len(count as u32);
+        let mut all = self.contacts.download_async(&self.ctx).await;
+        all.truncate(count);
+        all
     }
 
     // -----------------------------------------------------------------------
