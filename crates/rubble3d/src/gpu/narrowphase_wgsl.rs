@@ -109,7 +109,6 @@ struct PlaneParams {
 @group(0) @binding(9) var<storage, read>       convex_verts:  array<ConvexVert>;
 @group(0) @binding(10) var<storage, read>      capsules:      array<CapsuleDataGpu>;
 @group(0) @binding(11) var<uniform>            plane_params:  PlaneParams;
-@group(0) @binding(12) var<storage, read_write> pair_count:   atomic<u32>;
 
 // ---------- Helpers ----------
 
@@ -1297,7 +1296,7 @@ fn box_hull_test(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
-    let num_pairs = atomicLoad(&pair_count);
+    let num_pairs = params.counts.z;
     if pi >= num_pairs {
         return;
     }

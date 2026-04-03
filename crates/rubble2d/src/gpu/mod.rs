@@ -495,27 +495,16 @@ impl GpuPipeline2D {
         self.snapshot_prev_step_states(num_bodies);
         self.dispatch_aabb(num_bodies);
 
-        // GPU LBVH broadphase: Morton codes + radix sort on GPU, tree build CPU, pair finding GPU.
-        // Aabb2D and Aabb3D have identical memory layout (Vec4 min + Vec4 max), so we
-        // reinterpret the downloaded Aabb2D slice as Aabb3D for GpuLbvh scene bounds.
+        // GPU LBVH broadphase: scene bounds, Morton codes, radix sort, and pair finding
+        // run on device. The current tree topology build/refit still executes on CPU.
         self.aabbs.set_len(num_bodies);
-        let aabb2d_data = self.aabbs.download(&self.ctx);
-        let cpu_aabbs_3d: &[rubble_math::Aabb3D] = bytemuck::cast_slice(&aabb2d_data);
-        let pair_thread_count = self.gpu_lbvh.query_on_device_raw(
-            &self.ctx,
-            self.aabbs.buffer(),
-            cpu_aabbs_3d,
-            num_bodies,
-        );
+        let pair_thread_count =
+            self.gpu_lbvh
+                .query_on_device_raw(&self.ctx, self.aabbs.buffer(), num_bodies);
         if pair_thread_count > 0 {
+            let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
-            self.dispatch_narrowphase_with_source(
-                num_bodies,
-                pair_thread_count,
-                &pair_buffer,
-                &pair_count_buffer,
-            );
+            self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
         }
 
         // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
@@ -528,14 +517,9 @@ impl GpuPipeline2D {
             // Reset counter and re-run narrowphase
             self.contact_count.reset(&self.ctx);
             if pair_thread_count > 0 {
+                let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    pair_thread_count,
-                    &pair_buffer,
-                    &pair_count_buffer,
-                );
+                self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
             }
         }
     }
@@ -787,30 +771,27 @@ impl GpuPipeline2D {
         let t1 = Instant::now();
         let mut broadphase = BroadphaseBreakdownMs::default();
         self.aabbs.set_len(num_bodies);
-        let t_readback = Instant::now();
-        let aabb2d_data = self.aabbs.download(&self.ctx);
-        broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-        let cpu_aabbs_3d: &[rubble_math::Aabb3D] = bytemuck::cast_slice(&aabb2d_data);
         let pair_thread_count = self.gpu_lbvh.query_on_device_raw_with_breakdown(
             &self.ctx,
             self.aabbs.buffer(),
-            cpu_aabbs_3d,
             num_bodies,
             &mut broadphase,
         );
+        let pair_count = if pair_thread_count > 0 {
+            let t_readback = Instant::now();
+            let count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
+            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+            count
+        } else {
+            0
+        };
         timings.set_broadphase_breakdown(broadphase);
         debug_assert!(timings.broadphase_ms <= t1.elapsed().as_secs_f32() * 1000.0 + 0.5);
 
         let t2 = Instant::now();
-        if pair_thread_count > 0 {
+        if pair_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
-            self.dispatch_narrowphase_with_source(
-                num_bodies,
-                pair_thread_count,
-                &pair_buffer,
-                &pair_count_buffer,
-            );
+            self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
         }
 
         let contact_count_val = self.contact_count.read(&self.ctx);
@@ -819,15 +800,9 @@ impl GpuPipeline2D {
             let new_cap = (contact_count_val as usize) * 2;
             self.contacts.grow_if_needed(&self.ctx, new_cap);
             self.contact_count.reset(&self.ctx);
-            if pair_thread_count > 0 {
+            if pair_count > 0 {
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    pair_thread_count,
-                    &pair_buffer,
-                    &pair_count_buffer,
-                );
+                self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
             }
         }
         timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
@@ -877,33 +852,33 @@ impl GpuPipeline2D {
         let t1 = Instant::now();
         let mut broadphase = BroadphaseBreakdownMs::default();
         self.aabbs.set_len(num_bodies);
-        let t_readback = Instant::now();
-        let gpu_aabbs = self.aabbs.download_async(&self.ctx).await;
-        broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-        let cpu_aabbs_3d: &[rubble_math::Aabb3D] = bytemuck::cast_slice(&gpu_aabbs);
         let pair_thread_count = self
             .gpu_lbvh
             .query_on_device_raw_async_with_breakdown(
                 &self.ctx,
                 self.aabbs.buffer(),
-                cpu_aabbs_3d,
                 num_bodies,
                 &mut broadphase,
             )
             .await;
+        let pair_count = if pair_thread_count > 0 {
+            let t_readback = Instant::now();
+            let count = self
+                .gpu_lbvh
+                .read_pair_count_async(&self.ctx, pair_thread_count)
+                .await;
+            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+            count
+        } else {
+            0
+        };
         timings.set_broadphase_breakdown(broadphase);
         debug_assert!(timings.broadphase_ms <= t1.elapsed().as_secs_f32() * 1000.0 + 0.5);
 
         let t2 = Instant::now();
-        if pair_thread_count > 0 {
+        if pair_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
-            self.dispatch_narrowphase_with_source(
-                num_bodies,
-                pair_thread_count,
-                &pair_buffer,
-                &pair_count_buffer,
-            );
+            self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
         }
 
         let contact_count_val = self.contact_count.read_async(&self.ctx).await;
@@ -912,15 +887,9 @@ impl GpuPipeline2D {
             let new_cap = (contact_count_val as usize) * 2;
             self.contacts.grow_if_needed(&self.ctx, new_cap);
             self.contact_count.reset(&self.ctx);
-            if pair_thread_count > 0 {
+            if pair_count > 0 {
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    pair_thread_count,
-                    &pair_buffer,
-                    &pair_count_buffer,
-                );
+                self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
             }
         }
         timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
@@ -1138,63 +1107,60 @@ impl GpuPipeline2D {
     fn create_narrowphase_bind_group(
         &self,
         pairs_buffer: &wgpu::Buffer,
-        pair_count_buffer: &wgpu::Buffer,
         label: &'static str,
     ) -> wgpu::BindGroup {
-        self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout: self.narrowphase_kernel.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.old_states.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.shape_infos.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: pairs_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.circles.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.rects.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: self.contacts.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: self.contact_count.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: self.params_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: self.convex_polys.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: self.convex_verts.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 10,
-                    resource: self.capsules.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: pair_count_buffer.as_entire_binding(),
-                },
-            ],
-        })
+        self.ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: self.narrowphase_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.old_states.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.shape_infos.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: pairs_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.circles.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.rects.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.contact_count.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.params_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: self.convex_polys.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: self.convex_verts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: self.capsules.buffer().as_entire_binding(),
+                    },
+                ],
+            })
     }
 
     fn free_motion_bind_group(&mut self) -> &wgpu::BindGroup {
@@ -1406,23 +1372,21 @@ impl GpuPipeline2D {
     fn dispatch_narrowphase_with_source(
         &mut self,
         _num_bodies: u32,
-        thread_count: u32,
+        num_pairs: u32,
         pairs_buffer: &wgpu::Buffer,
-        pair_count_buffer: &wgpu::Buffer,
     ) {
-        if thread_count == 0 {
+        if num_pairs == 0 {
             return;
         }
-        self.sim_params.counts[2] = thread_count;
+        self.sim_params.counts[2] = num_pairs;
         self.ctx.queue.write_buffer(
             &self.params_uniform,
             0,
             bytemuck::bytes_of(&self.sim_params),
         );
 
-        let bg =
-            self.create_narrowphase_bind_group(pairs_buffer, pair_count_buffer, "narrowphase_2d_ext");
-        self.run_pass("narrowphase_2d", &self.narrowphase_kernel, &bg, thread_count);
+        let bg = self.create_narrowphase_bind_group(pairs_buffer, "narrowphase_2d_ext");
+        self.run_pass("narrowphase_2d", &self.narrowphase_kernel, &bg, num_pairs);
     }
 
     fn dispatch_extract(&mut self, num_bodies: u32) {

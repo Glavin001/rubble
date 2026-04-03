@@ -87,7 +87,6 @@ struct CapsuleData2DGpu {
 @group(0) @binding(8) var<storage, read>       convex_polys:  array<ConvexPolyInfo>;
 @group(0) @binding(9) var<storage, read>       convex_verts:  array<ConvexVert2D>;
 @group(0) @binding(10) var<storage, read>      capsules_2d:   array<CapsuleData2DGpu>;
-@group(0) @binding(11) var<storage, read_write> pair_count:   atomic<u32>;
 
 fn emit_contact_2d(
     point: vec2<f32>,
@@ -789,7 +788,7 @@ fn capsule_poly_test(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
-    let num_pairs = atomicLoad(&pair_count);
+    let num_pairs = params.counts.z;
     if pi >= num_pairs {
         return;
     }
