@@ -63,6 +63,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let vel = body.lin_vel.xyz;
     let omega = body.ang_vel.xyz;
     let prev_vel = prev_states[idx].lin_vel.xyz;
+    let inertial_vel = vel + gravity * dt;
 
     let inertial_pos = pos + vel * dt + gravity * (dt * dt);
 
@@ -83,7 +84,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     inertial_states[idx].position_inv_mass = vec4<f32>(inertial_pos, inv_mass);
     inertial_states[idx].orientation = q_new;
-    inertial_states[idx].lin_vel = body.lin_vel;
+    inertial_states[idx].lin_vel = vec4<f32>(inertial_vel, 0.0);
     inertial_states[idx].ang_vel = body.ang_vel;
 
     bodies[idx].position_inv_mass = vec4<f32>(warm_pos, inv_mass);

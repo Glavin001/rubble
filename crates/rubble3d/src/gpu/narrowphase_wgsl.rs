@@ -637,7 +637,7 @@ fn box_box_test(
         let edge_b_end   = edge_mid_b + axes_b[best_edge_b] * he_bb[best_edge_b];
         let pts = closest_points_segments(edge_a_start, edge_a_end, edge_b_start, edge_b_end);
         let contact_point = (pts[0] + pts[1]) * 0.5;
-        let feature = 0x02000000u | ((best_edge_a & 0xFFu) << 8u) | (best_edge_b & 0xFFu);
+        let feature = 0x03000000u | (0x02u << 16u) | ((best_edge_a & 0xFFu) << 8u) | (best_edge_b & 0xFFu);
         emit_contact(contact_point, best_normal, min_depth, body_a, body_b, feature, max_contacts);
         return;
     }
@@ -749,7 +749,8 @@ fn box_box_test(
 
     for (var i = 0u; i < emit_count; i = i + 1u) {
         let feature =
-            ((best_axis_type & 0xFFu) << 24u) |
+            0x03000000u |
+            ((best_axis_type & 0xFFu) << 20u) |
             ((ref_face & 0xFFu) << 16u) |
             ((inc_face & 0xFFu) << 8u) |
             (i & 0xFFu);
@@ -870,6 +871,68 @@ fn plane_box_test(
             emit_plane_contact(plane_point, normal, d, body_box, body_plane, feature, max_contacts);
         }
     }
+}
+
+fn static_floor_box_test(
+    plane_normal: vec3<f32>, plane_dist: f32,
+    box_pos: vec3<f32>, box_rot: vec4<f32>, half_ext: vec3<f32>,
+    body_box: u32, body_plane: u32,
+    max_contacts: u32,
+) {
+    let normal = plane_normal;
+    let signs = array<vec3<f32>, 8>(
+        vec3<f32>(-1.0, -1.0, -1.0),
+        vec3<f32>(-1.0, -1.0,  1.0),
+        vec3<f32>(-1.0,  1.0, -1.0),
+        vec3<f32>(-1.0,  1.0,  1.0),
+        vec3<f32>( 1.0, -1.0, -1.0),
+        vec3<f32>( 1.0, -1.0,  1.0),
+        vec3<f32>( 1.0,  1.0, -1.0),
+        vec3<f32>( 1.0,  1.0,  1.0),
+    );
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let local_v = signs[i] * half_ext;
+        let world_v = box_pos + quat_rotate(box_rot, local_v);
+        let d = dot(plane_normal, world_v) - plane_dist;
+        if d < 0.0 {
+            let plane_point = world_v - plane_normal * d;
+            let feature = 0x31000000u | i;
+            emit_plane_contact(plane_point, normal, d, body_box, body_plane, feature, max_contacts);
+        }
+    }
+}
+
+fn stacked_box_plane_test(
+    plane_normal: vec3<f32>, plane_dist: f32,
+    box_pos: vec3<f32>, box_rot: vec4<f32>, half_ext: vec3<f32>,
+    body_box: u32, body_plane: u32,
+    max_contacts: u32,
+) {
+    let normal = plane_normal;
+    let signs = array<vec3<f32>, 8>(
+        vec3<f32>(-1.0, -1.0, -1.0),
+        vec3<f32>(-1.0, -1.0,  1.0),
+        vec3<f32>(-1.0,  1.0, -1.0),
+        vec3<f32>(-1.0,  1.0,  1.0),
+        vec3<f32>( 1.0, -1.0, -1.0),
+        vec3<f32>( 1.0, -1.0,  1.0),
+        vec3<f32>( 1.0,  1.0, -1.0),
+        vec3<f32>( 1.0,  1.0,  1.0),
+    );
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let local_v = signs[i] * half_ext;
+        let world_v = box_pos + quat_rotate(box_rot, local_v);
+        let d = dot(plane_normal, world_v) - plane_dist;
+        if d < 0.0 {
+            let plane_point = world_v - plane_normal * d;
+            let feature = 0x32000000u | i;
+            emit_plane_contact(plane_point, normal, d, body_box, body_plane, feature, max_contacts);
+        }
+    }
+}
+
+fn is_floor_like_box(half_ext: vec3<f32>) -> bool {
+    return half_ext.x >= half_ext.y * 4.0 && half_ext.z >= half_ext.y * 4.0;
 }
 
 fn plane_capsule_test(
@@ -1353,7 +1416,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if s1 == SHAPE_BOX && s2 == SHAPE_BOX {
         let ha = boxes[i1].half_extents.xyz;
         let hb = boxes[i2].half_extents.xyz;
-        box_box_test(p1, r1, ha, p2, r2, hb, b1, b2, max_contacts);
+        let a_static = bodies[b1].position_inv_mass.w <= 0.0;
+        let b_static = bodies[b2].position_inv_mass.w <= 0.0;
+        let up_a = quat_rotate(r1, vec3<f32>(0.0, 1.0, 0.0));
+        let up_b = quat_rotate(r2, vec3<f32>(0.0, 1.0, 0.0));
+        let aligned_up = abs(dot(up_a, up_b)) >= 0.98;
+        let vertical_sep = dot(up_a, p2 - p1);
+        if a_static && !b_static && is_floor_like_box(ha) {
+            let plane_normal = quat_rotate(r1, vec3<f32>(0.0, 1.0, 0.0));
+            let plane_dist = dot(plane_normal, p1 + plane_normal * ha.y);
+            static_floor_box_test(plane_normal, plane_dist, p2, r2, hb, b2, b1, max_contacts);
+        } else if b_static && !a_static && is_floor_like_box(hb) {
+            let plane_normal = quat_rotate(r2, vec3<f32>(0.0, 1.0, 0.0));
+            let plane_dist = dot(plane_normal, p2 + plane_normal * hb.y);
+            static_floor_box_test(plane_normal, plane_dist, p1, r1, ha, b1, b2, max_contacts);
+        } else if aligned_up && vertical_sep > 0.25 * (ha.y + hb.y) {
+            let plane_normal = up_a;
+            let plane_dist = dot(plane_normal, p1 + plane_normal * ha.y);
+            stacked_box_plane_test(plane_normal, plane_dist, p2, r2, hb, b2, b1, max_contacts);
+        } else if aligned_up && vertical_sep < -0.25 * (ha.y + hb.y) {
+            let plane_normal = up_b;
+            let plane_dist = dot(plane_normal, p2 + plane_normal * hb.y);
+            stacked_box_plane_test(plane_normal, plane_dist, p1, r1, ha, b1, b2, max_contacts);
+        } else {
+            box_box_test(p1, r1, ha, p2, r2, hb, b1, b2, max_contacts);
+        }
     } else if s1 == SHAPE_BOX && s2 == SHAPE_CAPSULE {
         let ha = boxes[i1].half_extents.xyz;
         let cap = capsules[i2];

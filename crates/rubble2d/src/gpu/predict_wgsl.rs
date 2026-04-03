@@ -53,6 +53,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let vel = body.lin_vel.xy;
     let omega = body.lin_vel.z;
     let prev_vel = prev_states[idx].lin_vel.xy;
+    let inertial_vel = vel + gravity * dt;
 
     // Inertial target used by the primal solve.
     let inertial_pos = pos + vel * dt + gravity * (dt * dt);
@@ -72,7 +73,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let warm_angle = inertial_angle;
 
     inertial_states[idx].position_inv_mass = vec4<f32>(inertial_pos, inertial_angle, inv_mass);
-    inertial_states[idx].lin_vel = body.lin_vel;
+    inertial_states[idx].lin_vel = vec4<f32>(inertial_vel, omega, 0.0);
     inertial_states[idx]._pad0 = body._pad0;
     inertial_states[idx]._pad1 = body._pad1;
 

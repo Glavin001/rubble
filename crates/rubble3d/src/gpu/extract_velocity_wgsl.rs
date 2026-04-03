@@ -18,7 +18,8 @@ struct SimParams {
 
 @group(0) @binding(0) var<storage, read_write> bodies:     array<Body>;
 @group(0) @binding(1) var<storage, read>       old_states: array<Body>;
-@group(0) @binding(2) var<uniform>             params:     SimParams;
+@group(0) @binding(2) var<storage, read>       active_bodies: array<u32>;
+@group(0) @binding(3) var<uniform>             params:     SimParams;
 
 // Quaternion multiply
 fn qmul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
@@ -55,9 +56,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos_old = old_states[idx].position_inv_mass.xyz;
     let pos_new = bodies[idx].position_inv_mass.xyz;
     let pos_delta = pos_new - pos_old;
-    var lin_vel = bodies[idx].lin_vel.xyz;
+    var lin_vel = vec3<f32>(0.0);
     if length(pos_delta) >= 1e-6 {
         lin_vel = pos_delta / dt;
+    } else if active_bodies[idx] == 0u {
+        // Preserve free-motion velocity when sub-ULP position changes would
+        // otherwise collapse to zero.
+        lin_vel = bodies[idx].lin_vel.xyz;
     }
     bodies[idx].lin_vel = vec4<f32>(lin_vel, 0.0);
 
@@ -68,10 +73,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         dq = -dq;
     }
     let imag_len = length(dq.xyz);
-    var omega_new = bodies[idx].ang_vel.xyz;
+    var omega_new = vec3<f32>(0.0);
     if imag_len >= 1e-6 {
         let angle = 2.0 * atan2(imag_len, dq.w);
         omega_new = dq.xyz / imag_len * (angle / dt);
+    } else if active_bodies[idx] == 0u {
+        omega_new = bodies[idx].ang_vel.xyz;
     }
     bodies[idx].ang_vel = vec4<f32>(omega_new, 0.0);
 }

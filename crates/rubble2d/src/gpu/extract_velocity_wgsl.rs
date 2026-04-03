@@ -42,12 +42,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos_new = bodies[idx].position_inv_mass.xy;
     let angle_new = bodies[idx].position_inv_mass.z;
     let pos_delta = pos_new - pos_old;
+    // Tiny timesteps can produce sub-ULP position changes even though the
+    // integrated velocity is non-zero. Preserve the already-updated velocity in
+    // that case so free motion can accumulate until the position changes become
+    // representable again.
     var lin_vel = bodies[idx].lin_vel.xy;
     if length(pos_delta) >= 1e-6 {
         lin_vel = pos_delta / dt;
     }
-    var ang_vel = bodies[idx].lin_vel.z;
     let angle_delta = angle_new - angle_old;
+    var ang_vel = bodies[idx].lin_vel.z;
     if abs(angle_delta) >= 1e-6 {
         ang_vel = angle_delta / dt;
     }

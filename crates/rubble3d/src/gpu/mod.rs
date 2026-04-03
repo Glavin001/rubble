@@ -368,6 +368,7 @@ pub struct GpuPipeline {
     compound_children_data: Vec<CompoundChildGpu>,
     /// CPU-side compound shapes with BVH data for broadphase culling.
     compound_shapes_cpu: Vec<rubble_shapes3d::CompoundShape>,
+    plane_data_cpu: Vec<Vec4>,
     body_props_cpu: Vec<RigidBodyProps3D>,
 
     // Uniform buffers
@@ -385,7 +386,7 @@ pub struct GpuPipeline {
     free_motion_bg_cache: CachedBindGroup<[u64; 4]>,
     primal_bg_cache: CachedBindGroupVec<[u64; 6]>,
     dual_bg_cache: CachedBindGroup<[u64; 3]>,
-    extract_bg_cache: CachedBindGroup<[u64; 2]>,
+    extract_bg_cache: CachedBindGroup<[u64; 3]>,
 
     // GPU broadphase
     gpu_lbvh: GpuLbvh,
@@ -476,6 +477,7 @@ impl GpuPipeline {
             compound_shapes_data: Vec::new(),
             compound_children_data: Vec::new(),
             compound_shapes_cpu: Vec::new(),
+            plane_data_cpu: Vec::new(),
             body_props_cpu: Vec::new(),
             sim_params: SimParamsGpu {
                 gravity: [0.0; 4],
@@ -539,6 +541,7 @@ impl GpuPipeline {
         self.compound_shapes_data = compound_shapes.to_vec();
         self.compound_children_data = compound_children.to_vec();
         self.compound_shapes_cpu = compound_shapes_cpu.to_vec();
+        self.plane_data_cpu = plane_data.to_vec();
         self.body_props_cpu = props.to_vec();
         self.body_states.upload(&self.ctx, states);
         self.old_states.upload(&self.ctx, states);
@@ -836,6 +839,87 @@ impl GpuPipeline {
         for (idx_a, idx_b) in candidate_pairs {
             let (child_pos_a, _, child_st_a, child_si_a) = children_a[idx_a];
             let (child_pos_b, _, child_st_b, child_si_b) = children_b[idx_b];
+
+            if child_st_a == rubble_math::SHAPE_PLANE || child_st_b == rubble_math::SHAPE_PLANE {
+                let (
+                    plane_parent,
+                    plane_si,
+                    dynamic_parent,
+                    dynamic_pos,
+                    dynamic_st,
+                    dynamic_si,
+                    dynamic_idx,
+                ) = if child_st_a == rubble_math::SHAPE_PLANE {
+                    (
+                        body_a,
+                        child_si_a,
+                        body_b,
+                        child_pos_b,
+                        child_st_b,
+                        child_si_b,
+                        idx_b as u32,
+                    )
+                } else {
+                    (
+                        body_b,
+                        child_si_b,
+                        body_a,
+                        child_pos_a,
+                        child_st_a,
+                        child_si_a,
+                        idx_a as u32,
+                    )
+                };
+
+                if let Some(plane) = self.plane_data_cpu.get(plane_si as usize) {
+                    let plane_normal = Vec3::new(plane.x, plane.y, plane.z).normalize_or_zero();
+                    let plane_dist = plane.w;
+                    let extent = self.child_extent(dynamic_st, dynamic_si);
+                    let signed_distance = plane_normal.dot(dynamic_pos) - plane_dist;
+                    let depth = signed_distance - extent;
+                    if depth > 0.0 {
+                        continue;
+                    }
+
+                    let plane_point = dynamic_pos - plane_normal * signed_distance;
+                    let tangent = if plane_normal.z.abs() > 0.707 {
+                        plane_normal.cross(Vec3::Y).normalize_or_zero()
+                    } else {
+                        plane_normal.cross(Vec3::Z).normalize_or_zero()
+                    };
+                    let world_a = plane_point + plane_normal * depth;
+                    let world_b = plane_point;
+                    let point = (world_a + world_b) * 0.5;
+
+                    let pos_dyn = states[dynamic_parent as usize].position();
+                    let rot_dyn = states[dynamic_parent as usize].quat();
+                    let pos_plane = states[plane_parent as usize].position();
+                    let rot_plane = states[plane_parent as usize].quat();
+                    let local_dyn = rot_dyn.conjugate() * (world_a - pos_dyn);
+                    let local_plane = rot_plane.conjugate() * (world_b - pos_plane);
+                    let feature_id = 0x4000_0000u32 | (dynamic_idx & 0xFFFF);
+
+                    out.push(Contact3D {
+                        point: Vec4::new(point.x, point.y, point.z, depth),
+                        normal: Vec4::new(plane_normal.x, plane_normal.y, plane_normal.z, 0.0),
+                        tangent: Vec4::new(tangent.x, tangent.y, tangent.z, 0.0),
+                        local_anchor_a: Vec4::new(local_dyn.x, local_dyn.y, local_dyn.z, 0.0),
+                        local_anchor_b: Vec4::new(local_plane.x, local_plane.y, local_plane.z, 0.0),
+                        lambda: Vec4::ZERO,
+                        penalty: Vec4::new(
+                            self.sim_params.solver[2],
+                            self.sim_params.solver[2],
+                            self.sim_params.solver[2],
+                            0.0,
+                        ),
+                        body_a: dynamic_parent,
+                        body_b: plane_parent,
+                        feature_id,
+                        flags: 0,
+                    });
+                }
+                continue;
+            }
 
             let ext_a = self.child_extent(child_st_a, child_si_a);
             let ext_b = self.child_extent(child_st_b, child_si_b);
@@ -1264,8 +1348,6 @@ impl GpuPipeline {
                 self.broadphase_pairs_3d_with_breakdown(num_bodies, &cpu_aabbs, &mut broadphase);
             if !overlap_pairs.is_empty() {
                 let props = &self.body_props_cpu[..num_bodies as usize];
-                let t_build = Instant::now();
-                let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
                 let states = if has_compounds {
                     self.body_states.current_mut().set_len(num_bodies);
                     let t_state_readback = Instant::now();
@@ -1275,6 +1357,8 @@ impl GpuPipeline {
                 } else {
                     None
                 };
+                let t_build = Instant::now();
+                let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
 
                 for p in &overlap_pairs {
                     let a = p[0];
@@ -1592,8 +1676,6 @@ impl GpuPipeline {
                 .await;
             if !overlap_pairs.is_empty() {
                 let props = &self.body_props_cpu[..num_bodies as usize];
-                let t_build = Instant::now();
-                let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
                 let states = if has_compounds {
                     self.body_states.set_len(num_bodies);
                     let t_state_readback = Instant::now();
@@ -1603,6 +1685,8 @@ impl GpuPipeline {
                 } else {
                     None
                 };
+                let t_build = Instant::now();
+                let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
 
                 for p in &overlap_pairs {
                     let a = p[0];
@@ -2142,7 +2226,11 @@ impl GpuPipeline {
     }
 
     fn extract_bind_group(&mut self) -> &wgpu::BindGroup {
-        let key = [self.body_states_cache_key(), self.old_states.byte_size()];
+        let key = [
+            self.body_states_cache_key(),
+            self.old_states.byte_size(),
+            self.active_body_flags.byte_size(),
+        ];
         if self.extract_bg_cache.key.as_ref() != Some(&key) {
             let bg = self
                 .ctx
@@ -2161,6 +2249,10 @@ impl GpuPipeline {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
+                            resource: self.active_body_flags.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
                             resource: self.params_uniform.as_entire_binding(),
                         },
                     ],
@@ -2352,6 +2444,10 @@ fn warm_start_contacts_3d(
         .collect();
 
     for nc in new_contacts.iter_mut() {
+        let feature_prefix = nc.feature_id & 0xFF00_0000;
+        if feature_prefix == 0x3200_0000 {
+            continue;
+        }
         let key = (
             nc.body_a.min(nc.body_b),
             nc.body_a.max(nc.body_b),
