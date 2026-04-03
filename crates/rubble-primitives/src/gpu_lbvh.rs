@@ -440,13 +440,16 @@ struct Aabb {
     max_pt: vec4<f32>,
 };
 
+// Note: refit_count uses atomic<u32> because this shader does atomicAdd
+// for bottom-up synchronization. Other shaders that share the same GPU
+// buffer declare refit_count as plain u32 (they don't use atomics).
 struct BvhNode {
     aabb_min: vec4<f32>,
     aabb_max: vec4<f32>,
     left: i32,
     right: i32,
     parent: u32,
-    refit_count: u32,
+    refit_count: atomic<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> leaf_aabbs: array<Aabb>;
