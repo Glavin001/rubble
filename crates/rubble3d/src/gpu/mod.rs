@@ -774,7 +774,7 @@ impl GpuPipeline {
         } else {
             pair_thread_count =
                 self.gpu_lbvh
-                    .query_on_device_gpu(&self.ctx, self.aabbs.buffer(), num_bodies);
+                    .query_on_device_raw(&self.ctx, self.aabbs.buffer(), num_bodies);
         }
 
         if requires_cpu_pair_stage {
@@ -2506,11 +2506,13 @@ impl GpuPipeline {
         }
 
         // Phase 2: Iterative Luby coloring
-        let max_iterations = 64u32; // safe upper bound; typically converges in ~10
-        let mut current_color = 0u32;
-        for _ in 0..max_iterations {
-            self.coloring_uncolored.reset(&self.ctx);
-
+        // Run a fixed number of iterations without per-iteration convergence checks.
+        // This avoids blocking GPU readbacks which are incompatible with WebGPU's
+        // async model on WASM. Luby's converges in O(log n) rounds for bounded-degree
+        // graphs; 32 iterations handles any practical contact graph. The shader is a
+        // no-op for already-colored bodies, so extra iterations are cheap.
+        let max_iterations = 32u32;
+        for current_color in 0..max_iterations {
             let params: [u32; 4] = [num_bodies, contact_count, current_color, 0];
             self.ctx.queue.write_buffer(
                 &self.coloring_params_buf,
@@ -2545,21 +2547,13 @@ impl GpuPipeline {
                 ],
             });
             self.run_pass("coloring_step", &self.coloring_step_kernel, &bg, num_bodies);
-
-            current_color += 1;
-
-            // Check if all bodies are colored
-            let remaining = self.coloring_uncolored.read(&self.ctx);
-            if remaining == 0 {
-                break;
-            }
         }
 
         // Phase 3: Download colors and build body_order / color_groups on CPU
         // (This is a small download: just u32 per body, much cheaper than contacts)
         self.body_colors.set_len(num_bodies);
         let colors = self.body_colors.download(&self.ctx);
-        let num_colors = current_color;
+        let num_colors = max_iterations;
 
         let mut active = vec![false; num_bodies as usize];
         for c in contacts {
