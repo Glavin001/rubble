@@ -1888,12 +1888,16 @@ impl GpuPipeline {
     }
 
     /// Async version of `step_with_contacts` for WASM/WebGPU.
+    ///
+    /// Warmstarting is handled entirely on GPU using the internally maintained
+    /// `prev_contacts` buffer. The `_warm_contacts` parameter is accepted for
+    /// API compatibility but ignored.
     #[cfg(target_arch = "wasm32")]
     pub async fn step_with_contacts_async(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        warm_contacts: Option<&[Contact3D]>,
+        _warm_contacts: Option<&[Contact3D]>,
         timings: &mut rubble_gpu::StepTimingsMs,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
         use rubble_gpu::web_time::Instant;
@@ -1906,6 +1910,13 @@ impl GpuPipeline {
 
         let t_cf = Instant::now();
         let gpu_count = self.contact_count.read_async(&self.ctx).await as usize;
+
+        // GPU warmstart before download
+        if gpu_count > 0 {
+            self.contacts.set_len(gpu_count as u32);
+            self.dispatch_gpu_warmstart(gpu_count as u32);
+        }
+
         let mut contacts = if gpu_count > 0 {
             self.download_contacts_exact_async(gpu_count).await
         } else {
@@ -1913,23 +1924,18 @@ impl GpuPipeline {
         };
 
         contacts.extend(compound_contacts);
-
-        if let Some(prev) = warm_contacts {
-            warm_start_contacts_3d(
-                &mut contacts,
-                prev,
-                self.warmstart_decay,
-                AVBD_WARMSTART_ALPHA,
-            );
-        }
         timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
         let t_solve = Instant::now();
         self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
 
         let final_contacts = if !contacts.is_empty() {
-            self.download_contacts_exact_async(contacts.len()).await
+            let fc = self.download_contacts_exact_async(contacts.len()).await;
+            let solved_count = fc.len() as u32;
+            self.swap_contact_buffers(solved_count);
+            fc
         } else {
+            self.prev_contact_count = 0;
             Vec::new()
         };
         timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
