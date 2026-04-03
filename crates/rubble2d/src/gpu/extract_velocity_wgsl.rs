@@ -1,10 +1,7 @@
 /// WGSL source for the 2D velocity extraction shader.
 ///
-/// Recomputes positions from the AVBD-solved velocities:
-///   pos_new = pos_old + dt * v_solved
-///   angle_new = angle_old + dt * omega_solved
-/// This ensures the solver's velocity corrections are reflected in positions.
-/// Then extracts velocity: v = (pos_new - pos_old) / dt = v_solved (consistent).
+/// Extracts velocity from the solved positions/orientations after the primal-dual
+/// position-space solve.
 pub const EXTRACT_VELOCITY_2D_WGSL: &str = r#"
 struct Body2D {
     position_inv_mass: vec4<f32>, // (x, y, angle, 1/m)
@@ -38,18 +35,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let dt = params.dt;
+    if dt <= 1e-12 {
+        return;
+    }
 
-    // The solver may have modified velocities. Recompute position from
-    // old position + dt * solved velocity, so impulses actually move bodies.
-    let v_solved = bodies[idx].lin_vel.xy;
-    let omega_solved = bodies[idx].lin_vel.z;
     let pos_old = old_states[idx].position_inv_mass.xy;
     let angle_old = old_states[idx].position_inv_mass.z;
-
-    let pos_new = pos_old + dt * v_solved;
-    let angle_new = angle_old + dt * omega_solved;
-
-    bodies[idx].position_inv_mass = vec4<f32>(pos_new, angle_new, inv_mass);
-    // Velocity is already correct (v_solved from predict + solver impulses)
+    let pos_new = bodies[idx].position_inv_mass.xy;
+    let angle_new = bodies[idx].position_inv_mass.z;
+    let pos_delta = pos_new - pos_old;
+    var lin_vel = bodies[idx].lin_vel.xy;
+    if length(pos_delta) >= 1e-6 {
+        lin_vel = pos_delta / dt;
+    }
+    var ang_vel = bodies[idx].lin_vel.z;
+    let angle_delta = angle_new - angle_old;
+    if abs(angle_delta) >= 1e-6 {
+        ang_vel = angle_delta / dt;
+    }
+    bodies[idx].lin_vel = vec4<f32>(lin_vel, ang_vel, 0.0);
 }
 "#;

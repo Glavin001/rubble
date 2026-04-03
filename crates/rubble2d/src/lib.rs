@@ -102,6 +102,53 @@ impl Default for RigidBodyDesc2D {
 }
 
 // ---------------------------------------------------------------------------
+// Inertia computation
+// ---------------------------------------------------------------------------
+
+/// Compute the inverse moment of inertia for a 2D shape with the given mass.
+fn compute_inverse_inertia_2d(shape: &ShapeDesc2D, mass: f32) -> f32 {
+    if mass <= 0.0 {
+        return 0.0;
+    }
+
+    let inertia = match shape {
+        ShapeDesc2D::Circle { radius } => 0.5 * mass * radius * radius,
+        ShapeDesc2D::Rect { half_extents } => {
+            let w = 2.0 * half_extents.x;
+            let h = 2.0 * half_extents.y;
+            mass * (w * w + h * h) / 12.0
+        }
+        ShapeDesc2D::Capsule {
+            half_height,
+            radius,
+        } => {
+            // Approximate the 2D capsule as a rectangle capped by circles using its
+            // bounding box. This keeps rotational response far closer to reality than
+            // reusing inverse mass for angular terms.
+            let w = 2.0 * radius;
+            let h = 2.0 * (half_height + radius);
+            mass * (w * w + h * h) / 12.0
+        }
+        ShapeDesc2D::ConvexPolygon { vertices } => {
+            let mut min = Vec2::splat(f32::MAX);
+            let mut max = Vec2::splat(f32::NEG_INFINITY);
+            for &v in vertices {
+                min = min.min(v);
+                max = max.max(v);
+            }
+            let size = max - min;
+            mass * (size.x * size.x + size.y * size.y) / 12.0
+        }
+    };
+
+    if inertia <= 1e-12 {
+        0.0
+    } else {
+        1.0 / inertia
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GenerationalIndexAllocator
 // ---------------------------------------------------------------------------
 
@@ -300,6 +347,7 @@ pub struct World2D {
     states: Vec<RigidBodyState2D>,
     shapes: Vec<ShapeDesc2D>,
     frictions: Vec<f32>,
+    inv_inertias: Vec<f32>,
     flags: Vec<u32>,
     allocator: GenerationalIndexAllocator,
     gpu_pipeline: gpu::GpuPipeline2D,
@@ -320,6 +368,7 @@ impl World2D {
             states: Vec::new(),
             shapes: Vec::new(),
             frictions: Vec::new(),
+            inv_inertias: Vec::new(),
             flags: Vec::new(),
             allocator: GenerationalIndexAllocator::new(),
             gpu_pipeline: pipeline,
@@ -356,6 +405,7 @@ impl World2D {
             desc.vy,
             desc.angular_velocity,
         );
+        let inv_inertia = compute_inverse_inertia_2d(&desc.shape, desc.mass);
 
         let idx = handle.index as usize;
 
@@ -373,12 +423,14 @@ impl World2D {
             self.shapes
                 .resize(idx + 1, ShapeDesc2D::Circle { radius: 0.0 });
             self.frictions.resize(idx + 1, 0.5);
+            self.inv_inertias.resize(idx + 1, 0.0);
             self.flags.resize(idx + 1, 0);
         }
 
         self.states[idx] = state;
         self.shapes[idx] = desc.shape.clone();
         self.frictions[idx] = desc.friction;
+        self.inv_inertias[idx] = inv_inertia;
         self.flags[idx] = body_flags;
 
         handle
@@ -393,6 +445,7 @@ impl World2D {
         self.states[idx] = RigidBodyState2D::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         self.shapes[idx] = ShapeDesc2D::Circle { radius: 0.0 };
         self.frictions[idx] = 0.0;
+        self.inv_inertias[idx] = 0.0;
         self.flags[idx] = 0;
         self.allocator.deallocate(handle)
     }
@@ -525,8 +578,8 @@ impl World2D {
             .iter()
             .map(|&i| {
                 let mut s = self.states[i];
-                // Pack friction into _pad0.x for the GPU solver
-                s._pad0 = Vec4::new(self.frictions[i], 0.0, 0.0, 0.0);
+                // Pack friction and inverse inertia into the padded lane used by the GPU solver.
+                s._pad0 = Vec4::new(self.frictions[i], self.inv_inertias[i], 0.0, 0.0);
                 s
             })
             .collect();
@@ -693,7 +746,7 @@ impl World2D {
             .iter()
             .map(|&i| {
                 let mut s = self.states[i];
-                s._pad0 = Vec4::new(self.frictions[i], 0.0, 0.0, 0.0);
+                s._pad0 = Vec4::new(self.frictions[i], self.inv_inertias[i], 0.0, 0.0);
                 s
             })
             .collect();

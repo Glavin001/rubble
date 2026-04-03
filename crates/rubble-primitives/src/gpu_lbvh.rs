@@ -10,7 +10,6 @@ use glam::Vec3;
 use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext};
 use rubble_math::Aabb3D;
 
-use crate::radix_sort::RadixSortEntry;
 use crate::GpuRadixSort;
 
 const WG: u32 = 256;
@@ -276,6 +275,231 @@ fn aabb_union(a: &Aabb3D, b: &Aabb3D) -> Aabb3D {
     )
 }
 
+fn validate_internal_tree(left: &[Child], right: &[Child]) -> bool {
+    if left.is_empty() {
+        return true;
+    }
+
+    let n = left.len();
+    let mut state = vec![0u8; n];
+    let mut seen = 0usize;
+    let mut stack = vec![(0usize, false)];
+
+    while let Some((idx, expanded)) = stack.pop() {
+        if idx >= n {
+            return false;
+        }
+
+        if expanded {
+            if state[idx] != 1 {
+                return false;
+            }
+            state[idx] = 2;
+            continue;
+        }
+
+        match state[idx] {
+            0 => {
+                state[idx] = 1;
+                seen += 1;
+                stack.push((idx, true));
+                if let Child::Internal(ci) = right[idx] {
+                    stack.push((ci, false));
+                }
+                if let Child::Internal(ci) = left[idx] {
+                    stack.push((ci, false));
+                }
+            }
+            1 => return false,
+            2 => return false,
+            _ => unreachable!(),
+        }
+    }
+
+    seen == n
+}
+
+fn refit_iterative(
+    left: &[Child],
+    right: &[Child],
+    leaves: &[Aabb3D],
+) -> Option<Vec<Aabb3D>> {
+    if left.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let n = left.len();
+    let mut internal = vec![Aabb3D::new(Vec3::ZERO, Vec3::ZERO); n];
+    let mut state = vec![0u8; n];
+    let mut stack = vec![(0usize, false)];
+
+    while let Some((idx, expanded)) = stack.pop() {
+        if idx >= n {
+            return None;
+        }
+
+        if expanded {
+            let la = match left[idx] {
+                Child::Leaf(i) => *leaves.get(i)?,
+                Child::Internal(i) => {
+                    if state.get(i).copied()? != 2 {
+                        return None;
+                    }
+                    internal[i]
+                }
+            };
+            let ra = match right[idx] {
+                Child::Leaf(i) => *leaves.get(i)?,
+                Child::Internal(i) => {
+                    if state.get(i).copied()? != 2 {
+                        return None;
+                    }
+                    internal[i]
+                }
+            };
+            internal[idx] = aabb_union(&la, &ra);
+            state[idx] = 2;
+            continue;
+        }
+
+        match state[idx] {
+            0 => {
+                state[idx] = 1;
+                stack.push((idx, true));
+                if let Child::Internal(ci) = right[idx] {
+                    stack.push((ci, false));
+                }
+                if let Child::Internal(ci) = left[idx] {
+                    stack.push((ci, false));
+                }
+            }
+            1 => return None,
+            2 => {}
+            _ => unreachable!(),
+        }
+    }
+
+    Some(internal)
+}
+
+fn children_to_gpu_nodes(
+    left: &[Child],
+    right: &[Child],
+    internal_aabbs: &[Aabb3D],
+) -> Vec<BvhNodeGpu> {
+    (0..left.len())
+        .map(|i| {
+            let left_val = match left[i] {
+                Child::Leaf(l) => -(l as i32 + 1),
+                Child::Internal(l) => l as i32,
+            };
+            let right_val = match right[i] {
+                Child::Leaf(r) => -(r as i32 + 1),
+                Child::Internal(r) => r as i32,
+            };
+            let aabb = internal_aabbs[i];
+            BvhNodeGpu {
+                aabb_min: [
+                    aabb.min_point().x,
+                    aabb.min_point().y,
+                    aabb.min_point().z,
+                    0.0,
+                ],
+                aabb_max: [
+                    aabb.max_point().x,
+                    aabb.max_point().y,
+                    aabb.max_point().z,
+                    0.0,
+                ],
+                left: left_val,
+                right: right_val,
+                _pad0: 0,
+                _pad1: 0,
+            }
+        })
+        .collect()
+}
+
+fn build_balanced_tree_cpu(leaf_aabbs: &[Aabb3D]) -> Vec<BvhNodeGpu> {
+    if leaf_aabbs.len() <= 1 {
+        return Vec::new();
+    }
+
+    #[derive(Clone, Copy)]
+    struct Task {
+        start: usize,
+        end: usize,
+        parent: Option<(usize, bool)>,
+    }
+
+    let mut left = Vec::<Child>::new();
+    let mut right = Vec::<Child>::new();
+    let mut stack = vec![Task {
+        start: 0,
+        end: leaf_aabbs.len(),
+        parent: None,
+    }];
+
+    while let Some(task) = stack.pop() {
+        let len = task.end - task.start;
+        if len == 0 {
+            continue;
+        }
+
+        if len == 1 {
+            if let Some((parent, is_left)) = task.parent {
+                let child = Child::Leaf(task.start);
+                if is_left {
+                    left[parent] = child;
+                } else {
+                    right[parent] = child;
+                }
+            }
+            continue;
+        }
+
+        let node_idx = left.len();
+        left.push(Child::Leaf(task.start));
+        right.push(Child::Leaf(task.start));
+
+        if let Some((parent, is_left)) = task.parent {
+            let child = Child::Internal(node_idx);
+            if is_left {
+                left[parent] = child;
+            } else {
+                right[parent] = child;
+            }
+        }
+
+        let mid = task.start + len / 2;
+        stack.push(Task {
+            start: mid,
+            end: task.end,
+            parent: Some((node_idx, false)),
+        });
+        stack.push(Task {
+            start: task.start,
+            end: mid,
+            parent: Some((node_idx, true)),
+        });
+    }
+
+    let mut internal_aabbs = vec![Aabb3D::new(Vec3::ZERO, Vec3::ZERO); left.len()];
+    for idx in (0..left.len()).rev() {
+        let la = match left[idx] {
+            Child::Leaf(i) => leaf_aabbs[i],
+            Child::Internal(i) => internal_aabbs[i],
+        };
+        let ra = match right[idx] {
+            Child::Leaf(i) => leaf_aabbs[i],
+            Child::Internal(i) => internal_aabbs[i],
+        };
+        internal_aabbs[idx] = aabb_union(&la, &ra);
+    }
+
+    children_to_gpu_nodes(&left, &right, &internal_aabbs)
+}
+
 /// Build Karras tree + refit on CPU. Returns (internal_nodes, leaf_aabbs_sorted).
 fn build_tree_cpu(
     sorted_codes: &[u32],
@@ -309,69 +533,15 @@ fn build_tree_cpu(
         .map(|&idx| aabbs[idx as usize])
         .collect();
 
-    // Bottom-up refit
-    let mut internal_aabbs = vec![Aabb3D::new(Vec3::ZERO, Vec3::ZERO); num_internal];
-    fn refit(
-        idx: usize,
-        left: &[Child],
-        right: &[Child],
-        internal: &mut [Aabb3D],
-        leaves: &[Aabb3D],
-    ) -> Aabb3D {
-        let la = match left[idx] {
-            Child::Leaf(i) => leaves[i],
-            Child::Internal(i) => refit(i, left, right, internal, leaves),
-        };
-        let ra = match right[idx] {
-            Child::Leaf(i) => leaves[i],
-            Child::Internal(i) => refit(i, left, right, internal, leaves),
-        };
-        let combined = aabb_union(&la, &ra);
-        internal[idx] = combined;
-        combined
-    }
-    if num_internal > 0 {
-        refit(
-            0,
-            &internal_left,
-            &internal_right,
-            &mut internal_aabbs,
-            &leaf_aabbs,
-        );
-    }
-
-    // Convert to GPU format
-    let gpu_nodes: Vec<BvhNodeGpu> = (0..num_internal)
-        .map(|i| {
-            let left_val = match internal_left[i] {
-                Child::Leaf(l) => -(l as i32 + 1),
-                Child::Internal(l) => l as i32,
-            };
-            let right_val = match internal_right[i] {
-                Child::Leaf(r) => -(r as i32 + 1),
-                Child::Internal(r) => r as i32,
-            };
-            let aabb = internal_aabbs[i];
-            BvhNodeGpu {
-                aabb_min: [
-                    aabb.min_point().x,
-                    aabb.min_point().y,
-                    aabb.min_point().z,
-                    0.0,
-                ],
-                aabb_max: [
-                    aabb.max_point().x,
-                    aabb.max_point().y,
-                    aabb.max_point().z,
-                    0.0,
-                ],
-                left: left_val,
-                right: right_val,
-                _pad0: 0,
-                _pad1: 0,
-            }
-        })
-        .collect();
+    let gpu_nodes = if validate_internal_tree(&internal_left, &internal_right) {
+        if let Some(internal_aabbs) = refit_iterative(&internal_left, &internal_right, &leaf_aabbs) {
+            children_to_gpu_nodes(&internal_left, &internal_right, &internal_aabbs)
+        } else {
+            build_balanced_tree_cpu(&leaf_aabbs)
+        }
+    } else {
+        build_balanced_tree_cpu(&leaf_aabbs)
+    };
 
     (gpu_nodes, leaf_aabbs)
 }
@@ -551,21 +721,12 @@ impl GpuLbvh {
         }
         ctx.queue.submit(Some(encoder.finish()));
 
-        // Step 2: Radix sort Morton codes on GPU
-        let keys = self.morton_keys.download(ctx);
-        let vals = self.body_indices.download(ctx);
-        let entries: Vec<RadixSortEntry> = keys
-            .iter()
-            .zip(vals.iter())
-            .map(|(&k, &v)| RadixSortEntry { key: k, value: v })
-            .collect();
-        let mut sort_buf = GpuBuffer::<RadixSortEntry>::new(ctx, n);
-        sort_buf.upload(ctx, &entries);
-        self.radix_sort.sort(ctx, &mut sort_buf);
-        let entries = sort_buf.download(ctx);
-
-        let sorted_codes: Vec<u32> = entries.iter().map(|e| e.key).collect();
-        let sorted_indices: Vec<u32> = entries.iter().map(|e| e.value).collect();
+        // Step 2: Radix sort Morton codes entirely on GPU, then download the
+        // sorted keys/indices for the lightweight CPU tree build.
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        let sorted_codes = self.morton_keys.download(ctx);
+        let sorted_indices = self.body_indices.download(ctx);
 
         // Step 3: Build Karras tree on CPU (tree build is lightweight; sort was the expensive part)
         let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, cpu_aabbs);
@@ -637,6 +798,183 @@ impl GpuLbvh {
         }
         self.pairs_out.set_len(pair_count);
         let pairs = self.pairs_out.download(ctx);
+
+        let mut result: Vec<[u32; 2]> = pairs
+            .iter()
+            .take(pair_count as usize)
+            .map(|p| {
+                let (a, b) = if p.a < p.b { (p.a, p.b) } else { (p.b, p.a) };
+                [a, b]
+            })
+            .collect();
+        result.sort_unstable();
+        result.dedup();
+        result
+    }
+
+    /// Async variant for WASM/WebGPU callers that already have CPU AABBs.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn build_and_query_raw_async(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        cpu_aabbs: &[Aabb3D],
+        num_bodies: u32,
+    ) -> Vec<[u32; 2]> {
+        if num_bodies <= 1 {
+            return Vec::new();
+        }
+        let n = num_bodies as usize;
+
+        let mut scene_min = Vec3::splat(f32::MAX);
+        let mut scene_max = Vec3::splat(f32::NEG_INFINITY);
+        for aabb in cpu_aabbs {
+            scene_min = scene_min.min(aabb.min_point());
+            scene_max = scene_max.max(aabb.max_point());
+        }
+        let extent = scene_max - scene_min;
+        let inv_x = if extent.x > 1e-10 {
+            1.0 / extent.x
+        } else {
+            0.0
+        };
+        let inv_y = if extent.y > 1e-10 {
+            1.0 / extent.y
+        } else {
+            0.0
+        };
+        let inv_z = if extent.z > 1e-10 {
+            1.0 / extent.z
+        } else {
+            0.0
+        };
+
+        let params = MortonParams {
+            num_bodies,
+            scene_min_x: scene_min.x,
+            scene_min_y: scene_min.y,
+            scene_min_z: scene_min.z,
+            inv_extent_x: inv_x,
+            inv_extent_y: inv_y,
+            inv_extent_z: inv_z,
+            _pad: 0,
+        };
+        ctx.queue
+            .write_buffer(&self.morton_params_buf, 0, bytemuck::bytes_of(&params));
+        self.morton_keys.grow_if_needed(ctx, n);
+        self.body_indices.grow_if_needed(ctx, n);
+        self.morton_keys.set_len(num_bodies);
+        self.body_indices.set_len(num_bodies);
+
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("morton"),
+            layout: self.morton_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: aabb_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.morton_keys.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.body_indices.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.morton_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("morton"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.morton_kernel.pipeline());
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WG), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        let sorted_codes = self.morton_keys.download_async(ctx).await;
+        let sorted_indices = self.body_indices.download_async(ctx).await;
+
+        let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, cpu_aabbs);
+        if gpu_nodes.is_empty() {
+            return Vec::new();
+        }
+
+        self.internal_nodes.upload(ctx, &gpu_nodes);
+        self.leaf_aabbs_sorted.upload(ctx, &leaf_aabbs);
+        self.sorted_indices_buf.upload(ctx, &sorted_indices);
+
+        self.pair_counter.reset(ctx);
+        let max_pairs = (n * 8) as u32;
+        self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
+
+        let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
+        ctx.queue
+            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
+
+        let bg2 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("find_pairs"),
+            layout: self.find_pairs_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.sorted_indices_buf.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.internal_nodes.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.pairs_out.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.pair_counter.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.find_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("find_pairs"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.find_pairs_kernel.pipeline());
+            pass.set_bind_group(0, &bg2, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let pair_count = self.pair_counter.read_async(ctx).await.min(max_pairs);
+        if pair_count == 0 {
+            return Vec::new();
+        }
+
+        self.pairs_out.set_len(pair_count);
+        let pairs = self.pairs_out.download_async(ctx).await;
 
         let mut result: Vec<[u32; 2]> = pairs
             .iter()

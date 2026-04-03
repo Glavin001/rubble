@@ -26,7 +26,7 @@ const timingsEl = document.getElementById("timings")!;
 const TIMING_LABELS = [
   ["Upload",      "(CPU)"],
   ["Predict",     "(GPU)"],
-  ["Broadphase",  "(CPU)"],
+  ["Broadphase",  "(GPU+CPU)"],
   ["Narrowphase", "(GPU)"],
   ["Contacts",    "(GPU>CPU)"],
   ["Solve",       "(GPU)"],
@@ -168,7 +168,7 @@ function formatTimings(timings: Float32Array, renderMs: number): string {
       `  ${name.padEnd(11)} ${tag.padEnd(8)} ${ms.toFixed(2).padStart(6)} ms ${pct.toFixed(0).padStart(3)}%`
     );
   }
-  lines.push(`Render      (JS)     ${renderMs.toFixed(2).padStart(6)} ms`);
+  lines.push(`Render      (Canvas) ${renderMs.toFixed(2).padStart(6)} ms`);
   return lines.join("\n");
 }
 

@@ -3,7 +3,7 @@ use rubble_gpu::StepTimingsMs;
 const STAGE_LABELS: &[(&str, &str)] = &[
     ("Upload", "(CPU)"),
     ("Predict", "(GPU)"),
-    ("Broadphase", "(CPU)"),
+    ("Broadphase", "(GPU+CPU)"),
     ("Narrowphase", "(GPU)"),
     ("Contacts", "(GPU>CPU)"),
     ("Solve", "(GPU)"),

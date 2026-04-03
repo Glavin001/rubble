@@ -143,7 +143,7 @@ impl GpuRadixSort {
         let mut values = GpuBuffer::<u32>::new(ctx, n as usize);
         values.upload(ctx, &values_data);
 
-        self.sort_key_value(ctx, &mut keys, &mut values);
+        self.sort_key_value_in_place(ctx, &mut keys, &mut values);
 
         // Recombine into entries buffer
         let sorted_keys = keys.download(ctx);
@@ -157,7 +157,7 @@ impl GpuRadixSort {
     }
 
     /// Internal sort on separate key/value buffers.
-    fn sort_key_value(
+    pub fn sort_key_value_in_place(
         &self,
         ctx: &GpuContext,
         keys: &mut GpuBuffer<u32>,

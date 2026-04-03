@@ -46,16 +46,17 @@ struct Pair {
 };
 
 struct Contact {
-    point:      vec4<f32>,
-    normal:     vec4<f32>,
-    body_a:     u32,
-    body_b:     u32,
-    feature_id: u32,
-    _pad:       u32,
-    lambda_n:   f32,
-    lambda_t1:  f32,
-    lambda_t2:  f32,
-    penalty_k:  f32,
+    point:          vec4<f32>,
+    normal:         vec4<f32>,
+    tangent:        vec4<f32>,
+    local_anchor_a: vec4<f32>,
+    local_anchor_b: vec4<f32>,
+    lambda:         vec4<f32>,
+    penalty:        vec4<f32>,
+    body_a:         u32,
+    body_b:         u32,
+    feature_id:     u32,
+    flags:          u32,
 };
 
 struct SimParams {
@@ -121,28 +122,83 @@ fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
          + 2.0 * s * cross(u, v);
 }
 
+fn quat_conj(q: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(-q.x, -q.y, -q.z, q.w);
+}
+
+fn build_tangent(normal: vec3<f32>) -> vec3<f32> {
+    let axis = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(normal.z) > 0.707);
+    return normalize(cross(axis, normal));
+}
+
 fn emit_contact(
     point: vec3<f32>,
     normal: vec3<f32>,
     depth: f32,
     body_a: u32,
     body_b: u32,
+    feature_id: u32,
     max_contacts: u32,
 ) {
     let slot = atomicAdd(&contact_count, 1u);
     if slot >= max_contacts {
         return;
     }
+    let tangent = build_tangent(normal);
+    let pos_a = bodies[body_a].position_inv_mass.xyz;
+    let pos_b = bodies[body_b].position_inv_mass.xyz;
+    let q_a = bodies[body_a].orientation;
+    let q_b = bodies[body_b].orientation;
+    let world_a = point + normal * depth * 0.5;
+    let world_b = point - normal * depth * 0.5;
+    let local_a = quat_rotate(quat_conj(q_a), world_a - pos_a);
+    let local_b = quat_rotate(quat_conj(q_b), world_b - pos_b);
     contacts[slot].point  = vec4<f32>(point, depth);
     contacts[slot].normal = vec4<f32>(normal, 0.0);
+    contacts[slot].tangent = vec4<f32>(tangent, 0.0);
+    contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
+    contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
+    contacts[slot].lambda = vec4<f32>(0.0);
+    contacts[slot].penalty = vec4<f32>(1e4, 1e4, 1e4, 0.0);
     contacts[slot].body_a = body_a;
     contacts[slot].body_b = body_b;
-    contacts[slot].feature_id = 0u;
-    contacts[slot]._pad = 0u;
-    contacts[slot].lambda_n = 0.0;
-    contacts[slot].lambda_t1 = 0.0;
-    contacts[slot].lambda_t2 = 0.0;
-    contacts[slot].penalty_k = 1e4;
+    contacts[slot].feature_id = feature_id;
+    contacts[slot].flags = 0u;
+}
+
+fn emit_plane_contact(
+    plane_point: vec3<f32>,
+    normal: vec3<f32>,
+    depth: f32,
+    body_dynamic: u32,
+    body_plane: u32,
+    feature_id: u32,
+    max_contacts: u32,
+) {
+    let slot = atomicAdd(&contact_count, 1u);
+    if slot >= max_contacts {
+        return;
+    }
+    let tangent = build_tangent(normal);
+    let pos_a = bodies[body_dynamic].position_inv_mass.xyz;
+    let pos_b = bodies[body_plane].position_inv_mass.xyz;
+    let q_a = bodies[body_dynamic].orientation;
+    let q_b = bodies[body_plane].orientation;
+    let world_a = plane_point + normal * depth;
+    let world_b = plane_point;
+    let local_a = quat_rotate(quat_conj(q_a), world_a - pos_a);
+    let local_b = quat_rotate(quat_conj(q_b), world_b - pos_b);
+    contacts[slot].point = vec4<f32>((world_a + world_b) * 0.5, depth);
+    contacts[slot].normal = vec4<f32>(normal, 0.0);
+    contacts[slot].tangent = vec4<f32>(tangent, 0.0);
+    contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
+    contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
+    contacts[slot].lambda = vec4<f32>(0.0);
+    contacts[slot].penalty = vec4<f32>(1e4, 1e4, 1e4, 0.0);
+    contacts[slot].body_a = body_dynamic;
+    contacts[slot].body_b = body_plane;
+    contacts[slot].feature_id = feature_id;
+    contacts[slot].flags = 0u;
 }
 
 // ---------- Closest point on segment ----------
@@ -218,10 +274,10 @@ fn sphere_sphere_test(
         return;
     }
     let dist = sqrt(dist2);
-    let normal = diff / dist;
+    let normal = -diff / dist;
     let depth = dist - sum_r;
-    let point = pos_a + normal * (radius_a + depth * 0.5);
-    emit_contact(point, normal, depth, body_a, body_b, max_contacts);
+    let point = pos_a - normal * (radius_a + depth * 0.5);
+    emit_contact(point, normal, depth, body_a, body_b, 1u, max_contacts);
 }
 
 // ---------- Sphere-Box ----------
@@ -262,9 +318,9 @@ fn sphere_box_test(
         depth = -(min_dist + radius);
     }
 
-    let normal_world = -quat_rotate(box_rot, normal_local);
-    let contact_point = sphere_pos + normal_world * (radius + depth * 0.5);
-    emit_contact(contact_point, normal_world, depth, body_sphere, body_box, max_contacts);
+    let normal_world = quat_rotate(box_rot, normal_local);
+    let contact_point = sphere_pos - normal_world * (radius + depth * 0.5);
+    emit_contact(contact_point, normal_world, depth, body_sphere, body_box, 1u, max_contacts);
 }
 
 // ---------- Sutherland-Hodgman polygon clipping ----------
@@ -581,7 +637,8 @@ fn box_box_test(
         let edge_b_end   = edge_mid_b + axes_b[best_edge_b] * he_bb[best_edge_b];
         let pts = closest_points_segments(edge_a_start, edge_a_end, edge_b_start, edge_b_end);
         let contact_point = (pts[0] + pts[1]) * 0.5;
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        let feature = 0x02000000u | ((best_edge_a & 0xFFu) << 8u) | (best_edge_b & 0xFFu);
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, feature, max_contacts);
         return;
     }
 
@@ -691,7 +748,12 @@ fn box_box_test(
     let emit_count = reduce_manifold(&final_points, &final_depths, final_count, ref_face_normal, &out_points, &out_depths);
 
     for (var i = 0u; i < emit_count; i = i + 1u) {
-        emit_contact(out_points[i], best_normal, out_depths[i], body_a, body_b, max_contacts);
+        let feature =
+            ((best_axis_type & 0xFFu) << 24u) |
+            ((ref_face & 0xFFu) << 16u) |
+            ((inc_face & 0xFFu) << 8u) |
+            (i & 0xFFu);
+        emit_contact(out_points[i], best_normal, out_depths[i], body_a, body_b, feature, max_contacts);
     }
 }
 
@@ -767,24 +829,26 @@ fn capsule_hull_test(
 fn plane_sphere_test(
     plane_normal: vec3<f32>, plane_dist: f32,
     sphere_pos: vec3<f32>, sphere_r: f32,
-    body_plane: u32, body_sphere: u32,
+    body_sphere: u32, body_plane: u32,
     max_contacts: u32,
 ) {
     let d = dot(plane_normal, sphere_pos) - plane_dist;
     if d >= sphere_r {
         return;
     }
-    let depth = -(sphere_r - d);
-    let point = sphere_pos - plane_normal * d;
-    emit_contact(point, plane_normal, depth, body_plane, body_sphere, max_contacts);
+    let normal = plane_normal;
+    let depth = d - sphere_r;
+    let plane_point = sphere_pos - plane_normal * d;
+    emit_plane_contact(plane_point, normal, depth, body_sphere, body_plane, 1u, max_contacts);
 }
 
 fn plane_box_test(
     plane_normal: vec3<f32>, plane_dist: f32,
     box_pos: vec3<f32>, box_rot: vec4<f32>, half_ext: vec3<f32>,
-    body_plane: u32, body_box: u32,
+    body_box: u32, body_plane: u32,
     max_contacts: u32,
 ) {
+    let normal = plane_normal;
     // Test 8 box vertices against plane
     let signs = array<vec3<f32>, 8>(
         vec3<f32>(-1.0, -1.0, -1.0),
@@ -801,8 +865,9 @@ fn plane_box_test(
         let world_v = box_pos + quat_rotate(box_rot, local_v);
         let d = dot(plane_normal, world_v) - plane_dist;
         if d < 0.0 {
-            let point = world_v - plane_normal * d;
-            emit_contact(point, plane_normal, d, body_plane, body_box, max_contacts);
+            let plane_point = world_v - plane_normal * d;
+            let feature = 0x05000000u | i;
+            emit_plane_contact(plane_point, normal, d, body_box, body_plane, feature, max_contacts);
         }
     }
 }
@@ -810,23 +875,24 @@ fn plane_box_test(
 fn plane_capsule_test(
     plane_normal: vec3<f32>, plane_dist: f32,
     cap_pos: vec3<f32>, cap_rot: vec4<f32>, cap_hh: f32, cap_r: f32,
-    body_plane: u32, body_capsule: u32,
+    body_capsule: u32, body_plane: u32,
     max_contacts: u32,
 ) {
     let axis = quat_rotate(cap_rot, vec3<f32>(0.0, 1.0, 0.0));
     let seg_a = cap_pos - axis * cap_hh;
     let seg_b = cap_pos + axis * cap_hh;
     // Test both endpoints as spheres
-    plane_sphere_test(plane_normal, plane_dist, seg_a, cap_r, body_plane, body_capsule, max_contacts);
-    plane_sphere_test(plane_normal, plane_dist, seg_b, cap_r, body_plane, body_capsule, max_contacts);
+    plane_sphere_test(plane_normal, plane_dist, seg_a, cap_r, body_capsule, body_plane, max_contacts);
+    plane_sphere_test(plane_normal, plane_dist, seg_b, cap_r, body_capsule, body_plane, max_contacts);
 }
 
 fn plane_hull_test(
     plane_normal: vec3<f32>, plane_dist: f32,
     hull_pos: vec3<f32>, hull_rot: vec4<f32>, hull_si: u32,
-    body_plane: u32, body_hull: u32,
+    body_hull: u32, body_plane: u32,
     max_contacts: u32,
 ) {
+    let normal = plane_normal;
     let hull = convex_hulls[hull_si];
     for (var i = 0u; i < hull.vertex_count; i = i + 1u) {
         let cv = convex_verts[hull.vertex_offset + i];
@@ -834,8 +900,9 @@ fn plane_hull_test(
         let world_v = hull_pos + quat_rotate(hull_rot, local_v);
         let d = dot(plane_normal, world_v) - plane_dist;
         if d < 0.0 {
-            let point = world_v - plane_normal * d;
-            emit_contact(point, plane_normal, d, body_plane, body_hull, max_contacts);
+            let plane_point = world_v - plane_normal * d;
+            let feature = 0x06000000u | i;
+            emit_plane_contact(plane_point, normal, d, body_hull, body_plane, feature, max_contacts);
         }
     }
 }
@@ -995,7 +1062,8 @@ fn hull_hull_test(
         let eb1 = hull_world_vert(si_b, (best_edge_j + 1u) % nb, pos_b, rot_b);
         let pts = closest_points_segments(ea0, ea1, eb0, eb1);
         let contact_point = (pts[0] + pts[1]) * 0.5;
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        let feature = 0x07000000u | ((best_edge_i & 0xFFu) << 8u) | (best_edge_j & 0xFFu);
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, feature, max_contacts);
         return;
     }
 
@@ -1029,7 +1097,7 @@ fn hull_hull_test(
     if rn_len < 1e-12 {
         // Degenerate face, fall back to single contact
         let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, 0x08000000u, max_contacts);
         return;
     }
     ref_normal = ref_normal / rn_len;
@@ -1086,7 +1154,7 @@ fn hull_hull_test(
     if final_count == 0u {
         // Fallback: single contact at midpoint
         let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, max_contacts);
+        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, 0x09000000u, max_contacts);
         return;
     }
 
@@ -1096,7 +1164,8 @@ fn hull_hull_test(
     let emit_count = reduce_manifold(&final_points, &final_depths, final_count, best_normal, &out_points, &out_depths);
 
     for (var i = 0u; i < emit_count; i = i + 1u) {
-        emit_contact(out_points[i], best_normal, out_depths[i], body_a, body_b, max_contacts);
+        let feature = 0x0A000000u | ((i & 0xFFu) << 0u);
+        emit_contact(out_points[i], best_normal, out_depths[i], body_a, body_b, feature, max_contacts);
     }
 }
 
@@ -1152,7 +1221,7 @@ fn sphere_hull_test(
     let depth = -overlap;
     let normal = select(axis, -axis, dot(axis, sphere_pos - hull_pos) > 0.0);
     let contact_point = sphere_pos + normal * (radius + depth * 0.5);
-    emit_contact(contact_point, normal, depth, body_sphere, body_hull, max_contacts);
+    emit_contact(contact_point, normal, depth, body_sphere, body_hull, 1u, max_contacts);
 }
 
 // ---------- Box-Hull ----------
@@ -1219,7 +1288,7 @@ fn box_hull_test(
     }
 
     let contact_point = (box_pos + hull_pos) * 0.5 + best_normal * min_depth * 0.5;
-    emit_contact(contact_point, best_normal, min_depth, body_box, body_hull, max_contacts);
+    emit_contact(contact_point, best_normal, min_depth, body_box, body_hull, 0x0B000000u, max_contacts);
 }
 
 // ---------- Main dispatch ----------
@@ -1280,7 +1349,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if s1 == SHAPE_SPHERE && s2 == SHAPE_PLANE {
         let ra = spheres[i1].radius;
         let pd = plane_params.planes[i2];
-        plane_sphere_test(pd.xyz, pd.w, p1, ra, b2, b1, max_contacts);
+        plane_sphere_test(pd.xyz, pd.w, p1, ra, b1, b2, max_contacts);
     } else if s1 == SHAPE_BOX && s2 == SHAPE_BOX {
         let ha = boxes[i1].half_extents.xyz;
         let hb = boxes[i2].half_extents.xyz;
@@ -1295,7 +1364,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if s1 == SHAPE_BOX && s2 == SHAPE_PLANE {
         let ha = boxes[i1].half_extents.xyz;
         let pd = plane_params.planes[i2];
-        plane_box_test(pd.xyz, pd.w, p1, r1, ha, b2, b1, max_contacts);
+        plane_box_test(pd.xyz, pd.w, p1, r1, ha, b1, b2, max_contacts);
     } else if s1 == SHAPE_CAPSULE && s2 == SHAPE_CAPSULE {
         let ca = capsules[i1];
         let cb = capsules[i2];
@@ -1306,12 +1375,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if s1 == SHAPE_CAPSULE && s2 == SHAPE_PLANE {
         let cap = capsules[i1];
         let pd = plane_params.planes[i2];
-        plane_capsule_test(pd.xyz, pd.w, p1, r1, cap.half_height, cap.radius, b2, b1, max_contacts);
+        plane_capsule_test(pd.xyz, pd.w, p1, r1, cap.half_height, cap.radius, b1, b2, max_contacts);
     } else if s1 == SHAPE_CONVEX_HULL && s2 == SHAPE_CONVEX_HULL {
         hull_hull_test(p1, r1, i1, p2, r2, i2, b1, b2, max_contacts);
     } else if s1 == SHAPE_CONVEX_HULL && s2 == SHAPE_PLANE {
         let pd = plane_params.planes[i2];
-        plane_hull_test(pd.xyz, pd.w, p1, r1, i1, b2, b1, max_contacts);
+        plane_hull_test(pd.xyz, pd.w, p1, r1, i1, b1, b2, max_contacts);
     }
     // SHAPE_PLANE vs SHAPE_PLANE: no collision
 }

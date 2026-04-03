@@ -26,10 +26,7 @@ impl GpuDevice {
         //
         // For compatibility we provide this but the caller should be aware it
         // clones the Arc-backed wgpu handles (which is cheap).
-        GpuContext {
-            device: self.device.clone(),
-            queue: self.queue.clone(),
-        }
+        GpuContext::from_device_queue(self.device.clone(), self.queue.clone())
     }
 }
 
