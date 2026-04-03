@@ -164,7 +164,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         rhs = rhs + jn * f_n + jt * f_t;
     }
 
-    let delta = solve_sym_3x3(a00, a01, a02, a11, a12, a22, rhs);
+    var delta = solve_sym_3x3(a00, a01, a02, a11, a12, a22, rhs);
+
+    // Clamp corrections to prevent explosion from overcorrection.
+    let max_lin_corr = 2.0;
+    let lin_corr_len = length(delta.xy);
+    if lin_corr_len > max_lin_corr {
+        delta = vec3<f32>(delta.xy * (max_lin_corr / lin_corr_len), delta.z);
+    }
+    let max_ang_corr = 1.0;
+    delta.z = clamp(delta.z, -max_ang_corr, max_ang_corr);
+
     bodies[body_idx].position_inv_mass = vec4<f32>(pos - delta.xy, angle - delta.z, inv_mass);
 }
 "#;

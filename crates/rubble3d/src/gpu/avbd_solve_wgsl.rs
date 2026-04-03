@@ -351,7 +351,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         accumulate_row(jt2_lin, jt2_ang, k_t2, tang.y, &mtx, &rhs);
     }
 
-    let solution = solve_6x6(mtx, rhs);
+    var solution = solve_6x6(mtx, rhs);
+
+    // Clamp corrections to prevent explosion from overcorrection.
+    let max_lin_corr = 2.0;
+    let lin_corr_len = length(solution.lin);
+    if lin_corr_len > max_lin_corr {
+        solution.lin = solution.lin * (max_lin_corr / lin_corr_len);
+    }
+    let max_ang_corr = 1.0;
+    let ang_corr_len = length(solution.ang);
+    if ang_corr_len > max_ang_corr {
+        solution.ang = solution.ang * (max_ang_corr / ang_corr_len);
+    }
+
     bodies[body_idx].position_inv_mass = vec4<f32>(pos - solution.lin, inv_mass);
     bodies[body_idx].orientation = quat_mul(small_angle_quat(-solution.ang), q);
 }

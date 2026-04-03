@@ -254,3 +254,233 @@ fn demo_pyramid_stays_supported_by_floor_without_exploding_3d() {
         last
     );
 }
+
+// ---------------------------------------------------------------------------
+// Slanted grid — regression tests for explosion bug
+// ---------------------------------------------------------------------------
+
+/// Build a small slanted grid (4×8×4 = 128 boxes) that reproduces the
+/// explosion behavior of the full 12×22×12 demo scene at lower cost.
+fn build_slanted_grid_scene() -> Option<(World, Vec<TrackedBody3D>, Vec3)> {
+    let gravity = Vec3::new(0.0, -9.81, 0.0);
+    let mut world = try_world(SimConfig {
+        gravity,
+        max_bodies: 256,
+        ..Default::default()
+    })?;
+    let mut tracked = Vec::new();
+
+    // Ground plane
+    tracked.push(add_tracked_body(
+        &mut world,
+        "floor",
+        RigidBodyDesc {
+            position: Vec3::ZERO,
+            mass: 0.0,
+            shape: ShapeDesc::Plane {
+                normal: Vec3::Y,
+                distance: 0.0,
+            },
+            ..Default::default()
+        },
+    ));
+
+    const NX: usize = 4;
+    const NY: usize = 8;
+    const NZ: usize = 4;
+    let side = 0.42_f32;
+    let gap = 0.08_f32;
+    let pitch = side + gap;
+    let half = side * 0.5;
+    let ox = -((NX - 1) as f32 * pitch) * 0.5;
+    let oz = -((NZ - 1) as f32 * pitch) * 0.5;
+    let base_y = half + 0.03;
+    let layer_shift = Vec3::new(0.038, 0.0, 0.026);
+
+    for j in 0..NY {
+        let shift = layer_shift * j as f32;
+        for i in 0..NX {
+            for k in 0..NZ {
+                let x = ox + i as f32 * pitch + shift.x;
+                let y = base_y + j as f32 * pitch;
+                let z = oz + k as f32 * pitch + shift.z;
+                tracked.push(add_tracked_body(
+                    &mut world,
+                    "box",
+                    box_desc(x, y, z, side, side, side, 1.0, 0.5),
+                ));
+            }
+        }
+    }
+
+    Some((world, tracked, gravity))
+}
+
+/// Build a matching non-slanted grid (4×8×4) as a control baseline.
+fn build_regular_grid_scene() -> Option<(World, Vec<TrackedBody3D>, Vec3)> {
+    let gravity = Vec3::new(0.0, -9.81, 0.0);
+    let mut world = try_world(SimConfig {
+        gravity,
+        max_bodies: 256,
+        ..Default::default()
+    })?;
+    let mut tracked = Vec::new();
+
+    tracked.push(add_tracked_body(
+        &mut world,
+        "floor",
+        RigidBodyDesc {
+            position: Vec3::ZERO,
+            mass: 0.0,
+            shape: ShapeDesc::Plane {
+                normal: Vec3::Y,
+                distance: 0.0,
+            },
+            ..Default::default()
+        },
+    ));
+
+    const NX: usize = 4;
+    const NY: usize = 8;
+    const NZ: usize = 4;
+    let side = 0.42_f32;
+    let gap = 0.08_f32;
+    let pitch = side + gap;
+    let half = side * 0.5;
+    let ox = -((NX - 1) as f32 * pitch) * 0.5;
+    let oz = -((NZ - 1) as f32 * pitch) * 0.5;
+    let base_y = half + 0.03;
+
+    for j in 0..NY {
+        for i in 0..NX {
+            for k in 0..NZ {
+                let x = ox + i as f32 * pitch;
+                let y = base_y + j as f32 * pitch;
+                let z = oz + k as f32 * pitch;
+                tracked.push(add_tracked_body(
+                    &mut world,
+                    "box",
+                    box_desc(x, y, z, side, side, side, 1.0, 0.5),
+                ));
+            }
+        }
+    }
+
+    Some((world, tracked, gravity))
+}
+
+#[test]
+fn slanted_grid_boxes_stay_bounded() {
+    let Some((mut world, tracked, gravity)) = build_slanted_grid_scene() else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    let reports = collect_reports(&mut world, &tracked, gravity, 480);
+
+    // Check that no body has flown far from the origin (explosion detection).
+    let max_distance = reports
+        .iter()
+        .flat_map(|r| r.bodies.iter())
+        .filter(|b| b.mass > 0.0)
+        .map(|b| b.position.length())
+        .fold(0.0_f32, f32::max);
+
+    let last = reports.last().unwrap();
+    assert!(
+        max_distance < 50.0,
+        "slanted grid body flew too far from origin (explosion): max_distance={max_distance}\n{}",
+        last
+    );
+}
+
+#[test]
+fn slanted_grid_max_speed_stays_reasonable() {
+    let Some((mut world, tracked, gravity)) = build_slanted_grid_scene() else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    let reports = collect_reports(&mut world, &tracked, gravity, 480);
+
+    // After initial settling (first 60 frames), max speed should stay bounded.
+    // With explosion bug, speeds would exceed 50+ m/s.
+    let window = &reports[60..];
+    let tail_max_speed = window
+        .iter()
+        .map(|r| r.metrics.max_speed)
+        .fold(0.0_f32, f32::max);
+
+    let last = reports.last().unwrap();
+    assert!(
+        tail_max_speed < 30.0,
+        "slanted grid developed explosion-like speeds: tail_max_speed={tail_max_speed}\n{}",
+        last
+    );
+}
+
+#[test]
+fn slanted_grid_energy_does_not_diverge() {
+    let Some((mut world, tracked, gravity)) = build_slanted_grid_scene() else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    let reports = collect_reports(&mut world, &tracked, gravity, 480);
+
+    // Kinetic energy should not grow unbounded. With the explosion bug, KE
+    // would increase dramatically as boxes accelerate outward.
+    let initial_ke = reports[0].metrics.translational_ke + reports[0].metrics.rotational_ke;
+    let max_ke = reports
+        .iter()
+        .map(|r| r.metrics.translational_ke + r.metrics.rotational_ke)
+        .fold(0.0_f32, f32::max);
+
+    // Allow KE to grow from gravitational potential conversion, but not
+    // explosively. The initial PE for 128 boxes at various heights is large,
+    // so we use an absolute bound rather than relative.
+    let last = reports.last().unwrap();
+    assert!(
+        max_ke < 5000.0,
+        "slanted grid kinetic energy diverged (explosion): initial_ke={initial_ke}, max_ke={max_ke}\n{}",
+        last
+    );
+}
+
+#[test]
+fn slanted_grid_no_worse_than_regular_grid() {
+    let Some((mut slanted_world, slanted_tracked, gravity)) = build_slanted_grid_scene() else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+    let Some((mut grid_world, grid_tracked, _)) = build_regular_grid_scene() else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    let slanted_reports = collect_reports(&mut slanted_world, &slanted_tracked, gravity, 480);
+    let grid_reports = collect_reports(&mut grid_world, &grid_tracked, gravity, 480);
+
+    // Compare max speeds in the settling window (after frame 120).
+    let slanted_max = slanted_reports[120..]
+        .iter()
+        .map(|r| r.metrics.max_speed)
+        .fold(0.0_f32, f32::max);
+    let grid_max = grid_reports[120..]
+        .iter()
+        .map(|r| r.metrics.max_speed)
+        .fold(0.0_f32, f32::max);
+
+    // Slanted grid speeds should not be wildly higher than grid speeds.
+    // With the explosion bug, slanted_max would be 10-100× higher.
+    // Allow 5× margin for the expected slightly worse behavior of offset stacking.
+    let ratio = if grid_max > 0.01 {
+        slanted_max / grid_max
+    } else {
+        slanted_max
+    };
+    assert!(
+        ratio < 5.0,
+        "slanted grid is much worse than regular grid: slanted_max={slanted_max}, grid_max={grid_max}, ratio={ratio}"
+    );
+}

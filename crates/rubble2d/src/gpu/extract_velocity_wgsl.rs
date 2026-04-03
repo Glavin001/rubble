@@ -55,6 +55,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if abs(angle_delta) >= 1e-6 {
         ang_vel = angle_delta / dt;
     }
+    // Clamp velocities to prevent explosion from solver overcorrection.
+    let max_lin_speed = 100.0;
+    let lin_speed = length(lin_vel);
+    if lin_speed > max_lin_speed {
+        lin_vel = lin_vel * (max_lin_speed / lin_speed);
+    }
+    let max_ang_speed = 100.0;
+    ang_vel = clamp(ang_vel, -max_ang_speed, max_ang_speed);
+
     bodies[idx].lin_vel = vec4<f32>(lin_vel, ang_vel, 0.0);
 }
 "#;

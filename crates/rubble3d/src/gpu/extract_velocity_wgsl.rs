@@ -79,6 +79,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         omega_new = bodies[idx].ang_vel.xyz;
     }
 
+    // Clamp velocities to prevent explosion from solver overcorrection.
+    let max_lin_speed = 100.0;
+    let lin_speed = length(lin_vel);
+    if lin_speed > max_lin_speed {
+        lin_vel = lin_vel * (max_lin_speed / lin_speed);
+    }
+    let max_ang_speed = 100.0;
+    let ang_speed = length(omega_new);
+    if ang_speed > max_ang_speed {
+        omega_new = omega_new * (max_ang_speed / ang_speed);
+    }
+
     bodies[idx].lin_vel = vec4<f32>(lin_vel, 0.0);
     bodies[idx].ang_vel = vec4<f32>(omega_new, 0.0);
 }
