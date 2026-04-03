@@ -1967,4 +1967,57 @@ mod tests {
         assert!(root.aabb_min[1] <= 0.0);
         assert!(root.aabb_max[1] >= 1.0);
     }
+
+    // -----------------------------------------------------------------------
+    // WGSL shader validation — catches shader bugs before they reach WebGPU
+    // -----------------------------------------------------------------------
+
+    fn validate_wgsl(name: &str, source: &str) {
+        let module = match naga::front::wgsl::parse_str(source) {
+            Ok(m) => m,
+            Err(e) => panic!("{name}: WGSL parse error:\n{e}"),
+        };
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        if let Err(e) = validator.validate(&module) {
+            panic!("{name}: WGSL validation error:\n{e}");
+        }
+    }
+
+    #[test]
+    fn validate_scene_bounds_reduce_wgsl() {
+        validate_wgsl("SCENE_BOUNDS_REDUCE_WGSL", SCENE_BOUNDS_REDUCE_WGSL);
+    }
+
+    #[test]
+    fn validate_morton_3d_wgsl() {
+        validate_wgsl("MORTON_3D_WGSL", MORTON_3D_WGSL);
+    }
+
+    #[test]
+    fn validate_gather_sorted_leaf_aabbs_wgsl() {
+        validate_wgsl("GATHER_SORTED_LEAF_AABBS_WGSL", GATHER_SORTED_LEAF_AABBS_WGSL);
+    }
+
+    #[test]
+    fn validate_find_pairs_wgsl() {
+        validate_wgsl("FIND_PAIRS_WGSL", FIND_PAIRS_WGSL);
+    }
+
+    #[test]
+    fn validate_find_pairs_gpu_tree_wgsl() {
+        validate_wgsl("FIND_PAIRS_GPU_TREE_WGSL", FIND_PAIRS_GPU_TREE_WGSL);
+    }
+
+    #[test]
+    fn validate_karras_build_wgsl() {
+        validate_wgsl("KARRAS_BUILD_WGSL", KARRAS_BUILD_WGSL);
+    }
+
+    #[test]
+    fn validate_refit_wgsl() {
+        validate_wgsl("REFIT_WGSL", REFIT_WGSL);
+    }
 }
