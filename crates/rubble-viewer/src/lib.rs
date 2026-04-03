@@ -15,6 +15,17 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+const CONTROLS_3D: &[&str] = &[
+    "Rotate camera: left drag",
+    "Pan camera: right or middle drag",
+    "Zoom camera: mouse wheel",
+];
+
+const CONTROLS_2D: &[&str] = &[
+    "Pan view: left drag",
+    "Zoom view: mouse wheel",
+];
+
 // ---------------------------------------------------------------------------
 // Shape tracking (mirrors rubble-wasm bookkeeping)
 // ---------------------------------------------------------------------------
@@ -34,101 +45,223 @@ enum ShapeInfo2D {
     Capsule { half_height: f32, radius: f32 },
 }
 
+struct Scene3D {
+    name: String,
+    descs: Vec<(rubble3d::RigidBodyDesc, ShapeInfo3D)>,
+}
+
+impl Scene3D {
+    fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            descs: Vec::new(),
+        }
+    }
+}
+
+struct Scene2D {
+    name: String,
+    descs: Vec<(rubble2d::RigidBodyDesc2D, ShapeInfo2D)>,
+}
+
+impl Scene2D {
+    fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            descs: Vec::new(),
+        }
+    }
+}
+
+fn shape_info_3d(shape: &rubble3d::ShapeDesc) -> ShapeInfo3D {
+    match shape {
+        rubble3d::ShapeDesc::Sphere { radius } => ShapeInfo3D::Sphere { radius: *radius },
+        rubble3d::ShapeDesc::Box { half_extents } => ShapeInfo3D::Box {
+            half_extents: *half_extents,
+        },
+        rubble3d::ShapeDesc::Capsule {
+            half_height,
+            radius,
+        } => ShapeInfo3D::Capsule {
+            half_height: *half_height,
+            radius: *radius,
+        },
+        rubble3d::ShapeDesc::Plane { .. } => ShapeInfo3D::Plane,
+        _ => panic!("Viewer3D does not support rendering this shape descriptor"),
+    }
+}
+
+fn shape_info_2d(shape: &rubble2d::ShapeDesc2D) -> ShapeInfo2D {
+    match shape {
+        rubble2d::ShapeDesc2D::Circle { radius } => ShapeInfo2D::Circle { radius: *radius },
+        rubble2d::ShapeDesc2D::Rect { half_extents } => ShapeInfo2D::Rect {
+            half_extents: *half_extents,
+        },
+        rubble2d::ShapeDesc2D::Capsule {
+            half_height,
+            radius,
+        } => ShapeInfo2D::Capsule {
+            half_height: *half_height,
+            radius: *radius,
+        },
+        _ => panic!("Viewer2D does not support rendering this shape descriptor"),
+    }
+}
+
+fn build_world_3d(
+    gravity: Vec3,
+    scene: &Scene3D,
+) -> (rubble3d::World, Vec<BodyHandle>, Vec<ShapeInfo3D>) {
+    let config = rubble3d::SimConfig {
+        gravity,
+        ..Default::default()
+    };
+    let mut world = rubble3d::World::new(config).expect("GPU physics init failed");
+    let mut handles = Vec::with_capacity(scene.descs.len());
+    let mut shapes = Vec::with_capacity(scene.descs.len());
+    for (desc, shape) in &scene.descs {
+        handles.push(world.add_body(desc));
+        shapes.push(shape.clone());
+    }
+    (world, handles, shapes)
+}
+
+fn build_world_2d(
+    gravity: Vec2,
+    scene: &Scene2D,
+) -> (rubble2d::World2D, Vec<BodyHandle>, Vec<ShapeInfo2D>) {
+    let config = rubble2d::SimConfig2D {
+        gravity,
+        ..Default::default()
+    };
+    let mut world = rubble2d::World2D::new(config).expect("GPU physics init failed");
+    let mut handles = Vec::with_capacity(scene.descs.len());
+    let mut shapes = Vec::with_capacity(scene.descs.len());
+    for (desc, shape) in &scene.descs {
+        handles.push(world.add_body(desc));
+        shapes.push(shape.clone());
+    }
+    (world, handles, shapes)
+}
+
 // ---------------------------------------------------------------------------
 // Viewer3D
 // ---------------------------------------------------------------------------
 
 pub struct Viewer3D {
     gravity: Vec3,
-    descs: Vec<(rubble3d::RigidBodyDesc, ShapeInfo3D)>,
+    scenes: Vec<Scene3D>,
+    initial_scene: usize,
 }
 
 impl Viewer3D {
     pub fn new(gx: f32, gy: f32, gz: f32) -> Self {
         Self {
             gravity: Vec3::new(gx, gy, gz),
-            descs: Vec::new(),
+            scenes: Vec::new(),
+            initial_scene: 0,
         }
     }
 
+    fn ensure_default_scene(&mut self) -> usize {
+        if self.scenes.is_empty() {
+            self.scenes.push(Scene3D::new("Scene"));
+            self.initial_scene = 0;
+        }
+        0
+    }
+
+    pub fn add_scene(&mut self, name: impl Into<String>) -> usize {
+        self.scenes.push(Scene3D::new(name));
+        self.scenes.len() - 1
+    }
+
+    pub fn add_scene_descs<I>(&mut self, name: impl Into<String>, descs: I) -> usize
+    where
+        I: IntoIterator<Item = rubble3d::RigidBodyDesc>,
+    {
+        let scene_idx = self.add_scene(name);
+        for desc in descs {
+            self.add_body_desc_to_scene(scene_idx, desc);
+        }
+        scene_idx
+    }
+
+    pub fn set_initial_scene(&mut self, scene_idx: usize) {
+        assert!(
+            scene_idx < self.scenes.len(),
+            "initial scene index out of bounds"
+        );
+        self.initial_scene = scene_idx;
+    }
+
+    pub fn add_body_desc(&mut self, desc: rubble3d::RigidBodyDesc) {
+        let scene_idx = self.ensure_default_scene();
+        self.add_body_desc_to_scene(scene_idx, desc);
+    }
+
+    pub fn add_body_desc_to_scene(&mut self, scene_idx: usize, desc: rubble3d::RigidBodyDesc) {
+        let shape = shape_info_3d(&desc.shape);
+        self.scenes[scene_idx].descs.push((desc, shape));
+    }
+
     pub fn add_sphere(&mut self, x: f32, y: f32, z: f32, radius: f32) {
-        self.descs.push((
-            rubble3d::RigidBodyDesc {
-                position: Vec3::new(x, y, z),
-                mass: 1.0,
-                shape: rubble3d::ShapeDesc::Sphere { radius },
-                ..Default::default()
-            },
-            ShapeInfo3D::Sphere { radius },
-        ));
+        self.add_body_desc(rubble3d::RigidBodyDesc {
+            position: Vec3::new(x, y, z),
+            mass: 1.0,
+            shape: rubble3d::ShapeDesc::Sphere { radius },
+            ..Default::default()
+        });
     }
 
     pub fn add_box(&mut self, x: f32, y: f32, z: f32, hw: f32, hh: f32, hd: f32) {
-        self.descs.push((
-            rubble3d::RigidBodyDesc {
-                position: Vec3::new(x, y, z),
-                mass: 1.0,
-                shape: rubble3d::ShapeDesc::Box {
-                    half_extents: Vec3::new(hw, hh, hd),
-                },
-                ..Default::default()
-            },
-            ShapeInfo3D::Box {
+        self.add_body_desc(rubble3d::RigidBodyDesc {
+            position: Vec3::new(x, y, z),
+            mass: 1.0,
+            shape: rubble3d::ShapeDesc::Box {
                 half_extents: Vec3::new(hw, hh, hd),
             },
-        ));
+            ..Default::default()
+        });
     }
 
     pub fn add_capsule(&mut self, x: f32, y: f32, z: f32, half_height: f32, radius: f32) {
-        self.descs.push((
-            rubble3d::RigidBodyDesc {
-                position: Vec3::new(x, y, z),
-                mass: 1.0,
-                shape: rubble3d::ShapeDesc::Capsule {
-                    half_height,
-                    radius,
-                },
-                ..Default::default()
-            },
-            ShapeInfo3D::Capsule {
+        self.add_body_desc(rubble3d::RigidBodyDesc {
+            position: Vec3::new(x, y, z),
+            mass: 1.0,
+            shape: rubble3d::ShapeDesc::Capsule {
                 half_height,
                 radius,
             },
-        ));
+            ..Default::default()
+        });
     }
 
     pub fn add_ground_plane(&mut self, y: f32) {
-        self.descs.push((
-            rubble3d::RigidBodyDesc {
-                position: Vec3::ZERO,
-                mass: 0.0,
-                shape: rubble3d::ShapeDesc::Plane {
-                    normal: Vec3::Y,
-                    distance: y,
-                },
-                ..Default::default()
+        self.add_body_desc(rubble3d::RigidBodyDesc {
+            position: Vec3::ZERO,
+            mass: 0.0,
+            shape: rubble3d::ShapeDesc::Plane {
+                normal: Vec3::Y,
+                distance: y,
             },
-            ShapeInfo3D::Plane,
-        ));
+            ..Default::default()
+        });
     }
 
     pub fn add_static_box(&mut self, x: f32, y: f32, z: f32, hw: f32, hh: f32, hd: f32) {
-        self.descs.push((
-            rubble3d::RigidBodyDesc {
-                position: Vec3::new(x, y, z),
-                mass: 0.0,
-                shape: rubble3d::ShapeDesc::Box {
-                    half_extents: Vec3::new(hw, hh, hd),
-                },
-                ..Default::default()
-            },
-            ShapeInfo3D::Box {
+        self.add_body_desc(rubble3d::RigidBodyDesc {
+            position: Vec3::new(x, y, z),
+            mass: 0.0,
+            shape: rubble3d::ShapeDesc::Box {
                 half_extents: Vec3::new(hw, hh, hd),
             },
-        ));
+            ..Default::default()
+        });
     }
 
-    pub fn run(self) {
+    pub fn run(mut self) {
+        self.ensure_default_scene();
         let event_loop = EventLoop::new().expect("Failed to create event loop");
         let mut app = App3D {
             viewer: self,
@@ -144,6 +277,8 @@ struct State3D {
     world: rubble3d::World,
     handles: Vec<BodyHandle>,
     shapes: Vec<ShapeInfo3D>,
+    scene_names: Vec<String>,
+    current_scene: usize,
     camera: OrbitCamera,
     draw_list: DrawList,
     mouse_pressed: bool,
@@ -178,18 +313,15 @@ impl ApplicationHandler for App3D {
         );
         let renderer = pollster::block_on(Renderer::new(window.clone()));
 
-        let config = rubble3d::SimConfig {
-            gravity: self.viewer.gravity,
-            ..Default::default()
-        };
-        let mut world = rubble3d::World::new(config).expect("GPU physics init failed");
-        let mut handles = Vec::new();
-        let mut shapes = Vec::new();
-
-        for (desc, shape) in &self.viewer.descs {
-            handles.push(world.add_body(desc));
-            shapes.push(shape.clone());
-        }
+        let current_scene = self.viewer.initial_scene;
+        let (world, handles, shapes) =
+            build_world_3d(self.viewer.gravity, &self.viewer.scenes[current_scene]);
+        let scene_names = self
+            .viewer
+            .scenes
+            .iter()
+            .map(|scene| scene.name.clone())
+            .collect();
 
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
@@ -207,6 +339,8 @@ impl ApplicationHandler for App3D {
             world,
             handles,
             shapes,
+            scene_names,
+            current_scene,
             camera: OrbitCamera::default(),
             draw_list: DrawList::default(),
             mouse_pressed: false,
@@ -291,17 +425,8 @@ impl App3D {
                 if event.state == ElementState::Pressed
                     && event.logical_key == Key::Character("r".into()) =>
             {
-                let config = rubble3d::SimConfig {
-                    gravity: self.viewer.gravity,
-                    ..Default::default()
-                };
-                let mut world = rubble3d::World::new(config).expect("GPU physics init failed");
-                let mut handles = Vec::new();
-                let mut shapes = Vec::new();
-                for (desc, shape) in &self.viewer.descs {
-                    handles.push(world.add_body(desc));
-                    shapes.push(shape.clone());
-                }
+                let (world, handles, shapes) =
+                    build_world_3d(self.viewer.gravity, &self.viewer.scenes[state.current_scene]);
                 state.world = world;
                 state.handles = handles;
                 state.shapes = shapes;
@@ -364,15 +489,30 @@ impl App3D {
                 }
 
                 let raw_input = state.egui_state.take_egui_input(&state.window);
+                let mut selected_scene = state.current_scene;
+                let mut reset_requested = false;
                 let full_output = state.egui_ctx.run_ui(raw_input, |ctx| {
-                    overlay::draw_stats(
+                    overlay::draw_panel(
                         ctx,
+                        "Rubble 3D Viewer",
+                        CONTROLS_3D,
+                        &state.scene_names,
+                        &mut selected_scene,
+                        &mut reset_requested,
                         state.fps,
                         state.handles.len(),
                         &timings,
                         state.render_ms,
                     );
                 });
+                if selected_scene != state.current_scene || reset_requested {
+                    let (world, handles, shapes) =
+                        build_world_3d(self.viewer.gravity, &self.viewer.scenes[selected_scene]);
+                    state.world = world;
+                    state.handles = handles;
+                    state.shapes = shapes;
+                    state.current_scene = selected_scene;
+                }
                 state
                     .egui_state
                     .handle_platform_output(&state.window, full_output.platform_output);
@@ -414,46 +554,82 @@ impl App3D {
 
 pub struct Viewer2D {
     gravity: Vec2,
-    descs: Vec<(rubble2d::RigidBodyDesc2D, ShapeInfo2D)>,
+    scenes: Vec<Scene2D>,
+    initial_scene: usize,
 }
 
 impl Viewer2D {
     pub fn new(gx: f32, gy: f32) -> Self {
         Self {
             gravity: Vec2::new(gx, gy),
-            descs: Vec::new(),
+            scenes: Vec::new(),
+            initial_scene: 0,
         }
     }
 
+    fn ensure_default_scene(&mut self) -> usize {
+        if self.scenes.is_empty() {
+            self.scenes.push(Scene2D::new("Scene"));
+            self.initial_scene = 0;
+        }
+        0
+    }
+
+    pub fn add_scene(&mut self, name: impl Into<String>) -> usize {
+        self.scenes.push(Scene2D::new(name));
+        self.scenes.len() - 1
+    }
+
+    pub fn add_scene_descs<I>(&mut self, name: impl Into<String>, descs: I) -> usize
+    where
+        I: IntoIterator<Item = rubble2d::RigidBodyDesc2D>,
+    {
+        let scene_idx = self.add_scene(name);
+        for desc in descs {
+            self.add_body_desc_to_scene(scene_idx, desc);
+        }
+        scene_idx
+    }
+
+    pub fn set_initial_scene(&mut self, scene_idx: usize) {
+        assert!(
+            scene_idx < self.scenes.len(),
+            "initial scene index out of bounds"
+        );
+        self.initial_scene = scene_idx;
+    }
+
+    pub fn add_body_desc(&mut self, desc: rubble2d::RigidBodyDesc2D) {
+        let scene_idx = self.ensure_default_scene();
+        self.add_body_desc_to_scene(scene_idx, desc);
+    }
+
+    pub fn add_body_desc_to_scene(&mut self, scene_idx: usize, desc: rubble2d::RigidBodyDesc2D) {
+        let shape = shape_info_2d(&desc.shape);
+        self.scenes[scene_idx].descs.push((desc, shape));
+    }
+
     pub fn add_circle(&mut self, x: f32, y: f32, radius: f32) {
-        self.descs.push((
-            rubble2d::RigidBodyDesc2D {
-                x,
-                y,
-                mass: 1.0,
-                shape: rubble2d::ShapeDesc2D::Circle { radius },
-                ..Default::default()
-            },
-            ShapeInfo2D::Circle { radius },
-        ));
+        self.add_body_desc(rubble2d::RigidBodyDesc2D {
+            x,
+            y,
+            mass: 1.0,
+            shape: rubble2d::ShapeDesc2D::Circle { radius },
+            ..Default::default()
+        });
     }
 
     pub fn add_rect(&mut self, x: f32, y: f32, hw: f32, hh: f32, angle: f32, mass: f32) {
-        self.descs.push((
-            rubble2d::RigidBodyDesc2D {
-                x,
-                y,
-                angle,
-                mass,
-                shape: rubble2d::ShapeDesc2D::Rect {
-                    half_extents: Vec2::new(hw, hh),
-                },
-                ..Default::default()
-            },
-            ShapeInfo2D::Rect {
+        self.add_body_desc(rubble2d::RigidBodyDesc2D {
+            x,
+            y,
+            angle,
+            mass,
+            shape: rubble2d::ShapeDesc2D::Rect {
                 half_extents: Vec2::new(hw, hh),
             },
-        ));
+            ..Default::default()
+        });
     }
 
     pub fn add_static_rect(&mut self, x: f32, y: f32, hw: f32, hh: f32, angle: f32) {
@@ -461,25 +637,20 @@ impl Viewer2D {
     }
 
     pub fn add_capsule(&mut self, x: f32, y: f32, half_height: f32, radius: f32) {
-        self.descs.push((
-            rubble2d::RigidBodyDesc2D {
-                x,
-                y,
-                mass: 1.0,
-                shape: rubble2d::ShapeDesc2D::Capsule {
-                    half_height,
-                    radius,
-                },
-                ..Default::default()
-            },
-            ShapeInfo2D::Capsule {
+        self.add_body_desc(rubble2d::RigidBodyDesc2D {
+            x,
+            y,
+            mass: 1.0,
+            shape: rubble2d::ShapeDesc2D::Capsule {
                 half_height,
                 radius,
             },
-        ));
+            ..Default::default()
+        });
     }
 
-    pub fn run(self) {
+    pub fn run(mut self) {
+        self.ensure_default_scene();
         let event_loop = EventLoop::new().expect("Failed to create event loop");
         let mut app = App2D {
             viewer: self,
@@ -495,6 +666,8 @@ struct State2D {
     world: rubble2d::World2D,
     handles: Vec<BodyHandle>,
     shapes: Vec<ShapeInfo2D>,
+    scene_names: Vec<String>,
+    current_scene: usize,
     camera: Camera2D,
     draw_list: DrawList,
     mouse_pressed: bool,
@@ -528,18 +701,15 @@ impl ApplicationHandler for App2D {
         );
         let renderer = pollster::block_on(Renderer::new(window.clone()));
 
-        let config = rubble2d::SimConfig2D {
-            gravity: self.viewer.gravity,
-            ..Default::default()
-        };
-        let mut world = rubble2d::World2D::new(config).expect("GPU physics init failed");
-        let mut handles = Vec::new();
-        let mut shapes = Vec::new();
-
-        for (desc, shape) in &self.viewer.descs {
-            handles.push(world.add_body(desc));
-            shapes.push(shape.clone());
-        }
+        let current_scene = self.viewer.initial_scene;
+        let (world, handles, shapes) =
+            build_world_2d(self.viewer.gravity, &self.viewer.scenes[current_scene]);
+        let scene_names = self
+            .viewer
+            .scenes
+            .iter()
+            .map(|scene| scene.name.clone())
+            .collect();
 
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
@@ -557,6 +727,8 @@ impl ApplicationHandler for App2D {
             world,
             handles,
             shapes,
+            scene_names,
+            current_scene,
             camera: Camera2D::default(),
             draw_list: DrawList::default(),
             mouse_pressed: false,
@@ -635,17 +807,8 @@ impl App2D {
                 if event.state == ElementState::Pressed
                     && event.logical_key == Key::Character("r".into()) =>
             {
-                let config = rubble2d::SimConfig2D {
-                    gravity: self.viewer.gravity,
-                    ..Default::default()
-                };
-                let mut world = rubble2d::World2D::new(config).expect("GPU physics init failed");
-                let mut handles = Vec::new();
-                let mut shapes = Vec::new();
-                for (desc, shape) in &self.viewer.descs {
-                    handles.push(world.add_body(desc));
-                    shapes.push(shape.clone());
-                }
+                let (world, handles, shapes) =
+                    build_world_2d(self.viewer.gravity, &self.viewer.scenes[state.current_scene]);
                 state.world = world;
                 state.handles = handles;
                 state.shapes = shapes;
@@ -705,15 +868,30 @@ impl App2D {
                 }
 
                 let raw_input = state.egui_state.take_egui_input(&state.window);
+                let mut selected_scene = state.current_scene;
+                let mut reset_requested = false;
                 let full_output = state.egui_ctx.run_ui(raw_input, |ctx| {
-                    overlay::draw_stats(
+                    overlay::draw_panel(
                         ctx,
+                        "Rubble 2D Viewer",
+                        CONTROLS_2D,
+                        &state.scene_names,
+                        &mut selected_scene,
+                        &mut reset_requested,
                         state.fps,
                         state.handles.len(),
                         &timings,
                         state.render_ms,
                     );
                 });
+                if selected_scene != state.current_scene || reset_requested {
+                    let (world, handles, shapes) =
+                        build_world_2d(self.viewer.gravity, &self.viewer.scenes[selected_scene]);
+                    state.world = world;
+                    state.handles = handles;
+                    state.shapes = shapes;
+                    state.current_scene = selected_scene;
+                }
                 state
                     .egui_state
                     .handle_platform_output(&state.window, full_output.platform_output);
