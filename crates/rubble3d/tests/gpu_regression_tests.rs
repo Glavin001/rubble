@@ -50,14 +50,30 @@ fn run_box_floor_step(
     let mut pipeline = GpuPipeline::try_new(2)?;
     let floor_he = Vec3::new(4.0, 0.5, 4.0);
     let body_he = Vec3::new(1.0, 0.5, 1.0);
-    let inv_mass = if body_mass > 0.0 { 1.0 / body_mass } else { 0.0 };
+    let inv_mass = if body_mass > 0.0 {
+        1.0 / body_mass
+    } else {
+        0.0
+    };
     let states = vec![
-        RigidBodyState3D::new(Vec3::new(0.0, -0.5, 0.0), 0.0, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
+        RigidBodyState3D::new(
+            Vec3::new(0.0, -0.5, 0.0),
+            0.0,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ),
         RigidBodyState3D::new(body_pos, inv_mass, body_rot, body_lin_vel, body_ang_vel),
     ];
     let props = vec![
         RigidBodyProps3D::new(Mat3::ZERO, 1.0, SHAPE_BOX, 0, FLAG_STATIC),
-        RigidBodyProps3D::new(box_inv_inertia(body_mass, body_he), friction, SHAPE_BOX, 1, 0),
+        RigidBodyProps3D::new(
+            box_inv_inertia(body_mass, body_he),
+            friction,
+            SHAPE_BOX,
+            1,
+            0,
+        ),
     ];
     let boxes = vec![
         BoxData {
@@ -88,11 +104,7 @@ fn run_box_floor_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some(pipeline.step_with_contacts(
-        states.len() as u32,
-        solver_iterations,
-        warm_contacts,
-    ))
+    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
 }
 
 fn run_sphere_plane_step(
@@ -155,11 +167,7 @@ fn run_sphere_plane_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some(pipeline.step_with_contacts(
-        states.len() as u32,
-        solver_iterations,
-        warm_contacts,
-    ))
+    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
 }
 
 fn simulate_sphere_plane_frames(
@@ -345,7 +353,8 @@ fn stiffness_ramp_conditional_3d() {
     assert!(
         contacts
             .iter()
-            .all(|c| (c.penalty.y - INITIAL_PENALTY).abs() <= 1.0 && (c.penalty.z - INITIAL_PENALTY).abs() <= 1.0),
+            .all(|c| (c.penalty.y - INITIAL_PENALTY).abs() <= 1.0
+                && (c.penalty.z - INITIAL_PENALTY).abs() <= 1.0),
         "purely normal resting contacts should not ramp tangential stiffness: {contacts:?}"
     );
 }
@@ -379,8 +388,16 @@ fn lambda_accumulates_correctly_3d() {
         return;
     };
 
-    let lambda_one: f32 = contacts_one_iter.iter().map(|c| c.lambda.x).sum::<f32>().abs();
-    let lambda_many: f32 = contacts_many_iters.iter().map(|c| c.lambda.x).sum::<f32>().abs();
+    let lambda_one: f32 = contacts_one_iter
+        .iter()
+        .map(|c| c.lambda.x)
+        .sum::<f32>()
+        .abs();
+    let lambda_many: f32 = contacts_many_iters
+        .iter()
+        .map(|c| c.lambda.x)
+        .sum::<f32>()
+        .abs();
 
     assert!(
         lambda_many >= lambda_one,
@@ -446,7 +463,10 @@ fn warm_start_matches_by_feature_not_distance_3d() {
         }
     }
 
-    assert!(matched > 0, "expected at least one persisted feature after small motion");
+    assert!(
+        matched > 0,
+        "expected at least one persisted feature after small motion"
+    );
 }
 
 #[test]
@@ -462,8 +482,20 @@ fn custom_k_start_is_applied_3d() {
     let body_he = Vec3::new(1.0, 0.5, 1.0);
     let custom_k_start = 2468.0;
     let states = vec![
-        RigidBodyState3D::new(Vec3::new(0.0, -0.5, 0.0), 0.0, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
-        RigidBodyState3D::new(Vec3::new(0.0, 0.45, 0.0), 1.0, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
+        RigidBodyState3D::new(
+            Vec3::new(0.0, -0.5, 0.0),
+            0.0,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ),
+        RigidBodyState3D::new(
+            Vec3::new(0.0, 0.45, 0.0),
+            1.0,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ),
     ];
     let props = vec![
         RigidBodyProps3D::new(Mat3::ZERO, 1.0, SHAPE_BOX, 0, FLAG_STATIC),
@@ -527,8 +559,14 @@ fn unconstrained_body_advances_to_inertial_state_3d() {
     let end_y = world.get_position(body).unwrap().y;
     let vel_y = world.get_velocity(body).unwrap().y;
 
-    assert!(end_y < start_y - 1e-5, "free body should fall under gravity: start={start_y}, end={end_y}");
-    assert!(vel_y < -1e-5, "free body should pick up downward velocity: vy={vel_y}");
+    assert!(
+        end_y < start_y - 1e-5,
+        "free body should fall under gravity: start={start_y}, end={end_y}"
+    );
+    assert!(
+        vel_y < -1e-5,
+        "free body should pick up downward velocity: vy={vel_y}"
+    );
 }
 
 #[test]
@@ -579,13 +617,20 @@ fn sphere_plane_contact_generated_without_nan() {
         return;
     };
 
-    assert!(!contacts.is_empty(), "sphere-plane should generate a contact");
     assert!(
-        contacts.iter().all(|c| c.point.is_finite() && c.normal.is_finite()),
+        !contacts.is_empty(),
+        "sphere-plane should generate a contact"
+    );
+    assert!(
+        contacts
+            .iter()
+            .all(|c| c.point.is_finite() && c.normal.is_finite()),
         "sphere-plane contact contains non-finite values: {contacts:?}"
     );
     assert!(
-        states.iter().all(|s| s.position().is_finite() && s.linear_velocity().is_finite()),
+        states
+            .iter()
+            .all(|s| s.position().is_finite() && s.linear_velocity().is_finite()),
         "narrowphase-only sphere-plane step produced non-finite state: {states:?}"
     );
 }
@@ -600,7 +645,10 @@ fn sphere_on_plane_without_warmstart_stays_finite() {
     let pos = states[1].position();
     let vel = states[1].linear_velocity();
     assert!(pos.is_finite(), "sphere without warmstart diverged: {pos}");
-    assert!(vel.is_finite(), "sphere without warmstart velocity diverged: {vel}");
+    assert!(
+        vel.is_finite(),
+        "sphere without warmstart velocity diverged: {vel}"
+    );
 }
 
 #[test]
@@ -632,7 +680,10 @@ fn sphere_on_plane_remains_supported() {
         world.step();
         let pos = world.get_position(sphere).unwrap();
         let vel = world.get_velocity(sphere).unwrap();
-        assert!(pos.is_finite(), "sphere on plane diverged at step {step}: {pos}");
+        assert!(
+            pos.is_finite(),
+            "sphere on plane diverged at step {step}: {pos}"
+        );
         assert!(
             vel.is_finite(),
             "sphere on plane velocity diverged at step {step}: {vel}"

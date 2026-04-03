@@ -52,7 +52,8 @@ fn rect_state(
     omega: f32,
     friction: f32,
 ) -> RigidBodyState2D {
-    let mut state = RigidBodyState2D::new(pos.x, pos.y, angle, inv_mass, lin_vel.x, lin_vel.y, omega);
+    let mut state =
+        RigidBodyState2D::new(pos.x, pos.y, angle, inv_mass, lin_vel.x, lin_vel.y, omega);
     state._pad0 = Vec4::new(friction, inv_inertia, 0.0, 0.0);
     state
 }
@@ -131,11 +132,7 @@ fn run_rect_floor_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some(pipeline.step_with_contacts(
-        states.len() as u32,
-        solver_iterations,
-        warm_contacts,
-    ))
+    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
 }
 
 fn approx_eq(a: f32, b: f32, tol: f32) -> bool {
@@ -271,8 +268,14 @@ fn unconstrained_body_advances_to_inertial_state_2d() {
     let end_y = world.get_position(body).unwrap().y;
     let vel_y = world.get_velocity(body).unwrap().y;
 
-    assert!(end_y < start_y - 1e-5, "free body should fall under gravity: start={start_y}, end={end_y}");
-    assert!(vel_y < -1e-5, "free body should pick up downward velocity: vy={vel_y}");
+    assert!(
+        end_y < start_y - 1e-5,
+        "free body should fall under gravity: start={start_y}, end={end_y}"
+    );
+    assert!(
+        vel_y < -1e-5,
+        "free body should pick up downward velocity: vy={vel_y}"
+    );
 }
 
 #[test]
@@ -437,7 +440,9 @@ fn stiffness_ramp_conditional_2d() {
 
     assert!(!contacts.is_empty());
     assert!(
-        contacts.iter().any(|c| c.lambda_penalty.z > INITIAL_PENALTY),
+        contacts
+            .iter()
+            .any(|c| c.lambda_penalty.z > INITIAL_PENALTY),
         "normal penalty should ramp under penetration: {contacts:?}"
     );
     assert!(
@@ -479,7 +484,11 @@ fn lambda_accumulates_correctly_2d() {
         return;
     };
 
-    let lambda_one: f32 = contacts_one_iter.iter().map(|c| c.lambda_penalty.x).sum::<f32>().abs();
+    let lambda_one: f32 = contacts_one_iter
+        .iter()
+        .map(|c| c.lambda_penalty.x)
+        .sum::<f32>()
+        .abs();
     let lambda_many: f32 = contacts_many_iters
         .iter()
         .map(|c| c.lambda_penalty.x)
@@ -549,7 +558,10 @@ fn warm_start_decay_2d() {
         }
     }
 
-    assert!(matched > 0, "expected at least one persisted contact feature");
+    assert!(
+        matched > 0,
+        "expected at least one persisted contact feature"
+    );
 }
 
 #[test]
@@ -672,7 +684,10 @@ fn circle_on_rect_remains_supported() {
         world.step();
         let pos = world.get_position(circle).unwrap();
         let vel = world.get_velocity(circle).unwrap();
-        assert!(pos.is_finite(), "circle on rect diverged at step {step}: {pos}");
+        assert!(
+            pos.is_finite(),
+            "circle on rect diverged at step {step}: {pos}"
+        );
         assert!(
             vel.is_finite(),
             "circle on rect velocity diverged at step {step}: {vel}"

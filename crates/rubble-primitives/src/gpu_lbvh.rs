@@ -7,7 +7,10 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
-use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext};
+use rubble_gpu::{
+    round_up_workgroups, BroadphaseBreakdownMs, ComputeKernel, GpuAtomicCounter, GpuBuffer,
+    GpuContext,
+};
 use rubble_math::Aabb3D;
 
 use crate::GpuRadixSort;
@@ -319,11 +322,7 @@ fn validate_internal_tree(left: &[Child], right: &[Child]) -> bool {
     seen == n
 }
 
-fn refit_iterative(
-    left: &[Child],
-    right: &[Child],
-    leaves: &[Aabb3D],
-) -> Option<Vec<Aabb3D>> {
+fn refit_iterative(left: &[Child], right: &[Child], leaves: &[Aabb3D]) -> Option<Vec<Aabb3D>> {
     if left.is_empty() {
         return Some(Vec::new());
     }
@@ -534,7 +533,8 @@ fn build_tree_cpu(
         .collect();
 
     let gpu_nodes = if validate_internal_tree(&internal_left, &internal_right) {
-        if let Some(internal_aabbs) = refit_iterative(&internal_left, &internal_right, &leaf_aabbs) {
+        if let Some(internal_aabbs) = refit_iterative(&internal_left, &internal_right, &leaf_aabbs)
+        {
             children_to_gpu_nodes(&internal_left, &internal_right, &internal_aabbs)
         } else {
             build_balanced_tree_cpu(&leaf_aabbs)
@@ -638,12 +638,60 @@ impl GpuLbvh {
         cpu_aabbs: &[Aabb3D],
         num_bodies: u32,
     ) -> Vec<[u32; 2]> {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.build_and_query_raw_with_breakdown(
+            ctx,
+            aabb_buf,
+            cpu_aabbs,
+            num_bodies,
+            &mut breakdown,
+        )
+    }
+
+    /// Run the broadphase and leave the resulting pair buffer resident on the GPU.
+    ///
+    /// Returns the dispatched pair capacity (`num_bodies * 8`) used as the upper bound
+    /// for the pair-finding kernel. The actual overlap count is stored in
+    /// [`GpuLbvh::pair_counter_buffer`].
+    pub fn query_on_device_raw(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        cpu_aabbs: &[Aabb3D],
+        num_bodies: u32,
+    ) -> u32 {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.query_on_device_raw_with_breakdown(
+            ctx,
+            aabb_buf,
+            cpu_aabbs,
+            num_bodies,
+            &mut breakdown,
+        )
+    }
+
+    /// Run the full GPU broadphase pipeline on any AABB buffer and accumulate
+    /// coarse timing buckets for the current hybrid CPU/GPU implementation.
+    pub fn build_and_query_raw_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        cpu_aabbs: &[Aabb3D],
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> Vec<[u32; 2]> {
+        #[cfg(target_arch = "wasm32")]
+        use rubble_gpu::web_time::Instant;
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::Instant;
+
         if num_bodies <= 1 {
             return Vec::new();
         }
         let n = num_bodies as usize;
 
         // Step 0: Compute scene bounds from CPU-side AABBs for Morton normalization.
+        let t_bounds = Instant::now();
         let mut scene_min = Vec3::splat(f32::MAX);
         let mut scene_max = Vec3::splat(f32::NEG_INFINITY);
         for aabb in cpu_aabbs {
@@ -666,8 +714,10 @@ impl GpuLbvh {
         } else {
             0.0
         };
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
 
         // Step 1: Compute Morton codes on GPU
+        let t_sort = Instant::now();
         let params = MortonParams {
             num_bodies,
             scene_min_x: scene_min.x,
@@ -725,12 +775,18 @@ impl GpuLbvh {
         // sorted keys/indices for the lightweight CPU tree build.
         self.radix_sort
             .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
-        let sorted_codes = self.morton_keys.download(ctx);
-        let sorted_indices = self.body_indices.download(ctx);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (sorted_codes, sorted_indices) =
+            self.morton_keys.download_with(ctx, &self.body_indices);
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
 
         // Step 3: Build Karras tree on CPU (tree build is lightweight; sort was the expensive part)
+        let t_build = Instant::now();
         let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, cpu_aabbs);
         if gpu_nodes.is_empty() {
+            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
             return Vec::new();
         }
 
@@ -738,8 +794,10 @@ impl GpuLbvh {
         self.internal_nodes.upload(ctx, &gpu_nodes);
         self.leaf_aabbs_sorted.upload(ctx, &leaf_aabbs);
         self.sorted_indices_buf.upload(ctx, &sorted_indices);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
 
         // Step 5: Find pairs on GPU via parallel BVH traversal
+        let t_traverse = Instant::now();
         self.pair_counter.reset(ctx);
         let max_pairs = (n * 8) as u32;
         self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
@@ -791,16 +849,20 @@ impl GpuLbvh {
             pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
         }
         ctx.queue.submit(Some(encoder.finish()));
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
 
-        let pair_count = self.pair_counter.read(ctx).min(max_pairs);
+        let t_readback = Instant::now();
+        let (pairs, pair_count) =
+            self.pairs_out
+                .download_with_counter(ctx, &self.pair_counter, max_pairs);
+        let pair_count = pair_count.min(max_pairs);
         if pair_count == 0 {
+            breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
             return Vec::new();
         }
-        self.pairs_out.set_len(pair_count);
-        let pairs = self.pairs_out.download(ctx);
 
         let mut result: Vec<[u32; 2]> = pairs
-            .iter()
+            .into_iter()
             .take(pair_count as usize)
             .map(|p| {
                 let (a, b) = if p.a < p.b { (p.a, p.b) } else { (p.b, p.a) };
@@ -809,23 +871,30 @@ impl GpuLbvh {
             .collect();
         result.sort_unstable();
         result.dedup();
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
         result
     }
 
-    /// Async variant for WASM/WebGPU callers that already have CPU AABBs.
-    #[cfg(target_arch = "wasm32")]
-    pub async fn build_and_query_raw_async(
+    /// Variant of [`GpuLbvh::query_on_device_raw`] that accumulates timing buckets.
+    pub fn query_on_device_raw_with_breakdown(
         &mut self,
         ctx: &GpuContext,
         aabb_buf: &wgpu::Buffer,
         cpu_aabbs: &[Aabb3D],
         num_bodies: u32,
-    ) -> Vec<[u32; 2]> {
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> u32 {
+        #[cfg(target_arch = "wasm32")]
+        use rubble_gpu::web_time::Instant;
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::Instant;
+
         if num_bodies <= 1 {
-            return Vec::new();
+            return 0;
         }
         let n = num_bodies as usize;
 
+        let t_bounds = Instant::now();
         let mut scene_min = Vec3::splat(f32::MAX);
         let mut scene_max = Vec3::splat(f32::NEG_INFINITY);
         for aabb in cpu_aabbs {
@@ -848,7 +917,9 @@ impl GpuLbvh {
         } else {
             0.0
         };
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
 
+        let t_sort = Instant::now();
         let params = MortonParams {
             num_bodies,
             scene_min_x: scene_min.x,
@@ -904,18 +975,25 @@ impl GpuLbvh {
 
         self.radix_sort
             .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
-        let sorted_codes = self.morton_keys.download_async(ctx).await;
-        let sorted_indices = self.body_indices.download_async(ctx).await;
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
 
+        let t_readback = Instant::now();
+        let (sorted_codes, sorted_indices) = self.morton_keys.download_with(ctx, &self.body_indices);
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
         let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, cpu_aabbs);
         if gpu_nodes.is_empty() {
-            return Vec::new();
+            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+            return 0;
         }
 
         self.internal_nodes.upload(ctx, &gpu_nodes);
         self.leaf_aabbs_sorted.upload(ctx, &leaf_aabbs);
         self.sorted_indices_buf.upload(ctx, &sorted_indices);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
 
+        let t_traverse = Instant::now();
         self.pair_counter.reset(ctx);
         let max_pairs = (n * 8) as u32;
         self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
@@ -967,17 +1045,236 @@ impl GpuLbvh {
             pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
         }
         ctx.queue.submit(Some(encoder.finish()));
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+        max_pairs
+    }
 
-        let pair_count = self.pair_counter.read_async(ctx).await.min(max_pairs);
-        if pair_count == 0 {
+    /// Async variant for WASM/WebGPU callers that already have CPU AABBs.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn build_and_query_raw_async(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        cpu_aabbs: &[Aabb3D],
+        num_bodies: u32,
+    ) -> Vec<[u32; 2]> {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.build_and_query_raw_async_with_breakdown(
+            ctx,
+            aabb_buf,
+            cpu_aabbs,
+            num_bodies,
+            &mut breakdown,
+        )
+        .await
+    }
+
+    /// Async variant of [`GpuLbvh::query_on_device_raw`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn query_on_device_raw_async(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        cpu_aabbs: &[Aabb3D],
+        num_bodies: u32,
+    ) -> u32 {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.query_on_device_raw_async_with_breakdown(
+            ctx,
+            aabb_buf,
+            cpu_aabbs,
+            num_bodies,
+            &mut breakdown,
+        )
+        .await
+    }
+
+    /// Async variant of [`build_and_query_raw_with_breakdown`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn build_and_query_raw_async_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        cpu_aabbs: &[Aabb3D],
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> Vec<[u32; 2]> {
+        use rubble_gpu::web_time::Instant;
+
+        if num_bodies <= 1 {
+            return Vec::new();
+        }
+        let n = num_bodies as usize;
+
+        let t_bounds = Instant::now();
+        let mut scene_min = Vec3::splat(f32::MAX);
+        let mut scene_max = Vec3::splat(f32::NEG_INFINITY);
+        for aabb in cpu_aabbs {
+            scene_min = scene_min.min(aabb.min_point());
+            scene_max = scene_max.max(aabb.max_point());
+        }
+        let extent = scene_max - scene_min;
+        let inv_x = if extent.x > 1e-10 {
+            1.0 / extent.x
+        } else {
+            0.0
+        };
+        let inv_y = if extent.y > 1e-10 {
+            1.0 / extent.y
+        } else {
+            0.0
+        };
+        let inv_z = if extent.z > 1e-10 {
+            1.0 / extent.z
+        } else {
+            0.0
+        };
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sort = Instant::now();
+        let params = MortonParams {
+            num_bodies,
+            scene_min_x: scene_min.x,
+            scene_min_y: scene_min.y,
+            scene_min_z: scene_min.z,
+            inv_extent_x: inv_x,
+            inv_extent_y: inv_y,
+            inv_extent_z: inv_z,
+            _pad: 0,
+        };
+        ctx.queue
+            .write_buffer(&self.morton_params_buf, 0, bytemuck::bytes_of(&params));
+        self.morton_keys.grow_if_needed(ctx, n);
+        self.body_indices.grow_if_needed(ctx, n);
+        self.morton_keys.set_len(num_bodies);
+        self.body_indices.set_len(num_bodies);
+
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("morton"),
+            layout: self.morton_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: aabb_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.morton_keys.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.body_indices.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.morton_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("morton"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.morton_kernel.pipeline());
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WG), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (sorted_codes, sorted_indices) = self
+            .morton_keys
+            .download_with_async(ctx, &self.body_indices)
+            .await;
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, cpu_aabbs);
+        if gpu_nodes.is_empty() {
+            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
             return Vec::new();
         }
 
-        self.pairs_out.set_len(pair_count);
-        let pairs = self.pairs_out.download_async(ctx).await;
+        self.internal_nodes.upload(ctx, &gpu_nodes);
+        self.leaf_aabbs_sorted.upload(ctx, &leaf_aabbs);
+        self.sorted_indices_buf.upload(ctx, &sorted_indices);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_traverse = Instant::now();
+        self.pair_counter.reset(ctx);
+        let max_pairs = (n * 8) as u32;
+        self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
+
+        let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
+        ctx.queue
+            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
+
+        let bg2 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("find_pairs"),
+            layout: self.find_pairs_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.sorted_indices_buf.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.internal_nodes.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.pairs_out.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.pair_counter.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.find_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("find_pairs"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.find_pairs_kernel.pipeline());
+            pass.set_bind_group(0, &bg2, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (pairs, pair_count) = self
+            .pairs_out
+            .download_with_counter_async(ctx, &self.pair_counter, max_pairs)
+            .await;
+        let pair_count = pair_count.min(max_pairs);
+        if pair_count == 0 {
+            breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+            return Vec::new();
+        }
 
         let mut result: Vec<[u32; 2]> = pairs
-            .iter()
+            .into_iter()
             .take(pair_count as usize)
             .map(|p| {
                 let (a, b) = if p.a < p.b { (p.a, p.b) } else { (p.b, p.a) };
@@ -986,7 +1283,189 @@ impl GpuLbvh {
             .collect();
         result.sort_unstable();
         result.dedup();
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
         result
+    }
+
+    /// Async variant of [`GpuLbvh::query_on_device_raw_with_breakdown`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn query_on_device_raw_async_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        cpu_aabbs: &[Aabb3D],
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> u32 {
+        use rubble_gpu::web_time::Instant;
+
+        if num_bodies <= 1 {
+            return 0;
+        }
+        let n = num_bodies as usize;
+
+        let t_bounds = Instant::now();
+        let mut scene_min = Vec3::splat(f32::MAX);
+        let mut scene_max = Vec3::splat(f32::NEG_INFINITY);
+        for aabb in cpu_aabbs {
+            scene_min = scene_min.min(aabb.min_point());
+            scene_max = scene_max.max(aabb.max_point());
+        }
+        let extent = scene_max - scene_min;
+        let inv_x = if extent.x > 1e-10 {
+            1.0 / extent.x
+        } else {
+            0.0
+        };
+        let inv_y = if extent.y > 1e-10 {
+            1.0 / extent.y
+        } else {
+            0.0
+        };
+        let inv_z = if extent.z > 1e-10 {
+            1.0 / extent.z
+        } else {
+            0.0
+        };
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sort = Instant::now();
+        let params = MortonParams {
+            num_bodies,
+            scene_min_x: scene_min.x,
+            scene_min_y: scene_min.y,
+            scene_min_z: scene_min.z,
+            inv_extent_x: inv_x,
+            inv_extent_y: inv_y,
+            inv_extent_z: inv_z,
+            _pad: 0,
+        };
+        ctx.queue
+            .write_buffer(&self.morton_params_buf, 0, bytemuck::bytes_of(&params));
+        self.morton_keys.grow_if_needed(ctx, n);
+        self.body_indices.grow_if_needed(ctx, n);
+        self.morton_keys.set_len(num_bodies);
+        self.body_indices.set_len(num_bodies);
+
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("morton"),
+            layout: self.morton_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: aabb_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.morton_keys.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.body_indices.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.morton_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("morton"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.morton_kernel.pipeline());
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WG), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (sorted_codes, sorted_indices) =
+            self.morton_keys.download_with_async(ctx, &self.body_indices).await;
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, cpu_aabbs);
+        if gpu_nodes.is_empty() {
+            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+            return 0;
+        }
+
+        self.internal_nodes.upload(ctx, &gpu_nodes);
+        self.leaf_aabbs_sorted.upload(ctx, &leaf_aabbs);
+        self.sorted_indices_buf.upload(ctx, &sorted_indices);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_traverse = Instant::now();
+        self.pair_counter.reset(ctx);
+        let max_pairs = (n * 8) as u32;
+        self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
+
+        let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
+        ctx.queue
+            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
+
+        let bg2 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("find_pairs"),
+            layout: self.find_pairs_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.sorted_indices_buf.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.internal_nodes.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.pairs_out.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.pair_counter.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.find_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("find_pairs"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.find_pairs_kernel.pipeline());
+            pass.set_bind_group(0, &bg2, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+        max_pairs
+    }
+
+    pub fn pair_buffer(&self) -> &wgpu::Buffer {
+        self.pairs_out.buffer()
+    }
+
+    pub fn pair_counter_buffer(&self) -> &wgpu::Buffer {
+        self.pair_counter.buffer()
     }
 }
 

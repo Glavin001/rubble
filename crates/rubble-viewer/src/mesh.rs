@@ -184,9 +184,49 @@ pub fn unit_cube() -> Mesh {
                 normal: *normal,
             });
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
     Mesh { vertices, indices }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unit_cube;
+
+    fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+
+    fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    #[test]
+    fn unit_cube_triangles_face_outward() {
+        let cube = unit_cube();
+
+        for triangle in cube.indices.chunks_exact(3) {
+            let a = cube.vertices[triangle[0] as usize].position;
+            let b = cube.vertices[triangle[1] as usize].position;
+            let c = cube.vertices[triangle[2] as usize].position;
+            let expected_normal = cube.vertices[triangle[0] as usize].normal;
+
+            let triangle_normal = cross(sub(b, a), sub(c, a));
+
+            assert!(
+                dot(triangle_normal, expected_normal) > 0.0,
+                "triangle winding should match outward face normal",
+            );
+        }
+    }
 }
 
 /// Capsule aligned along Y with given half-height (cylinder) and radius.

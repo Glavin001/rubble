@@ -10,6 +10,14 @@ const STAGE_LABELS: &[(&str, &str)] = &[
     ("Extract", "(GPU)"),
 ];
 
+const BROADPHASE_STAGE_LABELS: &[(&str, &str)] = &[
+    ("Bounds", "(CPU)"),
+    ("Sort", "(GPU)"),
+    ("Build", "(CPU+GPU)"),
+    ("Traverse", "(GPU)"),
+    ("Readback", "(CPU)"),
+];
+
 pub fn draw_stats(
     ctx: &egui::Context,
     fps: f32,
@@ -44,6 +52,32 @@ pub fn draw_stats(
                             "  {:<12}{:<10}{:>6.2} ms {:>3.0}%",
                             name, kind, ms, pct
                         ));
+
+                        if name == "Broadphase" && !timings.broadphase_breakdown.is_zero() {
+                            let bp_total = timings.broadphase_breakdown.total_ms();
+                            let bp_arr = timings.broadphase_breakdown.as_array();
+                            for (j, &(sub_name, sub_kind)) in
+                                BROADPHASE_STAGE_LABELS.iter().enumerate()
+                            {
+                                let sub_ms = bp_arr[j];
+                                if sub_ms <= 0.0 {
+                                    continue;
+                                }
+                                let sub_pct = if bp_total > 0.0 {
+                                    sub_ms / bp_total * 100.0
+                                } else {
+                                    0.0
+                                };
+                                ui.monospace(
+                                    egui::RichText::new(format!(
+                                        "    {:<10}{:<10}{:>6.2} ms {:>3.0}%",
+                                        sub_name, sub_kind, sub_ms, sub_pct
+                                    ))
+                                    .monospace()
+                                    .color(egui::Color32::from_gray(150)),
+                                );
+                            }
+                        }
                     }
 
                     ui.monospace(format!("Render      (GPU)    {:>6.2} ms", render_ms));

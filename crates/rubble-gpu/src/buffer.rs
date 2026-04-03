@@ -69,6 +69,116 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         result
     }
 
+    /// Download this buffer and another buffer in a single GPU submission and wait.
+    pub fn download_with<U>(&self, ctx: &GpuContext, other: &GpuBuffer<U>) -> (Vec<T>, Vec<U>)
+    where
+        T: bytemuck::Zeroable,
+        U: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        if self.len == 0 && other.len == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        let byte_len_self = (self.len as usize * std::mem::size_of::<T>()) as u64;
+        let byte_len_other = (other.len as usize * std::mem::size_of::<U>()) as u64;
+
+        let staging_self =
+            ctx.acquire_staging_buffer(byte_len_self.max(4), "GpuBuffer staging pair A");
+        let staging_other =
+            ctx.acquire_staging_buffer(byte_len_other.max(4), "GpuBuffer staging pair B");
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        if byte_len_self > 0 {
+            encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging_self, 0, byte_len_self);
+        }
+        if byte_len_other > 0 {
+            encoder.copy_buffer_to_buffer(&other.buffer, 0, &staging_other, 0, byte_len_other);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice_self = staging_self.slice(..byte_len_self.max(4));
+        let slice_other = staging_other.slice(..byte_len_other.max(4));
+        slice_self.map_async(wgpu::MapMode::Read, |_| {});
+        slice_other.map_async(wgpu::MapMode::Read, |_| {});
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+
+        let result_self = if byte_len_self == 0 {
+            Vec::new()
+        } else {
+            let mapped = slice_self.get_mapped_range();
+            let result = bytemuck::cast_slice(&mapped[..byte_len_self as usize]).to_vec();
+            drop(mapped);
+            result
+        };
+        let result_other = if byte_len_other == 0 {
+            Vec::new()
+        } else {
+            let mapped = slice_other.get_mapped_range();
+            let result = bytemuck::cast_slice(&mapped[..byte_len_other as usize]).to_vec();
+            drop(mapped);
+            result
+        };
+
+        staging_self.unmap();
+        staging_other.unmap();
+        ctx.release_staging_buffer(staging_self);
+        ctx.release_staging_buffer(staging_other);
+        (result_self, result_other)
+    }
+
+    /// Download this buffer and an atomic counter in a single GPU submission and wait.
+    pub fn download_with_counter(
+        &self,
+        ctx: &GpuContext,
+        counter: &GpuAtomicCounter,
+        element_count: u32,
+    ) -> (Vec<T>, u32)
+    where
+        T: bytemuck::Zeroable,
+    {
+        if element_count == 0 {
+            return (Vec::new(), counter.read(ctx));
+        }
+
+        let byte_len_self = (element_count as usize * std::mem::size_of::<T>()) as u64;
+        let staging_self =
+            ctx.acquire_staging_buffer(byte_len_self.max(4), "GpuBuffer staging with counter");
+        let staging_counter = ctx.acquire_staging_buffer(4, "GpuAtomicCounter staging with buffer");
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging_self, 0, byte_len_self);
+        encoder.copy_buffer_to_buffer(&counter.buffer, 0, &staging_counter, 0, 4);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice_self = staging_self.slice(..byte_len_self.max(4));
+        let slice_counter = staging_counter.slice(..4);
+        slice_self.map_async(wgpu::MapMode::Read, |_| {});
+        slice_counter.map_async(wgpu::MapMode::Read, |_| {});
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+
+        let mapped_self = slice_self.get_mapped_range();
+        let result_self = bytemuck::cast_slice(&mapped_self[..byte_len_self as usize]).to_vec();
+        drop(mapped_self);
+
+        let mapped_counter = slice_counter.get_mapped_range();
+        let count = *bytemuck::from_bytes::<u32>(&mapped_counter[..4]);
+        drop(mapped_counter);
+
+        staging_self.unmap();
+        staging_counter.unmap();
+        ctx.release_staging_buffer(staging_self);
+        ctx.release_staging_buffer(staging_counter);
+        (result_self, count)
+    }
+
     /// Download the buffer contents asynchronously (required for WASM/WebGPU).
     #[cfg(target_arch = "wasm32")]
     pub async fn download_async(&self, ctx: &GpuContext) -> Vec<T> {
@@ -109,6 +219,169 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         staging.unmap();
         ctx.release_staging_buffer(staging);
         result
+    }
+
+    /// Async variant of [`GpuBuffer::download_with`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn download_with_async<U>(
+        &self,
+        ctx: &GpuContext,
+        other: &GpuBuffer<U>,
+    ) -> (Vec<T>, Vec<U>)
+    where
+        T: bytemuck::Zeroable,
+        U: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        if self.len == 0 && other.len == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        let byte_len_self = (self.len as usize * std::mem::size_of::<T>()) as u64;
+        let byte_len_other = (other.len as usize * std::mem::size_of::<U>()) as u64;
+
+        let staging_self =
+            ctx.acquire_staging_buffer(byte_len_self.max(4), "GpuBuffer staging async pair A");
+        let staging_other =
+            ctx.acquire_staging_buffer(byte_len_other.max(4), "GpuBuffer staging async pair B");
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        if byte_len_self > 0 {
+            encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging_self, 0, byte_len_self);
+        }
+        if byte_len_other > 0 {
+            encoder.copy_buffer_to_buffer(&other.buffer, 0, &staging_other, 0, byte_len_other);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice_self = staging_self.slice(..byte_len_self.max(4));
+        let slice_other = staging_other.slice(..byte_len_other.max(4));
+        let done_self = Arc::new(AtomicBool::new(false));
+        let done_other = Arc::new(AtomicBool::new(false));
+        {
+            let done = done_self.clone();
+            slice_self.map_async(wgpu::MapMode::Read, move |result| {
+                result.unwrap();
+                done.store(true, Ordering::SeqCst);
+            });
+        }
+        {
+            let done = done_other.clone();
+            slice_other.map_async(wgpu::MapMode::Read, move |result| {
+                result.unwrap();
+                done.store(true, Ordering::SeqCst);
+            });
+        }
+
+        while !done_self.load(Ordering::SeqCst) || !done_other.load(Ordering::SeqCst) {
+            crate::yield_now().await;
+        }
+
+        let result_self = if byte_len_self == 0 {
+            Vec::new()
+        } else {
+            let mapped = slice_self.get_mapped_range();
+            let elem_count = byte_len_self as usize / std::mem::size_of::<T>();
+            let mut result = vec![T::zeroed(); elem_count];
+            let dst_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut result);
+            dst_bytes.copy_from_slice(&mapped[..dst_bytes.len()]);
+            drop(mapped);
+            result
+        };
+        let result_other = if byte_len_other == 0 {
+            Vec::new()
+        } else {
+            let mapped = slice_other.get_mapped_range();
+            let elem_count = byte_len_other as usize / std::mem::size_of::<U>();
+            let mut result = vec![U::zeroed(); elem_count];
+            let dst_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut result);
+            dst_bytes.copy_from_slice(&mapped[..dst_bytes.len()]);
+            drop(mapped);
+            result
+        };
+
+        staging_self.unmap();
+        staging_other.unmap();
+        ctx.release_staging_buffer(staging_self);
+        ctx.release_staging_buffer(staging_other);
+        (result_self, result_other)
+    }
+
+    /// Async variant of [`GpuBuffer::download_with_counter`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn download_with_counter_async(
+        &self,
+        ctx: &GpuContext,
+        counter: &GpuAtomicCounter,
+        element_count: u32,
+    ) -> (Vec<T>, u32)
+    where
+        T: bytemuck::Zeroable,
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        if element_count == 0 {
+            return (Vec::new(), counter.read_async(ctx).await);
+        }
+
+        let byte_len_self = (element_count as usize * std::mem::size_of::<T>()) as u64;
+        let staging_self = ctx
+            .acquire_staging_buffer(byte_len_self.max(4), "GpuBuffer staging async with counter");
+        let staging_counter =
+            ctx.acquire_staging_buffer(4, "GpuAtomicCounter staging async with buffer");
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging_self, 0, byte_len_self);
+        encoder.copy_buffer_to_buffer(&counter.buffer, 0, &staging_counter, 0, 4);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice_self = staging_self.slice(..byte_len_self.max(4));
+        let slice_counter = staging_counter.slice(..4);
+        let done_self = Arc::new(AtomicBool::new(false));
+        let done_counter = Arc::new(AtomicBool::new(false));
+        {
+            let done = done_self.clone();
+            slice_self.map_async(wgpu::MapMode::Read, move |result| {
+                result.unwrap();
+                done.store(true, Ordering::SeqCst);
+            });
+        }
+        {
+            let done = done_counter.clone();
+            slice_counter.map_async(wgpu::MapMode::Read, move |result| {
+                result.unwrap();
+                done.store(true, Ordering::SeqCst);
+            });
+        }
+
+        while !done_self.load(Ordering::SeqCst) || !done_counter.load(Ordering::SeqCst) {
+            crate::yield_now().await;
+        }
+
+        let mapped_self = slice_self.get_mapped_range();
+        let elem_count = byte_len_self as usize / std::mem::size_of::<T>();
+        let mut result = vec![T::zeroed(); elem_count];
+        let dst_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut result);
+        dst_bytes.copy_from_slice(&mapped_self[..dst_bytes.len()]);
+        drop(mapped_self);
+
+        let mapped_counter = slice_counter.get_mapped_range();
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&mapped_counter[..4]);
+        drop(mapped_counter);
+
+        staging_self.unmap();
+        staging_counter.unmap();
+        ctx.release_staging_buffer(staging_self);
+        ctx.release_staging_buffer(staging_counter);
+        (result, u32::from_le_bytes(bytes))
     }
 
     /// Set the logical length (for buffers populated by GPU compute shaders).
