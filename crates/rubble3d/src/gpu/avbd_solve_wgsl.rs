@@ -35,6 +35,7 @@ struct SimParams {
     gravity: vec4<f32>,
     solver:  vec4<f32>,
     counts:  vec4<u32>,
+    quality: vec4<f32>,
 };
 
 struct SolveRange {
@@ -392,6 +393,7 @@ struct SimParams {
     gravity: vec4<f32>,
     solver:  vec4<f32>,
     counts:  vec4<u32>,
+    quality: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read>       bodies:            array<Body>;
@@ -443,7 +445,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tangent1 = normalize(c.tangent.xyz);
     let tangent2 = normalize(cross(normal, tangent1));
 
-    let c_n = dot(normal, separation);
+    let c_n_raw = dot(normal, separation);
+    let penetration_slop = params.quality.z;
+    // Allow small penetration (slop) before correction — reduces jitter for resting contacts
+    let c_n = min(c_n_raw + penetration_slop, 0.0);
     let c_t1 = dot(tangent1, separation);
     let c_t2 = dot(tangent2, separation);
     let lambda_n = min(c.penalty.x * c_n + c.lambda.x, 0.0);
@@ -461,8 +466,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     var next_penalty = c.penalty;
-    if lambda_n < -1e-6 && c_n < -1e-5 {
-        next_penalty.x = min(c.penalty.x + beta * abs(c_n), max_penalty);
+    if lambda_n < -1e-6 && c_n_raw < -1e-5 {
+        next_penalty.x = min(c.penalty.x + beta * abs(c_n_raw), max_penalty);
     }
 
     var flags = 0u;

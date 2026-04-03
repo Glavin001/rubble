@@ -73,8 +73,14 @@ struct CachedBindGroupVec<K> {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SimParamsGpu {
     pub gravity: [f32; 4],
-    pub solver: [f32; 4], // (dt, beta, k_start, max_penalty)
-    pub counts: [u32; 4], // (num_bodies, solver_iterations, pair_count, flags)
+    pub solver: [f32; 4],  // (dt, beta, k_start, max_penalty)
+    pub counts: [u32; 4],  // (num_bodies, solver_iterations, pair_count, flags)
+    /// Narrowphase/solver quality knobs:
+    /// x = contact_offset (prediction distance for speculative contacts)
+    /// y = restitution_threshold (velocity below which restitution = 0)
+    /// z = penetration_slop (allowable penetration before correction)
+    /// w = reserved
+    pub quality: [f32; 4],
 }
 
 /// Broadphase pair (two body indices).
@@ -120,7 +126,7 @@ pub struct WarmstartParamsGpu {
 // Compile-time GPU layout validation
 // ---------------------------------------------------------------------------
 
-const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 48);
+const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 64);
 const _: () = assert!(std::mem::size_of::<GpuPair>() == 8);
 const _: () = assert!(std::mem::size_of::<SolveRangeGpu>() == 8);
 const _: () = assert!(std::mem::size_of::<WarmstartParamsGpu>() == 16);
@@ -167,6 +173,7 @@ struct SimParams {
     gravity: vec4<f32>,
     solver:  vec4<f32>,
     counts:  vec4<u32>,
+    quality: vec4<f32>,
 };
 
 const SHAPE_SPHERE:      u32 = 0u;
@@ -305,6 +312,7 @@ struct SimParams {
     gravity: vec4<f32>,
     solver:  vec4<f32>,
     counts:  vec4<u32>,
+    quality: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read_write> bodies:          array<Body>;
@@ -517,6 +525,7 @@ impl GpuPipeline {
                 gravity: [0.0; 4],
                 solver: [0.0, 10.0, 1.0e4, MAX_CONTACT_PENALTY],
                 counts: [0, 0, 0, 0],
+                quality: [0.02, 0.5, 0.005, 0.0], // contact_offset, restitution_threshold, penetration_slop, reserved
             },
             warmstart_decay: 0.95,
             params_uniform,
@@ -624,12 +633,23 @@ impl GpuPipeline {
             gravity: [gravity.x, gravity.y, gravity.z, 0.0],
             solver: [dt, beta, k_start, MAX_CONTACT_PENALTY],
             counts: [states.len() as u32, solver_iterations, 0, 0],
+            quality: self.sim_params.quality, // preserve quality params
         };
         self.ctx.queue.write_buffer(
             &self.params_uniform,
             0,
             bytemuck::bytes_of(&self.sim_params),
         );
+    }
+
+    /// Set narrowphase/solver quality tuning knobs.
+    pub fn set_quality_params(
+        &mut self,
+        contact_offset: f32,
+        restitution_threshold: f32,
+        penetration_slop: f32,
+    ) {
+        self.sim_params.quality = [contact_offset, restitution_threshold, penetration_slop, 0.0];
     }
 
     /// Run predict → AABB → broadphase → narrowphase (shared by both step variants).

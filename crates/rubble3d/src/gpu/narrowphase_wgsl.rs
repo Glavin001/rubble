@@ -63,6 +63,7 @@ struct SimParams {
     gravity: vec4<f32>,
     solver:  vec4<f32>,
     counts:  vec4<u32>,
+    quality: vec4<f32>,
 };
 
 const SHAPE_SPHERE:      u32 = 0u;
@@ -267,15 +268,16 @@ fn sphere_sphere_test(
     body_a: u32, body_b: u32,
     max_contacts: u32,
 ) {
+    let contact_offset = params.quality.x;
     let diff = pos_b - pos_a;
     let dist2 = dot(diff, diff);
-    let sum_r = radius_a + radius_b;
+    let sum_r = radius_a + radius_b + contact_offset;
     if dist2 >= sum_r * sum_r || dist2 < 1e-12 {
         return;
     }
     let dist = sqrt(dist2);
     let normal = -diff / dist;
-    let depth = dist - sum_r;
+    let depth = dist - (radius_a + radius_b); // depth relative to actual radii, not prediction
     let point = pos_a - normal * (radius_a + depth * 0.5);
     emit_contact(point, normal, depth, body_a, body_b, 1u, max_contacts);
 }

@@ -119,6 +119,7 @@ fn parameter_sweep_stays_bounded_3d() {
                                         k_start,
                                         warmstart_decay,
                                         friction_default: friction,
+                                        ..Default::default()
                                     },
                                     mass_ratio,
                                     friction,
@@ -194,6 +195,7 @@ fn build_chaos_scene_3d() -> Option<(rubble3d::World, Vec<TrackedBody3D>, Vec3)>
         k_start: 1.0e4,
         warmstart_decay: 0.95,
         friction_default: 0.7,
+        ..Default::default()
     })?;
     let mut tracked = Vec::new();
 
