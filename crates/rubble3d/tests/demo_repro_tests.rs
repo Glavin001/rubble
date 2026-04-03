@@ -4,6 +4,7 @@ use glam::Vec3;
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 use support::{add_tracked_body, collect_reports, try_world, SceneReport3D, TrackedBody3D};
 
+#[allow(clippy::too_many_arguments)]
 fn box_desc(
     x: f32,
     y: f32,

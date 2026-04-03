@@ -37,6 +37,7 @@ fn box_inv_inertia(mass: f32, half_extents: Vec3) -> Mat3 {
     Mat3::from_diagonal(Vec3::new(1.0 / i_x, 1.0 / i_y, 1.0 / i_z))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_box_floor_step(
     body_pos: Vec3,
     body_rot: Quat,
@@ -107,6 +108,7 @@ fn run_box_floor_step(
     Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_box_pair_step(
     a_pos: Vec3,
     a_rot: Quat,

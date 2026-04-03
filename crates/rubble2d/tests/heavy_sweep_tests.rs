@@ -4,6 +4,7 @@ use glam::Vec2;
 use rubble2d::{RigidBodyDesc2D, ShapeDesc2D, SimConfig2D};
 use support::{add_tracked_body, collect_reports, regular_polygon, TrackedBody2D};
 
+#[allow(clippy::vec_init_then_push)]
 fn build_sweep_scene_2d(
     config: SimConfig2D,
     mass_ratio: f32,
@@ -194,6 +195,7 @@ fn parameter_sweep_stays_bounded_2d() {
     }
 }
 
+#[allow(clippy::vec_init_then_push)]
 fn build_chaos_scene_2d() -> Option<(rubble2d::World2D, Vec<TrackedBody2D>, Vec2)> {
     let gravity = Vec2::new(0.0, -9.81);
     let mut world = support::try_world(SimConfig2D {

@@ -71,6 +71,7 @@ fn circle_state(
     state
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_rect_floor_step(
     body_pos: Vec2,
     body_angle: f32,

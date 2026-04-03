@@ -3,6 +3,7 @@ use rand::Rng;
 use rubble3d::{RigidBodyDesc, ShapeDesc};
 use rubble_viewer::Viewer3D;
 
+#[allow(clippy::too_many_arguments)]
 fn box_desc(
     x: f32,
     y: f32,
@@ -24,6 +25,7 @@ fn box_desc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn box_desc_with_velocity(
     x: f32,
     y: f32,
