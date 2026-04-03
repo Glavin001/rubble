@@ -229,6 +229,110 @@ fn scene_scatter() -> Vec<RigidBodyDesc> {
     descs
 }
 
+fn scene_scatter_boxes() -> Vec<RigidBodyDesc> {
+    let mut descs = vec![RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    }];
+
+    let mut rng = rand::rng();
+    for _ in 0..4000 {
+        let x = (rng.random::<f32>() - 0.5) * 16.0;
+        let y = 2.5 + rng.random::<f32>() * 20.0;
+        let z = (rng.random::<f32>() - 0.5) * 16.0;
+        let sx = 0.2 + rng.random::<f32>() * 0.5;
+        let sy = 0.2 + rng.random::<f32>() * 0.5;
+        let sz = 0.2 + rng.random::<f32>() * 0.5;
+        descs.push(box_desc(x, y, z, sx, sy, sz, 1.0, 0.5));
+    }
+
+    descs
+}
+
+fn scene_grid_boxes() -> Vec<RigidBodyDesc> {
+    let mut descs = vec![RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    }];
+
+    const NX: usize = 12;
+    const NY: usize = 11;
+    const NZ: usize = 12;
+    let side = 0.42_f32;
+    let gap = 0.08_f32;
+    let pitch = side + gap;
+    let half = side * 0.5;
+
+    let ox = -((NX - 1) as f32 * pitch) * 0.5;
+    let oz = -((NZ - 1) as f32 * pitch) * 0.5;
+    let base_y = half + 0.03;
+
+    let mut rng = rand::rng();
+    for j in 0..NY {
+        for i in 0..NX {
+            for k in 0..NZ {
+                let jitter = 0.012;
+                let x = ox + i as f32 * pitch + (rng.random::<f32>() - 0.5) * jitter;
+                let y = base_y + j as f32 * pitch + (rng.random::<f32>() - 0.5) * jitter;
+                let z = oz + k as f32 * pitch + (rng.random::<f32>() - 0.5) * jitter;
+                descs.push(box_desc(x, y, z, side, side, side, 1.0, 0.5));
+            }
+        }
+    }
+
+    descs
+}
+
+fn scene_slanted_grid_boxes() -> Vec<RigidBodyDesc> {
+    let mut descs = vec![RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    }];
+
+    const NX: usize = 12;
+    const NY: usize = 22;
+    const NZ: usize = 12;
+    let side = 0.42_f32;
+    let gap = 0.08_f32;
+    let pitch = side + gap;
+    let half = side * 0.5;
+
+    let ox = -((NX - 1) as f32 * pitch) * 0.5;
+    let oz = -((NZ - 1) as f32 * pitch) * 0.5;
+    let base_y = half + 0.03;
+
+    let layer_shift = Vec3::new(0.038, 0.0, 0.026);
+
+    for j in 0..NY {
+        let shift = layer_shift * j as f32;
+        for i in 0..NX {
+            for k in 0..NZ {
+                let x = ox + i as f32 * pitch + shift.x;
+                let y = base_y + j as f32 * pitch;
+                let z = oz + k as f32 * pitch + shift.z;
+                descs.push(box_desc(x, y, z, side, side, side, 1.0, 0.5));
+            }
+        }
+    }
+
+    descs
+}
+
 fn main() {
     let mut viewer = Viewer3D::new(0.0, -9.81, 0.0);
     let scenes = [
@@ -240,6 +344,9 @@ fn main() {
         ("Stack", scene_stack()),
         ("Stack Ratio", scene_stack_ratio()),
         ("Scatter", scene_scatter()),
+        ("Scatter Boxes", scene_scatter_boxes()),
+        ("Grid Boxes", scene_grid_boxes()),
+        ("Slanted Grid", scene_slanted_grid_boxes()),
     ];
 
     let mut pyramid_scene = 0;
