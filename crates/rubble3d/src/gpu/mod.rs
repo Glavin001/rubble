@@ -1150,7 +1150,7 @@ impl GpuPipeline {
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        contacts: &mut Vec<Contact3D>,
+        contacts: &mut [Contact3D],
     ) {
         self.apply_free_motion(num_bodies, contacts);
         if contacts.is_empty() {

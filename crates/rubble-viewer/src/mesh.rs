@@ -282,6 +282,52 @@ pub fn unit_capsule(rings: u32, segments: u32) -> Mesh {
     Mesh { vertices, indices }
 }
 
+/// 2D circle approximated as a triangle fan (flat, in XY plane, z=0).
+pub fn circle_2d(segments: u32) -> Mesh {
+    let mut vertices = vec![Vertex {
+        position: [0.0, 0.0, 0.0],
+        normal: [0.0, 0.0, 1.0],
+    }];
+    let mut indices = Vec::new();
+    for i in 0..=segments {
+        let theta = (i as f32 / segments as f32) * 2.0 * PI;
+        vertices.push(Vertex {
+            position: [theta.cos(), theta.sin(), 0.0],
+            normal: [0.0, 0.0, 1.0],
+        });
+        if i > 0 {
+            indices.push(0);
+            indices.push(i);
+            indices.push(i + 1);
+        }
+    }
+    Mesh { vertices, indices }
+}
+
+/// 2D unit quad (half-extent 1) in XY plane.
+pub fn quad_2d() -> Mesh {
+    let vertices = vec![
+        Vertex {
+            position: [-1.0, -1.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [1.0, -1.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [1.0, 1.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [-1.0, 1.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+    ];
+    let indices = vec![0, 1, 2, 0, 2, 3];
+    Mesh { vertices, indices }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{unit_capsule, unit_cube, Mesh};
@@ -364,50 +410,4 @@ mod tests {
             );
         }
     }
-}
-
-/// 2D circle approximated as a triangle fan (flat, in XY plane, z=0).
-pub fn circle_2d(segments: u32) -> Mesh {
-    let mut vertices = vec![Vertex {
-        position: [0.0, 0.0, 0.0],
-        normal: [0.0, 0.0, 1.0],
-    }];
-    let mut indices = Vec::new();
-    for i in 0..=segments {
-        let theta = (i as f32 / segments as f32) * 2.0 * PI;
-        vertices.push(Vertex {
-            position: [theta.cos(), theta.sin(), 0.0],
-            normal: [0.0, 0.0, 1.0],
-        });
-        if i > 0 {
-            indices.push(0);
-            indices.push(i);
-            indices.push(i + 1);
-        }
-    }
-    Mesh { vertices, indices }
-}
-
-/// 2D unit quad (half-extent 1) in XY plane.
-pub fn quad_2d() -> Mesh {
-    let vertices = vec![
-        Vertex {
-            position: [-1.0, -1.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [1.0, -1.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [1.0, 1.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [-1.0, 1.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-        },
-    ];
-    let indices = vec![0, 1, 2, 0, 2, 3];
-    Mesh { vertices, indices }
 }

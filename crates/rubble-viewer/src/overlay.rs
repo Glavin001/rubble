@@ -44,6 +44,7 @@ fn stat_card(ui: &mut egui::Ui, label: &str, value: String) {
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_panel(
     ctx: &egui::Context,
     title: &str,

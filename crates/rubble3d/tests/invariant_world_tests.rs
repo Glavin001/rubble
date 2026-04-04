@@ -162,7 +162,7 @@ fn zero_gravity_shapes_preserve_velocity_and_spin_3d() {
             },
         );
 
-        let initial_report = scene_report(&world, &[body.clone()], gravity, 0);
+        let initial_report = scene_report(&world, std::slice::from_ref(&body), gravity, 0);
         step_n(&mut world, steps);
         let final_report = scene_report(&world, &[body], gravity, steps);
         let snapshot = &final_report.bodies[0];
@@ -575,6 +575,7 @@ fn resting_box_stays_quiet_on_floor_3d() {
     );
 }
 
+#[allow(clippy::vec_init_then_push)]
 fn build_determinism_scene_3d() -> Option<(rubble3d::World, Vec<TrackedBody3D>, Vec3)> {
     let gravity = Vec3::new(0.0, -9.81, 0.0);
     let mut world = try_world(SimConfig {

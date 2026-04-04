@@ -600,18 +600,15 @@ fn build_tree_cpu(sorted_codes: &[u32], leaf_aabbs: &[Aabb3D]) -> Vec<BvhNodeGpu
         internal_right.push(right);
     }
 
-    let gpu_nodes = if validate_internal_tree(&internal_left, &internal_right) {
-        if let Some(internal_aabbs) = refit_iterative(&internal_left, &internal_right, &leaf_aabbs)
-        {
+    if validate_internal_tree(&internal_left, &internal_right) {
+        if let Some(internal_aabbs) = refit_iterative(&internal_left, &internal_right, leaf_aabbs) {
             children_to_gpu_nodes(&internal_left, &internal_right, &internal_aabbs)
         } else {
-            build_balanced_tree_cpu(&leaf_aabbs)
+            build_balanced_tree_cpu(leaf_aabbs)
         }
     } else {
-        build_balanced_tree_cpu(&leaf_aabbs)
-    };
-
-    gpu_nodes
+        build_balanced_tree_cpu(leaf_aabbs)
+    }
 }
 
 // ---------------------------------------------------------------------------
