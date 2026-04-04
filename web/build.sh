@@ -9,6 +9,13 @@ if [[ -f "${HOME}/.cargo/env" ]]; then
   . "${HOME}/.cargo/env"
 fi
 cd "$SCRIPT_DIR"
+
+# Ensure the wasm32 target is available (needed by wasm-pack)
+if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
+  echo "==> Adding wasm32-unknown-unknown target..."
+  rustup target add wasm32-unknown-unknown
+fi
+
 npm ci
 npm run build:all
 echo "==> Done. Output: web/dist/"
