@@ -780,8 +780,8 @@ impl GpuPipeline2D {
         let pair_count = if pair_thread_count > 0 {
             let t_readback = Instant::now();
             let count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
-            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-            broadphase.reattribute_webgpu_pair_counter_wait_to_traverse();
+            let elapsed = t_readback.elapsed().as_secs_f32() * 1000.0;
+            broadphase.add_pair_counter_read_elapsed_ms(elapsed);
             count
         } else {
             0
@@ -872,8 +872,8 @@ impl GpuPipeline2D {
                 .gpu_lbvh
                 .read_pair_count_async(&self.ctx, pair_thread_count)
                 .await;
-            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-            broadphase.reattribute_webgpu_pair_counter_wait_to_traverse();
+            let elapsed = t_readback.elapsed().as_secs_f32() * 1000.0;
+            broadphase.add_pair_counter_read_elapsed_ms(elapsed);
             count
         } else {
             0

@@ -1471,7 +1471,7 @@ impl GpuLbvh {
     /// GPU Karras build and refit are included in `build_ms`; pair finding in `traverse_ms`.
     /// `readback_ms` stays zero here; the engine times [`GpuLbvh::read_pair_count`] separately
     /// (on WebGPU that map can wait for prior GPU work — see
-    /// [`BroadphaseBreakdownMs::reattribute_webgpu_pair_counter_wait_to_traverse`]).
+    /// [`BroadphaseBreakdownMs::add_pair_counter_read_elapsed_ms`]).
     pub fn query_on_device_gpu_with_breakdown(
         &mut self,
         ctx: &GpuContext,
@@ -1510,7 +1510,8 @@ impl GpuLbvh {
 
         // Native Vulkan/Metal: block until submitted work completes so the subsequent
         // `read_pair_count` map is not mis-timed as hundreds of ms of "readback".
-        // WebGPU: `poll` does not wait — the step code reattributes that wait on wasm32.
+        // WebGPU: `poll` does not wait — pair-counter timing is split in
+        // `BroadphaseBreakdownMs::add_pair_counter_read_elapsed_ms`.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let t_flush = Instant::now();

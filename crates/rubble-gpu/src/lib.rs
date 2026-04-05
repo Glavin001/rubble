@@ -46,27 +46,27 @@ impl BroadphaseBreakdownMs {
         self.total_ms() <= f32::EPSILON
     }
 
-    /// WebGPU only: the first buffer map after broadphase often waits for **all** prior GPU
-    /// work, while `device.poll` does not block. That wall time is accumulated in
-    /// `readback_ms` even though it is mostly GPU pair-finding / tree work.
+    /// Account for wall time spent in [`GpuLbvh::read_pair_count`] / `read_pair_count_async`.
     ///
-    /// Call this **only** after timing a **4-byte** pair-counter read following the
-    /// on-device LBVH path — not after large `GpuBuffer::download` readbacks (e.g. compound
-    /// AABB staging).
-    #[cfg(target_arch = "wasm32")]
-    pub fn reattribute_webgpu_pair_counter_wait_to_traverse(&mut self) {
-        /// Typical host-side cost to map/copy the atomic counter (ms); the rest is GPU wait.
-        const COUNTER_READ_HOST_MS: f32 = 0.1;
-        let rb = self.readback_ms;
-        if rb <= COUNTER_READ_HOST_MS {
-            return;
+    /// On **WebGPU**, `device.poll` does not wait, so the counter map often blocks until all
+    /// prior GPU broadphase work completes. Split `elapsed_ms` so most of it lands in
+    /// **`traverse_ms`** (GPU wait) and a small fixed allowance stays in **`readback_ms`**
+    /// (host copy/map of 4 bytes). On native backends, the full elapsed time goes to
+    /// **`readback_ms`** (after `wait_for_queue`, that is mostly the staging read).
+    pub fn add_pair_counter_read_elapsed_ms(&mut self, elapsed_ms: f32) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            const HOST_COPY_MS: f32 = 0.15;
+            let host = elapsed_ms.min(HOST_COPY_MS);
+            let gpu_wait = (elapsed_ms - host).max(0.0);
+            self.traverse_ms += gpu_wait;
+            self.readback_ms += host;
         }
-        self.traverse_ms += rb - COUNTER_READ_HOST_MS;
-        self.readback_ms = COUNTER_READ_HOST_MS;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.readback_ms += elapsed_ms;
+        }
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn reattribute_webgpu_pair_counter_wait_to_traverse(&mut self) {}
 }
 
 /// Wall-clock timings (milliseconds) for each phase of a physics step.
