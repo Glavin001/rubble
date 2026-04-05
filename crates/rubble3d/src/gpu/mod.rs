@@ -51,6 +51,9 @@ use rubble_shapes3d::{
 use std::collections::HashSet;
 const WORKGROUP_SIZE: u32 = 64;
 const AVBD_WARMSTART_ALPHA: f32 = 0.99;
+/// Number of Luby coloring iterations. O(log n) rounds suffices for bounded-degree
+/// graphs. 32 handles any practical contact graph with room to spare.
+const COLORING_MAX_ITERATIONS: u32 = 32;
 const MAX_CONTACT_PENALTY: f32 = 1.0e6;
 
 #[derive(Default)]
@@ -1314,6 +1317,82 @@ impl GpuPipeline {
         self.ctx.queue.submit(Some(encoder.finish()));
     }
 
+    /// Async variant of `run_colored_solve` for WASM (uses non-blocking coloring download).
+    #[cfg(target_arch = "wasm32")]
+    async fn run_colored_solve_async(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        contacts: &mut [Contact3D],
+    ) {
+        self.apply_free_motion(num_bodies, contacts);
+        if contacts.is_empty() {
+            return;
+        }
+
+        let graph_key = body_graph_key_3d(contacts);
+        let (body_order, color_groups) =
+            if self.cached_color_num_bodies == num_bodies && self.cached_body_graph == graph_key {
+                (
+                    self.cached_body_order.clone(),
+                    self.cached_color_groups.clone(),
+                )
+            } else {
+                let result = self.gpu_color_bodies_async(num_bodies, contacts).await;
+                self.cached_color_num_bodies = num_bodies;
+                self.cached_body_graph = graph_key;
+                self.cached_body_order = result.0.clone();
+                self.cached_color_groups = result.1.clone();
+                result
+            };
+        let adjacency = build_body_contact_adjacency(num_bodies, contacts);
+        self.contacts.upload(&self.ctx, contacts);
+        self.contact_count.write(&self.ctx, contacts.len() as u32);
+        self.body_order.upload(&self.ctx, &body_order);
+        self.body_contact_ranges
+            .upload(&self.ctx, &adjacency.ranges);
+        self.body_contact_indices
+            .upload(&self.ctx, &adjacency.indices);
+        self.write_solve_ranges(&color_groups);
+        self.sync_primal_bind_groups(color_groups.len());
+        let _ = self.dual_bind_group();
+        let contact_count = contacts.len() as u32;
+        let primal_bind_groups = &self.primal_bg_cache.bind_groups;
+        let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("avbd_solve_batch_3d"),
+            });
+        for _ in 0..solver_iterations {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_primal_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.primal_kernel.pipeline());
+                for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
+                    if count == 0 {
+                        continue;
+                    }
+                    pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
+                    pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
+                }
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_dual_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.dual_kernel.pipeline());
+                pass.set_bind_group(0, dual_bind_group, &[]);
+                pass.dispatch_workgroups(round_up_workgroups(contact_count, WORKGROUP_SIZE), 1, 1);
+            }
+        }
+        self.ctx.queue.submit(Some(encoder.finish()));
+    }
+
     /// Run the full GPU physics step and download updated states.
     pub fn step(&mut self, num_bodies: u32, solver_iterations: u32) -> Vec<RigidBodyState3D> {
         if num_bodies == 0 {
@@ -1996,7 +2075,8 @@ impl GpuPipeline {
         timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
         let t_solve = Instant::now();
-        self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
+        self.run_colored_solve_async(num_bodies, solver_iterations, &mut contacts)
+            .await;
 
         let final_contacts = if !contacts.is_empty() {
             let fc = self.download_contacts_exact_async(contacts.len()).await;
@@ -2534,6 +2614,7 @@ impl GpuPipeline {
     }
 
     /// GPU Luby body coloring: color bodies so no two adjacent bodies share a color.
+    /// Sync variant for native (uses blocking buffer download).
     fn gpu_color_bodies(
         &mut self,
         num_bodies: u32,
@@ -2542,20 +2623,42 @@ impl GpuPipeline {
         if contacts.is_empty() {
             return (Vec::new(), Vec::new());
         }
+        self.dispatch_gpu_coloring(num_bodies, contacts.len() as u32);
+        self.gpu_coloring.body_colors.set_len(num_bodies);
+        let colors = self.gpu_coloring.body_colors.download(&self.ctx);
+        Self::finalize_coloring(num_bodies, contacts, &colors, COLORING_MAX_ITERATIONS)
+    }
 
-        // Borrow fields individually to avoid conflicting mutable borrows on self.
+    /// GPU Luby body coloring: async variant for WASM (uses non-blocking download).
+    #[cfg(target_arch = "wasm32")]
+    async fn gpu_color_bodies_async(
+        &mut self,
+        num_bodies: u32,
+        contacts: &[Contact3D],
+    ) -> (Vec<u32>, Vec<(u32, u32)>) {
+        if contacts.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        self.dispatch_gpu_coloring(num_bodies, contacts.len() as u32);
+        self.gpu_coloring.body_colors.set_len(num_bodies);
+        let colors = self
+            .gpu_coloring
+            .body_colors
+            .download_async(&self.ctx)
+            .await;
+        Self::finalize_coloring(num_bodies, contacts, &colors, COLORING_MAX_ITERATIONS)
+    }
+
+    /// Run the GPU coloring dispatches (reset + N Luby iterations).
+    /// Does NOT download results — caller is responsible for downloading body_colors.
+    fn dispatch_gpu_coloring(&mut self, num_bodies: u32, contact_count: u32) {
         let ctx = &self.ctx;
         let contacts_buf = self.contacts.buffer();
         let cs = &mut self.gpu_coloring;
 
         cs.frame_counter = cs.frame_counter.wrapping_add(1);
-        let contact_count = contacts.len() as u32;
-
-        // Grow buffers if needed
-        cs.body_colors
-            .grow_if_needed(&self.ctx, num_bodies as usize);
-        cs.body_priorities
-            .grow_if_needed(&self.ctx, num_bodies as usize);
+        cs.body_colors.grow_if_needed(ctx, num_bodies as usize);
+        cs.body_priorities.grow_if_needed(ctx, num_bodies as usize);
 
         // Phase 1: Reset — mark all bodies uncolored, assign random priorities
         {
@@ -2596,8 +2699,7 @@ impl GpuPipeline {
         }
 
         // Phase 2: Iterative Luby coloring (fixed iteration count, no blocking reads)
-        let max_iterations = 32u32;
-        for current_color in 0..max_iterations {
+        for current_color in 0..COLORING_MAX_ITERATIONS {
             let params: [u32; 4] = [num_bodies, contact_count, current_color, 0];
             ctx.queue
                 .write_buffer(&cs.params_buf, 0, bytemuck::cast_slice(&params));
@@ -2638,11 +2740,15 @@ impl GpuPipeline {
             }
             ctx.queue.submit(Some(encoder.finish()));
         }
+    }
 
-        // Phase 3: Download colors and build body_order / color_groups on CPU
-        cs.body_colors.set_len(num_bodies);
-        let colors = cs.body_colors.download(ctx);
-
+    /// Given downloaded per-body colors, build body_order and color_groups on CPU.
+    fn finalize_coloring(
+        num_bodies: u32,
+        contacts: &[Contact3D],
+        colors: &[u32],
+        num_colors: u32,
+    ) -> (Vec<u32>, Vec<(u32, u32)>) {
         let mut active = vec![false; num_bodies as usize];
         for c in contacts {
             active[c.body_a as usize] = true;
@@ -2651,7 +2757,7 @@ impl GpuPipeline {
 
         let mut body_order = Vec::new();
         let mut groups = Vec::new();
-        for color in 0..max_iterations {
+        for color in 0..num_colors {
             let offset = body_order.len() as u32;
             for (body_idx, &body_color) in colors.iter().enumerate() {
                 if active[body_idx] && body_color == color {
