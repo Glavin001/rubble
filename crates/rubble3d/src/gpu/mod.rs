@@ -1348,17 +1348,24 @@ impl GpuPipeline {
     /// Run the full GPU physics step with warm-starting support.
     /// Returns (updated_states, new_contacts) so the caller can track persistence.
     ///
-    /// Warmstarting is handled entirely on GPU using the internally maintained
-    /// `prev_contacts` buffer from the previous frame. The `warm_contacts` parameter
-    /// is accepted for API compatibility but ignored — GPU warmstart is always used.
+    /// Warmstarting runs on GPU. When `warm_contacts` is provided, those contacts
+    /// are uploaded to the GPU `prev_contacts` buffer and used for matching.
+    /// When `None`, the internally maintained `prev_contacts` buffer (from the
+    /// previous step on this pipeline) is used.
     pub fn step_with_contacts(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        _warm_contacts: Option<&[Contact3D]>,
+        warm_contacts: Option<&[Contact3D]>,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
         if num_bodies == 0 {
             return (Vec::new(), Vec::new());
+        }
+
+        // If caller provides explicit warm contacts, upload them as prev_contacts
+        // so the GPU warmstart kernel can match against them.
+        if let Some(warm) = warm_contacts {
+            self.upload_warm_contacts(warm);
         }
 
         let compound_contacts = self.run_detection(num_bodies);
@@ -1408,13 +1415,17 @@ impl GpuPipeline {
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        _warm_contacts: Option<&[Contact3D]>,
+        warm_contacts: Option<&[Contact3D]>,
         timings: &mut rubble_gpu::StepTimingsMs,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
         use std::time::Instant;
 
         if num_bodies == 0 {
             return (Vec::new(), Vec::new());
+        }
+
+        if let Some(warm) = warm_contacts {
+            self.upload_warm_contacts(warm);
         }
 
         let compound_contacts = self.run_detection_timed(num_bodies, timings);
@@ -1944,21 +1955,24 @@ impl GpuPipeline {
 
     /// Async version of `step_with_contacts` for WASM/WebGPU.
     ///
-    /// Warmstarting is handled entirely on GPU using the internally maintained
-    /// `prev_contacts` buffer. The `_warm_contacts` parameter is accepted for
-    /// API compatibility but ignored.
+    /// Warmstarting runs on GPU. When `warm_contacts` is provided, those contacts
+    /// are uploaded to `prev_contacts`. When `None`, the internal buffer is used.
     #[cfg(target_arch = "wasm32")]
     pub async fn step_with_contacts_async(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        _warm_contacts: Option<&[Contact3D]>,
+        warm_contacts: Option<&[Contact3D]>,
         timings: &mut rubble_gpu::StepTimingsMs,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
         use rubble_gpu::web_time::Instant;
 
         if num_bodies == 0 {
             return (Vec::new(), Vec::new());
+        }
+
+        if let Some(warm) = warm_contacts {
+            self.upload_warm_contacts(warm);
         }
 
         let compound_contacts = self.run_detection_async(num_bodies, timings).await;
@@ -2654,6 +2668,22 @@ impl GpuPipeline {
     }
 
     /// Dispatch GPU warmstart: match new contacts against prev-frame contacts on GPU.
+    /// Upload externally-provided warm contacts into the GPU `prev_contacts`
+    /// buffer so the GPU warmstart kernel can match against them.
+    fn upload_warm_contacts(&mut self, warm: &[Contact3D]) {
+        if warm.is_empty() {
+            self.prev_contact_count = 0;
+            // Invalidate cached warmstart bind group (buffer contents changing)
+            self.warmstart_bg_cache.key = None;
+            return;
+        }
+        self.prev_contacts.grow_if_needed(&self.ctx, warm.len());
+        self.prev_contacts.upload(&self.ctx, warm);
+        self.prev_contact_count = warm.len() as u32;
+        // Invalidate cached warmstart bind group (buffer may have been regrown)
+        self.warmstart_bg_cache.key = None;
+    }
+
     fn dispatch_gpu_warmstart(&mut self, new_count: u32) {
         if self.prev_contact_count == 0 || new_count == 0 {
             return;
