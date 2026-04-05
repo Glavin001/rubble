@@ -284,6 +284,55 @@ impl PhysicsWorld2D {
             .as_array();
         copy_f32_buffer("broadphase breakdown", out, &self.broadphase_cache)
     }
+
+    /// List the names of all available 2D demo scenes, in display order.
+    pub fn scene_names(&self) -> Vec<String> {
+        rubble_scenes::scenes_2d()
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect()
+    }
+
+    /// Default scene to load on startup.
+    pub fn initial_scene_name(&self) -> String {
+        rubble_scenes::INITIAL_SCENE_2D.to_string()
+    }
+
+    /// Populate the world with bodies from the named demo scene.
+    /// The caller is responsible for creating a fresh `PhysicsWorld2D`
+    /// before calling this if replacing an existing scene.
+    pub fn load_scene(&mut self, name: &str) -> Result<(), JsError> {
+        let scene = rubble_scenes::scenes_2d()
+            .iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| JsError::new(&format!("unknown 2D scene: {name}")))?;
+        let descs = (scene.build)();
+        for desc in &descs {
+            let handle = self.world.add_body(desc);
+            self.handles.push(handle);
+            self.shape_size_offsets.push(self.shape_sizes.len());
+            match &desc.shape {
+                rubble2d::ShapeDesc2D::Circle { radius } => {
+                    self.shape_types.push(0);
+                    self.shape_sizes.push(*radius);
+                }
+                rubble2d::ShapeDesc2D::Rect { half_extents } => {
+                    self.shape_types.push(1);
+                    self.shape_sizes.push(half_extents.x);
+                    self.shape_sizes.push(half_extents.y);
+                }
+                rubble2d::ShapeDesc2D::Capsule { half_height, radius } => {
+                    self.shape_types.push(3);
+                    self.shape_sizes.push(*half_height);
+                    self.shape_sizes.push(*radius);
+                }
+                rubble2d::ShapeDesc2D::ConvexPolygon { .. } => {
+                    self.shape_types.push(2);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -554,5 +603,59 @@ impl PhysicsWorld3D {
             .broadphase_breakdown
             .as_array();
         copy_f32_buffer("broadphase breakdown", out, &self.broadphase_cache)
+    }
+
+    /// List the names of all available 3D demo scenes, in display order.
+    pub fn scene_names(&self) -> Vec<String> {
+        rubble_scenes::scenes_3d()
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect()
+    }
+
+    /// Default scene to load on startup.
+    pub fn initial_scene_name(&self) -> String {
+        rubble_scenes::INITIAL_SCENE_3D.to_string()
+    }
+
+    /// Populate the world with bodies from the named demo scene.
+    /// The caller is responsible for creating a fresh `PhysicsWorld3D`
+    /// before calling this if replacing an existing scene.
+    pub fn load_scene(&mut self, name: &str) -> Result<(), JsError> {
+        let scene = rubble_scenes::scenes_3d()
+            .iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| JsError::new(&format!("unknown 3D scene: {name}")))?;
+        let descs = (scene.build)();
+        for desc in &descs {
+            let handle = self.world.add_body(desc);
+            self.handles.push(handle);
+            self.shape_size_offsets.push(self.shape_sizes.len());
+            match &desc.shape {
+                rubble3d::ShapeDesc::Sphere { radius } => {
+                    self.shape_types.push(0);
+                    self.shape_sizes.push(*radius);
+                }
+                rubble3d::ShapeDesc::Box { half_extents } => {
+                    self.shape_types.push(1);
+                    self.shape_sizes.push(half_extents.x);
+                    self.shape_sizes.push(half_extents.y);
+                    self.shape_sizes.push(half_extents.z);
+                }
+                rubble3d::ShapeDesc::Capsule { half_height, radius } => {
+                    self.shape_types.push(2);
+                    self.shape_sizes.push(*half_height);
+                    self.shape_sizes.push(*radius);
+                }
+                rubble3d::ShapeDesc::Plane { .. } => {
+                    self.shape_types.push(99);
+                }
+                rubble3d::ShapeDesc::ConvexHull { .. } | rubble3d::ShapeDesc::Compound { .. } => {
+                    // Not rendered — mark as plane sentinel so web viewer skips.
+                    self.shape_types.push(99);
+                }
+            }
+        }
+        Ok(())
     }
 }

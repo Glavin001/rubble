@@ -10,6 +10,7 @@ members = [
     "crates/rubble2d",
     "crates/rubble-wasm",
     "crates/rubble-viewer",
+    "crates/rubble-scenes",
 ]
 
 [profile.release]
@@ -44,3 +45,5 @@ rubble-shapes2d = { path = "crates/rubble-shapes2d" }
 rubble3d = { path = "crates/rubble3d" }
 rubble2d = { path = "crates/rubble2d" }
 rubble-viewer = { path = "crates/rubble-viewer" }
+rubble-scenes = { path = "crates/rubble-scenes" }
+rand = "0.9"

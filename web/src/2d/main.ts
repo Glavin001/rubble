@@ -1,15 +1,18 @@
 import init, { PhysicsWorld2D } from "../../src/wasm/rubble_wasm.js";
 
-// World dimensions in physics units
-const WORLD_W = 40;
-const WORLD_H = 30;
-const WALL_THICKNESS = 1;
+// World dimensions in physics units. Scenes are authored for a variety of
+// sizes; we pick a wide view that fits every demo (pyramid, scatter, stacks).
+const WORLD_W = 60;
+const WORLD_H = 40;
+const WORLD_CENTER_X = 0;
+const WORLD_CENTER_Y = 10;
 
 // Colors for bodies
 const COLORS = [
   "#ff6b35", "#f7c948", "#4ecdc4", "#45b7d1", "#96ceb4",
   "#ff6f69", "#ffcc5c", "#88d8b0", "#c3aed6", "#ffd166",
 ];
+const STATIC_COLOR = "#555";
 
 const DEMO_SEED = 0x2d5eed;
 
@@ -62,24 +65,25 @@ function createRng(seed: number) {
 
 const rng = createRng(DEMO_SEED);
 
-// Convert physics coords to screen coords
-function toScreen(px: number, py: number): [number, number] {
-  const scale = Math.min(canvas.width / WORLD_W, canvas.height / WORLD_H);
-  const ox = (canvas.width - WORLD_W * scale) / 2;
-  const oy = (canvas.height - WORLD_H * scale) / 2;
-  return [ox + px * scale, oy + (WORLD_H - py) * scale];
-}
-
+// Convert physics coords to screen coords. World is centered on
+// (WORLD_CENTER_X, WORLD_CENTER_Y) and scaled to fit the viewport.
 function physScale(): number {
   return Math.min(canvas.width / WORLD_W, canvas.height / WORLD_H);
+}
+
+function toScreen(px: number, py: number): [number, number] {
+  const scale = physScale();
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  return [cx + (px - WORLD_CENTER_X) * scale, cy - (py - WORLD_CENTER_Y) * scale];
 }
 
 // Convert screen coords to physics coords
 function toPhysics(sx: number, sy: number): [number, number] {
   const scale = physScale();
-  const ox = (canvas.width - WORLD_W * scale) / 2;
-  const oy = (canvas.height - WORLD_H * scale) / 2;
-  return [(sx - ox) / scale, WORLD_H - (sy - oy) / scale];
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  return [(sx - cx) / scale + WORLD_CENTER_X, WORLD_CENTER_Y - (sy - cy) / scale];
 }
 
 function randomColor(): string {
@@ -268,54 +272,51 @@ async function loop_() {
   requestAnimationFrame(loop_);
 }
 
+async function loadScene(name: string) {
+  world = await PhysicsWorld2D.create(0.0, -9.81, 1.0 / 60.0);
+  bodyColors = [];
+  world.load_scene(name);
+
+  updateShapeCache();
+  // Assign colors: static (mass 0) bodies get a muted shade, dynamics get
+  // a palette colour. We approximate "static" as index 0 for scenes whose
+  // first body is the ground; for safety, just colour all bodies from the
+  // palette — static bodies still read well on the dark background.
+  const handleCount = world.handle_count();
+  for (let i = 0; i < handleCount; i++) {
+    bodyColors.push(i === 0 ? STATIC_COLOR : randomColor());
+  }
+  ensureBodyStateBuffers();
+  syncBodyStateCache();
+  syncTimingCache();
+
+  if (window.__rubble_test) {
+    window.__rubble_test.bodyCount = world.body_count();
+  }
+}
+
 async function main() {
   await init();
 
+  // Bootstrap world so we can query scene names.
   world = await PhysicsWorld2D.create(0.0, -9.81, 1.0 / 60.0);
+  const sceneNames: string[] = world.scene_names();
+  const initialName: string = world.initial_scene_name();
 
-  // Ground
-  world.add_static_rect(WORLD_W / 2, WALL_THICKNESS / 2, WORLD_W / 2, WALL_THICKNESS / 2, 0.0);
-  bodyColors.push("#333");
-
-  // Left wall
-  world.add_static_rect(
-    WALL_THICKNESS / 2,
-    WORLD_H / 2,
-    WALL_THICKNESS / 2,
-    WORLD_H / 2,
-    0.0,
-  );
-  bodyColors.push("#333");
-
-  // Right wall
-  world.add_static_rect(
-    WORLD_W - WALL_THICKNESS / 2,
-    WORLD_H / 2,
-    WALL_THICKNESS / 2,
-    WORLD_H / 2,
-    0.0,
-  );
-  bodyColors.push("#333");
-
-  // Spawn a repeatable grid so browser/native timings compare the same scene.
-  // 40×25 = 1_000 dynamic bodies; spacing tuned to WORLD_W/H.
-  const columns = 40;
-  const rows = 25;
-  const xStart = 4.0;
-  const yStart = 6.5;
-  const xSpacing = 34 / 39;
-  const ySpacing = 21 / 24;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < columns; col++) {
-      const px = xStart + col * xSpacing;
-      const py = yStart + row * ySpacing;
-      spawnRandomBody(px, py);
-    }
+  const sceneSelect = document.getElementById("scene-select") as HTMLSelectElement;
+  for (const name of sceneNames) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    if (name === initialName) opt.selected = true;
+    sceneSelect.appendChild(opt);
   }
 
-  updateShapeCache();
-  syncBodyStateCache();
-  syncTimingCache();
+  await loadScene(initialName);
+
+  sceneSelect.addEventListener("change", () => {
+    void loadScene(sceneSelect.value);
+  });
 
   // Click to spawn
   canvas.addEventListener("click", (e) => {
