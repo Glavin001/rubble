@@ -15,6 +15,7 @@ rubble2d = { workspace = true }
 rubble3d = { workspace = true }
 rubble-math = { workspace = true }
 rubble-gpu = { workspace = true }
+rubble-scenes = { workspace = true }
 glam = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
