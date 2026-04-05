@@ -18,6 +18,27 @@
       pointer-events: none;
       line-height: 1.6;
     }
+    #scene-picker {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      font-family: monospace;
+      font-size: 13px;
+      color: #aaa;
+      background: rgba(20,20,20,0.7);
+      padding: 6px 8px;
+      border-radius: 4px;
+      z-index: 5;
+    }
+    #scene-picker select {
+      background: #222;
+      color: #eee;
+      border: 1px solid #444;
+      font-family: monospace;
+      font-size: 13px;
+      padding: 2px 4px;
+      margin-left: 4px;
+    }
     #info {
       position: fixed;
       bottom: 12px;
@@ -49,6 +70,10 @@
     <div id="fps">FPS: --</div>
     <div id="bodies">Bodies: --</div>
     <pre id="timings"></pre>
+  </div>
+  <div id="scene-picker">
+    <label for="scene-select">Scene:</label>
+    <select id="scene-select"></select>
   </div>
   <div id="info">Click to spawn bodies &middot; Drag to orbit &middot; <a href="../../index.html" style="pointer-events: auto;">Back</a></div>
   <script type="module" src="./main.ts"></script>

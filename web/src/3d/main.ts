@@ -3,13 +3,15 @@ import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-// Three.js WebGPURenderer stores per-instance transforms in a uniform buffer,
-// so keep this comfortably below the browser's 64 KiB binding limit.
-const MAX_INSTANCES = 1024;
+// Three.js WebGPURenderer stores per-instance transforms in a uniform buffer.
+// A 4x4 matrix is 64 bytes, so 1024 instances lands exactly on a 64 KiB limit;
+// keep real headroom here to avoid context/device loss on Chrome SwiftShader.
+const MAX_INSTANCES = 768;
 const DEMO_SEED = 0x3d5eed;
 
 const SPHERE_COLORS = [0xff6b35, 0xf7c948, 0x4ecdc4, 0x45b7d1, 0x96ceb4];
 const BOX_COLORS = [0xff6f69, 0xffcc5c, 0x88d8b0, 0xc3aed6, 0xffd166];
+const CAPSULE_COLORS = [0x9ae6b4, 0xf6ad55, 0x4fd1c5, 0xb794f4, 0xfbb6ce];
 
 function createRng(seed: number) {
   let state = seed >>> 0;
@@ -27,14 +29,20 @@ let world: PhysicsWorld3D;
 
 // Track per-body info for rendering
 interface BodyInfo {
-  type: number; // 0=sphere, 1=box, 2=capsule, 99=plane
+  type: number; // 0=sphere, 1=box, 2=capsule, 99=plane/hidden
   instanceIndex: number;
   radius?: number;
   halfExtents?: [number, number, number];
+  halfHeight?: number;
 }
-const bodies: BodyInfo[] = [];
+let bodies: BodyInfo[] = [];
 let sphereCount = 0;
 let boxCount = 0;
+let capsuleCount = 0;
+// Base dimensions used to build the current scene's capsule geometry.
+// Per-body scale is derived from these.
+let capsuleBaseHalfHeight = 0.3;
+let capsuleBaseRadius = 0.2;
 let controls: OrbitControls | null = null;
 
 // Three.js setup
@@ -54,6 +62,8 @@ camera.lookAt(0, 3, 0);
 let renderer: THREE.WebGLRenderer | WebGPURenderer;
 let renderBackendLabel = "WebGL";
 let frameInFlight = false;
+let sceneLoading = false;
+let firstStepLoggedFor: string | null = null;
 
 async function initRenderer() {
   try {
@@ -98,7 +108,7 @@ const fillLight = new THREE.DirectionalLight(0x6688cc, 0.5);
 fillLight.position.set(-5, 10, -5);
 scene.add(fillLight);
 
-// Ground plane
+// Ground plane (decorative — scenes add their own physics ground)
 const groundGeo = new THREE.PlaneGeometry(100, 100);
 const groundMat = new THREE.MeshStandardMaterial({
   color: 0x222222,
@@ -134,10 +144,10 @@ scene.add(sphereInstances);
 // Per-instance colors
 const sphereColorAttr = new Float32Array(MAX_INSTANCES * 3);
 const boxColorAttr = new Float32Array(MAX_INSTANCES * 3);
-sphereInstances.instanceColor = new THREE.InstancedBufferAttribute(
-  sphereColorAttr,
-  3,
-);
+const capsuleColorAttr = new Float32Array(MAX_INSTANCES * 3);
+const sphereInstanceColor = new THREE.InstancedBufferAttribute(sphereColorAttr, 3);
+const boxInstanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
+const capsuleInstanceColor = new THREE.InstancedBufferAttribute(capsuleColorAttr, 3);
 
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const boxMat = new THREE.MeshStandardMaterial({
@@ -151,22 +161,83 @@ boxInstances.count = 0;
 boxInstances.instanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
 scene.add(boxInstances);
 
+const capsuleMat = new THREE.MeshStandardMaterial({
+  roughness: 0.45,
+  metalness: 0.25,
+});
+let capsuleInstances: THREE.InstancedMesh = new THREE.InstancedMesh(
+  new THREE.CapsuleGeometry(capsuleBaseRadius, capsuleBaseHalfHeight * 2, 4, 12),
+  capsuleMat,
+  MAX_INSTANCES,
+);
+capsuleInstances.castShadow = true;
+capsuleInstances.receiveShadow = true;
+capsuleInstances.count = 0;
+scene.add(capsuleInstances);
+
+sphereInstances.instanceColor = sphereInstanceColor;
+boxInstances.instanceColor = boxInstanceColor;
+capsuleInstances.instanceColor = capsuleInstanceColor;
+
+function rebuildCapsuleGeometry(halfHeight: number, radius: number) {
+  if (
+    Math.abs(capsuleBaseHalfHeight - halfHeight) < 1e-6 &&
+    Math.abs(capsuleBaseRadius - radius) < 1e-6
+  ) {
+    return;
+  }
+
+  capsuleBaseHalfHeight = halfHeight;
+  capsuleBaseRadius = radius;
+  scene.remove(capsuleInstances);
+  capsuleInstances.geometry.dispose();
+  capsuleInstances = new THREE.InstancedMesh(
+    new THREE.CapsuleGeometry(
+      radius,
+      halfHeight * 2,
+      4,
+      12,
+    ),
+    capsuleMat,
+    MAX_INSTANCES,
+  );
+  capsuleInstances.castShadow = true;
+  capsuleInstances.receiveShadow = true;
+  capsuleInstances.count = 0;
+  capsuleInstances.instanceColor = capsuleInstanceColor;
+  scene.add(capsuleInstances);
+}
+
 const tempMatrix = new THREE.Matrix4();
 const tempQuat = new THREE.Quaternion();
 const tempPos = new THREE.Vector3();
 const tempScale = new THREE.Vector3();
 const tempColor = new THREE.Color();
 
+function pushColor(
+  attr: Float32Array,
+  palette: readonly number[],
+  idx: number,
+) {
+  const color = palette[idx % palette.length];
+  tempColor.set(color);
+  attr[idx * 3] = tempColor.r;
+  attr[idx * 3 + 1] = tempColor.g;
+  attr[idx * 3 + 2] = tempColor.b;
+}
+
+function markInstanceColorDirty(mesh: THREE.InstancedMesh) {
+  if (mesh.instanceColor) {
+    mesh.instanceColor.needsUpdate = true;
+  }
+}
+
 function addSphere(x: number, y: number, z: number, radius: number, mass: number) {
   const idx = world.add_sphere(x, y, z, radius, mass);
   const renderable = sphereCount < MAX_INSTANCES;
 
   if (renderable) {
-    const color = SPHERE_COLORS[sphereCount % SPHERE_COLORS.length];
-    tempColor.set(color);
-    sphereColorAttr[sphereCount * 3] = tempColor.r;
-    sphereColorAttr[sphereCount * 3 + 1] = tempColor.g;
-    sphereColorAttr[sphereCount * 3 + 2] = tempColor.b;
+    pushColor(sphereColorAttr, SPHERE_COLORS, sphereCount);
   }
 
   bodies.push({
@@ -177,7 +248,7 @@ function addSphere(x: number, y: number, z: number, radius: number, mass: number
   if (renderable) {
     sphereCount++;
     sphereInstances.count = sphereCount;
-    sphereInstances.instanceColor!.needsUpdate = true;
+    markInstanceColorDirty(sphereInstances);
   }
   return idx;
 }
@@ -195,11 +266,7 @@ function addBox(
   const renderable = boxCount < MAX_INSTANCES;
 
   if (renderable) {
-    const color = BOX_COLORS[boxCount % BOX_COLORS.length];
-    tempColor.set(color);
-    boxColorAttr[boxCount * 3] = tempColor.r;
-    boxColorAttr[boxCount * 3 + 1] = tempColor.g;
-    boxColorAttr[boxCount * 3 + 2] = tempColor.b;
+    pushColor(boxColorAttr, BOX_COLORS, boxCount);
   }
 
   bodies.push({
@@ -210,7 +277,7 @@ function addBox(
   if (renderable) {
     boxCount++;
     boxInstances.count = boxCount;
-    boxInstances.instanceColor!.needsUpdate = true;
+    markInstanceColorDirty(boxInstances);
   }
   return idx;
 }
@@ -275,11 +342,24 @@ function updateTransforms() {
       );
       tempMatrix.compose(tempPos, tempQuat, tempScale);
       boxInstances.setMatrixAt(b.instanceIndex, tempMatrix);
+    } else if (b.type === 2 && b.halfHeight !== undefined && b.radius !== undefined) {
+      // Scale relative to the base capsule geometry.
+      const sxz = b.radius / capsuleBaseRadius;
+      // CapsuleGeometry(radius, length) has total height = length + 2*radius.
+      // Scaling uniformly in Y won't preserve hemispheres, so approximate via
+      // radius-based scale for X/Z and length ratio for Y.
+      const totalHalf = b.halfHeight + b.radius;
+      const baseTotalHalf = capsuleBaseHalfHeight + capsuleBaseRadius;
+      const sy = totalHalf / baseTotalHalf;
+      tempScale.set(sxz, sy, sxz);
+      tempMatrix.compose(tempPos, tempQuat, tempScale);
+      capsuleInstances.setMatrixAt(b.instanceIndex, tempMatrix);
     }
   }
 
   sphereInstances.instanceMatrix.needsUpdate = true;
   boxInstances.instanceMatrix.needsUpdate = true;
+  capsuleInstances.instanceMatrix.needsUpdate = true;
 }
 
 // FPS tracking
@@ -361,13 +441,24 @@ function formatTimings(
 }
 
 async function loop_() {
-  if (frameInFlight) {
+  if (frameInFlight || sceneLoading) {
     return;
   }
   frameInFlight = true;
 
   try {
+  const stepStart = performance.now();
   await world.step();
+  if (firstStepLoggedFor) {
+    const elapsed = performance.now() - stepStart;
+    console.log(
+      `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
+    );
+    firstStepLoggedFor = null;
+    // Hide the overlay once the first step finishes — proves GPU is alive.
+    const loadingEl = document.getElementById("loading");
+    if (loadingEl) loadingEl.style.display = "none";
+  }
   stepCount++;
 
   // Cache data after step completes (world is no longer borrowed)
@@ -407,32 +498,203 @@ async function loop_() {
   }
 }
 
+async function loadScene(name: string) {
+  sceneLoading = true;
+  const loadingEl = document.getElementById("loading")!;
+  loadingEl.textContent = `Loading "${name}"…`;
+  loadingEl.style.display = "flex";
+  // Yield so the browser can paint the overlay before we start GPU work.
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+
+  const tStart = performance.now();
+  // Wait for any in-flight frame on the old world to finish before we swap.
+  while (frameInFlight) {
+    await new Promise((r) => setTimeout(r, 4));
+  }
+
+  loadingEl.textContent = `Loading "${name}"… creating world`;
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+
+  // Throw away old world & per-body state. Rebuild from the named scene.
+  const oldWorld = world as PhysicsWorld3D | undefined;
+  world = await PhysicsWorld3D.create(0.0, -9.81, 0.0, 1.0 / 60.0);
+  if (oldWorld) {
+    try {
+      oldWorld.free();
+    } catch (e) {
+      console.warn("failed to free old world", e);
+    }
+  }
+  const tCreated = performance.now();
+  bodies = [];
+  sphereCount = 0;
+  boxCount = 0;
+  capsuleCount = 0;
+  sphereInstances.count = 0;
+  boxInstances.count = 0;
+  capsuleInstances.count = 0;
+
+  loadingEl.textContent = `Loading "${name}"… spawning bodies`;
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+  try {
+    world.load_scene(name);
+  } catch (e) {
+    console.error(`load_scene("${name}") failed:`, e);
+    loadingEl.textContent = `Failed to load "${name}": ${(e as Error).message ?? e}`;
+    sceneLoading = false;
+    throw e;
+  }
+  const tSpawned = performance.now();
+
+  const shapeTypes = world.get_shape_types();
+  const shapeSizes = world.get_shape_sizes();
+  const shapeOffsets = world.get_shape_size_offsets();
+
+  // First pass: find capsule dimensions so we can rebuild the capsule geometry
+  // to match this scene. All capsules in a scene are assumed to share dims.
+  for (let i = 0; i < shapeTypes.length; i++) {
+    if (shapeTypes[i] === 2) {
+      const off = shapeOffsets[i];
+      rebuildCapsuleGeometry(shapeSizes[off], shapeSizes[off + 1]);
+      break;
+    }
+  }
+
+  for (let i = 0; i < shapeTypes.length; i++) {
+    const type_ = shapeTypes[i];
+    const off = shapeOffsets[i];
+    if (type_ === 0) {
+      const r = shapeSizes[off];
+      const renderable = sphereCount < MAX_INSTANCES;
+      if (renderable) pushColor(sphereColorAttr, SPHERE_COLORS, sphereCount);
+      bodies.push({ type: 0, instanceIndex: renderable ? sphereCount : -1, radius: r });
+      if (renderable) sphereCount++;
+    } else if (type_ === 1) {
+      const hw = shapeSizes[off];
+      const hh = shapeSizes[off + 1];
+      const hd = shapeSizes[off + 2];
+      const renderable = boxCount < MAX_INSTANCES;
+      if (renderable) pushColor(boxColorAttr, BOX_COLORS, boxCount);
+      bodies.push({
+        type: 1,
+        instanceIndex: renderable ? boxCount : -1,
+        halfExtents: [hw, hh, hd],
+      });
+      if (renderable) boxCount++;
+    } else if (type_ === 2) {
+      const halfHeight = shapeSizes[off];
+      const radius = shapeSizes[off + 1];
+      const renderable = capsuleCount < MAX_INSTANCES;
+      if (renderable) pushColor(capsuleColorAttr, CAPSULE_COLORS, capsuleCount);
+      bodies.push({
+        type: 2,
+        instanceIndex: renderable ? capsuleCount : -1,
+        halfHeight,
+        radius,
+      });
+      if (renderable) capsuleCount++;
+    } else {
+      // Plane or unrenderable: placeholder entry to keep indices aligned.
+      bodies.push({ type: 99, instanceIndex: -1 });
+    }
+  }
+
+  sphereInstances.count = sphereCount;
+  boxInstances.count = boxCount;
+  capsuleInstances.count = capsuleCount;
+  markInstanceColorDirty(sphereInstances);
+  markInstanceColorDirty(boxInstances);
+  markInstanceColorDirty(capsuleInstances);
+
+  syncTransformCache();
+  updateTransforms();
+  syncTimingCache();
+
+  const totalBodies = world.body_count();
+  const dropped =
+    (bodies.filter((b) => b.type === 0).length - sphereCount) +
+    (bodies.filter((b) => b.type === 1).length - boxCount) +
+    (bodies.filter((b) => b.type === 2).length - capsuleCount);
+  const tDone = performance.now();
+  console.log(
+    `[scene] "${name}": ${totalBodies} bodies — rendering ` +
+      `${sphereCount} spheres, ${boxCount} boxes, ${capsuleCount} capsules` +
+      (dropped > 0 ? ` (${dropped} bodies exceed MAX_INSTANCES=${MAX_INSTANCES} and are hidden)` : "") +
+      ` — timings: create ${(tCreated - tStart).toFixed(0)}ms, spawn ${(tSpawned - tCreated).toFixed(0)}ms, mesh ${(tDone - tSpawned).toFixed(0)}ms`,
+  );
+  if (totalBodies > 1500) {
+    console.warn(
+      `[scene] "${name}" has ${totalBodies} bodies — GPU step may take hundreds of ms per frame on non-discrete GPUs.`,
+    );
+  }
+
+  if (window.__rubble_test) {
+    window.__rubble_test.bodyCount = totalBodies;
+  }
+  // Track first-step timing so we can tell if GPU step() is hanging.
+  firstStepLoggedFor = name;
+  // Show the setup breakdown in the overlay. We keep it visible until the
+  // first GPU step completes, so on mobile/without devtools the user can see
+  // whether the world was built and whether step() is actually running.
+  loadingEl.innerHTML =
+    `<div style="text-align:center;line-height:1.6">` +
+    `<div>Loaded "${name}": ${totalBodies} bodies</div>` +
+    `<div style="font-size:0.85em;color:#777">create ${(tCreated - tStart).toFixed(0)}ms · spawn ${(tSpawned - tCreated).toFixed(0)}ms · mesh ${(tDone - tSpawned).toFixed(0)}ms</div>` +
+    `<div style="font-size:0.85em;color:#777">waiting for first GPU step…</div>` +
+    `</div>`;
+  sceneLoading = false;
+}
+
 async function main() {
   await init();
 
+  // Create an initial world just so we can ask it which scenes exist.
   world = await PhysicsWorld3D.create(0.0, -9.81, 0.0, 1.0 / 60.0);
+  const sceneNames: string[] = world.scene_names();
+  const initialName: string = world.initial_scene_name();
 
-  // Ground plane
-  world.add_ground_plane(0.0);
-  bodies.push({ type: 99, instanceIndex: -1 });
-
-  // Spawn initial bodies. Body count is configurable via `?bodies=N` query param
-  // so E2E tests (SwiftShader, ~1s/step broadphase readback) can use a smaller count.
-  const bodyCountParam = new URL(window.location.href).searchParams.get("bodies");
-  const initialBodies = bodyCountParam
-    ? Math.max(1, Math.min(MAX_INSTANCES, parseInt(bodyCountParam, 10) || 1000))
-    : 1000;
-  for (let i = 0; i < initialBodies; i++) {
-    const x = (rng() - 0.5) * 12;
-    const y = 3 + rng() * 15;
-    const z = (rng() - 0.5) * 12;
-    spawnRandomBody(x, y, z);
+  const sceneSelect = document.getElementById("scene-select") as HTMLSelectElement;
+  for (const name of sceneNames) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    if (name === initialName) opt.selected = true;
+    sceneSelect.appendChild(opt);
   }
+
+  // `?bodies=N` overrides the scene picker and does a simple imperative spawn.
+  // E2E tests on SwiftShader (CI) use this to keep per-step cost low.
+  const bodyCountParam = new URL(window.location.href).searchParams.get("bodies");
+  if (bodyCountParam !== null) {
+    const initialBodies = Math.max(
+      1,
+      Math.min(MAX_INSTANCES, parseInt(bodyCountParam, 10) || 1000),
+    );
+    world.add_ground_plane(0.0);
+    bodies.push({ type: 99, instanceIndex: -1 });
+    for (let i = 0; i < initialBodies; i++) {
+      const x = (rng() - 0.5) * 12;
+      const y = 3 + rng() * 15;
+      const z = (rng() - 0.5) * 12;
+      spawnRandomBody(x, y, z);
+    }
+    syncTransformCache();
+    updateTransforms();
+    syncTimingCache();
+    if (window.__rubble_test) {
+      window.__rubble_test.bodyCount = world.body_count();
+    }
+    sceneSelect.disabled = true;
+  } else {
+    await loadScene(initialName);
+  }
+
+  sceneSelect.addEventListener("change", () => {
+    void loadScene(sceneSelect.value);
+  });
 
   // Init renderer
   await initRenderer();
-  syncTransformCache();
-  syncTimingCache();
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 3, 0);
