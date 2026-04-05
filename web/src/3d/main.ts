@@ -144,6 +144,9 @@ scene.add(sphereInstances);
 const sphereColorAttr = new Float32Array(MAX_INSTANCES * 3);
 const boxColorAttr = new Float32Array(MAX_INSTANCES * 3);
 const capsuleColorAttr = new Float32Array(MAX_INSTANCES * 3);
+const sphereInstanceColor = new THREE.InstancedBufferAttribute(sphereColorAttr, 3);
+const boxInstanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
+const capsuleInstanceColor = new THREE.InstancedBufferAttribute(capsuleColorAttr, 3);
 
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const boxMat = new THREE.MeshStandardMaterial({
@@ -169,6 +172,10 @@ capsuleInstances.castShadow = true;
 capsuleInstances.receiveShadow = true;
 capsuleInstances.count = 0;
 scene.add(capsuleInstances);
+
+sphereInstances.instanceColor = sphereInstanceColor;
+boxInstances.instanceColor = boxInstanceColor;
+capsuleInstances.instanceColor = capsuleInstanceColor;
 
 function rebuildCapsuleGeometry(halfHeight: number, radius: number) {
   capsuleBaseHalfHeight = halfHeight;
@@ -200,6 +207,12 @@ function pushColor(
   attr[idx * 3 + 2] = tempColor.b;
 }
 
+function markInstanceColorDirty(mesh: THREE.InstancedMesh) {
+  if (mesh.instanceColor) {
+    mesh.instanceColor.needsUpdate = true;
+  }
+}
+
 function addSphere(x: number, y: number, z: number, radius: number, mass: number) {
   const idx = world.add_sphere(x, y, z, radius, mass);
   const renderable = sphereCount < MAX_INSTANCES;
@@ -216,10 +229,7 @@ function addSphere(x: number, y: number, z: number, radius: number, mass: number
   if (renderable) {
     sphereCount++;
     sphereInstances.count = sphereCount;
-    sphereInstances.instanceColor = new THREE.InstancedBufferAttribute(
-      sphereColorAttr.slice(0, sphereCount * 3),
-      3,
-    );
+    markInstanceColorDirty(sphereInstances);
   }
   return idx;
 }
@@ -248,10 +258,7 @@ function addBox(
   if (renderable) {
     boxCount++;
     boxInstances.count = boxCount;
-    boxInstances.instanceColor = new THREE.InstancedBufferAttribute(
-      boxColorAttr.slice(0, boxCount * 3),
-      3,
-    );
+    markInstanceColorDirty(boxInstances);
   }
   return idx;
 }
@@ -569,24 +576,9 @@ async function loadScene(name: string) {
   sphereInstances.count = sphereCount;
   boxInstances.count = boxCount;
   capsuleInstances.count = capsuleCount;
-  if (sphereCount > 0) {
-    sphereInstances.instanceColor = new THREE.InstancedBufferAttribute(
-      sphereColorAttr.slice(0, sphereCount * 3),
-      3,
-    );
-  }
-  if (boxCount > 0) {
-    boxInstances.instanceColor = new THREE.InstancedBufferAttribute(
-      boxColorAttr.slice(0, boxCount * 3),
-      3,
-    );
-  }
-  if (capsuleCount > 0) {
-    capsuleInstances.instanceColor = new THREE.InstancedBufferAttribute(
-      capsuleColorAttr.slice(0, capsuleCount * 3),
-      3,
-    );
-  }
+  markInstanceColorDirty(sphereInstances);
+  markInstanceColorDirty(boxInstances);
+  markInstanceColorDirty(capsuleInstances);
 
   syncTransformCache();
   updateTransforms();
