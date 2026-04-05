@@ -471,12 +471,14 @@ async function loop_() {
   lastRenderMs = performance.now() - t0;
 
   frameCount++;
+  // Step timings reflect the last `world.step()`; refresh every frame so the overlay
+  // is never up to ~1s stale (FPS is still averaged once per second).
+  syncTimingCache();
+  timingsEl.textContent = formatTimings(cachedTimings, cachedBroadphase, lastRenderMs);
   const now = performance.now();
   if (now - lastFpsTime >= 1000) {
-    syncTimingCache();
     fpsEl.textContent = `FPS: ${frameCount}`;
     bodiesEl.textContent = `Bodies: ${world.body_count()}`;
-    timingsEl.textContent = formatTimings(cachedTimings, cachedBroadphase, lastRenderMs);
     frameCount = 0;
     lastFpsTime = now;
   }

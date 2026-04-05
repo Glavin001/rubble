@@ -45,6 +45,28 @@ impl BroadphaseBreakdownMs {
     pub fn is_zero(&self) -> bool {
         self.total_ms() <= f32::EPSILON
     }
+
+    /// WebGPU only: the first buffer map after broadphase often waits for **all** prior GPU
+    /// work, while `device.poll` does not block. That wall time is accumulated in
+    /// `readback_ms` even though it is mostly GPU pair-finding / tree work.
+    ///
+    /// Call this **only** after timing a **4-byte** pair-counter read following the
+    /// on-device LBVH path — not after large `GpuBuffer::download` readbacks (e.g. compound
+    /// AABB staging).
+    #[cfg(target_arch = "wasm32")]
+    pub fn reattribute_webgpu_pair_counter_wait_to_traverse(&mut self) {
+        /// Typical host-side cost to map/copy the atomic counter (ms); the rest is GPU wait.
+        const COUNTER_READ_HOST_MS: f32 = 0.1;
+        let rb = self.readback_ms;
+        if rb <= COUNTER_READ_HOST_MS {
+            return;
+        }
+        self.traverse_ms += rb - COUNTER_READ_HOST_MS;
+        self.readback_ms = COUNTER_READ_HOST_MS;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn reattribute_webgpu_pair_counter_wait_to_traverse(&mut self) {}
 }
 
 /// Wall-clock timings (milliseconds) for each phase of a physics step.
