@@ -1372,7 +1372,12 @@ fn parry_oracle_transform_sweep_sphere_box() {
         Quat::from_rotation_x(std::f32::consts::FRAC_PI_4),
         Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
     ];
-    let separations = [0.85f32, 0.95, 1.0, 1.05, 1.2];
+    // For a unit box with half-extent 0.5, worst-case extent along any axis
+    // after 3D rotation is sqrt(3)*0.5 ≈ 0.866. Plus sphere radius 0.5, max
+    // touching distance is ~1.366. So use thresholds that account for this:
+    //   - sep < 0.98: definitely penetrating for all rotations
+    //   - sep > 1.50: definitely separated for all rotations
+    let separations = [0.85f32, 0.95, 1.0, 1.05, 1.2, 1.5, 1.8];
 
     let mut failures = Vec::new();
     for &rot in &rotations {
@@ -1426,7 +1431,8 @@ fn parry_oracle_transform_sweep_sphere_box() {
             }
             // Note: if !parry_penetrating for contact case, it might be marginal
             let _ = parry_penetrating;
-            if !case.expect_contact && sep > 1.15 && rubble_has_contact {
+            // sep > 1.5 guarantees no contact even for worst-case 3D box rotation
+            if !case.expect_contact && sep > 1.5 && rubble_has_contact {
                 failures.push(format!(
                     "sep={sep:.2}, rot=({:.2},{:.2},{:.2},{:.2}): Rubble false positive",
                     rot.x, rot.y, rot.z, rot.w
