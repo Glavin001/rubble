@@ -39,4 +39,16 @@ All commands documented in `README.md`. Quick reference:
 - `wasm-pack` is provided via npm devDependencies in `web/package.json`, not through `cargo install`.
 - Playwright E2E tests require `web/dist/` to exist (run `./web/build.sh` first). The Playwright config starts its own `vite preview` server on port 4173.
 - Playwright uses Chromium with `--enable-unsafe-webgpu --use-vulkan=swiftshader` flags for CPU-emulated WebGPU. Install browsers once with `npm --prefix web run playwright:install`.
-- The native viewer (`rubble-viewer`) requires a display/GPU. It builds in the cloud but cannot render headlessly.
+- The native viewer (`rubble-viewer`) needs `libxkbcommon-x11-0` and `libxcb-xkb1` installed (`sudo apt-get install -y libxkbcommon-x11-0 libxcb-xkb1`). With DISPLAY=:1 and lavapipe, the viewer renders live physics on the virtual X11 display.
+
+### Chrome WebGPU (SwiftShader) for web demos
+
+The default Chrome in this VM does **not** enable WebGPU. To view the Rubble web demos in Chrome, launch it with these additional flags:
+
+```
+--enable-unsafe-webgpu --enable-features=Vulkan --use-vulkan=swiftshader --use-angle=swiftshader --disable-vulkan-fallback-to-gl-for-testing --disable-gpu-sandbox
+```
+
+These flags have been added to `/usr/share/applications/google-chrome.desktop`. If Chrome was already running without them, kill it and relaunch.
+
+Playwright E2E tests already include these flags in `web/playwright.config.ts`, so `npm --prefix web test` works out of the box.
