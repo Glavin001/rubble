@@ -86,20 +86,22 @@ function randomColor(): string {
   return COLORS[Math.floor(rng() * COLORS.length)];
 }
 
-function spawnRandomBody(px: number, py: number) {
+function spawnRandomBody(px: number, py: number, refreshCaches = true) {
   const isCircle = rng() > 0.4;
   if (isCircle) {
-    const r = 0.3 + rng() * 0.5;
+    const r = 0.2 + rng() * 0.15;
     world.add_circle(px, py, r, 1.0);
   } else {
-    const hw = 0.3 + rng() * 0.5;
-    const hh = 0.3 + rng() * 0.5;
+    const hw = 0.2 + rng() * 0.15;
+    const hh = 0.2 + rng() * 0.15;
     const angle = rng() * Math.PI;
     world.add_rect(px, py, hw, hh, angle, 1.0);
   }
   bodyColors.push(randomColor());
-  updateShapeCache();
-  ensureBodyStateBuffers();
+  if (refreshCaches) {
+    updateShapeCache();
+    ensureBodyStateBuffers();
+  }
 }
 
 function updateShapeCache() {
@@ -309,7 +311,7 @@ async function main() {
     for (let col = 0; col < columns; col++) {
       const px = xStart + col * xSpacing;
       const py = yStart + row * ySpacing;
-      spawnRandomBody(px, py);
+      spawnRandomBody(px, py, false);
     }
   }
 
