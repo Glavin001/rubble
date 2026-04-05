@@ -200,6 +200,18 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done_clone = done.clone();
         slice.map_async(wgpu::MapMode::Read, move |result| {
+            // #region agent log
+            crate::debug_log(
+                "A",
+                "crates/rubble-gpu/src/buffer.rs:202",
+                "download_async_map_result",
+                format!(
+                    r#"{{"byteLen":{byte_len},"ok":{},"error":{:?}}}"#,
+                    result.is_ok(),
+                    result.as_ref().err().map(|err| err.to_string())
+                ),
+            );
+            // #endregion
             result.unwrap();
             done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         });
@@ -265,6 +277,18 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         {
             let done = done_self.clone();
             slice_self.map_async(wgpu::MapMode::Read, move |result| {
+                // #region agent log
+                crate::debug_log(
+                    "A",
+                    "crates/rubble-gpu/src/buffer.rs:267",
+                    "download_with_async_self_map_result",
+                    format!(
+                        r#"{{"byteLen":{byte_len_self},"ok":{},"error":{:?}}}"#,
+                        result.is_ok(),
+                        result.as_ref().err().map(|err| err.to_string())
+                    ),
+                );
+                // #endregion
                 result.unwrap();
                 done.store(true, Ordering::SeqCst);
             });
@@ -272,6 +296,18 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         {
             let done = done_other.clone();
             slice_other.map_async(wgpu::MapMode::Read, move |result| {
+                // #region agent log
+                crate::debug_log(
+                    "A",
+                    "crates/rubble-gpu/src/buffer.rs:274",
+                    "download_with_async_other_map_result",
+                    format!(
+                        r#"{{"byteLen":{byte_len_other},"ok":{},"error":{:?}}}"#,
+                        result.is_ok(),
+                        result.as_ref().err().map(|err| err.to_string())
+                    ),
+                );
+                // #endregion
                 result.unwrap();
                 done.store(true, Ordering::SeqCst);
             });
@@ -573,6 +609,18 @@ impl GpuAtomicCounter {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done_clone = done.clone();
         slice.map_async(wgpu::MapMode::Read, move |result| {
+            // #region agent log
+            crate::debug_log(
+                "A",
+                "crates/rubble-gpu/src/buffer.rs:575",
+                "atomic_counter_read_async_map_result",
+                format!(
+                    r#"{{"byteLen":4,"ok":{},"error":{:?}}}"#,
+                    result.is_ok(),
+                    result.as_ref().err().map(|err| err.to_string())
+                ),
+            );
+            // #endregion
             result.unwrap();
             done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         });

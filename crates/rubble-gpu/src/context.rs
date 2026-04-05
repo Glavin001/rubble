@@ -21,8 +21,26 @@ impl GpuContext {
         let mut pool = self.staging_pool.lock().unwrap();
         if let Some(idx) = pool.iter().position(|(capacity, _)| *capacity >= size) {
             let (_, buffer) = pool.swap_remove(idx);
+            #[cfg(target_arch = "wasm32")]
+            // #region agent log
+            crate::debug_log(
+                "B",
+                "crates/rubble-gpu/src/context.rs:23",
+                "acquire_staging_buffer",
+                format!(r#"{{"requestedSize":{size},"bufferSize":{},"reused":true,"label":{:?}}}"#, buffer.size(), label),
+            );
+            // #endregion
             buffer
         } else {
+            #[cfg(target_arch = "wasm32")]
+            // #region agent log
+            crate::debug_log(
+                "B",
+                "crates/rubble-gpu/src/context.rs:26",
+                "acquire_staging_buffer",
+                format!(r#"{{"requestedSize":{size},"reused":false,"label":{:?}}}"#, label),
+            );
+            // #endregion
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size,

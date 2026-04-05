@@ -107,6 +107,15 @@ pub enum GpuError {
     DeviceRequest(#[from] wgpu::RequestDeviceError),
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn debug_log(hypothesis_id: &str, location: &str, message: &str, data_json: String) {
+    let payload = format!(
+        r#"{{"hypothesisId":"{hypothesis_id}","location":"{location}","message":"{message}","data":{data_json},"timestamp":{}}}"#,
+        js_sys::Date::now() as u64
+    );
+    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&payload));
+}
+
 /// Yield to the JavaScript event loop (WASM only).
 /// Required for async GPU buffer mapping in WebGPU.
 #[cfg(target_arch = "wasm32")]
