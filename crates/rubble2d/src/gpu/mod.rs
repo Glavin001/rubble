@@ -529,7 +529,7 @@ impl GpuPipeline2D {
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        contacts: &mut Vec<Contact2D>,
+        contacts: &mut [Contact2D],
     ) {
         self.apply_free_motion(num_bodies, contacts);
         if contacts.is_empty() {
@@ -585,7 +585,7 @@ impl GpuPipeline2D {
         self.ctx.queue.submit(Some(encoder.finish()));
     }
 
-    fn run_post_stabilization_pass(&mut self, contacts: &mut Vec<Contact2D>) {
+    fn run_post_stabilization_pass(&mut self, contacts: &mut [Contact2D]) {
         if contacts.is_empty() {
             return;
         }

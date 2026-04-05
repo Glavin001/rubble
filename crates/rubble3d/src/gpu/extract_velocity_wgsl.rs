@@ -65,8 +65,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // otherwise collapse to zero.
         lin_vel = bodies[idx].lin_vel.xyz;
     }
-    bodies[idx].lin_vel = vec4<f32>(lin_vel, 0.0);
-
     let q_new = bodies[idx].orientation;
     let q_old = old_states[idx].orientation;
     var dq = qmul(q_new, qconj(q_old));
@@ -81,6 +79,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if active_bodies[idx] == 0u {
         omega_new = bodies[idx].ang_vel.xyz;
     }
+
+    bodies[idx].lin_vel = vec4<f32>(lin_vel, 0.0);
     bodies[idx].ang_vel = vec4<f32>(omega_new, 0.0);
 }
 "#;

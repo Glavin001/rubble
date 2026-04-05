@@ -7,6 +7,7 @@ use support::{
     TrackedBody3D,
 };
 
+#[allow(clippy::too_many_arguments)]
 fn box_desc(
     x: f32,
     y: f32,
@@ -32,8 +33,6 @@ fn demo_world(max_bodies: usize) -> Option<(World, Vec3)> {
     let gravity = Vec3::new(0.0, -9.81, 0.0);
     let world = try_world(SimConfig {
         gravity,
-        dt: 1.0 / 60.0,
-        solver_iterations: 5,
         max_bodies,
         ..Default::default()
     })?;
@@ -147,12 +146,6 @@ fn tail_max_abs_vertical_speed(reports: &[SceneReport3D]) -> f32 {
 
 #[test]
 fn demo_stack_settles_without_support_loss_or_ejection_3d() {
-    if should_skip_known_failure(
-        "demo_stack_settles_without_support_loss_or_ejection_3d",
-        "the demo 3D stack still sinks through support contacts and ejects upward under the default solver settings",
-    ) {
-        return;
-    }
     let Some((mut world, tracked, gravity)) = build_demo_stack_scene() else {
         eprintln!("SKIP: No GPU adapter found");
         return;
@@ -192,12 +185,6 @@ fn demo_stack_settles_without_support_loss_or_ejection_3d() {
 
 #[test]
 fn demo_stack_ratio_settles_without_persistent_vertical_oscillation_3d() {
-    if should_skip_known_failure(
-        "demo_stack_ratio_settles_without_persistent_vertical_oscillation_3d",
-        "the demo 3D stack-ratio scene still keeps vertically oscillating instead of converging to rest",
-    ) {
-        return;
-    }
     let Some((mut world, tracked, gravity)) = build_demo_stack_ratio_scene() else {
         eprintln!("SKIP: No GPU adapter found");
         return;
@@ -243,7 +230,7 @@ fn demo_stack_ratio_settles_without_persistent_vertical_oscillation_3d() {
 fn demo_pyramid_stays_supported_by_floor_without_exploding_3d() {
     if should_skip_known_failure(
         "demo_pyramid_stays_supported_by_floor_without_exploding_3d",
-        "the demo 3D pyramid still leaks through the floor and develops explosion-like velocity spikes",
+        "AVBD solver injects energy into large 3D pyramid stacks; max_speed diverges over time",
     ) {
         return;
     }

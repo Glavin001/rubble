@@ -4,6 +4,7 @@ use glam::{Quat, Vec3};
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig};
 use support::{add_tracked_body, collect_reports, cube_hull, octagon_hull, TrackedBody3D};
 
+#[allow(clippy::vec_init_then_push)]
 fn build_sweep_scene_3d(
     config: SimConfig,
     mass_ratio: f32,

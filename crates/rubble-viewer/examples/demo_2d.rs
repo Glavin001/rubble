@@ -26,6 +26,7 @@ fn rect_desc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rect_desc_with_velocity(
     x: f32,
     y: f32,

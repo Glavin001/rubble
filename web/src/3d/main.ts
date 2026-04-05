@@ -410,8 +410,13 @@ async function main() {
   world.add_ground_plane(0.0);
   bodies.push({ type: 99, instanceIndex: -1 });
 
-  // Spawn initial bodies
-  for (let i = 0; i < 1000; i++) {
+  // Spawn initial bodies. Body count is configurable via `?bodies=N` query param
+  // so E2E tests (SwiftShader, ~1s/step broadphase readback) can use a smaller count.
+  const bodyCountParam = new URL(window.location.href).searchParams.get("bodies");
+  const initialBodies = bodyCountParam
+    ? Math.max(1, Math.min(MAX_INSTANCES, parseInt(bodyCountParam, 10) || 1000))
+    : 1000;
+  for (let i = 0; i < initialBodies; i++) {
     const x = (rng() - 0.5) * 12;
     const y = 3 + rng() * 15;
     const z = (rng() - 0.5) * 12;
