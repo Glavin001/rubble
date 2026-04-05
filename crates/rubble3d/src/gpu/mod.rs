@@ -732,17 +732,6 @@ impl GpuPipeline {
         // Planes go through GPU LBVH broadphase (their large AABB handles pairing).
         // Only compound shapes still require CPU pair expansion.
         let requires_cpu_pair_stage = has_compounds;
-        // #region agent log
-        rubble_gpu::debug_log(
-            "D",
-            "crates/rubble3d/src/gpu/mod.rs:1813",
-            "run_detection_async_entry",
-            format!(
-                r#"{{"numBodies":{num_bodies},"hasCompounds":{},"requiresCpuPairStage":{}}}"#,
-                has_compounds, requires_cpu_pair_stage
-            ),
-        );
-        // #endregion
         self.aabbs.set_len(num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
@@ -1263,20 +1252,15 @@ impl GpuPipeline {
 
         // GPU graph coloring: Luby-style parallel body coloring on GPU.
         let graph_key = body_graph_key_3d(contacts);
-        let (body_order, color_groups) =
-            if self.cached_color_num_bodies == num_bodies && self.cached_body_graph == graph_key {
-                (
-                    self.cached_body_order.clone(),
-                    self.cached_color_groups.clone(),
-                )
-            } else {
-                let result = self.gpu_color_bodies(num_bodies, contacts);
-                self.cached_color_num_bodies = num_bodies;
-                self.cached_body_graph = graph_key;
-                self.cached_body_order = result.0.clone();
-                self.cached_color_groups = result.1.clone();
-                result
-            };
+        if self.cached_color_num_bodies != num_bodies || self.cached_body_graph != graph_key {
+            let (body_order, color_groups) = self.gpu_color_bodies(num_bodies, contacts);
+            self.cached_color_num_bodies = num_bodies;
+            self.cached_body_graph = graph_key;
+            self.cached_body_order = body_order;
+            self.cached_color_groups = color_groups;
+        }
+        let body_order = &self.cached_body_order;
+        let color_groups = &self.cached_color_groups;
         let adjacency = build_body_contact_adjacency(num_bodies, contacts);
         self.contacts.upload(&self.ctx, contacts);
         self.contact_count.write(&self.ctx, contacts.len() as u32);
@@ -1339,20 +1323,16 @@ impl GpuPipeline {
         }
 
         let graph_key = body_graph_key_3d(contacts);
-        let (body_order, color_groups) =
-            if self.cached_color_num_bodies == num_bodies && self.cached_body_graph == graph_key {
-                (
-                    self.cached_body_order.clone(),
-                    self.cached_color_groups.clone(),
-                )
-            } else {
-                let result = self.gpu_color_bodies_async(num_bodies, contacts).await;
-                self.cached_color_num_bodies = num_bodies;
-                self.cached_body_graph = graph_key;
-                self.cached_body_order = result.0.clone();
-                self.cached_color_groups = result.1.clone();
-                result
-            };
+        if self.cached_color_num_bodies != num_bodies || self.cached_body_graph != graph_key {
+            let (body_order, color_groups) =
+                self.gpu_color_bodies_async(num_bodies, contacts).await;
+            self.cached_color_num_bodies = num_bodies;
+            self.cached_body_graph = graph_key;
+            self.cached_body_order = body_order;
+            self.cached_color_groups = color_groups;
+        }
+        let body_order = &self.cached_body_order;
+        let color_groups = &self.cached_color_groups;
         let adjacency = build_body_contact_adjacency(num_bodies, contacts);
         self.contacts.upload(&self.ctx, contacts);
         self.contact_count.write(&self.ctx, contacts.len() as u32);
@@ -1987,14 +1967,6 @@ impl GpuPipeline {
         }
         let external_pair_count = if !requires_cpu_pair_stage && pair_thread_count > 0 {
             let t_readback = Instant::now();
-            // #region agent log
-            rubble_gpu::debug_log(
-                "D",
-                "crates/rubble3d/src/gpu/mod.rs:1902",
-                "before_read_pair_count_async",
-                format!(r#"{{"pairThreadCount":{pair_thread_count},"numBodies":{num_bodies}}}"#),
-            );
-            // #endregion
             let count = self
                 .gpu_lbvh
                 .read_pair_count_async(&self.ctx, pair_thread_count)
@@ -2015,17 +1987,6 @@ impl GpuPipeline {
             self.dispatch_narrowphase_with_source(num_bodies, external_pair_count, &pair_buffer);
         }
 
-        // #region agent log
-        rubble_gpu::debug_log(
-            "D",
-            "crates/rubble3d/src/gpu/mod.rs:1923",
-            "before_contact_count_read_async",
-            format!(
-                r#"{{"requiresCpuPairStage":{},"pairCount":{pair_count},"externalPairCount":{external_pair_count},"numBodies":{num_bodies}}}"#,
-                requires_cpu_pair_stage
-            ),
-        );
-        // #endregion
         let contact_count_val = self.contact_count.read_async(&self.ctx).await;
         let capacity = self.contacts.capacity();
         if contact_count_val > capacity {

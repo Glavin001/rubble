@@ -134,6 +134,10 @@ scene.add(sphereInstances);
 // Per-instance colors
 const sphereColorAttr = new Float32Array(MAX_INSTANCES * 3);
 const boxColorAttr = new Float32Array(MAX_INSTANCES * 3);
+sphereInstances.instanceColor = new THREE.InstancedBufferAttribute(
+  sphereColorAttr,
+  3,
+);
 
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const boxMat = new THREE.MeshStandardMaterial({
@@ -144,6 +148,7 @@ const boxInstances = new THREE.InstancedMesh(boxGeo, boxMat, MAX_INSTANCES);
 boxInstances.castShadow = true;
 boxInstances.receiveShadow = true;
 boxInstances.count = 0;
+boxInstances.instanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
 scene.add(boxInstances);
 
 const tempMatrix = new THREE.Matrix4();
@@ -172,10 +177,7 @@ function addSphere(x: number, y: number, z: number, radius: number, mass: number
   if (renderable) {
     sphereCount++;
     sphereInstances.count = sphereCount;
-    sphereInstances.instanceColor = new THREE.InstancedBufferAttribute(
-      sphereColorAttr.slice(0, sphereCount * 3),
-      3,
-    );
+    sphereInstances.instanceColor!.needsUpdate = true;
   }
   return idx;
 }
@@ -208,10 +210,7 @@ function addBox(
   if (renderable) {
     boxCount++;
     boxInstances.count = boxCount;
-    boxInstances.instanceColor = new THREE.InstancedBufferAttribute(
-      boxColorAttr.slice(0, boxCount * 3),
-      3,
-    );
+    boxInstances.instanceColor!.needsUpdate = true;
   }
   return idx;
 }
