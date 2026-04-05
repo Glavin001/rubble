@@ -370,14 +370,7 @@ impl App3D {
         };
 
         let _ = state.egui_state.on_window_event(&state.window, &event);
-        if state.egui_ctx.egui_wants_pointer_input() {
-            match &event {
-                WindowEvent::MouseInput { .. }
-                | WindowEvent::CursorMoved { .. }
-                | WindowEvent::MouseWheel { .. } => return,
-                _ => {}
-            }
-        }
+        let pointer_over_ui = state.egui_ctx.is_pointer_over_egui();
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -388,10 +381,12 @@ impl App3D {
                 state: btn, button, ..
             } => {
                 let pressed = btn == ElementState::Pressed;
-                match button {
-                    MouseButton::Left => state.mouse_pressed = pressed,
-                    MouseButton::Right | MouseButton::Middle => state.right_pressed = pressed,
-                    _ => {}
+                if !pressed || !pointer_over_ui {
+                    match button {
+                        MouseButton::Left => state.mouse_pressed = pressed,
+                        MouseButton::Right | MouseButton::Middle => state.right_pressed = pressed,
+                        _ => {}
+                    }
                 }
                 if !pressed {
                     state.last_mouse = None;
@@ -410,10 +405,10 @@ impl App3D {
                 }
                 state.last_mouse = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !pointer_over_ui => {
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.1,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.3,
                 };
                 state.camera.zoom(scroll);
             }
@@ -759,14 +754,7 @@ impl App2D {
         };
 
         let _ = state.egui_state.on_window_event(&state.window, &event);
-        if state.egui_ctx.egui_wants_pointer_input() {
-            match &event {
-                WindowEvent::MouseInput { .. }
-                | WindowEvent::CursorMoved { .. }
-                | WindowEvent::MouseWheel { .. } => return,
-                _ => {}
-            }
-        }
+        let pointer_over_ui = state.egui_ctx.is_pointer_over_egui();
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -777,7 +765,7 @@ impl App2D {
                 state: btn, button, ..
             } => {
                 let pressed = btn == ElementState::Pressed;
-                if button == MouseButton::Left {
+                if (!pressed || !pointer_over_ui) && button == MouseButton::Left {
                     state.mouse_pressed = pressed;
                 }
                 if !pressed {
@@ -794,10 +782,10 @@ impl App2D {
                 }
                 state.last_mouse = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !pointer_over_ui => {
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.1,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.3,
                 };
                 state.camera.zoom_by(scroll);
             }
