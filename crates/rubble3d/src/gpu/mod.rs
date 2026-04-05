@@ -1255,28 +1255,93 @@ impl GpuPipeline {
 
         // GPU graph coloring: Luby-style parallel body coloring on GPU.
         let graph_key = body_graph_key_3d(contacts);
-        let (body_order, color_groups) =
-            if self.cached_color_num_bodies == num_bodies && self.cached_body_graph == graph_key {
-                (
-                    self.cached_body_order.clone(),
-                    self.cached_color_groups.clone(),
-                )
-            } else {
-                let result = self.gpu_color_bodies(num_bodies, contacts);
-                self.cached_color_num_bodies = num_bodies;
-                self.cached_body_graph = graph_key;
-                self.cached_body_order = result.0.clone();
-                self.cached_color_groups = result.1.clone();
-                result
-            };
+        if self.cached_color_num_bodies != num_bodies || self.cached_body_graph != graph_key {
+            let (body_order, color_groups) = self.gpu_color_bodies(num_bodies, contacts);
+            self.cached_color_num_bodies = num_bodies;
+            self.cached_body_graph = graph_key;
+            self.cached_body_order = body_order;
+            self.cached_color_groups = color_groups;
+        }
         let adjacency = build_body_contact_adjacency(num_bodies, contacts);
         self.contacts.upload(&self.ctx, contacts);
         self.contact_count.write(&self.ctx, contacts.len() as u32);
-        self.body_order.upload(&self.ctx, &body_order);
+        self.body_order.upload(&self.ctx, &self.cached_body_order);
         self.body_contact_ranges
             .upload(&self.ctx, &adjacency.ranges);
         self.body_contact_indices
             .upload(&self.ctx, &adjacency.indices);
+        let color_groups = self.cached_color_groups.clone();
+        self.write_solve_ranges(&color_groups);
+        self.sync_primal_bind_groups(color_groups.len());
+        let _ = self.dual_bind_group();
+        let contact_count = contacts.len() as u32;
+        let primal_bind_groups = &self.primal_bg_cache.bind_groups;
+        let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("avbd_solve_batch_3d"),
+            });
+        for _ in 0..solver_iterations {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_primal_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.primal_kernel.pipeline());
+                for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
+                    if count == 0 {
+                        continue;
+                    }
+                    pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
+                    pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
+                }
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_dual_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.dual_kernel.pipeline());
+                pass.set_bind_group(0, dual_bind_group, &[]);
+                pass.dispatch_workgroups(round_up_workgroups(contact_count, WORKGROUP_SIZE), 1, 1);
+            }
+        }
+        self.ctx.queue.submit(Some(encoder.finish()));
+    }
+
+    /// Body-colored AVBD solve in position space (async, for WASM/WebGPU).
+    #[cfg(target_arch = "wasm32")]
+    async fn run_colored_solve_async(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        contacts: &mut [Contact3D],
+    ) {
+        self.apply_free_motion(num_bodies, contacts);
+        if contacts.is_empty() {
+            return;
+        }
+
+        let graph_key = body_graph_key_3d(contacts);
+        if self.cached_color_num_bodies != num_bodies || self.cached_body_graph != graph_key {
+            let (body_order, color_groups) =
+                self.gpu_color_bodies_async(num_bodies, contacts).await;
+            self.cached_color_num_bodies = num_bodies;
+            self.cached_body_graph = graph_key;
+            self.cached_body_order = body_order;
+            self.cached_color_groups = color_groups;
+        }
+        let adjacency = build_body_contact_adjacency(num_bodies, contacts);
+        self.contacts.upload(&self.ctx, contacts);
+        self.contact_count.write(&self.ctx, contacts.len() as u32);
+        self.body_order.upload(&self.ctx, &self.cached_body_order);
+        self.body_contact_ranges
+            .upload(&self.ctx, &adjacency.ranges);
+        self.body_contact_indices
+            .upload(&self.ctx, &adjacency.indices);
+        let color_groups = self.cached_color_groups.clone();
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
         let _ = self.dual_bind_group();
@@ -2758,6 +2823,136 @@ impl GpuPipeline {
         let mut body_order = Vec::new();
         let mut groups = Vec::new();
         for color in 0..num_colors {
+            let offset = body_order.len() as u32;
+            for (body_idx, &body_color) in colors.iter().enumerate() {
+                if active[body_idx] && body_color == color {
+                    body_order.push(body_idx as u32);
+                }
+            }
+            let count = body_order.len() as u32 - offset;
+            if count > 0 {
+                groups.push((offset, count));
+            }
+        }
+
+        (body_order, groups)
+    }
+
+    /// Async GPU Luby body coloring for WASM/WebGPU, avoiding blocking readback.
+    #[cfg(target_arch = "wasm32")]
+    async fn gpu_color_bodies_async(
+        &mut self,
+        num_bodies: u32,
+        contacts: &[Contact3D],
+    ) -> (Vec<u32>, Vec<(u32, u32)>) {
+        if contacts.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let ctx = &self.ctx;
+        let contacts_buf = self.contacts.buffer();
+        let cs = &mut self.gpu_coloring;
+
+        cs.frame_counter = cs.frame_counter.wrapping_add(1);
+        let contact_count = contacts.len() as u32;
+
+        cs.body_colors
+            .grow_if_needed(&self.ctx, num_bodies as usize);
+        cs.body_priorities
+            .grow_if_needed(&self.ctx, num_bodies as usize);
+
+        {
+            let params: [u32; 4] = [num_bodies, contact_count, cs.frame_counter, 0];
+            ctx.queue
+                .write_buffer(&cs.params_buf, 0, bytemuck::cast_slice(&params));
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("coloring_reset"),
+                layout: cs.reset_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: cs.body_colors.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: cs.body_priorities.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: cs.params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("coloring_reset"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(cs.reset_kernel.pipeline());
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
+            }
+            ctx.queue.submit(Some(encoder.finish()));
+        }
+
+        let max_iterations = 32u32;
+        for current_color in 0..max_iterations {
+            let params: [u32; 4] = [num_bodies, contact_count, current_color, 0];
+            ctx.queue
+                .write_buffer(&cs.params_buf, 0, bytemuck::cast_slice(&params));
+
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("coloring_step"),
+                layout: cs.step_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: cs.body_colors.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: cs.body_priorities.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: contacts_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: cs.params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("coloring_step"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(cs.step_kernel.pipeline());
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
+            }
+            ctx.queue.submit(Some(encoder.finish()));
+        }
+
+        cs.body_colors.set_len(num_bodies);
+        let colors = cs.body_colors.download_async(ctx).await;
+
+        let mut active = vec![false; num_bodies as usize];
+        for c in contacts {
+            active[c.body_a as usize] = true;
+            active[c.body_b as usize] = true;
+        }
+
+        let mut body_order = Vec::new();
+        let mut groups = Vec::new();
+        for color in 0..max_iterations {
             let offset = body_order.len() as u32;
             for (body_idx, &body_color) in colors.iter().enumerate() {
                 if active[body_idx] && body_color == color {
