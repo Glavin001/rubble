@@ -14,11 +14,11 @@ GPU-accelerated rigid-body physics in Rust ([wgpu](https://github.com/gfx-rs/wgp
 
 For software Vulkan (e.g. headless or no discrete GPU), aligned with CI:
 
-1. Install Mesa Vulkan drivers:
+1. Install Mesa Vulkan drivers and X11/keyboard libraries needed by the native viewer:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y mesa-vulkan-drivers
+sudo apt-get install -y mesa-vulkan-drivers libxkbcommon-x11-0 libxcb-xkb1
 ```
 
 2. If you need lavapipe explicitly, set the ICD and backend:
@@ -142,6 +142,28 @@ npm --prefix web run build:all
 | E2E (install browsers once, then tests) | `npm --prefix web run playwright:install` then `npm --prefix web test` |
 
 Use `cd web` and the same `npm run …` names if you prefer not to use `--prefix web`.
+
+### Chrome WebGPU without a GPU
+
+On headless Linux or machines without a discrete GPU, Chrome ships a bundled
+SwiftShader Vulkan driver that can emulate WebGPU in software. Launch Chrome
+with these extra flags to enable it:
+
+```bash
+google-chrome \
+  --enable-unsafe-webgpu \
+  --enable-features=Vulkan \
+  --use-vulkan=swiftshader \
+  --use-angle=swiftshader \
+  --disable-vulkan-fallback-to-gl-for-testing \
+  --disable-gpu-sandbox
+```
+
+The Playwright E2E config (`web/playwright.config.ts`) already includes these
+flags, so `npm --prefix web test` works without extra setup.
+
+> **Note:** E2E tests serve from `web/dist/`. Run `./web/build.sh` (or
+> `npm --prefix web run build:all`) before the first `npm --prefix web test`.
 
 ## CI at a glance
 
