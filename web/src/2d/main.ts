@@ -323,7 +323,51 @@ async function main() {
     sceneSelect.appendChild(opt);
   }
 
-  await loadScene(initialName);
+  // `?bodies=N` overrides the scene picker and does an imperative walled
+  // spawn. E2E tests on SwiftShader use this for a bounded, stable world.
+  const bodyCountParam = new URL(window.location.href).searchParams.get("bodies");
+  if (bodyCountParam !== null) {
+    const initialBodies = Math.max(
+      1,
+      Math.min(5000, parseInt(bodyCountParam, 10) || 50),
+    );
+    bodyColors = [];
+    const wallThickness = 1.0;
+    // 3 static walls (ground, left, right) in a [0, WORLD_W] x [0, WORLD_H]
+    // frame, then a grid of dynamic bodies inside.
+    world.add_static_rect(WORLD_W / 2, wallThickness / 2, WORLD_W / 2, wallThickness / 2, 0.0);
+    bodyColors.push(STATIC_COLOR);
+    world.add_static_rect(wallThickness / 2, WORLD_H / 2, wallThickness / 2, WORLD_H / 2, 0.0);
+    bodyColors.push(STATIC_COLOR);
+    world.add_static_rect(WORLD_W - wallThickness / 2, WORLD_H / 2, wallThickness / 2, WORLD_H / 2, 0.0);
+    bodyColors.push(STATIC_COLOR);
+
+    const cols = Math.ceil(Math.sqrt(initialBodies * 1.6));
+    const rows = Math.ceil(initialBodies / cols);
+    const xStart = 4.0;
+    const yStart = 6.5;
+    const xSpacing = (WORLD_W - 8) / Math.max(1, cols - 1);
+    const ySpacing = (WORLD_H - 15) / Math.max(1, rows - 1);
+    let spawned = 0;
+    for (let row = 0; row < rows && spawned < initialBodies; row++) {
+      for (let col = 0; col < cols && spawned < initialBodies; col++) {
+        const px = xStart + col * xSpacing;
+        const py = yStart + row * ySpacing;
+        spawnRandomBody(px, py, false);
+        spawned++;
+      }
+    }
+    updateShapeCache();
+    ensureBodyStateBuffers();
+    syncBodyStateCache();
+    syncTimingCache();
+    sceneSelect.disabled = true;
+    if (window.__rubble_test) {
+      window.__rubble_test.bodyCount = world.body_count();
+    }
+  } else {
+    await loadScene(initialName);
+  }
 
   sceneSelect.addEventListener("change", () => {
     void loadScene(sceneSelect.value);

@@ -29,7 +29,9 @@ test.describe("2D Physics Demo", () => {
       if (msg.type() === "error") errors.push(msg.text());
     });
 
-    await page.goto("/src/2d/index.html");
+    // Use the bounded walls+grid path (50 bodies) so SwiftShader can keep up
+    // and bodies stay contained within the asserted world bounds.
+    await page.goto("/src/2d/index.html?bodies=50");
     await waitForReady(page);
 
     // Attach errors to page for later assertions
