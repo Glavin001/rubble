@@ -1259,16 +1259,15 @@ impl GpuPipeline {
             self.cached_body_order = body_order;
             self.cached_color_groups = color_groups;
         }
-        let body_order = &self.cached_body_order;
-        let color_groups = &self.cached_color_groups;
         let adjacency = build_body_contact_adjacency(num_bodies, contacts);
         self.contacts.upload(&self.ctx, contacts);
         self.contact_count.write(&self.ctx, contacts.len() as u32);
-        self.body_order.upload(&self.ctx, &body_order);
+        self.body_order.upload(&self.ctx, &self.cached_body_order);
         self.body_contact_ranges
             .upload(&self.ctx, &adjacency.ranges);
         self.body_contact_indices
             .upload(&self.ctx, &adjacency.indices);
+        let color_groups = self.cached_color_groups.clone();
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
         let _ = self.dual_bind_group();
@@ -1331,16 +1330,15 @@ impl GpuPipeline {
             self.cached_body_order = body_order;
             self.cached_color_groups = color_groups;
         }
-        let body_order = &self.cached_body_order;
-        let color_groups = &self.cached_color_groups;
         let adjacency = build_body_contact_adjacency(num_bodies, contacts);
         self.contacts.upload(&self.ctx, contacts);
         self.contact_count.write(&self.ctx, contacts.len() as u32);
-        self.body_order.upload(&self.ctx, &body_order);
+        self.body_order.upload(&self.ctx, &self.cached_body_order);
         self.body_contact_ranges
             .upload(&self.ctx, &adjacency.ranges);
         self.body_contact_indices
             .upload(&self.ctx, &adjacency.indices);
+        let color_groups = self.cached_color_groups.clone();
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
         let _ = self.dual_bind_group();
