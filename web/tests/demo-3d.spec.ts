@@ -22,6 +22,24 @@ async function waitForSteps(
   );
 }
 
+async function waitForLoadingToHide(
+  page: import("@playwright/test").Page,
+  timeout = 30_000,
+) {
+  await page.waitForFunction(
+    () => document.getElementById("loading")?.style.display === "none",
+    null,
+    { timeout },
+  );
+}
+
+function filteredErrors(page: import("@playwright/test").Page) {
+  const errors = (page as any).__errors as string[];
+  return errors.filter(
+    (e) => !e.includes("DevTools") && !e.includes("favicon"),
+  );
+}
+
 test.describe("3D Physics Demo", () => {
   test.beforeEach(async ({ page }) => {
     const errors: string[] = [];
@@ -170,10 +188,55 @@ test.describe("3D Physics Demo", () => {
 
   test("no console errors during simulation", async ({ page }) => {
     await waitForSteps(page, 30);
-    const errors = (page as any).__errors as string[];
-    const realErrors = errors.filter(
-      (e) => !e.includes("DevTools") && !e.includes("favicon"),
-    );
+    const realErrors = filteredErrors(page);
     expect(realErrors).toHaveLength(0);
+  });
+});
+
+test.describe("3D scene switching", () => {
+  test.beforeEach(async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (err) => errors.push(err.message));
+    page.on("console", (msg) => {
+      if (msg.type() === "error") errors.push(msg.text());
+    });
+
+    await page.goto("/src/3d/index.html");
+    await waitForReady(page);
+    await waitForLoadingToHide(page, 120_000);
+
+    (page as any).__errors = errors;
+  });
+
+  test("switches to heavy scenes without render errors", async ({ page }) => {
+    const heavyScenes = [
+      { name: "Grid Boxes", minBodies: 1500 },
+      { name: "Scatter", minBodies: 2500 },
+    ] as const;
+
+    for (const scene of heavyScenes) {
+      const priorStepCount = await page.evaluate(
+        () => window.__rubble_test?.stepCount ?? 0,
+      );
+
+      await page.selectOption("#scene-select", scene.name);
+      await page.waitForFunction(
+        ({ minBodies, priorStepCount }) => {
+          const loadingHidden =
+            document.getElementById("loading")?.style.display === "none";
+          const testState = window.__rubble_test;
+          return loadingHidden &&
+            (testState?.bodyCount ?? 0) >= minBodies &&
+            (testState?.stepCount ?? 0) > priorStepCount;
+        },
+        {
+          minBodies: scene.minBodies,
+          priorStepCount,
+        },
+        { timeout: 180_000 },
+      );
+    }
+
+    expect(filteredErrors(page)).toHaveLength(0);
   });
 });
