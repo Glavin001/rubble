@@ -180,15 +180,32 @@ boxInstances.instanceColor = boxInstanceColor;
 capsuleInstances.instanceColor = capsuleInstanceColor;
 
 function rebuildCapsuleGeometry(halfHeight: number, radius: number) {
+  if (
+    Math.abs(capsuleBaseHalfHeight - halfHeight) < 1e-6 &&
+    Math.abs(capsuleBaseRadius - radius) < 1e-6
+  ) {
+    return;
+  }
+
   capsuleBaseHalfHeight = halfHeight;
   capsuleBaseRadius = radius;
+  scene.remove(capsuleInstances);
   capsuleInstances.geometry.dispose();
-  capsuleInstances.geometry = new THREE.CapsuleGeometry(
-    radius,
-    halfHeight * 2,
-    4,
-    12,
+  capsuleInstances = new THREE.InstancedMesh(
+    new THREE.CapsuleGeometry(
+      radius,
+      halfHeight * 2,
+      4,
+      12,
+    ),
+    capsuleMat,
+    MAX_INSTANCES,
   );
+  capsuleInstances.castShadow = true;
+  capsuleInstances.receiveShadow = true;
+  capsuleInstances.count = 0;
+  capsuleInstances.instanceColor = capsuleInstanceColor;
+  scene.add(capsuleInstances);
 }
 
 const tempMatrix = new THREE.Matrix4();

@@ -40,6 +40,15 @@ function filteredErrors(page: import("@playwright/test").Page) {
   );
 }
 
+function filteredGpuWarnings(page: import("@playwright/test").Page) {
+  const warnings = ((page as any).__warnings as string[] | undefined) ?? [];
+  return warnings.filter(
+    (warning) =>
+      warning.includes("Vertex buffer slot") ||
+      warning.includes("Invalid CommandBuffer"),
+  );
+}
+
 test.describe("3D Physics Demo", () => {
   test.beforeEach(async ({ page }) => {
     const errors: string[] = [];
@@ -196,9 +205,11 @@ test.describe("3D Physics Demo", () => {
 test.describe("3D scene switching", () => {
   test.beforeEach(async ({ page }) => {
     const errors: string[] = [];
+    const warnings: string[] = [];
     page.on("pageerror", (err) => errors.push(err.message));
     page.on("console", (msg) => {
       if (msg.type() === "error") errors.push(msg.text());
+      if (msg.type() === "warning") warnings.push(msg.text());
     });
 
     await page.goto("/src/3d/index.html");
@@ -206,6 +217,7 @@ test.describe("3D scene switching", () => {
     await waitForLoadingToHide(page, 120_000);
 
     (page as any).__errors = errors;
+    (page as any).__warnings = warnings;
   });
 
   test("switches to heavy scenes without render errors", async ({ page }) => {
@@ -238,5 +250,6 @@ test.describe("3D scene switching", () => {
     }
 
     expect(filteredErrors(page)).toHaveLength(0);
+    expect(filteredGpuWarnings(page)).toHaveLength(0);
   });
 });
