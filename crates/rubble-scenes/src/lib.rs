@@ -37,27 +37,87 @@ pub fn scenes_2d() -> &'static [Scene2D] {
 }
 
 static SCENES_3D: [Scene3D; 11] = [
-    Scene3D { name: "Empty", build: scenes_3d::scene_empty },
-    Scene3D { name: "Ground", build: scenes_3d::scene_ground },
-    Scene3D { name: "Dynamic Friction", build: scenes_3d::scene_dynamic_friction },
-    Scene3D { name: "Static Friction", build: scenes_3d::scene_static_friction },
-    Scene3D { name: "Pyramid", build: scenes_3d::scene_pyramid },
-    Scene3D { name: "Stack", build: scenes_3d::scene_stack },
-    Scene3D { name: "Stack Ratio", build: scenes_3d::scene_stack_ratio },
-    Scene3D { name: "Scatter", build: scenes_3d::scene_scatter },
-    Scene3D { name: "Scatter Boxes", build: scenes_3d::scene_scatter_boxes },
-    Scene3D { name: "Grid Boxes", build: scenes_3d::scene_grid_boxes },
-    Scene3D { name: "Slanted Grid", build: scenes_3d::scene_slanted_grid_boxes },
+    Scene3D {
+        name: "Empty",
+        build: scenes_3d::scene_empty,
+    },
+    Scene3D {
+        name: "Ground",
+        build: scenes_3d::scene_ground,
+    },
+    Scene3D {
+        name: "Dynamic Friction",
+        build: scenes_3d::scene_dynamic_friction,
+    },
+    Scene3D {
+        name: "Static Friction",
+        build: scenes_3d::scene_static_friction,
+    },
+    Scene3D {
+        name: "Pyramid",
+        build: scenes_3d::scene_pyramid,
+    },
+    Scene3D {
+        name: "Stack",
+        build: scenes_3d::scene_stack,
+    },
+    Scene3D {
+        name: "Stack Ratio",
+        build: scenes_3d::scene_stack_ratio,
+    },
+    Scene3D {
+        name: "Scatter",
+        build: scenes_3d::scene_scatter,
+    },
+    Scene3D {
+        name: "Scatter Boxes",
+        build: scenes_3d::scene_scatter_boxes,
+    },
+    Scene3D {
+        name: "Grid Boxes",
+        build: scenes_3d::scene_grid_boxes,
+    },
+    Scene3D {
+        name: "Slanted Grid",
+        build: scenes_3d::scene_slanted_grid_boxes,
+    },
 ];
 
 static SCENES_2D: [Scene2D; 9] = [
-    Scene2D { name: "Empty", build: scenes_2d::scene_empty },
-    Scene2D { name: "Ground", build: scenes_2d::scene_ground },
-    Scene2D { name: "Dynamic Friction", build: scenes_2d::scene_dynamic_friction },
-    Scene2D { name: "Static Friction", build: scenes_2d::scene_static_friction },
-    Scene2D { name: "Pyramid", build: scenes_2d::scene_pyramid },
-    Scene2D { name: "Cards", build: scenes_2d::scene_cards },
-    Scene2D { name: "Stack", build: scenes_2d::scene_stack },
-    Scene2D { name: "Stack Ratio", build: scenes_2d::scene_stack_ratio },
-    Scene2D { name: "Scatter", build: scenes_2d::scene_scatter },
+    Scene2D {
+        name: "Empty",
+        build: scenes_2d::scene_empty,
+    },
+    Scene2D {
+        name: "Ground",
+        build: scenes_2d::scene_ground,
+    },
+    Scene2D {
+        name: "Dynamic Friction",
+        build: scenes_2d::scene_dynamic_friction,
+    },
+    Scene2D {
+        name: "Static Friction",
+        build: scenes_2d::scene_static_friction,
+    },
+    Scene2D {
+        name: "Pyramid",
+        build: scenes_2d::scene_pyramid,
+    },
+    Scene2D {
+        name: "Cards",
+        build: scenes_2d::scene_cards,
+    },
+    Scene2D {
+        name: "Stack",
+        build: scenes_2d::scene_stack,
+    },
+    Scene2D {
+        name: "Stack Ratio",
+        build: scenes_2d::scene_stack_ratio,
+    },
+    Scene2D {
+        name: "Scatter",
+        build: scenes_2d::scene_scatter,
+    },
 ];

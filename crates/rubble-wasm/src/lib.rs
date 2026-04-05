@@ -321,7 +321,10 @@ impl PhysicsWorld2D {
                     self.shape_sizes.push(half_extents.x);
                     self.shape_sizes.push(half_extents.y);
                 }
-                rubble2d::ShapeDesc2D::Capsule { half_height, radius } => {
+                rubble2d::ShapeDesc2D::Capsule {
+                    half_height,
+                    radius,
+                } => {
                     self.shape_types.push(3);
                     self.shape_sizes.push(*half_height);
                     self.shape_sizes.push(*radius);
@@ -642,7 +645,10 @@ impl PhysicsWorld3D {
                     self.shape_sizes.push(half_extents.y);
                     self.shape_sizes.push(half_extents.z);
                 }
-                rubble3d::ShapeDesc::Capsule { half_height, radius } => {
+                rubble3d::ShapeDesc::Capsule {
+                    half_height,
+                    radius,
+                } => {
                     self.shape_types.push(2);
                     self.shape_sizes.push(*half_height);
                     self.shape_sizes.push(*radius);
