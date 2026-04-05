@@ -38,6 +38,17 @@ impl GpuContext {
         pool.push((capacity, buffer));
     }
 
+    /// Block until all work previously submitted to [`Self::queue`] has finished.
+    ///
+    /// On WebGPU, [`wgpu::Queue::submit`] returns before the GPU runs the commands; without
+    /// an explicit wait, the next host-side synchronization (e.g. mapping a readback
+    /// buffer) absorbs **all** of that GPU time into whatever phase is timed around that
+    /// wait—often mis-reporting hundreds of ms under “readback” while earlier buckets stay
+    /// near zero.
+    pub fn wait_for_queue(&self) {
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
     /// Enumerate all available GPU adapters and return their info.
     pub async fn enumerate_adapters() -> Vec<wgpu::AdapterInfo> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {

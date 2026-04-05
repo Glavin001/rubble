@@ -1,15 +1,18 @@
 import init, { PhysicsWorld2D } from "../../src/wasm/rubble_wasm.js";
 
-// World dimensions in physics units
-const WORLD_W = 40;
-const WORLD_H = 30;
-const WALL_THICKNESS = 1;
+// World dimensions in physics units. Scenes are authored for a variety of
+// sizes; we pick a wide view that fits every demo (pyramid, scatter, stacks).
+const WORLD_W = 60;
+const WORLD_H = 40;
+const WORLD_CENTER_X = 0;
+const WORLD_CENTER_Y = 10;
 
 // Colors for bodies
 const COLORS = [
   "#ff6b35", "#f7c948", "#4ecdc4", "#45b7d1", "#96ceb4",
   "#ff6f69", "#ffcc5c", "#88d8b0", "#c3aed6", "#ffd166",
 ];
+const STATIC_COLOR = "#555";
 
 const DEMO_SEED = 0x2d5eed;
 
@@ -25,23 +28,9 @@ const fpsEl = document.getElementById("fps")!;
 const bodiesEl = document.getElementById("bodies")!;
 const timingsEl = document.getElementById("timings")!;
 
-const TIMING_LABELS = [
-  ["Upload",      "(CPU)"],
-  ["Predict",     "(GPU)"],
-  ["Broadphase",  "(GPU+CPU)"],
-  ["Narrowphase", "(GPU)"],
-  ["Contacts",    "(GPU>CPU)"],
-  ["Solve",       "(GPU)"],
-  ["Extract",     "(GPU)"],
-] as const;
-
-const BROADPHASE_LABELS = [
-  ["Bounds",   "(CPU)"],
-  ["Sort",     "(GPU)"],
-  ["Build",    "(CPU+GPU)"],
-  ["Traverse", "(GPU)"],
-  ["Readback", "(CPU)"],
-] as const;
+function updateTimingsOverlay() {
+  timingsEl.textContent = world.last_step_overlay_text("Canvas", lastRenderMs);
+}
 
 function resize() {
   canvas.width = window.innerWidth;
@@ -62,44 +51,47 @@ function createRng(seed: number) {
 
 const rng = createRng(DEMO_SEED);
 
-// Convert physics coords to screen coords
-function toScreen(px: number, py: number): [number, number] {
-  const scale = Math.min(canvas.width / WORLD_W, canvas.height / WORLD_H);
-  const ox = (canvas.width - WORLD_W * scale) / 2;
-  const oy = (canvas.height - WORLD_H * scale) / 2;
-  return [ox + px * scale, oy + (WORLD_H - py) * scale];
-}
-
+// Convert physics coords to screen coords. World is centered on
+// (WORLD_CENTER_X, WORLD_CENTER_Y) and scaled to fit the viewport.
 function physScale(): number {
   return Math.min(canvas.width / WORLD_W, canvas.height / WORLD_H);
+}
+
+function toScreen(px: number, py: number): [number, number] {
+  const scale = physScale();
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  return [cx + (px - WORLD_CENTER_X) * scale, cy - (py - WORLD_CENTER_Y) * scale];
 }
 
 // Convert screen coords to physics coords
 function toPhysics(sx: number, sy: number): [number, number] {
   const scale = physScale();
-  const ox = (canvas.width - WORLD_W * scale) / 2;
-  const oy = (canvas.height - WORLD_H * scale) / 2;
-  return [(sx - ox) / scale, WORLD_H - (sy - oy) / scale];
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  return [(sx - cx) / scale + WORLD_CENTER_X, WORLD_CENTER_Y - (sy - cy) / scale];
 }
 
 function randomColor(): string {
   return COLORS[Math.floor(rng() * COLORS.length)];
 }
 
-function spawnRandomBody(px: number, py: number) {
+function spawnRandomBody(px: number, py: number, refreshCaches = true) {
   const isCircle = rng() > 0.4;
   if (isCircle) {
-    const r = 0.3 + rng() * 0.5;
+    const r = 0.2 + rng() * 0.15;
     world.add_circle(px, py, r, 1.0);
   } else {
-    const hw = 0.3 + rng() * 0.5;
-    const hh = 0.3 + rng() * 0.5;
+    const hw = 0.2 + rng() * 0.15;
+    const hh = 0.2 + rng() * 0.15;
     const angle = rng() * Math.PI;
     world.add_rect(px, py, hw, hh, angle, 1.0);
   }
   bodyColors.push(randomColor());
-  updateShapeCache();
-  ensureBodyStateBuffers();
+  if (refreshCaches) {
+    updateShapeCache();
+    ensureBodyStateBuffers();
+  }
 }
 
 function updateShapeCache() {
@@ -196,46 +188,6 @@ let lastRenderMs = 0;
 // Cached data for test hooks (avoids borrow conflicts during async step)
 let cachedPositions = new Float32Array(0);
 let cachedAngles = new Float32Array(0);
-let cachedTimings = new Float32Array(TIMING_LABELS.length);
-let cachedBroadphase = new Float32Array(BROADPHASE_LABELS.length);
-
-function syncTimingCache() {
-  world.copy_last_step_timings_into(cachedTimings);
-  world.copy_last_broadphase_breakdown_into(cachedBroadphase);
-}
-
-function formatTimings(
-  timings: Float32Array,
-  broadphase: Float32Array,
-  renderMs: number,
-): string {
-  const total = timings.reduce((a, b) => a + b, 0);
-  const lines: string[] = [`Step: ${total.toFixed(2)} ms`];
-  for (let i = 0; i < TIMING_LABELS.length; i++) {
-    const [name, tag] = TIMING_LABELS[i];
-    const ms = timings[i] ?? 0;
-    const pct = total > 0 ? ((ms / total) * 100) : 0;
-    lines.push(
-      `  ${name.padEnd(11)} ${tag.padEnd(8)} ${ms.toFixed(2).padStart(6)} ms ${pct.toFixed(0).padStart(3)}%`
-    );
-    if (name === "Broadphase") {
-      const bpTotal = broadphase.reduce((a, b) => a + b, 0);
-      for (let j = 0; j < BROADPHASE_LABELS.length; j++) {
-        const bpMs = broadphase[j] ?? 0;
-        if (bpMs <= 0) {
-          continue;
-        }
-        const [bpName, bpTag] = BROADPHASE_LABELS[j];
-        const bpPct = bpTotal > 0 ? ((bpMs / bpTotal) * 100) : 0;
-        lines.push(
-          `    ${bpName.padEnd(9)} ${bpTag.padEnd(10)} ${bpMs.toFixed(2).padStart(6)} ms ${bpPct.toFixed(0).padStart(3)}%`
-        );
-      }
-    }
-  }
-  lines.push(`Render      (Canvas) ${renderMs.toFixed(2).padStart(6)} ms`);
-  return lines.join("\n");
-}
 
 async function loop_() {
   await world.step();
@@ -249,12 +201,13 @@ async function loop_() {
   lastRenderMs = performance.now() - t0;
 
   frameCount++;
+  // Step timings reflect the last `world.step()`; refresh every frame so the overlay
+  // is never up to ~1s stale (FPS is still averaged once per second).
+  updateTimingsOverlay();
   const now = performance.now();
   if (now - lastFpsTime >= 1000) {
-    syncTimingCache();
     fpsEl.textContent = `FPS: ${frameCount}`;
     bodiesEl.textContent = `Bodies: ${world.body_count()}`;
-    timingsEl.textContent = formatTimings(cachedTimings, cachedBroadphase, lastRenderMs);
     frameCount = 0;
     lastFpsTime = now;
   }
@@ -268,54 +221,104 @@ async function loop_() {
   requestAnimationFrame(loop_);
 }
 
+async function loadScene(name: string) {
+  const oldWorld = world as PhysicsWorld2D | undefined;
+  world = await PhysicsWorld2D.create(0.0, -9.81, 1.0 / 60.0);
+  if (oldWorld) {
+    try {
+      oldWorld.free();
+    } catch (e) {
+      console.warn("failed to free old 2D world", e);
+    }
+  }
+  bodyColors = [];
+  world.load_scene(name);
+  console.log(`[scene 2D] "${name}": ${world.body_count()} bodies`);
+
+  updateShapeCache();
+  // Assign colors: static (mass 0) bodies get a muted shade, dynamics get
+  // a palette colour. We approximate "static" as index 0 for scenes whose
+  // first body is the ground; for safety, just colour all bodies from the
+  // palette — static bodies still read well on the dark background.
+  const handleCount = world.handle_count();
+  for (let i = 0; i < handleCount; i++) {
+    bodyColors.push(i === 0 ? STATIC_COLOR : randomColor());
+  }
+  ensureBodyStateBuffers();
+  syncBodyStateCache();
+  updateTimingsOverlay();
+
+  if (window.__rubble_test) {
+    window.__rubble_test.bodyCount = world.body_count();
+  }
+}
+
 async function main() {
   await init();
 
+  // Bootstrap world so we can query scene names.
   world = await PhysicsWorld2D.create(0.0, -9.81, 1.0 / 60.0);
+  const sceneNames: string[] = world.scene_names();
+  const initialName: string = world.initial_scene_name();
 
-  // Ground
-  world.add_static_rect(WORLD_W / 2, WALL_THICKNESS / 2, WORLD_W / 2, WALL_THICKNESS / 2, 0.0);
-  bodyColors.push("#333");
-
-  // Left wall
-  world.add_static_rect(
-    WALL_THICKNESS / 2,
-    WORLD_H / 2,
-    WALL_THICKNESS / 2,
-    WORLD_H / 2,
-    0.0,
-  );
-  bodyColors.push("#333");
-
-  // Right wall
-  world.add_static_rect(
-    WORLD_W - WALL_THICKNESS / 2,
-    WORLD_H / 2,
-    WALL_THICKNESS / 2,
-    WORLD_H / 2,
-    0.0,
-  );
-  bodyColors.push("#333");
-
-  // Spawn a repeatable grid so browser/native timings compare the same scene.
-  // 40×25 = 1_000 dynamic bodies; spacing tuned to WORLD_W/H.
-  const columns = 40;
-  const rows = 25;
-  const xStart = 4.0;
-  const yStart = 6.5;
-  const xSpacing = 34 / 39;
-  const ySpacing = 21 / 24;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < columns; col++) {
-      const px = xStart + col * xSpacing;
-      const py = yStart + row * ySpacing;
-      spawnRandomBody(px, py);
-    }
+  const sceneSelect = document.getElementById("scene-select") as HTMLSelectElement;
+  for (const name of sceneNames) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    if (name === initialName) opt.selected = true;
+    sceneSelect.appendChild(opt);
   }
 
-  updateShapeCache();
-  syncBodyStateCache();
-  syncTimingCache();
+  // `?bodies=N` overrides the scene picker and does an imperative walled
+  // spawn. E2E tests on SwiftShader use this for a bounded, stable world.
+  const bodyCountParam = new URL(window.location.href).searchParams.get("bodies");
+  if (bodyCountParam !== null) {
+    const initialBodies = Math.max(
+      1,
+      Math.min(5000, parseInt(bodyCountParam, 10) || 50),
+    );
+    bodyColors = [];
+    const wallThickness = 1.0;
+    // 3 static walls (ground, left, right) in a [0, WORLD_W] x [0, WORLD_H]
+    // frame, then a grid of dynamic bodies inside.
+    world.add_static_rect(WORLD_W / 2, wallThickness / 2, WORLD_W / 2, wallThickness / 2, 0.0);
+    bodyColors.push(STATIC_COLOR);
+    world.add_static_rect(wallThickness / 2, WORLD_H / 2, wallThickness / 2, WORLD_H / 2, 0.0);
+    bodyColors.push(STATIC_COLOR);
+    world.add_static_rect(WORLD_W - wallThickness / 2, WORLD_H / 2, wallThickness / 2, WORLD_H / 2, 0.0);
+    bodyColors.push(STATIC_COLOR);
+
+    const cols = Math.ceil(Math.sqrt(initialBodies * 1.6));
+    const rows = Math.ceil(initialBodies / cols);
+    const xStart = 4.0;
+    const yStart = 6.5;
+    const xSpacing = (WORLD_W - 8) / Math.max(1, cols - 1);
+    const ySpacing = (WORLD_H - 15) / Math.max(1, rows - 1);
+    let spawned = 0;
+    for (let row = 0; row < rows && spawned < initialBodies; row++) {
+      for (let col = 0; col < cols && spawned < initialBodies; col++) {
+        const px = xStart + col * xSpacing;
+        const py = yStart + row * ySpacing;
+        spawnRandomBody(px, py, false);
+        spawned++;
+      }
+    }
+    updateShapeCache();
+    ensureBodyStateBuffers();
+    syncBodyStateCache();
+    updateTimingsOverlay();
+    sceneSelect.disabled = true;
+    if (window.__rubble_test) {
+      window.__rubble_test.bodyCount = world.body_count();
+    }
+  } else {
+    await loadScene(initialName);
+  }
+
+  sceneSelect.addEventListener("change", () => {
+    void loadScene(sceneSelect.value);
+  });
 
   // Click to spawn
   canvas.addEventListener("click", (e) => {

@@ -8,13 +8,14 @@ description = "WebAssembly bindings for the Rubble GPU physics engine"
 crate-type = ["cdylib", "rlib"]
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O3"]
+wasm-opt = false
 
 [dependencies]
 rubble2d = { workspace = true }
 rubble3d = { workspace = true }
 rubble-math = { workspace = true }
 rubble-gpu = { workspace = true }
+rubble-scenes = { workspace = true }
 glam = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }

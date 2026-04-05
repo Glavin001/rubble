@@ -262,10 +262,21 @@ fn rotated_rect_rect_collision() {
 
 #[test]
 fn domino_chain_2d() {
-    // Line up rects, push the first one. Verify no NaN/crashes and
+    // Line up rects on a floor, push the first one. Verify no NaN/crashes and
     // the first domino moves in the push direction.
     let mut world = gpu_world!(SimConfig2D {
         gravity: Vec2::new(0.0, -9.81),
+        ..Default::default()
+    });
+
+    // Static floor so dominos have a stable resting surface.
+    let _floor = world.add_body(&RigidBodyDesc2D {
+        x: 5.0,
+        y: -0.5,
+        mass: 0.0,
+        shape: ShapeDesc2D::Rect {
+            half_extents: Vec2::new(20.0, 0.5),
+        },
         ..Default::default()
     });
 

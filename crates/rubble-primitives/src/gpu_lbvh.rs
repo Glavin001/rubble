@@ -2,9 +2,10 @@
 //!
 //! Pipeline: compute scene bounds → Morton codes → radix sort → build Karras tree
 //! → refit AABBs → find pairs.
-//! The scene-bounds reduction, Morton code computation, leaf gathering, and pair finding
-//! run as compute shaders. Tree topology and refit still run on CPU after downloading
-//! the sorted Morton codes and sorted leaf AABBs.
+//! The scene-bounds reduction, Morton code computation, leaf gathering, Karras build,
+//! refit, and pair finding run as compute shaders. The [`GpuLbvh::build_and_query_raw`]
+//! family can still download sorted keys and build a CPU BVH for debugging or callers
+//! that need overlap pairs on the host.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -30,16 +31,22 @@ pub struct BroadPair {
     pub b: u32,
 }
 
-/// Internal BVH node stored in a GPU buffer for the pair-finding kernel.
+/// BVH node stored in a GPU buffer. Used by tree build, refit, and pair-finding kernels.
+///
+/// Layout: [0..n-1] internal nodes, [n-1..2n-1] leaf nodes.
+/// For internal nodes: `left`/`right` are child indices into this array.
+/// For leaf nodes: `left` stores the sorted body index.
+/// `parent` points to the parent internal node. `refit_count` is used by
+/// the bottom-up refit kernel (atomic counter, 0→1→2).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct BvhNodeGpu {
     pub aabb_min: [f32; 4],
     pub aabb_max: [f32; 4],
-    pub left: i32, // negative → leaf index -(i+1)
+    pub left: i32,
     pub right: i32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    pub parent: u32,
+    pub refit_count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +184,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Pair-finding compute shader
 // ---------------------------------------------------------------------------
 
+/// Find pairs shader variant for the CPU-built tree (uses internal_nodes + negative leaf encoding).
 const FIND_PAIRS_WGSL: &str = r#"
 struct Aabb {
     min_pt: vec4<f32>,
@@ -188,8 +196,8 @@ struct BvhNode {
     aabb_max: vec4<f32>,
     left: i32,
     right: i32,
-    _pad0: u32,
-    _pad1: u32,
+    parent: u32,
+    refit_count: u32,
 };
 
 struct Pair {
@@ -251,6 +259,251 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     stack[sp] = nd.right; sp = sp + 1u;
                 }
             }
+        }
+    }
+}
+"#;
+
+/// Find pairs shader for the GPU-built tree (uses tree_nodes with absolute indices).
+/// Tree layout: [0..n-1] internal nodes, [n-1..2n-1] leaf nodes.
+/// Node.left for a leaf stores the sorted body index.
+const FIND_PAIRS_GPU_TREE_WGSL: &str = r#"
+struct BvhNode {
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    left: i32,
+    right: i32,
+    parent: u32,
+    refit_count: u32,
+};
+
+struct Pair {
+    a: u32,
+    b: u32,
+};
+
+@group(0) @binding(0) var<storage, read> tree: array<BvhNode>;
+@group(0) @binding(1) var<storage, read_write> pairs: array<Pair>;
+@group(0) @binding(2) var<storage, read_write> pair_count: atomic<u32>;
+@group(0) @binding(3) var<uniform> params: vec4<u32>; // x = num_bodies, y = max_pairs
+
+fn aabb_overlap(a_min: vec3<f32>, a_max: vec3<f32>, b_min: vec3<f32>, b_max: vec3<f32>) -> bool {
+    return a_min.x <= b_max.x && a_max.x >= b_min.x
+        && a_min.y <= b_max.y && a_max.y >= b_min.y
+        && a_min.z <= b_max.z && a_max.z >= b_min.z;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let leaf_local = gid.x;
+    let n = params.x;
+    let max_pairs = params.y;
+    let first_leaf = n - 1u;
+    if leaf_local >= n { return; }
+
+    let leaf_id = first_leaf + leaf_local;
+    let body_i = u32(tree[leaf_id].left); // leaf stores sorted body index
+    let ai_min = tree[leaf_id].aabb_min.xyz;
+    let ai_max = tree[leaf_id].aabb_max.xyz;
+
+    var stack: array<u32, 64>;
+    var sp = 0u;
+    stack[0] = 0u; // start at root
+    sp = 1u;
+
+    while sp > 0u {
+        sp -= 1u;
+        let node_id = stack[sp];
+
+        if node_id >= first_leaf {
+            // Leaf node
+            if node_id != leaf_id {
+                let body_j = u32(tree[node_id].left);
+                if body_i < body_j {
+                    if aabb_overlap(ai_min, ai_max, tree[node_id].aabb_min.xyz, tree[node_id].aabb_max.xyz) {
+                        let slot = atomicAdd(&pair_count, 1u);
+                        if slot < max_pairs {
+                            pairs[slot].a = body_i;
+                            pairs[slot].b = body_j;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Internal node
+            if aabb_overlap(ai_min, ai_max, tree[node_id].aabb_min.xyz, tree[node_id].aabb_max.xyz) {
+                if sp + 2u <= 64u {
+                    stack[sp] = u32(tree[node_id].left); sp += 1u;
+                    stack[sp] = u32(tree[node_id].right); sp += 1u;
+                }
+            }
+        }
+    }
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// GPU Karras tree build shader (adapted from wgparry lbvh.wgsl)
+// ---------------------------------------------------------------------------
+
+const KARRAS_BUILD_WGSL: &str = r#"
+struct BvhNode {
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    left: i32,
+    right: i32,
+    parent: u32,
+    refit_count: u32,
+};
+
+@group(0) @binding(0) var<storage, read> morton_keys: array<u32>;
+@group(0) @binding(1) var<storage, read_write> tree: array<BvhNode>;
+@group(0) @binding(2) var<uniform> params: vec4<u32>; // x = num_bodies
+
+fn prefix_len(curr_key: u32, curr_index: i32, other_index: i32, n: i32) -> i32 {
+    if other_index < 0 || other_index > n - 1 {
+        return -1;
+    }
+    let other_key = i32(morton_keys[u32(other_index)]);
+    let morton_prefix = countLeadingZeros(i32(curr_key) ^ other_key);
+    let fallback = 32 + countLeadingZeros(curr_index ^ other_index);
+    return select(fallback, morton_prefix, i32(curr_key) != other_key);
+}
+
+fn div_ceil_i(a: i32, b: i32) -> i32 {
+    return (a + b - 1) / b;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let num_bodies = params.x;
+    let num_internal = num_bodies - 1u;
+    let first_leaf = num_internal;
+    let i = gid.x;
+    if i >= num_internal { return; }
+
+    let ii = i32(i);
+    let n = i32(num_bodies);
+    let curr_key = morton_keys[i];
+
+    // Determine direction of the range
+    let d = sign(prefix_len(curr_key, ii, ii + 1, n) - prefix_len(curr_key, ii, ii - 1, n));
+
+    // Compute upper bound for range length
+    let delta_min = prefix_len(curr_key, ii, ii - d, n);
+    var lmax = 2;
+    while prefix_len(curr_key, ii, ii + lmax * d, n) > delta_min {
+        lmax *= 2;
+    }
+
+    // Binary search for the other end
+    var l = 0;
+    var t = lmax / 2;
+    while t >= 1 {
+        if prefix_len(curr_key, ii, ii + (l + t) * d, n) > delta_min {
+            l += t;
+        }
+        t /= 2;
+    }
+    let j = ii + l * d;
+
+    // Find split position
+    let delta_node = prefix_len(curr_key, ii, j, n);
+    var s = 0;
+    t = div_ceil_i(l, 2);
+    loop {
+        if prefix_len(curr_key, ii, ii + (s + t) * d, n) > delta_node {
+            s += t;
+        }
+        if t <= 1 { break; }
+        t = div_ceil_i(t, 2);
+    }
+    let gamma = ii + s * d + min(d, 0);
+
+    // Output child and parent pointers
+    let left = select(gamma, i32(first_leaf) + gamma, min(ii, j) == gamma);
+    let right = select(gamma + 1, i32(first_leaf) + gamma + 1, max(ii, j) == gamma + 1);
+    tree[i].left = left;
+    tree[i].right = right;
+    tree[i].refit_count = 0u;
+    tree[u32(left)].parent = i;
+    tree[u32(right)].parent = i;
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// GPU bottom-up refit shader (adapted from wgparry lbvh.wgsl)
+// ---------------------------------------------------------------------------
+
+const REFIT_WGSL: &str = r#"
+struct Aabb {
+    min_pt: vec4<f32>,
+    max_pt: vec4<f32>,
+};
+
+// Note: refit_count uses atomic<u32> because this shader does atomicAdd
+// for bottom-up synchronization. Other shaders that share the same GPU
+// buffer declare refit_count as plain u32 (they don't use atomics).
+struct BvhNode {
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    left: i32,
+    right: i32,
+    parent: u32,
+    refit_count: atomic<u32>,
+};
+
+@group(0) @binding(0) var<storage, read> leaf_aabbs: array<Aabb>;
+@group(0) @binding(1) var<storage, read> sorted_indices: array<u32>;
+@group(0) @binding(2) var<storage, read_write> tree: array<BvhNode>;
+@group(0) @binding(3) var<uniform> params: vec4<u32>; // x = num_bodies
+
+// Single-workgroup refit for web compatibility (uniform control flow).
+// Uses workgroupBarrier to synchronize between tree levels.
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+    let num_bodies = params.x;
+    let num_internal = num_bodies - 1u;
+    let first_leaf = num_internal;
+    let num_threads = 256u;
+    let num_iterations = (num_bodies + num_threads - 1u) / num_threads;
+
+    for (var iter = 0u; iter < num_iterations; iter++) {
+        let i = lid.x + iter * num_threads;
+        var thread_is_active = i < num_bodies;
+
+        // Set leaf AABB
+        var curr_id = 0u;
+        if thread_is_active {
+            let leaf_id = first_leaf + i;
+            tree[leaf_id].aabb_min = leaf_aabbs[i].min_pt;
+            tree[leaf_id].aabb_max = leaf_aabbs[i].max_pt;
+            tree[leaf_id].left = i32(sorted_indices[i]); // store body index
+            curr_id = tree[leaf_id].parent;
+        }
+
+        // Propagate AABBs bottom-up using atomic synchronization
+        for (var level = 0u; level < 32u; level++) {
+            if thread_is_active {
+                let refit_count = atomicAdd(&tree[curr_id].refit_count, 1u);
+                if refit_count == 0u {
+                    // Sibling hasn't arrived yet; stop here
+                    thread_is_active = false;
+                } else {
+                    // Both children ready; merge AABBs
+                    let left_id = u32(tree[curr_id].left);
+                    let right_id = u32(tree[curr_id].right);
+                    tree[curr_id].aabb_min = min(tree[left_id].aabb_min, tree[right_id].aabb_min);
+                    tree[curr_id].aabb_max = max(tree[left_id].aabb_max, tree[right_id].aabb_max);
+
+                    if curr_id == 0u {
+                        thread_is_active = false;
+                    } else {
+                        curr_id = tree[curr_id].parent;
+                    }
+                }
+            }
+            workgroupBarrier();
         }
     }
 }
@@ -486,8 +739,8 @@ fn children_to_gpu_nodes(
                 ],
                 left: left_val,
                 right: right_val,
-                _pad0: 0,
-                _pad1: 0,
+                parent: 0,
+                refit_count: 0,
             }
         })
         .collect()
@@ -600,18 +853,15 @@ fn build_tree_cpu(sorted_codes: &[u32], leaf_aabbs: &[Aabb3D]) -> Vec<BvhNodeGpu
         internal_right.push(right);
     }
 
-    let gpu_nodes = if validate_internal_tree(&internal_left, &internal_right) {
-        if let Some(internal_aabbs) = refit_iterative(&internal_left, &internal_right, &leaf_aabbs)
-        {
+    if validate_internal_tree(&internal_left, &internal_right) {
+        if let Some(internal_aabbs) = refit_iterative(&internal_left, &internal_right, leaf_aabbs) {
             children_to_gpu_nodes(&internal_left, &internal_right, &internal_aabbs)
         } else {
-            build_balanced_tree_cpu(&leaf_aabbs)
+            build_balanced_tree_cpu(leaf_aabbs)
         }
     } else {
-        build_balanced_tree_cpu(&leaf_aabbs)
-    };
-
-    gpu_nodes
+        build_balanced_tree_cpu(leaf_aabbs)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -620,26 +870,36 @@ fn build_tree_cpu(sorted_codes: &[u32], leaf_aabbs: &[Aabb3D]) -> Vec<BvhNodeGpu
 
 /// GPU-accelerated Linear BVH broadphase.
 ///
-/// Morton code computation and radix sort run on GPU.
-/// Tree construction and refit run on CPU (downloaded sorted codes).
-/// Pair finding runs on GPU via parallel BVH traversal.
+/// All stages run on GPU: scene bounds reduction, Morton codes, radix sort,
+/// Karras tree build, bottom-up refit, and pair finding.
+/// A CPU fallback path is retained for validation (behind `build_tree_cpu`).
 pub struct GpuLbvh {
     scene_bounds_reduce_kernel: ComputeKernel,
     morton_kernel: ComputeKernel,
     gather_sorted_leaf_aabbs_kernel: ComputeKernel,
     find_pairs_kernel: ComputeKernel,
+    // GPU-only tree kernels (Karras build + refit + GPU-tree traversal).
+    // Lazily compiled on first call to `query_on_device_gpu` to avoid loading
+    // unused shaders at startup (some stricter WebGPU backends validate atomics
+    // in storage struct members differently — only compile when actually used).
+    find_pairs_gpu_tree_kernel: Option<ComputeKernel>,
+    karras_build_kernel: Option<ComputeKernel>,
+    refit_kernel: Option<ComputeKernel>,
     radix_sort: GpuRadixSort,
     scene_bounds: GpuBuffer<Aabb3D>,
     bounds_scratch_a: GpuBuffer<Aabb3D>,
     bounds_scratch_b: GpuBuffer<Aabb3D>,
     morton_keys: GpuBuffer<u32>,
     body_indices: GpuBuffer<u32>,
+    /// Combined tree buffer: [0..n-1] internal nodes, [n-1..2n-1] leaf nodes.
+    tree_nodes: GpuBuffer<BvhNodeGpu>,
     internal_nodes: GpuBuffer<BvhNodeGpu>,
     leaf_aabbs_sorted: GpuBuffer<Aabb3D>,
     pairs_out: GpuBuffer<BroadPair>,
     pair_counter: GpuAtomicCounter,
     count_params_buf: wgpu::Buffer,
     find_params_buf: wgpu::Buffer,
+    tree_build_params_buf: wgpu::Buffer,
 }
 
 impl GpuLbvh {
@@ -651,6 +911,10 @@ impl GpuLbvh {
         let gather_sorted_leaf_aabbs_kernel =
             ComputeKernel::from_wgsl(ctx, GATHER_SORTED_LEAF_AABBS_WGSL, "main");
         let find_pairs_kernel = ComputeKernel::from_wgsl(ctx, FIND_PAIRS_WGSL, "main");
+        // Lazily compiled — see field doc comments.
+        let find_pairs_gpu_tree_kernel = None;
+        let karras_build_kernel = None;
+        let refit_kernel = None;
         let radix_sort = GpuRadixSort::new(ctx, max_bodies);
         let max_bounds_partials = round_up_workgroups(max_bodies.max(1) as u32, WG) as usize;
 
@@ -659,6 +923,8 @@ impl GpuLbvh {
         let bounds_scratch_b = GpuBuffer::new(ctx, max_bounds_partials.max(1));
         let morton_keys = GpuBuffer::new(ctx, max_bodies.max(1));
         let body_indices = GpuBuffer::new(ctx, max_bodies.max(1));
+        // Tree: 2*n - 1 nodes (n-1 internal + n leaves)
+        let tree_nodes = GpuBuffer::new(ctx, (max_bodies * 2).max(1));
         let internal_nodes = GpuBuffer::new(ctx, max_bodies.max(1));
         let leaf_aabbs_sorted = GpuBuffer::new(ctx, max_bodies.max(1));
         let max_pairs = max_bodies * 8;
@@ -677,24 +943,35 @@ impl GpuLbvh {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let tree_build_params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tree build params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Self {
             scene_bounds_reduce_kernel,
             morton_kernel,
             gather_sorted_leaf_aabbs_kernel,
             find_pairs_kernel,
+            find_pairs_gpu_tree_kernel,
+            karras_build_kernel,
+            refit_kernel,
             radix_sort,
             scene_bounds,
             bounds_scratch_a,
             bounds_scratch_b,
             morton_keys,
             body_indices,
+            tree_nodes,
             internal_nodes,
             leaf_aabbs_sorted,
             pairs_out,
             pair_counter,
             count_params_buf,
             find_params_buf,
+            tree_build_params_buf,
         }
     }
 
@@ -906,6 +1183,121 @@ impl GpuLbvh {
         ctx.queue.submit(Some(encoder.finish()));
     }
 
+    /// Dispatch GPU Karras tree build: construct BVH topology from sorted Morton codes.
+    fn dispatch_karras_build(&mut self, ctx: &GpuContext, num_bodies: u32) {
+        if num_bodies <= 1 {
+            return;
+        }
+        let num_internal = num_bodies - 1;
+        // Grow tree buffer: 2*n - 1 nodes (internal + leaves)
+        let tree_size = (num_bodies as usize * 2).saturating_sub(1);
+        self.tree_nodes.grow_if_needed(ctx, tree_size);
+
+        // Lazy compile on first use
+        if self.karras_build_kernel.is_none() {
+            self.karras_build_kernel =
+                Some(ComputeKernel::from_wgsl(ctx, KARRAS_BUILD_WGSL, "main"));
+        }
+        let kernel = self.karras_build_kernel.as_ref().unwrap();
+
+        let params: [u32; 4] = [num_bodies, 0, 0, 0];
+        ctx.queue.write_buffer(
+            &self.tree_build_params_buf,
+            0,
+            bytemuck::cast_slice(&params),
+        );
+
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("karras_build"),
+            layout: kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.morton_keys.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.tree_nodes.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.tree_build_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("karras_build"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(kernel.pipeline());
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_internal, WG), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+    }
+
+    /// Dispatch GPU bottom-up refit: propagate leaf AABBs up through the tree.
+    /// Uses a single workgroup with atomic synchronization for web compatibility.
+    fn dispatch_refit(&mut self, ctx: &GpuContext, num_bodies: u32) {
+        if num_bodies <= 1 {
+            return;
+        }
+
+        // Lazy compile on first use
+        if self.refit_kernel.is_none() {
+            self.refit_kernel = Some(ComputeKernel::from_wgsl(ctx, REFIT_WGSL, "main"));
+        }
+        let kernel = self.refit_kernel.as_ref().unwrap();
+
+        let params: [u32; 4] = [num_bodies, 0, 0, 0];
+        ctx.queue.write_buffer(
+            &self.tree_build_params_buf,
+            0,
+            bytemuck::cast_slice(&params),
+        );
+
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("refit"),
+            layout: kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.body_indices.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.tree_nodes.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.tree_build_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("refit"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(kernel.pipeline());
+            pass.set_bind_group(0, &bg, &[]);
+            // Single workgroup for web-compatible uniform control flow
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+    }
+
     fn dispatch_find_pairs(&mut self, ctx: &GpuContext, num_bodies: u32) -> u32 {
         let max_pairs = (num_bodies as usize * 8) as u32;
         self.pair_counter.reset(ctx);
@@ -961,6 +1353,64 @@ impl GpuLbvh {
         max_pairs
     }
 
+    /// Find pairs using the GPU-built tree (tree_nodes buffer with absolute indices).
+    fn dispatch_find_pairs_gpu_tree(&mut self, ctx: &GpuContext, num_bodies: u32) -> u32 {
+        let max_pairs = (num_bodies as usize * 8) as u32;
+        self.pair_counter.reset(ctx);
+        self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
+
+        // Lazy compile on first use
+        if self.find_pairs_gpu_tree_kernel.is_none() {
+            self.find_pairs_gpu_tree_kernel = Some(ComputeKernel::from_wgsl(
+                ctx,
+                FIND_PAIRS_GPU_TREE_WGSL,
+                "main",
+            ));
+        }
+        let kernel = self.find_pairs_gpu_tree_kernel.as_ref().unwrap();
+
+        let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
+        ctx.queue
+            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
+
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("find_pairs_gpu_tree"),
+            layout: kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.tree_nodes.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.pairs_out.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.pair_counter.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.find_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("find_pairs_gpu_tree"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(kernel.pipeline());
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+        max_pairs
+    }
+
     /// Run the full GPU broadphase pipeline on a 3D AABB buffer.
     pub fn build_and_query(
         &mut self,
@@ -999,6 +1449,72 @@ impl GpuLbvh {
     ) -> u32 {
         let mut breakdown = BroadphaseBreakdownMs::default();
         self.query_on_device_raw_with_breakdown(ctx, aabb_buf, num_bodies, &mut breakdown)
+    }
+
+    /// Fully-GPU broadphase pipeline: no CPU readback for tree construction.
+    ///
+    /// Pipeline: bounds reduction → Morton codes → radix sort → leaf gather →
+    /// GPU Karras tree build → GPU bottom-up refit → GPU pair finding.
+    /// All stages stay on GPU. Returns pair capacity (actual count in pair_counter).
+    pub fn query_on_device_gpu(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+    ) -> u32 {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.query_on_device_gpu_with_breakdown(ctx, aabb_buf, num_bodies, &mut breakdown)
+    }
+
+    /// Same as [`GpuLbvh::query_on_device_gpu`], with coarse timing buckets filled in.
+    ///
+    /// GPU Karras build and refit are included in `build_ms`; pair finding in `traverse_ms`.
+    /// `readback_ms` stays zero here; the engine times [`GpuLbvh::read_pair_count`] separately
+    /// (wall time for staging read / map; on WebGPU may include waiting for prior GPU work).
+    pub fn query_on_device_gpu_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> u32 {
+        #[cfg(target_arch = "wasm32")]
+        use rubble_gpu::web_time::Instant;
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::Instant;
+
+        if num_bodies <= 1 {
+            return 0;
+        }
+
+        let t_bounds = Instant::now();
+        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sort = Instant::now();
+        self.dispatch_morton(ctx, aabb_buf, num_bodies);
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
+        self.dispatch_karras_build(ctx, num_bodies);
+        self.dispatch_refit(ctx, num_bodies);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_traverse = Instant::now();
+        let max_pairs = self.dispatch_find_pairs_gpu_tree(ctx, num_bodies);
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+
+        // Native: wait so GPU completion is not lumped into the pair-counter readback timer.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let t_flush = Instant::now();
+            ctx.wait_for_queue();
+            breakdown.traverse_ms += t_flush.elapsed().as_secs_f32() * 1000.0;
+        }
+        max_pairs
     }
 
     /// Run the full GPU broadphase pipeline on any AABB buffer and accumulate
@@ -1077,6 +1593,9 @@ impl GpuLbvh {
     }
 
     /// Variant of [`GpuLbvh::query_on_device_raw`] that accumulates timing buckets.
+    ///
+    /// Uses the fully GPU LBVH path ([`GpuLbvh::query_on_device_gpu_with_breakdown`]) so
+    /// Morton codes and leaf AABBs are not read back for a CPU tree build.
     pub fn query_on_device_raw_with_breakdown(
         &mut self,
         ctx: &GpuContext,
@@ -1084,48 +1603,7 @@ impl GpuLbvh {
         num_bodies: u32,
         breakdown: &mut BroadphaseBreakdownMs,
     ) -> u32 {
-        #[cfg(target_arch = "wasm32")]
-        use rubble_gpu::web_time::Instant;
-        #[cfg(not(target_arch = "wasm32"))]
-        use std::time::Instant;
-
-        if num_bodies <= 1 {
-            return 0;
-        }
-
-        let t_bounds = Instant::now();
-        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
-        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
-
-        let t_sort = Instant::now();
-        self.dispatch_morton(ctx, aabb_buf, num_bodies);
-        self.radix_sort
-            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
-        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
-
-        let t_build = Instant::now();
-        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let t_readback = Instant::now();
-        let (sorted_codes, leaf_aabbs) =
-            self.morton_keys.download_with(ctx, &self.leaf_aabbs_sorted);
-        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-
-        let t_build = Instant::now();
-        let gpu_nodes = build_tree_cpu(&sorted_codes, &leaf_aabbs);
-        if gpu_nodes.is_empty() {
-            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-            return 0;
-        }
-
-        self.internal_nodes.upload(ctx, &gpu_nodes);
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let t_traverse = Instant::now();
-        let max_pairs = self.dispatch_find_pairs(ctx, num_bodies);
-        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
-        max_pairs
+        self.query_on_device_gpu_with_breakdown(ctx, aabb_buf, num_bodies, breakdown)
     }
 
     /// Async variant for WASM/WebGPU callers.
@@ -1238,47 +1716,7 @@ impl GpuLbvh {
         num_bodies: u32,
         breakdown: &mut BroadphaseBreakdownMs,
     ) -> u32 {
-        use rubble_gpu::web_time::Instant;
-
-        if num_bodies <= 1 {
-            return 0;
-        }
-
-        let t_bounds = Instant::now();
-        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
-        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
-
-        let t_sort = Instant::now();
-        self.dispatch_morton(ctx, aabb_buf, num_bodies);
-        self.radix_sort
-            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
-        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
-
-        let t_build = Instant::now();
-        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let t_readback = Instant::now();
-        let (sorted_codes, leaf_aabbs) = self
-            .morton_keys
-            .download_with_async(ctx, &self.leaf_aabbs_sorted)
-            .await;
-        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-
-        let t_build = Instant::now();
-        let gpu_nodes = build_tree_cpu(&sorted_codes, &leaf_aabbs);
-        if gpu_nodes.is_empty() {
-            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-            return 0;
-        }
-
-        self.internal_nodes.upload(ctx, &gpu_nodes);
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let t_traverse = Instant::now();
-        let max_pairs = self.dispatch_find_pairs(ctx, num_bodies);
-        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
-        max_pairs
+        self.query_on_device_gpu_with_breakdown(ctx, aabb_buf, num_bodies, breakdown)
     }
 
     pub fn pair_buffer(&self) -> &wgpu::Buffer {
@@ -1513,5 +1951,61 @@ mod tests {
         assert!(root.aabb_max[0] >= 4.0);
         assert!(root.aabb_min[1] <= 0.0);
         assert!(root.aabb_max[1] >= 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // WGSL shader validation — catches shader bugs before they reach WebGPU
+    // -----------------------------------------------------------------------
+
+    fn validate_wgsl(name: &str, source: &str) {
+        let module = match naga::front::wgsl::parse_str(source) {
+            Ok(m) => m,
+            Err(e) => panic!("{name}: WGSL parse error:\n{e}"),
+        };
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        if let Err(e) = validator.validate(&module) {
+            panic!("{name}: WGSL validation error:\n{e}");
+        }
+    }
+
+    #[test]
+    fn validate_scene_bounds_reduce_wgsl() {
+        validate_wgsl("SCENE_BOUNDS_REDUCE_WGSL", SCENE_BOUNDS_REDUCE_WGSL);
+    }
+
+    #[test]
+    fn validate_morton_3d_wgsl() {
+        validate_wgsl("MORTON_3D_WGSL", MORTON_3D_WGSL);
+    }
+
+    #[test]
+    fn validate_gather_sorted_leaf_aabbs_wgsl() {
+        validate_wgsl(
+            "GATHER_SORTED_LEAF_AABBS_WGSL",
+            GATHER_SORTED_LEAF_AABBS_WGSL,
+        );
+    }
+
+    #[test]
+    fn validate_find_pairs_wgsl() {
+        validate_wgsl("FIND_PAIRS_WGSL", FIND_PAIRS_WGSL);
+    }
+
+    #[test]
+    fn validate_find_pairs_gpu_tree_wgsl() {
+        validate_wgsl("FIND_PAIRS_GPU_TREE_WGSL", FIND_PAIRS_GPU_TREE_WGSL);
+    }
+
+    #[test]
+    fn validate_karras_build_wgsl() {
+        validate_wgsl("KARRAS_BUILD_WGSL", KARRAS_BUILD_WGSL);
+    }
+
+    #[test]
+    fn validate_refit_wgsl() {
+        validate_wgsl("REFIT_WGSL", REFIT_WGSL);
     }
 }

@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -111,12 +110,19 @@ jobs:
             export VK_ICD_FILENAMES="$LVP_ICD"
           fi
           cargo nextest run --workspace --profile ci
-      - name: Publish known-failure results
-        uses: mikepenz/action-junit-report@v5
+      - name: Summarize known-failure results
         if: always()
+        uses: mikepenz/action-junit-report@v5
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: Known Physics Failures
+          # This job tracks scenarios we expect to fail. Don't fail the check
+          # or the job when failures are present — they're expected.
+          fail_on_failure: false
+          require_tests: false
+          annotate_only: true
+          detailed_summary: true
+          include_passed: true
 
   coverage:
     name: Coverage

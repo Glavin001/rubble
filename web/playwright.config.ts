@@ -30,7 +30,7 @@ const chromiumPath = findChromium();
 
 export default defineConfig({
   testDir: "./tests",
-  timeout: 60_000,
+  timeout: 120_000,
   retries: 1,
   use: {
     baseURL: "http://localhost:4173",

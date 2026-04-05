@@ -1,0 +1,11 @@
+[package]
+name = "rubble-scenes"
+version = "0.1.0"
+edition = "2021"
+description = "Shared demo scene definitions for the Rubble physics engine viewers"
+
+[dependencies]
+rubble2d = { workspace = true }
+rubble3d = { workspace = true }
+glam = { workspace = true }
+rand = { workspace = true }

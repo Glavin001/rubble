@@ -20,4 +20,4 @@ egui-winit = "0.34"
 stacker = "0.1"
 
 [dev-dependencies]
-rand = "0.9"
+rubble-scenes = { workspace = true }

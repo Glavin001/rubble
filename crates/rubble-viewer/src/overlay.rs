@@ -1,22 +1,4 @@
-use rubble_gpu::StepTimingsMs;
-
-const STAGE_LABELS: &[(&str, &str)] = &[
-    ("Upload", "(CPU)"),
-    ("Predict", "(GPU)"),
-    ("Broadphase", "(GPU+CPU)"),
-    ("Narrowphase", "(GPU)"),
-    ("Contacts", "(GPU>CPU)"),
-    ("Solve", "(GPU)"),
-    ("Extract", "(GPU)"),
-];
-
-const BROADPHASE_STAGE_LABELS: &[(&str, &str)] = &[
-    ("Bounds", "(CPU)"),
-    ("Sort", "(GPU)"),
-    ("Build", "(CPU+GPU)"),
-    ("Traverse", "(GPU)"),
-    ("Readback", "(CPU)"),
-];
+use rubble_gpu::{StepTimingsMs, BROADPHASE_SUB_LABELS, STEP_TIMING_LABELS};
 
 fn stat_card(ui: &mut egui::Ui, label: &str, value: String) {
     egui::Frame::new()
@@ -44,6 +26,7 @@ fn stat_card(ui: &mut egui::Ui, label: &str, value: String) {
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_panel(
     ctx: &egui::Context,
     title: &str,
@@ -169,7 +152,7 @@ pub fn draw_panel(
                         ui.label(egui::RichText::new("%").strong());
                         ui.end_row();
 
-                        for (i, &(name, kind)) in STAGE_LABELS.iter().enumerate() {
+                        for (i, &(name, kind)) in STEP_TIMING_LABELS.iter().enumerate() {
                             let ms = arr[i];
                             let pct = if total > 0.0 { ms / total * 100.0 } else { 0.0 };
                             ui.label(
@@ -183,7 +166,7 @@ pub fn draw_panel(
                                     .color(egui::Color32::from_gray(210)),
                             );
                             ui.label(
-                                egui::RichText::new(format!("{pct:.0}%"))
+                                egui::RichText::new(format!("{pct:.1}%"))
                                     .color(egui::Color32::from_gray(170)),
                             );
                             ui.end_row();
@@ -201,7 +184,7 @@ pub fn draw_panel(
                         ui.end_row();
                     });
 
-                if !timings.broadphase_breakdown.is_zero() {
+                {
                     ui.add_space(2.0);
                     egui::CollapsingHeader::new("Broadphase Details")
                         .default_open(false)
@@ -216,16 +199,13 @@ pub fn draw_panel(
                                     ui.label(egui::RichText::new("Stage").strong());
                                     ui.label(egui::RichText::new("Lane").strong());
                                     ui.label(egui::RichText::new("Time").strong());
-                                    ui.label(egui::RichText::new("%").strong());
+                                    ui.label(egui::RichText::new("% of BP").strong());
                                     ui.end_row();
 
                                     for (j, &(sub_name, sub_kind)) in
-                                        BROADPHASE_STAGE_LABELS.iter().enumerate()
+                                        BROADPHASE_SUB_LABELS.iter().enumerate()
                                     {
                                         let sub_ms = bp_arr[j];
-                                        if sub_ms <= 0.0 {
-                                            continue;
-                                        }
                                         let sub_pct = if bp_total > 0.0 {
                                             sub_ms / bp_total * 100.0
                                         } else {
@@ -244,7 +224,7 @@ pub fn draw_panel(
                                                 .color(egui::Color32::from_gray(195)),
                                         );
                                         ui.label(
-                                            egui::RichText::new(format!("{sub_pct:.0}%"))
+                                            egui::RichText::new(format!("{sub_pct:.1}%"))
                                                 .color(egui::Color32::from_gray(170)),
                                         );
                                         ui.end_row();
