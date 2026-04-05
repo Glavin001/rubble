@@ -877,9 +877,13 @@ pub struct GpuLbvh {
     morton_kernel: ComputeKernel,
     gather_sorted_leaf_aabbs_kernel: ComputeKernel,
     find_pairs_kernel: ComputeKernel,
-    find_pairs_gpu_tree_kernel: ComputeKernel,
-    karras_build_kernel: ComputeKernel,
-    refit_kernel: ComputeKernel,
+    // GPU-only tree kernels (Karras build + refit + GPU-tree traversal).
+    // Lazily compiled on first call to `query_on_device_gpu` to avoid loading
+    // unused shaders at startup (some stricter WebGPU backends validate atomics
+    // in storage struct members differently — only compile when actually used).
+    find_pairs_gpu_tree_kernel: Option<ComputeKernel>,
+    karras_build_kernel: Option<ComputeKernel>,
+    refit_kernel: Option<ComputeKernel>,
     radix_sort: GpuRadixSort,
     scene_bounds: GpuBuffer<Aabb3D>,
     bounds_scratch_a: GpuBuffer<Aabb3D>,
@@ -906,10 +910,10 @@ impl GpuLbvh {
         let gather_sorted_leaf_aabbs_kernel =
             ComputeKernel::from_wgsl(ctx, GATHER_SORTED_LEAF_AABBS_WGSL, "main");
         let find_pairs_kernel = ComputeKernel::from_wgsl(ctx, FIND_PAIRS_WGSL, "main");
-        let find_pairs_gpu_tree_kernel =
-            ComputeKernel::from_wgsl(ctx, FIND_PAIRS_GPU_TREE_WGSL, "main");
-        let karras_build_kernel = ComputeKernel::from_wgsl(ctx, KARRAS_BUILD_WGSL, "main");
-        let refit_kernel = ComputeKernel::from_wgsl(ctx, REFIT_WGSL, "main");
+        // Lazily compiled — see field doc comments.
+        let find_pairs_gpu_tree_kernel = None;
+        let karras_build_kernel = None;
+        let refit_kernel = None;
         let radix_sort = GpuRadixSort::new(ctx, max_bodies);
         let max_bounds_partials = round_up_workgroups(max_bodies.max(1) as u32, WG) as usize;
 
@@ -1188,6 +1192,13 @@ impl GpuLbvh {
         let tree_size = (num_bodies as usize * 2).saturating_sub(1);
         self.tree_nodes.grow_if_needed(ctx, tree_size);
 
+        // Lazy compile on first use
+        if self.karras_build_kernel.is_none() {
+            self.karras_build_kernel =
+                Some(ComputeKernel::from_wgsl(ctx, KARRAS_BUILD_WGSL, "main"));
+        }
+        let kernel = self.karras_build_kernel.as_ref().unwrap();
+
         let params: [u32; 4] = [num_bodies, 0, 0, 0];
         ctx.queue.write_buffer(
             &self.tree_build_params_buf,
@@ -1197,7 +1208,7 @@ impl GpuLbvh {
 
         let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("karras_build"),
-            layout: self.karras_build_kernel.bind_group_layout(),
+            layout: kernel.bind_group_layout(),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1221,7 +1232,7 @@ impl GpuLbvh {
                 label: Some("karras_build"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(self.karras_build_kernel.pipeline());
+            pass.set_pipeline(kernel.pipeline());
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(round_up_workgroups(num_internal, WG), 1, 1);
         }
@@ -1235,6 +1246,12 @@ impl GpuLbvh {
             return;
         }
 
+        // Lazy compile on first use
+        if self.refit_kernel.is_none() {
+            self.refit_kernel = Some(ComputeKernel::from_wgsl(ctx, REFIT_WGSL, "main"));
+        }
+        let kernel = self.refit_kernel.as_ref().unwrap();
+
         let params: [u32; 4] = [num_bodies, 0, 0, 0];
         ctx.queue.write_buffer(
             &self.tree_build_params_buf,
@@ -1244,7 +1261,7 @@ impl GpuLbvh {
 
         let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("refit"),
-            layout: self.refit_kernel.bind_group_layout(),
+            layout: kernel.bind_group_layout(),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1272,7 +1289,7 @@ impl GpuLbvh {
                 label: Some("refit"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(self.refit_kernel.pipeline());
+            pass.set_pipeline(kernel.pipeline());
             pass.set_bind_group(0, &bg, &[]);
             // Single workgroup for web-compatible uniform control flow
             pass.dispatch_workgroups(1, 1, 1);
@@ -1341,13 +1358,23 @@ impl GpuLbvh {
         self.pair_counter.reset(ctx);
         self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
 
+        // Lazy compile on first use
+        if self.find_pairs_gpu_tree_kernel.is_none() {
+            self.find_pairs_gpu_tree_kernel = Some(ComputeKernel::from_wgsl(
+                ctx,
+                FIND_PAIRS_GPU_TREE_WGSL,
+                "main",
+            ));
+        }
+        let kernel = self.find_pairs_gpu_tree_kernel.as_ref().unwrap();
+
         let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
         ctx.queue
             .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
 
         let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("find_pairs_gpu_tree"),
-            layout: self.find_pairs_gpu_tree_kernel.bind_group_layout(),
+            layout: kernel.bind_group_layout(),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1375,7 +1402,7 @@ impl GpuLbvh {
                 label: Some("find_pairs_gpu_tree"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(self.find_pairs_gpu_tree_kernel.pipeline());
+            pass.set_pipeline(kernel.pipeline());
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
         }

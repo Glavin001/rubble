@@ -396,6 +396,13 @@ async function loop_() {
     window.__rubble_test.stepCount = stepCount;
     window.__rubble_test.bodyCount = world.body_count();
   }
+  } catch (e) {
+    // Surface step errors to console and test hooks (otherwise the animation
+    // loop silently swallows them via `void loop_()` and E2E tests hang).
+    console.error("world.step() failed:", e);
+    if (window.__rubble_test) {
+      window.__rubble_test.error = (e as Error)?.message || String(e);
+    }
   } finally {
     frameInFlight = false;
   }
