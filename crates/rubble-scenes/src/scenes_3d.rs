@@ -298,6 +298,44 @@ pub fn scene_grid_boxes() -> Vec<RigidBodyDesc> {
     descs
 }
 
+pub fn scene_grid_10k_boxes() -> Vec<RigidBodyDesc> {
+    let mut descs = vec![RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    }];
+
+    const NX: usize = 20;
+    const NY: usize = 25;
+    const NZ: usize = 20; // 20 * 25 * 20 = 10_000
+
+    let side = 0.42_f32;
+    let gap = 0.08_f32;
+    let pitch = side + gap;
+    let half = side * 0.5;
+
+    let ox = -((NX - 1) as f32 * pitch) * 0.5;
+    let oz = -((NZ - 1) as f32 * pitch) * 0.5;
+    let base_y = half + 0.03;
+
+    for j in 0..NY {
+        for i in 0..NX {
+            for k in 0..NZ {
+                let x = ox + i as f32 * pitch;
+                let y = base_y + j as f32 * pitch;
+                let z = oz + k as f32 * pitch;
+                descs.push(box_desc(x, y, z, side, side, side, 1.0, 0.5));
+            }
+        }
+    }
+
+    descs
+}
+
 pub fn scene_slanted_grid_boxes() -> Vec<RigidBodyDesc> {
     let mut descs = vec![RigidBodyDesc {
         position: Vec3::ZERO,

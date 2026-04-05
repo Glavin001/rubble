@@ -36,7 +36,7 @@ pub fn scenes_2d() -> &'static [Scene2D] {
     &SCENES_2D
 }
 
-static SCENES_3D: [Scene3D; 11] = [
+static SCENES_3D: [Scene3D; 12] = [
     Scene3D {
         name: "Empty",
         build: scenes_3d::scene_empty,
@@ -80,6 +80,10 @@ static SCENES_3D: [Scene3D; 11] = [
     Scene3D {
         name: "Slanted Grid",
         build: scenes_3d::scene_slanted_grid_boxes,
+    },
+    Scene3D {
+        name: "10k Grid",
+        build: scenes_3d::scene_grid_10k_boxes,
     },
 ];
 

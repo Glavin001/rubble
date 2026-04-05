@@ -53,7 +53,8 @@ impl OrbitCamera {
     }
 
     pub fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance - delta * 0.5).clamp(1.0, 100.0);
+        let factor = (-delta * 0.15).exp();
+        self.distance = (self.distance * factor).clamp(0.5, 200.0);
     }
 
     pub fn pan(&mut self, dx: f32, dy: f32) {
