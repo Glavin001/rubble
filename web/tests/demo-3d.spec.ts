@@ -227,7 +227,7 @@ test.describe("3D scene switching", () => {
           const testState = window.__rubble_test;
           return loadingHidden &&
             (testState?.bodyCount ?? 0) >= minBodies &&
-            (testState?.stepCount ?? 0) > priorStepCount;
+            (testState?.stepCount ?? 0) >= priorStepCount + 5;
         },
         {
           minBodies: scene.minBodies,

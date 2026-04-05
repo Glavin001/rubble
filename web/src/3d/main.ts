@@ -3,9 +3,10 @@ import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-// Three.js WebGPURenderer stores per-instance transforms in a uniform buffer,
-// so keep this comfortably below the browser's 64 KiB binding limit.
-const MAX_INSTANCES = 1024;
+// Three.js WebGPURenderer stores per-instance transforms in a uniform buffer.
+// A 4x4 matrix is 64 bytes, so 1024 instances lands exactly on a 64 KiB limit;
+// keep real headroom here to avoid context/device loss on Chrome SwiftShader.
+const MAX_INSTANCES = 768;
 const DEMO_SEED = 0x3d5eed;
 
 const SPHERE_COLORS = [0xff6b35, 0xf7c948, 0x4ecdc4, 0x45b7d1, 0x96ceb4];
