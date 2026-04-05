@@ -2,9 +2,10 @@
 //!
 //! Pipeline: compute scene bounds → Morton codes → radix sort → build Karras tree
 //! → refit AABBs → find pairs.
-//! The scene-bounds reduction, Morton code computation, leaf gathering, and pair finding
-//! run as compute shaders. Tree topology and refit still run on CPU after downloading
-//! the sorted Morton codes and sorted leaf AABBs.
+//! The scene-bounds reduction, Morton code computation, leaf gathering, Karras build,
+//! refit, and pair finding run as compute shaders. The [`GpuLbvh::build_and_query_raw`]
+//! family can still download sorted keys and build a CPU BVH for debugging or callers
+//! that need overlap pairs on the host.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -1504,6 +1505,13 @@ impl GpuLbvh {
         let t_traverse = Instant::now();
         let max_pairs = self.dispatch_find_pairs_gpu_tree(ctx, num_bodies);
         breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+
+        // WebGPU: `submit` is non-blocking; without this, the next `read_pair_count` maps
+        // the entire prior GPU broadphase into `readback_ms`. Flush here so that wall
+        // time lands in `traverse_ms` (and `readback_ms` stays the tiny counter copy).
+        let t_flush = Instant::now();
+        ctx.wait_for_queue();
+        breakdown.traverse_ms += t_flush.elapsed().as_secs_f32() * 1000.0;
         max_pairs
     }
 
