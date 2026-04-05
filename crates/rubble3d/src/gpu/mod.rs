@@ -28,11 +28,11 @@ mod predict_wgsl;
 mod warmstart_wgsl;
 
 pub use avbd_solve_wgsl::{AVBD_DUAL_WGSL, AVBD_PRIMAL_WGSL};
+pub use coloring_wgsl::{COLORING_RESET_WGSL, COLORING_STEP_WGSL};
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
 pub use warmstart_wgsl::WARMSTART_MATCH_WGSL;
-pub use coloring_wgsl::{COLORING_RESET_WGSL, COLORING_STEP_WGSL};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
@@ -74,8 +74,8 @@ struct CachedBindGroupVec<K> {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SimParamsGpu {
     pub gravity: [f32; 4],
-    pub solver: [f32; 4],  // (dt, beta, k_start, max_penalty)
-    pub counts: [u32; 4],  // (num_bodies, solver_iterations, pair_count, flags)
+    pub solver: [f32; 4], // (dt, beta, k_start, max_penalty)
+    pub counts: [u32; 4], // (num_bodies, solver_iterations, pair_count, flags)
     /// Narrowphase/solver quality knobs:
     /// x = contact_offset (prediction distance for speculative contacts)
     /// y = restitution_threshold (velocity below which restitution = 0)
@@ -443,7 +443,8 @@ struct GpuColoringState {
 
 impl GpuColoringState {
     fn new(ctx: &GpuContext, max_bodies: usize) -> Self {
-        let reset_kernel = ComputeKernel::from_wgsl(ctx, coloring_wgsl::COLORING_RESET_WGSL, "main");
+        let reset_kernel =
+            ComputeKernel::from_wgsl(ctx, coloring_wgsl::COLORING_RESET_WGSL, "main");
         let step_kernel = ComputeKernel::from_wgsl(ctx, coloring_wgsl::COLORING_STEP_WGSL, "main");
         let body_colors = GpuBuffer::new(ctx, max_bodies.max(1));
         let body_priorities = GpuBuffer::new(ctx, max_bodies.max(1));
@@ -2537,8 +2538,10 @@ impl GpuPipeline {
         let contact_count = contacts.len() as u32;
 
         // Grow buffers if needed
-        cs.body_colors.grow_if_needed(&self.ctx, num_bodies as usize);
-        cs.body_priorities.grow_if_needed(&self.ctx, num_bodies as usize);
+        cs.body_colors
+            .grow_if_needed(&self.ctx, num_bodies as usize);
+        cs.body_priorities
+            .grow_if_needed(&self.ctx, num_bodies as usize);
 
         // Phase 1: Reset — mark all bodies uncolored, assign random priorities
         {
@@ -2670,31 +2673,30 @@ impl GpuPipeline {
         );
 
         // Build or reuse bind group (keyed on buffer sizes to detect regrowth)
-        let key = [
-            self.prev_contacts.byte_size(),
-            self.contacts.byte_size(),
-            0,
-        ];
+        let key = [self.prev_contacts.byte_size(), self.contacts.byte_size(), 0];
         if self.warmstart_bg_cache.key != Some(key) {
             let layout = self.warmstart_kernel.pipeline().get_bind_group_layout(0);
-            let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("warmstart_bg"),
-                layout: &layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.prev_contacts.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.contacts.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.warmstart_params_uniform.as_entire_binding(),
-                    },
-                ],
-            });
+            let bg = self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("warmstart_bg"),
+                    layout: &layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.prev_contacts.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.contacts.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.warmstart_params_uniform.as_entire_binding(),
+                        },
+                    ],
+                });
             self.warmstart_bg_cache.key = Some(key);
             self.warmstart_bg_cache.bind_group = Some(bg);
         }
@@ -2713,8 +2715,7 @@ impl GpuPipeline {
                 .ctx
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            let byte_count =
-                (contact_count as u64) * std::mem::size_of::<Contact3D>() as u64;
+            let byte_count = (contact_count as u64) * std::mem::size_of::<Contact3D>() as u64;
             encoder.copy_buffer_to_buffer(
                 self.contacts.buffer(),
                 0,

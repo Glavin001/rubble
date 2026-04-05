@@ -31,7 +31,10 @@ fn validate_predict_wgsl() {
 
 #[test]
 fn validate_extract_velocity_wgsl() {
-    validate_wgsl("EXTRACT_VELOCITY_WGSL", rubble3d::gpu::EXTRACT_VELOCITY_WGSL);
+    validate_wgsl(
+        "EXTRACT_VELOCITY_WGSL",
+        rubble3d::gpu::EXTRACT_VELOCITY_WGSL,
+    );
 }
 
 #[test]
@@ -51,16 +54,10 @@ fn validate_warmstart_match_wgsl() {
 
 #[test]
 fn validate_coloring_reset_wgsl() {
-    validate_wgsl(
-        "COLORING_RESET_WGSL",
-        rubble3d::gpu::COLORING_RESET_WGSL,
-    );
+    validate_wgsl("COLORING_RESET_WGSL", rubble3d::gpu::COLORING_RESET_WGSL);
 }
 
 #[test]
 fn validate_coloring_step_wgsl() {
-    validate_wgsl(
-        "COLORING_STEP_WGSL",
-        rubble3d::gpu::COLORING_STEP_WGSL,
-    );
+    validate_wgsl("COLORING_STEP_WGSL", rubble3d::gpu::COLORING_STEP_WGSL);
 }

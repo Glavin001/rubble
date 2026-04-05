@@ -21,8 +21,9 @@ pub struct ParryContactResult {
 /// Convert a glam position + quaternion to a parry3d Isometry.
 pub fn to_isometry(position: Vec3, rotation: Quat) -> Isometry3<f32> {
     let translation = Vector3::new(position.x, position.y, position.z);
-    let quat =
-        UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(rotation.w, rotation.x, rotation.y, rotation.z));
+    let quat = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+        rotation.w, rotation.x, rotation.y, rotation.z,
+    ));
     Isometry3::from_parts(translation.into(), quat)
 }
 

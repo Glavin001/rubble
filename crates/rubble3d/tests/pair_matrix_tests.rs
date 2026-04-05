@@ -1601,13 +1601,22 @@ fn contact_sanity_extended_checks() {
         for (ci, c) in contacts.iter().enumerate() {
             // No NaN in any field
             if !c.point.is_finite() {
-                failures.push(format!("{} contact[{ci}]: point contains NaN/Inf", case.name));
+                failures.push(format!(
+                    "{} contact[{ci}]: point contains NaN/Inf",
+                    case.name
+                ));
             }
             if !c.normal.is_finite() {
-                failures.push(format!("{} contact[{ci}]: normal contains NaN/Inf", case.name));
+                failures.push(format!(
+                    "{} contact[{ci}]: normal contains NaN/Inf",
+                    case.name
+                ));
             }
             if !c.tangent.is_finite() {
-                failures.push(format!("{} contact[{ci}]: tangent contains NaN/Inf", case.name));
+                failures.push(format!(
+                    "{} contact[{ci}]: tangent contains NaN/Inf",
+                    case.name
+                ));
             }
             if !c.local_anchor_a.is_finite() {
                 failures.push(format!(

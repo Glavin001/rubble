@@ -1342,11 +1342,8 @@ impl GpuLbvh {
         self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
 
         let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
-        ctx.queue.write_buffer(
-            &self.find_params_buf,
-            0,
-            bytemuck::cast_slice(&find_params),
-        );
+        ctx.queue
+            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
 
         let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("find_pairs_gpu_tree"),
@@ -1995,7 +1992,10 @@ mod tests {
 
     #[test]
     fn validate_gather_sorted_leaf_aabbs_wgsl() {
-        validate_wgsl("GATHER_SORTED_LEAF_AABBS_WGSL", GATHER_SORTED_LEAF_AABBS_WGSL);
+        validate_wgsl(
+            "GATHER_SORTED_LEAF_AABBS_WGSL",
+            GATHER_SORTED_LEAF_AABBS_WGSL,
+        );
     }
 
     #[test]
