@@ -371,33 +371,15 @@ const fpsEl = document.getElementById("fps")!;
 const bodiesEl = document.getElementById("bodies")!;
 const timingsEl = document.getElementById("timings")!;
 
-const TIMING_LABELS = [
-  ["Upload",      "(CPU)"],
-  ["Predict",     "(GPU)"],
-  ["Broadphase",  "(GPU+CPU)"],
-  ["Narrowphase", "(GPU)"],
-  ["Contacts",    "(GPU>CPU)"],
-  ["Solve",       "(GPU)"],
-  ["Extract",     "(GPU)"],
-] as const;
-
-const BROADPHASE_LABELS = [
-  ["Bounds",   "(CPU)"],
-  ["Sort",     "(GPU)"],
-  ["Build",    "(CPU+GPU)"],
-  ["Traverse", "(GPU)"],
-  ["Readback", "(CPU)"],
-] as const;
+function updateTimingsOverlay() {
+  timingsEl.textContent = world.last_step_overlay_text(
+    renderBackendLabel,
+    lastRenderMs,
+  );
+}
 
 // Cached data for test hooks (avoids borrow conflicts during async step)
 let cachedTransforms = new Float32Array(0);
-let cachedTimings = new Float32Array(TIMING_LABELS.length);
-let cachedBroadphase = new Float32Array(BROADPHASE_LABELS.length);
-
-function syncTimingCache() {
-  world.copy_last_step_timings_into(cachedTimings);
-  world.copy_last_broadphase_breakdown_into(cachedBroadphase);
-}
 
 async function renderScene() {
   if ("isWebGPURenderer" in renderer && renderer.isWebGPURenderer) {
@@ -405,39 +387,6 @@ async function renderScene() {
     return;
   }
   renderer.render(scene, camera);
-}
-
-function formatTimings(
-  timings: Float32Array,
-  broadphase: Float32Array,
-  renderMs: number,
-): string {
-  const total = timings.reduce((a, b) => a + b, 0);
-  const lines: string[] = [`Step: ${total.toFixed(2)} ms`];
-  for (let i = 0; i < TIMING_LABELS.length; i++) {
-    const [name, tag] = TIMING_LABELS[i];
-    const ms = timings[i] ?? 0;
-    const pct = total > 0 ? ((ms / total) * 100) : 0;
-    lines.push(
-      `  ${name.padEnd(11)} ${tag.padEnd(8)} ${ms.toFixed(2).padStart(6)} ms ${pct.toFixed(0).padStart(3)}%`
-    );
-    if (name === "Broadphase") {
-      const bpTotal = broadphase.reduce((a, b) => a + b, 0);
-      for (let j = 0; j < BROADPHASE_LABELS.length; j++) {
-        const bpMs = broadphase[j] ?? 0;
-        if (bpMs <= 0) {
-          continue;
-        }
-        const [bpName, bpTag] = BROADPHASE_LABELS[j];
-        const bpPct = bpTotal > 0 ? ((bpMs / bpTotal) * 100) : 0;
-        lines.push(
-          `    ${bpName.padEnd(9)} ${bpTag.padEnd(10)} ${bpMs.toFixed(2).padStart(6)} ms ${bpPct.toFixed(0).padStart(3)}%`
-        );
-      }
-    }
-  }
-  lines.push(`Render      (${renderBackendLabel}) ${renderMs.toFixed(2).padStart(6)} ms`);
-  return lines.join("\n");
 }
 
 async function loop_() {
@@ -471,12 +420,13 @@ async function loop_() {
   lastRenderMs = performance.now() - t0;
 
   frameCount++;
+  // Step timings reflect the last `world.step()`; refresh every frame so the overlay
+  // is never up to ~1s stale (FPS is still averaged once per second).
+  updateTimingsOverlay();
   const now = performance.now();
   if (now - lastFpsTime >= 1000) {
-    syncTimingCache();
     fpsEl.textContent = `FPS: ${frameCount}`;
     bodiesEl.textContent = `Bodies: ${world.body_count()}`;
-    timingsEl.textContent = formatTimings(cachedTimings, cachedBroadphase, lastRenderMs);
     frameCount = 0;
     lastFpsTime = now;
   }
@@ -608,7 +558,7 @@ async function loadScene(name: string) {
 
   syncTransformCache();
   updateTransforms();
-  syncTimingCache();
+  updateTimingsOverlay();
 
   const totalBodies = world.body_count();
   const dropped =
@@ -680,7 +630,7 @@ async function main() {
     }
     syncTransformCache();
     updateTransforms();
-    syncTimingCache();
+    updateTimingsOverlay();
     if (window.__rubble_test) {
       window.__rubble_test.bodyCount = world.body_count();
     }

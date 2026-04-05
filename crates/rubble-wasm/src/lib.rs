@@ -285,6 +285,13 @@ impl PhysicsWorld2D {
         copy_f32_buffer("broadphase breakdown", out, &self.broadphase_cache)
     }
 
+    /// Full step timing overlay (same formatting as `rubble_gpu::StepTimingsMs::format_text_overlay`).
+    pub fn last_step_overlay_text(&self, render_backend: &str, render_ms: f32) -> String {
+        self.world
+            .last_step_timings()
+            .format_text_overlay(render_backend, render_ms)
+    }
+
     /// List the names of all available 2D demo scenes, in display order.
     pub fn scene_names(&self) -> Vec<String> {
         rubble_scenes::scenes_2d()
@@ -606,6 +613,13 @@ impl PhysicsWorld3D {
             .broadphase_breakdown
             .as_array();
         copy_f32_buffer("broadphase breakdown", out, &self.broadphase_cache)
+    }
+
+    /// Full step timing overlay (same formatting as `rubble_gpu::StepTimingsMs::format_text_overlay`).
+    pub fn last_step_overlay_text(&self, render_backend: &str, render_ms: f32) -> String {
+        self.world
+            .last_step_timings()
+            .format_text_overlay(render_backend, render_ms)
     }
 
     /// List the names of all available 3D demo scenes, in display order.

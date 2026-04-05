@@ -2,9 +2,10 @@
 //!
 //! Pipeline: compute scene bounds → Morton codes → radix sort → build Karras tree
 //! → refit AABBs → find pairs.
-//! The scene-bounds reduction, Morton code computation, leaf gathering, and pair finding
-//! run as compute shaders. Tree topology and refit still run on CPU after downloading
-//! the sorted Morton codes and sorted leaf AABBs.
+//! The scene-bounds reduction, Morton code computation, leaf gathering, Karras build,
+//! refit, and pair finding run as compute shaders. The [`GpuLbvh::build_and_query_raw`]
+//! family can still download sorted keys and build a CPU BVH for debugging or callers
+//! that need overlap pairs on the host.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -1461,18 +1462,59 @@ impl GpuLbvh {
         aabb_buf: &wgpu::Buffer,
         num_bodies: u32,
     ) -> u32 {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.query_on_device_gpu_with_breakdown(ctx, aabb_buf, num_bodies, &mut breakdown)
+    }
+
+    /// Same as [`GpuLbvh::query_on_device_gpu`], with coarse timing buckets filled in.
+    ///
+    /// GPU Karras build and refit are included in `build_ms`; pair finding in `traverse_ms`.
+    /// `readback_ms` stays zero here; the engine times [`GpuLbvh::read_pair_count`] separately
+    /// (wall time for staging read / map; on WebGPU may include waiting for prior GPU work).
+    pub fn query_on_device_gpu_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> u32 {
+        #[cfg(target_arch = "wasm32")]
+        use rubble_gpu::web_time::Instant;
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::Instant;
+
         if num_bodies <= 1 {
             return 0;
         }
 
+        let t_bounds = Instant::now();
         self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sort = Instant::now();
         self.dispatch_morton(ctx, aabb_buf, num_bodies);
         self.radix_sort
             .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
         self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
         self.dispatch_karras_build(ctx, num_bodies);
         self.dispatch_refit(ctx, num_bodies);
-        self.dispatch_find_pairs_gpu_tree(ctx, num_bodies)
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_traverse = Instant::now();
+        let max_pairs = self.dispatch_find_pairs_gpu_tree(ctx, num_bodies);
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+
+        // Native: wait so GPU completion is not lumped into the pair-counter readback timer.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let t_flush = Instant::now();
+            ctx.wait_for_queue();
+            breakdown.traverse_ms += t_flush.elapsed().as_secs_f32() * 1000.0;
+        }
+        max_pairs
     }
 
     /// Run the full GPU broadphase pipeline on any AABB buffer and accumulate
@@ -1551,6 +1593,9 @@ impl GpuLbvh {
     }
 
     /// Variant of [`GpuLbvh::query_on_device_raw`] that accumulates timing buckets.
+    ///
+    /// Uses the fully GPU LBVH path ([`GpuLbvh::query_on_device_gpu_with_breakdown`]) so
+    /// Morton codes and leaf AABBs are not read back for a CPU tree build.
     pub fn query_on_device_raw_with_breakdown(
         &mut self,
         ctx: &GpuContext,
@@ -1558,48 +1603,7 @@ impl GpuLbvh {
         num_bodies: u32,
         breakdown: &mut BroadphaseBreakdownMs,
     ) -> u32 {
-        #[cfg(target_arch = "wasm32")]
-        use rubble_gpu::web_time::Instant;
-        #[cfg(not(target_arch = "wasm32"))]
-        use std::time::Instant;
-
-        if num_bodies <= 1 {
-            return 0;
-        }
-
-        let t_bounds = Instant::now();
-        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
-        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
-
-        let t_sort = Instant::now();
-        self.dispatch_morton(ctx, aabb_buf, num_bodies);
-        self.radix_sort
-            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
-        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
-
-        let t_build = Instant::now();
-        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let t_readback = Instant::now();
-        let (sorted_codes, leaf_aabbs) =
-            self.morton_keys.download_with(ctx, &self.leaf_aabbs_sorted);
-        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-
-        let t_build = Instant::now();
-        let gpu_nodes = build_tree_cpu(&sorted_codes, &leaf_aabbs);
-        if gpu_nodes.is_empty() {
-            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-            return 0;
-        }
-
-        self.internal_nodes.upload(ctx, &gpu_nodes);
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let t_traverse = Instant::now();
-        let max_pairs = self.dispatch_find_pairs(ctx, num_bodies);
-        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
-        max_pairs
+        self.query_on_device_gpu_with_breakdown(ctx, aabb_buf, num_bodies, breakdown)
     }
 
     /// Async variant for WASM/WebGPU callers.
@@ -1712,47 +1716,7 @@ impl GpuLbvh {
         num_bodies: u32,
         breakdown: &mut BroadphaseBreakdownMs,
     ) -> u32 {
-        use rubble_gpu::web_time::Instant;
-
-        if num_bodies <= 1 {
-            return 0;
-        }
-
-        let t_bounds = Instant::now();
-        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
-        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
-
-        let t_sort = Instant::now();
-        self.dispatch_morton(ctx, aabb_buf, num_bodies);
-        self.radix_sort
-            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
-        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
-
-        let t_build = Instant::now();
-        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let t_readback = Instant::now();
-        let (sorted_codes, leaf_aabbs) = self
-            .morton_keys
-            .download_with_async(ctx, &self.leaf_aabbs_sorted)
-            .await;
-        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-
-        let t_build = Instant::now();
-        let gpu_nodes = build_tree_cpu(&sorted_codes, &leaf_aabbs);
-        if gpu_nodes.is_empty() {
-            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-            return 0;
-        }
-
-        self.internal_nodes.upload(ctx, &gpu_nodes);
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let t_traverse = Instant::now();
-        let max_pairs = self.dispatch_find_pairs(ctx, num_bodies);
-        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
-        max_pairs
+        self.query_on_device_gpu_with_breakdown(ctx, aabb_buf, num_bodies, breakdown)
     }
 
     pub fn pair_buffer(&self) -> &wgpu::Buffer {
