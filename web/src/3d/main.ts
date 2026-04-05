@@ -62,6 +62,7 @@ let renderer: THREE.WebGLRenderer | WebGPURenderer;
 let renderBackendLabel = "WebGL";
 let frameInFlight = false;
 let sceneLoading = false;
+let firstStepLoggedFor: string | null = null;
 
 async function initRenderer() {
   try {
@@ -420,7 +421,14 @@ async function loop_() {
   frameInFlight = true;
 
   try {
+  const stepStart = performance.now();
   await world.step();
+  if (firstStepLoggedFor) {
+    console.log(
+      `[scene] "${firstStepLoggedFor}" first step: ${(performance.now() - stepStart).toFixed(0)}ms`,
+    );
+    firstStepLoggedFor = null;
+  }
   stepCount++;
 
   // Cache data after step completes (world is no longer borrowed)
@@ -455,6 +463,13 @@ async function loop_() {
 
 async function loadScene(name: string) {
   sceneLoading = true;
+  const loadingEl = document.getElementById("loading")!;
+  loadingEl.textContent = `Loading "${name}"…`;
+  loadingEl.style.display = "flex";
+  // Yield so the browser can paint the overlay before we start GPU work.
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+
+  const tStart = performance.now();
   // Wait for any in-flight frame on the old world to finish before we swap.
   while (frameInFlight) {
     await new Promise((r) => setTimeout(r, 4));
@@ -470,6 +485,7 @@ async function loadScene(name: string) {
       console.warn("failed to free old world", e);
     }
   }
+  const tCreated = performance.now();
   bodies = [];
   sphereCount = 0;
   boxCount = 0;
@@ -483,8 +499,10 @@ async function loadScene(name: string) {
   } catch (e) {
     console.error(`load_scene("${name}") failed:`, e);
     sceneLoading = false;
+    loadingEl.style.display = "none";
     throw e;
   }
+  const tSpawned = performance.now();
 
   const shapeTypes = world.get_shape_types();
   const shapeSizes = world.get_shape_sizes();
@@ -570,15 +588,25 @@ async function loadScene(name: string) {
     (bodies.filter((b) => b.type === 0).length - sphereCount) +
     (bodies.filter((b) => b.type === 1).length - boxCount) +
     (bodies.filter((b) => b.type === 2).length - capsuleCount);
+  const tDone = performance.now();
   console.log(
     `[scene] "${name}": ${totalBodies} bodies — rendering ` +
       `${sphereCount} spheres, ${boxCount} boxes, ${capsuleCount} capsules` +
-      (dropped > 0 ? ` (${dropped} bodies exceed MAX_INSTANCES=${MAX_INSTANCES} and are hidden)` : ""),
+      (dropped > 0 ? ` (${dropped} bodies exceed MAX_INSTANCES=${MAX_INSTANCES} and are hidden)` : "") +
+      ` — timings: create ${(tCreated - tStart).toFixed(0)}ms, spawn ${(tSpawned - tCreated).toFixed(0)}ms, mesh ${(tDone - tSpawned).toFixed(0)}ms`,
   );
+  if (totalBodies > 1500) {
+    console.warn(
+      `[scene] "${name}" has ${totalBodies} bodies — GPU step may take hundreds of ms per frame on non-discrete GPUs.`,
+    );
+  }
 
   if (window.__rubble_test) {
     window.__rubble_test.bodyCount = totalBodies;
   }
+  // Track first-step timing so we can tell if GPU step() is hanging.
+  firstStepLoggedFor = name;
+  loadingEl.style.display = "none";
   sceneLoading = false;
 }
 
