@@ -599,7 +599,32 @@ async function main() {
     sceneSelect.appendChild(opt);
   }
 
-  await loadScene(initialName);
+  // `?bodies=N` overrides the scene picker and does a simple imperative spawn.
+  // E2E tests on SwiftShader (CI) use this to keep per-step cost low.
+  const bodyCountParam = new URL(window.location.href).searchParams.get("bodies");
+  if (bodyCountParam !== null) {
+    const initialBodies = Math.max(
+      1,
+      Math.min(MAX_INSTANCES, parseInt(bodyCountParam, 10) || 1000),
+    );
+    world.add_ground_plane(0.0);
+    bodies.push({ type: 99, instanceIndex: -1 });
+    for (let i = 0; i < initialBodies; i++) {
+      const x = (rng() - 0.5) * 12;
+      const y = 3 + rng() * 15;
+      const z = (rng() - 0.5) * 12;
+      spawnRandomBody(x, y, z);
+    }
+    syncTransformCache();
+    updateTransforms();
+    syncTimingCache();
+    if (window.__rubble_test) {
+      window.__rubble_test.bodyCount = world.body_count();
+    }
+    sceneSelect.disabled = true;
+  } else {
+    await loadScene(initialName);
+  }
 
   sceneSelect.addEventListener("change", () => {
     void loadScene(sceneSelect.value);
