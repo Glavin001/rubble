@@ -1,12 +1,12 @@
-/// WGSL source for GPU body graph coloring using Luby's algorithm.
-///
-/// Colors bodies so no two bodies sharing a contact have the same color,
-/// enabling parallel AVBD primal dispatch per color group.
-///
-/// Pipeline: reset → iterate (step + check convergence) → build body order
-///
-/// Adapted from wgrapier's coloring approach but simplified for Rubble's
-/// body-centric coloring (wgrapier colors constraints instead).
+//! WGSL source for GPU body graph coloring using Luby's algorithm.
+//!
+//! Colors bodies so no two bodies sharing a contact have the same color,
+//! enabling parallel AVBD primal dispatch per color group.
+//!
+//! Pipeline: reset → iterate (step + check convergence) → build body order
+//!
+//! Adapted from wgrapier's coloring approach but simplified for Rubble's
+//! body-centric coloring (wgrapier colors constraints instead).
 
 /// Reset kernel: initialize all bodies as uncolored and assign random priorities.
 pub const COLORING_RESET_WGSL: &str = r#"

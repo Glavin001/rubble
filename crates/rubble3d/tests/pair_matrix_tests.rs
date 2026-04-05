@@ -1160,13 +1160,11 @@ fn pair_matrix_contacts_match_geometry_3d() {
             } else {
                 failures.extend(contact_sanity_errors(&case, &contacts));
             }
-        } else {
-            if !contacts.is_empty() {
-                failures.push(format!(
-                    "{}: expected no contacts, got {:?}",
-                    case.name, contacts
-                ));
-            }
+        } else if !contacts.is_empty() {
+            failures.push(format!(
+                "{}: expected no contacts, got {:?}",
+                case.name, contacts
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -1420,24 +1418,19 @@ fn parry_oracle_transform_sweep_sphere_box() {
             let rubble_has_contact = !contacts.is_empty();
 
             // Both should agree on contact existence for clear cases
-            if case.expect_contact && sep < 0.98 {
-                if !rubble_has_contact {
-                    failures.push(format!(
-                        "sep={sep:.2}, rot=({:.2},{:.2},{:.2},{:.2}): Rubble missed contact",
-                        rot.x, rot.y, rot.z, rot.w
-                    ));
-                }
-                if !parry_penetrating {
-                    // Parry didn't find penetration either — might be marginal
-                }
+            if case.expect_contact && sep < 0.98 && !rubble_has_contact {
+                failures.push(format!(
+                    "sep={sep:.2}, rot=({:.2},{:.2},{:.2},{:.2}): Rubble missed contact",
+                    rot.x, rot.y, rot.z, rot.w
+                ));
             }
-            if !case.expect_contact && sep > 1.15 {
-                if rubble_has_contact {
-                    failures.push(format!(
-                        "sep={sep:.2}, rot=({:.2},{:.2},{:.2},{:.2}): Rubble false positive",
-                        rot.x, rot.y, rot.z, rot.w
-                    ));
-                }
+            // Note: if !parry_penetrating for contact case, it might be marginal
+            let _ = parry_penetrating;
+            if !case.expect_contact && sep > 1.15 && rubble_has_contact {
+                failures.push(format!(
+                    "sep={sep:.2}, rot=({:.2},{:.2},{:.2},{:.2}): Rubble false positive",
+                    rot.x, rot.y, rot.z, rot.w
+                ));
             }
         }
     }

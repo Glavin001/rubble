@@ -70,11 +70,8 @@ pub fn to_parry_shape(shape: &ShapeDesc) -> Option<SharedShape> {
             // the plane offset is encoded in the isometry instead.
             let _ = distance; // handled by caller via isometry translation
             let n = Vector3::new(normal.x, normal.y, normal.z);
-            if let Some(unit_n) = nalgebra::Unit::try_new(n, 1.0e-6) {
-                Some(SharedShape::new(HalfSpace::new(unit_n)))
-            } else {
-                None
-            }
+            nalgebra::Unit::try_new(n, 1.0e-6)
+                .map(|unit_n| SharedShape::new(HalfSpace::new(unit_n)))
         }
         ShapeDesc::Compound { .. } => None,
     }

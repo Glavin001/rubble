@@ -780,13 +780,11 @@ fn pair_matrix_contacts_match_geometry_2d() {
             } else {
                 failures.extend(contact_sanity_errors(&case, &contacts));
             }
-        } else {
-            if !contacts.is_empty() {
-                failures.push(format!(
-                    "{}: expected no contacts, got {:?}",
-                    case.name, contacts
-                ));
-            }
+        } else if !contacts.is_empty() {
+            failures.push(format!(
+                "{}: expected no contacts, got {:?}",
+                case.name, contacts
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
