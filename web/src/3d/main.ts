@@ -424,10 +424,14 @@ async function loop_() {
   const stepStart = performance.now();
   await world.step();
   if (firstStepLoggedFor) {
+    const elapsed = performance.now() - stepStart;
     console.log(
-      `[scene] "${firstStepLoggedFor}" first step: ${(performance.now() - stepStart).toFixed(0)}ms`,
+      `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
     );
     firstStepLoggedFor = null;
+    // Hide the overlay once the first step finishes — proves GPU is alive.
+    const loadingEl = document.getElementById("loading");
+    if (loadingEl) loadingEl.style.display = "none";
   }
   stepCount++;
 
@@ -475,6 +479,9 @@ async function loadScene(name: string) {
     await new Promise((r) => setTimeout(r, 4));
   }
 
+  loadingEl.textContent = `Loading "${name}"… creating world`;
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+
   // Throw away old world & per-body state. Rebuild from the named scene.
   const oldWorld = world as PhysicsWorld3D | undefined;
   world = await PhysicsWorld3D.create(0.0, -9.81, 0.0, 1.0 / 60.0);
@@ -494,12 +501,14 @@ async function loadScene(name: string) {
   boxInstances.count = 0;
   capsuleInstances.count = 0;
 
+  loadingEl.textContent = `Loading "${name}"… spawning bodies`;
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
   try {
     world.load_scene(name);
   } catch (e) {
     console.error(`load_scene("${name}") failed:`, e);
+    loadingEl.textContent = `Failed to load "${name}": ${(e as Error).message ?? e}`;
     sceneLoading = false;
-    loadingEl.style.display = "none";
     throw e;
   }
   const tSpawned = performance.now();
@@ -606,7 +615,15 @@ async function loadScene(name: string) {
   }
   // Track first-step timing so we can tell if GPU step() is hanging.
   firstStepLoggedFor = name;
-  loadingEl.style.display = "none";
+  // Show the setup breakdown in the overlay. We keep it visible until the
+  // first GPU step completes, so on mobile/without devtools the user can see
+  // whether the world was built and whether step() is actually running.
+  loadingEl.innerHTML =
+    `<div style="text-align:center;line-height:1.6">` +
+    `<div>Loaded "${name}": ${totalBodies} bodies</div>` +
+    `<div style="font-size:0.85em;color:#777">create ${(tCreated - tStart).toFixed(0)}ms · spawn ${(tSpawned - tCreated).toFixed(0)}ms · mesh ${(tDone - tSpawned).toFixed(0)}ms</div>` +
+    `<div style="font-size:0.85em;color:#777">waiting for first GPU step…</div>` +
+    `</div>`;
   sceneLoading = false;
 }
 
