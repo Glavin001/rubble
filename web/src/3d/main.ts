@@ -61,6 +61,7 @@ camera.lookAt(0, 3, 0);
 let renderer: THREE.WebGLRenderer | WebGPURenderer;
 let renderBackendLabel = "WebGL";
 let frameInFlight = false;
+let sceneLoading = false;
 
 async function initRenderer() {
   try {
@@ -413,7 +414,7 @@ function formatTimings(
 }
 
 async function loop_() {
-  if (frameInFlight) {
+  if (frameInFlight || sceneLoading) {
     return;
   }
   frameInFlight = true;
@@ -453,8 +454,22 @@ async function loop_() {
 }
 
 async function loadScene(name: string) {
+  sceneLoading = true;
+  // Wait for any in-flight frame on the old world to finish before we swap.
+  while (frameInFlight) {
+    await new Promise((r) => setTimeout(r, 4));
+  }
+
   // Throw away old world & per-body state. Rebuild from the named scene.
+  const oldWorld = world as PhysicsWorld3D | undefined;
   world = await PhysicsWorld3D.create(0.0, -9.81, 0.0, 1.0 / 60.0);
+  if (oldWorld) {
+    try {
+      oldWorld.free();
+    } catch (e) {
+      console.warn("failed to free old world", e);
+    }
+  }
   bodies = [];
   sphereCount = 0;
   boxCount = 0;
@@ -463,7 +478,13 @@ async function loadScene(name: string) {
   boxInstances.count = 0;
   capsuleInstances.count = 0;
 
-  world.load_scene(name);
+  try {
+    world.load_scene(name);
+  } catch (e) {
+    console.error(`load_scene("${name}") failed:`, e);
+    sceneLoading = false;
+    throw e;
+  }
 
   const shapeTypes = world.get_shape_types();
   const shapeSizes = world.get_shape_sizes();
@@ -544,9 +565,21 @@ async function loadScene(name: string) {
   updateTransforms();
   syncTimingCache();
 
+  const totalBodies = world.body_count();
+  const dropped =
+    (bodies.filter((b) => b.type === 0).length - sphereCount) +
+    (bodies.filter((b) => b.type === 1).length - boxCount) +
+    (bodies.filter((b) => b.type === 2).length - capsuleCount);
+  console.log(
+    `[scene] "${name}": ${totalBodies} bodies — rendering ` +
+      `${sphereCount} spheres, ${boxCount} boxes, ${capsuleCount} capsules` +
+      (dropped > 0 ? ` (${dropped} bodies exceed MAX_INSTANCES=${MAX_INSTANCES} and are hidden)` : ""),
+  );
+
   if (window.__rubble_test) {
-    window.__rubble_test.bodyCount = world.body_count();
+    window.__rubble_test.bodyCount = totalBodies;
   }
+  sceneLoading = false;
 }
 
 async function main() {

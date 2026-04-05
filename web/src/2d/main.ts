@@ -273,9 +273,18 @@ async function loop_() {
 }
 
 async function loadScene(name: string) {
+  const oldWorld = world as PhysicsWorld2D | undefined;
   world = await PhysicsWorld2D.create(0.0, -9.81, 1.0 / 60.0);
+  if (oldWorld) {
+    try {
+      oldWorld.free();
+    } catch (e) {
+      console.warn("failed to free old 2D world", e);
+    }
+  }
   bodyColors = [];
   world.load_scene(name);
+  console.log(`[scene 2D] "${name}": ${world.body_count()} bodies`);
 
   updateShapeCache();
   // Assign colors: static (mass 0) bodies get a muted shade, dynamics get
