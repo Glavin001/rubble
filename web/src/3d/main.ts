@@ -3,9 +3,10 @@ import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-// Three.js WebGPURenderer stores per-instance transforms in a uniform buffer,
-// so keep this comfortably below the browser's 64 KiB binding limit.
-const MAX_INSTANCES = 1024;
+// Three.js WebGPURenderer stores per-instance transforms in a uniform buffer.
+// A 4x4 matrix is 64 bytes, so 1024 instances lands exactly on a 64 KiB limit;
+// keep real headroom here to avoid context/device loss on Chrome SwiftShader.
+const MAX_INSTANCES = 768;
 const DEMO_SEED = 0x3d5eed;
 
 const SPHERE_COLORS = [0xff6b35, 0xf7c948, 0x4ecdc4, 0x45b7d1, 0x96ceb4];
@@ -157,6 +158,7 @@ const boxInstances = new THREE.InstancedMesh(boxGeo, boxMat, MAX_INSTANCES);
 boxInstances.castShadow = true;
 boxInstances.receiveShadow = true;
 boxInstances.count = 0;
+boxInstances.instanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
 scene.add(boxInstances);
 
 const capsuleMat = new THREE.MeshStandardMaterial({
@@ -178,15 +180,32 @@ boxInstances.instanceColor = boxInstanceColor;
 capsuleInstances.instanceColor = capsuleInstanceColor;
 
 function rebuildCapsuleGeometry(halfHeight: number, radius: number) {
+  if (
+    Math.abs(capsuleBaseHalfHeight - halfHeight) < 1e-6 &&
+    Math.abs(capsuleBaseRadius - radius) < 1e-6
+  ) {
+    return;
+  }
+
   capsuleBaseHalfHeight = halfHeight;
   capsuleBaseRadius = radius;
+  scene.remove(capsuleInstances);
   capsuleInstances.geometry.dispose();
-  capsuleInstances.geometry = new THREE.CapsuleGeometry(
-    radius,
-    halfHeight * 2,
-    4,
-    12,
+  capsuleInstances = new THREE.InstancedMesh(
+    new THREE.CapsuleGeometry(
+      radius,
+      halfHeight * 2,
+      4,
+      12,
+    ),
+    capsuleMat,
+    MAX_INSTANCES,
   );
+  capsuleInstances.castShadow = true;
+  capsuleInstances.receiveShadow = true;
+  capsuleInstances.count = 0;
+  capsuleInstances.instanceColor = capsuleInstanceColor;
+  scene.add(capsuleInstances);
 }
 
 const tempMatrix = new THREE.Matrix4();
@@ -467,6 +486,13 @@ async function loop_() {
     window.__rubble_test.stepCount = stepCount;
     window.__rubble_test.bodyCount = world.body_count();
   }
+  } catch (e) {
+    // Surface step errors to console and test hooks (otherwise the animation
+    // loop silently swallows them via `void loop_()` and E2E tests hang).
+    console.error("world.step() failed:", e);
+    if (window.__rubble_test) {
+      window.__rubble_test.error = (e as Error)?.message || String(e);
+    }
   } finally {
     frameInFlight = false;
   }

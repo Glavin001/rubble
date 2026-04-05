@@ -1062,6 +1062,89 @@ fn stress_mixed_shapes_interaction() {
 }
 
 // ---------------------------------------------------------------------------
+// Warm-start effectiveness A/B comparison
+// ---------------------------------------------------------------------------
+
+/// Compare settling behavior of a 5-box stack with warmstart enabled vs disabled.
+/// Warmstarting should result in faster settling (less oscillation).
+#[test]
+fn warmstart_ab_stack_settles_faster() {
+    let base_config = SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 60.0,
+        solver_iterations: 8,
+        ..Default::default()
+    };
+
+    let mut max_velocity_warm = Vec::new();
+    let mut max_velocity_cold = Vec::new();
+
+    for (warmstart_decay, velocity_log) in [
+        (0.95f32, &mut max_velocity_warm),
+        (0.0f32, &mut max_velocity_cold),
+    ] {
+        let mut world = gpu_world!(SimConfig {
+            warmstart_decay,
+            ..base_config.clone()
+        });
+
+        // Ground plane
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::ZERO,
+            mass: 0.0,
+            shape: ShapeDesc::Plane {
+                normal: Vec3::Y,
+                distance: 0.0,
+            },
+            ..Default::default()
+        });
+
+        // 5-box stack
+        let box_shape = ShapeDesc::Box {
+            half_extents: Vec3::new(0.5, 0.25, 0.5),
+        };
+        let mut handles = Vec::new();
+        for i in 0..5 {
+            let y = 0.25 + i as f32 * 0.51;
+            handles.push(world.add_body(&RigidBodyDesc {
+                position: Vec3::new(0.0, y, 0.0),
+                mass: 1.0,
+                shape: box_shape.clone(),
+                friction: 0.6,
+                ..Default::default()
+            }));
+        }
+
+        // Run 120 frames, log max velocity every 10 frames
+        for frame in 0..120 {
+            world.step();
+            if (frame + 1) % 10 == 0 {
+                let max_v: f32 = handles
+                    .iter()
+                    .filter_map(|h| world.get_velocity(*h))
+                    .map(|v| v.length())
+                    .fold(0.0f32, f32::max);
+                velocity_log.push(max_v);
+            }
+        }
+    }
+
+    // Compare the last 4 measurements (frames 90-120): warmstart should have lower max velocity
+    let warm_late_avg: f32 =
+        max_velocity_warm[8..].iter().sum::<f32>() / max_velocity_warm[8..].len() as f32;
+    let cold_late_avg: f32 =
+        max_velocity_cold[8..].iter().sum::<f32>() / max_velocity_cold[8..].len() as f32;
+
+    // Warmstart should help (or at least not be worse)
+    // Allow 20% tolerance since both might settle similarly for simple stacks
+    assert!(
+        warm_late_avg <= cold_late_avg * 1.2 + 0.01,
+        "Warmstart should help settling: warm_avg={warm_late_avg:.4}, cold_avg={cold_late_avg:.4}\n\
+         warm_log={max_velocity_warm:?}\ncold_log={max_velocity_cold:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------------
 

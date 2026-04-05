@@ -268,9 +268,11 @@ pub fn scene_grid_boxes() -> Vec<RigidBodyDesc> {
         ..Default::default()
     }];
 
-    const NX: usize = 12;
-    const NY: usize = 11;
-    const NZ: usize = 12;
+    // Favor vertical layers over footprint so the default camera reads this as
+    // a real 3D stack instead of a mostly flat sheet.
+    const NX: usize = 8;
+    const NY: usize = 24;
+    const NZ: usize = 8;
     let side = 0.42_f32;
     let gap = 0.08_f32;
     let pitch = side + gap;

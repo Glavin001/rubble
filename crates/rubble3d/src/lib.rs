@@ -35,6 +35,15 @@ pub struct SimConfig {
     pub warmstart_decay: f32,
     /// Default friction coefficient for bodies without explicit friction.
     pub friction_default: f32,
+    /// Prediction distance for speculative contacts (PhysX-style contactOffset).
+    /// Contacts are generated slightly before penetration to improve stacking stability.
+    pub contact_offset: f32,
+    /// Relative velocity below which restitution is suppressed (Jolt/Bullet-style).
+    /// Prevents resting contacts from bouncing at low speeds.
+    pub restitution_threshold: f32,
+    /// Allowable penetration depth before solver correction kicks in.
+    /// Small positive value reduces jitter for resting contacts.
+    pub penetration_slop: f32,
 }
 
 impl Default for SimConfig {
@@ -48,6 +57,9 @@ impl Default for SimConfig {
             k_start: 1e4,
             warmstart_decay: 0.999,
             friction_default: 0.5,
+            contact_offset: 0.02,
+            restitution_threshold: 0.5,
+            penetration_slop: 0.005,
         }
     }
 }
@@ -903,6 +915,11 @@ impl World {
             self.config.k_start,
             self.config.warmstart_decay,
         );
+        self.gpu_pipeline.set_quality_params(
+            self.config.contact_offset,
+            self.config.restitution_threshold,
+            self.config.penetration_slop,
+        );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
         let prev = self.contact_persistence.prev_contacts();
@@ -976,6 +993,11 @@ impl World {
             self.config.beta,
             self.config.k_start,
             self.config.warmstart_decay,
+        );
+        self.gpu_pipeline.set_quality_params(
+            self.config.contact_offset,
+            self.config.restitution_threshold,
+            self.config.penetration_slop,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 

@@ -16,6 +16,7 @@ use layout_validation::assert_gpu_layout;
 pub const FLAG_STATIC: u32 = 1 << 0;
 pub const FLAG_KINEMATIC: u32 = 1 << 1;
 pub const CONTACT_FLAG_STICKING: u32 = 1 << 0;
+pub const CONTACT_FLAG_WARMSTARTED: u32 = 1 << 1;
 
 // ---------------------------------------------------------------------------
 // Shape type constants

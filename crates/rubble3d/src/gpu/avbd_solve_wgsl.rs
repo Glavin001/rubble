@@ -35,6 +35,7 @@ struct SimParams {
     gravity: vec4<f32>,
     solver:  vec4<f32>,
     counts:  vec4<u32>,
+    quality: vec4<f32>,
 };
 
 struct SolveRange {
@@ -397,6 +398,7 @@ struct SimParams {
     gravity: vec4<f32>,
     solver:  vec4<f32>,
     counts:  vec4<u32>,
+    quality: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read>       bodies:            array<Body>;
@@ -483,8 +485,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     var next_penalty = c.penalty;
-    if lambda_n < -1e-6 && c_n < -1e-5 {
-        next_penalty.x = min(c.penalty.x + beta * abs(c_n), max_penalty);
+    if lambda_n < -1e-6 && geom_c_n < -1e-5 {
+        next_penalty.x = min(c.penalty.x + beta * abs(geom_c_n), max_penalty);
     }
 
     var flags = 0u;

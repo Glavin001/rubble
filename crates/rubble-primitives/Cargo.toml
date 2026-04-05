@@ -12,3 +12,4 @@ glam = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
+naga = { workspace = true }

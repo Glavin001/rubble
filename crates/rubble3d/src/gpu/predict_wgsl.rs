@@ -20,6 +20,7 @@ struct SimParams {
     gravity: vec4<f32>, // (gx, gy, gz, 0)
     solver:  vec4<f32>, // (dt, beta, k_start, max_penalty)
     counts:  vec4<u32>, // (num_bodies, solver_iterations, pair_count, flags)
+    quality: vec4<f32>, // (contact_offset, restitution_threshold, penetration_slop, reserved)
 };
 
 @group(0) @binding(0) var<storage, read_write> bodies:     array<Body>;
