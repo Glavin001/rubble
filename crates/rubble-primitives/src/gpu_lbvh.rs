@@ -1,16 +1,19 @@
 //! GPU-native Linear BVH broadphase using compute shaders.
 //!
-//! Pipeline: compute Morton codes → radix sort → build Karras tree → refit AABBs → find pairs.
-//! The Morton code computation and pair finding run as compute shaders. The tree build
-//! and refit are done on CPU after downloading the sorted codes, which keeps the
-//! implementation simple while the sort (the most expensive part) runs fully on GPU.
+//! Pipeline: compute scene bounds → Morton codes → radix sort → build Karras tree
+//! → refit AABBs → find pairs.
+//! The scene-bounds reduction, Morton code computation, leaf gathering, and pair finding
+//! run as compute shaders. Tree topology and refit still run on CPU after downloading
+//! the sorted Morton codes and sorted leaf AABBs.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
-use rubble_gpu::{round_up_workgroups, ComputeKernel, GpuAtomicCounter, GpuBuffer, GpuContext};
+use rubble_gpu::{
+    round_up_workgroups, BroadphaseBreakdownMs, ComputeKernel, GpuAtomicCounter, GpuBuffer,
+    GpuContext,
+};
 use rubble_math::Aabb3D;
 
-use crate::radix_sort::RadixSortEntry;
 use crate::GpuRadixSort;
 
 const WG: u32 = 256;
@@ -40,6 +43,63 @@ pub struct BvhNodeGpu {
 }
 
 // ---------------------------------------------------------------------------
+// Scene-bounds reduction shader
+// ---------------------------------------------------------------------------
+
+const SCENE_BOUNDS_REDUCE_WGSL: &str = r#"
+struct Aabb {
+    min_pt: vec4<f32>,
+    max_pt: vec4<f32>,
+};
+
+var<workgroup> shared_min: array<vec4<f32>, 256>;
+var<workgroup> shared_max: array<vec4<f32>, 256>;
+
+@group(0) @binding(0) var<storage, read> aabbs: array<Aabb>;
+@group(0) @binding(1) var<storage, read_write> out_bounds: array<Aabb>;
+@group(0) @binding(2) var<uniform> params: vec4<u32>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>,
+) {
+    let idx = gid.x;
+    let local_idx = lid.x;
+    let count = params.x;
+
+    if idx < count {
+        let aabb = aabbs[idx];
+        shared_min[local_idx] = aabb.min_pt;
+        shared_max[local_idx] = aabb.max_pt;
+    } else {
+        shared_min[local_idx] = vec4<f32>(1e30, 1e30, 1e30, 0.0);
+        shared_max[local_idx] = vec4<f32>(-1e30, -1e30, -1e30, 0.0);
+    }
+    workgroupBarrier();
+
+    var stride = 128u;
+    loop {
+        if local_idx < stride {
+            shared_min[local_idx] = min(shared_min[local_idx], shared_min[local_idx + stride]);
+            shared_max[local_idx] = max(shared_max[local_idx], shared_max[local_idx + stride]);
+        }
+        workgroupBarrier();
+        if stride == 1u {
+            break;
+        }
+        stride = stride >> 1u;
+    }
+
+    if local_idx == 0u {
+        out_bounds[wid.x].min_pt = shared_min[0];
+        out_bounds[wid.x].max_pt = shared_max[0];
+    }
+}
+"#;
+
+// ---------------------------------------------------------------------------
 // Morton code compute shader (3D, 30-bit)
 // ---------------------------------------------------------------------------
 
@@ -49,21 +109,11 @@ struct Aabb {
     max_pt: vec4<f32>,
 };
 
-struct Params {
-    num_bodies: u32,
-    scene_min_x: f32,
-    scene_min_y: f32,
-    scene_min_z: f32,
-    inv_extent_x: f32,
-    inv_extent_y: f32,
-    inv_extent_z: f32,
-    _pad: u32,
-};
-
 @group(0) @binding(0) var<storage, read> aabbs: array<Aabb>;
-@group(0) @binding(1) var<storage, read_write> morton_keys: array<u32>;
-@group(0) @binding(2) var<storage, read_write> body_indices: array<u32>;
-@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> scene_bounds: array<Aabb>;
+@group(0) @binding(2) var<storage, read_write> morton_keys: array<u32>;
+@group(0) @binding(3) var<storage, read_write> body_indices: array<u32>;
+@group(0) @binding(4) var<uniform> params: vec4<u32>;
 
 fn expand10(v_in: u32) -> u32 {
     var v = v_in & 0x3FFu;
@@ -77,19 +127,49 @@ fn expand10(v_in: u32) -> u32 {
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    if idx >= params.num_bodies { return; }
+    let num_bodies = params.x;
+    if idx >= num_bodies { return; }
     let aabb = aabbs[idx];
+    let scene = scene_bounds[0];
+    let extent = scene.max_pt.xyz - scene.min_pt.xyz;
+    let inv_extent_x = select(0.0, 1.0 / extent.x, extent.x > 1e-10);
+    let inv_extent_y = select(0.0, 1.0 / extent.y, extent.y > 1e-10);
+    let inv_extent_z = select(0.0, 1.0 / extent.z, extent.z > 1e-10);
     let cx = (aabb.min_pt.x + aabb.max_pt.x) * 0.5;
     let cy = (aabb.min_pt.y + aabb.max_pt.y) * 0.5;
     let cz = (aabb.min_pt.z + aabb.max_pt.z) * 0.5;
-    let nx = clamp((cx - params.scene_min_x) * params.inv_extent_x, 0.0, 1.0);
-    let ny = clamp((cy - params.scene_min_y) * params.inv_extent_y, 0.0, 1.0);
-    let nz = clamp((cz - params.scene_min_z) * params.inv_extent_z, 0.0, 1.0);
+    let nx = clamp((cx - scene.min_pt.x) * inv_extent_x, 0.0, 1.0);
+    let ny = clamp((cy - scene.min_pt.y) * inv_extent_y, 0.0, 1.0);
+    let nz = clamp((cz - scene.min_pt.z) * inv_extent_z, 0.0, 1.0);
     let ix = u32(nx * 1023.0);
     let iy = u32(ny * 1023.0);
     let iz = u32(nz * 1023.0);
     morton_keys[idx] = (expand10(ix) << 2u) | (expand10(iy) << 1u) | expand10(iz);
     body_indices[idx] = idx;
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Sorted leaf AABB gather shader
+// ---------------------------------------------------------------------------
+
+const GATHER_SORTED_LEAF_AABBS_WGSL: &str = r#"
+struct Aabb {
+    min_pt: vec4<f32>,
+    max_pt: vec4<f32>,
+};
+
+@group(0) @binding(0) var<storage, read> aabbs: array<Aabb>;
+@group(0) @binding(1) var<storage, read> sorted_indices: array<u32>;
+@group(0) @binding(2) var<storage, read_write> sorted_leaf_aabbs: array<Aabb>;
+@group(0) @binding(3) var<uniform> params: vec4<u32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let num_bodies = params.x;
+    if idx >= num_bodies { return; }
+    sorted_leaf_aabbs[idx] = aabbs[sorted_indices[idx]];
 }
 "#;
 
@@ -177,20 +257,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 // ---------------------------------------------------------------------------
-// Morton params uniform layout
+// Small count params uniform layout
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
-struct MortonParams {
+struct CountParams {
     num_bodies: u32,
-    scene_min_x: f32,
-    scene_min_y: f32,
-    scene_min_z: f32,
-    inv_extent_x: f32,
-    inv_extent_y: f32,
-    inv_extent_z: f32,
-    _pad: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,78 +352,121 @@ fn aabb_union(a: &Aabb3D, b: &Aabb3D) -> Aabb3D {
     )
 }
 
-/// Build Karras tree + refit on CPU. Returns (internal_nodes, leaf_aabbs_sorted).
-fn build_tree_cpu(
-    sorted_codes: &[u32],
-    sorted_indices: &[u32],
-    aabbs: &[Aabb3D],
-) -> (Vec<BvhNodeGpu>, Vec<Aabb3D>) {
-    let n = sorted_codes.len();
-    let num_internal = n - 1;
-
-    let mut internal_left: Vec<Child> = Vec::with_capacity(num_internal);
-    let mut internal_right: Vec<Child> = Vec::with_capacity(num_internal);
-
-    for i in 0..num_internal {
-        let (range_left, range_right, split) = karras_node(sorted_codes, i);
-        let left = if split == range_left {
-            Child::Leaf(split)
-        } else {
-            Child::Internal(split)
-        };
-        let right = if split + 1 == range_right {
-            Child::Leaf(split + 1)
-        } else {
-            Child::Internal(split + 1)
-        };
-        internal_left.push(left);
-        internal_right.push(right);
+fn validate_internal_tree(left: &[Child], right: &[Child]) -> bool {
+    if left.is_empty() {
+        return true;
     }
 
-    let leaf_aabbs: Vec<Aabb3D> = sorted_indices
-        .iter()
-        .map(|&idx| aabbs[idx as usize])
-        .collect();
+    let n = left.len();
+    let mut state = vec![0u8; n];
+    let mut seen = 0usize;
+    let mut stack = vec![(0usize, false)];
 
-    // Bottom-up refit
-    let mut internal_aabbs = vec![Aabb3D::new(Vec3::ZERO, Vec3::ZERO); num_internal];
-    fn refit(
-        idx: usize,
-        left: &[Child],
-        right: &[Child],
-        internal: &mut [Aabb3D],
-        leaves: &[Aabb3D],
-    ) -> Aabb3D {
-        let la = match left[idx] {
-            Child::Leaf(i) => leaves[i],
-            Child::Internal(i) => refit(i, left, right, internal, leaves),
-        };
-        let ra = match right[idx] {
-            Child::Leaf(i) => leaves[i],
-            Child::Internal(i) => refit(i, left, right, internal, leaves),
-        };
-        let combined = aabb_union(&la, &ra);
-        internal[idx] = combined;
-        combined
-    }
-    if num_internal > 0 {
-        refit(
-            0,
-            &internal_left,
-            &internal_right,
-            &mut internal_aabbs,
-            &leaf_aabbs,
-        );
+    while let Some((idx, expanded)) = stack.pop() {
+        if idx >= n {
+            return false;
+        }
+
+        if expanded {
+            if state[idx] != 1 {
+                return false;
+            }
+            state[idx] = 2;
+            continue;
+        }
+
+        match state[idx] {
+            0 => {
+                state[idx] = 1;
+                seen += 1;
+                stack.push((idx, true));
+                if let Child::Internal(ci) = right[idx] {
+                    stack.push((ci, false));
+                }
+                if let Child::Internal(ci) = left[idx] {
+                    stack.push((ci, false));
+                }
+            }
+            1 => return false,
+            2 => return false,
+            _ => unreachable!(),
+        }
     }
 
-    // Convert to GPU format
-    let gpu_nodes: Vec<BvhNodeGpu> = (0..num_internal)
+    seen == n
+}
+
+fn refit_iterative(left: &[Child], right: &[Child], leaves: &[Aabb3D]) -> Option<Vec<Aabb3D>> {
+    if left.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let n = left.len();
+    let mut internal = vec![Aabb3D::new(Vec3::ZERO, Vec3::ZERO); n];
+    let mut state = vec![0u8; n];
+    let mut stack = vec![(0usize, false)];
+
+    while let Some((idx, expanded)) = stack.pop() {
+        if idx >= n {
+            return None;
+        }
+
+        if expanded {
+            let la = match left[idx] {
+                Child::Leaf(i) => *leaves.get(i)?,
+                Child::Internal(i) => {
+                    if state.get(i).copied()? != 2 {
+                        return None;
+                    }
+                    internal[i]
+                }
+            };
+            let ra = match right[idx] {
+                Child::Leaf(i) => *leaves.get(i)?,
+                Child::Internal(i) => {
+                    if state.get(i).copied()? != 2 {
+                        return None;
+                    }
+                    internal[i]
+                }
+            };
+            internal[idx] = aabb_union(&la, &ra);
+            state[idx] = 2;
+            continue;
+        }
+
+        match state[idx] {
+            0 => {
+                state[idx] = 1;
+                stack.push((idx, true));
+                if let Child::Internal(ci) = right[idx] {
+                    stack.push((ci, false));
+                }
+                if let Child::Internal(ci) = left[idx] {
+                    stack.push((ci, false));
+                }
+            }
+            1 => return None,
+            2 => {}
+            _ => unreachable!(),
+        }
+    }
+
+    Some(internal)
+}
+
+fn children_to_gpu_nodes(
+    left: &[Child],
+    right: &[Child],
+    internal_aabbs: &[Aabb3D],
+) -> Vec<BvhNodeGpu> {
+    (0..left.len())
         .map(|i| {
-            let left_val = match internal_left[i] {
+            let left_val = match left[i] {
                 Child::Leaf(l) => -(l as i32 + 1),
                 Child::Internal(l) => l as i32,
             };
-            let right_val = match internal_right[i] {
+            let right_val = match right[i] {
                 Child::Leaf(r) => -(r as i32 + 1),
                 Child::Internal(r) => r as i32,
             };
@@ -371,9 +490,125 @@ fn build_tree_cpu(
                 _pad1: 0,
             }
         })
-        .collect();
+        .collect()
+}
 
-    (gpu_nodes, leaf_aabbs)
+fn build_balanced_tree_cpu(leaf_aabbs: &[Aabb3D]) -> Vec<BvhNodeGpu> {
+    if leaf_aabbs.len() <= 1 {
+        return Vec::new();
+    }
+
+    #[derive(Clone, Copy)]
+    struct Task {
+        start: usize,
+        end: usize,
+        parent: Option<(usize, bool)>,
+    }
+
+    let mut left = Vec::<Child>::new();
+    let mut right = Vec::<Child>::new();
+    let mut stack = vec![Task {
+        start: 0,
+        end: leaf_aabbs.len(),
+        parent: None,
+    }];
+
+    while let Some(task) = stack.pop() {
+        let len = task.end - task.start;
+        if len == 0 {
+            continue;
+        }
+
+        if len == 1 {
+            if let Some((parent, is_left)) = task.parent {
+                let child = Child::Leaf(task.start);
+                if is_left {
+                    left[parent] = child;
+                } else {
+                    right[parent] = child;
+                }
+            }
+            continue;
+        }
+
+        let node_idx = left.len();
+        left.push(Child::Leaf(task.start));
+        right.push(Child::Leaf(task.start));
+
+        if let Some((parent, is_left)) = task.parent {
+            let child = Child::Internal(node_idx);
+            if is_left {
+                left[parent] = child;
+            } else {
+                right[parent] = child;
+            }
+        }
+
+        let mid = task.start + len / 2;
+        stack.push(Task {
+            start: mid,
+            end: task.end,
+            parent: Some((node_idx, false)),
+        });
+        stack.push(Task {
+            start: task.start,
+            end: mid,
+            parent: Some((node_idx, true)),
+        });
+    }
+
+    let mut internal_aabbs = vec![Aabb3D::new(Vec3::ZERO, Vec3::ZERO); left.len()];
+    for idx in (0..left.len()).rev() {
+        let la = match left[idx] {
+            Child::Leaf(i) => leaf_aabbs[i],
+            Child::Internal(i) => internal_aabbs[i],
+        };
+        let ra = match right[idx] {
+            Child::Leaf(i) => leaf_aabbs[i],
+            Child::Internal(i) => internal_aabbs[i],
+        };
+        internal_aabbs[idx] = aabb_union(&la, &ra);
+    }
+
+    children_to_gpu_nodes(&left, &right, &internal_aabbs)
+}
+
+/// Build Karras tree + refit on CPU from already-sorted leaf AABBs.
+fn build_tree_cpu(sorted_codes: &[u32], leaf_aabbs: &[Aabb3D]) -> Vec<BvhNodeGpu> {
+    let n = sorted_codes.len();
+    if n <= 1 {
+        return Vec::new();
+    }
+    let num_internal = n - 1;
+
+    let mut internal_left: Vec<Child> = Vec::with_capacity(num_internal);
+    let mut internal_right: Vec<Child> = Vec::with_capacity(num_internal);
+
+    for i in 0..num_internal {
+        let (range_left, range_right, split) = karras_node(sorted_codes, i);
+        let left = if split == range_left {
+            Child::Leaf(split)
+        } else {
+            Child::Internal(split)
+        };
+        let right = if split + 1 == range_right {
+            Child::Leaf(split + 1)
+        } else {
+            Child::Internal(split + 1)
+        };
+        internal_left.push(left);
+        internal_right.push(right);
+    }
+
+    if validate_internal_tree(&internal_left, &internal_right) {
+        if let Some(internal_aabbs) = refit_iterative(&internal_left, &internal_right, leaf_aabbs) {
+            children_to_gpu_nodes(&internal_left, &internal_right, &internal_aabbs)
+        } else {
+            build_balanced_tree_cpu(leaf_aabbs)
+        }
+    } else {
+        build_balanced_tree_cpu(leaf_aabbs)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,39 +621,50 @@ fn build_tree_cpu(
 /// Tree construction and refit run on CPU (downloaded sorted codes).
 /// Pair finding runs on GPU via parallel BVH traversal.
 pub struct GpuLbvh {
+    scene_bounds_reduce_kernel: ComputeKernel,
     morton_kernel: ComputeKernel,
+    gather_sorted_leaf_aabbs_kernel: ComputeKernel,
     find_pairs_kernel: ComputeKernel,
     radix_sort: GpuRadixSort,
+    scene_bounds: GpuBuffer<Aabb3D>,
+    bounds_scratch_a: GpuBuffer<Aabb3D>,
+    bounds_scratch_b: GpuBuffer<Aabb3D>,
     morton_keys: GpuBuffer<u32>,
     body_indices: GpuBuffer<u32>,
     internal_nodes: GpuBuffer<BvhNodeGpu>,
     leaf_aabbs_sorted: GpuBuffer<Aabb3D>,
-    sorted_indices_buf: GpuBuffer<u32>,
     pairs_out: GpuBuffer<BroadPair>,
     pair_counter: GpuAtomicCounter,
-    morton_params_buf: wgpu::Buffer,
+    count_params_buf: wgpu::Buffer,
     find_params_buf: wgpu::Buffer,
 }
 
 impl GpuLbvh {
     /// Create a new GPU LBVH broadphase for up to `max_bodies` bodies.
     pub fn new(ctx: &GpuContext, max_bodies: usize) -> Self {
+        let scene_bounds_reduce_kernel =
+            ComputeKernel::from_wgsl(ctx, SCENE_BOUNDS_REDUCE_WGSL, "main");
         let morton_kernel = ComputeKernel::from_wgsl(ctx, MORTON_3D_WGSL, "main");
+        let gather_sorted_leaf_aabbs_kernel =
+            ComputeKernel::from_wgsl(ctx, GATHER_SORTED_LEAF_AABBS_WGSL, "main");
         let find_pairs_kernel = ComputeKernel::from_wgsl(ctx, FIND_PAIRS_WGSL, "main");
         let radix_sort = GpuRadixSort::new(ctx, max_bodies);
+        let max_bounds_partials = round_up_workgroups(max_bodies.max(1) as u32, WG) as usize;
 
+        let scene_bounds = GpuBuffer::new(ctx, 1);
+        let bounds_scratch_a = GpuBuffer::new(ctx, max_bounds_partials.max(1));
+        let bounds_scratch_b = GpuBuffer::new(ctx, max_bounds_partials.max(1));
         let morton_keys = GpuBuffer::new(ctx, max_bodies.max(1));
         let body_indices = GpuBuffer::new(ctx, max_bodies.max(1));
         let internal_nodes = GpuBuffer::new(ctx, max_bodies.max(1));
         let leaf_aabbs_sorted = GpuBuffer::new(ctx, max_bodies.max(1));
-        let sorted_indices_buf = GpuBuffer::new(ctx, max_bodies.max(1));
         let max_pairs = max_bodies * 8;
         let pairs_out = GpuBuffer::new(ctx, max_pairs.max(1));
         let pair_counter = GpuAtomicCounter::new(ctx);
 
-        let morton_params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("morton params"),
-            size: std::mem::size_of::<MortonParams>() as u64,
+        let count_params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lbvh count params"),
+            size: std::mem::size_of::<CountParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -430,86 +676,139 @@ impl GpuLbvh {
         });
 
         Self {
+            scene_bounds_reduce_kernel,
             morton_kernel,
+            gather_sorted_leaf_aabbs_kernel,
             find_pairs_kernel,
             radix_sort,
+            scene_bounds,
+            bounds_scratch_a,
+            bounds_scratch_b,
             morton_keys,
             body_indices,
             internal_nodes,
             leaf_aabbs_sorted,
-            sorted_indices_buf,
             pairs_out,
             pair_counter,
-            morton_params_buf,
+            count_params_buf,
             find_params_buf,
         }
     }
 
-    /// Run the full GPU broadphase pipeline on a 3D AABB buffer.
-    pub fn build_and_query(
-        &mut self,
-        ctx: &GpuContext,
-        aabbs: &GpuBuffer<Aabb3D>,
-        num_bodies: u32,
-    ) -> Vec<[u32; 2]> {
-        self.build_and_query_raw(ctx, aabbs.buffer(), &aabbs.download(ctx), num_bodies)
-    }
-
-    /// Run the full GPU broadphase pipeline on any AABB buffer.
-    ///
-    /// `aabb_buf` is the raw GPU buffer (must have the same layout as `array<Aabb>` in WGSL:
-    /// each element is `{min_pt: vec4<f32>, max_pt: vec4<f32>}`).
-    /// `cpu_aabbs` are the same AABBs on CPU (used for scene bounds computation).
-    /// Both `Aabb3D` and `Aabb2D` satisfy this layout (32 bytes, Vec4 min + Vec4 max).
-    pub fn build_and_query_raw(
-        &mut self,
-        ctx: &GpuContext,
-        aabb_buf: &wgpu::Buffer,
-        cpu_aabbs: &[Aabb3D],
-        num_bodies: u32,
-    ) -> Vec<[u32; 2]> {
-        if num_bodies <= 1 {
-            return Vec::new();
-        }
-        let n = num_bodies as usize;
-
-        // Step 0: Compute scene bounds from CPU-side AABBs for Morton normalization.
-        let mut scene_min = Vec3::splat(f32::MAX);
-        let mut scene_max = Vec3::splat(f32::NEG_INFINITY);
-        for aabb in cpu_aabbs {
-            scene_min = scene_min.min(aabb.min_point());
-            scene_max = scene_max.max(aabb.max_point());
-        }
-        let extent = scene_max - scene_min;
-        let inv_x = if extent.x > 1e-10 {
-            1.0 / extent.x
-        } else {
-            0.0
-        };
-        let inv_y = if extent.y > 1e-10 {
-            1.0 / extent.y
-        } else {
-            0.0
-        };
-        let inv_z = if extent.z > 1e-10 {
-            1.0 / extent.z
-        } else {
-            0.0
-        };
-
-        // Step 1: Compute Morton codes on GPU
-        let params = MortonParams {
-            num_bodies,
-            scene_min_x: scene_min.x,
-            scene_min_y: scene_min.y,
-            scene_min_z: scene_min.z,
-            inv_extent_x: inv_x,
-            inv_extent_y: inv_y,
-            inv_extent_z: inv_z,
-            _pad: 0,
+    fn write_count_params(&self, ctx: &GpuContext, count: u32) {
+        let params = CountParams {
+            num_bodies: count,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         ctx.queue
-            .write_buffer(&self.morton_params_buf, 0, bytemuck::bytes_of(&params));
+            .write_buffer(&self.count_params_buf, 0, bytemuck::bytes_of(&params));
+    }
+
+    fn dispatch_scene_bounds_reduce_pass(
+        &self,
+        ctx: &GpuContext,
+        input: &wgpu::Buffer,
+        output: &wgpu::Buffer,
+        count: u32,
+    ) {
+        self.write_count_params(ctx, count);
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene_bounds_reduce"),
+            layout: self.scene_bounds_reduce_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.count_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("scene_bounds_reduce"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.scene_bounds_reduce_kernel.pipeline());
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(count, WG), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
+    }
+
+    fn reduce_scene_bounds(&mut self, ctx: &GpuContext, aabb_buf: &wgpu::Buffer, num_bodies: u32) {
+        #[derive(Clone, Copy)]
+        enum BoundsInput<'a> {
+            Raw(&'a wgpu::Buffer),
+            ScratchA,
+            ScratchB,
+        }
+
+        self.scene_bounds.set_len(1);
+
+        let mut input = BoundsInput::Raw(aabb_buf);
+        let mut remaining = num_bodies;
+        let mut write_to_a = true;
+
+        loop {
+            let partial_count = round_up_workgroups(remaining, WG);
+            let output_is_final = partial_count == 1;
+
+            if !output_is_final {
+                if write_to_a {
+                    self.bounds_scratch_a
+                        .grow_if_needed(ctx, partial_count as usize);
+                    self.bounds_scratch_a.set_len(partial_count);
+                } else {
+                    self.bounds_scratch_b
+                        .grow_if_needed(ctx, partial_count as usize);
+                    self.bounds_scratch_b.set_len(partial_count);
+                }
+            }
+
+            let input_buffer = match input {
+                BoundsInput::Raw(buffer) => buffer,
+                BoundsInput::ScratchA => self.bounds_scratch_a.buffer(),
+                BoundsInput::ScratchB => self.bounds_scratch_b.buffer(),
+            };
+            let output_buffer = if output_is_final {
+                self.scene_bounds.buffer()
+            } else if write_to_a {
+                self.bounds_scratch_a.buffer()
+            } else {
+                self.bounds_scratch_b.buffer()
+            };
+
+            self.dispatch_scene_bounds_reduce_pass(ctx, input_buffer, output_buffer, remaining);
+
+            if output_is_final {
+                break;
+            }
+
+            input = if write_to_a {
+                BoundsInput::ScratchA
+            } else {
+                BoundsInput::ScratchB
+            };
+            remaining = partial_count;
+            write_to_a = !write_to_a;
+        }
+    }
+
+    fn dispatch_morton(&mut self, ctx: &GpuContext, aabb_buf: &wgpu::Buffer, num_bodies: u32) {
+        let n = num_bodies as usize;
+        self.write_count_params(ctx, num_bodies);
         self.morton_keys.grow_if_needed(ctx, n);
         self.body_indices.grow_if_needed(ctx, n);
         self.morton_keys.set_len(num_bodies);
@@ -525,15 +824,19 @@ impl GpuLbvh {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: self.morton_keys.buffer().as_entire_binding(),
+                    resource: self.scene_bounds.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.body_indices.buffer().as_entire_binding(),
+                    resource: self.morton_keys.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.morton_params_buf.as_entire_binding(),
+                    resource: self.body_indices.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.count_params_buf.as_entire_binding(),
                 },
             ],
         });
@@ -550,44 +853,66 @@ impl GpuLbvh {
             pass.dispatch_workgroups(round_up_workgroups(num_bodies, WG), 1, 1);
         }
         ctx.queue.submit(Some(encoder.finish()));
+    }
 
-        // Step 2: Radix sort Morton codes on GPU
-        let keys = self.morton_keys.download(ctx);
-        let vals = self.body_indices.download(ctx);
-        let entries: Vec<RadixSortEntry> = keys
-            .iter()
-            .zip(vals.iter())
-            .map(|(&k, &v)| RadixSortEntry { key: k, value: v })
-            .collect();
-        let mut sort_buf = GpuBuffer::<RadixSortEntry>::new(ctx, n);
-        sort_buf.upload(ctx, &entries);
-        self.radix_sort.sort(ctx, &mut sort_buf);
-        let entries = sort_buf.download(ctx);
+    fn dispatch_sorted_leaf_gather(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+    ) {
+        self.write_count_params(ctx, num_bodies);
+        self.leaf_aabbs_sorted
+            .grow_if_needed(ctx, num_bodies as usize);
+        self.leaf_aabbs_sorted.set_len(num_bodies);
 
-        let sorted_codes: Vec<u32> = entries.iter().map(|e| e.key).collect();
-        let sorted_indices: Vec<u32> = entries.iter().map(|e| e.value).collect();
-
-        // Step 3: Build Karras tree on CPU (tree build is lightweight; sort was the expensive part)
-        let (gpu_nodes, leaf_aabbs) = build_tree_cpu(&sorted_codes, &sorted_indices, cpu_aabbs);
-        if gpu_nodes.is_empty() {
-            return Vec::new();
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gather_sorted_leaf_aabbs"),
+            layout: self.gather_sorted_leaf_aabbs_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: aabb_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.body_indices.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.count_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gather_sorted_leaf_aabbs"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.gather_sorted_leaf_aabbs_kernel.pipeline());
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WG), 1, 1);
         }
+        ctx.queue.submit(Some(encoder.finish()));
+    }
 
-        // Step 4: Upload tree + sorted data for GPU pair finding
-        self.internal_nodes.upload(ctx, &gpu_nodes);
-        self.leaf_aabbs_sorted.upload(ctx, &leaf_aabbs);
-        self.sorted_indices_buf.upload(ctx, &sorted_indices);
-
-        // Step 5: Find pairs on GPU via parallel BVH traversal
+    fn dispatch_find_pairs(&mut self, ctx: &GpuContext, num_bodies: u32) -> u32 {
+        let max_pairs = (num_bodies as usize * 8) as u32;
         self.pair_counter.reset(ctx);
-        let max_pairs = (n * 8) as u32;
         self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
 
         let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
         ctx.queue
             .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
 
-        let bg2 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("find_pairs"),
             layout: self.find_pairs_kernel.bind_group_layout(),
             entries: &[
@@ -597,7 +922,7 @@ impl GpuLbvh {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: self.sorted_indices_buf.buffer().as_entire_binding(),
+                    resource: self.body_indices.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -626,20 +951,116 @@ impl GpuLbvh {
                 timestamp_writes: None,
             });
             pass.set_pipeline(self.find_pairs_kernel.pipeline());
-            pass.set_bind_group(0, &bg2, &[]);
+            pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
         }
         ctx.queue.submit(Some(encoder.finish()));
+        max_pairs
+    }
 
-        let pair_count = self.pair_counter.read(ctx).min(max_pairs);
-        if pair_count == 0 {
+    /// Run the full GPU broadphase pipeline on a 3D AABB buffer.
+    pub fn build_and_query(
+        &mut self,
+        ctx: &GpuContext,
+        aabbs: &GpuBuffer<Aabb3D>,
+        num_bodies: u32,
+    ) -> Vec<[u32; 2]> {
+        self.build_and_query_raw(ctx, aabbs.buffer(), num_bodies)
+    }
+
+    /// Run the full GPU broadphase pipeline on any AABB buffer.
+    ///
+    /// `aabb_buf` is the raw GPU buffer (must have the same layout as `array<Aabb>` in WGSL:
+    /// each element is `{min_pt: vec4<f32>, max_pt: vec4<f32>}`).
+    /// Both `Aabb3D` and `Aabb2D` satisfy this layout (32 bytes, Vec4 min + Vec4 max).
+    pub fn build_and_query_raw(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+    ) -> Vec<[u32; 2]> {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.build_and_query_raw_with_breakdown(ctx, aabb_buf, num_bodies, &mut breakdown)
+    }
+
+    /// Run the broadphase and leave the resulting pair buffer resident on the GPU.
+    ///
+    /// Returns the dispatched pair capacity (`num_bodies * 8`) used as the upper bound
+    /// for the pair-finding kernel. The actual overlap count is stored in
+    /// [`GpuLbvh::pair_counter_buffer`].
+    pub fn query_on_device_raw(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+    ) -> u32 {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.query_on_device_raw_with_breakdown(ctx, aabb_buf, num_bodies, &mut breakdown)
+    }
+
+    /// Run the full GPU broadphase pipeline on any AABB buffer and accumulate
+    /// coarse timing buckets for the current hybrid CPU/GPU implementation.
+    pub fn build_and_query_raw_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> Vec<[u32; 2]> {
+        #[cfg(target_arch = "wasm32")]
+        use rubble_gpu::web_time::Instant;
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::Instant;
+
+        if num_bodies <= 1 {
             return Vec::new();
         }
-        self.pairs_out.set_len(pair_count);
-        let pairs = self.pairs_out.download(ctx);
+
+        let t_bounds = Instant::now();
+        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sort = Instant::now();
+        self.dispatch_morton(ctx, aabb_buf, num_bodies);
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (sorted_codes, leaf_aabbs) =
+            self.morton_keys.download_with(ctx, &self.leaf_aabbs_sorted);
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        let gpu_nodes = build_tree_cpu(&sorted_codes, &leaf_aabbs);
+        if gpu_nodes.is_empty() {
+            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+            return Vec::new();
+        }
+
+        self.internal_nodes.upload(ctx, &gpu_nodes);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_traverse = Instant::now();
+        let max_pairs = self.dispatch_find_pairs(ctx, num_bodies);
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (pairs, pair_count) =
+            self.pairs_out
+                .download_with_counter(ctx, &self.pair_counter, max_pairs);
+        let pair_count = pair_count.min(max_pairs);
+        if pair_count == 0 {
+            breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+            return Vec::new();
+        }
 
         let mut result: Vec<[u32; 2]> = pairs
-            .iter()
+            .into_iter()
             .take(pair_count as usize)
             .map(|p| {
                 let (a, b) = if p.a < p.b { (p.a, p.b) } else { (p.b, p.a) };
@@ -648,7 +1069,230 @@ impl GpuLbvh {
             .collect();
         result.sort_unstable();
         result.dedup();
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
         result
+    }
+
+    /// Variant of [`GpuLbvh::query_on_device_raw`] that accumulates timing buckets.
+    pub fn query_on_device_raw_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> u32 {
+        #[cfg(target_arch = "wasm32")]
+        use rubble_gpu::web_time::Instant;
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::Instant;
+
+        if num_bodies <= 1 {
+            return 0;
+        }
+
+        let t_bounds = Instant::now();
+        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sort = Instant::now();
+        self.dispatch_morton(ctx, aabb_buf, num_bodies);
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (sorted_codes, leaf_aabbs) =
+            self.morton_keys.download_with(ctx, &self.leaf_aabbs_sorted);
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        let gpu_nodes = build_tree_cpu(&sorted_codes, &leaf_aabbs);
+        if gpu_nodes.is_empty() {
+            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+            return 0;
+        }
+
+        self.internal_nodes.upload(ctx, &gpu_nodes);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_traverse = Instant::now();
+        let max_pairs = self.dispatch_find_pairs(ctx, num_bodies);
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+        max_pairs
+    }
+
+    /// Async variant for WASM/WebGPU callers.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn build_and_query_raw_async(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+    ) -> Vec<[u32; 2]> {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.build_and_query_raw_async_with_breakdown(ctx, aabb_buf, num_bodies, &mut breakdown)
+            .await
+    }
+
+    /// Async variant of [`GpuLbvh::query_on_device_raw`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn query_on_device_raw_async(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+    ) -> u32 {
+        let mut breakdown = BroadphaseBreakdownMs::default();
+        self.query_on_device_raw_async_with_breakdown(ctx, aabb_buf, num_bodies, &mut breakdown)
+            .await
+    }
+
+    /// Async variant of [`build_and_query_raw_with_breakdown`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn build_and_query_raw_async_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> Vec<[u32; 2]> {
+        use rubble_gpu::web_time::Instant;
+
+        if num_bodies <= 1 {
+            return Vec::new();
+        }
+
+        let t_bounds = Instant::now();
+        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sort = Instant::now();
+        self.dispatch_morton(ctx, aabb_buf, num_bodies);
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (sorted_codes, leaf_aabbs) = self
+            .morton_keys
+            .download_with_async(ctx, &self.leaf_aabbs_sorted)
+            .await;
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        let gpu_nodes = build_tree_cpu(&sorted_codes, &leaf_aabbs);
+        if gpu_nodes.is_empty() {
+            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+            return Vec::new();
+        }
+
+        self.internal_nodes.upload(ctx, &gpu_nodes);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_traverse = Instant::now();
+        let max_pairs = self.dispatch_find_pairs(ctx, num_bodies);
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (pairs, pair_count) = self
+            .pairs_out
+            .download_with_counter_async(ctx, &self.pair_counter, max_pairs)
+            .await;
+        let pair_count = pair_count.min(max_pairs);
+        if pair_count == 0 {
+            breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+            return Vec::new();
+        }
+
+        let mut result: Vec<[u32; 2]> = pairs
+            .into_iter()
+            .take(pair_count as usize)
+            .map(|p| {
+                let (a, b) = if p.a < p.b { (p.a, p.b) } else { (p.b, p.a) };
+                [a, b]
+            })
+            .collect();
+        result.sort_unstable();
+        result.dedup();
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+        result
+    }
+
+    /// Async variant of [`GpuLbvh::query_on_device_raw_with_breakdown`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn query_on_device_raw_async_with_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        aabb_buf: &wgpu::Buffer,
+        num_bodies: u32,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) -> u32 {
+        use rubble_gpu::web_time::Instant;
+
+        if num_bodies <= 1 {
+            return 0;
+        }
+
+        let t_bounds = Instant::now();
+        self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
+        breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sort = Instant::now();
+        self.dispatch_morton(ctx, aabb_buf, num_bodies);
+        self.radix_sort
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_readback = Instant::now();
+        let (sorted_codes, leaf_aabbs) = self
+            .morton_keys
+            .download_with_async(ctx, &self.leaf_aabbs_sorted)
+            .await;
+        breakdown.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
+
+        let t_build = Instant::now();
+        let gpu_nodes = build_tree_cpu(&sorted_codes, &leaf_aabbs);
+        if gpu_nodes.is_empty() {
+            breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+            return 0;
+        }
+
+        self.internal_nodes.upload(ctx, &gpu_nodes);
+        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
+
+        let t_traverse = Instant::now();
+        let max_pairs = self.dispatch_find_pairs(ctx, num_bodies);
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
+        max_pairs
+    }
+
+    pub fn pair_buffer(&self) -> &wgpu::Buffer {
+        self.pairs_out.buffer()
+    }
+
+    pub fn read_pair_count(&self, ctx: &GpuContext, max_pairs: u32) -> u32 {
+        self.pair_counter.read(ctx).min(max_pairs)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn read_pair_count_async(&self, ctx: &GpuContext, max_pairs: u32) -> u32 {
+        self.pair_counter.read_async(ctx).await.min(max_pairs)
+    }
+
+    pub fn pair_counter_buffer(&self) -> &wgpu::Buffer {
+        self.pair_counter.buffer()
     }
 }
 
@@ -796,7 +1440,7 @@ mod tests {
         ];
         let mut buf = GpuBuffer::<Aabb3D>::new(&ctx, 2);
         buf.upload(&ctx, &aabbs);
-        let pairs = lbvh.build_and_query_raw(&ctx, buf.buffer(), &aabbs, 2);
+        let pairs = lbvh.build_and_query_raw(&ctx, buf.buffer(), 2);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], [0, 1]);
     }
@@ -849,18 +1493,16 @@ mod tests {
     fn karras_tree_build_correctness() {
         // Test CPU tree build directly with known Morton codes
         let codes = vec![0u32, 1, 2, 3];
-        let indices = vec![0u32, 1, 2, 3];
         let aabbs = vec![
             aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
             aabb([1.0, 0.0, 0.0], [2.0, 1.0, 1.0]),
             aabb([2.0, 0.0, 0.0], [3.0, 1.0, 1.0]),
             aabb([3.0, 0.0, 0.0], [4.0, 1.0, 1.0]),
         ];
-        let (nodes, leaf_aabbs) = build_tree_cpu(&codes, &indices, &aabbs);
+        let nodes = build_tree_cpu(&codes, &aabbs);
 
         // 4 leaves → 3 internal nodes
         assert_eq!(nodes.len(), 3);
-        assert_eq!(leaf_aabbs.len(), 4);
 
         // Root node AABB should encompass all leaves
         let root = &nodes[0];

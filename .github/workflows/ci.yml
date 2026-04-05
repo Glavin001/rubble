@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -54,6 +55,105 @@ jobs:
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: Test Results
+
+  heavy-test:
+    name: Heavy Physics Tests
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run ignored heavy tests
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo nextest run --workspace --profile heavy --run-ignored ignored-only
+      - name: Publish heavy test results
+        uses: mikepenz/action-junit-report@v5
+        if: always()
+        with:
+          report_paths: target/nextest/heavy/junit-heavy.xml
+          check_name: Heavy Physics Results
+
+  known-failures:
+    name: Known Physics Failures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run known-failure scenarios
+        continue-on-error: true
+        env:
+          WGPU_BACKEND: vulkan
+          RUBBLE_RUN_KNOWN_FAILURES: "1"
+        run: |
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo nextest run --workspace --profile ci
+      - name: Summarize known-failure results
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Known Physics Failures
+          # This job tracks scenarios we expect to fail. Don't fail the check
+          # or the job when failures are present — they're expected.
+          fail_on_failure: false
+          require_tests: false
+          annotate_only: true
+          detailed_summary: true
+          include_passed: true
+
+  coverage:
+    name: Coverage
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect Rust coverage
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo llvm-cov --workspace --lcov --output-path target/llvm-cov/lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-cov
+          path: target/llvm-cov/
 
   fmt:
     name: Format

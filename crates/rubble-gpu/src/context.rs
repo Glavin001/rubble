@@ -1,12 +1,43 @@
 use crate::GpuError;
+use std::sync::Mutex;
 
 /// Thin wrapper around a wgpu device and queue.
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    staging_pool: Mutex<Vec<(u64, wgpu::Buffer)>>,
 }
 
 impl GpuContext {
+    pub(crate) fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self {
+            device,
+            queue,
+            staging_pool: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn acquire_staging_buffer(&self, size: u64, label: &'static str) -> wgpu::Buffer {
+        let mut pool = self.staging_pool.lock().unwrap();
+        if let Some(idx) = pool.iter().position(|(capacity, _)| *capacity >= size) {
+            let (_, buffer) = pool.swap_remove(idx);
+            buffer
+        } else {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        }
+    }
+
+    pub(crate) fn release_staging_buffer(&self, buffer: wgpu::Buffer) {
+        let capacity = buffer.size();
+        let mut pool = self.staging_pool.lock().unwrap();
+        pool.push((capacity, buffer));
+    }
+
     /// Enumerate all available GPU adapters and return their info.
     pub async fn enumerate_adapters() -> Vec<wgpu::AdapterInfo> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -37,7 +68,7 @@ impl GpuContext {
             })
             .await?;
 
-        Ok(Self { device, queue })
+        Ok(Self::from_device_queue(device, queue))
     }
 
     /// Request a high-performance GPU adapter and create a device + queue.
@@ -93,7 +124,7 @@ impl GpuContext {
             })
             .await?;
 
-        Ok(Self { device, queue })
+        Ok(Self::from_device_queue(device, queue))
     }
 }
 

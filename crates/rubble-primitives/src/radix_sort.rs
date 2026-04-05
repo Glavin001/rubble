@@ -65,7 +65,7 @@ const SCATTER_WGSL: &str = r#"
 @group(0) @binding(4) var<storage, read> offsets: array<u32>;
 @group(0) @binding(5) var<uniform> params: vec4<u32>; // x=count, y=shift
 
-var<workgroup> local_offsets: array<atomic<u32>, 16>;
+var<workgroup> local_digits: array<u32, 256>;
 
 @compute @workgroup_size(256)
 fn scatter(
@@ -79,17 +79,29 @@ fn scatter(
     let shift = params.y;
     let num_blocks = (n + 255u) / 256u;
 
-    // Load the prefix-scanned offset for this workgroup's bucket
-    if local < 16u {
-        atomicStore(&local_offsets[local], offsets[local * num_blocks + wid.x]);
+    if global < n {
+        let key = keys_in[global];
+        local_digits[local] = (key >> shift) & 0xFu;
+    } else {
+        local_digits[local] = 0xFFFFFFFFu;
     }
     workgroupBarrier();
 
     if global < n {
         let key = keys_in[global];
         let val = values_in[global];
-        let digit = (key >> shift) & 0xFu;
-        let pos = atomicAdd(&local_offsets[digit], 1u);
+        let digit = local_digits[local];
+
+        // Compute a stable rank for this key within the current workgroup by
+        // counting earlier invocations with the same radix digit.
+        var local_rank = 0u;
+        for (var i = 0u; i < local; i = i + 1u) {
+            if local_digits[i] == digit {
+                local_rank = local_rank + 1u;
+            }
+        }
+
+        let pos = offsets[digit * num_blocks + wid.x] + local_rank;
         keys_out[pos] = key;
         values_out[pos] = val;
     }
@@ -143,7 +155,7 @@ impl GpuRadixSort {
         let mut values = GpuBuffer::<u32>::new(ctx, n as usize);
         values.upload(ctx, &values_data);
 
-        self.sort_key_value(ctx, &mut keys, &mut values);
+        self.sort_key_value_in_place(ctx, &mut keys, &mut values);
 
         // Recombine into entries buffer
         let sorted_keys = keys.download(ctx);
@@ -157,7 +169,7 @@ impl GpuRadixSort {
     }
 
     /// Internal sort on separate key/value buffers.
-    fn sort_key_value(
+    pub fn sort_key_value_in_place(
         &self,
         ctx: &GpuContext,
         keys: &mut GpuBuffer<u32>,

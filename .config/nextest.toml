@@ -2,3 +2,8 @@
 # Produce JUnit XML for GitHub Actions test reporting
 [profile.ci.junit]
 path = "junit.xml"
+
+[profile.heavy]
+# Produce a separate JUnit XML file for ignored heavy physics lanes
+[profile.heavy.junit]
+path = "junit-heavy.xml"

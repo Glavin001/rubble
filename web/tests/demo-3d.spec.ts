@@ -13,10 +13,12 @@ async function waitForSteps(
   page: import("@playwright/test").Page,
   minSteps: number,
 ) {
+  // SwiftShader WebGPU broadphase readback can take ~0.5s/step even at 50 bodies,
+  // so 120 steps needs ~60s. Use a generous timeout to keep CI reliable.
   await page.waitForFunction(
     (n) => (window.__rubble_test?.stepCount ?? 0) >= n,
     minSteps,
-    { timeout: 30_000 },
+    { timeout: 90_000 },
   );
 }
 
@@ -28,7 +30,9 @@ test.describe("3D Physics Demo", () => {
       if (msg.type() === "error") errors.push(msg.text());
     });
 
-    await page.goto("/src/3d/index.html");
+    // Use a small body count so SwiftShader (CI) can step fast enough for
+    // the waitForSteps timeouts below.
+    await page.goto("/src/3d/index.html?bodies=50");
     await waitForReady(page);
 
     (page as any).__errors = errors;
@@ -43,8 +47,8 @@ test.describe("3D Physics Demo", () => {
     const bodyCount = await page.evaluate(
       () => window.__rubble_test?.bodyCount ?? 0,
     );
-    // 1 ground plane + 100 dynamic bodies = 101
-    expect(bodyCount).toBeGreaterThanOrEqual(100);
+    // 1 ground plane + 50 dynamic bodies = 51 (see ?bodies=50 above)
+    expect(bodyCount).toBeGreaterThanOrEqual(50);
   });
 
   test("simulation advances (step count increases)", async ({ page }) => {

@@ -67,11 +67,32 @@ cargo install cargo-nextest --locked
 cargo nextest run --workspace --profile ci
 ```
 
-3. Without nextest:
+3. Run the heavy physics bug-hunt lane. This executes the ignored long-horizon sweep and chaos tests:
+
+```bash
+cargo nextest run --workspace --profile heavy --run-ignored ignored-only
+```
+
+4. Run the current known-failure scenarios explicitly. These are skipped by default in the normal lane, but they still live in-tree and can be re-run to track progress:
+
+```bash
+RUBBLE_RUN_KNOWN_FAILURES=1 cargo nextest run --workspace --profile ci
+```
+
+5. Without nextest:
 
 ```bash
 cargo test --workspace
 ```
+
+6. Optional host-side Rust coverage for the default lane:
+
+```bash
+cargo install cargo-llvm-cov --locked
+cargo llvm-cov --workspace --lcov --output-path target/llvm-cov/lcov.info
+```
+
+Coverage reports measure Rust-side orchestration and control flow. They do not directly measure WGSL or SPIR-V shader execution, so keep treating the invariant tests as the source of truth for GPU correctness.
 
 ## Format and Clippy
 

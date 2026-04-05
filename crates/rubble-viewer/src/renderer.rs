@@ -252,8 +252,8 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -394,18 +394,20 @@ impl Renderer {
                 ..Default::default()
             });
 
-            if draw_grid {
-                pass.set_pipeline(&self.grid_pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.draw(0..6, 0..1);
-            }
-
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
 
             self.draw_batch(&mut pass, &self.sphere_mesh, &instances.spheres);
             self.draw_batch(&mut pass, &self.cube_mesh, &instances.cubes);
             self.draw_batch(&mut pass, &self.capsule_mesh, &instances.capsules);
+
+            if draw_grid {
+                // Draw the transparent grid after opaque meshes without writing depth,
+                // so it cannot occlude bodies resting on the ground plane.
+                pass.set_pipeline(&self.grid_pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

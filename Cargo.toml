@@ -12,6 +12,11 @@ members = [
     "crates/rubble-viewer",
 ]
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
 [workspace.dependencies]
 glam = { version = "0.29", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }

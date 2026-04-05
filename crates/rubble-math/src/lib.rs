@@ -15,6 +15,7 @@ use layout_validation::assert_gpu_layout;
 
 pub const FLAG_STATIC: u32 = 1 << 0;
 pub const FLAG_KINEMATIC: u32 = 1 << 1;
+pub const CONTACT_FLAG_STICKING: u32 = 1 << 0;
 
 // ---------------------------------------------------------------------------
 // Shape type constants
@@ -208,7 +209,7 @@ impl RigidBodyProps3D {
 }
 
 // ---------------------------------------------------------------------------
-// Contact3D -- 64 bytes
+// Contact3D -- 128 bytes
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -218,14 +219,20 @@ pub struct Contact3D {
     pub point: Vec4,
     /// (nx, ny, nz, 0)
     pub normal: Vec4,
+    /// First tangent direction at the contact. Tangent 2 is `normal x tangent`.
+    pub tangent: Vec4,
+    /// Local-space anchor on body A.
+    pub local_anchor_a: Vec4,
+    /// Local-space anchor on body B.
+    pub local_anchor_b: Vec4,
+    /// (lambda_n, lambda_t1, lambda_t2, 0)
+    pub lambda: Vec4,
+    /// (penalty_n, penalty_t1, penalty_t2, 0)
+    pub penalty: Vec4,
     pub body_a: u32,
     pub body_b: u32,
     pub feature_id: u32,
-    pub _pad: u32,
-    pub lambda_n: f32,
-    pub lambda_t1: f32,
-    pub lambda_t2: f32,
-    pub penalty_k: f32,
+    pub flags: u32,
 }
 
 impl Contact3D {
@@ -243,10 +250,20 @@ impl Contact3D {
     pub fn contact_normal(&self) -> glam::Vec3 {
         self.normal.truncate()
     }
+
+    #[inline]
+    pub fn tangent1(&self) -> glam::Vec3 {
+        self.tangent.truncate()
+    }
+
+    #[inline]
+    pub fn tangent2(&self) -> glam::Vec3 {
+        self.contact_normal().cross(self.tangent1())
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Contact2D
+// Contact2D -- 80 bytes
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -254,16 +271,16 @@ impl Contact3D {
 pub struct Contact2D {
     /// (x, y, depth, 0)
     pub point: Vec4,
-    /// (nx, ny, 0, 0)
+    /// (nx, ny, tx, ty)
     pub normal: Vec4,
+    /// (rA_local.x, rA_local.y, rB_local.x, rB_local.y)
+    pub local_anchors: Vec4,
+    /// (lambda_n, lambda_t, penalty_n, penalty_t)
+    pub lambda_penalty: Vec4,
     pub body_a: u32,
     pub body_b: u32,
     pub feature_id: u32,
-    pub _pad: u32,
-    pub lambda_n: f32,
-    pub lambda_t: f32,
-    pub penalty_k: f32,
-    pub _pad2: f32,
+    pub flags: u32,
 }
 
 impl Contact2D {
@@ -280,6 +297,11 @@ impl Contact2D {
     #[inline]
     pub fn contact_normal(&self) -> glam::Vec2 {
         glam::Vec2::new(self.normal.x, self.normal.y)
+    }
+
+    #[inline]
+    pub fn contact_tangent(&self) -> glam::Vec2 {
+        glam::Vec2::new(self.normal.z, self.normal.w)
     }
 }
 
@@ -485,8 +507,8 @@ pub enum CollisionEvent {
 assert_gpu_layout!(RigidBodyState3D, 64, 16);
 assert_gpu_layout!(RigidBodyState2D, 64, 16);
 assert_gpu_layout!(RigidBodyProps3D, 64, 4);
-assert_gpu_layout!(Contact3D, 64, 4);
-assert_gpu_layout!(Contact2D, 64, 4);
+assert_gpu_layout!(Contact3D, 128, 4);
+assert_gpu_layout!(Contact2D, 80, 4);
 assert_gpu_layout!(Aabb3D, 32, 16);
 assert_gpu_layout!(Aabb2D, 32, 16);
 assert_gpu_layout!(BvhNode, 48, 4);
@@ -528,12 +550,12 @@ mod tests {
 
     #[test]
     fn size_contact_3d() {
-        assert_eq!(size_of::<Contact3D>(), 64);
+        assert_eq!(size_of::<Contact3D>(), 128);
     }
 
     #[test]
     fn size_contact_2d() {
-        assert_eq!(size_of::<Contact2D>(), 64);
+        assert_eq!(size_of::<Contact2D>(), 80);
     }
 
     #[test]
@@ -586,46 +608,50 @@ mod tests {
         let c = Contact3D {
             point: Vec4::new(1.0, 2.0, 3.0, 0.05),
             normal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            tangent: Vec4::new(1.0, 0.0, 0.0, 0.0),
+            local_anchor_a: Vec4::new(0.1, 0.2, 0.3, 0.0),
+            local_anchor_b: Vec4::new(-0.1, -0.2, -0.3, 0.0),
+            lambda: Vec4::new(-1.5, 0.1, 0.2, 0.0),
+            penalty: Vec4::new(1000.0, 500.0, 500.0, 0.0),
             body_a: 7,
             body_b: 42,
             feature_id: 99,
-            _pad: 0,
-            lambda_n: 1.5,
-            lambda_t1: 0.1,
-            lambda_t2: 0.2,
-            penalty_k: 1000.0,
+            flags: CONTACT_FLAG_STICKING,
         };
         let bytes = bytemuck::bytes_of(&c);
         let back: &Contact3D = from_bytes(bytes);
         assert_eq!(back.contact_point(), glam::Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(back.depth(), 0.05);
         assert_eq!(back.contact_normal(), glam::Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(back.tangent1(), glam::Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(back.body_a, 7);
         assert_eq!(back.body_b, 42);
-        assert_eq!(back.penalty_k, 1000.0);
+        assert_eq!(back.penalty.x, 1000.0);
+        assert_eq!(back.flags, CONTACT_FLAG_STICKING);
     }
 
     #[test]
     fn bytemuck_round_trip_contact_2d() {
         let c = Contact2D {
             point: Vec4::new(5.0, 6.0, 0.01, 0.0),
-            normal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            normal: Vec4::new(0.0, 1.0, 1.0, 0.0),
+            local_anchors: Vec4::new(0.25, 0.5, -0.25, -0.5),
+            lambda_penalty: Vec4::new(-0.5, 0.3, 500.0, 250.0),
             body_a: 1,
             body_b: 2,
             feature_id: 10,
-            _pad: 0,
-            lambda_n: 0.5,
-            lambda_t: 0.3,
-            penalty_k: 500.0,
-            _pad2: 0.0,
+            flags: CONTACT_FLAG_STICKING,
         };
         let bytes = bytemuck::bytes_of(&c);
         let back: &Contact2D = from_bytes(bytes);
         assert_eq!(back.contact_point(), glam::Vec2::new(5.0, 6.0));
         assert_eq!(back.depth(), 0.01);
         assert_eq!(back.contact_normal(), glam::Vec2::new(0.0, 1.0));
+        assert_eq!(back.contact_tangent(), glam::Vec2::new(1.0, 0.0));
         assert_eq!(back.body_a, 1);
         assert_eq!(back.body_b, 2);
+        assert_eq!(back.lambda_penalty.z, 500.0);
+        assert_eq!(back.flags, CONTACT_FLAG_STICKING);
     }
 
     #[test]
@@ -745,6 +771,7 @@ mod tests {
     fn flags_and_shape_constants() {
         assert_eq!(FLAG_STATIC, 1);
         assert_eq!(FLAG_KINEMATIC, 2);
+        assert_eq!(CONTACT_FLAG_STICKING, 1);
         assert_eq!(SHAPE_SPHERE, 0);
         assert_eq!(SHAPE_BOX, 1);
         assert_eq!(SHAPE_CAPSULE, 2);
@@ -778,6 +805,38 @@ mod tests {
         let (colors, num) = greedy_coloring(5, &[]);
         assert_eq!(num, 1);
         assert!(colors.iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn test_greedy_coloring_deterministic() {
+        let pairs = vec![(0, 1), (1, 2), (2, 3), (0, 3), (3, 4), (1, 4)];
+        let (colors_a, num_a) = greedy_coloring(5, &pairs);
+        let (colors_b, num_b) = greedy_coloring(5, &pairs);
+        assert_eq!(num_a, num_b);
+        assert_eq!(colors_a, colors_b);
+    }
+
+    #[test]
+    fn test_greedy_coloring_no_adjacent_conflicts_dense() {
+        let pairs = vec![
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (0, 5),
+            (0, 2),
+            (1, 3),
+            (2, 4),
+            (3, 5),
+        ];
+        let (colors, _) = greedy_coloring(6, &pairs);
+        for &(a, b) in &pairs {
+            assert_ne!(
+                colors[a as usize], colors[b as usize],
+                "adjacent bodies must not share a color: pair=({a}, {b}), colors={colors:?}"
+            );
+        }
     }
 
     #[test]

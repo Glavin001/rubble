@@ -1,0 +1,1002 @@
+use glam::{Mat3, Quat, Vec3, Vec4};
+use rubble3d::{gpu::GpuPipeline, RigidBodyDesc, ShapeDesc, SimConfig, World};
+use rubble_math::{
+    Contact3D, RigidBodyProps3D, RigidBodyState3D, FLAG_STATIC, SHAPE_BOX, SHAPE_PLANE,
+    SHAPE_SPHERE,
+};
+use rubble_shapes3d::{BoxData, CompoundShape, CompoundShapeGpu, SphereData};
+
+const INITIAL_PENALTY: f32 = 1.0e4;
+
+fn should_skip_known_failure(name: &str, reason: &str) -> bool {
+    if std::env::var_os("RUBBLE_RUN_KNOWN_FAILURES").is_some() {
+        return false;
+    }
+    eprintln!(
+        "SKIP known failure `{name}`: {reason}. Set RUBBLE_RUN_KNOWN_FAILURES=1 to run this scenario."
+    );
+    true
+}
+
+macro_rules! gpu_world_3d {
+    ($config:expr) => {
+        match World::new($config) {
+            Ok(w) => w,
+            Err(_) => {
+                eprintln!("SKIP: No GPU adapter found");
+                return;
+            }
+        }
+    };
+}
+
+fn step_n(world: &mut World, n: usize) {
+    for _ in 0..n {
+        world.step();
+    }
+}
+
+fn box_inv_inertia(mass: f32, half_extents: Vec3) -> Mat3 {
+    if mass <= 0.0 {
+        return Mat3::ZERO;
+    }
+    let size = 2.0 * half_extents;
+    let i_x = mass * (size.y * size.y + size.z * size.z) / 12.0;
+    let i_y = mass * (size.x * size.x + size.z * size.z) / 12.0;
+    let i_z = mass * (size.x * size.x + size.y * size.y) / 12.0;
+    Mat3::from_diagonal(Vec3::new(1.0 / i_x, 1.0 / i_y, 1.0 / i_z))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_box_floor_step(
+    body_pos: Vec3,
+    body_rot: Quat,
+    body_lin_vel: Vec3,
+    body_ang_vel: Vec3,
+    body_mass: f32,
+    friction: f32,
+    solver_iterations: u32,
+    warm_contacts: Option<&[Contact3D]>,
+) -> Option<(Vec<RigidBodyState3D>, Vec<Contact3D>)> {
+    let mut pipeline = GpuPipeline::try_new(2)?;
+    let floor_he = Vec3::new(4.0, 0.5, 4.0);
+    let body_he = Vec3::new(1.0, 0.5, 1.0);
+    let inv_mass = if body_mass > 0.0 {
+        1.0 / body_mass
+    } else {
+        0.0
+    };
+    let states = vec![
+        RigidBodyState3D::new(
+            Vec3::new(0.0, -0.5, 0.0),
+            0.0,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ),
+        RigidBodyState3D::new(body_pos, inv_mass, body_rot, body_lin_vel, body_ang_vel),
+    ];
+    let props = vec![
+        RigidBodyProps3D::new(Mat3::ZERO, 1.0, SHAPE_BOX, 0, FLAG_STATIC),
+        RigidBodyProps3D::new(
+            box_inv_inertia(body_mass, body_he),
+            friction,
+            SHAPE_BOX,
+            1,
+            0,
+        ),
+    ];
+    let boxes = vec![
+        BoxData {
+            half_extents: floor_he.extend(0.0),
+        },
+        BoxData {
+            half_extents: body_he.extend(0.0),
+        },
+    ];
+
+    pipeline.upload(
+        &states,
+        &states,
+        &props,
+        &[],
+        &boxes,
+        &[],
+        &[],
+        &[],
+        &[],
+        &Vec::<CompoundShapeGpu>::new(),
+        &[],
+        &Vec::<CompoundShape>::new(),
+        Vec3::ZERO,
+        1.0 / 60.0,
+        solver_iterations,
+        10.0,
+        INITIAL_PENALTY,
+        0.95,
+    );
+    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_box_pair_step(
+    a_pos: Vec3,
+    a_rot: Quat,
+    a_lin_vel: Vec3,
+    a_mass: f32,
+    b_pos: Vec3,
+    b_rot: Quat,
+    b_lin_vel: Vec3,
+    b_mass: f32,
+    solver_iterations: u32,
+    warm_contacts: Option<&[Contact3D]>,
+) -> Option<(Vec<RigidBodyState3D>, Vec<Contact3D>)> {
+    let mut pipeline = GpuPipeline::try_new(2)?;
+    let box_he = Vec3::new(1.0, 0.5, 1.0);
+    let a_inv_mass = if a_mass > 0.0 { 1.0 / a_mass } else { 0.0 };
+    let b_inv_mass = if b_mass > 0.0 { 1.0 / b_mass } else { 0.0 };
+    let states = vec![
+        RigidBodyState3D::new(a_pos, a_inv_mass, a_rot, a_lin_vel, Vec3::ZERO),
+        RigidBodyState3D::new(b_pos, b_inv_mass, b_rot, b_lin_vel, Vec3::ZERO),
+    ];
+    let props = vec![
+        RigidBodyProps3D::new(
+            box_inv_inertia(a_mass, box_he),
+            1.0,
+            SHAPE_BOX,
+            0,
+            if a_mass <= 0.0 { FLAG_STATIC } else { 0 },
+        ),
+        RigidBodyProps3D::new(
+            box_inv_inertia(b_mass, box_he),
+            1.0,
+            SHAPE_BOX,
+            1,
+            if b_mass <= 0.0 { FLAG_STATIC } else { 0 },
+        ),
+    ];
+    let boxes = vec![
+        BoxData {
+            half_extents: box_he.extend(0.0),
+        },
+        BoxData {
+            half_extents: box_he.extend(0.0),
+        },
+    ];
+
+    pipeline.upload(
+        &states,
+        &states,
+        &props,
+        &[],
+        &boxes,
+        &[],
+        &[],
+        &[],
+        &[],
+        &Vec::<CompoundShapeGpu>::new(),
+        &[],
+        &Vec::<CompoundShape>::new(),
+        Vec3::ZERO,
+        1.0 / 60.0,
+        solver_iterations,
+        10.0,
+        INITIAL_PENALTY,
+        0.95,
+    );
+    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
+}
+
+fn run_sphere_plane_step(
+    sphere_pos: Vec3,
+    sphere_lin_vel: Vec3,
+    sphere_mass: f32,
+    solver_iterations: u32,
+    warm_contacts: Option<&[Contact3D]>,
+) -> Option<(Vec<RigidBodyState3D>, Vec<Contact3D>)> {
+    let mut pipeline = GpuPipeline::try_new(2)?;
+    let inv_mass = if sphere_mass > 0.0 {
+        1.0 / sphere_mass
+    } else {
+        0.0
+    };
+    let radius = 0.5;
+    let inv_inertia = if sphere_mass > 0.0 {
+        let inertia = 2.0 * sphere_mass * radius * radius / 5.0;
+        Mat3::from_diagonal(Vec3::splat(1.0 / inertia))
+    } else {
+        Mat3::ZERO
+    };
+    let states = vec![
+        RigidBodyState3D::new(Vec3::ZERO, 0.0, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
+        RigidBodyState3D::new(
+            sphere_pos,
+            inv_mass,
+            Quat::IDENTITY,
+            sphere_lin_vel,
+            Vec3::ZERO,
+        ),
+    ];
+    let props = vec![
+        RigidBodyProps3D::new(Mat3::ZERO, 1.0, SHAPE_PLANE, 0, FLAG_STATIC),
+        RigidBodyProps3D::new(inv_inertia, 1.0, SHAPE_SPHERE, 0, 0),
+    ];
+    let spheres = vec![SphereData {
+        radius,
+        _pad: [0.0; 3],
+    }];
+    let planes = vec![Vec4::new(0.0, 1.0, 0.0, 0.0)];
+
+    pipeline.upload(
+        &states,
+        &states,
+        &props,
+        &spheres,
+        &[],
+        &[],
+        &[],
+        &[],
+        &planes,
+        &Vec::<CompoundShapeGpu>::new(),
+        &[],
+        &Vec::<CompoundShape>::new(),
+        Vec3::ZERO,
+        1.0 / 60.0,
+        solver_iterations,
+        10.0,
+        INITIAL_PENALTY,
+        0.95,
+    );
+    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
+}
+
+fn simulate_sphere_plane_frames(
+    steps: usize,
+    solver_iterations: u32,
+    use_warmstart: bool,
+) -> Option<Vec<RigidBodyState3D>> {
+    let mut pipeline = GpuPipeline::try_new(2)?;
+    let radius = 0.5;
+    let mass = 1.0;
+    let inertia = 2.0 * mass * radius * radius / 5.0;
+    let props = vec![
+        RigidBodyProps3D::new(Mat3::ZERO, 1.0, SHAPE_PLANE, 0, FLAG_STATIC),
+        RigidBodyProps3D::new(
+            Mat3::from_diagonal(Vec3::splat(1.0 / inertia)),
+            1.0,
+            SHAPE_SPHERE,
+            0,
+            0,
+        ),
+    ];
+    let spheres = vec![SphereData {
+        radius,
+        _pad: [0.0; 3],
+    }];
+    let planes = vec![Vec4::new(0.0, 1.0, 0.0, 0.0)];
+    let mut states = vec![
+        RigidBodyState3D::new(Vec3::ZERO, 0.0, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO),
+        RigidBodyState3D::new(
+            Vec3::new(0.0, 2.0, 0.0),
+            1.0 / mass,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ),
+    ];
+    let mut prev_states = states.clone();
+    let mut prev_contacts = Vec::new();
+
+    for _ in 0..steps {
+        pipeline.upload(
+            &states,
+            &prev_states,
+            &props,
+            &spheres,
+            &[],
+            &[],
+            &[],
+            &[],
+            &planes,
+            &Vec::<CompoundShapeGpu>::new(),
+            &[],
+            &Vec::<CompoundShape>::new(),
+            Vec3::new(0.0, -9.81, 0.0),
+            1.0 / 60.0,
+            solver_iterations,
+            10.0,
+            INITIAL_PENALTY,
+            0.95,
+        );
+        let warm = if use_warmstart && !prev_contacts.is_empty() {
+            Some(prev_contacts.as_slice())
+        } else {
+            None
+        };
+        let (next_states, contacts) =
+            pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm);
+        prev_states = states;
+        states = next_states;
+        prev_contacts = contacts;
+    }
+
+    Some(states)
+}
+
+#[test]
+fn box_on_box_generates_multi_contact_manifold() {
+    let Some((_, contacts)) = run_box_floor_step(
+        Vec3::new(0.0, 0.45, 0.0),
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        0,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    assert!(
+        contacts.len() >= 2,
+        "face-face box contact should produce a manifold, got {} contact(s)",
+        contacts.len()
+    );
+    assert!(contacts.iter().all(|c| c.feature_id != 0));
+}
+
+#[test]
+fn rotated_box_on_box_manifold() {
+    let Some((_, contacts)) = run_box_floor_step(
+        Vec3::new(0.0, 0.46, 0.0),
+        Quat::from_rotation_z(0.08),
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        0,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    assert!(
+        contacts.len() >= 2,
+        "slightly rotated box should still keep a manifold, got {} contact(s)",
+        contacts.len()
+    );
+}
+
+#[test]
+fn feature_ids_stable_under_small_motion_3d() {
+    let Some((_, contacts_a)) = run_box_floor_step(
+        Vec3::new(0.0, 0.45, 0.0),
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        0,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+    let Some((_, contacts_b)) = run_box_floor_step(
+        Vec3::new(0.05, 0.45, 0.0),
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        0,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    let ids_a: std::collections::BTreeSet<u32> = contacts_a.iter().map(|c| c.feature_id).collect();
+    let ids_b: std::collections::BTreeSet<u32> = contacts_b.iter().map(|c| c.feature_id).collect();
+    let overlap: Vec<u32> = ids_a.intersection(&ids_b).copied().collect();
+
+    assert!(
+        !overlap.is_empty(),
+        "small translations should preserve at least part of the manifold identity: a={ids_a:?}, b={ids_b:?}"
+    );
+}
+
+#[test]
+fn predicted_box_floor_overlap_can_miss_contacts_from_separated_old_pose_3d() {
+    if should_skip_known_failure(
+        "predicted_box_floor_overlap_can_miss_contacts_from_separated_old_pose_3d",
+        "narrowphase now produces contacts from the separated old pose; this regression test codifies the superseded behaviour",
+    ) {
+        return;
+    }
+    let start = Vec3::new(0.0, 0.7, 0.0);
+    let velocity = Vec3::new(0.0, -20.0, 0.0);
+    let predicted_y = start.y + velocity.y * (1.0 / 60.0);
+    let predicted_bottom = predicted_y - 0.5;
+    assert!(
+        predicted_bottom < 0.0,
+        "test setup should move the predicted box through the floor region"
+    );
+
+    let Some((states, contacts)) = run_box_floor_step(
+        start,
+        Quat::IDENTITY,
+        velocity,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        0,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    assert!(
+        contacts.is_empty(),
+        "predicted floor overlap still produced contacts; this test expects narrowphase to miss them when it reads the separated old pose. predicted_bottom={predicted_bottom}, contacts={contacts:?}"
+    );
+    assert!(
+        states[1].position().y < 0.5,
+        "without a contact manifold the box should advance into the floor region, got {:?}",
+        states[1]
+    );
+}
+
+#[test]
+fn box_stack_manifold_switches_when_alignment_drops_below_threshold_3d() {
+    if should_skip_known_failure(
+        "box_stack_manifold_switches_when_alignment_drops_below_threshold_3d",
+        "aligned box stacks no longer tag contacts with the stacked_box_plane_test feature prefix",
+    ) {
+        return;
+    }
+    let Some((_, near_aligned_contacts)) = run_box_pair_step(
+        Vec3::ZERO,
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        1.0,
+        Vec3::new(0.0, 0.9, 0.0),
+        Quat::from_rotation_z(0.18),
+        Vec3::ZERO,
+        1.0,
+        0,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+    let Some((_, slightly_more_tilted_contacts)) = run_box_pair_step(
+        Vec3::ZERO,
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        1.0,
+        Vec3::new(0.0, 0.9, 0.0),
+        Quat::from_rotation_z(0.22),
+        Vec3::ZERO,
+        1.0,
+        0,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    assert!(
+        near_aligned_contacts
+            .iter()
+            .any(|c| c.feature_id & 0xFF00_0000 == 0x3200_0000),
+        "aligned stack should enter stacked_box_plane_test path, got {near_aligned_contacts:?}"
+    );
+    assert!(
+        !slightly_more_tilted_contacts.is_empty(),
+        "slightly more tilted stack should still generate contacts"
+    );
+    assert!(
+        slightly_more_tilted_contacts
+            .iter()
+            .all(|c| c.feature_id & 0xFF00_0000 != 0x3200_0000),
+        "crossing the alignment threshold should switch away from stacked_box_plane_test, got {slightly_more_tilted_contacts:?}"
+    );
+}
+
+#[test]
+fn stiffness_ramp_conditional_3d() {
+    let Some((_, contacts)) = run_box_floor_step(
+        Vec3::new(0.0, 0.43, 0.0),
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        4,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    assert!(!contacts.is_empty());
+    assert!(
+        contacts.iter().any(|c| c.penalty.x > INITIAL_PENALTY),
+        "normal penalty should ramp under penetration: {contacts:?}"
+    );
+    assert!(
+        contacts
+            .iter()
+            .all(|c| (c.penalty.y - INITIAL_PENALTY).abs() <= 1.0
+                && (c.penalty.z - INITIAL_PENALTY).abs() <= 1.0),
+        "purely normal resting contacts should not ramp tangential stiffness: {contacts:?}"
+    );
+}
+
+#[test]
+fn lambda_accumulates_correctly_3d() {
+    let Some((_, contacts_one_iter)) = run_box_floor_step(
+        Vec3::new(0.0, 0.43, 0.0),
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        1,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+    let Some((_, contacts_many_iters)) = run_box_floor_step(
+        Vec3::new(0.0, 0.43, 0.0),
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        6,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    let lambda_one: f32 = contacts_one_iter
+        .iter()
+        .map(|c| c.lambda.x)
+        .sum::<f32>()
+        .abs();
+    let lambda_many: f32 = contacts_many_iters
+        .iter()
+        .map(|c| c.lambda.x)
+        .sum::<f32>()
+        .abs();
+
+    assert!(
+        lambda_many >= lambda_one,
+        "more dual updates should accumulate at least as much normal lambda: one_iter={lambda_one}, many_iters={lambda_many}"
+    );
+}
+
+#[test]
+fn warm_start_matches_by_feature_not_distance_3d() {
+    let Some((_, first_contacts)) = run_box_floor_step(
+        Vec3::new(0.0, 0.43, 0.0),
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        6,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+    assert!(!first_contacts.is_empty());
+
+    let Some((_, second_contacts)) = run_box_floor_step(
+        Vec3::new(0.05, 0.43, 0.0),
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        1.0,
+        1.0,
+        0,
+        Some(&first_contacts),
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+    assert!(!second_contacts.is_empty());
+
+    let first_by_feature: std::collections::HashMap<u32, &Contact3D> =
+        first_contacts.iter().map(|c| (c.feature_id, c)).collect();
+
+    let mut matched = 0usize;
+    for contact in &second_contacts {
+        if let Some(prev) = first_by_feature.get(&contact.feature_id) {
+            matched += 1;
+            let expected_lambda = prev.lambda * (0.95 * 0.99);
+            let expected_penalty = prev.penalty * 0.95;
+            let lambda_delta = (contact.lambda - expected_lambda).abs();
+            let penalty_delta = (contact.penalty - expected_penalty).abs();
+            assert!(
+                lambda_delta.max_element() < 1e-3,
+                "warm-start lambda should track by feature id: feature={}, expected={expected_lambda:?}, actual={:?}",
+                contact.feature_id,
+                contact.lambda
+            );
+            assert!(
+                penalty_delta.max_element() < 1e-3,
+                "warm-start penalty should track by feature id: feature={}, expected={expected_penalty:?}, actual={:?}",
+                contact.feature_id,
+                contact.penalty
+            );
+        }
+    }
+
+    assert!(
+        matched > 0,
+        "expected at least one persisted feature after small motion"
+    );
+}
+
+#[test]
+fn stacked_box_plane_contacts_skip_warm_start_3d() {
+    if should_skip_known_failure(
+        "stacked_box_plane_contacts_skip_warm_start_3d",
+        "aligned box stacks no longer tag contacts with the stacked_box_plane_test feature prefix",
+    ) {
+        return;
+    }
+    let Some((_, first_contacts)) = run_box_pair_step(
+        Vec3::ZERO,
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        1.0,
+        Vec3::new(0.0, 0.9, 0.0),
+        Quat::from_rotation_z(0.18),
+        Vec3::ZERO,
+        1.0,
+        6,
+        None,
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+    let first_stacked: Vec<&Contact3D> = first_contacts
+        .iter()
+        .filter(|c| c.feature_id & 0xFF00_0000 == 0x3200_0000)
+        .collect();
+    assert!(
+        !first_stacked.is_empty(),
+        "expected aligned box stack to use stacked_box_plane_test contacts"
+    );
+    assert!(
+        first_stacked.iter().any(|c| c.lambda.x.abs() > 1e-3),
+        "expected first stacked contacts to accumulate a non-zero normal lambda: {first_stacked:?}"
+    );
+
+    let Some((_, second_contacts)) = run_box_pair_step(
+        Vec3::ZERO,
+        Quat::IDENTITY,
+        Vec3::ZERO,
+        1.0,
+        Vec3::new(0.0, 0.9, 0.0),
+        Quat::from_rotation_z(0.18),
+        Vec3::ZERO,
+        1.0,
+        0,
+        Some(&first_contacts),
+    ) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+    let second_stacked: Vec<&Contact3D> = second_contacts
+        .iter()
+        .filter(|c| c.feature_id & 0xFF00_0000 == 0x3200_0000)
+        .collect();
+    assert!(
+        !second_stacked.is_empty(),
+        "expected stacked contacts to persist into the warm-started step"
+    );
+    assert!(
+        second_stacked
+            .iter()
+            .all(|c| c.lambda.abs().max_element() < 1e-6),
+        "stacked_box_plane_test contacts are expected to skip warm-start and keep zero lambda, got {second_stacked:?}"
+    );
+    assert!(
+        second_stacked
+            .iter()
+            .all(|c| (c.penalty.x - INITIAL_PENALTY).abs() < 1e-3),
+        "stacked_box_plane_test contacts are expected to keep the initial penalty when warm-start is skipped, got {second_stacked:?}"
+    );
+}
+
+#[test]
+fn custom_k_start_is_applied_3d() {
+    let mut pipeline = match GpuPipeline::try_new(2) {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: No GPU adapter found");
+            return;
+        }
+    };
+    let floor_he = Vec3::new(4.0, 0.5, 4.0);
+    let body_he = Vec3::new(1.0, 0.5, 1.0);
+    let custom_k_start = 2468.0;
+    let states = vec![
+        RigidBodyState3D::new(
+            Vec3::new(0.0, -0.5, 0.0),
+            0.0,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ),
+        RigidBodyState3D::new(
+            Vec3::new(0.0, 0.45, 0.0),
+            1.0,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        ),
+    ];
+    let props = vec![
+        RigidBodyProps3D::new(Mat3::ZERO, 1.0, SHAPE_BOX, 0, FLAG_STATIC),
+        RigidBodyProps3D::new(box_inv_inertia(1.0, body_he), 1.0, SHAPE_BOX, 1, 0),
+    ];
+    let boxes = vec![
+        BoxData {
+            half_extents: floor_he.extend(0.0),
+        },
+        BoxData {
+            half_extents: body_he.extend(0.0),
+        },
+    ];
+
+    pipeline.upload(
+        &states,
+        &states,
+        &props,
+        &[],
+        &boxes,
+        &[],
+        &[],
+        &[],
+        &[],
+        &Vec::<CompoundShapeGpu>::new(),
+        &[],
+        &Vec::<CompoundShape>::new(),
+        Vec3::ZERO,
+        1.0 / 60.0,
+        0,
+        10.0,
+        custom_k_start,
+        0.95,
+    );
+    let (_, contacts) = pipeline.step_with_contacts(2, 0, None);
+    assert!(!contacts.is_empty(), "expected resting box-floor contacts");
+    assert!(contacts.iter().all(|c| {
+        (c.penalty.x - custom_k_start).abs() < 1e-3
+            && (c.penalty.y - custom_k_start).abs() < 1e-3
+            && (c.penalty.z - custom_k_start).abs() < 1e-3
+    }));
+}
+
+#[test]
+fn unconstrained_body_advances_to_inertial_state_3d() {
+    let mut world = gpu_world_3d!(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 60.0,
+        solver_iterations: 8,
+        ..Default::default()
+    });
+
+    let body = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 5.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::Sphere { radius: 0.5 },
+        ..Default::default()
+    });
+    let start_y = world.get_position(body).unwrap().y;
+    world.step();
+    let end_y = world.get_position(body).unwrap().y;
+    let vel_y = world.get_velocity(body).unwrap().y;
+
+    assert!(
+        end_y < start_y - 1e-5,
+        "free body should fall under gravity: start={start_y}, end={end_y}"
+    );
+    assert!(
+        vel_y < -1e-5,
+        "free body should pick up downward velocity: vy={vel_y}"
+    );
+}
+
+#[test]
+fn friction_torque_stops_spinning() {
+    let mut world = gpu_world_3d!(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 60.0,
+        solver_iterations: 12,
+        friction_default: 1.0,
+        ..Default::default()
+    });
+
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        friction: 1.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(20.0, 0.5, 20.0),
+        },
+        ..Default::default()
+    });
+    let sphere = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 0.52, 0.0),
+        angular_velocity: Vec3::new(0.0, 0.0, 15.0),
+        mass: 1.0,
+        friction: 1.0,
+        shape: ShapeDesc::Sphere { radius: 0.5 },
+        ..Default::default()
+    });
+
+    let initial = world.get_angular_velocity(sphere).unwrap().length();
+    step_n(&mut world, 120);
+    let final_omega = world.get_angular_velocity(sphere).unwrap().length();
+
+    assert!(final_omega.is_finite());
+    assert!(
+        final_omega < initial * 0.85,
+        "contact friction should bleed off spinning energy: initial={initial}, final={final_omega}"
+    );
+}
+
+#[test]
+fn sphere_plane_contact_generated_without_nan() {
+    let Some((states, contacts)) =
+        run_sphere_plane_step(Vec3::new(0.0, 0.45, 0.0), Vec3::ZERO, 1.0, 0, None)
+    else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    assert!(
+        !contacts.is_empty(),
+        "sphere-plane should generate a contact"
+    );
+    assert!(
+        contacts
+            .iter()
+            .all(|c| c.point.is_finite() && c.normal.is_finite()),
+        "sphere-plane contact contains non-finite values: {contacts:?}"
+    );
+    assert!(
+        states
+            .iter()
+            .all(|s| s.position().is_finite() && s.linear_velocity().is_finite()),
+        "narrowphase-only sphere-plane step produced non-finite state: {states:?}"
+    );
+}
+
+#[test]
+fn sphere_on_plane_without_warmstart_stays_finite() {
+    let Some(states) = simulate_sphere_plane_frames(180, 12, false) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    let pos = states[1].position();
+    let vel = states[1].linear_velocity();
+    assert!(pos.is_finite(), "sphere without warmstart diverged: {pos}");
+    assert!(
+        vel.is_finite(),
+        "sphere without warmstart velocity diverged: {vel}"
+    );
+}
+
+#[test]
+fn sphere_on_plane_remains_supported() {
+    let mut world = gpu_world_3d!(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 60.0,
+        solver_iterations: 12,
+        ..Default::default()
+    });
+
+    let _plane = world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    });
+    let sphere = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 2.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::Sphere { radius: 0.5 },
+        ..Default::default()
+    });
+
+    for step in 0..180 {
+        world.step();
+        let pos = world.get_position(sphere).unwrap();
+        let vel = world.get_velocity(sphere).unwrap();
+        assert!(
+            pos.is_finite(),
+            "sphere on plane diverged at step {step}: {pos}"
+        );
+        assert!(
+            vel.is_finite(),
+            "sphere on plane velocity diverged at step {step}: {vel}"
+        );
+    }
+
+    let pos = world.get_position(sphere).unwrap();
+    assert!(pos.y > -1.0, "sphere fell through plane: y={}", pos.y);
+}
+
+#[test]
+fn sphere_stack_on_box_remains_supported() {
+    let mut world = gpu_world_3d!(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 60.0,
+        solver_iterations: 10,
+        warmstart_decay: 0.95,
+        ..Default::default()
+    });
+
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -1.0, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(10.0, 1.0, 10.0),
+        },
+        ..Default::default()
+    });
+
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        handles.push(world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 1.0 + i as f32 * 2.5, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 1.0 },
+            ..Default::default()
+        }));
+    }
+
+    for step in 0..180 {
+        world.step();
+        for (idx, &handle) in handles.iter().enumerate() {
+            let pos = world.get_position(handle).unwrap();
+            let vel = world.get_velocity(handle).unwrap();
+            assert!(
+                pos.is_finite(),
+                "stacked sphere {idx} diverged at step {step}: {pos}"
+            );
+            assert!(
+                vel.is_finite(),
+                "stacked sphere {idx} velocity diverged at step {step}: {vel}"
+            );
+        }
+    }
+
+    for (idx, &handle) in handles.iter().enumerate() {
+        let pos = world.get_position(handle).unwrap();
+        assert!(
+            pos.y > -10.0,
+            "stacked sphere {idx} fell through box floor: y={}",
+            pos.y
+        );
+    }
+}

@@ -39,7 +39,7 @@ pub struct Body2D {
     pub position_inv_mass: Vec4,
     /// (vx, vy, angular_vel, 0)
     pub lin_vel: Vec4,
-    /// Padding — _pad0.x stores friction
+    /// Padding — `_pad0.x` stores friction, `_pad0.y` stores inverse inertia.
     pub _pad0: Vec4,
     pub _pad1: Vec4,
 }
@@ -57,7 +57,7 @@ pub struct BodyProps3D {
     pub flags: u32,
 }
 
-/// 3D contact: 64 bytes.
+/// 3D contact: 128 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Contact3D {
@@ -65,32 +65,31 @@ pub struct Contact3D {
     pub point: Vec4,
     /// (nx, ny, nz, 0)
     pub normal: Vec4,
+    pub tangent: Vec4,
+    pub local_anchor_a: Vec4,
+    pub local_anchor_b: Vec4,
+    pub lambda: Vec4,
+    pub penalty: Vec4,
     pub body_a: u32,
     pub body_b: u32,
     pub feature_id: u32,
-    pub _pad: u32,
-    pub lambda_n: f32,
-    pub lambda_t1: f32,
-    pub lambda_t2: f32,
-    pub penalty_k: f32,
+    pub flags: u32,
 }
 
-/// 2D contact: 64 bytes.
+/// 2D contact: 80 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Contact2D {
     /// (x, y, depth, 0)
     pub point: Vec4,
-    /// (nx, ny, 0, 0)
+    /// (nx, ny, tx, ty)
     pub normal: Vec4,
+    pub local_anchors: Vec4,
+    pub lambda_penalty: Vec4,
     pub body_a: u32,
     pub body_b: u32,
     pub feature_id: u32,
-    pub _pad: u32,
-    pub lambda_n: f32,
-    pub lambda_t: f32,
-    pub penalty_k: f32,
-    pub _pad2: f32,
+    pub flags: u32,
 }
 
 /// Simulation parameters: 32 bytes.
@@ -388,8 +387,8 @@ pub fn avbd_solve_3d(
     }
 
     // Augmented Lagrangian impulse
-    let penalty = c.penalty_k;
-    let lambda_old = c.lambda_n;
+    let penalty = c.penalty.x;
+    let lambda_old = c.lambda.x;
     let impulse = (-d_c * penalty + lambda_old) / (w_eff * penalty + 1.0);
     let impulse_clamped = impulse.max(0.0);
 
@@ -404,7 +403,7 @@ pub fn avbd_solve_3d(
     }
 
     // Update dual variable
-    contacts[ci].lambda_n = (lambda_old + penalty * (-depth)).max(0.0);
+    contacts[ci].lambda.x = (lambda_old + penalty * (-depth)).max(0.0);
 
     // --- Friction ---
     let mu = (props_a.friction + props_b.friction) * 0.5;
@@ -427,7 +426,7 @@ pub fn avbd_solve_3d(
     }
 
     // Stiffness ramp
-    contacts[ci].penalty_k = penalty + 10.0 * (-depth);
+    contacts[ci].penalty.x = penalty + 10.0 * (-depth);
 }
 
 // ---------------------------------------------------------------------------
@@ -601,8 +600,8 @@ pub fn avbd_solve_2d(
     }
 
     // Augmented Lagrangian impulse
-    let penalty = c.penalty_k;
-    let lambda_old = c.lambda_n;
+    let penalty = c.lambda_penalty.z;
+    let lambda_old = c.lambda_penalty.x;
     let impulse = (-d_c * penalty + lambda_old) / (w_eff * penalty + 1.0);
     let impulse_clamped = impulse.max(0.0);
 
@@ -618,7 +617,7 @@ pub fn avbd_solve_2d(
     }
 
     // Update dual variable
-    contacts[ci].lambda_n = (lambda_old + penalty * (-depth)).max(0.0);
+    contacts[ci].lambda_penalty.x = (lambda_old + penalty * (-depth)).max(0.0);
 
     // Friction
     let mu = (bodies[a]._pad0.x + bodies[b]._pad0.x) * 0.5;
@@ -647,7 +646,7 @@ pub fn avbd_solve_2d(
     }
 
     // Stiffness ramp
-    contacts[ci].penalty_k = penalty + 10.0 * (-depth);
+    contacts[ci].lambda_penalty.z = penalty + 10.0 * (-depth);
 }
 
 // ---------------------------------------------------------------------------
@@ -751,14 +750,15 @@ pub fn sphere_sphere_test(
     let _contact = Contact3D {
         point: Vec4::new(point.x, point.y, point.z, depth),
         normal: Vec4::new(normal.x, normal.y, normal.z, 0.0),
+        tangent: Vec4::new(1.0, 0.0, 0.0, 0.0),
+        local_anchor_a: Vec4::ZERO,
+        local_anchor_b: Vec4::ZERO,
+        lambda: Vec4::ZERO,
+        penalty: Vec4::new(1e4, 1e4, 1e4, 0.0),
         body_a: pair.a,
         body_b: pair.b,
-        feature_id: 0,
-        _pad: 0,
-        lambda_n: 0.0,
-        lambda_t1: 0.0,
-        lambda_t2: 0.0,
-        penalty_k: 1e4,
+        feature_id: 1,
+        flags: 0,
     };
 
     // Note: actual atomic contact emission requires spirv_std atomics.

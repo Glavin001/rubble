@@ -1,9 +1,9 @@
 /// WGSL source for the 2D prediction shader.
 ///
-/// 1. Saves current state to old_states (for velocity extraction later).
-/// 2. Integrates velocity with gravity: v' = v + dt * g
-/// 3. Predicts position: x_tilde = pos + dt * v'
-/// 4. Stores BOTH updated velocity AND predicted position for the solver.
+/// 1. Saves the current state to `old_states` (used later for velocity extraction).
+/// 2. Computes the inertial target `x* = x + v dt + g dt^2`.
+/// 3. Computes a VBD-style warmstarted primal position using the previous-step velocity.
+/// 4. Writes the warmstarted state to `bodies` and the inertial target to `inertial_states`.
 pub const PREDICT_2D_WGSL: &str = r#"
 // ---------- Types matching rubble-math RigidBodyState2D (64 bytes) ----------
 
@@ -16,21 +16,22 @@ struct Body2D {
 };
 
 struct SimParams2D {
-    gravity:           vec4<f32>, // (gx, gy, 0, 0)
-    dt:                f32,
-    num_bodies:        u32,
-    solver_iterations: u32,
-    _pad:              u32,
+    gravity: vec4<f32>, // (gx, gy, 0, 0)
+    solver:  vec4<f32>, // (dt, beta, k_start, max_penalty)
+    counts:  vec4<u32>, // (num_bodies, solver_iterations, pair_count, flags)
 };
 
 @group(0) @binding(0) var<storage, read_write> bodies:     array<Body2D>;
 @group(0) @binding(1) var<storage, read_write> old_states: array<Body2D>;
-@group(0) @binding(2) var<uniform>             params:     SimParams2D;
+@group(0) @binding(2) var<storage, read_write> inertial_states: array<Body2D>;
+@group(0) @binding(3) var<storage, read>       prev_states:     array<Body2D>;
+@group(0) @binding(4) var<uniform>             params:          SimParams2D;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    if idx >= params.num_bodies {
+    let num_bodies = params.counts.x;
+    if idx >= num_bodies {
         return;
     }
 
@@ -40,7 +41,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Save old state for velocity extraction.
     old_states[idx] = body;
 
+    let dt = params.solver.x;
+    let gravity = params.gravity.xy;
     if inv_mass <= 0.0 {
+        inertial_states[idx] = body;
         return; // static body -- no prediction
     }
 
@@ -48,20 +52,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let angle = body.position_inv_mass.z;
     let vel = body.lin_vel.xy;
     let omega = body.lin_vel.z;
-    let dt = params.dt;
-    let gravity = params.gravity.xy;
+    let prev_vel = prev_states[idx].lin_vel.xy;
+    let inertial_vel = vel + gravity * dt;
 
-    // Integrate velocity with gravity: v' = v + dt * g
-    let new_vel = vel + dt * gravity;
+    // Inertial target used by the primal solve.
+    let inertial_pos = pos + vel * dt + gravity * (dt * dt);
+    let inertial_angle = angle + dt * omega;
 
-    // Position prediction: x_tilde = pos + dt * v'
-    let x_tilde = pos + dt * new_vel;
+    // Adaptive warmstart weight from motion along the gravity direction.
+    let gravity_mag = length(gravity);
+    var accel_weight = 0.0;
+    if gravity_mag > 1e-6 && dt > 1e-12 {
+        let gravity_dir = gravity / gravity_mag;
+        let accel = (vel - prev_vel) / dt;
+        let accel_ext = dot(accel, gravity_dir);
+        accel_weight = clamp(accel_ext / gravity_mag, 0.0, 1.0);
+    }
 
-    // Angle prediction: angle_tilde = angle + dt * omega
-    let angle_tilde = angle + dt * omega;
+    let warm_pos = pos + vel * dt + gravity * (accel_weight * dt * dt);
+    let warm_angle = inertial_angle;
 
-    // Store predicted position AND gravity-integrated velocity
-    bodies[idx].position_inv_mass = vec4<f32>(x_tilde, angle_tilde, inv_mass);
-    bodies[idx].lin_vel = vec4<f32>(new_vel, omega, 0.0);
+    inertial_states[idx].position_inv_mass = vec4<f32>(inertial_pos, inertial_angle, inv_mass);
+    inertial_states[idx].lin_vel = vec4<f32>(inertial_vel, omega, 0.0);
+    inertial_states[idx]._pad0 = body._pad0;
+    inertial_states[idx]._pad1 = body._pad1;
+
+    bodies[idx].position_inv_mass = vec4<f32>(warm_pos, warm_angle, inv_mass);
+    bodies[idx].lin_vel = body.lin_vel;
 }
 "#;

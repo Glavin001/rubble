@@ -4,13 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "npm run wasm",
     "dev": "vite",
     "wasm": "wasm-pack build ../crates/rubble-wasm --target web --out-dir ../../web/src/wasm",
+    "prebuild": "npm run wasm",
     "build": "tsc && vite build",
     "build:all": "npm run wasm && npm run build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "playwright:install": "playwright install chromium",
+    "pretest": "npm run wasm",
     "test": "playwright test",
     "test:e2e": "playwright test"
   },

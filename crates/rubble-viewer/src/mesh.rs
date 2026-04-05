@@ -184,7 +184,7 @@ pub fn unit_cube() -> Mesh {
                 normal: *normal,
             });
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
     Mesh { vertices, indices }
 }
@@ -192,77 +192,91 @@ pub fn unit_cube() -> Mesh {
 /// Capsule aligned along Y with given half-height (cylinder) and radius.
 /// Returns a unit capsule (half_height=1, radius=1) that gets scaled via instance transform.
 pub fn unit_capsule(rings: u32, segments: u32) -> Mesh {
+    assert!(rings >= 2, "capsule needs at least two hemisphere rings");
+    assert!(
+        segments >= 3,
+        "capsule needs at least three radial segments"
+    );
+
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
     let half_h = 1.0_f32;
     let radius = 1.0_f32;
+    let mut ring_indices: Vec<Vec<u32>> = Vec::new();
 
-    // Top hemisphere
-    for ring in 0..=rings {
-        let phi = (ring as f32 / rings as f32) * PI * 0.5;
-        let y = phi.cos() * radius + half_h;
-        let r = phi.sin() * radius;
-        for seg in 0..=segments {
-            let theta = (seg as f32 / segments as f32) * 2.0 * PI;
-            let x = r * theta.cos();
-            let z = r * theta.sin();
-            let nx = phi.sin() * theta.cos();
-            let ny = phi.cos();
-            let nz = phi.sin() * theta.sin();
-            vertices.push(Vertex {
-                position: [x, y, z],
-                normal: [nx, ny, nz],
-            });
-        }
-    }
+    let top_pole = vertices.len() as u32;
+    vertices.push(Vertex {
+        position: [0.0, half_h + radius, 0.0],
+        normal: [0.0, 1.0, 0.0],
+    });
 
-    // Cylinder body (two rings at +half_h and -half_h)
-    for &cy in &[half_h, -half_h] {
-        for seg in 0..=segments {
-            let theta = (seg as f32 / segments as f32) * 2.0 * PI;
-            let x = radius * theta.cos();
-            let z = radius * theta.sin();
-            vertices.push(Vertex {
-                position: [x, cy, z],
-                normal: [theta.cos(), 0.0, theta.sin()],
-            });
-        }
-    }
-
-    // Bottom hemisphere
-    for ring in 0..=rings {
-        let phi = (ring as f32 / rings as f32) * PI * 0.5 + PI * 0.5;
-        let y = phi.cos() * radius - half_h;
-        let r = phi.sin() * radius;
-        for seg in 0..=segments {
-            let theta = (seg as f32 / segments as f32) * 2.0 * PI;
-            let x = r * theta.cos();
-            let z = r * theta.sin();
-            let nx = phi.sin() * theta.cos();
-            let ny = phi.cos();
-            let nz = phi.sin() * theta.sin();
-            vertices.push(Vertex {
-                position: [x, y, z],
-                normal: [nx, ny, nz],
-            });
-        }
-    }
-
-    // Generate indices: connect successive rings
-    let verts_per_ring = segments + 1;
-    let total_rings = (rings + 1) + 2 + (rings + 1);
-    for ring in 0..(total_rings - 1) {
+    let mut push_ring = |y: f32, ring_radius: f32, normal_y: f32| -> Vec<u32> {
+        let mut ring = Vec::with_capacity(segments as usize);
         for seg in 0..segments {
-            let a = ring * verts_per_ring + seg;
-            let b = a + verts_per_ring;
-            indices.push(a);
-            indices.push(b);
-            indices.push(a + 1);
-            indices.push(a + 1);
-            indices.push(b);
-            indices.push(b + 1);
+            let theta = (seg as f32 / segments as f32) * 2.0 * PI;
+            let cos_theta = theta.cos();
+            let sin_theta = theta.sin();
+            ring.push(vertices.len() as u32);
+            vertices.push(Vertex {
+                position: [ring_radius * cos_theta, y, ring_radius * sin_theta],
+                normal: [ring_radius * cos_theta, normal_y, ring_radius * sin_theta],
+            });
         }
+        ring
+    };
+
+    for ring in 1..rings {
+        let phi = (ring as f32 / rings as f32) * PI * 0.5;
+        ring_indices.push(push_ring(
+            phi.cos() * radius + half_h,
+            phi.sin() * radius,
+            phi.cos(),
+        ));
+    }
+
+    ring_indices.push(push_ring(half_h, radius, 0.0));
+    ring_indices.push(push_ring(-half_h, radius, 0.0));
+
+    for ring in 1..rings {
+        let phi = PI * 0.5 + (ring as f32 / rings as f32) * PI * 0.5;
+        ring_indices.push(push_ring(
+            phi.cos() * radius - half_h,
+            phi.sin() * radius,
+            phi.cos(),
+        ));
+    }
+
+    let bottom_pole = vertices.len() as u32;
+    vertices.push(Vertex {
+        position: [0.0, -half_h - radius, 0.0],
+        normal: [0.0, -1.0, 0.0],
+    });
+
+    let first_ring = ring_indices
+        .first()
+        .expect("capsule should have at least one ring");
+    for seg in 0..segments as usize {
+        let next = (seg + 1) % segments as usize;
+        indices.extend_from_slice(&[top_pole, first_ring[next], first_ring[seg]]);
+    }
+
+    for rings in ring_indices.windows(2) {
+        let upper = &rings[0];
+        let lower = &rings[1];
+        for seg in 0..segments as usize {
+            let next = (seg + 1) % segments as usize;
+            indices.extend_from_slice(&[upper[seg], upper[next], lower[seg]]);
+            indices.extend_from_slice(&[upper[next], lower[next], lower[seg]]);
+        }
+    }
+
+    let last_ring = ring_indices
+        .last()
+        .expect("capsule should have at least one ring");
+    for seg in 0..segments as usize {
+        let next = (seg + 1) % segments as usize;
+        indices.extend_from_slice(&[bottom_pole, last_ring[seg], last_ring[next]]);
     }
 
     Mesh { vertices, indices }
@@ -312,4 +326,88 @@ pub fn quad_2d() -> Mesh {
     ];
     let indices = vec![0, 1, 2, 0, 2, 3];
     Mesh { vertices, indices }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{unit_capsule, unit_cube, Mesh};
+
+    fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+
+    fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    fn length_sq(v: [f32; 3]) -> f32 {
+        dot(v, v)
+    }
+
+    fn triangle_winding_matches_normals(mesh: &Mesh) {
+        for triangle in mesh.indices.chunks_exact(3) {
+            let a = mesh.vertices[triangle[0] as usize].position;
+            let b = mesh.vertices[triangle[1] as usize].position;
+            let c = mesh.vertices[triangle[2] as usize].position;
+            let na = mesh.vertices[triangle[0] as usize].normal;
+            let nb = mesh.vertices[triangle[1] as usize].normal;
+            let nc = mesh.vertices[triangle[2] as usize].normal;
+
+            let triangle_normal = cross(sub(b, a), sub(c, a));
+            let avg_normal = [
+                na[0] + nb[0] + nc[0],
+                na[1] + nb[1] + nc[1],
+                na[2] + nb[2] + nc[2],
+            ];
+
+            assert!(
+                dot(triangle_normal, avg_normal) > 0.0,
+                "triangle winding should match outward face normal",
+            );
+        }
+    }
+
+    #[test]
+    fn unit_cube_triangles_face_outward() {
+        triangle_winding_matches_normals(&unit_cube());
+    }
+
+    #[test]
+    fn unit_capsule_triangles_face_outward() {
+        triangle_winding_matches_normals(&unit_capsule(8, 16));
+    }
+
+    #[test]
+    fn unit_capsule_has_no_degenerate_triangles() {
+        let capsule = unit_capsule(8, 16);
+
+        assert!(
+            !capsule.vertices.is_empty(),
+            "capsule should produce vertices"
+        );
+        assert!(
+            !capsule.indices.is_empty(),
+            "capsule should produce indices"
+        );
+
+        for triangle in capsule.indices.chunks_exact(3) {
+            let a = capsule.vertices[triangle[0] as usize].position;
+            let b = capsule.vertices[triangle[1] as usize].position;
+            let c = capsule.vertices[triangle[2] as usize].position;
+            let triangle_normal = cross(sub(b, a), sub(c, a));
+
+            assert!(
+                length_sq(triangle_normal) > 1.0e-8,
+                "capsule should not emit degenerate triangles",
+            );
+        }
+    }
 }

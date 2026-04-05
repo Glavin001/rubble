@@ -28,11 +28,23 @@ struct VertexOutput {
     @location(2) color: vec4<f32>,
 };
 
+fn normal_matrix(model_3x3: mat3x3<f32>) -> mat3x3<f32> {
+    let c0 = model_3x3[0];
+    let c1 = model_3x3[1];
+    let c2 = model_3x3[2];
+    let inv_c0 = cross(c1, c2);
+    let inv_c1 = cross(c2, c0);
+    let inv_c2 = cross(c0, c1);
+    let det = dot(c0, inv_c0);
+    let safe_det = select(1.0, det, abs(det) > 1e-8);
+    return transpose(mat3x3<f32>(inv_c0 / safe_det, inv_c1 / safe_det, inv_c2 / safe_det));
+}
+
 @vertex
 fn vs_main(vert: VertexInput, inst: InstanceInput) -> VertexOutput {
     let model = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
     let world_pos = model * vec4<f32>(vert.position, 1.0);
-    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+    let normal_mat = normal_matrix(mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz));
     let world_normal = normalize(normal_mat * vert.normal);
 
     var out: VertexOutput;

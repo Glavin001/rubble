@@ -13,6 +13,40 @@ pub use kernel::{round_up_workgroups, ComputeKernel};
 pub use multi_gpu::{GpuDevice, GpuDevicePool, MultiGpuBuffer, MultiGpuContext, WorkDistribution};
 pub use web_time;
 
+/// Transitional breakdown of broadphase wall time.
+///
+/// These buckets are intentionally coarse so the viewer can distinguish
+/// scene-bounds work, sorting, structure build/staging, traversal, and
+/// host/device synchronization while rubble migrates to an all-GPU broadphase.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BroadphaseBreakdownMs {
+    pub bounds_ms: f32,
+    pub sort_ms: f32,
+    pub build_ms: f32,
+    pub traverse_ms: f32,
+    pub readback_ms: f32,
+}
+
+impl BroadphaseBreakdownMs {
+    pub fn as_array(&self) -> [f32; 5] {
+        [
+            self.bounds_ms,
+            self.sort_ms,
+            self.build_ms,
+            self.traverse_ms,
+            self.readback_ms,
+        ]
+    }
+
+    pub fn total_ms(&self) -> f32 {
+        self.bounds_ms + self.sort_ms + self.build_ms + self.traverse_ms + self.readback_ms
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.total_ms() <= f32::EPSILON
+    }
+}
+
 /// Wall-clock timings (milliseconds) for each phase of a physics step.
 ///
 /// Field order matches the array returned by `last_step_timings_ms()` in WASM:
@@ -23,6 +57,7 @@ pub struct StepTimingsMs {
     pub upload_ms: f32,
     pub predict_aabb_ms: f32,
     pub broadphase_ms: f32,
+    pub broadphase_breakdown: BroadphaseBreakdownMs,
     pub narrowphase_ms: f32,
     pub contact_fetch_ms: f32,
     pub solve_ms: f32,
@@ -35,6 +70,7 @@ impl Default for StepTimingsMs {
             upload_ms: 0.0,
             predict_aabb_ms: 0.0,
             broadphase_ms: 0.0,
+            broadphase_breakdown: BroadphaseBreakdownMs::default(),
             narrowphase_ms: 0.0,
             contact_fetch_ms: 0.0,
             solve_ms: 0.0,
@@ -44,6 +80,11 @@ impl Default for StepTimingsMs {
 }
 
 impl StepTimingsMs {
+    pub fn set_broadphase_breakdown(&mut self, breakdown: BroadphaseBreakdownMs) {
+        self.broadphase_breakdown = breakdown;
+        self.broadphase_ms = breakdown.total_ms();
+    }
+
     pub fn as_array(&self) -> [f32; 7] {
         [
             self.upload_ms,

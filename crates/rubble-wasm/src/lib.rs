@@ -4,6 +4,7 @@
 //! GPU compute shaders run via WebGPU in the browser.
 
 use glam::{Quat, Vec2, Vec3};
+use js_sys::Float32Array;
 use rubble_math::BodyHandle;
 use wasm_bindgen::prelude::*;
 
@@ -13,6 +14,18 @@ use getrandom as _;
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();
+}
+
+fn copy_f32_buffer(label: &str, out: &Float32Array, data: &[f32]) -> Result<(), JsError> {
+    let expected = data.len();
+    let actual = out.length() as usize;
+    if actual != expected {
+        return Err(JsError::new(&format!(
+            "{label} buffer length mismatch: expected {expected}, got {actual}"
+        )));
+    }
+    out.copy_from(data);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -31,6 +44,10 @@ pub struct PhysicsWorld2D {
     shape_sizes: Vec<f32>,
     /// Offset into shape_sizes for each body.
     shape_size_offsets: Vec<usize>,
+    positions_cache: Vec<f32>,
+    angles_cache: Vec<f32>,
+    timings_cache: [f32; 7],
+    broadphase_cache: [f32; 5],
 }
 
 #[wasm_bindgen]
@@ -57,6 +74,10 @@ impl PhysicsWorld2D {
             shape_types: Vec::new(),
             shape_sizes: Vec::new(),
             shape_size_offsets: Vec::new(),
+            positions_cache: Vec::new(),
+            angles_cache: Vec::new(),
+            timings_cache: [0.0; 7],
+            broadphase_cache: [0.0; 5],
         })
     }
 
@@ -199,6 +220,31 @@ impl PhysicsWorld2D {
         self.handles.len() as u32
     }
 
+    /// Copy body positions into a caller-provided typed array.
+    pub fn copy_positions_into(&mut self, out: &Float32Array) -> Result<(), JsError> {
+        self.positions_cache.resize(self.handles.len() * 2, 0.0);
+        for (i, h) in self.handles.iter().enumerate() {
+            let (x, y) = if let Some(p) = self.world.get_position(*h) {
+                (p.x, p.y)
+            } else {
+                (0.0, 0.0)
+            };
+            let off = i * 2;
+            self.positions_cache[off] = x;
+            self.positions_cache[off + 1] = y;
+        }
+        copy_f32_buffer("positions", out, &self.positions_cache)
+    }
+
+    /// Copy body angles into a caller-provided typed array.
+    pub fn copy_angles_into(&mut self, out: &Float32Array) -> Result<(), JsError> {
+        self.angles_cache.resize(self.handles.len(), 0.0);
+        for (i, h) in self.handles.iter().enumerate() {
+            self.angles_cache[i] = self.world.get_angle(*h).unwrap_or(0.0);
+        }
+        copy_f32_buffer("angles", out, &self.angles_cache)
+    }
+
     /// Per-phase wall-clock timings (ms) from the last `step()` call.
     ///
     /// Returns 7 floats in fixed order:
@@ -206,6 +252,37 @@ impl PhysicsWorld2D {
     ///   [4] contact_fetch, [5] solve, [6] extract
     pub fn last_step_timings_ms(&self) -> Vec<f32> {
         self.world.last_step_timings().as_array().to_vec()
+    }
+
+    /// Copy the last step timings into a caller-provided typed array.
+    pub fn copy_last_step_timings_into(&mut self, out: &Float32Array) -> Result<(), JsError> {
+        self.timings_cache = self.world.last_step_timings().as_array();
+        copy_f32_buffer("step timings", out, &self.timings_cache)
+    }
+
+    /// Broadphase sub-stage timings from the last `step()` call.
+    ///
+    /// Returns 5 floats in fixed order:
+    ///   [0] bounds, [1] sort, [2] build, [3] traverse, [4] readback
+    pub fn last_broadphase_breakdown_ms(&self) -> Vec<f32> {
+        self.world
+            .last_step_timings()
+            .broadphase_breakdown
+            .as_array()
+            .to_vec()
+    }
+
+    /// Copy the broadphase sub-stage timings into a caller-provided typed array.
+    pub fn copy_last_broadphase_breakdown_into(
+        &mut self,
+        out: &Float32Array,
+    ) -> Result<(), JsError> {
+        self.broadphase_cache = self
+            .world
+            .last_step_timings()
+            .broadphase_breakdown
+            .as_array();
+        copy_f32_buffer("broadphase breakdown", out, &self.broadphase_cache)
     }
 }
 
@@ -222,6 +299,9 @@ pub struct PhysicsWorld3D {
     shape_types: Vec<u32>,
     shape_sizes: Vec<f32>,
     shape_size_offsets: Vec<usize>,
+    transforms_cache: Vec<f32>,
+    timings_cache: [f32; 7],
+    broadphase_cache: [f32; 5],
 }
 
 #[wasm_bindgen]
@@ -249,6 +329,9 @@ impl PhysicsWorld3D {
             shape_types: Vec::new(),
             shape_sizes: Vec::new(),
             shape_size_offsets: Vec::new(),
+            transforms_cache: Vec::new(),
+            timings_cache: [0.0; 7],
+            broadphase_cache: [0.0; 5],
         })
     }
 
@@ -415,6 +498,24 @@ impl PhysicsWorld3D {
         self.handles.len() as u32
     }
 
+    /// Copy body transforms into a caller-provided typed array.
+    pub fn copy_transforms_into(&mut self, out: &Float32Array) -> Result<(), JsError> {
+        self.transforms_cache.resize(self.handles.len() * 7, 0.0);
+        for (i, h) in self.handles.iter().enumerate() {
+            let pos = self.world.get_position(*h).unwrap_or(Vec3::ZERO);
+            let rot = self.world.get_rotation(*h).unwrap_or(Quat::IDENTITY);
+            let off = i * 7;
+            self.transforms_cache[off] = pos.x;
+            self.transforms_cache[off + 1] = pos.y;
+            self.transforms_cache[off + 2] = pos.z;
+            self.transforms_cache[off + 3] = rot.x;
+            self.transforms_cache[off + 4] = rot.y;
+            self.transforms_cache[off + 5] = rot.z;
+            self.transforms_cache[off + 6] = rot.w;
+        }
+        copy_f32_buffer("transforms", out, &self.transforms_cache)
+    }
+
     /// Per-phase wall-clock timings (ms) from the last `step()` call.
     ///
     /// Returns 7 floats in fixed order:
@@ -422,5 +523,36 @@ impl PhysicsWorld3D {
     ///   [4] contact_fetch, [5] solve, [6] extract
     pub fn last_step_timings_ms(&self) -> Vec<f32> {
         self.world.last_step_timings().as_array().to_vec()
+    }
+
+    /// Copy the last step timings into a caller-provided typed array.
+    pub fn copy_last_step_timings_into(&mut self, out: &Float32Array) -> Result<(), JsError> {
+        self.timings_cache = self.world.last_step_timings().as_array();
+        copy_f32_buffer("step timings", out, &self.timings_cache)
+    }
+
+    /// Broadphase sub-stage timings from the last `step()` call.
+    ///
+    /// Returns 5 floats in fixed order:
+    ///   [0] bounds, [1] sort, [2] build, [3] traverse, [4] readback
+    pub fn last_broadphase_breakdown_ms(&self) -> Vec<f32> {
+        self.world
+            .last_step_timings()
+            .broadphase_breakdown
+            .as_array()
+            .to_vec()
+    }
+
+    /// Copy the broadphase sub-stage timings into a caller-provided typed array.
+    pub fn copy_last_broadphase_breakdown_into(
+        &mut self,
+        out: &Float32Array,
+    ) -> Result<(), JsError> {
+        self.broadphase_cache = self
+            .world
+            .last_step_timings()
+            .broadphase_breakdown
+            .as_array();
+        copy_f32_buffer("broadphase breakdown", out, &self.broadphase_cache)
     }
 }
