@@ -14,10 +14,206 @@ use rubble_gpu::{
     GpuContext,
 };
 use rubble_math::Aabb3D;
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::VecDeque;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::GpuRadixSort;
 
 const WG: u32 = 256;
+
+#[repr(u32)]
+#[derive(Clone, Copy)]
+enum BroadphaseTimingMarker {
+    BoundsStart = 0,
+    BoundsEnd = 1,
+    SortStart = 2,
+    SortEnd = 3,
+    BuildStart = 4,
+    BuildEnd = 5,
+    TraverseStart = 6,
+    TraverseEnd = 7,
+}
+
+const BROADPHASE_QUERY_COUNT: u32 = 8;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PendingBroadphaseTimingReadback {
+    staging: wgpu::Buffer,
+    ready: Arc<AtomicBool>,
+    success: Arc<AtomicBool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct PreciseBroadphaseTimings {
+    bounds_ms: f32,
+    sort_ms: f32,
+    build_ms: f32,
+    traverse_ms: f32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct GpuBroadphaseProfiler {
+    query_set: wgpu::QuerySet,
+    timestamp_period_ns: f32,
+    pending: VecDeque<PendingBroadphaseTimingReadback>,
+    latest: Option<PreciseBroadphaseTimings>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GpuBroadphaseProfiler {
+    fn new(ctx: &GpuContext) -> Option<Self> {
+        let required =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        if !ctx.device.features().contains(required) {
+            return None;
+        }
+        let query_set = ctx.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("lbvh broadphase timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: BROADPHASE_QUERY_COUNT,
+        });
+        Some(Self {
+            query_set,
+            timestamp_period_ns: ctx.queue.get_timestamp_period(),
+            pending: VecDeque::new(),
+            latest: None,
+        })
+    }
+
+    fn mark(&self, ctx: &GpuContext, marker: BroadphaseTimingMarker) {
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("lbvh timestamp marker"),
+            });
+        encoder.write_timestamp(&self.query_set, marker as u32);
+        ctx.queue.submit(Some(encoder.finish()));
+    }
+
+    fn finish_frame(&mut self, ctx: &GpuContext) {
+        let byte_size = BROADPHASE_QUERY_COUNT as u64 * std::mem::size_of::<u64>() as u64;
+        let resolve = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lbvh timestamp resolve"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lbvh timestamp staging"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("lbvh timestamp resolve encoder"),
+            });
+        encoder.resolve_query_set(&self.query_set, 0..BROADPHASE_QUERY_COUNT, &resolve, 0);
+        encoder.copy_buffer_to_buffer(&resolve, 0, &staging, 0, byte_size);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let success = Arc::new(AtomicBool::new(false));
+        let ready_cb = ready.clone();
+        let success_cb = success.clone();
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                success_cb.store(result.is_ok(), Ordering::SeqCst);
+                ready_cb.store(true, Ordering::SeqCst);
+            });
+        self.pending.push_back(PendingBroadphaseTimingReadback {
+            staging,
+            ready,
+            success,
+        });
+        while self.pending.len() > 3 {
+            let Some(front) = self.pending.front() else {
+                break;
+            };
+            if !front.ready.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some(old) = self.pending.pop_front() {
+                old.staging.unmap();
+            }
+        }
+    }
+
+    fn collect_ready(&mut self, ctx: &GpuContext) {
+        let _ = ctx.device.poll(wgpu::PollType::Poll);
+        loop {
+            let Some(front) = self.pending.front() else {
+                break;
+            };
+            if !front.ready.load(Ordering::SeqCst) {
+                break;
+            }
+            let pending = self.pending.pop_front().unwrap();
+            if pending.success.load(Ordering::SeqCst) {
+                let mapped = pending.staging.slice(..).get_mapped_range();
+                let ticks: &[u64] = bytemuck::cast_slice(&mapped);
+                if ticks.len() >= BROADPHASE_QUERY_COUNT as usize {
+                    self.latest = Some(PreciseBroadphaseTimings {
+                        bounds_ms: self.delta_ms(
+                            ticks,
+                            BroadphaseTimingMarker::BoundsStart,
+                            BroadphaseTimingMarker::BoundsEnd,
+                        ),
+                        sort_ms: self.delta_ms(
+                            ticks,
+                            BroadphaseTimingMarker::SortStart,
+                            BroadphaseTimingMarker::SortEnd,
+                        ),
+                        build_ms: self.delta_ms(
+                            ticks,
+                            BroadphaseTimingMarker::BuildStart,
+                            BroadphaseTimingMarker::BuildEnd,
+                        ),
+                        traverse_ms: self.delta_ms(
+                            ticks,
+                            BroadphaseTimingMarker::TraverseStart,
+                            BroadphaseTimingMarker::TraverseEnd,
+                        ),
+                    });
+                }
+                drop(mapped);
+            }
+            pending.staging.unmap();
+        }
+    }
+
+    fn apply_latest(&self, breakdown: &mut BroadphaseBreakdownMs) {
+        if let Some(latest) = self.latest {
+            breakdown.bounds_ms = latest.bounds_ms;
+            breakdown.sort_ms = latest.sort_ms;
+            breakdown.build_ms = latest.build_ms;
+            breakdown.traverse_ms = latest.traverse_ms;
+            breakdown.precise = true;
+        }
+    }
+
+    fn delta_ms(
+        &self,
+        ticks: &[u64],
+        start: BroadphaseTimingMarker,
+        end: BroadphaseTimingMarker,
+    ) -> f32 {
+        let start_tick = ticks[start as usize];
+        let end_tick = ticks[end as usize];
+        if end_tick <= start_tick {
+            return 0.0;
+        }
+        ((end_tick - start_tick) as f32 * self.timestamp_period_ns) / 1_000_000.0
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GPU types
@@ -900,6 +1096,8 @@ pub struct GpuLbvh {
     count_params_buf: wgpu::Buffer,
     find_params_buf: wgpu::Buffer,
     tree_build_params_buf: wgpu::Buffer,
+    #[cfg(not(target_arch = "wasm32"))]
+    broadphase_profiler: Option<GpuBroadphaseProfiler>,
 }
 
 impl GpuLbvh {
@@ -949,6 +1147,8 @@ impl GpuLbvh {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        let broadphase_profiler = GpuBroadphaseProfiler::new(ctx);
 
         Self {
             scene_bounds_reduce_kernel,
@@ -972,6 +1172,34 @@ impl GpuLbvh {
             count_params_buf,
             find_params_buf,
             tree_build_params_buf,
+            #[cfg(not(target_arch = "wasm32"))]
+            broadphase_profiler,
+        }
+    }
+
+    fn mark_precise_breakdown(&self, ctx: &GpuContext, marker: BroadphaseTimingMarker) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(profiler) = &self.broadphase_profiler {
+            profiler.mark(ctx, marker);
+        }
+    }
+
+    fn finish_precise_breakdown(&mut self, ctx: &GpuContext) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(profiler) = &mut self.broadphase_profiler {
+            profiler.finish_frame(ctx);
+        }
+    }
+
+    pub fn refresh_precise_breakdown(
+        &mut self,
+        ctx: &GpuContext,
+        breakdown: &mut BroadphaseBreakdownMs,
+    ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(profiler) = &mut self.broadphase_profiler {
+            profiler.collect_ready(ctx);
+            profiler.apply_latest(breakdown);
         }
     }
 
@@ -1468,9 +1696,9 @@ impl GpuLbvh {
 
     /// Same as [`GpuLbvh::query_on_device_gpu`], with coarse timing buckets filled in.
     ///
-    /// GPU Karras build and refit are included in `build_ms`; pair finding in `traverse_ms`.
-    /// `readback_ms` stays zero here; the engine times [`GpuLbvh::read_pair_count`] separately
-    /// (wall time for staging read / map; on WebGPU may include waiting for prior GPU work).
+    /// GPU Karras build and refit are included in `build_ms`; pair-finding command submission
+    /// is included in `traverse_ms`. The function does not force a queue wait so downstream
+    /// stages can consume the pair counter directly on GPU without a CPU sync.
     pub fn query_on_device_gpu_with_breakdown(
         &mut self,
         ctx: &GpuContext,
@@ -1488,32 +1716,33 @@ impl GpuLbvh {
         }
 
         let t_bounds = Instant::now();
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::BoundsStart);
         self.reduce_scene_bounds(ctx, aabb_buf, num_bodies);
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::BoundsEnd);
         breakdown.bounds_ms += t_bounds.elapsed().as_secs_f32() * 1000.0;
 
         let t_sort = Instant::now();
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::SortStart);
         self.dispatch_morton(ctx, aabb_buf, num_bodies);
         self.radix_sort
             .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::SortEnd);
         breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
 
         let t_build = Instant::now();
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::BuildStart);
         self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
         self.dispatch_karras_build(ctx, num_bodies);
         self.dispatch_refit(ctx, num_bodies);
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::BuildEnd);
         breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
 
         let t_traverse = Instant::now();
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::TraverseStart);
         let max_pairs = self.dispatch_find_pairs_gpu_tree(ctx, num_bodies);
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::TraverseEnd);
         breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
-
-        // Native: wait so GPU completion is not lumped into the pair-counter readback timer.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let t_flush = Instant::now();
-            ctx.wait_for_queue();
-            breakdown.traverse_ms += t_flush.elapsed().as_secs_f32() * 1000.0;
-        }
+        self.finish_precise_breakdown(ctx);
         max_pairs
     }
 

@@ -78,6 +78,7 @@ pub struct BroadphaseBreakdownMs {
     pub build_ms: f32,
     pub traverse_ms: f32,
     pub readback_ms: f32,
+    pub precise: bool,
 }
 
 impl BroadphaseBreakdownMs {
@@ -139,6 +140,7 @@ pub struct StepTimingsMs {
     pub solve_ms: f32,
     pub extract_ms: f32,
     pub cpu_sync_ms: f32,
+    pub precise_gpu: bool,
 }
 
 impl Default for StepTimingsMs {
@@ -153,6 +155,7 @@ impl Default for StepTimingsMs {
             solve_ms: 0.0,
             extract_ms: 0.0,
             cpu_sync_ms: 0.0,
+            precise_gpu: false,
         }
     }
 }
@@ -183,6 +186,14 @@ impl StepTimingsMs {
         let total: f32 = arr.iter().sum::<f32>() + self.cpu_sync_ms;
         let mut lines = Vec::with_capacity(16);
         lines.push(format!("Step: {total:.2} ms"));
+        lines.push(format!(
+            "Timing: {}",
+            if self.precise_gpu {
+                "GPU timestamps"
+            } else {
+                "Host wall-clock (approx)"
+            }
+        ));
 
         for (i, &(name, lane)) in STEP_TIMING_LABELS.iter().enumerate() {
             let ms = arr[i];
@@ -195,6 +206,9 @@ impl StepTimingsMs {
                 let bp = &self.broadphase_breakdown;
                 let bp_arr = bp.as_array();
                 let bp_total = bp.total_ms();
+                if !bp.precise {
+                    lines.push("    Broadphase details: approx".to_string());
+                }
                 for (j, &(sub_name, sub_lane)) in BROADPHASE_SUB_LABELS.iter().enumerate() {
                     let bms = bp_arr[j];
                     let bpct = if bp_total > 0.0 {

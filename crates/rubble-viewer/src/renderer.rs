@@ -68,9 +68,7 @@ impl Renderer {
         renderer
     }
 
-    pub async fn new_with_shared_context(
-        window: Arc<winit::window::Window>,
-    ) -> (Self, GpuContext) {
+    pub async fn new_with_shared_context(window: Arc<winit::window::Window>) -> (Self, GpuContext) {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -90,9 +88,13 @@ impl Renderer {
             .expect("No suitable GPU adapter found");
 
         let adapter_limits = adapter.limits();
+        let supported_features = adapter.features();
+        let required_features = supported_features
+            & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
         let desired_storage_buffers: u32 = 16;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
+                required_features,
                 required_limits: wgpu::Limits {
                     max_storage_buffers_per_shader_stage: desired_storage_buffers
                         .min(adapter_limits.max_storage_buffers_per_shader_stage),
@@ -280,7 +282,8 @@ impl Renderer {
         self.config.width = width.min(self.max_surface_extent).max(1);
         self.config.height = height.min(self.max_surface_extent).max(1);
         self.surface.configure(&self.device, &self.config);
-        self.depth_view = Self::create_depth_view(&self.device, self.config.width, self.config.height);
+        self.depth_view =
+            Self::create_depth_view(&self.device, self.config.width, self.config.height);
     }
 
     pub fn aspect(&self) -> f32 {

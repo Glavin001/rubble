@@ -108,11 +108,12 @@ struct PlaneParams {
 @group(0) @binding(4) var<storage, read>       boxes:         array<BoxDataGpu>;
 @group(0) @binding(5) var<storage, read_write> contacts:      array<Contact>;
 @group(0) @binding(6) var<storage, read_write> contact_count: atomic<u32>;
-@group(0) @binding(7) var<uniform>             params:        SimParams;
-@group(0) @binding(8) var<storage, read>       convex_hulls:  array<ConvexHullInfo>;
-@group(0) @binding(9) var<storage, read>       convex_verts:  array<ConvexVert>;
-@group(0) @binding(10) var<storage, read>      capsules:      array<CapsuleDataGpu>;
-@group(0) @binding(11) var<uniform>            plane_params:  PlaneParams;
+@group(0) @binding(7) var<storage, read>       pair_count_buf: array<u32>;
+@group(0) @binding(8) var<uniform>             params:        SimParams;
+@group(0) @binding(9) var<storage, read>       convex_hulls:  array<ConvexHullInfo>;
+@group(0) @binding(10) var<storage, read>      convex_verts:  array<ConvexVert>;
+@group(0) @binding(11) var<storage, read>      capsules:      array<CapsuleDataGpu>;
+@group(0) @binding(12) var<uniform>            plane_params:  PlaneParams;
 
 // ---------- Helpers ----------
 
@@ -1512,7 +1513,7 @@ fn box_hull_test(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pi = gid.x;
-    let num_pairs = params.counts.z;
+    let num_pairs = pair_count_buf[0];
     if pi >= num_pairs {
         return;
     }

@@ -133,6 +133,15 @@ pub fn draw_panel(
                     stat_card(&mut columns[0], "Step", format!("{total:.2} ms"));
                     stat_card(&mut columns[1], "Render", format!("{render_ms:.2} ms"));
                 });
+                ui.label(
+                    egui::RichText::new(if timings.precise_gpu {
+                        "Timing source: GPU timestamps"
+                    } else {
+                        "Timing source: host wall-clock (approx)"
+                    })
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(165)),
+                );
 
                 ui.add_space(2.0);
                 ui.label(
@@ -210,9 +219,23 @@ pub fn draw_panel(
 
                 {
                     ui.add_space(2.0);
-                    egui::CollapsingHeader::new("Broadphase Details")
+                    egui::CollapsingHeader::new(if timings.broadphase_breakdown.precise {
+                        "Broadphase Details"
+                    } else {
+                        "Broadphase Details (Approx)"
+                    })
                         .default_open(false)
                         .show(ui, |ui| {
+                            if !timings.broadphase_breakdown.precise {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Top-level broadphase may be precise while these substage timings remain host-approximate.",
+                                    )
+                                    .size(11.0)
+                                    .color(egui::Color32::from_gray(150)),
+                                );
+                                ui.add_space(4.0);
+                            }
                             let bp_total = timings.broadphase_breakdown.total_ms();
                             let bp_arr = timings.broadphase_breakdown.as_array();
                             egui::Grid::new("broadphase_grid")

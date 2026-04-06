@@ -30,8 +30,7 @@ mod render_instances_wgsl;
 mod warmstart_wgsl;
 
 pub use adjacency_wgsl::{
-    ADJACENCY_COUNT_WGSL, ADJACENCY_INIT_RANGES_WGSL, ADJACENCY_RESET_WGSL,
-    ADJACENCY_SCATTER_WGSL,
+    ADJACENCY_COUNT_WGSL, ADJACENCY_INIT_RANGES_WGSL, ADJACENCY_RESET_WGSL, ADJACENCY_SCATTER_WGSL,
 };
 pub use avbd_solve_wgsl::{AVBD_DUAL_WGSL, AVBD_PRIMAL_WGSL};
 pub use coloring_wgsl::{COLORING_RESET_WGSL, COLORING_STEP_WGSL};
@@ -50,17 +49,217 @@ use rubble_gpu::{
 use rubble_math::{
     Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
 };
-use rubble_primitives::{GpuLbvh, GpuRadixSort, GpuPrefixScan};
+use rubble_primitives::{GpuLbvh, GpuPrefixScan, GpuRadixSort};
 use rubble_shapes3d::{
     BoxData, CapsuleData, CompoundChildGpu, CompoundShapeGpu, ConvexHullData, ConvexVertex3D,
     SphereData,
 };
 use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::VecDeque;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 const WORKGROUP_SIZE: u32 = 64;
 const AVBD_WARMSTART_ALPHA: f32 = 0.99;
 /// Number of Luby coloring iterations. O(log n) rounds suffices for bounded-degree
 /// graphs. 32 handles any practical contact graph with room to spare.
 const MAX_CONTACT_PENALTY: f32 = 1.0e6;
+
+#[repr(u32)]
+#[derive(Clone, Copy)]
+enum PreciseTimingMarker {
+    PredictStart = 0,
+    PredictEnd = 1,
+    BroadphaseStart = 2,
+    BroadphaseEnd = 3,
+    NarrowphaseStart = 4,
+    NarrowphaseEnd = 5,
+    SolveStart = 6,
+    SolveEnd = 7,
+    ExtractStart = 8,
+    ExtractEnd = 9,
+}
+
+const PRECISE_TIMING_QUERY_COUNT: u32 = 10;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PendingPreciseTimingReadback {
+    staging: wgpu::Buffer,
+    ready: Arc<AtomicBool>,
+    success: Arc<AtomicBool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct PreciseGpuStepTimings {
+    predict_aabb_ms: f32,
+    broadphase_ms: f32,
+    narrowphase_ms: f32,
+    solve_ms: f32,
+    extract_ms: f32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct GpuStepProfiler {
+    query_set: wgpu::QuerySet,
+    timestamp_period_ns: f32,
+    pending: VecDeque<PendingPreciseTimingReadback>,
+    latest: Option<PreciseGpuStepTimings>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GpuStepProfiler {
+    fn new(ctx: &GpuContext) -> Option<Self> {
+        let required =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        if !ctx.device.features().contains(required) {
+            return None;
+        }
+        let query_set = ctx.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("physics step timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: PRECISE_TIMING_QUERY_COUNT,
+        });
+        Some(Self {
+            query_set,
+            timestamp_period_ns: ctx.queue.get_timestamp_period(),
+            pending: VecDeque::new(),
+            latest: None,
+        })
+    }
+
+    fn collect_ready(&mut self, ctx: &GpuContext) {
+        let _ = ctx.device.poll(wgpu::PollType::Poll);
+        loop {
+            let Some(front) = self.pending.front() else {
+                break;
+            };
+            if !front.ready.load(Ordering::SeqCst) {
+                break;
+            }
+            let pending = self.pending.pop_front().unwrap();
+            if pending.success.load(Ordering::SeqCst) {
+                let mapped = pending.staging.slice(..).get_mapped_range();
+                let ticks: &[u64] = bytemuck::cast_slice(&mapped);
+                if ticks.len() >= PRECISE_TIMING_QUERY_COUNT as usize {
+                    self.latest = Some(PreciseGpuStepTimings {
+                        predict_aabb_ms: self.delta_ms(
+                            ticks,
+                            PreciseTimingMarker::PredictStart,
+                            PreciseTimingMarker::PredictEnd,
+                        ),
+                        broadphase_ms: self.delta_ms(
+                            ticks,
+                            PreciseTimingMarker::BroadphaseStart,
+                            PreciseTimingMarker::BroadphaseEnd,
+                        ),
+                        narrowphase_ms: self.delta_ms(
+                            ticks,
+                            PreciseTimingMarker::NarrowphaseStart,
+                            PreciseTimingMarker::NarrowphaseEnd,
+                        ),
+                        solve_ms: self.delta_ms(
+                            ticks,
+                            PreciseTimingMarker::SolveStart,
+                            PreciseTimingMarker::SolveEnd,
+                        ),
+                        extract_ms: self.delta_ms(
+                            ticks,
+                            PreciseTimingMarker::ExtractStart,
+                            PreciseTimingMarker::ExtractEnd,
+                        ),
+                    });
+                }
+                drop(mapped);
+            }
+            pending.staging.unmap();
+        }
+    }
+
+    fn mark(&self, ctx: &GpuContext, marker: PreciseTimingMarker) {
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("physics timestamp marker"),
+            });
+        encoder.write_timestamp(&self.query_set, marker as u32);
+        ctx.queue.submit(Some(encoder.finish()));
+    }
+
+    fn finish_frame(&mut self, ctx: &GpuContext) {
+        let byte_size = PRECISE_TIMING_QUERY_COUNT as u64 * std::mem::size_of::<u64>() as u64;
+        let resolve = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("physics timestamp resolve"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("physics timestamp staging"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("physics timestamp resolve encoder"),
+            });
+        encoder.resolve_query_set(&self.query_set, 0..PRECISE_TIMING_QUERY_COUNT, &resolve, 0);
+        encoder.copy_buffer_to_buffer(&resolve, 0, &staging, 0, byte_size);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let success = Arc::new(AtomicBool::new(false));
+        let ready_cb = ready.clone();
+        let success_cb = success.clone();
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                success_cb.store(result.is_ok(), Ordering::SeqCst);
+                ready_cb.store(true, Ordering::SeqCst);
+            });
+        self.pending.push_back(PendingPreciseTimingReadback {
+            staging,
+            ready,
+            success,
+        });
+        while self.pending.len() > 3 {
+            let Some(front) = self.pending.front() else {
+                break;
+            };
+            if !front.ready.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some(old) = self.pending.pop_front() {
+                old.staging.unmap();
+            }
+        }
+    }
+
+    fn apply_latest(&self, timings: &mut rubble_gpu::StepTimingsMs) {
+        if let Some(latest) = self.latest {
+            timings.predict_aabb_ms = latest.predict_aabb_ms;
+            timings.broadphase_ms = latest.broadphase_ms;
+            timings.narrowphase_ms = latest.narrowphase_ms;
+            timings.solve_ms = latest.solve_ms;
+            timings.extract_ms = latest.extract_ms;
+            timings.precise_gpu = true;
+        }
+    }
+
+    fn delta_ms(&self, ticks: &[u64], start: PreciseTimingMarker, end: PreciseTimingMarker) -> f32 {
+        let start_tick = ticks[start as usize];
+        let end_tick = ticks[end as usize];
+        if end_tick <= start_tick {
+            return 0.0;
+        }
+        ((end_tick - start_tick) as f32 * self.timestamp_period_ns) / 1_000_000.0
+    }
+}
 
 #[derive(Default)]
 struct CachedBindGroup<K> {
@@ -509,6 +708,8 @@ pub struct GpuPipeline {
 
     // GPU broadphase
     gpu_lbvh: GpuLbvh,
+    #[cfg(not(target_arch = "wasm32"))]
+    gpu_step_profiler: Option<GpuStepProfiler>,
 }
 
 /// GPU graph build state for adjacency / CSR construction.
@@ -673,6 +874,8 @@ impl GpuPipeline {
         let gpu_graph = GpuGraphState::new(&ctx, max_bodies, max_contacts * 2);
         let gpu_coloring = GpuColoringState::new(&ctx, max_bodies);
         let gpu_render = GpuRenderState::new(&ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        let gpu_step_profiler = GpuStepProfiler::new(&ctx);
 
         Self {
             ctx,
@@ -752,6 +955,8 @@ impl GpuPipeline {
             extract_bg_cache: CachedBindGroup::default(),
             render_instances_bg_cache: CachedBindGroup::default(),
             gpu_lbvh,
+            #[cfg(not(target_arch = "wasm32"))]
+            gpu_step_profiler,
         }
     }
 
@@ -1019,9 +1224,14 @@ impl GpuPipeline {
         if requires_cpu_pair_stage {
             self.dispatch_narrowphase(num_bodies, pair_count);
         } else if pair_thread_count > 0 {
-            let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
+            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
+            self.dispatch_narrowphase_with_source(
+                num_bodies,
+                pair_thread_count,
+                &pair_buffer,
+                &pair_count_buffer,
+            );
         }
 
         // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
@@ -1036,9 +1246,14 @@ impl GpuPipeline {
             if requires_cpu_pair_stage {
                 self.dispatch_narrowphase(num_bodies, pair_count);
             } else if pair_thread_count > 0 {
-                let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
+                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
+                self.dispatch_narrowphase_with_source(
+                    num_bodies,
+                    pair_thread_count,
+                    &pair_buffer,
+                    &pair_count_buffer,
+                );
             }
         }
 
@@ -1451,6 +1666,40 @@ impl GpuPipeline {
         }
     }
 
+    fn prepare_precise_timing(&mut self, timings: &mut rubble_gpu::StepTimingsMs) {
+        timings.precise_gpu = false;
+        timings.broadphase_breakdown.precise = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(profiler) = &mut self.gpu_step_profiler {
+            profiler.collect_ready(&self.ctx);
+            profiler.apply_latest(timings);
+        }
+    }
+
+    fn mark_precise_timing(&self, marker: PreciseTimingMarker) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(profiler) = &self.gpu_step_profiler {
+            profiler.mark(&self.ctx, marker);
+        }
+    }
+
+    fn finish_precise_timing(&mut self, timings: &mut rubble_gpu::StepTimingsMs) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(profiler) = &mut self.gpu_step_profiler {
+            profiler.finish_frame(&self.ctx);
+            profiler.collect_ready(&self.ctx);
+            profiler.apply_latest(timings);
+        }
+    }
+
+    fn refresh_precise_timing(&mut self, timings: &mut rubble_gpu::StepTimingsMs) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(profiler) = &mut self.gpu_step_profiler {
+            profiler.collect_ready(&self.ctx);
+            profiler.apply_latest(timings);
+        }
+    }
+
     fn run_colored_solve_device(
         &mut self,
         num_bodies: u32,
@@ -1463,7 +1712,12 @@ impl GpuPipeline {
         self.dispatch_gpu_solve_graph(num_bodies, contact_count);
         let _ = self.free_motion_bind_group();
         let free_motion_bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
-        self.run_pass("free_motion", &self.free_motion_kernel, free_motion_bg, num_bodies);
+        self.run_pass(
+            "free_motion",
+            &self.free_motion_kernel,
+            free_motion_bg,
+            num_bodies,
+        );
         let color_groups = self.dispatch_gpu_coloring(num_bodies);
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
@@ -1604,6 +1858,7 @@ impl GpuPipeline {
             return Vec::new();
         }
 
+        self.prepare_precise_timing(timings);
         let compound_contacts = self.run_detection_timed(num_bodies, timings);
         assert!(
             compound_contacts.is_empty(),
@@ -1613,6 +1868,12 @@ impl GpuPipeline {
         timings.contact_fetch_ms = 0.0;
         let t_solve = Instant::now();
         let contact_count = self.contact_count.read(&self.ctx);
+        self.gpu_lbvh
+            .refresh_precise_breakdown(&self.ctx, &mut timings.broadphase_breakdown);
+        if timings.broadphase_breakdown.precise {
+            timings.set_broadphase_breakdown(timings.broadphase_breakdown);
+        }
+        self.mark_precise_timing(PreciseTimingMarker::SolveStart);
         if contact_count > 0 {
             self.contacts.set_len(contact_count);
             self.dispatch_gpu_warmstart(contact_count);
@@ -1622,17 +1883,22 @@ impl GpuPipeline {
             self.apply_free_motion(num_bodies, &[]);
             self.prev_contact_count = 0;
         }
+        self.mark_precise_timing(PreciseTimingMarker::SolveEnd);
         timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let t_extract = Instant::now();
+        self.mark_precise_timing(PreciseTimingMarker::ExtractStart);
         self.dispatch_extract(num_bodies);
+        self.mark_precise_timing(PreciseTimingMarker::ExtractEnd);
         timings.extract_ms = t_extract.elapsed().as_secs_f32() * 1000.0;
+        self.finish_precise_timing(timings);
 
         let t_sync = Instant::now();
         self.body_states.current_mut().set_len(num_bodies);
         let states = self.body_states.download(&self.ctx);
         self.body_states.swap();
         timings.cpu_sync_ms = t_sync.elapsed().as_secs_f32() * 1000.0;
+        self.refresh_precise_timing(timings);
         states
     }
 
@@ -1648,6 +1914,7 @@ impl GpuPipeline {
             return;
         }
 
+        self.prepare_precise_timing(timings);
         let compound_contacts = self.run_detection_timed(num_bodies, timings);
         assert!(
             compound_contacts.is_empty(),
@@ -1657,6 +1924,12 @@ impl GpuPipeline {
         timings.contact_fetch_ms = 0.0;
         let t_solve = Instant::now();
         let contact_count = self.contact_count.read(&self.ctx);
+        self.gpu_lbvh
+            .refresh_precise_breakdown(&self.ctx, &mut timings.broadphase_breakdown);
+        if timings.broadphase_breakdown.precise {
+            timings.set_broadphase_breakdown(timings.broadphase_breakdown);
+        }
+        self.mark_precise_timing(PreciseTimingMarker::SolveStart);
         if contact_count > 0 {
             self.contacts.set_len(contact_count);
             self.dispatch_gpu_warmstart(contact_count);
@@ -1666,11 +1939,15 @@ impl GpuPipeline {
             self.apply_free_motion(num_bodies, &[]);
             self.prev_contact_count = 0;
         }
+        self.mark_precise_timing(PreciseTimingMarker::SolveEnd);
         timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let t_extract = Instant::now();
+        self.mark_precise_timing(PreciseTimingMarker::ExtractStart);
         self.dispatch_extract(num_bodies);
+        self.mark_precise_timing(PreciseTimingMarker::ExtractEnd);
         timings.extract_ms = t_extract.elapsed().as_secs_f32() * 1000.0;
+        self.finish_precise_timing(timings);
     }
 
     /// Run the full GPU physics step and download updated states.
@@ -1759,6 +2036,7 @@ impl GpuPipeline {
             return (Vec::new(), Vec::new());
         }
 
+        self.prepare_precise_timing(timings);
         if let Some(warm) = warm_contacts {
             self.upload_warm_contacts(warm);
         }
@@ -1767,6 +2045,11 @@ impl GpuPipeline {
 
         let t_cf = Instant::now();
         let gpu_count = self.contact_count.read(&self.ctx) as usize;
+        self.gpu_lbvh
+            .refresh_precise_breakdown(&self.ctx, &mut timings.broadphase_breakdown);
+        if timings.broadphase_breakdown.precise {
+            timings.set_broadphase_breakdown(timings.broadphase_breakdown);
+        }
 
         // GPU warmstart before download
         if gpu_count > 0 {
@@ -1786,6 +2069,7 @@ impl GpuPipeline {
         timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
         let t_solve = Instant::now();
+        self.mark_precise_timing(PreciseTimingMarker::SolveStart);
         self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
 
         let final_contacts = if !contacts.is_empty() {
@@ -1797,17 +2081,22 @@ impl GpuPipeline {
             self.prev_contact_count = 0;
             Vec::new()
         };
+        self.mark_precise_timing(PreciseTimingMarker::SolveEnd);
         timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let t_ext = Instant::now();
+        self.mark_precise_timing(PreciseTimingMarker::ExtractStart);
         self.dispatch_extract(num_bodies);
+        self.mark_precise_timing(PreciseTimingMarker::ExtractEnd);
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+        self.finish_precise_timing(timings);
 
         let t_sync = Instant::now();
         self.body_states.current_mut().set_len(num_bodies);
         let states = self.body_states.download(&self.ctx);
         self.body_states.swap();
         timings.cpu_sync_ms = t_sync.elapsed().as_secs_f32() * 1000.0;
+        self.refresh_precise_timing(timings);
 
         (states, final_contacts)
     }
@@ -1823,12 +2112,15 @@ impl GpuPipeline {
         self.pair_count.reset(&self.ctx);
 
         let t0 = Instant::now();
+        self.mark_precise_timing(PreciseTimingMarker::PredictStart);
         self.dispatch_predict(num_bodies);
         self.snapshot_prev_step_states(num_bodies);
         self.dispatch_aabb(num_bodies);
+        self.mark_precise_timing(PreciseTimingMarker::PredictEnd);
         timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
 
         let t1 = Instant::now();
+        self.mark_precise_timing(PreciseTimingMarker::BroadphaseStart);
         let mut broadphase = BroadphaseBreakdownMs::default();
         let has_compounds = self.body_props_cpu[..num_bodies as usize]
             .iter()
@@ -1914,23 +2206,23 @@ impl GpuPipeline {
                 &mut broadphase,
             );
         }
-        let external_pair_count = if !requires_cpu_pair_stage && pair_thread_count > 0 {
-            let t_readback = Instant::now();
-            let count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
-            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-            count
-        } else {
-            0
-        };
         timings.set_broadphase_breakdown(broadphase);
+        self.mark_precise_timing(PreciseTimingMarker::BroadphaseEnd);
         debug_assert!(timings.broadphase_ms <= t1.elapsed().as_secs_f32() * 1000.0 + 0.5);
 
         let t2 = Instant::now();
+        self.mark_precise_timing(PreciseTimingMarker::NarrowphaseStart);
         if requires_cpu_pair_stage {
             self.dispatch_narrowphase(num_bodies, pair_count);
-        } else if external_pair_count > 0 {
+        } else if pair_thread_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            self.dispatch_narrowphase_with_source(num_bodies, external_pair_count, &pair_buffer);
+            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
+            self.dispatch_narrowphase_with_source(
+                num_bodies,
+                pair_thread_count,
+                &pair_buffer,
+                &pair_count_buffer,
+            );
         }
 
         let contact_count_val = self.contact_count.read(&self.ctx);
@@ -1941,15 +2233,18 @@ impl GpuPipeline {
             self.contact_count.reset(&self.ctx);
             if requires_cpu_pair_stage {
                 self.dispatch_narrowphase(num_bodies, pair_count);
-            } else if external_pair_count > 0 {
+            } else if pair_thread_count > 0 {
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
+                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
                 self.dispatch_narrowphase_with_source(
                     num_bodies,
-                    external_pair_count,
+                    pair_thread_count,
                     &pair_buffer,
+                    &pair_count_buffer,
                 );
             }
         }
+        self.mark_precise_timing(PreciseTimingMarker::NarrowphaseEnd);
         timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
 
         cpu_compound_contacts
@@ -2293,26 +2588,21 @@ impl GpuPipeline {
                 )
                 .await;
         }
-        let external_pair_count = if !requires_cpu_pair_stage && pair_thread_count > 0 {
-            let t_readback = Instant::now();
-            let count = self
-                .gpu_lbvh
-                .read_pair_count_async(&self.ctx, pair_thread_count)
-                .await;
-            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-            count
-        } else {
-            0
-        };
         timings.set_broadphase_breakdown(broadphase);
         debug_assert!(timings.broadphase_ms <= t1.elapsed().as_secs_f32() * 1000.0 + 0.5);
 
         let t2 = Instant::now();
         if requires_cpu_pair_stage {
             self.dispatch_narrowphase(num_bodies, pair_count);
-        } else if external_pair_count > 0 {
+        } else if pair_thread_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            self.dispatch_narrowphase_with_source(num_bodies, external_pair_count, &pair_buffer);
+            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
+            self.dispatch_narrowphase_with_source(
+                num_bodies,
+                pair_thread_count,
+                &pair_buffer,
+                &pair_count_buffer,
+            );
         }
 
         let contact_count_val = self.contact_count.read_async(&self.ctx).await;
@@ -2323,12 +2613,14 @@ impl GpuPipeline {
             self.contact_count.reset(&self.ctx);
             if requires_cpu_pair_stage {
                 self.dispatch_narrowphase(num_bodies, pair_count);
-            } else if external_pair_count > 0 {
+            } else if pair_thread_count > 0 {
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
+                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
                 self.dispatch_narrowphase_with_source(
                     num_bodies,
-                    external_pair_count,
+                    pair_thread_count,
                     &pair_buffer,
+                    &pair_count_buffer,
                 );
             }
         }
@@ -2574,7 +2866,11 @@ impl GpuPipeline {
             self.capsules.byte_size(),
         ];
         if self.narrowphase_bg_cache.key.as_ref() != Some(&key) {
-            let bg = self.create_narrowphase_bind_group(self.pairs.buffer(), "narrowphase");
+            let bg = self.create_narrowphase_bind_group(
+                self.pairs.buffer(),
+                self.pair_count.buffer(),
+                "narrowphase",
+            );
             self.narrowphase_bg_cache.key = Some(key);
             self.narrowphase_bg_cache.bind_group = Some(bg);
         }
@@ -2584,6 +2880,7 @@ impl GpuPipeline {
     fn create_narrowphase_bind_group(
         &self,
         pairs_buffer: &wgpu::Buffer,
+        pair_count_buffer: &wgpu::Buffer,
         label: &'static str,
     ) -> wgpu::BindGroup {
         self.ctx
@@ -2622,22 +2919,26 @@ impl GpuPipeline {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: self.params_uniform.as_entire_binding(),
+                        resource: pair_count_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: self.convex_hulls.buffer().as_entire_binding(),
+                        resource: self.params_uniform.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: self.convex_vertices.buffer().as_entire_binding(),
+                        resource: self.convex_hulls.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: self.capsules.buffer().as_entire_binding(),
+                        resource: self.convex_vertices.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 11,
+                        resource: self.capsules.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
                         resource: self.plane_params_uniform.as_entire_binding(),
                     },
                 ],
@@ -2948,21 +3249,26 @@ impl GpuPipeline {
     fn dispatch_narrowphase_with_source(
         &mut self,
         _num_bodies: u32,
-        num_pairs: u32,
+        dispatch_pairs: u32,
         pairs_buffer: &wgpu::Buffer,
+        pair_count_buffer: &wgpu::Buffer,
     ) {
-        if num_pairs == 0 {
+        if dispatch_pairs == 0 {
             return;
         }
-        self.sim_params.counts[2] = num_pairs;
+        self.sim_params.counts[2] = dispatch_pairs;
         self.ctx.queue.write_buffer(
             &self.params_uniform,
             0,
             bytemuck::bytes_of(&self.sim_params),
         );
 
-        let bg = self.create_narrowphase_bind_group(pairs_buffer, "narrowphase_external");
-        self.run_pass("narrowphase", &self.narrowphase_kernel, &bg, num_pairs);
+        let bg = self.create_narrowphase_bind_group(
+            pairs_buffer,
+            pair_count_buffer,
+            "narrowphase_external",
+        );
+        self.run_pass("narrowphase", &self.narrowphase_kernel, &bg, dispatch_pairs);
     }
 
     fn dispatch_extract(&mut self, num_bodies: u32) {
@@ -3077,13 +3383,16 @@ impl GpuPipeline {
         self.gpu_graph.body_contact_counts.set_len(num_bodies);
         self.gpu_graph.body_contact_offsets.set_len(num_bodies);
         self.gpu_graph.body_contact_heads.set_len(num_bodies);
-        self.body_contact_ranges.grow_if_needed(ctx, num_bodies as usize);
+        self.body_contact_ranges
+            .grow_if_needed(ctx, num_bodies as usize);
         self.body_contact_ranges.set_len(num_bodies);
-        self.active_body_flags.grow_if_needed(ctx, num_bodies as usize);
+        self.active_body_flags
+            .grow_if_needed(ctx, num_bodies as usize);
         self.active_body_flags.set_len(num_bodies);
         self.body_contact_indices
             .grow_if_needed(ctx, (contact_count as usize).saturating_mul(2).max(1));
-        self.body_contact_indices.set_len(contact_count.saturating_mul(2));
+        self.body_contact_indices
+            .set_len(contact_count.saturating_mul(2));
 
         let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("adjacency params"),
@@ -3091,8 +3400,11 @@ impl GpuPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        ctx.queue
-            .write_buffer(&params_buf, 0, bytemuck::cast_slice(&[num_bodies, 0u32, 0, 0]));
+        ctx.queue.write_buffer(
+            &params_buf,
+            0,
+            bytemuck::cast_slice(&[num_bodies, 0u32, 0, 0]),
+        );
 
         {
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3117,7 +3429,12 @@ impl GpuPipeline {
                     },
                 ],
             });
-            self.run_pass("adjacency_reset", &self.gpu_graph.reset_kernel, &bg, num_bodies);
+            self.run_pass(
+                "adjacency_reset",
+                &self.gpu_graph.reset_kernel,
+                &bg,
+                num_bodies,
+            );
         }
 
         {
@@ -3299,19 +3616,18 @@ impl GpuPipeline {
 
         {
             let params: [u32; 4] = [num_bodies, 0u32, self.gpu_coloring.frame_counter, 0u32];
-            ctx.queue
-                .write_buffer(&self.gpu_coloring.params_buf, 0, bytemuck::cast_slice(&params));
+            ctx.queue.write_buffer(
+                &self.gpu_coloring.params_buf,
+                0,
+                bytemuck::cast_slice(&params),
+            );
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("coloring_reset"),
                 layout: self.gpu_coloring.reset_kernel.bind_group_layout(),
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self
-                            .gpu_coloring
-                            .body_colors
-                            .buffer()
-                            .as_entire_binding(),
+                        resource: self.gpu_coloring.body_colors.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -3335,25 +3651,29 @@ impl GpuPipeline {
                     },
                 ],
             });
-            self.run_pass("coloring_reset", &self.gpu_coloring.reset_kernel, &bg, num_bodies);
+            self.run_pass(
+                "coloring_reset",
+                &self.gpu_coloring.reset_kernel,
+                &bg,
+                num_bodies,
+            );
         }
 
         for current_color in 0..num_bodies {
             self.gpu_coloring.unfinished.reset(ctx);
             let params: [u32; 4] = [num_bodies, 0u32, current_color, 0u32];
-            ctx.queue
-                .write_buffer(&self.gpu_coloring.params_buf, 0, bytemuck::cast_slice(&params));
+            ctx.queue.write_buffer(
+                &self.gpu_coloring.params_buf,
+                0,
+                bytemuck::cast_slice(&params),
+            );
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("coloring_step"),
                 layout: self.gpu_coloring.step_kernel.bind_group_layout(),
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self
-                            .gpu_coloring
-                            .body_colors
-                            .buffer()
-                            .as_entire_binding(),
+                        resource: self.gpu_coloring.body_colors.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -3385,7 +3705,12 @@ impl GpuPipeline {
                     },
                 ],
             });
-            self.run_pass("coloring_step", &self.gpu_coloring.step_kernel, &bg, num_bodies);
+            self.run_pass(
+                "coloring_step",
+                &self.gpu_coloring.step_kernel,
+                &bg,
+                num_bodies,
+            );
             if self.gpu_coloring.unfinished.read(ctx) == 0 {
                 break;
             }

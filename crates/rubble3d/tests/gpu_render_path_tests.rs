@@ -79,7 +79,10 @@ fn cpu_sync_is_explicit_after_gpu_render_step() {
 
     world.sync_body_states_from_gpu();
     let synced_y = world.get_position(body).unwrap().y;
-    assert!(synced_y < y_before, "Explicit sync should pull GPU pose to CPU");
+    assert!(
+        synced_y < y_before,
+        "Explicit sync should pull GPU pose to CPU"
+    );
 }
 
 #[test]

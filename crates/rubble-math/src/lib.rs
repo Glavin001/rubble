@@ -197,7 +197,14 @@ impl RigidBodyProps3D {
         } else {
             glam::Mat3::ZERO
         };
-        Self::new_with_inertia(inv_inertia, inertia, friction, shape_type, shape_index, flags)
+        Self::new_with_inertia(
+            inv_inertia,
+            inertia,
+            friction,
+            shape_type,
+            shape_index,
+            flags,
+        )
     }
 
     pub fn new_with_inertia(
