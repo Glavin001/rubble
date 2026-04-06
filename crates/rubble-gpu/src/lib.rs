@@ -108,6 +108,8 @@ pub struct SolveBreakdownMs {
     pub free_motion_ms: f32,
     pub coloring_ms: f32,
     pub iterations_ms: f32,
+    pub iterations_primal_ms: f32,
+    pub iterations_dual_ms: f32,
     pub swap_ms: f32,
     pub precise: bool,
 }
@@ -122,6 +124,16 @@ impl SolveBreakdownMs {
             self.iterations_ms,
             self.swap_ms,
         ]
+    }
+
+    /// Returns (primal_ms, dual_ms) for the Iterations sub-breakdown.
+    /// Only meaningful when `precise` is true and the profiler wrote midpoint timestamps.
+    pub fn iterations_split(&self) -> Option<(f32, f32)> {
+        if self.precise && (self.iterations_primal_ms > 0.0 || self.iterations_dual_ms > 0.0) {
+            Some((self.iterations_primal_ms, self.iterations_dual_ms))
+        } else {
+            None
+        }
     }
 
     pub fn total_ms(&self) -> f32 {
@@ -293,6 +305,21 @@ impl StepTimingsMs {
                         "    {sub_name:<11} {sub_lane:<8} {:>6.2} ms {:>5.1}%",
                         sms, spct
                     ));
+                }
+                if let Some((primal_ms, dual_ms)) = solve.iterations_split() {
+                    if solve.iterations_ms >= DETAILED_BREAKDOWN_THRESHOLD_MS {
+                        let iter_total = solve.iterations_ms.max(f32::EPSILON);
+                        let pp = primal_ms / iter_total * 100.0;
+                        let dp = dual_ms / iter_total * 100.0;
+                        lines.push(format!(
+                            "      Primal   (GPU)   {:>6.2} ms {:>5.1}%",
+                            primal_ms, pp
+                        ));
+                        lines.push(format!(
+                            "      Dual     (GPU)   {:>6.2} ms {:>5.1}%",
+                            dual_ms, dp
+                        ));
+                    }
                 }
             }
         }
