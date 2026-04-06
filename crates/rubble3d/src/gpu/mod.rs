@@ -26,6 +26,7 @@ mod coloring_wgsl;
 mod extract_velocity_wgsl;
 mod narrowphase_wgsl;
 mod predict_wgsl;
+mod render_instances_wgsl;
 mod warmstart_wgsl;
 
 pub use adjacency_wgsl::{
@@ -37,13 +38,14 @@ pub use coloring_wgsl::{COLORING_RESET_WGSL, COLORING_STEP_WGSL};
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
+pub use render_instances_wgsl::BUILD_RENDER_INSTANCES_WGSL;
 pub use warmstart_wgsl::{WARMSTART_BUILD_KEYS_WGSL, WARMSTART_MATCH_WGSL};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
 use rubble_gpu::{
     round_up_workgroups, BroadphaseBreakdownMs, ComputeKernel, GpuAtomicCounter, GpuBuffer,
-    GpuContext, PingPongBuffer,
+    GpuContext, MeshInstanceBatch, MeshInstanceData, PingPongBuffer,
 };
 use rubble_math::{
     Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
@@ -118,6 +120,35 @@ pub struct PlaneParamsGpu {
     pub num_planes: u32,
     pub _pad: [u32; 3],
     pub planes: [[f32; 4]; MAX_PLANES],
+}
+
+pub const RENDER_SHAPE_SPHERE: u32 = 0;
+pub const RENDER_SHAPE_BOX: u32 = 1;
+pub const RENDER_SHAPE_CAPSULE: u32 = 2;
+pub const RENDER_SHAPE_HIDDEN: u32 = u32::MAX;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct RenderBodyMeta3D {
+    pub scale: [f32; 4],
+    pub color: [f32; 4],
+    pub shape_data: [u32; 4],
+}
+
+pub struct GpuRenderFrame3D {
+    pub spheres: MeshInstanceBatch,
+    pub cubes: MeshInstanceBatch,
+    pub capsules: MeshInstanceBatch,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct DrawIndexedIndirectArgsGpu {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub base_vertex: i32,
+    pub first_instance: u32,
 }
 
 /// GPU warmstart parameters. Must match the WGSL `WarmstartParams` layout exactly.
@@ -399,6 +430,7 @@ pub struct GpuPipeline {
     dual_kernel: ComputeKernel,
     extract_kernel: ComputeKernel,
     event_pairs_kernel: ComputeKernel,
+    render_instances_kernel: ComputeKernel,
     warmstart_prepare_kernel: ComputeKernel,
     warmstart_kernel: ComputeKernel,
 
@@ -425,10 +457,15 @@ pub struct GpuPipeline {
     active_body_flags: GpuBuffer<u32>,
     event_pair_keys: GpuBuffer<[u32; 2]>,
     lbvh_subset_aabbs: GpuBuffer<Aabb3D>,
+    render_bodies: GpuBuffer<RenderBodyMeta3D>,
+    render_spheres: GpuBuffer<MeshInstanceData>,
+    render_cubes: GpuBuffer<MeshInstanceData>,
+    render_capsules: GpuBuffer<MeshInstanceData>,
 
     // GPU solve graph
     gpu_graph: GpuGraphState,
     gpu_coloring: GpuColoringState,
+    gpu_render: GpuRenderState,
 
     // Persistent contact buffers for GPU-side warmstarting
     prev_contacts: GpuBuffer<Contact3D>,
@@ -468,6 +505,7 @@ pub struct GpuPipeline {
     primal_bg_cache: CachedBindGroupVec<[u64; 8]>,
     dual_bg_cache: CachedBindGroup<[u64; 3]>,
     extract_bg_cache: CachedBindGroup<[u64; 3]>,
+    render_instances_bg_cache: CachedBindGroup<[u64; 6]>,
 
     // GPU broadphase
     gpu_lbvh: GpuLbvh,
@@ -538,6 +576,24 @@ impl GpuColoringState {
     }
 }
 
+struct GpuRenderState {
+    indirect_args: GpuBuffer<DrawIndexedIndirectArgsGpu>,
+    indirect_template: [DrawIndexedIndirectArgsGpu; 3],
+}
+
+impl GpuRenderState {
+    fn new(ctx: &GpuContext) -> Self {
+        let mut indirect_args = GpuBuffer::new_with_usage(ctx, 3, wgpu::BufferUsages::INDIRECT);
+        indirect_args.set_len(3);
+        let indirect_template = [DrawIndexedIndirectArgsGpu::zeroed(); 3];
+        indirect_args.upload(ctx, &indirect_template);
+        Self {
+            indirect_args,
+            indirect_template,
+        }
+    }
+}
+
 impl GpuPipeline {
     /// Create a new GPU pipeline. Compiles all shaders and allocates buffers.
     pub fn new(ctx: GpuContext, max_bodies: usize) -> Self {
@@ -552,6 +608,8 @@ impl GpuPipeline {
         let dual_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_DUAL_WGSL, "main");
         let extract_kernel = ComputeKernel::from_wgsl(&ctx, EXTRACT_VELOCITY_WGSL, "main");
         let event_pairs_kernel = ComputeKernel::from_wgsl(&ctx, EVENT_PAIR_KEYS_WGSL, "main");
+        let render_instances_kernel =
+            ComputeKernel::from_wgsl(&ctx, BUILD_RENDER_INSTANCES_WGSL, "main");
         let warmstart_prepare_kernel =
             ComputeKernel::from_wgsl(&ctx, WARMSTART_BUILD_KEYS_WGSL, "main");
         let warmstart_kernel = ComputeKernel::from_wgsl(&ctx, WARMSTART_MATCH_WGSL, "main");
@@ -578,6 +636,13 @@ impl GpuPipeline {
         let active_body_flags = GpuBuffer::new(&ctx, max_bodies.max(1));
         let event_pair_keys = GpuBuffer::new(&ctx, max_contacts.max(1));
         let lbvh_subset_aabbs = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let render_bodies = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let render_spheres =
+            GpuBuffer::new_with_usage(&ctx, max_bodies.max(1), wgpu::BufferUsages::VERTEX);
+        let render_cubes =
+            GpuBuffer::new_with_usage(&ctx, max_bodies.max(1), wgpu::BufferUsages::VERTEX);
+        let render_capsules =
+            GpuBuffer::new_with_usage(&ctx, max_bodies.max(1), wgpu::BufferUsages::VERTEX);
 
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SimParams uniform"),
@@ -607,6 +672,7 @@ impl GpuPipeline {
         let gpu_lbvh = GpuLbvh::new(&ctx, max_bodies);
         let gpu_graph = GpuGraphState::new(&ctx, max_bodies, max_contacts * 2);
         let gpu_coloring = GpuColoringState::new(&ctx, max_bodies);
+        let gpu_render = GpuRenderState::new(&ctx);
 
         Self {
             ctx,
@@ -618,6 +684,7 @@ impl GpuPipeline {
             dual_kernel,
             extract_kernel,
             event_pairs_kernel,
+            render_instances_kernel,
             warmstart_prepare_kernel,
             warmstart_kernel,
             body_states,
@@ -642,8 +709,13 @@ impl GpuPipeline {
             active_body_flags,
             event_pair_keys,
             lbvh_subset_aabbs,
+            render_bodies,
+            render_spheres,
+            render_cubes,
+            render_capsules,
             gpu_graph,
             gpu_coloring,
+            gpu_render,
             prev_contacts,
             prev_contact_hashes,
             prev_contact_indices,
@@ -678,6 +750,7 @@ impl GpuPipeline {
             primal_bg_cache: CachedBindGroupVec::default(),
             dual_bg_cache: CachedBindGroup::default(),
             extract_bg_cache: CachedBindGroup::default(),
+            render_instances_bg_cache: CachedBindGroup::default(),
             gpu_lbvh,
         }
     }
@@ -720,6 +793,61 @@ impl GpuPipeline {
         k_start: f32,
         warmstart_decay: f32,
     ) {
+        let render_bodies = vec![
+            RenderBodyMeta3D {
+                scale: [0.0; 4],
+                color: [0.0; 4],
+                shape_data: [RENDER_SHAPE_HIDDEN, 0, 0, 0],
+            };
+            states.len()
+        ];
+        self.upload_with_render_bodies(
+            states,
+            prev_step_states,
+            props,
+            &render_bodies,
+            sphere_data,
+            box_data,
+            capsule_data,
+            hull_data,
+            hull_vertices,
+            plane_data,
+            compound_shapes,
+            compound_children,
+            compound_shapes_cpu,
+            gravity,
+            dt,
+            solver_iterations,
+            beta,
+            k_start,
+            warmstart_decay,
+        );
+    }
+
+    /// Upload body data plus render metadata for GPU-driven drawing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_with_render_bodies(
+        &mut self,
+        states: &[RigidBodyState3D],
+        prev_step_states: &[RigidBodyState3D],
+        props: &[RigidBodyProps3D],
+        render_bodies: &[RenderBodyMeta3D],
+        sphere_data: &[SphereData],
+        box_data: &[BoxData],
+        capsule_data: &[CapsuleData],
+        hull_data: &[ConvexHullData],
+        hull_vertices: &[ConvexVertex3D],
+        plane_data: &[Vec4],
+        compound_shapes: &[CompoundShapeGpu],
+        compound_children: &[CompoundChildGpu],
+        compound_shapes_cpu: &[rubble_shapes3d::CompoundShape],
+        gravity: Vec3,
+        dt: f32,
+        solver_iterations: u32,
+        beta: f32,
+        k_start: f32,
+        warmstart_decay: f32,
+    ) {
         // Store compound data for CPU-side pair expansion
         self.compound_shapes_data = compound_shapes.to_vec();
         self.compound_children_data = compound_children.to_vec();
@@ -736,6 +864,7 @@ impl GpuPipeline {
         self.prev_step_states.upload(&self.ctx, prev_step_states);
         self.inertial_states.upload(&self.ctx, states);
         self.body_props.upload(&self.ctx, props);
+        self.render_bodies.upload(&self.ctx, render_bodies);
 
         if !sphere_data.is_empty() {
             self.spheres.upload(&self.ctx, sphere_data);
@@ -1497,10 +1626,51 @@ impl GpuPipeline {
 
         let t_extract = Instant::now();
         self.dispatch_extract(num_bodies);
+        timings.extract_ms = t_extract.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sync = Instant::now();
+        self.body_states.current_mut().set_len(num_bodies);
         let states = self.body_states.download(&self.ctx);
         self.body_states.swap();
-        timings.extract_ms = t_extract.elapsed().as_secs_f32() * 1000.0;
+        timings.cpu_sync_ms = t_sync.elapsed().as_secs_f32() * 1000.0;
         states
+    }
+
+    pub fn step_fast_device_timed(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) {
+        use std::time::Instant;
+
+        if num_bodies == 0 {
+            return;
+        }
+
+        let compound_contacts = self.run_detection_timed(num_bodies, timings);
+        assert!(
+            compound_contacts.is_empty(),
+            "GPU-only happy path does not support CPU compound contact expansion"
+        );
+
+        timings.contact_fetch_ms = 0.0;
+        let t_solve = Instant::now();
+        let contact_count = self.contact_count.read(&self.ctx);
+        if contact_count > 0 {
+            self.contacts.set_len(contact_count);
+            self.dispatch_gpu_warmstart(contact_count);
+            self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
+            self.swap_contact_buffers(contact_count);
+        } else {
+            self.apply_free_motion(num_bodies, &[]);
+            self.prev_contact_count = 0;
+        }
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
+
+        let t_extract = Instant::now();
+        self.dispatch_extract(num_bodies);
+        timings.extract_ms = t_extract.elapsed().as_secs_f32() * 1000.0;
     }
 
     /// Run the full GPU physics step and download updated states.
@@ -1569,6 +1739,7 @@ impl GpuPipeline {
         };
 
         self.dispatch_extract(num_bodies);
+        self.body_states.current_mut().set_len(num_bodies);
         let states = self.body_states.download(&self.ctx);
         self.body_states.swap();
         (states, final_contacts)
@@ -1630,9 +1801,13 @@ impl GpuPipeline {
 
         let t_ext = Instant::now();
         self.dispatch_extract(num_bodies);
+        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+
+        let t_sync = Instant::now();
+        self.body_states.current_mut().set_len(num_bodies);
         let states = self.body_states.download(&self.ctx);
         self.body_states.swap();
-        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+        timings.cpu_sync_ms = t_sync.elapsed().as_secs_f32() * 1000.0;
 
         (states, final_contacts)
     }
@@ -2655,6 +2830,59 @@ impl GpuPipeline {
         self.extract_bg_cache.bind_group.as_ref().unwrap()
     }
 
+    fn render_instances_bind_group(&mut self) -> &wgpu::BindGroup {
+        let key = [
+            self.body_states_cache_key(),
+            self.render_bodies.byte_size(),
+            self.render_spheres.byte_size(),
+            self.render_cubes.byte_size(),
+            self.render_capsules.byte_size(),
+            self.gpu_render.indirect_args.byte_size(),
+        ];
+        if self.render_instances_bg_cache.key.as_ref() != Some(&key) {
+            let bg = self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("build_render_instances"),
+                    layout: self.render_instances_kernel.bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.body_states.current().buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.render_bodies.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.render_spheres.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.render_cubes.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.render_capsules.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.gpu_render.indirect_args.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.params_uniform.as_entire_binding(),
+                        },
+                    ],
+                });
+            self.render_instances_bg_cache.key = Some(key);
+            self.render_instances_bg_cache.bind_group = Some(bg);
+        }
+        self.render_instances_bg_cache.bind_group.as_ref().unwrap()
+    }
+
     fn snapshot_prev_step_states(&mut self, num_bodies: u32) {
         self.prev_step_states
             .grow_if_needed(&self.ctx, num_bodies as usize);
@@ -2741,6 +2969,94 @@ impl GpuPipeline {
         let _ = self.extract_bind_group();
         let bg = self.extract_bg_cache.bind_group.as_ref().unwrap();
         self.run_pass("extract_vel", &self.extract_kernel, bg, num_bodies);
+    }
+
+    pub fn build_render_instances(&mut self, num_bodies: u32) {
+        self.render_spheres.set_len(num_bodies);
+        self.render_cubes.set_len(num_bodies);
+        self.render_capsules.set_len(num_bodies);
+        self.ctx.queue.write_buffer(
+            self.gpu_render.indirect_args.buffer(),
+            0,
+            bytemuck::cast_slice(&self.gpu_render.indirect_template),
+        );
+        let _ = self.render_instances_bind_group();
+        let bg = self.render_instances_bg_cache.bind_group.as_ref().unwrap();
+        self.run_pass(
+            "build_render_instances",
+            &self.render_instances_kernel,
+            bg,
+            num_bodies,
+        );
+    }
+
+    pub fn render_frame(&self) -> GpuRenderFrame3D {
+        let stride = std::mem::size_of::<DrawIndexedIndirectArgsGpu>() as u64;
+        GpuRenderFrame3D {
+            spheres: MeshInstanceBatch {
+                buffer: self.render_spheres.buffer().clone(),
+                indirect_buffer: self.gpu_render.indirect_args.buffer().clone(),
+                indirect_offset: 0,
+            },
+            cubes: MeshInstanceBatch {
+                buffer: self.render_cubes.buffer().clone(),
+                indirect_buffer: self.gpu_render.indirect_args.buffer().clone(),
+                indirect_offset: stride,
+            },
+            capsules: MeshInstanceBatch {
+                buffer: self.render_capsules.buffer().clone(),
+                indirect_buffer: self.gpu_render.indirect_args.buffer().clone(),
+                indirect_offset: stride * 2,
+            },
+        }
+    }
+
+    pub fn configure_render_indirect_args(
+        &mut self,
+        sphere_index_count: u32,
+        cube_index_count: u32,
+        capsule_index_count: u32,
+    ) {
+        self.gpu_render.indirect_template = [
+            DrawIndexedIndirectArgsGpu {
+                index_count: sphere_index_count,
+                instance_count: 0,
+                first_index: 0,
+                base_vertex: 0,
+                first_instance: 0,
+            },
+            DrawIndexedIndirectArgsGpu {
+                index_count: cube_index_count,
+                instance_count: 0,
+                first_index: 0,
+                base_vertex: 0,
+                first_instance: 0,
+            },
+            DrawIndexedIndirectArgsGpu {
+                index_count: capsule_index_count,
+                instance_count: 0,
+                first_index: 0,
+                base_vertex: 0,
+                first_instance: 0,
+            },
+        ];
+        self.gpu_render
+            .indirect_args
+            .upload(&self.ctx, &self.gpu_render.indirect_template);
+    }
+
+    pub fn download_render_instance_counts(&self) -> [u32; 3] {
+        let args = self.gpu_render.indirect_args.download(&self.ctx);
+        [
+            args.first().map(|a| a.instance_count).unwrap_or(0),
+            args.get(1).map(|a| a.instance_count).unwrap_or(0),
+            args.get(2).map(|a| a.instance_count).unwrap_or(0),
+        ]
+    }
+
+    pub fn download_body_states_current(&mut self, num_bodies: u32) -> Vec<RigidBodyState3D> {
+        self.body_states.current_mut().set_len(num_bodies);
+        self.body_states.download(&self.ctx)
     }
 
     fn dispatch_gpu_solve_graph(&mut self, num_bodies: u32, contact_count: u32) {

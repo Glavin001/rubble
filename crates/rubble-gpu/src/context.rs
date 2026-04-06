@@ -1,15 +1,29 @@
 use crate::GpuError;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Thin wrapper around a wgpu device and queue.
 pub struct GpuContext {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
     staging_pool: Mutex<Vec<(u64, wgpu::Buffer)>>,
 }
 
+impl Clone for GpuContext {
+    fn clone(&self) -> Self {
+        Self {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            staging_pool: Mutex::new(Vec::new()),
+        }
+    }
+}
+
 impl GpuContext {
-    pub(crate) fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    pub fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self::from_shared(Arc::new(device), Arc::new(queue))
+    }
+
+    pub fn from_shared(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         Self {
             device,
             queue,

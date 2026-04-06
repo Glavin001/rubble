@@ -1,6 +1,7 @@
 use crate::mesh::{self, Vertex};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
+use rubble_gpu::{GpuContext, MeshInstanceBatch, MeshInstanceData};
 use std::sync::Arc;
 
 #[repr(C)]
@@ -13,46 +14,7 @@ pub struct Uniforms {
     pub _pad1: f32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct InstanceData {
-    pub model: [[f32; 4]; 4],
-    pub color: [f32; 4],
-}
-
-impl InstanceData {
-    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<InstanceData>() as u64,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &[
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 0,
-                shader_location: 2,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 16,
-                shader_location: 3,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 32,
-                shader_location: 4,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 48,
-                shader_location: 5,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 64,
-                shader_location: 6,
-            },
-        ],
-    };
-}
+pub type InstanceData = MeshInstanceData;
 
 pub struct GpuMesh {
     pub vertex_buf: wgpu::Buffer,
@@ -86,6 +48,7 @@ pub struct Renderer {
     pub queue: Arc<wgpu::Queue>,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
+    pub max_surface_extent: u32,
     pub depth_view: wgpu::TextureView,
     pub pipeline: wgpu::RenderPipeline,
     pub grid_pipeline: wgpu::RenderPipeline,
@@ -101,6 +64,13 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(window: Arc<winit::window::Window>) -> Self {
+        let (renderer, _) = Self::new_with_shared_context(window).await;
+        renderer
+    }
+
+    pub async fn new_with_shared_context(
+        window: Arc<winit::window::Window>,
+    ) -> (Self, GpuContext) {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -119,8 +89,17 @@ impl Renderer {
             .await
             .expect("No suitable GPU adapter found");
 
+        let adapter_limits = adapter.limits();
+        let desired_storage_buffers: u32 = 16;
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits: wgpu::Limits {
+                    max_storage_buffers_per_shader_stage: desired_storage_buffers
+                        .min(adapter_limits.max_storage_buffers_per_shader_stage),
+                    ..wgpu::Limits::downlevel_defaults()
+                },
+                ..Default::default()
+            })
             .await
             .expect("Failed to request device");
 
@@ -128,6 +107,7 @@ impl Renderer {
         let queue = Arc::new(queue);
 
         let caps = surface.get_capabilities(&adapter);
+        let max_surface_extent = adapter.limits().max_texture_dimension_2d.min(2048).max(1);
         let format = caps
             .formats
             .iter()
@@ -138,8 +118,8 @@ impl Renderer {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: size.width.max(1).min(max_surface_extent),
+            height: size.height.max(1).min(max_surface_extent),
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
@@ -271,11 +251,12 @@ impl Renderer {
         let egui_renderer =
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
 
-        Self {
-            device,
-            queue,
+        let renderer = Self {
+            device: device.clone(),
+            queue: queue.clone(),
             surface,
             config,
+            max_surface_extent,
             depth_view,
             pipeline,
             grid_pipeline,
@@ -287,17 +268,19 @@ impl Renderer {
             circle_mesh,
             quad_mesh,
             egui_renderer,
-        }
+        };
+        let ctx = GpuContext::from_shared(device, queue);
+        (renderer, ctx)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
+        self.config.width = width.min(self.max_surface_extent).max(1);
+        self.config.height = height.min(self.max_surface_extent).max(1);
         self.surface.configure(&self.device, &self.config);
-        self.depth_view = Self::create_depth_view(&self.device, width, height);
+        self.depth_view = Self::create_depth_view(&self.device, self.config.width, self.config.height);
     }
 
     pub fn aspect(&self) -> f32 {
@@ -397,9 +380,9 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
 
-            self.draw_batch(&mut pass, &self.sphere_mesh, &instances.spheres);
-            self.draw_batch(&mut pass, &self.cube_mesh, &instances.cubes);
-            self.draw_batch(&mut pass, &self.capsule_mesh, &instances.capsules);
+            self.draw_batch_cpu(&mut pass, &self.sphere_mesh, &instances.spheres);
+            self.draw_batch_cpu(&mut pass, &self.cube_mesh, &instances.cubes);
+            self.draw_batch_cpu(&mut pass, &self.capsule_mesh, &instances.capsules);
 
             if draw_grid {
                 // Draw the transparent grid after opaque meshes without writing depth,
@@ -515,9 +498,9 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
 
-            self.draw_batch(&mut pass, &self.circle_mesh, &instances.spheres);
-            self.draw_batch(&mut pass, &self.quad_mesh, &instances.cubes);
-            self.draw_batch(&mut pass, &self.capsule_mesh, &instances.capsules);
+            self.draw_batch_cpu(&mut pass, &self.circle_mesh, &instances.spheres);
+            self.draw_batch_cpu(&mut pass, &self.quad_mesh, &instances.cubes);
+            self.draw_batch_cpu(&mut pass, &self.capsule_mesh, &instances.capsules);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -554,7 +537,128 @@ impl Renderer {
         }
     }
 
-    fn draw_batch<'a>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_3d_gpu(
+        &mut self,
+        view_proj: Mat4,
+        camera_pos: Vec3,
+        spheres: MeshInstanceBatch,
+        cubes: MeshInstanceBatch,
+        capsules: MeshInstanceBatch,
+        draw_grid: bool,
+        egui_primitives: &[egui::ClippedPrimitive],
+        egui_textures_delta: &egui::TexturesDelta,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+    ) {
+        let uniforms = Uniforms {
+            view_proj: view_proj.to_cols_array_2d(),
+            light_dir: Vec3::new(0.5, 1.0, 0.3).normalize().to_array(),
+            _pad0: 0.0,
+            camera_pos: camera_pos.to_array(),
+            _pad1: 0.0,
+        };
+        self.queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+
+        for (id, delta) in &egui_textures_delta.set {
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, delta);
+        }
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut self.device.create_command_encoder(&Default::default()),
+            egui_primitives,
+            screen_descriptor,
+        );
+
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(tex)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+            _ => return,
+        };
+        let view = frame.texture.create_view(&Default::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.08,
+                            g: 0.08,
+                            b: 0.10,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+
+            self.draw_batch_gpu(&mut pass, &self.sphere_mesh, spheres);
+            self.draw_batch_gpu(&mut pass, &self.cube_mesh, cubes);
+            self.draw_batch_gpu(&mut pass, &self.capsule_mesh, capsules);
+
+            if draw_grid {
+                pass.set_pipeline(&self.grid_pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let mut egui_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("egui"),
+                });
+        {
+            let pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            let mut pass = pass.forget_lifetime();
+            self.egui_renderer
+                .render(&mut pass, egui_primitives, screen_descriptor);
+        }
+        self.queue.submit(std::iter::once(egui_encoder.finish()));
+        frame.present();
+
+        for &id in &egui_textures_delta.free {
+            self.egui_renderer.free_texture(&id);
+        }
+    }
+
+    fn draw_batch_cpu<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         mesh: &'a GpuMesh,
@@ -575,6 +679,18 @@ impl Renderer {
         pass.set_vertex_buffer(1, instance_buf.slice(..));
         pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.index_count, 0, 0..instances.len() as u32);
+    }
+
+    fn draw_batch_gpu<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        mesh: &'a GpuMesh,
+        instances: MeshInstanceBatch,
+    ) {
+        pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+        pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed_indirect(&instances.indirect_buffer, instances.indirect_offset);
     }
 }
 

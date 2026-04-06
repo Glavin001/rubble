@@ -100,3 +100,11 @@ fn validate_adjacency_scatter_wgsl() {
 fn validate_event_pair_keys_wgsl() {
     validate_wgsl("EVENT_PAIR_KEYS_WGSL", rubble3d::gpu::EVENT_PAIR_KEYS_WGSL);
 }
+
+#[test]
+fn validate_build_render_instances_wgsl() {
+    validate_wgsl(
+        "BUILD_RENDER_INSTANCES_WGSL",
+        rubble3d::gpu::BUILD_RENDER_INSTANCES_WGSL,
+    );
+}

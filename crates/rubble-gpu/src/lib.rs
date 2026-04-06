@@ -13,6 +13,56 @@ pub use kernel::{round_up_workgroups, ComputeKernel};
 pub use multi_gpu::{GpuDevice, GpuDevicePool, MultiGpuBuffer, MultiGpuContext, WorkDistribution};
 pub use web_time;
 
+use bytemuck::{Pod, Zeroable};
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct MeshInstanceData {
+    pub model: [[f32; 4]; 4],
+    pub color: [f32; 4],
+}
+
+impl MeshInstanceData {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<MeshInstanceData>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 3,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 4,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 48,
+                shader_location: 5,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 64,
+                shader_location: 6,
+            },
+        ],
+    };
+}
+
+#[derive(Clone, Debug)]
+pub struct MeshInstanceBatch {
+    pub buffer: wgpu::Buffer,
+    pub indirect_buffer: wgpu::Buffer,
+    pub indirect_offset: u64,
+}
+
 /// Broadphase substage wall times (milliseconds), measured around GPU submits and host readbacks.
 ///
 /// **WebGPU note:** `wgpu::Queue::submit` returns before work finishes. Buckets **Bounds** /
@@ -88,6 +138,7 @@ pub struct StepTimingsMs {
     pub contact_fetch_ms: f32,
     pub solve_ms: f32,
     pub extract_ms: f32,
+    pub cpu_sync_ms: f32,
 }
 
 impl Default for StepTimingsMs {
@@ -101,6 +152,7 @@ impl Default for StepTimingsMs {
             contact_fetch_ms: 0.0,
             solve_ms: 0.0,
             extract_ms: 0.0,
+            cpu_sync_ms: 0.0,
         }
     }
 }
@@ -128,7 +180,7 @@ impl StepTimingsMs {
     /// dev overlays (web text, tests); native UI may use [`STEP_TIMING_LABELS`] for custom layout.
     pub fn format_text_overlay(&self, render_backend: &str, render_ms: f32) -> String {
         let arr = self.as_array();
-        let total: f32 = arr.iter().sum();
+        let total: f32 = arr.iter().sum::<f32>() + self.cpu_sync_ms;
         let mut lines = Vec::with_capacity(16);
         lines.push(format!("Step: {total:.2} ms"));
 
@@ -156,6 +208,18 @@ impl StepTimingsMs {
                     ));
                 }
             }
+        }
+
+        if self.cpu_sync_ms > 0.0 {
+            let pct = if total > 0.0 {
+                self.cpu_sync_ms / total * 100.0
+            } else {
+                0.0
+            };
+            lines.push(format!(
+                "  {:<11} {:<8} {:>6.2} ms {:>5.1}%",
+                "StateSync", "(CPU)", self.cpu_sync_ms, pct
+            ));
         }
 
         lines.push(format!(

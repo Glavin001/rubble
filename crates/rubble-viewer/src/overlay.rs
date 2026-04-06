@@ -40,7 +40,7 @@ pub fn draw_panel(
     render_ms: f32,
 ) {
     let arr = timings.as_array();
-    let total: f32 = arr.iter().sum();
+    let total: f32 = arr.iter().sum::<f32>() + timings.cpu_sync_ms;
     let panel_frame = egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(18, 20, 26, 232))
         .stroke(egui::Stroke::new(
@@ -163,6 +163,30 @@ pub fn draw_panel(
                             );
                             ui.label(
                                 egui::RichText::new(format!("{ms:.2} ms"))
+                                    .color(egui::Color32::from_gray(210)),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{pct:.1}%"))
+                                    .color(egui::Color32::from_gray(170)),
+                            );
+                            ui.end_row();
+                        }
+
+                        if timings.cpu_sync_ms > 0.0 {
+                            let pct = if total > 0.0 {
+                                timings.cpu_sync_ms / total * 100.0
+                            } else {
+                                0.0
+                            };
+                            ui.label(
+                                egui::RichText::new("StateSync")
+                                    .color(egui::Color32::from_gray(210)),
+                            );
+                            ui.label(
+                                egui::RichText::new("(CPU)").color(egui::Color32::from_gray(140)),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{:.2} ms", timings.cpu_sync_ms))
                                     .color(egui::Color32::from_gray(210)),
                             );
                             ui.label(
