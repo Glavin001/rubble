@@ -101,6 +101,43 @@ impl BroadphaseBreakdownMs {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SolveBreakdownMs {
+    pub warmstart_ms: f32,
+    pub graph_ms: f32,
+    pub free_motion_ms: f32,
+    pub coloring_ms: f32,
+    pub iterations_ms: f32,
+    pub swap_ms: f32,
+    pub precise: bool,
+}
+
+impl SolveBreakdownMs {
+    pub fn as_array(&self) -> [f32; 6] {
+        [
+            self.warmstart_ms,
+            self.graph_ms,
+            self.free_motion_ms,
+            self.coloring_ms,
+            self.iterations_ms,
+            self.swap_ms,
+        ]
+    }
+
+    pub fn total_ms(&self) -> f32 {
+        self.warmstart_ms
+            + self.graph_ms
+            + self.free_motion_ms
+            + self.coloring_ms
+            + self.iterations_ms
+            + self.swap_ms
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.total_ms() <= f32::EPSILON
+    }
+}
+
 /// Labels for the seven top-level [`StepTimingsMs::as_array`] fields (name, lane).
 pub const STEP_TIMING_LABELS: [(&str, &str); 7] = [
     ("Upload", "(CPU)"),
@@ -121,6 +158,17 @@ pub const BROADPHASE_SUB_LABELS: [(&str, &str); 5] = [
     ("Readback", "(CPU)"),
 ];
 
+pub const SOLVE_SUB_LABELS: [(&str, &str); 6] = [
+    ("Warmstart", "(GPU)"),
+    ("Graph", "(GPU)"),
+    ("FreeMotion", "(GPU)"),
+    ("Coloring", "(GPU)"),
+    ("Iterations", "(GPU)"),
+    ("Swap", "(GPU)"),
+];
+
+pub const DETAILED_BREAKDOWN_THRESHOLD_MS: f32 = 20.0;
+
 /// Index of the broadphase row in [`STEP_TIMING_LABELS`] / [`StepTimingsMs::as_array`].
 pub const STEP_INDEX_BROADPHASE: usize = 2;
 
@@ -138,6 +186,7 @@ pub struct StepTimingsMs {
     pub narrowphase_ms: f32,
     pub contact_fetch_ms: f32,
     pub solve_ms: f32,
+    pub solve_breakdown: SolveBreakdownMs,
     pub extract_ms: f32,
     pub cpu_sync_ms: f32,
     pub precise_gpu: bool,
@@ -153,6 +202,7 @@ impl Default for StepTimingsMs {
             narrowphase_ms: 0.0,
             contact_fetch_ms: 0.0,
             solve_ms: 0.0,
+            solve_breakdown: SolveBreakdownMs::default(),
             extract_ms: 0.0,
             cpu_sync_ms: 0.0,
             precise_gpu: false,
@@ -219,6 +269,29 @@ impl StepTimingsMs {
                     lines.push(format!(
                         "    {sub_name:<9} {sub_lane:<10} {:>6.2} ms {:>5.1}%",
                         bms, bpct
+                    ));
+                }
+            }
+            if name == "Solve"
+                && ms >= DETAILED_BREAKDOWN_THRESHOLD_MS
+                && !self.solve_breakdown.is_zero()
+            {
+                let solve = &self.solve_breakdown;
+                let solve_arr = solve.as_array();
+                let solve_total = solve.total_ms();
+                if !solve.precise {
+                    lines.push("    Solve details: approx".to_string());
+                }
+                for (j, &(sub_name, sub_lane)) in SOLVE_SUB_LABELS.iter().enumerate() {
+                    let sms = solve_arr[j];
+                    let spct = if solve_total > 0.0 {
+                        sms / solve_total * 100.0
+                    } else {
+                        0.0
+                    };
+                    lines.push(format!(
+                        "    {sub_name:<11} {sub_lane:<8} {:>6.2} ms {:>5.1}%",
+                        sms, spct
                     ));
                 }
             }

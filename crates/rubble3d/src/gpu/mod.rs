@@ -81,9 +81,21 @@ enum PreciseTimingMarker {
     SolveEnd = 7,
     ExtractStart = 8,
     ExtractEnd = 9,
+    SolveWarmstartStart = 10,
+    SolveWarmstartEnd = 11,
+    SolveGraphStart = 12,
+    SolveGraphEnd = 13,
+    SolveFreeMotionStart = 14,
+    SolveFreeMotionEnd = 15,
+    SolveColoringStart = 16,
+    SolveColoringEnd = 17,
+    SolveIterationsStart = 18,
+    SolveIterationsEnd = 19,
+    SolveSwapStart = 20,
+    SolveSwapEnd = 21,
 }
 
-const PRECISE_TIMING_QUERY_COUNT: u32 = 10;
+const PRECISE_TIMING_QUERY_COUNT: u32 = 22;
 
 #[cfg(not(target_arch = "wasm32"))]
 struct PendingPreciseTimingReadback {
@@ -100,6 +112,7 @@ struct PreciseGpuStepTimings {
     narrowphase_ms: f32,
     solve_ms: f32,
     extract_ms: f32,
+    solve_breakdown: rubble_gpu::SolveBreakdownMs,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -171,6 +184,39 @@ impl GpuStepProfiler {
                             PreciseTimingMarker::ExtractStart,
                             PreciseTimingMarker::ExtractEnd,
                         ),
+                        solve_breakdown: rubble_gpu::SolveBreakdownMs {
+                            warmstart_ms: self.delta_ms(
+                                ticks,
+                                PreciseTimingMarker::SolveWarmstartStart,
+                                PreciseTimingMarker::SolveWarmstartEnd,
+                            ),
+                            graph_ms: self.delta_ms(
+                                ticks,
+                                PreciseTimingMarker::SolveGraphStart,
+                                PreciseTimingMarker::SolveGraphEnd,
+                            ),
+                            free_motion_ms: self.delta_ms(
+                                ticks,
+                                PreciseTimingMarker::SolveFreeMotionStart,
+                                PreciseTimingMarker::SolveFreeMotionEnd,
+                            ),
+                            coloring_ms: self.delta_ms(
+                                ticks,
+                                PreciseTimingMarker::SolveColoringStart,
+                                PreciseTimingMarker::SolveColoringEnd,
+                            ),
+                            iterations_ms: self.delta_ms(
+                                ticks,
+                                PreciseTimingMarker::SolveIterationsStart,
+                                PreciseTimingMarker::SolveIterationsEnd,
+                            ),
+                            swap_ms: self.delta_ms(
+                                ticks,
+                                PreciseTimingMarker::SolveSwapStart,
+                                PreciseTimingMarker::SolveSwapEnd,
+                            ),
+                            precise: true,
+                        },
                     });
                 }
                 drop(mapped);
@@ -246,6 +292,7 @@ impl GpuStepProfiler {
             timings.broadphase_ms = latest.broadphase_ms;
             timings.narrowphase_ms = latest.narrowphase_ms;
             timings.solve_ms = latest.solve_ms;
+            timings.solve_breakdown = latest.solve_breakdown;
             timings.extract_ms = latest.extract_ms;
             timings.precise_gpu = true;
         }
@@ -1669,6 +1716,7 @@ impl GpuPipeline {
     fn prepare_precise_timing(&mut self, timings: &mut rubble_gpu::StepTimingsMs) {
         timings.precise_gpu = false;
         timings.broadphase_breakdown.precise = false;
+        timings.solve_breakdown.precise = false;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(profiler) = &mut self.gpu_step_profiler {
             profiler.collect_ready(&self.ctx);
@@ -1709,21 +1757,28 @@ impl GpuPipeline {
         if contact_count == 0 {
             return;
         }
+        self.mark_precise_timing(PreciseTimingMarker::SolveGraphStart);
         self.dispatch_gpu_solve_graph(num_bodies, contact_count);
+        self.mark_precise_timing(PreciseTimingMarker::SolveGraphEnd);
         let _ = self.free_motion_bind_group();
         let free_motion_bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
+        self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionStart);
         self.run_pass(
             "free_motion",
             &self.free_motion_kernel,
             free_motion_bg,
             num_bodies,
         );
+        self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionEnd);
+        self.mark_precise_timing(PreciseTimingMarker::SolveColoringStart);
         let color_groups = self.dispatch_gpu_coloring(num_bodies);
+        self.mark_precise_timing(PreciseTimingMarker::SolveColoringEnd);
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
         let _ = self.dual_bind_group();
         let primal_bind_groups = &self.primal_bg_cache.bind_groups;
         let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
+        self.mark_precise_timing(PreciseTimingMarker::SolveIterationsStart);
         let mut encoder = self
             .ctx
             .device
@@ -1756,6 +1811,7 @@ impl GpuPipeline {
             }
         }
         self.ctx.queue.submit(Some(encoder.finish()));
+        self.mark_precise_timing(PreciseTimingMarker::SolveIterationsEnd);
     }
 
     /// Body-colored AVBD solve in position space.
@@ -1876,11 +1932,17 @@ impl GpuPipeline {
         self.mark_precise_timing(PreciseTimingMarker::SolveStart);
         if contact_count > 0 {
             self.contacts.set_len(contact_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartStart);
             self.dispatch_gpu_warmstart(contact_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartEnd);
             self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveSwapStart);
             self.swap_contact_buffers(contact_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveSwapEnd);
         } else {
+            self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionStart);
             self.apply_free_motion(num_bodies, &[]);
+            self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionEnd);
             self.prev_contact_count = 0;
         }
         self.mark_precise_timing(PreciseTimingMarker::SolveEnd);
@@ -1932,11 +1994,17 @@ impl GpuPipeline {
         self.mark_precise_timing(PreciseTimingMarker::SolveStart);
         if contact_count > 0 {
             self.contacts.set_len(contact_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartStart);
             self.dispatch_gpu_warmstart(contact_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartEnd);
             self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveSwapStart);
             self.swap_contact_buffers(contact_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveSwapEnd);
         } else {
+            self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionStart);
             self.apply_free_motion(num_bodies, &[]);
+            self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionEnd);
             self.prev_contact_count = 0;
         }
         self.mark_precise_timing(PreciseTimingMarker::SolveEnd);
@@ -2070,12 +2138,16 @@ impl GpuPipeline {
 
         let t_solve = Instant::now();
         self.mark_precise_timing(PreciseTimingMarker::SolveStart);
+        self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartStart);
+        self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartEnd);
         self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
 
         let final_contacts = if !contacts.is_empty() {
             let fc = self.download_contacts();
             let solved_count = fc.len() as u32;
+            self.mark_precise_timing(PreciseTimingMarker::SolveSwapStart);
             self.swap_contact_buffers(solved_count);
+            self.mark_precise_timing(PreciseTimingMarker::SolveSwapEnd);
             fc
         } else {
             self.prev_contact_count = 0;
