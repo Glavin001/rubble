@@ -53,6 +53,14 @@ fn validate_warmstart_match_wgsl() {
 }
 
 #[test]
+fn validate_warmstart_build_keys_wgsl() {
+    validate_wgsl(
+        "WARMSTART_BUILD_KEYS_WGSL",
+        rubble3d::gpu::WARMSTART_BUILD_KEYS_WGSL,
+    );
+}
+
+#[test]
 fn validate_coloring_reset_wgsl() {
     validate_wgsl("COLORING_RESET_WGSL", rubble3d::gpu::COLORING_RESET_WGSL);
 }
@@ -60,4 +68,35 @@ fn validate_coloring_reset_wgsl() {
 #[test]
 fn validate_coloring_step_wgsl() {
     validate_wgsl("COLORING_STEP_WGSL", rubble3d::gpu::COLORING_STEP_WGSL);
+}
+
+#[test]
+fn validate_adjacency_reset_wgsl() {
+    validate_wgsl("ADJACENCY_RESET_WGSL", rubble3d::gpu::ADJACENCY_RESET_WGSL);
+}
+
+#[test]
+fn validate_adjacency_count_wgsl() {
+    validate_wgsl("ADJACENCY_COUNT_WGSL", rubble3d::gpu::ADJACENCY_COUNT_WGSL);
+}
+
+#[test]
+fn validate_adjacency_init_ranges_wgsl() {
+    validate_wgsl(
+        "ADJACENCY_INIT_RANGES_WGSL",
+        rubble3d::gpu::ADJACENCY_INIT_RANGES_WGSL,
+    );
+}
+
+#[test]
+fn validate_adjacency_scatter_wgsl() {
+    validate_wgsl(
+        "ADJACENCY_SCATTER_WGSL",
+        rubble3d::gpu::ADJACENCY_SCATTER_WGSL,
+    );
+}
+
+#[test]
+fn validate_event_pair_keys_wgsl() {
+    validate_wgsl("EVENT_PAIR_KEYS_WGSL", rubble3d::gpu::EVENT_PAIR_KEYS_WGSL);
 }

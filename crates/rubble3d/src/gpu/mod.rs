@@ -20,6 +20,7 @@
 //! The performance-critical AVBD solver, predict, and extract kernels are available
 //! in both WGSL and rust-gpu variants.
 
+mod adjacency_wgsl;
 mod avbd_solve_wgsl;
 mod coloring_wgsl;
 mod extract_velocity_wgsl;
@@ -27,12 +28,16 @@ mod narrowphase_wgsl;
 mod predict_wgsl;
 mod warmstart_wgsl;
 
+pub use adjacency_wgsl::{
+    ADJACENCY_COUNT_WGSL, ADJACENCY_INIT_RANGES_WGSL, ADJACENCY_RESET_WGSL,
+    ADJACENCY_SCATTER_WGSL,
+};
 pub use avbd_solve_wgsl::{AVBD_DUAL_WGSL, AVBD_PRIMAL_WGSL};
 pub use coloring_wgsl::{COLORING_RESET_WGSL, COLORING_STEP_WGSL};
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
-pub use warmstart_wgsl::WARMSTART_MATCH_WGSL;
+pub use warmstart_wgsl::{WARMSTART_BUILD_KEYS_WGSL, WARMSTART_MATCH_WGSL};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
@@ -43,7 +48,7 @@ use rubble_gpu::{
 use rubble_math::{
     Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
 };
-use rubble_primitives::GpuLbvh;
+use rubble_primitives::{GpuLbvh, GpuRadixSort, GpuPrefixScan};
 use rubble_shapes3d::{
     BoxData, CapsuleData, CompoundChildGpu, CompoundShapeGpu, ConvexHullData, ConvexVertex3D,
     SphereData,
@@ -53,7 +58,6 @@ const WORKGROUP_SIZE: u32 = 64;
 const AVBD_WARMSTART_ALPHA: f32 = 0.99;
 /// Number of Luby coloring iterations. O(log n) rounds suffices for bounded-degree
 /// graphs. 32 handles any practical contact graph with room to spare.
-const COLORING_MAX_ITERATIONS: u32 = 32;
 const MAX_CONTACT_PENALTY: f32 = 1.0e6;
 
 #[derive(Default)]
@@ -151,6 +155,9 @@ struct BodyProps {
     inv_inertia_row0: vec4<f32>,
     inv_inertia_row1: vec4<f32>,
     inv_inertia_row2: vec4<f32>,
+    inertia_row0:     vec4<f32>,
+    inertia_row1:     vec4<f32>,
+    inertia_row2:     vec4<f32>,
     friction:         f32,
     shape_type:       u32,
     shape_index:      u32,
@@ -336,6 +343,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+pub const EVENT_PAIR_KEYS_WGSL: &str = r#"
+struct Contact {
+    point:          vec4<f32>,
+    normal:         vec4<f32>,
+    tangent:        vec4<f32>,
+    local_anchor_a: vec4<f32>,
+    local_anchor_b: vec4<f32>,
+    lambda:         vec4<f32>,
+    penalty:        vec4<f32>,
+    body_a:         u32,
+    body_b:         u32,
+    feature_id:     u32,
+    flags:          u32,
+};
+
+@group(0) @binding(0) var<storage, read>       contacts:          array<Contact>;
+@group(0) @binding(1) var<storage, read_write> pair_keys:         array<vec2<u32>>;
+@group(0) @binding(2) var<storage, read>       contact_count_buf: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let ci = gid.x;
+    let count = contact_count_buf[0];
+    if ci >= count {
+        return;
+    }
+    let c = contacts[ci];
+    pair_keys[ci] = vec2<u32>(min(c.body_a, c.body_b), max(c.body_a, c.body_b));
+}
+"#;
+
 // ---------------------------------------------------------------------------
 // GpuPipeline
 // ---------------------------------------------------------------------------
@@ -360,6 +398,8 @@ pub struct GpuPipeline {
     primal_kernel: ComputeKernel,
     dual_kernel: ComputeKernel,
     extract_kernel: ComputeKernel,
+    event_pairs_kernel: ComputeKernel,
+    warmstart_prepare_kernel: ComputeKernel,
     warmstart_kernel: ComputeKernel,
 
     // Storage buffers
@@ -383,22 +423,21 @@ pub struct GpuPipeline {
     body_contact_ranges: GpuBuffer<[u32; 2]>,
     body_contact_indices: GpuBuffer<u32>,
     active_body_flags: GpuBuffer<u32>,
+    event_pair_keys: GpuBuffer<[u32; 2]>,
     lbvh_subset_aabbs: GpuBuffer<Aabb3D>,
 
-    // GPU graph coloring
+    // GPU solve graph
+    gpu_graph: GpuGraphState,
     gpu_coloring: GpuColoringState,
 
     // Persistent contact buffers for GPU-side warmstarting
     prev_contacts: GpuBuffer<Contact3D>,
+    prev_contact_hashes: GpuBuffer<u32>,
+    prev_contact_indices: GpuBuffer<u32>,
     prev_contact_count: u32,
     warmstart_params_uniform: wgpu::Buffer,
     warmstart_bg_cache: CachedBindGroup<[u64; 3]>,
-
-    // Cached body coloring for steady-state contact graphs.
-    cached_body_graph: Vec<(u32, u32)>,
-    cached_body_order: Vec<u32>,
-    cached_color_groups: Vec<(u32, u32)>,
-    cached_color_num_bodies: u32,
+    warmstart_sort: GpuRadixSort,
 
     // Compound shape data (for CPU-side pair expansion)
     compound_shapes_data: Vec<CompoundShapeGpu>,
@@ -434,10 +473,39 @@ pub struct GpuPipeline {
     gpu_lbvh: GpuLbvh,
 }
 
-/// GPU coloring state for Luby-style parallel body graph coloring.
+/// GPU graph build state for adjacency / CSR construction.
+struct GpuGraphState {
+    reset_kernel: ComputeKernel,
+    count_kernel: ComputeKernel,
+    init_ranges_kernel: ComputeKernel,
+    scatter_kernel: ComputeKernel,
+    prefix_scan: GpuPrefixScan,
+    body_contact_counts: GpuBuffer<u32>,
+    body_contact_offsets: GpuBuffer<u32>,
+    body_contact_heads: GpuBuffer<u32>,
+}
+
+impl GpuGraphState {
+    fn new(ctx: &GpuContext, max_bodies: usize, max_contacts: usize) -> Self {
+        Self {
+            reset_kernel: ComputeKernel::from_wgsl(ctx, ADJACENCY_RESET_WGSL, "main"),
+            count_kernel: ComputeKernel::from_wgsl(ctx, ADJACENCY_COUNT_WGSL, "main"),
+            init_ranges_kernel: ComputeKernel::from_wgsl(ctx, ADJACENCY_INIT_RANGES_WGSL, "main"),
+            scatter_kernel: ComputeKernel::from_wgsl(ctx, ADJACENCY_SCATTER_WGSL, "main"),
+            prefix_scan: GpuPrefixScan::new(ctx, (max_bodies * 2).max(max_contacts * 2).max(1)),
+            body_contact_counts: GpuBuffer::new(ctx, max_bodies.max(1)),
+            body_contact_offsets: GpuBuffer::new(ctx, max_bodies.max(1)),
+            body_contact_heads: GpuBuffer::new(ctx, max_bodies.max(1)),
+        }
+    }
+}
+
+/// GPU coloring state for adjacency-based parallel body graph coloring.
 struct GpuColoringState {
     reset_kernel: ComputeKernel,
     step_kernel: ComputeKernel,
+    unfinished: GpuAtomicCounter,
+    radix_sort: GpuRadixSort,
     body_colors: GpuBuffer<u32>,
     body_priorities: GpuBuffer<u32>,
     params_buf: wgpu::Buffer,
@@ -460,6 +528,8 @@ impl GpuColoringState {
         Self {
             reset_kernel,
             step_kernel,
+            unfinished: GpuAtomicCounter::new(ctx),
+            radix_sort: GpuRadixSort::new(ctx, max_bodies.max(1)),
             body_colors,
             body_priorities,
             params_buf,
@@ -481,6 +551,9 @@ impl GpuPipeline {
         let primal_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_PRIMAL_WGSL, "main");
         let dual_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_DUAL_WGSL, "main");
         let extract_kernel = ComputeKernel::from_wgsl(&ctx, EXTRACT_VELOCITY_WGSL, "main");
+        let event_pairs_kernel = ComputeKernel::from_wgsl(&ctx, EVENT_PAIR_KEYS_WGSL, "main");
+        let warmstart_prepare_kernel =
+            ComputeKernel::from_wgsl(&ctx, WARMSTART_BUILD_KEYS_WGSL, "main");
         let warmstart_kernel = ComputeKernel::from_wgsl(&ctx, WARMSTART_MATCH_WGSL, "main");
 
         let body_states = PingPongBuffer::new(&ctx, max_bodies);
@@ -503,6 +576,7 @@ impl GpuPipeline {
         let body_contact_ranges = GpuBuffer::new(&ctx, max_bodies.max(1));
         let body_contact_indices = GpuBuffer::new(&ctx, (max_contacts * 2).max(1));
         let active_body_flags = GpuBuffer::new(&ctx, max_bodies.max(1));
+        let event_pair_keys = GpuBuffer::new(&ctx, max_contacts.max(1));
         let lbvh_subset_aabbs = GpuBuffer::new(&ctx, max_bodies.max(1));
 
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -520,6 +594,9 @@ impl GpuPipeline {
         });
 
         let prev_contacts: GpuBuffer<Contact3D> = GpuBuffer::new(&ctx, max_contacts);
+        let prev_contact_hashes = GpuBuffer::new(&ctx, max_contacts.max(1));
+        let prev_contact_indices = GpuBuffer::new(&ctx, max_contacts.max(1));
+        let warmstart_sort = GpuRadixSort::new(&ctx, max_contacts.max(1));
         let warmstart_params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("WarmstartParams uniform"),
             size: std::mem::size_of::<WarmstartParamsGpu>() as u64,
@@ -528,6 +605,7 @@ impl GpuPipeline {
         });
 
         let gpu_lbvh = GpuLbvh::new(&ctx, max_bodies);
+        let gpu_graph = GpuGraphState::new(&ctx, max_bodies, max_contacts * 2);
         let gpu_coloring = GpuColoringState::new(&ctx, max_bodies);
 
         Self {
@@ -539,6 +617,8 @@ impl GpuPipeline {
             primal_kernel,
             dual_kernel,
             extract_kernel,
+            event_pairs_kernel,
+            warmstart_prepare_kernel,
             warmstart_kernel,
             body_states,
             body_props,
@@ -560,16 +640,17 @@ impl GpuPipeline {
             body_contact_ranges,
             body_contact_indices,
             active_body_flags,
+            event_pair_keys,
             lbvh_subset_aabbs,
+            gpu_graph,
             gpu_coloring,
             prev_contacts,
+            prev_contact_hashes,
+            prev_contact_indices,
             prev_contact_count: 0,
             warmstart_params_uniform,
             warmstart_bg_cache: CachedBindGroup::default(),
-            cached_body_graph: Vec::new(),
-            cached_body_order: Vec::new(),
-            cached_color_groups: Vec::new(),
-            cached_color_num_bodies: 0,
+            warmstart_sort,
             compound_shapes_data: Vec::new(),
             compound_children_data: Vec::new(),
             sphere_data_cpu: Vec::new(),
@@ -1241,40 +1322,23 @@ impl GpuPipeline {
         }
     }
 
-    /// Body-colored AVBD solve in position space.
-    fn run_colored_solve(
+    fn run_colored_solve_device(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
-        contacts: &mut [Contact3D],
+        contact_count: u32,
     ) {
-        self.apply_free_motion(num_bodies, contacts);
-        if contacts.is_empty() {
+        if contact_count == 0 {
             return;
         }
-
-        // GPU graph coloring: Luby-style parallel body coloring on GPU.
-        let graph_key = body_graph_key_3d(contacts);
-        if self.cached_color_num_bodies != num_bodies || self.cached_body_graph != graph_key {
-            let (body_order, color_groups) = self.gpu_color_bodies(num_bodies, contacts);
-            self.cached_color_num_bodies = num_bodies;
-            self.cached_body_graph = graph_key;
-            self.cached_body_order = body_order;
-            self.cached_color_groups = color_groups;
-        }
-        let adjacency = build_body_contact_adjacency(num_bodies, contacts);
-        self.contacts.upload(&self.ctx, contacts);
-        self.contact_count.write(&self.ctx, contacts.len() as u32);
-        self.body_order.upload(&self.ctx, &self.cached_body_order);
-        self.body_contact_ranges
-            .upload(&self.ctx, &adjacency.ranges);
-        self.body_contact_indices
-            .upload(&self.ctx, &adjacency.indices);
-        let color_groups = self.cached_color_groups.clone();
+        self.dispatch_gpu_solve_graph(num_bodies, contact_count);
+        let _ = self.free_motion_bind_group();
+        let free_motion_bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
+        self.run_pass("free_motion", &self.free_motion_kernel, free_motion_bg, num_bodies);
+        let color_groups = self.dispatch_gpu_coloring(num_bodies);
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
         let _ = self.dual_bind_group();
-        let contact_count = contacts.len() as u32;
         let primal_bind_groups = &self.primal_bg_cache.bind_groups;
         let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
         let mut encoder = self
@@ -1295,7 +1359,7 @@ impl GpuPipeline {
                         continue;
                     }
                     pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
-                    pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
+                    pass.dispatch_workgroups(count, 1, 1);
                 }
             }
             {
@@ -1309,6 +1373,22 @@ impl GpuPipeline {
             }
         }
         self.ctx.queue.submit(Some(encoder.finish()));
+    }
+
+    /// Body-colored AVBD solve in position space.
+    fn run_colored_solve(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        contacts: &mut [Contact3D],
+    ) {
+        if contacts.is_empty() {
+            return;
+        }
+        self.contacts.upload(&self.ctx, contacts);
+        let contact_count = contacts.len() as u32;
+        self.contact_count.write(&self.ctx, contact_count);
+        self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
     }
 
     /// Body-colored AVBD solve in position space (async, for WASM/WebGPU).
@@ -1382,35 +1462,51 @@ impl GpuPipeline {
         self.ctx.queue.submit(Some(encoder.finish()));
     }
 
-    /// Run the full GPU physics step and download updated states.
-    pub fn step(&mut self, num_bodies: u32, solver_iterations: u32) -> Vec<RigidBodyState3D> {
+    /// Run the GPU-only happy-path step: no contact readback and GPU-owned persistence.
+    pub fn step_fast_timed(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) -> Vec<RigidBodyState3D> {
+        use std::time::Instant;
+
         if num_bodies == 0 {
             return Vec::new();
         }
 
-        let compound_contacts = self.run_detection(num_bodies);
+        let compound_contacts = self.run_detection_timed(num_bodies, timings);
+        assert!(
+            compound_contacts.is_empty(),
+            "GPU-only happy path does not support CPU compound contact expansion"
+        );
 
-        let gpu_count = self.contact_count.read(&self.ctx) as usize;
-        let mut contacts = if gpu_count > 0 {
-            self.contacts.set_len(gpu_count as u32);
-            let mut c = self.contacts.download(&self.ctx);
-            c.truncate(gpu_count);
-            c
+        timings.contact_fetch_ms = 0.0;
+        let t_solve = Instant::now();
+        let contact_count = self.contact_count.read(&self.ctx);
+        if contact_count > 0 {
+            self.contacts.set_len(contact_count);
+            self.dispatch_gpu_warmstart(contact_count);
+            self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
+            self.swap_contact_buffers(contact_count);
         } else {
-            Vec::new()
-        };
-
-        // Merge CPU-generated compound contacts with GPU narrowphase contacts
-        contacts.extend(compound_contacts);
-
-        if !contacts.is_empty() {
-            self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
+            self.apply_free_motion(num_bodies, &[]);
+            self.prev_contact_count = 0;
         }
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
+        let t_extract = Instant::now();
         self.dispatch_extract(num_bodies);
         let states = self.body_states.download(&self.ctx);
         self.body_states.swap();
+        timings.extract_ms = t_extract.elapsed().as_secs_f32() * 1000.0;
         states
+    }
+
+    /// Run the full GPU physics step and download updated states.
+    pub fn step(&mut self, num_bodies: u32, solver_iterations: u32) -> Vec<RigidBodyState3D> {
+        let mut timings = rubble_gpu::StepTimingsMs::default();
+        self.step_fast_timed(num_bodies, solver_iterations, &mut timings)
     }
 
     /// Run the full GPU physics step with warm-starting support.
@@ -1867,6 +1963,51 @@ impl GpuPipeline {
         self.contacts.set_len(count as u32);
         let all = self.contacts.download(&self.ctx);
         all.into_iter().take(count).collect()
+    }
+
+    pub fn download_contact_pairs(&mut self) -> Vec<(u32, u32)> {
+        let count = self.contact_count.read(&self.ctx);
+        if count == 0 {
+            return Vec::new();
+        }
+
+        self.event_pair_keys
+            .grow_if_needed(&self.ctx, count as usize);
+        self.event_pair_keys.set_len(count);
+
+        let bg = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("event_pair_keys"),
+                layout: self.event_pairs_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.event_pair_keys.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.contact_count.buffer().as_entire_binding(),
+                    },
+                ],
+            });
+        self.run_pass("event_pair_keys", &self.event_pairs_kernel, &bg, count);
+
+        let mut pairs: Vec<(u32, u32)> = self
+            .event_pair_keys
+            .download(&self.ctx)
+            .into_iter()
+            .take(count as usize)
+            .map(|pair| (pair[0], pair[1]))
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
     }
 
     /// Async version of `run_detection` for WASM/WebGPU.
@@ -2602,164 +2743,345 @@ impl GpuPipeline {
         self.run_pass("extract_vel", &self.extract_kernel, bg, num_bodies);
     }
 
-    /// GPU Luby body coloring: color bodies so no two adjacent bodies share a color.
-    /// Sync variant for native (uses blocking buffer download).
-    fn gpu_color_bodies(
-        &mut self,
-        num_bodies: u32,
-        contacts: &[Contact3D],
-    ) -> (Vec<u32>, Vec<(u32, u32)>) {
-        if contacts.is_empty() {
-            return (Vec::new(), Vec::new());
+    fn dispatch_gpu_solve_graph(&mut self, num_bodies: u32, contact_count: u32) {
+        if num_bodies == 0 || contact_count == 0 {
+            return;
         }
-        self.dispatch_gpu_coloring(num_bodies, contacts.len() as u32);
-        self.gpu_coloring.body_colors.set_len(num_bodies);
-        let colors = self.gpu_coloring.body_colors.download(&self.ctx);
-        Self::finalize_coloring(num_bodies, contacts, &colors, COLORING_MAX_ITERATIONS)
-    }
 
-    /// GPU Luby body coloring: async variant for WASM (uses non-blocking download).
-    #[cfg(target_arch = "wasm32")]
-    async fn gpu_color_bodies_async(
-        &mut self,
-        num_bodies: u32,
-        contacts: &[Contact3D],
-    ) -> (Vec<u32>, Vec<(u32, u32)>) {
-        if contacts.is_empty() {
-            return (Vec::new(), Vec::new());
-        }
-        self.dispatch_gpu_coloring(num_bodies, contacts.len() as u32);
-        self.gpu_coloring.body_colors.set_len(num_bodies);
-        let colors = self
-            .gpu_coloring
-            .body_colors
-            .download_async(&self.ctx)
-            .await;
-        Self::finalize_coloring(num_bodies, contacts, &colors, COLORING_MAX_ITERATIONS)
-    }
-
-    /// Run the GPU coloring dispatches (reset + N Luby iterations).
-    /// Does NOT download results — caller is responsible for downloading body_colors.
-    fn dispatch_gpu_coloring(&mut self, num_bodies: u32, contact_count: u32) {
         let ctx = &self.ctx;
-        let contacts_buf = self.contacts.buffer();
-        let cs = &mut self.gpu_coloring;
+        self.gpu_graph
+            .body_contact_counts
+            .grow_if_needed(ctx, num_bodies as usize);
+        self.gpu_graph
+            .body_contact_offsets
+            .grow_if_needed(ctx, num_bodies as usize);
+        self.gpu_graph
+            .body_contact_heads
+            .grow_if_needed(ctx, num_bodies as usize);
+        self.gpu_graph.body_contact_counts.set_len(num_bodies);
+        self.gpu_graph.body_contact_offsets.set_len(num_bodies);
+        self.gpu_graph.body_contact_heads.set_len(num_bodies);
+        self.body_contact_ranges.grow_if_needed(ctx, num_bodies as usize);
+        self.body_contact_ranges.set_len(num_bodies);
+        self.active_body_flags.grow_if_needed(ctx, num_bodies as usize);
+        self.active_body_flags.set_len(num_bodies);
+        self.body_contact_indices
+            .grow_if_needed(ctx, (contact_count as usize).saturating_mul(2).max(1));
+        self.body_contact_indices.set_len(contact_count.saturating_mul(2));
 
-        cs.frame_counter = cs.frame_counter.wrapping_add(1);
-        cs.body_colors.grow_if_needed(ctx, num_bodies as usize);
-        cs.body_priorities.grow_if_needed(ctx, num_bodies as usize);
+        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("adjacency params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue
+            .write_buffer(&params_buf, 0, bytemuck::cast_slice(&[num_bodies, 0u32, 0, 0]));
 
-        // Phase 1: Reset — mark all bodies uncolored, assign random priorities
         {
-            let params: [u32; 4] = [num_bodies, contact_count, cs.frame_counter, 0];
-            ctx.queue
-                .write_buffer(&cs.params_buf, 0, bytemuck::cast_slice(&params));
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("coloring_reset"),
-                layout: cs.reset_kernel.bind_group_layout(),
+                label: Some("adjacency_reset"),
+                layout: self.gpu_graph.reset_kernel.bind_group_layout(),
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: cs.body_colors.buffer().as_entire_binding(),
+                        resource: self
+                            .gpu_graph
+                            .body_contact_counts
+                            .buffer()
+                            .as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: cs.body_priorities.buffer().as_entire_binding(),
+                        resource: self.active_body_flags.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: cs.params_buf.as_entire_binding(),
+                        resource: params_buf.as_entire_binding(),
                     },
                 ],
             });
-            let mut encoder = ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("coloring_reset"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(cs.reset_kernel.pipeline());
-                pass.set_bind_group(0, &bg, &[]);
-                pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
-            }
-            ctx.queue.submit(Some(encoder.finish()));
+            self.run_pass("adjacency_reset", &self.gpu_graph.reset_kernel, &bg, num_bodies);
         }
 
-        // Phase 2: Iterative Luby coloring (fixed iteration count, no blocking reads)
-        for current_color in 0..COLORING_MAX_ITERATIONS {
-            let params: [u32; 4] = [num_bodies, contact_count, current_color, 0];
-            ctx.queue
-                .write_buffer(&cs.params_buf, 0, bytemuck::cast_slice(&params));
-
+        {
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("coloring_step"),
-                layout: cs.step_kernel.bind_group_layout(),
+                label: Some("adjacency_count"),
+                layout: self.gpu_graph.count_kernel.bind_group_layout(),
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: cs.body_colors.buffer().as_entire_binding(),
+                        resource: self.contacts.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: cs.body_priorities.buffer().as_entire_binding(),
+                        resource: self
+                            .gpu_graph
+                            .body_contact_counts
+                            .buffer()
+                            .as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: contacts_buf.as_entire_binding(),
+                        resource: self.active_body_flags.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: cs.params_buf.as_entire_binding(),
+                        resource: self.contact_count.buffer().as_entire_binding(),
                     },
                 ],
             });
+            self.run_pass(
+                "adjacency_count",
+                &self.gpu_graph.count_kernel,
+                &bg,
+                contact_count,
+            );
+        }
+
+        {
+            let byte_count = (num_bodies as u64) * std::mem::size_of::<u32>() as u64;
             let mut encoder = ctx
                 .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("coloring_step"),
-                    timestamp_writes: None,
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("adjacency_copy_counts"),
                 });
-                pass.set_pipeline(cs.step_kernel.pipeline());
-                pass.set_bind_group(0, &bg, &[]);
-                pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
-            }
+            encoder.copy_buffer_to_buffer(
+                self.gpu_graph.body_contact_counts.buffer(),
+                0,
+                self.gpu_graph.body_contact_offsets.buffer(),
+                0,
+                byte_count,
+            );
             ctx.queue.submit(Some(encoder.finish()));
+        }
+
+        self.gpu_graph
+            .prefix_scan
+            .exclusive_scan(ctx, &mut self.gpu_graph.body_contact_offsets);
+
+        {
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("adjacency_init_ranges"),
+                layout: self.gpu_graph.init_ranges_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self
+                            .gpu_graph
+                            .body_contact_counts
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self
+                            .gpu_graph
+                            .body_contact_offsets
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.body_contact_ranges.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self
+                            .gpu_graph
+                            .body_contact_heads
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            self.run_pass(
+                "adjacency_init_ranges",
+                &self.gpu_graph.init_ranges_kernel,
+                &bg,
+                num_bodies,
+            );
+        }
+
+        {
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("adjacency_scatter"),
+                layout: self.gpu_graph.scatter_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self
+                            .gpu_graph
+                            .body_contact_heads
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.body_contact_indices.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.contact_count.buffer().as_entire_binding(),
+                    },
+                ],
+            });
+            self.run_pass(
+                "adjacency_scatter",
+                &self.gpu_graph.scatter_kernel,
+                &bg,
+                contact_count,
+            );
         }
     }
 
-    /// Given downloaded per-body colors, build body_order and color_groups on CPU.
-    fn finalize_coloring(
-        num_bodies: u32,
-        contacts: &[Contact3D],
-        colors: &[u32],
-        num_colors: u32,
-    ) -> (Vec<u32>, Vec<(u32, u32)>) {
-        let mut active = vec![false; num_bodies as usize];
-        for c in contacts {
-            active[c.body_a as usize] = true;
-            active[c.body_b as usize] = true;
-        }
+    fn build_color_groups_from_sorted_colors(colors: &[u32]) -> Vec<(u32, u32)> {
+        const INACTIVE_COLOR: u32 = 0xFFFFFFFE;
+        const UNCOLORED: u32 = 0xFFFFFFFF;
 
-        let mut body_order = Vec::new();
         let mut groups = Vec::new();
-        for color in 0..num_colors {
-            let offset = body_order.len() as u32;
-            for (body_idx, &body_color) in colors.iter().enumerate() {
-                if active[body_idx] && body_color == color {
-                    body_order.push(body_idx as u32);
-                }
+        let mut idx = 0usize;
+        while idx < colors.len() {
+            let color = colors[idx];
+            if color == INACTIVE_COLOR || color == UNCOLORED {
+                break;
             }
-            let count = body_order.len() as u32 - offset;
-            if count > 0 {
-                groups.push((offset, count));
+            let start = idx;
+            while idx < colors.len() && colors[idx] == color {
+                idx += 1;
+            }
+            groups.push((start as u32, (idx - start) as u32));
+        }
+        groups
+    }
+
+    fn dispatch_gpu_coloring(&mut self, num_bodies: u32) -> Vec<(u32, u32)> {
+        if num_bodies == 0 {
+            return Vec::new();
+        }
+
+        let ctx = &self.ctx;
+        self.gpu_coloring.frame_counter = self.gpu_coloring.frame_counter.wrapping_add(1);
+        self.gpu_coloring
+            .body_colors
+            .grow_if_needed(ctx, num_bodies as usize);
+        self.gpu_coloring
+            .body_priorities
+            .grow_if_needed(ctx, num_bodies as usize);
+        self.gpu_coloring.body_colors.set_len(num_bodies);
+        self.gpu_coloring.body_priorities.set_len(num_bodies);
+        self.body_order.grow_if_needed(ctx, num_bodies as usize);
+        self.body_order.set_len(num_bodies);
+
+        {
+            let params: [u32; 4] = [num_bodies, 0u32, self.gpu_coloring.frame_counter, 0u32];
+            ctx.queue
+                .write_buffer(&self.gpu_coloring.params_buf, 0, bytemuck::cast_slice(&params));
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("coloring_reset"),
+                layout: self.gpu_coloring.reset_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self
+                            .gpu_coloring
+                            .body_colors
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self
+                            .gpu_coloring
+                            .body_priorities
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.body_order.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.active_body_flags.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.gpu_coloring.params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            self.run_pass("coloring_reset", &self.gpu_coloring.reset_kernel, &bg, num_bodies);
+        }
+
+        for current_color in 0..num_bodies {
+            self.gpu_coloring.unfinished.reset(ctx);
+            let params: [u32; 4] = [num_bodies, 0u32, current_color, 0u32];
+            ctx.queue
+                .write_buffer(&self.gpu_coloring.params_buf, 0, bytemuck::cast_slice(&params));
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("coloring_step"),
+                layout: self.gpu_coloring.step_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self
+                            .gpu_coloring
+                            .body_colors
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self
+                            .gpu_coloring
+                            .body_priorities
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.body_contact_ranges.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.body_contact_indices.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.gpu_coloring.params_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.gpu_coloring.unfinished.buffer().as_entire_binding(),
+                    },
+                ],
+            });
+            self.run_pass("coloring_step", &self.gpu_coloring.step_kernel, &bg, num_bodies);
+            if self.gpu_coloring.unfinished.read(ctx) == 0 {
+                break;
             }
         }
 
-        (body_order, groups)
+        self.gpu_coloring.radix_sort.sort_key_value_in_place(
+            ctx,
+            &mut self.gpu_coloring.body_colors,
+            &mut self.body_order,
+        );
+        let sorted_colors = self.gpu_coloring.body_colors.download(ctx);
+        Self::build_color_groups_from_sorted_colors(&sorted_colors)
     }
 
     /// Dispatch GPU warmstart: match new contacts against prev-frame contacts on GPU.
@@ -2775,8 +3097,71 @@ impl GpuPipeline {
         self.prev_contacts.grow_if_needed(&self.ctx, warm.len());
         self.prev_contacts.upload(&self.ctx, warm);
         self.prev_contact_count = warm.len() as u32;
+        self.prepare_prev_contact_lookup(self.prev_contact_count);
         // Invalidate cached warmstart bind group (buffer may have been regrown)
         self.warmstart_bg_cache.key = None;
+    }
+
+    fn prepare_prev_contact_lookup(&mut self, prev_count: u32) {
+        if prev_count == 0 {
+            return;
+        }
+
+        self.prev_contact_hashes
+            .grow_if_needed(&self.ctx, prev_count as usize);
+        self.prev_contact_indices
+            .grow_if_needed(&self.ctx, prev_count as usize);
+        self.prev_contact_hashes.set_len(prev_count);
+        self.prev_contact_indices.set_len(prev_count);
+
+        let count_buf = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("warmstart prev count"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.ctx.queue.write_buffer(
+            &count_buf,
+            0,
+            bytemuck::cast_slice(&[prev_count, 0u32, 0u32, 0u32]),
+        );
+
+        let bg = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("warmstart_prepare_bg"),
+                layout: self.warmstart_prepare_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.prev_contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.prev_contact_hashes.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.prev_contact_indices.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: count_buf.as_entire_binding(),
+                    },
+                ],
+            });
+        self.run_pass(
+            "warmstart_prepare",
+            &self.warmstart_prepare_kernel,
+            &bg,
+            prev_count,
+        );
+        self.warmstart_sort.sort_key_value_in_place(
+            &self.ctx,
+            &mut self.prev_contact_hashes,
+            &mut self.prev_contact_indices,
+        );
     }
 
     fn dispatch_gpu_warmstart(&mut self, new_count: u32) {
@@ -2798,7 +3183,11 @@ impl GpuPipeline {
         );
 
         // Build or reuse bind group (keyed on buffer sizes to detect regrowth)
-        let key = [self.prev_contacts.byte_size(), self.contacts.byte_size(), 0];
+        let key = [
+            self.prev_contacts.byte_size(),
+            self.prev_contact_hashes.byte_size(),
+            self.contacts.byte_size(),
+        ];
         if self.warmstart_bg_cache.key != Some(key) {
             let layout = self.warmstart_kernel.pipeline().get_bind_group_layout(0);
             let bg = self
@@ -2814,10 +3203,18 @@ impl GpuPipeline {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: self.contacts.buffer().as_entire_binding(),
+                            resource: self.prev_contact_hashes.buffer().as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
+                            resource: self.prev_contact_indices.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.contacts.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
                             resource: self.warmstart_params_uniform.as_entire_binding(),
                         },
                     ],
@@ -2850,6 +3247,7 @@ impl GpuPipeline {
             );
             self.ctx.queue.submit(Some(encoder.finish()));
             self.prev_contact_count = contact_count;
+            self.prepare_prev_contact_lookup(contact_count);
             // Invalidate cached bind group since buffer contents changed
             self.warmstart_bg_cache.key = None;
         } else {
@@ -2882,89 +3280,44 @@ impl GpuPipeline {
 }
 
 // ---------------------------------------------------------------------------
-// Body contact adjacency (per-body contact index lists for primal solver)
-// ---------------------------------------------------------------------------
-
-struct BodyContactAdjacency3D {
-    ranges: Vec<[u32; 2]>,
-    indices: Vec<u32>,
-}
-
-fn build_body_contact_adjacency(num_bodies: u32, contacts: &[Contact3D]) -> BodyContactAdjacency3D {
-    let mut counts = vec![0u32; num_bodies as usize];
-    for contact in contacts {
-        counts[contact.body_a as usize] += 1;
-        counts[contact.body_b as usize] += 1;
-    }
-
-    let mut ranges = vec![[0u32; 2]; num_bodies as usize];
-    let mut offset = 0u32;
-    for (body_idx, &count) in counts.iter().enumerate() {
-        ranges[body_idx] = [offset, count];
-        offset += count;
-    }
-
-    let mut write_heads: Vec<u32> = ranges.iter().map(|range| range[0]).collect();
-    let mut indices = vec![0u32; offset as usize];
-    for (contact_idx, contact) in contacts.iter().enumerate() {
-        let contact_idx = contact_idx as u32;
-
-        let head_a = &mut write_heads[contact.body_a as usize];
-        indices[*head_a as usize] = contact_idx;
-        *head_a += 1;
-
-        let head_b = &mut write_heads[contact.body_b as usize];
-        indices[*head_b as usize] = contact_idx;
-        *head_b += 1;
-    }
-
-    BodyContactAdjacency3D { ranges, indices }
-}
-
-fn body_graph_key_3d(contacts: &[Contact3D]) -> Vec<(u32, u32)> {
-    let mut pairs: Vec<(u32, u32)> = contacts
-        .iter()
-        .map(|c| (c.body_a.min(c.body_b), c.body_a.max(c.body_b)))
-        .collect();
-    pairs.sort_unstable();
-    pairs.dedup();
-    pairs
-}
-
-// ---------------------------------------------------------------------------
 // Contact persistence + collision events
 // ---------------------------------------------------------------------------
 
 /// Tracks contacts frame-to-frame for warm-starting and collision events.
 pub struct ContactPersistence3D {
     prev_contacts: Vec<Contact3D>,
+    prev_pairs: HashSet<(u32, u32)>,
 }
 
 impl ContactPersistence3D {
     pub fn new() -> Self {
         Self {
             prev_contacts: Vec::new(),
+            prev_pairs: HashSet::new(),
         }
     }
 
     /// Update with new contacts. Returns collision events (Started / Ended).
     pub fn update(&mut self, new_contacts: &[Contact3D]) -> Vec<CollisionEvent> {
-        let mut events = Vec::new();
-
-        let prev_pairs: HashSet<(u32, u32)> = self
-            .prev_contacts
-            .iter()
-            .map(|c| (c.body_a.min(c.body_b), c.body_a.max(c.body_b)))
-            .collect();
-
         let new_pairs: HashSet<(u32, u32)> = new_contacts
             .iter()
             .map(|c| (c.body_a.min(c.body_b), c.body_a.max(c.body_b)))
             .collect();
+        let events = self.update_pair_set(new_pairs);
+        self.prev_contacts = new_contacts.to_vec();
+        events
+    }
 
-        // Started: in new but not in prev
+    pub fn update_pairs(&mut self, new_pairs: &[(u32, u32)]) -> Vec<CollisionEvent> {
+        self.prev_contacts.clear();
+        self.update_pair_set(new_pairs.iter().copied().collect())
+    }
+
+    fn update_pair_set(&mut self, new_pairs: HashSet<(u32, u32)>) -> Vec<CollisionEvent> {
+        let mut events = Vec::new();
+
         for &(a, b) in &new_pairs {
-            if !prev_pairs.contains(&(a, b)) {
+            if !self.prev_pairs.contains(&(a, b)) {
                 events.push(CollisionEvent::Started {
                     body_a: BodyHandle::new(a, 0),
                     body_b: BodyHandle::new(b, 0),
@@ -2972,8 +3325,7 @@ impl ContactPersistence3D {
             }
         }
 
-        // Ended: in prev but not in new
-        for &(a, b) in &prev_pairs {
+        for &(a, b) in &self.prev_pairs {
             if !new_pairs.contains(&(a, b)) {
                 events.push(CollisionEvent::Ended {
                     body_a: BodyHandle::new(a, 0),
@@ -2982,7 +3334,7 @@ impl ContactPersistence3D {
             }
         }
 
-        self.prev_contacts = new_contacts.to_vec();
+        self.prev_pairs = new_pairs;
         events
     }
 

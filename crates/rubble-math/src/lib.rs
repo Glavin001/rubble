@@ -155,8 +155,8 @@ impl RigidBodyState2D {
 // ---------------------------------------------------------------------------
 // Static properties (3D)
 //
-// The inverse inertia tensor is stored as 3 rows, each padded to vec4 for
-// GPU alignment. Total: 3*16 + 4*4 + 4 = 68 -> rounds to 80 with padding.
+// The inverse and forward inertia tensors are stored as padded vec4 rows so
+// the hot solver path can use either form without per-body matrix inversion.
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -168,6 +168,12 @@ pub struct RigidBodyProps3D {
     pub inv_inertia_row1: Vec4,
     /// Row 2.
     pub inv_inertia_row2: Vec4,
+    /// Row 0 of the 3x3 forward inertia tensor (local frame), padded to vec4.
+    pub inertia_row0: Vec4,
+    /// Row 1.
+    pub inertia_row1: Vec4,
+    /// Row 2.
+    pub inertia_row2: Vec4,
     /// Friction coefficient.
     pub friction: f32,
     /// Shape type (see `SHAPE_*` constants).
@@ -186,12 +192,47 @@ impl RigidBodyProps3D {
         shape_index: u32,
         flags: u32,
     ) -> Self {
+        let inertia = if inv_inertia.determinant().abs() > 1.0e-12 {
+            inv_inertia.inverse()
+        } else {
+            glam::Mat3::ZERO
+        };
+        Self::new_with_inertia(inv_inertia, inertia, friction, shape_type, shape_index, flags)
+    }
+
+    pub fn new_with_inertia(
+        inv_inertia: glam::Mat3,
+        inertia: glam::Mat3,
+        friction: f32,
+        shape_type: u32,
+        shape_index: u32,
+        flags: u32,
+    ) -> Self {
         let cols = inv_inertia.to_cols_array_2d();
+        let inertia_cols = inertia.to_cols_array_2d();
         // glam Mat3 is column-major; we store each column padded to vec4.
         Self {
             inv_inertia_row0: Vec4::new(cols[0][0], cols[0][1], cols[0][2], 0.0),
             inv_inertia_row1: Vec4::new(cols[1][0], cols[1][1], cols[1][2], 0.0),
             inv_inertia_row2: Vec4::new(cols[2][0], cols[2][1], cols[2][2], 0.0),
+            inertia_row0: Vec4::new(
+                inertia_cols[0][0],
+                inertia_cols[0][1],
+                inertia_cols[0][2],
+                0.0,
+            ),
+            inertia_row1: Vec4::new(
+                inertia_cols[1][0],
+                inertia_cols[1][1],
+                inertia_cols[1][2],
+                0.0,
+            ),
+            inertia_row2: Vec4::new(
+                inertia_cols[2][0],
+                inertia_cols[2][1],
+                inertia_cols[2][2],
+                0.0,
+            ),
             friction,
             shape_type,
             shape_index,
@@ -205,6 +246,15 @@ impl RigidBodyProps3D {
             self.inv_inertia_row0.truncate(),
             self.inv_inertia_row1.truncate(),
             self.inv_inertia_row2.truncate(),
+        )
+    }
+
+    /// Reconstruct the forward inertia tensor as a `glam::Mat3`.
+    pub fn inertia(&self) -> glam::Mat3 {
+        glam::Mat3::from_cols(
+            self.inertia_row0.truncate(),
+            self.inertia_row1.truncate(),
+            self.inertia_row2.truncate(),
         )
     }
 }
@@ -507,7 +557,7 @@ pub enum CollisionEvent {
 
 assert_gpu_layout!(RigidBodyState3D, 64, 16);
 assert_gpu_layout!(RigidBodyState2D, 64, 16);
-assert_gpu_layout!(RigidBodyProps3D, 64, 4);
+assert_gpu_layout!(RigidBodyProps3D, 112, 4);
 assert_gpu_layout!(Contact3D, 128, 4);
 assert_gpu_layout!(Contact2D, 80, 4);
 assert_gpu_layout!(Aabb3D, 32, 16);
@@ -738,10 +788,16 @@ mod tests {
         let mat = glam::Mat3::from_diagonal(glam::Vec3::new(0.1, 0.2, 0.3));
         let props = RigidBodyProps3D::new(mat, 0.5, SHAPE_BOX, 0, FLAG_STATIC);
         let recovered = props.inv_inertia();
+        let recovered_forward = props.inertia();
         let cols_orig = mat.to_cols_array();
         let cols_back = recovered.to_cols_array();
         for (a, b) in cols_orig.iter().zip(cols_back.iter()) {
             assert!((a - b).abs() < 1e-7);
+        }
+        let expected_forward = mat.inverse().to_cols_array();
+        let cols_forward = recovered_forward.to_cols_array();
+        for (a, b) in expected_forward.iter().zip(cols_forward.iter()) {
+            assert!((a - b).abs() < 1e-5);
         }
         assert_eq!(props.friction, 0.5);
         assert_eq!(props.shape_type, SHAPE_BOX);

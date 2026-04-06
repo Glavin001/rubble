@@ -131,9 +131,9 @@ impl Default for RigidBodyDesc {
 // Inertia computation
 // ---------------------------------------------------------------------------
 
-/// Compute the inverse inertia tensor for a shape given its mass.
+/// Compute the local forward inertia tensor for a shape given its mass.
 /// Returns `Mat3::ZERO` for static bodies (mass <= 0).
-fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
+fn compute_local_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
     if mass <= 0.0 {
         return Mat3::ZERO;
     }
@@ -210,7 +210,18 @@ fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
             )
         }
     };
-    Mat3::from_diagonal(Vec3::new(1.0 / diag.x, 1.0 / diag.y, 1.0 / diag.z))
+    Mat3::from_diagonal(diag)
+}
+
+/// Compute the inverse inertia tensor for a shape given its mass.
+/// Returns `Mat3::ZERO` for static bodies (mass <= 0).
+fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
+    let inertia = compute_local_inertia(shape, mass);
+    if inertia.determinant().abs() <= 1.0e-12 {
+        Mat3::ZERO
+    } else {
+        inertia.inverse()
+    }
 }
 
 /// Compute the local AABB for a child shape at a given local offset and rotation.
@@ -588,6 +599,7 @@ impl World {
             desc.angular_velocity,
         );
 
+        let inertia = compute_local_inertia(&desc.shape, desc.mass);
         let inv_inertia = compute_inertia(&desc.shape, desc.mass);
         let flags = if desc.mass <= 0.0 { FLAG_STATIC } else { 0 };
 
@@ -762,8 +774,14 @@ impl World {
             }
         };
 
-        let prop =
-            RigidBodyProps3D::new(inv_inertia, desc.friction, shape_type, shape_index, flags);
+        let prop = RigidBodyProps3D::new_with_inertia(
+            inv_inertia,
+            inertia,
+            desc.friction,
+            shape_type,
+            shape_index,
+            flags,
+        );
 
         if idx >= self.states.len() {
             self.states.resize(idx + 1, bytemuck::Zeroable::zeroed());
@@ -922,17 +940,34 @@ impl World {
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
-        let prev = self.contact_persistence.prev_contacts();
-        let warm = if prev.is_empty() { None } else { Some(prev) };
-        let (results, new_contacts) = self.gpu_pipeline.step_with_contacts_timed(
-            num_bodies,
-            self.config.solver_iterations,
-            warm,
-            &mut timings,
-        );
-
-        let events = self.contact_persistence.update(&new_contacts);
-        self.collision_events.extend(events);
+        let has_compounds = alive_indices.iter().any(|&i| {
+            matches!(self.shapes[i], ShapeDesc::Compound { .. })
+        });
+        let results = if has_compounds && alive_indices.len() > 1 {
+            let prev = self.contact_persistence.prev_contacts();
+            let warm = if prev.is_empty() { None } else { Some(prev) };
+            let (results, new_contacts) = self.gpu_pipeline.step_with_contacts_timed(
+                num_bodies,
+                self.config.solver_iterations,
+                warm,
+                &mut timings,
+            );
+            let events = self.contact_persistence.update(&new_contacts);
+            self.collision_events.extend(events);
+            results
+        } else {
+            let results = self.gpu_pipeline.step_fast_timed(
+                num_bodies,
+                self.config.solver_iterations,
+                &mut timings,
+            );
+            self.collision_events.clear();
+            let pair_events = self
+                .contact_persistence
+                .update_pairs(&self.gpu_pipeline.download_contact_pairs());
+            self.collision_events.extend(pair_events);
+            results
+        };
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {

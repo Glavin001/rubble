@@ -11,6 +11,9 @@ struct BodyProps {
     inv_inertia_row0: vec4<f32>,
     inv_inertia_row1: vec4<f32>,
     inv_inertia_row2: vec4<f32>,
+    inertia_row0:     vec4<f32>,
+    inertia_row1:     vec4<f32>,
+    inertia_row2:     vec4<f32>,
     friction:         f32,
     shape_type:       u32,
     shape_index:      u32,
@@ -18,13 +21,13 @@ struct BodyProps {
 };
 
 struct Contact {
-    point:          vec4<f32>, // (x, y, z, depth)
-    normal:         vec4<f32>, // (nx, ny, nz, 0)
-    tangent:        vec4<f32>, // tangent 1
+    point:          vec4<f32>,
+    normal:         vec4<f32>,
+    tangent:        vec4<f32>,
     local_anchor_a: vec4<f32>,
     local_anchor_b: vec4<f32>,
-    lambda:         vec4<f32>, // (lambda_n, lambda_t1, lambda_t2, 0)
-    penalty:        vec4<f32>, // (k_n, k_t1, k_t2, 0)
+    lambda:         vec4<f32>,
+    penalty:        vec4<f32>,
     body_a:         u32,
     body_b:         u32,
     feature_id:     u32,
@@ -49,16 +52,20 @@ struct Solve6 {
 };
 
 const CONTACT_MARGIN: f32 = 0.01;
+const BODY_LANES: u32 = 64u;
 
-@group(0) @binding(0) var<storage, read_write> bodies:            array<Body>;
-@group(0) @binding(1) var<storage, read>       inertial_states:   array<Body>;
-@group(0) @binding(2) var<storage, read>       props:             array<BodyProps>;
-@group(0) @binding(3) var<storage, read>       contacts:          array<Contact>;
-@group(0) @binding(4) var<storage, read>       body_order:        array<u32>;
-@group(0) @binding(5) var<uniform>             params:            SimParams;
+var<workgroup> partial_mtx: array<array<f32, 36>, BODY_LANES>;
+var<workgroup> partial_rhs: array<array<f32, 6>, BODY_LANES>;
+
+@group(0) @binding(0) var<storage, read_write> bodies:              array<Body>;
+@group(0) @binding(1) var<storage, read>       inertial_states:     array<Body>;
+@group(0) @binding(2) var<storage, read>       props:               array<BodyProps>;
+@group(0) @binding(3) var<storage, read>       contacts:            array<Contact>;
+@group(0) @binding(4) var<storage, read>       body_order:          array<u32>;
+@group(0) @binding(5) var<uniform>             params:              SimParams;
 @group(0) @binding(6) var<storage, read>       body_contact_ranges: array<vec2<u32>>;
 @group(0) @binding(7) var<storage, read>       body_contact_indices: array<u32>;
-@group(0) @binding(8) var<uniform>             solve_range:       SolveRange;
+@group(0) @binding(8) var<uniform>             solve_range:         SolveRange;
 
 fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(
@@ -106,48 +113,13 @@ fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
     );
 }
 
-fn mat3_from_props(p: BodyProps) -> mat3x3<f32> {
-    return mat3x3<f32>(p.inv_inertia_row0.xyz, p.inv_inertia_row1.xyz, p.inv_inertia_row2.xyz);
+fn mat3_from_inertia(p: BodyProps) -> mat3x3<f32> {
+    return mat3x3<f32>(p.inertia_row0.xyz, p.inertia_row1.xyz, p.inertia_row2.xyz);
 }
 
-fn mat3_transpose(m: mat3x3<f32>) -> mat3x3<f32> {
-    return transpose(m);
-}
-
-fn world_inv_inertia(p: BodyProps, q: vec4<f32>) -> mat3x3<f32> {
+fn world_inertia(p: BodyProps, q: vec4<f32>) -> mat3x3<f32> {
     let r = quat_to_mat3(q);
-    let local = mat3_from_props(p);
-    return r * local * mat3_transpose(r);
-}
-
-fn mat3_inverse_safe(m: mat3x3<f32>) -> mat3x3<f32> {
-    let a = m[0].x;
-    let d = m[0].y;
-    let g = m[0].z;
-    let b = m[1].x;
-    let e = m[1].y;
-    let h = m[1].z;
-    let c = m[2].x;
-    let f = m[2].y;
-    let i = m[2].z;
-
-    let det_m =
-        a * (e * i - f * h)
-        - b * (d * i - f * g)
-        + c * (d * h - e * g);
-    if abs(det_m) < 1e-10 {
-        return mat3x3<f32>(
-            vec3<f32>(0.0),
-            vec3<f32>(0.0),
-            vec3<f32>(0.0),
-        );
-    }
-    let inv_det = 1.0 / det_m;
-    return mat3x3<f32>(
-        vec3<f32>((e * i - f * h) * inv_det, (f * g - d * i) * inv_det, (d * h - e * g) * inv_det),
-        vec3<f32>((c * h - b * i) * inv_det, (a * i - c * g) * inv_det, (b * g - a * h) * inv_det),
-        vec3<f32>((b * f - c * e) * inv_det, (c * d - a * f) * inv_det, (a * e - b * d) * inv_det),
-    );
+    return r * mat3_from_inertia(p) * transpose(r);
 }
 
 fn small_angle_quat(theta: vec3<f32>) -> vec4<f32> {
@@ -167,59 +139,107 @@ fn rotation_delta_vec(current: vec4<f32>, reference: vec4<f32>) -> vec3<f32> {
     return dq.xyz / imag_len * angle;
 }
 
+fn mat_idx(r: u32, c: u32) -> u32 {
+    return r * 6u + c;
+}
+
 fn solve_6x6(m: array<array<f32, 6>, 6>, rhs: array<f32, 6>) -> Solve6 {
-    var aug: array<array<f32, 7>, 6>;
-    for (var i = 0u; i < 6u; i = i + 1u) {
-        for (var j = 0u; j < 6u; j = j + 1u) {
-            aug[i][j] = m[i][j];
-        }
-        aug[i][6] = rhs[i];
+    let eps = 1e-9;
+
+    let A11 = m[0][0];
+    let A21 = m[1][0];
+    let A22 = m[1][1];
+    let A31 = m[2][0];
+    let A32 = m[2][1];
+    let A33 = m[2][2];
+    let A41 = m[3][0];
+    let A42 = m[3][1];
+    let A43 = m[3][2];
+    let A44 = m[3][3];
+    let A51 = m[4][0];
+    let A52 = m[4][1];
+    let A53 = m[4][2];
+    let A54 = m[4][3];
+    let A55 = m[4][4];
+    let A61 = m[5][0];
+    let A62 = m[5][1];
+    let A63 = m[5][2];
+    let A64 = m[5][3];
+    let A65 = m[5][4];
+    let A66 = m[5][5];
+
+    if A11 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
     }
 
-    for (var k = 0u; k < 6u; k = k + 1u) {
-        var pivot = k;
-        var pivot_abs = abs(aug[k][k]);
-        for (var i = k + 1u; i < 6u; i = i + 1u) {
-            let cand = abs(aug[i][k]);
-            if cand > pivot_abs {
-                pivot = i;
-                pivot_abs = cand;
-            }
-        }
+    let D1 = A11;
+    let L21 = A21 / D1;
+    let L31 = A31 / D1;
+    let L41 = A41 / D1;
+    let L51 = A51 / D1;
+    let L61 = A61 / D1;
 
-        if pivot_abs < 1e-9 {
-            return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
-        }
-
-        if pivot != k {
-            let tmp = aug[k];
-            aug[k] = aug[pivot];
-            aug[pivot] = tmp;
-        }
-
-        let inv_pivot = 1.0 / aug[k][k];
-        for (var j = k; j < 7u; j = j + 1u) {
-            aug[k][j] = aug[k][j] * inv_pivot;
-        }
-
-        for (var i = 0u; i < 6u; i = i + 1u) {
-            if i == k {
-                continue;
-            }
-            let factor = aug[i][k];
-            if abs(factor) < 1e-12 {
-                continue;
-            }
-            for (var j = k; j < 7u; j = j + 1u) {
-                aug[i][j] = aug[i][j] - factor * aug[k][j];
-            }
-        }
+    let D2 = A22 - L21 * L21 * D1;
+    if D2 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
     }
 
-    return Solve6(
-        vec3<f32>(aug[0][6], aug[1][6], aug[2][6]),
-        vec3<f32>(aug[3][6], aug[4][6], aug[5][6]),
-    );
+    let L32 = (A32 - L21 * L31 * D1) / D2;
+    let L42 = (A42 - L21 * L41 * D1) / D2;
+    let L52 = (A52 - L21 * L51 * D1) / D2;
+    let L62 = (A62 - L21 * L61 * D1) / D2;
+
+    let D3 = A33 - (L31 * L31 * D1 + L32 * L32 * D2);
+    if D3 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let L43 = (A43 - L31 * L41 * D1 - L32 * L42 * D2) / D3;
+    let L53 = (A53 - L31 * L51 * D1 - L32 * L52 * D2) / D3;
+    let L63 = (A63 - L31 * L61 * D1 - L32 * L62 * D2) / D3;
+
+    let D4 = A44 - (L41 * L41 * D1 + L42 * L42 * D2 + L43 * L43 * D3);
+    if D4 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let L54 = (A54 - L41 * L51 * D1 - L42 * L52 * D2 - L43 * L53 * D3) / D4;
+    let L64 = (A64 - L41 * L61 * D1 - L42 * L62 * D2 - L43 * L63 * D3) / D4;
+
+    let D5 = A55 - (L51 * L51 * D1 + L52 * L52 * D2 + L53 * L53 * D3 + L54 * L54 * D4);
+    if D5 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let L65 = (A65 - L51 * L61 * D1 - L52 * L62 * D2 - L53 * L63 * D3 - L54 * L64 * D4) / D5;
+
+    let D6 = A66 - (L61 * L61 * D1 + L62 * L62 * D2 + L63 * L63 * D3 + L64 * L64 * D4 + L65 * L65 * D5);
+    if D6 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let y1 = rhs[0];
+    let y2 = rhs[1] - L21 * y1;
+    let y3 = rhs[2] - L31 * y1 - L32 * y2;
+    let y4 = rhs[3] - L41 * y1 - L42 * y2 - L43 * y3;
+    let y5 = rhs[4] - L51 * y1 - L52 * y2 - L53 * y3 - L54 * y4;
+    let y6 = rhs[5] - L61 * y1 - L62 * y2 - L63 * y3 - L64 * y4 - L65 * y5;
+
+    let z1 = y1 / D1;
+    let z2 = y2 / D2;
+    let z3 = y3 / D3;
+    let z4 = y4 / D4;
+    let z5 = y5 / D5;
+    let z6 = y6 / D6;
+
+    let x6 = z6;
+    let x5 = z5 - L65 * x6;
+    let x4 = z4 - L54 * x5 - L64 * x6;
+    let x3 = z3 - L43 * x4 - L53 * x5 - L63 * x6;
+    let x2 = z2 - L32 * x3 - L42 * x4 - L52 * x5 - L62 * x6;
+    let x1 = z1 - L21 * x2 - L31 * x3 - L41 * x4 - L51 * x5 - L61 * x6;
+
+    return Solve6(vec3<f32>(x1, x2, x3), vec3<f32>(x4, x5, x6));
 }
 
 fn accumulate_row(
@@ -227,21 +247,26 @@ fn accumulate_row(
     j_ang: vec3<f32>,
     stiffness: f32,
     force: f32,
-    m: ptr<function, array<array<f32, 6>, 6>>,
+    m: ptr<function, array<f32, 36>>,
     rhs: ptr<function, array<f32, 6>>,
 ) {
     let j = array<f32, 6>(j_lin.x, j_lin.y, j_lin.z, j_ang.x, j_ang.y, j_ang.z);
     for (var r = 0u; r < 6u; r = r + 1u) {
         (*rhs)[r] = (*rhs)[r] + j[r] * force;
         for (var c = 0u; c < 6u; c = c + 1u) {
-            (*m)[r][c] = (*m)[r][c] + stiffness * j[r] * j[c];
+            let idx = mat_idx(r, c);
+            (*m)[idx] = (*m)[idx] + stiffness * j[r] * j[c];
         }
     }
 }
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let local_idx = gid.x;
+@compute @workgroup_size(BODY_LANES)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let lane = lid.x;
+    let local_idx = wid.x;
     if local_idx >= solve_range.count {
         return;
     }
@@ -260,41 +285,42 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dt = params.solver.x;
     let dt2 = dt * dt;
     let mass = 1.0 / inv_mass;
-    let inv_i_world = world_inv_inertia(props[body_idx], q);
-    let i_world = mat3_inverse_safe(inv_i_world);
+    let i_world = world_inertia(props[body_idx], q);
 
-    var mtx: array<array<f32, 6>, 6>;
-    var rhs: array<f32, 6>;
-    for (var r = 0u; r < 6u; r = r + 1u) {
-        rhs[r] = 0.0;
-        for (var c = 0u; c < 6u; c = c + 1u) {
-            mtx[r][c] = 0.0;
-        }
+    var local_mtx: array<f32, 36>;
+    var local_rhs: array<f32, 6>;
+    for (var i = 0u; i < 36u; i = i + 1u) {
+        local_mtx[i] = 0.0;
+    }
+    for (var i = 0u; i < 6u; i = i + 1u) {
+        local_rhs[i] = 0.0;
     }
 
-    mtx[0][0] = mass / dt2;
-    mtx[1][1] = mass / dt2;
-    mtx[2][2] = mass / dt2;
-    rhs[0] = mtx[0][0] * (pos.x - pos_inertial.x);
-    rhs[1] = mtx[1][1] * (pos.y - pos_inertial.y);
-    rhs[2] = mtx[2][2] * (pos.z - pos_inertial.z);
+    if lane == 0u {
+        local_mtx[mat_idx(0u, 0u)] = mass / dt2;
+        local_mtx[mat_idx(1u, 1u)] = mass / dt2;
+        local_mtx[mat_idx(2u, 2u)] = mass / dt2;
+        local_rhs[0] = local_mtx[mat_idx(0u, 0u)] * (pos.x - pos_inertial.x);
+        local_rhs[1] = local_mtx[mat_idx(1u, 1u)] * (pos.y - pos_inertial.y);
+        local_rhs[2] = local_mtx[mat_idx(2u, 2u)] * (pos.z - pos_inertial.z);
 
-    mtx[3][3] = i_world[0][0] / dt2;
-    mtx[3][4] = i_world[0][1] / dt2;
-    mtx[3][5] = i_world[0][2] / dt2;
-    mtx[4][3] = i_world[1][0] / dt2;
-    mtx[4][4] = i_world[1][1] / dt2;
-    mtx[4][5] = i_world[1][2] / dt2;
-    mtx[5][3] = i_world[2][0] / dt2;
-    mtx[5][4] = i_world[2][1] / dt2;
-    mtx[5][5] = i_world[2][2] / dt2;
-    rhs[3] = (i_world[0][0] * rot_delta.x + i_world[0][1] * rot_delta.y + i_world[0][2] * rot_delta.z) / dt2;
-    rhs[4] = (i_world[1][0] * rot_delta.x + i_world[1][1] * rot_delta.y + i_world[1][2] * rot_delta.z) / dt2;
-    rhs[5] = (i_world[2][0] * rot_delta.x + i_world[2][1] * rot_delta.y + i_world[2][2] * rot_delta.z) / dt2;
+        local_mtx[mat_idx(3u, 3u)] = i_world[0][0] / dt2;
+        local_mtx[mat_idx(3u, 4u)] = i_world[0][1] / dt2;
+        local_mtx[mat_idx(3u, 5u)] = i_world[0][2] / dt2;
+        local_mtx[mat_idx(4u, 3u)] = i_world[1][0] / dt2;
+        local_mtx[mat_idx(4u, 4u)] = i_world[1][1] / dt2;
+        local_mtx[mat_idx(4u, 5u)] = i_world[1][2] / dt2;
+        local_mtx[mat_idx(5u, 3u)] = i_world[2][0] / dt2;
+        local_mtx[mat_idx(5u, 4u)] = i_world[2][1] / dt2;
+        local_mtx[mat_idx(5u, 5u)] = i_world[2][2] / dt2;
+        local_rhs[3] = (i_world[0][0] * rot_delta.x + i_world[0][1] * rot_delta.y + i_world[0][2] * rot_delta.z) / dt2;
+        local_rhs[4] = (i_world[1][0] * rot_delta.x + i_world[1][1] * rot_delta.y + i_world[1][2] * rot_delta.z) / dt2;
+        local_rhs[5] = (i_world[2][0] * rot_delta.x + i_world[2][1] * rot_delta.y + i_world[2][2] * rot_delta.z) / dt2;
+    }
 
     let contact_range = body_contact_ranges[body_idx];
     let range_end = contact_range.x + contact_range.y;
-    for (var slot = contact_range.x; slot < range_end; slot = slot + 1u) {
+    for (var slot = contact_range.x + lane; slot < range_end; slot = slot + BODY_LANES) {
         let c = contacts[body_contact_indices[slot]];
         let is_a = c.body_a == body_idx;
         let is_b = c.body_b == body_idx;
@@ -312,8 +338,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let world_b = pos_b + r_b;
         let separation = world_a - world_b;
         let normal = c.normal.xyz;
-        let tangent1 = normalize(c.tangent.xyz);
-        let tangent2 = normalize(cross(normal, tangent1));
+        let tangent1 = c.tangent.xyz;
+        let tangent2 = cross(normal, tangent1);
         let lambda_n = c.lambda.x;
         let lambda_t1 = c.lambda.y;
         let lambda_t2 = c.lambda.z;
@@ -347,9 +373,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             jt2_ang = -cross(r_b, tangent2);
         }
 
-        accumulate_row(jn_lin, jn_ang, k_n, f_n, &mtx, &rhs);
-        accumulate_row(jt1_lin, jt1_ang, k_t1, tang.x, &mtx, &rhs);
-        accumulate_row(jt2_lin, jt2_ang, k_t2, tang.y, &mtx, &rhs);
+        accumulate_row(jn_lin, jn_ang, k_n, f_n, &local_mtx, &local_rhs);
+        accumulate_row(jt1_lin, jt1_ang, k_t1, tang.x, &local_mtx, &local_rhs);
+        accumulate_row(jt2_lin, jt2_ang, k_t2, tang.y, &local_mtx, &local_rhs);
+    }
+
+    partial_mtx[lane] = local_mtx;
+    partial_rhs[lane] = local_rhs;
+    workgroupBarrier();
+
+    var stride = BODY_LANES >> 1u;
+    loop {
+        if stride == 0u {
+            break;
+        }
+        if lane < stride {
+            for (var i = 0u; i < 36u; i = i + 1u) {
+                partial_mtx[lane][i] = partial_mtx[lane][i] + partial_mtx[lane + stride][i];
+            }
+            for (var i = 0u; i < 6u; i = i + 1u) {
+                partial_rhs[lane][i] = partial_rhs[lane][i] + partial_rhs[lane + stride][i];
+            }
+        }
+        workgroupBarrier();
+        stride = stride >> 1u;
+    }
+
+    if lane != 0u {
+        return;
+    }
+
+    var mtx: array<array<f32, 6>, 6>;
+    var rhs: array<f32, 6>;
+    for (var r = 0u; r < 6u; r = r + 1u) {
+        rhs[r] = partial_rhs[0][r];
+        for (var c = 0u; c < 6u; c = c + 1u) {
+            mtx[r][c] = partial_mtx[0][mat_idx(r, c)];
+        }
     }
 
     let solution = solve_6x6(mtx, rhs);
@@ -371,6 +431,9 @@ struct BodyProps {
     inv_inertia_row0: vec4<f32>,
     inv_inertia_row1: vec4<f32>,
     inv_inertia_row2: vec4<f32>,
+    inertia_row0:     vec4<f32>,
+    inertia_row1:     vec4<f32>,
+    inertia_row2:     vec4<f32>,
     friction:         f32,
     shape_type:       u32,
     shape_index:      u32,
@@ -407,19 +470,6 @@ struct SimParams {
 @group(0) @binding(3) var<uniform>             params:            SimParams;
 @group(0) @binding(4) var<storage, read>       contact_count_buf: array<u32>;
 
-fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(
-        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
-    );
-}
-
-fn quat_conj(q: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(-q.x, -q.y, -q.z, q.w);
-}
-
 fn quat_normalize(q: vec4<f32>) -> vec4<f32> {
     return q / max(length(q), 1e-12);
 }
@@ -430,19 +480,6 @@ fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     return 2.0 * dot(u, v) * u
          + (s * s - dot(u, u)) * v
          + 2.0 * s * cross(u, v);
-}
-
-fn rotation_delta_vec(current: vec4<f32>, reference: vec4<f32>) -> vec3<f32> {
-    var dq = quat_mul(current, quat_conj(reference));
-    if dq.w < 0.0 {
-        dq = -dq;
-    }
-    let imag_len = length(dq.xyz);
-    if imag_len < 1e-8 {
-        return 2.0 * dq.xyz;
-    }
-    let angle = 2.0 * atan2(imag_len, dq.w);
-    return dq.xyz / imag_len * angle;
 }
 
 @compute @workgroup_size(64)
@@ -464,8 +501,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world_b = pos_b + r_b;
     let separation = world_a - world_b;
     let normal = c.normal.xyz;
-    let tangent1 = normalize(c.tangent.xyz);
-    let tangent2 = normalize(cross(normal, tangent1));
+    let tangent1 = c.tangent.xyz;
+    let tangent2 = cross(normal, tangent1);
     let geom_c_n = dot(normal, separation);
     let c_n = geom_c_n + CONTACT_MARGIN;
     let c_t1 = dot(tangent1, separation);
