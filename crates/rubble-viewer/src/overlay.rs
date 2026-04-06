@@ -352,6 +352,44 @@ pub fn draw_panel(
                                 );
                                 ui.end_row();
                             }
+
+                            // Show Iterations primal/dual sub-breakdown when precise and significant
+                            if let Some((primal_ms, dual_ms)) =
+                                timings.solve_breakdown.iterations_split()
+                            {
+                                if timings.solve_breakdown.iterations_ms
+                                    >= DETAILED_BREAKDOWN_THRESHOLD_MS
+                                {
+                                    let iter_total =
+                                        timings.solve_breakdown.iterations_ms.max(f32::EPSILON);
+                                    for &(label, ms) in
+                                        &[("  Primal", primal_ms), ("  Dual", dual_ms)]
+                                    {
+                                        let pct = ms / iter_total * 100.0;
+                                        ui.label(
+                                            egui::RichText::new(label)
+                                                .size(10.5)
+                                                .color(egui::Color32::from_gray(175)),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new("(GPU)")
+                                                .size(10.5)
+                                                .color(egui::Color32::from_gray(130)),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("{ms:.2} ms"))
+                                                .size(10.5)
+                                                .color(egui::Color32::from_gray(175)),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("{pct:.1}%"))
+                                                .size(10.5)
+                                                .color(egui::Color32::from_gray(150)),
+                                        );
+                                        ui.end_row();
+                                    }
+                                }
+                            }
                         });
                 }
 
