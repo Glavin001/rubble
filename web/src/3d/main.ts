@@ -380,6 +380,7 @@ function updateTimingsOverlay() {
 
 // Cached data for test hooks (avoids borrow conflicts during async step)
 let cachedTransforms = new Float32Array(0);
+let cachedTimings = new Float32Array(7);
 
 async function renderScene() {
   if ("isWebGPURenderer" in renderer && renderer.isWebGPURenderer) {
@@ -412,6 +413,7 @@ async function loop_() {
 
   // Cache data after step completes (world is no longer borrowed)
   syncTransformCache();
+  world.copy_last_step_timings_into(cachedTimings);
 
   const t0 = performance.now();
   controls?.update();
@@ -435,6 +437,7 @@ async function loop_() {
   if (window.__rubble_test) {
     window.__rubble_test.stepCount = stepCount;
     window.__rubble_test.bodyCount = world.body_count();
+    window.__rubble_test.lastStepTimingsMs = cachedTimings;
   }
   } catch (e) {
     // Surface step errors to console and test hooks (otherwise the animation
@@ -676,6 +679,7 @@ async function main() {
     stepCount: 0,
     bodyCount: world.body_count(),
     getTransforms: () => cachedTransforms,
+    lastStepTimingsMs: cachedTimings,
     error: null,
   };
 

@@ -15,7 +15,8 @@
     "playwright:install": "playwright install chromium",
     "pretest": "npm run wasm",
     "test": "playwright test",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:webgpu": "playwright test tests/webgpu-narrowphase.spec.ts"
   },
   "dependencies": {
     "three": "^0.172.0"
