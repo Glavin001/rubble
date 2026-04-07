@@ -38,7 +38,7 @@ impl Default for SimConfig2D {
             max_bodies: 65536,
             beta: 10.0,
             k_start: 1e4,
-            warmstart_decay: 0.95,
+            warmstart_decay: 0.99,
             friction_default: 0.5,
         }
     }

@@ -502,6 +502,13 @@ impl Ord for BodyHandle {
 /// This is used to partition solver iterations: contacts between bodies of the
 /// same color can be solved in parallel without data races.
 pub fn greedy_coloring(num_bodies: usize, contact_pairs: &[(u32, u32)]) -> (Vec<u32>, u32) {
+    if num_bodies == 0 {
+        return (Vec::new(), 0);
+    }
+    if contact_pairs.is_empty() {
+        return (vec![0; num_bodies], 1);
+    }
+
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_bodies];
     for &(a, b) in contact_pairs {
         let a = a as usize;
@@ -512,38 +519,48 @@ pub fn greedy_coloring(num_bodies: usize, contact_pairs: &[(u32, u32)]) -> (Vec<
         }
     }
 
+    for neighbors in &mut adj {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
+
+    let mut order: Vec<usize> = (0..num_bodies).collect();
+    order.sort_unstable_by(|&a, &b| {
+        adj[b]
+            .len()
+            .cmp(&adj[a].len())
+            .then_with(|| a.cmp(&b))
+    });
+
     let mut colors: Vec<u32> = vec![u32::MAX; num_bodies];
+    let mut used = Vec::<u32>::new();
     let mut num_colors: u32 = 0;
 
-    for body in 0..num_bodies {
-        let mut used = Vec::new();
+    for body in order {
+        used.clear();
         for &nb in &adj[body] {
-            if colors[nb] != u32::MAX {
-                used.push(colors[nb]);
+            let color = colors[nb];
+            if color != u32::MAX {
+                used.push(color);
             }
         }
         used.sort_unstable();
         used.dedup();
 
-        let mut c = 0u32;
-        for &u in &used {
-            if c == u {
-                c += 1;
+        let mut color = 0u32;
+        for &occupied in &used {
+            if color == occupied {
+                color += 1;
             } else {
                 break;
             }
         }
-        colors[body] = c;
-        if c + 1 > num_colors {
-            num_colors = c + 1;
-        }
+
+        colors[body] = color;
+        num_colors = num_colors.max(color + 1);
     }
 
-    if num_bodies > 0 && num_colors == 0 {
-        num_colors = 1;
-    }
-
-    (colors, num_colors)
+    (colors, num_colors.max(1))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

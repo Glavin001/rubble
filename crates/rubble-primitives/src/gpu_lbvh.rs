@@ -42,6 +42,14 @@ enum BroadphaseTimingMarker {
 const BROADPHASE_QUERY_COUNT: u32 = 8;
 
 #[cfg(not(target_arch = "wasm32"))]
+fn precise_gpu_timing_enabled() -> bool {
+    matches!(
+        std::env::var("RUBBLE_PRECISE_GPU_TIMING").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "on" | "ON" | "yes" | "YES")
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 struct PendingBroadphaseTimingReadback {
     staging: wgpu::Buffer,
     ready: Arc<AtomicBool>,
@@ -68,6 +76,9 @@ struct GpuBroadphaseProfiler {
 #[cfg(not(target_arch = "wasm32"))]
 impl GpuBroadphaseProfiler {
     fn new(ctx: &GpuContext) -> Option<Self> {
+        if !precise_gpu_timing_enabled() {
+            return None;
+        }
         let required =
             wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         if !ctx.device.features().contains(required) {

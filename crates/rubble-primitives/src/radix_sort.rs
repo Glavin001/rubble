@@ -1,6 +1,7 @@
 //! GPU-accelerated radix sort for 32-bit key-value pairs.
 
 use rubble_gpu::{ComputeKernel, GpuBuffer, GpuContext};
+use std::sync::Mutex;
 
 const WORKGROUP_SIZE: u32 = 256;
 const RADIX_BITS: u32 = 4;
@@ -108,25 +109,23 @@ fn scatter(
 }
 "#;
 
+struct RadixSortScratch {
+    keys_tmp: GpuBuffer<u32>,
+    values_tmp: GpuBuffer<u32>,
+    histograms: GpuBuffer<u32>,
+}
+
 /// GPU-accelerated radix sort for 32-bit key-value pairs.
 ///
 /// Sorts [`RadixSortEntry`] elements by key in ascending order using a 4-bit-per-pass
 /// radix sort (8 passes total for 32-bit keys).
-/// Reusable workspace for radix sort temp buffers, avoiding per-frame allocation.
-struct SortWorkspace {
-    keys_tmp: GpuBuffer<u32>,
-    values_tmp: GpuBuffer<u32>,
-    histograms: GpuBuffer<u32>,
-    params_buf: wgpu::Buffer,
-    n: u32,
-}
-
 pub struct GpuRadixSort {
     histogram_kernel: ComputeKernel,
     scatter_kernel: ComputeKernel,
     prefix_scan: crate::InternalPrefixScan,
+    params_buf: wgpu::Buffer,
+    scratch: Mutex<RadixSortScratch>,
     max_elements: usize,
-    workspace: Option<SortWorkspace>,
 }
 
 impl GpuRadixSort {
@@ -135,12 +134,28 @@ impl GpuRadixSort {
         let histogram_kernel = ComputeKernel::from_wgsl(ctx, HISTOGRAM_WGSL, "histogram");
         let scatter_kernel = ComputeKernel::from_wgsl(ctx, SCATTER_WGSL, "scatter");
         let prefix_scan = crate::InternalPrefixScan::new(ctx);
+        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("radix sort params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let max_elements = max_elements.max(1);
+        let max_hist_size = (RADIX_BUCKETS
+            * rubble_gpu::round_up_workgroups(max_elements as u32, WORKGROUP_SIZE))
+            as usize;
+        let scratch = Mutex::new(RadixSortScratch {
+            keys_tmp: GpuBuffer::<u32>::new(ctx, max_elements),
+            values_tmp: GpuBuffer::<u32>::new(ctx, max_elements),
+            histograms: GpuBuffer::<u32>::new(ctx, max_hist_size.max(1)),
+        });
         Self {
             histogram_kernel,
             scatter_kernel,
             prefix_scan,
+            params_buf,
+            scratch,
             max_elements,
-            workspace: None,
         }
     }
 
@@ -150,7 +165,7 @@ impl GpuRadixSort {
     }
 
     /// Sort entries in-place by key (ascending).
-    pub fn sort(&mut self, ctx: &GpuContext, entries: &mut GpuBuffer<RadixSortEntry>) {
+    pub fn sort(&self, ctx: &GpuContext, entries: &mut GpuBuffer<RadixSortEntry>) {
         let n = entries.len();
         if n <= 1 {
             return;
@@ -180,41 +195,26 @@ impl GpuRadixSort {
     }
 
     /// Internal sort on separate key/value buffers.
-    ///
-    /// Reuses persistent temp buffers across calls to avoid per-frame GPU allocation.
     pub fn sort_key_value_in_place(
-        &mut self,
+        &self,
         ctx: &GpuContext,
         keys: &mut GpuBuffer<u32>,
         values: &mut GpuBuffer<u32>,
     ) {
         let n = keys.len();
+        if n <= 1 {
+            return;
+        }
         let num_blocks = rubble_gpu::round_up_workgroups(n, WORKGROUP_SIZE);
         let hist_size = (RADIX_BUCKETS * num_blocks) as usize;
 
-        // Take workspace out of self so we can borrow self's kernels independently
-        let prev_ws = self.workspace.take();
-        let needs_realloc = prev_ws.as_ref().is_none_or(|w| w.n != n);
-        let mut ws = if needs_realloc {
-            let mut keys_tmp = GpuBuffer::<u32>::new(ctx, n as usize);
-            keys_tmp.upload(ctx, &vec![0u32; n as usize]);
-            let mut values_tmp = GpuBuffer::<u32>::new(ctx, n as usize);
-            values_tmp.upload(ctx, &vec![0u32; n as usize]);
-            SortWorkspace {
-                keys_tmp,
-                values_tmp,
-                histograms: GpuBuffer::<u32>::new(ctx, hist_size),
-                params_buf: ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("radix sort params"),
-                    size: 16,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }),
-                n,
-            }
-        } else {
-            prev_ws.unwrap()
-        };
+        let mut scratch = self.scratch.lock().unwrap();
+        scratch.keys_tmp.grow_if_needed(ctx, n as usize);
+        scratch.values_tmp.grow_if_needed(ctx, n as usize);
+        scratch.histograms.grow_if_needed(ctx, hist_size.max(1));
+        scratch.keys_tmp.set_len(n);
+        scratch.values_tmp.set_len(n);
+        scratch.histograms.set_len(hist_size as u32);
 
         for pass in 0..NUM_PASSES {
             let shift = pass * RADIX_BITS;
@@ -224,24 +224,21 @@ impl GpuRadixSort {
                 (
                     keys as &GpuBuffer<u32>,
                     values as &GpuBuffer<u32>,
-                    &mut ws.keys_tmp,
-                    &mut ws.values_tmp,
+                    &mut scratch.keys_tmp,
+                    &mut scratch.values_tmp,
                 )
             } else {
                 (
-                    &ws.keys_tmp as &GpuBuffer<u32>,
-                    &ws.values_tmp as &GpuBuffer<u32>,
+                    &scratch.keys_tmp as &GpuBuffer<u32>,
+                    &scratch.values_tmp as &GpuBuffer<u32>,
                     keys as &mut GpuBuffer<u32>,
                     values as &mut GpuBuffer<u32>,
                 )
             };
 
-            // Clear histograms
-            ws.histograms.upload(ctx, &vec![0u32; hist_size]);
-
             // Update params
             ctx.queue.write_buffer(
-                &ws.params_buf,
+                &self.params_buf,
                 0,
                 bytemuck::cast_slice(&[n, shift, 0u32, 0]),
             );
@@ -258,11 +255,11 @@ impl GpuRadixSort {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: ws.histograms.buffer().as_entire_binding(),
+                            resource: scratch.histograms.buffer().as_entire_binding()
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: ws.params_buf.as_entire_binding(),
+                            resource: self.params_buf.as_entire_binding()
                         },
                     ],
                 });
@@ -283,7 +280,7 @@ impl GpuRadixSort {
             }
 
             // Pass 2: Exclusive prefix scan on histograms (flattened)
-            self.prefix_scan.exclusive_scan(ctx, &ws.histograms);
+            self.prefix_scan.exclusive_scan(ctx, &mut scratch.histograms);
 
             // Pass 3: Scatter
             {
@@ -309,11 +306,11 @@ impl GpuRadixSort {
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
-                            resource: ws.histograms.buffer().as_entire_binding(),
+                            resource: scratch.histograms.buffer().as_entire_binding()
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: ws.params_buf.as_entire_binding(),
+                            resource: self.params_buf.as_entire_binding()
                         },
                     ],
                 });
@@ -341,25 +338,10 @@ impl GpuRadixSort {
             let mut encoder = ctx
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            encoder.copy_buffer_to_buffer(
-                ws.keys_tmp.buffer(),
-                0,
-                keys.buffer(),
-                0,
-                byte_len,
-            );
-            encoder.copy_buffer_to_buffer(
-                ws.values_tmp.buffer(),
-                0,
-                values.buffer(),
-                0,
-                byte_len,
-            );
+            encoder.copy_buffer_to_buffer(scratch.keys_tmp.buffer(), 0, keys.buffer(), 0, byte_len);
+            encoder.copy_buffer_to_buffer(scratch.values_tmp.buffer(), 0, values.buffer(), 0, byte_len);
             ctx.queue.submit(Some(encoder.finish()));
         }
-
-        // Put workspace back for reuse next frame
-        self.workspace = Some(ws);
     }
 }
 
@@ -373,7 +355,7 @@ mod tests {
             eprintln!("SKIP: No GPU");
             return;
         };
-        let mut sort = GpuRadixSort::new(&ctx, 1024);
+        let sort = GpuRadixSort::new(&ctx, 1024);
 
         let input = [
             RadixSortEntry { key: 5, value: 50 },
@@ -402,7 +384,7 @@ mod tests {
             eprintln!("SKIP: No GPU");
             return;
         };
-        let mut sort = GpuRadixSort::new(&ctx, 1024);
+        let sort = GpuRadixSort::new(&ctx, 1024);
 
         // Simple LCG pseudo-random
         let mut rng_state = 12345u64;
@@ -442,7 +424,7 @@ mod tests {
             eprintln!("SKIP: No GPU");
             return;
         };
-        let mut sort = GpuRadixSort::new(&ctx, 1024);
+        let sort = GpuRadixSort::new(&ctx, 1024);
 
         // Simple LCG pseudo-random
         let mut rng_state = 99999u64;

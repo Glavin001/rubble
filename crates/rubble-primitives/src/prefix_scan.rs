@@ -110,6 +110,7 @@ fn exclusive_to_inclusive(
 pub(crate) struct InternalPrefixScan {
     scan_blocks_kernel: ComputeKernel,
     add_block_sums_kernel: ComputeKernel,
+    params_buf: wgpu::Buffer,
 }
 
 impl InternalPrefixScan {
@@ -117,9 +118,16 @@ impl InternalPrefixScan {
         let scan_blocks_kernel = ComputeKernel::from_wgsl(ctx, SCAN_BLOCKS_WGSL, "scan_blocks");
         let add_block_sums_kernel =
             ComputeKernel::from_wgsl(ctx, ADD_BLOCK_SUMS_WGSL, "add_block_sums");
+        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scan params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             scan_blocks_kernel,
             add_block_sums_kernel,
+            params_buf,
         }
     }
 
@@ -133,17 +141,10 @@ impl InternalPrefixScan {
         let num_blocks = rubble_gpu::round_up_workgroups(n, WORKGROUP_SIZE);
         let block_sums_len = num_blocks.max(1) as usize;
         let mut block_sums = GpuBuffer::<u32>::new(ctx, block_sums_len);
-        block_sums.upload(ctx, &vec![0u32; block_sums_len]);
+        block_sums.set_len(num_blocks);
 
-        // Params uniform
-        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("scan params"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         ctx.queue
-            .write_buffer(&params_buf, 0, bytemuck::cast_slice(&[n, 0u32, 0, 0]));
+            .write_buffer(&self.params_buf, 0, bytemuck::cast_slice(&[n, 0u32, 0, 0]));
 
         // Pass 1: scan each block, collect block sums
         {
@@ -161,7 +162,7 @@ impl InternalPrefixScan {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: params_buf.as_entire_binding(),
+                        resource: self.params_buf.as_entire_binding()
                     },
                 ],
             });
@@ -183,6 +184,8 @@ impl InternalPrefixScan {
 
         if num_blocks > 1 {
             self.exclusive_scan(ctx, &block_sums);
+            ctx.queue
+                .write_buffer(&self.params_buf, 0, bytemuck::cast_slice(&[n, 0u32, 0, 0]));
 
             // Pass 3: add scanned block sums back
             {
@@ -200,7 +203,7 @@ impl InternalPrefixScan {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: params_buf.as_entire_binding(),
+                            resource: self.params_buf.as_entire_binding()
                         },
                     ],
                 });
@@ -227,6 +230,7 @@ impl InternalPrefixScan {
 pub struct GpuPrefixScan {
     internal: InternalPrefixScan,
     inclusive_kernel: ComputeKernel,
+    inclusive_params_buf: wgpu::Buffer,
     max_elements: usize,
 }
 
@@ -236,9 +240,16 @@ impl GpuPrefixScan {
         let internal = InternalPrefixScan::new(ctx);
         let inclusive_kernel =
             ComputeKernel::from_wgsl(ctx, EXCLUSIVE_TO_INCLUSIVE_WGSL, "exclusive_to_inclusive");
+        let inclusive_params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("inclusive scan params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             internal,
             inclusive_kernel,
+            inclusive_params_buf,
             max_elements,
         }
     }
@@ -269,14 +280,11 @@ impl GpuPrefixScan {
         self.internal.exclusive_scan(ctx, data);
 
         // Convert: inclusive[i] = exclusive[i] + original[i]
-        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("inclusive scan params"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        ctx.queue
-            .write_buffer(&params_buf, 0, bytemuck::cast_slice(&[n, 0u32, 0, 0]));
+        ctx.queue.write_buffer(
+            &self.inclusive_params_buf,
+            0,
+            bytemuck::cast_slice(&[n, 0u32, 0, 0]),
+        );
 
         let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -292,7 +300,7 @@ impl GpuPrefixScan {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: params_buf.as_entire_binding(),
+                    resource: self.inclusive_params_buf.as_entire_binding()
                 },
             ],
         });
