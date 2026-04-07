@@ -721,6 +721,7 @@ pub struct GpuPipeline {
     body_order: GpuBuffer<u32>,
     body_contact_ranges: GpuBuffer<[u32; 2]>,
     body_contact_indices: GpuBuffer<u32>,
+    body_contact_neighbors: GpuBuffer<u32>,
     active_body_flags: GpuBuffer<u32>,
     event_pair_keys: GpuBuffer<[u32; 2]>,
     lbvh_subset_aabbs: GpuBuffer<Aabb3D>,
@@ -908,6 +909,7 @@ impl GpuPipeline {
         let body_order = GpuBuffer::new(&ctx, max_bodies);
         let body_contact_ranges = GpuBuffer::new(&ctx, max_bodies.max(1));
         let body_contact_indices = GpuBuffer::new(&ctx, (max_contacts * 2).max(1));
+        let body_contact_neighbors = GpuBuffer::new(&ctx, (max_contacts * 2).max(1));
         let active_body_flags = GpuBuffer::new(&ctx, max_bodies.max(1));
         let event_pair_keys = GpuBuffer::new(&ctx, max_contacts.max(1));
         let lbvh_subset_aabbs = GpuBuffer::new(&ctx, max_bodies.max(1));
@@ -990,6 +992,7 @@ impl GpuPipeline {
             body_order,
             body_contact_ranges,
             body_contact_indices,
+            body_contact_neighbors,
             active_body_flags,
             event_pair_keys,
             lbvh_subset_aabbs,
@@ -3455,6 +3458,10 @@ impl GpuPipeline {
             .grow_if_needed(ctx, (contact_count as usize).saturating_mul(2).max(1));
         self.body_contact_indices
             .set_len(contact_count.saturating_mul(2));
+        self.body_contact_neighbors
+            .grow_if_needed(ctx, (contact_count as usize).saturating_mul(2).max(1));
+        self.body_contact_neighbors
+            .set_len(contact_count.saturating_mul(2));
 
         let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("adjacency params"),
@@ -3627,6 +3634,10 @@ impl GpuPipeline {
                         binding: 3,
                         resource: self.contact_count.buffer().as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.body_contact_neighbors.buffer().as_entire_binding(),
+                    },
                 ],
             });
             self.run_pass(
@@ -3750,22 +3761,18 @@ impl GpuPipeline {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: self.contacts.buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
                             resource: self.body_contact_ranges.buffer().as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: self.body_contact_indices.buffer().as_entire_binding(),
+                            binding: 3,
+                            resource: self.body_contact_neighbors.buffer().as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
-                            binding: 5,
+                            binding: 4,
                             resource: self.gpu_coloring.params_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
-                            binding: 6,
+                            binding: 5,
                             resource: self.gpu_coloring.unfinished.buffer().as_entire_binding(),
                         },
                     ],

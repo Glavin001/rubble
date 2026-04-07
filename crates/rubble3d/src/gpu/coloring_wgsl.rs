@@ -33,32 +33,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 /// Step kernel: one iteration of adjacency-based Jones-Plassmann/Luby body coloring.
+/// Uses compact body_contact_neighbors buffer instead of full Contact structs
+/// to reduce memory bandwidth (~4 bytes vs ~128 bytes per neighbor lookup).
 pub const COLORING_STEP_WGSL: &str = r#"
-struct Contact {
-    point:          vec4<f32>,
-    normal:         vec4<f32>,
-    tangent:        vec4<f32>,
-    local_anchor_a: vec4<f32>,
-    local_anchor_b: vec4<f32>,
-    lambda:         vec4<f32>,
-    penalty:        vec4<f32>,
-    body_a:         u32,
-    body_b:         u32,
-    feature_id:     u32,
-    flags:          u32,
-};
-
 @group(0) @binding(0) var<storage, read_write> body_colors:     array<u32>;
 @group(0) @binding(1) var<storage, read>       body_priorities: array<u32>;
-@group(0) @binding(2) var<storage, read>       contacts:        array<Contact>;
-@group(0) @binding(3) var<storage, read>       body_contact_ranges: array<vec2<u32>>;
-@group(0) @binding(4) var<storage, read>       body_contact_indices: array<u32>;
-@group(0) @binding(5) var<uniform>             params:          vec4<u32>; // x=num_bodies, z=current_color
-@group(0) @binding(6) var<storage, read_write> unfinished:      atomic<u32>;
+@group(0) @binding(2) var<storage, read>       body_contact_ranges: array<vec2<u32>>;
+@group(0) @binding(3) var<storage, read>       body_contact_neighbors: array<u32>;
+@group(0) @binding(4) var<uniform>             params:          vec4<u32>; // x=num_bodies, z=current_color
+@group(0) @binding(5) var<storage, read_write> unfinished:      atomic<u32>;
 
 const WORKGROUP_SIZE: u32 = 64u;
 const UNCOLORED: u32 = 0xFFFFFFFFu;
-const INACTIVE_COLOR: u32 = 0xFFFFFFFEu;
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -76,14 +62,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let range = body_contact_ranges[body_idx];
     let range_end = range.x + range.y;
     for (var slot = range.x; slot < range_end; slot = slot + 1u) {
-        let c = contacts[body_contact_indices[slot]];
-        var neighbor = c.body_b;
-        if c.body_a != body_idx {
-            neighbor = c.body_a;
-        }
+        let neighbor = body_contact_neighbors[slot];
 
         let neighbor_color = body_colors[neighbor];
-        if neighbor_color == INACTIVE_COLOR || neighbor_color != UNCOLORED {
+        if neighbor_color != UNCOLORED {
             continue;
         }
 

@@ -91,6 +91,7 @@ struct Contact {
 @group(0) @binding(1) var<storage, read_write> body_contact_heads:    array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read_write> body_contact_indices:  array<u32>;
 @group(0) @binding(3) var<storage, read>       contact_count_buf:     array<u32>;
+@group(0) @binding(4) var<storage, read_write> body_contact_neighbors: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -105,5 +106,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slot_b = atomicAdd(&body_contact_heads[c.body_b], 1u);
     body_contact_indices[slot_a] = ci;
     body_contact_indices[slot_b] = ci;
+    body_contact_neighbors[slot_a] = c.body_b;
+    body_contact_neighbors[slot_b] = c.body_a;
 }
 "#;
