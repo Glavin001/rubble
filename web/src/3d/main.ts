@@ -3,10 +3,10 @@ import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-// Three.js WebGPURenderer stores per-instance transforms in a uniform buffer.
-// A 4x4 matrix is 64 bytes, so 1024 instances lands exactly on a 64 KiB limit;
-// keep real headroom here to avoid context/device loss on Chrome SwiftShader.
-const MAX_INSTANCES = 768;
+// Three.js InstanceNode uses a UBO when mesh.count <= 1000 and vertex
+// attributes when > 1000. The UBO path sends the full instanceMatrix array,
+// so the InstancedMesh constructor count must stay <= 1000 for small scenes
+// or > 1000 for large ones. We recreate meshes per scene with exact capacity.
 const DEMO_SEED = 0x3d5eed;
 
 const SPHERE_COLORS = [0xff6b35, 0xf7c948, 0x4ecdc4, 0x45b7d1, 0x96ceb4];
@@ -125,86 +125,97 @@ const grid = new THREE.GridHelper(100, 100, 0x333333, 0x222222);
 grid.position.y = 0.01;
 scene.add(grid);
 
-// Instanced meshes for spheres and boxes
+// Instanced meshes for spheres, boxes, and capsules.
+// These are recreated per scene load with the exact capacity needed.
 const sphereGeo = new THREE.SphereGeometry(1, 24, 24);
 const sphereMat = new THREE.MeshStandardMaterial({
   roughness: 0.4,
   metalness: 0.3,
 });
-const sphereInstances = new THREE.InstancedMesh(
-  sphereGeo,
-  sphereMat,
-  MAX_INSTANCES,
-);
-sphereInstances.castShadow = true;
-sphereInstances.receiveShadow = true;
-sphereInstances.count = 0;
-scene.add(sphereInstances);
-
-// Per-instance colors
-const sphereColorAttr = new Float32Array(MAX_INSTANCES * 3);
-const boxColorAttr = new Float32Array(MAX_INSTANCES * 3);
-const capsuleColorAttr = new Float32Array(MAX_INSTANCES * 3);
-const sphereInstanceColor = new THREE.InstancedBufferAttribute(sphereColorAttr, 3);
-const boxInstanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
-const capsuleInstanceColor = new THREE.InstancedBufferAttribute(capsuleColorAttr, 3);
-
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const boxMat = new THREE.MeshStandardMaterial({
   roughness: 0.5,
   metalness: 0.2,
 });
-const boxInstances = new THREE.InstancedMesh(boxGeo, boxMat, MAX_INSTANCES);
-boxInstances.castShadow = true;
-boxInstances.receiveShadow = true;
-boxInstances.count = 0;
-boxInstances.instanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
-scene.add(boxInstances);
-
 const capsuleMat = new THREE.MeshStandardMaterial({
   roughness: 0.45,
   metalness: 0.25,
 });
-let capsuleInstances: THREE.InstancedMesh = new THREE.InstancedMesh(
-  new THREE.CapsuleGeometry(capsuleBaseRadius, capsuleBaseHalfHeight * 2, 4, 12),
-  capsuleMat,
-  MAX_INSTANCES,
-);
-capsuleInstances.castShadow = true;
-capsuleInstances.receiveShadow = true;
-capsuleInstances.count = 0;
-scene.add(capsuleInstances);
 
-sphereInstances.instanceColor = sphereInstanceColor;
-boxInstances.instanceColor = boxInstanceColor;
-capsuleInstances.instanceColor = capsuleInstanceColor;
+let sphereInstances: THREE.InstancedMesh;
+let boxInstances: THREE.InstancedMesh;
+let capsuleInstances: THREE.InstancedMesh;
+let sphereColorAttr: Float32Array;
+let boxColorAttr: Float32Array;
+let capsuleColorAttr: Float32Array;
 
-function rebuildCapsuleGeometry(halfHeight: number, radius: number) {
-  if (
-    Math.abs(capsuleBaseHalfHeight - halfHeight) < 1e-6 &&
-    Math.abs(capsuleBaseRadius - radius) < 1e-6
-  ) {
-    return;
-  }
+/**
+ * (Re)create the three InstancedMesh objects with the given capacities.
+ * Removes previous meshes from the scene if they exist.
+ */
+function allocateInstancedMeshes(sphereCap: number, boxCap: number, capsuleCap: number) {
+  sphereCap = Math.max(sphereCap, 1);
+  boxCap = Math.max(boxCap, 1);
+  capsuleCap = Math.max(capsuleCap, 1);
 
-  capsuleBaseHalfHeight = halfHeight;
-  capsuleBaseRadius = radius;
-  scene.remove(capsuleInstances);
-  capsuleInstances.geometry.dispose();
+  // Tear down old meshes
+  if (sphereInstances) { scene.remove(sphereInstances); sphereInstances.dispose(); }
+  if (boxInstances) { scene.remove(boxInstances); boxInstances.dispose(); }
+  if (capsuleInstances) { scene.remove(capsuleInstances); capsuleInstances.dispose(); }
+
+  // Color arrays
+  sphereColorAttr = new Float32Array(sphereCap * 3);
+  boxColorAttr = new Float32Array(boxCap * 3);
+  capsuleColorAttr = new Float32Array(capsuleCap * 3);
+
+  // Spheres
+  sphereInstances = new THREE.InstancedMesh(sphereGeo, sphereMat, sphereCap);
+  sphereInstances.castShadow = true;
+  sphereInstances.receiveShadow = true;
+  sphereInstances.count = 0;
+  sphereInstances.instanceColor = new THREE.InstancedBufferAttribute(sphereColorAttr, 3);
+  scene.add(sphereInstances);
+
+  // Boxes
+  boxInstances = new THREE.InstancedMesh(boxGeo, boxMat, boxCap);
+  boxInstances.castShadow = true;
+  boxInstances.receiveShadow = true;
+  boxInstances.count = 0;
+  boxInstances.instanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
+  scene.add(boxInstances);
+
+  // Capsules
   capsuleInstances = new THREE.InstancedMesh(
-    new THREE.CapsuleGeometry(
-      radius,
-      halfHeight * 2,
-      4,
-      12,
-    ),
+    new THREE.CapsuleGeometry(capsuleBaseRadius, capsuleBaseHalfHeight * 2, 4, 12),
     capsuleMat,
-    MAX_INSTANCES,
+    capsuleCap,
   );
   capsuleInstances.castShadow = true;
   capsuleInstances.receiveShadow = true;
   capsuleInstances.count = 0;
-  capsuleInstances.instanceColor = capsuleInstanceColor;
+  capsuleInstances.instanceColor = new THREE.InstancedBufferAttribute(capsuleColorAttr, 3);
+  scene.add(capsuleInstances);
+}
+
+// Initial allocation (small — will be resized on first scene load)
+allocateInstancedMeshes(64, 64, 64);
+
+function rebuildCapsuleGeometry(halfHeight: number, radius: number, capacity: number) {
+  capsuleBaseHalfHeight = halfHeight;
+  capsuleBaseRadius = radius;
+  scene.remove(capsuleInstances);
+  capsuleInstances.geometry.dispose();
+  capsuleInstances.dispose();
+  capsuleColorAttr = new Float32Array(Math.max(capacity, 1) * 3);
+  capsuleInstances = new THREE.InstancedMesh(
+    new THREE.CapsuleGeometry(radius, halfHeight * 2, 4, 12),
+    capsuleMat,
+    Math.max(capacity, 1),
+  );
+  capsuleInstances.castShadow = true;
+  capsuleInstances.receiveShadow = true;
+  capsuleInstances.count = 0;
+  capsuleInstances.instanceColor = new THREE.InstancedBufferAttribute(capsuleColorAttr, 3);
   scene.add(capsuleInstances);
 }
 
@@ -234,22 +245,11 @@ function markInstanceColorDirty(mesh: THREE.InstancedMesh) {
 
 function addSphere(x: number, y: number, z: number, radius: number, mass: number) {
   const idx = world.add_sphere(x, y, z, radius, mass);
-  const renderable = sphereCount < MAX_INSTANCES;
-
-  if (renderable) {
-    pushColor(sphereColorAttr, SPHERE_COLORS, sphereCount);
-  }
-
-  bodies.push({
-    type: 0,
-    instanceIndex: renderable ? sphereCount : -1,
-    radius,
-  });
-  if (renderable) {
-    sphereCount++;
-    sphereInstances.count = sphereCount;
-    markInstanceColorDirty(sphereInstances);
-  }
+  pushColor(sphereColorAttr, SPHERE_COLORS, sphereCount);
+  bodies.push({ type: 0, instanceIndex: sphereCount, radius });
+  sphereCount++;
+  sphereInstances.count = sphereCount;
+  markInstanceColorDirty(sphereInstances);
   return idx;
 }
 
@@ -263,22 +263,11 @@ function addBox(
   mass: number,
 ) {
   const idx = world.add_box(x, y, z, hw, hh, hd, mass);
-  const renderable = boxCount < MAX_INSTANCES;
-
-  if (renderable) {
-    pushColor(boxColorAttr, BOX_COLORS, boxCount);
-  }
-
-  bodies.push({
-    type: 1,
-    instanceIndex: renderable ? boxCount : -1,
-    halfExtents: [hw, hh, hd],
-  });
-  if (renderable) {
-    boxCount++;
-    boxInstances.count = boxCount;
-    markInstanceColorDirty(boxInstances);
-  }
+  pushColor(boxColorAttr, BOX_COLORS, boxCount);
+  bodies.push({ type: 1, instanceIndex: boxCount, halfExtents: [hw, hh, hd] });
+  boxCount++;
+  boxInstances.count = boxCount;
+  markInstanceColorDirty(boxInstances);
   return idx;
 }
 
@@ -503,51 +492,50 @@ async function loadScene(name: string) {
   const shapeSizes = world.get_shape_sizes();
   const shapeOffsets = world.get_shape_size_offsets();
 
-  // First pass: find capsule dimensions so we can rebuild the capsule geometry
-  // to match this scene. All capsules in a scene are assumed to share dims.
+  // First pass: count shapes per type and find capsule dimensions.
+  let nSpheres = 0, nBoxes = 0, nCapsules = 0;
+  let capsuleDimIdx = -1;
   for (let i = 0; i < shapeTypes.length; i++) {
-    if (shapeTypes[i] === 2) {
-      const off = shapeOffsets[i];
-      rebuildCapsuleGeometry(shapeSizes[off], shapeSizes[off + 1]);
-      break;
+    if (shapeTypes[i] === 0) nSpheres++;
+    else if (shapeTypes[i] === 1) nBoxes++;
+    else if (shapeTypes[i] === 2) {
+      nCapsules++;
+      if (capsuleDimIdx < 0) capsuleDimIdx = i;
     }
   }
 
+  // Allocate meshes with exact capacity
+  allocateInstancedMeshes(nSpheres, nBoxes, nCapsules);
+
+  // Rebuild capsule geometry if this scene has capsules
+  if (capsuleDimIdx >= 0) {
+    const off = shapeOffsets[capsuleDimIdx];
+    rebuildCapsuleGeometry(shapeSizes[off], shapeSizes[off + 1], nCapsules);
+  }
+
+  // Second pass: populate bodies and colors
   for (let i = 0; i < shapeTypes.length; i++) {
     const type_ = shapeTypes[i];
     const off = shapeOffsets[i];
     if (type_ === 0) {
       const r = shapeSizes[off];
-      const renderable = sphereCount < MAX_INSTANCES;
-      if (renderable) pushColor(sphereColorAttr, SPHERE_COLORS, sphereCount);
-      bodies.push({ type: 0, instanceIndex: renderable ? sphereCount : -1, radius: r });
-      if (renderable) sphereCount++;
+      pushColor(sphereColorAttr, SPHERE_COLORS, sphereCount);
+      bodies.push({ type: 0, instanceIndex: sphereCount, radius: r });
+      sphereCount++;
     } else if (type_ === 1) {
       const hw = shapeSizes[off];
       const hh = shapeSizes[off + 1];
       const hd = shapeSizes[off + 2];
-      const renderable = boxCount < MAX_INSTANCES;
-      if (renderable) pushColor(boxColorAttr, BOX_COLORS, boxCount);
-      bodies.push({
-        type: 1,
-        instanceIndex: renderable ? boxCount : -1,
-        halfExtents: [hw, hh, hd],
-      });
-      if (renderable) boxCount++;
+      pushColor(boxColorAttr, BOX_COLORS, boxCount);
+      bodies.push({ type: 1, instanceIndex: boxCount, halfExtents: [hw, hh, hd] });
+      boxCount++;
     } else if (type_ === 2) {
       const halfHeight = shapeSizes[off];
       const radius = shapeSizes[off + 1];
-      const renderable = capsuleCount < MAX_INSTANCES;
-      if (renderable) pushColor(capsuleColorAttr, CAPSULE_COLORS, capsuleCount);
-      bodies.push({
-        type: 2,
-        instanceIndex: renderable ? capsuleCount : -1,
-        halfHeight,
-        radius,
-      });
-      if (renderable) capsuleCount++;
+      pushColor(capsuleColorAttr, CAPSULE_COLORS, capsuleCount);
+      bodies.push({ type: 2, instanceIndex: capsuleCount, halfHeight, radius });
+      capsuleCount++;
     } else {
-      // Plane or unrenderable: placeholder entry to keep indices aligned.
       bodies.push({ type: 99, instanceIndex: -1 });
     }
   }
@@ -564,15 +552,10 @@ async function loadScene(name: string) {
   updateTimingsOverlay();
 
   const totalBodies = world.body_count();
-  const dropped =
-    (bodies.filter((b) => b.type === 0).length - sphereCount) +
-    (bodies.filter((b) => b.type === 1).length - boxCount) +
-    (bodies.filter((b) => b.type === 2).length - capsuleCount);
   const tDone = performance.now();
   console.log(
     `[scene] "${name}": ${totalBodies} bodies — rendering ` +
       `${sphereCount} spheres, ${boxCount} boxes, ${capsuleCount} capsules` +
-      (dropped > 0 ? ` (${dropped} bodies exceed MAX_INSTANCES=${MAX_INSTANCES} and are hidden)` : "") +
       ` — timings: create ${(tCreated - tStart).toFixed(0)}ms, spawn ${(tSpawned - tCreated).toFixed(0)}ms, mesh ${(tDone - tSpawned).toFixed(0)}ms`,
   );
   if (totalBodies > 1500) {
@@ -621,8 +604,10 @@ async function main() {
   if (bodyCountParam !== null) {
     const initialBodies = Math.max(
       1,
-      Math.min(MAX_INSTANCES, parseInt(bodyCountParam, 10) || 1000),
+      Math.min(50_000, parseInt(bodyCountParam, 10) || 1000),
     );
+    // Pre-allocate meshes with enough capacity for the requested body count.
+    allocateInstancedMeshes(initialBodies, initialBodies, initialBodies);
     world.add_ground_plane(0.0);
     bodies.push({ type: 99, instanceIndex: -1 });
     for (let i = 0; i < initialBodies; i++) {
