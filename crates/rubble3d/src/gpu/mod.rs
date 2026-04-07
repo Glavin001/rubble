@@ -222,6 +222,8 @@ impl GpuStepProfiler {
                                 PreciseTimingMarker::SolveIterationsStart,
                                 PreciseTimingMarker::SolveIterationsEnd,
                             ),
+                            iterations_primal_ms: 0.0,
+                            iterations_dual_ms: 0.0,
                             swap_ms: self.delta_ms(
                                 ticks,
                                 PreciseTimingMarker::SolveSwapStart,

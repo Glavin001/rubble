@@ -218,23 +218,7 @@ impl GpuRadixSort {
 
         for pass in 0..NUM_PASSES {
             let shift = pass * RADIX_BITS;
-
-            // Determine which buffers are source and destination
-            let (src_keys, src_values, dst_keys, dst_values) = if pass % 2 == 0 {
-                (
-                    keys as &GpuBuffer<u32>,
-                    values as &GpuBuffer<u32>,
-                    &mut scratch.keys_tmp,
-                    &mut scratch.values_tmp,
-                )
-            } else {
-                (
-                    &scratch.keys_tmp as &GpuBuffer<u32>,
-                    &scratch.values_tmp as &GpuBuffer<u32>,
-                    keys as &mut GpuBuffer<u32>,
-                    values as &mut GpuBuffer<u32>,
-                )
-            };
+            let even = pass % 2 == 0;
 
             // Update params
             ctx.queue.write_buffer(
@@ -245,13 +229,18 @@ impl GpuRadixSort {
 
             // Pass 1: Compute histograms
             {
+                let src_keys_buf = if even {
+                    keys.buffer()
+                } else {
+                    scratch.keys_tmp.buffer()
+                };
                 let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: self.histogram_kernel.bind_group_layout(),
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: src_keys.buffer().as_entire_binding(),
+                            resource: src_keys_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
@@ -284,25 +273,40 @@ impl GpuRadixSort {
 
             // Pass 3: Scatter
             {
+                let (src_keys_buf, src_values_buf, dst_keys_buf, dst_values_buf) = if even {
+                    (
+                        keys.buffer(),
+                        values.buffer(),
+                        scratch.keys_tmp.buffer(),
+                        scratch.values_tmp.buffer(),
+                    )
+                } else {
+                    (
+                        scratch.keys_tmp.buffer(),
+                        scratch.values_tmp.buffer(),
+                        keys.buffer(),
+                        values.buffer(),
+                    )
+                };
                 let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: self.scatter_kernel.bind_group_layout(),
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: src_keys.buffer().as_entire_binding(),
+                            resource: src_keys_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: src_values.buffer().as_entire_binding(),
+                            resource: src_values_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: dst_keys.buffer().as_entire_binding(),
+                            resource: dst_keys_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
-                            resource: dst_values.buffer().as_entire_binding(),
+                            resource: dst_values_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
