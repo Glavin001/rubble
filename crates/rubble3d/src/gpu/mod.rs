@@ -1313,12 +1313,11 @@ impl GpuPipeline {
             self.dispatch_narrowphase(num_bodies, pair_count);
         } else if pair_thread_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
+            let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
             self.dispatch_narrowphase_with_source(
                 num_bodies,
-                pair_thread_count,
+                pair_count,
                 &pair_buffer,
-                &pair_count_buffer,
             );
         }
 
@@ -1335,12 +1334,11 @@ impl GpuPipeline {
                 self.dispatch_narrowphase(num_bodies, pair_count);
             } else if pair_thread_count > 0 {
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
+                let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
                 self.dispatch_narrowphase_with_source(
                     num_bodies,
-                    pair_thread_count,
+                    pair_count,
                     &pair_buffer,
-                    &pair_count_buffer,
                 );
             }
         }
@@ -1880,12 +1878,69 @@ impl GpuPipeline {
         contacts: &mut [Contact3D],
     ) {
         if contacts.is_empty() {
+            self.apply_free_motion(num_bodies, &[]);
+            self.prev_contact_count = 0;
             return;
         }
         self.contacts.upload(&self.ctx, contacts);
         let contact_count = contacts.len() as u32;
         self.contact_count.write(&self.ctx, contact_count);
-        self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
+
+        self.mark_precise_timing(PreciseTimingMarker::SolveGraphStart);
+        self.dispatch_gpu_solve_graph(num_bodies, contact_count);
+        self.mark_precise_timing(PreciseTimingMarker::SolveGraphEnd);
+        let _ = self.free_motion_bind_group();
+        let free_motion_bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
+        self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionStart);
+        self.run_pass(
+            "free_motion",
+            &self.free_motion_kernel,
+            free_motion_bg,
+            num_bodies,
+        );
+        self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionEnd);
+        self.mark_precise_timing(PreciseTimingMarker::SolveColoringStart);
+        let color_groups = self.dispatch_gpu_coloring_async(num_bodies).await;
+        self.mark_precise_timing(PreciseTimingMarker::SolveColoringEnd);
+        self.write_solve_ranges(&color_groups);
+        self.sync_primal_bind_groups(color_groups.len());
+        let _ = self.dual_bind_group();
+        let primal_bind_groups = &self.primal_bg_cache.bind_groups;
+        let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
+        self.mark_precise_timing(PreciseTimingMarker::SolveIterationsStart);
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("avbd_solve_batch_3d"),
+            });
+        for _ in 0..solver_iterations {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_primal_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.primal_kernel.pipeline());
+                for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
+                    if count == 0 {
+                        continue;
+                    }
+                    pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
+                    pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
+                }
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_dual_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.dual_kernel.pipeline());
+                pass.set_bind_group(0, dual_bind_group, &[]);
+                pass.dispatch_workgroups(round_up_workgroups(contact_count, WORKGROUP_SIZE), 1, 1);
+            }
+        }
+        self.ctx.queue.submit(Some(encoder.finish()));
+        self.mark_precise_timing(PreciseTimingMarker::SolveIterationsEnd);
     }
 
     /// Run the GPU-only happy-path step: no contact readback and GPU-owned persistence.
@@ -2275,12 +2330,11 @@ impl GpuPipeline {
             self.dispatch_narrowphase(num_bodies, pair_count);
         } else if pair_thread_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
+            let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
             self.dispatch_narrowphase_with_source(
                 num_bodies,
-                pair_thread_count,
+                pair_count,
                 &pair_buffer,
-                &pair_count_buffer,
             );
         }
 
@@ -2294,12 +2348,11 @@ impl GpuPipeline {
                 self.dispatch_narrowphase(num_bodies, pair_count);
             } else if pair_thread_count > 0 {
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
+                let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
                 self.dispatch_narrowphase_with_source(
                     num_bodies,
-                    pair_thread_count,
+                    pair_count,
                     &pair_buffer,
-                    &pair_count_buffer,
                 );
             }
         }
@@ -2660,13 +2713,12 @@ impl GpuPipeline {
         if requires_cpu_pair_stage {
             self.dispatch_narrowphase(num_bodies, pair_count);
         } else if pair_thread_count > 0 {
+            let pair_count = self.gpu_lbvh.read_pair_count_async(&self.ctx, pair_thread_count).await;
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
             self.dispatch_narrowphase_with_source(
                 num_bodies,
-                pair_thread_count,
+                pair_count,
                 &pair_buffer,
-                &pair_count_buffer,
             );
         }
 
@@ -2679,13 +2731,12 @@ impl GpuPipeline {
             if requires_cpu_pair_stage {
                 self.dispatch_narrowphase(num_bodies, pair_count);
             } else if pair_thread_count > 0 {
+                let pair_count = self.gpu_lbvh.read_pair_count_async(&self.ctx, pair_thread_count).await;
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                let pair_count_buffer = self.gpu_lbvh.pair_counter_buffer().clone();
                 self.dispatch_narrowphase_with_source(
                     num_bodies,
-                    pair_thread_count,
+                    pair_count,
                     &pair_buffer,
-                    &pair_count_buffer,
                 );
             }
         }
@@ -2933,7 +2984,6 @@ impl GpuPipeline {
         if self.narrowphase_bg_cache.key.as_ref() != Some(&key) {
             let bg = self.create_narrowphase_bind_group(
                 self.pairs.buffer(),
-                self.pair_count.buffer(),
                 "narrowphase",
             );
             self.narrowphase_bg_cache.key = Some(key);
@@ -2945,7 +2995,6 @@ impl GpuPipeline {
     fn create_narrowphase_bind_group(
         &self,
         pairs_buffer: &wgpu::Buffer,
-        pair_count_buffer: &wgpu::Buffer,
         label: &'static str,
     ) -> wgpu::BindGroup {
         self.ctx
@@ -2984,26 +3033,22 @@ impl GpuPipeline {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: pair_count_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
                         resource: self.params_uniform.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 9,
+                        binding: 8,
                         resource: self.convex_hulls.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 10,
+                        binding: 9,
                         resource: self.convex_vertices.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 11,
+                        binding: 10,
                         resource: self.capsules.buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 12,
+                        binding: 11,
                         resource: self.plane_params_uniform.as_entire_binding(),
                     },
                 ],
@@ -3314,14 +3359,13 @@ impl GpuPipeline {
     fn dispatch_narrowphase_with_source(
         &mut self,
         _num_bodies: u32,
-        dispatch_pairs: u32,
+        num_pairs: u32,
         pairs_buffer: &wgpu::Buffer,
-        pair_count_buffer: &wgpu::Buffer,
     ) {
-        if dispatch_pairs == 0 {
+        if num_pairs == 0 {
             return;
         }
-        self.sim_params.counts[2] = dispatch_pairs;
+        self.sim_params.counts[2] = num_pairs;
         self.ctx.queue.write_buffer(
             &self.params_uniform,
             0,
@@ -3330,10 +3374,9 @@ impl GpuPipeline {
 
         let bg = self.create_narrowphase_bind_group(
             pairs_buffer,
-            pair_count_buffer,
             "narrowphase_external",
         );
-        self.run_pass("narrowphase", &self.narrowphase_kernel, &bg, dispatch_pairs);
+        self.run_pass("narrowphase", &self.narrowphase_kernel, &bg, num_pairs);
     }
 
     fn dispatch_extract(&mut self, num_bodies: u32) {
@@ -3798,6 +3841,140 @@ impl GpuPipeline {
             4,
         );
         let sorted_colors = self.gpu_coloring.body_colors.download(ctx);
+        Self::build_color_groups_from_sorted_colors(&sorted_colors)
+    }
+
+    /// Async version of `dispatch_gpu_coloring` for WASM/WebGPU (uses async buffer readbacks).
+    #[cfg(target_arch = "wasm32")]
+    async fn dispatch_gpu_coloring_async(&mut self, num_bodies: u32) -> Vec<(u32, u32)> {
+        if num_bodies == 0 {
+            return Vec::new();
+        }
+
+        let ctx = &self.ctx;
+        self.gpu_coloring.frame_counter = self.gpu_coloring.frame_counter.wrapping_add(1);
+        self.gpu_coloring
+            .body_colors
+            .grow_if_needed(ctx, num_bodies as usize);
+        self.gpu_coloring
+            .body_priorities
+            .grow_if_needed(ctx, num_bodies as usize);
+        self.gpu_coloring.body_colors.set_len(num_bodies);
+        self.gpu_coloring.body_priorities.set_len(num_bodies);
+        self.body_order.grow_if_needed(ctx, num_bodies as usize);
+        self.body_order.set_len(num_bodies);
+
+        {
+            let params: [u32; 4] = [num_bodies, 0u32, self.gpu_coloring.frame_counter, 0u32];
+            ctx.queue.write_buffer(
+                &self.gpu_coloring.params_buf,
+                0,
+                bytemuck::cast_slice(&params),
+            );
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("coloring_reset"),
+                layout: self.gpu_coloring.reset_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.gpu_coloring.body_colors.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self
+                            .gpu_coloring
+                            .body_priorities
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.body_order.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.active_body_flags.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.gpu_coloring.params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            self.run_pass(
+                "coloring_reset",
+                &self.gpu_coloring.reset_kernel,
+                &bg,
+                num_bodies,
+            );
+        }
+
+        let mut current_color = 0u32;
+        while current_color < num_bodies {
+            let batch_end = (current_color + MAX_GPU_COLORING_ROUNDS).min(num_bodies);
+            while current_color < batch_end {
+                self.gpu_coloring.unfinished.reset(ctx);
+                let params: [u32; 4] = [num_bodies, 0u32, current_color, 0u32];
+                ctx.queue.write_buffer(
+                    &self.gpu_coloring.params_buf,
+                    0,
+                    bytemuck::cast_slice(&params),
+                );
+                let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("coloring_step"),
+                    layout: self.gpu_coloring.step_kernel.bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.gpu_coloring.body_colors.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self
+                                .gpu_coloring
+                                .body_priorities
+                                .buffer()
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.body_contact_ranges.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.body_contact_neighbors.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.gpu_coloring.params_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.gpu_coloring.unfinished.buffer().as_entire_binding(),
+                        },
+                    ],
+                });
+                self.run_pass(
+                    "coloring_step",
+                    &self.gpu_coloring.step_kernel,
+                    &bg,
+                    num_bodies,
+                );
+                current_color += 1;
+            }
+            if self.gpu_coloring.unfinished.read_async(ctx).await == 0 {
+                break;
+            }
+        }
+
+        // Colors are 0..~12, so only 4 bits needed (1 radix pass instead of 8)
+        self.gpu_coloring.radix_sort.sort_key_value_partial(
+            ctx,
+            &mut self.gpu_coloring.body_colors,
+            &mut self.body_order,
+            4,
+        );
+        let sorted_colors = self.gpu_coloring.body_colors.download_async(ctx).await;
         Self::build_color_groups_from_sorted_colors(&sorted_colors)
     }
 
