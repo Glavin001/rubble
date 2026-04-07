@@ -794,17 +794,10 @@ struct GpuGraphState {
     body_contact_counts: GpuBuffer<u32>,
     body_contact_offsets: GpuBuffer<u32>,
     body_contact_heads: GpuBuffer<u32>,
-    params_buf: wgpu::Buffer,
 }
 
 impl GpuGraphState {
     fn new(ctx: &GpuContext, max_bodies: usize, max_contacts: usize) -> Self {
-        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("adjacency params"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         Self {
             reset_kernel: ComputeKernel::from_wgsl(ctx, ADJACENCY_RESET_WGSL, "main"),
             count_kernel: ComputeKernel::from_wgsl(ctx, ADJACENCY_COUNT_WGSL, "main"),
@@ -814,7 +807,6 @@ impl GpuGraphState {
             body_contact_counts: GpuBuffer::new(ctx, max_bodies.max(1)),
             body_contact_offsets: GpuBuffer::new(ctx, max_bodies.max(1)),
             body_contact_heads: GpuBuffer::new(ctx, max_bodies.max(1)),
-            params_buf,
         }
     }
 }
@@ -3464,9 +3456,14 @@ impl GpuPipeline {
         self.body_contact_indices
             .set_len(contact_count.saturating_mul(2));
 
-        let params_buf = &self.gpu_graph.params_buf;
+        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("adjacency params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         ctx.queue.write_buffer(
-            params_buf,
+            &params_buf,
             0,
             bytemuck::cast_slice(&[num_bodies, 0u32, 0, 0]),
         );
