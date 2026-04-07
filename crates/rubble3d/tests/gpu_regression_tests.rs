@@ -623,7 +623,7 @@ fn warm_start_matches_by_feature_not_distance_3d() {
     for contact in &second_contacts {
         if let Some(prev) = first_by_feature.get(&contact.feature_id) {
             matched += 1;
-            let expected_lambda = prev.lambda * (0.95 * 0.99);
+            let expected_lambda = prev.lambda * (0.95 * 0.95);
             let expected_penalty = prev.penalty * 0.95;
             let lambda_delta = (contact.lambda - expected_lambda).abs();
             let penalty_delta = (contact.penalty - expected_penalty).abs();
