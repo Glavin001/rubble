@@ -68,7 +68,7 @@ const WORKGROUP_SIZE: u32 = 64;
 const AVBD_WARMSTART_ALPHA: f32 = 0.95;
 /// Run GPU coloring in fixed-size batches to avoid a CPU/GPU sync after every color.
 /// This keeps the algorithm GPU-resident while dramatically reducing readback overhead.
-const MAX_GPU_COLORING_ROUNDS: u32 = 16;
+const MAX_GPU_COLORING_ROUNDS: u32 = 32;
 const MAX_CONTACT_PENALTY: f32 = 1.0e6;
 
 #[repr(u32)]
