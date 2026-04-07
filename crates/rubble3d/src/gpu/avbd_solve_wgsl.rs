@@ -136,34 +136,35 @@ fn rotation_delta_vec(current: vec4<f32>, reference: vec4<f32>) -> vec3<f32> {
     return dq.xyz / imag_len * angle;
 }
 
-fn mat_idx(r: u32, c: u32) -> u32 {
-    return r * 6u + c;
-}
+// Lower-triangle packed index: lt[r*(r+1)/2 + c] for r >= c
+// (0,0)=0  (1,0)=1 (1,1)=2  (2,0)=3 (2,1)=4 (2,2)=5
+// (3,0)=6 (3,1)=7 (3,2)=8 (3,3)=9  (4,0)=10 .. (4,4)=14
+// (5,0)=15 .. (5,5)=20   Total: 21 elements
 
-fn solve_6x6(m: array<array<f32, 6>, 6>, rhs: array<f32, 6>) -> Solve6 {
+fn solve_6x6_lt(lt: array<f32, 21>, rhs: array<f32, 6>) -> Solve6 {
     let eps = 1e-9;
 
-    let A11 = m[0][0];
-    let A21 = m[1][0];
-    let A22 = m[1][1];
-    let A31 = m[2][0];
-    let A32 = m[2][1];
-    let A33 = m[2][2];
-    let A41 = m[3][0];
-    let A42 = m[3][1];
-    let A43 = m[3][2];
-    let A44 = m[3][3];
-    let A51 = m[4][0];
-    let A52 = m[4][1];
-    let A53 = m[4][2];
-    let A54 = m[4][3];
-    let A55 = m[4][4];
-    let A61 = m[5][0];
-    let A62 = m[5][1];
-    let A63 = m[5][2];
-    let A64 = m[5][3];
-    let A65 = m[5][4];
-    let A66 = m[5][5];
+    let A11 = lt[0];
+    let A21 = lt[1];
+    let A22 = lt[2];
+    let A31 = lt[3];
+    let A32 = lt[4];
+    let A33 = lt[5];
+    let A41 = lt[6];
+    let A42 = lt[7];
+    let A43 = lt[8];
+    let A44 = lt[9];
+    let A51 = lt[10];
+    let A52 = lt[11];
+    let A53 = lt[12];
+    let A54 = lt[13];
+    let A55 = lt[14];
+    let A61 = lt[15];
+    let A62 = lt[16];
+    let A63 = lt[17];
+    let A64 = lt[18];
+    let A65 = lt[19];
+    let A66 = lt[20];
 
     if A11 <= eps {
         return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
@@ -244,10 +245,9 @@ fn accumulate_row(
     j_ang: vec3<f32>,
     stiffness: f32,
     force: f32,
-    m: ptr<function, array<f32, 36>>,
+    lt: ptr<function, array<f32, 21>>,
     rhs: ptr<function, array<f32, 6>>,
 ) {
-    // Unrolled to avoid dynamic array indexing in loops (causes register spills on GPU).
     (*rhs)[0] += j_lin.x * force;
     (*rhs)[1] += j_lin.y * force;
     (*rhs)[2] += j_lin.z * force;
@@ -262,18 +262,22 @@ fn accumulate_row(
     let sj4 = stiffness * j_ang.y;
     let sj5 = stiffness * j_ang.z;
 
-    (*m)[0]  += sj0 * j_lin.x; (*m)[1]  += sj0 * j_lin.y; (*m)[2]  += sj0 * j_lin.z;
-    (*m)[3]  += sj0 * j_ang.x; (*m)[4]  += sj0 * j_ang.y; (*m)[5]  += sj0 * j_ang.z;
-    (*m)[6]  += sj1 * j_lin.x; (*m)[7]  += sj1 * j_lin.y; (*m)[8]  += sj1 * j_lin.z;
-    (*m)[9]  += sj1 * j_ang.x; (*m)[10] += sj1 * j_ang.y; (*m)[11] += sj1 * j_ang.z;
-    (*m)[12] += sj2 * j_lin.x; (*m)[13] += sj2 * j_lin.y; (*m)[14] += sj2 * j_lin.z;
-    (*m)[15] += sj2 * j_ang.x; (*m)[16] += sj2 * j_ang.y; (*m)[17] += sj2 * j_ang.z;
-    (*m)[18] += sj3 * j_lin.x; (*m)[19] += sj3 * j_lin.y; (*m)[20] += sj3 * j_lin.z;
-    (*m)[21] += sj3 * j_ang.x; (*m)[22] += sj3 * j_ang.y; (*m)[23] += sj3 * j_ang.z;
-    (*m)[24] += sj4 * j_lin.x; (*m)[25] += sj4 * j_lin.y; (*m)[26] += sj4 * j_lin.z;
-    (*m)[27] += sj4 * j_ang.x; (*m)[28] += sj4 * j_ang.y; (*m)[29] += sj4 * j_ang.z;
-    (*m)[30] += sj5 * j_lin.x; (*m)[31] += sj5 * j_lin.y; (*m)[32] += sj5 * j_lin.z;
-    (*m)[33] += sj5 * j_ang.x; (*m)[34] += sj5 * j_ang.y; (*m)[35] += sj5 * j_ang.z;
+    // Lower triangle only (21 FMAs instead of 36)
+    // Row 0: (0,0)
+    (*lt)[0]  += sj0 * j_lin.x;
+    // Row 1: (1,0) (1,1)
+    (*lt)[1]  += sj1 * j_lin.x; (*lt)[2]  += sj1 * j_lin.y;
+    // Row 2: (2,0) (2,1) (2,2)
+    (*lt)[3]  += sj2 * j_lin.x; (*lt)[4]  += sj2 * j_lin.y; (*lt)[5]  += sj2 * j_lin.z;
+    // Row 3: (3,0) (3,1) (3,2) (3,3)
+    (*lt)[6]  += sj3 * j_lin.x; (*lt)[7]  += sj3 * j_lin.y; (*lt)[8]  += sj3 * j_lin.z;
+    (*lt)[9]  += sj3 * j_ang.x;
+    // Row 4: (4,0) (4,1) (4,2) (4,3) (4,4)
+    (*lt)[10] += sj4 * j_lin.x; (*lt)[11] += sj4 * j_lin.y; (*lt)[12] += sj4 * j_lin.z;
+    (*lt)[13] += sj4 * j_ang.x; (*lt)[14] += sj4 * j_ang.y;
+    // Row 5: (5,0) (5,1) (5,2) (5,3) (5,4) (5,5)
+    (*lt)[15] += sj5 * j_lin.x; (*lt)[16] += sj5 * j_lin.y; (*lt)[17] += sj5 * j_lin.z;
+    (*lt)[18] += sj5 * j_ang.x; (*lt)[19] += sj5 * j_ang.y; (*lt)[20] += sj5 * j_ang.z;
 }
 
 @compute @workgroup_size(BODY_LANES)
@@ -302,34 +306,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mass = 1.0 / inv_mass;
     let i_world = world_inertia(body_props, q);
 
-    // Zero-initialize without loops (avoids dynamic indexing)
-    var local_mtx = array<f32, 36>(
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    // Lower-triangle packed matrix (21 elements instead of 36)
+    var local_lt = array<f32, 21>(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
     );
     var local_rhs = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
     let m_dt2 = mass / dt2;
-    local_mtx[0]  = m_dt2;
-    local_mtx[7]  = m_dt2;
-    local_mtx[14] = m_dt2;
+    // Diagonal: (0,0)=0, (1,1)=2, (2,2)=5
+    local_lt[0] = m_dt2;
+    local_lt[2] = m_dt2;
+    local_lt[5] = m_dt2;
     local_rhs[0] = m_dt2 * (pos.x - pos_inertial.x);
     local_rhs[1] = m_dt2 * (pos.y - pos_inertial.y);
     local_rhs[2] = m_dt2 * (pos.z - pos_inertial.z);
 
-    local_mtx[21] = i_world[0][0] / dt2;
-    local_mtx[22] = i_world[0][1] / dt2;
-    local_mtx[23] = i_world[0][2] / dt2;
-    local_mtx[27] = i_world[1][0] / dt2;
-    local_mtx[28] = i_world[1][1] / dt2;
-    local_mtx[29] = i_world[1][2] / dt2;
-    local_mtx[33] = i_world[2][0] / dt2;
-    local_mtx[34] = i_world[2][1] / dt2;
-    local_mtx[35] = i_world[2][2] / dt2;
+    // Inertia block: (3,3)=9, (4,3)=13, (4,4)=14, (5,3)=18, (5,4)=19, (5,5)=20
+    local_lt[9]  = i_world[0][0] / dt2;
+    local_lt[13] = i_world[1][0] / dt2;
+    local_lt[14] = i_world[1][1] / dt2;
+    local_lt[18] = i_world[2][0] / dt2;
+    local_lt[19] = i_world[2][1] / dt2;
+    local_lt[20] = i_world[2][2] / dt2;
     local_rhs[3] =
         (i_world[0][0] * rot_delta.x + i_world[0][1] * rot_delta.y + i_world[0][2] * rot_delta.z) / dt2;
     local_rhs[4] =
@@ -392,21 +392,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             jt2_ang = -cross(r_b, tangent2);
         }
 
-        accumulate_row(jn_lin, jn_ang, k_n, f_n, &local_mtx, &local_rhs);
-        accumulate_row(jt1_lin, jt1_ang, k_t1, tang.x, &local_mtx, &local_rhs);
-        accumulate_row(jt2_lin, jt2_ang, k_t2, tang.y, &local_mtx, &local_rhs);
+        accumulate_row(jn_lin, jn_ang, k_n, f_n, &local_lt, &local_rhs);
+        accumulate_row(jt1_lin, jt1_ang, k_t1, tang.x, &local_lt, &local_rhs);
+        accumulate_row(jt2_lin, jt2_ang, k_t2, tang.y, &local_lt, &local_rhs);
     }
 
-    let mtx = array<array<f32, 6>, 6>(
-        array<f32, 6>(local_mtx[0],  local_mtx[1],  local_mtx[2],  local_mtx[3],  local_mtx[4],  local_mtx[5]),
-        array<f32, 6>(local_mtx[6],  local_mtx[7],  local_mtx[8],  local_mtx[9],  local_mtx[10], local_mtx[11]),
-        array<f32, 6>(local_mtx[12], local_mtx[13], local_mtx[14], local_mtx[15], local_mtx[16], local_mtx[17]),
-        array<f32, 6>(local_mtx[18], local_mtx[19], local_mtx[20], local_mtx[21], local_mtx[22], local_mtx[23]),
-        array<f32, 6>(local_mtx[24], local_mtx[25], local_mtx[26], local_mtx[27], local_mtx[28], local_mtx[29]),
-        array<f32, 6>(local_mtx[30], local_mtx[31], local_mtx[32], local_mtx[33], local_mtx[34], local_mtx[35]),
-    );
-
-    let solution = solve_6x6(mtx, local_rhs);
+    let solution = solve_6x6_lt(local_lt, local_rhs);
     bodies[body_idx].position_inv_mass = vec4<f32>(pos - solution.lin, inv_mass);
     bodies[body_idx].orientation = quat_normalize(quat_mul(small_angle_quat(-solution.ang), q));
 }
