@@ -140,10 +140,11 @@ fn build_world_3d(
     gravity: Vec3,
     scene: &Scene3D,
 ) -> (rubble3d::World, Vec<BodyHandle>, Vec<ShapeInfo3D>) {
-    let config = rubble3d::SimConfig {
+    let mut config = rubble3d::SimConfig {
         gravity,
         ..Default::default()
     };
+    config.max_bodies = config.max_bodies.max(scene.descs.len());
     let mut world = rubble3d::World::new_with_context(config, gpu_ctx);
     let mut handles = Vec::with_capacity(scene.descs.len());
     let mut shapes = Vec::with_capacity(scene.descs.len());
