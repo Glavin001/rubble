@@ -821,7 +821,6 @@ struct GpuColoringState {
     body_priorities: GpuBuffer<u32>,
     params_buf: wgpu::Buffer,
     frame_counter: u32,
-    step_bg_cache: CachedBindGroup<[u64; 5]>,
 }
 
 impl GpuColoringState {
@@ -846,7 +845,6 @@ impl GpuColoringState {
             body_priorities,
             params_buf,
             frame_counter: 0,
-            step_bg_cache: CachedBindGroup::default(),
         }
     }
 }
@@ -3723,59 +3721,6 @@ impl GpuPipeline {
             );
         }
 
-        // Cache the coloring step bind group — buffers don't change within a step,
-        // only the params_buf *contents* change (via write_buffer) each round.
-        let step_bg_key = [
-            self.gpu_coloring.body_colors.byte_size() as u64,
-            self.gpu_coloring.body_priorities.byte_size() as u64,
-            self.contacts.byte_size() as u64,
-            self.body_contact_ranges.byte_size() as u64,
-            self.body_contact_indices.byte_size() as u64,
-        ];
-        if self.gpu_coloring.step_bg_cache.key != Some(step_bg_key) {
-            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("coloring_step"),
-                layout: self.gpu_coloring.step_kernel.bind_group_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.gpu_coloring.body_colors.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self
-                            .gpu_coloring
-                            .body_priorities
-                            .buffer()
-                            .as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.contacts.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.body_contact_ranges.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: self.body_contact_indices.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: self.gpu_coloring.params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: self.gpu_coloring.unfinished.buffer().as_entire_binding(),
-                    },
-                ],
-            });
-            self.gpu_coloring.step_bg_cache.key = Some(step_bg_key);
-            self.gpu_coloring.step_bg_cache.bind_group = Some(bg);
-        }
-        let step_bg = self.gpu_coloring.step_bg_cache.bind_group.as_ref().unwrap();
-
         let mut current_color = 0u32;
         while current_color < num_bodies {
             let batch_end = (current_color + MAX_GPU_COLORING_ROUNDS).min(num_bodies);
@@ -3787,10 +3732,48 @@ impl GpuPipeline {
                     0,
                     bytemuck::cast_slice(&params),
                 );
+                let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("coloring_step"),
+                    layout: self.gpu_coloring.step_kernel.bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.gpu_coloring.body_colors.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self
+                                .gpu_coloring
+                                .body_priorities
+                                .buffer()
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.contacts.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.body_contact_ranges.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.body_contact_indices.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.gpu_coloring.params_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.gpu_coloring.unfinished.buffer().as_entire_binding(),
+                        },
+                    ],
+                });
                 self.run_pass(
                     "coloring_step",
                     &self.gpu_coloring.step_kernel,
-                    step_bg,
+                    &bg,
                     num_bodies,
                 );
                 current_color += 1;
