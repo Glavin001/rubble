@@ -39,6 +39,12 @@ fn main() {
     let mut swap_times = Vec::with_capacity(bench_steps);
     let mut iter_times = Vec::with_capacity(bench_steps);
     let mut coloring_times = Vec::with_capacity(bench_steps);
+    let mut upload_times = Vec::with_capacity(bench_steps);
+    let mut predict_times = Vec::with_capacity(bench_steps);
+    let mut broadphase_times = Vec::with_capacity(bench_steps);
+    let mut narrowphase_times = Vec::with_capacity(bench_steps);
+    let mut contact_times = Vec::with_capacity(bench_steps);
+    let mut extract_times = Vec::with_capacity(bench_steps);
 
     for i in 0..bench_steps {
         world.step();
@@ -49,6 +55,12 @@ fn main() {
         swap_times.push(sb.swap_ms);
         iter_times.push(sb.iterations_ms);
         coloring_times.push(sb.coloring_ms);
+        upload_times.push(t.upload_ms);
+        predict_times.push(t.predict_aabb_ms);
+        broadphase_times.push(t.broadphase_ms);
+        narrowphase_times.push(t.narrowphase_ms);
+        contact_times.push(t.contact_fetch_ms);
+        extract_times.push(t.extract_ms);
 
         if i % 20 == 0 {
             eprintln!(
@@ -80,6 +92,12 @@ fn main() {
         "median_swap_ms": median(&mut swap_times),
         "median_iterations_ms": median(&mut iter_times),
         "median_coloring_ms": median(&mut coloring_times),
+        "median_upload_ms": median(&mut upload_times),
+        "median_predict_ms": median(&mut predict_times),
+        "median_broadphase_ms": median(&mut broadphase_times),
+        "median_narrowphase_ms": median(&mut narrowphase_times),
+        "median_contact_fetch_ms": median(&mut contact_times),
+        "median_extract_ms": median(&mut extract_times),
         "precise_gpu": world.last_step_timings().precise_gpu,
     });
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
