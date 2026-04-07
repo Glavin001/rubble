@@ -13,6 +13,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
+use winit::dpi::PhysicalPosition;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 const CONTROLS_3D: &[&str] = &[
@@ -22,6 +23,31 @@ const CONTROLS_3D: &[&str] = &[
 ];
 
 const CONTROLS_2D: &[&str] = &["Pan view: left drag", "Zoom view: mouse wheel"];
+
+fn physical_pos_to_egui_pos(window: &Window, egui_ctx: &egui::Context, pos: PhysicalPosition<f64>) -> egui::Pos2 {
+    let ppp = egui_winit::pixels_per_point(egui_ctx, window);
+    egui::pos2(pos.x as f32 / ppp, pos.y as f32 / ppp)
+}
+
+/// Hit-test the viewer overlay using the **last laid-out** area rect plus the **current** cursor
+/// position. `Context::is_pointer_over_egui()` is tied to the last `run_ui` pass and is often stale
+/// between frames, which incorrectly blocks all camera input.
+fn viewer_ui_blocks_camera(window: &Window, egui_ctx: &egui::Context, pos: PhysicalPosition<f64>) -> bool {
+    if egui_ctx.egui_is_using_pointer() {
+        return true;
+    }
+    let p = physical_pos_to_egui_pos(window, egui_ctx, pos);
+    egui_ctx
+        .memory(|m| m.area_rect(overlay::viewer_overlay_area_id()))
+        .is_some_and(|rect| rect.contains(p))
+}
+
+fn physical_cursor_pos(
+    last_mouse: Option<(f64, f64)>,
+    event_pos: Option<PhysicalPosition<f64>>,
+) -> Option<PhysicalPosition<f64>> {
+    event_pos.or_else(|| last_mouse.map(|(x, y)| PhysicalPosition::new(x, y)))
+}
 
 // ---------------------------------------------------------------------------
 // Shape tracking (mirrors rubble-wasm bookkeeping)
@@ -384,14 +410,13 @@ impl App3D {
         };
 
         let _ = state.egui_state.on_window_event(&state.window, &event);
-        let pointer_over_ui = state.egui_ctx.is_pointer_over_egui();
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 let clamped = winit::dpi::PhysicalSize::new(
-                    size.width.min(state.renderer.max_surface_extent),
-                    size.height.min(state.renderer.max_surface_extent),
+                    size.width.min(state.renderer.max_texture_dimension_2d),
+                    size.height.min(state.renderer.max_texture_dimension_2d),
                 );
                 if clamped != size {
                     let _ = state.window.request_inner_size(clamped);
@@ -403,7 +428,11 @@ impl App3D {
                 state: btn, button, ..
             } => {
                 let pressed = btn == ElementState::Pressed;
-                if !pressed || !pointer_over_ui {
+                let pos = physical_cursor_pos(state.last_mouse, None);
+                let block = pos
+                    .map(|p| viewer_ui_blocks_camera(&state.window, &state.egui_ctx, p))
+                    .unwrap_or(false);
+                if !pressed || !block {
                     match button {
                         MouseButton::Left => state.mouse_pressed = pressed,
                         MouseButton::Right | MouseButton::Middle => state.right_pressed = pressed,
@@ -427,12 +456,20 @@ impl App3D {
                 }
                 state.last_mouse = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } if !pointer_over_ui => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.3,
-                };
-                state.camera.zoom(scroll);
+            WindowEvent::MouseWheel { delta, .. } => {
+                let pos = physical_cursor_pos(state.last_mouse, None);
+                let block = pos
+                    .map(|p| viewer_ui_blocks_camera(&state.window, &state.egui_ctx, p))
+                    .unwrap_or(false);
+                if !block {
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => {
+                            (p.y as f32 / 120.0).clamp(-4.0, 4.0)
+                        }
+                    };
+                    state.camera.zoom(scroll);
+                }
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
@@ -748,14 +785,13 @@ impl App2D {
         };
 
         let _ = state.egui_state.on_window_event(&state.window, &event);
-        let pointer_over_ui = state.egui_ctx.is_pointer_over_egui();
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 let clamped = winit::dpi::PhysicalSize::new(
-                    size.width.min(state.renderer.max_surface_extent),
-                    size.height.min(state.renderer.max_surface_extent),
+                    size.width.min(state.renderer.max_texture_dimension_2d),
+                    size.height.min(state.renderer.max_texture_dimension_2d),
                 );
                 if clamped != size {
                     let _ = state.window.request_inner_size(clamped);
@@ -767,7 +803,11 @@ impl App2D {
                 state: btn, button, ..
             } => {
                 let pressed = btn == ElementState::Pressed;
-                if (!pressed || !pointer_over_ui) && button == MouseButton::Left {
+                let pos = physical_cursor_pos(state.last_mouse, None);
+                let block = pos
+                    .map(|p| viewer_ui_blocks_camera(&state.window, &state.egui_ctx, p))
+                    .unwrap_or(false);
+                if (!pressed || !block) && button == MouseButton::Left {
                     state.mouse_pressed = pressed;
                 }
                 if !pressed {
@@ -784,12 +824,20 @@ impl App2D {
                 }
                 state.last_mouse = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } if !pointer_over_ui => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.3,
-                };
-                state.camera.zoom_by(scroll);
+            WindowEvent::MouseWheel { delta, .. } => {
+                let pos = physical_cursor_pos(state.last_mouse, None);
+                let block = pos
+                    .map(|p| viewer_ui_blocks_camera(&state.window, &state.egui_ctx, p))
+                    .unwrap_or(false);
+                if !block {
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => {
+                            (p.y as f32 / 120.0).clamp(-4.0, 4.0)
+                        }
+                    };
+                    state.camera.zoom_by(scroll);
+                }
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed

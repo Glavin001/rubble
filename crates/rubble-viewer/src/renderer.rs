@@ -48,7 +48,7 @@ pub struct Renderer {
     pub queue: Arc<wgpu::Queue>,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
-    pub max_surface_extent: u32,
+    pub max_texture_dimension_2d: u32,
     pub depth_view: wgpu::TextureView,
     pub pipeline: wgpu::RenderPipeline,
     pub grid_pipeline: wgpu::RenderPipeline,
@@ -92,14 +92,13 @@ impl Renderer {
         let required_features = supported_features
             & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
         let desired_storage_buffers: u32 = 16;
+        let mut required_limits = adapter_limits.clone();
+        required_limits.max_storage_buffers_per_shader_stage =
+            desired_storage_buffers.min(adapter_limits.max_storage_buffers_per_shader_stage);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features,
-                required_limits: wgpu::Limits {
-                    max_storage_buffers_per_shader_stage: desired_storage_buffers
-                        .min(adapter_limits.max_storage_buffers_per_shader_stage),
-                    ..wgpu::Limits::downlevel_defaults()
-                },
+                required_limits,
                 ..Default::default()
             })
             .await
@@ -109,7 +108,7 @@ impl Renderer {
         let queue = Arc::new(queue);
 
         let caps = surface.get_capabilities(&adapter);
-        let max_surface_extent = adapter.limits().max_texture_dimension_2d.min(2048).max(1);
+        let max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d.max(1);
         let format = caps
             .formats
             .iter()
@@ -120,8 +119,8 @@ impl Renderer {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1).min(max_surface_extent),
-            height: size.height.max(1).min(max_surface_extent),
+            width: size.width.max(1).min(max_texture_dimension_2d),
+            height: size.height.max(1).min(max_texture_dimension_2d),
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
@@ -258,7 +257,7 @@ impl Renderer {
             queue: queue.clone(),
             surface,
             config,
-            max_surface_extent,
+            max_texture_dimension_2d,
             depth_view,
             pipeline,
             grid_pipeline,
@@ -279,8 +278,8 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width.min(self.max_surface_extent).max(1);
-        self.config.height = height.min(self.max_surface_extent).max(1);
+        self.config.width = width.min(self.max_texture_dimension_2d).max(1);
+        self.config.height = height.min(self.max_texture_dimension_2d).max(1);
         self.surface.configure(&self.device, &self.config);
         self.depth_view =
             Self::create_depth_view(&self.device, self.config.width, self.config.height);

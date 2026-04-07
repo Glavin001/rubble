@@ -3,6 +3,12 @@ use rubble_gpu::{
     STEP_TIMING_LABELS,
 };
 
+/// Stable id for the main viewer overlay [`egui::Area`], used for hit-testing in `rubble-viewer`.
+#[inline]
+pub fn viewer_overlay_area_id() -> egui::Id {
+    egui::Id::new("viewer_overlay_panel")
+}
+
 fn stat_card(ui: &mut egui::Ui, label: &str, value: String) {
     egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14))
@@ -53,7 +59,7 @@ pub fn draw_panel(
         .corner_radius(14.0)
         .inner_margin(egui::Margin::same(14));
 
-    egui::Area::new(egui::Id::new("viewer_overlay_panel"))
+    egui::Area::new(viewer_overlay_area_id())
         .fixed_pos(egui::pos2(16.0, 16.0))
         .show(ctx, |ui| {
             ui.set_width(320.0);
