@@ -8,6 +8,7 @@ inspiration/
 # Web build artifacts
 web/node_modules/
 web/dist/
+web/dist*/
 web/src/wasm/
 web/test-results/
 web/playwright-report/

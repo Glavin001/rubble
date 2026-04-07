@@ -16,7 +16,8 @@
     "pretest": "npm run wasm",
     "test": "playwright test",
     "test:e2e": "playwright test",
-    "test:webgpu": "playwright test tests/webgpu-narrowphase.spec.ts"
+    "test:webgpu": "playwright test tests/webgpu-narrowphase.spec.ts tests/ground-contact.spec.ts",
+    "test:smoke": "npm run build && playwright test tests/ground-contact.spec.ts"
   },
   "dependencies": {
     "three": "^0.172.0"
