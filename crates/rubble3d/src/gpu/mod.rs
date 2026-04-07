@@ -38,7 +38,9 @@ pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
 pub use render_instances_wgsl::BUILD_RENDER_INSTANCES_WGSL;
-pub use warmstart_wgsl::{WARMSTART_BUILD_KEYS_WGSL, WARMSTART_MATCH_WGSL};
+pub use warmstart_wgsl::{
+    WARMSTART_HASHMAP_CLEAR_WGSL, WARMSTART_HASHMAP_INSERT_WGSL, WARMSTART_MATCH_WGSL,
+};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
@@ -419,6 +421,10 @@ pub struct WarmstartParamsGpu {
     pub new_count: u32,
     pub alpha: f32,
     pub gamma: f32,
+    pub hashmap_capacity: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +434,7 @@ pub struct WarmstartParamsGpu {
 const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 64);
 const _: () = assert!(std::mem::size_of::<GpuPair>() == 8);
 const _: () = assert!(std::mem::size_of::<SolveRangeGpu>() == 8);
-const _: () = assert!(std::mem::size_of::<WarmstartParamsGpu>() == 16);
+const _: () = assert!(std::mem::size_of::<WarmstartParamsGpu>() == 32);
 
 // ---------------------------------------------------------------------------
 // AABB compute shader
@@ -691,7 +697,8 @@ pub struct GpuPipeline {
     extract_kernel: ComputeKernel,
     event_pairs_kernel: ComputeKernel,
     render_instances_kernel: ComputeKernel,
-    warmstart_prepare_kernel: ComputeKernel,
+    warmstart_hashmap_clear_kernel: ComputeKernel,
+    warmstart_hashmap_insert_kernel: ComputeKernel,
     warmstart_kernel: ComputeKernel,
 
     // Storage buffers
@@ -729,14 +736,15 @@ pub struct GpuPipeline {
 
     // Persistent contact buffers for GPU-side warmstarting
     prev_contacts: GpuBuffer<Contact3D>,
-    prev_contact_hashes: GpuBuffer<u32>,
-    prev_contact_indices: GpuBuffer<u32>,
     prev_contact_count: u32,
     warmstart_params_uniform: wgpu::Buffer,
-    warmstart_prepare_count_buf: wgpu::Buffer,
-    warmstart_prepare_bg_cache: CachedBindGroup<[u64; 3]>,
+    warmstart_hashmap_params_buf: wgpu::Buffer,
+    warmstart_hashmap_keys: GpuBuffer<u32>,
+    warmstart_hashmap_values: GpuBuffer<u32>,
+    warmstart_hashmap_capacity: u32,
+    warmstart_clear_bg_cache: CachedBindGroup<[u64; 1]>,
+    warmstart_insert_bg_cache: CachedBindGroup<[u64; 3]>,
     warmstart_bg_cache: CachedBindGroup<[u64; 3]>,
-    warmstart_sort: GpuRadixSort,
 
     // Compound shape data (for CPU-side pair expansion)
     compound_shapes_data: Vec<CompoundShapeGpu>,
@@ -875,8 +883,10 @@ impl GpuPipeline {
         let event_pairs_kernel = ComputeKernel::from_wgsl(&ctx, EVENT_PAIR_KEYS_WGSL, "main");
         let render_instances_kernel =
             ComputeKernel::from_wgsl(&ctx, BUILD_RENDER_INSTANCES_WGSL, "main");
-        let warmstart_prepare_kernel =
-            ComputeKernel::from_wgsl(&ctx, WARMSTART_BUILD_KEYS_WGSL, "main");
+        let warmstart_hashmap_clear_kernel =
+            ComputeKernel::from_wgsl(&ctx, WARMSTART_HASHMAP_CLEAR_WGSL, "main");
+        let warmstart_hashmap_insert_kernel =
+            ComputeKernel::from_wgsl(&ctx, WARMSTART_HASHMAP_INSERT_WGSL, "main");
         let warmstart_kernel = ComputeKernel::from_wgsl(&ctx, WARMSTART_MATCH_WGSL, "main");
 
         let body_states = PingPongBuffer::new(&ctx, max_bodies);
@@ -924,17 +934,17 @@ impl GpuPipeline {
         });
 
         let prev_contacts: GpuBuffer<Contact3D> = GpuBuffer::new(&ctx, max_contacts);
-        let prev_contact_hashes = GpuBuffer::new(&ctx, max_contacts.max(1));
-        let prev_contact_indices = GpuBuffer::new(&ctx, max_contacts.max(1));
-        let warmstart_sort = GpuRadixSort::new(&ctx, max_contacts.max(1));
+        let initial_hashmap_cap = (max_contacts * 2).next_power_of_two().max(64);
+        let warmstart_hashmap_keys = GpuBuffer::new(&ctx, initial_hashmap_cap);
+        let warmstart_hashmap_values = GpuBuffer::new(&ctx, initial_hashmap_cap);
         let warmstart_params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("WarmstartParams uniform"),
             size: std::mem::size_of::<WarmstartParamsGpu>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let warmstart_prepare_count_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("WarmstartPrepareCount storage"),
+        let warmstart_hashmap_params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("WarmstartHashmapParams storage"),
             size: 16,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -958,7 +968,8 @@ impl GpuPipeline {
             extract_kernel,
             event_pairs_kernel,
             render_instances_kernel,
-            warmstart_prepare_kernel,
+            warmstart_hashmap_clear_kernel,
+            warmstart_hashmap_insert_kernel,
             warmstart_kernel,
             body_states,
             body_props,
@@ -990,14 +1001,15 @@ impl GpuPipeline {
             gpu_coloring,
             gpu_render,
             prev_contacts,
-            prev_contact_hashes,
-            prev_contact_indices,
             prev_contact_count: 0,
             warmstart_params_uniform,
-            warmstart_prepare_count_buf,
-            warmstart_prepare_bg_cache: CachedBindGroup::default(),
+            warmstart_hashmap_params_buf,
+            warmstart_hashmap_keys,
+            warmstart_hashmap_values,
+            warmstart_hashmap_capacity: initial_hashmap_cap as u32,
+            warmstart_clear_bg_cache: CachedBindGroup::default(),
+            warmstart_insert_bg_cache: CachedBindGroup::default(),
             warmstart_bg_cache: CachedBindGroup::default(),
-            warmstart_sort,
             compound_shapes_data: Vec::new(),
             compound_children_data: Vec::new(),
             sphere_data_cpu: Vec::new(),
@@ -3771,10 +3783,12 @@ impl GpuPipeline {
             }
         }
 
-        self.gpu_coloring.radix_sort.sort_key_value_in_place(
+        // Colors are 0..~12, so only 4 bits needed (1 radix pass instead of 8)
+        self.gpu_coloring.radix_sort.sort_key_value_partial(
             ctx,
             &mut self.gpu_coloring.body_colors,
             &mut self.body_order,
+            4,
         );
         let sorted_colors = self.gpu_coloring.body_colors.download(ctx);
         Self::build_color_groups_from_sorted_colors(&sorted_colors)
@@ -3799,65 +3813,123 @@ impl GpuPipeline {
             return;
         }
 
-        self.prev_contact_hashes
-            .grow_if_needed(&self.ctx, prev_count as usize);
-        self.prev_contact_indices
-            .grow_if_needed(&self.ctx, prev_count as usize);
-        self.prev_contact_hashes.set_len(prev_count);
-        self.prev_contact_indices.set_len(prev_count);
-
-        self.ctx.queue.write_buffer(
-            &self.warmstart_prepare_count_buf,
-            0,
-            bytemuck::cast_slice(&[prev_count, 0u32, 0u32, 0u32]),
-        );
-
-        let key = [
-            self.prev_contacts.byte_size(),
-            self.prev_contact_hashes.byte_size(),
-            self.prev_contact_indices.byte_size(),
-        ];
-        if self.warmstart_prepare_bg_cache.key != Some(key) {
-            let bg = self
-                .ctx
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("warmstart_prepare_bg"),
-                    layout: self.warmstart_prepare_kernel.bind_group_layout(),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: self.prev_contacts.buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: self.prev_contact_hashes.buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.prev_contact_indices.buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: self.warmstart_prepare_count_buf.as_entire_binding(),
-                        },
-                    ],
-                });
-            self.warmstart_prepare_bg_cache.key = Some(key);
-            self.warmstart_prepare_bg_cache.bind_group = Some(bg);
+        // Compute hash map capacity: next power of 2 >= prev_count * 2 (50% load factor)
+        let needed_cap = ((prev_count as usize) * 2).next_power_of_two().max(64) as u32;
+        if needed_cap > self.warmstart_hashmap_capacity {
+            self.warmstart_hashmap_keys
+                .grow_if_needed(&self.ctx, needed_cap as usize);
+            self.warmstart_hashmap_values
+                .grow_if_needed(&self.ctx, needed_cap as usize);
+            self.warmstart_hashmap_capacity = needed_cap;
+            // Invalidate cached bind groups since buffers may have been reallocated
+            self.warmstart_clear_bg_cache.key = None;
+            self.warmstart_insert_bg_cache.key = None;
+            self.warmstart_bg_cache.key = None;
         }
-        let bg = self.warmstart_prepare_bg_cache.bind_group.as_ref().unwrap();
-        self.run_pass(
-            "warmstart_prepare",
-            &self.warmstart_prepare_kernel,
-            bg,
-            prev_count,
-        );
-        self.warmstart_sort.sort_key_value_in_place(
-            &self.ctx,
-            &mut self.prev_contact_hashes,
-            &mut self.prev_contact_indices,
-        );
+        let capacity = self.warmstart_hashmap_capacity;
+        self.warmstart_hashmap_keys.set_len(capacity);
+        self.warmstart_hashmap_values.set_len(capacity);
+
+        // Dispatch 1: Clear hash map
+        {
+            self.ctx.queue.write_buffer(
+                &self.warmstart_hashmap_params_buf,
+                0,
+                bytemuck::cast_slice(&[capacity, 0u32, 0u32, 0u32]),
+            );
+            let key = [self.warmstart_hashmap_keys.byte_size()];
+            if self.warmstart_clear_bg_cache.key != Some(key) {
+                let bg = self
+                    .ctx
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("warmstart_hashmap_clear_bg"),
+                        layout: self.warmstart_hashmap_clear_kernel.bind_group_layout(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self
+                                    .warmstart_hashmap_keys
+                                    .buffer()
+                                    .as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: self
+                                    .warmstart_hashmap_params_buf
+                                    .as_entire_binding(),
+                            },
+                        ],
+                    });
+                self.warmstart_clear_bg_cache.key = Some(key);
+                self.warmstart_clear_bg_cache.bind_group = Some(bg);
+            }
+            let bg = self.warmstart_clear_bg_cache.bind_group.as_ref().unwrap();
+            self.run_pass(
+                "warmstart_hashmap_clear",
+                &self.warmstart_hashmap_clear_kernel,
+                bg,
+                capacity,
+            );
+        }
+
+        // Dispatch 2: Insert prev contacts into hash map
+        {
+            self.ctx.queue.write_buffer(
+                &self.warmstart_hashmap_params_buf,
+                0,
+                bytemuck::cast_slice(&[prev_count, capacity, 0u32, 0u32]),
+            );
+            let key = [
+                self.prev_contacts.byte_size(),
+                self.warmstart_hashmap_keys.byte_size(),
+                self.warmstart_hashmap_values.byte_size(),
+            ];
+            if self.warmstart_insert_bg_cache.key != Some(key) {
+                let bg = self
+                    .ctx
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("warmstart_hashmap_insert_bg"),
+                        layout: self.warmstart_hashmap_insert_kernel.bind_group_layout(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.prev_contacts.buffer().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: self
+                                    .warmstart_hashmap_keys
+                                    .buffer()
+                                    .as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: self
+                                    .warmstart_hashmap_values
+                                    .buffer()
+                                    .as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: self
+                                    .warmstart_hashmap_params_buf
+                                    .as_entire_binding(),
+                            },
+                        ],
+                    });
+                self.warmstart_insert_bg_cache.key = Some(key);
+                self.warmstart_insert_bg_cache.bind_group = Some(bg);
+            }
+            let bg = self.warmstart_insert_bg_cache.bind_group.as_ref().unwrap();
+            self.run_pass(
+                "warmstart_hashmap_insert",
+                &self.warmstart_hashmap_insert_kernel,
+                bg,
+                prev_count,
+            );
+        }
     }
 
     fn dispatch_gpu_warmstart(&mut self, new_count: u32) {
@@ -3865,12 +3937,16 @@ impl GpuPipeline {
             return;
         }
 
-        // Write warmstart params
+        // Write warmstart params (now includes hashmap_capacity)
         let params = WarmstartParamsGpu {
             prev_count: self.prev_contact_count,
             new_count,
             alpha: AVBD_WARMSTART_ALPHA,
             gamma: self.warmstart_decay,
+            hashmap_capacity: self.warmstart_hashmap_capacity,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         self.ctx.queue.write_buffer(
             &self.warmstart_params_uniform,
@@ -3881,7 +3957,7 @@ impl GpuPipeline {
         // Build or reuse bind group (keyed on buffer sizes to detect regrowth)
         let key = [
             self.prev_contacts.byte_size(),
-            self.prev_contact_hashes.byte_size(),
+            self.warmstart_hashmap_keys.byte_size(),
             self.contacts.byte_size(),
         ];
         if self.warmstart_bg_cache.key != Some(key) {
@@ -3899,11 +3975,17 @@ impl GpuPipeline {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: self.prev_contact_hashes.buffer().as_entire_binding(),
+                            resource: self
+                                .warmstart_hashmap_keys
+                                .buffer()
+                                .as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: self.prev_contact_indices.buffer().as_entire_binding(),
+                            resource: self
+                                .warmstart_hashmap_values
+                                .buffer()
+                                .as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
@@ -3923,26 +4005,24 @@ impl GpuPipeline {
         self.run_pass("warmstart_match", &self.warmstart_kernel, bg, new_count);
     }
 
-    /// Swap contacts → prev_contacts for next frame's warmstarting.
+    /// Swap contacts ↔ prev_contacts for next frame's warmstarting.
+    /// Uses a zero-copy pointer swap instead of `copy_buffer_to_buffer`.
     fn swap_contact_buffers(&mut self, contact_count: u32) {
-        // Copy current contacts to prev_contacts buffer
         if contact_count > 0 {
+            // Ensure prev_contacts buffer is large enough before swapping
             self.prev_contacts
                 .grow_if_needed(&self.ctx, contact_count as usize);
-            let mut encoder = self
-                .ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            let byte_count = (contact_count as u64) * std::mem::size_of::<Contact3D>() as u64;
-            encoder.copy_buffer_to_buffer(
-                self.contacts.buffer(),
-                0,
-                self.prev_contacts.buffer(),
-                0,
-                byte_count,
-            );
-            self.ctx.queue.submit(Some(encoder.finish()));
+            // Zero-copy swap: this frame's contacts become next frame's prev_contacts
+            std::mem::swap(&mut self.contacts, &mut self.prev_contacts);
             self.prev_contact_count = contact_count;
+            // Invalidate all bind group caches that reference contacts or prev_contacts
+            self.narrowphase_bg_cache.key = None;
+            self.primal_bg_cache.key = None;
+            self.primal_bg_cache.bind_groups.clear();
+            self.dual_bg_cache.key = None;
+            self.warmstart_bg_cache.key = None;
+            self.warmstart_insert_bg_cache.key = None;
+            self.event_pairs_bg_cache.key = None;
             self.prepare_prev_contact_lookup(contact_count);
         } else {
             self.prev_contact_count = 0;

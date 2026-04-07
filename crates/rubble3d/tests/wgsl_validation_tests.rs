@@ -53,10 +53,18 @@ fn validate_warmstart_match_wgsl() {
 }
 
 #[test]
-fn validate_warmstart_build_keys_wgsl() {
+fn validate_warmstart_hashmap_clear_wgsl() {
     validate_wgsl(
-        "WARMSTART_BUILD_KEYS_WGSL",
-        rubble3d::gpu::WARMSTART_BUILD_KEYS_WGSL,
+        "WARMSTART_HASHMAP_CLEAR_WGSL",
+        rubble3d::gpu::WARMSTART_HASHMAP_CLEAR_WGSL,
+    );
+}
+
+#[test]
+fn validate_warmstart_hashmap_insert_wgsl() {
+    validate_wgsl(
+        "WARMSTART_HASHMAP_INSERT_WGSL",
+        rubble3d::gpu::WARMSTART_HASHMAP_INSERT_WGSL,
     );
 }
 

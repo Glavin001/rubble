@@ -19,3 +19,5 @@ pollster = { workspace = true }
 naga = { workspace = true }
 parry3d = "0.17"
 nalgebra = "0.33"
+serde_json = "1"
+rubble-scenes = { workspace = true }

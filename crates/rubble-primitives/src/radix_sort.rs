@@ -194,12 +194,36 @@ impl GpuRadixSort {
         entries.upload(ctx, &sorted_entries);
     }
 
+    /// Sort on separate key/value buffers, but only consider the lowest `max_bits` bits.
+    /// This runs `ceil(max_bits / 4)` passes instead of the full 8, saving GPU work
+    /// when keys are known to fit in fewer bits (e.g. color values 0-12 need only 4 bits).
+    pub fn sort_key_value_partial(
+        &self,
+        ctx: &GpuContext,
+        keys: &mut GpuBuffer<u32>,
+        values: &mut GpuBuffer<u32>,
+        max_bits: u32,
+    ) {
+        let num_passes = (max_bits + RADIX_BITS - 1) / RADIX_BITS;
+        self.sort_key_value_n_passes(ctx, keys, values, num_passes);
+    }
+
     /// Internal sort on separate key/value buffers.
     pub fn sort_key_value_in_place(
         &self,
         ctx: &GpuContext,
         keys: &mut GpuBuffer<u32>,
         values: &mut GpuBuffer<u32>,
+    ) {
+        self.sort_key_value_n_passes(ctx, keys, values, NUM_PASSES);
+    }
+
+    fn sort_key_value_n_passes(
+        &self,
+        ctx: &GpuContext,
+        keys: &mut GpuBuffer<u32>,
+        values: &mut GpuBuffer<u32>,
+        num_passes: u32,
     ) {
         let n = keys.len();
         if n <= 1 {
@@ -216,7 +240,7 @@ impl GpuRadixSort {
         scratch.values_tmp.set_len(n);
         scratch.histograms.set_len(hist_size as u32);
 
-        for pass in 0..NUM_PASSES {
+        for pass in 0..num_passes {
             let shift = pass * RADIX_BITS;
             let even = pass % 2 == 0;
 
@@ -335,9 +359,9 @@ impl GpuRadixSort {
             }
         }
 
-        // After NUM_PASSES (8) passes with ping-pong, last pass index = 7 (odd),
-        // so the result is already in keys/values. If NUM_PASSES were odd, we'd copy back.
-        if NUM_PASSES % 2 == 1 {
+        // After num_passes passes with ping-pong, if the last pass was odd,
+        // the result is already in keys/values. If num_passes is odd, copy back from scratch.
+        if num_passes % 2 == 1 {
             let byte_len = (n as usize * std::mem::size_of::<u32>()) as u64;
             let mut encoder = ctx
                 .device
