@@ -247,14 +247,33 @@ fn accumulate_row(
     m: ptr<function, array<f32, 36>>,
     rhs: ptr<function, array<f32, 6>>,
 ) {
-    let j = array<f32, 6>(j_lin.x, j_lin.y, j_lin.z, j_ang.x, j_ang.y, j_ang.z);
-    for (var r = 0u; r < 6u; r = r + 1u) {
-        (*rhs)[r] = (*rhs)[r] + j[r] * force;
-        for (var c = 0u; c < 6u; c = c + 1u) {
-            let idx = mat_idx(r, c);
-            (*m)[idx] = (*m)[idx] + stiffness * j[r] * j[c];
-        }
-    }
+    // Unrolled to avoid dynamic array indexing in loops (causes register spills on GPU).
+    (*rhs)[0] += j_lin.x * force;
+    (*rhs)[1] += j_lin.y * force;
+    (*rhs)[2] += j_lin.z * force;
+    (*rhs)[3] += j_ang.x * force;
+    (*rhs)[4] += j_ang.y * force;
+    (*rhs)[5] += j_ang.z * force;
+
+    let sj0 = stiffness * j_lin.x;
+    let sj1 = stiffness * j_lin.y;
+    let sj2 = stiffness * j_lin.z;
+    let sj3 = stiffness * j_ang.x;
+    let sj4 = stiffness * j_ang.y;
+    let sj5 = stiffness * j_ang.z;
+
+    (*m)[0]  += sj0 * j_lin.x; (*m)[1]  += sj0 * j_lin.y; (*m)[2]  += sj0 * j_lin.z;
+    (*m)[3]  += sj0 * j_ang.x; (*m)[4]  += sj0 * j_ang.y; (*m)[5]  += sj0 * j_ang.z;
+    (*m)[6]  += sj1 * j_lin.x; (*m)[7]  += sj1 * j_lin.y; (*m)[8]  += sj1 * j_lin.z;
+    (*m)[9]  += sj1 * j_ang.x; (*m)[10] += sj1 * j_ang.y; (*m)[11] += sj1 * j_ang.z;
+    (*m)[12] += sj2 * j_lin.x; (*m)[13] += sj2 * j_lin.y; (*m)[14] += sj2 * j_lin.z;
+    (*m)[15] += sj2 * j_ang.x; (*m)[16] += sj2 * j_ang.y; (*m)[17] += sj2 * j_ang.z;
+    (*m)[18] += sj3 * j_lin.x; (*m)[19] += sj3 * j_lin.y; (*m)[20] += sj3 * j_lin.z;
+    (*m)[21] += sj3 * j_ang.x; (*m)[22] += sj3 * j_ang.y; (*m)[23] += sj3 * j_ang.z;
+    (*m)[24] += sj4 * j_lin.x; (*m)[25] += sj4 * j_lin.y; (*m)[26] += sj4 * j_lin.z;
+    (*m)[27] += sj4 * j_ang.x; (*m)[28] += sj4 * j_ang.y; (*m)[29] += sj4 * j_ang.z;
+    (*m)[30] += sj5 * j_lin.x; (*m)[31] += sj5 * j_lin.y; (*m)[32] += sj5 * j_lin.z;
+    (*m)[33] += sj5 * j_ang.x; (*m)[34] += sj5 * j_ang.y; (*m)[35] += sj5 * j_ang.z;
 }
 
 @compute @workgroup_size(BODY_LANES)
