@@ -27,6 +27,18 @@ function findChromium(): string | undefined {
 }
 
 const chromiumPath = findChromium();
+const isCI = !!process.env.CI;
+
+// On CI (no real GPU), use SwiftShader CPU emulation for WebGPU.
+// Locally, use the real GPU for faster and more accurate tests.
+const swiftshaderArgs = isCI
+  ? [
+      "--use-vulkan=swiftshader",
+      "--use-angle=swiftshader",
+      "--disable-vulkan-fallback-to-gl-for-testing",
+      "--disable-dev-shm-usage",
+    ]
+  : [];
 
 export default defineConfig({
   testDir: "./tests",
@@ -46,15 +58,10 @@ export default defineConfig({
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--headless=new",
-            // Enable WebGPU with SwiftShader CPU emulation
             "--enable-unsafe-webgpu",
             "--enable-features=Vulkan",
-            "--use-vulkan=swiftshader",
-            "--use-angle=swiftshader",
-            "--disable-vulkan-fallback-to-gl-for-testing",
             "--disable-gpu-sandbox",
-            // Stability flags for CI
-            "--disable-dev-shm-usage",
+            ...swiftshaderArgs,
           ],
         },
       },
