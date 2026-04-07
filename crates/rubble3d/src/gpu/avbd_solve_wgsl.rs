@@ -302,31 +302,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mass = 1.0 / inv_mass;
     let i_world = world_inertia(body_props, q);
 
-    var local_mtx: array<f32, 36>;
-    var local_rhs: array<f32, 6>;
-    for (var i = 0u; i < 36u; i = i + 1u) {
-        local_mtx[i] = 0.0;
-    }
-    for (var i = 0u; i < 6u; i = i + 1u) {
-        local_rhs[i] = 0.0;
-    }
+    // Zero-initialize without loops (avoids dynamic indexing)
+    var local_mtx = array<f32, 36>(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    );
+    var local_rhs = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
-    local_mtx[mat_idx(0u, 0u)] = mass / dt2;
-    local_mtx[mat_idx(1u, 1u)] = mass / dt2;
-    local_mtx[mat_idx(2u, 2u)] = mass / dt2;
-    local_rhs[0] = local_mtx[mat_idx(0u, 0u)] * (pos.x - pos_inertial.x);
-    local_rhs[1] = local_mtx[mat_idx(1u, 1u)] * (pos.y - pos_inertial.y);
-    local_rhs[2] = local_mtx[mat_idx(2u, 2u)] * (pos.z - pos_inertial.z);
+    let m_dt2 = mass / dt2;
+    local_mtx[0]  = m_dt2;
+    local_mtx[7]  = m_dt2;
+    local_mtx[14] = m_dt2;
+    local_rhs[0] = m_dt2 * (pos.x - pos_inertial.x);
+    local_rhs[1] = m_dt2 * (pos.y - pos_inertial.y);
+    local_rhs[2] = m_dt2 * (pos.z - pos_inertial.z);
 
-    local_mtx[mat_idx(3u, 3u)] = i_world[0][0] / dt2;
-    local_mtx[mat_idx(3u, 4u)] = i_world[0][1] / dt2;
-    local_mtx[mat_idx(3u, 5u)] = i_world[0][2] / dt2;
-    local_mtx[mat_idx(4u, 3u)] = i_world[1][0] / dt2;
-    local_mtx[mat_idx(4u, 4u)] = i_world[1][1] / dt2;
-    local_mtx[mat_idx(4u, 5u)] = i_world[1][2] / dt2;
-    local_mtx[mat_idx(5u, 3u)] = i_world[2][0] / dt2;
-    local_mtx[mat_idx(5u, 4u)] = i_world[2][1] / dt2;
-    local_mtx[mat_idx(5u, 5u)] = i_world[2][2] / dt2;
+    local_mtx[21] = i_world[0][0] / dt2;
+    local_mtx[22] = i_world[0][1] / dt2;
+    local_mtx[23] = i_world[0][2] / dt2;
+    local_mtx[27] = i_world[1][0] / dt2;
+    local_mtx[28] = i_world[1][1] / dt2;
+    local_mtx[29] = i_world[1][2] / dt2;
+    local_mtx[33] = i_world[2][0] / dt2;
+    local_mtx[34] = i_world[2][1] / dt2;
+    local_mtx[35] = i_world[2][2] / dt2;
     local_rhs[3] =
         (i_world[0][0] * rot_delta.x + i_world[0][1] * rot_delta.y + i_world[0][2] * rot_delta.z) / dt2;
     local_rhs[4] =
@@ -394,16 +397,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         accumulate_row(jt2_lin, jt2_ang, k_t2, tang.y, &local_mtx, &local_rhs);
     }
 
-    var mtx: array<array<f32, 6>, 6>;
-    var rhs: array<f32, 6>;
-    for (var r = 0u; r < 6u; r = r + 1u) {
-        rhs[r] = local_rhs[r];
-        for (var c = 0u; c < 6u; c = c + 1u) {
-            mtx[r][c] = local_mtx[mat_idx(r, c)];
-        }
-    }
+    let mtx = array<array<f32, 6>, 6>(
+        array<f32, 6>(local_mtx[0],  local_mtx[1],  local_mtx[2],  local_mtx[3],  local_mtx[4],  local_mtx[5]),
+        array<f32, 6>(local_mtx[6],  local_mtx[7],  local_mtx[8],  local_mtx[9],  local_mtx[10], local_mtx[11]),
+        array<f32, 6>(local_mtx[12], local_mtx[13], local_mtx[14], local_mtx[15], local_mtx[16], local_mtx[17]),
+        array<f32, 6>(local_mtx[18], local_mtx[19], local_mtx[20], local_mtx[21], local_mtx[22], local_mtx[23]),
+        array<f32, 6>(local_mtx[24], local_mtx[25], local_mtx[26], local_mtx[27], local_mtx[28], local_mtx[29]),
+        array<f32, 6>(local_mtx[30], local_mtx[31], local_mtx[32], local_mtx[33], local_mtx[34], local_mtx[35]),
+    );
 
-    let solution = solve_6x6(mtx, rhs);
+    let solution = solve_6x6(mtx, local_rhs);
     bodies[body_idx].position_inv_mass = vec4<f32>(pos - solution.lin, inv_mass);
     bodies[body_idx].orientation = quat_normalize(quat_mul(small_angle_quat(-solution.ang), q));
 }
