@@ -1,0 +1,2 @@
+[alias]
+stability = "test -p rubble3d -- settled_sphere_does_not_spontaneously_jump resting_contact_energy_does_not_grow penalty_floor_prevents_stiffness_collapse extreme_mass_ratio_does_not_explode hundred_box_grid_settles_without_divergence pyramid_kinetic_energy_does_not_grow_after_settling resting_box_stays_quiet_on_floor"
