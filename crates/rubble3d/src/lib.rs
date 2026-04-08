@@ -51,7 +51,7 @@ impl Default for SimConfig {
         Self {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
-            solver_iterations: 20,
+            solver_iterations: 5,
             max_bodies: 65536,
             beta: 10.0,
             k_start: 1e4,
@@ -1207,20 +1207,39 @@ impl World {
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
-        let prev = self.contact_persistence.prev_contacts();
-        let warm = if prev.is_empty() { None } else { Some(prev) };
-        let (results, new_contacts) = self
-            .gpu_pipeline
-            .step_with_contacts_async(
-                num_bodies,
-                self.config.solver_iterations,
-                warm,
-                &mut timings,
-            )
-            .await;
+        let has_compounds = alive_indices
+            .iter()
+            .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }));
 
-        let events = self.contact_persistence.update(&new_contacts);
-        self.collision_events.extend(events);
+        let results = if has_compounds && alive_indices.len() > 1 {
+            let prev = self.contact_persistence.prev_contacts();
+            let warm = if prev.is_empty() { None } else { Some(prev) };
+            let (results, new_contacts) = self
+                .gpu_pipeline
+                .step_with_contacts_async(
+                    num_bodies,
+                    self.config.solver_iterations,
+                    warm,
+                    &mut timings,
+                )
+                .await;
+
+            let events = self.contact_persistence.update(&new_contacts);
+            self.collision_events.extend(events);
+            results
+        } else {
+            let results = self
+                .gpu_pipeline
+                .step_fast_async(
+                    num_bodies,
+                    self.config.solver_iterations,
+                    &mut timings,
+                )
+                .await;
+
+            self.collision_events.clear();
+            results
+        };
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {

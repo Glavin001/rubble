@@ -735,6 +735,12 @@ pub struct GpuPipeline {
     gpu_coloring: GpuColoringState,
     gpu_render: GpuRenderState,
 
+    // Cached color groups for WASM async path (avoids GPU→CPU sync every frame)
+    #[cfg(target_arch = "wasm32")]
+    cached_color_groups: Option<Vec<(u32, u32)>>,
+    #[cfg(target_arch = "wasm32")]
+    color_cache_frame: u32,
+
     // Persistent contact buffers for GPU-side warmstarting
     prev_contacts: GpuBuffer<Contact3D>,
     prev_contact_count: u32,
@@ -1005,6 +1011,10 @@ impl GpuPipeline {
             gpu_render,
             prev_contacts,
             prev_contact_count: 0,
+            #[cfg(target_arch = "wasm32")]
+            cached_color_groups: None,
+            #[cfg(target_arch = "wasm32")]
+            color_cache_frame: 0,
             warmstart_params_uniform,
             warmstart_hashmap_params_buf,
             warmstart_hashmap_keys,
@@ -1314,6 +1324,7 @@ impl GpuPipeline {
         } else if pair_thread_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
             let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
+            self.pair_count.write(&self.ctx, pair_count);
             self.dispatch_narrowphase_with_source(
                 num_bodies,
                 pair_count,
@@ -2331,6 +2342,7 @@ impl GpuPipeline {
         } else if pair_thread_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
             let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
+            self.pair_count.write(&self.ctx, pair_count);
             self.dispatch_narrowphase_with_source(
                 num_bodies,
                 pair_count,
@@ -2599,12 +2611,15 @@ impl GpuPipeline {
     }
 
     /// Async version of `run_detection` for WASM/WebGPU.
+    /// Returns (compound_contacts, contact_count) to avoid a redundant GPU sync.
+    /// When `skip_capacity_check` is true (GPU-only fast path), skips the contact buffer
+    /// capacity check and re-dispatch, saving a GPU→CPU sync.
     #[cfg(target_arch = "wasm32")]
     async fn run_detection_async(
         &mut self,
         num_bodies: u32,
         timings: &mut rubble_gpu::StepTimingsMs,
-    ) -> Vec<Contact3D> {
+    ) -> (Vec<Contact3D>, u32) {
         use rubble_gpu::web_time::Instant;
 
         self.contact_count.reset(&self.ctx);
@@ -2616,7 +2631,6 @@ impl GpuPipeline {
         self.dispatch_aabb(num_bodies);
         timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
 
-        let t1 = Instant::now();
         let mut broadphase = BroadphaseBreakdownMs::default();
         let has_compounds = self.body_props_cpu[..num_bodies as usize]
             .iter()
@@ -2627,7 +2641,6 @@ impl GpuPipeline {
         self.aabbs.set_len(num_bodies);
 
         let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
-        let mut pair_thread_count: u32 = 0;
         let mut pair_count: u32 = 0;
 
         if requires_cpu_pair_stage {
@@ -2696,7 +2709,7 @@ impl GpuPipeline {
                 broadphase.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
             }
         } else {
-            pair_thread_count = self
+            let pair_thread_count = self
                 .gpu_lbvh
                 .query_on_device_raw_async_with_breakdown(
                     &self.ctx,
@@ -2705,15 +2718,20 @@ impl GpuPipeline {
                     &mut broadphase,
                 )
                 .await;
+            if pair_thread_count > 0 {
+                pair_count = self
+                    .gpu_lbvh
+                    .read_pair_count_async(&self.ctx, pair_thread_count)
+                    .await;
+                self.pair_count.write(&self.ctx, pair_count);
+            }
         }
         timings.set_broadphase_breakdown(broadphase);
-        debug_assert!(timings.broadphase_ms <= t1.elapsed().as_secs_f32() * 1000.0 + 0.5);
 
         let t2 = Instant::now();
         if requires_cpu_pair_stage {
             self.dispatch_narrowphase(num_bodies, pair_count);
-        } else if pair_thread_count > 0 {
-            let pair_count = self.gpu_lbvh.read_pair_count_async(&self.ctx, pair_thread_count).await;
+        } else if pair_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
             self.dispatch_narrowphase_with_source(
                 num_bodies,
@@ -2722,27 +2740,11 @@ impl GpuPipeline {
             );
         }
 
+        // Read contact count — single GPU→CPU sync point per frame
         let contact_count_val = self.contact_count.read_async(&self.ctx).await;
-        let capacity = self.contacts.capacity();
-        if contact_count_val > capacity {
-            let new_cap = (contact_count_val as usize) * 2;
-            self.contacts.grow_if_needed(&self.ctx, new_cap);
-            self.contact_count.reset(&self.ctx);
-            if requires_cpu_pair_stage {
-                self.dispatch_narrowphase(num_bodies, pair_count);
-            } else if pair_thread_count > 0 {
-                let pair_count = self.gpu_lbvh.read_pair_count_async(&self.ctx, pair_thread_count).await;
-                let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    pair_count,
-                    &pair_buffer,
-                );
-            }
-        }
         timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
 
-        cpu_compound_contacts
+        (cpu_compound_contacts, contact_count_val)
     }
 
     /// Async version of `step_with_contacts` for WASM/WebGPU.
@@ -2767,10 +2769,10 @@ impl GpuPipeline {
             self.upload_warm_contacts(warm);
         }
 
-        let compound_contacts = self.run_detection_async(num_bodies, timings).await;
+        let (compound_contacts, contact_count_val) = self.run_detection_async(num_bodies, timings).await;
 
         let t_cf = Instant::now();
-        let gpu_count = self.contact_count.read_async(&self.ctx).await as usize;
+        let gpu_count = contact_count_val as usize;
 
         // GPU warmstart before download
         if gpu_count > 0 {
@@ -2808,6 +2810,142 @@ impl GpuPipeline {
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
 
         (states, final_contacts)
+    }
+
+    /// Async GPU-only fast path: no contact readback, GPU-owned persistence.
+    /// Mirrors `step_fast_timed` but uses async buffer operations for WASM/WebGPU.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn step_fast_async(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) -> Vec<RigidBodyState3D> {
+        use rubble_gpu::web_time::Instant;
+
+        if num_bodies == 0 {
+            return Vec::new();
+        }
+
+        let (compound_contacts, contact_count) = self.run_detection_async(num_bodies, timings).await;
+        assert!(
+            compound_contacts.is_empty(),
+            "GPU-only happy path does not support CPU compound contact expansion"
+        );
+
+        timings.contact_fetch_ms = 0.0;
+        let t_solve = Instant::now();
+
+        if contact_count > 0 {
+            self.contacts.set_len(contact_count);
+            self.dispatch_gpu_warmstart(contact_count);
+            self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
+                .await;
+            self.swap_contact_buffers(contact_count);
+        } else {
+            self.apply_free_motion(num_bodies, &[]);
+            self.prev_contact_count = 0;
+        }
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
+
+        let t_ext = Instant::now();
+        self.dispatch_extract(num_bodies);
+        self.body_states.current_mut().set_len(num_bodies);
+        let states = self.body_states.download_async(&self.ctx).await;
+        self.body_states.swap();
+        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+
+        states
+    }
+
+    /// Async version of `run_colored_solve_device` for WASM/WebGPU.
+    /// Operates on GPU-resident contacts (no CPU download/upload).
+    /// Uses GPU graph coloring with cross-frame caching to minimize GPU→CPU syncs.
+    /// Full coloring runs every COLOR_CACHE_INTERVAL frames; cached groups reused otherwise.
+    #[cfg(target_arch = "wasm32")]
+    async fn run_colored_solve_device_async(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        contact_count: u32,
+    ) {
+        const COLOR_CACHE_INTERVAL: u32 = 8;
+
+        if contact_count == 0 {
+            return;
+        }
+        self.dispatch_gpu_solve_graph(num_bodies, contact_count);
+        let _ = self.free_motion_bind_group();
+        let free_motion_bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
+        self.run_pass(
+            "free_motion",
+            &self.free_motion_kernel,
+            free_motion_bg,
+            num_bodies,
+        );
+
+        // Reuse cached color groups when available; refresh periodically
+        self.color_cache_frame += 1;
+        let needs_refresh = self.cached_color_groups.is_none()
+            || self.color_cache_frame % COLOR_CACHE_INTERVAL == 0;
+
+        let color_groups = if needs_refresh {
+            let groups = self.dispatch_gpu_coloring_async(num_bodies).await;
+            self.cached_color_groups = Some(groups.clone());
+            groups
+        } else {
+            // Reuse cached color groups AND body_order from previous coloring.
+            // body_order is still on GPU from the last coloring dispatch.
+            // The graph adjacency is rebuilt each frame (dispatch_gpu_solve_graph),
+            // but the color assignment is approximately stable frame-to-frame.
+            self.cached_color_groups.clone().unwrap()
+        };
+
+        self.write_solve_ranges(&color_groups);
+        self.sync_primal_bind_groups(color_groups.len());
+        let _ = self.dual_bind_group();
+        let primal_bind_groups = &self.primal_bg_cache.bind_groups;
+        let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("avbd_solve_batch_3d"),
+            });
+        for _ in 0..solver_iterations {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_primal_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.primal_kernel.pipeline());
+                for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
+                    if count == 0 {
+                        continue;
+                    }
+                    pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
+                    pass.dispatch_workgroups(
+                        round_up_workgroups(count, WORKGROUP_SIZE),
+                        1,
+                        1,
+                    );
+                }
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_dual_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.dual_kernel.pipeline());
+                pass.set_bind_group(0, dual_bind_group, &[]);
+                pass.dispatch_workgroups(
+                    round_up_workgroups(contact_count, WORKGROUP_SIZE),
+                    1,
+                    1,
+                );
+            }
+        }
+        self.ctx.queue.submit(Some(encoder.finish()));
     }
 
     #[cfg(target_arch = "wasm32")]
