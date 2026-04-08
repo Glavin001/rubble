@@ -9,6 +9,10 @@ interface RubbleTestHooks {
   /** 7 floats: [upload, predict+aabb, broadphase, narrowphase, contact_fetch, solve, extract] */
   lastStepTimingsMs?: Float32Array;
   error: string | null;
+  /** Benchmark-only: stop the render loop and wait for any in-flight frame. */
+  stopLoop?: () => Promise<void>;
+  /** Benchmark-only: run one physics step without rendering. Returns 7-float timings. */
+  benchStep?: () => Promise<number[]>;
 }
 
 interface Window {

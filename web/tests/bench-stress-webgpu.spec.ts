@@ -1,23 +1,18 @@
 import { test, expect } from "@playwright/test";
 
 /**
- * WebGPU benchmark for the 10k Grid scene.
+ * WebGPU stress benchmark: 20k mixed shapes (spheres, boxes, capsules).
  *
  * Uses benchStep() to run physics steps directly, bypassing Three.js rendering.
  * This gives clean physics-only timings without animation frame throttling.
  *
  * Usage:
- *   cd web && npx playwright test tests/bench-10k-webgpu.spec.ts
- *
- * The test outputs JSON timing stats to stdout via console.log so you can
- * capture it with:
- *   npx playwright test tests/bench-10k-webgpu.spec.ts --reporter=list 2>&1 | grep '^{'
+ *   cd web && npx playwright test tests/bench-stress-webgpu.spec.ts --reporter=list
  */
 
 const WARMUP_STEPS = 60;
 const BENCH_STEPS = 200;
 
-/** Timing phase indices in the 7-float lastStepTimingsMs array */
 const PHASE = {
   upload: 0,
   predict_aabb: 1,
@@ -60,18 +55,16 @@ function max(values: number[]): number {
   return Math.max(...values);
 }
 
-test.describe("WebGPU 10k Grid Benchmark", () => {
-  // Generous timeout — 10k bodies on WebGPU can be slow on CI
+test.describe("WebGPU Stress Mixed Benchmark", () => {
   test.setTimeout(600_000);
 
-  test("benchmark 10k grid scene", async ({ page }) => {
+  test("benchmark stress 20k mixed scene", async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", (err) => errors.push(err.message));
     page.on("console", (msg) => {
       if (msg.type() === "error") errors.push(msg.text());
     });
 
-    // Navigate to the 3D demo
     await page.goto("/src/3d/index.html");
 
     // Wait for WASM + world init
@@ -85,22 +78,22 @@ test.describe("WebGPU 10k Grid Benchmark", () => {
       { timeout: 60_000 },
     );
 
-    // Wait for default scene to load so UI is interactive
+    // Wait for default scene to load
     await page.waitForFunction(
       () => document.getElementById("loading")?.style.display === "none",
       null,
       { timeout: 60_000 },
     );
 
-    // Switch to 10k Grid scene
-    await page.selectOption("#scene-select", "10k Grid");
+    // Switch to Stress Mixed scene
+    await page.selectOption("#scene-select", "Stress Mixed");
 
-    // Wait for 10k Grid to fully load (expect ~10000 bodies)
+    // Wait for scene to fully load
     await page.waitForFunction(
       () => {
         const t = window.__rubble_test;
         return (
-          (t?.bodyCount ?? 0) >= 10000 &&
+          (t?.bodyCount ?? 0) >= 20000 &&
           document.getElementById("loading")?.style.display === "none"
         );
       },
@@ -179,15 +172,13 @@ test.describe("WebGPU 10k Grid Benchmark", () => {
       ...phaseStats("extract_ms", byPhase(PHASE.extract)),
     };
 
-    // Print JSON result (mirrors bench_10k.rs output format)
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(result, null, 2));
 
-    // --- Assertions (sanity checks, not perf gates) ---
-    expect(bodyCount).toBeGreaterThanOrEqual(10000);
+    // --- Assertions ---
+    expect(bodyCount).toBeGreaterThanOrEqual(20000);
     expect(timings).toHaveLength(BENCH_STEPS);
 
-    // All timings should be finite and non-negative
     for (let s = 0; s < timings.length; s++) {
       for (let p = 0; p < 7; p++) {
         expect(
@@ -198,7 +189,6 @@ test.describe("WebGPU 10k Grid Benchmark", () => {
       }
     }
 
-    // No runtime errors
     const realErrors = errors.filter(
       (e) => !e.includes("DevTools") && !e.includes("favicon"),
     );

@@ -666,6 +666,25 @@ async function main() {
     getTransforms: () => cachedTransforms,
     lastStepTimingsMs: cachedTimings,
     error: null,
+    // Benchmark-only: stop the render loop and wait for any in-flight frame.
+    stopLoop: async () => {
+      renderer.setAnimationLoop(null);
+      // Wait for any in-flight frame to finish
+      while (frameInFlight) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    },
+    // Benchmark-only: run one physics step without rendering.
+    // Call stopLoop() first to prevent conflicts with the animation loop.
+    // Returns the 7-float timings array after the step completes.
+    benchStep: async () => {
+      await world.step();
+      stepCount++;
+      world.copy_last_step_timings_into(cachedTimings);
+      window.__rubble_test!.stepCount = stepCount;
+      window.__rubble_test!.lastStepTimingsMs = cachedTimings;
+      return Array.from(cachedTimings);
+    },
   };
 
   document.getElementById("loading")!.style.display = "none";
