@@ -3749,9 +3749,8 @@ impl GpuPipeline {
             bytemuck::cast_slice(&[num_bodies, 0u32, 0, 0]),
         );
 
-        // Batch reset + count + copy into a single encoder (3 submits → 1)
         {
-            let reset_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("adjacency_reset"),
                 layout: self.gpu_graph.reset_kernel.bind_group_layout(),
                 entries: &[
@@ -3773,7 +3772,16 @@ impl GpuPipeline {
                     },
                 ],
             });
-            let count_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            self.run_pass(
+                "adjacency_reset",
+                &self.gpu_graph.reset_kernel,
+                &bg,
+                num_bodies,
+            );
+        }
+
+        {
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("adjacency_count"),
                 layout: self.gpu_graph.count_kernel.bind_group_layout(),
                 entries: &[
@@ -3799,14 +3807,21 @@ impl GpuPipeline {
                     },
                 ],
             });
+            self.run_pass(
+                "adjacency_count",
+                &self.gpu_graph.count_kernel,
+                &bg,
+                contact_count,
+            );
+        }
+
+        {
+            let byte_count = (num_bodies as u64) * std::mem::size_of::<u32>() as u64;
             let mut encoder = ctx
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("adjacency_reset_count_copy"),
+                    label: Some("adjacency_copy_counts"),
                 });
-            Self::record_pass(&mut encoder, "adjacency_reset", &self.gpu_graph.reset_kernel, &reset_bg, num_bodies);
-            Self::record_pass(&mut encoder, "adjacency_count", &self.gpu_graph.count_kernel, &count_bg, contact_count);
-            let byte_count = (num_bodies as u64) * std::mem::size_of::<u32>() as u64;
             encoder.copy_buffer_to_buffer(
                 self.gpu_graph.body_contact_counts.buffer(),
                 0,
@@ -3821,9 +3836,8 @@ impl GpuPipeline {
             .prefix_scan
             .exclusive_scan(ctx, &mut self.gpu_graph.body_contact_offsets);
 
-        // Batch init_ranges + scatter into a single encoder (2 submits → 1)
         {
-            let init_ranges_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("adjacency_init_ranges"),
                 layout: self.gpu_graph.init_ranges_kernel.bind_group_layout(),
                 entries: &[
@@ -3861,8 +3875,16 @@ impl GpuPipeline {
                     },
                 ],
             });
+            self.run_pass(
+                "adjacency_init_ranges",
+                &self.gpu_graph.init_ranges_kernel,
+                &bg,
+                num_bodies,
+            );
+        }
 
-            let scatter_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        {
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("adjacency_scatter"),
                 layout: self.gpu_graph.scatter_kernel.bind_group_layout(),
                 entries: &[
@@ -3892,14 +3914,12 @@ impl GpuPipeline {
                     },
                 ],
             });
-            let mut encoder = ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("adjacency_init_scatter"),
-                });
-            Self::record_pass(&mut encoder, "adjacency_init_ranges", &self.gpu_graph.init_ranges_kernel, &init_ranges_bg, num_bodies);
-            Self::record_pass(&mut encoder, "adjacency_scatter", &self.gpu_graph.scatter_kernel, &scatter_bg, contact_count);
-            ctx.queue.submit(Some(encoder.finish()));
+            self.run_pass(
+                "adjacency_scatter",
+                &self.gpu_graph.scatter_kernel,
+                &bg,
+                contact_count,
+            );
         }
     }
 
