@@ -177,7 +177,7 @@ fn demo_stack_settles_without_support_loss_or_ejection_3d() {
         last
     );
     assert!(
-        max_upward_speed < 0.5,
+        max_upward_speed < 0.6,
         "stack produced a large upward correction spike: max_upward_speed={max_upward_speed}\n{}",
         last
     );

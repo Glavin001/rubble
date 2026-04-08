@@ -624,7 +624,9 @@ fn warm_start_matches_by_feature_not_distance_3d() {
         if let Some(prev) = first_by_feature.get(&contact.feature_id) {
             matched += 1;
             let expected_lambda = prev.lambda * (0.95 * 0.95);
-            let expected_penalty = prev.penalty * 0.95;
+            // Penalty is decayed by gamma but floored at k_start (per paper Eq 19)
+            let k_start_vec = Vec4::new(INITIAL_PENALTY, INITIAL_PENALTY, INITIAL_PENALTY, 0.0);
+            let expected_penalty = (prev.penalty * 0.95).max(k_start_vec);
             let lambda_delta = (contact.lambda - expected_lambda).abs();
             let penalty_delta = (contact.penalty - expected_penalty).abs();
             assert!(

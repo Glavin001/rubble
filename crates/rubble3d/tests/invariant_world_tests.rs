@@ -78,6 +78,7 @@ fn free_flight_shapes_match_discrete_ballistics_3d() {
             dt,
             solver_iterations: 8,
             max_bodies: 64,
+            sub_steps: 1, // exact ballistic comparison requires single-step integration
             ..Default::default()
         }) {
             Some(world) => world,
@@ -143,6 +144,7 @@ fn zero_gravity_shapes_preserve_velocity_and_spin_3d() {
             dt,
             solver_iterations: 8,
             max_bodies: 64,
+            sub_steps: 1, // exact trajectory comparison requires single-step integration
             ..Default::default()
         }) {
             Some(world) => world,

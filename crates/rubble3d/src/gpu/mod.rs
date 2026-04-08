@@ -69,7 +69,7 @@ const AVBD_WARMSTART_ALPHA: f32 = 0.95;
 /// Run GPU coloring in fixed-size batches to avoid a CPU/GPU sync after every color.
 /// This keeps the algorithm GPU-resident while dramatically reducing readback overhead.
 const MAX_GPU_COLORING_ROUNDS: u32 = 32;
-const MAX_CONTACT_PENALTY: f32 = 1.0e6;
+const MAX_CONTACT_PENALTY: f32 = 1.0e5;
 
 #[repr(u32)]
 #[derive(Clone, Copy)]
@@ -422,7 +422,7 @@ pub struct WarmstartParamsGpu {
     pub alpha: f32,
     pub gamma: f32,
     pub hashmap_capacity: u32,
-    pub _pad0: u32,
+    pub k_start: f32,
     pub _pad1: u32,
     pub _pad2: u32,
 }
@@ -1037,7 +1037,7 @@ impl GpuPipeline {
                 gravity: [0.0; 4],
                 solver: [0.0, 10.0, 1.0e4, MAX_CONTACT_PENALTY],
                 counts: [0, 0, 0, 0],
-                quality: [0.02, 0.5, 0.005, 0.0], // contact_offset, restitution_threshold, penetration_slop, reserved
+                quality: [0.02, 0.5, 0.01, AVBD_WARMSTART_ALPHA], // contact_offset, restitution_threshold, penetration_slop, alpha_reg
             },
             warmstart_decay: 0.99,
             params_uniform,
@@ -1226,7 +1226,18 @@ impl GpuPipeline {
         restitution_threshold: f32,
         penetration_slop: f32,
     ) {
-        self.sim_params.quality = [contact_offset, restitution_threshold, penetration_slop, 0.0];
+        self.sim_params.quality = [contact_offset, restitution_threshold, penetration_slop, AVBD_WARMSTART_ALPHA];
+    }
+
+    /// Update the simulation timestep in the GPU uniform buffer.
+    /// Used for sub-stepping: upload once with full dt, then override to dt/sub_steps.
+    pub fn set_sim_dt(&mut self, dt: f32) {
+        self.sim_params.solver[0] = dt;
+        self.ctx.queue.write_buffer(
+            &self.params_uniform,
+            0,
+            bytemuck::bytes_of(&self.sim_params),
+        );
     }
 
     /// Run predict → AABB → broadphase → narrowphase (shared by both step variants).
@@ -1538,9 +1549,10 @@ impl GpuPipeline {
                     let local_plane = rot_plane.conjugate() * (world_b - pos_plane);
                     let feature_id = 0x4000_0000u32 | (dynamic_idx & 0xFFFF);
 
+                    let c_n_initial = depth + self.sim_params.quality[2];
                     out.push(Contact3D {
                         point: Vec4::new(point.x, point.y, point.z, depth),
-                        normal: Vec4::new(plane_normal.x, plane_normal.y, plane_normal.z, 0.0),
+                        normal: Vec4::new(plane_normal.x, plane_normal.y, plane_normal.z, c_n_initial),
                         tangent: Vec4::new(tangent.x, tangent.y, tangent.z, 0.0),
                         local_anchor_a: Vec4::new(local_dyn.x, local_dyn.y, local_dyn.z, 0.0),
                         local_anchor_b: Vec4::new(local_plane.x, local_plane.y, local_plane.z, 0.0),
@@ -1592,9 +1604,10 @@ impl GpuPipeline {
             let feature_id =
                 0x4100_0000u32 | (((idx_a as u32) & 0xFF) << 8) | ((idx_b as u32) & 0xFF);
 
+            let c_n_initial = depth + self.sim_params.quality[2];
             out.push(Contact3D {
                 point: Vec4::new(point.x, point.y, point.z, depth),
-                normal: Vec4::new(normal.x, normal.y, normal.z, 0.0),
+                normal: Vec4::new(normal.x, normal.y, normal.z, c_n_initial),
                 tangent: Vec4::new(tangent.x, tangent.y, tangent.z, 0.0),
                 local_anchor_a: Vec4::new(local_a.x, local_a.y, local_a.z, 0.0),
                 local_anchor_b: Vec4::new(local_b.x, local_b.y, local_b.z, 0.0),
@@ -2856,6 +2869,47 @@ impl GpuPipeline {
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
 
         states
+    }
+
+    /// Async device-only sub-step: runs the full pipeline without downloading results.
+    /// Used for intermediate sub-steps where results stay on GPU.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn step_fast_device_async(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) {
+        use rubble_gpu::web_time::Instant;
+
+        if num_bodies == 0 {
+            return;
+        }
+
+        let (compound_contacts, contact_count) = self.run_detection_async(num_bodies, timings).await;
+        assert!(
+            compound_contacts.is_empty(),
+            "GPU-only happy path does not support CPU compound contact expansion"
+        );
+
+        timings.contact_fetch_ms = 0.0;
+        let t_solve = Instant::now();
+
+        if contact_count > 0 {
+            self.contacts.set_len(contact_count);
+            self.dispatch_gpu_warmstart(contact_count);
+            self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
+                .await;
+            self.swap_contact_buffers(contact_count);
+        } else {
+            self.apply_free_motion(num_bodies, &[]);
+            self.prev_contact_count = 0;
+        }
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
+
+        let t_ext = Instant::now();
+        self.dispatch_extract(num_bodies);
+        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
     }
 
     /// Async version of `run_colored_solve_device` for WASM/WebGPU.
@@ -4266,7 +4320,7 @@ impl GpuPipeline {
             alpha: AVBD_WARMSTART_ALPHA,
             gamma: self.warmstart_decay,
             hashmap_capacity: self.warmstart_hashmap_capacity,
-            _pad0: 0,
+            k_start: self.sim_params.solver[2],
             _pad1: 0,
             _pad2: 0,
         };

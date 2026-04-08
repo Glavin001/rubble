@@ -129,7 +129,7 @@ struct WarmstartParams {
     alpha:            f32,
     gamma:            f32,
     hashmap_capacity: u32,
-    _pad0:            u32,
+    k_start:          f32,
     _pad1:            u32,
     _pad2:            u32,
 };
@@ -205,7 +205,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if prev_lo == key_lo && prev_hi == key_hi && pc.feature_id == key_fid {
                 let scale = params.alpha * params.gamma;
                 new_contacts[idx].lambda = pc.lambda * scale;
-                new_contacts[idx].penalty = pc.penalty * params.gamma;
+                let k_floor = vec4<f32>(params.k_start, params.k_start, params.k_start, 0.0);
+                new_contacts[idx].penalty = max(pc.penalty * params.gamma, k_floor);
                 new_contacts[idx].flags = pc.flags | CONTACT_FLAG_WARMSTARTED;
                 if (pc.flags & CONTACT_FLAG_STICKING) != 0u {
                     new_contacts[idx].local_anchor_a = pc.local_anchor_a;

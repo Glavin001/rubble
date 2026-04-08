@@ -51,8 +51,8 @@ struct Solve6 {
     ang: vec3<f32>,
 };
 
-const CONTACT_MARGIN: f32 = 0.01;
 const BODY_LANES: u32 = 64u;
+const CONTACT_FLAG_WARMSTARTED: u32 = 2u;
 
 @group(0) @binding(0) var<storage, read_write> bodies:               array<Body>;
 @group(0) @binding(1) var<storage, read>       inertial_states:      array<Body>;
@@ -366,11 +366,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let k_t1 = c.penalty.y;
         let k_t2 = c.penalty.z;
         let mu = sqrt(max(props[c.body_a].friction * props[c.body_b].friction, 0.0));
-        let c_n = dot(normal, separation) + CONTACT_MARGIN;
+        let margin = params.quality.z;
+        let c_n_raw = dot(normal, separation) + margin;
+        // α-regularization (Paper Eq 18): only for warmstarted contacts
+        // (pre-existing error from previous frame should be corrected gradually)
+        var c_n = c_n_raw;
+        if (c.flags & CONTACT_FLAG_WARMSTARTED) != 0u {
+            let alpha_reg = params.quality.w;
+            let c_n_initial = c.normal.w;
+            c_n = c_n_raw - alpha_reg * min(c_n_initial, 0.0);
+        }
         let c_t1 = dot(tangent1, separation);
         let c_t2 = dot(tangent2, separation);
-        let f_n = min(k_n * c_n + lambda_n, 0.0);
-        var tang = vec2<f32>(k_t1 * c_t1 + lambda_t1, k_t2 * c_t2 + lambda_t2);
+        // Bound effective force magnitude (Paper Algorithm 1, line 14: clamp(k*C + λ, λ_min, λ_max))
+        let max_lambda = params.solver.w; // max_penalty
+        let f_n = max(min(k_n * c_n + lambda_n, 0.0), -max_lambda);
+        var tang = vec2<f32>(
+            clamp(k_t1 * c_t1 + lambda_t1, -max_lambda, max_lambda),
+            clamp(k_t2 * c_t2 + lambda_t2, -max_lambda, max_lambda),
+        );
         let tang_limit = mu * abs(f_n);
         let tang_len = length(tang);
         if tang_len > tang_limit && tang_len > 1e-8 {
@@ -440,7 +454,7 @@ struct Contact {
 };
 
 const CONTACT_FLAG_STICKING: u32 = 1u;
-const CONTACT_MARGIN: f32 = 0.01;
+const CONTACT_FLAG_WARMSTARTED: u32 = 2u;
 
 struct SimParams {
     gravity: vec4<f32>,
@@ -488,14 +502,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let normal = c.normal.xyz;
     let tangent1 = c.tangent.xyz;
     let tangent2 = cross(normal, tangent1);
+    let margin = params.quality.z;
     let geom_c_n = dot(normal, separation);
-    let c_n = geom_c_n + CONTACT_MARGIN;
+    let c_n_raw = geom_c_n + margin;
+    // α-regularization (Paper Eq 18): only for warmstarted contacts
+    var c_n = c_n_raw;
+    if (c.flags & CONTACT_FLAG_WARMSTARTED) != 0u {
+        let alpha_reg = params.quality.w;
+        let c_n_initial = c.normal.w;
+        c_n = c_n_raw - alpha_reg * min(c_n_initial, 0.0);
+    }
     let c_t1 = dot(tangent1, separation);
     let c_t2 = dot(tangent2, separation);
-    let lambda_n = min(c.penalty.x * c_n + c.lambda.x, 0.0);
+    // Bound λ magnitude (Paper Section 4, "Bounding the Dual Variables"):
+    // prevents unbounded force growth when constraints can't be satisfied.
+    let max_lambda = params.solver.w; // same as max_penalty
+    let lambda_n = max(min(c.penalty.x * c_n + c.lambda.x, 0.0), -max_lambda);
     var tang = vec2<f32>(
-        c.penalty.y * c_t1 + c.lambda.y,
-        c.penalty.z * c_t2 + c.lambda.z,
+        clamp(c.penalty.y * c_t1 + c.lambda.y, -max_lambda, max_lambda),
+        clamp(c.penalty.z * c_t2 + c.lambda.z, -max_lambda, max_lambda),
     );
     let mu = sqrt(max(props[c.body_a].friction * props[c.body_b].friction, 0.0));
     let tang_limit = mu * abs(lambda_n);

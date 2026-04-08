@@ -44,6 +44,10 @@ pub struct SimConfig {
     /// Allowable penetration depth before solver correction kicks in.
     /// Small positive value reduces jitter for resting contacts.
     pub penetration_slop: f32,
+    /// Number of sub-steps per frame. Each sub-step runs the full pipeline
+    /// (predict → detect → solve → extract) with dt/sub_steps. Higher values
+    /// improve stability for stacking/dense scenes at the cost of GPU time.
+    pub sub_steps: u32,
 }
 
 impl Default for SimConfig {
@@ -59,7 +63,8 @@ impl Default for SimConfig {
             friction_default: 0.5,
             contact_offset: 0.02,
             restitution_threshold: 0.5,
-            penetration_slop: 0.005,
+            penetration_slop: 0.01,
+            sub_steps: 2,
         }
     }
 }
@@ -1040,6 +1045,8 @@ impl World {
     }
 
     /// Advance the simulation by one time step on the GPU.
+    /// When `sub_steps > 1`, the frame is split into N sub-steps each with `dt/N`,
+    /// running the full pipeline (predict → detect → solve → extract) per sub-step.
     pub fn step(&mut self) {
         use std::time::Instant;
 
@@ -1054,6 +1061,12 @@ impl World {
             let t_upload = Instant::now();
             self.upload_world_state();
             timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
+        }
+
+        let sub_steps = self.config.sub_steps.max(1);
+        let sub_dt = self.config.dt / sub_steps as f32;
+        if sub_steps > 1 {
+            self.gpu_pipeline.set_sim_dt(sub_dt);
         }
 
         let compact_states: Vec<RigidBodyState3D> = self
@@ -1079,6 +1092,15 @@ impl World {
             self.collision_events.extend(events);
             results
         } else {
+            // Run intermediate sub-steps on device (no download)
+            for _sub in 0..sub_steps - 1 {
+                self.gpu_pipeline.step_fast_device_timed(
+                    num_bodies,
+                    self.config.solver_iterations,
+                    &mut timings,
+                );
+            }
+            // Final sub-step: download results
             let results = self.gpu_pipeline.step_fast_timed(
                 num_bodies,
                 self.config.solver_iterations,
@@ -1131,11 +1153,18 @@ impl World {
         );
 
         let num_bodies = self.gpu_compact_indices.len() as u32;
-        self.gpu_pipeline.step_fast_device_timed(
-            num_bodies,
-            self.config.solver_iterations,
-            &mut timings,
-        );
+        let sub_steps = self.config.sub_steps.max(1);
+        if sub_steps > 1 {
+            let sub_dt = self.config.dt / sub_steps as f32;
+            self.gpu_pipeline.set_sim_dt(sub_dt);
+        }
+        for _sub in 0..sub_steps {
+            self.gpu_pipeline.step_fast_device_timed(
+                num_bodies,
+                self.config.solver_iterations,
+                &mut timings,
+            );
+        }
         let t_render_extract = Instant::now();
         self.gpu_pipeline.build_render_instances(num_bodies);
         timings.extract_ms += t_render_extract.elapsed().as_secs_f32() * 1000.0;
@@ -1207,6 +1236,12 @@ impl World {
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
+        let sub_steps = self.config.sub_steps.max(1);
+        if sub_steps > 1 {
+            let sub_dt = self.config.dt / sub_steps as f32;
+            self.gpu_pipeline.set_sim_dt(sub_dt);
+        }
+
         let has_compounds = alive_indices
             .iter()
             .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }));
@@ -1228,6 +1263,17 @@ impl World {
             self.collision_events.extend(events);
             results
         } else {
+            // Run intermediate sub-steps on device (no download)
+            for _sub in 0..sub_steps - 1 {
+                self.gpu_pipeline
+                    .step_fast_device_async(
+                        num_bodies,
+                        self.config.solver_iterations,
+                        &mut timings,
+                    )
+                    .await;
+            }
+            // Final sub-step: download results
             let results = self
                 .gpu_pipeline
                 .step_fast_async(
