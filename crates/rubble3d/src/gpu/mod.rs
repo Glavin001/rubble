@@ -2888,24 +2888,36 @@ impl GpuPipeline {
         timings.contact_fetch_ms = 0.0;
         let t_solve = Instant::now();
 
-        if contact_count > 0 {
+        let staging = if contact_count > 0 {
             self.contacts.set_len(contact_count);
             self.dispatch_gpu_warmstart(contact_count);
-            // run_colored_solve_device_async now includes extract in its batch
-            self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
+            // run_colored_solve_device_async batches solver + extract + staging copy
+            let staging = self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
                 .await;
             self.swap_contact_buffers(contact_count);
+            staging
         } else {
             self.apply_free_motion(num_bodies, &[]);
             self.prev_contact_count = 0;
             // Extract must be dispatched separately when solver didn't run
             self.dispatch_extract(num_bodies);
-        }
+            self.body_states.current_mut().set_len(num_bodies);
+            None
+        };
         timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let t_ext = Instant::now();
-        self.body_states.current_mut().set_len(num_bodies);
-        let states = self.body_states.download_async(&self.ctx).await;
+        let states = if let Some((staging_buf, byte_len)) = staging {
+            // Staging copy already submitted in solver batch — just map it
+            let result = rubble_gpu::GpuBuffer::<RigidBodyState3D>::map_staging_async(
+                &self.ctx, staging_buf, byte_len,
+            ).await;
+            result
+        } else {
+            // Fallback: full download (creates its own encoder)
+            self.body_states.current_mut().set_len(num_bodies);
+            self.body_states.download_async(&self.ctx).await
+        };
         self.body_states.swap();
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
 
@@ -2939,7 +2951,7 @@ impl GpuPipeline {
         if contact_count > 0 {
             self.contacts.set_len(contact_count);
             self.dispatch_gpu_warmstart(contact_count);
-            self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
+            let _ = self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
                 .await;
             self.swap_contact_buffers(contact_count);
         } else {
@@ -2957,17 +2969,19 @@ impl GpuPipeline {
     /// Operates on GPU-resident contacts (no CPU download/upload).
     /// Uses GPU graph coloring with cross-frame caching to minimize GPU→CPU syncs.
     /// Full coloring runs every COLOR_CACHE_INTERVAL frames; cached groups reused otherwise.
+    /// Also records the body state copy-to-staging on the same encoder, avoiding
+    /// a separate queue.submit() for the download. Returns the staging handle.
     #[cfg(target_arch = "wasm32")]
     async fn run_colored_solve_device_async(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
         contact_count: u32,
-    ) {
+    ) -> Option<(wgpu::Buffer, u64)> {
         const COLOR_CACHE_INTERVAL: u32 = 8;
 
         if contact_count == 0 {
-            return;
+            return None;
         }
         self.dispatch_gpu_solve_graph(num_bodies, contact_count);
 
@@ -3038,7 +3052,11 @@ impl GpuPipeline {
         }
         // extract pass — appended to the same encoder to avoid an extra submit
         Self::record_pass(&mut encoder, "extract_vel", &self.extract_kernel, extract_bg, num_bodies);
+        // Copy body states to staging buffer on the same encoder (saves 1 submit)
+        self.body_states.current_mut().set_len(num_bodies);
+        let staging = self.body_states.current().record_copy_to_staging(&self.ctx, &mut encoder);
         self.ctx.queue.submit(Some(encoder.finish()));
+        staging
     }
 
     #[cfg(target_arch = "wasm32")]

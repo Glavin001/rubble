@@ -208,6 +208,32 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, byte_len);
         ctx.queue.submit(Some(encoder.finish()));
 
+        Self::map_staging_async(ctx, staging, byte_len).await
+    }
+
+    /// Record a copy from this buffer to a staging buffer on the given encoder.
+    /// Returns the staging buffer to be mapped later with `map_staging_async`.
+    /// This avoids a separate queue.submit() for the copy — the caller batches it
+    /// into an existing encoder.
+    #[cfg(target_arch = "wasm32")]
+    pub fn record_copy_to_staging(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<(wgpu::Buffer, u64)> {
+        if self.len == 0 {
+            return None;
+        }
+        let byte_len = (self.len as usize * std::mem::size_of::<T>()) as u64;
+        let staging = ctx.acquire_staging_buffer(byte_len, "GpuBuffer staging (batched)");
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, byte_len);
+        Some((staging, byte_len))
+    }
+
+    /// Await an already-submitted staging buffer copy. Call this after the
+    /// encoder containing the copy has been submitted.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn map_staging_async(ctx: &GpuContext, staging: wgpu::Buffer, byte_len: u64) -> Vec<T> {
         let slice = staging.slice(..byte_len);
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done_clone = done.clone();
@@ -221,8 +247,6 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         }
 
         let mapped = slice.get_mapped_range();
-        // In WebGPU/WASM, mapped ranges may not be aligned for T.
-        // Allocate a properly-aligned Vec<T> and copy bytes into it.
         let elem_count = mapped.len() / std::mem::size_of::<T>();
         let mut result = vec![T::zeroed(); elem_count];
         let dst_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut result);
