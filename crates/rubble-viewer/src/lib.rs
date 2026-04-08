@@ -5,7 +5,8 @@ pub mod renderer;
 
 use camera::{Camera2D, OrbitCamera};
 use glam::{Quat, Vec2, Vec3};
-use renderer::{model_matrix, palette_color, static_color, DrawList, InstanceData, Renderer};
+use renderer::{model_matrix, palette_color, DrawList, InstanceData, Renderer};
+use rubble_gpu::GpuContext;
 use rubble_math::BodyHandle;
 use std::{sync::Arc, time::Instant};
 use winit::application::ApplicationHandler;
@@ -27,6 +28,7 @@ const CONTROLS_2D: &[&str] = &["Pan view: left drag", "Zoom view: mouse wheel"];
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum ShapeInfo3D {
     Sphere { radius: f32 },
     Box { half_extents: Vec3 },
@@ -105,6 +107,10 @@ fn shape_info_2d(shape: &rubble2d::ShapeDesc2D) -> ShapeInfo2D {
 }
 
 fn build_world_3d(
+    gpu_ctx: GpuContext,
+    sphere_index_count: u32,
+    cube_index_count: u32,
+    capsule_index_count: u32,
     gravity: Vec3,
     scene: &Scene3D,
 ) -> (rubble3d::World, Vec<BodyHandle>, Vec<ShapeInfo3D>) {
@@ -112,13 +118,14 @@ fn build_world_3d(
         gravity,
         ..Default::default()
     };
-    let mut world = rubble3d::World::new(config).expect("GPU physics init failed");
+    let mut world = rubble3d::World::new_with_context(config, gpu_ctx);
     let mut handles = Vec::with_capacity(scene.descs.len());
     let mut shapes = Vec::with_capacity(scene.descs.len());
     for (desc, shape) in &scene.descs {
         handles.push(world.add_body(desc));
         shapes.push(shape.clone());
     }
+    world.configure_gpu_render_meshes(sphere_index_count, cube_index_count, capsule_index_count);
     (world, handles, shapes)
 }
 
@@ -269,6 +276,7 @@ impl Viewer3D {
 
 struct State3D {
     renderer: Renderer,
+    gpu_ctx: GpuContext,
     window: Arc<Window>,
     world: rubble3d::World,
     handles: Vec<BodyHandle>,
@@ -276,7 +284,6 @@ struct State3D {
     scene_names: Vec<String>,
     current_scene: usize,
     camera: OrbitCamera,
-    draw_list: DrawList,
     mouse_pressed: bool,
     right_pressed: bool,
     last_mouse: Option<(f64, f64)>,
@@ -307,11 +314,18 @@ impl ApplicationHandler for App3D {
                 )
                 .expect("Failed to create window"),
         );
-        let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let (renderer, gpu_ctx) =
+            pollster::block_on(Renderer::new_with_shared_context(window.clone()));
 
         let current_scene = self.viewer.initial_scene;
-        let (world, handles, shapes) =
-            build_world_3d(self.viewer.gravity, &self.viewer.scenes[current_scene]);
+        let (world, handles, shapes) = build_world_3d(
+            gpu_ctx.clone(),
+            renderer.sphere_mesh.index_count,
+            renderer.cube_mesh.index_count,
+            renderer.capsule_mesh.index_count,
+            self.viewer.gravity,
+            &self.viewer.scenes[current_scene],
+        );
         let scene_names = self
             .viewer
             .scenes
@@ -331,6 +345,7 @@ impl ApplicationHandler for App3D {
 
         self.state = Some(State3D {
             renderer,
+            gpu_ctx,
             window,
             world,
             handles,
@@ -338,7 +353,6 @@ impl ApplicationHandler for App3D {
             scene_names,
             current_scene,
             camera: OrbitCamera::default(),
-            draw_list: DrawList::default(),
             mouse_pressed: false,
             right_pressed: false,
             last_mouse: None,
@@ -375,6 +389,14 @@ impl App3D {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                let clamped = winit::dpi::PhysicalSize::new(
+                    size.width.min(state.renderer.max_surface_extent),
+                    size.height.min(state.renderer.max_surface_extent),
+                );
+                if clamped != size {
+                    let _ = state.window.request_inner_size(clamped);
+                    return;
+                }
                 state.renderer.resize(size.width, size.height);
             }
             WindowEvent::MouseInput {
@@ -417,6 +439,10 @@ impl App3D {
                     && event.logical_key == Key::Character("r".into()) =>
             {
                 let (world, handles, shapes) = build_world_3d(
+                    state.gpu_ctx.clone(),
+                    state.renderer.sphere_mesh.index_count,
+                    state.renderer.cube_mesh.index_count,
+                    state.renderer.capsule_mesh.index_count,
                     self.viewer.gravity,
                     &self.viewer.scenes[state.current_scene],
                 );
@@ -431,47 +457,8 @@ impl App3D {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                state.world.step();
+                let render_frame = state.world.step_for_gpu_render();
                 let timings = *state.world.last_step_timings();
-
-                state.draw_list.clear();
-                for (i, handle) in state.handles.iter().enumerate() {
-                    let pos = state.world.get_position(*handle).unwrap_or(Vec3::ZERO);
-                    let rot = state.world.get_rotation(*handle).unwrap_or(Quat::IDENTITY);
-                    let is_static = matches!(state.shapes[i], ShapeInfo3D::Plane);
-                    let color = if is_static {
-                        static_color()
-                    } else {
-                        palette_color(i)
-                    };
-
-                    match &state.shapes[i] {
-                        ShapeInfo3D::Sphere { radius } => {
-                            let s = Vec3::splat(*radius);
-                            state.draw_list.spheres.push(InstanceData {
-                                model: model_matrix(pos, rot, s).to_cols_array_2d(),
-                                color,
-                            });
-                        }
-                        ShapeInfo3D::Box { half_extents } => {
-                            state.draw_list.cubes.push(InstanceData {
-                                model: model_matrix(pos, rot, *half_extents).to_cols_array_2d(),
-                                color,
-                            });
-                        }
-                        ShapeInfo3D::Capsule {
-                            half_height,
-                            radius,
-                        } => {
-                            let s = Vec3::new(*radius, *half_height, *radius);
-                            state.draw_list.capsules.push(InstanceData {
-                                model: model_matrix(pos, rot, s).to_cols_array_2d(),
-                                color,
-                            });
-                        }
-                        ShapeInfo3D::Plane => {}
-                    }
-                }
 
                 state.frame_count += 1;
                 let elapsed = state.fps_instant.elapsed();
@@ -499,8 +486,14 @@ impl App3D {
                     );
                 });
                 if selected_scene != state.current_scene || reset_requested {
-                    let (world, handles, shapes) =
-                        build_world_3d(self.viewer.gravity, &self.viewer.scenes[selected_scene]);
+                    let (world, handles, shapes) = build_world_3d(
+                        state.gpu_ctx.clone(),
+                        state.renderer.sphere_mesh.index_count,
+                        state.renderer.cube_mesh.index_count,
+                        state.renderer.capsule_mesh.index_count,
+                        self.viewer.gravity,
+                        &self.viewer.scenes[selected_scene],
+                    );
                     state.world = world;
                     state.handles = handles;
                     state.shapes = shapes;
@@ -513,9 +506,8 @@ impl App3D {
                     .egui_ctx
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let size = state.window.inner_size();
                 let sd = egui_wgpu::ScreenDescriptor {
-                    size_in_pixels: [size.width, size.height],
+                    size_in_pixels: [state.renderer.config.width, state.renderer.config.height],
                     pixels_per_point: full_output.pixels_per_point,
                 };
 
@@ -523,10 +515,12 @@ impl App3D {
                 let eye = state.camera.eye();
 
                 let t_render = Instant::now();
-                state.renderer.render_3d(
+                state.renderer.render_3d_gpu(
                     vp,
                     eye,
-                    &state.draw_list,
+                    render_frame.spheres,
+                    render_frame.cubes,
+                    render_frame.capsules,
                     true,
                     &primitives,
                     &full_output.textures_delta,
@@ -759,6 +753,14 @@ impl App2D {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                let clamped = winit::dpi::PhysicalSize::new(
+                    size.width.min(state.renderer.max_surface_extent),
+                    size.height.min(state.renderer.max_surface_extent),
+                );
+                if clamped != size {
+                    let _ = state.window.request_inner_size(clamped);
+                    return;
+                }
                 state.renderer.resize(size.width, size.height);
             }
             WindowEvent::MouseInput {
@@ -887,9 +889,8 @@ impl App2D {
                     .egui_ctx
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let size = state.window.inner_size();
                 let sd = egui_wgpu::ScreenDescriptor {
-                    size_in_pixels: [size.width, size.height],
+                    size_in_pixels: [state.renderer.config.width, state.renderer.config.height],
                     pixels_per_point: full_output.pixels_per_point,
                 };
 

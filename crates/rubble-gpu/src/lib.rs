@@ -13,6 +13,56 @@ pub use kernel::{round_up_workgroups, ComputeKernel};
 pub use multi_gpu::{GpuDevice, GpuDevicePool, MultiGpuBuffer, MultiGpuContext, WorkDistribution};
 pub use web_time;
 
+use bytemuck::{Pod, Zeroable};
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct MeshInstanceData {
+    pub model: [[f32; 4]; 4],
+    pub color: [f32; 4],
+}
+
+impl MeshInstanceData {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<MeshInstanceData>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 3,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 4,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 48,
+                shader_location: 5,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 64,
+                shader_location: 6,
+            },
+        ],
+    };
+}
+
+#[derive(Clone, Debug)]
+pub struct MeshInstanceBatch {
+    pub buffer: wgpu::Buffer,
+    pub indirect_buffer: wgpu::Buffer,
+    pub indirect_offset: u64,
+}
+
 /// Broadphase substage wall times (milliseconds), measured around GPU submits and host readbacks.
 ///
 /// **WebGPU note:** `wgpu::Queue::submit` returns before work finishes. Buckets **Bounds** /
@@ -28,6 +78,7 @@ pub struct BroadphaseBreakdownMs {
     pub build_ms: f32,
     pub traverse_ms: f32,
     pub readback_ms: f32,
+    pub precise: bool,
 }
 
 impl BroadphaseBreakdownMs {
@@ -43,6 +94,43 @@ impl BroadphaseBreakdownMs {
 
     pub fn total_ms(&self) -> f32 {
         self.bounds_ms + self.sort_ms + self.build_ms + self.traverse_ms + self.readback_ms
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.total_ms() <= f32::EPSILON
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SolveBreakdownMs {
+    pub warmstart_ms: f32,
+    pub graph_ms: f32,
+    pub free_motion_ms: f32,
+    pub coloring_ms: f32,
+    pub iterations_ms: f32,
+    pub swap_ms: f32,
+    pub precise: bool,
+}
+
+impl SolveBreakdownMs {
+    pub fn as_array(&self) -> [f32; 6] {
+        [
+            self.warmstart_ms,
+            self.graph_ms,
+            self.free_motion_ms,
+            self.coloring_ms,
+            self.iterations_ms,
+            self.swap_ms,
+        ]
+    }
+
+    pub fn total_ms(&self) -> f32 {
+        self.warmstart_ms
+            + self.graph_ms
+            + self.free_motion_ms
+            + self.coloring_ms
+            + self.iterations_ms
+            + self.swap_ms
     }
 
     pub fn is_zero(&self) -> bool {
@@ -70,6 +158,17 @@ pub const BROADPHASE_SUB_LABELS: [(&str, &str); 5] = [
     ("Readback", "(CPU)"),
 ];
 
+pub const SOLVE_SUB_LABELS: [(&str, &str); 6] = [
+    ("Warmstart", "(GPU)"),
+    ("Graph", "(GPU)"),
+    ("FreeMotion", "(GPU)"),
+    ("Coloring", "(GPU)"),
+    ("Iterations", "(GPU)"),
+    ("Swap", "(GPU)"),
+];
+
+pub const DETAILED_BREAKDOWN_THRESHOLD_MS: f32 = 20.0;
+
 /// Index of the broadphase row in [`STEP_TIMING_LABELS`] / [`StepTimingsMs::as_array`].
 pub const STEP_INDEX_BROADPHASE: usize = 2;
 
@@ -87,7 +186,10 @@ pub struct StepTimingsMs {
     pub narrowphase_ms: f32,
     pub contact_fetch_ms: f32,
     pub solve_ms: f32,
+    pub solve_breakdown: SolveBreakdownMs,
     pub extract_ms: f32,
+    pub cpu_sync_ms: f32,
+    pub precise_gpu: bool,
 }
 
 impl Default for StepTimingsMs {
@@ -100,7 +202,10 @@ impl Default for StepTimingsMs {
             narrowphase_ms: 0.0,
             contact_fetch_ms: 0.0,
             solve_ms: 0.0,
+            solve_breakdown: SolveBreakdownMs::default(),
             extract_ms: 0.0,
+            cpu_sync_ms: 0.0,
+            precise_gpu: false,
         }
     }
 }
@@ -128,9 +233,17 @@ impl StepTimingsMs {
     /// dev overlays (web text, tests); native UI may use [`STEP_TIMING_LABELS`] for custom layout.
     pub fn format_text_overlay(&self, render_backend: &str, render_ms: f32) -> String {
         let arr = self.as_array();
-        let total: f32 = arr.iter().sum();
+        let total: f32 = arr.iter().sum::<f32>() + self.cpu_sync_ms;
         let mut lines = Vec::with_capacity(16);
         lines.push(format!("Step: {total:.2} ms"));
+        lines.push(format!(
+            "Timing: {}",
+            if self.precise_gpu {
+                "GPU timestamps"
+            } else {
+                "Host wall-clock (approx)"
+            }
+        ));
 
         for (i, &(name, lane)) in STEP_TIMING_LABELS.iter().enumerate() {
             let ms = arr[i];
@@ -143,6 +256,9 @@ impl StepTimingsMs {
                 let bp = &self.broadphase_breakdown;
                 let bp_arr = bp.as_array();
                 let bp_total = bp.total_ms();
+                if !bp.precise {
+                    lines.push("    Broadphase details: approx".to_string());
+                }
                 for (j, &(sub_name, sub_lane)) in BROADPHASE_SUB_LABELS.iter().enumerate() {
                     let bms = bp_arr[j];
                     let bpct = if bp_total > 0.0 {
@@ -156,6 +272,41 @@ impl StepTimingsMs {
                     ));
                 }
             }
+            if name == "Solve"
+                && ms >= DETAILED_BREAKDOWN_THRESHOLD_MS
+                && !self.solve_breakdown.is_zero()
+            {
+                let solve = &self.solve_breakdown;
+                let solve_arr = solve.as_array();
+                let solve_total = solve.total_ms();
+                if !solve.precise {
+                    lines.push("    Solve details: approx".to_string());
+                }
+                for (j, &(sub_name, sub_lane)) in SOLVE_SUB_LABELS.iter().enumerate() {
+                    let sms = solve_arr[j];
+                    let spct = if solve_total > 0.0 {
+                        sms / solve_total * 100.0
+                    } else {
+                        0.0
+                    };
+                    lines.push(format!(
+                        "    {sub_name:<11} {sub_lane:<8} {:>6.2} ms {:>5.1}%",
+                        sms, spct
+                    ));
+                }
+            }
+        }
+
+        if self.cpu_sync_ms > 0.0 {
+            let pct = if total > 0.0 {
+                self.cpu_sync_ms / total * 100.0
+            } else {
+                0.0
+            };
+            lines.push(format!(
+                "  {:<11} {:<8} {:>6.2} ms {:>5.1}%",
+                "StateSync", "(CPU)", self.cpu_sync_ms, pct
+            ));
         }
 
         lines.push(format!(

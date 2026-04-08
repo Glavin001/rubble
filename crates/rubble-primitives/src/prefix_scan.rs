@@ -130,17 +130,10 @@ impl InternalPrefixScan {
             return;
         }
 
-        let max_gpu = WORKGROUP_SIZE * WORKGROUP_SIZE; // 65536
-        if n > max_gpu {
-            self.cpu_fallback(ctx, data);
-            return;
-        }
-
         let num_blocks = rubble_gpu::round_up_workgroups(n, WORKGROUP_SIZE);
-
-        // Create block sums buffer (pad to WORKGROUP_SIZE for the single-block scan)
-        let mut block_sums = GpuBuffer::<u32>::new(ctx, WORKGROUP_SIZE as usize);
-        block_sums.upload(ctx, &vec![0u32; WORKGROUP_SIZE as usize]);
+        let block_sums_len = num_blocks.max(1) as usize;
+        let mut block_sums = GpuBuffer::<u32>::new(ctx, block_sums_len);
+        block_sums.upload(ctx, &vec![0u32; block_sums_len]);
 
         // Params uniform
         let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -189,57 +182,7 @@ impl InternalPrefixScan {
         }
 
         if num_blocks > 1 {
-            // Pass 2: scan block sums (single workgroup since num_blocks <= 256)
-            let block_sums_params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("block sums scan params"),
-                size: 16,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            ctx.queue.write_buffer(
-                &block_sums_params_buf,
-                0,
-                bytemuck::cast_slice(&[num_blocks, 0u32, 0, 0]),
-            );
-
-            // Dummy block_sums_of_block_sums buffer
-            let mut dummy_block_sums = GpuBuffer::<u32>::new(ctx, WORKGROUP_SIZE as usize);
-            dummy_block_sums.upload(ctx, &vec![0u32; WORKGROUP_SIZE as usize]);
-
-            {
-                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: self.scan_blocks_kernel.bind_group_layout(),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: block_sums.buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: dummy_block_sums.buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: block_sums_params_buf.as_entire_binding(),
-                        },
-                    ],
-                });
-
-                let mut encoder = ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                {
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: None,
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(self.scan_blocks_kernel.pipeline());
-                    pass.set_bind_group(0, &bind_group, &[]);
-                    pass.dispatch_workgroups(1, 1, 1);
-                }
-                ctx.queue.submit(Some(encoder.finish()));
-            }
+            self.exclusive_scan(ctx, &block_sums);
 
             // Pass 3: add scanned block sums back
             {
@@ -277,19 +220,6 @@ impl InternalPrefixScan {
                 ctx.queue.submit(Some(encoder.finish()));
             }
         }
-    }
-
-    /// CPU fallback for arrays larger than 65536 elements.
-    fn cpu_fallback(&self, ctx: &GpuContext, data: &GpuBuffer<u32>) {
-        let mut host = data.download(ctx);
-        let mut sum = 0u32;
-        for v in host.iter_mut() {
-            let old = *v;
-            *v = sum;
-            sum = sum.wrapping_add(old);
-        }
-        ctx.queue
-            .write_buffer(data.buffer(), 0, bytemuck::cast_slice(&host));
     }
 }
 
@@ -461,5 +391,25 @@ mod tests {
         let result = buf.download(&ctx);
         // inclusive: [3, 4, 8, 9, 14, 23, 25, 31]
         assert_eq!(result, vec![3, 4, 8, 9, 14, 23, 25, 31]);
+    }
+
+    #[test]
+    fn test_exclusive_scan_large_n_stays_on_gpu() {
+        let Some(ctx) = crate::test_gpu() else {
+            eprintln!("SKIP: No GPU");
+            return;
+        };
+        let n = 70_000usize;
+        let scan = GpuPrefixScan::new(&ctx, n);
+        let input: Vec<u32> = vec![1; n];
+        let mut buf = GpuBuffer::<u32>::new(&ctx, n);
+        buf.upload(&ctx, &input);
+
+        scan.exclusive_scan(&ctx, &mut buf);
+
+        let result = buf.download(&ctx);
+        assert_eq!(result[0], 0);
+        assert_eq!(result[1], 1);
+        assert_eq!(result[n - 1], (n - 1) as u32);
     }
 }
