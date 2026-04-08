@@ -1735,11 +1735,8 @@ impl GpuLbvh {
         let t_sort = Instant::now();
         self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::SortStart);
         self.dispatch_morton(ctx, aabb_buf, num_bodies);
-        // Morton codes are 30 bits (10 per axis). Sorting only the low 24 bits
-        // (6 radix passes instead of 8) saves ~25% of sort submits while
-        // preserving sufficient spatial ordering for the BVH.
         self.radix_sort
-            .sort_key_value_partial(ctx, &mut self.morton_keys, &mut self.body_indices, 24);
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
         self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::SortEnd);
         breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
 
@@ -1785,7 +1782,7 @@ impl GpuLbvh {
         let t_sort = Instant::now();
         self.dispatch_morton(ctx, aabb_buf, num_bodies);
         self.radix_sort
-            .sort_key_value_partial(ctx, &mut self.morton_keys, &mut self.body_indices, 24);
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
         breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
 
         let t_build = Instant::now();
@@ -1897,7 +1894,7 @@ impl GpuLbvh {
         let t_sort = Instant::now();
         self.dispatch_morton(ctx, aabb_buf, num_bodies);
         self.radix_sort
-            .sort_key_value_partial(ctx, &mut self.morton_keys, &mut self.body_indices, 24);
+            .sort_key_value_in_place(ctx, &mut self.morton_keys, &mut self.body_indices);
         breakdown.sort_ms += t_sort.elapsed().as_secs_f32() * 1000.0;
 
         let t_build = Instant::now();
