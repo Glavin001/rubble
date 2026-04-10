@@ -191,8 +191,9 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         (result_self, count)
     }
 
-    /// Download the buffer contents asynchronously (required for WASM/WebGPU).
-    #[cfg(target_arch = "wasm32")]
+    /// Download the buffer contents asynchronously.
+    /// On WASM, yields to the JS event loop while waiting for the GPU.
+    /// On native, blocks via `device.poll(wait_indefinitely)`.
     pub async fn download_async(&self, ctx: &GpuContext) -> Vec<T> {
         if self.len == 0 {
             return Vec::new();
@@ -215,7 +216,6 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
     /// Returns the staging buffer to be mapped later with `map_staging_async`.
     /// This avoids a separate queue.submit() for the copy — the caller batches it
     /// into an existing encoder.
-    #[cfg(target_arch = "wasm32")]
     pub fn record_copy_to_staging(
         &self,
         ctx: &GpuContext,
@@ -232,18 +232,27 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
 
     /// Await an already-submitted staging buffer copy. Call this after the
     /// encoder containing the copy has been submitted.
-    #[cfg(target_arch = "wasm32")]
+    /// On WASM, yields to the JS event loop while waiting; on native, blocks.
     pub async fn map_staging_async(ctx: &GpuContext, staging: wgpu::Buffer, byte_len: u64) -> Vec<T> {
         let slice = staging.slice(..byte_len);
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let done_clone = done.clone();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            result.unwrap();
-            done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
 
-        while !done.load(std::sync::atomic::Ordering::SeqCst) {
-            crate::yield_now().await;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let done_clone = done.clone();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                result.unwrap();
+                done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::yield_now().await;
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
         }
 
         let mapped = slice.get_mapped_range();
@@ -258,7 +267,6 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
     }
 
     /// Async variant of [`GpuBuffer::download_with`].
-    #[cfg(target_arch = "wasm32")]
     pub async fn download_with_async<U>(
         &self,
         ctx: &GpuContext,
@@ -268,9 +276,6 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         T: bytemuck::Zeroable,
         U: bytemuck::Pod + bytemuck::Zeroable,
     {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
         if self.len == 0 && other.len == 0 {
             return (Vec::new(), Vec::new());
         }
@@ -296,25 +301,37 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
 
         let slice_self = staging_self.slice(..byte_len_self.max(4));
         let slice_other = staging_other.slice(..byte_len_other.max(4));
-        let done_self = Arc::new(AtomicBool::new(false));
-        let done_other = Arc::new(AtomicBool::new(false));
+
+        #[cfg(target_arch = "wasm32")]
         {
-            let done = done_self.clone();
-            slice_self.map_async(wgpu::MapMode::Read, move |result| {
-                result.unwrap();
-                done.store(true, Ordering::SeqCst);
-            });
-        }
-        {
-            let done = done_other.clone();
-            slice_other.map_async(wgpu::MapMode::Read, move |result| {
-                result.unwrap();
-                done.store(true, Ordering::SeqCst);
-            });
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+            let done_self = Arc::new(AtomicBool::new(false));
+            let done_other = Arc::new(AtomicBool::new(false));
+            {
+                let done = done_self.clone();
+                slice_self.map_async(wgpu::MapMode::Read, move |result| {
+                    result.unwrap();
+                    done.store(true, Ordering::SeqCst);
+                });
+            }
+            {
+                let done = done_other.clone();
+                slice_other.map_async(wgpu::MapMode::Read, move |result| {
+                    result.unwrap();
+                    done.store(true, Ordering::SeqCst);
+                });
+            }
+            while !done_self.load(Ordering::SeqCst) || !done_other.load(Ordering::SeqCst) {
+                crate::yield_now().await;
+            }
         }
 
-        while !done_self.load(Ordering::SeqCst) || !done_other.load(Ordering::SeqCst) {
-            crate::yield_now().await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            slice_self.map_async(wgpu::MapMode::Read, |_| {});
+            slice_other.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
         }
 
         let result_self = if byte_len_self == 0 {
@@ -348,7 +365,6 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
     }
 
     /// Async variant of [`GpuBuffer::download_with_counter`].
-    #[cfg(target_arch = "wasm32")]
     pub async fn download_with_counter_async(
         &self,
         ctx: &GpuContext,
@@ -358,9 +374,6 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
     where
         T: bytemuck::Zeroable,
     {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
         if element_count == 0 {
             return (Vec::new(), counter.read_async(ctx).await);
         }
@@ -380,25 +393,37 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
 
         let slice_self = staging_self.slice(..byte_len_self.max(4));
         let slice_counter = staging_counter.slice(..4);
-        let done_self = Arc::new(AtomicBool::new(false));
-        let done_counter = Arc::new(AtomicBool::new(false));
+
+        #[cfg(target_arch = "wasm32")]
         {
-            let done = done_self.clone();
-            slice_self.map_async(wgpu::MapMode::Read, move |result| {
-                result.unwrap();
-                done.store(true, Ordering::SeqCst);
-            });
-        }
-        {
-            let done = done_counter.clone();
-            slice_counter.map_async(wgpu::MapMode::Read, move |result| {
-                result.unwrap();
-                done.store(true, Ordering::SeqCst);
-            });
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+            let done_self = Arc::new(AtomicBool::new(false));
+            let done_counter = Arc::new(AtomicBool::new(false));
+            {
+                let done = done_self.clone();
+                slice_self.map_async(wgpu::MapMode::Read, move |result| {
+                    result.unwrap();
+                    done.store(true, Ordering::SeqCst);
+                });
+            }
+            {
+                let done = done_counter.clone();
+                slice_counter.map_async(wgpu::MapMode::Read, move |result| {
+                    result.unwrap();
+                    done.store(true, Ordering::SeqCst);
+                });
+            }
+            while !done_self.load(Ordering::SeqCst) || !done_counter.load(Ordering::SeqCst) {
+                crate::yield_now().await;
+            }
         }
 
-        while !done_self.load(Ordering::SeqCst) || !done_counter.load(Ordering::SeqCst) {
-            crate::yield_now().await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            slice_self.map_async(wgpu::MapMode::Read, |_| {});
+            slice_counter.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
         }
 
         let mapped_self = slice_self.get_mapped_range();
@@ -531,8 +556,7 @@ impl<T: bytemuck::Pod> PingPongBuffer<T> {
         self.buffers[self.current].set_len(len);
     }
 
-    /// Async download (required for WASM/WebGPU).
-    #[cfg(target_arch = "wasm32")]
+    /// Async download — works on all platforms.
     pub async fn download_async(&self, ctx: &GpuContext) -> Vec<T> {
         self.buffers[self.current].download_async(ctx).await
     }
@@ -626,8 +650,7 @@ impl GpuAtomicCounter {
         values
     }
 
-    /// Read the counter value asynchronously (required for WASM/WebGPU).
-    #[cfg(target_arch = "wasm32")]
+    /// Read the counter value asynchronously — works on all platforms.
     pub async fn read_async(&self, ctx: &GpuContext) -> u32 {
         let staging = ctx.acquire_staging_buffer(4, "GpuAtomicCounter staging (async)");
 
@@ -638,19 +661,27 @@ impl GpuAtomicCounter {
         ctx.queue.submit(Some(encoder.finish()));
 
         let slice = staging.slice(..4);
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let done_clone = done.clone();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            result.unwrap();
-            done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
 
-        while !done.load(std::sync::atomic::Ordering::SeqCst) {
-            crate::yield_now().await;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let done_clone = done.clone();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                result.unwrap();
+                done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::yield_now().await;
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
         }
 
         let mapped = slice.get_mapped_range();
-        // Avoid alignment issues: copy 4 bytes manually
         let mut bytes = [0u8; 4];
         bytes.copy_from_slice(&mapped[..4]);
         drop(mapped);

@@ -1,6 +1,7 @@
 mod support;
 
 use glam::{Mat3, Quat, Vec3, Vec4};
+use pollster;
 use rubble3d::{gpu::GpuPipeline, ShapeDesc};
 use rubble_gpu::{GpuBuffer, GpuContext};
 use rubble_math::{
@@ -295,7 +296,8 @@ fn run_pair_case(case: &PairCase3D) -> Option<(Vec<RigidBodyState3D>, Vec<Contac
         INITIAL_PENALTY,
         0.95,
     );
-    Some(pipeline.step_with_contacts(2, 10, None))
+    let mut timings = rubble_gpu::StepTimingsMs::default();
+    Some(pollster::block_on(pipeline.step_with_contacts_async(2, 10, None, &mut timings)))
 }
 
 fn contact_sanity_errors(case: &PairCase3D, contacts: &[Contact3D]) -> Vec<String> {
@@ -1512,7 +1514,8 @@ fn feature_id_stability_slow_translation() {
             INITIAL_PENALTY,
             0.95,
         );
-        let (_states, contacts) = pipeline.step_with_contacts(2, 1, None);
+        let mut timings = rubble_gpu::StepTimingsMs::default();
+        let (_states, contacts) = pollster::block_on(pipeline.step_with_contacts_async(2, 1, None, &mut timings));
 
         if contacts.is_empty() {
             continue;

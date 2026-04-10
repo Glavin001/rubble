@@ -1847,7 +1847,6 @@ impl GpuLbvh {
     }
 
     /// Async variant for WASM/WebGPU callers.
-    #[cfg(target_arch = "wasm32")]
     pub async fn build_and_query_raw_async(
         &mut self,
         ctx: &GpuContext,
@@ -1860,7 +1859,6 @@ impl GpuLbvh {
     }
 
     /// Async variant of [`GpuLbvh::query_on_device_raw`].
-    #[cfg(target_arch = "wasm32")]
     pub async fn query_on_device_raw_async(
         &mut self,
         ctx: &GpuContext,
@@ -1873,7 +1871,6 @@ impl GpuLbvh {
     }
 
     /// Async variant of [`build_and_query_raw_with_breakdown`].
-    #[cfg(target_arch = "wasm32")]
     pub async fn build_and_query_raw_async_with_breakdown(
         &mut self,
         ctx: &GpuContext,
@@ -1948,7 +1945,6 @@ impl GpuLbvh {
     }
 
     /// Async variant of [`GpuLbvh::query_on_device_raw_with_breakdown`].
-    #[cfg(target_arch = "wasm32")]
     pub async fn query_on_device_raw_async_with_breakdown(
         &mut self,
         ctx: &GpuContext,
@@ -1967,7 +1963,6 @@ impl GpuLbvh {
         self.pair_counter.read(ctx).min(max_pairs)
     }
 
-    #[cfg(target_arch = "wasm32")]
     pub async fn read_pair_count_async(&self, ctx: &GpuContext, max_pairs: u32) -> u32 {
         self.pair_counter.read_async(ctx).await.min(max_pairs)
     }

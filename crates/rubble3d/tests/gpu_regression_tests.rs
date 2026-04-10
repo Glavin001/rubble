@@ -1,4 +1,5 @@
 use glam::{Mat3, Quat, Vec3, Vec4};
+use pollster;
 use rubble3d::{gpu::GpuPipeline, RigidBodyDesc, ShapeDesc, SimConfig, World};
 use rubble_math::{
     Contact3D, RigidBodyProps3D, RigidBodyState3D, FLAG_STATIC, SHAPE_BOX, SHAPE_PLANE,
@@ -115,7 +116,7 @@ fn run_box_floor_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
+    Some({let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(states.len() as u32, solver_iterations, warm_contacts, &mut __t))})
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -184,7 +185,7 @@ fn run_box_pair_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
+    Some({let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(states.len() as u32, solver_iterations, warm_contacts, &mut __t))})
 }
 
 fn run_sphere_plane_step(
@@ -247,7 +248,7 @@ fn run_sphere_plane_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
+    Some({let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(states.len() as u32, solver_iterations, warm_contacts, &mut __t))})
 }
 
 fn simulate_sphere_plane_frames(
@@ -314,7 +315,7 @@ fn simulate_sphere_plane_frames(
             None
         };
         let (next_states, contacts) =
-            pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm);
+            {let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(states.len() as u32, solver_iterations, warm, &mut __t))};
         prev_states = states;
         states = next_states;
         prev_contacts = contacts;
@@ -784,7 +785,7 @@ fn custom_k_start_is_applied_3d() {
         custom_k_start,
         0.95,
     );
-    let (_, contacts) = pipeline.step_with_contacts(2, 0, None);
+    let (_, contacts) = {let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(2, 0, None, &mut __t))};
     assert!(!contacts.is_empty(), "expected resting box-floor contacts");
     assert!(contacts.iter().all(|c| {
         (c.penalty.x - custom_k_start).abs() < 1e-3

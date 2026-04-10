@@ -735,12 +735,6 @@ pub struct GpuPipeline {
     gpu_coloring: GpuColoringState,
     gpu_render: GpuRenderState,
 
-    // Cached color groups for WASM async path (avoids GPU→CPU sync every frame)
-    #[cfg(target_arch = "wasm32")]
-    cached_color_groups: Option<Vec<(u32, u32)>>,
-    #[cfg(target_arch = "wasm32")]
-    color_cache_frame: u32,
-
     // Persistent contact buffers for GPU-side warmstarting
     prev_contacts: GpuBuffer<Contact3D>,
     prev_contact_count: u32,
@@ -1011,10 +1005,6 @@ impl GpuPipeline {
             gpu_render,
             prev_contacts,
             prev_contact_count: 0,
-            #[cfg(target_arch = "wasm32")]
-            cached_color_groups: None,
-            #[cfg(target_arch = "wasm32")]
-            color_cache_frame: 0,
             warmstart_params_uniform,
             warmstart_hashmap_params_buf,
             warmstart_hashmap_keys,
@@ -1238,134 +1228,6 @@ impl GpuPipeline {
             0,
             bytemuck::bytes_of(&self.sim_params),
         );
-    }
-
-    /// Run predict → AABB → broadphase → narrowphase (shared by both step variants).
-    ///
-    /// When a broadphase pair involves a compound shape (SHAPE_COMPOUND = 5),
-    /// the pair is expanded on the CPU into individual child-vs-body pairs.
-    /// This avoids adding compound-specific bindings/logic to the GPU narrowphase.
-    fn run_detection(&mut self, num_bodies: u32) -> Vec<Contact3D> {
-        self.contact_count.reset(&self.ctx);
-        self.pair_count.reset(&self.ctx);
-
-        self.dispatch_predict(num_bodies);
-        self.snapshot_prev_step_states(num_bodies);
-        self.dispatch_aabb(num_bodies);
-
-        let has_compounds = self.body_props_cpu[..num_bodies as usize]
-            .iter()
-            .any(|prop| prop.shape_type == rubble_math::SHAPE_COMPOUND);
-        // Planes go through GPU LBVH broadphase (their large AABB handles pairing).
-        // Only compound shapes still require CPU pair expansion.
-        let requires_cpu_pair_stage = has_compounds;
-        self.aabbs.set_len(num_bodies);
-
-        let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
-        let mut pair_thread_count: u32 = 0;
-        let mut pair_count: u32 = 0;
-
-        if requires_cpu_pair_stage {
-            let cpu_aabbs = self.aabbs.download(&self.ctx);
-            let overlap_pairs = self.broadphase_pairs_3d(num_bodies, &cpu_aabbs);
-            if !overlap_pairs.is_empty() {
-                let props = &self.body_props_cpu[..num_bodies as usize];
-                let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
-                let states = if has_compounds {
-                    self.body_states.current_mut().set_len(num_bodies);
-                    Some(self.body_states.download(&self.ctx))
-                } else {
-                    None
-                };
-
-                for p in &overlap_pairs {
-                    let a = p[0];
-                    let b = p[1];
-                    if has_compounds {
-                        let st_a = props[a as usize].shape_type;
-                        let st_b = props[b as usize].shape_type;
-
-                        let a_is_compound = st_a == rubble_math::SHAPE_COMPOUND;
-                        let b_is_compound = st_b == rubble_math::SHAPE_COMPOUND;
-
-                        if !a_is_compound && !b_is_compound {
-                            non_compound_pairs.push(GpuPair { a, b });
-                        } else {
-                            self.generate_compound_contacts_cpu(
-                                a,
-                                b,
-                                props,
-                                states.as_ref().expect("compound path requires states"),
-                                &mut cpu_compound_contacts,
-                            );
-                        }
-                    } else {
-                        non_compound_pairs.push(GpuPair { a, b });
-                    }
-                }
-
-                if !non_compound_pairs.is_empty() {
-                    // Sort pairs by (shape_type_a << 16 | shape_type_b) for SIMD-friendly
-                    // narrowphase dispatch. Bodies with the same shape-pair type are grouped
-                    // together, improving GPU warp/wavefront coherence.
-                    non_compound_pairs.sort_unstable_by_key(|pair| {
-                        let st_a = props[pair.a as usize].shape_type;
-                        let st_b = props[pair.b as usize].shape_type;
-                        let (lo, hi) = if st_a <= st_b {
-                            (st_a, st_b)
-                        } else {
-                            (st_b, st_a)
-                        };
-                        (lo << 16) | hi
-                    });
-                    let count = non_compound_pairs.len() as u32;
-                    self.pairs.upload(&self.ctx, &non_compound_pairs);
-                    self.pair_count.write(&self.ctx, count);
-                    pair_count = count;
-                }
-            }
-        } else {
-            pair_thread_count =
-                self.gpu_lbvh
-                    .query_on_device_raw(&self.ctx, self.aabbs.buffer(), num_bodies);
-        }
-
-        if requires_cpu_pair_stage {
-            self.dispatch_narrowphase(num_bodies, pair_count);
-        } else if pair_thread_count > 0 {
-            let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
-            self.pair_count.write(&self.ctx, pair_count);
-            self.dispatch_narrowphase_with_source(
-                num_bodies,
-                pair_count,
-                &pair_buffer,
-            );
-        }
-
-        // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
-        let contact_count_val = self.contact_count.read(&self.ctx);
-        let capacity = self.contacts.capacity();
-        if contact_count_val > capacity {
-            // Grow contacts buffer to 2x the needed size
-            let new_cap = (contact_count_val as usize) * 2;
-            self.contacts.grow_if_needed(&self.ctx, new_cap);
-            // Reset counter and re-run narrowphase
-            self.contact_count.reset(&self.ctx);
-            if requires_cpu_pair_stage {
-                self.dispatch_narrowphase(num_bodies, pair_count);
-            } else if pair_thread_count > 0 {
-                let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    pair_count,
-                    &pair_buffer,
-                );
-            }
-        }
-
-        cpu_compound_contacts
     }
 
     /// Generate contacts on the CPU for pairs involving compound shapes.
@@ -1811,90 +1673,7 @@ impl GpuPipeline {
         }
     }
 
-    fn run_colored_solve_device(
-        &mut self,
-        num_bodies: u32,
-        solver_iterations: u32,
-        contact_count: u32,
-    ) {
-        if contact_count == 0 {
-            return;
-        }
-        self.mark_precise_timing(PreciseTimingMarker::SolveGraphStart);
-        self.dispatch_gpu_solve_graph(num_bodies, contact_count);
-        self.mark_precise_timing(PreciseTimingMarker::SolveGraphEnd);
-        let _ = self.free_motion_bind_group();
-        let free_motion_bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
-        self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionStart);
-        self.run_pass(
-            "free_motion",
-            &self.free_motion_kernel,
-            free_motion_bg,
-            num_bodies,
-        );
-        self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionEnd);
-        self.mark_precise_timing(PreciseTimingMarker::SolveColoringStart);
-        let color_groups = self.dispatch_gpu_coloring(num_bodies);
-        self.mark_precise_timing(PreciseTimingMarker::SolveColoringEnd);
-        self.write_solve_ranges(&color_groups);
-        self.sync_primal_bind_groups(color_groups.len());
-        let _ = self.dual_bind_group();
-        let primal_bind_groups = &self.primal_bg_cache.bind_groups;
-        let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
-        self.mark_precise_timing(PreciseTimingMarker::SolveIterationsStart);
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("avbd_solve_batch_3d"),
-            });
-        for _ in 0..solver_iterations {
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("avbd_primal_3d"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(self.primal_kernel.pipeline());
-                for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
-                    if count == 0 {
-                        continue;
-                    }
-                    pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
-                    pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
-                }
-            }
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("avbd_dual_3d"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(self.dual_kernel.pipeline());
-                pass.set_bind_group(0, dual_bind_group, &[]);
-                pass.dispatch_workgroups(round_up_workgroups(contact_count, WORKGROUP_SIZE), 1, 1);
-            }
-        }
-        self.ctx.queue.submit(Some(encoder.finish()));
-        self.mark_precise_timing(PreciseTimingMarker::SolveIterationsEnd);
-    }
-
-    /// Body-colored AVBD solve in position space.
-    fn run_colored_solve(
-        &mut self,
-        num_bodies: u32,
-        solver_iterations: u32,
-        contacts: &mut [Contact3D],
-    ) {
-        if contacts.is_empty() {
-            return;
-        }
-        self.contacts.upload(&self.ctx, contacts);
-        let contact_count = contacts.len() as u32;
-        self.contact_count.write(&self.ctx, contact_count);
-        self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
-    }
-
     /// Body-colored AVBD solve in position space (async, for WASM/WebGPU).
-    #[cfg(target_arch = "wasm32")]
     async fn run_colored_solve_async(
         &mut self,
         num_bodies: u32,
@@ -1967,508 +1746,6 @@ impl GpuPipeline {
         self.mark_precise_timing(PreciseTimingMarker::SolveIterationsEnd);
     }
 
-    /// Run the GPU-only happy-path step: no contact readback and GPU-owned persistence.
-    pub fn step_fast_timed(
-        &mut self,
-        num_bodies: u32,
-        solver_iterations: u32,
-        timings: &mut rubble_gpu::StepTimingsMs,
-    ) -> Vec<RigidBodyState3D> {
-        use std::time::Instant;
-
-        if num_bodies == 0 {
-            return Vec::new();
-        }
-
-        self.prepare_precise_timing(timings);
-        let compound_contacts = self.run_detection_timed(num_bodies, timings);
-        assert!(
-            compound_contacts.is_empty(),
-            "GPU-only happy path does not support CPU compound contact expansion"
-        );
-
-        timings.contact_fetch_ms = 0.0;
-        let t_solve = Instant::now();
-        let contact_count = self.contact_count.read(&self.ctx);
-        self.gpu_lbvh
-            .refresh_precise_breakdown(&self.ctx, &mut timings.broadphase_breakdown);
-        if timings.broadphase_breakdown.precise {
-            timings.set_broadphase_breakdown(timings.broadphase_breakdown);
-        }
-        self.mark_precise_timing(PreciseTimingMarker::SolveStart);
-        if contact_count > 0 {
-            self.contacts.set_len(contact_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartStart);
-            self.dispatch_gpu_warmstart(contact_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartEnd);
-            self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveSwapStart);
-            self.swap_contact_buffers(contact_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveSwapEnd);
-        } else {
-            self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionStart);
-            self.apply_free_motion(num_bodies, &[]);
-            self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionEnd);
-            self.prev_contact_count = 0;
-        }
-        self.mark_precise_timing(PreciseTimingMarker::SolveEnd);
-        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
-
-        let t_extract = Instant::now();
-        self.mark_precise_timing(PreciseTimingMarker::ExtractStart);
-        self.dispatch_extract(num_bodies);
-        self.mark_precise_timing(PreciseTimingMarker::ExtractEnd);
-        timings.extract_ms = t_extract.elapsed().as_secs_f32() * 1000.0;
-        self.finish_precise_timing(timings);
-
-        let t_sync = Instant::now();
-        self.body_states.current_mut().set_len(num_bodies);
-        let states = self.body_states.download(&self.ctx);
-        self.body_states.swap();
-        timings.cpu_sync_ms = t_sync.elapsed().as_secs_f32() * 1000.0;
-        self.refresh_precise_timing(timings);
-        states
-    }
-
-    pub fn step_fast_device_timed(
-        &mut self,
-        num_bodies: u32,
-        solver_iterations: u32,
-        timings: &mut rubble_gpu::StepTimingsMs,
-    ) {
-        use std::time::Instant;
-
-        if num_bodies == 0 {
-            return;
-        }
-
-        self.prepare_precise_timing(timings);
-        let compound_contacts = self.run_detection_timed(num_bodies, timings);
-        assert!(
-            compound_contacts.is_empty(),
-            "GPU-only happy path does not support CPU compound contact expansion"
-        );
-
-        timings.contact_fetch_ms = 0.0;
-        let t_solve = Instant::now();
-        let contact_count = self.contact_count.read(&self.ctx);
-        self.gpu_lbvh
-            .refresh_precise_breakdown(&self.ctx, &mut timings.broadphase_breakdown);
-        if timings.broadphase_breakdown.precise {
-            timings.set_broadphase_breakdown(timings.broadphase_breakdown);
-        }
-        self.mark_precise_timing(PreciseTimingMarker::SolveStart);
-        if contact_count > 0 {
-            self.contacts.set_len(contact_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartStart);
-            self.dispatch_gpu_warmstart(contact_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartEnd);
-            self.run_colored_solve_device(num_bodies, solver_iterations, contact_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveSwapStart);
-            self.swap_contact_buffers(contact_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveSwapEnd);
-        } else {
-            self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionStart);
-            self.apply_free_motion(num_bodies, &[]);
-            self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionEnd);
-            self.prev_contact_count = 0;
-        }
-        self.mark_precise_timing(PreciseTimingMarker::SolveEnd);
-        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
-
-        let t_extract = Instant::now();
-        self.mark_precise_timing(PreciseTimingMarker::ExtractStart);
-        self.dispatch_extract(num_bodies);
-        self.mark_precise_timing(PreciseTimingMarker::ExtractEnd);
-        timings.extract_ms = t_extract.elapsed().as_secs_f32() * 1000.0;
-        self.finish_precise_timing(timings);
-    }
-
-    /// Run the full GPU physics step and download updated states.
-    pub fn step(&mut self, num_bodies: u32, solver_iterations: u32) -> Vec<RigidBodyState3D> {
-        let mut timings = rubble_gpu::StepTimingsMs::default();
-        self.step_fast_timed(num_bodies, solver_iterations, &mut timings)
-    }
-
-    /// Run the full GPU physics step with warm-starting support.
-    /// Returns (updated_states, new_contacts) so the caller can track persistence.
-    ///
-    /// Warmstarting runs on GPU. When `warm_contacts` is provided, those contacts
-    /// are uploaded to the GPU `prev_contacts` buffer and used for matching.
-    /// When `None`, the internally maintained `prev_contacts` buffer (from the
-    /// previous step on this pipeline) is used.
-    pub fn step_with_contacts(
-        &mut self,
-        num_bodies: u32,
-        solver_iterations: u32,
-        warm_contacts: Option<&[Contact3D]>,
-    ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
-        if num_bodies == 0 {
-            return (Vec::new(), Vec::new());
-        }
-
-        // If caller provides explicit warm contacts, upload them as prev_contacts
-        // so the GPU warmstart kernel can match against them.
-        if let Some(warm) = warm_contacts {
-            self.upload_warm_contacts(warm);
-        }
-
-        let compound_contacts = self.run_detection(num_bodies);
-
-        let gpu_count = self.contact_count.read(&self.ctx) as usize;
-
-        // GPU warmstart: match new contacts against prev-frame contacts on GPU
-        if gpu_count > 0 {
-            self.contacts.set_len(gpu_count as u32);
-            self.dispatch_gpu_warmstart(gpu_count as u32);
-        }
-
-        let mut contacts = if gpu_count > 0 {
-            self.contacts.set_len(gpu_count as u32);
-            let mut c = self.contacts.download(&self.ctx);
-            c.truncate(gpu_count);
-            c
-        } else {
-            Vec::new()
-        };
-
-        // Merge CPU-generated compound contacts with GPU narrowphase contacts
-        contacts.extend(compound_contacts);
-
-        self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
-
-        // Download contacts after solve (lambdas are updated by GPU)
-        let final_contacts = if !contacts.is_empty() {
-            let fc = self.download_contacts();
-            // Swap solved contacts → prev_contacts for next frame's GPU warmstart
-            let solved_count = fc.len() as u32;
-            self.swap_contact_buffers(solved_count);
-            fc
-        } else {
-            self.prev_contact_count = 0;
-            Vec::new()
-        };
-
-        self.dispatch_extract(num_bodies);
-        self.body_states.current_mut().set_len(num_bodies);
-        let states = self.body_states.download(&self.ctx);
-        self.body_states.swap();
-        (states, final_contacts)
-    }
-
-    /// Timed version of `step_with_contacts` that populates per-phase timings.
-    pub fn step_with_contacts_timed(
-        &mut self,
-        num_bodies: u32,
-        solver_iterations: u32,
-        warm_contacts: Option<&[Contact3D]>,
-        timings: &mut rubble_gpu::StepTimingsMs,
-    ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
-        use std::time::Instant;
-
-        if num_bodies == 0 {
-            return (Vec::new(), Vec::new());
-        }
-
-        self.prepare_precise_timing(timings);
-        if let Some(warm) = warm_contacts {
-            self.upload_warm_contacts(warm);
-        }
-
-        let compound_contacts = self.run_detection_timed(num_bodies, timings);
-
-        let t_cf = Instant::now();
-        let gpu_count = self.contact_count.read(&self.ctx) as usize;
-        self.gpu_lbvh
-            .refresh_precise_breakdown(&self.ctx, &mut timings.broadphase_breakdown);
-        if timings.broadphase_breakdown.precise {
-            timings.set_broadphase_breakdown(timings.broadphase_breakdown);
-        }
-
-        // GPU warmstart before download
-        if gpu_count > 0 {
-            self.contacts.set_len(gpu_count as u32);
-            self.dispatch_gpu_warmstart(gpu_count as u32);
-        }
-
-        let mut contacts = if gpu_count > 0 {
-            self.contacts.set_len(gpu_count as u32);
-            let mut c = self.contacts.download(&self.ctx);
-            c.truncate(gpu_count);
-            c
-        } else {
-            Vec::new()
-        };
-        contacts.extend(compound_contacts);
-        timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
-
-        let t_solve = Instant::now();
-        self.mark_precise_timing(PreciseTimingMarker::SolveStart);
-        self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartStart);
-        self.mark_precise_timing(PreciseTimingMarker::SolveWarmstartEnd);
-        self.run_colored_solve(num_bodies, solver_iterations, &mut contacts);
-
-        let final_contacts = if !contacts.is_empty() {
-            let fc = self.download_contacts();
-            let solved_count = fc.len() as u32;
-            self.mark_precise_timing(PreciseTimingMarker::SolveSwapStart);
-            self.swap_contact_buffers(solved_count);
-            self.mark_precise_timing(PreciseTimingMarker::SolveSwapEnd);
-            fc
-        } else {
-            self.prev_contact_count = 0;
-            Vec::new()
-        };
-        self.mark_precise_timing(PreciseTimingMarker::SolveEnd);
-        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
-
-        let t_ext = Instant::now();
-        self.mark_precise_timing(PreciseTimingMarker::ExtractStart);
-        self.dispatch_extract(num_bodies);
-        self.mark_precise_timing(PreciseTimingMarker::ExtractEnd);
-        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
-        self.finish_precise_timing(timings);
-
-        let t_sync = Instant::now();
-        self.body_states.current_mut().set_len(num_bodies);
-        let states = self.body_states.download(&self.ctx);
-        self.body_states.swap();
-        timings.cpu_sync_ms = t_sync.elapsed().as_secs_f32() * 1000.0;
-        self.refresh_precise_timing(timings);
-
-        (states, final_contacts)
-    }
-
-    fn run_detection_timed(
-        &mut self,
-        num_bodies: u32,
-        timings: &mut rubble_gpu::StepTimingsMs,
-    ) -> Vec<Contact3D> {
-        use std::time::Instant;
-
-        self.contact_count.reset(&self.ctx);
-        self.pair_count.reset(&self.ctx);
-
-        let t0 = Instant::now();
-        self.mark_precise_timing(PreciseTimingMarker::PredictStart);
-        self.dispatch_predict(num_bodies);
-        self.snapshot_prev_step_states(num_bodies);
-        self.dispatch_aabb(num_bodies);
-        self.mark_precise_timing(PreciseTimingMarker::PredictEnd);
-        timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
-
-        let t1 = Instant::now();
-        self.mark_precise_timing(PreciseTimingMarker::BroadphaseStart);
-        let mut broadphase = BroadphaseBreakdownMs::default();
-        let has_compounds = self.body_props_cpu[..num_bodies as usize]
-            .iter()
-            .any(|prop| prop.shape_type == rubble_math::SHAPE_COMPOUND);
-        // Planes go through GPU LBVH broadphase (their large AABB handles pairing).
-        // Only compound shapes still require CPU pair expansion.
-        let requires_cpu_pair_stage = has_compounds;
-        self.aabbs.set_len(num_bodies);
-
-        let mut cpu_compound_contacts: Vec<Contact3D> = Vec::new();
-        let mut pair_thread_count: u32 = 0;
-        let mut pair_count: u32 = 0;
-
-        if requires_cpu_pair_stage {
-            let t_readback = Instant::now();
-            let cpu_aabbs = self.aabbs.download(&self.ctx);
-            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-            let overlap_pairs =
-                self.broadphase_pairs_3d_with_breakdown(num_bodies, &cpu_aabbs, &mut broadphase);
-            if !overlap_pairs.is_empty() {
-                let props = &self.body_props_cpu[..num_bodies as usize];
-                let states = if has_compounds {
-                    self.body_states.current_mut().set_len(num_bodies);
-                    let t_state_readback = Instant::now();
-                    let states = self.body_states.download(&self.ctx);
-                    broadphase.readback_ms += t_state_readback.elapsed().as_secs_f32() * 1000.0;
-                    Some(states)
-                } else {
-                    None
-                };
-                let t_build = Instant::now();
-                let mut non_compound_pairs: Vec<GpuPair> = Vec::with_capacity(overlap_pairs.len());
-
-                for p in &overlap_pairs {
-                    let a = p[0];
-                    let b = p[1];
-                    if has_compounds {
-                        let st_a = props[a as usize].shape_type;
-                        let st_b = props[b as usize].shape_type;
-
-                        let a_is_compound = st_a == rubble_math::SHAPE_COMPOUND;
-                        let b_is_compound = st_b == rubble_math::SHAPE_COMPOUND;
-
-                        if !a_is_compound && !b_is_compound {
-                            non_compound_pairs.push(GpuPair { a, b });
-                        } else {
-                            self.generate_compound_contacts_cpu(
-                                a,
-                                b,
-                                props,
-                                states.as_ref().expect("compound path requires states"),
-                                &mut cpu_compound_contacts,
-                            );
-                        }
-                    } else {
-                        non_compound_pairs.push(GpuPair { a, b });
-                    }
-                }
-
-                if !non_compound_pairs.is_empty() {
-                    non_compound_pairs.sort_unstable_by_key(|pair| {
-                        let st_a = props[pair.a as usize].shape_type;
-                        let st_b = props[pair.b as usize].shape_type;
-                        let (lo, hi) = if st_a <= st_b {
-                            (st_a, st_b)
-                        } else {
-                            (st_b, st_a)
-                        };
-                        (lo << 16) | hi
-                    });
-                    let count = non_compound_pairs.len() as u32;
-                    self.pairs.upload(&self.ctx, &non_compound_pairs);
-                    self.pair_count.write(&self.ctx, count);
-                    pair_count = count;
-                }
-                broadphase.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-            }
-        } else {
-            pair_thread_count = self.gpu_lbvh.query_on_device_raw_with_breakdown(
-                &self.ctx,
-                self.aabbs.buffer(),
-                num_bodies,
-                &mut broadphase,
-            );
-        }
-        timings.set_broadphase_breakdown(broadphase);
-        self.mark_precise_timing(PreciseTimingMarker::BroadphaseEnd);
-        debug_assert!(timings.broadphase_ms <= t1.elapsed().as_secs_f32() * 1000.0 + 0.5);
-
-        let t2 = Instant::now();
-        self.mark_precise_timing(PreciseTimingMarker::NarrowphaseStart);
-        if requires_cpu_pair_stage {
-            self.dispatch_narrowphase(num_bodies, pair_count);
-        } else if pair_thread_count > 0 {
-            let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
-            self.pair_count.write(&self.ctx, pair_count);
-            self.dispatch_narrowphase_with_source(
-                num_bodies,
-                pair_count,
-                &pair_buffer,
-            );
-        }
-
-        let contact_count_val = self.contact_count.read(&self.ctx);
-        let capacity = self.contacts.capacity();
-        if contact_count_val > capacity {
-            let new_cap = (contact_count_val as usize) * 2;
-            self.contacts.grow_if_needed(&self.ctx, new_cap);
-            self.contact_count.reset(&self.ctx);
-            if requires_cpu_pair_stage {
-                self.dispatch_narrowphase(num_bodies, pair_count);
-            } else if pair_thread_count > 0 {
-                let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    pair_count,
-                    &pair_buffer,
-                );
-            }
-        }
-        self.mark_precise_timing(PreciseTimingMarker::NarrowphaseEnd);
-        timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
-
-        cpu_compound_contacts
-    }
-
-    fn broadphase_pairs_3d(&mut self, num_bodies: u32, cpu_aabbs: &[Aabb3D]) -> Vec<[u32; 2]> {
-        let mut breakdown = BroadphaseBreakdownMs::default();
-        self.broadphase_pairs_3d_with_breakdown(num_bodies, cpu_aabbs, &mut breakdown)
-    }
-
-    fn broadphase_pairs_3d_with_breakdown(
-        &mut self,
-        num_bodies: u32,
-        cpu_aabbs: &[Aabb3D],
-        breakdown: &mut BroadphaseBreakdownMs,
-    ) -> Vec<[u32; 2]> {
-        #[cfg(target_arch = "wasm32")]
-        use rubble_gpu::web_time::Instant;
-        #[cfg(not(target_arch = "wasm32"))]
-        use std::time::Instant;
-
-        let t_build = Instant::now();
-        let props = &self.body_props_cpu[..num_bodies as usize];
-        let active_bodies: Vec<u32> = props
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, prop)| {
-                (prop.shape_type != rubble_math::SHAPE_PLANE).then_some(idx as u32)
-            })
-            .collect();
-        let plane_bodies: Vec<u32> = props
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, prop)| {
-                (prop.shape_type == rubble_math::SHAPE_PLANE).then_some(idx as u32)
-            })
-            .collect();
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-
-        let mut pairs = if active_bodies.len() >= 2 {
-            if plane_bodies.is_empty() && active_bodies.len() == num_bodies as usize {
-                self.gpu_lbvh.build_and_query_raw_with_breakdown(
-                    &self.ctx,
-                    self.aabbs.buffer(),
-                    num_bodies,
-                    breakdown,
-                )
-            } else {
-                let t_build = Instant::now();
-                let subset_aabbs: Vec<Aabb3D> = active_bodies
-                    .iter()
-                    .map(|&body_idx| cpu_aabbs[body_idx as usize])
-                    .collect();
-                self.lbvh_subset_aabbs.upload(&self.ctx, &subset_aabbs);
-                breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-                let lbvh_pairs = self.gpu_lbvh.build_and_query_raw_with_breakdown(
-                    &self.ctx,
-                    self.lbvh_subset_aabbs.buffer(),
-                    subset_aabbs.len() as u32,
-                    breakdown,
-                );
-                let t_build = Instant::now();
-                let pairs = lbvh_pairs
-                    .into_iter()
-                    .map(|[a, b]| [active_bodies[a as usize], active_bodies[b as usize]])
-                    .collect();
-                breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-                pairs
-            }
-        } else {
-            Vec::new()
-        };
-
-        let t_build = Instant::now();
-        for &plane_idx in &plane_bodies {
-            for &body_idx in &active_bodies {
-                pairs.push([plane_idx, body_idx]);
-            }
-        }
-
-        pairs.sort_unstable();
-        pairs.dedup();
-        breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-        pairs
-    }
-
-    #[cfg(target_arch = "wasm32")]
     async fn broadphase_pairs_3d_async_with_breakdown(
         &mut self,
         num_bodies: u32,
@@ -2627,7 +1904,6 @@ impl GpuPipeline {
     /// Returns (compound_contacts, contact_count) to avoid a redundant GPU sync.
     /// When `skip_capacity_check` is true (GPU-only fast path), skips the contact buffer
     /// capacity check and re-dispatch, saving a GPU→CPU sync.
-    #[cfg(target_arch = "wasm32")]
     async fn run_detection_async(
         &mut self,
         num_bodies: u32,
@@ -2788,7 +2064,6 @@ impl GpuPipeline {
     ///
     /// Warmstarting runs on GPU. When `warm_contacts` is provided, those contacts
     /// are uploaded to `prev_contacts`. When `None`, the internal buffer is used.
-    #[cfg(target_arch = "wasm32")]
     pub async fn step_with_contacts_async(
         &mut self,
         num_bodies: u32,
@@ -2851,7 +2126,6 @@ impl GpuPipeline {
 
     /// Async GPU-only fast path: no contact readback, GPU-owned persistence.
     /// Mirrors `step_fast_timed` but uses async buffer operations for WASM/WebGPU.
-    #[cfg(target_arch = "wasm32")]
     pub async fn step_fast_async(
         &mut self,
         num_bodies: u32,
@@ -2897,7 +2171,6 @@ impl GpuPipeline {
 
     /// Async device-only sub-step: runs the full pipeline without downloading results.
     /// Used for intermediate sub-steps where results stay on GPU.
-    #[cfg(target_arch = "wasm32")]
     pub async fn step_fast_device_async(
         &mut self,
         num_bodies: u32,
@@ -2938,17 +2211,12 @@ impl GpuPipeline {
 
     /// Async version of `run_colored_solve_device` for WASM/WebGPU.
     /// Operates on GPU-resident contacts (no CPU download/upload).
-    /// Uses GPU graph coloring with cross-frame caching to minimize GPU→CPU syncs.
-    /// Full coloring runs every COLOR_CACHE_INTERVAL frames; cached groups reused otherwise.
-    #[cfg(target_arch = "wasm32")]
     async fn run_colored_solve_device_async(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
         contact_count: u32,
     ) {
-        const COLOR_CACHE_INTERVAL: u32 = 8;
-
         if contact_count == 0 {
             return;
         }
@@ -2962,22 +2230,7 @@ impl GpuPipeline {
             num_bodies,
         );
 
-        // Reuse cached color groups when available; refresh periodically
-        self.color_cache_frame += 1;
-        let needs_refresh = self.cached_color_groups.is_none()
-            || self.color_cache_frame % COLOR_CACHE_INTERVAL == 0;
-
-        let color_groups = if needs_refresh {
-            let groups = self.dispatch_gpu_coloring_async(num_bodies).await;
-            self.cached_color_groups = Some(groups.clone());
-            groups
-        } else {
-            // Reuse cached color groups AND body_order from previous coloring.
-            // body_order is still on GPU from the last coloring dispatch.
-            // The graph adjacency is rebuilt each frame (dispatch_gpu_solve_graph),
-            // but the color assignment is approximately stable frame-to-frame.
-            self.cached_color_groups.clone().unwrap()
-        };
+        let color_groups = self.dispatch_gpu_coloring_async(num_bodies).await;
 
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
@@ -3026,7 +2279,6 @@ impl GpuPipeline {
         self.ctx.queue.submit(Some(encoder.finish()));
     }
 
-    #[cfg(target_arch = "wasm32")]
     async fn download_contacts_exact_async(&mut self, count: usize) -> Vec<Contact3D> {
         if count == 0 {
             return Vec::new();
@@ -4061,7 +3313,6 @@ impl GpuPipeline {
     }
 
     /// Async version of `dispatch_gpu_coloring` for WASM/WebGPU (uses async buffer readbacks).
-    #[cfg(target_arch = "wasm32")]
     async fn dispatch_gpu_coloring_async(&mut self, num_bodies: u32) -> Vec<(u32, u32)> {
         if num_bodies == 0 {
             return Vec::new();

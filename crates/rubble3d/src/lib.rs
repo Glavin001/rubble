@@ -1048,86 +1048,11 @@ impl World {
     /// When `sub_steps > 1`, the frame is split into N sub-steps each with `dt/N`,
     /// running the full pipeline (predict → detect → solve → extract) per sub-step.
     pub fn step(&mut self) {
-        use std::time::Instant;
-
-        self.sync_body_states_from_gpu();
-        let mut timings = rubble_gpu::StepTimingsMs::default();
-        if self.body_count() == 0 {
-            self.last_step_timings = timings;
-            return;
-        }
-
-        if !self.gpu_uploaded {
-            let t_upload = Instant::now();
-            self.upload_world_state();
-            timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
-        }
-
-        let sub_steps = self.config.sub_steps.max(1);
-        let sub_dt = self.config.dt / sub_steps as f32;
-        if sub_steps > 1 {
-            self.gpu_pipeline.set_sim_dt(sub_dt);
-        }
-
-        let compact_states: Vec<RigidBodyState3D> = self
-            .gpu_compact_indices
-            .iter()
-            .map(|&i| self.states[i])
-            .collect();
-        let num_bodies = self.gpu_compact_indices.len() as u32;
-        let has_compounds = self
-            .gpu_compact_indices
-            .iter()
-            .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }));
-        let results = if has_compounds && self.gpu_compact_indices.len() > 1 {
-            let prev = self.contact_persistence.prev_contacts();
-            let warm = if prev.is_empty() { None } else { Some(prev) };
-            let (results, new_contacts) = self.gpu_pipeline.step_with_contacts_timed(
-                num_bodies,
-                self.config.solver_iterations,
-                warm,
-                &mut timings,
-            );
-            let events = self.contact_persistence.update(&new_contacts);
-            self.collision_events.extend(events);
-            results
-        } else {
-            // Run intermediate sub-steps on device (no download)
-            for _sub in 0..sub_steps - 1 {
-                self.gpu_pipeline.step_fast_device_timed(
-                    num_bodies,
-                    self.config.solver_iterations,
-                    &mut timings,
-                );
-            }
-            // Final sub-step: download results
-            let results = self.gpu_pipeline.step_fast_timed(
-                num_bodies,
-                self.config.solver_iterations,
-                &mut timings,
-            );
-            self.collision_events.clear();
-            let pair_events = self
-                .contact_persistence
-                .update_pairs(&self.gpu_pipeline.download_contact_pairs());
-            self.collision_events.extend(pair_events);
-            results
-        };
-
-        for (slot, &orig) in self.gpu_compact_indices.iter().enumerate() {
-            if slot < results.len() {
-                self.prev_warmstart_states[orig] = compact_states[slot];
-                self.states[orig] = results[slot];
-            }
-        }
-
-        self.gpu_uploaded = false;
-        self.gpu_cpu_sync_pending = false;
-        self.last_step_timings = timings;
+        pollster::block_on(self.step_async());
     }
 
     pub fn step_for_gpu_render(&mut self) -> gpu::GpuRenderFrame3D {
-        use std::time::Instant;
+        use rubble_gpu::web_time::Instant;
 
         let mut timings = rubble_gpu::StepTimingsMs::default();
         if self.body_count() == 0 {
@@ -1159,11 +1084,11 @@ impl World {
             self.gpu_pipeline.set_sim_dt(sub_dt);
         }
         for _sub in 0..sub_steps {
-            self.gpu_pipeline.step_fast_device_timed(
+            pollster::block_on(self.gpu_pipeline.step_fast_device_async(
                 num_bodies,
                 self.config.solver_iterations,
                 &mut timings,
-            );
+            ));
         }
         let t_render_extract = Instant::now();
         self.gpu_pipeline.build_render_instances(num_bodies);
@@ -1174,8 +1099,7 @@ impl World {
         self.gpu_pipeline.render_frame()
     }
 
-    /// Advance the simulation by one time step (async, for WASM/WebGPU).
-    #[cfg(target_arch = "wasm32")]
+    /// Advance the simulation by one time step (async).
     pub async fn step_async(&mut self) {
         use rubble_gpu::web_time::Instant;
 
