@@ -17,7 +17,9 @@
     "test": "playwright test",
     "test:e2e": "playwright test",
     "test:webgpu": "playwright test tests/webgpu-narrowphase.spec.ts tests/ground-contact.spec.ts",
-    "test:smoke": "npm run build && playwright test tests/ground-contact.spec.ts"
+    "test:smoke": "npm run build && playwright test tests/ground-contact.spec.ts",
+    "bench:10k": "npm run build && playwright test tests/bench-10k-webgpu.spec.ts --reporter=list",
+    "bench:stress": "npm run build && playwright test tests/bench-stress-webgpu.spec.ts --reporter=list"
   },
   "dependencies": {
     "three": "^0.172.0"

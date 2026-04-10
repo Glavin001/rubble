@@ -336,6 +336,93 @@ pub fn scene_grid_10k_boxes() -> Vec<RigidBodyDesc> {
     descs
 }
 
+pub fn scene_grid_100k_boxes() -> Vec<RigidBodyDesc> {
+    let mut descs = vec![RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    }];
+
+    const NX: usize = 50;
+    const NY: usize = 40;
+    const NZ: usize = 50; // 50 * 40 * 50 = 100_000
+
+    let side = 0.42_f32;
+    let gap = 0.08_f32;
+    let pitch = side + gap;
+    let half = side * 0.5;
+
+    let ox = -((NX - 1) as f32 * pitch) * 0.5;
+    let oz = -((NZ - 1) as f32 * pitch) * 0.5;
+    let base_y = half + 0.03;
+
+    for j in 0..NY {
+        for i in 0..NX {
+            for k in 0..NZ {
+                let x = ox + i as f32 * pitch;
+                let y = base_y + j as f32 * pitch;
+                let z = oz + k as f32 * pitch;
+                descs.push(box_desc(x, y, z, side, side, side, 1.0, 0.5));
+            }
+        }
+    }
+
+    descs
+}
+
+/// 20k mixed-shape stress test: spheres, boxes, and capsules in a 3D grid.
+/// Uses a deterministic pattern (body index mod 3) so no shapes overlap initially.
+/// All capsules share the same dimensions for instanced rendering compatibility.
+pub fn scene_stress_20k_mixed() -> Vec<RigidBodyDesc> {
+    let mut descs = vec![RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    }];
+
+    // 25 * 32 * 25 = 20_000
+    const NX: usize = 25;
+    const NY: usize = 32;
+    const NZ: usize = 25;
+
+    // Use a generous gap so shapes don't initially overlap.
+    // The largest shape (capsule) has total height = 2*(half_height+radius) = 2*(0.12+0.15) = 0.54
+    // and diameter = 2*radius = 0.30. Box diagonal ~0.36. Sphere diameter = 0.40.
+    let pitch = 0.60_f32;
+
+    let ox = -((NX - 1) as f32 * pitch) * 0.5;
+    let oz = -((NZ - 1) as f32 * pitch) * 0.5;
+    let base_y = 0.30 + 0.03;
+
+    let mut idx = 0u32;
+    for j in 0..NY {
+        for i in 0..NX {
+            for k in 0..NZ {
+                let x = ox + i as f32 * pitch;
+                let y = base_y + j as f32 * pitch;
+                let z = oz + k as f32 * pitch;
+                let desc = match idx % 3 {
+                    0 => sphere_desc(x, y, z, 0.20, 1.0, 0.5),
+                    1 => box_desc(x, y, z, 0.36, 0.36, 0.36, 1.0, 0.5),
+                    _ => capsule_desc(x, y, z, 0.12, 0.15, 1.0, 0.5),
+                };
+                descs.push(desc);
+                idx += 1;
+            }
+        }
+    }
+
+    descs
+}
+
 pub fn scene_slanted_grid_boxes() -> Vec<RigidBodyDesc> {
     let mut descs = vec![RigidBodyDesc {
         position: Vec3::ZERO,

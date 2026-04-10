@@ -11,6 +11,9 @@ struct BodyProps {
     inv_inertia_row0: vec4<f32>,
     inv_inertia_row1: vec4<f32>,
     inv_inertia_row2: vec4<f32>,
+    inertia_row0:     vec4<f32>,
+    inertia_row1:     vec4<f32>,
+    inertia_row2:     vec4<f32>,
     friction:         f32,
     shape_type:       u32,
     shape_index:      u32,
@@ -18,13 +21,13 @@ struct BodyProps {
 };
 
 struct Contact {
-    point:          vec4<f32>, // (x, y, z, depth)
-    normal:         vec4<f32>, // (nx, ny, nz, 0)
-    tangent:        vec4<f32>, // tangent 1
+    point:          vec4<f32>,
+    normal:         vec4<f32>,
+    tangent:        vec4<f32>,
     local_anchor_a: vec4<f32>,
     local_anchor_b: vec4<f32>,
-    lambda:         vec4<f32>, // (lambda_n, lambda_t1, lambda_t2, 0)
-    penalty:        vec4<f32>, // (k_n, k_t1, k_t2, 0)
+    lambda:         vec4<f32>,
+    penalty:        vec4<f32>,
     body_a:         u32,
     body_b:         u32,
     feature_id:     u32,
@@ -48,17 +51,18 @@ struct Solve6 {
     ang: vec3<f32>,
 };
 
-const CONTACT_MARGIN: f32 = 0.01;
+const BODY_LANES: u32 = 64u;
+const CONTACT_FLAG_WARMSTARTED: u32 = 2u;
 
-@group(0) @binding(0) var<storage, read_write> bodies:            array<Body>;
-@group(0) @binding(1) var<storage, read>       inertial_states:   array<Body>;
-@group(0) @binding(2) var<storage, read>       props:             array<BodyProps>;
-@group(0) @binding(3) var<storage, read>       contacts:          array<Contact>;
-@group(0) @binding(4) var<storage, read>       body_order:        array<u32>;
-@group(0) @binding(5) var<uniform>             params:            SimParams;
-@group(0) @binding(6) var<storage, read>       body_contact_ranges: array<vec2<u32>>;
+@group(0) @binding(0) var<storage, read_write> bodies:               array<Body>;
+@group(0) @binding(1) var<storage, read>       inertial_states:      array<Body>;
+@group(0) @binding(2) var<storage, read>       props:                array<BodyProps>;
+@group(0) @binding(3) var<storage, read>       contacts:             array<Contact>;
+@group(0) @binding(4) var<storage, read>       body_order:           array<u32>;
+@group(0) @binding(5) var<uniform>             params:               SimParams;
+@group(0) @binding(6) var<storage, read>       body_contact_ranges:  array<vec2<u32>>;
 @group(0) @binding(7) var<storage, read>       body_contact_indices: array<u32>;
-@group(0) @binding(8) var<uniform>             solve_range:       SolveRange;
+@group(0) @binding(8) var<uniform>             solve_range:          SolveRange;
 
 fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(
@@ -106,48 +110,13 @@ fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
     );
 }
 
-fn mat3_from_props(p: BodyProps) -> mat3x3<f32> {
-    return mat3x3<f32>(p.inv_inertia_row0.xyz, p.inv_inertia_row1.xyz, p.inv_inertia_row2.xyz);
+fn mat3_from_inertia(p: BodyProps) -> mat3x3<f32> {
+    return mat3x3<f32>(p.inertia_row0.xyz, p.inertia_row1.xyz, p.inertia_row2.xyz);
 }
 
-fn mat3_transpose(m: mat3x3<f32>) -> mat3x3<f32> {
-    return transpose(m);
-}
-
-fn world_inv_inertia(p: BodyProps, q: vec4<f32>) -> mat3x3<f32> {
+fn world_inertia(p: BodyProps, q: vec4<f32>) -> mat3x3<f32> {
     let r = quat_to_mat3(q);
-    let local = mat3_from_props(p);
-    return r * local * mat3_transpose(r);
-}
-
-fn mat3_inverse_safe(m: mat3x3<f32>) -> mat3x3<f32> {
-    let a = m[0].x;
-    let d = m[0].y;
-    let g = m[0].z;
-    let b = m[1].x;
-    let e = m[1].y;
-    let h = m[1].z;
-    let c = m[2].x;
-    let f = m[2].y;
-    let i = m[2].z;
-
-    let det_m =
-        a * (e * i - f * h)
-        - b * (d * i - f * g)
-        + c * (d * h - e * g);
-    if abs(det_m) < 1e-10 {
-        return mat3x3<f32>(
-            vec3<f32>(0.0),
-            vec3<f32>(0.0),
-            vec3<f32>(0.0),
-        );
-    }
-    let inv_det = 1.0 / det_m;
-    return mat3x3<f32>(
-        vec3<f32>((e * i - f * h) * inv_det, (f * g - d * i) * inv_det, (d * h - e * g) * inv_det),
-        vec3<f32>((c * h - b * i) * inv_det, (a * i - c * g) * inv_det, (b * g - a * h) * inv_det),
-        vec3<f32>((b * f - c * e) * inv_det, (c * d - a * f) * inv_det, (a * e - b * d) * inv_det),
-    );
+    return r * mat3_from_inertia(p) * transpose(r);
 }
 
 fn small_angle_quat(theta: vec3<f32>) -> vec4<f32> {
@@ -167,59 +136,108 @@ fn rotation_delta_vec(current: vec4<f32>, reference: vec4<f32>) -> vec3<f32> {
     return dq.xyz / imag_len * angle;
 }
 
-fn solve_6x6(m: array<array<f32, 6>, 6>, rhs: array<f32, 6>) -> Solve6 {
-    var aug: array<array<f32, 7>, 6>;
-    for (var i = 0u; i < 6u; i = i + 1u) {
-        for (var j = 0u; j < 6u; j = j + 1u) {
-            aug[i][j] = m[i][j];
-        }
-        aug[i][6] = rhs[i];
+// Lower-triangle packed index: lt[r*(r+1)/2 + c] for r >= c
+// (0,0)=0  (1,0)=1 (1,1)=2  (2,0)=3 (2,1)=4 (2,2)=5
+// (3,0)=6 (3,1)=7 (3,2)=8 (3,3)=9  (4,0)=10 .. (4,4)=14
+// (5,0)=15 .. (5,5)=20   Total: 21 elements
+
+fn solve_6x6_lt(lt: array<f32, 21>, rhs: array<f32, 6>) -> Solve6 {
+    let eps = 1e-9;
+
+    let A11 = lt[0];
+    let A21 = lt[1];
+    let A22 = lt[2];
+    let A31 = lt[3];
+    let A32 = lt[4];
+    let A33 = lt[5];
+    let A41 = lt[6];
+    let A42 = lt[7];
+    let A43 = lt[8];
+    let A44 = lt[9];
+    let A51 = lt[10];
+    let A52 = lt[11];
+    let A53 = lt[12];
+    let A54 = lt[13];
+    let A55 = lt[14];
+    let A61 = lt[15];
+    let A62 = lt[16];
+    let A63 = lt[17];
+    let A64 = lt[18];
+    let A65 = lt[19];
+    let A66 = lt[20];
+
+    if A11 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
     }
 
-    for (var k = 0u; k < 6u; k = k + 1u) {
-        var pivot = k;
-        var pivot_abs = abs(aug[k][k]);
-        for (var i = k + 1u; i < 6u; i = i + 1u) {
-            let cand = abs(aug[i][k]);
-            if cand > pivot_abs {
-                pivot = i;
-                pivot_abs = cand;
-            }
-        }
+    let D1 = A11;
+    let L21 = A21 / D1;
+    let L31 = A31 / D1;
+    let L41 = A41 / D1;
+    let L51 = A51 / D1;
+    let L61 = A61 / D1;
 
-        if pivot_abs < 1e-9 {
-            return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
-        }
-
-        if pivot != k {
-            let tmp = aug[k];
-            aug[k] = aug[pivot];
-            aug[pivot] = tmp;
-        }
-
-        let inv_pivot = 1.0 / aug[k][k];
-        for (var j = k; j < 7u; j = j + 1u) {
-            aug[k][j] = aug[k][j] * inv_pivot;
-        }
-
-        for (var i = 0u; i < 6u; i = i + 1u) {
-            if i == k {
-                continue;
-            }
-            let factor = aug[i][k];
-            if abs(factor) < 1e-12 {
-                continue;
-            }
-            for (var j = k; j < 7u; j = j + 1u) {
-                aug[i][j] = aug[i][j] - factor * aug[k][j];
-            }
-        }
+    let D2 = A22 - L21 * L21 * D1;
+    if D2 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
     }
 
-    return Solve6(
-        vec3<f32>(aug[0][6], aug[1][6], aug[2][6]),
-        vec3<f32>(aug[3][6], aug[4][6], aug[5][6]),
-    );
+    let L32 = (A32 - L21 * L31 * D1) / D2;
+    let L42 = (A42 - L21 * L41 * D1) / D2;
+    let L52 = (A52 - L21 * L51 * D1) / D2;
+    let L62 = (A62 - L21 * L61 * D1) / D2;
+
+    let D3 = A33 - (L31 * L31 * D1 + L32 * L32 * D2);
+    if D3 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let L43 = (A43 - L31 * L41 * D1 - L32 * L42 * D2) / D3;
+    let L53 = (A53 - L31 * L51 * D1 - L32 * L52 * D2) / D3;
+    let L63 = (A63 - L31 * L61 * D1 - L32 * L62 * D2) / D3;
+
+    let D4 = A44 - (L41 * L41 * D1 + L42 * L42 * D2 + L43 * L43 * D3);
+    if D4 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let L54 = (A54 - L41 * L51 * D1 - L42 * L52 * D2 - L43 * L53 * D3) / D4;
+    let L64 = (A64 - L41 * L61 * D1 - L42 * L62 * D2 - L43 * L63 * D3) / D4;
+
+    let D5 = A55 - (L51 * L51 * D1 + L52 * L52 * D2 + L53 * L53 * D3 + L54 * L54 * D4);
+    if D5 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let L65 = (A65 - L51 * L61 * D1 - L52 * L62 * D2 - L53 * L63 * D3 - L54 * L64 * D4) / D5;
+
+    let D6 = A66 - (L61 * L61 * D1 + L62 * L62 * D2 + L63 * L63 * D3 + L64 * L64 * D4 + L65 * L65 * D5);
+    if D6 <= eps {
+        return Solve6(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let y1 = rhs[0];
+    let y2 = rhs[1] - L21 * y1;
+    let y3 = rhs[2] - L31 * y1 - L32 * y2;
+    let y4 = rhs[3] - L41 * y1 - L42 * y2 - L43 * y3;
+    let y5 = rhs[4] - L51 * y1 - L52 * y2 - L53 * y3 - L54 * y4;
+    let y6 = rhs[5] - L61 * y1 - L62 * y2 - L63 * y3 - L64 * y4 - L65 * y5;
+
+    let z1 = y1 / D1;
+    let z2 = y2 / D2;
+    let z3 = y3 / D3;
+    let z4 = y4 / D4;
+    let z5 = y5 / D5;
+    let z6 = y6 / D6;
+
+    let x6 = z6;
+    let x5 = z5 - L65 * x6;
+    let x4 = z4 - L54 * x5 - L64 * x6;
+    let x3 = z3 - L43 * x4 - L53 * x5 - L63 * x6;
+    let x2 = z2 - L32 * x3 - L42 * x4 - L52 * x5 - L62 * x6;
+    let x1 = z1 - L21 * x2 - L31 * x3 - L41 * x4 - L51 * x5 - L61 * x6;
+
+    return Solve6(vec3<f32>(x1, x2, x3), vec3<f32>(x4, x5, x6));
 }
 
 fn accumulate_row(
@@ -227,19 +245,42 @@ fn accumulate_row(
     j_ang: vec3<f32>,
     stiffness: f32,
     force: f32,
-    m: ptr<function, array<array<f32, 6>, 6>>,
+    lt: ptr<function, array<f32, 21>>,
     rhs: ptr<function, array<f32, 6>>,
 ) {
-    let j = array<f32, 6>(j_lin.x, j_lin.y, j_lin.z, j_ang.x, j_ang.y, j_ang.z);
-    for (var r = 0u; r < 6u; r = r + 1u) {
-        (*rhs)[r] = (*rhs)[r] + j[r] * force;
-        for (var c = 0u; c < 6u; c = c + 1u) {
-            (*m)[r][c] = (*m)[r][c] + stiffness * j[r] * j[c];
-        }
-    }
+    (*rhs)[0] += j_lin.x * force;
+    (*rhs)[1] += j_lin.y * force;
+    (*rhs)[2] += j_lin.z * force;
+    (*rhs)[3] += j_ang.x * force;
+    (*rhs)[4] += j_ang.y * force;
+    (*rhs)[5] += j_ang.z * force;
+
+    let sj0 = stiffness * j_lin.x;
+    let sj1 = stiffness * j_lin.y;
+    let sj2 = stiffness * j_lin.z;
+    let sj3 = stiffness * j_ang.x;
+    let sj4 = stiffness * j_ang.y;
+    let sj5 = stiffness * j_ang.z;
+
+    // Lower triangle only (21 FMAs instead of 36)
+    // Row 0: (0,0)
+    (*lt)[0]  += sj0 * j_lin.x;
+    // Row 1: (1,0) (1,1)
+    (*lt)[1]  += sj1 * j_lin.x; (*lt)[2]  += sj1 * j_lin.y;
+    // Row 2: (2,0) (2,1) (2,2)
+    (*lt)[3]  += sj2 * j_lin.x; (*lt)[4]  += sj2 * j_lin.y; (*lt)[5]  += sj2 * j_lin.z;
+    // Row 3: (3,0) (3,1) (3,2) (3,3)
+    (*lt)[6]  += sj3 * j_lin.x; (*lt)[7]  += sj3 * j_lin.y; (*lt)[8]  += sj3 * j_lin.z;
+    (*lt)[9]  += sj3 * j_ang.x;
+    // Row 4: (4,0) (4,1) (4,2) (4,3) (4,4)
+    (*lt)[10] += sj4 * j_lin.x; (*lt)[11] += sj4 * j_lin.y; (*lt)[12] += sj4 * j_lin.z;
+    (*lt)[13] += sj4 * j_ang.x; (*lt)[14] += sj4 * j_ang.y;
+    // Row 5: (5,0) (5,1) (5,2) (5,3) (5,4) (5,5)
+    (*lt)[15] += sj5 * j_lin.x; (*lt)[16] += sj5 * j_lin.y; (*lt)[17] += sj5 * j_lin.z;
+    (*lt)[18] += sj5 * j_ang.x; (*lt)[19] += sj5 * j_ang.y; (*lt)[20] += sj5 * j_ang.z;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(BODY_LANES)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let local_idx = gid.x;
     if local_idx >= solve_range.count {
@@ -247,50 +288,54 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let body_idx = body_order[solve_range.offset + local_idx];
-    let inv_mass = bodies[body_idx].position_inv_mass.w;
+    let body = bodies[body_idx];
+    let inv_mass = body.position_inv_mass.w;
     if inv_mass <= 0.0 {
         return;
     }
 
-    let q = quat_normalize(bodies[body_idx].orientation);
-    let q_inertial = quat_normalize(inertial_states[body_idx].orientation);
-    let pos = bodies[body_idx].position_inv_mass.xyz;
-    let pos_inertial = inertial_states[body_idx].position_inv_mass.xyz;
+    let body_props = props[body_idx];
+    let inertial_body = inertial_states[body_idx];
+    let q = quat_normalize(body.orientation);
+    let q_inertial = quat_normalize(inertial_body.orientation);
+    let pos = body.position_inv_mass.xyz;
+    let pos_inertial = inertial_body.position_inv_mass.xyz;
     let rot_delta = rotation_delta_vec(q, q_inertial);
     let dt = params.solver.x;
     let dt2 = dt * dt;
     let mass = 1.0 / inv_mass;
-    let inv_i_world = world_inv_inertia(props[body_idx], q);
-    let i_world = mat3_inverse_safe(inv_i_world);
+    let i_world = world_inertia(body_props, q);
 
-    var mtx: array<array<f32, 6>, 6>;
-    var rhs: array<f32, 6>;
-    for (var r = 0u; r < 6u; r = r + 1u) {
-        rhs[r] = 0.0;
-        for (var c = 0u; c < 6u; c = c + 1u) {
-            mtx[r][c] = 0.0;
-        }
-    }
+    // Lower-triangle packed matrix (21 elements instead of 36)
+    var local_lt = array<f32, 21>(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    );
+    var local_rhs = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
-    mtx[0][0] = mass / dt2;
-    mtx[1][1] = mass / dt2;
-    mtx[2][2] = mass / dt2;
-    rhs[0] = mtx[0][0] * (pos.x - pos_inertial.x);
-    rhs[1] = mtx[1][1] * (pos.y - pos_inertial.y);
-    rhs[2] = mtx[2][2] * (pos.z - pos_inertial.z);
+    let m_dt2 = mass / dt2;
+    // Diagonal: (0,0)=0, (1,1)=2, (2,2)=5
+    local_lt[0] = m_dt2;
+    local_lt[2] = m_dt2;
+    local_lt[5] = m_dt2;
+    local_rhs[0] = m_dt2 * (pos.x - pos_inertial.x);
+    local_rhs[1] = m_dt2 * (pos.y - pos_inertial.y);
+    local_rhs[2] = m_dt2 * (pos.z - pos_inertial.z);
 
-    mtx[3][3] = i_world[0][0] / dt2;
-    mtx[3][4] = i_world[0][1] / dt2;
-    mtx[3][5] = i_world[0][2] / dt2;
-    mtx[4][3] = i_world[1][0] / dt2;
-    mtx[4][4] = i_world[1][1] / dt2;
-    mtx[4][5] = i_world[1][2] / dt2;
-    mtx[5][3] = i_world[2][0] / dt2;
-    mtx[5][4] = i_world[2][1] / dt2;
-    mtx[5][5] = i_world[2][2] / dt2;
-    rhs[3] = (i_world[0][0] * rot_delta.x + i_world[0][1] * rot_delta.y + i_world[0][2] * rot_delta.z) / dt2;
-    rhs[4] = (i_world[1][0] * rot_delta.x + i_world[1][1] * rot_delta.y + i_world[1][2] * rot_delta.z) / dt2;
-    rhs[5] = (i_world[2][0] * rot_delta.x + i_world[2][1] * rot_delta.y + i_world[2][2] * rot_delta.z) / dt2;
+    // Inertia block: (3,3)=9, (4,3)=13, (4,4)=14, (5,3)=18, (5,4)=19, (5,5)=20
+    local_lt[9]  = i_world[0][0] / dt2;
+    local_lt[13] = i_world[1][0] / dt2;
+    local_lt[14] = i_world[1][1] / dt2;
+    local_lt[18] = i_world[2][0] / dt2;
+    local_lt[19] = i_world[2][1] / dt2;
+    local_lt[20] = i_world[2][2] / dt2;
+    local_rhs[3] =
+        (i_world[0][0] * rot_delta.x + i_world[0][1] * rot_delta.y + i_world[0][2] * rot_delta.z) / dt2;
+    local_rhs[4] =
+        (i_world[1][0] * rot_delta.x + i_world[1][1] * rot_delta.y + i_world[1][2] * rot_delta.z) / dt2;
+    local_rhs[5] =
+        (i_world[2][0] * rot_delta.x + i_world[2][1] * rot_delta.y + i_world[2][2] * rot_delta.z) / dt2;
 
     let contact_range = body_contact_ranges[body_idx];
     let range_end = contact_range.x + contact_range.y;
@@ -302,18 +347,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
 
-        let pos_a = bodies[c.body_a].position_inv_mass.xyz;
-        let pos_b = bodies[c.body_b].position_inv_mass.xyz;
-        let q_a = quat_normalize(bodies[c.body_a].orientation);
-        let q_b = quat_normalize(bodies[c.body_b].orientation);
+        let body_a = bodies[c.body_a];
+        let body_b = bodies[c.body_b];
+        let q_a = quat_normalize(body_a.orientation);
+        let q_b = quat_normalize(body_b.orientation);
         let r_a = quat_rotate(q_a, c.local_anchor_a.xyz);
         let r_b = quat_rotate(q_b, c.local_anchor_b.xyz);
-        let world_a = pos_a + r_a;
-        let world_b = pos_b + r_b;
+        let world_a = body_a.position_inv_mass.xyz + r_a;
+        let world_b = body_b.position_inv_mass.xyz + r_b;
         let separation = world_a - world_b;
         let normal = c.normal.xyz;
-        let tangent1 = normalize(c.tangent.xyz);
-        let tangent2 = normalize(cross(normal, tangent1));
+        let tangent1 = c.tangent.xyz;
+        let tangent2 = cross(normal, tangent1);
         let lambda_n = c.lambda.x;
         let lambda_t1 = c.lambda.y;
         let lambda_t2 = c.lambda.z;
@@ -321,11 +366,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let k_t1 = c.penalty.y;
         let k_t2 = c.penalty.z;
         let mu = sqrt(max(props[c.body_a].friction * props[c.body_b].friction, 0.0));
-        let c_n = dot(normal, separation) + CONTACT_MARGIN;
+        let margin = params.quality.z;
+        let c_n_raw = dot(normal, separation) + margin;
+        // α-regularization (Paper Eq 18): only for warmstarted contacts
+        // (pre-existing error from previous frame should be corrected gradually)
+        var c_n = c_n_raw;
+        if (c.flags & CONTACT_FLAG_WARMSTARTED) != 0u {
+            let alpha_reg = params.quality.w;
+            let c_n_initial = c.normal.w;
+            c_n = c_n_raw - alpha_reg * min(c_n_initial, 0.0);
+        }
         let c_t1 = dot(tangent1, separation);
         let c_t2 = dot(tangent2, separation);
-        let f_n = min(k_n * c_n + lambda_n, 0.0);
-        var tang = vec2<f32>(k_t1 * c_t1 + lambda_t1, k_t2 * c_t2 + lambda_t2);
+        // Bound effective force magnitude (Paper Algorithm 1, line 14: clamp(k*C + λ, λ_min, λ_max))
+        let max_lambda = params.solver.w; // max_penalty
+        let f_n = max(min(k_n * c_n + lambda_n, 0.0), -max_lambda);
+        var tang = vec2<f32>(
+            clamp(k_t1 * c_t1 + lambda_t1, -max_lambda, max_lambda),
+            clamp(k_t2 * c_t2 + lambda_t2, -max_lambda, max_lambda),
+        );
         let tang_limit = mu * abs(f_n);
         let tang_len = length(tang);
         if tang_len > tang_limit && tang_len > 1e-8 {
@@ -347,14 +406,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             jt2_ang = -cross(r_b, tangent2);
         }
 
-        accumulate_row(jn_lin, jn_ang, k_n, f_n, &mtx, &rhs);
-        accumulate_row(jt1_lin, jt1_ang, k_t1, tang.x, &mtx, &rhs);
-        accumulate_row(jt2_lin, jt2_ang, k_t2, tang.y, &mtx, &rhs);
+        accumulate_row(jn_lin, jn_ang, k_n, f_n, &local_lt, &local_rhs);
+        accumulate_row(jt1_lin, jt1_ang, k_t1, tang.x, &local_lt, &local_rhs);
+        accumulate_row(jt2_lin, jt2_ang, k_t2, tang.y, &local_lt, &local_rhs);
     }
 
-    let solution = solve_6x6(mtx, rhs);
+    let solution = solve_6x6_lt(local_lt, local_rhs);
     bodies[body_idx].position_inv_mass = vec4<f32>(pos - solution.lin, inv_mass);
-    bodies[body_idx].orientation = quat_mul(small_angle_quat(-solution.ang), q);
+    bodies[body_idx].orientation = quat_normalize(quat_mul(small_angle_quat(-solution.ang), q));
 }
 "#;
 
@@ -371,6 +430,9 @@ struct BodyProps {
     inv_inertia_row0: vec4<f32>,
     inv_inertia_row1: vec4<f32>,
     inv_inertia_row2: vec4<f32>,
+    inertia_row0:     vec4<f32>,
+    inertia_row1:     vec4<f32>,
+    inertia_row2:     vec4<f32>,
     friction:         f32,
     shape_type:       u32,
     shape_index:      u32,
@@ -392,7 +454,7 @@ struct Contact {
 };
 
 const CONTACT_FLAG_STICKING: u32 = 1u;
-const CONTACT_MARGIN: f32 = 0.01;
+const CONTACT_FLAG_WARMSTARTED: u32 = 2u;
 
 struct SimParams {
     gravity: vec4<f32>,
@@ -407,19 +469,6 @@ struct SimParams {
 @group(0) @binding(3) var<uniform>             params:            SimParams;
 @group(0) @binding(4) var<storage, read>       contact_count_buf: array<u32>;
 
-fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(
-        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
-    );
-}
-
-fn quat_conj(q: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(-q.x, -q.y, -q.z, q.w);
-}
-
 fn quat_normalize(q: vec4<f32>) -> vec4<f32> {
     return q / max(length(q), 1e-12);
 }
@@ -430,19 +479,6 @@ fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     return 2.0 * dot(u, v) * u
          + (s * s - dot(u, u)) * v
          + 2.0 * s * cross(u, v);
-}
-
-fn rotation_delta_vec(current: vec4<f32>, reference: vec4<f32>) -> vec3<f32> {
-    var dq = quat_mul(current, quat_conj(reference));
-    if dq.w < 0.0 {
-        dq = -dq;
-    }
-    let imag_len = length(dq.xyz);
-    if imag_len < 1e-8 {
-        return 2.0 * dq.xyz;
-    }
-    let angle = 2.0 * atan2(imag_len, dq.w);
-    return dq.xyz / imag_len * angle;
 }
 
 @compute @workgroup_size(64)
@@ -464,16 +500,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world_b = pos_b + r_b;
     let separation = world_a - world_b;
     let normal = c.normal.xyz;
-    let tangent1 = normalize(c.tangent.xyz);
-    let tangent2 = normalize(cross(normal, tangent1));
+    let tangent1 = c.tangent.xyz;
+    let tangent2 = cross(normal, tangent1);
+    let margin = params.quality.z;
     let geom_c_n = dot(normal, separation);
-    let c_n = geom_c_n + CONTACT_MARGIN;
+    let c_n_raw = geom_c_n + margin;
+    // α-regularization (Paper Eq 18): only for warmstarted contacts
+    var c_n = c_n_raw;
+    if (c.flags & CONTACT_FLAG_WARMSTARTED) != 0u {
+        let alpha_reg = params.quality.w;
+        let c_n_initial = c.normal.w;
+        c_n = c_n_raw - alpha_reg * min(c_n_initial, 0.0);
+    }
     let c_t1 = dot(tangent1, separation);
     let c_t2 = dot(tangent2, separation);
-    let lambda_n = min(c.penalty.x * c_n + c.lambda.x, 0.0);
+    // Bound λ magnitude (Paper Section 4, "Bounding the Dual Variables"):
+    // prevents unbounded force growth when constraints can't be satisfied.
+    let max_lambda = params.solver.w; // same as max_penalty
+    let lambda_n = max(min(c.penalty.x * c_n + c.lambda.x, 0.0), -max_lambda);
     var tang = vec2<f32>(
-        c.penalty.y * c_t1 + c.lambda.y,
-        c.penalty.z * c_t2 + c.lambda.z,
+        clamp(c.penalty.y * c_t1 + c.lambda.y, -max_lambda, max_lambda),
+        clamp(c.penalty.z * c_t2 + c.lambda.z, -max_lambda, max_lambda),
     );
     let mu = sqrt(max(props[c.body_a].friction * props[c.body_b].friction, 0.0));
     let tang_limit = mu * abs(lambda_n);

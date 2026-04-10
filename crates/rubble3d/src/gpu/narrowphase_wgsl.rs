@@ -16,6 +16,9 @@ struct BodyProps {
     inv_inertia_row0: vec4<f32>,
     inv_inertia_row1: vec4<f32>,
     inv_inertia_row2: vec4<f32>,
+    inertia_row0:     vec4<f32>,
+    inertia_row1:     vec4<f32>,
+    inertia_row2:     vec4<f32>,
     friction:         f32,
     shape_type:       u32,
     shape_index:      u32,
@@ -166,8 +169,10 @@ fn emit_contact_world_points(
     let depth = dot(normal, world_a - world_b);
     let local_a = quat_rotate(quat_conj(q_a), world_a - pos_a);
     let local_b = quat_rotate(quat_conj(q_b), world_b - pos_b);
+    let margin = params.quality.z;  // penetration_slop
+    let c_n_initial = depth + margin;
     contacts[slot].point  = vec4<f32>(point, depth);
-    contacts[slot].normal = vec4<f32>(normal, 0.0);
+    contacts[slot].normal = vec4<f32>(normal, c_n_initial);
     contacts[slot].tangent = vec4<f32>(tangent, 0.0);
     contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
     contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
@@ -202,8 +207,10 @@ fn emit_plane_contact(
     let world_b = plane_point;
     let local_a = quat_rotate(quat_conj(q_a), world_a - pos_a);
     let local_b = quat_rotate(quat_conj(q_b), world_b - pos_b);
+    let margin = params.quality.z;  // penetration_slop
+    let c_n_initial = depth + margin;
     contacts[slot].point = vec4<f32>((world_a + world_b) * 0.5, depth);
-    contacts[slot].normal = vec4<f32>(normal, 0.0);
+    contacts[slot].normal = vec4<f32>(normal, c_n_initial);
     contacts[slot].tangent = vec4<f32>(tangent, 0.0);
     contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
     contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);

@@ -29,7 +29,7 @@ use rubble_primitives::GpuLbvh;
 use rubble_shapes2d::{CapsuleData2D, CircleData, ConvexPolygonData, ConvexVertex2D, RectData};
 use std::collections::{HashMap, HashSet};
 const WORKGROUP_SIZE: u32 = 64;
-const AVBD_WARMSTART_ALPHA: f32 = 0.99;
+const AVBD_WARMSTART_ALPHA: f32 = 0.95;
 const ENABLE_POST_STABILIZATION_2D: bool = true;
 const MAX_CONTACT_PENALTY: f32 = 1.0e6;
 const SIM_FLAG_POST_STABILIZE: u32 = 1 << 0;
@@ -393,7 +393,7 @@ impl GpuPipeline2D {
                 solver: [0.0, 10.0, 1.0e4, MAX_CONTACT_PENALTY],
                 counts: [0, 0, 0, SIM_FLAG_POST_STABILIZE],
             },
-            warmstart_decay: 0.95,
+            warmstart_decay: 0.99,
             params_uniform,
             solve_range_buffers: Vec::new(),
             predict_bg_cache: CachedBindGroup::default(),

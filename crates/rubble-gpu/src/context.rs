@@ -1,15 +1,29 @@
 use crate::GpuError;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Thin wrapper around a wgpu device and queue.
 pub struct GpuContext {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
     staging_pool: Mutex<Vec<(u64, wgpu::Buffer)>>,
 }
 
+impl Clone for GpuContext {
+    fn clone(&self) -> Self {
+        Self {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            staging_pool: Mutex::new(Vec::new()),
+        }
+    }
+}
+
 impl GpuContext {
-    pub(crate) fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    pub fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self::from_shared(Arc::new(device), Arc::new(queue))
+    }
+
+    pub fn from_shared(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         Self {
             device,
             queue,
@@ -69,8 +83,12 @@ impl GpuContext {
 
     /// Create a [`GpuContext`] from an existing adapter.
     pub async fn new_with_adapter(adapter: &wgpu::Adapter) -> Result<Self, GpuError> {
+        let supported_features = adapter.features();
+        let required_features = supported_features
+            & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
+                required_features,
                 required_limits: wgpu::Limits {
                     max_storage_buffers_per_shader_stage: 16,
                     ..wgpu::Limits::downlevel_defaults()
@@ -123,9 +141,13 @@ impl GpuContext {
         // Clamp requested limits to what the adapter actually supports.
         // SwiftShader (used in CI/testing) may support fewer storage buffers.
         let adapter_limits = adapter.limits();
+        let supported_features = adapter.features();
+        let required_features = supported_features
+            & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
         let desired_storage_buffers: u32 = 16;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
+                required_features,
                 required_limits: wgpu::Limits {
                     max_storage_buffers_per_shader_stage: desired_storage_buffers
                         .min(adapter_limits.max_storage_buffers_per_shader_stage),

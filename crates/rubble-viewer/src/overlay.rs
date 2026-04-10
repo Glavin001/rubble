@@ -1,4 +1,13 @@
-use rubble_gpu::{StepTimingsMs, BROADPHASE_SUB_LABELS, STEP_TIMING_LABELS};
+use rubble_gpu::{
+    StepTimingsMs, BROADPHASE_SUB_LABELS, DETAILED_BREAKDOWN_THRESHOLD_MS, SOLVE_SUB_LABELS,
+    STEP_TIMING_LABELS,
+};
+
+/// Stable id for the main viewer overlay [`egui::Area`], used for hit-testing in `rubble-viewer`.
+#[inline]
+pub fn viewer_overlay_area_id() -> egui::Id {
+    egui::Id::new("viewer_overlay_panel")
+}
 
 fn stat_card(ui: &mut egui::Ui, label: &str, value: String) {
     egui::Frame::new()
@@ -40,7 +49,7 @@ pub fn draw_panel(
     render_ms: f32,
 ) {
     let arr = timings.as_array();
-    let total: f32 = arr.iter().sum();
+    let total: f32 = arr.iter().sum::<f32>() + timings.cpu_sync_ms;
     let panel_frame = egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(18, 20, 26, 232))
         .stroke(egui::Stroke::new(
@@ -50,7 +59,7 @@ pub fn draw_panel(
         .corner_radius(14.0)
         .inner_margin(egui::Margin::same(14));
 
-    egui::Area::new(egui::Id::new("viewer_overlay_panel"))
+    egui::Area::new(viewer_overlay_area_id())
         .fixed_pos(egui::pos2(16.0, 16.0))
         .show(ctx, |ui| {
             ui.set_width(320.0);
@@ -133,6 +142,15 @@ pub fn draw_panel(
                     stat_card(&mut columns[0], "Step", format!("{total:.2} ms"));
                     stat_card(&mut columns[1], "Render", format!("{render_ms:.2} ms"));
                 });
+                ui.label(
+                    egui::RichText::new(if timings.precise_gpu {
+                        "Timing source: GPU timestamps"
+                    } else {
+                        "Timing source: host wall-clock (approx)"
+                    })
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(165)),
+                );
 
                 ui.add_space(2.0);
                 ui.label(
@@ -172,6 +190,30 @@ pub fn draw_panel(
                             ui.end_row();
                         }
 
+                        if timings.cpu_sync_ms > 0.0 {
+                            let pct = if total > 0.0 {
+                                timings.cpu_sync_ms / total * 100.0
+                            } else {
+                                0.0
+                            };
+                            ui.label(
+                                egui::RichText::new("StateSync")
+                                    .color(egui::Color32::from_gray(210)),
+                            );
+                            ui.label(
+                                egui::RichText::new("(CPU)").color(egui::Color32::from_gray(140)),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{:.2} ms", timings.cpu_sync_ms))
+                                    .color(egui::Color32::from_gray(210)),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{pct:.1}%"))
+                                    .color(egui::Color32::from_gray(170)),
+                            );
+                            ui.end_row();
+                        }
+
                         ui.label(
                             egui::RichText::new("Render").color(egui::Color32::from_gray(210)),
                         );
@@ -184,52 +226,176 @@ pub fn draw_panel(
                         ui.end_row();
                     });
 
+                if timings.broadphase_ms >= DETAILED_BREAKDOWN_THRESHOLD_MS
+                    && !timings.broadphase_breakdown.is_zero()
                 {
                     ui.add_space(2.0);
-                    egui::CollapsingHeader::new("Broadphase Details")
-                        .default_open(false)
+                    ui.label(
+                        egui::RichText::new(if timings.broadphase_breakdown.precise {
+                            "Broadphase Details"
+                        } else {
+                            "Broadphase Details (Approx)"
+                        })
+                        .size(13.0)
+                        .strong()
+                        .color(egui::Color32::from_gray(205)),
+                    );
+                    if !timings.broadphase_breakdown.precise {
+                        ui.label(
+                            egui::RichText::new(
+                                "Top-level broadphase may be precise while these substage timings remain host-approximate.",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(150)),
+                        );
+                    }
+                    let bp_total = timings.broadphase_breakdown.total_ms();
+                    let bp_arr = timings.broadphase_breakdown.as_array();
+                    egui::Grid::new("broadphase_grid")
+                        .num_columns(4)
+                        .spacing([6.0, 3.0])
+                        .striped(true)
                         .show(ui, |ui| {
-                            let bp_total = timings.broadphase_breakdown.total_ms();
-                            let bp_arr = timings.broadphase_breakdown.as_array();
-                            egui::Grid::new("broadphase_grid")
-                                .num_columns(4)
-                                .spacing([8.0, 4.0])
-                                .striped(true)
-                                .show(ui, |ui| {
-                                    ui.label(egui::RichText::new("Stage").strong());
-                                    ui.label(egui::RichText::new("Lane").strong());
-                                    ui.label(egui::RichText::new("Time").strong());
-                                    ui.label(egui::RichText::new("% of BP").strong());
-                                    ui.end_row();
+                            ui.label(egui::RichText::new("Stage").strong());
+                            ui.label(egui::RichText::new("Lane").strong());
+                            ui.label(egui::RichText::new("Time").strong());
+                            ui.label(egui::RichText::new("% of BP").strong());
+                            ui.end_row();
 
-                                    for (j, &(sub_name, sub_kind)) in
-                                        BROADPHASE_SUB_LABELS.iter().enumerate()
+                            for (j, &(sub_name, sub_kind)) in BROADPHASE_SUB_LABELS.iter().enumerate()
+                            {
+                                let sub_ms = bp_arr[j];
+                                let sub_pct = if bp_total > 0.0 {
+                                    sub_ms / bp_total * 100.0
+                                } else {
+                                    0.0
+                                };
+                                ui.label(
+                                    egui::RichText::new(sub_name)
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(195)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(sub_kind)
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(140)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{sub_ms:.2} ms"))
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(195)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{sub_pct:.1}%"))
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(170)),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                }
+
+                if timings.solve_ms >= DETAILED_BREAKDOWN_THRESHOLD_MS
+                    && !timings.solve_breakdown.is_zero()
+                {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(if timings.solve_breakdown.precise {
+                            "Solve Details"
+                        } else {
+                            "Solve Details (Approx)"
+                        })
+                        .size(13.0)
+                        .strong()
+                        .color(egui::Color32::from_gray(205)),
+                    );
+                    if !timings.solve_breakdown.precise {
+                        ui.label(
+                            egui::RichText::new("Solve details are approximate on this device/path.")
+                                .size(10.5)
+                                .color(egui::Color32::from_gray(150)),
+                        );
+                    }
+                    let solve_total = timings.solve_breakdown.total_ms();
+                    let solve_arr = timings.solve_breakdown.as_array();
+                    egui::Grid::new("solve_grid")
+                        .num_columns(4)
+                        .spacing([6.0, 3.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Stage").strong());
+                            ui.label(egui::RichText::new("Lane").strong());
+                            ui.label(egui::RichText::new("Time").strong());
+                            ui.label(egui::RichText::new("% of Solve").strong());
+                            ui.end_row();
+
+                            for (j, &(sub_name, sub_kind)) in SOLVE_SUB_LABELS.iter().enumerate() {
+                                let sub_ms = solve_arr[j];
+                                let sub_pct = if solve_total > 0.0 {
+                                    sub_ms / solve_total * 100.0
+                                } else {
+                                    0.0
+                                };
+                                ui.label(
+                                    egui::RichText::new(sub_name)
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(195)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(sub_kind)
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(140)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{sub_ms:.2} ms"))
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(195)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{sub_pct:.1}%"))
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(170)),
+                                );
+                                ui.end_row();
+                            }
+
+                            // Show Iterations primal/dual sub-breakdown when precise and significant
+                            if let Some((primal_ms, dual_ms)) =
+                                timings.solve_breakdown.iterations_split()
+                            {
+                                if timings.solve_breakdown.iterations_ms
+                                    >= DETAILED_BREAKDOWN_THRESHOLD_MS
+                                {
+                                    let iter_total =
+                                        timings.solve_breakdown.iterations_ms.max(f32::EPSILON);
+                                    for &(label, ms) in
+                                        &[("  Primal", primal_ms), ("  Dual", dual_ms)]
                                     {
-                                        let sub_ms = bp_arr[j];
-                                        let sub_pct = if bp_total > 0.0 {
-                                            sub_ms / bp_total * 100.0
-                                        } else {
-                                            0.0
-                                        };
+                                        let pct = ms / iter_total * 100.0;
                                         ui.label(
-                                            egui::RichText::new(sub_name)
-                                                .color(egui::Color32::from_gray(195)),
+                                            egui::RichText::new(label)
+                                                .size(10.5)
+                                                .color(egui::Color32::from_gray(175)),
                                         );
                                         ui.label(
-                                            egui::RichText::new(sub_kind)
-                                                .color(egui::Color32::from_gray(140)),
+                                            egui::RichText::new("(GPU)")
+                                                .size(10.5)
+                                                .color(egui::Color32::from_gray(130)),
                                         );
                                         ui.label(
-                                            egui::RichText::new(format!("{sub_ms:.2} ms"))
-                                                .color(egui::Color32::from_gray(195)),
+                                            egui::RichText::new(format!("{ms:.2} ms"))
+                                                .size(10.5)
+                                                .color(egui::Color32::from_gray(175)),
                                         );
                                         ui.label(
-                                            egui::RichText::new(format!("{sub_pct:.1}%"))
-                                                .color(egui::Color32::from_gray(170)),
+                                            egui::RichText::new(format!("{pct:.1}%"))
+                                                .size(10.5)
+                                                .color(egui::Color32::from_gray(150)),
                                         );
                                         ui.end_row();
                                     }
-                                });
+                                }
+                            }
                         });
                 }
 

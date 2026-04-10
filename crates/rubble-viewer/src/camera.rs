@@ -48,8 +48,8 @@ impl OrbitCamera {
     }
 
     pub fn rotate(&mut self, dx: f32, dy: f32) {
-        self.yaw -= dx * 0.005;
-        self.pitch = (self.pitch + dy * 0.005).clamp(-1.5, 1.5);
+        self.yaw -= dx * 0.0035;
+        self.pitch = (self.pitch + dy * 0.0035).clamp(-1.5, 1.5);
     }
 
     pub fn zoom(&mut self, delta: f32) {

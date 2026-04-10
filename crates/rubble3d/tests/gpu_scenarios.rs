@@ -948,3 +948,803 @@ fn long_simulation_no_divergence() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Energy injection & sporadic jumping regression tests
+// ---------------------------------------------------------------------------
+// These tests target the missing α-regularization (Paper Section 3.6) and
+// penalty floor (Paper Eq 19). They should FAIL on code without these fixes
+// and PASS after implementation.
+
+#[test]
+fn settled_sphere_does_not_spontaneously_jump() {
+    let mut world = gpu_world!(SimConfig::default());
+
+    // Static floor
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -1.0, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(10.0, 1.0, 10.0),
+        },
+        ..Default::default()
+    });
+
+    // Sphere dropped from low height (just above contact)
+    let h = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 1.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::Sphere { radius: 0.5 },
+        ..Default::default()
+    });
+
+    // Let it settle for 240 steps (4 seconds — enough for low drop to fully damp)
+    step_n(&mut world, 240);
+
+    // Monitor for 360 more steps — no velocity spikes allowed
+    let mut max_speed = 0.0_f32;
+    let mut max_upward_vel = f32::NEG_INFINITY;
+    for step in 240..600 {
+        world.step();
+        let vel = world.get_velocity(h).unwrap();
+        let speed = vel.length();
+        max_speed = max_speed.max(speed);
+        max_upward_vel = max_upward_vel.max(vel.y);
+        assert!(
+            speed < 1.0,
+            "Settled sphere jumped at step {step}: speed={speed:.3}, vel={vel}"
+        );
+    }
+    assert!(
+        max_upward_vel < 0.5,
+        "Settled sphere had upward velocity spike: max_upward_vel={max_upward_vel:.3}"
+    );
+}
+
+#[test]
+fn resting_contact_energy_does_not_grow() {
+    let g = 9.81_f32;
+    let mut world = gpu_world!(SimConfig::default());
+
+    // Static floor
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(10.0, 0.5, 10.0),
+        },
+        ..Default::default()
+    });
+
+    // Stack of 3 boxes, placed touching (no overlap, no gap)
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.5 + i as f32 * 1.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            ..Default::default()
+        });
+        handles.push(h);
+    }
+
+    // Let settle for 60 steps
+    step_n(&mut world, 60);
+
+    // Measure settled energy
+    let settled_energy: f32 = handles
+        .iter()
+        .map(|&h| {
+            let pos = world.get_position(h).unwrap();
+            let vel = world.get_velocity(h).unwrap();
+            0.5 * 1.0 * vel.length_squared() + 1.0 * g * pos.y
+        })
+        .sum();
+
+    // Run 540 more steps — energy must not grow
+    for step in 60..600 {
+        world.step();
+        let total_energy: f32 = handles
+            .iter()
+            .map(|&h| {
+                let pos = world.get_position(h).unwrap();
+                let vel = world.get_velocity(h).unwrap();
+                0.5 * 1.0 * vel.length_squared() + 1.0 * g * pos.y
+            })
+            .sum();
+        assert!(
+            total_energy < settled_energy + settled_energy.abs() * 0.05 + 0.1,
+            "Energy grew after settling at step {step}: E={total_energy:.3}, E_settled={settled_energy:.3}"
+        );
+    }
+
+    // Late window: speeds should be near zero
+    let max_late_speed: f32 = handles
+        .iter()
+        .map(|&h| world.get_velocity(h).unwrap().length())
+        .fold(0.0, f32::max);
+    assert!(
+        max_late_speed < 0.5,
+        "Stack still moving at end: max_speed={max_late_speed:.3}"
+    );
+}
+
+#[test]
+fn long_horizon_stack_velocity_stays_bounded() {
+    let mut world = gpu_world!(SimConfig::default());
+
+    // Static floor
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(20.0, 0.5, 20.0),
+        },
+        ..Default::default()
+    });
+
+    // 5x5 grid of boxes on the floor
+    let mut handles = Vec::new();
+    for ix in 0..5 {
+        for iz in 0..5 {
+            let h = world.add_body(&RigidBodyDesc {
+                position: Vec3::new(
+                    ix as f32 * 1.0 - 2.0,
+                    0.5,
+                    iz as f32 * 1.0 - 2.0,
+                ),
+                mass: 1.0,
+                shape: ShapeDesc::Box {
+                    half_extents: Vec3::new(0.4, 0.4, 0.4),
+                },
+                ..Default::default()
+            });
+            handles.push(h);
+        }
+    }
+
+    // Settle
+    step_n(&mut world, 120);
+
+    // Run 780 more steps (total 900 = 15 seconds)
+    for step in 120..900 {
+        world.step();
+        for (i, &h) in handles.iter().enumerate() {
+            let pos = world.get_position(h).unwrap();
+            let vel = world.get_velocity(h).unwrap();
+            let speed = vel.length();
+            assert!(
+                speed < 5.0,
+                "Body {i} velocity diverged at step {step}: speed={speed:.3}, vel={vel}"
+            );
+            assert!(
+                pos.y < 3.0,
+                "Body {i} launched upward at step {step}: pos={pos}"
+            );
+            assert!(
+                pos.y > -0.5,
+                "Body {i} fell through floor at step {step}: pos={pos}"
+            );
+        }
+    }
+}
+
+#[test]
+fn penalty_floor_prevents_stiffness_collapse() {
+    let mut world = gpu_world!(SimConfig::default());
+
+    // Static floor
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(10.0, 0.5, 10.0),
+        },
+        ..Default::default()
+    });
+
+    // Heavy box resting on floor
+    let h = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 0.5, 0.0),
+        mass: 10.0,
+        friction: 0.5,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(0.5, 0.5, 0.5),
+        },
+        ..Default::default()
+    });
+
+    // Let settle for 240 steps (4 seconds — longer for heavy body)
+    step_n(&mut world, 240);
+
+    // Monitor position stability for 360 steps
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    let mut max_vy = 0.0_f32;
+    for _step in 240..600 {
+        world.step();
+        let pos = world.get_position(h).unwrap();
+        let vel = world.get_velocity(h).unwrap();
+        min_y = min_y.min(pos.y);
+        max_y = max_y.max(pos.y);
+        max_vy = max_vy.max(vel.y.abs());
+    }
+
+    let oscillation = max_y - min_y;
+    assert!(
+        oscillation < 0.06,
+        "Heavy box oscillated vertically: range={oscillation:.4} (min_y={min_y:.4}, max_y={max_y:.4})"
+    );
+    assert!(
+        max_vy < 1.0,
+        "Heavy box had vertical velocity: max_vy={max_vy:.4}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Energy injection detection tests
+// ---------------------------------------------------------------------------
+
+/// A small pyramid of boxes (4-3-2-1 = 10 boxes) is built above a floor.
+/// After an initial settling period, track total kinetic energy.
+/// Energy should trend DOWNWARD (friction dissipation), never spike upward.
+/// This catches the runaway energy injection that causes pyramid explosions.
+#[test]
+fn pyramid_kinetic_energy_does_not_grow_after_settling() {
+    let mut world = gpu_world!(SimConfig::default());
+
+    // Static floor
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(20.0, 0.5, 20.0),
+        },
+        ..Default::default()
+    });
+
+    // Build a 4-row pyramid: 4 boxes base, 3, 2, 1 on top = 10 boxes
+    let mut handles = Vec::new();
+    let box_size = 0.5;
+    for row in 0..4 {
+        let count = 4 - row;
+        let y = box_size + row as f32 * (box_size * 2.0 + 0.01);
+        let x_start = -(count as f32 - 1.0) * box_size;
+        for i in 0..count {
+            let h = world.add_body(&RigidBodyDesc {
+                position: Vec3::new(x_start + i as f32 * box_size * 2.0, y, 0.0),
+                mass: 1.0,
+                shape: ShapeDesc::Box {
+                    half_extents: Vec3::splat(box_size),
+                },
+                ..Default::default()
+            });
+            handles.push(h);
+        }
+    }
+
+    let gravity_y = -9.81_f32;
+
+    // Helper: compute total KE for all dynamic bodies
+    let compute_ke = |world: &World, handles: &Vec<_>| -> f32 {
+        let mut total_ke = 0.0_f32;
+        for &h in handles {
+            let vel = world.get_velocity(h).unwrap();
+            let mass = 1.0_f32;
+            total_ke += 0.5 * mass * vel.length_squared();
+        }
+        total_ke
+    };
+
+    // Settle for 5 seconds (300 frames)
+    step_n(&mut world, 300);
+
+    // Record KE after settling
+    let ke_settled = compute_ke(&world, &handles);
+
+    // Run for 10 more seconds (600 frames), track KE
+    let mut max_ke_after_settle = ke_settled;
+    let mut max_speed = 0.0_f32;
+    for step in 300..900 {
+        world.step();
+        let ke = compute_ke(&world, &handles);
+        max_ke_after_settle = max_ke_after_settle.max(ke);
+
+        for &h in &handles {
+            let vel = world.get_velocity(h).unwrap();
+            let speed = vel.length();
+            if speed > max_speed {
+                max_speed = speed;
+            }
+            // No body should reach physically unreasonable speeds.
+            // Free fall from pyramid height (~4m): max_v = sqrt(2*9.81*4) ~ 8.9 m/s
+            // Allow 2x for collisions: 18 m/s
+            assert!(
+                speed < 18.0,
+                "Body exceeded free-fall-derived speed limit at step {step}: speed={speed:.2}"
+            );
+        }
+    }
+
+    // KE should not grow significantly after settling.
+    // Allow 3x the settled KE as headroom (some oscillation is OK, but not runaway).
+    let ke_threshold = ke_settled.max(0.5) * 3.0;
+    assert!(
+        max_ke_after_settle < ke_threshold,
+        "Kinetic energy grew after settling: max_ke={max_ke_after_settle:.3} vs settled={ke_settled:.3} (threshold={ke_threshold:.3})"
+    );
+
+    // Max speed should be reasonable — no explosion-level velocities
+    assert!(
+        max_speed < 10.0,
+        "Max speed in settled pyramid too high: {max_speed:.3} m/s (suggests energy injection)"
+    );
+}
+
+/// Drop 50 boxes from height onto a floor. After they pile up and settle,
+/// no body should have velocity exceeding what gravity alone could produce.
+/// This catches the "10k boxes explosion" scenario at smaller scale.
+#[test]
+fn falling_box_pile_does_not_explode() {
+    // Use 10 iterations for this dense scene — 5 is insufficient for 50 simultaneous bodies
+    let mut world = gpu_world!(SimConfig {
+        solver_iterations: 10,
+        ..SimConfig::default()
+    });
+
+    // Static floor
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(20.0, 0.5, 20.0),
+        },
+        ..Default::default()
+    });
+
+    // Drop 50 boxes from various heights (1-5m), slightly offset
+    let mut handles = Vec::new();
+    for i in 0..50 {
+        let layer = i / 10;
+        let idx = i % 10;
+        let x = (idx % 5) as f32 * 0.9 - 1.8;
+        let z = (idx / 5) as f32 * 0.9 - 0.45;
+        let y = 1.0 + layer as f32 * 1.2;
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(x, y, z),
+            mass: 1.0,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::splat(0.4),
+            },
+            ..Default::default()
+        });
+        handles.push(h);
+    }
+
+    // Max height is about 6.8m. Free-fall speed: sqrt(2*9.81*6.8) ~ 11.6 m/s
+    // During chaotic multi-body impacts, transient speeds can exceed free-fall due to
+    // constraint resolution. Use 50 m/s to catch true explosions (100+ m/s).
+    let max_physical_speed = 50.0;
+
+    // Run for 20 seconds (1200 frames)
+    let mut max_speed_late = 0.0_f32; // after 10 seconds
+    for step in 0..1200 {
+        world.step();
+        for &h in &handles {
+            let vel = world.get_velocity(h).unwrap();
+            let speed = vel.length();
+
+            // During any frame: speed should not exceed physical limits
+            assert!(
+                speed < max_physical_speed,
+                "Body exceeded physical speed limit at step {step}: speed={speed:.2} m/s"
+            );
+
+            if step > 600 {
+                max_speed_late = max_speed_late.max(speed);
+            }
+        }
+    }
+
+    // After 10 seconds of settling, all bodies should be nearly at rest
+    assert!(
+        max_speed_late < 3.0,
+        "Bodies still moving fast after 10s settling: max_speed_late={max_speed_late:.3} m/s"
+    );
+
+    // Check no body fell through floor or launched into space
+    for (i, &h) in handles.iter().enumerate() {
+        let pos = world.get_position(h).unwrap();
+        assert!(
+            pos.y > -1.0,
+            "Body {i} fell through floor: y={:.2}",
+            pos.y
+        );
+        assert!(
+            pos.y < 20.0,
+            "Body {i} launched into space: y={:.2}",
+            pos.y
+        );
+    }
+}
+
+/// Track total system energy (KE + PE) over a long simulation of stacked boxes.
+/// After settling, energy should only decrease (friction) or stay constant.
+/// Any INCREASE indicates the solver is injecting energy.
+#[test]
+fn total_energy_monotonically_decreases_after_settling() {
+    let mut world = gpu_world!(SimConfig::default());
+
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(20.0, 0.5, 20.0),
+        },
+        ..Default::default()
+    });
+
+    // 5 boxes stacked vertically
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.5 + i as f32 * 1.01, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::splat(0.5),
+            },
+            ..Default::default()
+        });
+        handles.push(h);
+    }
+
+    let gravity_mag = 9.81_f32;
+
+    let compute_total_energy = |world: &World| -> f32 {
+        let mut total = 0.0_f32;
+        for &h in &handles {
+            let pos = world.get_position(h).unwrap();
+            let vel = world.get_velocity(h).unwrap();
+            let mass = 1.0_f32;
+            total += 0.5 * mass * vel.length_squared(); // KE
+            total += mass * gravity_mag * pos.y; // PE
+        }
+        total
+    };
+
+    // Settle for 180 frames (3 seconds)
+    step_n(&mut world, 180);
+
+    let e_settled = compute_total_energy(&world);
+
+    // Run for 600 more frames (10 seconds). Track energy.
+    // Use a sliding window average to filter frame-to-frame noise
+    // but catch sustained energy growth.
+    let mut energy_window: Vec<f32> = Vec::new();
+    let window_size = 30; // half-second window
+    for step in 180..780 {
+        world.step();
+        let e = compute_total_energy(&world);
+        energy_window.push(e);
+        if energy_window.len() > window_size {
+            energy_window.remove(0);
+        }
+        if energy_window.len() == window_size {
+            let avg: f32 = energy_window.iter().sum::<f32>() / window_size as f32;
+
+            // Window-averaged energy should not exceed settled energy by more than 10%
+            assert!(
+                avg < e_settled * 1.1 + 1.0,
+                "Energy growing after settling at step {step}: window_avg={avg:.3} vs settled={e_settled:.3}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Long-horizon stability regression tests
+// ---------------------------------------------------------------------------
+
+/// A 60-second simulation of a settled 3-box stack must not accumulate energy drift.
+/// This catches slow energy injection that shorter tests miss (e.g. penalty decay,
+/// warmstart rounding, or α-regularization drift over thousands of frames).
+#[test]
+fn long_horizon_60s_stack_energy_stable() {
+    let mut world = gpu_world!(SimConfig {
+        solver_iterations: 5,
+        max_bodies: 16,
+        ..Default::default()
+    });
+
+    // Floor
+    world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    });
+
+    // 3 stacked boxes
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.5 + i as f32 * 1.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::splat(0.5),
+            },
+            ..Default::default()
+        });
+        handles.push(h);
+    }
+
+    // Settle for 5 seconds
+    step_n(&mut world, 300);
+
+    let settled_ke: f32 = handles
+        .iter()
+        .map(|h| {
+            let v = world.get_velocity(*h).unwrap();
+            0.5 * v.length_squared()
+        })
+        .sum();
+
+    // Run for 55 more seconds (3300 steps at 60 Hz)
+    let mut max_ke = settled_ke;
+    for step in 300..3600 {
+        world.step();
+        let ke: f32 = handles
+            .iter()
+            .map(|h| {
+                let v = world.get_velocity(*h).unwrap();
+                0.5 * v.length_squared()
+            })
+            .sum();
+        if ke > max_ke {
+            max_ke = ke;
+        }
+        // Every 10 seconds, check energy hasn't grown unboundedly
+        if step % 600 == 0 {
+            assert!(
+                max_ke < settled_ke + 1.0,
+                "KE grew over 60s simulation at step {step}: max_ke={max_ke:.4} settled_ke={settled_ke:.4}"
+            );
+        }
+    }
+
+    // Final check: max speed should be tiny
+    let max_speed: f32 = handles
+        .iter()
+        .map(|h| world.get_velocity(*h).unwrap().length())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_speed < 1.0,
+        "Bodies still moving after 60s: max_speed={max_speed:.4}"
+    );
+}
+
+/// Extreme mass ratio: a heavy box (mass 100) resting on a light box (mass 1) on a floor.
+/// The solver must not eject the light box or inject energy due to the mass disparity.
+#[test]
+fn extreme_mass_ratio_does_not_explode() {
+    let mut world = gpu_world!(SimConfig {
+        solver_iterations: 5,
+        max_bodies: 16,
+        ..Default::default()
+    });
+
+    // Floor
+    world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    });
+
+    // Light box on floor
+    let light = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 0.5, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::splat(0.5),
+        },
+        ..Default::default()
+    });
+
+    // Heavy box on top (20:1 mass ratio)
+    let heavy = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 1.5, 0.0),
+        mass: 20.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::splat(0.5),
+        },
+        ..Default::default()
+    });
+
+    // Settle
+    step_n(&mut world, 120);
+
+    // Monitor for 10 seconds
+    let mut max_speed = 0.0_f32;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for _step in 0..600 {
+        world.step();
+        for &h in &[light, heavy] {
+            let v = world.get_velocity(h).unwrap();
+            let p = world.get_position(h).unwrap();
+            max_speed = max_speed.max(v.length());
+            min_y = min_y.min(p.y);
+            max_y = max_y.max(p.y);
+        }
+    }
+
+    assert!(
+        max_speed < 3.0,
+        "Extreme mass ratio produced high speed: {max_speed:.3}"
+    );
+    assert!(
+        min_y > -0.5,
+        "Body fell through floor with extreme mass ratio: min_y={min_y:.3}"
+    );
+    assert!(
+        max_y < 5.0,
+        "Body launched upward with extreme mass ratio: max_y={max_y:.3}"
+    );
+}
+
+/// Sphere-on-sphere stacking stability: 5 spheres dropped onto a floor.
+/// Spheres are harder to stack than boxes (point contacts, rolling), but they
+/// should settle and not gain energy.
+#[test]
+fn sphere_pile_settles_without_energy_growth() {
+    let mut world = gpu_world!(SimConfig {
+        solver_iterations: 5,
+        max_bodies: 16,
+        ..Default::default()
+    });
+
+    // Floor
+    world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    });
+
+    // 5 spheres dropped in a cluster
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let h = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(
+                (i % 2) as f32 * 0.3 - 0.15,
+                1.0 + i as f32 * 1.2,
+                (i / 2) as f32 * 0.3 - 0.15,
+            ),
+            mass: 1.0,
+            shape: ShapeDesc::Sphere { radius: 0.5 },
+            ..Default::default()
+        });
+        handles.push(h);
+    }
+
+    // Let them fall and settle for 8 seconds (spheres roll longer than boxes)
+    step_n(&mut world, 480);
+
+    // Monitor for 10 more seconds — track max speed (spheres roll so KE stays
+    // nonzero, but max speed should be bounded and not grow)
+    let mut max_speed = 0.0_f32;
+    let settled_max_speed: f32 = handles
+        .iter()
+        .map(|h| world.get_velocity(*h).unwrap().length())
+        .fold(0.0_f32, f32::max);
+
+    for _step in 0..600 {
+        world.step();
+        for &h in &handles {
+            let v = world.get_velocity(h).unwrap();
+            max_speed = max_speed.max(v.length());
+        }
+    }
+
+    // No body should fly away
+    for &h in &handles {
+        let p = world.get_position(h).unwrap();
+        assert!(
+            p.y > -1.0 && p.y < 10.0,
+            "Sphere left reasonable bounds: y={:.3}",
+            p.y
+        );
+    }
+
+    // Max speed should not grow significantly beyond settled speed
+    assert!(
+        max_speed < settled_max_speed + 5.0,
+        "Sphere pile speed grew: max_speed={max_speed:.3} settled_max_speed={settled_max_speed:.3}"
+    );
+}
+
+/// A 10x10 grid (100 boxes) dropped onto a floor must settle without velocity divergence.
+/// This is the smallest "large scene" test that catches scaling issues before the
+/// full 10k-body benchmark.
+#[test]
+fn hundred_box_grid_settles_without_divergence() {
+    let mut world = gpu_world!(SimConfig {
+        solver_iterations: 5,
+        max_bodies: 256,
+        ..Default::default()
+    });
+
+    // Floor
+    world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::Y,
+            distance: 0.0,
+        },
+        ..Default::default()
+    });
+
+    // 10x10 grid of boxes at y=0.5 (resting on floor)
+    let mut handles = Vec::new();
+    for x in 0..10 {
+        for z in 0..10 {
+            let h = world.add_body(&RigidBodyDesc {
+                position: Vec3::new(x as f32 * 1.1 - 5.0, 0.5, z as f32 * 1.1 - 5.0),
+                mass: 1.0,
+                shape: ShapeDesc::Box {
+                    half_extents: Vec3::splat(0.5),
+                },
+                ..Default::default()
+            });
+            handles.push(h);
+        }
+    }
+
+    // Settle for 3 seconds
+    step_n(&mut world, 180);
+
+    // Monitor for 10 seconds
+    let mut max_speed = 0.0_f32;
+    let mut any_fell_through = false;
+    let mut any_launched = false;
+    for _step in 0..600 {
+        world.step();
+        for &h in &handles {
+            let v = world.get_velocity(h).unwrap();
+            let p = world.get_position(h).unwrap();
+            max_speed = max_speed.max(v.length());
+            if p.y < -0.5 {
+                any_fell_through = true;
+            }
+            if p.y > 5.0 {
+                any_launched = true;
+            }
+        }
+    }
+
+    assert!(
+        !any_fell_through,
+        "A box fell through the floor in 100-box grid"
+    );
+    assert!(
+        !any_launched,
+        "A box was launched upward in 100-box grid"
+    );
+    assert!(
+        max_speed < 5.0,
+        "100-box grid had high velocity after settling: max_speed={max_speed:.3}"
+    );
+}

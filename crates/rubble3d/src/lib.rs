@@ -44,6 +44,10 @@ pub struct SimConfig {
     /// Allowable penetration depth before solver correction kicks in.
     /// Small positive value reduces jitter for resting contacts.
     pub penetration_slop: f32,
+    /// Number of sub-steps per frame. Each sub-step runs the full pipeline
+    /// (predict → detect → solve → extract) with dt/sub_steps. Higher values
+    /// improve stability for stacking/dense scenes at the cost of GPU time.
+    pub sub_steps: u32,
 }
 
 impl Default for SimConfig {
@@ -51,15 +55,16 @@ impl Default for SimConfig {
         Self {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
-            solver_iterations: 20,
+            solver_iterations: 5,
             max_bodies: 65536,
-            beta: 1.0e4,
+            beta: 10.0,
             k_start: 1e4,
-            warmstart_decay: 0.999,
+            warmstart_decay: 0.99,
             friction_default: 0.5,
             contact_offset: 0.02,
             restitution_threshold: 0.5,
-            penetration_slop: 0.005,
+            penetration_slop: 0.01,
+            sub_steps: 2,
         }
     }
 }
@@ -131,9 +136,9 @@ impl Default for RigidBodyDesc {
 // Inertia computation
 // ---------------------------------------------------------------------------
 
-/// Compute the inverse inertia tensor for a shape given its mass.
+/// Compute the local forward inertia tensor for a shape given its mass.
 /// Returns `Mat3::ZERO` for static bodies (mass <= 0).
-fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
+fn compute_local_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
     if mass <= 0.0 {
         return Mat3::ZERO;
     }
@@ -210,7 +215,32 @@ fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
             )
         }
     };
-    Mat3::from_diagonal(Vec3::new(1.0 / diag.x, 1.0 / diag.y, 1.0 / diag.z))
+    Mat3::from_diagonal(diag)
+}
+
+/// Compute the inverse inertia tensor for a shape given its mass.
+/// Returns `Mat3::ZERO` for static bodies (mass <= 0).
+fn compute_inertia(shape: &ShapeDesc, mass: f32) -> Mat3 {
+    let inertia = compute_local_inertia(shape, mass);
+    if inertia.determinant().abs() <= 1.0e-12 {
+        Mat3::ZERO
+    } else {
+        inertia.inverse()
+    }
+}
+
+fn palette_color(index: usize) -> [f32; 4] {
+    const COLORS: [[f32; 4]; 8] = [
+        [0.93, 0.36, 0.36, 1.0],
+        [0.29, 0.74, 0.95, 1.0],
+        [0.96, 0.77, 0.27, 1.0],
+        [0.47, 0.84, 0.53, 1.0],
+        [0.78, 0.45, 0.96, 1.0],
+        [0.95, 0.58, 0.27, 1.0],
+        [0.39, 0.83, 0.78, 1.0],
+        [0.98, 0.47, 0.67, 1.0],
+    ];
+    COLORS[index % COLORS.len()]
 }
 
 /// Compute the local AABB for a child shape at a given local offset and rotation.
@@ -527,16 +557,15 @@ pub struct World {
     contact_persistence: gpu::ContactPersistence3D,
     collision_events: Vec<CollisionEvent>,
     last_step_timings: rubble_gpu::StepTimingsMs,
+    gpu_compact_indices: Vec<usize>,
+    gpu_uploaded: bool,
+    gpu_cpu_sync_pending: bool,
 }
 
 impl World {
-    /// Create a new 3D physics world backed by GPU compute shaders (async).
-    ///
-    /// Use this constructor in WASM/browser environments where blocking is not allowed.
-    pub async fn new_async(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
-        let ctx = rubble_gpu::GpuContext::new().await?;
+    fn with_context(config: SimConfig, ctx: rubble_gpu::GpuContext) -> Self {
         let pipeline = gpu::GpuPipeline::new(ctx, config.max_bodies);
-        Ok(Self {
+        Self {
             config,
             states: Vec::new(),
             prev_warmstart_states: Vec::new(),
@@ -557,7 +586,22 @@ impl World {
             contact_persistence: gpu::ContactPersistence3D::new(),
             collision_events: Vec::new(),
             last_step_timings: rubble_gpu::StepTimingsMs::default(),
-        })
+            gpu_compact_indices: Vec::new(),
+            gpu_uploaded: false,
+            gpu_cpu_sync_pending: false,
+        }
+    }
+
+    /// Create a new 3D physics world backed by GPU compute shaders (async).
+    ///
+    /// Use this constructor in WASM/browser environments where blocking is not allowed.
+    pub async fn new_async(config: SimConfig) -> Result<Self, rubble_gpu::GpuError> {
+        let ctx = rubble_gpu::GpuContext::new().await?;
+        Ok(Self::with_context(config, ctx))
+    }
+
+    pub fn new_with_context(config: SimConfig, ctx: rubble_gpu::GpuContext) -> Self {
+        Self::with_context(config, ctx)
     }
 
     /// Create a new 3D physics world backed by GPU compute shaders.
@@ -569,8 +613,126 @@ impl World {
         pollster::block_on(Self::new_async(config))
     }
 
+    fn mark_gpu_dirty(&mut self) {
+        self.gpu_uploaded = false;
+    }
+
+    fn render_meta_for_slot(&self, idx: usize) -> gpu::RenderBodyMeta3D {
+        let is_static = (self.props[idx].flags & FLAG_STATIC) != 0;
+        let color = if is_static {
+            [0.55, 0.55, 0.58, 1.0]
+        } else {
+            palette_color(idx)
+        };
+        match &self.shapes[idx] {
+            ShapeDesc::Sphere { radius } => gpu::RenderBodyMeta3D {
+                scale: [*radius, *radius, *radius, 0.0],
+                color,
+                shape_data: [gpu::RENDER_SHAPE_SPHERE, 0, 0, 0],
+            },
+            ShapeDesc::Box { half_extents } => gpu::RenderBodyMeta3D {
+                scale: [half_extents.x, half_extents.y, half_extents.z, 0.0],
+                color,
+                shape_data: [gpu::RENDER_SHAPE_BOX, 0, 0, 0],
+            },
+            ShapeDesc::Capsule {
+                half_height,
+                radius,
+            } => gpu::RenderBodyMeta3D {
+                scale: [*radius, *half_height, *radius, 0.0],
+                color,
+                shape_data: [gpu::RENDER_SHAPE_CAPSULE, 0, 0, 0],
+            },
+            _ => gpu::RenderBodyMeta3D {
+                scale: [0.0; 4],
+                color,
+                shape_data: [gpu::RENDER_SHAPE_HIDDEN, 0, 0, 0],
+            },
+        }
+    }
+
+    fn upload_world_state(&mut self) {
+        let alive_indices: Vec<usize> = (0..self.states.len()).filter(|&i| self.alive[i]).collect();
+        let compact_states: Vec<RigidBodyState3D> =
+            alive_indices.iter().map(|&i| self.states[i]).collect();
+        let compact_prev_states: Vec<RigidBodyState3D> = alive_indices
+            .iter()
+            .map(|&i| self.prev_warmstart_states[i])
+            .collect();
+        let compact_props: Vec<RigidBodyProps3D> =
+            alive_indices.iter().map(|&i| self.props[i]).collect();
+        let compact_render: Vec<gpu::RenderBodyMeta3D> = alive_indices
+            .iter()
+            .map(|&i| self.render_meta_for_slot(i))
+            .collect();
+
+        self.gpu_pipeline.upload_with_render_bodies(
+            &compact_states,
+            &compact_prev_states,
+            &compact_props,
+            &compact_render,
+            &self.spheres,
+            &self.boxes,
+            &self.capsules,
+            &self.convex_hulls,
+            &self.convex_vertices,
+            &self.planes,
+            &self.compound_shapes,
+            &self.compound_children,
+            &self.compound_shapes_cpu,
+            self.config.gravity,
+            self.config.dt,
+            self.config.solver_iterations,
+            self.config.beta,
+            self.config.k_start,
+            self.config.warmstart_decay,
+        );
+        self.gpu_pipeline.set_quality_params(
+            self.config.contact_offset,
+            self.config.restitution_threshold,
+            self.config.penetration_slop,
+        );
+        self.gpu_compact_indices = alive_indices;
+        self.gpu_uploaded = true;
+        self.gpu_cpu_sync_pending = false;
+    }
+
+    pub fn sync_body_states_from_gpu(&mut self) {
+        if !self.gpu_cpu_sync_pending || self.gpu_compact_indices.is_empty() {
+            return;
+        }
+        let compact = self
+            .gpu_pipeline
+            .download_body_states_current(self.gpu_compact_indices.len() as u32);
+        for (slot, &orig) in self.gpu_compact_indices.iter().enumerate() {
+            if let Some(state) = compact.get(slot).copied() {
+                self.states[orig] = state;
+                self.prev_warmstart_states[orig] = state;
+            }
+        }
+        self.gpu_cpu_sync_pending = false;
+    }
+
+    pub fn configure_gpu_render_meshes(
+        &mut self,
+        sphere_index_count: u32,
+        cube_index_count: u32,
+        capsule_index_count: u32,
+    ) {
+        self.gpu_pipeline.configure_render_indirect_args(
+            sphere_index_count,
+            cube_index_count,
+            capsule_index_count,
+        );
+    }
+
+    pub fn debug_render_instance_counts(&self) -> [u32; 3] {
+        self.gpu_pipeline.download_render_instance_counts()
+    }
+
     /// Add a rigid body to the world. Returns a stable handle.
     pub fn add_body(&mut self, desc: &RigidBodyDesc) -> BodyHandle {
+        self.sync_body_states_from_gpu();
         let handle = self.allocator.alloc();
         let idx = handle.index as usize;
 
@@ -588,6 +750,7 @@ impl World {
             desc.angular_velocity,
         );
 
+        let inertia = compute_local_inertia(&desc.shape, desc.mass);
         let inv_inertia = compute_inertia(&desc.shape, desc.mass);
         let flags = if desc.mass <= 0.0 { FLAG_STATIC } else { 0 };
 
@@ -762,8 +925,14 @@ impl World {
             }
         };
 
-        let prop =
-            RigidBodyProps3D::new(inv_inertia, desc.friction, shape_type, shape_index, flags);
+        let prop = RigidBodyProps3D::new_with_inertia(
+            inv_inertia,
+            inertia,
+            desc.friction,
+            shape_type,
+            shape_index,
+            flags,
+        );
 
         if idx >= self.states.len() {
             self.states.resize(idx + 1, bytemuck::Zeroable::zeroed());
@@ -780,12 +949,14 @@ impl World {
         self.props[idx] = prop;
         self.shapes[idx] = desc.shape.clone();
         self.alive[idx] = true;
+        self.mark_gpu_dirty();
 
         handle
     }
 
     /// Remove a body from the world. Returns `true` if it was successfully removed.
     pub fn remove_body(&mut self, handle: BodyHandle) -> bool {
+        self.sync_body_states_from_gpu();
         if !self.allocator.is_valid(handle) {
             return false;
         }
@@ -795,6 +966,7 @@ impl World {
         self.prev_warmstart_states[idx] = bytemuck::Zeroable::zeroed();
         self.props[idx] = bytemuck::Zeroable::zeroed();
         self.allocator.dealloc(handle);
+        self.mark_gpu_dirty();
         true
     }
 
@@ -829,6 +1001,7 @@ impl World {
 
     /// Set the position of a body.
     pub fn set_position(&mut self, handle: BodyHandle, pos: Vec3) {
+        self.sync_body_states_from_gpu();
         if !self.allocator.is_valid(handle) {
             return;
         }
@@ -836,16 +1009,19 @@ impl World {
         let im = self.states[idx].inv_mass();
         self.states[idx].position_inv_mass = Vec4::new(pos.x, pos.y, pos.z, im);
         self.prev_warmstart_states[idx].position_inv_mass = self.states[idx].position_inv_mass;
+        self.mark_gpu_dirty();
     }
 
     /// Set the linear velocity of a body.
     pub fn set_velocity(&mut self, handle: BodyHandle, vel: Vec3) {
+        self.sync_body_states_from_gpu();
         if !self.allocator.is_valid(handle) {
             return;
         }
         let idx = handle.index as usize;
         self.states[idx].lin_vel = vel.extend(0.0);
         self.prev_warmstart_states[idx].lin_vel = self.states[idx].lin_vel;
+        self.mark_gpu_dirty();
     }
 
     /// Get the angular velocity of a body.
@@ -858,90 +1034,144 @@ impl World {
 
     /// Set the angular velocity of a body.
     pub fn set_angular_velocity(&mut self, handle: BodyHandle, omega: Vec3) {
+        self.sync_body_states_from_gpu();
         if !self.allocator.is_valid(handle) {
             return;
         }
         let idx = handle.index as usize;
         self.states[idx].ang_vel = omega.extend(0.0);
         self.prev_warmstart_states[idx].ang_vel = self.states[idx].ang_vel;
+        self.mark_gpu_dirty();
     }
 
     /// Advance the simulation by one time step on the GPU.
+    /// When `sub_steps > 1`, the frame is split into N sub-steps each with `dt/N`,
+    /// running the full pipeline (predict → detect → solve → extract) per sub-step.
     pub fn step(&mut self) {
         use std::time::Instant;
 
+        self.sync_body_states_from_gpu();
         let mut timings = rubble_gpu::StepTimingsMs::default();
-
-        let n = self.states.len();
-        if n == 0 {
+        if self.body_count() == 0 {
             self.last_step_timings = timings;
             return;
         }
 
-        let alive_indices: Vec<usize> = (0..n).filter(|&i| self.alive[i]).collect();
-        if alive_indices.is_empty() {
-            self.last_step_timings = timings;
-            return;
+        if !self.gpu_uploaded {
+            let t_upload = Instant::now();
+            self.upload_world_state();
+            timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
         }
 
-        let compact_states: Vec<RigidBodyState3D> =
-            alive_indices.iter().map(|&i| self.states[i]).collect();
-        let compact_prev_states: Vec<RigidBodyState3D> = alive_indices
+        let sub_steps = self.config.sub_steps.max(1);
+        let sub_dt = self.config.dt / sub_steps as f32;
+        if sub_steps > 1 {
+            self.gpu_pipeline.set_sim_dt(sub_dt);
+        }
+
+        let compact_states: Vec<RigidBodyState3D> = self
+            .gpu_compact_indices
             .iter()
-            .map(|&i| self.prev_warmstart_states[i])
+            .map(|&i| self.states[i])
             .collect();
-        let compact_props: Vec<RigidBodyProps3D> =
-            alive_indices.iter().map(|&i| self.props[i]).collect();
-        let num_bodies = compact_states.len() as u32;
+        let num_bodies = self.gpu_compact_indices.len() as u32;
+        let has_compounds = self
+            .gpu_compact_indices
+            .iter()
+            .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }));
+        let results = if has_compounds && self.gpu_compact_indices.len() > 1 {
+            let prev = self.contact_persistence.prev_contacts();
+            let warm = if prev.is_empty() { None } else { Some(prev) };
+            let (results, new_contacts) = self.gpu_pipeline.step_with_contacts_timed(
+                num_bodies,
+                self.config.solver_iterations,
+                warm,
+                &mut timings,
+            );
+            let events = self.contact_persistence.update(&new_contacts);
+            self.collision_events.extend(events);
+            results
+        } else {
+            // Run intermediate sub-steps on device (no download)
+            for _sub in 0..sub_steps - 1 {
+                self.gpu_pipeline.step_fast_device_timed(
+                    num_bodies,
+                    self.config.solver_iterations,
+                    &mut timings,
+                );
+            }
+            // Final sub-step: download results
+            let results = self.gpu_pipeline.step_fast_timed(
+                num_bodies,
+                self.config.solver_iterations,
+                &mut timings,
+            );
+            self.collision_events.clear();
+            let pair_events = self
+                .contact_persistence
+                .update_pairs(&self.gpu_pipeline.download_contact_pairs());
+            self.collision_events.extend(pair_events);
+            results
+        };
 
-        let t_upload = Instant::now();
-        self.gpu_pipeline.upload(
-            &compact_states,
-            &compact_prev_states,
-            &compact_props,
-            &self.spheres,
-            &self.boxes,
-            &self.capsules,
-            &self.convex_hulls,
-            &self.convex_vertices,
-            &self.planes,
-            &self.compound_shapes,
-            &self.compound_children,
-            &self.compound_shapes_cpu,
-            self.config.gravity,
-            self.config.dt,
-            self.config.solver_iterations,
-            self.config.beta,
-            self.config.k_start,
-            self.config.warmstart_decay,
-        );
-        self.gpu_pipeline.set_quality_params(
-            self.config.contact_offset,
-            self.config.restitution_threshold,
-            self.config.penetration_slop,
-        );
-        timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
-
-        let prev = self.contact_persistence.prev_contacts();
-        let warm = if prev.is_empty() { None } else { Some(prev) };
-        let (results, new_contacts) = self.gpu_pipeline.step_with_contacts_timed(
-            num_bodies,
-            self.config.solver_iterations,
-            warm,
-            &mut timings,
-        );
-
-        let events = self.contact_persistence.update(&new_contacts);
-        self.collision_events.extend(events);
-
-        for (slot, &orig) in alive_indices.iter().enumerate() {
+        for (slot, &orig) in self.gpu_compact_indices.iter().enumerate() {
             if slot < results.len() {
                 self.prev_warmstart_states[orig] = compact_states[slot];
                 self.states[orig] = results[slot];
             }
         }
 
+        self.gpu_uploaded = false;
+        self.gpu_cpu_sync_pending = false;
         self.last_step_timings = timings;
+    }
+
+    pub fn step_for_gpu_render(&mut self) -> gpu::GpuRenderFrame3D {
+        use std::time::Instant;
+
+        let mut timings = rubble_gpu::StepTimingsMs::default();
+        if self.body_count() == 0 {
+            self.gpu_pipeline.build_render_instances(0);
+            self.last_step_timings = timings;
+            return self.gpu_pipeline.render_frame();
+        }
+
+        if !self.gpu_uploaded {
+            let t_upload = Instant::now();
+            self.upload_world_state();
+            timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
+        }
+
+        let has_unsupported_compounds = self
+            .gpu_compact_indices
+            .iter()
+            .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }))
+            && self.gpu_compact_indices.len() > 1;
+        assert!(
+            !has_unsupported_compounds,
+            "GPU render path currently supports non-compound 3D happy-path scenes"
+        );
+
+        let num_bodies = self.gpu_compact_indices.len() as u32;
+        let sub_steps = self.config.sub_steps.max(1);
+        if sub_steps > 1 {
+            let sub_dt = self.config.dt / sub_steps as f32;
+            self.gpu_pipeline.set_sim_dt(sub_dt);
+        }
+        for _sub in 0..sub_steps {
+            self.gpu_pipeline.step_fast_device_timed(
+                num_bodies,
+                self.config.solver_iterations,
+                &mut timings,
+            );
+        }
+        let t_render_extract = Instant::now();
+        self.gpu_pipeline.build_render_instances(num_bodies);
+        timings.extract_ms += t_render_extract.elapsed().as_secs_f32() * 1000.0;
+        self.collision_events.clear();
+        self.gpu_cpu_sync_pending = true;
+        self.last_step_timings = timings;
+        self.gpu_pipeline.render_frame()
     }
 
     /// Advance the simulation by one time step (async, for WASM/WebGPU).
@@ -971,13 +1201,18 @@ impl World {
             .collect();
         let compact_props: Vec<RigidBodyProps3D> =
             alive_indices.iter().map(|&i| self.props[i]).collect();
+        let compact_render: Vec<gpu::RenderBodyMeta3D> = alive_indices
+            .iter()
+            .map(|&i| self.render_meta_for_slot(i))
+            .collect();
         let num_bodies = compact_states.len() as u32;
 
         let t_upload = Instant::now();
-        self.gpu_pipeline.upload(
+        self.gpu_pipeline.upload_with_render_bodies(
             &compact_states,
             &compact_prev_states,
             &compact_props,
+            &compact_render,
             &self.spheres,
             &self.boxes,
             &self.capsules,
@@ -1001,20 +1236,56 @@ impl World {
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
-        let prev = self.contact_persistence.prev_contacts();
-        let warm = if prev.is_empty() { None } else { Some(prev) };
-        let (results, new_contacts) = self
-            .gpu_pipeline
-            .step_with_contacts_async(
-                num_bodies,
-                self.config.solver_iterations,
-                warm,
-                &mut timings,
-            )
-            .await;
+        let sub_steps = self.config.sub_steps.max(1);
+        if sub_steps > 1 {
+            let sub_dt = self.config.dt / sub_steps as f32;
+            self.gpu_pipeline.set_sim_dt(sub_dt);
+        }
 
-        let events = self.contact_persistence.update(&new_contacts);
-        self.collision_events.extend(events);
+        let has_compounds = alive_indices
+            .iter()
+            .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }));
+
+        let results = if has_compounds && alive_indices.len() > 1 {
+            let prev = self.contact_persistence.prev_contacts();
+            let warm = if prev.is_empty() { None } else { Some(prev) };
+            let (results, new_contacts) = self
+                .gpu_pipeline
+                .step_with_contacts_async(
+                    num_bodies,
+                    self.config.solver_iterations,
+                    warm,
+                    &mut timings,
+                )
+                .await;
+
+            let events = self.contact_persistence.update(&new_contacts);
+            self.collision_events.extend(events);
+            results
+        } else {
+            // Run intermediate sub-steps on device (no download)
+            for _sub in 0..sub_steps - 1 {
+                self.gpu_pipeline
+                    .step_fast_device_async(
+                        num_bodies,
+                        self.config.solver_iterations,
+                        &mut timings,
+                    )
+                    .await;
+            }
+            // Final sub-step: download results
+            let results = self
+                .gpu_pipeline
+                .step_fast_async(
+                    num_bodies,
+                    self.config.solver_iterations,
+                    &mut timings,
+                )
+                .await;
+
+            self.collision_events.clear();
+            results
+        };
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
@@ -1023,6 +1294,8 @@ impl World {
             }
         }
 
+        self.gpu_uploaded = false;
+        self.gpu_cpu_sync_pending = false;
         self.last_step_timings = timings;
     }
 
@@ -1033,6 +1306,7 @@ impl World {
     /// The original `inv_mass` is saved in `props.inv_inertia_row0.w`
     /// (padding) so it can be restored when the body is made dynamic again.
     pub fn set_body_kinematic(&mut self, handle: BodyHandle, kinematic: bool) {
+        self.sync_body_states_from_gpu();
         if !self.allocator.is_valid(handle) {
             return;
         }
@@ -1056,6 +1330,7 @@ impl World {
                 self.props[idx].inv_inertia_row0.w = 0.0;
             }
         }
+        self.mark_gpu_dirty();
     }
 
     /// Drain collision events from the last step.

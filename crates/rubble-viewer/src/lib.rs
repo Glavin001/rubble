@@ -5,13 +5,15 @@ pub mod renderer;
 
 use camera::{Camera2D, OrbitCamera};
 use glam::{Quat, Vec2, Vec3};
-use renderer::{model_matrix, palette_color, static_color, DrawList, InstanceData, Renderer};
+use renderer::{model_matrix, palette_color, DrawList, InstanceData, Renderer};
+use rubble_gpu::GpuContext;
 use rubble_math::BodyHandle;
 use std::{sync::Arc, time::Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
+use winit::dpi::PhysicalPosition;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 const CONTROLS_3D: &[&str] = &[
@@ -22,11 +24,37 @@ const CONTROLS_3D: &[&str] = &[
 
 const CONTROLS_2D: &[&str] = &["Pan view: left drag", "Zoom view: mouse wheel"];
 
+fn physical_pos_to_egui_pos(window: &Window, egui_ctx: &egui::Context, pos: PhysicalPosition<f64>) -> egui::Pos2 {
+    let ppp = egui_winit::pixels_per_point(egui_ctx, window);
+    egui::pos2(pos.x as f32 / ppp, pos.y as f32 / ppp)
+}
+
+/// Hit-test the viewer overlay using the **last laid-out** area rect plus the **current** cursor
+/// position. `Context::is_pointer_over_egui()` is tied to the last `run_ui` pass and is often stale
+/// between frames, which incorrectly blocks all camera input.
+fn viewer_ui_blocks_camera(window: &Window, egui_ctx: &egui::Context, pos: PhysicalPosition<f64>) -> bool {
+    if egui_ctx.egui_is_using_pointer() {
+        return true;
+    }
+    let p = physical_pos_to_egui_pos(window, egui_ctx, pos);
+    egui_ctx
+        .memory(|m| m.area_rect(overlay::viewer_overlay_area_id()))
+        .is_some_and(|rect| rect.contains(p))
+}
+
+fn physical_cursor_pos(
+    last_mouse: Option<(f64, f64)>,
+    event_pos: Option<PhysicalPosition<f64>>,
+) -> Option<PhysicalPosition<f64>> {
+    event_pos.or_else(|| last_mouse.map(|(x, y)| PhysicalPosition::new(x, y)))
+}
+
 // ---------------------------------------------------------------------------
 // Shape tracking (mirrors rubble-wasm bookkeeping)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum ShapeInfo3D {
     Sphere { radius: f32 },
     Box { half_extents: Vec3 },
@@ -105,20 +133,26 @@ fn shape_info_2d(shape: &rubble2d::ShapeDesc2D) -> ShapeInfo2D {
 }
 
 fn build_world_3d(
+    gpu_ctx: GpuContext,
+    sphere_index_count: u32,
+    cube_index_count: u32,
+    capsule_index_count: u32,
     gravity: Vec3,
     scene: &Scene3D,
 ) -> (rubble3d::World, Vec<BodyHandle>, Vec<ShapeInfo3D>) {
-    let config = rubble3d::SimConfig {
+    let mut config = rubble3d::SimConfig {
         gravity,
         ..Default::default()
     };
-    let mut world = rubble3d::World::new(config).expect("GPU physics init failed");
+    config.max_bodies = config.max_bodies.max(scene.descs.len());
+    let mut world = rubble3d::World::new_with_context(config, gpu_ctx);
     let mut handles = Vec::with_capacity(scene.descs.len());
     let mut shapes = Vec::with_capacity(scene.descs.len());
     for (desc, shape) in &scene.descs {
         handles.push(world.add_body(desc));
         shapes.push(shape.clone());
     }
+    world.configure_gpu_render_meshes(sphere_index_count, cube_index_count, capsule_index_count);
     (world, handles, shapes)
 }
 
@@ -269,6 +303,7 @@ impl Viewer3D {
 
 struct State3D {
     renderer: Renderer,
+    gpu_ctx: GpuContext,
     window: Arc<Window>,
     world: rubble3d::World,
     handles: Vec<BodyHandle>,
@@ -276,7 +311,6 @@ struct State3D {
     scene_names: Vec<String>,
     current_scene: usize,
     camera: OrbitCamera,
-    draw_list: DrawList,
     mouse_pressed: bool,
     right_pressed: bool,
     last_mouse: Option<(f64, f64)>,
@@ -307,11 +341,18 @@ impl ApplicationHandler for App3D {
                 )
                 .expect("Failed to create window"),
         );
-        let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let (renderer, gpu_ctx) =
+            pollster::block_on(Renderer::new_with_shared_context(window.clone()));
 
         let current_scene = self.viewer.initial_scene;
-        let (world, handles, shapes) =
-            build_world_3d(self.viewer.gravity, &self.viewer.scenes[current_scene]);
+        let (world, handles, shapes) = build_world_3d(
+            gpu_ctx.clone(),
+            renderer.sphere_mesh.index_count,
+            renderer.cube_mesh.index_count,
+            renderer.capsule_mesh.index_count,
+            self.viewer.gravity,
+            &self.viewer.scenes[current_scene],
+        );
         let scene_names = self
             .viewer
             .scenes
@@ -331,6 +372,7 @@ impl ApplicationHandler for App3D {
 
         self.state = Some(State3D {
             renderer,
+            gpu_ctx,
             window,
             world,
             handles,
@@ -338,7 +380,6 @@ impl ApplicationHandler for App3D {
             scene_names,
             current_scene,
             camera: OrbitCamera::default(),
-            draw_list: DrawList::default(),
             mouse_pressed: false,
             right_pressed: false,
             last_mouse: None,
@@ -370,18 +411,29 @@ impl App3D {
         };
 
         let _ = state.egui_state.on_window_event(&state.window, &event);
-        let pointer_over_ui = state.egui_ctx.is_pointer_over_egui();
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                let clamped = winit::dpi::PhysicalSize::new(
+                    size.width.min(state.renderer.max_texture_dimension_2d),
+                    size.height.min(state.renderer.max_texture_dimension_2d),
+                );
+                if clamped != size {
+                    let _ = state.window.request_inner_size(clamped);
+                    return;
+                }
                 state.renderer.resize(size.width, size.height);
             }
             WindowEvent::MouseInput {
                 state: btn, button, ..
             } => {
                 let pressed = btn == ElementState::Pressed;
-                if !pressed || !pointer_over_ui {
+                let pos = physical_cursor_pos(state.last_mouse, None);
+                let block = pos
+                    .map(|p| viewer_ui_blocks_camera(&state.window, &state.egui_ctx, p))
+                    .unwrap_or(false);
+                if !pressed || !block {
                     match button {
                         MouseButton::Left => state.mouse_pressed = pressed,
                         MouseButton::Right | MouseButton::Middle => state.right_pressed = pressed,
@@ -405,18 +457,30 @@ impl App3D {
                 }
                 state.last_mouse = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } if !pointer_over_ui => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.3,
-                };
-                state.camera.zoom(scroll);
+            WindowEvent::MouseWheel { delta, .. } => {
+                let pos = physical_cursor_pos(state.last_mouse, None);
+                let block = pos
+                    .map(|p| viewer_ui_blocks_camera(&state.window, &state.egui_ctx, p))
+                    .unwrap_or(false);
+                if !block {
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => {
+                            (p.y as f32 / 120.0).clamp(-4.0, 4.0)
+                        }
+                    };
+                    state.camera.zoom(scroll);
+                }
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
                     && event.logical_key == Key::Character("r".into()) =>
             {
                 let (world, handles, shapes) = build_world_3d(
+                    state.gpu_ctx.clone(),
+                    state.renderer.sphere_mesh.index_count,
+                    state.renderer.cube_mesh.index_count,
+                    state.renderer.capsule_mesh.index_count,
                     self.viewer.gravity,
                     &self.viewer.scenes[state.current_scene],
                 );
@@ -431,47 +495,8 @@ impl App3D {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                state.world.step();
+                let render_frame = state.world.step_for_gpu_render();
                 let timings = *state.world.last_step_timings();
-
-                state.draw_list.clear();
-                for (i, handle) in state.handles.iter().enumerate() {
-                    let pos = state.world.get_position(*handle).unwrap_or(Vec3::ZERO);
-                    let rot = state.world.get_rotation(*handle).unwrap_or(Quat::IDENTITY);
-                    let is_static = matches!(state.shapes[i], ShapeInfo3D::Plane);
-                    let color = if is_static {
-                        static_color()
-                    } else {
-                        palette_color(i)
-                    };
-
-                    match &state.shapes[i] {
-                        ShapeInfo3D::Sphere { radius } => {
-                            let s = Vec3::splat(*radius);
-                            state.draw_list.spheres.push(InstanceData {
-                                model: model_matrix(pos, rot, s).to_cols_array_2d(),
-                                color,
-                            });
-                        }
-                        ShapeInfo3D::Box { half_extents } => {
-                            state.draw_list.cubes.push(InstanceData {
-                                model: model_matrix(pos, rot, *half_extents).to_cols_array_2d(),
-                                color,
-                            });
-                        }
-                        ShapeInfo3D::Capsule {
-                            half_height,
-                            radius,
-                        } => {
-                            let s = Vec3::new(*radius, *half_height, *radius);
-                            state.draw_list.capsules.push(InstanceData {
-                                model: model_matrix(pos, rot, s).to_cols_array_2d(),
-                                color,
-                            });
-                        }
-                        ShapeInfo3D::Plane => {}
-                    }
-                }
 
                 state.frame_count += 1;
                 let elapsed = state.fps_instant.elapsed();
@@ -499,8 +524,14 @@ impl App3D {
                     );
                 });
                 if selected_scene != state.current_scene || reset_requested {
-                    let (world, handles, shapes) =
-                        build_world_3d(self.viewer.gravity, &self.viewer.scenes[selected_scene]);
+                    let (world, handles, shapes) = build_world_3d(
+                        state.gpu_ctx.clone(),
+                        state.renderer.sphere_mesh.index_count,
+                        state.renderer.cube_mesh.index_count,
+                        state.renderer.capsule_mesh.index_count,
+                        self.viewer.gravity,
+                        &self.viewer.scenes[selected_scene],
+                    );
                     state.world = world;
                     state.handles = handles;
                     state.shapes = shapes;
@@ -513,9 +544,8 @@ impl App3D {
                     .egui_ctx
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let size = state.window.inner_size();
                 let sd = egui_wgpu::ScreenDescriptor {
-                    size_in_pixels: [size.width, size.height],
+                    size_in_pixels: [state.renderer.config.width, state.renderer.config.height],
                     pixels_per_point: full_output.pixels_per_point,
                 };
 
@@ -523,10 +553,12 @@ impl App3D {
                 let eye = state.camera.eye();
 
                 let t_render = Instant::now();
-                state.renderer.render_3d(
+                state.renderer.render_3d_gpu(
                     vp,
                     eye,
-                    &state.draw_list,
+                    render_frame.spheres,
+                    render_frame.cubes,
+                    render_frame.capsules,
                     true,
                     &primitives,
                     &full_output.textures_delta,
@@ -754,18 +786,29 @@ impl App2D {
         };
 
         let _ = state.egui_state.on_window_event(&state.window, &event);
-        let pointer_over_ui = state.egui_ctx.is_pointer_over_egui();
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                let clamped = winit::dpi::PhysicalSize::new(
+                    size.width.min(state.renderer.max_texture_dimension_2d),
+                    size.height.min(state.renderer.max_texture_dimension_2d),
+                );
+                if clamped != size {
+                    let _ = state.window.request_inner_size(clamped);
+                    return;
+                }
                 state.renderer.resize(size.width, size.height);
             }
             WindowEvent::MouseInput {
                 state: btn, button, ..
             } => {
                 let pressed = btn == ElementState::Pressed;
-                if (!pressed || !pointer_over_ui) && button == MouseButton::Left {
+                let pos = physical_cursor_pos(state.last_mouse, None);
+                let block = pos
+                    .map(|p| viewer_ui_blocks_camera(&state.window, &state.egui_ctx, p))
+                    .unwrap_or(false);
+                if (!pressed || !block) && button == MouseButton::Left {
                     state.mouse_pressed = pressed;
                 }
                 if !pressed {
@@ -782,12 +825,20 @@ impl App2D {
                 }
                 state.last_mouse = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } if !pointer_over_ui => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.3,
-                };
-                state.camera.zoom_by(scroll);
+            WindowEvent::MouseWheel { delta, .. } => {
+                let pos = physical_cursor_pos(state.last_mouse, None);
+                let block = pos
+                    .map(|p| viewer_ui_blocks_camera(&state.window, &state.egui_ctx, p))
+                    .unwrap_or(false);
+                if !block {
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => {
+                            (p.y as f32 / 120.0).clamp(-4.0, 4.0)
+                        }
+                    };
+                    state.camera.zoom_by(scroll);
+                }
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
@@ -887,9 +938,8 @@ impl App2D {
                     .egui_ctx
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let size = state.window.inner_size();
                 let sd = egui_wgpu::ScreenDescriptor {
-                    size_in_pixels: [size.width, size.height],
+                    size_in_pixels: [state.renderer.config.width, state.renderer.config.height],
                     pixels_per_point: full_output.pixels_per_point,
                 };
 

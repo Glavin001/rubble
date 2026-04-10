@@ -97,6 +97,42 @@ fn sustained_500_steps_with_contacts() {
     }
 }
 
+#[test]
+fn default_step_uses_gpu_only_fast_path_timings() {
+    let mut world = gpu_world!(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 60.0,
+        solver_iterations: 8,
+        ..Default::default()
+    });
+
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -1.0, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(20.0, 1.0, 20.0),
+        },
+        ..Default::default()
+    });
+
+    let body = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, 2.0, 0.0),
+        mass: 1.0,
+        shape: ShapeDesc::Sphere { radius: 0.5 },
+        ..Default::default()
+    });
+
+    step_n(&mut world, 30);
+
+    let pos = world.get_position(body).unwrap();
+    assert!(pos.is_finite(), "Body diverged in fast-path step: {pos}");
+    assert_eq!(
+        world.last_step_timings().contact_fetch_ms,
+        0.0,
+        "Default 3D step should stay on the no-readback fast path"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Scaling tests
 // ---------------------------------------------------------------------------

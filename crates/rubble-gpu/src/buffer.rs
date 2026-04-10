@@ -6,27 +6,39 @@ pub struct GpuBuffer<T: bytemuck::Pod> {
     buffer: wgpu::Buffer,
     capacity: u32,
     len: u32,
+    usage: wgpu::BufferUsages,
     _marker: PhantomData<T>,
 }
 
 impl<T: bytemuck::Pod> GpuBuffer<T> {
     /// Create a new GPU buffer with the given element capacity.
     pub fn new(ctx: &GpuContext, capacity: usize) -> Self {
+        Self::new_with_usage(ctx, capacity, wgpu::BufferUsages::empty())
+    }
+
+    pub fn new_with_usage(
+        ctx: &GpuContext,
+        capacity: usize,
+        extra_usage: wgpu::BufferUsages,
+    ) -> Self {
         let byte_size = (capacity * std::mem::size_of::<T>()) as u64;
         // wgpu requires non-zero buffer size
         let byte_size = byte_size.max(4);
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST
+            | extra_usage;
         let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GpuBuffer"),
             size: byte_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
+            usage,
             mapped_at_creation: false,
         });
         Self {
             buffer,
             capacity: capacity as u32,
             len: 0,
+            usage,
             _marker: PhantomData,
         }
     }
@@ -196,6 +208,32 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, byte_len);
         ctx.queue.submit(Some(encoder.finish()));
 
+        Self::map_staging_async(ctx, staging, byte_len).await
+    }
+
+    /// Record a copy from this buffer to a staging buffer on the given encoder.
+    /// Returns the staging buffer to be mapped later with `map_staging_async`.
+    /// This avoids a separate queue.submit() for the copy — the caller batches it
+    /// into an existing encoder.
+    #[cfg(target_arch = "wasm32")]
+    pub fn record_copy_to_staging(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<(wgpu::Buffer, u64)> {
+        if self.len == 0 {
+            return None;
+        }
+        let byte_len = (self.len as usize * std::mem::size_of::<T>()) as u64;
+        let staging = ctx.acquire_staging_buffer(byte_len, "GpuBuffer staging (batched)");
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, byte_len);
+        Some((staging, byte_len))
+    }
+
+    /// Await an already-submitted staging buffer copy. Call this after the
+    /// encoder containing the copy has been submitted.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn map_staging_async(ctx: &GpuContext, staging: wgpu::Buffer, byte_len: u64) -> Vec<T> {
         let slice = staging.slice(..byte_len);
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done_clone = done.clone();
@@ -209,8 +247,6 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         }
 
         let mapped = slice.get_mapped_range();
-        // In WebGPU/WASM, mapped ranges may not be aligned for T.
-        // Allocate a properly-aligned Vec<T> and copy bytes into it.
         let elem_count = mapped.len() / std::mem::size_of::<T>();
         let mut result = vec![T::zeroed(); elem_count];
         let dst_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut result);
@@ -415,9 +451,7 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         let new_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GpuBuffer (grown)"),
             size: new_byte_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
+            usage: self.usage,
             mapped_at_creation: false,
         });
 
@@ -556,6 +590,40 @@ impl GpuAtomicCounter {
         staging.unmap();
         ctx.release_staging_buffer(staging);
         value
+    }
+
+    pub fn read_triplet(
+        ctx: &GpuContext,
+        a: &GpuAtomicCounter,
+        b: &GpuAtomicCounter,
+        c: &GpuAtomicCounter,
+    ) -> [u32; 3] {
+        let staging = ctx.acquire_staging_buffer(12, "GpuAtomicCounter triplet staging");
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&a.buffer, 0, &staging, 0, 4);
+        encoder.copy_buffer_to_buffer(&b.buffer, 0, &staging, 4, 4);
+        encoder.copy_buffer_to_buffer(&c.buffer, 0, &staging, 8, 4);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..12);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+
+        let mapped = slice.get_mapped_range();
+        let values = [
+            *bytemuck::from_bytes::<u32>(&mapped[0..4]),
+            *bytemuck::from_bytes::<u32>(&mapped[4..8]),
+            *bytemuck::from_bytes::<u32>(&mapped[8..12]),
+        ];
+        drop(mapped);
+        staging.unmap();
+        ctx.release_staging_buffer(staging);
+        values
     }
 
     /// Read the counter value asynchronously (required for WASM/WebGPU).
