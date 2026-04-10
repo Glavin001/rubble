@@ -13,6 +13,8 @@ interface RubbleTestHooks {
   stopLoop?: () => Promise<void>;
   /** Benchmark-only: run one physics step without rendering. Returns 7-float timings. */
   benchStep?: () => Promise<number[]>;
+  /** Run one full animation loop iteration (step + sync + render). */
+  loopStep?: () => Promise<void>;
 }
 
 interface Window {

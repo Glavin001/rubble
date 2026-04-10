@@ -2639,48 +2639,9 @@ impl GpuPipeline {
         self.pair_count.reset(&self.ctx);
 
         let t0 = Instant::now();
-        // Batch predict + snapshot + aabb into a single encoder/submit
-        {
-            let _ = self.predict_bind_group();
-            let _ = self.aabb_bind_group();
-            self.prev_step_states
-                .grow_if_needed(&self.ctx, num_bodies as usize);
-            self.prev_step_states.set_len(num_bodies);
-
-            let mut encoder = self
-                .ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("predict_snapshot_aabb_batch"),
-                });
-            // predict
-            Self::record_pass(
-                &mut encoder,
-                "predict",
-                &self.predict_kernel,
-                self.predict_bg_cache.bind_group.as_ref().unwrap(),
-                num_bodies,
-            );
-            // snapshot prev states (buffer copy)
-            let byte_len =
-                num_bodies as u64 * std::mem::size_of::<RigidBodyState3D>() as u64;
-            encoder.copy_buffer_to_buffer(
-                self.old_states.buffer(),
-                0,
-                self.prev_step_states.buffer(),
-                0,
-                byte_len,
-            );
-            // aabb
-            Self::record_pass(
-                &mut encoder,
-                "aabb",
-                &self.aabb_kernel,
-                self.aabb_bg_cache.bind_group.as_ref().unwrap(),
-                num_bodies,
-            );
-            self.ctx.queue.submit(Some(encoder.finish()));
-        }
+        self.dispatch_predict(num_bodies);
+        self.snapshot_prev_step_states(num_bodies);
+        self.dispatch_aabb(num_bodies);
         timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
 
         let mut broadphase = BroadphaseBreakdownMs::default();
@@ -2794,6 +2755,30 @@ impl GpuPipeline {
 
         // Read contact count — single GPU→CPU sync point per frame
         let contact_count_val = self.contact_count.read_async(&self.ctx).await;
+
+        // Handle contact buffer overflow: if narrowphase generated more contacts
+        // than the buffer can hold, grow the buffer and re-dispatch.
+        // Without this, contacts are silently dropped, causing solver instability.
+        let capacity = self.contacts.capacity();
+        let contact_count_val = if contact_count_val > capacity {
+            let new_cap = (contact_count_val as usize) * 2;
+            self.contacts.grow_if_needed(&self.ctx, new_cap);
+            self.contact_count.reset(&self.ctx);
+            if requires_cpu_pair_stage {
+                self.dispatch_narrowphase(num_bodies, pair_count);
+            } else if pair_count > 0 {
+                let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
+                self.dispatch_narrowphase_with_source(
+                    num_bodies,
+                    pair_count,
+                    &pair_buffer,
+                );
+            }
+            self.contact_count.read_async(&self.ctx).await
+        } else {
+            contact_count_val
+        };
+
         timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
 
         (cpu_compound_contacts, contact_count_val)
@@ -2888,36 +2873,22 @@ impl GpuPipeline {
         timings.contact_fetch_ms = 0.0;
         let t_solve = Instant::now();
 
-        let staging = if contact_count > 0 {
+        if contact_count > 0 {
             self.contacts.set_len(contact_count);
             self.dispatch_gpu_warmstart(contact_count);
-            // run_colored_solve_device_async batches solver + extract + staging copy
-            let staging = self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
+            self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
                 .await;
             self.swap_contact_buffers(contact_count);
-            staging
         } else {
             self.apply_free_motion(num_bodies, &[]);
             self.prev_contact_count = 0;
-            // Extract must be dispatched separately when solver didn't run
-            self.dispatch_extract(num_bodies);
-            self.body_states.current_mut().set_len(num_bodies);
-            None
-        };
+        }
         timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let t_ext = Instant::now();
-        let states = if let Some((staging_buf, byte_len)) = staging {
-            // Staging copy already submitted in solver batch — just map it
-            let result = rubble_gpu::GpuBuffer::<RigidBodyState3D>::map_staging_async(
-                &self.ctx, staging_buf, byte_len,
-            ).await;
-            result
-        } else {
-            // Fallback: full download (creates its own encoder)
-            self.body_states.current_mut().set_len(num_bodies);
-            self.body_states.download_async(&self.ctx).await
-        };
+        self.dispatch_extract(num_bodies);
+        self.body_states.current_mut().set_len(num_bodies);
+        let states = self.body_states.download_async(&self.ctx).await;
         self.body_states.swap();
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
 
@@ -2951,17 +2922,17 @@ impl GpuPipeline {
         if contact_count > 0 {
             self.contacts.set_len(contact_count);
             self.dispatch_gpu_warmstart(contact_count);
-            let _ = self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
+            self.run_colored_solve_device_async(num_bodies, solver_iterations, contact_count)
                 .await;
             self.swap_contact_buffers(contact_count);
         } else {
             self.apply_free_motion(num_bodies, &[]);
             self.prev_contact_count = 0;
-            self.dispatch_extract(num_bodies);
         }
         timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let t_ext = Instant::now();
+        self.dispatch_extract(num_bodies);
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
     }
 
@@ -2969,21 +2940,27 @@ impl GpuPipeline {
     /// Operates on GPU-resident contacts (no CPU download/upload).
     /// Uses GPU graph coloring with cross-frame caching to minimize GPU→CPU syncs.
     /// Full coloring runs every COLOR_CACHE_INTERVAL frames; cached groups reused otherwise.
-    /// Also records the body state copy-to-staging on the same encoder, avoiding
-    /// a separate queue.submit() for the download. Returns the staging handle.
     #[cfg(target_arch = "wasm32")]
     async fn run_colored_solve_device_async(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
         contact_count: u32,
-    ) -> Option<(wgpu::Buffer, u64)> {
+    ) {
         const COLOR_CACHE_INTERVAL: u32 = 8;
 
         if contact_count == 0 {
-            return None;
+            return;
         }
         self.dispatch_gpu_solve_graph(num_bodies, contact_count);
+        let _ = self.free_motion_bind_group();
+        let free_motion_bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
+        self.run_pass(
+            "free_motion",
+            &self.free_motion_kernel,
+            free_motion_bg,
+            num_bodies,
+        );
 
         // Reuse cached color groups when available; refresh periodically
         self.color_cache_frame += 1;
@@ -2995,28 +2972,24 @@ impl GpuPipeline {
             self.cached_color_groups = Some(groups.clone());
             groups
         } else {
+            // Reuse cached color groups AND body_order from previous coloring.
+            // body_order is still on GPU from the last coloring dispatch.
+            // The graph adjacency is rebuilt each frame (dispatch_gpu_solve_graph),
+            // but the color assignment is approximately stable frame-to-frame.
             self.cached_color_groups.clone().unwrap()
         };
 
         self.write_solve_ranges(&color_groups);
         self.sync_primal_bind_groups(color_groups.len());
-        let _ = self.free_motion_bind_group();
         let _ = self.dual_bind_group();
-        let _ = self.extract_bind_group();
         let primal_bind_groups = &self.primal_bg_cache.bind_groups;
         let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
-        let free_motion_bg = self.free_motion_bg_cache.bind_group.as_ref().unwrap();
-        let extract_bg = self.extract_bg_cache.bind_group.as_ref().unwrap();
-        // Batch free_motion + solver iterations + extract into a single encoder
         let mut encoder = self
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("avbd_solve_batch_3d"),
             });
-        // free_motion pass
-        Self::record_pass(&mut encoder, "free_motion", &self.free_motion_kernel, free_motion_bg, num_bodies);
-        // solver iterations
         for _ in 0..solver_iterations {
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -3050,13 +3023,7 @@ impl GpuPipeline {
                 );
             }
         }
-        // extract pass — appended to the same encoder to avoid an extra submit
-        Self::record_pass(&mut encoder, "extract_vel", &self.extract_kernel, extract_bg, num_bodies);
-        // Copy body states to staging buffer on the same encoder (saves 1 submit)
-        self.body_states.current_mut().set_len(num_bodies);
-        let staging = self.body_states.current().record_copy_to_staging(&self.ctx, &mut encoder);
         self.ctx.queue.submit(Some(encoder.finish()));
-        staging
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -4473,26 +4440,16 @@ impl GpuPipeline {
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        Self::record_pass(&mut encoder, label, kernel, bind_group, thread_count);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(kernel.pipeline());
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(thread_count, WORKGROUP_SIZE), 1, 1);
+        }
         self.ctx.queue.submit(Some(encoder.finish()));
-    }
-
-    /// Record a compute pass onto an existing encoder without submitting.
-    /// Use this to batch multiple passes into a single queue.submit() call.
-    fn record_pass(
-        encoder: &mut wgpu::CommandEncoder,
-        label: &str,
-        kernel: &ComputeKernel,
-        bind_group: &wgpu::BindGroup,
-        thread_count: u32,
-    ) {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some(label),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(kernel.pipeline());
-        pass.set_bind_group(0, bind_group, &[]);
-        pass.dispatch_workgroups(round_up_workgroups(thread_count, WORKGROUP_SIZE), 1, 1);
     }
 }
 

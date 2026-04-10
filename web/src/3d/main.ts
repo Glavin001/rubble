@@ -65,8 +65,11 @@ let frameInFlight = false;
 let sceneLoading = false;
 let firstStepLoggedFor: string | null = null;
 
+const forceWebGL = new URL(window.location.href).searchParams.get("webgl") === "1";
+
 async function initRenderer() {
   try {
+    if (forceWebGL) throw new Error("forced WebGL");
     const webgpuRenderer = new WebGPURenderer({ antialias: true });
     await webgpuRenderer.init();
     renderer = webgpuRenderer;
@@ -371,7 +374,11 @@ function updateTimingsOverlay() {
 let cachedTransforms = new Float32Array(0);
 let cachedTimings = new Float32Array(7);
 
+// URL parameter ?norender=1 disables rendering for stability diagnostics
+const noRender = new URL(window.location.href).searchParams.get("norender") === "1";
+
 async function renderScene() {
+  if (noRender) return;
   if ("isWebGPURenderer" in renderer && renderer.isWebGPURenderer) {
     await renderer.renderAsync(scene, camera);
     return;
@@ -388,6 +395,21 @@ async function loop_() {
   try {
   const stepStart = performance.now();
   await world.step();
+
+  // Stability diagnostic: detect the first step where bodies go unstable
+  if (stepCount < 200) {
+    syncTransformCache();
+    const n = cachedTransforms.length / 7;
+    for (let i = 1; i < n; i++) {
+      const y = cachedTransforms[i * 7 + 1];
+      if (y > 20 || y < -2) {
+        console.warn(
+          `[STABILITY] Body ${i} at y=${y.toFixed(2)} on step ${stepCount + 1}`,
+        );
+      }
+    }
+  }
+
   if (firstStepLoggedFor) {
     const elapsed = performance.now() - stepStart;
     console.log(
@@ -659,6 +681,7 @@ async function main() {
   });
 
   // Expose test hooks
+  let loopRunning = true;
   window.__rubble_test = {
     ready: true,
     stepCount: 0,
@@ -668,7 +691,7 @@ async function main() {
     error: null,
     // Benchmark-only: stop the render loop and wait for any in-flight frame.
     stopLoop: async () => {
-      renderer.setAnimationLoop(null);
+      loopRunning = false;
       // Wait for any in-flight frame to finish
       while (frameInFlight) {
         await new Promise((r) => setTimeout(r, 10));
@@ -680,17 +703,109 @@ async function main() {
     benchStep: async () => {
       await world.step();
       stepCount++;
+      syncTransformCache();
       world.copy_last_step_timings_into(cachedTimings);
+      controls?.update();
+      updateTransforms();
+      updateTimingsOverlay();
       window.__rubble_test!.stepCount = stepCount;
+      window.__rubble_test!.bodyCount = world.body_count();
       window.__rubble_test!.lastStepTimingsMs = cachedTimings;
       return Array.from(cachedTimings);
+    },
+    loopStep: async () => {
+      await loop_();
     },
   };
 
   document.getElementById("loading")!.style.display = "none";
-  await renderer.setAnimationLoop(() => {
-    void loop_();
-  });
+
+  // Main animation loop: step physics, sync transforms, render.
+  // Scheduling next frame after current completes avoids re-entrancy.
+  async function animStep() {
+    const stepStart = performance.now();
+    await world.step();
+    if (firstStepLoggedFor) {
+      const elapsed = performance.now() - stepStart;
+      console.log(
+        `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
+      );
+      firstStepLoggedFor = null;
+      const loadingEl = document.getElementById("loading");
+      if (loadingEl) loadingEl.style.display = "none";
+    }
+    stepCount++;
+    syncTransformCache();
+    world.copy_last_step_timings_into(cachedTimings);
+    const t0 = performance.now();
+    controls?.update();
+    updateTransforms();
+    await renderScene();
+    lastRenderMs = performance.now() - t0;
+    frameCount++;
+    updateTimingsOverlay();
+    const now = performance.now();
+    if (now - lastFpsTime >= 1000) {
+      fpsEl.textContent = `FPS: ${frameCount}`;
+      bodiesEl.textContent = `Bodies: ${world.body_count()}`;
+      frameCount = 0;
+      lastFpsTime = now;
+    }
+    if (window.__rubble_test) {
+      window.__rubble_test.stepCount = stepCount;
+      window.__rubble_test.bodyCount = world.body_count();
+      window.__rubble_test.lastStepTimingsMs = cachedTimings;
+    }
+  }
+
+  // Animation loop
+  async function stepTick() {
+    if (!loopRunning || frameInFlight) return;
+    frameInFlight = true;
+    try {
+      const stepStart = performance.now();
+      await world.step();
+      if (firstStepLoggedFor) {
+        const elapsed = performance.now() - stepStart;
+        console.log(
+          `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
+        );
+        firstStepLoggedFor = null;
+        const loadingEl = document.getElementById("loading");
+        if (loadingEl) loadingEl.style.display = "none";
+      }
+      stepCount++;
+      syncTransformCache();
+      world.copy_last_step_timings_into(cachedTimings);
+      controls?.update();
+      updateTransforms();
+      await renderScene();
+      lastRenderMs = performance.now() - stepStart;
+      frameCount++;
+      updateTimingsOverlay();
+      const now = performance.now();
+      if (now - lastFpsTime >= 1000) {
+        fpsEl.textContent = `FPS: ${frameCount}`;
+        bodiesEl.textContent = `Bodies: ${world.body_count()}`;
+        frameCount = 0;
+        lastFpsTime = now;
+      }
+      if (window.__rubble_test) {
+        window.__rubble_test.stepCount = stepCount;
+        window.__rubble_test.bodyCount = world.body_count();
+        window.__rubble_test.lastStepTimingsMs = cachedTimings;
+      }
+    } catch (e) {
+      console.error("step failed:", e);
+      if (window.__rubble_test) {
+        window.__rubble_test.error = (e as Error)?.message || String(e);
+      }
+    } finally {
+      frameInFlight = false;
+    }
+    if (loopRunning) setTimeout(stepTick, 0);
+  }
+  setTimeout(() => void stepTick(), 0);
 }
 
 main().catch((e) => {

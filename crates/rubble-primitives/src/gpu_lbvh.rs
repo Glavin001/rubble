@@ -1592,204 +1592,6 @@ impl GpuLbvh {
         max_pairs
     }
 
-    /// Batch gather + karras build + refit + find_pairs into a single encoder/submit.
-    /// Saves 3 queue.submit() calls vs calling each dispatch method individually.
-    fn dispatch_build_traverse_batched(
-        &mut self,
-        ctx: &GpuContext,
-        aabb_buf: &wgpu::Buffer,
-        num_bodies: u32,
-    ) -> u32 {
-        if num_bodies <= 1 {
-            return 0;
-        }
-
-        let max_pairs = (num_bodies as usize * 8) as u32;
-        let num_internal = num_bodies - 1;
-
-        // Pre-allocate / grow all buffers
-        self.leaf_aabbs_sorted
-            .grow_if_needed(ctx, num_bodies as usize);
-        self.leaf_aabbs_sorted.set_len(num_bodies);
-        let tree_size = (num_bodies as usize * 2).saturating_sub(1);
-        self.tree_nodes.grow_if_needed(ctx, tree_size);
-        self.pair_counter.reset(ctx);
-        self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
-
-        // Lazy-compile kernels
-        if self.karras_build_kernel.is_none() {
-            self.karras_build_kernel =
-                Some(ComputeKernel::from_wgsl(ctx, KARRAS_BUILD_WGSL, "main"));
-        }
-        if self.refit_kernel.is_none() {
-            self.refit_kernel = Some(ComputeKernel::from_wgsl(ctx, REFIT_WGSL, "main"));
-        }
-        if self.find_pairs_gpu_tree_kernel.is_none() {
-            self.find_pairs_gpu_tree_kernel = Some(ComputeKernel::from_wgsl(
-                ctx,
-                FIND_PAIRS_GPU_TREE_WGSL,
-                "main",
-            ));
-        }
-
-        // Write params to different buffers (all visible at submit time)
-        self.write_count_params(ctx, num_bodies);
-        ctx.queue.write_buffer(
-            &self.tree_build_params_buf,
-            0,
-            bytemuck::cast_slice(&[num_bodies, 0u32, 0, 0]),
-        );
-        let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
-        ctx.queue
-            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
-
-        // Build bind groups
-        let gather_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gather_sorted_leaf_aabbs"),
-            layout: self.gather_sorted_leaf_aabbs_kernel.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: aabb_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.body_indices.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.count_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let karras_kernel = self.karras_build_kernel.as_ref().unwrap();
-        let karras_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("karras_build"),
-            layout: karras_kernel.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.morton_keys.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.tree_nodes.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.tree_build_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let refit_kernel = self.refit_kernel.as_ref().unwrap();
-        let refit_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("refit"),
-            layout: refit_kernel.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.body_indices.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.tree_nodes.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.tree_build_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let find_kernel = self.find_pairs_gpu_tree_kernel.as_ref().unwrap();
-        let find_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("find_pairs_gpu_tree"),
-            layout: find_kernel.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.tree_nodes.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.pairs_out.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.pair_counter.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.find_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        // Record all 4 passes on one encoder
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("lbvh_build_traverse_batch"),
-            });
-
-        // 1. Gather sorted leaf AABBs
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("gather_sorted_leaf_aabbs"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(self.gather_sorted_leaf_aabbs_kernel.pipeline());
-            pass.set_bind_group(0, &gather_bg, &[]);
-            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WG), 1, 1);
-        }
-
-        // 2. Karras BVH build
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("karras_build"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(karras_kernel.pipeline());
-            pass.set_bind_group(0, &karras_bg, &[]);
-            pass.dispatch_workgroups(round_up_workgroups(num_internal, WG), 1, 1);
-        }
-
-        // 3. Bottom-up refit
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("refit"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(refit_kernel.pipeline());
-            pass.set_bind_group(0, &refit_bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-
-        // 4. Find pairs via tree traversal
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("find_pairs_gpu_tree"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(find_kernel.pipeline());
-            pass.set_bind_group(0, &find_bg, &[]);
-            pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
-        }
-
-        ctx.queue.submit(Some(encoder.finish()));
-        max_pairs
-    }
-
     /// Find pairs using the GPU-built tree (tree_nodes buffer with absolute indices).
     fn dispatch_find_pairs_gpu_tree(&mut self, ctx: &GpuContext, num_bodies: u32) -> u32 {
         let max_pairs = (num_bodies as usize * 8) as u32;
@@ -1940,10 +1742,17 @@ impl GpuLbvh {
 
         let t_build = Instant::now();
         self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::BuildStart);
-        let max_pairs = self.dispatch_build_traverse_batched(ctx, aabb_buf, num_bodies);
+        self.dispatch_sorted_leaf_gather(ctx, aabb_buf, num_bodies);
+        self.dispatch_karras_build(ctx, num_bodies);
+        self.dispatch_refit(ctx, num_bodies);
         self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::BuildEnd);
         breakdown.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
-        // traverse timing merged into build since they share one submit
+
+        let t_traverse = Instant::now();
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::TraverseStart);
+        let max_pairs = self.dispatch_find_pairs_gpu_tree(ctx, num_bodies);
+        self.mark_precise_breakdown(ctx, BroadphaseTimingMarker::TraverseEnd);
+        breakdown.traverse_ms += t_traverse.elapsed().as_secs_f32() * 1000.0;
         self.finish_precise_breakdown(ctx);
         max_pairs
     }
