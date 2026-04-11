@@ -99,6 +99,15 @@ impl BroadphaseBreakdownMs {
     pub fn is_zero(&self) -> bool {
         self.total_ms() <= f32::EPSILON
     }
+
+    pub fn accumulate(&mut self, other: &Self) {
+        self.bounds_ms += other.bounds_ms;
+        self.sort_ms += other.sort_ms;
+        self.build_ms += other.build_ms;
+        self.traverse_ms += other.traverse_ms;
+        self.readback_ms += other.readback_ms;
+        self.precise |= other.precise;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -147,6 +156,18 @@ impl SolveBreakdownMs {
 
     pub fn is_zero(&self) -> bool {
         self.total_ms() <= f32::EPSILON
+    }
+
+    pub fn accumulate(&mut self, other: &Self) {
+        self.warmstart_ms += other.warmstart_ms;
+        self.graph_ms += other.graph_ms;
+        self.free_motion_ms += other.free_motion_ms;
+        self.coloring_ms += other.coloring_ms;
+        self.iterations_ms += other.iterations_ms;
+        self.iterations_primal_ms += other.iterations_primal_ms;
+        self.iterations_dual_ms += other.iterations_dual_ms;
+        self.swap_ms += other.swap_ms;
+        self.precise |= other.precise;
     }
 }
 
@@ -238,6 +259,20 @@ impl StepTimingsMs {
             self.solve_ms,
             self.extract_ms,
         ]
+    }
+
+    pub fn accumulate(&mut self, other: &Self) {
+        self.upload_ms += other.upload_ms;
+        self.predict_aabb_ms += other.predict_aabb_ms;
+        self.broadphase_ms += other.broadphase_ms;
+        self.broadphase_breakdown.accumulate(&other.broadphase_breakdown);
+        self.narrowphase_ms += other.narrowphase_ms;
+        self.contact_fetch_ms += other.contact_fetch_ms;
+        self.solve_ms += other.solve_ms;
+        self.solve_breakdown.accumulate(&other.solve_breakdown);
+        self.extract_ms += other.extract_ms;
+        self.cpu_sync_ms += other.cpu_sync_ms;
+        self.precise_gpu |= other.precise_gpu;
     }
 
     /// Monospace-friendly overlay: step total, per-stage ms and % of step, broadphase substages

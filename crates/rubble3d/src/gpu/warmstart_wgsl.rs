@@ -161,6 +161,20 @@ fn warm_key(body_a: u32, body_b: u32, feature_id: u32) -> u32 {
     return k;
 }
 
+fn build_tangent(normal: vec3<f32>) -> vec3<f32> {
+    let axis = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(normal.z) > 0.707);
+    return normalize(cross(axis, normal));
+}
+
+fn preserve_tangent(prev_tangent: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let projected = prev_tangent - normal * dot(prev_tangent, normal);
+    let len2 = dot(projected, projected);
+    if len2 > 1e-8 {
+        return projected * inverseSqrt(len2);
+    }
+    return build_tangent(normal);
+}
+
 @group(0) @binding(0) var<storage, read>       prev_contacts:  array<Contact>;
 @group(0) @binding(1) var<storage, read>       hashmap_keys:   array<u32>;
 @group(0) @binding(2) var<storage, read>       hashmap_values: array<u32>;
@@ -207,6 +221,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 new_contacts[idx].lambda = pc.lambda * scale;
                 let k_floor = vec4<f32>(params.k_start, params.k_start, params.k_start, 0.0);
                 new_contacts[idx].penalty = max(pc.penalty * params.gamma, k_floor);
+                new_contacts[idx].tangent = vec4<f32>(
+                    preserve_tangent(pc.tangent.xyz, nc.normal.xyz),
+                    0.0,
+                );
                 new_contacts[idx].flags = pc.flags | CONTACT_FLAG_WARMSTARTED;
                 if (pc.flags & CONTACT_FLAG_STICKING) != 0u {
                     new_contacts[idx].local_anchor_a = pc.local_anchor_a;

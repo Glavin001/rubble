@@ -8,7 +8,6 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 // so the InstancedMesh constructor count must stay <= 1000 for small scenes
 // or > 1000 for large ones. We recreate meshes per scene with exact capacity.
 const DEMO_SEED = 0x3d5eed;
-const GPU_RESIDENT_STEP_BODY_THRESHOLD = 1500;
 
 const SPHERE_COLORS = [0xff6b35, 0xf7c948, 0x4ecdc4, 0x45b7d1, 0x96ceb4];
 const BOX_COLORS = [0xff6f69, 0xffcc5c, 0x88d8b0, 0xc3aed6, 0xffd166];
@@ -36,7 +35,26 @@ interface BodyInfo {
   halfExtents?: [number, number, number];
   halfHeight?: number;
 }
+interface SphereBinding {
+  transformOffset: number;
+  matrixBase: number;
+  radius: number;
+}
+interface BoxBinding {
+  transformOffset: number;
+  matrixBase: number;
+  scale: [number, number, number];
+}
+interface CapsuleBinding {
+  transformOffset: number;
+  matrixBase: number;
+  radius: number;
+  halfHeight: number;
+}
 let bodies: BodyInfo[] = [];
+let sphereBindings: SphereBinding[] = [];
+let boxBindings: BoxBinding[] = [];
+let capsuleBindings: CapsuleBinding[] = [];
 let sphereCount = 0;
 let boxCount = 0;
 let capsuleCount = 0;
@@ -247,10 +265,45 @@ function markInstanceColorDirty(mesh: THREE.InstancedMesh) {
   }
 }
 
+function pushHiddenBody() {
+  bodies.push({ type: 99, instanceIndex: -1 });
+}
+
+function pushSphereBody(radius: number) {
+  const bodyIndex = bodies.length;
+  bodies.push({ type: 0, instanceIndex: sphereCount, radius });
+  sphereBindings.push({
+    transformOffset: bodyIndex * 7,
+    matrixBase: sphereCount * 16,
+    radius,
+  });
+}
+
+function pushBoxBody(hw: number, hh: number, hd: number) {
+  const bodyIndex = bodies.length;
+  bodies.push({ type: 1, instanceIndex: boxCount, halfExtents: [hw, hh, hd] });
+  boxBindings.push({
+    transformOffset: bodyIndex * 7,
+    matrixBase: boxCount * 16,
+    scale: [hw * 2, hh * 2, hd * 2],
+  });
+}
+
+function pushCapsuleBody(halfHeight: number, radius: number) {
+  const bodyIndex = bodies.length;
+  bodies.push({ type: 2, instanceIndex: capsuleCount, halfHeight, radius });
+  capsuleBindings.push({
+    transformOffset: bodyIndex * 7,
+    matrixBase: capsuleCount * 16,
+    radius,
+    halfHeight,
+  });
+}
+
 function addSphere(x: number, y: number, z: number, radius: number, mass: number) {
   const idx = world.add_sphere(x, y, z, radius, mass);
   pushColor(sphereColorAttr, SPHERE_COLORS, sphereCount);
-  bodies.push({ type: 0, instanceIndex: sphereCount, radius });
+  pushSphereBody(radius);
   sphereCount++;
   sphereInstances.count = sphereCount;
   markInstanceColorDirty(sphereInstances);
@@ -268,7 +321,7 @@ function addBox(
 ) {
   const idx = world.add_box(x, y, z, hw, hh, hd, mass);
   pushColor(boxColorAttr, BOX_COLORS, boxCount);
-  bodies.push({ type: 1, instanceIndex: boxCount, halfExtents: [hw, hh, hd] });
+  pushBoxBody(hw, hh, hd);
   boxCount++;
   boxInstances.count = boxCount;
   markInstanceColorDirty(boxInstances);
@@ -305,7 +358,7 @@ function syncTransformCache() {
 
 async function stepAndSyncTransformCache() {
   ensureTransformBuffer();
-  if (cachedTransforms.length > 0 && world.handle_count() >= GPU_RESIDENT_STEP_BODY_THRESHOLD) {
+  if (cachedTransforms.length > 0) {
     await world.step_and_copy_transforms_into(cachedTransforms);
   } else {
     await world.step();
@@ -370,12 +423,9 @@ function updateTransforms() {
   const boxMatrices = boxInstances.instanceMatrix.array as Float32Array;
   const capsuleMatrices = capsuleInstances.instanceMatrix.array as Float32Array;
 
-  for (let i = 0; i < bodies.length; i++) {
-    const b = bodies[i];
-    if (b.instanceIndex < 0) {
-      continue;
-    }
-    const off = i * 7;
+  for (let i = 0; i < sphereBindings.length; i++) {
+    const b = sphereBindings[i];
+    const off = b.transformOffset;
     const px = transforms[off];
     const py = transforms[off + 1];
     const pz = transforms[off + 2];
@@ -383,38 +433,63 @@ function updateTransforms() {
     const qy = transforms[off + 4];
     const qz = transforms[off + 5];
     const qw = transforms[off + 6];
+    writeMatrix(
+      sphereMatrices,
+      b.matrixBase,
+      px,
+      py,
+      pz,
+      qx,
+      qy,
+      qz,
+      qw,
+      b.radius,
+      b.radius,
+      b.radius,
+    );
+  }
 
-    if (b.type === 0 && b.radius !== undefined) {
-      const base = b.instanceIndex * 16;
-      writeMatrix(sphereMatrices, base, px, py, pz, qx, qy, qz, qw, b.radius, b.radius, b.radius);
-    } else if (b.type === 1 && b.halfExtents) {
-      const base = b.instanceIndex * 16;
-      writeMatrix(
-        boxMatrices,
-        base,
-        px,
-        py,
-        pz,
-        qx,
-        qy,
-        qz,
-        qw,
-        b.halfExtents[0] * 2,
-        b.halfExtents[1] * 2,
-        b.halfExtents[2] * 2,
-      );
-    } else if (b.type === 2 && b.halfHeight !== undefined && b.radius !== undefined) {
-      // Scale relative to the base capsule geometry.
-      const sxz = b.radius / capsuleBaseRadius;
-      // CapsuleGeometry(radius, length) has total height = length + 2*radius.
-      // Scaling uniformly in Y won't preserve hemispheres, so approximate via
-      // radius-based scale for X/Z and length ratio for Y.
-      const totalHalf = b.halfHeight + b.radius;
-      const baseTotalHalf = capsuleBaseHalfHeight + capsuleBaseRadius;
-      const sy = totalHalf / baseTotalHalf;
-      const base = b.instanceIndex * 16;
-      writeMatrix(capsuleMatrices, base, px, py, pz, qx, qy, qz, qw, sxz, sy, sxz);
-    }
+  for (let i = 0; i < boxBindings.length; i++) {
+    const b = boxBindings[i];
+    const off = b.transformOffset;
+    const px = transforms[off];
+    const py = transforms[off + 1];
+    const pz = transforms[off + 2];
+    const qx = transforms[off + 3];
+    const qy = transforms[off + 4];
+    const qz = transforms[off + 5];
+    const qw = transforms[off + 6];
+    writeMatrix(
+      boxMatrices,
+      b.matrixBase,
+      px,
+      py,
+      pz,
+      qx,
+      qy,
+      qz,
+      qw,
+      b.scale[0],
+      b.scale[1],
+      b.scale[2],
+    );
+  }
+
+  for (let i = 0; i < capsuleBindings.length; i++) {
+    const b = capsuleBindings[i];
+    const off = b.transformOffset;
+    const px = transforms[off];
+    const py = transforms[off + 1];
+    const pz = transforms[off + 2];
+    const qx = transforms[off + 3];
+    const qy = transforms[off + 4];
+    const qz = transforms[off + 5];
+    const qw = transforms[off + 6];
+    const sxz = b.radius / capsuleBaseRadius;
+    const totalHalf = b.halfHeight + b.radius;
+    const baseTotalHalf = capsuleBaseHalfHeight + capsuleBaseRadius;
+    const sy = totalHalf / baseTotalHalf;
+    writeMatrix(capsuleMatrices, b.matrixBase, px, py, pz, qx, qy, qz, qw, sxz, sy, sxz);
   }
 
   sphereInstances.instanceMatrix.needsUpdate = true;
@@ -567,6 +642,9 @@ async function loadScene(name: string) {
   }
   const tCreated = performance.now();
   bodies = [];
+  sphereBindings = [];
+  boxBindings = [];
+  capsuleBindings = [];
   sphereCount = 0;
   boxCount = 0;
   capsuleCount = 0;
@@ -618,23 +696,23 @@ async function loadScene(name: string) {
     if (type_ === 0) {
       const r = shapeSizes[off];
       pushColor(sphereColorAttr, SPHERE_COLORS, sphereCount);
-      bodies.push({ type: 0, instanceIndex: sphereCount, radius: r });
+      pushSphereBody(r);
       sphereCount++;
     } else if (type_ === 1) {
       const hw = shapeSizes[off];
       const hh = shapeSizes[off + 1];
       const hd = shapeSizes[off + 2];
       pushColor(boxColorAttr, BOX_COLORS, boxCount);
-      bodies.push({ type: 1, instanceIndex: boxCount, halfExtents: [hw, hh, hd] });
+      pushBoxBody(hw, hh, hd);
       boxCount++;
     } else if (type_ === 2) {
       const halfHeight = shapeSizes[off];
       const radius = shapeSizes[off + 1];
       pushColor(capsuleColorAttr, CAPSULE_COLORS, capsuleCount);
-      bodies.push({ type: 2, instanceIndex: capsuleCount, halfHeight, radius });
+      pushCapsuleBody(halfHeight, radius);
       capsuleCount++;
     } else {
-      bodies.push({ type: 99, instanceIndex: -1 });
+      pushHiddenBody();
     }
   }
 
@@ -707,7 +785,7 @@ async function main() {
     // Pre-allocate meshes with enough capacity for the requested body count.
     allocateInstancedMeshes(initialBodies, initialBodies, initialBodies);
     world.add_ground_plane(0.0);
-    bodies.push({ type: 99, instanceIndex: -1 });
+    pushHiddenBody();
     for (let i = 0; i < initialBodies; i++) {
       const x = (rng() - 0.5) * 12;
       const y = 3 + rng() * 15;

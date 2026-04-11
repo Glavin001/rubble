@@ -1084,11 +1084,13 @@ impl World {
             self.gpu_pipeline.set_sim_dt(sub_dt);
         }
         for _sub in 0..sub_steps {
+            let mut sub_timings = rubble_gpu::StepTimingsMs::default();
             pollster::block_on(self.gpu_pipeline.step_fast_device_async(
                 num_bodies,
                 self.config.solver_iterations,
-                &mut timings,
+                &mut sub_timings,
             ));
+            timings.accumulate(&sub_timings);
         }
         let t_render_extract = Instant::now();
         self.gpu_pipeline.build_render_instances(num_bodies);
@@ -1128,18 +1130,43 @@ impl World {
             .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }))
             && self.gpu_compact_indices.len() > 1;
         if has_unsupported_compounds {
-            self.step_async().await;
-            return self
-                .gpu_compact_indices
-                .iter()
-                .map(|&idx| {
-                    let state = self.states[idx];
-                    gpu::RenderTransform3D {
-                        position: state.position_inv_mass.to_array(),
-                        rotation: state.orientation.to_array(),
-                    }
-                })
-                .collect();
+            let mut warm_contacts = self.contact_persistence.prev_contacts().to_vec();
+            let mut transforms = Vec::new();
+            self.collision_events.clear();
+
+            let num_bodies = self.gpu_compact_indices.len() as u32;
+            let sub_steps = self.config.sub_steps.max(1);
+            if sub_steps > 1 {
+                let sub_dt = self.config.dt / sub_steps as f32;
+                self.gpu_pipeline.set_sim_dt(sub_dt);
+            }
+
+            for _sub in 0..sub_steps {
+                let warm = if warm_contacts.is_empty() {
+                    None
+                } else {
+                    Some(warm_contacts.as_slice())
+                };
+                let mut sub_timings = rubble_gpu::StepTimingsMs::default();
+                let (sub_transforms, new_contacts) = self
+                    .gpu_pipeline
+                    .step_with_contacts_render_async(
+                        num_bodies,
+                        self.config.solver_iterations,
+                        warm,
+                        &mut sub_timings,
+                    )
+                    .await;
+                timings.accumulate(&sub_timings);
+                transforms = sub_transforms;
+                warm_contacts = new_contacts;
+            }
+
+            let events = self.contact_persistence.update(&warm_contacts);
+            self.collision_events.extend(events);
+            self.gpu_cpu_sync_pending = true;
+            self.last_step_timings = timings;
+            return transforms;
         }
 
         let num_bodies = self.gpu_compact_indices.len() as u32;
@@ -1150,9 +1177,15 @@ impl World {
         }
 
         for _sub in 0..sub_steps {
+            let mut sub_timings = rubble_gpu::StepTimingsMs::default();
             self.gpu_pipeline
-                .step_fast_device_async(num_bodies, self.config.solver_iterations, &mut timings)
+                .step_fast_device_async(
+                    num_bodies,
+                    self.config.solver_iterations,
+                    &mut sub_timings,
+                )
                 .await;
+            timings.accumulate(&sub_timings);
         }
 
         let t_extract = Instant::now();
@@ -1240,41 +1273,54 @@ impl World {
             .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }));
 
         let results = if has_compounds && alive_indices.len() > 1 {
-            let prev = self.contact_persistence.prev_contacts();
-            let warm = if prev.is_empty() { None } else { Some(prev) };
-            let (results, new_contacts) = self
-                .gpu_pipeline
-                .step_with_contacts_async(
-                    num_bodies,
-                    self.config.solver_iterations,
-                    warm,
-                    &mut timings,
-                )
-                .await;
+            let mut warm_contacts = self.contact_persistence.prev_contacts().to_vec();
+            let mut results = compact_states.clone();
+            self.collision_events.clear();
 
-            let events = self.contact_persistence.update(&new_contacts);
+            for _sub in 0..sub_steps {
+                let warm = if warm_contacts.is_empty() {
+                    None
+                } else {
+                    Some(warm_contacts.as_slice())
+                };
+                let mut sub_timings = rubble_gpu::StepTimingsMs::default();
+                let (sub_results, new_contacts) = self
+                    .gpu_pipeline
+                    .step_with_contacts_async(
+                        num_bodies,
+                        self.config.solver_iterations,
+                        warm,
+                        &mut sub_timings,
+                    )
+                    .await;
+                timings.accumulate(&sub_timings);
+                results = sub_results;
+                warm_contacts = new_contacts;
+            }
+
+            let events = self.contact_persistence.update(&warm_contacts);
             self.collision_events.extend(events);
             results
         } else {
             // Run intermediate sub-steps on device (no download)
             for _sub in 0..sub_steps - 1 {
+                let mut sub_timings = rubble_gpu::StepTimingsMs::default();
                 self.gpu_pipeline
                     .step_fast_device_async(
                         num_bodies,
                         self.config.solver_iterations,
-                        &mut timings,
+                        &mut sub_timings,
                     )
                     .await;
+                timings.accumulate(&sub_timings);
             }
             // Final sub-step: download results
+            let mut sub_timings = rubble_gpu::StepTimingsMs::default();
             let results = self
                 .gpu_pipeline
-                .step_fast_async(
-                    num_bodies,
-                    self.config.solver_iterations,
-                    &mut timings,
-                )
+                .step_fast_async(num_bodies, self.config.solver_iterations, &mut sub_timings)
                 .await;
+            timings.accumulate(&sub_timings);
 
             self.collision_events.clear();
             results
@@ -2371,6 +2417,57 @@ mod tests {
             dist >= 0.5,
             "Compound bodies should separate after collision: distance = {}",
             dist
+        );
+    }
+
+    #[test]
+    fn test_compound_substeps_execute_full_frame() {
+        let mut world = gpu_world!(SimConfig {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            dt: 1.0 / 60.0,
+            sub_steps: 4,
+            solver_iterations: 10,
+            max_bodies: 64,
+            ..Default::default()
+        });
+
+        world.add_body(&RigidBodyDesc {
+            position: Vec3::ZERO,
+            mass: 0.0,
+            shape: ShapeDesc::Plane {
+                normal: Vec3::Y,
+                distance: -100.0,
+            },
+            ..Default::default()
+        });
+
+        let compound = world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 10.0, 0.0),
+            mass: 1.0,
+            shape: ShapeDesc::Compound {
+                children: vec![
+                    (
+                        ShapeDesc::Sphere { radius: 0.4 },
+                        Vec3::new(-0.6, 0.0, 0.0),
+                        Quat::IDENTITY,
+                    ),
+                    (
+                        ShapeDesc::Sphere { radius: 0.4 },
+                        Vec3::new(0.6, 0.0, 0.0),
+                        Quat::IDENTITY,
+                    ),
+                ],
+            },
+            ..Default::default()
+        });
+
+        world.step();
+
+        let pos = world.get_position(compound).unwrap();
+        assert!(
+            pos.y < 9.999,
+            "compound sub-steps should execute the full frame, got y={}",
+            pos.y
         );
     }
 

@@ -2144,6 +2144,69 @@ impl GpuPipeline {
         (states, final_contacts)
     }
 
+    /// Async render-oriented contact step: preserves CPU-visible contact state
+    /// but returns compact render transforms instead of downloading full body
+    /// states. This keeps the web render path GPU-resident even for scenes that
+    /// still require CPU-side compound pair expansion.
+    pub async fn step_with_contacts_render_async(
+        &mut self,
+        num_bodies: u32,
+        solver_iterations: u32,
+        warm_contacts: Option<&[Contact3D]>,
+        timings: &mut rubble_gpu::StepTimingsMs,
+    ) -> (Vec<RenderTransform3D>, Vec<Contact3D>) {
+        use rubble_gpu::web_time::Instant;
+
+        if num_bodies == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        if let Some(warm) = warm_contacts {
+            self.upload_warm_contacts(warm);
+        }
+
+        let (compound_contacts, contact_count_val) = self.run_detection_async(num_bodies, timings).await;
+
+        let t_cf = Instant::now();
+        let gpu_count = contact_count_val as usize;
+
+        if gpu_count > 0 {
+            self.contacts.set_len(gpu_count as u32);
+            self.dispatch_gpu_warmstart(gpu_count as u32);
+        }
+
+        let mut contacts = if gpu_count > 0 {
+            self.download_contacts_exact_async(gpu_count).await
+        } else {
+            Vec::new()
+        };
+
+        contacts.extend(compound_contacts);
+        timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
+
+        let t_solve = Instant::now();
+        self.run_colored_solve_async(num_bodies, solver_iterations, &mut contacts)
+            .await;
+
+        let final_contacts = if !contacts.is_empty() {
+            let fc = self.download_contacts_exact_async(contacts.len()).await;
+            let solved_count = fc.len() as u32;
+            self.swap_contact_buffers(solved_count);
+            fc
+        } else {
+            self.prev_contact_count = 0;
+            Vec::new()
+        };
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
+
+        let t_ext = Instant::now();
+        self.dispatch_extract(num_bodies);
+        let transforms = self.download_render_transforms_async(num_bodies).await;
+        timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
+
+        (transforms, final_contacts)
+    }
+
     /// Async GPU-only fast path: no contact readback, GPU-owned persistence.
     /// Mirrors `step_fast_timed` but uses async buffer operations for WASM/WebGPU.
     pub async fn step_fast_async(
