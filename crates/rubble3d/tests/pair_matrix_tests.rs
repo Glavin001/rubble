@@ -297,7 +297,12 @@ fn run_pair_case(case: &PairCase3D) -> Option<(Vec<RigidBodyState3D>, Vec<Contac
         0.95,
     );
     let mut timings = rubble_gpu::StepTimingsMs::default();
-    Some(pollster::block_on(pipeline.step_with_contacts_async(2, 10, None, &mut timings)))
+    Some(pollster::block_on(pipeline.step_with_contacts_async(
+        2,
+        10,
+        None,
+        &mut timings,
+    )))
 }
 
 fn contact_sanity_errors(case: &PairCase3D, contacts: &[Contact3D]) -> Vec<String> {
@@ -1515,7 +1520,8 @@ fn feature_id_stability_slow_translation() {
             0.95,
         );
         let mut timings = rubble_gpu::StepTimingsMs::default();
-        let (_states, contacts) = pollster::block_on(pipeline.step_with_contacts_async(2, 1, None, &mut timings));
+        let (_states, contacts) =
+            pollster::block_on(pipeline.step_with_contacts_async(2, 1, None, &mut timings));
 
         if contacts.is_empty() {
             continue;

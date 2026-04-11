@@ -1179,11 +1179,7 @@ impl World {
         for _sub in 0..sub_steps {
             let mut sub_timings = rubble_gpu::StepTimingsMs::default();
             self.gpu_pipeline
-                .step_fast_device_async(
-                    num_bodies,
-                    self.config.solver_iterations,
-                    &mut sub_timings,
-                )
+                .step_fast_device_async(num_bodies, self.config.solver_iterations, &mut sub_timings)
                 .await;
             timings.accumulate(&sub_timings);
         }

@@ -162,7 +162,7 @@ impl InternalPrefixScan {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: self.params_buf.as_entire_binding()
+                        resource: self.params_buf.as_entire_binding(),
                     },
                 ],
             });
@@ -203,7 +203,7 @@ impl InternalPrefixScan {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: self.params_buf.as_entire_binding()
+                            resource: self.params_buf.as_entire_binding(),
                         },
                     ],
                 });
@@ -300,7 +300,7 @@ impl GpuPrefixScan {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.inclusive_params_buf.as_entire_binding()
+                    resource: self.inclusive_params_buf.as_entire_binding(),
                 },
             ],
         });

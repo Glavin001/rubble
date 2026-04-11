@@ -525,12 +525,7 @@ pub fn greedy_coloring(num_bodies: usize, contact_pairs: &[(u32, u32)]) -> (Vec<
     }
 
     let mut order: Vec<usize> = (0..num_bodies).collect();
-    order.sort_unstable_by(|&a, &b| {
-        adj[b]
-            .len()
-            .cmp(&adj[a].len())
-            .then_with(|| a.cmp(&b))
-    });
+    order.sort_unstable_by(|&a, &b| adj[b].len().cmp(&adj[a].len()).then_with(|| a.cmp(&b)));
 
     let mut colors: Vec<u32> = vec![u32::MAX; num_bodies];
     let mut used = Vec::<u32>::new();

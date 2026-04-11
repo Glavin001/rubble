@@ -34,7 +34,9 @@ pub use adjacency_wgsl::{
     ADJACENCY_COUNT_WGSL, ADJACENCY_INIT_RANGES_WGSL, ADJACENCY_RESET_WGSL, ADJACENCY_SCATTER_WGSL,
 };
 pub use avbd_solve_wgsl::{AVBD_DUAL_WGSL, AVBD_PRIMAL_WGSL};
-pub use coloring_wgsl::{COLORING_RESET_WGSL, COLORING_STEP_WGSL};
+pub use coloring_wgsl::{
+    COLORING_RESET_WGSL, COLORING_STEP_WGSL, SOLVE_RUNS_BUILD_WGSL, SOLVE_RUNS_RESET_WGSL,
+};
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
@@ -71,6 +73,7 @@ const AVBD_WARMSTART_ALPHA: f32 = 0.95;
 /// Run GPU coloring in fixed-size batches to avoid a CPU/GPU sync after every color.
 /// This keeps the algorithm GPU-resident while dramatically reducing readback overhead.
 const MAX_GPU_COLORING_ROUNDS: u32 = 32;
+const MAX_SOLVE_COLOR_RUNS: usize = 64;
 const MAX_CONTACT_PENALTY: f32 = 1.0e5;
 
 #[repr(u32)]
@@ -373,6 +376,15 @@ pub struct SolveRangeGpu {
     pub count: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ComputeDispatchIndirectArgsGpu {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub _pad: u32,
+}
+
 /// Uniform buffer layout for plane data in the narrowphase shader.
 /// Uses a uniform binding instead of storage to stay within the
 /// `maxStorageBuffersPerShaderStage` limit on constrained adapters (e.g. SwiftShader).
@@ -443,6 +455,7 @@ pub struct WarmstartParamsGpu {
 const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 64);
 const _: () = assert!(std::mem::size_of::<GpuPair>() == 8);
 const _: () = assert!(std::mem::size_of::<SolveRangeGpu>() == 8);
+const _: () = assert!(std::mem::size_of::<ComputeDispatchIndirectArgsGpu>() == 16);
 const _: () = assert!(std::mem::size_of::<WarmstartParamsGpu>() == 32);
 
 // ---------------------------------------------------------------------------
@@ -744,6 +757,7 @@ pub struct GpuPipeline {
     // GPU solve graph
     gpu_graph: GpuGraphState,
     gpu_coloring: GpuColoringState,
+    gpu_solve_schedule: GpuSolveScheduleState,
     gpu_render: GpuRenderState,
 
     // Persistent contact buffers for GPU-side warmstarting
@@ -775,7 +789,6 @@ pub struct GpuPipeline {
     sim_params: SimParamsGpu,
     warmstart_decay: f32,
     params_uniform: wgpu::Buffer,
-    solve_range_buffers: Vec<wgpu::Buffer>,
     /// Uniform buffer for plane data in narrowphase (avoids a storage binding).
     plane_params_uniform: wgpu::Buffer,
 
@@ -858,6 +871,60 @@ impl GpuColoringState {
             body_priorities,
             params_buf,
             frame_counter: 0,
+        }
+    }
+}
+
+struct GpuSolveScheduleState {
+    reset_kernel: ComputeKernel,
+    build_kernel: ComputeKernel,
+    solve_runs: GpuBuffer<SolveRangeGpu>,
+    dispatch_args: GpuBuffer<ComputeDispatchIndirectArgsGpu>,
+    run_counter: GpuAtomicCounter,
+    params_buf: wgpu::Buffer,
+    run_index_uniforms: Vec<wgpu::Buffer>,
+}
+
+impl GpuSolveScheduleState {
+    fn new(ctx: &GpuContext) -> Self {
+        let reset_kernel =
+            ComputeKernel::from_wgsl(ctx, coloring_wgsl::SOLVE_RUNS_RESET_WGSL, "main");
+        let build_kernel =
+            ComputeKernel::from_wgsl(ctx, coloring_wgsl::SOLVE_RUNS_BUILD_WGSL, "main");
+        let mut solve_runs = GpuBuffer::new(ctx, MAX_SOLVE_COLOR_RUNS);
+        solve_runs.set_len(MAX_SOLVE_COLOR_RUNS as u32);
+        let mut dispatch_args =
+            GpuBuffer::new_with_usage(ctx, MAX_SOLVE_COLOR_RUNS, wgpu::BufferUsages::INDIRECT);
+        dispatch_args.set_len(MAX_SOLVE_COLOR_RUNS as u32);
+        let params_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("solve schedule params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut run_index_uniforms = Vec::with_capacity(MAX_SOLVE_COLOR_RUNS);
+        for run_idx in 0..MAX_SOLVE_COLOR_RUNS {
+            let buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("solve run index"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let params = [run_idx as u32, 0, 0, 0];
+            ctx.queue
+                .write_buffer(&buf, 0, bytemuck::cast_slice(&params));
+            run_index_uniforms.push(buf);
+        }
+
+        Self {
+            reset_kernel,
+            build_kernel,
+            solve_runs,
+            dispatch_args,
+            run_counter: GpuAtomicCounter::new(ctx),
+            params_buf,
+            run_index_uniforms,
         }
     }
 }
@@ -970,6 +1037,7 @@ impl GpuPipeline {
         let gpu_lbvh = GpuLbvh::new(&ctx, max_bodies);
         let gpu_graph = GpuGraphState::new(&ctx, max_bodies, max_contacts * 2);
         let gpu_coloring = GpuColoringState::new(&ctx, max_bodies);
+        let gpu_solve_schedule = GpuSolveScheduleState::new(&ctx);
         let gpu_render = GpuRenderState::new(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         let gpu_step_profiler = GpuStepProfiler::new(&ctx);
@@ -1019,6 +1087,7 @@ impl GpuPipeline {
             render_transforms,
             gpu_graph,
             gpu_coloring,
+            gpu_solve_schedule,
             gpu_render,
             prev_contacts,
             prev_contact_count: 0,
@@ -1048,7 +1117,6 @@ impl GpuPipeline {
             },
             warmstart_decay: 0.99,
             params_uniform,
-            solve_range_buffers: Vec::new(),
             plane_params_uniform,
             predict_bg_cache: CachedBindGroup::default(),
             aabb_bg_cache: CachedBindGroup::default(),
@@ -1236,7 +1304,12 @@ impl GpuPipeline {
         restitution_threshold: f32,
         penetration_slop: f32,
     ) {
-        self.sim_params.quality = [contact_offset, restitution_threshold, penetration_slop, AVBD_WARMSTART_ALPHA];
+        self.sim_params.quality = [
+            contact_offset,
+            restitution_threshold,
+            penetration_slop,
+            AVBD_WARMSTART_ALPHA,
+        ];
     }
 
     /// Update the simulation timestep in the GPU uniform buffer.
@@ -1434,7 +1507,12 @@ impl GpuPipeline {
                     let c_n_initial = depth + self.sim_params.quality[2];
                     out.push(Contact3D {
                         point: Vec4::new(point.x, point.y, point.z, depth),
-                        normal: Vec4::new(plane_normal.x, plane_normal.y, plane_normal.z, c_n_initial),
+                        normal: Vec4::new(
+                            plane_normal.x,
+                            plane_normal.y,
+                            plane_normal.z,
+                            c_n_initial,
+                        ),
                         tangent: Vec4::new(tangent.x, tangent.y, tangent.z, 0.0),
                         local_anchor_a: Vec4::new(local_dyn.x, local_dyn.y, local_dyn.z, 0.0),
                         local_anchor_b: Vec4::new(local_plane.x, local_plane.y, local_plane.z, 0.0),
@@ -1723,10 +1801,10 @@ impl GpuPipeline {
         );
         self.mark_precise_timing(PreciseTimingMarker::SolveFreeMotionEnd);
         self.mark_precise_timing(PreciseTimingMarker::SolveColoringStart);
-        let color_groups = self.dispatch_gpu_coloring_async(num_bodies).await;
+        self.dispatch_gpu_coloring_async(num_bodies).await;
+        self.dispatch_gpu_solve_schedule(num_bodies);
         self.mark_precise_timing(PreciseTimingMarker::SolveColoringEnd);
-        self.write_solve_ranges(&color_groups);
-        self.sync_primal_bind_groups(color_groups.len());
+        self.sync_primal_bind_groups();
         let _ = self.dual_bind_group();
         let primal_bind_groups = &self.primal_bg_cache.bind_groups;
         let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
@@ -1744,12 +1822,14 @@ impl GpuPipeline {
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(self.primal_kernel.pipeline());
-                for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
-                    if count == 0 {
-                        continue;
-                    }
-                    pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
-                    pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
+                for (range_idx, bind_group) in primal_bind_groups.iter().enumerate() {
+                    let indirect_offset =
+                        (range_idx * std::mem::size_of::<ComputeDispatchIndirectArgsGpu>()) as u64;
+                    pass.set_bind_group(0, bind_group, &[]);
+                    pass.dispatch_workgroups_indirect(
+                        self.gpu_solve_schedule.dispatch_args.buffer(),
+                        indirect_offset,
+                    );
                 }
             }
             {
@@ -2042,11 +2122,7 @@ impl GpuPipeline {
             self.dispatch_narrowphase(num_bodies, pair_count);
         } else if pair_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            self.dispatch_narrowphase_with_source(
-                num_bodies,
-                pair_count,
-                &pair_buffer,
-            );
+            self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
         }
 
         // Read contact count — single GPU→CPU sync point per frame
@@ -2064,11 +2140,7 @@ impl GpuPipeline {
                 self.dispatch_narrowphase(num_bodies, pair_count);
             } else if pair_count > 0 {
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    pair_count,
-                    &pair_buffer,
-                );
+                self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
             }
             self.contact_count.read_async(&self.ctx).await
         } else {
@@ -2101,7 +2173,8 @@ impl GpuPipeline {
             self.upload_warm_contacts(warm);
         }
 
-        let (compound_contacts, contact_count_val) = self.run_detection_async(num_bodies, timings).await;
+        let (compound_contacts, contact_count_val) =
+            self.run_detection_async(num_bodies, timings).await;
 
         let t_cf = Instant::now();
         let gpu_count = contact_count_val as usize;
@@ -2165,7 +2238,8 @@ impl GpuPipeline {
             self.upload_warm_contacts(warm);
         }
 
-        let (compound_contacts, contact_count_val) = self.run_detection_async(num_bodies, timings).await;
+        let (compound_contacts, contact_count_val) =
+            self.run_detection_async(num_bodies, timings).await;
 
         let t_cf = Instant::now();
         let gpu_count = contact_count_val as usize;
@@ -2221,7 +2295,8 @@ impl GpuPipeline {
             return Vec::new();
         }
 
-        let (compound_contacts, contact_count) = self.run_detection_async(num_bodies, timings).await;
+        let (compound_contacts, contact_count) =
+            self.run_detection_async(num_bodies, timings).await;
         assert!(
             compound_contacts.is_empty(),
             "GPU-only happy path does not support CPU compound contact expansion"
@@ -2266,7 +2341,8 @@ impl GpuPipeline {
             return;
         }
 
-        let (compound_contacts, contact_count) = self.run_detection_async(num_bodies, timings).await;
+        let (compound_contacts, contact_count) =
+            self.run_detection_async(num_bodies, timings).await;
         assert!(
             compound_contacts.is_empty(),
             "GPU-only happy path does not support CPU compound contact expansion"
@@ -2313,10 +2389,9 @@ impl GpuPipeline {
             num_bodies,
         );
 
-        let color_groups = self.dispatch_gpu_coloring_async(num_bodies).await;
-
-        self.write_solve_ranges(&color_groups);
-        self.sync_primal_bind_groups(color_groups.len());
+        self.dispatch_gpu_coloring_async(num_bodies).await;
+        self.dispatch_gpu_solve_schedule(num_bodies);
+        self.sync_primal_bind_groups();
         let _ = self.dual_bind_group();
         let primal_bind_groups = &self.primal_bg_cache.bind_groups;
         let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
@@ -2333,15 +2408,13 @@ impl GpuPipeline {
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(self.primal_kernel.pipeline());
-                for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
-                    if count == 0 {
-                        continue;
-                    }
-                    pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
-                    pass.dispatch_workgroups(
-                        round_up_workgroups(count, WORKGROUP_SIZE),
-                        1,
-                        1,
+                for (range_idx, bind_group) in primal_bind_groups.iter().enumerate() {
+                    let indirect_offset =
+                        (range_idx * std::mem::size_of::<ComputeDispatchIndirectArgsGpu>()) as u64;
+                    pass.set_bind_group(0, bind_group, &[]);
+                    pass.dispatch_workgroups_indirect(
+                        self.gpu_solve_schedule.dispatch_args.buffer(),
+                        indirect_offset,
                     );
                 }
             }
@@ -2352,11 +2425,7 @@ impl GpuPipeline {
                 });
                 pass.set_pipeline(self.dual_kernel.pipeline());
                 pass.set_bind_group(0, dual_bind_group, &[]);
-                pass.dispatch_workgroups(
-                    round_up_workgroups(contact_count, WORKGROUP_SIZE),
-                    1,
-                    1,
-                );
+                pass.dispatch_workgroups(round_up_workgroups(contact_count, WORKGROUP_SIZE), 1, 1);
             }
         }
         self.ctx.queue.submit(Some(encoder.finish()));
@@ -2380,33 +2449,110 @@ impl GpuPipeline {
         (self.body_states.current().byte_size() << 1) | self.body_states.current_index() as u64
     }
 
-    fn ensure_solve_range_buffers(&mut self, required: usize) {
-        while self.solve_range_buffers.len() < required {
-            self.solve_range_buffers
-                .push(self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("SolveRange uniform"),
-                    size: std::mem::size_of::<SolveRangeGpu>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-        }
-    }
+    fn dispatch_gpu_solve_schedule(&mut self, num_bodies: u32) {
+        let params_reset = [MAX_SOLVE_COLOR_RUNS as u32, 0, 0, 0];
+        self.ctx.queue.write_buffer(
+            &self.gpu_solve_schedule.params_buf,
+            0,
+            bytemuck::cast_slice(&params_reset),
+        );
+        let reset_bg = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("solve_runs_reset"),
+                layout: self.gpu_solve_schedule.reset_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self
+                            .gpu_solve_schedule
+                            .solve_runs
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self
+                            .gpu_solve_schedule
+                            .dispatch_args
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self
+                            .gpu_solve_schedule
+                            .run_counter
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.gpu_solve_schedule.params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+        self.run_pass(
+            "solve_runs_reset",
+            &self.gpu_solve_schedule.reset_kernel,
+            &reset_bg,
+            MAX_SOLVE_COLOR_RUNS as u32,
+        );
 
-    fn write_solve_ranges(&mut self, color_groups: &[(u32, u32)]) {
-        if color_groups.is_empty() {
-            return;
-        }
-
-        self.ensure_solve_range_buffers(color_groups.len());
-
-        for (idx, &(offset, count)) in color_groups.iter().enumerate() {
-            let range = SolveRangeGpu { offset, count };
-            self.ctx.queue.write_buffer(
-                &self.solve_range_buffers[idx],
-                0,
-                bytemuck::bytes_of(&range),
-            );
-        }
+        let params_build = [num_bodies, MAX_SOLVE_COLOR_RUNS as u32, 0, 0];
+        self.ctx.queue.write_buffer(
+            &self.gpu_solve_schedule.params_buf,
+            0,
+            bytemuck::cast_slice(&params_build),
+        );
+        let build_bg = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("solve_runs_build"),
+                layout: self.gpu_solve_schedule.build_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.gpu_coloring.body_colors.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self
+                            .gpu_solve_schedule
+                            .solve_runs
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self
+                            .gpu_solve_schedule
+                            .dispatch_args
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self
+                            .gpu_solve_schedule
+                            .run_counter
+                            .buffer()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.gpu_solve_schedule.params_buf.as_entire_binding(),
+                    },
+                ],
+            });
+        self.run_pass(
+            "solve_runs_build",
+            &self.gpu_solve_schedule.build_kernel,
+            &build_bg,
+            num_bodies,
+        );
     }
 
     fn predict_bind_group(&mut self) -> &wgpu::BindGroup {
@@ -2533,10 +2679,7 @@ impl GpuPipeline {
             self.capsules.byte_size(),
         ];
         if self.narrowphase_bg_cache.key.as_ref() != Some(&key) {
-            let bg = self.create_narrowphase_bind_group(
-                self.pairs.buffer(),
-                "narrowphase",
-            );
+            let bg = self.create_narrowphase_bind_group(self.pairs.buffer(), "narrowphase");
             self.narrowphase_bg_cache.key = Some(key);
             self.narrowphase_bg_cache.bind_group = Some(bg);
         }
@@ -2645,7 +2788,7 @@ impl GpuPipeline {
         self.free_motion_bg_cache.bind_group.as_ref().unwrap()
     }
 
-    fn sync_primal_bind_groups(&mut self, range_count: usize) {
+    fn sync_primal_bind_groups(&mut self) {
         let key = [
             self.body_states_cache_key(),
             self.inertial_states.byte_size(),
@@ -2654,14 +2797,14 @@ impl GpuPipeline {
             self.body_order.byte_size(),
             self.body_contact_ranges.byte_size(),
             self.body_contact_indices.byte_size(),
-            range_count as u64,
+            self.gpu_solve_schedule.solve_runs.byte_size(),
         ];
         if self.primal_bg_cache.key.as_ref() != Some(&key) {
             self.primal_bg_cache.key = Some(key);
             self.primal_bg_cache.bind_groups.clear();
         }
 
-        while self.primal_bg_cache.bind_groups.len() < range_count {
+        while self.primal_bg_cache.bind_groups.len() < MAX_SOLVE_COLOR_RUNS {
             let idx = self.primal_bg_cache.bind_groups.len();
             let bg = self
                 .ctx
@@ -2704,7 +2847,16 @@ impl GpuPipeline {
                         },
                         wgpu::BindGroupEntry {
                             binding: 8,
-                            resource: self.solve_range_buffers[idx].as_entire_binding(),
+                            resource: self
+                                .gpu_solve_schedule
+                                .solve_runs
+                                .buffer()
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: self.gpu_solve_schedule.run_index_uniforms[idx]
+                                .as_entire_binding(),
                         },
                     ],
                 });
@@ -2956,10 +3108,7 @@ impl GpuPipeline {
             bytemuck::bytes_of(&self.sim_params),
         );
 
-        let bg = self.create_narrowphase_bind_group(
-            pairs_buffer,
-            "narrowphase_external",
-        );
+        let bg = self.create_narrowphase_bind_group(pairs_buffer, "narrowphase_external");
         self.run_pass("narrowphase", &self.narrowphase_kernel, &bg, num_pairs);
     }
 
@@ -2980,11 +3129,7 @@ impl GpuPipeline {
             .grow_if_needed(&self.ctx, num_bodies as usize);
         self.render_transforms.set_len(num_bodies);
         let _ = self.transform_extract_bind_group();
-        let bg = self
-            .transform_extract_bg_cache
-            .bind_group
-            .as_ref()
-            .unwrap();
+        let bg = self.transform_extract_bg_cache.bind_group.as_ref().unwrap();
 
         let mut encoder = self
             .ctx
@@ -3471,9 +3616,9 @@ impl GpuPipeline {
     }
 
     /// Async version of `dispatch_gpu_coloring` for WASM/WebGPU (uses async buffer readbacks).
-    async fn dispatch_gpu_coloring_async(&mut self, num_bodies: u32) -> Vec<(u32, u32)> {
+    async fn dispatch_gpu_coloring_async(&mut self, num_bodies: u32) {
         if num_bodies == 0 {
-            return Vec::new();
+            return;
         }
 
         let ctx = &self.ctx;
@@ -3599,8 +3744,6 @@ impl GpuPipeline {
             &mut self.body_order,
             4,
         );
-        let sorted_colors = self.gpu_coloring.body_colors.download_async(ctx).await;
-        Self::build_color_groups_from_sorted_colors(&sorted_colors)
     }
 
     /// Dispatch GPU warmstart: match new contacts against prev-frame contacts on GPU.
@@ -3657,16 +3800,11 @@ impl GpuPipeline {
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: self
-                                    .warmstart_hashmap_keys
-                                    .buffer()
-                                    .as_entire_binding(),
+                                resource: self.warmstart_hashmap_keys.buffer().as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: self
-                                    .warmstart_hashmap_params_buf
-                                    .as_entire_binding(),
+                                resource: self.warmstart_hashmap_params_buf.as_entire_binding(),
                             },
                         ],
                     });
@@ -3708,10 +3846,7 @@ impl GpuPipeline {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: self
-                                    .warmstart_hashmap_keys
-                                    .buffer()
-                                    .as_entire_binding(),
+                                resource: self.warmstart_hashmap_keys.buffer().as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
@@ -3722,9 +3857,7 @@ impl GpuPipeline {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: self
-                                    .warmstart_hashmap_params_buf
-                                    .as_entire_binding(),
+                                resource: self.warmstart_hashmap_params_buf.as_entire_binding(),
                             },
                         ],
                     });
@@ -3784,17 +3917,11 @@ impl GpuPipeline {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: self
-                                .warmstart_hashmap_keys
-                                .buffer()
-                                .as_entire_binding(),
+                            resource: self.warmstart_hashmap_keys.buffer().as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: self
-                                .warmstart_hashmap_values
-                                .buffer()
-                                .as_entire_binding(),
+                            resource: self.warmstart_hashmap_values.buffer().as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,

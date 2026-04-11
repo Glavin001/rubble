@@ -79,6 +79,22 @@ fn validate_coloring_step_wgsl() {
 }
 
 #[test]
+fn validate_solve_runs_reset_wgsl() {
+    validate_wgsl(
+        "SOLVE_RUNS_RESET_WGSL",
+        rubble3d::gpu::SOLVE_RUNS_RESET_WGSL,
+    );
+}
+
+#[test]
+fn validate_solve_runs_build_wgsl() {
+    validate_wgsl(
+        "SOLVE_RUNS_BUILD_WGSL",
+        rubble3d::gpu::SOLVE_RUNS_BUILD_WGSL,
+    );
+}
+
+#[test]
 fn validate_adjacency_reset_wgsl() {
     validate_wgsl("ADJACENCY_RESET_WGSL", rubble3d::gpu::ADJACENCY_RESET_WGSL);
 }

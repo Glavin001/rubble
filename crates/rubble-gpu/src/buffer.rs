@@ -233,7 +233,11 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
     /// Await an already-submitted staging buffer copy. Call this after the
     /// encoder containing the copy has been submitted.
     /// On WASM, yields to the JS event loop while waiting; on native, blocks.
-    pub async fn map_staging_async(ctx: &GpuContext, staging: wgpu::Buffer, byte_len: u64) -> Vec<T> {
+    pub async fn map_staging_async(
+        ctx: &GpuContext,
+        staging: wgpu::Buffer,
+        byte_len: u64,
+    ) -> Vec<T> {
         let slice = staging.slice(..byte_len);
 
         #[cfg(target_arch = "wasm32")]

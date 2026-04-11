@@ -1090,11 +1090,7 @@ fn long_horizon_stack_velocity_stays_bounded() {
     for ix in 0..5 {
         for iz in 0..5 {
             let h = world.add_body(&RigidBodyDesc {
-                position: Vec3::new(
-                    ix as f32 * 1.0 - 2.0,
-                    0.5,
-                    iz as f32 * 1.0 - 2.0,
-                ),
+                position: Vec3::new(ix as f32 * 1.0 - 2.0, 0.5, iz as f32 * 1.0 - 2.0),
                 mass: 1.0,
                 shape: ShapeDesc::Box {
                     half_extents: Vec3::new(0.4, 0.4, 0.4),
@@ -1357,16 +1353,8 @@ fn falling_box_pile_does_not_explode() {
     // Check no body fell through floor or launched into space
     for (i, &h) in handles.iter().enumerate() {
         let pos = world.get_position(h).unwrap();
-        assert!(
-            pos.y > -1.0,
-            "Body {i} fell through floor: y={:.2}",
-            pos.y
-        );
-        assert!(
-            pos.y < 20.0,
-            "Body {i} launched into space: y={:.2}",
-            pos.y
-        );
+        assert!(pos.y > -1.0, "Body {i} fell through floor: y={:.2}", pos.y);
+        assert!(pos.y < 20.0, "Body {i} launched into space: y={:.2}", pos.y);
     }
 }
 
@@ -1739,10 +1727,7 @@ fn hundred_box_grid_settles_without_divergence() {
         !any_fell_through,
         "A box fell through the floor in 100-box grid"
     );
-    assert!(
-        !any_launched,
-        "A box was launched upward in 100-box grid"
-    );
+    assert!(!any_launched, "A box was launched upward in 100-box grid");
     assert!(
         max_speed < 5.0,
         "100-box grid had high velocity after settling: max_speed={max_speed:.3}"

@@ -265,7 +265,8 @@ impl StepTimingsMs {
         self.upload_ms += other.upload_ms;
         self.predict_aabb_ms += other.predict_aabb_ms;
         self.broadphase_ms += other.broadphase_ms;
-        self.broadphase_breakdown.accumulate(&other.broadphase_breakdown);
+        self.broadphase_breakdown
+            .accumulate(&other.broadphase_breakdown);
         self.narrowphase_ms += other.narrowphase_ms;
         self.contact_fetch_ms += other.contact_fetch_ms;
         self.solve_ms += other.solve_ms;

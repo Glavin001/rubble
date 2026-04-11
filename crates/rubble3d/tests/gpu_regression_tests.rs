@@ -116,7 +116,15 @@ fn run_box_floor_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some({let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(states.len() as u32, solver_iterations, warm_contacts, &mut __t))})
+    Some({
+        let mut __t = rubble_gpu::StepTimingsMs::default();
+        pollster::block_on(pipeline.step_with_contacts_async(
+            states.len() as u32,
+            solver_iterations,
+            warm_contacts,
+            &mut __t,
+        ))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -185,7 +193,15 @@ fn run_box_pair_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some({let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(states.len() as u32, solver_iterations, warm_contacts, &mut __t))})
+    Some({
+        let mut __t = rubble_gpu::StepTimingsMs::default();
+        pollster::block_on(pipeline.step_with_contacts_async(
+            states.len() as u32,
+            solver_iterations,
+            warm_contacts,
+            &mut __t,
+        ))
+    })
 }
 
 fn run_sphere_plane_step(
@@ -248,7 +264,15 @@ fn run_sphere_plane_step(
         INITIAL_PENALTY,
         0.95,
     );
-    Some({let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(states.len() as u32, solver_iterations, warm_contacts, &mut __t))})
+    Some({
+        let mut __t = rubble_gpu::StepTimingsMs::default();
+        pollster::block_on(pipeline.step_with_contacts_async(
+            states.len() as u32,
+            solver_iterations,
+            warm_contacts,
+            &mut __t,
+        ))
+    })
 }
 
 fn simulate_sphere_plane_frames(
@@ -314,8 +338,15 @@ fn simulate_sphere_plane_frames(
         } else {
             None
         };
-        let (next_states, contacts) =
-            {let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(states.len() as u32, solver_iterations, warm, &mut __t))};
+        let (next_states, contacts) = {
+            let mut __t = rubble_gpu::StepTimingsMs::default();
+            pollster::block_on(pipeline.step_with_contacts_async(
+                states.len() as u32,
+                solver_iterations,
+                warm,
+                &mut __t,
+            ))
+        };
         prev_states = states;
         states = next_states;
         prev_contacts = contacts;
@@ -785,7 +816,10 @@ fn custom_k_start_is_applied_3d() {
         custom_k_start,
         0.95,
     );
-    let (_, contacts) = {let mut __t = rubble_gpu::StepTimingsMs::default(); pollster::block_on(pipeline.step_with_contacts_async(2, 0, None, &mut __t))};
+    let (_, contacts) = {
+        let mut __t = rubble_gpu::StepTimingsMs::default();
+        pollster::block_on(pipeline.step_with_contacts_async(2, 0, None, &mut __t))
+    };
     assert!(!contacts.is_empty(), "expected resting box-floor contacts");
     assert!(contacts.iter().all(|c| {
         (c.penalty.x - custom_k_start).abs() < 1e-3

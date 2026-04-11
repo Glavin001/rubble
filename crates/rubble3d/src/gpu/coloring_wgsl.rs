@@ -83,3 +83,98 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 "#;
+
+/// Reset GPU-built solve run descriptors and indirect dispatch args.
+pub const SOLVE_RUNS_RESET_WGSL: &str = r#"
+struct SolveRange {
+    offset: u32,
+    count:  u32,
+};
+
+struct DispatchArgs {
+    x: u32,
+    y: u32,
+    z: u32,
+    _pad: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> solve_runs:    array<SolveRange>;
+@group(0) @binding(1) var<storage, read_write> dispatch_args: array<DispatchArgs>;
+@group(0) @binding(2) var<storage, read_write> run_counter:   atomic<u32>;
+@group(0) @binding(3) var<uniform>             params:        vec4<u32>; // x=max_runs
+
+const WORKGROUP_SIZE: u32 = 64u;
+
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let max_runs = params.x;
+    if idx >= max_runs {
+        return;
+    }
+
+    solve_runs[idx] = SolveRange(0u, 0u);
+    dispatch_args[idx] = DispatchArgs(1u, 1u, 1u, 0u);
+    if idx == 0u {
+        atomicStore(&run_counter, 0u);
+    }
+}
+"#;
+
+/// Build compact solve runs and indirect dispatch args from sorted body colors.
+pub const SOLVE_RUNS_BUILD_WGSL: &str = r#"
+struct SolveRange {
+    offset: u32,
+    count:  u32,
+};
+
+struct DispatchArgs {
+    x: u32,
+    y: u32,
+    z: u32,
+    _pad: u32,
+};
+
+@group(0) @binding(0) var<storage, read>       sorted_colors:  array<u32>;
+@group(0) @binding(1) var<storage, read_write> solve_runs:     array<SolveRange>;
+@group(0) @binding(2) var<storage, read_write> dispatch_args:  array<DispatchArgs>;
+@group(0) @binding(3) var<storage, read_write> run_counter:    atomic<u32>;
+@group(0) @binding(4) var<uniform>             params:         vec4<u32>; // x=num_bodies, y=max_runs
+
+const WORKGROUP_SIZE: u32 = 64u;
+const UNCOLORED: u32 = 0xFFFFFFFFu;
+const INACTIVE_COLOR: u32 = 0xFFFFFFFEu;
+
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let num_bodies = params.x;
+    let max_runs = params.y;
+    if idx >= num_bodies {
+        return;
+    }
+
+    let color = sorted_colors[idx];
+    if color == UNCOLORED || color == INACTIVE_COLOR {
+        return;
+    }
+
+    if idx > 0u && sorted_colors[idx - 1u] == color {
+        return;
+    }
+
+    var run_end = idx + 1u;
+    while run_end < num_bodies && sorted_colors[run_end] == color {
+        run_end += 1u;
+    }
+
+    let slot = atomicAdd(&run_counter, 1u);
+    if slot >= max_runs {
+        return;
+    }
+
+    let count = run_end - idx;
+    solve_runs[slot] = SolveRange(idx, count);
+    dispatch_args[slot] = DispatchArgs(max((count + WORKGROUP_SIZE - 1u) / WORKGROUP_SIZE, 1u), 1u, 1u, 0u);
+}
+"#;

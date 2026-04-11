@@ -62,7 +62,8 @@ const CONTACT_FLAG_WARMSTARTED: u32 = 2u;
 @group(0) @binding(5) var<uniform>             params:               SimParams;
 @group(0) @binding(6) var<storage, read>       body_contact_ranges:  array<vec2<u32>>;
 @group(0) @binding(7) var<storage, read>       body_contact_indices: array<u32>;
-@group(0) @binding(8) var<uniform>             solve_range:          SolveRange;
+@group(0) @binding(8) var<storage, read>       solve_runs:           array<SolveRange>;
+@group(0) @binding(9) var<uniform>             solve_run_params:     vec4<u32>; // x=run_index
 
 fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(
@@ -282,6 +283,7 @@ fn accumulate_row(
 
 @compute @workgroup_size(BODY_LANES)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let solve_range = solve_runs[solve_run_params.x];
     let local_idx = gid.x;
     if local_idx >= solve_range.count {
         return;

@@ -10,10 +10,10 @@ use rubble_gpu::GpuContext;
 use rubble_math::BodyHandle;
 use std::{sync::Arc, time::Instant};
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::dpi::PhysicalPosition;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 const CONTROLS_3D: &[&str] = &[
@@ -24,7 +24,11 @@ const CONTROLS_3D: &[&str] = &[
 
 const CONTROLS_2D: &[&str] = &["Pan view: left drag", "Zoom view: mouse wheel"];
 
-fn physical_pos_to_egui_pos(window: &Window, egui_ctx: &egui::Context, pos: PhysicalPosition<f64>) -> egui::Pos2 {
+fn physical_pos_to_egui_pos(
+    window: &Window,
+    egui_ctx: &egui::Context,
+    pos: PhysicalPosition<f64>,
+) -> egui::Pos2 {
     let ppp = egui_winit::pixels_per_point(egui_ctx, window);
     egui::pos2(pos.x as f32 / ppp, pos.y as f32 / ppp)
 }
@@ -32,7 +36,11 @@ fn physical_pos_to_egui_pos(window: &Window, egui_ctx: &egui::Context, pos: Phys
 /// Hit-test the viewer overlay using the **last laid-out** area rect plus the **current** cursor
 /// position. `Context::is_pointer_over_egui()` is tied to the last `run_ui` pass and is often stale
 /// between frames, which incorrectly blocks all camera input.
-fn viewer_ui_blocks_camera(window: &Window, egui_ctx: &egui::Context, pos: PhysicalPosition<f64>) -> bool {
+fn viewer_ui_blocks_camera(
+    window: &Window,
+    egui_ctx: &egui::Context,
+    pos: PhysicalPosition<f64>,
+) -> bool {
     if egui_ctx.egui_is_using_pointer() {
         return true;
     }
@@ -465,9 +473,7 @@ impl App3D {
                 if !block {
                     let scroll = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y,
-                        MouseScrollDelta::PixelDelta(p) => {
-                            (p.y as f32 / 120.0).clamp(-4.0, 4.0)
-                        }
+                        MouseScrollDelta::PixelDelta(p) => (p.y as f32 / 120.0).clamp(-4.0, 4.0),
                     };
                     state.camera.zoom(scroll);
                 }
@@ -833,9 +839,7 @@ impl App2D {
                 if !block {
                     let scroll = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y,
-                        MouseScrollDelta::PixelDelta(p) => {
-                            (p.y as f32 / 120.0).clamp(-4.0, 4.0)
-                        }
+                        MouseScrollDelta::PixelDelta(p) => (p.y as f32 / 120.0).clamp(-4.0, 4.0),
                     };
                     state.camera.zoom_by(scroll);
                 }

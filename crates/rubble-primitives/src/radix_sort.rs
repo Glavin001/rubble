@@ -268,11 +268,11 @@ impl GpuRadixSort {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: scratch.histograms.buffer().as_entire_binding()
+                            resource: scratch.histograms.buffer().as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: self.params_buf.as_entire_binding()
+                            resource: self.params_buf.as_entire_binding(),
                         },
                     ],
                 });
@@ -293,7 +293,8 @@ impl GpuRadixSort {
             }
 
             // Pass 2: Exclusive prefix scan on histograms (flattened)
-            self.prefix_scan.exclusive_scan(ctx, &mut scratch.histograms);
+            self.prefix_scan
+                .exclusive_scan(ctx, &mut scratch.histograms);
 
             // Pass 3: Scatter
             {
@@ -334,11 +335,11 @@ impl GpuRadixSort {
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
-                            resource: scratch.histograms.buffer().as_entire_binding()
+                            resource: scratch.histograms.buffer().as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: self.params_buf.as_entire_binding()
+                            resource: self.params_buf.as_entire_binding(),
                         },
                     ],
                 });
@@ -367,7 +368,13 @@ impl GpuRadixSort {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             encoder.copy_buffer_to_buffer(scratch.keys_tmp.buffer(), 0, keys.buffer(), 0, byte_len);
-            encoder.copy_buffer_to_buffer(scratch.values_tmp.buffer(), 0, values.buffer(), 0, byte_len);
+            encoder.copy_buffer_to_buffer(
+                scratch.values_tmp.buffer(),
+                0,
+                values.buffer(),
+                0,
+                byte_len,
+            );
             ctx.queue.submit(Some(encoder.finish()));
         }
     }
