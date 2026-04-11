@@ -8,6 +8,8 @@ interface RubbleTestHooks {
   getTransforms?: () => Float32Array;
   /** 7 floats: [upload, predict+aabb, broadphase, narrowphase, contact_fetch, solve, extract] */
   lastStepTimingsMs?: Float32Array;
+  /** 4 floats: [step+transform_copy, matrix_update, render, total] */
+  lastFrameTimingsMs?: Float32Array;
   error: string | null;
   /** Benchmark-only: stop the render loop and wait for any in-flight frame. */
   stopLoop?: () => Promise<void>;

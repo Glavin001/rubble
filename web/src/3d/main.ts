@@ -8,6 +8,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 // so the InstancedMesh constructor count must stay <= 1000 for small scenes
 // or > 1000 for large ones. We recreate meshes per scene with exact capacity.
 const DEMO_SEED = 0x3d5eed;
+const GPU_RESIDENT_STEP_BODY_THRESHOLD = 1500;
 
 const SPHERE_COLORS = [0xff6b35, 0xf7c948, 0x4ecdc4, 0x45b7d1, 0x96ceb4];
 const BOX_COLORS = [0xff6f69, 0xffcc5c, 0x88d8b0, 0xc3aed6, 0xffd166];
@@ -175,6 +176,7 @@ function allocateInstancedMeshes(sphereCap: number, boxCap: number, capsuleCap: 
   sphereInstances = new THREE.InstancedMesh(sphereGeo, sphereMat, sphereCap);
   sphereInstances.castShadow = true;
   sphereInstances.receiveShadow = true;
+  sphereInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   sphereInstances.count = 0;
   sphereInstances.instanceColor = new THREE.InstancedBufferAttribute(sphereColorAttr, 3);
   scene.add(sphereInstances);
@@ -183,6 +185,7 @@ function allocateInstancedMeshes(sphereCap: number, boxCap: number, capsuleCap: 
   boxInstances = new THREE.InstancedMesh(boxGeo, boxMat, boxCap);
   boxInstances.castShadow = true;
   boxInstances.receiveShadow = true;
+  boxInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   boxInstances.count = 0;
   boxInstances.instanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
   scene.add(boxInstances);
@@ -195,6 +198,7 @@ function allocateInstancedMeshes(sphereCap: number, boxCap: number, capsuleCap: 
   );
   capsuleInstances.castShadow = true;
   capsuleInstances.receiveShadow = true;
+  capsuleInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   capsuleInstances.count = 0;
   capsuleInstances.instanceColor = new THREE.InstancedBufferAttribute(capsuleColorAttr, 3);
   scene.add(capsuleInstances);
@@ -217,15 +221,12 @@ function rebuildCapsuleGeometry(halfHeight: number, radius: number, capacity: nu
   );
   capsuleInstances.castShadow = true;
   capsuleInstances.receiveShadow = true;
+  capsuleInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   capsuleInstances.count = 0;
   capsuleInstances.instanceColor = new THREE.InstancedBufferAttribute(capsuleColorAttr, 3);
   scene.add(capsuleInstances);
 }
 
-const tempMatrix = new THREE.Matrix4();
-const tempQuat = new THREE.Quaternion();
-const tempPos = new THREE.Vector3();
-const tempScale = new THREE.Vector3();
 const tempColor = new THREE.Color();
 
 function pushColor(
@@ -302,8 +303,72 @@ function syncTransformCache() {
   }
 }
 
+async function stepAndSyncTransformCache() {
+  ensureTransformBuffer();
+  if (cachedTransforms.length > 0 && world.handle_count() >= GPU_RESIDENT_STEP_BODY_THRESHOLD) {
+    await world.step_and_copy_transforms_into(cachedTransforms);
+  } else {
+    await world.step();
+    syncTransformCache();
+    world.copy_last_step_timings_into(cachedTimings);
+    return;
+  }
+  world.copy_last_step_timings_into(cachedTimings);
+}
+
+function writeMatrix(
+  out: Float32Array,
+  base: number,
+  px: number,
+  py: number,
+  pz: number,
+  qx: number,
+  qy: number,
+  qz: number,
+  qw: number,
+  sx: number,
+  sy: number,
+  sz: number,
+) {
+  const x2 = qx + qx;
+  const y2 = qy + qy;
+  const z2 = qz + qz;
+  const xx = qx * x2;
+  const xy = qx * y2;
+  const xz = qx * z2;
+  const yy = qy * y2;
+  const yz = qy * z2;
+  const zz = qz * z2;
+  const wx = qw * x2;
+  const wy = qw * y2;
+  const wz = qw * z2;
+
+  out[base] = (1 - (yy + zz)) * sx;
+  out[base + 1] = (xy + wz) * sx;
+  out[base + 2] = (xz - wy) * sx;
+  out[base + 3] = 0;
+
+  out[base + 4] = (xy - wz) * sy;
+  out[base + 5] = (1 - (xx + zz)) * sy;
+  out[base + 6] = (yz + wx) * sy;
+  out[base + 7] = 0;
+
+  out[base + 8] = (xz + wy) * sz;
+  out[base + 9] = (yz - wx) * sz;
+  out[base + 10] = (1 - (xx + yy)) * sz;
+  out[base + 11] = 0;
+
+  out[base + 12] = px;
+  out[base + 13] = py;
+  out[base + 14] = pz;
+  out[base + 15] = 1;
+}
+
 function updateTransforms() {
   const transforms = cachedTransforms;
+  const sphereMatrices = sphereInstances.instanceMatrix.array as Float32Array;
+  const boxMatrices = boxInstances.instanceMatrix.array as Float32Array;
+  const capsuleMatrices = capsuleInstances.instanceMatrix.array as Float32Array;
 
   for (let i = 0; i < bodies.length; i++) {
     const b = bodies[i];
@@ -319,21 +384,25 @@ function updateTransforms() {
     const qz = transforms[off + 5];
     const qw = transforms[off + 6];
 
-    tempPos.set(px, py, pz);
-    tempQuat.set(qx, qy, qz, qw);
-
     if (b.type === 0 && b.radius !== undefined) {
-      tempScale.setScalar(b.radius);
-      tempMatrix.compose(tempPos, tempQuat, tempScale);
-      sphereInstances.setMatrixAt(b.instanceIndex, tempMatrix);
+      const base = b.instanceIndex * 16;
+      writeMatrix(sphereMatrices, base, px, py, pz, qx, qy, qz, qw, b.radius, b.radius, b.radius);
     } else if (b.type === 1 && b.halfExtents) {
-      tempScale.set(
+      const base = b.instanceIndex * 16;
+      writeMatrix(
+        boxMatrices,
+        base,
+        px,
+        py,
+        pz,
+        qx,
+        qy,
+        qz,
+        qw,
         b.halfExtents[0] * 2,
         b.halfExtents[1] * 2,
         b.halfExtents[2] * 2,
       );
-      tempMatrix.compose(tempPos, tempQuat, tempScale);
-      boxInstances.setMatrixAt(b.instanceIndex, tempMatrix);
     } else if (b.type === 2 && b.halfHeight !== undefined && b.radius !== undefined) {
       // Scale relative to the base capsule geometry.
       const sxz = b.radius / capsuleBaseRadius;
@@ -343,9 +412,8 @@ function updateTransforms() {
       const totalHalf = b.halfHeight + b.radius;
       const baseTotalHalf = capsuleBaseHalfHeight + capsuleBaseRadius;
       const sy = totalHalf / baseTotalHalf;
-      tempScale.set(sxz, sy, sxz);
-      tempMatrix.compose(tempPos, tempQuat, tempScale);
-      capsuleInstances.setMatrixAt(b.instanceIndex, tempMatrix);
+      const base = b.instanceIndex * 16;
+      writeMatrix(capsuleMatrices, base, px, py, pz, qx, qy, qz, qw, sxz, sy, sxz);
     }
   }
 
@@ -373,6 +441,8 @@ function updateTimingsOverlay() {
 // Cached data for test hooks (avoids borrow conflicts during async step)
 let cachedTransforms = new Float32Array(0);
 let cachedTimings = new Float32Array(7);
+// [step+transform_copy, matrix_update, render, total]
+let cachedFrameTimings = new Float32Array(4);
 
 // URL parameter ?norender=1 disables rendering for stability diagnostics
 const noRender = new URL(window.location.href).searchParams.get("norender") === "1";
@@ -386,19 +456,14 @@ async function renderScene() {
   renderer.render(scene, camera);
 }
 
-async function loop_() {
-  if (frameInFlight || sceneLoading) {
-    return;
-  }
-  frameInFlight = true;
-
-  try {
+async function runViewerFrame() {
+  const frameStart = performance.now();
   const stepStart = performance.now();
-  await world.step();
+  await stepAndSyncTransformCache();
+  const stepAndCopyMs = performance.now() - stepStart;
 
-  // Stability diagnostic: detect the first step where bodies go unstable
+  // Stability diagnostic: detect the first step where bodies go unstable.
   if (stepCount < 200) {
-    syncTransformCache();
     const n = cachedTransforms.length / 7;
     for (let i = 1; i < n; i++) {
       const y = cachedTransforms[i * 7 + 1];
@@ -411,30 +476,31 @@ async function loop_() {
   }
 
   if (firstStepLoggedFor) {
-    const elapsed = performance.now() - stepStart;
     console.log(
-      `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
+      `[scene] "${firstStepLoggedFor}" first step: ${stepAndCopyMs.toFixed(0)}ms`,
     );
     firstStepLoggedFor = null;
-    // Hide the overlay once the first step finishes — proves GPU is alive.
     const loadingEl = document.getElementById("loading");
     if (loadingEl) loadingEl.style.display = "none";
   }
   stepCount++;
 
-  // Cache data after step completes (world is no longer borrowed)
-  syncTransformCache();
-  world.copy_last_step_timings_into(cachedTimings);
-
-  const t0 = performance.now();
+  const updateStart = performance.now();
   controls?.update();
   updateTransforms();
+  const matrixUpdateMs = performance.now() - updateStart;
+
+  const renderStart = performance.now();
   await renderScene();
-  lastRenderMs = performance.now() - t0;
+  const renderMs = performance.now() - renderStart;
+  lastRenderMs = renderMs;
+
+  cachedFrameTimings[0] = stepAndCopyMs;
+  cachedFrameTimings[1] = matrixUpdateMs;
+  cachedFrameTimings[2] = renderMs;
+  cachedFrameTimings[3] = performance.now() - frameStart;
 
   frameCount++;
-  // Step timings reflect the last `world.step()`; refresh every frame so the overlay
-  // is never up to ~1s stale (FPS is still averaged once per second).
   updateTimingsOverlay();
   const now = performance.now();
   if (now - lastFpsTime >= 1000) {
@@ -444,12 +510,22 @@ async function loop_() {
     lastFpsTime = now;
   }
 
-  // Update test hooks
   if (window.__rubble_test) {
     window.__rubble_test.stepCount = stepCount;
     window.__rubble_test.bodyCount = world.body_count();
     window.__rubble_test.lastStepTimingsMs = cachedTimings;
+    window.__rubble_test.lastFrameTimingsMs = cachedFrameTimings;
   }
+}
+
+async function loop_() {
+  if (frameInFlight || sceneLoading) {
+    return;
+  }
+  frameInFlight = true;
+
+  try {
+    await runViewerFrame();
   } catch (e) {
     // Surface step errors to console and test hooks (otherwise the animation
     // loop silently swallows them via `void loop_()` and E2E tests hang).
@@ -688,6 +764,7 @@ async function main() {
     bodyCount: world.body_count(),
     getTransforms: () => cachedTransforms,
     lastStepTimingsMs: cachedTimings,
+    lastFrameTimingsMs: cachedFrameTimings,
     error: null,
     // Benchmark-only: stop the render loop and wait for any in-flight frame.
     stopLoop: async () => {
@@ -701,16 +778,24 @@ async function main() {
     // Call stopLoop() first to prevent conflicts with the animation loop.
     // Returns the 7-float timings array after the step completes.
     benchStep: async () => {
-      await world.step();
+      const frameStart = performance.now();
+      const stepStart = performance.now();
+      await stepAndSyncTransformCache();
+      const stepAndCopyMs = performance.now() - stepStart;
       stepCount++;
-      syncTransformCache();
-      world.copy_last_step_timings_into(cachedTimings);
+      const updateStart = performance.now();
       controls?.update();
       updateTransforms();
+      const matrixUpdateMs = performance.now() - updateStart;
+      cachedFrameTimings[0] = stepAndCopyMs;
+      cachedFrameTimings[1] = matrixUpdateMs;
+      cachedFrameTimings[2] = 0;
+      cachedFrameTimings[3] = performance.now() - frameStart;
       updateTimingsOverlay();
       window.__rubble_test!.stepCount = stepCount;
       window.__rubble_test!.bodyCount = world.body_count();
       window.__rubble_test!.lastStepTimingsMs = cachedTimings;
+      window.__rubble_test!.lastFrameTimingsMs = cachedFrameTimings;
       return Array.from(cachedTimings);
     },
     loopStep: async () => {
@@ -720,81 +805,12 @@ async function main() {
 
   document.getElementById("loading")!.style.display = "none";
 
-  // Main animation loop: step physics, sync transforms, render.
-  // Scheduling next frame after current completes avoids re-entrancy.
-  async function animStep() {
-    const stepStart = performance.now();
-    await world.step();
-    if (firstStepLoggedFor) {
-      const elapsed = performance.now() - stepStart;
-      console.log(
-        `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
-      );
-      firstStepLoggedFor = null;
-      const loadingEl = document.getElementById("loading");
-      if (loadingEl) loadingEl.style.display = "none";
-    }
-    stepCount++;
-    syncTransformCache();
-    world.copy_last_step_timings_into(cachedTimings);
-    const t0 = performance.now();
-    controls?.update();
-    updateTransforms();
-    await renderScene();
-    lastRenderMs = performance.now() - t0;
-    frameCount++;
-    updateTimingsOverlay();
-    const now = performance.now();
-    if (now - lastFpsTime >= 1000) {
-      fpsEl.textContent = `FPS: ${frameCount}`;
-      bodiesEl.textContent = `Bodies: ${world.body_count()}`;
-      frameCount = 0;
-      lastFpsTime = now;
-    }
-    if (window.__rubble_test) {
-      window.__rubble_test.stepCount = stepCount;
-      window.__rubble_test.bodyCount = world.body_count();
-      window.__rubble_test.lastStepTimingsMs = cachedTimings;
-    }
-  }
-
   // Animation loop
   async function stepTick() {
     if (!loopRunning || frameInFlight) return;
     frameInFlight = true;
     try {
-      const stepStart = performance.now();
-      await world.step();
-      if (firstStepLoggedFor) {
-        const elapsed = performance.now() - stepStart;
-        console.log(
-          `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
-        );
-        firstStepLoggedFor = null;
-        const loadingEl = document.getElementById("loading");
-        if (loadingEl) loadingEl.style.display = "none";
-      }
-      stepCount++;
-      syncTransformCache();
-      world.copy_last_step_timings_into(cachedTimings);
-      controls?.update();
-      updateTransforms();
-      await renderScene();
-      lastRenderMs = performance.now() - stepStart;
-      frameCount++;
-      updateTimingsOverlay();
-      const now = performance.now();
-      if (now - lastFpsTime >= 1000) {
-        fpsEl.textContent = `FPS: ${frameCount}`;
-        bodiesEl.textContent = `Bodies: ${world.body_count()}`;
-        frameCount = 0;
-        lastFpsTime = now;
-      }
-      if (window.__rubble_test) {
-        window.__rubble_test.stepCount = stepCount;
-        window.__rubble_test.bodyCount = world.body_count();
-        window.__rubble_test.lastStepTimingsMs = cachedTimings;
-      }
+      await runViewerFrame();
     } catch (e) {
       console.error("step failed:", e);
       if (window.__rubble_test) {

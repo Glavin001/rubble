@@ -116,3 +116,11 @@ fn validate_build_render_instances_wgsl() {
         rubble3d::gpu::BUILD_RENDER_INSTANCES_WGSL,
     );
 }
+
+#[test]
+fn validate_extract_render_transforms_wgsl() {
+    validate_wgsl(
+        "EXTRACT_RENDER_TRANSFORMS_WGSL",
+        rubble3d::gpu::EXTRACT_RENDER_TRANSFORMS_WGSL,
+    );
+}

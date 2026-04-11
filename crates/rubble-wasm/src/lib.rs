@@ -514,6 +514,63 @@ impl PhysicsWorld3D {
         self.world.step();
     }
 
+    /// Step the simulation and copy compact render transforms into a caller-provided array.
+    ///
+    /// This is the Web 3D viewer hot path. It keeps the Rust physics state on the
+    /// GPU and downloads only position + orientation for Three.js instance updates.
+    pub async fn step_and_copy_transforms_into(
+        &mut self,
+        out: &Float32Array,
+    ) -> Result<(), JsError> {
+        let expected = self.handles.len() * 7;
+        if out.length() as usize != expected {
+            return Err(JsError::new(&format!(
+                "transforms buffer length mismatch: expected {expected}, got {}",
+                out.length()
+            )));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        let transforms: Vec<rubble3d::gpu::RenderTransform3D> =
+            self.world.step_for_render_transforms_async().await;
+        #[cfg(not(target_arch = "wasm32"))]
+        let transforms: Vec<rubble3d::gpu::RenderTransform3D> = {
+            self.world.step();
+            Vec::new()
+        };
+
+        self.transforms_cache.resize(expected, 0.0);
+        if transforms.len() == self.handles.len() {
+            for (i, transform) in transforms.iter().enumerate() {
+                let off = i * 7;
+                self.transforms_cache[off] = transform.position[0];
+                self.transforms_cache[off + 1] = transform.position[1];
+                self.transforms_cache[off + 2] = transform.position[2];
+                self.transforms_cache[off + 3] = transform.rotation[0];
+                self.transforms_cache[off + 4] = transform.rotation[1];
+                self.transforms_cache[off + 5] = transform.rotation[2];
+                self.transforms_cache[off + 6] = transform.rotation[3];
+            }
+        } else {
+            // Rare path: removed bodies or compound fallback can make the compact
+            // render stream differ from the stable JS handle list.
+            self.world.sync_body_states_from_gpu();
+            for (i, h) in self.handles.iter().enumerate() {
+                let pos = self.world.get_position(*h).unwrap_or(Vec3::ZERO);
+                let rot = self.world.get_rotation(*h).unwrap_or(Quat::IDENTITY);
+                let off = i * 7;
+                self.transforms_cache[off] = pos.x;
+                self.transforms_cache[off + 1] = pos.y;
+                self.transforms_cache[off + 2] = pos.z;
+                self.transforms_cache[off + 3] = rot.x;
+                self.transforms_cache[off + 4] = rot.y;
+                self.transforms_cache[off + 5] = rot.z;
+                self.transforms_cache[off + 6] = rot.w;
+            }
+        }
+        copy_f32_buffer("transforms", out, &self.transforms_cache)
+    }
+
     /// Number of live bodies.
     pub fn body_count(&self) -> u32 {
         self.world.body_count() as u32

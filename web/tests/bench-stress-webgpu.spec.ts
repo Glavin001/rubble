@@ -3,8 +3,8 @@ import { test, expect } from "@playwright/test";
 /**
  * WebGPU stress benchmark: 20k mixed shapes (spheres, boxes, capsules).
  *
- * Uses benchStep() to run physics steps directly, bypassing Three.js rendering.
- * This gives clean physics-only timings without animation frame throttling.
+ * Uses benchStep() for clean physics timings, then samples loopStep() frames
+ * for end-to-end viewer timing with Three.js rendering.
  *
  * Usage:
  *   cd web && npx playwright test tests/bench-stress-webgpu.spec.ts --reporter=list
@@ -12,6 +12,7 @@ import { test, expect } from "@playwright/test";
 
 const WARMUP_STEPS = 60;
 const BENCH_STEPS = 200;
+const FRAME_SAMPLE_STEPS = 5;
 
 const PHASE = {
   upload: 0,
@@ -21,6 +22,13 @@ const PHASE = {
   contact_fetch: 4,
   solve: 5,
   extract: 6,
+} as const;
+
+const FRAME = {
+  step_copy: 0,
+  matrix_update: 1,
+  render: 2,
+  total: 3,
 } as const;
 
 function median(values: number[]): number {
@@ -142,9 +150,20 @@ test.describe("WebGPU Stress Mixed Benchmark", () => {
       }
     }
 
+    // --- Sample end-to-end viewer frames ---
+    const frameTimings: number[][] = [];
+    for (let i = 0; i < FRAME_SAMPLE_STEPS; i++) {
+      await page.evaluate(() => window.__rubble_test!.loopStep!());
+      const f = await page.evaluate(() =>
+        Array.from(window.__rubble_test!.lastFrameTimingsMs ?? []),
+      );
+      frameTimings.push(f);
+    }
+
     // --- Compute stats ---
     const byPhase = (idx: number) => timings.map((t) => t[idx]);
     const totalPerStep = timings.map((t) => t.reduce((a, b) => a + b, 0));
+    const byFrame = (idx: number) => frameTimings.map((t) => t[idx]);
 
     function phaseStats(name: string, values: number[]) {
       return {
@@ -170,6 +189,11 @@ test.describe("WebGPU Stress Mixed Benchmark", () => {
       ...phaseStats("contact_fetch_ms", byPhase(PHASE.contact_fetch)),
       ...phaseStats("solve_ms", byPhase(PHASE.solve)),
       ...phaseStats("extract_ms", byPhase(PHASE.extract)),
+      frame_sample_steps: FRAME_SAMPLE_STEPS,
+      ...phaseStats("frame_step_copy_ms", byFrame(FRAME.step_copy)),
+      ...phaseStats("frame_matrix_update_ms", byFrame(FRAME.matrix_update)),
+      ...phaseStats("frame_render_ms", byFrame(FRAME.render)),
+      ...phaseStats("frame_total_ms", byFrame(FRAME.total)),
     };
 
     // eslint-disable-next-line no-console
@@ -178,6 +202,7 @@ test.describe("WebGPU Stress Mixed Benchmark", () => {
     // --- Assertions ---
     expect(bodyCount).toBeGreaterThanOrEqual(20000);
     expect(timings).toHaveLength(BENCH_STEPS);
+    expect(frameTimings).toHaveLength(FRAME_SAMPLE_STEPS);
 
     for (let s = 0; s < timings.length; s++) {
       for (let p = 0; p < 7; p++) {
@@ -186,6 +211,17 @@ test.describe("WebGPU Stress Mixed Benchmark", () => {
           `timings[step=${s}][phase=${p}] = ${timings[s][p]} is not finite`,
         ).toBe(true);
         expect(timings[s][p]).toBeGreaterThanOrEqual(0);
+      }
+    }
+
+    for (let s = 0; s < frameTimings.length; s++) {
+      expect(frameTimings[s]).toHaveLength(4);
+      for (let p = 0; p < 4; p++) {
+        expect(
+          Number.isFinite(frameTimings[s][p]),
+          `frameTimings[step=${s}][phase=${p}] = ${frameTimings[s][p]} is not finite`,
+        ).toBe(true);
+        expect(frameTimings[s][p]).toBeGreaterThanOrEqual(0);
       }
     }
 

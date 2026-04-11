@@ -1099,6 +1099,75 @@ impl World {
         self.gpu_pipeline.render_frame()
     }
 
+    /// Advance the simulation and return compact render transforms without
+    /// downloading the full CPU state mirror.
+    ///
+    /// This is the Web/Three.js viewer hot path: the simulation remains
+    /// GPU-resident across frames, while callers receive only position +
+    /// orientation data needed to update instance matrices. CPU state is synced
+    /// explicitly by [`sync_body_states_from_gpu`](Self::sync_body_states_from_gpu)
+    /// when later API calls need it.
+    pub async fn step_for_render_transforms_async(&mut self) -> Vec<gpu::RenderTransform3D> {
+        use rubble_gpu::web_time::Instant;
+
+        let mut timings = rubble_gpu::StepTimingsMs::default();
+        if self.body_count() == 0 {
+            self.last_step_timings = timings;
+            return Vec::new();
+        }
+
+        if !self.gpu_uploaded {
+            let t_upload = Instant::now();
+            self.upload_world_state();
+            timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
+        }
+
+        let has_unsupported_compounds = self
+            .gpu_compact_indices
+            .iter()
+            .any(|&i| matches!(self.shapes[i], ShapeDesc::Compound { .. }))
+            && self.gpu_compact_indices.len() > 1;
+        if has_unsupported_compounds {
+            self.step_async().await;
+            return self
+                .gpu_compact_indices
+                .iter()
+                .map(|&idx| {
+                    let state = self.states[idx];
+                    gpu::RenderTransform3D {
+                        position: state.position_inv_mass.to_array(),
+                        rotation: state.orientation.to_array(),
+                    }
+                })
+                .collect();
+        }
+
+        let num_bodies = self.gpu_compact_indices.len() as u32;
+        let sub_steps = self.config.sub_steps.max(1);
+        if sub_steps > 1 {
+            let sub_dt = self.config.dt / sub_steps as f32;
+            self.gpu_pipeline.set_sim_dt(sub_dt);
+        }
+
+        for _sub in 0..sub_steps {
+            self.gpu_pipeline
+                .step_fast_device_async(num_bodies, self.config.solver_iterations, &mut timings)
+                .await;
+        }
+
+        let t_extract = Instant::now();
+        let transforms = self
+            .gpu_pipeline
+            .download_render_transforms_async(num_bodies)
+            .await;
+        timings.extract_ms += t_extract.elapsed().as_secs_f32() * 1000.0;
+
+        self.collision_events.clear();
+        self.gpu_cpu_sync_pending = true;
+        self.last_step_timings = timings;
+        transforms
+    }
+
     /// Advance the simulation by one time step (async).
     pub async fn step_async(&mut self) {
         use rubble_gpu::web_time::Instant;

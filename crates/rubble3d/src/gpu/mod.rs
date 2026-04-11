@@ -27,6 +27,7 @@ mod extract_velocity_wgsl;
 mod narrowphase_wgsl;
 mod predict_wgsl;
 mod render_instances_wgsl;
+mod transform_extract_wgsl;
 mod warmstart_wgsl;
 
 pub use adjacency_wgsl::{
@@ -38,6 +39,7 @@ pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::NARROWPHASE_WGSL;
 pub use predict_wgsl::PREDICT_WGSL;
 pub use render_instances_wgsl::BUILD_RENDER_INSTANCES_WGSL;
+pub use transform_extract_wgsl::EXTRACT_RENDER_TRANSFORMS_WGSL;
 pub use warmstart_wgsl::{
     WARMSTART_HASHMAP_CLEAR_WGSL, WARMSTART_HASHMAP_INSERT_WGSL, WARMSTART_MATCH_WGSL,
 };
@@ -397,6 +399,13 @@ pub struct RenderBodyMeta3D {
     pub shape_data: [u32; 4],
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct RenderTransform3D {
+    pub position: [f32; 4],
+    pub rotation: [f32; 4],
+}
+
 pub struct GpuRenderFrame3D {
     pub spheres: MeshInstanceBatch,
     pub cubes: MeshInstanceBatch,
@@ -697,6 +706,7 @@ pub struct GpuPipeline {
     extract_kernel: ComputeKernel,
     event_pairs_kernel: ComputeKernel,
     render_instances_kernel: ComputeKernel,
+    transform_extract_kernel: ComputeKernel,
     warmstart_hashmap_clear_kernel: ComputeKernel,
     warmstart_hashmap_insert_kernel: ComputeKernel,
     warmstart_kernel: ComputeKernel,
@@ -729,6 +739,7 @@ pub struct GpuPipeline {
     render_spheres: GpuBuffer<MeshInstanceData>,
     render_cubes: GpuBuffer<MeshInstanceData>,
     render_capsules: GpuBuffer<MeshInstanceData>,
+    render_transforms: GpuBuffer<RenderTransform3D>,
 
     // GPU solve graph
     gpu_graph: GpuGraphState,
@@ -777,6 +788,7 @@ pub struct GpuPipeline {
     dual_bg_cache: CachedBindGroup<[u64; 3]>,
     extract_bg_cache: CachedBindGroup<[u64; 3]>,
     render_instances_bg_cache: CachedBindGroup<[u64; 6]>,
+    transform_extract_bg_cache: CachedBindGroup<[u64; 2]>,
     event_pairs_bg_cache: CachedBindGroup<[u64; 2]>,
 
     // GPU broadphase
@@ -884,6 +896,8 @@ impl GpuPipeline {
         let event_pairs_kernel = ComputeKernel::from_wgsl(&ctx, EVENT_PAIR_KEYS_WGSL, "main");
         let render_instances_kernel =
             ComputeKernel::from_wgsl(&ctx, BUILD_RENDER_INSTANCES_WGSL, "main");
+        let transform_extract_kernel =
+            ComputeKernel::from_wgsl(&ctx, EXTRACT_RENDER_TRANSFORMS_WGSL, "main");
         let warmstart_hashmap_clear_kernel =
             ComputeKernel::from_wgsl(&ctx, WARMSTART_HASHMAP_CLEAR_WGSL, "main");
         let warmstart_hashmap_insert_kernel =
@@ -920,6 +934,7 @@ impl GpuPipeline {
             GpuBuffer::new_with_usage(&ctx, max_bodies.max(1), wgpu::BufferUsages::VERTEX);
         let render_capsules =
             GpuBuffer::new_with_usage(&ctx, max_bodies.max(1), wgpu::BufferUsages::VERTEX);
+        let render_transforms = GpuBuffer::new(&ctx, max_bodies.max(1));
 
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SimParams uniform"),
@@ -970,6 +985,7 @@ impl GpuPipeline {
             extract_kernel,
             event_pairs_kernel,
             render_instances_kernel,
+            transform_extract_kernel,
             warmstart_hashmap_clear_kernel,
             warmstart_hashmap_insert_kernel,
             warmstart_kernel,
@@ -1000,6 +1016,7 @@ impl GpuPipeline {
             render_spheres,
             render_cubes,
             render_capsules,
+            render_transforms,
             gpu_graph,
             gpu_coloring,
             gpu_render,
@@ -1041,6 +1058,7 @@ impl GpuPipeline {
             dual_bg_cache: CachedBindGroup::default(),
             extract_bg_cache: CachedBindGroup::default(),
             render_instances_bg_cache: CachedBindGroup::default(),
+            transform_extract_bg_cache: CachedBindGroup::default(),
             event_pairs_bg_cache: CachedBindGroup::default(),
             gpu_lbvh,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1194,6 +1212,8 @@ impl GpuPipeline {
         }
 
         self.aabbs.grow_if_needed(&self.ctx, states.len());
+        self.render_transforms
+            .grow_if_needed(&self.ctx, states.len().max(1));
 
         self.warmstart_decay = warmstart_decay;
         self.sim_params = SimParamsGpu {
@@ -2762,6 +2782,39 @@ impl GpuPipeline {
         self.render_instances_bg_cache.bind_group.as_ref().unwrap()
     }
 
+    fn transform_extract_bind_group(&mut self) -> &wgpu::BindGroup {
+        let key = [
+            self.body_states_cache_key(),
+            self.render_transforms.byte_size(),
+        ];
+        if self.transform_extract_bg_cache.key.as_ref() != Some(&key) {
+            let bg = self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("extract_render_transforms"),
+                    layout: self.transform_extract_kernel.bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.body_states.current().buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.render_transforms.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.params_uniform.as_entire_binding(),
+                        },
+                    ],
+                });
+            self.transform_extract_bg_cache.key = Some(key);
+            self.transform_extract_bg_cache.bind_group = Some(bg);
+        }
+        self.transform_extract_bg_cache.bind_group.as_ref().unwrap()
+    }
+
     fn snapshot_prev_step_states(&mut self, num_bodies: u32) {
         self.prev_step_states
             .grow_if_needed(&self.ctx, num_bodies as usize);
@@ -2851,6 +2904,48 @@ impl GpuPipeline {
         let _ = self.extract_bind_group();
         let bg = self.extract_bg_cache.bind_group.as_ref().unwrap();
         self.run_pass("extract_vel", &self.extract_kernel, bg, num_bodies);
+    }
+
+    pub async fn download_render_transforms_async(
+        &mut self,
+        num_bodies: u32,
+    ) -> Vec<RenderTransform3D> {
+        if num_bodies == 0 {
+            return Vec::new();
+        }
+        self.render_transforms
+            .grow_if_needed(&self.ctx, num_bodies as usize);
+        self.render_transforms.set_len(num_bodies);
+        let _ = self.transform_extract_bind_group();
+        let bg = self
+            .transform_extract_bg_cache
+            .bind_group
+            .as_ref()
+            .unwrap();
+
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("extract_render_transforms_readback"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("extract_render_transforms"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.transform_extract_kernel.pipeline());
+            pass.set_bind_group(0, bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
+        }
+        let Some((staging, byte_len)) = self
+            .render_transforms
+            .record_copy_to_staging(&self.ctx, &mut encoder)
+        else {
+            return Vec::new();
+        };
+        self.ctx.queue.submit(Some(encoder.finish()));
+        GpuBuffer::map_staging_async(&self.ctx, staging, byte_len).await
     }
 
     pub fn build_render_instances(&mut self, num_bodies: u32) {
