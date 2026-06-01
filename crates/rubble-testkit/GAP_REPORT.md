@@ -14,7 +14,9 @@ export VK_ICD_FILENAMES=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' | head -
 
 cargo test -p rubble3d --test harness_tests      -- --nocapture   # scenario ladder + per-tick invariants
 cargo test -p rubble3d --test inertia_tests      -- --nocapture   # inertia vs parry (independent)
+cargo test -p rubble3d --test narrowphase_tests  -- --nocapture   # contact geometry vs parry (incl. convex)
 cargo test -p rubble3d --test metamorphic_tests  -- --nocapture   # determinism / invariances
+cargo test -p rubble3d --test ccd_tests          -- --nocapture   # tunneling / CCD characterization
 cargo test -p rubble3d --test fault_detection_tests -- --ignored --nocapture   # "test the tests"
 RUBBLE_RUN_KNOWN_FAILURES=1 cargo test -p rubble3d --test harness_tests        # surface every gap
 ```
@@ -39,7 +41,7 @@ catch real bugs, not merely loose enough to pass.
 | **Determinism** | metamorphic_tests | same input twice | **bit-identical (0.0)** |
 | **Mass-independence** | metamorphic_tests | free fall vs 1000× mass | **bit-identical (0.0)** |
 | **Permutation invariance** | metamorphic_tests | reversed insertion order | **bit-identical (0.0)** — solving is order-independent despite graph coloring |
-| **Narrowphase (collision detection)** | narrowphase_tests | **parry3d, all shape pairs incl. rotated** | normal axis + penetration depth match **exactly** for sphere/box/capsule/plane (8 axis-aligned + 2 rotated): the detection layer is solid; gaps are in the solver/integration |
+| **Narrowphase (collision detection)** | narrowphase_tests | **parry3d, all shape pairs incl. rotated** | normal axis + depth match **exactly** for sphere/box/capsule/plane (8 axis-aligned + 2 rotated) and for convex-convex / convex-box. The primitive detection layer is solid. (Exception: convex-**sphere** is broken — gap #5.) |
 
 ## Engine gaps DETECTED (registry: `gaps.rs`)
 
@@ -47,11 +49,13 @@ catch real bugs, not merely loose enough to pass.
 2. **Angular-momentum non-conservation** — `AngularIntegration`. `torque_free_box_angular_momentum`: L drifts **~14% of |L₀|** over 180 zero-torque steps (energy stays bounded). A torque-free body must conserve L exactly — the conservation-law quantification of gap #1.
 3. **Penetration under tangential load** — `Solver`. `static_friction_holds`: a resting box sinks **~0.15 m** into the floor under tilted gravity (normal+tangential); straight-gravity resting does not. The normal constraint is under-resolved when a large tangential load is present.
 4. **Explosive deep-penetration recovery** — `Solver`. `deep_overlap_separates`: two spheres started 0.6 m overlapping separate at **~70 m/s** (vs a 15 m/s sanity bound). No penetration-recovery velocity clamp — bodies spawned overlapping get launched.
+5. **Convex-hull vs sphere narrowphase is wrong** — `Narrowphase`. `narrowphase_tests` (convex_sphere): a cube-hull penetrating a sphere reports a normal ~60° off parry's and a depth of 0.92 m vs the correct 0.10 m. Convex-convex and convex-box are exact, so the bug is specific to the convex↔sphere path. (Convex hull is supported but should be used cautiously against spheres.)
 
 ## Characterizations — real, but expected / good-to-know (not "bugs")
 
 - **Convex-hull inertia is a bbox approximation** (`inertia_tests`): for an octahedron the engine's inertia is ~3.3× the true value (0.48 vs 0.144). Affects rotational dynamics of convex hulls; primitives are exact.
 - **Absolute-position f32 sensitivity / large-world precision** (`metamorphic_tests`): translating a scene 13 m from the origin changes the result by **~6 mm for free motion** and **~2 m for a contact scene** (chaos-amplified). The equations are translation-invariant; this is f32 precision in absolute-position math (notably finite-difference velocity extraction), and it grows with distance from the origin. Relevant for large worlds — keep scenes near the origin or use a local frame.
+- **No continuous collision detection (CCD)** (`ccd_tests`): a sphere is correctly stopped by a thin solid wall up to ~40 m/s but **tunnels through at ~80 m/s** (≈0.67 m/step at 1/120s). Expected for a discrete-time engine without CCD; the correctness floor (slow bodies are always stopped) holds. Fast/small bodies vs thin geometry need CCD or substepping.
 
 ## Fault-detection matrix — does the suite catch injected bugs?
 
@@ -86,10 +90,14 @@ tolerances honest:
 
 ## Not yet covered (next, in confidence order)
 
-- **Convex-hull narrowphase pairs** — the narrowphase matrix covers
-  sphere/box/capsule/plane; convex-hull pairs are not yet validated against parry
-  (and convex inertia is already a known bbox approximation).
-- **A passing friction scenario** to close the ZeroFriction blind spot.
+- **Compound bodies** — supported (CPU pair expansion) but a known faller; add a
+  compound resting/dynamics scenario to characterize the fall-through gap in this
+  framework.
+- **Kinematic bodies** — `set_body_kinematic` exists; add a test that a kinematic
+  body follows its prescribed motion and is unaffected by collisions/gravity.
+- **Convergence/order test** — does gap #1/#2 shrink at the integrator's order as
+  dt→0? Distinguishes acceptable order-of-accuracy from a biased integrator.
+- **2D coverage** (`rubble2d`) — the harness is structured to extend.
 - **Convergence testing** for rotational accuracy — does gap #1/#2 shrink at the
   integrator's order as dt→0? Distinguishes "acceptable order-of-accuracy" from a
   biased integrator.
