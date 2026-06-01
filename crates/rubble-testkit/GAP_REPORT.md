@@ -53,20 +53,22 @@ catch real bugs, not merely loose enough to pass.
 - **Convex-hull inertia is a bbox approximation** (`inertia_tests`): for an octahedron the engine's inertia is ~3.3× the true value (0.48 vs 0.144). Affects rotational dynamics of convex hulls; primitives are exact.
 - **Absolute-position f32 sensitivity / large-world precision** (`metamorphic_tests`): translating a scene 13 m from the origin changes the result by **~6 mm for free motion** and **~2 m for a contact scene** (chaos-amplified). The equations are translation-invariant; this is f32 precision in absolute-position math (notably finite-difference velocity extraction), and it grows with distance from the origin. Relevant for large worlds — keep scenes near the origin or use a local frame.
 
-## Suite blind spot (from the fault-detection matrix)
+## Fault-detection matrix — does the suite catch injected bugs?
 
-The matrix injects known bugs and confirms the suite catches them:
+The matrix injects known bugs and confirms ≥1 *passing* scenario catches each
+(proving the derived tolerances are tight enough to fail on a real bug):
 
 | Fault | Caught by |
 |---|---|
-| NegateGravity / ZeroGravity / ScaleGravity(1.5) | free_fall, projectile (+ contact scenes) |
-| DropSolverIterations→1 | two_body, drop_bounce, stack |
-| **ZeroFriction** | **NOT DETECTED** |
+| NegateGravity | free_fall, projectile, drop_bounce, resting_box, gentle_incline, stack×2, box_rests |
+| ZeroGravity | free_fall, projectile, box_rests |
+| ScaleGravity(1.5) | free_fall, projectile, drop_bounce, resting_box, box_rests |
+| DropSolverIterations→1 | two_body, drop_bounce, stack×2, newtons_cradle, unequal_mass |
+| ZeroFriction | gentle_incline_friction_holds |
 
-4/5 caught by multiple scenarios. **`ZeroFriction` is a blind spot**: the only
-friction scenario is quarantined for gap #3, and no *passing* scenario loads
-friction tangentially. Friction is under-tested until gap #3 is fixed or a
-gentle-incline-that-holds scenario is added.
+**All 5 faults are caught — no remaining blind spots.** A 1.5× gravity error, a
+single solver iteration, or zeroed friction each trip ≥1 scenario, which is what
+makes the *passing* results trustworthy rather than merely loose.
 
 ## Methodology findings (the tests were wrong before the engine was)
 

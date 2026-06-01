@@ -16,15 +16,13 @@ use rubble_testkit::{run_native, run_native_with_fault, scenarios};
 /// Faults we do not yet expect the *passing* suite to catch, with the reason.
 /// These are suite blind spots to close, tracked here so the matrix stays green
 /// while they're documented (analogous to the engine gap registry).
+///
+/// Currently EMPTY: every fault in the catalog is caught by at least one
+/// baseline-passing scenario. (ZeroFriction is caught by
+/// `gentle_incline_friction_holds`, which holds tangentially under friction and
+/// slides without it.)
 fn known_blind_spots() -> &'static [(FaultKind, &'static str)] {
-    &[(
-        FaultKind::ZeroFriction,
-        "No baseline-passing scenario loads friction tangentially: the one \
-         friction scenario (static_friction_holds) is quarantined for the \
-         penetration gap, and the resting/stack scenarios have no lateral load. \
-         Friction is under-tested until the penetration gap is fixed or a \
-         gentle-incline scenario that passes-with-friction is added.",
-    )]
+    &[]
 }
 
 #[test]
