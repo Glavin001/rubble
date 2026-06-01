@@ -7,14 +7,14 @@
 //! `step_async().await`.
 
 use glam::{DVec3, Mat3, Quat, Vec3};
-use rubble3d::World;
+use rubble3d::{RigidBodyDesc, SimConfig, World};
 use rubble_math::BodyHandle;
 
 use crate::invariants::{check_tick, energy_rel_tol, momentum_rel_tol, InvariantSpec};
 use crate::metrics::{compute_metrics, BodyMeta, BodySample, TickRecord};
 use crate::oracle::evaluate_endpoint;
 use crate::report::{ScenarioReport, Violation};
-use crate::scenario::Scenario;
+use crate::scenario::{Scenario, ScenarioChecks};
 
 /// Read one body's live state from the engine into a serializable sample.
 fn record_tick(
@@ -51,13 +51,14 @@ fn record_tick(
 /// Build the per-tick invariant spec from the scenario and its recorded initial
 /// (tick-0) state. All derived tolerances are assembled here in one place.
 fn build_spec(
-    scn: &Scenario,
+    cfg: &SimConfig,
+    steps: usize,
+    checks: &ScenarioChecks,
     r0: &TickRecord,
     shapes: Vec<rubble3d::ShapeDesc>,
     static_indices: Vec<usize>,
 ) -> InvariantSpec {
-    let cfg = &scn.config;
-    let t = cfg.dt as f64 * scn.steps as f64;
+    let t = cfg.dt as f64 * steps as f64;
 
     let v0max = r0
         .bodies
@@ -70,11 +71,10 @@ fn build_spec(
         .map(|b| b.ang_vel().length() as f64)
         .fold(0.0, f64::max);
 
-    let v_escape = scn
-        .checks
+    let v_escape = checks
         .v_escape
         .unwrap_or_else(|| 4.0 * (v0max + cfg.gravity.length() as f64 * t) + 20.0);
-    let omega_escape = scn.checks.omega_escape.unwrap_or(4.0 * w0max + 50.0);
+    let omega_escape = checks.omega_escape.unwrap_or(4.0 * w0max + 50.0);
 
     let static_pos0 = static_indices
         .iter()
@@ -112,14 +112,14 @@ fn build_spec(
         static_indices,
         static_pos0,
         static_tol: 1.0e-5,
-        floor_y: scn.checks.floor_y,
+        floor_y: checks.floor_y,
         penetration_bound: (cfg.penetration_slop + cfg.contact_offset) as f64,
         shapes,
-        energy_non_increase: scn.checks.energy_non_increase,
+        energy_non_increase: checks.energy_non_increase,
         baseline_energy: r0.metrics.total_energy,
         energy_rel: energy_rel_tol(cfg.solver_iterations),
         energy_abs,
-        momentum_conserve: scn.checks.momentum_conserve,
+        momentum_conserve: checks.momentum_conserve,
         baseline_momentum: DVec3::from_array(r0.metrics.linear_momentum),
         momentum_tol,
     }
@@ -140,48 +140,76 @@ fn engine_inertia_local(world: &World, h: BodyHandle, is_dynamic: bool) -> Mat3 
 /// Run a scenario natively (synchronous stepping). Returns a skipped report if no
 /// GPU adapter is available, so the suite degrades gracefully on machines without
 /// one rather than failing spuriously.
-pub fn run_native(scn: &Scenario) -> ScenarioReport {
-    let mut world = match World::new(scn.config.clone()) {
+/// Shared run core: create the world, add bodies, step + record + check, evaluate
+/// oracles, and assemble the report. Parameterized by raw config/bodies/checks so
+/// both the normal runner and the fault-injecting runner reuse identical logic
+/// (the fault path differs only in the config/body descriptors it passes in).
+fn run_core(
+    name: &str,
+    engine_cfg: &SimConfig,
+    intended_cfg: &SimConfig,
+    bodies: &[(&'static str, RigidBodyDesc)],
+    steps: usize,
+    checks: &ScenarioChecks,
+) -> ScenarioReport {
+    let mut world = match World::new(engine_cfg.clone()) {
         Ok(w) => w,
-        Err(_) => return ScenarioReport::skipped(scn.name),
+        Err(_) => return ScenarioReport::skipped(name),
     };
 
-    let mut handles = Vec::with_capacity(scn.bodies.len());
-    let mut metas = Vec::with_capacity(scn.bodies.len());
-    let mut shapes = Vec::with_capacity(scn.bodies.len());
+    let mut handles = Vec::with_capacity(bodies.len());
+    let mut metas = Vec::with_capacity(bodies.len());
+    let mut shapes = Vec::with_capacity(bodies.len());
     let mut static_indices = Vec::new();
 
-    for (i, bd) in scn.bodies.iter().enumerate() {
-        let h = world.add_body(&bd.desc);
-        let is_dynamic = bd.desc.mass > 0.0;
+    for (i, (label, desc)) in bodies.iter().enumerate() {
+        let h = world.add_body(desc);
+        let is_dynamic = desc.mass > 0.0;
         let inertia_local = engine_inertia_local(&world, h, is_dynamic);
         metas.push(BodyMeta {
-            label: bd.label.to_string(),
-            mass: bd.desc.mass,
+            label: label.to_string(),
+            mass: desc.mass,
             is_dynamic,
             inertia_local,
         });
-        shapes.push(bd.desc.shape.clone());
+        shapes.push(desc.shape.clone());
         if !is_dynamic {
             static_indices.push(i);
         }
         handles.push(h);
     }
 
-    let mut traj: Vec<TickRecord> = Vec::with_capacity(scn.steps + 1);
-    traj.push(record_tick(0, &world, &handles, &metas, scn.config.gravity));
-    let spec = build_spec(scn, &traj[0], shapes, static_indices);
+    // The engine runs under `engine_cfg`, but every oracle/metric is evaluated
+    // against `intended_cfg` (the *correct* physics). This is what lets a config
+    // fault (e.g. negated gravity) be caught: the faulted trajectory is judged
+    // against the intended expectation, not against the fault's own assumption.
+    let mut traj: Vec<TickRecord> = Vec::with_capacity(steps + 1);
+    traj.push(record_tick(
+        0,
+        &world,
+        &handles,
+        &metas,
+        intended_cfg.gravity,
+    ));
+    let spec = build_spec(
+        intended_cfg,
+        steps,
+        checks,
+        &traj[0],
+        shapes,
+        static_indices,
+    );
 
     let mut violations = Vec::new();
-    for step in 1..=scn.steps {
+    for step in 1..=steps {
         world.step();
-        let rec = record_tick(step, &world, &handles, &metas, scn.config.gravity);
+        let rec = record_tick(step, &world, &handles, &metas, intended_cfg.gravity);
         check_tick(&spec, traj.last(), &rec, &mut violations);
         traj.push(rec);
     }
 
-    for ep in &scn.checks.endpoints {
-        evaluate_endpoint(ep, &scn.config, scn.steps, &traj, &mut violations);
+    for ep in &checks.endpoints {
+        evaluate_endpoint(ep, intended_cfg, steps, &traj, &mut violations);
     }
     let violations = collapse_violations(violations);
 
@@ -193,14 +221,51 @@ pub fn run_native(scn: &Scenario) -> ScenarioReport {
     };
 
     ScenarioReport {
-        scenario: scn.name.to_string(),
-        steps: scn.steps,
-        body_count: scn.bodies.len(),
+        scenario: name.to_string(),
+        steps,
+        body_count: bodies.len(),
         skipped_no_gpu: false,
         violations,
         final_metrics,
         trajectory_on_failure,
     }
+}
+
+/// Run a scenario natively (synchronous stepping). Returns a skipped report if no
+/// GPU adapter is available, so the suite degrades gracefully on machines without
+/// one rather than failing spuriously.
+pub fn run_native(scn: &Scenario) -> ScenarioReport {
+    let bodies: Vec<(&'static str, RigidBodyDesc)> = scn
+        .bodies
+        .iter()
+        .map(|b| (b.label, b.desc.clone()))
+        .collect();
+    run_core(
+        scn.name,
+        &scn.config,
+        &scn.config,
+        &bodies,
+        scn.steps,
+        &scn.checks,
+    )
+}
+
+/// Run a scenario with a deliberate fault injected into its config/bodies. Used by
+/// the detection matrix to prove the suite actually catches bugs (and that its
+/// tolerances aren't too loose). See [`crate::faults`].
+#[cfg(feature = "faults")]
+pub fn run_native_with_fault(scn: &Scenario, fault: crate::faults::FaultKind) -> ScenarioReport {
+    let mut cfg = scn.config.clone();
+    let mut descs: Vec<RigidBodyDesc> = scn.bodies.iter().map(|b| b.desc.clone()).collect();
+    crate::faults::apply(fault, &mut cfg, &mut descs);
+    let bodies: Vec<(&'static str, RigidBodyDesc)> = scn
+        .bodies
+        .iter()
+        .zip(descs)
+        .map(|(b, d)| (b.label, d))
+        .collect();
+    // Engine runs faulted (`cfg`); oracles judge against the intended `scn.config`.
+    run_core(scn.name, &cfg, &scn.config, &bodies, scn.steps, &scn.checks)
 }
 
 /// Collapse repeated per-(kind, body) violations to their first occurrence,

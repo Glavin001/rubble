@@ -102,6 +102,7 @@ pub enum ShapeDesc {
 // ---------------------------------------------------------------------------
 
 /// Descriptor for creating a rigid body.
+#[derive(Clone)]
 pub struct RigidBodyDesc {
     pub position: Vec3,
     pub rotation: Quat,

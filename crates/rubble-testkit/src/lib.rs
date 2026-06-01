@@ -26,6 +26,9 @@ pub mod oracle;
 pub mod report;
 pub mod scenario;
 
+#[cfg(feature = "faults")]
+pub mod faults;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
 
@@ -36,3 +39,6 @@ pub use scenario::{scenario_by_name, scenario_names, scenarios, Scenario};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::{run_all_native, run_native};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "faults"))]
+pub use runner::run_native_with_fault;
