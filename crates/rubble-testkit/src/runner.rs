@@ -137,9 +137,6 @@ fn engine_inertia_local(world: &World, h: BodyHandle, is_dynamic: bool) -> Mat3 
     }
 }
 
-/// Run a scenario natively (synchronous stepping). Returns a skipped report if no
-/// GPU adapter is available, so the suite degrades gracefully on machines without
-/// one rather than failing spuriously.
 /// Shared run core: create the world, add bodies, step + record + check, evaluate
 /// oracles, and assemble the report. Parameterized by raw config/bodies/checks so
 /// both the normal runner and the fault-injecting runner reuse identical logic
