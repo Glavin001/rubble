@@ -866,6 +866,19 @@ impl World {
         self.prev_warmstart_states[idx].ang_vel = self.states[idx].ang_vel;
     }
 
+    /// Get the body's **inverse** inertia tensor in the local (body) frame, if the
+    /// handle is valid. Returns `Mat3::ZERO` for static bodies.
+    ///
+    /// This exposes the engine's own tensor (as uploaded to the GPU) so tests can
+    /// cross-validate their analytic inertia formulas against the real value rather
+    /// than trusting a duplicated formula.
+    pub fn get_inv_inertia(&self, handle: BodyHandle) -> Option<Mat3> {
+        if !self.allocator.is_valid(handle) {
+            return None;
+        }
+        Some(self.props[handle.index as usize].inv_inertia())
+    }
+
     /// Advance the simulation by one time step on the GPU.
     pub fn step(&mut self) {
         use std::time::Instant;

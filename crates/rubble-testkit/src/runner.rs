@@ -1,0 +1,238 @@
+//! Scenario runner. `run_native` drives the engine with the synchronous `step()`
+//! against a software (or real) GPU adapter, records every tick, runs the per-tick
+//! invariants and endpoint oracles, and returns a structured [`ScenarioReport`].
+//!
+//! The recording + checking helpers (`record_tick`, `build_spec`) are target-
+//! agnostic so a future async wasm runner can reuse them verbatim with
+//! `step_async().await`.
+
+use glam::{DVec3, Mat3, Quat, Vec3};
+use rubble3d::World;
+use rubble_math::BodyHandle;
+
+use crate::invariants::{check_tick, energy_rel_tol, momentum_rel_tol, InvariantSpec};
+use crate::metrics::{compute_metrics, BodyMeta, BodySample, TickRecord};
+use crate::oracle::evaluate_endpoint;
+use crate::report::{ScenarioReport, Violation};
+use crate::scenario::Scenario;
+
+/// Read one body's live state from the engine into a serializable sample.
+fn record_tick(
+    tick: usize,
+    world: &World,
+    handles: &[BodyHandle],
+    metas: &[BodyMeta],
+    gravity: Vec3,
+) -> TickRecord {
+    let mut bodies = Vec::with_capacity(handles.len());
+    for (h, m) in handles.iter().zip(metas) {
+        let pos = world.get_position(*h).unwrap_or(Vec3::ZERO);
+        let rot = world.get_rotation(*h).unwrap_or(Quat::IDENTITY);
+        let lin = world.get_velocity(*h).unwrap_or(Vec3::ZERO);
+        let ang = world.get_angular_velocity(*h).unwrap_or(Vec3::ZERO);
+        bodies.push(BodySample {
+            label: m.label.clone(),
+            pos: pos.to_array(),
+            rot: rot.to_array(),
+            lin: lin.to_array(),
+            ang: ang.to_array(),
+            mass: m.mass,
+            is_dynamic: m.is_dynamic,
+        });
+    }
+    let metrics = compute_metrics(&bodies, metas, gravity);
+    TickRecord {
+        tick,
+        bodies,
+        metrics,
+    }
+}
+
+/// Build the per-tick invariant spec from the scenario and its recorded initial
+/// (tick-0) state. All derived tolerances are assembled here in one place.
+fn build_spec(
+    scn: &Scenario,
+    r0: &TickRecord,
+    shapes: Vec<rubble3d::ShapeDesc>,
+    static_indices: Vec<usize>,
+) -> InvariantSpec {
+    let cfg = &scn.config;
+    let t = cfg.dt as f64 * scn.steps as f64;
+
+    let v0max = r0
+        .bodies
+        .iter()
+        .map(|b| b.lin_vel().length() as f64)
+        .fold(0.0, f64::max);
+    let w0max = r0
+        .bodies
+        .iter()
+        .map(|b| b.ang_vel().length() as f64)
+        .fold(0.0, f64::max);
+
+    let v_escape = scn
+        .checks
+        .v_escape
+        .unwrap_or_else(|| 4.0 * (v0max + cfg.gravity.length() as f64 * t) + 20.0);
+    let omega_escape = scn.checks.omega_escape.unwrap_or(4.0 * w0max + 50.0);
+
+    let static_pos0 = static_indices
+        .iter()
+        .map(|&i| r0.bodies[i].position())
+        .collect();
+
+    let gmag = cfg.gravity.length() as f64;
+    let lchar = r0
+        .bodies
+        .iter()
+        .filter(|b| b.is_dynamic)
+        .map(|b| b.position().length() as f64)
+        .fold(1.0, f64::max);
+    let total_mass = r0.metrics.total_mass.max(1e-3);
+    // Absolute floor for energy non-increase: a small fraction of the available
+    // potential *and* kinetic energy, so zero-gravity (purely kinetic) scenarios
+    // still get a sensible floor instead of ~0.
+    let energy_abs = 1e-3 * (total_mass * gmag * lchar + r0.metrics.kinetic_energy.abs()) + 1e-9;
+
+    let momentum_scale: f64 = r0
+        .bodies
+        .iter()
+        .filter(|b| b.is_dynamic)
+        .map(|b| b.mass as f64 * b.lin_vel().length() as f64)
+        .sum();
+    let momentum_tol = momentum_scale * momentum_rel_tol(cfg.solver_iterations) * 8.0 + 1e-6;
+
+    InvariantSpec {
+        dt: cfg.dt,
+        gravity: cfg.gravity,
+        quat_norm_tol: 1.0e-5,
+        v_escape,
+        omega_escape,
+        teleport_extra: cfg.contact_offset as f64 + 4.0 * cfg.penetration_slop as f64,
+        static_indices,
+        static_pos0,
+        static_tol: 1.0e-5,
+        floor_y: scn.checks.floor_y,
+        penetration_bound: (cfg.penetration_slop + cfg.contact_offset) as f64,
+        shapes,
+        energy_non_increase: scn.checks.energy_non_increase,
+        baseline_energy: r0.metrics.total_energy,
+        energy_rel: energy_rel_tol(cfg.solver_iterations),
+        energy_abs,
+        momentum_conserve: scn.checks.momentum_conserve,
+        baseline_momentum: DVec3::from_array(r0.metrics.linear_momentum),
+        momentum_tol,
+    }
+}
+
+/// Recover the local-frame inertia tensor the engine actually uses (it stores the
+/// inverse). Zero for static bodies.
+fn engine_inertia_local(world: &World, h: BodyHandle, is_dynamic: bool) -> Mat3 {
+    if !is_dynamic {
+        return Mat3::ZERO;
+    }
+    match world.get_inv_inertia(h) {
+        Some(inv) if inv.determinant().abs() > 1e-20 => inv.inverse(),
+        _ => Mat3::ZERO,
+    }
+}
+
+/// Run a scenario natively (synchronous stepping). Returns a skipped report if no
+/// GPU adapter is available, so the suite degrades gracefully on machines without
+/// one rather than failing spuriously.
+pub fn run_native(scn: &Scenario) -> ScenarioReport {
+    let mut world = match World::new(scn.config.clone()) {
+        Ok(w) => w,
+        Err(_) => return ScenarioReport::skipped(scn.name),
+    };
+
+    let mut handles = Vec::with_capacity(scn.bodies.len());
+    let mut metas = Vec::with_capacity(scn.bodies.len());
+    let mut shapes = Vec::with_capacity(scn.bodies.len());
+    let mut static_indices = Vec::new();
+
+    for (i, bd) in scn.bodies.iter().enumerate() {
+        let h = world.add_body(&bd.desc);
+        let is_dynamic = bd.desc.mass > 0.0;
+        let inertia_local = engine_inertia_local(&world, h, is_dynamic);
+        metas.push(BodyMeta {
+            label: bd.label.to_string(),
+            mass: bd.desc.mass,
+            is_dynamic,
+            inertia_local,
+        });
+        shapes.push(bd.desc.shape.clone());
+        if !is_dynamic {
+            static_indices.push(i);
+        }
+        handles.push(h);
+    }
+
+    let mut traj: Vec<TickRecord> = Vec::with_capacity(scn.steps + 1);
+    traj.push(record_tick(0, &world, &handles, &metas, scn.config.gravity));
+    let spec = build_spec(scn, &traj[0], shapes, static_indices);
+
+    let mut violations = Vec::new();
+    for step in 1..=scn.steps {
+        world.step();
+        let rec = record_tick(step, &world, &handles, &metas, scn.config.gravity);
+        check_tick(&spec, traj.last(), &rec, &mut violations);
+        traj.push(rec);
+    }
+
+    for ep in &scn.checks.endpoints {
+        evaluate_endpoint(ep, &scn.config, scn.steps, &traj, &mut violations);
+    }
+    let violations = collapse_violations(violations);
+
+    let final_metrics = traj.last().map(|r| r.metrics.clone());
+    let trajectory_on_failure = if violations.is_empty() {
+        None
+    } else {
+        Some(traj)
+    };
+
+    ScenarioReport {
+        scenario: scn.name.to_string(),
+        steps: scn.steps,
+        body_count: scn.bodies.len(),
+        skipped_no_gpu: false,
+        violations,
+        final_metrics,
+        trajectory_on_failure,
+    }
+}
+
+/// Collapse repeated per-(kind, body) violations to their first occurrence,
+/// annotating how many ticks they recurred on. The full trajectory is still
+/// dumped for observability; this just keeps the violation list readable when a
+/// per-tick invariant fails on every tick of a run.
+fn collapse_violations(violations: Vec<Violation>) -> Vec<Violation> {
+    use std::collections::{HashMap, HashSet};
+    let mut counts: HashMap<(String, Option<usize>), usize> = HashMap::new();
+    for v in &violations {
+        *counts.entry((v.kind.clone(), v.body)).or_insert(0) += 1;
+    }
+    let mut seen: HashSet<(String, Option<usize>)> = HashSet::new();
+    let mut out = Vec::new();
+    for mut v in violations {
+        let key = (v.kind.clone(), v.body);
+        if seen.insert(key.clone()) {
+            let c = counts[&key];
+            if c > 1 {
+                v.detail = format!("{} [recurred on {c} ticks]", v.detail);
+            }
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Run every scenario in the ladder. Used by the native harness test and the gap
+/// report generator.
+pub fn run_all_native() -> Vec<ScenarioReport> {
+    crate::scenario::scenarios()
+        .iter()
+        .map(run_native)
+        .collect()
+}
