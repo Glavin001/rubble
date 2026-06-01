@@ -38,6 +38,7 @@ catch real bugs, not merely loose enough to pass.
 | **Determinism** | metamorphic_tests | same input twice | **bit-identical (0.0)** |
 | **Mass-independence** | metamorphic_tests | free fall vs 1000× mass | **bit-identical (0.0)** |
 | **Permutation invariance** | metamorphic_tests | reversed insertion order | **bit-identical (0.0)** — solving is order-independent despite graph coloring |
+| **Narrowphase (collision detection)** | narrowphase_tests | **parry3d, all shape pairs incl. rotated** | normal axis + penetration depth match **exactly** for sphere/box/capsule/plane (8 axis-aligned + 2 rotated): the detection layer is solid; gaps are in the solver/integration |
 
 ## Engine gaps DETECTED (registry: `gaps.rs`)
 
@@ -82,10 +83,9 @@ tolerances honest:
 
 ## Not yet covered (next, in confidence order)
 
-- **Parry shape-pair narrowphase matrix** — per-pair contact normal/depth vs
-  parry across sphere/box/capsule/convex/plane at random poses. The whole
-  collision-detection layer is currently only exercised indirectly; this is the
-  biggest remaining native confidence gap and would independently confirm gap #3.
+- **Convex-hull narrowphase pairs** — the narrowphase matrix covers
+  sphere/box/capsule/plane; convex-hull pairs are not yet validated against parry
+  (and convex inertia is already a known bbox approximation).
 - **A passing friction scenario** to close the ZeroFriction blind spot.
 - **Convergence testing** for rotational accuracy — does gap #1/#2 shrink at the
   integrator's order as dt→0? Distinguishes "acceptable order-of-accuracy" from a
