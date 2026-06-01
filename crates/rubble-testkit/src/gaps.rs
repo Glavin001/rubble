@@ -69,6 +69,25 @@ pub fn known_gaps() -> &'static [KnownGap] {
                      tangential load is present. Needs the Parry depth oracle to \
                      confirm magnitude independently.",
         },
+        KnownGap {
+            scenario: "torque_free_box_angular_momentum",
+            category: GapCategory::AngularIntegration,
+            reason: "Angular momentum drifts ~14% of |L₀| over 180 zero-torque \
+                     steps for a tumbling box, even though energy stays bounded. \
+                     A torque-free body MUST conserve L exactly, so this is a \
+                     real rotational-integration error — the conservation-law \
+                     quantification of the same root cause as \
+                     `zero_g_sphere_constant_spin`.",
+        },
+        KnownGap {
+            scenario: "deep_overlap_separates",
+            category: GapCategory::Solver,
+            reason: "Two spheres started 0.6m deep in overlap separate explosively \
+                     at ~70 m/s (vs a 15 m/s sanity bound). The engine has no \
+                     penetration-recovery velocity clamp, so a large initial \
+                     overlap converts directly into an unphysical velocity spike. \
+                     Bodies spawned overlapping (a common case) will be launched.",
+        },
     ]
 }
 

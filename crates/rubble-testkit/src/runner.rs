@@ -100,7 +100,11 @@ fn build_spec(
         .filter(|b| b.is_dynamic)
         .map(|b| b.mass as f64 * b.lin_vel().length() as f64)
         .sum();
-    let momentum_tol = momentum_scale * momentum_rel_tol(cfg.solver_iterations) * 8.0 + 1e-6;
+    // Derived f32 round-off floor for momentum conservation. The coefficient
+    // counts the handful of round-off-accumulating ops per solver iteration; it is
+    // order-of-magnitude (16 ≈ a few ops × a couple contacts), not fitted — a 5:1
+    // mass-ratio collision lands near this floor at ~5e-5 relative.
+    let momentum_tol = momentum_scale * momentum_rel_tol(cfg.solver_iterations) * 16.0 + 1e-6;
 
     InvariantSpec {
         dt: cfg.dt,

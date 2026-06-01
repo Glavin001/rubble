@@ -2,7 +2,7 @@
 //! the integrator's *own* discrete scheme or from a conservation law — never a
 //! hand-transcribed number — so a failure is unambiguous.
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use rubble3d::SimConfig;
 
 use crate::metrics::{TickRecord, F32_EPS};
@@ -54,6 +54,34 @@ pub enum EndpointCheck {
     SettledAtRest {
         label: &'static str,
         after_frac: f64,
+    },
+    /// System angular momentum (world frame) must be conserved for a torque-free
+    /// system. Integration-accuracy tier: bound is relative to |L₀|.
+    AngularMomentumConserved { rel_tol: f64 },
+    /// Body must settle to a known analytic resting height (e.g. floor +
+    /// half-extent) within `tol` — a stronger oracle than "low jitter".
+    RestHeight {
+        label: &'static str,
+        expected_y: f64,
+        tol: f64,
+    },
+    /// Symmetry: a body's lateral (perpendicular-to-up) displacement from its
+    /// initial position must stay below `max_drift` (a box dropped flat must not
+    /// slide sideways).
+    LateralDriftBounded { label: &'static str, max_drift: f64 },
+    /// Two bodies that start overlapping must end up separated: final
+    /// center-to-center distance ≥ `min_dist`.
+    MinSeparation {
+        a: &'static str,
+        b: &'static str,
+        min_dist: f64,
+    },
+    /// A body's final speed must lie within `[min, max]` (e.g. a struck body must
+    /// move; a striker must have slowed — without assuming a restitution value).
+    FinalSpeed {
+        label: &'static str,
+        min: f64,
+        max: f64,
     },
 }
 
@@ -262,6 +290,105 @@ pub fn evaluate_endpoint(
                     drift,
                     drift_bound,
                     format!("'{label}' height drift after settling exceeds 4·slop"),
+                ));
+            }
+        }
+
+        EndpointCheck::AngularMomentumConserved { rel_tol } => {
+            let l0 = DVec3::from_array(traj[0].metrics.angular_momentum);
+            let ln = DVec3::from_array(traj[last].metrics.angular_momentum);
+            let d = (ln - l0).length();
+            let bound = rel_tol * l0.length() + 1.0e-6;
+            if d > bound {
+                out.push(Violation::new(
+                    last,
+                    None,
+                    "angular_momentum_drift",
+                    d,
+                    bound,
+                    format!(
+                        "angular momentum not conserved under zero torque (L0={l0:?}, Ln={ln:?})"
+                    ),
+                ));
+            }
+        }
+
+        EndpointCheck::RestHeight {
+            label,
+            expected_y,
+            tol,
+        } => {
+            let Some(i) = body_index(traj, label) else {
+                return;
+            };
+            let y = traj[last].bodies[i].position().y as f64;
+            let d = (y - expected_y).abs();
+            if d > *tol {
+                out.push(Violation::new(
+                    last,
+                    Some(i),
+                    "rest_height",
+                    d,
+                    *tol,
+                    format!("'{label}' settled at y={y:.5}, expected {expected_y:.5}"),
+                ));
+            }
+        }
+
+        EndpointCheck::LateralDriftBounded { label, max_drift } => {
+            let Some(i) = body_index(traj, label) else {
+                return;
+            };
+            let up = if g.length_squared() > 1e-12 {
+                -g.normalize()
+            } else {
+                Vec3::Y
+            };
+            let delta = traj[last].bodies[i].position() - traj[0].bodies[i].position();
+            let lateral = (delta - up * delta.dot(up)).length() as f64;
+            if lateral > *max_drift {
+                out.push(Violation::new(
+                    last,
+                    Some(i),
+                    "lateral_drift",
+                    lateral,
+                    *max_drift,
+                    format!("'{label}' drifted sideways {lateral:.5} (symmetry broken)"),
+                ));
+            }
+        }
+
+        EndpointCheck::MinSeparation { a, b, min_dist } => {
+            let (Some(ia), Some(ib)) = (body_index(traj, a), body_index(traj, b)) else {
+                return;
+            };
+            let dist = (traj[last].bodies[ia].position() - traj[last].bodies[ib].position())
+                .length() as f64;
+            if dist < *min_dist {
+                out.push(Violation::new(
+                    last,
+                    None,
+                    "min_separation",
+                    dist,
+                    *min_dist,
+                    format!("'{a}' and '{b}' failed to separate (center dist {dist:.4})"),
+                ));
+            }
+        }
+
+        EndpointCheck::FinalSpeed { label, min, max } => {
+            let Some(i) = body_index(traj, label) else {
+                return;
+            };
+            let s = traj[last].bodies[i].lin_vel().length() as f64;
+            if s < *min || s > *max {
+                out.push(Violation::new(
+                    last,
+                    Some(i),
+                    "final_speed",
+                    s,
+                    if s < *min { *min } else { *max },
+                    format!("'{label}' final speed {s:.4} outside [{min:.4}, {max:.4}]"),
                 ));
             }
         }

@@ -221,6 +221,29 @@ pub fn scenarios() -> Vec<Scenario> {
                 ..Default::default()
             },
         },
+        // 3c. Torque-free anisotropic body: angular momentum MUST be conserved (ω
+        //     evolving is fine). Quantifies the rotational-integration gap via a
+        //     conservation law — pure rotation, no translation, to isolate L.
+        Scenario {
+            name: "torque_free_box_angular_momentum",
+            config: cfg(Vec3::ZERO, dt, 8, 0.0),
+            steps: 180,
+            bodies: vec![boxd(
+                "tumbler",
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::new(0.4, -0.25, 0.6),
+                Quat::from_rotation_z(0.25) * Quat::from_rotation_y(-0.35),
+                Vec3::new(0.5, 0.35, 0.45),
+                1.5,
+                0.0,
+            )],
+            checks: ScenarioChecks {
+                energy_non_increase: true,
+                endpoints: vec![EndpointCheck::AngularMomentumConserved { rel_tol: 0.02 }],
+                ..Default::default()
+            },
+        },
         // 4. Two-body elastic-ish collision, isolated (no gravity, no statics).
         //    Isolates pairwise contact solve via momentum conservation.
         Scenario {
@@ -368,6 +391,193 @@ pub fn scenarios() -> Vec<Scenario> {
                 endpoints: vec![EndpointCheck::SettledAtRest {
                     label: "upper",
                     after_frac: 0.6,
+                }],
+                ..Default::default()
+            },
+        },
+        // 9. Newton's-cradle: a moving sphere strikes a resting equal-mass sphere.
+        //    Momentum + energy + "the struck body must move" (no assumption about
+        //    the restitution value), and the striker must not speed up.
+        Scenario {
+            name: "newtons_cradle",
+            config: cfg(Vec3::ZERO, 1.0 / 240.0, 24, 0.0),
+            steps: 220,
+            bodies: vec![
+                sphere(
+                    "striker",
+                    Vec3::new(-1.5, 0.0, 0.0),
+                    Vec3::new(3.0, 0.0, 0.0),
+                    0.5,
+                    1.0,
+                    0.0,
+                ),
+                sphere(
+                    "target",
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::ZERO,
+                    0.5,
+                    1.0,
+                    0.0,
+                ),
+            ],
+            checks: ScenarioChecks {
+                momentum_conserve: true,
+                energy_non_increase: true,
+                endpoints: vec![
+                    EndpointCheck::FinalSpeed {
+                        label: "target",
+                        min: 0.5,
+                        max: f64::INFINITY,
+                    },
+                    EndpointCheck::FinalSpeed {
+                        label: "striker",
+                        min: 0.0,
+                        max: 3.05,
+                    },
+                ],
+                ..Default::default()
+            },
+        },
+        // 10. Unequal-mass collision (5:1). Momentum conservation across a mass
+        //     ratio; the light body must be kicked forward.
+        Scenario {
+            name: "unequal_mass_collision",
+            config: cfg(Vec3::ZERO, 1.0 / 240.0, 24, 0.0),
+            steps: 220,
+            bodies: vec![
+                sphere(
+                    "heavy",
+                    Vec3::new(-1.5, 0.0, 0.0),
+                    Vec3::new(2.0, 0.0, 0.0),
+                    0.5,
+                    5.0,
+                    0.0,
+                ),
+                sphere("light", Vec3::new(0.0, 0.0, 0.0), Vec3::ZERO, 0.5, 1.0, 0.0),
+            ],
+            checks: ScenarioChecks {
+                momentum_conserve: true,
+                energy_non_increase: true,
+                endpoints: vec![EndpointCheck::FinalSpeed {
+                    label: "light",
+                    min: 1.0,
+                    max: f64::INFINITY,
+                }],
+                ..Default::default()
+            },
+        },
+        // 11. Resting equilibrium: a box dropped flat must settle at the exact
+        //     analytic height (floor + half-extent) and not drift sideways.
+        Scenario {
+            name: "box_rests_at_correct_height",
+            config: cfg(g, dt, 24, 0.6),
+            steps: 300,
+            bodies: vec![
+                floor(0.0, 0.6),
+                boxd(
+                    "box",
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::splat(0.5),
+                    1.0,
+                    0.6,
+                ),
+            ],
+            checks: ScenarioChecks {
+                floor_y: Some(0.0),
+                energy_non_increase: true,
+                endpoints: vec![
+                    EndpointCheck::RestHeight {
+                        label: "box",
+                        expected_y: 0.5,
+                        tol: 0.03, // ≤ slop + contact_offset band
+                    },
+                    EndpointCheck::LateralDriftBounded {
+                        label: "box",
+                        max_drift: 0.02,
+                    },
+                ],
+                ..Default::default()
+            },
+        },
+        // 12. Taller stack (4 boxes) — heavier stress on warm-start + coloring.
+        //     Invariant-only plus "top box settles".
+        Scenario {
+            name: "stack_four_boxes",
+            config: cfg(g, dt, 24, 0.6),
+            steps: 360,
+            bodies: vec![
+                floor(0.0, 0.6),
+                boxd(
+                    "b1",
+                    Vec3::new(0.0, 0.5, 0.0),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::splat(0.5),
+                    1.0,
+                    0.6,
+                ),
+                boxd(
+                    "b2",
+                    Vec3::new(0.0, 1.5, 0.0),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::splat(0.5),
+                    1.0,
+                    0.6,
+                ),
+                boxd(
+                    "b3",
+                    Vec3::new(0.0, 2.5, 0.0),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::splat(0.5),
+                    1.0,
+                    0.6,
+                ),
+                boxd(
+                    "b4",
+                    Vec3::new(0.0, 3.5, 0.0),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::splat(0.5),
+                    1.0,
+                    0.6,
+                ),
+            ],
+            checks: ScenarioChecks {
+                floor_y: Some(0.0),
+                energy_non_increase: true,
+                endpoints: vec![EndpointCheck::SettledAtRest {
+                    label: "b4",
+                    after_frac: 0.7,
+                }],
+                ..Default::default()
+            },
+        },
+        // 13. Deep-penetration recovery: two spheres start heavily overlapping and
+        //     must push apart (separate) without exploding or NaN-ing. Energy is
+        //     NOT checked (separating from overlap legitimately releases energy).
+        Scenario {
+            name: "deep_overlap_separates",
+            config: cfg(Vec3::ZERO, 1.0 / 240.0, 24, 0.0),
+            steps: 160,
+            bodies: vec![
+                sphere("left", Vec3::new(-0.2, 0.0, 0.0), Vec3::ZERO, 0.5, 1.0, 0.0),
+                sphere("right", Vec3::new(0.2, 0.0, 0.0), Vec3::ZERO, 0.5, 1.0, 0.0),
+            ],
+            checks: ScenarioChecks {
+                v_escape: Some(15.0), // separating 0.6m of overlap should not fling them
+                endpoints: vec![EndpointCheck::MinSeparation {
+                    a: "left",
+                    b: "right",
+                    min_dist: 0.95, // sum of radii = 1.0; ~separated
                 }],
                 ..Default::default()
             },
