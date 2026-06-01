@@ -89,6 +89,27 @@ pub fn known_gaps() -> &'static [KnownGap] {
                      overlap converts directly into an unphysical velocity spike. \
                      Bodies spawned overlapping (a common case) will be launched.",
         },
+        KnownGap {
+            scenario: "convex_cube_rests",
+            category: GapCategory::Solver,
+            reason: "A convex-hull cube dropped on the floor is UNSTABLE: it gains \
+                     energy (≈2x E0), reaches ~118 m/s, and flies off to y≈-243. \
+                     The convex↔box NARROWPHASE is exact (see narrowphase_tests), \
+                     so the instability is in the dynamic contact solve for convex \
+                     hulls (possibly compounded by the bbox-approximated convex \
+                     inertia). Convex hulls are not yet usable as resting dynamic \
+                     bodies.",
+        },
+        KnownGap {
+            scenario: "compound_box_rests",
+            category: GapCategory::Solver,
+            reason: "A compound body (two boxes) dropped on the floor EXPLODES on \
+                     contact — ~3213 m/s by tick 1, ending at y≈-6444. Refines the \
+                     existing `compound_shape_stays_supported_without_exploding_3d` \
+                     known-failure ('falls through floor') to a violent explosion. \
+                     Compound contact handling (CPU pair expansion → solver) is \
+                     broken for resting on a surface.",
+        },
     ]
 }
 

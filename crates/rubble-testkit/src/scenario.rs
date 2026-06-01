@@ -90,6 +90,22 @@ fn boxd(
     }
 }
 
+/// Axis-aligned cube as a convex hull (8 corners), for exercising the convex path.
+fn cube_hull(h: f32) -> ShapeDesc {
+    ShapeDesc::ConvexHull {
+        vertices: vec![
+            Vec3::new(-h, -h, -h),
+            Vec3::new(h, -h, -h),
+            Vec3::new(h, h, -h),
+            Vec3::new(-h, h, -h),
+            Vec3::new(-h, -h, h),
+            Vec3::new(h, -h, h),
+            Vec3::new(h, h, h),
+            Vec3::new(-h, h, h),
+        ],
+    }
+}
+
 /// Static box floor whose top surface sits at `top_y`.
 fn floor(top_y: f32, friction: f32) -> BodyDef {
     BodyDef {
@@ -609,6 +625,84 @@ pub fn scenarios() -> Vec<Scenario> {
                     a: "left",
                     b: "right",
                     min_dist: 0.95, // sum of radii = 1.0; ~separated
+                }],
+                ..Default::default()
+            },
+        },
+        // 14. Convex hull (cube) resting on the floor. convex↔box narrowphase is
+        //     exact, so a convex cube should rest like a box at floor+half_extent.
+        Scenario {
+            name: "convex_cube_rests",
+            config: cfg(g, dt, 24, 0.6),
+            steps: 300,
+            bodies: vec![
+                floor(0.0, 0.6),
+                BodyDef {
+                    label: "hull",
+                    desc: RigidBodyDesc {
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                        mass: 1.0,
+                        friction: 0.6,
+                        shape: cube_hull(0.5),
+                        ..Default::default()
+                    },
+                },
+            ],
+            checks: ScenarioChecks {
+                floor_y: Some(0.0),
+                energy_non_increase: true,
+                endpoints: vec![EndpointCheck::RestHeight {
+                    label: "hull",
+                    expected_y: 0.5,
+                    tol: 0.05,
+                }],
+                ..Default::default()
+            },
+        },
+        // 15. Compound body (two boxes) dropped on the floor. Compound is supported
+        //     via CPU pair expansion but is a known faller; RestHeight catches a
+        //     fall-through (final center far below the resting height).
+        Scenario {
+            name: "compound_box_rests",
+            config: cfg(g, dt, 24, 0.6),
+            steps: 240,
+            bodies: vec![
+                floor(0.0, 0.6),
+                BodyDef {
+                    label: "compound",
+                    desc: RigidBodyDesc {
+                        position: Vec3::new(0.0, 2.0, 0.0),
+                        mass: 2.0,
+                        friction: 0.6,
+                        shape: ShapeDesc::Compound {
+                            children: vec![
+                                (
+                                    ShapeDesc::Box {
+                                        half_extents: Vec3::new(0.5, 0.25, 0.5),
+                                    },
+                                    Vec3::new(0.0, -0.25, 0.0),
+                                    Quat::IDENTITY,
+                                ),
+                                (
+                                    ShapeDesc::Box {
+                                        half_extents: Vec3::splat(0.25),
+                                    },
+                                    Vec3::new(0.0, 0.25, 0.0),
+                                    Quat::IDENTITY,
+                                ),
+                            ],
+                        },
+                        ..Default::default()
+                    },
+                },
+            ],
+            checks: ScenarioChecks {
+                floor_y: Some(0.0),
+                // Lowest child point is 0.5 below center ⇒ rest center at floor+0.5.
+                endpoints: vec![EndpointCheck::RestHeight {
+                    label: "compound",
+                    expected_y: 0.5,
+                    tol: 0.1,
                 }],
                 ..Default::default()
             },

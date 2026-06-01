@@ -49,7 +49,9 @@ catch real bugs, not merely loose enough to pass.
 2. **Angular-momentum non-conservation** — `AngularIntegration`. `torque_free_box_angular_momentum`: L drifts **~14% of |L₀|** over 180 zero-torque steps (energy stays bounded). A torque-free body must conserve L exactly — the conservation-law quantification of gap #1.
 3. **Penetration under tangential load** — `Solver`. `static_friction_holds`: a resting box sinks **~0.15 m** into the floor under tilted gravity (normal+tangential); straight-gravity resting does not. The normal constraint is under-resolved when a large tangential load is present.
 4. **Explosive deep-penetration recovery** — `Solver`. `deep_overlap_separates`: two spheres started 0.6 m overlapping separate at **~70 m/s** (vs a 15 m/s sanity bound). No penetration-recovery velocity clamp — bodies spawned overlapping get launched.
-5. **Convex-hull vs sphere narrowphase is wrong** — `Narrowphase`. `narrowphase_tests` (convex_sphere): a cube-hull penetrating a sphere reports a normal ~60° off parry's and a depth of 0.92 m vs the correct 0.10 m. Convex-convex and convex-box are exact, so the bug is specific to the convex↔sphere path. (Convex hull is supported but should be used cautiously against spheres.)
+5. **Convex-hull vs sphere narrowphase is wrong** — `Narrowphase`. `narrowphase_tests` (convex_sphere): a cube-hull penetrating a sphere reports a normal ~60° off parry's and a depth of 0.92 m vs the correct 0.10 m. Convex-convex and convex-box are exact, so the bug is specific to the convex↔sphere path.
+6. **Convex-hull resting dynamics are unstable** — `Solver`. `convex_cube_rests`: a convex cube dropped on the floor gains energy (~2× E0), reaches ~118 m/s and flies to y≈-243. The convex↔box *narrowphase* is exact, so this is the dynamic contact solve for convex hulls (perhaps compounded by the bbox-approximated convex inertia). Convex hulls aren't yet usable as resting dynamic bodies.
+7. **Compound bodies explode on contact** — `Solver`. `compound_box_rests`: a two-box compound dropped on the floor reaches ~3213 m/s by tick 1 and ends at y≈-6444. Refines the prior "compound falls through floor" known-failure to a violent explosion; compound contact handling is broken for resting on a surface.
 
 ## Characterizations — real, but expected / good-to-know (not "bugs")
 
@@ -90,9 +92,6 @@ tolerances honest:
 
 ## Not yet covered (next, in confidence order)
 
-- **Compound bodies** — supported (CPU pair expansion) but a known faller; add a
-  compound resting/dynamics scenario to characterize the fall-through gap in this
-  framework.
 - **Kinematic bodies** — `set_body_kinematic` exists; add a test that a kinematic
   body follows its prescribed motion and is unaffected by collisions/gravity.
 - **Convergence/order test** — does gap #1/#2 shrink at the integrator's order as
