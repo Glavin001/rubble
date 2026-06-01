@@ -34,6 +34,7 @@ catch real bugs, not merely loose enough to pass.
 | No energy creation | drop_bounce | rebound ≤ drop height | pass |
 | Resting | resting_box, box_rests_at_correct_height | non-penetration + exact rest height + settle | pass |
 | Stacking | stack_two_boxes, stack_four_boxes | non-penetration + settle + energy | pass |
+| Friction (tangential hold) | gentle_incline_friction_holds | μ>tanθ ⇒ no slide | pass (penetration covered by gap #3) |
 | **Inertia tensor** | inertia_tests | **parry3d mass-properties (independent)** | sphere/box/**capsule** match to **~1e-7** |
 | **Determinism** | metamorphic_tests | same input twice | **bit-identical (0.0)** |
 | **Mass-independence** | metamorphic_tests | free fall vs 1000× mass | **bit-identical (0.0)** |

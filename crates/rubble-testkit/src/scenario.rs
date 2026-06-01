@@ -355,6 +355,37 @@ pub fn scenarios() -> Vec<Scenario> {
                 ..Default::default()
             },
         },
+        // 7b. Gentle incline (small tangential load): isolates the *tangential
+        //     hold* property of friction. Non-penetration is intentionally NOT
+        //     checked here — the box still sinks ~0.026m (gap #3 is load-
+        //     proportional and covered by `static_friction_holds`); this scenario
+        //     verifies friction prevents sliding, and serves as the *passing*
+        //     friction case the fault matrix needs to detect ZeroFriction.
+        Scenario {
+            name: "gentle_incline_friction_holds",
+            config: cfg(Vec3::new(0.5, -9.81, 0.0), dt, 24, 0.5), // tanθ≈0.051 ≪ μ=0.5
+            steps: 240,
+            bodies: vec![
+                floor(0.0, 0.5),
+                boxd(
+                    "slider",
+                    Vec3::new(0.0, 0.5, 0.0),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::splat(0.5),
+                    1.0,
+                    0.5,
+                ),
+            ],
+            checks: ScenarioChecks {
+                endpoints: vec![EndpointCheck::StaticFrictionNoSlide {
+                    label: "slider",
+                    max_slide: 0.05,
+                }],
+                ..Default::default()
+            },
+        },
         // 8. Small stack — stresses warm-start + graph-coloring cross-frame state
         //    (the transient-glitch risk). Invariant-only: no NaN, no penetration,
         //    energy non-increase, and the top box must settle.

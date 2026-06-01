@@ -61,13 +61,14 @@ pub fn known_gaps() -> &'static [KnownGap] {
         KnownGap {
             scenario: "static_friction_holds",
             category: GapCategory::Solver,
-            reason: "A box resting on the floor sinks ~0.15m below the surface from \
-                     the first tick under a tilted-gravity (combined normal + \
-                     tangential) load. Straight-gravity resting \
+            reason: "A box resting on the floor sinks into the surface under a \
+                     tilted-gravity (normal + tangential) load, by an amount \
+                     PROPORTIONAL to the tangential load: ~0.15m at tanθ≈0.31 and \
+                     ~0.026m at tanθ≈0.051. Straight-gravity resting \
                      (`resting_box_settles`) does NOT penetrate, so the contact \
-                     solver under-resolves the normal constraint when a large \
-                     tangential load is present. Needs the Parry depth oracle to \
-                     confirm magnitude independently.",
+                     solver under-resolves the normal constraint in the presence \
+                     of tangential load. Friction itself holds tangentially \
+                     (`gentle_incline_friction_holds` passes the no-slide check).",
         },
         KnownGap {
             scenario: "torque_free_box_angular_momentum",
