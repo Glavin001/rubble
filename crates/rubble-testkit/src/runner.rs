@@ -294,6 +294,38 @@ fn collapse_violations(violations: Vec<Violation>) -> Vec<Violation> {
     out
 }
 
+/// Step a scene and return the full per-tick trajectory, with no checks applied.
+/// Used by the metamorphic / determinism tests, which compare the trajectories of
+/// deliberately-related scenes (same scene run twice, translated, reordered, or
+/// re-massed). Returns `None` if no GPU adapter is available.
+pub fn simulate_native(
+    cfg: &SimConfig,
+    bodies: &[(&'static str, RigidBodyDesc)],
+    steps: usize,
+) -> Option<Vec<TickRecord>> {
+    let mut world = World::new(cfg.clone()).ok()?;
+    let mut handles = Vec::with_capacity(bodies.len());
+    let mut metas = Vec::with_capacity(bodies.len());
+    for (label, desc) in bodies {
+        let h = world.add_body(desc);
+        let is_dynamic = desc.mass > 0.0;
+        metas.push(BodyMeta {
+            label: label.to_string(),
+            mass: desc.mass,
+            is_dynamic,
+            inertia_local: engine_inertia_local(&world, h, is_dynamic),
+        });
+        handles.push(h);
+    }
+    let mut traj = Vec::with_capacity(steps + 1);
+    traj.push(record_tick(0, &world, &handles, &metas, cfg.gravity));
+    for step in 1..=steps {
+        world.step();
+        traj.push(record_tick(step, &world, &handles, &metas, cfg.gravity));
+    }
+    Some(traj)
+}
+
 /// Run every scenario in the ladder. Used by the native harness test and the gap
 /// report generator.
 pub fn run_all_native() -> Vec<ScenarioReport> {

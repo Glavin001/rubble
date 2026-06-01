@@ -38,7 +38,7 @@ pub use report::{ScenarioReport, Violation};
 pub use scenario::{scenario_by_name, scenario_names, scenarios, Scenario};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use runner::{run_all_native, run_native};
+pub use runner::{run_all_native, run_native, simulate_native};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "faults"))]
 pub use runner::run_native_with_fault;
