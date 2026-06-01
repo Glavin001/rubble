@@ -149,7 +149,7 @@ fn run_core(
     name: &str,
     engine_cfg: &SimConfig,
     intended_cfg: &SimConfig,
-    bodies: &[(&'static str, RigidBodyDesc)],
+    bodies: &[(&'static str, RigidBodyDesc, Option<Vec3>)],
     steps: usize,
     checks: &ScenarioChecks,
 ) -> ScenarioReport {
@@ -162,10 +162,20 @@ fn run_core(
     let mut metas = Vec::with_capacity(bodies.len());
     let mut shapes = Vec::with_capacity(bodies.len());
     let mut static_indices = Vec::new();
+    // (handle, x0, v) for every kinematic body — driven each tick to x0 + v·t.
+    let mut kinematic: Vec<(BodyHandle, Vec3, Vec3)> = Vec::new();
 
-    for (i, (label, desc)) in bodies.iter().enumerate() {
+    for (i, (label, desc, drive)) in bodies.iter().enumerate() {
         let h = world.add_body(desc);
-        let is_dynamic = desc.mass > 0.0;
+        // A kinematic body is driven, not simulated: exclude it from the dynamic
+        // subsystem (energy/momentum/dynamic-only invariants) but DON'T treat it
+        // as a frozen static either — it legitimately moves along its path.
+        let is_dynamic = desc.mass > 0.0 && drive.is_none();
+        if let Some(v) = drive {
+            world.set_body_kinematic(h, true);
+            let x0 = world.get_position(h).unwrap_or(desc.position);
+            kinematic.push((h, x0, *v));
+        }
         let inertia_local = engine_inertia_local(&world, h, is_dynamic);
         metas.push(BodyMeta {
             label: label.to_string(),
@@ -174,7 +184,7 @@ fn run_core(
             inertia_local,
         });
         shapes.push(desc.shape.clone());
-        if !is_dynamic {
+        if !is_dynamic && drive.is_none() {
             static_indices.push(i);
         }
         handles.push(h);
@@ -203,6 +213,13 @@ fn run_core(
 
     let mut violations = Vec::new();
     for step in 1..=steps {
+        // Drive kinematic bodies to their prescribed pose for this tick BEFORE
+        // stepping, so narrowphase/solver see them advanced and push dynamic
+        // bodies accordingly (the engine never integrates an inv_mass=0 body, so
+        // set_position is the sole mover — no double-advance).
+        for (h, x0, v) in &kinematic {
+            world.set_position(*h, *x0 + *v * (engine_cfg.dt * step as f32));
+        }
         world.step();
         let rec = record_tick(step, &world, &handles, &metas, intended_cfg.gravity);
         check_tick(&spec, traj.last(), &rec, &mut violations);
@@ -236,10 +253,10 @@ fn run_core(
 /// GPU adapter is available, so the suite degrades gracefully on machines without
 /// one rather than failing spuriously.
 pub fn run_native(scn: &Scenario) -> ScenarioReport {
-    let bodies: Vec<(&'static str, RigidBodyDesc)> = scn
+    let bodies: Vec<(&'static str, RigidBodyDesc, Option<Vec3>)> = scn
         .bodies
         .iter()
-        .map(|b| (b.label, b.desc.clone()))
+        .map(|b| (b.label, b.desc.clone(), b.kinematic))
         .collect();
     run_core(
         scn.name,
@@ -259,11 +276,11 @@ pub fn run_native_with_fault(scn: &Scenario, fault: crate::faults::FaultKind) ->
     let mut cfg = scn.config.clone();
     let mut descs: Vec<RigidBodyDesc> = scn.bodies.iter().map(|b| b.desc.clone()).collect();
     crate::faults::apply(fault, &mut cfg, &mut descs);
-    let bodies: Vec<(&'static str, RigidBodyDesc)> = scn
+    let bodies: Vec<(&'static str, RigidBodyDesc, Option<Vec3>)> = scn
         .bodies
         .iter()
         .zip(descs)
-        .map(|(b, d)| (b.label, d))
+        .map(|(b, d)| (b.label, d, b.kinematic))
         .collect();
     // Engine runs faulted (`cfg`); oracles judge against the intended `scn.config`.
     run_core(scn.name, &cfg, &scn.config, &bodies, scn.steps, &scn.checks)

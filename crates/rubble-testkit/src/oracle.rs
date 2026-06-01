@@ -83,6 +83,15 @@ pub enum EndpointCheck {
         min: f64,
         max: f64,
     },
+    /// A **kinematic** body must stay exactly on its prescribed path `x0 + v·t`:
+    /// unaffected by gravity AND by any contact load it carries (it is driven, not
+    /// simulated). `velocity` is the prescribed constant linear velocity it is
+    /// driven with. This is the headline kinematic correctness property.
+    KinematicFollowsPath {
+        label: &'static str,
+        velocity: [f32; 3],
+        pos_tol: f64,
+    },
 }
 
 fn body_index(traj: &[TickRecord], label: &str) -> Option<usize> {
@@ -389,6 +398,43 @@ pub fn evaluate_endpoint(
                     s,
                     if s < *min { *min } else { *max },
                     format!("'{label}' final speed {s:.4} outside [{min:.4}, {max:.4}]"),
+                ));
+            }
+        }
+
+        EndpointCheck::KinematicFollowsPath {
+            label,
+            velocity,
+            pos_tol,
+        } => {
+            let Some(i) = body_index(traj, label) else {
+                return;
+            };
+            let x0 = traj[0].bodies[i].position();
+            let v = Vec3::from_array(*velocity);
+            // The body is driven (teleported) to x0+v·t each tick, so the expected
+            // endpoint is the closed-form path point — NO gravity term, because a
+            // kinematic body ignores gravity.
+            let exp = x0 + v * (dt * steps as f32);
+            let got = traj[last].bodies[i].position();
+            // No accumulation (each tick is set absolutely), so the only error is
+            // f32 round-off in the product: floor ≈ |x|·ε.
+            let pos_scale = traj
+                .iter()
+                .map(|r| r.bodies[i].position().length() as f64)
+                .fold(1.0, f64::max);
+            let bound = pos_tol.max(pos_scale * F32_EPS * 8.0);
+            let d = (got - exp).length() as f64;
+            if d > bound {
+                out.push(Violation::new(
+                    last,
+                    Some(i),
+                    "kinematic_path",
+                    d,
+                    bound,
+                    format!(
+                        "kinematic '{label}' left its prescribed path x0+v·t (exp={exp:?}, got={got:?})"
+                    ),
                 ));
             }
         }

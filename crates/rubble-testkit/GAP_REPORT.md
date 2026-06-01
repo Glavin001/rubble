@@ -26,6 +26,19 @@ failure prints `tick / body / measured / bound` and a failing run dumps its full
 trajectory. The fault matrix below proves the tolerances are tight enough to
 catch real bugs, not merely loose enough to pass.
 
+## Coverage at a glance
+
+- **19 scenarios** on the native (lavapipe) ladder, each isolating one pipeline
+  stage so a failure localizes the bug.
+- **13 areas verified** against independent or analytic oracles (table below),
+  **7 gaps catalogued** (registry below), **3 characterizations** noted.
+- **Every injected fault is caught** by ≥1 *passing* scenario (matrix below), so
+  the green checks have teeth — they are not merely loose enough to pass.
+- The strongest evidence is **non-self-referential**: inertia and narrowphase are
+  judged against **parry3d** (an independent engine), integration against its own
+  **discrete recurrence**, and three properties (**determinism, mass-independence,
+  permutation invariance**) hold **bit-exactly (0.0)**.
+
 ## Confidence — what PASSES, and the oracle that proves it
 
 | Area | Scenario / test | Oracle | Result |
@@ -42,6 +55,7 @@ catch real bugs, not merely loose enough to pass.
 | **Mass-independence** | metamorphic_tests | free fall vs 1000× mass | **bit-identical (0.0)** |
 | **Permutation invariance** | metamorphic_tests | reversed insertion order | **bit-identical (0.0)** — solving is order-independent despite graph coloring |
 | **Narrowphase (collision detection)** | narrowphase_tests | **parry3d, all shape pairs incl. rotated** | normal axis + depth match **exactly** for sphere/box/capsule/plane (8 axis-aligned + 2 rotated) and for convex-convex / convex-box. The primitive detection layer is solid. (Exception: convex-**sphere** is broken — gap #5.) |
+| **Kinematic bodies** | kinematic_ram_pushes_box | prescribed path `x0+v·t` (driven, not simulated) + infinite-mass push | a kinematic "ram" driven into a resting dynamic box tracks its path **bit-exactly (err = 0.0)** — it ignores gravity **and** stays immovable while carrying the contact load — while the driven box is pushed to **exactly 1.5 m/s** (= the ram's velocity). Catches a kinematic that falls, is shoved back, or fails to push. |
 
 ## Engine gaps DETECTED (registry: `gaps.rs`)
 
@@ -92,14 +106,22 @@ tolerances honest:
 
 ## Not yet covered (next, in confidence order)
 
-- **Kinematic bodies** — `set_body_kinematic` exists; add a test that a kinematic
-  body follows its prescribed motion and is unaffected by collisions/gravity.
-- **Convergence/order test** — does gap #1/#2 shrink at the integrator's order as
-  dt→0? Distinguishes acceptable order-of-accuracy from a biased integrator.
-- **2D coverage** (`rubble2d`) — the harness is structured to extend.
-- **Convergence testing** for rotational accuracy — does gap #1/#2 shrink at the
-  integrator's order as dt→0? Distinguishes "acceptable order-of-accuracy" from a
-  biased integrator.
-- **2D coverage** (`rubble2d`) — the harness is structured to extend.
-- **Browser lane** — same scenarios + checks inside wasm under Chrome+SwiftShader,
-  to catch browser-only (toolchain / binding / async / device-limit) divergences.
+Kinematic **translation** is now covered (table above: `kinematic_ram_pushes_box`).
+What remains, highest-confidence-value first:
+
+- **Kinematic rotation / `set_velocity` drive** — the new lane drives a
+  *translating* kinematic body by `set_position`; extend the same bit-exact path
+  oracle to a prescribed *angular* path and to `set_velocity`-based drives (a
+  spinning platform, a rotating conveyor).
+- **Convergence / order test** — do the rotational gaps (#1/#2) shrink at the
+  integrator's order as dt→0? This separates an acceptable order-of-accuracy from
+  a biased integrator, turning "L drifts ~14%" into a quantified order claim.
+- **Restitution coefficient (equality, not bound)** — `drop_bounce` bounds the
+  rebound from above (e≤1); add a scenario that pins the rebound *value* for a
+  known `e`, so restitution is verified, not just shown non-creating.
+- **2D coverage** (`rubble2d`) — `set_body_kinematic` and the same APIs exist
+  there; the scenario data + oracles are structured to extend to the 2D engine.
+- **Browser lane** — run the *identical* ladder + checks inside wasm under
+  Chrome+SwiftShader, to catch browser-only (naga-vs-Tint, WASM-binding, async,
+  device-limit) divergences. This is the one structural gap between "native is
+  correct" and "the shipped (browser) engine is correct."

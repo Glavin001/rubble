@@ -11,6 +11,13 @@ use crate::oracle::EndpointCheck;
 pub struct BodyDef {
     pub label: &'static str,
     pub desc: RigidBodyDesc,
+    /// If `Some(v)`, this body is **kinematic**: the runner marks it via
+    /// `set_body_kinematic` (so it ignores gravity and the solver treats it as
+    /// immovable) and *drives* it each tick to `x0 + v·t` — it follows the
+    /// prescribed constant velocity `v` while still pushing any dynamic body it
+    /// contacts. `None` = an ordinary dynamic/static body. Kept as plain data so
+    /// the identical definition can drive the (future) wasm lane.
+    pub kinematic: Option<Vec3>,
 }
 
 /// Which oracles / invariants apply to a scenario.
@@ -62,6 +69,7 @@ fn sphere(label: &'static str, p: Vec3, v: Vec3, r: f32, m: f32, friction: f32) 
             shape: ShapeDesc::Sphere { radius: r },
             ..Default::default()
         },
+        kinematic: None,
     }
 }
 
@@ -87,6 +95,24 @@ fn boxd(
             friction,
             shape: ShapeDesc::Box { half_extents: he },
         },
+        kinematic: None,
+    }
+}
+
+/// A **kinematic** box driven at constant velocity `v`: it is marked kinematic
+/// (ignores gravity, immovable by the solver) and teleported to `x0 + v·t` each
+/// tick, so it follows its prescribed path while pushing any dynamic body it meets.
+fn kinematic_box(label: &'static str, p: Vec3, v: Vec3, he: Vec3) -> BodyDef {
+    BodyDef {
+        label,
+        desc: RigidBodyDesc {
+            position: p,
+            mass: 1.0, // inv_mass is zeroed by set_body_kinematic; value is irrelevant
+            friction: 0.6,
+            shape: ShapeDesc::Box { half_extents: he },
+            ..Default::default()
+        },
+        kinematic: Some(v),
     }
 }
 
@@ -119,6 +145,7 @@ fn floor(top_y: f32, friction: f32) -> BodyDef {
             },
             ..Default::default()
         },
+        kinematic: None,
     }
 }
 
@@ -192,6 +219,7 @@ pub fn scenarios() -> Vec<Scenario> {
                     friction: 0.0,
                     shape: ShapeDesc::Sphere { radius: 0.5 },
                 },
+                kinematic: None,
             }],
             checks: ScenarioChecks {
                 energy_non_increase: true,
@@ -646,6 +674,7 @@ pub fn scenarios() -> Vec<Scenario> {
                         shape: cube_hull(0.5),
                         ..Default::default()
                     },
+                    kinematic: None,
                 },
             ],
             checks: ScenarioChecks {
@@ -694,6 +723,7 @@ pub fn scenarios() -> Vec<Scenario> {
                         },
                         ..Default::default()
                     },
+                    kinematic: None,
                 },
             ],
             checks: ScenarioChecks {
@@ -704,6 +734,54 @@ pub fn scenarios() -> Vec<Scenario> {
                     expected_y: 0.5,
                     tol: 0.1,
                 }],
+                ..Default::default()
+            },
+        },
+        // 16. Kinematic body: a kinematic "ram" box is driven at constant velocity
+        //     straight into a dynamic box resting on the floor. Two properties at
+        //     once: (a) the ram must stay EXACTLY on its prescribed path x0+v·t —
+        //     unaffected by gravity AND by the contact load it carries
+        //     (KinematicFollowsPath, derived f32 bound); and (b) the dynamic box
+        //     must be pushed (FinalSpeed > 0), proving a kinematic body acts as an
+        //     infinite-mass driver. Energy/momentum are intentionally NOT checked:
+        //     the ram is an external agent that legitimately injects both.
+        Scenario {
+            name: "kinematic_ram_pushes_box",
+            config: cfg(g, dt, 24, 0.4),
+            steps: 180,
+            bodies: vec![
+                floor(0.0, 0.4),
+                kinematic_box(
+                    "ram",
+                    Vec3::new(-2.0, 0.5, 0.0),
+                    Vec3::new(1.5, 0.0, 0.0),
+                    Vec3::splat(0.5),
+                ),
+                boxd(
+                    "puck",
+                    Vec3::new(0.0, 0.5, 0.0),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::splat(0.5),
+                    1.0,
+                    0.4,
+                ),
+            ],
+            checks: ScenarioChecks {
+                floor_y: Some(0.0),
+                endpoints: vec![
+                    EndpointCheck::KinematicFollowsPath {
+                        label: "ram",
+                        velocity: [1.5, 0.0, 0.0],
+                        pos_tol: 1.0e-4,
+                    },
+                    EndpointCheck::FinalSpeed {
+                        label: "puck",
+                        min: 0.5,
+                        max: f64::INFINITY,
+                    },
+                ],
                 ..Default::default()
             },
         },
