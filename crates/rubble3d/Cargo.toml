@@ -19,3 +19,4 @@ pollster = { workspace = true }
 naga = { workspace = true }
 parry3d = "0.17"
 nalgebra = "0.33"
+rubble-testkit = { workspace = true, features = ["faults"] }

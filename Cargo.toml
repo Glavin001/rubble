@@ -11,6 +11,7 @@ members = [
     "crates/rubble-wasm",
     "crates/rubble-viewer",
     "crates/rubble-scenes",
+    "crates/rubble-testkit",
 ]
 
 [profile.release]
@@ -46,4 +47,7 @@ rubble3d = { path = "crates/rubble3d" }
 rubble2d = { path = "crates/rubble2d" }
 rubble-viewer = { path = "crates/rubble-viewer" }
 rubble-scenes = { path = "crates/rubble-scenes" }
+rubble-testkit = { path = "crates/rubble-testkit" }
 rand = "0.9"
+parry3d = "0.17"
+nalgebra = "0.33"

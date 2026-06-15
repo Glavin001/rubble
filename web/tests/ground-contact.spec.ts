@@ -34,6 +34,12 @@ test.describe("Ground contact acceptance", () => {
   });
 
   test("dynamic body contacts ground within 5s sim time", async ({ page }) => {
+    // SwiftShader (CI's CPU WebGPU) runs the full compute pipeline at roughly
+    // ~1 step/second due to per-dispatch overhead, so a body needs ~40s of
+    // wall-clock to fall from y=4 to the floor. Give the poll a generous budget
+    // (it breaks early as soon as the body has fallen, so this only costs time
+    // when SwiftShader is genuinely slow) and raise this test's timeout to match.
+    test.setTimeout(180_000);
     // Wait for the initial scene (Pyramid) to finish its first step so the
     // loading overlay hides and scene-select is interactive.
     await page.waitForFunction(
@@ -90,7 +96,9 @@ test.describe("Ground contact acceptance", () => {
     // Floor top surface at y=0.5, box half-height=0.5 → resting y ≈ 1.0.
     // Accept y < 2.0 as "contacted ground" (started at ~4).
     const pollStart = Date.now();
-    const deadline = pollStart + 30_000;
+    // ~90s budget ≈ ~90 SwiftShader steps, well past the ~38 needed to reach y<2
+    // (and the ~45 to rest near the floor). The loop breaks early on success.
+    const deadline = pollStart + 90_000;
     let lastY = maxY;
     let lastStepCount = initial.stepCount;
     while (Date.now() < deadline) {

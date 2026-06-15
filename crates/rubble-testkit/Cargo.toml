@@ -1,0 +1,24 @@
+[package]
+name = "rubble-testkit"
+version = "0.1.0"
+edition = "2021"
+description = "Dual-target (native + wasm) bug-detection harness for the Rubble physics engine: scenarios, derived-tolerance oracles, per-tick invariants, and a trajectory recorder."
+
+[dependencies]
+rubble3d = { workspace = true }
+rubble-math = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = { workspace = true }
+rand = { workspace = true }
+# Independent geometry oracle — heavy, native-only. The in-browser runner uses the
+# analytic + conservation + recorded-depth oracles instead.
+parry3d = { workspace = true }
+nalgebra = { workspace = true }
+
+[features]
+# Enables the fault-injection catalog used by the "test the tests" detection matrix.
+# Off by default so production/normal runs never carry fault hooks.
+faults = []
