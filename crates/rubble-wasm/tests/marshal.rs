@@ -71,7 +71,10 @@ fn remove_body_keeps_slot_and_renders_removed_at_origin() {
     assert_eq!(w.handle_count(), 2);
     assert_eq!(w.body_count(), 2);
 
-    assert!(w.remove_body(1), "remove_body should succeed for a live slot");
+    assert!(
+        w.remove_body(1),
+        "remove_body should succeed for a live slot"
+    );
 
     // CURRENT (documented) behaviour: `remove_body` does NOT pop the handle/shape
     // arrays, so handle_count is unchanged while alive body_count drops, and the
@@ -79,7 +82,11 @@ fn remove_body_keeps_slot_and_renders_removed_at_origin() {
     // substitution). Pinning this means a change to removal semantics — e.g. when
     // remove_body is reworked for GPU-residency — is caught here rather than as a
     // body silently rendering at the world origin in the browser.
-    assert_eq!(w.handle_count(), 2, "handles array is not compacted on remove");
+    assert_eq!(
+        w.handle_count(),
+        2,
+        "handles array is not compacted on remove"
+    );
     assert_eq!(w.body_count(), 1, "alive count must drop after remove");
 
     let t = w.get_transforms();
