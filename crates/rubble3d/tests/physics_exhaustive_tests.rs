@@ -1077,3 +1077,125 @@ fn set_angular_velocity_applies_correctly() {
         "Angular velocity should cause rotation: angle={angle}"
     );
 }
+
+/// CA4 — scale correctness via an oracle (rest height), not just `is_finite`.
+///
+/// 8x8 grid of unit boxes dropped a short distance onto a large floor, spaced so
+/// each rests independently. Guards a performance refactor (broadphase /
+/// narrowphase / pair-buffer / coloring at scale) from silently corrupting or
+/// dropping contacts for large body counts — the headline use of the perf work,
+/// and exactly where the legacy suite only checks finiteness.
+#[test]
+fn grid_rest_heights_correct_64() {
+    let mut world = gpu_world!(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 120.0,
+        solver_iterations: 12,
+        max_bodies: 128,
+        friction_default: 0.5,
+        ..Default::default()
+    });
+    // Floor top at y = 0.
+    let _floor = world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(50.0, 0.5, 50.0),
+        },
+        ..Default::default()
+    });
+    const H: f32 = 0.5; // box half-extent -> rests with centre at y = H
+    let mut bodies = Vec::new();
+    for i in 0..8 {
+        for j in 0..8 {
+            let x = (i as f32 - 3.5) * 2.0;
+            let z = (j as f32 - 3.5) * 2.0;
+            let h = world.add_body(&RigidBodyDesc {
+                position: Vec3::new(x, H + 0.1, z),
+                mass: 1.0,
+                shape: ShapeDesc::Box {
+                    half_extents: Vec3::splat(H),
+                },
+                ..Default::default()
+            });
+            bodies.push((x, z, h));
+        }
+    }
+    step_n(&mut world, 300);
+    for (x0, z0, h) in &bodies {
+        let p = world.get_position(*h).expect("body should be alive");
+        assert!(
+            (p.y - H).abs() < 0.06,
+            "box at ({x0},{z0}) did not rest at the correct height: y={} (expected ~{H})",
+            p.y
+        );
+        assert!(
+            (p.x - x0).abs() < 0.05 && (p.z - z0).abs() < 0.05,
+            "box drifted laterally: now ({}, {}) from ({x0}, {z0})",
+            p.x,
+            p.z
+        );
+    }
+}
+
+/// CA5 — broadphase/narrowphase completeness under motion: every pair of bodies
+/// that *actually* overlaps must produce a contact. Counts (not per-pair index
+/// mapping) make this robust: sphere-sphere yields exactly one contact per pair
+/// and there is no floor, so `last_contacts().len()` equals the number of
+/// contacting pairs, which must be >= the brute-force strict-overlap count
+/// (the engine may additionally report speculative near-contacts).
+///
+/// Guards the first performance milestone (broadphase: switching to the fully-GPU
+/// LBVH / a different acceleration structure must not drop a pair).
+#[test]
+fn broadphase_finds_all_overlapping_pairs_under_motion() {
+    let mut world = gpu_world!(SimConfig {
+        gravity: Vec3::ZERO, // no floor / no gravity -> contacts are sphere-sphere only
+        dt: 1.0 / 120.0,
+        solver_iterations: 12,
+        max_bodies: 64,
+        friction_default: 0.0,
+        ..Default::default()
+    });
+    const R: f32 = 0.5;
+    // 3x3x1 cluster, neighbours 0.9 apart -> mild overlap (1.0 = R+R), in motion
+    // as they gently separate. Tiny seeded velocities add cross-frame motion.
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        for j in 0..3 {
+            let x = (i as f32 - 1.0) * 0.9;
+            let y = (j as f32 - 1.0) * 0.9;
+            let seed = (i * 3 + j) as f32;
+            handles.push(world.add_body(&RigidBodyDesc {
+                position: Vec3::new(x, y, 0.0),
+                linear_velocity: Vec3::new((seed * 0.7).sin(), (seed * 1.3).cos(), 0.0) * 0.2,
+                mass: 1.0,
+                shape: ShapeDesc::Sphere { radius: R },
+                ..Default::default()
+            }));
+        }
+    }
+    for step in 0..40 {
+        world.step();
+        // Brute-force count of pairs that clearly overlap (by > 1cm, so borderline
+        // speculative cases never make this a flaky lower bound).
+        let pos: Vec<Vec3> = handles
+            .iter()
+            .map(|h| world.get_position(*h).unwrap_or(Vec3::ZERO))
+            .collect();
+        let mut strict = 0usize;
+        for a in 0..pos.len() {
+            for b in (a + 1)..pos.len() {
+                if (pos[a] - pos[b]).length() < 2.0 * R - 0.01 {
+                    strict += 1;
+                }
+            }
+        }
+        let engine = world.last_contacts().len();
+        assert!(
+            engine >= strict,
+            "broadphase missed contacts at step {step}: engine reported {engine} contacts \
+             but {strict} sphere pairs clearly overlap"
+        );
+    }
+}

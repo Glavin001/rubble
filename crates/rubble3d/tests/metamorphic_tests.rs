@@ -266,3 +266,100 @@ fn permutation_invariance_of_insertion_order() {
          solving (graph coloring / contact ordering)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// High-contact determinism (CA1) — guards the coloring / adjacency / atomic
+// contact-emission paths that the performance plan rewrites (GPU coloring,
+// CSR adjacency, indirect dispatch). The 4-body mixed scene above has only a
+// handful of contacts; a settled box stack produces a dense, multi-color
+// contact graph, which is where order-/scheduling-dependent nondeterminism
+// would first appear.
+// ---------------------------------------------------------------------------
+
+const STACK_LABELS: [&str; 6] = ["b0", "b1", "b2", "b3", "b4", "b5"];
+
+/// Floor + a 6-box vertical stack (settles into 6 multi-point contacts, a graph
+/// that needs several colors). Labels are static so trajectories can be matched
+/// by label under insertion-order permutation.
+fn stack_scene() -> Vec<(&'static str, RigidBodyDesc)> {
+    let mut v = vec![(
+        "floor",
+        RigidBodyDesc {
+            position: Vec3::new(0.0, -0.5, 0.0),
+            mass: 0.0,
+            friction: 0.6,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::new(20.0, 0.5, 20.0),
+            },
+            ..Default::default()
+        },
+    )];
+    for (i, &label) in STACK_LABELS.iter().enumerate() {
+        // Half-extent 0.5 boxes touching with a 5mm settle gap.
+        v.push((
+            label,
+            RigidBodyDesc {
+                position: Vec3::new(0.0, 0.5 + i as f32 * 1.005, 0.0),
+                mass: 1.0,
+                friction: 0.6,
+                shape: ShapeDesc::Box {
+                    half_extents: Vec3::splat(0.5),
+                },
+                ..Default::default()
+            },
+        ));
+    }
+    v
+}
+
+#[test]
+fn determinism_high_contact_stack_two_worlds() {
+    let scene = stack_scene();
+    let (Some(a), Some(b)) = (
+        simulate_native(&cfg(), &scene, STEPS),
+        simulate_native(&cfg(), &scene, STEPS),
+    ) else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    let worst = worst_delta(&a, &b, Vec3::ZERO);
+    println!("high-contact determinism (two worlds): worst delta = {worst:.3e}");
+    assert!(
+        worst < 1.0e-5,
+        "dense contact graph is non-deterministic across two independent worlds \
+         (worst delta {worst:.3e}) — a scheduling/atomic/coloring-order dependence the \
+         performance refactor must preserve"
+    );
+}
+
+#[test]
+fn permutation_invariance_high_contact_stack() {
+    let fwd = stack_scene();
+    let mut rev = fwd.clone();
+    rev.reverse();
+    let (Some(a), Some(b)) = (
+        simulate_native(&cfg(), &fwd, STEPS),
+        simulate_native(&cfg(), &rev, STEPS),
+    ) else {
+        eprintln!("SKIP: no GPU adapter");
+        return;
+    };
+    let worst = worst_delta(&a, &b, Vec3::ZERO);
+    println!("high-contact permutation invariance: worst delta = {worst:.3e}");
+    // A graph-colored Gauss-Seidel solver is *inherently* mildly order-dependent:
+    // the coloring keys off body index, so reversing insertion order assigns
+    // different colors and the per-color sweep converges along a slightly
+    // different path. Measured ~4.7e-4 over 240 steps on this 6-box stack (vs
+    // <1e-4 for the sparse mixed scene) — sub-millimetre, and the reference
+    // solvers share this property. This is therefore a *regression ceiling*: it
+    // guards against a perf refactor introducing a gross order/scheduling
+    // dependence (a race, nondeterministic atomic ordering), not against the
+    // inherent ~5e-4 sensitivity.
+    assert!(
+        worst < 5.0e-3,
+        "insertion order grossly changes a dense-contact result (worst delta {worst:.3e}, \
+         ceiling 5e-3): the perf refactor introduced an order/scheduling dependence well \
+         beyond the inherent Gauss-Seidel coloring sensitivity (~5e-4)"
+    );
+}
+

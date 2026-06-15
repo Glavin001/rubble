@@ -25,3 +25,10 @@ console_error_panic_hook = { workspace = true }
 serde = { workspace = true }
 serde-wasm-bindgen = { workspace = true }
 getrandom = { workspace = true }
+
+# Native-only: drive the async `create()` in marshaling tests (CB3). These tests
+# exercise the wasm-binding *logic* (shape-offset bookkeeping, transform packing,
+# remove_body semantics) on the native build, since the JS-typed entry points are
+# the same plain-Rust methods natively.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+pollster = { workspace = true }
