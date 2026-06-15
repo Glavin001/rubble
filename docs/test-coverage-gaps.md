@@ -31,6 +31,41 @@ Sources: full reads of `crates/rubble3d/tests/**`, `crates/rubble2d/tests/**`, `
 
 ---
 
+## Implementation status (branch `claude/happy-fermat-8sb3le`)
+
+The **native** safety net that gates the performance work is implemented and green on
+lavapipe (software Vulkan = CI parity):
+
+| Gap | Status | Test(s) |
+|---|---|---|
+| **CA1** two-world / scheduling-order determinism + high-contact permutation | ✅ done | `rubble3d` `metamorphic_tests::{determinism_high_contact_stack_two_worlds, permutation_invariance_high_contact_stack}`; new `rubble2d/tests/metamorphic_tests.rs::{determinism_two_worlds_2d, permutation_invariance_2d}` |
+| **CA2** manifold count + location vs analytic ground truth | ✅ done | `rubble3d` `narrowphase_tests::{flat_box_on_plane_has_four_corner_contacts, edge_balanced_box_on_plane_has_two_contacts}` |
+| **CA3** stack converges to correct rest heights (warm-start fidelity) | ✅ done | `rubble3d` `avbd_solver_tests::stack_converges_to_correct_rest_heights` |
+| **CA4** scale correctness (64-body grid rest heights) | ✅ done | `rubble3d` `physics_exhaustive_tests::grid_rest_heights_correct_64` |
+| **CA5** broadphase/narrowphase completeness under motion | ✅ done | `rubble3d` `physics_exhaustive_tests::broadphase_finds_all_overlapping_pairs_under_motion` |
+| **CB3** `rubble-wasm` marshaling (offsets, transform packing, remove semantics) | ✅ done | new `crates/rubble-wasm/tests/marshal.rs` (native, `pollster`-driven `create`) |
+
+**Findings surfaced while building the net (important for the perf work):**
+1. *Same-order determinism is bit-reproducible* even for a dense exploding scene (<1e-5) — the key
+   race-detection guarantee the perf refactor must preserve. *Insertion order* shifts a dense 3D stack by
+   ~4.7e-4 (inherent graph-colored Gauss-Seidel sensitivity; guarded as a regression ceiling).
+2. *2D multi-body resting contact is unstable* — even a flat rect row does not settle, so 2D permutation is
+   a tracked known-failure (the 2D determinism guard is active). Tied to the `resting_rect` known-failure.
+3. **Warm-start is load-bearing for stacks in rubble** (not just an accelerant): with `warmstart_decay = 0`
+   a 4-box stack collapses through the floor (rest heights ~ −110). The cross-frame λ/penalty carry is what
+   accumulates the holding force. → M4 (CAS persistence-map warm-start) **must preserve warm-start fidelity**,
+   which CA3 guards.
+
+**Not yet implemented (web-specific; verifiable only via the browser/playwright lane, recommended as a
+follow-up landed with browser verification):** CB9 (wire the dual-target `rubble-testkit` wasm runner +
+`testkit.spec.ts` — highest-leverage web guard, closes CB1/CB2/CB4/CB6 at once), CB1/CB2 (native↔web parity
++ WebGPU determinism). Also outstanding (lower priority for the perf work): CA6–CA10 (physics gaps, several
+already known-broken), CA13 (2D parity oracle via `parry2d`), CA11/CA12/CA14, CB10–CB12. The native net above
+is sufficient to guard the native GPU-pipeline milestones (M1, M3, M4, M5) and most of M2 (GPU-residency);
+CB9 is the recommended addition before M2's web async-readback path lands.
+
+---
+
 ## Part A — Core Rust gaps
 
 ### A.0 Oracle assessment (what the good tier actually guarantees)

@@ -316,3 +316,108 @@ fn narrowphase_matches_parry() {
             .join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// CA2 — contact-manifold COUNT and LOCATION (not just the deepest point).
+//
+// The matrix above checks only the single deepest contact's normal+depth. A
+// flat box on a plane must generate a full multi-point manifold at its bottom
+// corners; a perf refactor (coloring / broadphase / GPU-residency / readback
+// removal) that drops a manifold point passes every other test but tips boxes
+// over in production. These assert the manifold against analytic ground truth.
+// ---------------------------------------------------------------------------
+
+fn manifold_on_plane(box_half: f32, rot: Quat, pen: f32) -> Vec<rubble_math::Contact3D> {
+    let mut world = World::new(cfg()).unwrap();
+    // Static plane, free half-space above (normal +y).
+    world.add_body(&RigidBodyDesc {
+        position: Vec3::ZERO,
+        mass: 0.0,
+        friction: 0.5,
+        shape: ShapeDesc::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            distance: 0.0,
+        },
+        ..Default::default()
+    });
+    // Box whose lowest features penetrate the plane by `pen`.
+    world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, box_half - pen, 0.0),
+        rotation: rot,
+        mass: 1.0,
+        friction: 0.5,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::splat(box_half),
+        },
+        ..Default::default()
+    });
+    world.step();
+    world.last_contacts().to_vec()
+}
+
+#[test]
+fn flat_box_on_plane_has_four_corner_contacts() {
+    let h = 0.5;
+    let contacts = manifold_on_plane(h, Quat::IDENTITY, 0.1);
+    println!(
+        "flat box/plane: {} contacts at {:?}",
+        contacts.len(),
+        contacts
+            .iter()
+            .map(|c| c.contact_point().to_array())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        contacts.len(),
+        4,
+        "a flat box on a plane must produce a 4-point manifold (got {})",
+        contacts.len()
+    );
+    // Every contact normal points up out of the plane.
+    for c in &contacts {
+        let n = c.contact_normal();
+        assert!(
+            n.dot(Vec3::Y).abs() > 0.98,
+            "manifold normal should be ~+/-Y, got {n:?}"
+        );
+    }
+    // The four points must sit at the four bottom corners (±h, ·, ±h). Match each
+    // expected corner to a contact within 1cm in the X/Z plane.
+    let corners = [(-h, -h), (-h, h), (h, -h), (h, h)];
+    for (cx, cz) in corners {
+        let found = contacts.iter().any(|c| {
+            let p = c.contact_point();
+            (p.x - cx).abs() < 0.02 && (p.z - cz).abs() < 0.02
+        });
+        assert!(found, "no manifold point near bottom corner ({cx}, {cz})");
+    }
+}
+
+#[test]
+fn edge_balanced_box_on_plane_has_two_contacts() {
+    // Box rotated 45° about Z rests on its bottom edge (parallel to Z): the two
+    // ends of that edge are the only contacts -> a 2-point manifold.
+    let h = 0.5;
+    let contacts = manifold_on_plane(h, Quat::from_rotation_z(std::f32::consts::FRAC_PI_4), 0.05);
+    println!(
+        "edge box/plane: {} contacts at {:?}",
+        contacts.len(),
+        contacts
+            .iter()
+            .map(|c| c.contact_point().to_array())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        contacts.len(),
+        2,
+        "an edge-balanced box should produce a 2-point manifold (got {})",
+        contacts.len()
+    );
+    // The two points share X≈0 (the edge is centred) and lie at opposite Z ends.
+    let mut zs: Vec<f32> = contacts.iter().map(|c| c.contact_point().z).collect();
+    zs.sort_by(f32::total_cmp);
+    assert!(
+        zs[0] < -0.3 && zs[1] > 0.3,
+        "edge manifold points should be at opposite Z ends, got {zs:?}"
+    );
+}
