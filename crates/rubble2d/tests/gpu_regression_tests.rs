@@ -132,6 +132,7 @@ fn run_rect_floor_step(
         10.0,
         INITIAL_PENALTY,
         0.95,
+        0.3,
     );
     Some(pipeline.step_with_contacts(states.len() as u32, solver_iterations, warm_contacts))
 }
@@ -239,6 +240,7 @@ fn custom_k_start_is_applied_2d() {
         10.0,
         custom_k_start,
         0.95,
+        0.3,
     );
     let (_, contacts) = pipeline.step_with_contacts(2, 0, None);
     assert!(!contacts.is_empty(), "expected resting box-floor contacts");
@@ -616,6 +618,7 @@ fn circle_contact_warm_start_keeps_feature_ids() {
         10.0,
         INITIAL_PENALTY,
         0.95,
+        0.3,
     );
     let (_, first_contacts) = pipeline.step_with_contacts(2, 4, None);
 
@@ -634,6 +637,7 @@ fn circle_contact_warm_start_keeps_feature_ids() {
         10.0,
         INITIAL_PENALTY,
         0.95,
+        0.3,
     );
     let (_, second_contacts) = pipeline.step_with_contacts(2, 0, Some(&first_contacts));
 

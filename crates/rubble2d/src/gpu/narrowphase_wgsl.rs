@@ -120,7 +120,10 @@ fn emit_contact_2d(
         ca_b * (world_b.x - pos_b.x) + sa_b * (world_b.y - pos_b.y),
         -sa_b * (world_b.x - pos_b.x) + ca_b * (world_b.y - pos_b.y),
     );
-    contacts[slot].point  = vec4<f32>(point.x, point.y, depth, 0.0);
+    // point.w stores the frozen solve-start normal separation C0 (AVBD
+    // alpha-stabilization). point.z is the live depth, refreshed each dual pass;
+    // point.w is written once here and preserved by the dual pass.
+    contacts[slot].point  = vec4<f32>(point.x, point.y, depth, depth);
     contacts[slot].normal = vec4<f32>(normal.x, normal.y, tangent.x, tangent.y);
     contacts[slot].local_anchors = vec4<f32>(local_a.x, local_a.y, local_b.x, local_b.y);
     let k_start = params.solver.z;

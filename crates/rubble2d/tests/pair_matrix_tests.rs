@@ -194,6 +194,7 @@ fn run_pair_case(case: &PairCase2D) -> Option<(Vec<RigidBodyState2D>, Vec<Contac
         10.0,
         INITIAL_PENALTY,
         0.95,
+        0.3,
     );
     Some(pipeline.step_with_contacts(2, 10, None))
 }
