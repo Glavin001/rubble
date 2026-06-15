@@ -1199,3 +1199,99 @@ fn broadphase_finds_all_overlapping_pairs_under_motion() {
         );
     }
 }
+
+/// Resting-stability matrix: every dynamic shape must settle on a box floor and on
+/// a plane (the common floor types). This is the coverage gap that let a class of
+/// contact-normal sign bugs hide — the narrowphase oracle only checks the normal
+/// *axis*, not its sign, so box_hull / sphere_hull emitted A->B instead of B->A and
+/// the *dynamic* contact pushed the shape the wrong way (it exploded) while every
+/// static narrowphase test still passed.
+#[test]
+fn shapes_rest_on_box_and_plane_floors() {
+    use rubble3d::ShapeDesc;
+    let cube_hull = vec![
+        Vec3::new(-0.5, -0.5, -0.5),
+        Vec3::new(0.5, -0.5, -0.5),
+        Vec3::new(0.5, 0.5, -0.5),
+        Vec3::new(-0.5, 0.5, -0.5),
+        Vec3::new(-0.5, -0.5, 0.5),
+        Vec3::new(0.5, -0.5, 0.5),
+        Vec3::new(0.5, 0.5, 0.5),
+        Vec3::new(-0.5, 0.5, 0.5),
+    ];
+    let shapes: [(&str, ShapeDesc); 4] = [
+        (
+            "box",
+            ShapeDesc::Box {
+                half_extents: Vec3::splat(0.5),
+            },
+        ),
+        (
+            "hull",
+            ShapeDesc::ConvexHull {
+                vertices: cube_hull,
+            },
+        ),
+        (
+            "capsule",
+            ShapeDesc::Capsule {
+                half_height: 0.3,
+                radius: 0.3,
+            },
+        ),
+        ("sphere", ShapeDesc::Sphere { radius: 0.5 }),
+    ];
+    for floor_is_plane in [false, true] {
+        for (name, shape) in &shapes {
+            let mut world = gpu_world!(SimConfig {
+                gravity: Vec3::new(0.0, -9.81, 0.0),
+                dt: 1.0 / 120.0,
+                solver_iterations: 12,
+                max_bodies: 8,
+                friction_default: 0.6,
+                ..Default::default()
+            });
+            if floor_is_plane {
+                world.add_body(&RigidBodyDesc {
+                    position: Vec3::ZERO,
+                    mass: 0.0,
+                    shape: ShapeDesc::Plane {
+                        normal: Vec3::new(0.0, 1.0, 0.0),
+                        distance: 0.0,
+                    },
+                    ..Default::default()
+                });
+            } else {
+                world.add_body(&RigidBodyDesc {
+                    position: Vec3::new(0.0, -0.5, 0.0),
+                    mass: 0.0,
+                    shape: ShapeDesc::Box {
+                        half_extents: Vec3::new(5.0, 0.5, 5.0),
+                    },
+                    ..Default::default()
+                });
+            }
+            let h = world.add_body(&RigidBodyDesc {
+                position: Vec3::new(0.0, 0.6, 0.0),
+                mass: 1.0,
+                friction: 0.6,
+                shape: shape.clone(),
+                ..Default::default()
+            });
+            let mut tail_max_speed = 0.0f32;
+            for s in 0..300 {
+                world.step();
+                if s >= 150 {
+                    tail_max_speed = tail_max_speed.max(world.get_velocity(h).unwrap().length());
+                }
+            }
+            let p = world.get_position(h).unwrap();
+            let floor = if floor_is_plane { "plane" } else { "box" };
+            assert!(
+                p.y.is_finite() && p.y > 0.1 && p.y < 1.0 && tail_max_speed < 0.5,
+                "{name} on {floor} floor did not rest: y={}, tail_max_speed={tail_max_speed}",
+                p.y
+            );
+        }
+    }
+}
