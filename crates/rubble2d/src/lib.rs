@@ -27,6 +27,11 @@ pub struct SimConfig2D {
     pub warmstart_decay: f32,
     /// Default friction coefficient for bodies without explicit friction.
     pub friction_default: f32,
+    /// AVBD alpha-stabilization factor in [0, 1). Each step the solver only
+    /// corrects `(1 - contact_stabilization)` of the initial constraint
+    /// violation, bleeding penetration out gradually instead of snapping it to
+    /// zero (which injects energy). 0 disables stabilization.
+    pub contact_stabilization: f32,
 }
 
 impl Default for SimConfig2D {
@@ -40,6 +45,7 @@ impl Default for SimConfig2D {
             k_start: 1e4,
             warmstart_decay: 0.95,
             friction_default: 0.5,
+            contact_stabilization: 0.3,
         }
     }
 }
@@ -721,6 +727,7 @@ impl World2D {
             self.config.beta,
             self.config.k_start,
             self.config.warmstart_decay,
+            self.config.contact_stabilization,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
@@ -898,6 +905,7 @@ impl World2D {
             self.config.beta,
             self.config.k_start,
             self.config.warmstart_decay,
+            self.config.contact_stabilization,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 

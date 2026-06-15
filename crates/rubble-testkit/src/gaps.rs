@@ -83,23 +83,20 @@ pub fn known_gaps() -> &'static [KnownGap] {
         KnownGap {
             scenario: "deep_overlap_separates",
             category: GapCategory::Solver,
-            reason: "Two spheres started 0.6m deep in overlap separate explosively \
-                     at ~70 m/s (vs a 15 m/s sanity bound). The engine has no \
-                     penetration-recovery velocity clamp, so a large initial \
-                     overlap converts directly into an unphysical velocity spike. \
-                     Bodies spawned overlapping (a common case) will be launched.",
+            reason: "Two spheres started 0.6m deep in overlap separate too fast \
+                     (peak ~17 m/s vs a 15 m/s bound). IMPROVED: a per-step \
+                     penetration-recovery clamp (MAX_RECOVERY_VEL) cut this from \
+                     ~70 m/s, so overlapping spawns no longer catastrophically \
+                     launch. The residual ~17 m/s is the position-based solver \
+                     accumulating the recovery kick into velocity each frame in \
+                     zero gravity with no damping; fully closing it needs \
+                     relative-velocity-aware recovery (Baumgarte/restitution split).",
         },
-        KnownGap {
-            scenario: "convex_cube_rests",
-            category: GapCategory::Solver,
-            reason: "A convex-hull cube dropped on the floor is UNSTABLE: it gains \
-                     energy (≈2x E0), reaches ~118 m/s, and flies off to y≈-243. \
-                     The convex↔box NARROWPHASE is exact (see narrowphase_tests), \
-                     so the instability is in the dynamic contact solve for convex \
-                     hulls (possibly compounded by the bbox-approximated convex \
-                     inertia). Convex hulls are not yet usable as resting dynamic \
-                     bodies.",
-        },
+        // FIXED: `convex_cube_rests` — the convex↔box narrowphase (`box_hull_test`)
+        // emitted the contact normal A→B instead of B→A (the solver / box_box / circle
+        // convention), so the contact pushed the hull the wrong way. The narrowphase
+        // oracle only checks the normal axis (sign-agnostic), which is why it passed
+        // while the dynamic solve exploded. Hull cubes now rest correctly.
         KnownGap {
             scenario: "compound_box_rests",
             category: GapCategory::Solver,

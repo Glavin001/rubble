@@ -1180,3 +1180,62 @@ fn repeated_simulation_consistent() {
         diff
     );
 }
+
+/// CA3 — warm-start is load-bearing for stack stability in rubble, so a warm-start
+/// refactor (e.g. the planned CAS persistence map) must preserve the *converged*
+/// state. This pins the absolute fixed point: a 4-box stack must settle to its
+/// analytic resting heights [0.5, 1.5, 2.5, 3.5]. A persistence-map / decay /
+/// feature-match refactor that subtly mis-carries lambda would shift these.
+///
+/// NOTE (finding): unlike the reference solvers, rubble's per-frame lambda does
+/// not converge fast enough to hold a stack *cold* — with `warmstart_decay = 0.0`
+/// this same stack collapses through the floor (rest heights ~ -110). So
+/// warm-start here is not merely a convergence accelerant; the cross-frame
+/// lambda/penalty carry is what accumulates the holding force. The performance
+/// plan's M4 (CAS persistence-map warm-start) must therefore preserve warm-start
+/// *fidelity*, which this absolute-convergence test guards.
+#[test]
+fn stack_converges_to_correct_rest_heights() {
+    let mut world = gpu_world!(SimConfig {
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        dt: 1.0 / 120.0,
+        solver_iterations: 12,
+        max_bodies: 16,
+        friction_default: 0.5,
+        ..Default::default()
+    });
+    world.add_body(&RigidBodyDesc {
+        position: Vec3::new(0.0, -0.5, 0.0),
+        mass: 0.0,
+        friction: 0.5,
+        shape: ShapeDesc::Box {
+            half_extents: Vec3::new(10.0, 0.5, 10.0),
+        },
+        ..Default::default()
+    });
+    let mut hs = Vec::new();
+    for i in 0..4 {
+        hs.push(world.add_body(&RigidBodyDesc {
+            position: Vec3::new(0.0, 0.5 + i as f32 * 1.005, 0.0),
+            mass: 1.0,
+            friction: 0.5,
+            shape: ShapeDesc::Box {
+                half_extents: Vec3::splat(0.5),
+            },
+            ..Default::default()
+        }));
+    }
+    step_n(&mut world, 600);
+    let heights: Vec<f32> = hs
+        .iter()
+        .map(|h| world.get_position(*h).unwrap().y)
+        .collect();
+    println!("stack rest heights = {heights:?}");
+    for (i, y) in heights.iter().enumerate() {
+        let expected = 0.5 + i as f32; // analytic: boxes settle touching at 0.5,1.5,2.5,3.5
+        assert!(
+            (y - expected).abs() < 0.05,
+            "box {i} did not converge to its rest height: y={y} (expected ~{expected})"
+        );
+    }
+}

@@ -3,8 +3,7 @@ mod support;
 use glam::Vec2;
 use rubble2d::{RigidBodyDesc2D, ShapeDesc2D, SimConfig2D};
 use support::{
-    add_tracked_body, collect_reports, regular_polygon, scene_report, should_skip_known_failure,
-    step_n, try_world,
+    add_tracked_body, collect_reports, regular_polygon, scene_report, step_n, try_world,
 };
 
 fn discrete_ballistic_position(
@@ -310,12 +309,9 @@ fn set_velocity_and_spin_take_effect_immediately_2d() {
 
 #[test]
 fn frictionless_glancing_circles_do_not_inject_spin_2d() {
-    if should_skip_known_failure(
-        "frictionless_glancing_circles_do_not_inject_spin_2d",
-        "2D frictionless circle impacts still create extra translational energy",
-    ) {
-        return;
-    }
+    // Previously a known failure ("2D frictionless circle impacts still create
+    // extra translational energy"); fixed by the AVBD alpha-stabilization +
+    // bounded-dual + trust-region work, so it now runs in the default lane.
     let dt = 1.0 / 240.0;
     let gravity = Vec2::ZERO;
     let mut world = match try_world(SimConfig2D {
@@ -458,12 +454,8 @@ fn run_slide_scene_2d(friction: f32) -> Option<(f32, f32, f32)> {
 
 #[test]
 fn friction_strength_monotonically_reduces_slip_2d() {
-    if should_skip_known_failure(
-        "friction_strength_monotonically_reduces_slip_2d",
-        "2D friction ordering is currently inverted for some sliding scenes",
-    ) {
-        return;
-    }
+    // Previously a known failure ("2D friction ordering is currently inverted") —
+    // fixed by correcting the 2D convex-convex contact normal direction.
     let low = run_slide_scene_2d(0.0);
     let medium = run_slide_scene_2d(0.4);
     let high = run_slide_scene_2d(1.0);
@@ -489,12 +481,9 @@ fn friction_strength_monotonically_reduces_slip_2d() {
 
 #[test]
 fn resting_rect_stays_quiet_on_floor_2d() {
-    if should_skip_known_failure(
-        "resting_rect_stays_quiet_on_floor_2d",
-        "2D resting contacts still develop large upward drift and spin",
-    ) {
-        return;
-    }
+    // Previously a known failure ("2D resting contacts still develop large upward
+    // drift and spin") — fixed by correcting the 2D convex-convex contact normal
+    // direction (the contact force and incident anchor were both wrong-signed).
     let gravity = Vec2::new(0.0, -9.81);
     let mut world = match try_world(SimConfig2D {
         gravity,

@@ -130,6 +130,7 @@ fn parameter_sweep_stays_bounded_2d() {
                                         k_start,
                                         warmstart_decay,
                                         friction_default: friction,
+                                        contact_stabilization: 0.3,
                                     },
                                     mass_ratio,
                                     friction,
@@ -207,6 +208,7 @@ fn build_chaos_scene_2d() -> Option<(rubble2d::World2D, Vec<TrackedBody2D>, Vec2
         k_start: 1.0e4,
         warmstart_decay: 0.95,
         friction_default: 0.7,
+        contact_stabilization: 0.3,
     })?;
     let mut tracked = Vec::new();
 
