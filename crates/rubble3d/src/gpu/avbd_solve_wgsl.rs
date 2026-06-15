@@ -53,6 +53,10 @@ const CONTACT_MARGIN: f32 = 0.01;
 // effective per-contact cap is scaled by the lighter body's mass so a light body
 // cannot stockpile arbitrarily large forces (mirrors avbd-metal's lamCap).
 const LAMBDA_MAX: f32 = 1.0e6;
+// Max penetration-recovery speed (m/s). Deep initial overlap (e.g. bodies spawned
+// intersecting) is recovered at no more than this rate, so it separates gently
+// instead of launching. Resisting *further* penetration is unaffected.
+const MAX_RECOVERY_VEL: f32 = 6.0;
 
 @group(0) @binding(0) var<storage, read_write> bodies:            array<Body>;
 @group(0) @binding(1) var<storage, read>       inertial_states:   array<Body>;
@@ -329,9 +333,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Alpha-regularized constraint target: C_reg = (1 - alpha)*C0 + J*dx.
         // Only correcting (1 - alpha) of the initial violation per step bleeds
         // penetration out gradually instead of injecting energy by snapping it
-        // to zero in one step.
+        // to zero in one step. The recovery term is additionally clamped so a deep
+        // initial overlap recovers at most MAX_RECOVERY_VEL per step (J*dx, which
+        // resists further penetration, is left unclamped).
         let alpha_stab = params.quality.w;
-        let c_n = dot(normal, separation) + CONTACT_MARGIN - alpha_stab * (c0_n + CONTACT_MARGIN);
+        let recovery_target = max((1.0 - alpha_stab) * (c0_n + CONTACT_MARGIN), -MAX_RECOVERY_VEL * dt);
+        let c_n = recovery_target + (dot(normal, separation) - c0_n);
         let c_t1 = dot(tangent1, separation);
         let c_t2 = dot(tangent2, separation);
         // Bounded augmented-Lagrangian: cap the normal force by the lighter body's mass.
@@ -433,6 +440,7 @@ struct Contact {
 const CONTACT_FLAG_STICKING: u32 = 1u;
 const CONTACT_MARGIN: f32 = 0.01;
 const LAMBDA_MAX: f32 = 1.0e6;
+const MAX_RECOVERY_VEL: f32 = 6.0;
 
 struct SimParams {
     gravity: vec4<f32>,
@@ -509,9 +517,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tangent2 = normalize(cross(normal, tangent1));
     let geom_c_n = dot(normal, separation);
     let alpha_stab = params.quality.w;
-    // Alpha-regularized constraint used for the dual/force update (the penalty
-    // ramp below still keys off the raw geometric penetration geom_c_n).
-    let c_n = geom_c_n + CONTACT_MARGIN - alpha_stab * (c0_n + CONTACT_MARGIN);
+    let dt = params.solver.x;
+    // Alpha-regularized constraint with bounded penetration recovery (matches the
+    // primal). The penalty ramp below still keys off the raw geometric penetration.
+    let recovery_target = max((1.0 - alpha_stab) * (c0_n + CONTACT_MARGIN), -MAX_RECOVERY_VEL * dt);
+    let c_n = recovery_target + (geom_c_n - c0_n);
     let c_t1 = dot(tangent1, separation);
     let c_t2 = dot(tangent2, separation);
     let inv_m_a = bodies[c.body_a].position_inv_mass.w;
