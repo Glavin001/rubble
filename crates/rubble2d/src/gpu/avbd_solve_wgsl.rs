@@ -41,6 +41,8 @@ struct SolveRange {
 @group(0) @binding(5) var<storage, read>       contact_count_buf: array<u32>;
 @group(0) @binding(6) var<uniform>             solve_range:       SolveRange;
 
+const LAMBDA_MAX: f32 = 1.0e6;
+
 fn cross2d(a: vec2<f32>, b: vec2<f32>) -> f32 {
     return a.x * b.y - a.y * b.x;
 }
@@ -135,7 +137,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let normal = c.normal.xy;
         let tangent = c.normal.zw;
-        let c_n = dot(normal, separation);
+        let c0_n = c.point.w; // frozen solve-start normal separation (AVBD alpha-stabilization)
+        let alpha_stab = params.gravity.w;
+        // Alpha-regularized constraint target: C_reg = (1 - alpha)*C0 + J*dx.
+        let c_n = dot(normal, separation) - alpha_stab * c0_n;
         let c_t = dot(tangent, separation);
         let lambda_n = c.lambda_penalty.x;
         let lambda_t = c.lambda_penalty.y;
@@ -143,8 +148,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let k_t = c.lambda_penalty.w;
 
         let mu = sqrt(max(bodies[c.body_a]._pad0.x * bodies[c.body_b]._pad0.x, 0.0));
-        let f_n = min(k_n * c_n + lambda_n, 0.0);
-        let tang_limit = mu * abs(f_n);
+        // Bounded augmented-Lagrangian: cap the normal force by the lighter body's mass.
+        let inv_m_a = bodies[c.body_a].position_inv_mass.w;
+        let inv_m_b = bodies[c.body_b].position_inv_mass.w;
+        let mass_a = select(1e30, 1.0 / inv_m_a, inv_m_a > 0.0);
+        let mass_b = select(1e30, 1.0 / inv_m_b, inv_m_b > 0.0);
+        let lam_cap = min(LAMBDA_MAX, max(10.0, 1.0e5 * min(mass_a, mass_b)));
+        let f_n = clamp(k_n * c_n + lambda_n, -lam_cap, 0.0);
+        // Lagged Coulomb cone (stable grip on warm-started resting contacts).
+        let tang_limit = mu * max(abs(f_n), abs(lambda_n));
         let f_t = clamp(k_t * c_t + lambda_t, -tang_limit, tang_limit);
 
         var jn = vec3<f32>(normal.x, normal.y, cross2d(r_a, normal));
@@ -165,7 +177,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let delta = solve_sym_3x3(a00, a01, a02, a11, a12, a22, rhs);
-    bodies[body_idx].position_inv_mass = vec4<f32>(pos - delta.xy, angle - delta.z, inv_mass);
+
+    // Trust-region step caps: bound a single Newton step. Linear cap scales with
+    // the body's bounding radius R = sqrt(3 * inertia / mass) (exact for rects);
+    // angular cap is a fixed ~0.5 rad.
+    let bound_r = sqrt(max(3.0 * inertia * inv_mass, 1e-8));
+    let max_lin = 0.35 * bound_r;
+    var dlin = delta.xy;
+    let lin_len = length(dlin);
+    if lin_len > max_lin && lin_len > 1e-12 {
+        dlin = dlin * (max_lin / lin_len);
+    }
+    let dang = clamp(delta.z, -0.5, 0.5);
+
+    bodies[body_idx].position_inv_mass = vec4<f32>(pos - dlin, angle - dang, inv_mass);
 }
 "#;
 
@@ -199,6 +224,7 @@ struct SimParams2D {
 };
 
 const CONTACT_FLAG_STICKING: u32 = 1u;
+const LAMBDA_MAX: f32 = 1.0e6;
 
 @group(0) @binding(0) var<storage, read>       bodies:            array<Body2D>;
 @group(0) @binding(1) var<storage, read_write> contacts:          array<Contact2D>;
@@ -233,7 +259,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let normal = c.normal.xy;
     let tangent = c.normal.zw;
-    let c_n = dot(normal, separation);
+    let c0_n = c.point.w; // frozen solve-start normal separation (AVBD alpha-stabilization)
+    let alpha_stab = params.gravity.w;
+    let geom_c_n = dot(normal, separation);
+    // Alpha-regularized constraint for the force/dual update; the penalty ramp
+    // below keys off the raw geometric penetration geom_c_n.
+    let c_n = geom_c_n - alpha_stab * c0_n;
     let c_t = dot(tangent, separation);
 
     let lambda_n_old = c.lambda_penalty.x;
@@ -244,13 +275,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let beta = params.solver.y;
     let max_penalty = params.solver.w;
 
-    let lambda_n = min(k_n * c_n + lambda_n_old, 0.0);
+    let inv_m_a = bodies[c.body_a].position_inv_mass.w;
+    let inv_m_b = bodies[c.body_b].position_inv_mass.w;
+    let mass_a = select(1e30, 1.0 / inv_m_a, inv_m_a > 0.0);
+    let mass_b = select(1e30, 1.0 / inv_m_b, inv_m_b > 0.0);
+    let lam_cap = min(LAMBDA_MAX, max(10.0, 1.0e5 * min(mass_a, mass_b)));
+    let lambda_n = clamp(k_n * c_n + lambda_n_old, -lam_cap, 0.0);
     let tang_limit = mu * abs(lambda_n);
     let lambda_t = clamp(k_t * c_t + lambda_t_old, -tang_limit, tang_limit);
 
     var next_k_n = k_n;
-    if lambda_n < -1e-6 && c_n < -1e-5 {
-        next_k_n = min(k_n + beta * abs(c_n), max_penalty);
+    if lambda_n < -1e-6 && geom_c_n < -1e-5 {
+        next_k_n = min(k_n + beta * abs(geom_c_n), max_penalty);
     }
 
     var next_k_t = k_t;
@@ -260,7 +296,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         next_k_t = min(k_t + beta * abs(c_t), max_penalty);
     }
 
-    contacts[ci].point = vec4<f32>((world_a + world_b) * 0.5, c_n, 0.0);
+    // point.z = live penetration, point.w = preserved frozen C0.
+    contacts[ci].point = vec4<f32>((world_a + world_b) * 0.5, geom_c_n, c0_n);
     contacts[ci].lambda_penalty = vec4<f32>(lambda_n, lambda_t, next_k_n, next_k_t);
     contacts[ci].flags = flags;
 }

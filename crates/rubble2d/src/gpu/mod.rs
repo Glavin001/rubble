@@ -389,7 +389,7 @@ impl GpuPipeline2D {
             cached_color_groups: Vec::new(),
             cached_color_num_bodies: 0,
             sim_params: SimParams2DGpu {
-                gravity: [0.0; 4],
+                gravity: [0.0, 0.0, 0.0, 0.3], // gravity.w = alpha-stabilization
                 solver: [0.0, 10.0, 1.0e4, MAX_CONTACT_PENALTY],
                 counts: [0, 0, 0, SIM_FLAG_POST_STABILIZE],
             },
@@ -439,6 +439,7 @@ impl GpuPipeline2D {
         beta: f32,
         k_start: f32,
         warmstart_decay: f32,
+        contact_stabilization: f32,
     ) {
         self.shape_info_cpu = shape_info_data.to_vec();
         self.body_states.upload(&self.ctx, states);
@@ -467,7 +468,8 @@ impl GpuPipeline2D {
 
         self.warmstart_decay = warmstart_decay;
         self.sim_params = SimParams2DGpu {
-            gravity: [gravity.x, gravity.y, 0.0, 0.0],
+            // gravity.w carries the AVBD alpha-stabilization factor (gravity is 2D).
+            gravity: [gravity.x, gravity.y, 0.0, contact_stabilization],
             solver: [dt, beta, k_start, MAX_CONTACT_PENALTY],
             counts: [
                 states.len() as u32,
