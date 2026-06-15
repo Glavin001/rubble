@@ -44,6 +44,11 @@ pub struct SimConfig {
     /// Allowable penetration depth before solver correction kicks in.
     /// Small positive value reduces jitter for resting contacts.
     pub penetration_slop: f32,
+    /// AVBD alpha-stabilization factor in [0, 1). Each step the solver only
+    /// corrects `(1 - contact_stabilization)` of the initial constraint
+    /// violation, bleeding penetration out gradually instead of snapping it to
+    /// zero (which injects energy). 0 disables stabilization; 0.9-0.99 is typical.
+    pub contact_stabilization: f32,
 }
 
 impl Default for SimConfig {
@@ -60,6 +65,7 @@ impl Default for SimConfig {
             contact_offset: 0.02,
             restitution_threshold: 0.5,
             penetration_slop: 0.005,
+            contact_stabilization: 0.3,
         }
     }
 }
@@ -946,6 +952,7 @@ impl World {
             self.config.contact_offset,
             self.config.restitution_threshold,
             self.config.penetration_slop,
+            self.config.contact_stabilization,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
@@ -1026,6 +1033,7 @@ impl World {
             self.config.contact_offset,
             self.config.restitution_threshold,
             self.config.penetration_slop,
+            self.config.contact_stabilization,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
