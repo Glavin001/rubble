@@ -584,7 +584,7 @@ impl GpuPipeline {
                 gravity: [0.0; 4],
                 solver: [0.0, 10.0, 1.0e4, MAX_CONTACT_PENALTY],
                 counts: [0, 0, 0, 0],
-                quality: [0.02, 0.5, 0.005, 0.0], // contact_offset, restitution_threshold, penetration_slop, reserved
+                quality: [0.02, 0.5, 0.005, 0.95], // contact_offset, restitution_threshold, penetration_slop, contact_stabilization (alpha)
             },
             warmstart_decay: 0.95,
             params_uniform,
@@ -712,8 +712,14 @@ impl GpuPipeline {
         contact_offset: f32,
         restitution_threshold: f32,
         penetration_slop: f32,
+        contact_stabilization: f32,
     ) {
-        self.sim_params.quality = [contact_offset, restitution_threshold, penetration_slop, 0.0];
+        self.sim_params.quality = [
+            contact_offset,
+            restitution_threshold,
+            penetration_slop,
+            contact_stabilization,
+        ];
     }
 
     /// Run predict → AABB → broadphase → narrowphase (shared by both step variants).

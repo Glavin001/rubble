@@ -49,6 +49,10 @@ struct Solve6 {
 };
 
 const CONTACT_MARGIN: f32 = 0.01;
+// Upper bound on the bounded-augmented-Lagrangian contact force magnitude. The
+// effective per-contact cap is scaled by the lighter body's mass so a light body
+// cannot stockpile arbitrarily large forces (mirrors avbd-metal's lamCap).
+const LAMBDA_MAX: f32 = 1.0e6;
 
 @group(0) @binding(0) var<storage, read_write> bodies:            array<Body>;
 @group(0) @binding(1) var<storage, read>       inertial_states:   array<Body>;
@@ -312,6 +316,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let world_b = pos_b + r_b;
         let separation = world_a - world_b;
         let normal = c.normal.xyz;
+        let c0_n = c.normal.w; // frozen solve-start normal separation (AVBD alpha-stabilization)
         let tangent1 = normalize(c.tangent.xyz);
         let tangent2 = normalize(cross(normal, tangent1));
         let lambda_n = c.lambda.x;
@@ -321,12 +326,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let k_t1 = c.penalty.y;
         let k_t2 = c.penalty.z;
         let mu = sqrt(max(props[c.body_a].friction * props[c.body_b].friction, 0.0));
-        let c_n = dot(normal, separation) + CONTACT_MARGIN;
+        // Alpha-regularized constraint target: C_reg = (1 - alpha)*C0 + J*dx.
+        // Only correcting (1 - alpha) of the initial violation per step bleeds
+        // penetration out gradually instead of injecting energy by snapping it
+        // to zero in one step.
+        let alpha_stab = params.quality.w;
+        let c_n = dot(normal, separation) + CONTACT_MARGIN - alpha_stab * (c0_n + CONTACT_MARGIN);
         let c_t1 = dot(tangent1, separation);
         let c_t2 = dot(tangent2, separation);
-        let f_n = min(k_n * c_n + lambda_n, 0.0);
+        // Bounded augmented-Lagrangian: cap the normal force by the lighter body's mass.
+        let inv_m_a = bodies[c.body_a].position_inv_mass.w;
+        let inv_m_b = bodies[c.body_b].position_inv_mass.w;
+        let mass_a = select(1e30, 1.0 / inv_m_a, inv_m_a > 0.0);
+        let mass_b = select(1e30, 1.0 / inv_m_b, inv_m_b > 0.0);
+        let lam_cap = min(LAMBDA_MAX, max(10.0, 1.0e5 * min(mass_a, mass_b)));
+        let f_n = clamp(k_n * c_n + lambda_n, -lam_cap, 0.0);
         var tang = vec2<f32>(k_t1 * c_t1 + lambda_t1, k_t2 * c_t2 + lambda_t2);
-        let tang_limit = mu * abs(f_n);
+        // Coulomb cone radius uses the larger of the instantaneous normal force
+        // and the lagged accumulated normal dual. The lagged dual gives a stable
+        // grip from iteration 0 on warm-started resting contacts (instead of the
+        // volatile per-iteration f_n collapsing the cone), reducing slip/toppling.
+        let tang_limit = mu * max(abs(f_n), abs(lambda_n));
         let tang_len = length(tang);
         if tang_len > tang_limit && tang_len > 1e-8 {
             tang = tang * (tang_limit / tang_len);
@@ -353,8 +373,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let solution = solve_6x6(mtx, rhs);
-    bodies[body_idx].position_inv_mass = vec4<f32>(pos - solution.lin, inv_mass);
-    bodies[body_idx].orientation = quat_mul(small_angle_quat(-solution.ang), q);
+
+    // Trust-region step caps (VBD-style): bound a single Newton step so it cannot
+    // overshoot or tunnel through a thin contact. The linear cap scales with the
+    // body's bounding radius R = sqrt(1.5 * trace(I) / m) (exact for boxes,
+    // conservative for spheres); the angular cap is a fixed ~0.5 rad (~29 deg).
+    let trace_i = i_world[0][0] + i_world[1][1] + i_world[2][2];
+    let bound_r = sqrt(max(1.5 * trace_i * inv_mass, 1e-8));
+    let max_lin = 0.35 * bound_r;
+    var dlin = solution.lin;
+    var dang = solution.ang;
+    let lin_len = length(dlin);
+    if lin_len > max_lin && lin_len > 1e-12 {
+        dlin = dlin * (max_lin / lin_len);
+    }
+    let ang_len = length(dang);
+    if ang_len > 0.5 && ang_len > 1e-12 {
+        dang = dang * (0.5 / ang_len);
+    }
+
+    bodies[body_idx].position_inv_mass = vec4<f32>(pos - dlin, inv_mass);
+    bodies[body_idx].orientation = quat_mul(small_angle_quat(-dang), q);
 }
 "#;
 
@@ -393,6 +432,7 @@ struct Contact {
 
 const CONTACT_FLAG_STICKING: u32 = 1u;
 const CONTACT_MARGIN: f32 = 0.01;
+const LAMBDA_MAX: f32 = 1.0e6;
 
 struct SimParams {
     gravity: vec4<f32>,
@@ -464,13 +504,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world_b = pos_b + r_b;
     let separation = world_a - world_b;
     let normal = c.normal.xyz;
+    let c0_n = c.normal.w; // frozen solve-start normal separation (AVBD alpha-stabilization)
     let tangent1 = normalize(c.tangent.xyz);
     let tangent2 = normalize(cross(normal, tangent1));
     let geom_c_n = dot(normal, separation);
-    let c_n = geom_c_n + CONTACT_MARGIN;
+    let alpha_stab = params.quality.w;
+    // Alpha-regularized constraint used for the dual/force update (the penalty
+    // ramp below still keys off the raw geometric penetration geom_c_n).
+    let c_n = geom_c_n + CONTACT_MARGIN - alpha_stab * (c0_n + CONTACT_MARGIN);
     let c_t1 = dot(tangent1, separation);
     let c_t2 = dot(tangent2, separation);
-    let lambda_n = min(c.penalty.x * c_n + c.lambda.x, 0.0);
+    let inv_m_a = bodies[c.body_a].position_inv_mass.w;
+    let inv_m_b = bodies[c.body_b].position_inv_mass.w;
+    let mass_a = select(1e30, 1.0 / inv_m_a, inv_m_a > 0.0);
+    let mass_b = select(1e30, 1.0 / inv_m_b, inv_m_b > 0.0);
+    let lam_cap = min(LAMBDA_MAX, max(10.0, 1.0e5 * min(mass_a, mass_b)));
+    let lambda_n = clamp(c.penalty.x * c_n + c.lambda.x, -lam_cap, 0.0);
     var tang = vec2<f32>(
         c.penalty.y * c_t1 + c.lambda.y,
         c.penalty.z * c_t2 + c.lambda.z,
