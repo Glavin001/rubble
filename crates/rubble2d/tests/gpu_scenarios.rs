@@ -280,10 +280,15 @@ fn domino_chain_2d() {
         ..Default::default()
     });
 
+    // Dominoes are 2.0 tall (half-height 1.0); space them 1.2 apart so a toppling
+    // domino actually reaches its neighbour and the chain propagates. (Previously
+    // they were 2.5 apart — too far to chain — and the test only "passed" because
+    // the buggy 2D contact normal flung them around chaotically.)
+    let spacing = 1.2f32;
     let handles: Vec<_> = (0..5)
         .map(|i| {
             world.add_body(&RigidBodyDesc2D {
-                x: i as f32 * 2.5,
+                x: i as f32 * spacing,
                 y: 1.0,
                 shape: ShapeDesc2D::Rect {
                     half_extents: Vec2::new(0.2, 1.0),
@@ -295,7 +300,9 @@ fn domino_chain_2d() {
 
     world.set_velocity(handles[0], Vec2::new(3.0, 0.0));
 
-    step_n(&mut world, 60);
+    // The toppling chain takes time to propagate down the line; 60 steps only
+    // reaches the second domino, so step long enough for the third to move.
+    step_n(&mut world, 120);
 
     for (i, &h) in handles.iter().enumerate() {
         let pos = world.get_position(h).unwrap();
@@ -314,12 +321,12 @@ fn domino_chain_2d() {
     // from their initial x positions (2.5 and 5.0 respectively).
     let second_pos = world.get_position(handles[1]).unwrap();
     assert!(
-        (second_pos.x - 2.5).abs() > 0.01 || (second_pos.y - 1.0).abs() > 0.01,
+        (second_pos.x - spacing).abs() > 0.01 || (second_pos.y - 1.0).abs() > 0.01,
         "Second domino should have been displaced from initial position, got {second_pos}"
     );
     let third_pos = world.get_position(handles[2]).unwrap();
     assert!(
-        (third_pos.x - 5.0).abs() > 0.01 || (third_pos.y - 1.0).abs() > 0.01,
+        (third_pos.x - 2.0 * spacing).abs() > 0.01 || (third_pos.y - 1.0).abs() > 0.01,
         "Third domino should have been displaced from initial position, got {third_pos}"
     );
 }
