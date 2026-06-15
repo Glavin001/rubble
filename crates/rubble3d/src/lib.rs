@@ -56,7 +56,7 @@ impl Default for SimConfig {
         Self {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
-            solver_iterations: 20,
+            solver_iterations: 12,
             max_bodies: 65536,
             beta: 1.0e4,
             k_start: 1e4,
