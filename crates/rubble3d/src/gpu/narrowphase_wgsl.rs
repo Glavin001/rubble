@@ -1266,10 +1266,14 @@ fn hull_hull_test(
         }
     }
 
-    // Ensure normal points from A to B
+    // Ensure normal points from A to B (used for the face/clipping geometry below).
     if dot(best_normal, d) < 0.0 {
         best_normal = -best_normal;
     }
+    // The solver convention (and box_box_test) emit the normal from body_b to
+    // body_a, so contacts use `-best_normal`. Without this, hull-hull contacts push
+    // the wrong way (a hull resting on a hull would explode).
+    let contact_normal = -best_normal;
 
     // Edge-edge: emit single contact from closest points on the two edges
     if best_is_edge {
@@ -1280,7 +1284,7 @@ fn hull_hull_test(
         let pts = closest_points_segments(ea0, ea1, eb0, eb1);
         let contact_point = (pts[0] + pts[1]) * 0.5;
         let feature = 0x07000000u | ((best_edge_i & 0xFFu) << 8u) | (best_edge_j & 0xFFu);
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, feature, max_contacts);
+        emit_contact(contact_point, contact_normal, min_depth, body_a, body_b, feature, max_contacts);
         return;
     }
 
@@ -1314,7 +1318,7 @@ fn hull_hull_test(
     if rn_len < 1e-12 {
         // Degenerate face, fall back to single contact
         let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, 0x08000000u, max_contacts);
+        emit_contact(contact_point, contact_normal, min_depth, body_a, body_b, 0x08000000u, max_contacts);
         return;
     }
     ref_normal = ref_normal / rn_len;
@@ -1371,7 +1375,7 @@ fn hull_hull_test(
     if final_count == 0u {
         // Fallback: single contact at midpoint
         let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, 0x09000000u, max_contacts);
+        emit_contact(contact_point, contact_normal, min_depth, body_a, body_b, 0x09000000u, max_contacts);
         return;
     }
 
@@ -1382,7 +1386,7 @@ fn hull_hull_test(
 
     for (var i = 0u; i < emit_count; i = i + 1u) {
         let feature = 0x0A000000u | ((i & 0xFFu) << 0u);
-        emit_contact(out_points[i], best_normal, out_depths[i], body_a, body_b, feature, max_contacts);
+        emit_contact(out_points[i], contact_normal, out_depths[i], body_a, body_b, feature, max_contacts);
     }
 }
 
@@ -1436,9 +1440,12 @@ fn sphere_hull_test(
     }
 
     let depth = -overlap;
+    // `normal` points from the sphere (A) toward the hull (B); the solver convention
+    // emits from body_b to body_a, so the contact uses `-normal` (the contact point
+    // still uses the geometric sphere->hull normal).
     let normal = select(axis, -axis, dot(axis, sphere_pos - hull_pos) > 0.0);
     let contact_point = sphere_pos + normal * (radius + depth * 0.5);
-    emit_contact(contact_point, normal, depth, body_sphere, body_hull, 1u, max_contacts);
+    emit_contact(contact_point, -normal, depth, body_sphere, body_hull, 1u, max_contacts);
 }
 
 // ---------- Box-Hull ----------
@@ -1504,8 +1511,13 @@ fn box_hull_test(
         }
     }
 
+    // `best_normal` points from A (box) to B (hull). The solver convention — and
+    // box_box_test / hull_hull_test — emit the normal from body_b to body_a, so flip
+    // it. Without this the contact pushes the hull the wrong way and the incident
+    // anchor lands on the far face, exploding a hull resting on a box.
+    let contact_normal = -best_normal;
     let contact_point = (box_pos + hull_pos) * 0.5 + best_normal * min_depth * 0.5;
-    emit_contact(contact_point, best_normal, min_depth, body_box, body_hull, 0x0B000000u, max_contacts);
+    emit_contact(contact_point, contact_normal, min_depth, body_box, body_hull, 0x0B000000u, max_contacts);
 }
 
 // ---------- Main dispatch ----------
