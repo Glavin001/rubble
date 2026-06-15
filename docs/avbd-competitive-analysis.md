@@ -20,6 +20,28 @@ This document is the result of a line‑by‑line read of all three solvers. Eve
 
 ---
 
+## 0. Implementation status — branch `claude/happy-fermat-8sb3le`
+
+**Landed & verified (P0 stability core, 2D + 3D):**
+
+| Change | 3D | 2D | Notes |
+|---|---|---|---|
+| P0.1 α‑regularized contact target `(1−α)·C0 + J·Δx` | ✅ | ✅ | `C0` frozen in `normal.w` (3D) / `point.w` (2D) at narrowphase; `SimConfig{,2D}::contact_stabilization`, default **0.3** (higher over‑softens rubble's current convergence — see §3.1) |
+| P0.2 mass‑scaled bounded dual `clamp(·, −lam_cap, 0)`, `lam_cap=min(1e6,max(10,1e5·m_min))` | ✅ | ✅ | primal + dual |
+| P0.4 trust‑region step caps (`0.35·R` lin, `0.5 rad` ang; `R=√(c·trace(I)/m)`) | ✅ | ✅ | exact R for boxes/rects |
+| Lagged Coulomb cone `μ·max(|f_n|,|λ_n|)` | ✅ | ✅ | stable grip from iter 0 on warm‑started contacts |
+
+**Verification (lavapipe / software Vulkan, matching CI):**
+- `rubble3d` default suite: **187 passed / 0 failed** (no regressions).
+- `rubble2d` default suite: **119 → 120 passed / 0 failed** (one known‑failure promoted, below).
+- 3D pyramid known‑failure: `tail_max_speed` **~17 → ~10.7** (clean vertical stacks remain rock‑solid; previously the divergence baseline).
+- 2D `frictionless_glancing_circles_do_not_inject_spin_2d`: **known‑failure → passing**, un‑ignored and now runs in the default lane.
+- 2D `resting_rect_stays_quiet`: improved (`max_speed` 51.6 → 45.1) but still a known‑failure (tilted‑box pole‑vaulting on impact — needs the manifold work in §5).
+
+**Not yet started (the rest of "strictly better"):** P0.3 penalty floor `m/dt²`, P0.5 damped LDLᵀ (rubble's `solve_6x6` is SPD so its zero‑pivot guard rarely fires — low urgency), P0.6 velocity clamp, **all of §4 (performance / GPU‑residency)**, §5 (contact robustness), §6 (joints → sleeping → soft bodies/cloth), §7 (restitution, CPU reference solver). The performance work in §4 is the largest remaining lever and is intentionally deferred as a separate milestone (it is invasive and needs its own verification pass).
+
+---
+
 ## 1. Capability matrix (where each repo stands today)
 
 | Axis | avbd-metal | webphysics | **rubble (today)** |

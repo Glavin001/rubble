@@ -310,12 +310,9 @@ fn set_velocity_and_spin_take_effect_immediately_2d() {
 
 #[test]
 fn frictionless_glancing_circles_do_not_inject_spin_2d() {
-    if should_skip_known_failure(
-        "frictionless_glancing_circles_do_not_inject_spin_2d",
-        "2D frictionless circle impacts still create extra translational energy",
-    ) {
-        return;
-    }
+    // Previously a known failure ("2D frictionless circle impacts still create
+    // extra translational energy"); fixed by the AVBD alpha-stabilization +
+    // bounded-dual + trust-region work, so it now runs in the default lane.
     let dt = 1.0 / 240.0;
     let gravity = Vec2::ZERO;
     let mut world = match try_world(SimConfig2D {
