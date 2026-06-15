@@ -83,11 +83,14 @@ pub fn known_gaps() -> &'static [KnownGap] {
         KnownGap {
             scenario: "deep_overlap_separates",
             category: GapCategory::Solver,
-            reason: "Two spheres started 0.6m deep in overlap separate explosively \
-                     at ~70 m/s (vs a 15 m/s sanity bound). The engine has no \
-                     penetration-recovery velocity clamp, so a large initial \
-                     overlap converts directly into an unphysical velocity spike. \
-                     Bodies spawned overlapping (a common case) will be launched.",
+            reason: "Two spheres started 0.6m deep in overlap separate too fast \
+                     (peak ~17 m/s vs a 15 m/s bound). IMPROVED: a per-step \
+                     penetration-recovery clamp (MAX_RECOVERY_VEL) cut this from \
+                     ~70 m/s, so overlapping spawns no longer catastrophically \
+                     launch. The residual ~17 m/s is the position-based solver \
+                     accumulating the recovery kick into velocity each frame in \
+                     zero gravity with no damping; fully closing it needs \
+                     relative-velocity-aware recovery (Baumgarte/restitution split).",
         },
         // FIXED: `convex_cube_rests` — the convex↔box narrowphase (`box_hull_test`)
         // emitted the contact normal A→B instead of B→A (the solver / box_box / circle
