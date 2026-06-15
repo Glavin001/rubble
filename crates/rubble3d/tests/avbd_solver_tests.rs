@@ -1226,7 +1226,10 @@ fn stack_converges_to_correct_rest_heights() {
         }));
     }
     step_n(&mut world, 600);
-    let heights: Vec<f32> = hs.iter().map(|h| world.get_position(*h).unwrap().y).collect();
+    let heights: Vec<f32> = hs
+        .iter()
+        .map(|h| world.get_position(*h).unwrap().y)
+        .collect();
     println!("stack rest heights = {heights:?}");
     for (i, y) in heights.iter().enumerate() {
         let expected = 0.5 + i as f32; // analytic: boxes settle touching at 0.5,1.5,2.5,3.5

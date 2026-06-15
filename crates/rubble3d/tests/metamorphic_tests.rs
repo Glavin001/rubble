@@ -362,4 +362,3 @@ fn permutation_invariance_high_contact_stack() {
          beyond the inherent Gauss-Seidel coloring sensitivity (~5e-4)"
     );
 }
-
