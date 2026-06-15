@@ -161,14 +161,20 @@ Status tracking against the Rubble Software Specification v1.1.0.
 - [x] Graph-colored Gauss-Seidel: `color_contacts()` with greedy coloring
 - [x] Contacts sorted by color, `SolveRange` uniform provides (offset, count) per group
 - [x] Per-color dispatch prevents data races (no two contacts in same group share a body)
-- [x] Augmented Lagrangian: `impulse = (-dC * penalty + lambda_old) / (w_eff * penalty + 1.0)`
-- [x] Penalty stiffness ramp: `penalty_k += 10.0 * (-depth)`
-- [x] Baumgarte positional stabilization: `bias = 0.2 * depth / dt`
-- [x] Normal impulse clamped to ≥0 (non-attractive)
-- [x] Tangential friction impulse with Coulomb cone clamping: `min(tang_len / w_eff, mu * impulse_clamped)`
-- [x] Per-body friction averaging: `mu = (props_a.friction + props_b.friction) * 0.5`
+- [x] Position-space per-body block descent: 6×6 (3D) / 3×3 (2D) Newton solve per body
+- [x] Normal force clamped ≤ 0 (non-attractive); dual (lambda) update for warm starting
+- [x] Tangential friction with Coulomb cone clamping; `mu = sqrt(friction_a * friction_b)`
 - [x] Inverse inertia tensor application for angular impulses (3D) / scalar inertia (2D)
-- [x] Dual variable (lambda) update for warm starting
+
+### AVBD stability core (see `docs/avbd-competitive-analysis.md`) — landed on `claude/happy-fermat-8sb3le`
+- [x] **α-regularization**: `C_reg = (1-α)·C0 + J·Δx`; `C0` frozen at narrowphase in `normal.w` (3D) / `point.w` (2D); `SimConfig{,2D}::contact_stabilization` (default 0.3)
+- [x] **Bounded augmented-Lagrangian dual**: `clamp(k·C+λ, -lam_cap, 0)`, `lam_cap = min(1e6, max(10, 1e5·min_mass))`
+- [x] **Trust-region step caps**: linear `0.35·R` (`R = sqrt(c·trace(I)/m)`), angular `0.5 rad` per iteration
+- [x] **Lagged Coulomb cone**: `μ·max(|f_n|, |λ_n|)` for stable grip on warm-started resting contacts
+- [ ] Penalty floor `= m/dt²` and split normal/tangential caps (P0.3)
+- [ ] Preconditioned/damped LDLᵀ replacing Gauss-elim zero-return on singular pivot (P0.5)
+- [ ] Velocity safety clamp at extraction (P0.6)
+- [ ] Tune α upward (toward the references' 0.95) once λ converges faster — needs faster warm-start + penalty schedule
 
 ## Pipeline — Velocity Extraction
 
