@@ -62,7 +62,7 @@ fn run_pair(case: &PairCase) -> Option<(Vec3, f32)> {
     });
     world.step();
     let c = world
-        .last_contacts()
+        .fetch_last_contacts()
         .iter()
         .max_by(|x, y| x.depth().abs().partial_cmp(&y.depth().abs()).unwrap())?;
     Some((c.contact_normal(), c.depth().abs()))
@@ -352,7 +352,7 @@ fn manifold_on_plane(box_half: f32, rot: Quat, pen: f32) -> Vec<rubble_math::Con
         ..Default::default()
     });
     world.step();
-    world.last_contacts().to_vec()
+    world.fetch_last_contacts().to_vec()
 }
 
 #[test]

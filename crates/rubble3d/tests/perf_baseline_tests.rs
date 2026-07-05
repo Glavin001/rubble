@@ -222,7 +222,7 @@ fn measure_scene(name: &str, descs: &[RigidBodyDesc], iterations: u32) -> Option
     Some(SceneResult {
         name: name.to_string(),
         bodies: descs.len(),
-        contacts: world.last_contacts().len(),
+        contacts: world.fetch_last_contacts().len(),
         phase_ms,
         total_ms,
     })

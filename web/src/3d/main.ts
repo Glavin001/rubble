@@ -377,6 +377,16 @@ let frameCount = 0;
 let lastFpsTime = performance.now();
 let stepCount = 0;
 let lastRenderMs = 0;
+
+// Fixed-timestep accumulator: the world advances a fixed dt (1/60 s) per step,
+// so stepping once per animation frame would tie simulation speed to the
+// display refresh rate (2x real time on a 120 Hz panel). We instead accumulate
+// real elapsed time and consume it in fixed dt slices, clamped so a stall
+// (minimized tab, GC) can't trigger a catch-up spiral.
+const FIXED_DT = 1 / 60;
+const MAX_CATCHUP_STEPS = 4;
+let simAccumulator = 0;
+let lastFrameTime = performance.now();
 const fpsEl = document.getElementById("fps")!;
 const bodiesEl = document.getElementById("bodies")!;
 const timingsEl = document.getElementById("timings")!;
@@ -437,21 +447,39 @@ async function loop_() {
   frameInFlight = true;
 
   try {
-  const stepStart = performance.now();
-  await world.step();
-  if (firstStepLoggedFor) {
-    const elapsed = performance.now() - stepStart;
-    console.log(
-      `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
-    );
-    firstStepLoggedFor = null;
-    // Hide the overlay once the first step finishes — proves GPU is alive.
-    const loadingEl = document.getElementById("loading");
-    if (loadingEl) loadingEl.style.display = "none";
-  }
-  stepCount++;
+  // Advance simulation by real elapsed wall-clock time in fixed dt slices, so
+  // the sim runs at real time regardless of the animation-frame rate.
+  const now = performance.now();
+  let elapsed = (now - lastFrameTime) / 1000;
+  lastFrameTime = now;
+  if (elapsed > 0.25) elapsed = 0.25; // clamp after a stall (avoid catch-up spiral)
+  simAccumulator += elapsed;
 
-  // Cache data after step completes (world is no longer borrowed)
+  let steps = 0;
+  while (simAccumulator >= FIXED_DT && steps < MAX_CATCHUP_STEPS) {
+    const stepStart = performance.now();
+    await world.step();
+    simAccumulator -= FIXED_DT;
+    steps++;
+    stepCount++;
+    if (firstStepLoggedFor) {
+      const elapsedMs = performance.now() - stepStart;
+      console.log(
+        `[scene] "${firstStepLoggedFor}" first step: ${elapsedMs.toFixed(0)}ms`,
+      );
+      firstStepLoggedFor = null;
+      // Hide the overlay once the first step finishes — proves GPU is alive.
+      const loadingEl = document.getElementById("loading");
+      if (loadingEl) loadingEl.style.display = "none";
+    }
+  }
+  // If we saturated the catch-up budget, drop the backlog so we never run
+  // faster than real time to "make up" for a long stall.
+  if (steps === MAX_CATCHUP_STEPS) {
+    simAccumulator = 0;
+  }
+
+  // Cache data after the step(s) complete (world is no longer borrowed)
   syncTransformCache();
 
   const t0 = performance.now();
@@ -464,12 +492,12 @@ async function loop_() {
   // Step timings reflect the last `world.step()`; refresh every frame so the overlay
   // is never up to ~1s stale (FPS is still averaged once per second).
   updateTimingsOverlay();
-  const now = performance.now();
-  if (now - lastFpsTime >= 1000) {
+  const nowFps = performance.now();
+  if (nowFps - lastFpsTime >= 1000) {
     fpsEl.textContent = `FPS: ${frameCount}`;
     bodiesEl.textContent = `Bodies: ${world.body_count()}`;
     frameCount = 0;
-    lastFpsTime = now;
+    lastFpsTime = nowFps;
   }
 
   // Update test hooks

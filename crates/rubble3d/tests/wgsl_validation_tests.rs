@@ -64,7 +64,18 @@ fn validate_avbd_persistent_wgsl() {
 
 #[test]
 fn validate_warmstart_match_wgsl() {
-    validate_wgsl("WARMSTART_MATCH_WGSL", rubble3d::gpu::WARMSTART_MATCH_WGSL);
+    validate_wgsl(
+        "warmstart_match_wgsl()",
+        &rubble3d::gpu::warmstart_match_wgsl(),
+    );
+}
+
+#[test]
+fn validate_warmstart_map_insert_wgsl() {
+    validate_wgsl(
+        "warmstart_map_insert_wgsl()",
+        &rubble3d::gpu::warmstart_map_insert_wgsl(),
+    );
 }
 
 #[test]

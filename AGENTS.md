@@ -1,5 +1,7 @@
 # AGENTS.md
 
+- Assume our target is 10,000+ active rigid bodies when calculating performance at scale
+
 ## Cursor Cloud specific instructions
 
 > All standard build/test/lint/web commands and prerequisites are in `README.md`.
