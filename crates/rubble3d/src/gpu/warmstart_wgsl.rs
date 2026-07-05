@@ -68,10 +68,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let prev_hi = max(pc.body_a, pc.body_b);
 
         if prev_lo == key_lo && prev_hi == key_hi && pc.feature_id == key_fid {
-            // Match found — transfer cached solver state with decay
+            // Match found — transfer cached solver state with decay.
+            // Penalty: paper warm-start is k <- max(k_start, gamma*k); the fresh
+            // contact's penalty already carries k_start (and the contact-prep pass
+            // re-applies the m/dt^2 floor + caps after this), so take the
+            // componentwise max with the decayed carried stiffness.
             let scale = params.alpha * params.gamma;
             new_contacts[idx].lambda = pc.lambda * scale;
-            new_contacts[idx].penalty = pc.penalty * params.gamma;
+            new_contacts[idx].penalty = max(nc.penalty, pc.penalty * params.gamma);
             new_contacts[idx].flags = pc.flags | CONTACT_FLAG_WARMSTARTED;
 
             // Preserve local anchors if contact was sticking (friction lock)

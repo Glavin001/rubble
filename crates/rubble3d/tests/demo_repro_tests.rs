@@ -228,9 +228,18 @@ fn demo_stack_ratio_settles_without_persistent_vertical_oscillation_3d() {
 
 #[test]
 fn demo_pyramid_stays_supported_by_floor_without_exploding_3d() {
+    // M1 status: improved but not yet passing. The solver-fidelity work
+    // (preconditioned LDL^T, penalty floor, Taylor-cached constraints,
+    // Eq.14 friction rescaling) plus three determinism fixes (race-free
+    // coloring, no-drop pair growth, total-order contact sort) brought
+    // tail_max_speed from ~13.3 to ~12 against a limit of 10, and removed the
+    // wild run-to-run swings. The residual energy injection rides on one
+    // remaining scheduling-dependent nondeterminism source (see
+    // determinism_probe_tests) and the manifold churn the M3 feature-id +
+    // hysteresis work targets.
     if should_skip_known_failure(
         "demo_pyramid_stays_supported_by_floor_without_exploding_3d",
-        "AVBD solver injects energy into large 3D pyramid stacks; max_speed diverges over time",
+        "large pyramid still injects energy slowly (tail ~12 vs limit 10); owned by M2/M3",
     ) {
         return;
     }

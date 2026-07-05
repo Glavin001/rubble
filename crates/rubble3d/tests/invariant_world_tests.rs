@@ -99,6 +99,7 @@ fn free_flight_shapes_match_discrete_ballistics_3d() {
                 angular_velocity: Vec3::ZERO,
                 mass: 2.0,
                 friction: 0.3,
+                restitution: 0.0,
                 shape,
             },
         );
@@ -165,6 +166,7 @@ fn zero_gravity_shapes_preserve_velocity_and_spin_3d() {
                 angular_velocity: initial_omega,
                 mass: 1.5,
                 friction: 0.2,
+                restitution: 0.0,
                 shape,
             },
         );
@@ -234,6 +236,7 @@ fn low_speed_free_motion_is_preserved_3d() {
             angular_velocity: initial_omega,
             mass: 1.0,
             friction: 0.1,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::splat(0.35),
             },
@@ -294,6 +297,7 @@ fn set_velocity_and_spin_take_effect_immediately_3d() {
             angular_velocity: Vec3::ZERO,
             mass: 1.0,
             friction: 0.3,
+            restitution: 0.0,
             shape: ShapeDesc::Sphere { radius: 0.5 },
         },
     );
@@ -354,6 +358,7 @@ fn frictionless_glancing_spheres_do_not_inject_spin_3d() {
             angular_velocity: Vec3::ZERO,
             mass: 1.0,
             friction: 0.0,
+            restitution: 0.0,
             shape: ShapeDesc::Sphere { radius: 1.0 },
         },
     );
@@ -367,6 +372,7 @@ fn frictionless_glancing_spheres_do_not_inject_spin_3d() {
             angular_velocity: Vec3::ZERO,
             mass: 1.0,
             friction: 0.0,
+            restitution: 0.0,
             shape: ShapeDesc::Sphere { radius: 1.0 },
         },
     );
@@ -435,6 +441,7 @@ fn run_slide_scene_3d(friction: f32) -> Option<(f32, f32, f32)> {
             angular_velocity: Vec3::ZERO,
             mass: 0.0,
             friction,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::new(20.0, 0.5, 20.0),
             },
@@ -450,6 +457,7 @@ fn run_slide_scene_3d(friction: f32) -> Option<(f32, f32, f32)> {
             angular_velocity: Vec3::ZERO,
             mass: 1.0,
             friction,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::splat(0.5),
             },
@@ -516,6 +524,7 @@ fn resting_box_stays_quiet_on_floor_3d() {
             angular_velocity: Vec3::ZERO,
             mass: 0.0,
             friction: 0.8,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::new(20.0, 0.5, 20.0),
             },
@@ -531,6 +540,7 @@ fn resting_box_stays_quiet_on_floor_3d() {
             angular_velocity: Vec3::ZERO,
             mass: 1.0,
             friction: 0.8,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::splat(0.5),
             },
@@ -605,6 +615,7 @@ fn build_determinism_scene_3d() -> Option<(rubble3d::World, Vec<TrackedBody3D>, 
             angular_velocity: Vec3::ZERO,
             mass: 0.0,
             friction: 0.7,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::new(20.0, 0.5, 20.0),
             },
@@ -620,6 +631,7 @@ fn build_determinism_scene_3d() -> Option<(rubble3d::World, Vec<TrackedBody3D>, 
             angular_velocity: Vec3::new(0.0, 0.0, 0.75),
             mass: 1.0,
             friction: 0.5,
+            restitution: 0.0,
             shape: ShapeDesc::Sphere { radius: 0.5 },
         },
     ));
@@ -633,6 +645,7 @@ fn build_determinism_scene_3d() -> Option<(rubble3d::World, Vec<TrackedBody3D>, 
             angular_velocity: Vec3::ZERO,
             mass: 1.5,
             friction: 0.6,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::new(0.6, 0.45, 0.5),
             },
@@ -648,6 +661,7 @@ fn build_determinism_scene_3d() -> Option<(rubble3d::World, Vec<TrackedBody3D>, 
             angular_velocity: Vec3::new(0.0, 0.4, 0.0),
             mass: 1.2,
             friction: 0.5,
+            restitution: 0.0,
             shape: ShapeDesc::Capsule {
                 half_height: 0.6,
                 radius: 0.25,
@@ -739,6 +753,7 @@ fn compound_shape_stays_supported_without_exploding_3d() {
             angular_velocity: Vec3::ZERO,
             mass: 0.0,
             friction: 0.7,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::new(20.0, 0.5, 20.0),
             },
@@ -754,6 +769,7 @@ fn compound_shape_stays_supported_without_exploding_3d() {
             angular_velocity: Vec3::new(0.0, 0.0, 0.4),
             mass: 2.5,
             friction: 0.7,
+            restitution: 0.0,
             shape: ShapeDesc::Compound {
                 children: vec![
                     (

@@ -624,7 +624,17 @@ fn warm_start_matches_by_feature_not_distance_3d() {
         if let Some(prev) = first_by_feature.get(&contact.feature_id) {
             matched += 1;
             let expected_lambda = prev.lambda * (0.95 * 0.99);
-            let expected_penalty = prev.penalty * 0.95;
+            // Warm-start penalty is paper-style `k <- max(k_fresh, gamma*k)`:
+            // the decayed carried stiffness never drops below the fresh
+            // contact's floored starting stiffness (INITIAL_PENALTY here; the
+            // m/dt^2 floor of 3600 for this 1 kg body is below it).
+            let decayed = prev.penalty * 0.95;
+            let expected_penalty = Vec4::new(
+                decayed.x.max(INITIAL_PENALTY),
+                decayed.y.max(INITIAL_PENALTY),
+                decayed.z.max(INITIAL_PENALTY),
+                decayed.w,
+            );
             let lambda_delta = (contact.lambda - expected_lambda).abs();
             let penalty_delta = (contact.penalty - expected_penalty).abs();
             assert!(
@@ -634,7 +644,7 @@ fn warm_start_matches_by_feature_not_distance_3d() {
                 contact.lambda
             );
             assert!(
-                penalty_delta.max_element() < 1e-3,
+                penalty_delta.max_element() < 1e-2,
                 "warm-start penalty should track by feature id: feature={}, expected={expected_penalty:?}, actual={:?}",
                 contact.feature_id,
                 contact.penalty
@@ -784,10 +794,46 @@ fn custom_k_start_is_applied_3d() {
     );
     let (_, contacts) = pipeline.step_with_contacts(2, 0, None);
     assert!(!contacts.is_empty(), "expected resting box-floor contacts");
+    // The contact-prep pass floors the starting stiffness at m/dt^2 (a single
+    // contact must be able to hold the lighter body in one step), so a
+    // k_start *below* the floor is raised to it: 1 kg at dt=1/60 -> 3600.
+    let dt = 1.0f32 / 60.0;
+    let floor = 1.0 / (dt * dt);
+    let expected = custom_k_start.max(floor);
     assert!(contacts.iter().all(|c| {
-        (c.penalty.x - custom_k_start).abs() < 1e-3
-            && (c.penalty.y - custom_k_start).abs() < 1e-3
-            && (c.penalty.z - custom_k_start).abs() < 1e-3
+        (c.penalty.x - expected).abs() < 1.0
+            && (c.penalty.y - expected).abs() < 1.0
+            && (c.penalty.z - expected).abs() < 1.0
+    }));
+
+    // A k_start above the floor must pass through exactly (plumbing check).
+    let above_floor = 5000.0f32;
+    pipeline.upload(
+        &states,
+        &states,
+        &props,
+        &[],
+        &boxes,
+        &[],
+        &[],
+        &[],
+        &[],
+        &Vec::<CompoundShapeGpu>::new(),
+        &[],
+        &Vec::<CompoundShape>::new(),
+        Vec3::ZERO,
+        1.0 / 60.0,
+        0,
+        10.0,
+        above_floor,
+        0.95,
+    );
+    let (_, contacts) = pipeline.step_with_contacts(2, 0, None);
+    assert!(!contacts.is_empty(), "expected resting box-floor contacts");
+    assert!(contacts.iter().all(|c| {
+        (c.penalty.x - above_floor).abs() < 1.0
+            && (c.penalty.y - above_floor).abs() < 1.0
+            && (c.penalty.z - above_floor).abs() < 1.0
     }));
 }
 

@@ -24,6 +24,7 @@ fn build_sweep_scene_3d(
             angular_velocity: Vec3::ZERO,
             mass: 0.0,
             friction,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::new(40.0, 0.5, 40.0),
             },
@@ -39,6 +40,7 @@ fn build_sweep_scene_3d(
             angular_velocity: Vec3::ZERO,
             mass: mass_ratio,
             friction,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::new(0.7, 0.5, 0.6),
             },
@@ -54,6 +56,7 @@ fn build_sweep_scene_3d(
             angular_velocity: Vec3::new(0.0, 0.0, 0.5),
             mass: 1.0,
             friction,
+            restitution: 0.0,
             shape: ShapeDesc::Sphere { radius: 0.45 },
         },
     ));
@@ -67,6 +70,7 @@ fn build_sweep_scene_3d(
             angular_velocity: Vec3::new(0.0, 0.3, 0.0),
             mass: 1.5,
             friction,
+            restitution: 0.0,
             shape: ShapeDesc::Capsule {
                 half_height: 0.7,
                 radius: 0.2,
@@ -83,6 +87,7 @@ fn build_sweep_scene_3d(
             angular_velocity: Vec3::new(0.0, 0.5, 0.0),
             mass: 1.25,
             friction,
+            restitution: 0.0,
             shape: ShapeDesc::ConvexHull {
                 vertices: octagon_hull(0.35, 0.55),
             },
@@ -210,6 +215,7 @@ fn build_chaos_scene_3d() -> Option<(rubble3d::World, Vec<TrackedBody3D>, Vec3)>
             angular_velocity: Vec3::ZERO,
             mass: 0.0,
             friction: 0.7,
+            restitution: 0.0,
             shape: ShapeDesc::Box {
                 half_extents: Vec3::new(40.0, 0.5, 40.0),
             },
@@ -244,6 +250,7 @@ fn build_chaos_scene_3d() -> Option<(rubble3d::World, Vec<TrackedBody3D>, Vec3)>
                 angular_velocity: Vec3::new(0.0, 0.1 * i as f32, 0.05 * i as f32),
                 mass: 1.0 + 0.1 * i as f32,
                 friction: 0.7,
+                restitution: 0.0,
                 shape,
             },
         ));
