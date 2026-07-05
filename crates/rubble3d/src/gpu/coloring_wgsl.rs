@@ -35,9 +35,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Step kernel: one iteration of Luby's body coloring.
+/// Step kernel: one iteration of Luby's body coloring — *mark phase*.
+///
 /// Each uncolored body checks if it has the highest priority among its
-/// uncolored neighbors (connected via contacts). If so, assign current color.
+/// uncolored neighbors (connected via contacts) and, if so, marks itself a
+/// winner. It does NOT write `body_colors`: writing colors in the same
+/// dispatch that reads neighbors' colors is a data race (a neighbor's
+/// just-written color may or may not be visible), which produced improper
+/// colorings — two adjacent bodies sharing a color — and made whole-sim
+/// results vary run to run. The separate apply kernel below commits winners.
 pub const COLORING_STEP_WGSL: &str = r#"
 struct Contact {
     point:          vec4<f32>,
@@ -53,10 +59,11 @@ struct Contact {
     flags:          u32,
 };
 
-@group(0) @binding(0) var<storage, read_write> body_colors:     array<u32>;
+@group(0) @binding(0) var<storage, read>       body_colors:     array<u32>;
 @group(0) @binding(1) var<storage, read>       body_priorities: array<u32>;
 @group(0) @binding(2) var<storage, read>       contacts:        array<Contact>;
 @group(0) @binding(3) var<uniform>             params:          vec4<u32>; // x=num_bodies, y=num_contacts, z=current_color
+@group(0) @binding(4) var<storage, read_write> winners:         array<u32>;
 
 const WORKGROUP_SIZE: u32 = 64u;
 const UNCOLORED: u32 = 0xFFFFFFFFu;
@@ -66,9 +73,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let body_idx = gid.x;
     let num_bodies = params.x;
     let num_contacts = params.y;
-    let curr_color = params.z;
     if body_idx >= num_bodies { return; }
 
+    winners[body_idx] = 0u;
     if body_colors[body_idx] != UNCOLORED {
         return; // already colored
     }
@@ -90,7 +97,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
 
-        // Only compete with uncolored neighbors
+        // Only compete with uncolored neighbors (stable read: this dispatch
+        // never writes body_colors).
         if body_colors[neighbor] != UNCOLORED {
             continue;
         }
@@ -103,7 +111,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if is_local_max {
-        body_colors[body_idx] = curr_color;
+        winners[body_idx] = 1u;
+    }
+}
+"#;
+
+/// Apply kernel: commit this round's winners to `body_colors`. Runs as a
+/// separate dispatch after the mark phase so color reads and writes never
+/// overlap (each invocation touches only its own slot here).
+pub const COLORING_APPLY_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read_write> body_colors: array<u32>;
+@group(0) @binding(1) var<storage, read>       winners:     array<u32>;
+@group(0) @binding(2) var<uniform>             params:      vec4<u32>; // x=num_bodies, z=current_color
+
+const WORKGROUP_SIZE: u32 = 64u;
+const UNCOLORED: u32 = 0xFFFFFFFFu;
+
+@compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let body_idx = gid.x;
+    if body_idx >= params.x { return; }
+    if winners[body_idx] == 1u && body_colors[body_idx] == UNCOLORED {
+        body_colors[body_idx] = params.z;
     }
 }
 "#;

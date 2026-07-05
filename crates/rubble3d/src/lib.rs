@@ -4,6 +4,7 @@
 //! The pipeline: predict → AABB → broadphase → narrowphase → AVBD solver → velocity extraction.
 
 pub mod gpu;
+pub mod mirror;
 
 use glam::{Mat3, Quat, Vec3, Vec4};
 use rubble_math::{
@@ -47,8 +48,36 @@ pub struct SimConfig {
     /// AVBD alpha-stabilization factor in [0, 1). Each step the solver only
     /// corrects `(1 - contact_stabilization)` of the initial constraint
     /// violation, bleeding penetration out gradually instead of snapping it to
-    /// zero (which injects energy). 0 disables stabilization; 0.9-0.99 is typical.
+    /// zero (which injects energy).
+    ///
+    /// Note: the paper runs α=0.95 on its *history* formulation
+    /// (`C = C*(x) − α·C*(x_prev)`). Rubble uses a recovery-clamp formulation
+    /// (`C = (1−α)·C0 + J·Δx`, rate-limited), where high α parks resting
+    /// contacts ~20× deeper at equilibrium and the deep manifolds churn.
+    /// Measured on the pyramid/stack ladder, 0.3 is the stable optimum for
+    /// this formulation.
     pub contact_stabilization: f32,
+    /// Cap on the normal-direction penalty stiffness ramp. High values (1e8-1e10)
+    /// give paper-faithful hard contacts; the preconditioned LDL^T solve keeps the
+    /// system well-conditioned at these magnitudes.
+    pub k_max_normal: f32,
+    /// Cap on the tangential (friction) penalty stiffness ramp. Kept well below
+    /// `k_max_normal` (references use 1e6): overly stiff friction rows fight the
+    /// normal rows and cause tangential buzzing.
+    pub k_max_tangential: f32,
+    /// Post-solve linear speed clamp in m/s (0 disables). A position-space solver
+    /// cannot produce unbounded velocities from a single good step, but a bad
+    /// frame (deep spawn overlap) must not launch bodies across the world.
+    pub max_speed: f32,
+    /// Post-solve angular speed clamp in rad/s (0 disables).
+    pub max_ang_speed: f32,
+    /// Dynamic (kinetic) friction as a fraction of static friction, in (0, 1].
+    /// 1.0 = single-coefficient Coulomb model (previous behavior).
+    pub dynamic_friction_ratio: f32,
+    /// Number of substeps per `step()`. Each substep runs the full detection +
+    /// solve at `dt / substeps`. 1 (default) matches the paper's single-step
+    /// regime; raise for very high-energy scenes.
+    pub substeps: u32,
 }
 
 impl Default for SimConfig {
@@ -66,6 +95,12 @@ impl Default for SimConfig {
             restitution_threshold: 0.5,
             penetration_slop: 0.005,
             contact_stabilization: 0.3,
+            k_max_normal: 1.0e9,
+            k_max_tangential: 1.0e6,
+            max_speed: 100.0,
+            max_ang_speed: 64.0,
+            dynamic_friction_ratio: 1.0,
+            substeps: 1,
         }
     }
 }
@@ -117,6 +152,9 @@ pub struct RigidBodyDesc {
     /// Mass of the body. Use 0 for static bodies.
     pub mass: f32,
     pub friction: f32,
+    /// Coefficient of restitution in [0, 1]. Contacts use the max of the two
+    /// bodies' coefficients; 0 (default) = perfectly inelastic (no bounce).
+    pub restitution: f32,
     pub shape: ShapeDesc,
 }
 
@@ -129,6 +167,7 @@ impl Default for RigidBodyDesc {
             angular_velocity: Vec3::ZERO,
             mass: 1.0,
             friction: 0.5,
+            restitution: 0.0,
             shape: ShapeDesc::Sphere { radius: 0.5 },
         }
     }
@@ -774,8 +813,12 @@ impl World {
             }
         };
 
-        let prop =
+        let mut prop =
             RigidBodyProps3D::new(inv_inertia, desc.friction, shape_type, shape_index, flags);
+        // Coefficient of restitution rides in inertia-row padding (the GPU-side
+        // struct has no spare scalar slot); row0.w is reserved for the kinematic
+        // inv_mass save, row2.w is ours.
+        prop.inv_inertia_row2.w = desc.restitution.clamp(0.0, 1.0);
 
         if idx >= self.states.len() {
             self.states.resize(idx + 1, bytemuck::Zeroable::zeroed());
@@ -900,7 +943,18 @@ impl World {
     }
 
     /// Advance the simulation by one time step on the GPU.
+    ///
+    /// Runs `config.substeps` full detection+solve substeps at `dt / substeps`
+    /// (default 1 — the paper's single-step regime).
     pub fn step(&mut self) {
+        let substeps = self.config.substeps.max(1);
+        let sub_dt = self.config.dt / substeps as f32;
+        for _ in 0..substeps {
+            self.step_once(sub_dt);
+        }
+    }
+
+    fn step_once(&mut self, dt: f32) {
         use std::time::Instant;
 
         let mut timings = rubble_gpu::StepTimingsMs::default();
@@ -928,6 +982,19 @@ impl World {
         let num_bodies = compact_states.len() as u32;
 
         let t_upload = Instant::now();
+        self.gpu_pipeline.set_quality_params(
+            self.config.contact_offset,
+            self.config.restitution_threshold,
+            self.config.penetration_slop,
+            self.config.contact_stabilization,
+        );
+        self.gpu_pipeline.set_solver_extras(
+            self.config.k_max_normal,
+            self.config.k_max_tangential,
+            self.config.max_speed,
+            self.config.max_ang_speed,
+            self.config.dynamic_friction_ratio.clamp(0.0, 1.0),
+        );
         self.gpu_pipeline.upload(
             &compact_states,
             &compact_prev_states,
@@ -942,17 +1009,11 @@ impl World {
             &self.compound_children,
             &self.compound_shapes_cpu,
             self.config.gravity,
-            self.config.dt,
+            dt,
             self.config.solver_iterations,
             self.config.beta,
             self.config.k_start,
             self.config.warmstart_decay,
-        );
-        self.gpu_pipeline.set_quality_params(
-            self.config.contact_offset,
-            self.config.restitution_threshold,
-            self.config.penetration_slop,
-            self.config.contact_stabilization,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
@@ -980,8 +1041,20 @@ impl World {
     }
 
     /// Advance the simulation by one time step (async, for WASM/WebGPU).
+    ///
+    /// Runs `config.substeps` full detection+solve substeps at `dt / substeps`
+    /// (default 1 — the paper's single-step regime).
     #[cfg(target_arch = "wasm32")]
     pub async fn step_async(&mut self) {
+        let substeps = self.config.substeps.max(1);
+        let sub_dt = self.config.dt / substeps as f32;
+        for _ in 0..substeps {
+            self.step_once_async(sub_dt).await;
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn step_once_async(&mut self, dt: f32) {
         use rubble_gpu::web_time::Instant;
 
         let mut timings = rubble_gpu::StepTimingsMs::default();
@@ -1009,6 +1082,19 @@ impl World {
         let num_bodies = compact_states.len() as u32;
 
         let t_upload = Instant::now();
+        self.gpu_pipeline.set_quality_params(
+            self.config.contact_offset,
+            self.config.restitution_threshold,
+            self.config.penetration_slop,
+            self.config.contact_stabilization,
+        );
+        self.gpu_pipeline.set_solver_extras(
+            self.config.k_max_normal,
+            self.config.k_max_tangential,
+            self.config.max_speed,
+            self.config.max_ang_speed,
+            self.config.dynamic_friction_ratio.clamp(0.0, 1.0),
+        );
         self.gpu_pipeline.upload(
             &compact_states,
             &compact_prev_states,
@@ -1023,17 +1109,11 @@ impl World {
             &self.compound_children,
             &self.compound_shapes_cpu,
             self.config.gravity,
-            self.config.dt,
+            dt,
             self.config.solver_iterations,
             self.config.beta,
             self.config.k_start,
             self.config.warmstart_decay,
-        );
-        self.gpu_pipeline.set_quality_params(
-            self.config.contact_offset,
-            self.config.restitution_threshold,
-            self.config.penetration_slop,
-            self.config.contact_stabilization,
         );
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 

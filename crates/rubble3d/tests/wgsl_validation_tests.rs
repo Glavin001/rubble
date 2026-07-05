@@ -53,6 +53,16 @@ fn validate_warmstart_match_wgsl() {
 }
 
 #[test]
+fn validate_contact_prep_wgsl() {
+    validate_wgsl("CONTACT_PREP_WGSL", rubble3d::gpu::CONTACT_PREP_WGSL);
+}
+
+#[test]
+fn validate_restitution_wgsl() {
+    validate_wgsl("RESTITUTION_WGSL", rubble3d::gpu::RESTITUTION_WGSL);
+}
+
+#[test]
 fn validate_coloring_reset_wgsl() {
     validate_wgsl("COLORING_RESET_WGSL", rubble3d::gpu::COLORING_RESET_WGSL);
 }
@@ -60,4 +70,9 @@ fn validate_coloring_reset_wgsl() {
 #[test]
 fn validate_coloring_step_wgsl() {
     validate_wgsl("COLORING_STEP_WGSL", rubble3d::gpu::COLORING_STEP_WGSL);
+}
+
+#[test]
+fn validate_coloring_apply_wgsl() {
+    validate_wgsl("COLORING_APPLY_WGSL", rubble3d::gpu::COLORING_APPLY_WGSL);
 }

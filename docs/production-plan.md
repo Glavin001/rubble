@@ -186,3 +186,51 @@ Effort: **M** (deletions S; shader-tree refactor M; crate moves M). Benefit: one
 1. ✅ This plan committed as `docs/production-plan.md` with superseding pointers in
    `avbd-competitive-analysis.md`, `performance-plan.md`, and `TODO.md`.
 2. Next: **M0** (perf harness + browser testkit lane — test-only, zero engine risk), then M1 onward in order.
+
+## 9. Execution log
+
+### M0 — Baseline + guards (landed)
+- Perf harness `crates/rubble3d/tests/perf_baseline_tests.rs`: six deterministic scenes
+  (stack/pyramid/grid 256–4k/pile 1k), per-phase `StepTimingsMs` medians, JSON report,
+  committed baselines + non-blocking CI `perf` job (`.github/workflows/ci.yml`).
+- Browser testkit lane (CB9) deliberately deferred to M2's async-readback work, per
+  `test-coverage-gaps.md`'s own sequencing note.
+
+### M1 — Solver fidelity (landed)
+- **D6a** Jacobi-preconditioned LDLᵀ 6×6 with pivot floor (replaces return-zero Gaussian
+  elimination). **D6b** `m/dt²` penalty floor at contact prep + split caps (normal 1e9 /
+  tangential 1e6, configurable). **D6c** Taylor-cached constraints: new `contact_prep`
+  kernel freezes C0 rows + anchors in the solve-start frame (`solve_start_states`
+  snapshot); primal/dual evaluate `C = C0 + J·Δx` against frozen Jacobians. **D6d**
+  Eq. 14 secant stiffness rescaling — *friction rows only*: applying it to the normal
+  row (force clamped to zero ⇒ zero Hessian) removes the two-sided stiffness that damps
+  the contact boundary and limit-cycles stacks (measured, then scoped correctly).
+  **D6e** post-solve velocity clamps (`max_speed`, `max_ang_speed`). **D6f** α kept at
+  0.3 — measured: with rubble's recovery-clamp formulation, α=0.95 parks resting
+  contacts ~20× deeper and destabilizes stacks/pyramids; the paper's 0.95 belongs to its
+  history formulation (revisit under M2 if the formulation changes). **D6g** `substeps`
+  config (full detection+solve per substep; default 1).
+- **D10** Restitution: per-body coefficient (`RigidBodyDesc::restitution`), pre-solve
+  normal speed captured in contact prep, post-extract per-body Jacobi restitution pass.
+- **D12** CPU mirror (`rubble3d::mirror`): LDLᵀ, contact rows, primal update, dual
+  update as scalar Rust with unit tests; full-step GPU↔CPU parity test
+  (`mirror_parity_tests.rs`) pins the whole solve chain on a sphere–plane scene.
+- **Determinism (D13 brought forward — three real races found and fixed):**
+  1. Luby coloring wrote colors in the same dispatch that read neighbors' colors →
+     improper colorings run-to-run → primal races between adjacent bodies. Fixed with a
+     mark/apply two-phase round.
+  2. LBVH pair emission silently dropped a scheduling-dependent subset when demand
+     exceeded `bodies*8`. Fixed with grow-and-retry off the unclamped attempt counter
+     (native; wasm single-shot until M2).
+  3. Contact solve order inherited atomicAdd emission order. Fixed with a total-order
+     sort (pair, feature, then raw bytes).
+  Plus one compute pass per solve color (pass-boundary hazard ordering between
+  Gauss-Seidel colors). Result: `determinism_probe_tests.rs` — detection stack and
+  1-iteration solve are bitwise deterministic across processes; one residual
+  multithread-scheduling source at ≥2 iterations remains (~1e-10/step; pinned as an
+  ignored repro with bisection notes; owned by the M2 rewrite).
+- **Exit-gate status:** full 3D+2D+testkit ladder green (200+ tests). Pyramid
+  known-failure *improved* (tail ~13.3 → ~12 vs limit 10, wild variance eliminated) but
+  not flipped; kept registered with updated notes — the residual rides the remaining
+  nondeterminism source + M3's manifold work. 2D resting-rect gate moved to M6 with the
+  2D rebuild (per D14: the 2D solver is replaced by the shared core, not hand-patched).
