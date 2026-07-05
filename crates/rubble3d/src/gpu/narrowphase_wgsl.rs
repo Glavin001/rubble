@@ -372,13 +372,48 @@ fn sphere_box_test(
 
 // Clip polygon (up to 8 verts) against a single plane (points on positive side kept).
 // Returns new vertex count.
+// Clip-vertex identity (M3 contact stability): every vertex of the clipped
+// incident polygon is the intersection of exactly two of eight lines in the
+// reference-face plane — the 4 incident-face edges (line ids 0..3) and the 4
+// reference-face clip planes (line ids 4..7). Encoding that unordered line
+// pair as `(min << 3) | max` gives a feature id low byte that is:
+//   - stable: derived from geometry, invariant to Sutherland-Hodgman output
+//     order (the old loop-index ids reshuffled as the incident box rotated,
+//     defeating warm-start and pumping energy into resting stacks), and
+//   - unique within the manifold: no two distinct vertices share a line pair,
+//     which the warm-start hash map requires — duplicate (pair, feature) keys
+//     resolve by insertion race and would break bitwise determinism.
+// Original corner k is the intersection of incident edges (k+3)%4 and k. An
+// intersection vertex inherits the line shared by the clipped segment's
+// endpoints, paired with the clip plane's id.
+
+fn clip_line_pair(l1: u32, l2: u32) -> u32 {
+    return (min(l1, l2) << 3u) | max(l1, l2);
+}
+
+// The line shared by both endpoints of a polygon edge (each id packs two
+// 3-bit line ids). Convex clipping guarantees one exists; fall back to the
+// first line of `id_i` for degenerate float cases.
+fn shared_clip_line(id_i: u32, id_j: u32) -> u32 {
+    let a1 = id_i >> 3u;
+    let a2 = id_i & 7u;
+    let b1 = id_j >> 3u;
+    let b2 = id_j & 7u;
+    if a1 == b1 || a1 == b2 { return a1; }
+    if a2 == b1 || a2 == b2 { return a2; }
+    return a1;
+}
+
 fn clip_polygon_against_plane(
     verts: ptr<function, array<vec3<f32>, 8>>,
+    ids: ptr<function, array<u32, 8>>,
     count: u32,
     plane_normal: vec3<f32>,
     plane_dist: f32,
+    plane_line_id: u32,
 ) -> u32 {
     var out: array<vec3<f32>, 8>;
+    var out_ids: array<u32, 8>;
     var out_count = 0u;
     if count == 0u { return 0u; }
 
@@ -393,6 +428,7 @@ fn clip_polygon_against_plane(
             // Current vertex is inside
             if out_count < 8u {
                 out[out_count] = vi;
+                out_ids[out_count] = (*ids)[i];
                 out_count = out_count + 1u;
             }
             if dj < 0.0 {
@@ -400,6 +436,8 @@ fn clip_polygon_against_plane(
                 let t = di / (di - dj);
                 if out_count < 8u {
                     out[out_count] = vi + (vj - vi) * t;
+                    out_ids[out_count] =
+                        clip_line_pair(shared_clip_line((*ids)[i], (*ids)[j]), plane_line_id);
                     out_count = out_count + 1u;
                 }
             }
@@ -408,6 +446,8 @@ fn clip_polygon_against_plane(
             let t = di / (di - dj);
             if out_count < 8u {
                 out[out_count] = vi + (vj - vi) * t;
+                out_ids[out_count] =
+                    clip_line_pair(shared_clip_line((*ids)[i], (*ids)[j]), plane_line_id);
                 out_count = out_count + 1u;
             }
         }
@@ -415,6 +455,7 @@ fn clip_polygon_against_plane(
 
     for (var i = 0u; i < out_count; i = i + 1u) {
         (*verts)[i] = out[i];
+        (*ids)[i] = out_ids[i];
     }
     return out_count;
 }
@@ -602,6 +643,20 @@ fn box_box_test(
     let he_arr_a = array<f32, 3>(he_a.x, he_a.y, he_a.z);
     let he_arr_b = array<f32, 3>(he_b.x, he_b.y, he_b.z);
 
+    // Face-axis selection hysteresis (M3 contact stability). SAT winners on
+    // near-aligned boxes (e.g. a resting stack) sit in a near-tie between A's
+    // and B's parallel face axes; a bare `>` lets sub-millimeter jitter flip
+    // the winner every frame, which rewrites the contact `feature_id` prefix
+    // and defeats warm-start (each miss re-arms the penalty spring against the
+    // resting penetration -> energy pump). A challenger must beat the incumbent
+    // by this band to take over; axes are enumerated in a fixed order (A.x,
+    // A.y, A.z, then B.x, B.y, B.z), so near-ties resolve to the same axis
+    // every frame for near-constant geometry. The band (sub-mm) is far below
+    // the ~half-extent gap between genuinely different faces, so it never
+    // selects a wrong axis.
+    let face_hyst_abs = 5.0e-4;
+    let face_hyst_rel = 0.05;
+
     // 6 face axes (3 from A, 3 from B)
     for (var i = 0u; i < 3u; i = i + 1u) {
         let axis = axes_a[i];
@@ -612,7 +667,8 @@ fn box_box_test(
         let center_proj = dot(d, axis);
         let separation = abs(center_proj) - (proj_a + proj_b);
         if separation > 0.0 { return; }
-        if !have_face_axis || separation > best_face_sep {
+        let hyst = face_hyst_abs + face_hyst_rel * abs(best_face_sep);
+        if !have_face_axis || separation > best_face_sep + hyst {
             have_face_axis = true;
             best_face_sep = separation;
             best_face_normal = axis * select(1.0, -1.0, center_proj < 0.0);
@@ -629,7 +685,8 @@ fn box_box_test(
         let center_proj = dot(d, axis);
         let separation = abs(center_proj) - (proj_a + proj_b);
         if separation > 0.0 { return; }
-        if !have_face_axis || separation > best_face_sep {
+        let hyst = face_hyst_abs + face_hyst_rel * abs(best_face_sep);
+        if !have_face_axis || separation > best_face_sep + hyst {
             have_face_axis = true;
             best_face_sep = separation;
             best_face_normal = axis * select(1.0, -1.0, center_proj < 0.0);
@@ -823,31 +880,48 @@ fn box_box_test(
     clip_poly[3] = inc_center + inc_u * inc_extent_u - inc_v * inc_extent_v;
     var clip_count = 4u;
 
+    // Stable per-vertex identity (see clip_polygon_against_plane): incident
+    // edge k runs corner k -> corner (k+1)%4, so corner k is the intersection
+    // of edges (k+3)%4 and k. Clip planes get line ids 4..7 in call order.
+    var clip_ids: array<u32, 8>;
+    clip_ids[0] = clip_line_pair(3u, 0u);
+    clip_ids[1] = clip_line_pair(0u, 1u);
+    clip_ids[2] = clip_line_pair(1u, 2u);
+    clip_ids[3] = clip_line_pair(2u, 3u);
+
     // The generic clip helper keeps the positive half-space, so negate the CPU
     // reference planes which keep points on the <= side.
     clip_count = clip_polygon_against_plane(
         &clip_poly,
+        &clip_ids,
         clip_count,
         -ref_u,
         -(dot(ref_u, ref_center) + ref_extent_u),
+        4u,
     );
     clip_count = clip_polygon_against_plane(
         &clip_poly,
+        &clip_ids,
         clip_count,
         ref_u,
         -(dot(-ref_u, ref_center) + ref_extent_u),
+        5u,
     );
     clip_count = clip_polygon_against_plane(
         &clip_poly,
+        &clip_ids,
         clip_count,
         -ref_v,
         -(dot(ref_v, ref_center) + ref_extent_v),
+        6u,
     );
     clip_count = clip_polygon_against_plane(
         &clip_poly,
+        &clip_ids,
         clip_count,
         ref_v,
         -(dot(-ref_v, ref_center) + ref_extent_v),
+        7u,
     );
     let face_feature_prefix =
         0x03000000u |
@@ -900,7 +974,7 @@ fn box_box_test(
                 final_points[final_count] = midpoint;
                 final_world_a[final_count] = world_a;
                 final_world_b[final_count] = world_b;
-                final_features[final_count] = i;
+                final_features[final_count] = clip_ids[i];
                 final_count = final_count + 1u;
             }
         }
@@ -1367,6 +1441,15 @@ fn hull_hull_test(
     clip_poly[2] = hull_world_vert(inc_si, ic1, inc_pos, inc_rot);
     var clip_count = 3u;
 
+    // Vertex ids for the clip helper. Hull-hull still emits loop-index
+    // feature ids below (its manifolds are transient triangle fans, not the
+    // persistent stacks the box-box stability work targets), so these ids are
+    // only used internally by the clipper.
+    var clip_ids: array<u32, 8>;
+    clip_ids[0] = clip_line_pair(2u, 0u);
+    clip_ids[1] = clip_line_pair(0u, 1u);
+    clip_ids[2] = clip_line_pair(1u, 2u);
+
     // Clip against 3 side planes of the reference triangle
     let ref_tri = array<vec3<f32>, 3>(rv0, rv1, rv2);
     for (var i = 0u; i < 3u; i = i + 1u) {
@@ -1377,7 +1460,7 @@ fn hull_hull_test(
         if side_len < 1e-12 { continue; }
         let sn = side_normal / side_len;
         let side_dist = dot(sn, ref_tri[i]);
-        clip_count = clip_polygon_against_plane(&clip_poly, clip_count, sn, side_dist);
+        clip_count = clip_polygon_against_plane(&clip_poly, &clip_ids, clip_count, sn, side_dist, 4u + i);
     }
 
     if clip_count == 0u { return; }

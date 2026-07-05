@@ -272,6 +272,9 @@ pub fn collect_reports(
 #[derive(Debug, Clone)]
 pub struct StabilityFrame {
     pub ke: f32,
+    /// KE + PE. Distinguishes energy injection (total rises) from legitimate
+    /// metastable rearrangement like a flank box slipping (KE rises, total falls).
+    pub total_energy: f32,
     pub contacts: usize,
     pub key_survival: f32,
 }
@@ -308,6 +311,7 @@ pub fn collect_stability_frames(
 
         frames.push(StabilityFrame {
             ke: metrics.translational_ke + metrics.rotational_ke,
+            total_energy: metrics.total_energy,
             contacts: contacts.len(),
             key_survival: if contacts.is_empty() {
                 1.0
@@ -331,6 +335,10 @@ pub struct SettleStats {
     pub max_ke: f32,
     /// Kinetic energy on the final frame.
     pub final_ke: f32,
+    /// Largest rise of TOTAL energy (KE + PE) above its running minimum in the
+    /// window. ~0 for a healthy engine even during metastable slips (a falling
+    /// box trades PE for KE); large iff the solver injects energy.
+    pub max_total_energy_gain: f32,
 }
 
 pub fn settle_stats(frames: &[StabilityFrame], window_start: usize) -> SettleStats {
@@ -339,16 +347,21 @@ pub fn settle_stats(frames: &[StabilityFrame], window_start: usize) -> SettleSta
     let mut sum_survival = 0.0f32;
     let mut min_survival = f32::INFINITY;
     let mut max_ke = 0.0f32;
+    let mut running_min_total = f32::INFINITY;
+    let mut max_gain = 0.0f32;
     for frame in window {
         sum_survival += frame.key_survival;
         min_survival = min_survival.min(frame.key_survival);
         max_ke = max_ke.max(frame.ke);
+        running_min_total = running_min_total.min(frame.total_energy);
+        max_gain = max_gain.max(frame.total_energy - running_min_total);
     }
     SettleStats {
         mean_key_survival: sum_survival / window.len() as f32,
         min_key_survival: min_survival,
         max_ke,
         final_ke: window.last().unwrap().ke,
+        max_total_energy_gain: max_gain,
     }
 }
 
