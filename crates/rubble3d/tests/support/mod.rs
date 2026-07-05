@@ -252,6 +252,106 @@ pub fn collect_reports(
     reports
 }
 
+// ---------------------------------------------------------------------------
+// Contact-stability / energy-pump instrumentation (M3 detectors)
+// ---------------------------------------------------------------------------
+//
+// The pyramid energy-injection failure (see docs/production-plan.md, M3) is
+// driven by contact-identity churn: SAT axis flip-flop and order-dependent
+// clip-vertex indices change `feature_id` frame-to-frame, so warm-start
+// misses reset lambda/penalty against existing penetration and pump kinetic
+// energy into piles that should be at rest. These helpers measure that
+// directly: per-frame warm-start key survival and kinetic energy over a
+// settle window. The metrics are threshold-friendly: run-to-run scheduling
+// nondeterminism moves them by a few percent, while the failure mode moves
+// them by an order of magnitude.
+
+/// Per-frame stability sample: kinetic energy plus warm-start key survival
+/// (fraction of this frame's contacts whose `(pair, feature_id)` key existed
+/// in the previous frame).
+#[derive(Debug, Clone)]
+pub struct StabilityFrame {
+    pub ke: f32,
+    pub contacts: usize,
+    pub key_survival: f32,
+}
+
+/// Steps `world` for `steps` frames, collecting kinetic energy and contact-key
+/// survival per frame. Downloads contacts each frame (diagnostic path), so use
+/// only in tests.
+pub fn collect_stability_frames(
+    world: &mut World,
+    bodies: &[TrackedBody3D],
+    gravity: Vec3,
+    steps: usize,
+) -> Vec<StabilityFrame> {
+    use std::collections::HashSet;
+
+    let mut prev_keys: HashSet<(u32, u32, u32)> = HashSet::new();
+    let mut frames = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        world.step();
+
+        let snapshots = snapshot_all(world, bodies);
+        let metrics = compute_metrics(&snapshots, gravity);
+
+        let contacts = world.fetch_last_contacts().to_vec();
+        let mut survived = 0usize;
+        let mut keys = HashSet::with_capacity(contacts.len());
+        for c in &contacts {
+            let key = (c.body_a.min(c.body_b), c.body_a.max(c.body_b), c.feature_id);
+            if prev_keys.contains(&key) {
+                survived += 1;
+            }
+            keys.insert(key);
+        }
+
+        frames.push(StabilityFrame {
+            ke: metrics.translational_ke + metrics.rotational_ke,
+            contacts: contacts.len(),
+            key_survival: if contacts.is_empty() {
+                1.0
+            } else {
+                survived as f32 / contacts.len() as f32
+            },
+        });
+        prev_keys = keys;
+    }
+    frames
+}
+
+/// Summary of a settle window (frames `[start..]` of a stability run).
+#[derive(Debug, Clone)]
+pub struct SettleStats {
+    /// Mean per-frame warm-start key survival.
+    pub mean_key_survival: f32,
+    /// Worst single-frame key survival.
+    pub min_key_survival: f32,
+    /// Highest kinetic energy seen anywhere in the window.
+    pub max_ke: f32,
+    /// Kinetic energy on the final frame.
+    pub final_ke: f32,
+}
+
+pub fn settle_stats(frames: &[StabilityFrame], window_start: usize) -> SettleStats {
+    let window = &frames[window_start..];
+    assert!(!window.is_empty(), "settle window is empty");
+    let mut sum_survival = 0.0f32;
+    let mut min_survival = f32::INFINITY;
+    let mut max_ke = 0.0f32;
+    for frame in window {
+        sum_survival += frame.key_survival;
+        min_survival = min_survival.min(frame.key_survival);
+        max_ke = max_ke.max(frame.ke);
+    }
+    SettleStats {
+        mean_key_survival: sum_survival / window.len() as f32,
+        min_key_survival: min_survival,
+        max_ke,
+        final_ke: window.last().unwrap().ke,
+    }
+}
+
 pub fn cube_hull(extents: Vec3) -> Vec<Vec3> {
     let hx = extents.x;
     let hy = extents.y;
