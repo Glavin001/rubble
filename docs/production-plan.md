@@ -312,6 +312,26 @@ persistent small-scene kernel is the designed answer; large scenes shed the
 download (318 ms at 4k). The post-solve download (persistence/events/last_contacts)
 is the remaining half: CAS pair map + GPU events + async snapshot.
 
+### Web measurement (M3 Max, Chrome, 137-body pyramid demo) — M2 priorities reordered
+User-measured overlay: 45 ms/step, 21 FPS. Decomposition: Solve 24.6 ms (~300+
+compute passes/frame + per-pass bind groups — orchestration, not math), await
+round-trips ~15 ms (pair count 5.6, contact count 5.3, extract 4.4), physics ≈ 0.
+The M3 Max is idling — dispatch-count overhead hits real browsers as hard as
+lavapipe, not 30× less as earlier assumed. Sequenced web-perf plan (= M2 remainder):
+- **W1** Indirect dispatch off GPU-written pair/contact counters (kills the count
+  awaits; also fixes the wasm pair-overflow single-shot gap).
+- **W2** M2(c) compacted per-color lists + per-color indirect args + static cached
+  bind groups; solve records into one encoder/submit per frame.
+- **W3** D8 persistent single-workgroup solve kernel for ≤256 active bodies — at
+  demo scale the whole solve becomes ONE dispatch (24.6 ms → <1 ms).
+- **W4** M2(a) async snapshot ring for render state (deletes the extract await);
+  post-solve contact download goes with the CAS pair map + GPU events.
+- **W5** Single-encoder frame (D2 end state).
+Projected demo-scale result: 45 ms → 2–4 ms/step on M3-class hardware.
+The demo's visible pyramid bounce/collapse = the registered known-failure
+(manifold churn re-exciting the stack; restitution is 0 there) — owned by M3
+(feature IDs + SAT hysteresis), directly after the web-perf stages.
+
 Follow-ups landed in the same chunk after measurement:
 - The recolor-every-frame decision exposed the mark kernel's O(bodies×contacts)
   scan (solve 266→774 ms at 4k) → mark kernel now walks the CSR adjacency built
