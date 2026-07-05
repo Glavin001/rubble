@@ -129,6 +129,14 @@ fn two_worlds_pyramid_bitwise_deterministic() {
 ///   scheduling dependence remains on multithreaded llvmpipe.
 /// - Physically the divergence is round-off-scale per step; it only matters
 ///   for replay determinism and chaotic-scene test thresholds.
+///
+/// W3 data point: with the ENTIRE iterate loop in one single-workgroup
+/// persistent dispatch (no per-color passes at all, this scene qualifies),
+/// 12 iterations still diverges multithreaded and is still clean under
+/// `LP_NUM_THREADS=1` — the engine's command stream and float-summation
+/// orders are fully pinned, and the variance is llvmpipe's threaded
+/// execution *inside* a dispatch. Real GPUs schedule differently; this
+/// repro documents a software-rasterizer artifact, not an engine property.
 #[test]
 fn two_worlds_pyramid_full_iterations_bitwise_deterministic() {
     if support::should_skip_known_failure(

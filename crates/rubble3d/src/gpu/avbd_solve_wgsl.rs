@@ -52,6 +52,7 @@ struct Solve6 {
 };
 
 const CONTACT_MARGIN: f32 = 0.01;
+const CONTACT_FLAG_STICKING: u32 = 1u;
 // Upper bound on the bounded-augmented-Lagrangian contact force magnitude. The
 // effective per-contact cap is scaled by the lighter body's mass so a light body
 // cannot stockpile arbitrarily large forces (mirrors avbd-metal's lamCap).
@@ -64,7 +65,7 @@ const MAX_RECOVERY_VEL: f32 = 6.0;
 @group(0) @binding(0) var<storage, read_write> bodies:            array<Body>;
 @group(0) @binding(1) var<storage, read>       inertial_states:   array<Body>;
 @group(0) @binding(2) var<storage, read>       props:             array<BodyProps>;
-@group(0) @binding(3) var<storage, read>       contacts:          array<Contact>;
+@group(0) @binding(3) var<storage, read_write> contacts:          array<Contact>;
 @group(0) @binding(4) var<storage, read>       body_order:        array<u32>;
 @group(0) @binding(5) var<uniform>             params:            SimParams;
 @group(0) @binding(6) var<storage, read>       body_contact_ranges: array<vec2<u32>>;
@@ -275,17 +276,10 @@ fn effective_stiffness(k: f32, force: f32, c: f32, clamped: bool) -> f32 {
 
 const ORDER_HEADER: u32 = 64u;
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let local_idx = gid.x;
-    let color = solve_range.offset;
-    let range_offset = body_order[2u * color];
-    let range_count = body_order[2u * color + 1u];
-    if local_idx >= range_count {
-        return;
-    }
-
-    let body_idx = body_order[ORDER_HEADER + range_offset + local_idx];
+// One AVBD block-descent step for a single body (called per color; the
+// persistent small-scene kernel drives the same function from its in-kernel
+// color loop).
+fn solve_body(body_idx: u32) {
     let inv_mass = bodies[body_idx].position_inv_mass.w;
     if inv_mass <= 0.0 {
         return;
@@ -460,6 +454,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     bodies[body_idx].position_inv_mass = vec4<f32>(pos - dlin, inv_mass);
     bodies[body_idx].orientation = quat_mul(small_angle_quat(-dang), q);
 }
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let local_idx = gid.x;
+    let color = solve_range.offset;
+    let range_offset = body_order[2u * color];
+    let range_count = body_order[2u * color + 1u];
+    if local_idx >= range_count {
+        return;
+    }
+    solve_body(body_order[ORDER_HEADER + range_offset + local_idx]);
+}
 "#;
 
 /// WGSL source for the 3D AVBD dual update.
@@ -553,14 +559,10 @@ fn rotation_delta_vec(current: vec4<f32>, reference: vec4<f32>) -> vec3<f32> {
     return dq.xyz / imag_len * angle;
 }
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let ci = gid.x;
-    let num_contacts = contact_count_buf[0];
-    if ci >= num_contacts {
-        return;
-    }
-
+// >>> dual-contact-update
+// Verbatim-shared with the persistent solve kernel via source extraction —
+// see avbd_persistent_wgsl(); edit only here.
+fn dual_update_contact(ci: u32) {
     let c = contacts[ci];
 
     // Same Taylor-cached constraint evaluation as the primal.
@@ -635,6 +637,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     contacts[ci].lambda = vec4<f32>(lambda_n, tang.x, tang.y, 0.0);
     contacts[ci].penalty = next_penalty;
     contacts[ci].flags = flags;
+}
+// <<< dual-contact-update
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let ci = gid.x;
+    let num_contacts = contact_count_buf[0];
+    if ci >= num_contacts {
+        return;
+    }
+    dual_update_contact(ci);
 }
 "#;
 
@@ -924,3 +937,62 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     bodies[body_idx].ang_vel = vec4<f32>(ang, 0.0);
 }
 "#;
+
+/// Entry point for the single-workgroup persistent solve (D8/W3): the whole
+/// `iterations x (colors + dual)` loop in ONE dispatch, replacing hundreds of
+/// per-color compute passes for small scenes. Portable by construction: one
+/// workgroup, `workgroupBarrier`/`storageBarrier` between phases (the
+/// multi-workgroup variant is rejected — WGSL has no device-scope barrier and
+/// avbd-metal's deadlocked).
+///
+/// Selected when total bodies <= 256 (web's max workgroup size); a color's
+/// compacted range can then never exceed the workgroup, and contacts stride.
+/// `params.counts.y` = solver iterations; `params.counts.w` carries the
+/// clamped contact count, patched GPU-side by the args kernel + buffer copy
+/// (same trick as the narrowphase pair count — no readback).
+const AVBD_PERSISTENT_MAIN_WGSL: &str = r#"
+const PERSIST_WG: u32 = 256u;
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid_v: vec3<u32>) {
+    let lid = lid_v.x;
+    let iterations = params.counts.y;
+    let num_contacts = min(params.counts.w, arrayLength(&contacts));
+    for (var it = 0u; it < iterations; it = it + 1u) {
+        // Gauss-Seidel across colors: barriers order color N's body writes
+        // before color N+1's partner reads (the job pass boundaries do in the
+        // multi-dispatch path).
+        for (var color = 0u; color < 32u; color = color + 1u) {
+            let range_count = body_order[2u * color + 1u];
+            if lid < range_count {
+                let range_offset = body_order[2u * color];
+                solve_body(body_order[ORDER_HEADER + range_offset + lid]);
+            }
+            workgroupBarrier();
+            storageBarrier();
+        }
+        for (var ci = lid; ci < num_contacts; ci = ci + PERSIST_WG) {
+            dual_update_contact(ci);
+        }
+        workgroupBarrier();
+        storageBarrier();
+    }
+}
+"#;
+
+/// Compose the persistent solve kernel from the primal's shared source
+/// (types, bindings, constants, `solve_body`) plus the dual's marked
+/// `dual_update_contact` — single source of truth by extraction, so the
+/// persistent path can never drift from the per-color kernels.
+pub fn avbd_persistent_wgsl() -> String {
+    let primal_shared = AVBD_PRIMAL_WGSL
+        .split("@compute")
+        .next()
+        .expect("AVBD_PRIMAL_WGSL has an entry point");
+    let dual_fn = AVBD_DUAL_WGSL
+        .split("// >>> dual-contact-update")
+        .nth(1)
+        .and_then(|tail| tail.split("// <<< dual-contact-update").next())
+        .expect("AVBD_DUAL_WGSL carries the dual-contact-update markers");
+    format!("{primal_shared}\n{dual_fn}\n{AVBD_PERSISTENT_MAIN_WGSL}")
+}
