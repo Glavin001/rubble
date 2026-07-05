@@ -345,3 +345,34 @@ Follow-ups landed in the same chunk after measurement:
   rasterizer); small scenes 1.3–2.7× from per-frame dispatch count — lavapipe
   taxes dispatches ~30× harder than real GPUs; D8 owns that case. Baselines
   intentionally NOT refreshed: they pin the pre-rewrite shape until M2 completes.
+
+### W2 / M2(c) — LANDED: GPU color compaction + indirect per-color solve dispatch
+The solve is now download-free on both targets (native and web run the identical
+`run_colored_solve`; the wasm-only async solve path is deleted):
+- Three new kernels after the Luby rounds, recorded into the same coloring
+  submit: `COLOR_COUNT` (atomic per-color counts of active bodies),
+  `COLOR_SCAN_ARGS` (single 32-lane workgroup: serial exclusive scan → 64-word
+  `(offset,count)` header at the head of `body_order` + per-color indirect
+  dispatch args `(ceil(n/64),1,1)` + cursor clear), `COLOR_SCATTER` (slot =
+  header offset + atomicAdd cursor).
+- The header lives INSIDE `body_order` (not a 9th buffer) because the primal
+  already uses 8 storage buffers per stage — WebGPU's default limit.
+- Primal reads its `(offset,count)` from the header indexed by a static
+  per-color uniform (`SolveRangeGpu.offset` = color index, written once ever);
+  the solve loop dispatches `dispatch_workgroups_indirect` per color — empty
+  colors cost one zero-workgroup pass, no CPU knowledge of group sizes needed.
+- Within-color scatter order is scheduling-dependent but result-invariant
+  (same-color bodies share no contacts; each body's row accumulation is
+  adjacency-ordered). Confirmed stronger than required: the determinism probe
+  fingerprint is bit-identical to the CPU-compaction build (5a97ed437cee8bae).
+- Deleted: `finalize_coloring` (CPU group build), `write_solve_ranges`
+  (per-frame per-color uniform writes), the wasm `run_colored_solve_async`,
+  and the solve's two remaining per-frame downloads (colors + active flags) —
+  the web solve now contains zero awaits between contact sort and extract.
+- Trade-off accepted: the loop records all 32 color passes per iteration
+  (CPU no longer knows how many are nonempty); empty ones dispatch zero
+  workgroups. In exchange the 32 primal bind groups are fully static across
+  frames (the old cache key included the changing group count, so browsers
+  re-created bind groups per frame). Deterministic-by-construction — no lagged
+  color-count hints. W3's single-workgroup kernel collapses the pass count at
+  ≤256-body scale; beyond that the passes amortize over real solve work.

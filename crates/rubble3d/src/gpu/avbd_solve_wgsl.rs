@@ -40,6 +40,8 @@ struct SimParams {
 };
 
 struct SolveRange {
+    // x = color index into the 32-entry (offset,count) header at the head of
+    // body_order (written on GPU by the color compaction pass); y unused.
     offset: u32,
     count:  u32,
 };
@@ -271,14 +273,19 @@ fn effective_stiffness(k: f32, force: f32, c: f32, clamped: bool) -> f32 {
     return min(k, abs(force) / max(abs(c), 1e-9));
 }
 
+const ORDER_HEADER: u32 = 64u;
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let local_idx = gid.x;
-    if local_idx >= solve_range.count {
+    let color = solve_range.offset;
+    let range_offset = body_order[2u * color];
+    let range_count = body_order[2u * color + 1u];
+    if local_idx >= range_count {
         return;
     }
 
-    let body_idx = body_order[solve_range.offset + local_idx];
+    let body_idx = body_order[ORDER_HEADER + range_offset + local_idx];
     let inv_mass = bodies[body_idx].position_inv_mass.w;
     if inv_mass <= 0.0 {
         return;

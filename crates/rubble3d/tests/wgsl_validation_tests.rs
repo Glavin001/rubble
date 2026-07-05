@@ -78,6 +78,13 @@ fn validate_coloring_apply_wgsl() {
 }
 
 #[test]
+fn validate_color_compaction_wgsl() {
+    validate_wgsl("COLOR_COUNT_WGSL", rubble3d::gpu::COLOR_COUNT_WGSL);
+    validate_wgsl("COLOR_SCAN_ARGS_WGSL", rubble3d::gpu::COLOR_SCAN_ARGS_WGSL);
+    validate_wgsl("COLOR_SCATTER_WGSL", rubble3d::gpu::COLOR_SCATTER_WGSL);
+}
+
+#[test]
 fn validate_contact_stream_wgsl() {
     validate_wgsl(
         "SORT_KEY_EXTRACT_WGSL",
