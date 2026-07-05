@@ -288,3 +288,26 @@ multithread-scheduling divergence at ≥2 solver iterations (see
 ignored, with full bisection notes) — re-test once the solve loop is re-hosted on the
 rewritten dispatch path; if it persists, instrument per-pass buffer hashes to locate
 the racing stage.
+
+### M2(d) first half — LANDED: pre-solve contact download eliminated
+The design above is implemented for the pre-solve half:
+- Narrowphase emits a content-derived `pos_hash` disambiguator (`lambda.w`, consumed
+  by the sort before warm-start overwrites lambda); CPU compound contacts get the
+  same hash and are appended to the tail of the GPU buffer (upload only).
+- `sort_contacts_gpu`: iota → 4 chained stable LSD word passes (`pos_hash`,
+  `feature_id`, `body_b`, `body_a`) through `GpuRadixSort` → gather + copy-back.
+  Reproduces the CPU total order bit-for-bit (determinism probe green).
+- `build_adjacency_gpu`: clear → count/mark-active → `GpuPrefixScan` → ranges,
+  plus a stable incidence sort `(body, contact)` that reproduces the CPU
+  `body_contact_indices` exactly. Free-motion reads GPU-written active flags.
+- Recolor every frame (coloring is one submit since the M2 slice); group/order
+  build still round-trips two small per-body buffers (colors + active) until
+  M2(c) compaction.
+- Deleted: pre-solve `contacts.download()`, CPU total-order sort, CPU adjacency
+  build (`build_body_contact_adjacency` + struct), coloring graph-key cache,
+  CPU active-flag build.
+Cost note (lavapipe): small scenes pay for the per-frame recolor + sort submit
+chain (the 137-body probe stepped ~2× slower) — real GPUs care far less, and D8's
+persistent small-scene kernel is the designed answer; large scenes shed the
+download (318 ms at 4k). The post-solve download (persistence/events/last_contacts)
+is the remaining half: CAS pair map + GPU events + async snapshot.
