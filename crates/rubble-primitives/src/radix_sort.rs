@@ -440,6 +440,43 @@ impl GpuRadixSort {
     }
 }
 
+/// Persistent temporaries for [`GpuRadixSort::record_sort_key_value`].
+pub struct RadixRecordTemps {
+    keys_tmp: GpuBuffer<u32>,
+    values_tmp: GpuBuffer<u32>,
+    histograms: GpuBuffer<u32>,
+    pass_params: Vec<wgpu::Buffer>,
+    scan_temps: crate::prefix_scan::ScanRecordTemps,
+}
+
+impl RadixRecordTemps {
+    pub fn new(ctx: &GpuContext, max_elements: usize) -> Self {
+        let mk = |_i: usize| {
+            ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("radix pass params"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let n = max_elements.max(1);
+        let num_blocks = rubble_gpu::round_up_workgroups(n as u32, WORKGROUP_SIZE) as usize;
+        Self {
+            keys_tmp: GpuBuffer::new(ctx, n),
+            values_tmp: GpuBuffer::new(ctx, n),
+            histograms: GpuBuffer::new(ctx, RADIX_BUCKETS as usize * num_blocks),
+            pass_params: (0..NUM_PASSES as usize).map(mk).collect(),
+            scan_temps: crate::prefix_scan::ScanRecordTemps::new(ctx),
+        }
+    }
+
+    fn grow(&mut self, ctx: &GpuContext, n: usize, hist_size: usize) {
+        self.keys_tmp.grow_if_needed(ctx, n);
+        self.values_tmp.grow_if_needed(ctx, n);
+        self.histograms.grow_if_needed(ctx, hist_size);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,42 +596,5 @@ mod tests {
                 i, entry.key, original_entries[original_index].key, original_index
             );
         }
-    }
-}
-
-/// Persistent temporaries for [`GpuRadixSort::record_sort_key_value`].
-pub struct RadixRecordTemps {
-    keys_tmp: GpuBuffer<u32>,
-    values_tmp: GpuBuffer<u32>,
-    histograms: GpuBuffer<u32>,
-    pass_params: Vec<wgpu::Buffer>,
-    scan_temps: crate::prefix_scan::ScanRecordTemps,
-}
-
-impl RadixRecordTemps {
-    pub fn new(ctx: &GpuContext, max_elements: usize) -> Self {
-        let mk = |_i: usize| {
-            ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("radix pass params"),
-                size: 16,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        };
-        let n = max_elements.max(1);
-        let num_blocks = rubble_gpu::round_up_workgroups(n as u32, WORKGROUP_SIZE) as usize;
-        Self {
-            keys_tmp: GpuBuffer::new(ctx, n),
-            values_tmp: GpuBuffer::new(ctx, n),
-            histograms: GpuBuffer::new(ctx, RADIX_BUCKETS as usize * num_blocks),
-            pass_params: (0..NUM_PASSES as usize).map(mk).collect(),
-            scan_temps: crate::prefix_scan::ScanRecordTemps::new(ctx),
-        }
-    }
-
-    fn grow(&mut self, ctx: &GpuContext, n: usize, hist_size: usize) {
-        self.keys_tmp.grow_if_needed(ctx, n);
-        self.values_tmp.grow_if_needed(ctx, n);
-        self.histograms.grow_if_needed(ctx, hist_size);
     }
 }
