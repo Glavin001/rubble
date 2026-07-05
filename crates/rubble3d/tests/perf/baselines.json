@@ -1,0 +1,10 @@
+{
+  "scenes": {
+    "stack_10": { "bodies": 11, "contacts": 36, "total_ms": 10.870, "upload_ms": 0.025, "predict_ms": 0.321, "broadphase_ms": 4.709, "narrowphase_ms": 0.240, "contact_fetch_ms": 0.280, "solve_ms": 4.827, "extract_ms": 0.231 },
+    "pyramid_16": { "bodies": 137, "contacts": 1028, "total_ms": 28.743, "upload_ms": 0.033, "predict_ms": 0.420, "broadphase_ms": 5.022, "narrowphase_ms": 0.365, "contact_fetch_ms": 1.851, "solve_ms": 20.656, "extract_ms": 0.270 },
+    "grid_256": { "bodies": 257, "contacts": 1026, "total_ms": 16.210, "upload_ms": 0.037, "predict_ms": 0.430, "broadphase_ms": 5.681, "narrowphase_ms": 0.356, "contact_fetch_ms": 2.109, "solve_ms": 7.296, "extract_ms": 0.268 },
+    "grid_1k": { "bodies": 1025, "contacts": 4774, "total_ms": 70.138, "upload_ms": 0.083, "predict_ms": 0.614, "broadphase_ms": 7.192, "narrowphase_ms": 0.967, "contact_fetch_ms": 23.635, "solve_ms": 37.898, "extract_ms": 0.337 },
+    "grid_4k": { "bodies": 4097, "contacts": 22206, "total_ms": 606.893, "upload_ms": 0.290, "predict_ms": 1.249, "broadphase_ms": 18.060, "narrowphase_ms": 3.286, "contact_fetch_ms": 318.508, "solve_ms": 265.739, "extract_ms": 0.835 },
+    "pile_1k": { "bodies": 1025, "contacts": 1194, "total_ms": 28.422, "upload_ms": 0.068, "predict_ms": 0.478, "broadphase_ms": 9.341, "narrowphase_ms": 0.534, "contact_fetch_ms": 0.519, "solve_ms": 17.411, "extract_ms": 0.280 }
+  }
+}
