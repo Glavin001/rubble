@@ -2,6 +2,10 @@
 
 Status tracking against the Rubble Software Specification v1.1.0.
 
+> **Sequencing note.** Feature/production sequencing is now driven by
+> [`docs/production-plan.md`](./docs/production-plan.md) (approved plan of record: GPU-resident
+> rewrite, solver fidelity, milestones M0–M6). This checklist tracks spec-level feature status only.
+
 ## Legend
 - [x] Done and working
 - [~] Partial — built but not integrated, or CPU-side instead of GPU

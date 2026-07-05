@@ -1,5 +1,10 @@
 # Rubble Performance Plan — maximize real-time rigid-body runtime
 
+> **Superseded for planning.** The milestones in this document are superseded by
+> [`production-plan.md`](./production-plan.md), the approved plan of record (its D2/D3 + M2 absorb
+> this plan's GPU-residency milestones). The measurements and technique mapping below remain the
+> underlying evidence.
+
 Scope: **rigid-body collision performance only**. Goal: match/beat the two reference AVBD solvers
 (`avbd-metal`, `webphysics`) on real-time throughput while the test net in
 [`test-coverage-gaps.md`](./test-coverage-gaps.md) guarantees no physics regressions.
