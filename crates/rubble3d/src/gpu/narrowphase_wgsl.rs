@@ -144,6 +144,24 @@ fn emit_contact(
     emit_contact_world_points(world_a, world_b, normal, body_a, body_b, feature_id, max_contacts);
 }
 
+// Content-derived disambiguator for the deterministic contact sort: contacts
+// sharing (pair, feature) — e.g. capsule cap points with a constant feature id
+// — get distinct hashes from their quantized positions, making the sort key a
+// total order. Bitwise-identical duplicate points may collide, which is
+// harmless: identical rows commute in float summation.
+fn contact_pos_hash(p: vec3<f32>) -> u32 {
+    let q = vec3<u32>(
+        bitcast<u32>(i32(floor(p.x * 1024.0))),
+        bitcast<u32>(i32(floor(p.y * 1024.0))),
+        bitcast<u32>(i32(floor(p.z * 1024.0))),
+    );
+    var h = q.x * 0x8da6b343u;
+    h = h ^ (q.y * 0xd8163841u);
+    h = h ^ (q.z * 0xcb1ab31fu);
+    h = h * 0x9e3779b1u;
+    return h;
+}
+
 fn emit_contact_world_points(
     world_a: vec3<f32>,
     world_b: vec3<f32>,
@@ -174,7 +192,9 @@ fn emit_contact_world_points(
     contacts[slot].tangent = vec4<f32>(tangent, 0.0);
     contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
     contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
-    contacts[slot].lambda = vec4<f32>(0.0);
+    // lambda.w carries the sort disambiguator until the GPU sort consumes it;
+    // warm-start/dual rewrite lambda afterwards.
+    contacts[slot].lambda = vec4<f32>(0.0, 0.0, 0.0, bitcast<f32>(contact_pos_hash(point)));
     let k_start = params.solver.z;
     contacts[slot].penalty = vec4<f32>(k_start, k_start, k_start, 0.0);
     contacts[slot].body_a = body_a;
@@ -211,7 +231,12 @@ fn emit_plane_contact(
     contacts[slot].tangent = vec4<f32>(tangent, 0.0);
     contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
     contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
-    contacts[slot].lambda = vec4<f32>(0.0);
+    contacts[slot].lambda = vec4<f32>(
+        0.0,
+        0.0,
+        0.0,
+        bitcast<f32>(contact_pos_hash((world_a + world_b) * 0.5)),
+    );
     let k_start = params.solver.z;
     contacts[slot].penalty = vec4<f32>(k_start, k_start, k_start, 0.0);
     contacts[slot].body_a = body_dynamic;
