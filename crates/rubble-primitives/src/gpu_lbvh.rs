@@ -1305,6 +1305,7 @@ impl GpuLbvh {
         // demand fits — dropping a scheduling-dependent subset of pairs both
         // loses contacts and makes runs non-reproducible. Capacity is sticky
         // across frames so steady-state scenes re-dispatch at most once ever.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // wasm: single-shot, no retry
         let mut max_pairs =
             ((num_bodies as usize * 8).max(self.pairs_out.capacity() as usize)) as u32;
         loop {
@@ -1391,6 +1392,7 @@ impl GpuLbvh {
             ));
         }
 
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // wasm: single-shot, no retry
         let mut max_pairs =
             ((num_bodies as usize * 8).max(self.pairs_out.capacity() as usize)) as u32;
         loop {

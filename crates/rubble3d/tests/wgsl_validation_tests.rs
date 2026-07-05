@@ -76,3 +76,14 @@ fn validate_coloring_step_wgsl() {
 fn validate_coloring_apply_wgsl() {
     validate_wgsl("COLORING_APPLY_WGSL", rubble3d::gpu::COLORING_APPLY_WGSL);
 }
+
+#[test]
+fn validate_contact_stream_wgsl() {
+    validate_wgsl("SORT_KEY_EXTRACT_WGSL", rubble3d::gpu::SORT_KEY_EXTRACT_WGSL);
+    validate_wgsl("SORT_IOTA_WGSL", rubble3d::gpu::SORT_IOTA_WGSL);
+    validate_wgsl("SORT_GATHER_WGSL", rubble3d::gpu::SORT_GATHER_WGSL);
+    validate_wgsl("ADJ_CLEAR_WGSL", rubble3d::gpu::ADJ_CLEAR_WGSL);
+    validate_wgsl("ADJ_COUNT_WGSL", rubble3d::gpu::ADJ_COUNT_WGSL);
+    validate_wgsl("ADJ_RANGES_WGSL", rubble3d::gpu::ADJ_RANGES_WGSL);
+    validate_wgsl("ADJ_INCIDENCE_WGSL", rubble3d::gpu::ADJ_INCIDENCE_WGSL);
+}
