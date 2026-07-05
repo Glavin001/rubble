@@ -22,6 +22,10 @@ fn validate_wgsl(name: &str, source: &str) {
 #[test]
 fn validate_narrowphase_wgsl() {
     validate_wgsl("NARROWPHASE_WGSL", rubble3d::gpu::NARROWPHASE_WGSL);
+    validate_wgsl(
+        "NARROWPHASE_ARGS_WGSL",
+        rubble3d::gpu::NARROWPHASE_ARGS_WGSL,
+    );
 }
 
 #[test]

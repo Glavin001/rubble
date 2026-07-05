@@ -37,13 +37,16 @@ const FEATURE_PREFIX_MASK: u32 = 0xFF000000u;
 @group(0) @binding(0) var<storage, read>       prev_contacts: array<Contact>;
 @group(0) @binding(1) var<storage, read_write> new_contacts:  array<Contact>;
 @group(0) @binding(2) var<uniform>             params:        WarmstartParams;
+@group(0) @binding(3) var<storage, read>       count_buf:     array<u32>;
 
 const WORKGROUP_SIZE: u32 = 64u;
 
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    if idx >= params.new_count {
+    // params.new_count is the dispatch upper bound (live count on native,
+    // capacity on web); the live count comes from the GPU counter.
+    if idx >= min(count_buf[0], params.new_count) {
         return;
     }
 

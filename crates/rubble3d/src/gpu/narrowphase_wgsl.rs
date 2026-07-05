@@ -1568,7 +1568,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let si_a = props[a].shape_index;
     let si_b = props[b].shape_index;
 
-    let max_contacts = params.counts.x * 8u;
+    let max_contacts = min(params.counts.x * 8u, arrayLength(&contacts));
 
     // Order: ensure st_a <= st_b for consistent dispatch
     var s1 = st_a; var s2 = st_b;
@@ -1649,5 +1649,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         plane_hull_test(pd.xyz, pd.w, p1, r1, i1, b1, b2, max_contacts);
     }
     // SHAPE_PLANE vs SHAPE_PLANE: no collision
+}
+"#;
+
+/// Single-thread prep for the indirect narrowphase dispatch: clamps the
+/// GPU-written pair demand to the pair buffer capacity, emits the dispatch
+/// args, and stages the clamped count for a buffer-to-buffer copy into
+/// `SimParams.counts.z` (so the narrowphase kernel itself is unchanged and
+/// no CPU readback of the pair count is needed on any target).
+///
+/// `params.x` = pair buffer capacity.
+pub const NARROWPHASE_ARGS_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read>       pair_counter:  array<u32>;
+@group(0) @binding(1) var<storage, read_write> dispatch_args: array<u32>;
+@group(0) @binding(2) var<storage, read_write> clamped_count: array<u32>;
+@group(0) @binding(3) var<uniform>             params:        vec4<u32>;
+
+@compute @workgroup_size(1)
+fn main() {
+    let n = min(pair_counter[0], params.x);
+    dispatch_args[0] = (n + 63u) / 64u;
+    dispatch_args[1] = 1u;
+    dispatch_args[2] = 1u;
+    clamped_count[0] = n;
 }
 "#;
