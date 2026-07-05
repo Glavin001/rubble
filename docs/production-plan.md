@@ -376,3 +376,37 @@ The solve is now download-free on both targets (native and web run the identical
   re-created bind groups per frame). Deterministic-by-construction — no lagged
   color-count hints. W3's single-workgroup kernel collapses the pass count at
   ≤256-body scale; beyond that the passes amortize over real solve work.
+
+### W1 — LANDED: GPU-sized detection, pre-solve awaits eliminated on web
+- Pair count never touches the CPU on either target: a single-thread
+  `NARROWPHASE_ARGS` kernel clamps the LBVH's pair demand to capacity, writes
+  the indirect dispatch args, and stages the clamped count; a 4-byte
+  buffer-to-buffer copy patches it into `SimParams.counts.z`, so the
+  narrowphase kernel itself is untouched. One submit; native and web identical.
+- Contact counts: the per-contact kernels (sort key extract, adjacency
+  count/incidence, warm-start; prep/dual already did) clamp in-shader against
+  the GPU counter — `min(count_buf[0], params.x)` where `params.x` is the
+  dispatch bound: the exact count on native (which still reads it for the
+  same-frame overflow retry — zero behavioral change, probe fingerprint still
+  5a97ed437cee8bae), the buffer capacity on web (no pre-solve readback at
+  all). Slots past the live count write `0xFFFFFFFF` sentinel keys, which
+  stable-sort behind every real key, so capacity-sized radix passes reproduce
+  the count-sized order exactly.
+- Web frame shape now: detection (0 awaits without compounds) → sort/warmstart
+  /adjacency/coloring/solve (0 awaits) → ONE count read riding the frame-end
+  sync (overlaps GPU drain; also owns overflow healing: grow after download,
+  full coverage next frame) → contact download (W4's CAS pair map owns this)
+  → states download (W4's snapshot ring owns this). Compound scenes keep one
+  pre-solve count await for the CPU tail append.
+- Narrowphase emission clamp hardened to
+  `min(num_bodies*8, arrayLength(&contacts))` so overflow frames can never
+  write past capacity on any target (previously relied on driver robustness
+  when bodies were added beyond the initial capacity).
+- Interim cost accepted on web: idle/empty frames still record the full
+  contact pipeline at capacity size with all-sentinel data (guards no-op the
+  work). W3 owns small scenes; D7 sleeping owns settled scenes; W5's
+  single-encoder frame is where count-driven indirect args for the radix
+  passes would land if profiling ever demands them.
+- Deleted: `dispatch_narrowphase_with_source`, the dead `pair_count` GPU
+  counter (never bound by any kernel), the wasm pair-count and pre-solve
+  contact-count awaits, and the timed pair-readback bucket.

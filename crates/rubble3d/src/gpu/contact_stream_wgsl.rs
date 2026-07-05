@@ -8,11 +8,16 @@
 /// over the words (hash, feature, body_b, body_a — least significant first)
 /// reproduce the CPU total order `(body_a, body_b, feature_id, pos_hash)`.
 ///
-/// `params.x` = contact count, `params.y` = word selector:
+/// `params.x` = dispatch upper bound (live count on native, buffer capacity on
+/// web — the true count is read from `count_buf` and clamped), `params.y` =
+/// word selector:
 ///   0 = pos_hash (bitcast of `lambda.w`, written at narrowphase emit)
 ///   1 = feature_id
 ///   2 = body_b
 ///   3 = body_a
+/// Slots in `[count, params.x)` get sentinel `0xFFFFFFFF` keys: every real key
+/// is smaller (body indices < num_bodies), so after all stable LSD passes the
+/// sentinel tail stays behind the sorted live region.
 pub const SORT_KEY_EXTRACT_WGSL: &str = r#"
 struct Contact {
     point:          vec4<f32>,
@@ -28,10 +33,11 @@ struct Contact {
     flags:          u32,
 };
 
-@group(0) @binding(0) var<storage, read>       contacts: array<Contact>;
-@group(0) @binding(1) var<storage, read>       vals:     array<u32>;
-@group(0) @binding(2) var<storage, read_write> keys:     array<u32>;
-@group(0) @binding(3) var<uniform>             params:   vec4<u32>;
+@group(0) @binding(0) var<storage, read>       contacts:  array<Contact>;
+@group(0) @binding(1) var<storage, read>       vals:      array<u32>;
+@group(0) @binding(2) var<storage, read_write> keys:      array<u32>;
+@group(0) @binding(3) var<uniform>             params:    vec4<u32>;
+@group(0) @binding(4) var<storage, read>       count_buf: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -39,13 +45,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if i >= params.x {
         return;
     }
-    let c = contacts[vals[i]];
-    var key: u32;
-    switch params.y {
-        case 0u: { key = bitcast<u32>(c.lambda.w); }
-        case 1u: { key = c.feature_id; }
-        case 2u: { key = c.body_b; }
-        default: { key = c.body_a; }
+    let n = min(count_buf[0], params.x);
+    var key = 0xFFFFFFFFu;
+    if i < n {
+        let c = contacts[vals[i]];
+        switch params.y {
+            case 0u: { key = bitcast<u32>(c.lambda.w); }
+            case 1u: { key = c.feature_id; }
+            case 2u: { key = c.body_b; }
+            default: { key = c.body_a; }
+        }
     }
     keys[i] = key;
 }
@@ -116,7 +125,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 /// Count contacts per body and mark contact-touched bodies active.
-/// `params.x` = contact count.
+/// `params.x` = dispatch upper bound; the live count comes from `count_buf`.
 pub const ADJ_COUNT_WGSL: &str = r#"
 struct Contact {
     point:          vec4<f32>,
@@ -136,11 +145,12 @@ struct Contact {
 @group(0) @binding(1) var<storage, read_write> counts:   array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read_write> active_flags:   array<u32>;
 @group(0) @binding(3) var<uniform>             params:   vec4<u32>;
+@group(0) @binding(4) var<storage, read>       count_buf: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
-    if i >= params.x {
+    if i >= min(count_buf[0], params.x) {
         return;
     }
     let c = contacts[i];
@@ -172,7 +182,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// Emit the (body, contact) incidence list: two entries per contact. A stable
 /// radix sort of `keys=body` with `vals=contact_idx` then yields exactly the
 /// CPU adjacency's `body_contact_indices` (contact order within each body).
-/// `params.x` = contact count.
+/// `params.x` = dispatch upper bound; live count from `count_buf`. Slots past
+/// the live count emit sentinel `0xFFFFFFFF` keys, which sort behind every
+/// real body index and land beyond all CSR ranges.
 pub const ADJ_INCIDENCE_WGSL: &str = r#"
 struct Contact {
     point:          vec4<f32>,
@@ -192,11 +204,19 @@ struct Contact {
 @group(0) @binding(1) var<storage, read_write> keys:     array<u32>;
 @group(0) @binding(2) var<storage, read_write> vals:     array<u32>;
 @group(0) @binding(3) var<uniform>             params:   vec4<u32>;
+@group(0) @binding(4) var<storage, read>       count_buf: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if i >= params.x {
+        return;
+    }
+    if i >= min(count_buf[0], params.x) {
+        keys[2u * i] = 0xFFFFFFFFu;
+        vals[2u * i] = 0u;
+        keys[2u * i + 1u] = 0xFFFFFFFFu;
+        vals[2u * i + 1u] = 0u;
         return;
     }
     let c = contacts[i];

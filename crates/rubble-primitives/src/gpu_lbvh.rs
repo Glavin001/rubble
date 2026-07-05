@@ -1308,6 +1308,7 @@ impl GpuLbvh {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // wasm: single-shot, no retry
         let mut max_pairs =
             ((num_bodies as usize * 8).max(self.pairs_out.capacity() as usize)) as u32;
+        #[cfg_attr(target_arch = "wasm32", allow(clippy::never_loop))] // wasm: single-shot
         loop {
             self.pair_counter.reset(ctx);
             self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
@@ -1395,6 +1396,7 @@ impl GpuLbvh {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // wasm: single-shot, no retry
         let mut max_pairs =
             ((num_bodies as usize * 8).max(self.pairs_out.capacity() as usize)) as u32;
+        #[cfg_attr(target_arch = "wasm32", allow(clippy::never_loop))] // wasm: single-shot
         loop {
             self.pair_counter.reset(ctx);
             self.pairs_out.grow_if_needed(ctx, max_pairs as usize);

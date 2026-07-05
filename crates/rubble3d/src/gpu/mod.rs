@@ -38,7 +38,7 @@ pub use contact_stream_wgsl::{
     SORT_IOTA_WGSL, SORT_KEY_EXTRACT_WGSL,
 };
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
-pub use narrowphase_wgsl::NARROWPHASE_WGSL;
+pub use narrowphase_wgsl::{NARROWPHASE_ARGS_WGSL, NARROWPHASE_WGSL};
 pub use predict_wgsl::PREDICT_WGSL;
 pub use warmstart_wgsl::WARMSTART_MATCH_WGSL;
 
@@ -396,7 +396,6 @@ pub struct GpuPipeline {
     contacts: GpuBuffer<Contact3D>,
     contact_count: GpuAtomicCounter,
     pairs: GpuBuffer<GpuPair>,
-    pair_count: GpuAtomicCounter,
     spheres: GpuBuffer<SphereData>,
     boxes: GpuBuffer<BoxData>,
     capsules: GpuBuffer<CapsuleData>,
@@ -442,6 +441,13 @@ pub struct GpuPipeline {
     /// One-shot init guard for the static color-index uniforms (see
     /// `ensure_color_index_uniforms`).
     color_uniforms_written: bool,
+    /// Indirect narrowphase (W1): clamps the GPU pair demand, writes dispatch
+    /// args, and stages the clamped count for a copy into `counts.z` — no CPU
+    /// pair-count readback on any target.
+    narrowphase_args_kernel: ComputeKernel,
+    narrowphase_dispatch_args: wgpu::Buffer,
+    clamped_pair_count: wgpu::Buffer,
+    narrowphase_args_params: wgpu::Buffer,
     /// Uniform buffer for plane data in narrowphase (avoids a storage binding).
     plane_params_uniform: wgpu::Buffer,
 
@@ -651,6 +657,7 @@ impl GpuPipeline {
         let predict_kernel = ComputeKernel::from_wgsl(&ctx, PREDICT_WGSL, "main");
         let aabb_kernel = ComputeKernel::from_wgsl(&ctx, AABB_COMPUTE_WGSL, "main");
         let narrowphase_kernel = ComputeKernel::from_wgsl(&ctx, NARROWPHASE_WGSL, "main");
+        let narrowphase_args_kernel = ComputeKernel::from_wgsl(&ctx, NARROWPHASE_ARGS_WGSL, "main");
         let free_motion_kernel = ComputeKernel::from_wgsl(&ctx, FREE_MOTION_WGSL, "main");
         let primal_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_PRIMAL_WGSL, "main");
         let dual_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_DUAL_WGSL, "main");
@@ -670,7 +677,6 @@ impl GpuPipeline {
         let contacts = GpuBuffer::new(&ctx, max_contacts);
         let contact_count = GpuAtomicCounter::new(&ctx);
         let pairs = GpuBuffer::new(&ctx, max_pairs);
-        let pair_count = GpuAtomicCounter::new(&ctx);
         let spheres = GpuBuffer::new(&ctx, max_bodies.max(1));
         let boxes = GpuBuffer::new(&ctx, max_bodies.max(1));
         let capsules = GpuBuffer::new(&ctx, max_bodies.max(1));
@@ -686,6 +692,25 @@ impl GpuPipeline {
         let params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SimParams uniform"),
             size: std::mem::size_of::<SimParamsGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let narrowphase_dispatch_args = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("narrowphase dispatch args"),
+            size: 12,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let clamped_pair_count = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("clamped pair count"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let narrowphase_args_params = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("narrowphase args params"),
+            size: 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -714,6 +739,7 @@ impl GpuPipeline {
             predict_kernel,
             aabb_kernel,
             narrowphase_kernel,
+            narrowphase_args_kernel,
             free_motion_kernel,
             primal_kernel,
             dual_kernel,
@@ -732,7 +758,6 @@ impl GpuPipeline {
             contacts,
             contact_count,
             pairs,
-            pair_count,
             spheres,
             boxes,
             capsules,
@@ -771,6 +796,9 @@ impl GpuPipeline {
             params_uniform,
             solve_range_buffers: Vec::new(),
             color_uniforms_written: false,
+            narrowphase_dispatch_args,
+            clamped_pair_count,
+            narrowphase_args_params,
             plane_params_uniform,
             predict_bg_cache: CachedBindGroup::default(),
             aabb_bg_cache: CachedBindGroup::default(),
@@ -970,7 +998,6 @@ impl GpuPipeline {
     /// This avoids adding compound-specific bindings/logic to the GPU narrowphase.
     fn run_detection(&mut self, num_bodies: u32) -> Vec<Contact3D> {
         self.contact_count.reset(&self.ctx);
-        self.pair_count.reset(&self.ctx);
 
         self.dispatch_predict_and_bounds(num_bodies);
 
@@ -1041,7 +1068,6 @@ impl GpuPipeline {
                     });
                     let count = non_compound_pairs.len() as u32;
                     self.pairs.upload(&self.ctx, &non_compound_pairs);
-                    self.pair_count.write(&self.ctx, count);
                     pair_count = count;
                 }
             }
@@ -1054,12 +1080,14 @@ impl GpuPipeline {
         if requires_cpu_pair_stage {
             self.dispatch_narrowphase(num_bodies, pair_count);
         } else if pair_thread_count > 0 {
-            let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
+            // No pair-count readback: args kernel + uniform patch + indirect.
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
+            self.dispatch_narrowphase_indirect(&pair_buffer, pair_thread_count);
         }
 
-        // Buffer overflow recovery: if contact count exceeded capacity, grow and retry
+        // Buffer overflow recovery: if contact demand exceeded capacity, grow
+        // and retry (native-only same-frame heal; the emission clamp keeps the
+        // pre-retry buffer contents valid either way).
         let contact_count_val = self.contact_count.read(&self.ctx);
         let capacity = self.contacts.capacity();
         if contact_count_val > capacity {
@@ -1071,9 +1099,8 @@ impl GpuPipeline {
             if requires_cpu_pair_stage {
                 self.dispatch_narrowphase(num_bodies, pair_count);
             } else if pair_thread_count > 0 {
-                let pair_count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                self.dispatch_narrowphase_with_source(num_bodies, pair_count, &pair_buffer);
+                self.dispatch_narrowphase_indirect(&pair_buffer, pair_thread_count);
             }
         }
 
@@ -1690,7 +1717,6 @@ impl GpuPipeline {
         use std::time::Instant;
 
         self.contact_count.reset(&self.ctx);
-        self.pair_count.reset(&self.ctx);
 
         let t0 = Instant::now();
         self.dispatch_predict_and_bounds(num_bodies);
@@ -1769,7 +1795,6 @@ impl GpuPipeline {
                     });
                     let count = non_compound_pairs.len() as u32;
                     self.pairs.upload(&self.ctx, &non_compound_pairs);
-                    self.pair_count.write(&self.ctx, count);
                     pair_count = count;
                 }
                 broadphase.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
@@ -1782,23 +1807,15 @@ impl GpuPipeline {
                 &mut broadphase,
             );
         }
-        let external_pair_count = if !requires_cpu_pair_stage && pair_thread_count > 0 {
-            let t_readback = Instant::now();
-            let count = self.gpu_lbvh.read_pair_count(&self.ctx, pair_thread_count);
-            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-            count
-        } else {
-            0
-        };
         timings.set_broadphase_breakdown(broadphase);
         debug_assert!(timings.broadphase_ms <= t1.elapsed().as_secs_f32() * 1000.0 + 0.5);
 
         let t2 = Instant::now();
         if requires_cpu_pair_stage {
             self.dispatch_narrowphase(num_bodies, pair_count);
-        } else if external_pair_count > 0 {
+        } else if pair_thread_count > 0 {
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            self.dispatch_narrowphase_with_source(num_bodies, external_pair_count, &pair_buffer);
+            self.dispatch_narrowphase_indirect(&pair_buffer, pair_thread_count);
         }
 
         let contact_count_val = self.contact_count.read(&self.ctx);
@@ -1809,13 +1826,9 @@ impl GpuPipeline {
             self.contact_count.reset(&self.ctx);
             if requires_cpu_pair_stage {
                 self.dispatch_narrowphase(num_bodies, pair_count);
-            } else if external_pair_count > 0 {
+            } else if pair_thread_count > 0 {
                 let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    external_pair_count,
-                    &pair_buffer,
-                );
+                self.dispatch_narrowphase_indirect(&pair_buffer, pair_thread_count);
             }
         }
         timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
@@ -2018,7 +2031,6 @@ impl GpuPipeline {
         use rubble_gpu::web_time::Instant;
 
         self.contact_count.reset(&self.ctx);
-        self.pair_count.reset(&self.ctx);
 
         let t0 = Instant::now();
         self.dispatch_predict_and_bounds(num_bodies);
@@ -2098,7 +2110,6 @@ impl GpuPipeline {
                     });
                     let count = non_compound_pairs.len() as u32;
                     self.pairs.upload(&self.ctx, &non_compound_pairs);
-                    self.pair_count.write(&self.ctx, count);
                     pair_count = count;
                 }
                 broadphase.build_ms += t_build.elapsed().as_secs_f32() * 1000.0;
@@ -2114,45 +2125,21 @@ impl GpuPipeline {
                 )
                 .await;
         }
-        let external_pair_count = if !requires_cpu_pair_stage && pair_thread_count > 0 {
-            let t_readback = Instant::now();
-            let count = self
-                .gpu_lbvh
-                .read_pair_count_async(&self.ctx, pair_thread_count)
-                .await;
-            broadphase.readback_ms += t_readback.elapsed().as_secs_f32() * 1000.0;
-            count
-        } else {
-            0
-        };
         timings.set_broadphase_breakdown(broadphase);
         debug_assert!(timings.broadphase_ms <= t1.elapsed().as_secs_f32() * 1000.0 + 0.5);
 
         let t2 = Instant::now();
         if requires_cpu_pair_stage {
             self.dispatch_narrowphase(num_bodies, pair_count);
-        } else if external_pair_count > 0 {
+        } else if pair_thread_count > 0 {
+            // No pair-count await: args kernel + uniform patch + indirect
+            // dispatch — identical to the native path.
             let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-            self.dispatch_narrowphase_with_source(num_bodies, external_pair_count, &pair_buffer);
+            self.dispatch_narrowphase_indirect(&pair_buffer, pair_thread_count);
         }
-
-        let contact_count_val = self.contact_count.read_async(&self.ctx).await;
-        let capacity = self.contacts.capacity();
-        if contact_count_val > capacity {
-            let new_cap = (contact_count_val as usize) * 2;
-            self.contacts.grow_if_needed(&self.ctx, new_cap);
-            self.contact_count.reset(&self.ctx);
-            if requires_cpu_pair_stage {
-                self.dispatch_narrowphase(num_bodies, pair_count);
-            } else if external_pair_count > 0 {
-                let pair_buffer = self.gpu_lbvh.pair_buffer().clone();
-                self.dispatch_narrowphase_with_source(
-                    num_bodies,
-                    external_pair_count,
-                    &pair_buffer,
-                );
-            }
-        }
+        // Contact-overflow healing happens at the frame-end count read (the
+        // emission clamp keeps this frame's buffer contents valid); no
+        // blocking mid-frame readback on web.
         timings.narrowphase_ms = t2.elapsed().as_secs_f32() * 1000.0;
 
         cpu_compound_contacts
@@ -2182,21 +2169,37 @@ impl GpuPipeline {
 
         let compound_contacts = self.run_detection_async(num_bodies, timings).await;
 
+        // Contact upper bound WITHOUT a pre-solve readback (W1): every
+        // contact-sized stage clamps against the GPU counter in-shader, so the
+        // dispatch bound only needs to be >= the live count. Compound scenes
+        // still read the count (their CPU tail append must know where to
+        // write) — that's the only remaining pre-solve await, and only when
+        // compounds exist.
         let t_cf = Instant::now();
-        let gpu_count = self.contact_count.read_async(&self.ctx).await;
-        let total = self.append_compound_contacts(gpu_count, &compound_contacts);
-        if total > 0 {
-            self.contacts.set_len(total);
+        let total_upper = if compound_contacts.is_empty() {
+            self.contacts.capacity()
+        } else {
+            let gpu_count = self.contact_count.read_async(&self.ctx).await;
+            self.append_compound_contacts(gpu_count, &compound_contacts)
+        };
+        if total_upper > 0 {
+            self.contacts.set_len(total_upper);
             // Deterministic order first (the sort key rides in lambda.w and the
             // warm-start pass overwrites lambda), then GPU warm-start matching.
-            self.sort_contacts_gpu(total);
-            self.dispatch_gpu_warmstart(total);
+            self.sort_contacts_gpu(total_upper);
+            self.dispatch_gpu_warmstart(total_upper);
         }
         timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
         let t_solve = Instant::now();
-        self.run_colored_solve(num_bodies, solver_iterations, total);
+        self.run_colored_solve(num_bodies, solver_iterations, total_upper);
 
+        // The one remaining count read rides the frame-end sync point,
+        // overlapping GPU drain instead of stalling before the solve. It also
+        // owns overflow healing: grow now, complete coverage next frame.
+        let demand = self.contact_count.read_async(&self.ctx).await;
+        let capacity = self.contacts.capacity();
+        let total = demand.min(capacity);
         let final_contacts = if total > 0 {
             let fc = self.download_contacts_exact_async(total as usize).await;
             let solved_count = fc.len() as u32;
@@ -2206,6 +2209,12 @@ impl GpuPipeline {
             self.prev_contact_count = 0;
             Vec::new()
         };
+        // Grow AFTER the download so the solved data isn't copied through the
+        // reallocation; the widened buffer takes effect next frame.
+        if demand > capacity {
+            self.contacts
+                .grow_if_needed(&self.ctx, (demand as usize) * 2);
+        }
         timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
         let t_ext = Instant::now();
@@ -2724,6 +2733,10 @@ impl GpuPipeline {
                         binding: 3,
                         resource: self.contact_stream.params_bufs[slot].as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.contact_count.buffer().as_entire_binding(),
+                    },
                 ],
                 count,
                 "sort_key_extract",
@@ -2885,6 +2898,10 @@ impl GpuPipeline {
                     binding: 3,
                     resource: self.contact_stream.params_bufs[6].as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.contact_count.buffer().as_entire_binding(),
+                },
             ],
             contact_count,
             "adj_count",
@@ -2967,6 +2984,10 @@ impl GpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.contact_stream.params_bufs[6].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.contact_count.buffer().as_entire_binding(),
                 },
             ],
             contact_count,
@@ -3246,24 +3267,82 @@ impl GpuPipeline {
         self.run_pass("narrowphase", &self.narrowphase_kernel, bg, num_pairs);
     }
 
-    fn dispatch_narrowphase_with_source(
-        &mut self,
-        _num_bodies: u32,
-        num_pairs: u32,
-        pairs_buffer: &wgpu::Buffer,
-    ) {
-        if num_pairs == 0 {
-            return;
-        }
-        self.sim_params.counts[2] = num_pairs;
+    /// Narrowphase without a CPU pair-count readback (W1): a single-thread
+    /// kernel clamps the GPU-written pair demand to capacity and emits the
+    /// dispatch args; a 4-byte buffer copy patches the clamped count into
+    /// `SimParams.counts.z` (offset 40) so the narrowphase kernel is unchanged.
+    /// One encoder, one submit, identical on native and web.
+    fn dispatch_narrowphase_indirect(&mut self, pairs_buffer: &wgpu::Buffer, max_pairs: u32) {
+        let args_params: [u32; 4] = [max_pairs, 0, 0, 0];
         self.ctx.queue.write_buffer(
-            &self.params_uniform,
+            &self.narrowphase_args_params,
             0,
-            bytemuck::bytes_of(&self.sim_params),
+            bytemuck::cast_slice(&args_params),
         );
+        let args_bg = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("narrowphase_args"),
+                layout: self.narrowphase_args_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.gpu_lbvh.pair_counter_buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.narrowphase_dispatch_args.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.clamped_pair_count.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.narrowphase_args_params.as_entire_binding(),
+                    },
+                ],
+            });
+        let narrow_bg = self.create_narrowphase_bind_group(pairs_buffer, "narrowphase_indirect");
 
-        let bg = self.create_narrowphase_bind_group(pairs_buffer, "narrowphase_external");
-        self.run_pass("narrowphase", &self.narrowphase_kernel, &bg, num_pairs);
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("narrowphase_indirect"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("narrowphase_args"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.narrowphase_args_kernel.pipeline());
+            pass.set_bind_group(0, &args_bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        // Patch the clamped pair count into SimParams.counts.z. The CPU shadow
+        // of counts[2] goes stale here by design; every consumer of counts.z
+        // (narrowphase only) runs after this copy within the same submit, and
+        // the next frame's refresh rewrites the whole uniform anyway.
+        let counts_z = (std::mem::offset_of!(SimParamsGpu, counts) + 8) as u64;
+        encoder.copy_buffer_to_buffer(
+            &self.clamped_pair_count,
+            0,
+            &self.params_uniform,
+            counts_z,
+            4,
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("narrowphase"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.narrowphase_kernel.pipeline());
+            pass.set_bind_group(0, &narrow_bg, &[]);
+            pass.dispatch_workgroups_indirect(&self.narrowphase_dispatch_args, 0);
+        }
+        self.ctx.queue.submit(Some(encoder.finish()));
     }
 
     fn dispatch_extract(&mut self, num_bodies: u32) {
@@ -3626,6 +3705,10 @@ impl GpuPipeline {
                         wgpu::BindGroupEntry {
                             binding: 2,
                             resource: self.warmstart_params_uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.contact_count.buffer().as_entire_binding(),
                         },
                     ],
                 });
