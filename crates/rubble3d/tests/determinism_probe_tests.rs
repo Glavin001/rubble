@@ -13,6 +13,8 @@
 //!
 //! One residual source remains (see the ignored full-iteration probe below).
 
+mod support;
+
 use glam::Vec3;
 use rubble3d::{RigidBodyDesc, ShapeDesc, SimConfig, World};
 
@@ -112,8 +114,10 @@ fn two_worlds_pyramid_bitwise_deterministic() {
     run_lockstep(1, 360);
 }
 
-/// Pinned repro of the one KNOWN residual nondeterminism source (kept ignored
-/// until the M2 GPU-resident rewrite replaces the affected stages).
+/// Pinned repro of the one KNOWN residual nondeterminism source (registered
+/// via the known-failure gate — NOT `#[ignore]`, because the heavy CI lane
+/// runs ignored tests and this one fails by design until the M2 rewrite
+/// replaces the affected stages).
 ///
 /// Findings from the M1 bisection, all on lavapipe (software Vulkan):
 /// - `LP_NUM_THREADS=1` (single-threaded execution): bit-deterministic over
@@ -126,7 +130,12 @@ fn two_worlds_pyramid_bitwise_deterministic() {
 /// - Physically the divergence is round-off-scale per step; it only matters
 ///   for replay determinism and chaotic-scene test thresholds.
 #[test]
-#[ignore = "residual multithread scheduling nondeterminism; tracked for the M2 rewrite"]
 fn two_worlds_pyramid_full_iterations_bitwise_deterministic() {
+    if support::should_skip_known_failure(
+        "two_worlds_pyramid_full_iterations_bitwise_deterministic",
+        "residual multithread scheduling nondeterminism at >=2 solver iterations; owned by the M2 rewrite",
+    ) {
+        return;
+    }
     run_lockstep(12, 360);
 }
