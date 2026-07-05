@@ -2269,13 +2269,17 @@ impl GpuPipeline {
 
         // Contact upper bound WITHOUT a pre-solve readback (W1): every
         // contact-sized stage clamps against the GPU counter in-shader, so the
-        // dispatch bound only needs to be >= the live count. Compound scenes
-        // still read the count (their CPU tail append must know where to
-        // write) — that's the only remaining pre-solve await, and only when
-        // compounds exist.
+        // dispatch bound only needs to be >= the live count. The narrowphase
+        // emission clamp guarantees demand <= num_bodies*8, and that bound is
+        // scene-sized — the raw buffer capacity is allocation-sized
+        // (max_bodies*8 = 512k contacts at the wasm default), which made every
+        // SwiftShader CI frame sort half a million sentinel slots and hang the
+        // E2E lane. Compound scenes still read the count (their CPU tail
+        // append must know where to write) — the only remaining pre-solve
+        // await, and only when compounds exist.
         let t_cf = Instant::now();
         let total_upper = if compound_contacts.is_empty() {
-            self.contacts.capacity()
+            (num_bodies * 8).min(self.contacts.capacity())
         } else {
             let gpu_count = self.contact_count.read_async(&self.ctx).await;
             self.append_compound_contacts(gpu_count, &compound_contacts)
