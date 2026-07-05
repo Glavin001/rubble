@@ -106,6 +106,39 @@ fn exclusive_to_inclusive(
 }
 "#;
 
+/// Persistent temporaries for the record-based scan API: lets callers fold the
+/// whole scan into their own command encoder (one submit for a full pipeline
+/// stage instead of one per scan dispatch).
+pub struct ScanRecordTemps {
+    block_sums: GpuBuffer<u32>,
+    dummy_sums: GpuBuffer<u32>,
+    params_data: wgpu::Buffer,
+    params_blocks: wgpu::Buffer,
+}
+
+impl ScanRecordTemps {
+    pub fn new(ctx: &GpuContext) -> Self {
+        let mk = |label: &str| {
+            ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let mut block_sums = GpuBuffer::new(ctx, WORKGROUP_SIZE as usize);
+        block_sums.upload(ctx, &vec![0u32; WORKGROUP_SIZE as usize]);
+        let mut dummy_sums = GpuBuffer::new(ctx, WORKGROUP_SIZE as usize);
+        dummy_sums.upload(ctx, &vec![0u32; WORKGROUP_SIZE as usize]);
+        Self {
+            block_sums,
+            dummy_sums,
+            params_data: mk("scan params data"),
+            params_blocks: mk("scan params blocks"),
+        }
+    }
+}
+
 /// Internal prefix scan implementation shared by public API and other modules in this crate.
 pub(crate) struct InternalPrefixScan {
     scan_blocks_kernel: ComputeKernel,
@@ -120,6 +153,117 @@ impl InternalPrefixScan {
         Self {
             scan_blocks_kernel,
             add_block_sums_kernel,
+        }
+    }
+
+    /// Record an exclusive scan into `encoder` (no submit). Supports
+    /// `n <= 65536` (two scan levels); callers assert or fall back above that.
+    /// Uniform writes via `queue.write_buffer` are queue-ordered before the
+    /// encoder's eventual submission.
+    pub(crate) fn record_exclusive_scan(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        data: &wgpu::Buffer,
+        n: u32,
+        temps: &ScanRecordTemps,
+    ) {
+        assert!(n > 0 && n <= WORKGROUP_SIZE * WORKGROUP_SIZE);
+        let num_blocks = rubble_gpu::round_up_workgroups(n, WORKGROUP_SIZE);
+        ctx.queue.write_buffer(
+            &temps.params_data,
+            0,
+            bytemuck::cast_slice(&[n, 0u32, 0, 0]),
+        );
+        ctx.queue.write_buffer(
+            &temps.params_blocks,
+            0,
+            bytemuck::cast_slice(&[num_blocks, 0u32, 0, 0]),
+        );
+
+        let bg1 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_blocks"),
+            layout: self.scan_blocks_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: data.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: temps.block_sums.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: temps.params_data.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("scan_blocks"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.scan_blocks_kernel.pipeline());
+            pass.set_bind_group(0, &bg1, &[]);
+            pass.dispatch_workgroups(num_blocks, 1, 1);
+        }
+
+        if num_blocks > 1 {
+            let bg2 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scan_block_sums"),
+                layout: self.scan_blocks_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: temps.block_sums.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: temps.dummy_sums.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: temps.params_blocks.as_entire_binding(),
+                    },
+                ],
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("scan_block_sums"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.scan_blocks_kernel.pipeline());
+                pass.set_bind_group(0, &bg2, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            let bg3 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("add_block_sums"),
+                layout: self.add_block_sums_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: data.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: temps.block_sums.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: temps.params_data.as_entire_binding(),
+                    },
+                ],
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("add_block_sums"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.add_block_sums_kernel.pipeline());
+                pass.set_bind_group(0, &bg3, &[]);
+                pass.dispatch_workgroups(num_blocks, 1, 1);
+            }
         }
     }
 
@@ -321,6 +465,19 @@ impl GpuPrefixScan {
     /// Exclusive prefix scan in-place. After this call, `data[i] = sum(data[0..i])`.
     pub fn exclusive_scan(&self, ctx: &GpuContext, data: &mut GpuBuffer<u32>) {
         self.internal.exclusive_scan(ctx, data);
+    }
+
+    /// Record an exclusive scan into `encoder` (no submit); `n <= 65536`.
+    pub fn record_exclusive_scan(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        data: &wgpu::Buffer,
+        n: u32,
+        temps: &ScanRecordTemps,
+    ) {
+        self.internal
+            .record_exclusive_scan(ctx, encoder, data, n, temps);
     }
 
     /// Inclusive prefix scan in-place. After this call, `data[i] = sum(data[0..=i])`.

@@ -311,3 +311,17 @@ chain (the 137-body probe stepped ~2× slower) — real GPUs care far less, and 
 persistent small-scene kernel is the designed answer; large scenes shed the
 download (318 ms at 4k). The post-solve download (persistence/events/last_contacts)
 is the remaining half: CAS pair map + GPU events + async snapshot.
+
+Follow-ups landed in the same chunk after measurement:
+- The recolor-every-frame decision exposed the mark kernel's O(bodies×contacts)
+  scan (solve 266→774 ms at 4k) → mark kernel now walks the CSR adjacency built
+  immediately before coloring (O(degree); avbd-metal's shape). 774→507 ms.
+- ~160 queue submits/frame from the chained radix sorts → record-based APIs on
+  `GpuPrefixScan`/`GpuRadixSort` (persistent temps, `clear_buffer` for histograms,
+  per-pass uniforms) so the whole sort and the whole adjacency stage are ONE
+  submit each. Determinism probe stayed bit-identical and stepped 76.7→44.7 s.
+- Measured end state vs pre-M2(d) baselines (lavapipe, release): grid_4k 1.02×
+  total with contact_fetch 318→114 ms (remaining = real sort GPU time on a CPU
+  rasterizer); small scenes 1.3–2.7× from per-frame dispatch count — lavapipe
+  taxes dispatches ~30× harder than real GPUs; D8 owns that case. Baselines
+  intentionally NOT refreshed: they pin the pre-rewrite shape until M2 completes.

@@ -64,6 +64,8 @@ struct Contact {
 @group(0) @binding(2) var<storage, read>       contacts:        array<Contact>;
 @group(0) @binding(3) var<uniform>             params:          vec4<u32>; // x=num_bodies, y=num_contacts, z=current_color
 @group(0) @binding(4) var<storage, read_write> winners:         array<u32>;
+@group(0) @binding(5) var<storage, read>       body_contact_ranges:  array<vec2<u32>>;
+@group(0) @binding(6) var<storage, read>       body_contact_indices: array<u32>;
 
 const WORKGROUP_SIZE: u32 = 64u;
 const UNCOLORED: u32 = 0xFFFFFFFFu;
@@ -72,7 +74,6 @@ const UNCOLORED: u32 = 0xFFFFFFFFu;
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let body_idx = gid.x;
     let num_bodies = params.x;
-    let num_contacts = params.y;
     if body_idx >= num_bodies { return; }
 
     winners[body_idx] = 0u;
@@ -83,17 +84,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let my_priority = body_priorities[body_idx];
     var is_local_max = true;
 
-    // Check all contacts to find neighbors.
-    // This is O(contacts) per body but runs in parallel across all bodies.
-    for (var ci = 0u; ci < num_contacts; ci = ci + 1u) {
-        var neighbor = UNCOLORED;
-        if contacts[ci].body_a == body_idx {
-            neighbor = contacts[ci].body_b;
-        } else if contacts[ci].body_b == body_idx {
-            neighbor = contacts[ci].body_a;
+    // Walk only this body's contacts via the CSR adjacency (built immediately
+    // before coloring). The previous all-contacts scan was O(bodies*contacts)
+    // per round — recoloring every frame made that the dominant solve cost.
+    let range = body_contact_ranges[body_idx];
+    let range_end = range.x + range.y;
+    for (var slot = range.x; slot < range_end; slot = slot + 1u) {
+        let c = contacts[body_contact_indices[slot]];
+        var neighbor = c.body_a;
+        if neighbor == body_idx {
+            neighbor = c.body_b;
         }
-
-        if neighbor == UNCOLORED {
+        if neighbor == body_idx {
             continue;
         }
 
