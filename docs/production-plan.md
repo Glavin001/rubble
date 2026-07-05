@@ -403,10 +403,20 @@ The solve is now download-free on both targets (native and web run the identical
   write past capacity on any target (previously relied on driver robustness
   when bodies were added beyond the initial capacity).
 - Interim cost accepted on web: idle/empty frames still record the full
-  contact pipeline at capacity size with all-sentinel data (guards no-op the
-  work). W3 owns small scenes; D7 sleeping owns settled scenes; W5's
+  contact pipeline at the dispatch bound with all-sentinel data (guards no-op
+  the work). W3 owns small scenes; D7 sleeping owns settled scenes; W5's
   single-encoder frame is where count-driven indirect args for the radix
   passes would land if profiling ever demands them.
+- Incident + fix (caught by the Playwright/SwiftShader E2E lane — the M0
+  browser-lane investment paying off): the first W1 push used
+  `contacts.capacity()` as the wasm dispatch bound, but capacity is
+  ALLOCATION-sized (max_bodies*8 = 512k at the wasm default), not
+  scene-sized — every SwiftShader frame radix-sorted ~half a million
+  sentinel slots and the demo stopped advancing (9 E2E timeouts). Corrected
+  to `num_bodies*8` (always sufficient: the narrowphase emission clamp
+  bounds demand by exactly that), which is scene-sized — 1096 slots for the
+  137-body demo. Lesson recorded: "capacity" bounds must be tied to live
+  scene quantities, never to preallocation.
 - Deleted: `dispatch_narrowphase_with_source`, the dead `pair_count` GPU
   counter (never bound by any kernel), the wasm pair-count and pre-solve
   contact-count awaits, and the timed pair-readback bucket.
