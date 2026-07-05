@@ -42,7 +42,7 @@ pub use contact_stream_wgsl::{
 pub use extract_velocity_wgsl::EXTRACT_VELOCITY_WGSL;
 pub use narrowphase_wgsl::{NARROWPHASE_ARGS_WGSL, NARROWPHASE_WGSL};
 pub use predict_wgsl::PREDICT_WGSL;
-pub use warmstart_wgsl::WARMSTART_MATCH_WGSL;
+pub use warmstart_wgsl::{warmstart_map_insert_wgsl, warmstart_match_wgsl};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
@@ -148,6 +148,11 @@ pub struct WarmstartParamsGpu {
     pub new_count: u32,
     pub alpha: f32,
     pub gamma: f32,
+    /// `map_cap - 1` (capacity is a power of two) for bucket indexing (W4a-3).
+    pub cap_mask: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +162,7 @@ pub struct WarmstartParamsGpu {
 const _: () = assert!(std::mem::size_of::<SimParamsGpu>() == 80);
 const _: () = assert!(std::mem::size_of::<GpuPair>() == 8);
 const _: () = assert!(std::mem::size_of::<SolveRangeGpu>() == 8);
-const _: () = assert!(std::mem::size_of::<WarmstartParamsGpu>() == 16);
+const _: () = assert!(std::mem::size_of::<WarmstartParamsGpu>() == 32);
 
 // ---------------------------------------------------------------------------
 // AABB compute shader
@@ -384,12 +389,20 @@ pub struct GpuPipeline {
     primal_kernel: ComputeKernel,
     dual_kernel: ComputeKernel,
     extract_kernel: ComputeKernel,
+    /// Warm-start pair-map lookup (new contacts -> cached solver state) (W4a-3).
     warmstart_kernel: ComputeKernel,
+    /// Warm-start pair-map builder (prev contacts -> map) (W4a-3).
+    warmstart_insert_kernel: ComputeKernel,
     contact_prep_kernel: ComputeKernel,
     restitution_kernel: ComputeKernel,
 
     // Storage buffers
     body_states: PingPongBuffer<RigidBodyState3D>,
+    /// Async snapshot ring for post-extract body states (W4b, wasm only): the
+    /// step enqueues a non-blocking copy and returns the most recent completed
+    /// snapshot (~1 frame lag) instead of blocking on a `mapAsync` round trip.
+    #[cfg(target_arch = "wasm32")]
+    states_ring: rubble_gpu::SnapshotRing<RigidBodyState3D>,
     body_props: GpuBuffer<RigidBodyProps3D>,
     old_states: GpuBuffer<RigidBodyState3D>,
     prev_step_states: GpuBuffer<RigidBodyState3D>,
@@ -424,8 +437,19 @@ pub struct GpuPipeline {
     // Persistent contact buffers for GPU-side warmstarting
     prev_contacts: GpuBuffer<Contact3D>,
     prev_contact_count: u32,
+    /// GPU-resident previous-frame solved contact count (W5): lets the warm-start
+    /// insert kernel clamp to the true count without a CPU count readback, so the
+    /// web hot path never blocks on `contact_count`.
+    prev_contact_count_buf: GpuBuffer<u32>,
     warmstart_params_uniform: wgpu::Buffer,
     warmstart_bg_cache: CachedBindGroup<[u64; 3]>,
+    warmstart_insert_bg_cache: CachedBindGroup<[u64; 3]>,
+    /// Warm-start pair map (W4a-3): open-addressing, power-of-two capacity.
+    /// `ws_map_hash[b]` = 0 (empty) or a nonzero key hash; `ws_map_entry[b]` =
+    /// (lo, hi, feature_id, prev_contact_index).
+    ws_map_hash: GpuBuffer<u32>,
+    ws_map_entry: GpuBuffer<[u32; 4]>,
+    ws_map_cap: u32,
 
     // Compound shape data (for CPU-side pair expansion)
     compound_shapes_data: Vec<CompoundShapeGpu>,
@@ -676,11 +700,15 @@ impl GpuPipeline {
         let primal_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_PRIMAL_WGSL, "main");
         let dual_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_DUAL_WGSL, "main");
         let extract_kernel = ComputeKernel::from_wgsl(&ctx, EXTRACT_VELOCITY_WGSL, "main");
-        let warmstart_kernel = ComputeKernel::from_wgsl(&ctx, WARMSTART_MATCH_WGSL, "main");
+        let warmstart_kernel = ComputeKernel::from_wgsl(&ctx, &warmstart_match_wgsl(), "main");
+        let warmstart_insert_kernel =
+            ComputeKernel::from_wgsl(&ctx, &warmstart_map_insert_wgsl(), "main");
         let contact_prep_kernel = ComputeKernel::from_wgsl(&ctx, CONTACT_PREP_WGSL, "main");
         let restitution_kernel = ComputeKernel::from_wgsl(&ctx, RESTITUTION_WGSL, "main");
 
         let body_states = PingPongBuffer::new(&ctx, max_bodies);
+        #[cfg(target_arch = "wasm32")]
+        let states_ring = rubble_gpu::SnapshotRing::new(&ctx, max_bodies);
         let body_props = GpuBuffer::new(&ctx, max_bodies);
         let old_states = GpuBuffer::new(&ctx, max_bodies);
         let prev_step_states = GpuBuffer::new(&ctx, max_bodies);
@@ -743,12 +771,19 @@ impl GpuPipeline {
         });
 
         let prev_contacts: GpuBuffer<Contact3D> = GpuBuffer::new(&ctx, max_contacts);
+        let mut prev_contact_count_buf: GpuBuffer<u32> = GpuBuffer::new(&ctx, 1);
+        prev_contact_count_buf.set_len(1);
         let warmstart_params_uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("WarmstartParams uniform"),
             size: std::mem::size_of::<WarmstartParamsGpu>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // Warm-start pair map (W4a-3): power-of-two capacity >= 2*max_contacts
+        // keeps the open-addressing load factor <= 0.5.
+        let ws_map_cap = (2 * max_contacts.max(1)).next_power_of_two() as u32;
+        let ws_map_hash: GpuBuffer<u32> = GpuBuffer::new(&ctx, ws_map_cap as usize);
+        let ws_map_entry: GpuBuffer<[u32; 4]> = GpuBuffer::new(&ctx, ws_map_cap as usize);
 
         let gpu_lbvh = GpuLbvh::new(&ctx, max_bodies);
         let gpu_coloring = GpuColoringState::new(&ctx, max_bodies);
@@ -765,9 +800,12 @@ impl GpuPipeline {
             dual_kernel,
             extract_kernel,
             warmstart_kernel,
+            warmstart_insert_kernel,
             contact_prep_kernel,
             restitution_kernel,
             body_states,
+            #[cfg(target_arch = "wasm32")]
+            states_ring,
             body_props,
             old_states,
             prev_step_states,
@@ -793,8 +831,13 @@ impl GpuPipeline {
             contact_stream,
             prev_contacts,
             prev_contact_count: 0,
+            prev_contact_count_buf,
             warmstart_params_uniform,
             warmstart_bg_cache: CachedBindGroup::default(),
+            warmstart_insert_bg_cache: CachedBindGroup::default(),
+            ws_map_hash,
+            ws_map_entry,
+            ws_map_cap,
             compound_shapes_data: Vec::new(),
             compound_children_data: Vec::new(),
             sphere_data_cpu: Vec::new(),
@@ -1747,17 +1790,23 @@ impl GpuPipeline {
         };
 
         self.dispatch_extract(num_bodies);
-        self.dispatch_restitution(num_bodies, !final_contacts.is_empty());
+        self.dispatch_restitution(num_bodies, total > 0);
         let states = self.body_states.download(&self.ctx);
         (states, final_contacts)
     }
 
     /// Timed version of `step_with_contacts` that populates per-phase timings.
+    ///
+    /// When `want_contacts` is false, the solved contacts are NOT downloaded
+    /// (the returned contact vec is empty); warm-start persistence is still
+    /// maintained on-device via `swap_contact_buffers`. Pass true only when the
+    /// caller needs the contacts (collision events / debug queries) — W4a-2.
     pub fn step_with_contacts_timed(
         &mut self,
         num_bodies: u32,
         solver_iterations: u32,
         warm_contacts: Option<&[Contact3D]>,
+        want_contacts: bool,
         timings: &mut rubble_gpu::StepTimingsMs,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
         use std::time::Instant;
@@ -1786,21 +1835,33 @@ impl GpuPipeline {
 
         let t_solve = Instant::now();
         self.run_colored_solve(num_bodies, solver_iterations, total);
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
+        // Post-solve: swap solved contacts -> prev_contacts on-device for next
+        // frame's warm-start (always), and download them only when the caller
+        // wants them. The download is a GPU->CPU readback, not solve work, so
+        // it accounts to contact_fetch_ms (QW-0). `gpu_count` is the GPU-emitted
+        // solved count that `download_contacts()` would re-read (W4a-2).
+        let t_cf2 = Instant::now();
         let final_contacts = if total > 0 {
-            let fc = self.download_contacts();
-            let solved_count = fc.len() as u32;
-            self.swap_contact_buffers(solved_count);
-            fc
+            self.swap_contact_buffers(gpu_count);
+            if want_contacts {
+                self.download_contacts()
+            } else {
+                Vec::new()
+            }
         } else {
             self.prev_contact_count = 0;
             Vec::new()
         };
-        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
+        timings.contact_fetch_ms += t_cf2.elapsed().as_secs_f32() * 1000.0;
 
         let t_ext = Instant::now();
         self.dispatch_extract(num_bodies);
-        self.dispatch_restitution(num_bodies, !final_contacts.is_empty());
+        // Guard on the pre-solve count (`total`), not `final_contacts`: with
+        // events disabled (W4a-2) the contacts aren't downloaded, so
+        // `final_contacts` is empty even when the solve had contacts.
+        self.dispatch_restitution(num_bodies, total > 0);
         let states = self.body_states.download(&self.ctx);
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
 
@@ -2253,6 +2314,7 @@ impl GpuPipeline {
         num_bodies: u32,
         solver_iterations: u32,
         warm_contacts: Option<&[Contact3D]>,
+        want_contacts: bool,
         timings: &mut rubble_gpu::StepTimingsMs,
     ) -> (Vec<RigidBodyState3D>, Vec<Contact3D>) {
         use rubble_gpu::web_time::Instant;
@@ -2260,6 +2322,12 @@ impl GpuPipeline {
         if num_bodies == 0 {
             return (Vec::new(), Vec::new());
         }
+
+        // W5 zero-readback guard: snapshot the context's readback counter so we
+        // can assert the resident (events-off, non-compound) hot path performs
+        // no blocking GPU->CPU readback below.
+        #[cfg(debug_assertions)]
+        let readbacks_at_entry = self.ctx.readback_count();
 
         if let Some(warm) = warm_contacts {
             self.upload_warm_contacts(warm);
@@ -2295,37 +2363,78 @@ impl GpuPipeline {
 
         let t_solve = Instant::now();
         self.run_colored_solve(num_bodies, solver_iterations, total_upper);
+        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
 
-        // The one remaining count read rides the frame-end sync point,
-        // overlapping GPU drain instead of stalling before the solve. It also
-        // owns overflow healing: grow now, complete coverage next frame.
-        let demand = self.contact_count.read_async(&self.ctx).await;
-        let capacity = self.contacts.capacity();
-        let total = demand.min(capacity);
-        let final_contacts = if total > 0 {
-            let fc = self.download_contacts_exact_async(total as usize).await;
-            let solved_count = fc.len() as u32;
-            self.swap_contact_buffers(solved_count);
-            fc
+        // QW-1: submit ALL remaining GPU work (extract + restitution) BEFORE any
+        // readback await, so those passes drain concurrently with the
+        // map-backed downloads below instead of after them. Restitution's guard
+        // uses the dispatch bound (`total_upper > 0`), known without a readback
+        // — the in-shader guards no-op against the true GPU count regardless.
+        self.dispatch_extract(num_bodies);
+        self.dispatch_restitution(num_bodies, total_upper > 0);
+
+        // W5: NO count readback on the hot path. Warm-start persistence is
+        // maintained entirely on-device — the swap copies the dispatch-bound
+        // prefix of solved contacts into prev_contacts and publishes the true
+        // GPU count into prev_contact_count_buf (which the next frame's insert
+        // kernel clamps by). Buffer overflow is impossible: narrowphase emission
+        // is clamped to `arrayLength(&contacts)` (capacity), so demand <=
+        // capacity always — no grow needed. The contacts download only happens
+        // on the opt-in events/debug path (W4a-2), which may block.
+        let t_cf2 = Instant::now();
+        let final_contacts = if total_upper > 0 {
+            self.swap_contact_buffers(total_upper);
+            if want_contacts {
+                let demand = self.contact_count.read_async(&self.ctx).await;
+                let total = demand.min(self.contacts.capacity());
+                self.download_contacts_exact_async(total as usize).await
+            } else {
+                Vec::new()
+            }
         } else {
             self.prev_contact_count = 0;
             Vec::new()
         };
-        // Grow AFTER the download so the solved data isn't copied through the
-        // reallocation; the widened buffer takes effect next frame.
-        if demand > capacity {
-            self.contacts
-                .grow_if_needed(&self.ctx, (demand as usize) * 2);
-        }
-        timings.solve_ms = t_solve.elapsed().as_secs_f32() * 1000.0;
+        timings.contact_fetch_ms += t_cf2.elapsed().as_secs_f32() * 1000.0;
 
+        // W4b: enqueue a NON-BLOCKING copy of the post-extract body states into
+        // the snapshot ring and return the most recently completed snapshot
+        // (~1 frame lag). This removes the blocking `body_states.download_async`
+        // await (~4.8 ms of pure mapAsync latency on Chrome) from the hot path.
+        // The first frame or two before any copy completes return empty, which
+        // the caller treats as "state unchanged".
         let t_ext = Instant::now();
-        self.dispatch_extract(num_bodies);
-        self.dispatch_restitution(num_bodies, !final_contacts.is_empty());
-        let states = self.body_states.download_async(&self.ctx).await;
+        self.body_states.set_len(num_bodies);
+        let src = self.body_states.current().buffer();
+        self.states_ring.enqueue(&self.ctx, src, num_bodies);
+        let states = self
+            .states_ring
+            .latest()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
 
+        // W5: on the resident path (events off, no compound CPU tail) the step
+        // must not have blocked on any GPU->CPU readback.
+        #[cfg(debug_assertions)]
+        if !want_contacts && compound_contacts.is_empty() {
+            debug_assert_eq!(
+                self.ctx.readback_count(),
+                readbacks_at_entry,
+                "W5: {} unexpected hot-path GPU->CPU readback(s)",
+                self.ctx.readback_count() - readbacks_at_entry
+            );
+        }
+
         (states, final_contacts)
+    }
+
+    /// Drain the snapshot ring to the newest enqueued frame and return exact,
+    /// current body states (zero lag). For tests/queries that need synchronous
+    /// state on the wasm path; not used by the hot render loop.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn sync_states_async(&mut self) -> Vec<RigidBodyState3D> {
+        self.states_ring.sync().await.to_vec()
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3827,21 +3936,47 @@ impl GpuPipeline {
         self.prev_contacts.grow_if_needed(&self.ctx, warm.len());
         self.prev_contacts.upload(&self.ctx, warm);
         self.prev_contact_count = warm.len() as u32;
+        // Publish the GPU-resident prev count too (the insert kernel clamps by
+        // it, W5) — otherwise explicit warm contacts never enter the map.
+        self.ctx.queue.write_buffer(
+            self.prev_contact_count_buf.buffer(),
+            0,
+            bytemuck::bytes_of(&(warm.len() as u32)),
+        );
         // Invalidate cached warmstart bind group (buffer may have been regrown)
         self.warmstart_bg_cache.key = None;
     }
 
+    /// GPU warm-start (W4a-3): build an open-addressing pair map from the
+    /// previous frame's contacts, then look up each new contact in O(1)
+    /// expected — replacing the old O(new x prev) linear scan. Clear + insert +
+    /// match record into ONE submit (pass boundaries provide write->read
+    /// ordering between the three stages).
     fn dispatch_gpu_warmstart(&mut self, new_count: u32) {
         if self.prev_contact_count == 0 || new_count == 0 {
             return;
         }
 
-        // Write warmstart params
+        // Grow the map if either count would push the load factor past ~0.5.
+        let want_cap =
+            (2 * self.prev_contact_count.max(new_count).max(1)).next_power_of_two();
+        if want_cap > self.ws_map_cap {
+            self.ws_map_hash.grow_if_needed(&self.ctx, want_cap as usize);
+            self.ws_map_entry.grow_if_needed(&self.ctx, want_cap as usize);
+            self.ws_map_cap = want_cap;
+            self.warmstart_bg_cache.key = None;
+            self.warmstart_insert_bg_cache.key = None;
+        }
+
         let params = WarmstartParamsGpu {
             prev_count: self.prev_contact_count,
             new_count,
             alpha: AVBD_WARMSTART_ALPHA,
             gamma: self.warmstart_decay,
+            cap_mask: self.ws_map_cap - 1,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         self.ctx.queue.write_buffer(
             &self.warmstart_params_uniform,
@@ -3849,44 +3984,127 @@ impl GpuPipeline {
             bytemuck::bytes_of(&params),
         );
 
-        // Build or reuse bind group (keyed on buffer sizes to detect regrowth)
-        let key = [self.prev_contacts.byte_size(), self.contacts.byte_size(), 0];
-        if self.warmstart_bg_cache.key != Some(key) {
-            let layout = self.warmstart_kernel.pipeline().get_bind_group_layout(0);
-            let bg = self
-                .ctx
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("warmstart_bg"),
-                    layout: &layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: self.prev_contacts.buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: self.contacts.buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.warmstart_params_uniform.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: self.contact_count.buffer().as_entire_binding(),
-                        },
-                    ],
-                });
-            self.warmstart_bg_cache.key = Some(key);
+        // Insert bind group: prev_contacts, params, map_hash, map_entry.
+        let insert_key = [
+            self.prev_contacts.byte_size(),
+            self.ws_map_hash.byte_size(),
+            self.ws_map_entry.byte_size(),
+        ];
+        if self.warmstart_insert_bg_cache.key != Some(insert_key) {
+            let layout = self.warmstart_insert_kernel.bind_group_layout();
+            let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("warmstart_insert_bg"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.prev_contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.warmstart_params_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.ws_map_hash.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.ws_map_entry.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.prev_contact_count_buf.buffer().as_entire_binding(),
+                    },
+                ],
+            });
+            self.warmstart_insert_bg_cache.key = Some(insert_key);
+            self.warmstart_insert_bg_cache.bind_group = Some(bg);
+        }
+
+        // Match bind group: prev_contacts, new_contacts, params, count_buf,
+        // map_hash, map_entry (8-storage-buffer WebGPU limit respected — 5
+        // storage + 1 uniform).
+        let match_key = [
+            self.prev_contacts.byte_size(),
+            self.contacts.byte_size(),
+            self.ws_map_hash.byte_size(),
+        ];
+        if self.warmstart_bg_cache.key != Some(match_key) {
+            let layout = self.warmstart_kernel.bind_group_layout();
+            let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("warmstart_match_bg"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.prev_contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.contacts.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.warmstart_params_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.contact_count.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.ws_map_hash.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.ws_map_entry.buffer().as_entire_binding(),
+                    },
+                ],
+            });
+            self.warmstart_bg_cache.key = Some(match_key);
             self.warmstart_bg_cache.bind_group = Some(bg);
         }
 
-        let bg = self.warmstart_bg_cache.bind_group.as_ref().unwrap();
-        self.run_pass("warmstart_match", &self.warmstart_kernel, bg, new_count);
+        let insert_bg = self.warmstart_insert_bg_cache.bind_group.as_ref().unwrap();
+        let match_bg = self.warmstart_bg_cache.bind_group.as_ref().unwrap();
+
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("warmstart"),
+            });
+        // Clear the map to empty (0). Only the live prefix is touched by the
+        // insert/match dispatches, so clearing that prefix suffices.
+        let hash_bytes = (self.ws_map_cap as u64) * std::mem::size_of::<u32>() as u64;
+        encoder.clear_buffer(self.ws_map_hash.buffer(), 0, Some(hash_bytes));
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("warmstart_insert"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.warmstart_insert_kernel.pipeline());
+            pass.set_bind_group(0, insert_bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(self.prev_contact_count, 64), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("warmstart_match"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.warmstart_kernel.pipeline());
+            pass.set_bind_group(0, match_bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(new_count, 64), 1, 1);
+        }
+        self.ctx.queue.submit(Some(encoder.finish()));
     }
 
     /// Swap contacts → prev_contacts for next frame's warmstarting.
+    ///
+    /// `contact_count` is an exact count (native) or an upper bound (web, W5).
+    /// The copied prefix is what the next frame's warm-start insert reads,
+    /// clamped by the GPU-resident true count in `prev_contact_count_buf`.
     fn swap_contact_buffers(&mut self, contact_count: u32) {
         // Copy current contacts to prev_contacts buffer
         if contact_count > 0 {
@@ -3903,6 +4121,14 @@ impl GpuPipeline {
                 self.prev_contacts.buffer(),
                 0,
                 byte_count,
+            );
+            // Publish the GPU-side true count for the next frame's insert clamp.
+            encoder.copy_buffer_to_buffer(
+                self.contact_count.buffer(),
+                0,
+                self.prev_contact_count_buf.buffer(),
+                0,
+                4,
             );
             self.ctx.queue.submit(Some(encoder.finish()));
             self.prev_contact_count = contact_count;

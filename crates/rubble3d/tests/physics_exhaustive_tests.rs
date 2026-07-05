@@ -585,6 +585,7 @@ fn collision_events_generated_on_impact() {
         ..Default::default()
     });
 
+    world.set_events_enabled(true);
     let mut found_collision = false;
     for _ in 0..120 {
         world.step();
@@ -1191,7 +1192,7 @@ fn broadphase_finds_all_overlapping_pairs_under_motion() {
                 }
             }
         }
-        let engine = world.last_contacts().len();
+        let engine = world.fetch_last_contacts().len();
         assert!(
             engine >= strict,
             "broadphase missed contacts at step {step}: engine reported {engine} contacts \

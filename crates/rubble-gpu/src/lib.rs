@@ -4,8 +4,12 @@ mod buffer;
 mod context;
 mod kernel;
 mod multi_gpu;
+#[cfg(target_arch = "wasm32")]
+mod snapshot;
 
 pub use buffer::{GpuAtomicCounter, GpuBuffer, PingPongBuffer};
+#[cfg(target_arch = "wasm32")]
+pub use snapshot::SnapshotRing;
 #[cfg(test)]
 pub use context::test_gpu;
 pub use context::GpuContext;
