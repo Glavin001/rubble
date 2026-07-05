@@ -1556,8 +1556,7 @@ impl GpuPipeline {
 
         self.dispatch_extract(num_bodies);
         self.dispatch_restitution(num_bodies, !contacts.is_empty());
-        let states = self.body_states.download(&self.ctx);
-        states
+        self.body_states.download(&self.ctx)
     }
 
     /// Run the full GPU physics step with warm-starting support.
