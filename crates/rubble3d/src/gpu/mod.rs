@@ -48,7 +48,7 @@ use rubble_gpu::{
 use rubble_math::{
     Aabb3D, BodyHandle, CollisionEvent, Contact3D, RigidBodyProps3D, RigidBodyState3D,
 };
-use rubble_primitives::{GpuLbvh, GpuPrefixScan, GpuRadixSort};
+use rubble_primitives::{GpuLbvh, GpuPrefixScan, GpuRadixSort, RadixRecordTemps, ScanRecordTemps};
 use rubble_shapes3d::{
     BoxData, CapsuleData, CompoundChildGpu, CompoundShapeGpu, ConvexHullData, ConvexVertex3D,
     SphereData,
@@ -477,7 +477,7 @@ struct GpuColoringState {
     round_step_bgs: Vec<wgpu::BindGroup>,
     round_apply_bgs: Vec<wgpu::BindGroup>,
     /// Cache key for the per-round bind groups (buffer identities via sizes).
-    round_bg_key: Option<[u64; 3]>,
+    round_bg_key: Option<[u64; 5]>,
     frame_counter: u32,
 }
 
@@ -546,7 +546,9 @@ struct ContactStreamState {
     /// Per-stage tiny uniforms (count / word-selector), rewritten per use.
     params_bufs: Vec<wgpu::Buffer>,
     radix: GpuRadixSort,
+    radix_temps: RadixRecordTemps,
     scan: GpuPrefixScan,
+    scan_temps: ScanRecordTemps,
 }
 
 impl ContactStreamState {
@@ -600,7 +602,9 @@ impl ContactStreamState {
             incidence_vals: GpuBuffer::new(ctx, (2 * max_contacts).max(1)),
             params_bufs: (0..8).map(|_| mk_params()).collect(),
             radix: GpuRadixSort::new(ctx, (2 * max_contacts).max(1)),
+            radix_temps: RadixRecordTemps::new(ctx, (2 * max_contacts).max(1)),
             scan: GpuPrefixScan::new(ctx, max_bodies.max(1)),
+            scan_temps: ScanRecordTemps::new(ctx),
         }
     }
 }
@@ -2650,11 +2654,10 @@ impl GpuPipeline {
         self.dual_bg_cache.bind_group.as_ref().unwrap()
     }
 
-    /// One-off dispatch of a contact-stream kernel with a fresh bind group.
-    /// These stages interleave with `GpuRadixSort`/`GpuPrefixScan` calls that
-    /// submit internally, so per-stage submits are the current granularity.
-    fn run_stream_pass(
+    /// Record one contact-stream kernel dispatch into `encoder`.
+    fn record_stream_pass(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         kernel: &ComputeKernel,
         entries: &[wgpu::BindGroupEntry],
         threads: u32,
@@ -2668,26 +2671,21 @@ impl GpuPipeline {
                 layout: kernel.bind_group_layout(),
                 entries,
             });
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(label),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(kernel.pipeline());
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(round_up_workgroups(threads, WORKGROUP_SIZE), 1, 1);
-        }
-        self.ctx.queue.submit(Some(encoder.finish()));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(label),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(kernel.pipeline());
+        pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups(round_up_workgroups(threads, WORKGROUP_SIZE), 1, 1);
     }
 
     /// Deterministic GPU contact sort (M2(d)): chained stable LSD radix passes
     /// over the composite key (body_a, body_b, feature_id, pos_hash) — most
     /// significant word LAST — then a gather through the final permutation.
-    /// Reproduces the CPU total order without downloading contacts.
+    /// Reproduces the CPU total order without downloading contacts. The whole
+    /// chain (iota, 4x extract+sort, gather, copy-back) records into ONE
+    /// submit; pass boundaries provide the write→read hazard ordering.
     fn sort_contacts_gpu(&mut self, count: u32) {
         if count <= 1 {
             return;
@@ -2707,8 +2705,23 @@ impl GpuPipeline {
             0,
             bytemuck::cast_slice(&count_params),
         );
-        self.run_stream_pass(
-            // iota: vals = identity permutation
+        for (slot, word) in [(1usize, 0u32), (2, 1), (3, 2), (4, 3)] {
+            let params: [u32; 4] = [count, word, 0, 0];
+            self.ctx.queue.write_buffer(
+                &self.contact_stream.params_bufs[slot],
+                0,
+                bytemuck::cast_slice(&params),
+            );
+        }
+
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("contact_sort"),
+            });
+        self.record_stream_pass(
+            &mut encoder,
             &self.contact_stream.iota_kernel,
             &[
                 wgpu::BindGroupEntry {
@@ -2725,14 +2738,9 @@ impl GpuPipeline {
         );
 
         // Least-significant word first: pos_hash, feature, body_b, body_a.
-        for (slot, word) in [(1usize, 0u32), (2, 1), (3, 2), (4, 3)] {
-            let params: [u32; 4] = [count, word, 0, 0];
-            self.ctx.queue.write_buffer(
-                &self.contact_stream.params_bufs[slot],
-                0,
-                bytemuck::cast_slice(&params),
-            );
-            self.run_stream_pass(
+        for slot in [1usize, 2, 3, 4] {
+            self.record_stream_pass(
+                &mut encoder,
                 &self.contact_stream.key_extract_kernel,
                 &[
                     wgpu::BindGroupEntry {
@@ -2757,15 +2765,24 @@ impl GpuPipeline {
             );
             let ContactStreamState {
                 radix,
+                radix_temps,
                 sort_keys,
                 sort_vals,
                 ..
             } = &mut self.contact_stream;
-            radix.sort_key_value_in_place(&self.ctx, sort_keys, sort_vals);
+            radix.record_sort_key_value(
+                &self.ctx,
+                &mut encoder,
+                sort_keys,
+                sort_vals,
+                count,
+                radix_temps,
+            );
         }
 
         // Gather contacts through the permutation, then copy back.
-        self.run_stream_pass(
+        self.record_stream_pass(
+            &mut encoder,
             &self.contact_stream.gather_kernel,
             &[
                 wgpu::BindGroupEntry {
@@ -2793,12 +2810,6 @@ impl GpuPipeline {
             "sort_gather",
         );
         let byte_len = count as u64 * std::mem::size_of::<Contact3D>() as u64;
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("sort_copy_back"),
-            });
         encoder.copy_buffer_to_buffer(
             self.contact_stream.contacts_scratch.buffer(),
             0,
@@ -2813,6 +2824,7 @@ impl GpuPipeline {
     /// scan → ranges, plus a stable incidence sort that reproduces the CPU
     /// `body_contact_indices` (contact order within each body — the contacts
     /// are already globally sorted, so per-body order is deterministic).
+    /// The whole stage records into ONE submit.
     fn build_adjacency_gpu(&mut self, num_bodies: u32, contact_count: u32) {
         let nb = num_bodies as usize;
         self.contact_stream.adj_counts.grow_if_needed(&self.ctx, nb);
@@ -2832,7 +2844,39 @@ impl GpuPipeline {
             0,
             bytemuck::cast_slice(&body_params),
         );
-        self.run_stream_pass(
+        let contact_params: [u32; 4] = [contact_count, 0, 0, 0];
+        self.ctx.queue.write_buffer(
+            &self.contact_stream.params_bufs[6],
+            0,
+            bytemuck::cast_slice(&contact_params),
+        );
+
+        let inc = (2 * contact_count) as usize;
+        if contact_count > 0 {
+            self.contact_stream
+                .incidence_keys
+                .grow_if_needed(&self.ctx, inc);
+            self.contact_stream
+                .incidence_vals
+                .grow_if_needed(&self.ctx, inc);
+            self.contact_stream
+                .incidence_keys
+                .set_len(2 * contact_count);
+            self.contact_stream
+                .incidence_vals
+                .set_len(2 * contact_count);
+            self.body_contact_indices.grow_if_needed(&self.ctx, inc);
+            self.body_contact_indices.set_len(2 * contact_count);
+        }
+
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("adjacency"),
+            });
+        self.record_stream_pass(
+            &mut encoder,
             &self.contact_stream.adj_clear_kernel,
             &[
                 wgpu::BindGroupEntry {
@@ -2852,16 +2896,12 @@ impl GpuPipeline {
             "adj_clear",
         );
         if contact_count == 0 {
+            self.ctx.queue.submit(Some(encoder.finish()));
             return;
         }
 
-        let contact_params: [u32; 4] = [contact_count, 0, 0, 0];
-        self.ctx.queue.write_buffer(
-            &self.contact_stream.params_bufs[6],
-            0,
-            bytemuck::cast_slice(&contact_params),
-        );
-        self.run_stream_pass(
+        self.record_stream_pass(
+            &mut encoder,
             &self.contact_stream.adj_count_kernel,
             &[
                 wgpu::BindGroupEntry {
@@ -2885,30 +2925,32 @@ impl GpuPipeline {
             "adj_count",
         );
 
-        // offsets = exclusive_scan(counts)
+        // offsets = exclusive_scan(copy of counts)
+        encoder.copy_buffer_to_buffer(
+            self.contact_stream.adj_counts.buffer(),
+            0,
+            self.contact_stream.adj_offsets.buffer(),
+            0,
+            num_bodies as u64 * 4,
+        );
         {
-            let byte_len = num_bodies as u64 * 4;
-            let mut encoder =
-                self.ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("adj_counts_copy"),
-                    });
-            encoder.copy_buffer_to_buffer(
-                self.contact_stream.adj_counts.buffer(),
-                0,
-                self.contact_stream.adj_offsets.buffer(),
-                0,
-                byte_len,
-            );
-            self.ctx.queue.submit(Some(encoder.finish()));
             let ContactStreamState {
-                scan, adj_offsets, ..
-            } = &mut self.contact_stream;
-            scan.exclusive_scan(&self.ctx, adj_offsets);
+                scan,
+                scan_temps,
+                adj_offsets,
+                ..
+            } = &self.contact_stream;
+            scan.record_exclusive_scan(
+                &self.ctx,
+                &mut encoder,
+                adj_offsets.buffer(),
+                num_bodies,
+                scan_temps,
+            );
         }
 
-        self.run_stream_pass(
+        self.record_stream_pass(
+            &mut encoder,
             &self.contact_stream.adj_ranges_kernel,
             &[
                 wgpu::BindGroupEntry {
@@ -2933,23 +2975,8 @@ impl GpuPipeline {
         );
 
         // Incidence list: (body, contact) pairs, stable-sorted by body.
-        let inc = (2 * contact_count) as usize;
-        self.contact_stream
-            .incidence_keys
-            .grow_if_needed(&self.ctx, inc);
-        self.contact_stream
-            .incidence_vals
-            .grow_if_needed(&self.ctx, inc);
-        self.contact_stream
-            .incidence_keys
-            .set_len(2 * contact_count);
-        self.contact_stream
-            .incidence_vals
-            .set_len(2 * contact_count);
-        self.body_contact_indices.grow_if_needed(&self.ctx, inc);
-        self.body_contact_indices.set_len(2 * contact_count);
-
-        self.run_stream_pass(
+        self.record_stream_pass(
+            &mut encoder,
             &self.contact_stream.adj_incidence_kernel,
             &[
                 wgpu::BindGroupEntry {
@@ -2983,29 +3010,28 @@ impl GpuPipeline {
         {
             let ContactStreamState {
                 radix,
+                radix_temps,
                 incidence_keys,
                 incidence_vals,
                 ..
             } = &mut self.contact_stream;
-            radix.sort_key_value_in_place(&self.ctx, incidence_keys, incidence_vals);
-        }
-        {
-            let byte_len = (2 * contact_count) as u64 * 4;
-            let mut encoder =
-                self.ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("adj_indices_copy"),
-                    });
-            encoder.copy_buffer_to_buffer(
-                self.contact_stream.incidence_vals.buffer(),
-                0,
-                self.body_contact_indices.buffer(),
-                0,
-                byte_len,
+            radix.record_sort_key_value(
+                &self.ctx,
+                &mut encoder,
+                incidence_keys,
+                incidence_vals,
+                2 * contact_count,
+                radix_temps,
             );
-            self.ctx.queue.submit(Some(encoder.finish()));
         }
+        encoder.copy_buffer_to_buffer(
+            self.contact_stream.incidence_vals.buffer(),
+            0,
+            self.body_contact_indices.buffer(),
+            0,
+            (2 * contact_count) as u64 * 4,
+        );
+        self.ctx.queue.submit(Some(encoder.finish()));
     }
 
     fn contact_prep_bind_group(&mut self) -> &wgpu::BindGroup {
@@ -3341,6 +3367,8 @@ impl GpuPipeline {
             cs.body_colors.byte_size(),
             cs.winners.byte_size(),
             contacts_buf.size(),
+            self.body_contact_ranges.byte_size(),
+            self.body_contact_indices.byte_size(),
         ];
         if cs.round_bg_key != Some(bg_key)
             || cs.round_step_bgs.len() != COLORING_MAX_ITERATIONS as usize
@@ -3372,6 +3400,14 @@ impl GpuPipeline {
                             wgpu::BindGroupEntry {
                                 binding: 4,
                                 resource: cs.winners.buffer().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: self.body_contact_ranges.buffer().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: self.body_contact_indices.buffer().as_entire_binding(),
                             },
                         ],
                     }));

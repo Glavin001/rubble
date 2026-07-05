@@ -79,7 +79,10 @@ fn validate_coloring_apply_wgsl() {
 
 #[test]
 fn validate_contact_stream_wgsl() {
-    validate_wgsl("SORT_KEY_EXTRACT_WGSL", rubble3d::gpu::SORT_KEY_EXTRACT_WGSL);
+    validate_wgsl(
+        "SORT_KEY_EXTRACT_WGSL",
+        rubble3d::gpu::SORT_KEY_EXTRACT_WGSL,
+    );
     validate_wgsl("SORT_IOTA_WGSL", rubble3d::gpu::SORT_IOTA_WGSL);
     validate_wgsl("SORT_GATHER_WGSL", rubble3d::gpu::SORT_GATHER_WGSL);
     validate_wgsl("ADJ_CLEAR_WGSL", rubble3d::gpu::ADJ_CLEAR_WGSL);
