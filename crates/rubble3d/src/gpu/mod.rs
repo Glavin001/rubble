@@ -29,7 +29,10 @@ mod predict_wgsl;
 mod warmstart_wgsl;
 
 pub use avbd_solve_wgsl::{AVBD_DUAL_WGSL, AVBD_PRIMAL_WGSL, CONTACT_PREP_WGSL, RESTITUTION_WGSL};
-pub use coloring_wgsl::{COLORING_APPLY_WGSL, COLORING_RESET_WGSL, COLORING_STEP_WGSL};
+pub use coloring_wgsl::{
+    COLORING_APPLY_WGSL, COLORING_RESET_WGSL, COLORING_STEP_WGSL, COLOR_COUNT_WGSL,
+    COLOR_SCAN_ARGS_WGSL, COLOR_SCATTER_WGSL,
+};
 pub use contact_stream_wgsl::{
     ADJ_CLEAR_WGSL, ADJ_COUNT_WGSL, ADJ_INCIDENCE_WGSL, ADJ_RANGES_WGSL, SORT_GATHER_WGSL,
     SORT_IOTA_WGSL, SORT_KEY_EXTRACT_WGSL,
@@ -436,6 +439,9 @@ pub struct GpuPipeline {
     warmstart_decay: f32,
     params_uniform: wgpu::Buffer,
     solve_range_buffers: Vec<wgpu::Buffer>,
+    /// One-shot init guard for the static color-index uniforms (see
+    /// `ensure_color_index_uniforms`).
+    color_uniforms_written: bool,
     /// Uniform buffer for plane data in narrowphase (avoids a storage binding).
     plane_params_uniform: wgpu::Buffer,
 
@@ -465,6 +471,9 @@ struct GpuColoringState {
     reset_kernel: ComputeKernel,
     step_kernel: ComputeKernel,
     apply_kernel: ComputeKernel,
+    color_count_kernel: ComputeKernel,
+    color_scan_args_kernel: ComputeKernel,
+    color_scatter_kernel: ComputeKernel,
     body_colors: GpuBuffer<u32>,
     body_priorities: GpuBuffer<u32>,
     /// Per-round winner flags (mark phase output, apply phase input): keeps
@@ -478,6 +487,10 @@ struct GpuColoringState {
     round_apply_bgs: Vec<wgpu::BindGroup>,
     /// Cache key for the per-round bind groups (buffer identities via sizes).
     round_bg_key: Option<[u64; 5]>,
+    /// Per-color body counts (compaction pass); doubles as scatter cursors.
+    color_counts: GpuBuffer<u32>,
+    /// Per-color indirect dispatch args (ceil(count/64), 1, 1) — 32 entries.
+    dispatch_args: wgpu::Buffer,
     frame_counter: u32,
 }
 
@@ -488,6 +501,12 @@ impl GpuColoringState {
         let step_kernel = ComputeKernel::from_wgsl(ctx, coloring_wgsl::COLORING_STEP_WGSL, "main");
         let apply_kernel =
             ComputeKernel::from_wgsl(ctx, coloring_wgsl::COLORING_APPLY_WGSL, "main");
+        let color_count_kernel =
+            ComputeKernel::from_wgsl(ctx, coloring_wgsl::COLOR_COUNT_WGSL, "main");
+        let color_scan_args_kernel =
+            ComputeKernel::from_wgsl(ctx, coloring_wgsl::COLOR_SCAN_ARGS_WGSL, "main");
+        let color_scatter_kernel =
+            ComputeKernel::from_wgsl(ctx, coloring_wgsl::COLOR_SCATTER_WGSL, "main");
         let body_colors = GpuBuffer::new(ctx, max_bodies.max(1));
         let body_priorities = GpuBuffer::new(ctx, max_bodies.max(1));
         let winners = GpuBuffer::new(ctx, max_bodies.max(1));
@@ -509,10 +528,22 @@ impl GpuColoringState {
                 })
             })
             .collect();
+        let color_counts = GpuBuffer::new(ctx, COLORING_MAX_ITERATIONS as usize);
+        let dispatch_args = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("per-color dispatch args"),
+            size: COLORING_MAX_ITERATIONS as u64 * 12,
+            usage: wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             reset_kernel,
             step_kernel,
             apply_kernel,
+            color_count_kernel,
+            color_scan_args_kernel,
+            color_scatter_kernel,
             body_colors,
             body_priorities,
             winners,
@@ -521,6 +552,8 @@ impl GpuColoringState {
             round_step_bgs: Vec::new(),
             round_apply_bgs: Vec::new(),
             round_bg_key: None,
+            color_counts,
+            dispatch_args,
             frame_counter: 0,
         }
     }
@@ -737,6 +770,7 @@ impl GpuPipeline {
             warmstart_decay: 0.95,
             params_uniform,
             solve_range_buffers: Vec::new(),
+            color_uniforms_written: false,
             plane_params_uniform,
             predict_bg_cache: CachedBindGroup::default(),
             aabb_bg_cache: CachedBindGroup::default(),
@@ -1462,24 +1496,16 @@ impl GpuPipeline {
             return;
         }
 
-        // Recolor every frame on GPU (single submit since the M2 slice); the
-        // group/order build still round-trips two small per-body buffers until
-        // compacted color lists land (M2(c)).
+        // Recolor + compact on GPU every frame (one submit): body_order gains a
+        // 64-word (offset,count) header and per-color indirect dispatch args —
+        // no CPU downloads anywhere in the solve (M2(c)). Identical path for
+        // native and web.
         self.dispatch_gpu_coloring(num_bodies, contact_count);
-        self.gpu_coloring.body_colors.set_len(num_bodies);
-        let colors = self.gpu_coloring.body_colors.download(&self.ctx);
-        let active = self.active_body_flags.download(&self.ctx);
-        let (body_order, color_groups) =
-            Self::finalize_coloring(&colors, &active, COLORING_MAX_ITERATIONS);
-        if color_groups.is_empty() {
-            return;
-        }
-        self.body_order.upload(&self.ctx, &body_order);
-        self.write_solve_ranges(&color_groups);
+        self.ensure_color_index_uniforms();
         // Freeze the Taylor cache (C0 per row, penalty floor/caps, restitution
         // v_n) for the sorted contact stream before the first iteration.
         self.dispatch_contact_prep(contact_count);
-        self.sync_primal_bind_groups(color_groups.len());
+        self.sync_primal_bind_groups(COLORING_MAX_ITERATIONS as usize);
         let _ = self.dual_bind_group();
         let primal_bind_groups = &self.primal_bg_cache.bind_groups;
         let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
@@ -1492,87 +1518,23 @@ impl GpuPipeline {
         for _ in 0..solver_iterations {
             // One compute pass PER COLOR so wgpu's pass-boundary hazard
             // tracking orders color N's body writes before color N+1's partner
-            // reads (Gauss-Seidel across colors).
-            for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
-                if count == 0 {
-                    continue;
-                }
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("avbd_primal_3d"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(self.primal_kernel.pipeline());
-                pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
-                pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
-            }
+            // reads (Gauss-Seidel across colors). Empty colors dispatch zero
+            // workgroups via the GPU-written indirect args.
+            for (color, bind_group) in primal_bind_groups
+                .iter()
+                .enumerate()
+                .take(COLORING_MAX_ITERATIONS as usize)
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("avbd_dual_3d"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(self.dual_kernel.pipeline());
-                pass.set_bind_group(0, dual_bind_group, &[]);
-                pass.dispatch_workgroups(round_up_workgroups(contact_count, WORKGROUP_SIZE), 1, 1);
-            }
-        }
-        self.ctx.queue.submit(Some(encoder.finish()));
-    }
-
-    /// Body-colored AVBD solve in position space (async, for WASM/WebGPU).
-    #[cfg(target_arch = "wasm32")]
-    async fn run_colored_solve_async(
-        &mut self,
-        num_bodies: u32,
-        solver_iterations: u32,
-        contact_count: u32,
-    ) {
-        self.build_adjacency_gpu(num_bodies, contact_count);
-        self.dispatch_free_motion(num_bodies);
-        if contact_count == 0 {
-            return;
-        }
-
-        self.dispatch_gpu_coloring(num_bodies, contact_count);
-        self.gpu_coloring.body_colors.set_len(num_bodies);
-        let colors = self
-            .gpu_coloring
-            .body_colors
-            .download_async(&self.ctx)
-            .await;
-        let active = self.active_body_flags.download_async(&self.ctx).await;
-        let (body_order, color_groups) =
-            Self::finalize_coloring(&colors, &active, COLORING_MAX_ITERATIONS);
-        if color_groups.is_empty() {
-            return;
-        }
-        self.body_order.upload(&self.ctx, &body_order);
-        self.write_solve_ranges(&color_groups);
-        self.dispatch_contact_prep(contact_count);
-        self.sync_primal_bind_groups(color_groups.len());
-        let _ = self.dual_bind_group();
-        let primal_bind_groups = &self.primal_bg_cache.bind_groups;
-        let dual_bind_group = self.dual_bg_cache.bind_group.as_ref().unwrap();
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("avbd_solve_batch_3d"),
-            });
-        for _ in 0..solver_iterations {
-            // One compute pass PER COLOR so wgpu's pass-boundary hazard
-            // tracking orders color N's body writes before color N+1's partner
-            // reads (Gauss-Seidel across colors).
-            for (range_idx, &(_, count)) in color_groups.iter().enumerate() {
-                if count == 0 {
-                    continue;
-                }
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("avbd_primal_3d"),
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(self.primal_kernel.pipeline());
-                pass.set_bind_group(0, &primal_bind_groups[range_idx], &[]);
-                pass.dispatch_workgroups(round_up_workgroups(count, WORKGROUP_SIZE), 1, 1);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.dispatch_workgroups_indirect(
+                    &self.gpu_coloring.dispatch_args,
+                    (color * 12) as u64,
+                );
             }
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2233,8 +2195,7 @@ impl GpuPipeline {
         timings.contact_fetch_ms = t_cf.elapsed().as_secs_f32() * 1000.0;
 
         let t_solve = Instant::now();
-        self.run_colored_solve_async(num_bodies, solver_iterations, total)
-            .await;
+        self.run_colored_solve(num_bodies, solver_iterations, total);
 
         let final_contacts = if total > 0 {
             let fc = self.download_contacts_exact_async(total as usize).await;
@@ -2287,21 +2248,25 @@ impl GpuPipeline {
         }
     }
 
-    fn write_solve_ranges(&mut self, color_groups: &[(u32, u32)]) {
-        if color_groups.is_empty() {
+    /// The per-color primal uniforms are static color indices now: the shader
+    /// reads the actual (offset, count) from the GPU-written header in
+    /// `body_order`, so `offset` carries the color index and `count` is
+    /// unused. Written once, never per frame.
+    fn ensure_color_index_uniforms(&mut self) {
+        if self.color_uniforms_written {
             return;
         }
-
-        self.ensure_solve_range_buffers(color_groups.len());
-
-        for (idx, &(offset, count)) in color_groups.iter().enumerate() {
-            let range = SolveRangeGpu { offset, count };
-            self.ctx.queue.write_buffer(
-                &self.solve_range_buffers[idx],
-                0,
-                bytemuck::bytes_of(&range),
-            );
+        self.ensure_solve_range_buffers(COLORING_MAX_ITERATIONS as usize);
+        for (idx, buf) in self.solve_range_buffers.iter().enumerate() {
+            let range = SolveRangeGpu {
+                offset: idx as u32,
+                count: 0,
+            };
+            self.ctx
+                .queue
+                .write_buffer(buf, 0, bytemuck::bytes_of(&range));
         }
+        self.color_uniforms_written = true;
     }
 
     fn predict_bind_group(&mut self) -> &wgpu::BindGroup {
@@ -3443,6 +3408,11 @@ impl GpuPipeline {
             );
         }
 
+        // The compacted body_order carries a 64-word (offset,count) header.
+        self.body_order
+            .grow_if_needed(ctx, 64 + num_bodies as usize);
+        self.body_order.set_len(64 + num_bodies);
+
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3468,31 +3438,105 @@ impl GpuPipeline {
                 pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
             }
         }
-        ctx.queue.submit(Some(encoder.finish()));
-    }
 
-    /// Given downloaded per-body colors, build body_order and color_groups on CPU.
-    fn finalize_coloring(
-        colors: &[u32],
-        active: &[u32],
-        num_colors: u32,
-    ) -> (Vec<u32>, Vec<(u32, u32)>) {
-        let mut body_order = Vec::new();
-        let mut groups = Vec::new();
-        for color in 0..num_colors {
-            let offset = body_order.len() as u32;
-            for (body_idx, &body_color) in colors.iter().enumerate() {
-                if active.get(body_idx).copied().unwrap_or(0) != 0 && body_color == color {
-                    body_order.push(body_idx as u32);
-                }
-            }
-            let count = body_order.len() as u32 - offset;
-            if count > 0 {
-                groups.push((offset, count));
-            }
+        // Compaction (M2(c)): per-color counts -> header/offsets/indirect args
+        // -> scatter. All recorded into the same submit; replaces the CPU
+        // colors+active downloads and group build entirely.
+        encoder.clear_buffer(cs.color_counts.buffer(), 0, None);
+        let count_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("color_count"),
+            layout: cs.color_count_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cs.body_colors.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.active_body_flags.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: cs.color_counts.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: cs.params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("color_count"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(cs.color_count_kernel.pipeline());
+            pass.set_bind_group(0, &count_bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
         }
-
-        (body_order, groups)
+        let scan_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("color_scan_args"),
+            layout: cs.color_scan_args_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cs.color_counts.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.body_order.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: cs.dispatch_args.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("color_scan_args"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(cs.color_scan_args_kernel.pipeline());
+            pass.set_bind_group(0, &scan_bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        let scatter_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("color_scatter"),
+            layout: cs.color_scatter_kernel.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cs.body_colors.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.active_body_flags.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: cs.color_counts.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.body_order.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: cs.params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("color_scatter"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(cs.color_scatter_kernel.pipeline());
+            pass.set_bind_group(0, &scatter_bg, &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
+        }
+        ctx.queue.submit(Some(encoder.finish()));
     }
 
     /// Append CPU-generated compound contacts to the tail of the GPU contact
