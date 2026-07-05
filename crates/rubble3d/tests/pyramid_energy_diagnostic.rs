@@ -89,7 +89,7 @@ fn pyramid_energy_injection_diagnostic() {
         return;
     };
 
-    let steps = 360usize;
+    let steps = 600usize;
     let mut prev_features: HashMap<PairKey, HashSet<u32>> = HashMap::new();
     let mut prev_keys: HashSet<ContactKey> = HashSet::new();
     let mut frames: Vec<FrameStats> = Vec::with_capacity(steps);
