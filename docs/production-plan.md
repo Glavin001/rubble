@@ -253,3 +253,38 @@ are everything. Committed in `crates/rubble3d/tests/perf/baselines.json`.
 - Next (the real M2 body): GPU CSR adjacency + recolor-every-frame to drop the
   coloring's contact dependency, then the D3 split contact record + GPU sort to kill
   `contact_fetch` entirely.
+
+### M2(d) design notes (worked out during the M1 determinism hunt — execute next)
+The pre-solve contact download (318 ms at 4k) exists for five reasons; each has a
+GPU-side replacement, and they must land TOGETHER (standalone GPU adjacency was
+evaluated and rejected: while the download remains, CPU adjacency is µs-scale, and a
+naive atomic scatter reintroduces order nondeterminism):
+1. **Deterministic solve order** → GPU stable radix sort of contacts by a composite
+   key. Key totality without CPU byte-compares: `(body_a, body_b, feature_id,
+   pos_hash)` where `pos_hash` is a narrowphase-emitted quantized-position word.
+   Bitwise-identical duplicate contacts commute in float summation, so hash
+   collisions of identical points are harmless; distinct points get distinct hashes.
+   Three chained 32-bit stable LSD passes (fid+hash packed, then b, then a) using the
+   existing `GpuRadixSort`, then one gather kernel reorders the records.
+2. **CPU adjacency build** → CSR count→scan→scatter kernels (existing
+   `GpuPrefixScan`); scatter is deterministic *because the contact list is already
+   GPU-sorted* — scatter in contact-index order via one thread per contact writing
+   both endpoints' slots taken from per-body cursors seeded by the scan (per-body
+   in-range order = contact order, matching today's CPU build exactly).
+3. **Coloring cache key** → drop the cache; recolor every frame (now one submit).
+4. **`apply_free_motion` active flags** → set `active[a/b]` in the adjacency count
+   kernel; free-motion binds that buffer directly.
+5. **CPU compound-contact merge** → upload compound contacts into the tail of the
+   GPU contact buffer *before* the sort (small upload, no download), so they join
+   the sorted/prepped stream like GPU contacts.
+The post-solve download (for warm-start persistence, `last_contacts`, events) is the
+second half: CAS pair-map persistence + GPU events (pair-map diff) + `last_contacts`
+demoted to an explicit debug/query API. Only after both halves flip does
+`contact_fetch` reach ≈0; then delete the readback path per M2(e).
+
+Also queued for M2, discovered during the determinism hunt: the residual
+multithread-scheduling divergence at ≥2 solver iterations (see
+`determinism_probe_tests::two_worlds_pyramid_full_iterations_bitwise_deterministic`,
+ignored, with full bisection notes) — re-test once the solve loop is re-hosted on the
+rewritten dispatch path; if it persists, instrument per-pass buffer hashes to locate
+the racing stage.
