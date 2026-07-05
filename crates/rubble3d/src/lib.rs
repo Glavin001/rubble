@@ -577,6 +577,10 @@ pub struct World {
     /// narrowphase validation tests.
     last_contacts: Vec<Contact3D>,
     last_step_timings: rubble_gpu::StepTimingsMs,
+    /// True when CPU-side body/shape state changed since the last GPU upload
+    /// (add/remove/set_* mutations). Clean frames skip the full re-upload:
+    /// the GPU buffers already hold bit-identical state from the last step.
+    gpu_dirty: bool,
 }
 
 impl World {
@@ -608,6 +612,7 @@ impl World {
             collision_events: Vec::new(),
             last_contacts: Vec::new(),
             last_step_timings: rubble_gpu::StepTimingsMs::default(),
+            gpu_dirty: true,
         })
     }
 
@@ -835,6 +840,7 @@ impl World {
         self.props[idx] = prop;
         self.shapes[idx] = desc.shape.clone();
         self.alive[idx] = true;
+        self.gpu_dirty = true;
 
         handle
     }
@@ -850,6 +856,7 @@ impl World {
         self.prev_warmstart_states[idx] = bytemuck::Zeroable::zeroed();
         self.props[idx] = bytemuck::Zeroable::zeroed();
         self.allocator.dealloc(handle);
+        self.gpu_dirty = true;
         true
     }
 
@@ -888,6 +895,7 @@ impl World {
             return;
         }
         let idx = handle.index as usize;
+        self.gpu_dirty = true;
         let im = self.states[idx].inv_mass();
         self.states[idx].position_inv_mass = Vec4::new(pos.x, pos.y, pos.z, im);
         self.prev_warmstart_states[idx].position_inv_mass = self.states[idx].position_inv_mass;
@@ -899,6 +907,7 @@ impl World {
             return;
         }
         let idx = handle.index as usize;
+        self.gpu_dirty = true;
         self.states[idx].lin_vel = vel.extend(0.0);
         self.prev_warmstart_states[idx].lin_vel = self.states[idx].lin_vel;
     }
@@ -917,6 +926,7 @@ impl World {
             return;
         }
         let idx = handle.index as usize;
+        self.gpu_dirty = true;
         self.states[idx].ang_vel = omega.extend(0.0);
         self.prev_warmstart_states[idx].ang_vel = self.states[idx].ang_vel;
     }
@@ -995,26 +1005,41 @@ impl World {
             self.config.max_ang_speed,
             self.config.dynamic_friction_ratio.clamp(0.0, 1.0),
         );
-        self.gpu_pipeline.upload(
-            &compact_states,
-            &compact_prev_states,
-            &compact_props,
-            &self.spheres,
-            &self.boxes,
-            &self.capsules,
-            &self.convex_hulls,
-            &self.convex_vertices,
-            &self.planes,
-            &self.compound_shapes,
-            &self.compound_children,
-            &self.compound_shapes_cpu,
-            self.config.gravity,
-            dt,
-            self.config.solver_iterations,
-            self.config.beta,
-            self.config.k_start,
-            self.config.warmstart_decay,
-        );
+        if self.gpu_dirty {
+            self.gpu_pipeline.upload(
+                &compact_states,
+                &compact_prev_states,
+                &compact_props,
+                &self.spheres,
+                &self.boxes,
+                &self.capsules,
+                &self.convex_hulls,
+                &self.convex_vertices,
+                &self.planes,
+                &self.compound_shapes,
+                &self.compound_children,
+                &self.compound_shapes_cpu,
+                self.config.gravity,
+                dt,
+                self.config.solver_iterations,
+                self.config.beta,
+                self.config.k_start,
+                self.config.warmstart_decay,
+            );
+            self.gpu_dirty = false;
+        } else {
+            // Clean frame: GPU buffers already hold this exact state (the
+            // step outputs we downloaded last frame). Refresh parameters only.
+            self.gpu_pipeline.refresh_frame_params(
+                self.config.gravity,
+                dt,
+                self.config.solver_iterations,
+                self.config.beta,
+                self.config.k_start,
+                self.config.warmstart_decay,
+                num_bodies,
+            );
+        }
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
         let prev = self.contact_persistence.prev_contacts();
@@ -1095,26 +1120,41 @@ impl World {
             self.config.max_ang_speed,
             self.config.dynamic_friction_ratio.clamp(0.0, 1.0),
         );
-        self.gpu_pipeline.upload(
-            &compact_states,
-            &compact_prev_states,
-            &compact_props,
-            &self.spheres,
-            &self.boxes,
-            &self.capsules,
-            &self.convex_hulls,
-            &self.convex_vertices,
-            &self.planes,
-            &self.compound_shapes,
-            &self.compound_children,
-            &self.compound_shapes_cpu,
-            self.config.gravity,
-            dt,
-            self.config.solver_iterations,
-            self.config.beta,
-            self.config.k_start,
-            self.config.warmstart_decay,
-        );
+        if self.gpu_dirty {
+            self.gpu_pipeline.upload(
+                &compact_states,
+                &compact_prev_states,
+                &compact_props,
+                &self.spheres,
+                &self.boxes,
+                &self.capsules,
+                &self.convex_hulls,
+                &self.convex_vertices,
+                &self.planes,
+                &self.compound_shapes,
+                &self.compound_children,
+                &self.compound_shapes_cpu,
+                self.config.gravity,
+                dt,
+                self.config.solver_iterations,
+                self.config.beta,
+                self.config.k_start,
+                self.config.warmstart_decay,
+            );
+            self.gpu_dirty = false;
+        } else {
+            // Clean frame: GPU buffers already hold this exact state (the
+            // step outputs we downloaded last frame). Refresh parameters only.
+            self.gpu_pipeline.refresh_frame_params(
+                self.config.gravity,
+                dt,
+                self.config.solver_iterations,
+                self.config.beta,
+                self.config.k_start,
+                self.config.warmstart_decay,
+                num_bodies,
+            );
+        }
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
         let prev = self.contact_persistence.prev_contacts();
@@ -1154,6 +1194,7 @@ impl World {
             return;
         }
         let idx = handle.index as usize;
+        self.gpu_dirty = true;
         if kinematic {
             self.props[idx].flags |= rubble_math::FLAG_KINEMATIC;
             // Save original inv_mass and zero it out so GPU skips this body.

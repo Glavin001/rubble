@@ -469,6 +469,13 @@ struct GpuColoringState {
     /// color reads and writes in separate dispatches — see COLORING_STEP_WGSL.
     winners: GpuBuffer<u32>,
     params_buf: wgpu::Buffer,
+    /// Per-round uniforms (round index = current color) so the whole Luby
+    /// iteration records into one submit instead of one submit per round.
+    round_params: Vec<wgpu::Buffer>,
+    round_step_bgs: Vec<wgpu::BindGroup>,
+    round_apply_bgs: Vec<wgpu::BindGroup>,
+    /// Cache key for the per-round bind groups (buffer identities via sizes).
+    round_bg_key: Option<[u64; 3]>,
     frame_counter: u32,
 }
 
@@ -488,6 +495,18 @@ impl GpuColoringState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // One tiny uniform per Luby round so all rounds record into a single
+        // encoder/submit (the round's `current_color` differs per dispatch).
+        let round_params = (0..COLORING_MAX_ITERATIONS)
+            .map(|_| {
+                ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("coloring round params"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
         Self {
             reset_kernel,
             step_kernel,
@@ -496,6 +515,10 @@ impl GpuColoringState {
             body_priorities,
             winners,
             params_buf,
+            round_params,
+            round_step_bgs: Vec::new(),
+            round_apply_bgs: Vec::new(),
+            round_bg_key: None,
             frame_counter: 0,
         }
     }
@@ -754,6 +777,34 @@ impl GpuPipeline {
         );
     }
 
+    /// Per-frame parameter refresh for clean frames (no CPU-side body/shape
+    /// mutations since the last upload): the GPU already holds bit-identical
+    /// state — `body_states.current()` persists across steps — so only the
+    /// simulation parameters need updating. Skips the full re-upload that
+    /// used to dominate `upload_ms`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_frame_params(
+        &mut self,
+        gravity: Vec3,
+        dt: f32,
+        solver_iterations: u32,
+        beta: f32,
+        k_start: f32,
+        warmstart_decay: f32,
+        num_bodies: u32,
+    ) {
+        self.warmstart_decay = warmstart_decay;
+        self.sim_params.gravity = [gravity.x, gravity.y, gravity.z, 0.0];
+        self.sim_params.solver = [dt, beta, k_start, self.k_max_normal];
+        self.sim_params.counts[0] = num_bodies;
+        self.sim_params.counts[1] = solver_iterations;
+        self.ctx.queue.write_buffer(
+            &self.params_uniform,
+            0,
+            bytemuck::bytes_of(&self.sim_params),
+        );
+    }
+
     /// Set narrowphase/solver quality tuning knobs.
     pub fn set_quality_params(
         &mut self,
@@ -804,10 +855,7 @@ impl GpuPipeline {
         self.contact_count.reset(&self.ctx);
         self.pair_count.reset(&self.ctx);
 
-        self.dispatch_predict(num_bodies);
-        self.snapshot_prev_step_states(num_bodies);
-        self.snapshot_solve_start(num_bodies);
-        self.dispatch_aabb(num_bodies);
+        self.dispatch_predict_and_bounds(num_bodies);
 
         let has_compounds = self.body_props_cpu[..num_bodies as usize]
             .iter()
@@ -1509,7 +1557,6 @@ impl GpuPipeline {
         self.dispatch_extract(num_bodies);
         self.dispatch_restitution(num_bodies, !contacts.is_empty());
         let states = self.body_states.download(&self.ctx);
-        self.body_states.swap();
         states
     }
 
@@ -1575,7 +1622,6 @@ impl GpuPipeline {
         self.dispatch_extract(num_bodies);
         self.dispatch_restitution(num_bodies, !final_contacts.is_empty());
         let states = self.body_states.download(&self.ctx);
-        self.body_states.swap();
         (states, final_contacts)
     }
 
@@ -1637,7 +1683,6 @@ impl GpuPipeline {
         self.dispatch_extract(num_bodies);
         self.dispatch_restitution(num_bodies, !final_contacts.is_empty());
         let states = self.body_states.download(&self.ctx);
-        self.body_states.swap();
         timings.extract_ms = t_ext.elapsed().as_secs_f32() * 1000.0;
 
         (states, final_contacts)
@@ -1654,10 +1699,7 @@ impl GpuPipeline {
         self.pair_count.reset(&self.ctx);
 
         let t0 = Instant::now();
-        self.dispatch_predict(num_bodies);
-        self.snapshot_prev_step_states(num_bodies);
-        self.snapshot_solve_start(num_bodies);
-        self.dispatch_aabb(num_bodies);
+        self.dispatch_predict_and_bounds(num_bodies);
         timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
 
         let t1 = Instant::now();
@@ -1985,10 +2027,7 @@ impl GpuPipeline {
         self.pair_count.reset(&self.ctx);
 
         let t0 = Instant::now();
-        self.dispatch_predict(num_bodies);
-        self.snapshot_prev_step_states(num_bodies);
-        self.snapshot_solve_start(num_bodies);
-        self.dispatch_aabb(num_bodies);
+        self.dispatch_predict_and_bounds(num_bodies);
         timings.predict_aabb_ms = t0.elapsed().as_secs_f32() * 1000.0;
 
         let t1 = Instant::now();
@@ -2761,18 +2800,39 @@ impl GpuPipeline {
         self.extract_bg_cache.bind_group.as_ref().unwrap()
     }
 
-    fn snapshot_prev_step_states(&mut self, num_bodies: u32) {
+    /// Predict + solve-start/prev-step snapshots + AABB in ONE submit.
+    /// These four operations are strictly producer→consumer and used to cost
+    /// four queue submits per step.
+    fn dispatch_predict_and_bounds(&mut self, num_bodies: u32) {
         self.prev_step_states
             .grow_if_needed(&self.ctx, num_bodies as usize);
         self.prev_step_states.set_len(num_bodies);
+        self.solve_start_states
+            .grow_if_needed(&self.ctx, num_bodies as usize);
+        self.solve_start_states.set_len(num_bodies);
 
+        let _ = self.predict_bind_group();
+        let _ = self.aabb_bind_group();
         let byte_len = num_bodies as u64 * std::mem::size_of::<RigidBodyState3D>() as u64;
+
         let mut encoder = self
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("snapshot_prev_step_3d"),
+                label: Some("predict_and_bounds_3d"),
             });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("predict"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.predict_kernel.pipeline());
+            pass.set_bind_group(0, self.predict_bg_cache.bind_group.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
+        }
+        // prev_step_states <- old_states (pre-predict pose, for accel-weighted
+        // warm start next frame); solve_start_states <- post-predict bodies
+        // (the Taylor-cache frame).
         encoder.copy_buffer_to_buffer(
             self.old_states.buffer(),
             0,
@@ -2780,28 +2840,6 @@ impl GpuPipeline {
             0,
             byte_len,
         );
-        self.ctx.queue.submit(Some(encoder.finish()));
-    }
-
-    fn dispatch_predict(&mut self, num_bodies: u32) {
-        let _ = self.predict_bind_group();
-        let bg = self.predict_bg_cache.bind_group.as_ref().unwrap();
-        self.run_pass("predict", &self.predict_kernel, bg, num_bodies);
-    }
-
-    /// Snapshot the post-predict body states — the frame the Taylor-cached
-    /// constraint Jacobians (contact prep + primal/dual) are frozen in.
-    fn snapshot_solve_start(&mut self, num_bodies: u32) {
-        self.solve_start_states
-            .grow_if_needed(&self.ctx, num_bodies as usize);
-        self.solve_start_states.set_len(num_bodies);
-        let byte_len = num_bodies as u64 * std::mem::size_of::<RigidBodyState3D>() as u64;
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("snapshot_solve_start_3d"),
-            });
         encoder.copy_buffer_to_buffer(
             self.body_states.current().buffer(),
             0,
@@ -2809,13 +2847,16 @@ impl GpuPipeline {
             0,
             byte_len,
         );
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("aabb"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.aabb_kernel.pipeline());
+            pass.set_bind_group(0, self.aabb_bg_cache.bind_group.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
+        }
         self.ctx.queue.submit(Some(encoder.finish()));
-    }
-
-    fn dispatch_aabb(&mut self, num_bodies: u32) {
-        let _ = self.aabb_bind_group();
-        let bg = self.aabb_bg_cache.bind_group.as_ref().unwrap();
-        self.run_pass("aabb", &self.aabb_kernel, bg, num_bodies);
     }
 
     fn apply_free_motion(&mut self, num_bodies: u32, contacts: &[Contact3D]) {
@@ -2958,66 +2999,93 @@ impl GpuPipeline {
             ctx.queue.submit(Some(encoder.finish()));
         }
 
-        // Phase 2: Iterative Luby coloring (fixed iteration count, no blocking reads)
+        // Phase 2: Iterative Luby coloring — all rounds in ONE submit. Each
+        // round has its own tiny uniform (the round index doubles as the color
+        // being assigned), and the mark/apply bind groups are cached across
+        // frames keyed on the backing buffer sizes.
+        let bg_key = [
+            cs.body_colors.byte_size(),
+            cs.winners.byte_size(),
+            contacts_buf.size(),
+        ];
+        if cs.round_bg_key != Some(bg_key)
+            || cs.round_step_bgs.len() != COLORING_MAX_ITERATIONS as usize
+        {
+            cs.round_step_bgs.clear();
+            cs.round_apply_bgs.clear();
+            for round in 0..COLORING_MAX_ITERATIONS as usize {
+                cs.round_step_bgs
+                    .push(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("coloring_step"),
+                        layout: cs.step_kernel.bind_group_layout(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: cs.body_colors.buffer().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: cs.body_priorities.buffer().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: contacts_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: cs.round_params[round].as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: cs.winners.buffer().as_entire_binding(),
+                            },
+                        ],
+                    }));
+                cs.round_apply_bgs
+                    .push(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("coloring_apply"),
+                        layout: cs.apply_kernel.bind_group_layout(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: cs.body_colors.buffer().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: cs.winners.buffer().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: cs.round_params[round].as_entire_binding(),
+                            },
+                        ],
+                    }));
+            }
+            cs.round_bg_key = Some(bg_key);
+        }
+
         for current_color in 0..COLORING_MAX_ITERATIONS {
             let params: [u32; 4] = [num_bodies, contact_count, current_color, 0];
-            ctx.queue
-                .write_buffer(&cs.params_buf, 0, bytemuck::cast_slice(&params));
+            ctx.queue.write_buffer(
+                &cs.round_params[current_color as usize],
+                0,
+                bytemuck::cast_slice(&params),
+            );
+        }
 
-            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("coloring_step"),
-                layout: cs.step_kernel.bind_group_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: cs.body_colors.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: cs.body_priorities.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: contacts_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: cs.params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: cs.winners.buffer().as_entire_binding(),
-                    },
-                ],
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("coloring_rounds"),
             });
-            let apply_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("coloring_apply"),
-                layout: cs.apply_kernel.bind_group_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: cs.body_colors.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: cs.winners.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: cs.params_buf.as_entire_binding(),
-                    },
-                ],
-            });
-            let mut encoder = ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        for round in 0..COLORING_MAX_ITERATIONS as usize {
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("coloring_step"),
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(cs.step_kernel.pipeline());
-                pass.set_bind_group(0, &bg, &[]);
+                pass.set_bind_group(0, &cs.round_step_bgs[round], &[]);
                 pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
             }
             {
@@ -3026,11 +3094,11 @@ impl GpuPipeline {
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(cs.apply_kernel.pipeline());
-                pass.set_bind_group(0, &apply_bg, &[]);
+                pass.set_bind_group(0, &cs.round_apply_bgs[round], &[]);
                 pass.dispatch_workgroups(round_up_workgroups(num_bodies, WORKGROUP_SIZE), 1, 1);
             }
-            ctx.queue.submit(Some(encoder.finish()));
         }
+        ctx.queue.submit(Some(encoder.finish()));
     }
 
     /// Given downloaded per-body colors, build body_order and color_groups on CPU.
