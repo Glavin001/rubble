@@ -22,6 +22,10 @@ This document is the result of a line‑by‑line read of all three solvers. Eve
 
 ## 0. Implementation status — branch `claude/happy-fermat-8sb3le`
 
+> **Superseded for planning.** The roadmap portions of this document (§§3–7) are superseded by
+> [`production-plan.md`](./production-plan.md), the approved plan of record. This document remains
+> the underlying line-by-line evidence (citations, capability matrix, landed-status table below).
+
 **Landed & verified (P0 stability core, 2D + 3D):**
 
 | Change | 3D | 2D | Notes |
