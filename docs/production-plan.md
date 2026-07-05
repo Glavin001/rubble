@@ -234,3 +234,22 @@ Effort: **M** (deletions S; shader-tree refactor M; crate moves M). Benefit: one
   not flipped; kept registered with updated notes — the residual rides the remaining
   nondeterminism source + M3's manifold work. 2D resting-rect gate moved to M6 with the
   2D rebuild (per D14: the 2D solver is replaced by the shared core, not hand-patched).
+
+### M0 baselines (release, lavapipe) — the measured M2 thesis
+At 4k bodies / 22k contacts: 607 ms/step, of which `contact_fetch` (full contact
+download + CPU merge/sort/adjacency) = 318 ms and the solve lane (incl. coloring
+submits + CPU orchestration) = 266 ms. Upload enqueue is negligible; the round-trips
+are everything. Committed in `crates/rubble3d/tests/perf/baselines.json`.
+
+### M2 — first slice (submit granularity + clean-frame uploads)
+- Clean-frame upload skip: `World` tracks `gpu_dirty`; unmutated frames call
+  `refresh_frame_params` instead of re-uploading every body/prop/shape buffer (the
+  GPU already holds bit-identical state — enabled by removing the vestigial
+  body-state ping-pong swap, which also stabilizes bind-group caches).
+- Luby coloring: all 32 mark/apply rounds record into ONE submit (per-round uniform
+  buffers + bind groups cached across frames) — was 33 submits per recolor.
+- Step front-end: predict + prev-step snapshot + solve-start snapshot + AABB fused
+  into ONE submit — was 4.
+- Next (the real M2 body): GPU CSR adjacency + recolor-every-frame to drop the
+  coloring's contact dependency, then the D3 split contact record + GPU sort to kill
+  `contact_fetch` entirely.
