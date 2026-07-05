@@ -94,6 +94,92 @@ cargo llvm-cov --workspace --lcov --output-path target/llvm-cov/lcov.info
 
 Coverage reports measure Rust-side orchestration and control flow. They do not directly measure WGSL or SPIR-V shader execution, so keep treating the invariant tests as the source of truth for GPU correctness.
 
+### Physics validation workflow
+
+For 3D physics work, especially solve, narrowphase, warmstart, coloring, and scheduling changes, use the tests below as the core signal:
+
+1. **Fast deterministic phase checks**. These are the highest-signal inner-loop tests because they validate GPU phase outputs directly against invariants or tiny CPU references, without depending on a full scene settling correctly:
+
+```bash
+cargo test -p rubble3d --test gpu_phase_invariant_tests --test gpu_differential_tests -- --nocapture
+```
+
+What they cover:
+- solve-graph / adjacency buffer correctness
+- stale-state and zero-contact transitions
+- coloring reset determinism
+- solve-run / indirect-dispatch generation
+- warmstart exact-match, mismatch, skip-prefix, and hash-collision behavior
+
+If these fail, do **not** trust any benchmark result or end-to-end scene behavior yet.
+
+2. **Native stability guardrails**. These are the most useful non-visual stack/resting-contact checks to run before browser tests. They are slower than the phase tests, but they directly exercise the kinds of failures that show up as stack collapse, support loss, or energy injection:
+
+```bash
+cargo physics-guardrails-native
+```
+
+This runs:
+- `box_stack_three_high_guardrail`
+- `demo_stack_settles_without_support_loss_or_ejection_guardrail`
+- `demo_stack_ratio_settles_without_vertical_oscillation_guardrail`
+- `resting_contact_energy_does_not_grow_guardrail`
+- `long_horizon_stack_velocity_stays_bounded_guardrail`
+
+Use this when you want confidence that stacked scenes still settle, stay supported, and do not quietly accumulate energy. These tests are the best native answer to "will stacks still stand up without me visually inspecting them?"
+
+3. **Core web guardrails**. These are the minimum browser checks for 3D correctness regressions:
+
+```bash
+npm --prefix web run test:physics-guardrails
+```
+
+This runs:
+- `ground-contact.spec.ts`
+- `stability-1step.spec.ts`
+- `stability-stack.spec.ts`
+- `stability-pyramid.spec.ts`
+
+Use this after any 3D hot-path change that could affect contact generation, stability, or solver behavior. This is the browser-visible backstop for failures that only show up in full scenes.
+
+4. **Targeted web smoke**. When you only need a quick browser sanity check:
+
+```bash
+npm --prefix web test -- tests/ground-contact.spec.ts --reporter=list
+```
+
+This is useful for fast validation that the WASM/WebGPU path still initializes, bodies still move, and contact still occurs.
+
+### What to run when
+
+For most performance iterations, use this order:
+
+1. `cargo test -p rubble3d --test gpu_phase_invariant_tests --test gpu_differential_tests -- --nocapture`
+2. `cargo physics-guardrails-native`
+3. `npm --prefix web run test:physics-guardrails`
+4. `npm --prefix web run bench:stress`
+
+Interpretation:
+- The **Rust phase tests** are the most trustworthy correctness signal for GPU pipeline changes.
+- The **native stability guardrails** are the best automated answer for stack collapse, support loss, and slow energy injection without opening the viewer.
+- The **web guardrails** catch browser-visible regressions that tiny synthetic tests and native runs cannot.
+- `bench:stress` is for performance measurement only; it is not a correctness oracle.
+
+### Most critical tests
+
+If you only run a small subset and still want good confidence:
+
+- `gpu_phase_invariant_tests`
+  Best for catching stale buffers, bad ranges, bad indices, and invalid graph/schedule state.
+- `gpu_differential_tests`
+  Best for proving phase logic still matches the intended deterministic algorithm on tiny cases.
+- `physics-guardrails-native`
+  Best native coverage for the failures that usually require visual inspection: stack collapse, support loss, persistent oscillation, and energy growth in resting scenes.
+- `test:physics-guardrails`
+  Best browser-level confidence that the 3D runtime still behaves acceptably on real scenes.
+- `bench:stress`
+  Best single-number view of current web performance, but only meaningful after the correctness checks above are green.
+
 ## Format and Clippy
 
 1. Add components once:

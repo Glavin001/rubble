@@ -614,6 +614,72 @@ impl PhysicsWorld3D {
         self.handles.len() as u32
     }
 
+    pub fn debug_contact_count(&self) -> u32 {
+        self.world.debug_contact_count()
+    }
+
+    pub fn debug_contact_pairs(&mut self) -> Vec<u32> {
+        let pairs = self.world.debug_contact_pairs();
+        let mut flat = Vec::with_capacity(pairs.len() * 2);
+        for (a, b) in pairs {
+            flat.push(a);
+            flat.push(b);
+        }
+        flat
+    }
+
+    pub fn debug_active_body_flags(&mut self) -> Vec<u32> {
+        self.world.debug_active_body_flags()
+    }
+
+    pub fn debug_body_contact_ranges(&mut self) -> Vec<u32> {
+        let ranges = self.world.debug_body_contact_ranges();
+        let mut flat = Vec::with_capacity(ranges.len() * 2);
+        for [offset, count] in ranges {
+            flat.push(offset);
+            flat.push(count);
+        }
+        flat
+    }
+
+    pub fn debug_body_contact_indices(&mut self) -> Vec<u32> {
+        self.world.debug_body_contact_indices()
+    }
+
+    pub fn debug_body_contact_neighbors(&mut self) -> Vec<u32> {
+        self.world.debug_body_contact_neighbors()
+    }
+
+    pub fn debug_body_colors(&mut self) -> Vec<u32> {
+        self.world.debug_body_colors()
+    }
+
+    pub fn debug_body_order(&mut self) -> Vec<u32> {
+        self.world.debug_body_order()
+    }
+
+    pub fn debug_solve_runs(&mut self) -> Vec<u32> {
+        let runs = self.world.debug_solve_runs();
+        let mut flat = Vec::with_capacity(runs.len() * 2);
+        for run in runs {
+            flat.push(run.offset);
+            flat.push(run.count);
+        }
+        flat
+    }
+
+    pub fn debug_dispatch_args(&mut self) -> Vec<u32> {
+        let args = self.world.debug_dispatch_args();
+        let mut flat = Vec::with_capacity(args.len() * 4);
+        for arg in args {
+            flat.push(arg.x);
+            flat.push(arg.y);
+            flat.push(arg.z);
+            flat.push(arg._pad);
+        }
+        flat
+    }
+
     /// Copy body transforms into a caller-provided typed array.
     pub fn copy_transforms_into(&mut self, out: &Float32Array) -> Result<(), JsError> {
         self.transforms_cache.resize(self.handles.len() * 7, 0.0);

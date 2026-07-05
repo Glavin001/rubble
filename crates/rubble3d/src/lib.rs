@@ -730,6 +730,72 @@ impl World {
         self.gpu_pipeline.download_render_instance_counts()
     }
 
+    pub fn debug_contact_count(&self) -> u32 {
+        self.gpu_pipeline.read_contact_count()
+    }
+
+    pub fn debug_contact_pairs(&mut self) -> Vec<(u32, u32)> {
+        self.gpu_pipeline.download_contact_pairs()
+    }
+
+    pub fn debug_active_body_flags(&mut self) -> Vec<u32> {
+        self.gpu_pipeline
+            .download_active_body_flags(self.gpu_compact_indices.len() as u32)
+    }
+
+    pub fn debug_body_contact_ranges(&mut self) -> Vec<[u32; 2]> {
+        self.gpu_pipeline
+            .download_body_contact_ranges(self.gpu_compact_indices.len() as u32)
+    }
+
+    pub fn debug_body_contact_indices(&mut self) -> Vec<u32> {
+        self.gpu_pipeline
+            .download_body_contact_indices(self.debug_contact_count())
+    }
+
+    pub fn debug_body_contact_neighbors(&mut self) -> Vec<u32> {
+        self.gpu_pipeline
+            .download_body_contact_neighbors(self.debug_contact_count())
+    }
+
+    pub fn debug_body_colors(&mut self) -> Vec<u32> {
+        let num_bodies = self.gpu_compact_indices.len() as u32;
+        if self.debug_contact_count() == 0 {
+            return vec![gpu::INACTIVE_BODY_COLOR; num_bodies as usize];
+        }
+        let sorted_colors = self.gpu_pipeline.download_body_colors(num_bodies);
+        let body_order = self.gpu_pipeline.download_body_order(num_bodies);
+        let mut per_body = vec![gpu::INACTIVE_BODY_COLOR; num_bodies as usize];
+        for (slot, body) in body_order.into_iter().enumerate() {
+            if let Some(color) = sorted_colors.get(slot).copied() {
+                per_body[body as usize] = color;
+            }
+        }
+        per_body
+    }
+
+    pub fn debug_body_order(&mut self) -> Vec<u32> {
+        let num_bodies = self.gpu_compact_indices.len() as u32;
+        if self.debug_contact_count() == 0 {
+            return (0..num_bodies).collect();
+        }
+        self.gpu_pipeline.download_body_order(num_bodies)
+    }
+
+    pub fn debug_solve_runs(&mut self) -> Vec<gpu::SolveRangeGpu> {
+        if self.debug_contact_count() == 0 {
+            return Vec::new();
+        }
+        self.gpu_pipeline.download_solve_runs()
+    }
+
+    pub fn debug_dispatch_args(&mut self) -> Vec<gpu::ComputeDispatchIndirectArgsGpu> {
+        if self.debug_contact_count() == 0 {
+            return Vec::new();
+        }
+        self.gpu_pipeline.download_dispatch_args()
+    }
+
     /// Add a rigid body to the world. Returns a stable handle.
     pub fn add_body(&mut self, desc: &RigidBodyDesc) -> BodyHandle {
         self.sync_body_states_from_gpu();

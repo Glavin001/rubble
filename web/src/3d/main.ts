@@ -836,6 +836,25 @@ async function main() {
 
   // Expose test hooks
   let loopRunning = true;
+  window.__rubble_world = world;
+  const debugHooks = {
+    debugContactCount: () => world.debug_contact_count(),
+    debugContactPairs: () => Array.from(world.debug_contact_pairs()),
+    debugActiveBodyFlags: () => Array.from(world.debug_active_body_flags()),
+    debugBodyContactRanges: () => Array.from(world.debug_body_contact_ranges()),
+    debugBodyContactIndices: () => Array.from(world.debug_body_contact_indices()),
+    debugBodyContactNeighbors: () =>
+      Array.from(world.debug_body_contact_neighbors()),
+    debugBodyColors: () => Array.from(world.debug_body_colors()),
+    debugBodyOrder: () => Array.from(world.debug_body_order()),
+    debugSolveRuns: () => Array.from(world.debug_solve_runs()),
+    debugDispatchArgs: () => Array.from(world.debug_dispatch_args()),
+  };
+  const attachDebugHooks = () => {
+    window.__rubble_debug = debugHooks;
+    if (!window.__rubble_test) return;
+    Object.assign(window.__rubble_test, debugHooks);
+  };
   window.__rubble_test = {
     ready: true,
     stepCount: 0,
@@ -880,6 +899,7 @@ async function main() {
       await loop_();
     },
   };
+  attachDebugHooks();
 
   document.getElementById("loading")!.style.display = "none";
 
@@ -903,6 +923,8 @@ async function main() {
 }
 
 main().catch((e) => {
+  window.__rubble_debug = undefined;
+  window.__rubble_world = undefined;
   window.__rubble_test = {
     ready: false,
     stepCount: 0,
