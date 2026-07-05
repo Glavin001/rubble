@@ -410,3 +410,35 @@ The solve is now download-free on both targets (native and web run the identical
 - Deleted: `dispatch_narrowphase_with_source`, the dead `pair_count` GPU
   counter (never bound by any kernel), the wasm pair-count and pre-solve
   contact-count awaits, and the timed pair-readback bucket.
+
+### W3 / D8 — LANDED: single-workgroup persistent solve for ≤256-body scenes
+The whole `iterations × (32 colors + dual)` loop — previously ~400 compute
+passes per frame at demo scale — is ONE dispatch of one 256-thread workgroup:
+- Source is composed, not duplicated: the primal's main body became
+  `solve_body(body_idx)` (its entry point is now a thin range-check wrapper),
+  the dual's update became `dual_update_contact(ci)` behind extraction
+  markers, and `avbd_persistent_wgsl()` assembles primal-shared source + the
+  marker-extracted dual function + the persistent entry point at pipeline
+  creation. The validation test compiles the composition, so the persistent
+  path can never silently drift from the per-color kernels.
+- In-kernel Gauss-Seidel: `workgroupBarrier()+storageBarrier()` between
+  colors and around the strided dual sweep reproduce exactly the ordering the
+  pass boundaries provided. Proof: the 137-body pyramid determinism probe —
+  now routed through the persistent kernel — reproduces the fingerprint
+  bit-for-bit (5a97ed437cee8bae).
+- The contact count reaches the kernel via `SimParams.counts.w`, patched
+  GPU-side by the same args-kernel + 4-byte-copy trick as the pair count (the
+  primal contacts binding widened to read_write for the embedded dual; the
+  scratch args/staging buffers are reused).
+- Gate: total bodies ≤ 256 (WebGPU's guaranteed max workgroup size) on BOTH
+  targets — identical path, no active-count readback needed. Above it, the
+  W2 indirect per-color loop runs unchanged.
+- Solve submits at demo scale: 4 (adjacency, coloring+compaction, prep,
+  args+patch+persistent) with ~7 passes total, vs ~400 passes before — this
+  is the projected 24.6 ms → <1 ms web-orchestration collapse; awaiting
+  user-side browser measurement to confirm.
+- Bonus bisection datum: the pinned ≥2-iteration lavapipe nondeterminism
+  reproduces even with the whole solve in one dispatch (and stays clean under
+  LP_NUM_THREADS=1) — the engine's command stream and summation orders are
+  fully pinned; the variance is llvmpipe threading inside a dispatch. Known
+  failure notes updated; real-GPU replay determinism unaffected by design.

@@ -51,6 +51,17 @@ fn validate_avbd_dual_wgsl() {
     validate_wgsl("AVBD_DUAL_WGSL", rubble3d::gpu::AVBD_DUAL_WGSL);
 }
 
+/// The persistent solve kernel is composed at runtime from the primal's
+/// shared source and the dual's marked update function — validating the
+/// composition also proves the extraction markers are intact.
+#[test]
+fn validate_avbd_persistent_wgsl() {
+    validate_wgsl(
+        "avbd_persistent_wgsl()",
+        &rubble3d::gpu::avbd_persistent_wgsl(),
+    );
+}
+
 #[test]
 fn validate_warmstart_match_wgsl() {
     validate_wgsl("WARMSTART_MATCH_WGSL", rubble3d::gpu::WARMSTART_MATCH_WGSL);

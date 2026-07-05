@@ -28,7 +28,9 @@ mod narrowphase_wgsl;
 mod predict_wgsl;
 mod warmstart_wgsl;
 
-pub use avbd_solve_wgsl::{AVBD_DUAL_WGSL, AVBD_PRIMAL_WGSL, CONTACT_PREP_WGSL, RESTITUTION_WGSL};
+pub use avbd_solve_wgsl::{
+    avbd_persistent_wgsl, AVBD_DUAL_WGSL, AVBD_PRIMAL_WGSL, CONTACT_PREP_WGSL, RESTITUTION_WGSL,
+};
 pub use coloring_wgsl::{
     COLORING_APPLY_WGSL, COLORING_RESET_WGSL, COLORING_STEP_WGSL, COLOR_COUNT_WGSL,
     COLOR_SCAN_ARGS_WGSL, COLOR_SCATTER_WGSL,
@@ -58,6 +60,9 @@ use rubble_shapes3d::{
 };
 use std::collections::HashSet;
 const WORKGROUP_SIZE: u32 = 64;
+/// Scenes at or below this body count solve in ONE persistent-kernel dispatch
+/// (D8/W3); 256 = WebGPU's guaranteed max workgroup size.
+const PERSISTENT_MAX_BODIES: u32 = 256;
 const AVBD_WARMSTART_ALPHA: f32 = 0.99;
 /// Number of Luby coloring iterations. O(log n) rounds suffices for bounded-degree
 /// graphs. 32 handles any practical contact graph with room to spare.
@@ -90,7 +95,9 @@ struct CachedBindGroupVec<K> {
 pub struct SimParamsGpu {
     pub gravity: [f32; 4],
     pub solver: [f32; 4], // (dt, beta, k_start, k_max_normal)
-    pub counts: [u32; 4], // (num_bodies, solver_iterations, pair_count, flags)
+    pub counts: [u32; 4], // (num_bodies, solver_iterations, pair_count*, contact_count*)
+    // *counts.z and counts.w are patched ON GPU each frame (buffer copies from
+    //  the clamped pair/contact counters) — the CPU shadow values are stale.
     /// Narrowphase/solver quality knobs:
     /// x = contact_offset (prediction distance for speculative contacts)
     /// y = restitution_threshold (velocity below which restitution = 0)
@@ -448,6 +455,11 @@ pub struct GpuPipeline {
     narrowphase_dispatch_args: wgpu::Buffer,
     clamped_pair_count: wgpu::Buffer,
     narrowphase_args_params: wgpu::Buffer,
+    /// Single-workgroup persistent solve (D8/W3): the whole iterate loop in
+    /// one dispatch for scenes with <= 256 bodies.
+    persistent_kernel: ComputeKernel,
+    /// Uniform for the contact-count patch (args kernel input: x = capacity).
+    contact_args_params: wgpu::Buffer,
     /// Uniform buffer for plane data in narrowphase (avoids a storage binding).
     plane_params_uniform: wgpu::Buffer,
 
@@ -457,6 +469,7 @@ pub struct GpuPipeline {
     narrowphase_bg_cache: CachedBindGroup<[u64; 9]>,
     free_motion_bg_cache: CachedBindGroup<[u64; 4]>,
     primal_bg_cache: CachedBindGroupVec<[u64; 8]>,
+    persistent_bg_cache: CachedBindGroup<[u64; 9]>,
     dual_bg_cache: CachedBindGroup<[u64; 3]>,
     extract_bg_cache: CachedBindGroup<[u64; 3]>,
     contact_prep_bg_cache: CachedBindGroup<[u64; 2]>,
@@ -658,6 +671,7 @@ impl GpuPipeline {
         let aabb_kernel = ComputeKernel::from_wgsl(&ctx, AABB_COMPUTE_WGSL, "main");
         let narrowphase_kernel = ComputeKernel::from_wgsl(&ctx, NARROWPHASE_WGSL, "main");
         let narrowphase_args_kernel = ComputeKernel::from_wgsl(&ctx, NARROWPHASE_ARGS_WGSL, "main");
+        let persistent_kernel = ComputeKernel::from_wgsl(&ctx, &avbd_persistent_wgsl(), "main");
         let free_motion_kernel = ComputeKernel::from_wgsl(&ctx, FREE_MOTION_WGSL, "main");
         let primal_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_PRIMAL_WGSL, "main");
         let dual_kernel = ComputeKernel::from_wgsl(&ctx, AVBD_DUAL_WGSL, "main");
@@ -710,6 +724,12 @@ impl GpuPipeline {
         });
         let narrowphase_args_params = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("narrowphase args params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let contact_args_params = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("contact args params"),
             size: 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -799,12 +819,15 @@ impl GpuPipeline {
             narrowphase_dispatch_args,
             clamped_pair_count,
             narrowphase_args_params,
+            persistent_kernel,
+            contact_args_params,
             plane_params_uniform,
             predict_bg_cache: CachedBindGroup::default(),
             aabb_bg_cache: CachedBindGroup::default(),
             narrowphase_bg_cache: CachedBindGroup::default(),
             free_motion_bg_cache: CachedBindGroup::default(),
             primal_bg_cache: CachedBindGroupVec::default(),
+            persistent_bg_cache: CachedBindGroup::default(),
             dual_bg_cache: CachedBindGroup::default(),
             extract_bg_cache: CachedBindGroup::default(),
             contact_prep_bg_cache: CachedBindGroup::default(),
@@ -1528,10 +1551,85 @@ impl GpuPipeline {
         // no CPU downloads anywhere in the solve (M2(c)). Identical path for
         // native and web.
         self.dispatch_gpu_coloring(num_bodies, contact_count);
-        self.ensure_color_index_uniforms();
         // Freeze the Taylor cache (C0 per row, penalty floor/caps, restitution
         // v_n) for the sorted contact stream before the first iteration.
         self.dispatch_contact_prep(contact_count);
+
+        if num_bodies <= PERSISTENT_MAX_BODIES {
+            // D8/W3: whole iterations x (colors + dual) loop in ONE dispatch of
+            // one workgroup. The clamped contact count is patched into
+            // SimParams.counts.w GPU-side first (same args-kernel + 4-byte-copy
+            // trick as the narrowphase pair count).
+            let args_params: [u32; 4] = [self.contacts.capacity(), 0, 0, 0];
+            self.ctx.queue.write_buffer(
+                &self.contact_args_params,
+                0,
+                bytemuck::cast_slice(&args_params),
+            );
+            let args_bg = self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("contact_count_args"),
+                    layout: self.narrowphase_args_kernel.bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.contact_count.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.narrowphase_dispatch_args.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.clamped_pair_count.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.contact_args_params.as_entire_binding(),
+                        },
+                    ],
+                });
+            let _ = self.persistent_bind_group();
+            let persistent_bg = self.persistent_bg_cache.bind_group.as_ref().unwrap();
+            let mut encoder =
+                self.ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("avbd_solve_persistent_3d"),
+                    });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("contact_count_args"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.narrowphase_args_kernel.pipeline());
+                pass.set_bind_group(0, &args_bg, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            let counts_w = (std::mem::offset_of!(SimParamsGpu, counts) + 12) as u64;
+            encoder.copy_buffer_to_buffer(
+                &self.clamped_pair_count,
+                0,
+                &self.params_uniform,
+                counts_w,
+                4,
+            );
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("avbd_persistent_3d"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.persistent_kernel.pipeline());
+                pass.set_bind_group(0, persistent_bg, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            self.ctx.queue.submit(Some(encoder.finish()));
+            return;
+        }
+
+        self.ensure_color_index_uniforms();
         self.sync_primal_bind_groups(COLORING_MAX_ITERATIONS as usize);
         let _ = self.dual_bind_group();
         let primal_bind_groups = &self.primal_bg_cache.bind_groups;
@@ -2580,6 +2678,70 @@ impl GpuPipeline {
                 });
             self.primal_bg_cache.bind_groups.push(bg);
         }
+    }
+
+    fn persistent_bind_group(&mut self) -> &wgpu::BindGroup {
+        let key = [
+            self.body_states_cache_key(),
+            self.inertial_states.byte_size(),
+            self.body_props.byte_size(),
+            self.contacts.byte_size(),
+            self.body_order.byte_size(),
+            self.body_contact_ranges.byte_size(),
+            self.body_contact_indices.byte_size(),
+            self.solve_start_states.byte_size(),
+            0,
+        ];
+        if self.persistent_bg_cache.key.as_ref() != Some(&key) {
+            let bg = self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("avbd_persistent"),
+                    layout: self.persistent_kernel.bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.body_states.current().buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.inertial_states.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.body_props.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.contacts.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.body_order.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.params_uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.body_contact_ranges.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: self.body_contact_indices.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: self.solve_start_states.buffer().as_entire_binding(),
+                        },
+                    ],
+                });
+            self.persistent_bg_cache.key = Some(key);
+            self.persistent_bg_cache.bind_group = Some(bg);
+        }
+        self.persistent_bg_cache.bind_group.as_ref().unwrap()
     }
 
     fn dual_bind_group(&mut self) -> &wgpu::BindGroup {
