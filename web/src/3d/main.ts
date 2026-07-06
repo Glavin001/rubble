@@ -390,12 +390,22 @@ let lastFrameTime = performance.now();
 const fpsEl = document.getElementById("fps")!;
 const bodiesEl = document.getElementById("bodies")!;
 const timingsEl = document.getElementById("timings")!;
+const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement;
+
+function qualityIsStability(): boolean {
+  return qualitySelect.value === "stability";
+}
+
+function applyQualityMode() {
+  world.set_accuracy_mode(qualityIsStability());
+  updateTimingsOverlay();
+}
 
 function updateTimingsOverlay() {
-  timingsEl.textContent = world.last_step_overlay_text(
-    renderBackendLabel,
-    lastRenderMs,
-  );
+  const mode = world.accuracy_mode() ? "Stability" : "Speed";
+  const substeps = world.last_substeps();
+  const overlay = world.last_step_overlay_text(renderBackendLabel, lastRenderMs);
+  timingsEl.textContent = `Quality: ${mode} (${substeps} substeps/step)\n${overlay}`;
 }
 
 // Cached data for test hooks (avoids borrow conflicts during async step)
@@ -716,6 +726,10 @@ async function main() {
 
   sceneSelect.addEventListener("change", () => {
     void loadScene(sceneSelect.value);
+  });
+
+  qualitySelect.addEventListener("change", () => {
+    applyQualityMode();
   });
 
   // Init renderer
