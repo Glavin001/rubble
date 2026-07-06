@@ -76,8 +76,25 @@ pub struct SimConfig {
     pub dynamic_friction_ratio: f32,
     /// Number of substeps per `step()`. Each substep runs the full detection +
     /// solve at `dt / substeps`. 1 (default) matches the paper's single-step
-    /// regime; raise for very high-energy scenes.
+    /// regime; raise for very high-energy scenes. This is the *floor*: when
+    /// adaptive substepping is enabled (see `max_substeps`) the engine may run
+    /// more.
     pub substeps: u32,
+    /// Upper bound on adaptive substepping. When `max_substeps > substeps`, each
+    /// `step()` measures the fastest body and subdivides `dt` so no body travels
+    /// more than `max_substep_travel` per substep, clamped to
+    /// `[substeps, max_substeps]`. This prevents fast bodies (e.g. a deep stack
+    /// compacting at several m/s) from tunnelling past the speculative contact
+    /// margin into deep overlap, which the penalty solver would otherwise
+    /// convert into an explosion. Resting scenes stay at `substeps` (no cost).
+    /// Set equal to `substeps` to disable adaptivity.
+    pub max_substeps: u32,
+    /// Target maximum linear travel (metres) for the fastest body within a single
+    /// substep when adaptive substepping is active. Smaller = more substeps under
+    /// motion = deeper stacks stay stable, at higher cost during impacts. Chosen
+    /// well below typical body thickness so contacts are found before deep
+    /// penetration forms.
+    pub max_substep_travel: f32,
 }
 
 impl Default for SimConfig {
@@ -101,7 +118,31 @@ impl Default for SimConfig {
             max_ang_speed: 64.0,
             dynamic_friction_ratio: 1.0,
             substeps: 1,
+            max_substeps: 1,
+            max_substep_travel: 0.01,
         }
+    }
+}
+
+impl SimConfig {
+    /// Number of substeps to run this step given the fastest dynamic body's
+    /// linear speed. Returns `substeps` (the floor) for resting/slow scenes and
+    /// ramps up to `max_substeps` so the fastest body travels no more than
+    /// `max_substep_travel` per substep. Deterministic in `max_speed_mps`.
+    pub(crate) fn adaptive_substeps(&self, max_speed_mps: f32) -> u32 {
+        let floor = self.substeps.max(1);
+        let cap = self.max_substeps.max(floor);
+        if cap == floor || self.max_substep_travel <= 0.0 || !max_speed_mps.is_finite() {
+            return floor;
+        }
+        let travel = max_speed_mps * self.dt;
+        let needed = (travel / self.max_substep_travel).ceil();
+        let needed = if needed.is_finite() && needed >= 1.0 {
+            needed as u32
+        } else {
+            1
+        };
+        needed.clamp(floor, cap)
     }
 }
 
@@ -577,6 +618,8 @@ pub struct World {
     /// narrowphase validation tests.
     last_contacts: Vec<Contact3D>,
     last_step_timings: rubble_gpu::StepTimingsMs,
+    /// Number of substeps the most recent `step()` ran (adaptive substepping).
+    last_substeps: u32,
     /// True when CPU-side body/shape state changed since the last GPU upload
     /// (add/remove/set_* mutations). Clean frames skip the full re-upload:
     /// the GPU buffers already hold bit-identical state from the last step.
@@ -619,6 +662,7 @@ impl World {
             collision_events: Vec::new(),
             last_contacts: Vec::new(),
             last_step_timings: rubble_gpu::StepTimingsMs::default(),
+            last_substeps: 1,
             gpu_dirty: true,
             events_enabled: false,
         })
@@ -979,6 +1023,20 @@ impl World {
     /// When enabled, each `step` downloads the solved contacts to diff against
     /// the previous frame's set (for [`drain_collision_events`](Self::drain_collision_events))
     /// and to populate [`last_contacts`](Self::last_contacts). This adds a
+    /// The current simulation configuration.
+    pub fn config(&self) -> &SimConfig {
+        &self.config
+    }
+
+    /// Enable (or disable) adaptive substepping by setting the upper bound on
+    /// substeps per `step()`. `max_substeps <= substeps` disables adaptivity.
+    /// Deep stacks / high-energy scenes need this to avoid tunnelling into deep
+    /// overlap; resting scenes stay at the `substeps` floor (no added cost).
+    /// Does not require a GPU re-upload — it only affects orchestration.
+    pub fn set_adaptive_substeps(&mut self, max_substeps: u32) {
+        self.config.max_substeps = max_substeps;
+    }
+
     /// per-frame GPU->CPU readback, so it is off by default (W4a-2).
     pub fn set_events_enabled(&mut self, enabled: bool) {
         self.events_enabled = enabled;
@@ -1008,11 +1066,35 @@ impl World {
     /// Runs `config.substeps` full detection+solve substeps at `dt / substeps`
     /// (default 1 — the paper's single-step regime).
     pub fn step(&mut self) {
-        let substeps = self.config.substeps.max(1);
+        let substeps = self.config.adaptive_substeps(self.max_dynamic_speed());
+        self.last_substeps = substeps;
         let sub_dt = self.config.dt / substeps as f32;
         for _ in 0..substeps {
             self.step_once(sub_dt);
         }
+    }
+
+    /// Number of substeps the most recent `step()` ran. 1 unless adaptive
+    /// substepping escalated (fast bodies) or `substeps` was raised.
+    pub fn last_substeps(&self) -> u32 {
+        self.last_substeps
+    }
+
+    /// Fastest dynamic body's linear speed (m/s), read from the CPU-resident
+    /// state downloaded after the previous step. Free (no GPU readback) and
+    /// deterministic; drives adaptive substepping.
+    fn max_dynamic_speed(&self) -> f32 {
+        let mut max_sq = 0.0f32;
+        for (i, state) in self.states.iter().enumerate() {
+            if !self.alive[i] || state.position_inv_mass.w <= 0.0 {
+                continue;
+            }
+            let v = state.lin_vel.truncate().length_squared();
+            if v > max_sq {
+                max_sq = v;
+            }
+        }
+        max_sq.sqrt()
     }
 
     fn step_once(&mut self, dt: f32) {
@@ -1134,7 +1216,8 @@ impl World {
     /// (default 1 — the paper's single-step regime).
     #[cfg(target_arch = "wasm32")]
     pub async fn step_async(&mut self) {
-        let substeps = self.config.substeps.max(1);
+        let substeps = self.config.adaptive_substeps(self.max_dynamic_speed());
+        self.last_substeps = substeps;
         let sub_dt = self.config.dt / substeps as f32;
         for _ in 0..substeps {
             self.step_once_async(sub_dt).await;
