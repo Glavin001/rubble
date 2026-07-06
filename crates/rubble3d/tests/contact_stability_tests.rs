@@ -93,9 +93,98 @@ fn build_pyramid() -> Option<(World, Vec<TrackedBody3D>, Vec3)> {
     Some((world, tracked, gravity))
 }
 
+/// Dense, deep dropped grid — the "Grid Boxes" demo scene shape. At a single
+/// step per frame this compacts so fast it tunnels into deep overlap and the
+/// penalty solver explodes it (energy injection, boxes launched). With adaptive
+/// substepping (as the demo scenes ship) it stays bounded and settles.
+fn build_grid(nx: usize, ny: usize, nz: usize, max_substeps: u32) -> Option<(World, Vec<TrackedBody3D>, Vec3)> {
+    let gravity = Vec3::new(0.0, -9.81, 0.0);
+    let mut world = try_world(SimConfig {
+        gravity,
+        max_bodies: nx * ny * nz + 4,
+        ..Default::default()
+    })?;
+    world.set_adaptive_substeps(max_substeps);
+    tracked_floor_and_grid(world, nx, ny, nz, gravity)
+}
+
+fn tracked_floor_and_grid(
+    mut world: World,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    gravity: Vec3,
+) -> Option<(World, Vec<TrackedBody3D>, Vec3)> {
+    let mut tracked = Vec::new();
+    tracked.push(add_tracked_body(
+        &mut world,
+        "floor",
+        box_desc(0.0, 0.0, 0.0, 100.0, 1.0, 100.0, 0.0),
+    ));
+    let side = 0.42_f32;
+    let pitch = side + 0.08;
+    let half = side * 0.5;
+    let ox = -((nx - 1) as f32 * pitch) * 0.5;
+    let oz = -((nz - 1) as f32 * pitch) * 0.5;
+    let base_y = 0.5 + half + 0.03;
+    for j in 0..ny {
+        for i in 0..nx {
+            for k in 0..nz {
+                let x = ox + i as f32 * pitch;
+                let y = base_y + j as f32 * pitch;
+                let z = oz + k as f32 * pitch;
+                tracked.push(add_tracked_body(
+                    &mut world,
+                    "box",
+                    box_desc(x, y, z, side, side, side, 1.0),
+                ));
+            }
+        }
+    }
+    Some((world, tracked, gravity))
+}
+
 // ---------------------------------------------------------------------------
 // Gates (pass today): stack manifold stability + energy decay
 // ---------------------------------------------------------------------------
+
+#[test]
+fn grid_does_not_explode_with_adaptive_substeps_3d() {
+    // Regression gate for the deep-grid explosion (see grid_explosion_diagnostic
+    // for the full T1-T6 investigation). Root cause: box-box contacts carry no
+    // speculative margin, so a deep stack compacting at several m/s tunnels into
+    // ~0.2 m overlap (half a box) in one 1/60 s step; the penalty solver then
+    // converts that overlap into an explosion (measured 7478 J of total-energy
+    // INJECTION, boxes fired to 22 m/s / y=27 on a 6x24x6 grid at substeps=1).
+    //
+    // Substeps prevent the deep overlap by shrinking per-step travel. We ship it
+    // as per-scene adaptive substepping (World::set_adaptive_substeps), NOT a
+    // global default — substeps recalibrate the per-step solver and destabilise
+    // other scenes (the offset pyramid regresses from 0.03 J to 500+ J of
+    // injection under substeps; see grid_explosion_diagnostic::
+    // pyramid_regression_probe). This gate uses the shipped adaptive config and
+    // asserts the injection stays ~2 orders of magnitude below the broken level.
+    let Some((mut world, tracked, gravity)) = build_grid(4, 20, 4, 8) else {
+        eprintln!("SKIP: No GPU adapter found");
+        return;
+    };
+
+    let frames = collect_stability_frames(&mut world, &tracked, gravity, 300);
+    let stats = settle_stats(&frames, 60);
+    eprintln!("grid (adaptive) settle stats: {stats:?}");
+
+    // The bug injects thousands of joules; adaptive holds it to tens. 200 J is
+    // ~1% of this 320-box grid's ~5000 J budget: comfortably above the healthy
+    // band, ~40x below the substeps=1 explosion.
+    assert!(
+        stats.max_total_energy_gain < 200.0,
+        "grid is injecting energy (deep-overlap explosion): \
+         max_total_energy_gain={:.1} J (max_ke={:.1} J, final_ke={:.1} J)",
+        stats.max_total_energy_gain,
+        stats.max_ke,
+        stats.final_ke
+    );
+}
 
 #[test]
 fn stack_contacts_keep_identity_and_energy_decays_3d() {

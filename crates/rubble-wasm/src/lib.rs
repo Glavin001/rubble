@@ -643,6 +643,10 @@ impl PhysicsWorld3D {
             .iter()
             .find(|s| s.name == name)
             .ok_or_else(|| JsError::new(&format!("unknown 3D scene: {name}")))?;
+        // Per-scene adaptive substepping (deep dropped grids need it; calibrated
+        // single-step scenes leave it at 1). Applied before bodies are added so
+        // the very first step already substeps.
+        self.world.set_adaptive_substeps(scene.max_substeps);
         let descs = (scene.build)();
         for desc in &descs {
             let handle = self.world.add_body(desc);

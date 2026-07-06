@@ -44,6 +44,7 @@ enum ShapeInfo2D {
 struct Scene3D {
     name: String,
     descs: Vec<(rubble3d::RigidBodyDesc, ShapeInfo3D)>,
+    max_substeps: u32,
 }
 
 impl Scene3D {
@@ -51,6 +52,7 @@ impl Scene3D {
         Self {
             name: name.into(),
             descs: Vec::new(),
+            max_substeps: 1,
         }
     }
 }
@@ -113,6 +115,7 @@ fn build_world_3d(
         ..Default::default()
     };
     let mut world = rubble3d::World::new(config).expect("GPU physics init failed");
+    world.set_adaptive_substeps(scene.max_substeps);
     let mut handles = Vec::with_capacity(scene.descs.len());
     let mut shapes = Vec::with_capacity(scene.descs.len());
     for (desc, shape) in &scene.descs {
@@ -181,6 +184,15 @@ impl Viewer3D {
             self.add_body_desc_to_scene(scene_idx, desc);
         }
         scene_idx
+    }
+
+    /// Set the adaptive-substep cap for a scene (see
+    /// `rubble3d::World::set_adaptive_substeps`). Applied when the scene's world
+    /// is (re)built. 1 = single-step; deep/high-energy scenes want more.
+    pub fn set_scene_max_substeps(&mut self, scene_idx: usize, max_substeps: u32) {
+        if let Some(scene) = self.scenes.get_mut(scene_idx) {
+            scene.max_substeps = max_substeps;
+        }
     }
 
     pub fn set_initial_scene(&mut self, scene_idx: usize) {
