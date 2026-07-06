@@ -29,6 +29,10 @@
       padding: 6px 8px;
       border-radius: 4px;
       z-index: 5;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: auto;
     }
     #scene-picker select {
       background: #222;
@@ -38,6 +42,9 @@
       font-size: 13px;
       padding: 2px 4px;
       margin-left: 4px;
+    }
+    #scene-picker label {
+      pointer-events: none;
     }
     #info {
       position: fixed;
@@ -72,8 +79,17 @@
     <pre id="timings"></pre>
   </div>
   <div id="scene-picker">
-    <label for="scene-select">Scene:</label>
-    <select id="scene-select"></select>
+    <div>
+      <label for="scene-select">Scene:</label>
+      <select id="scene-select"></select>
+    </div>
+    <div>
+      <label for="quality-select">Quality:</label>
+      <select id="quality-select" title="Speed = single-step (fast). Stability = adaptive substeps (prevents deep-stack explosions).">
+        <option value="speed" selected>Speed</option>
+        <option value="stability">Stability</option>
+      </select>
+    </div>
   </div>
   <div id="info">Click to spawn bodies &middot; Drag to orbit &middot; <a href="../../index.html" style="pointer-events: auto;">Back</a></div>
   <script type="module" src="./main.ts"></script>
