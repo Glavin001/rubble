@@ -409,17 +409,17 @@ impl MetalWorld {
             }
         }
 
-        // Stash last frame's contacts for feature-id warm-start (shared storage memcpy).
-        let prev_n = self.last_counters.contact_count.min(self.capacity.max_contacts) as usize;
+        let cb = self.device.queue.new_command_buffer();
+        // Stash last frame's contacts for warm-start (GPU blit — was CPU memcpy of up to ~35MB).
+        let prev_n = self.last_counters.contact_count.min(self.capacity.max_contacts) as u64;
         if prev_n > 0 {
-            let max_c = self.capacity.max_contacts as usize;
-            unsafe {
-                let base = self.contacts.contents() as *mut Contact;
-                std::ptr::copy_nonoverlapping(base, base.add(max_c), prev_n);
-            }
+            let max_c = self.capacity.max_contacts as u64;
+            let bytes = prev_n * std::mem::size_of::<Contact>() as u64;
+            let blit = cb.new_blit_command_encoder();
+            blit.copy_from_buffer(&self.contacts, 0, &self.contacts, max_c * std::mem::size_of::<Contact>() as u64, bytes);
+            blit.end_encoding();
         }
 
-        let cb = self.device.queue.new_command_buffer();
         let encoder = cb.new_compute_command_encoder();
         // Bind once per encoder — rebinding 24 buffers every dispatch dominated large scenes.
         self.bind_all(&encoder);
