@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>engine-webgpu — Chrome WGSL load (fair bar vs three-avbd)</title>
+  <style>
+    body { font: 14px/1.4 ui-monospace, Menlo, monospace; margin: 1.5rem; background: #111; color: #ddd; }
+    h1 { font-size: 1.1rem; font-weight: 600; }
+    .ok { color: #6d6; } .fail { color: #f66; } .muted { color: #888; }
+    pre { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Slang → WGSL — Chrome WebGPU module load</h1>
+  <p class="muted">Fair oracle bar: same browser/API as three-avbd. Not native Metal <code>scene_fps</code>.</p>
+  <p id="adapter" class="muted">requesting adapter…</p>
+  <pre id="log"></pre>
+  <script type="module">
+    const logEl = document.getElementById('log');
+    const adapterEl = document.getElementById('adapter');
+    const line = (cls, s) => { logEl.innerHTML += `<span class="${cls}">${s}</span>\n`; };
+
+    if (!navigator.gpu) {
+      line('fail', 'navigator.gpu missing — use Chrome with WebGPU');
+      throw new Error('no WebGPU');
+    }
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) { line('fail', 'no adapter'); throw new Error('no adapter'); }
+    const info = adapter.info || {};
+    adapterEl.textContent = `adapter: ${info.vendor || '?'} · ${info.architecture || '?'} · ${info.description || adapter.constructor.name}`;
+    const device = await adapter.requestDevice();
+
+    const manifest = await (await fetch('./generated/wgsl/manifest.json')).json();
+    line('muted', `manifest: ${manifest.count} entries`);
+
+    const t0 = performance.now();
+    let ok = 0, fail = 0;
+    for (const name of manifest.entries) {
+      try {
+        const src = await (await fetch(`./generated/wgsl/${name}.wgsl`)).text();
+        device.createShaderModule({ label: name, code: src });
+        // Force sync validation via getCompilationInfo when available
+        ok++;
+        line('ok', `OK   ${name.padEnd(28)} ${src.length} B`);
+      } catch (e) {
+        fail++;
+        line('fail', `FAIL ${name.padEnd(28)} ${e.message || e}`);
+      }
+    }
+    const ms = performance.now() - t0;
+    line('muted', `\nloaded ${ok} ok, ${fail} failed in ${ms.toFixed(1)} ms`);
+    line('muted', 'Next: full step harness (same bench-cases as three-avbd bench3d).');
+  </script>
+</body>
+</html>
