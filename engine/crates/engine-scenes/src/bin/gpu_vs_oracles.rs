@@ -124,7 +124,7 @@ fn main() {
         }
     }
 
-    println!("\n== Speed (local Metal p50; oracle_ms TBD via Chrome WebGPU) ==");
+    println!("\n== Speed (Metal = interactive gate; fair oracle bar = Chrome WGSL vs three-avbd) ==");
     for bar in TIMING_SCENES {
         let Ok((mut world, info)) = build_world(bar.scene) else {
             println!("FAIL  speed     {} — missing scene", bar.scene);

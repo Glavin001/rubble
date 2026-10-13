@@ -14,8 +14,13 @@ wgpu.workspace = true
 pollster.workspace = true
 anyhow.workspace = true
 log.workspace = true
+env_logger.workspace = true
 naga = { version = "24", features = ["spv-in", "wgsl-out"] }
 
 [build-dependencies]
 engine-slang-build.workspace = true
 anyhow.workspace = true
+
+[[bin]]
+name = "wgsl_smoke"
+path = "src/bin/wgsl_smoke.rs"

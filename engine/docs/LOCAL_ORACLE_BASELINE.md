@@ -42,11 +42,27 @@ cargo run -p engine-scenes --release --bin scene_fps
 4. CSR Hillis–Steele offsets through 2^19 (was exploding >65k bodies)
 5. JP smallest-free colours; island sleep gate always; asleep early-out
 
+## Fair speed bar (policy)
+
+| Comparison | Status |
+|------------|--------|
+| **three-avbd Chrome WebGPU ↔ our Slang→WGSL in Chrome WebGPU** | **Fair oracle bar** (same API, same browser). Target. |
+| our native Metal `scene_fps` ↔ three-avbd Chrome `gpuTotal` | Cross-API hint only — useful for M3 interactive gate, **not** the claim that we beat their WebGPU stack. |
+| our Metal ↔ three-avbd wallMs | Unfair until we have a body/state ring (their wallMs pipelines encode∥GPU). |
+
+Commands for the fair path (in progress — full step still stubbed):
+
+```bash
+cd engine
+cargo run -p engine-webgpu --release --bin wgsl_smoke   # SPIR-V→WGSL coverage + wgpu load
+# Next: Chrome harness loading the same WGSL, same bench-cases as three-avbd bench3d
+```
+
 ## Speed — three-avbd Chrome WebGPU (local M3 Max, 2026-10-13)
 
 Adapter: `apple · metal-3`. Source: `LOCAL_three_avbd_gpu_bench.json`.
 
-**Measurement note:** three-avbd reports two numbers. `wallMs` pipelines a batch of steps then one queue drain (CPU encode overlaps GPU). `gpuTotal` is isolated per-step GPU timestamp time. Our `scene_fps` p50 is `commit`+`wait_until_completed` per step — comparable to **gpuTotal**, not wallMs. Pipelining on Metal needs double-buffered host counter/scratch writes (deferred).
+**Measurement note:** three-avbd reports two numbers. `wallMs` pipelines a batch of steps then one queue drain (CPU encode overlaps GPU). `gpuTotal` is isolated per-step GPU timestamp time. Our Metal `scene_fps` p50 is `commit`+`wait_until_completed` per step — a **cross-API** proxy for gpuTotal, not the fair WebGPU bar.
 
 | Scene | wallMs | gpuTotal | contacts | colours |
 |-------|--------|----------|----------|---------|

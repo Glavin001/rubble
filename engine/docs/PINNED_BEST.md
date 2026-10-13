@@ -1,6 +1,6 @@
 # Best-of-pinned (GPU oracles only)
 
-**Speed:** beat every open-source **GPU** alternative (`three-avbd` WebGPU first).  
+**Speed:** beat every open-source **GPU** alternative — **fair bar = Chrome WebGPU ↔ Chrome WebGPU** (`three-avbd` first; our path is Slang→SPIR-V→WGSL). Native Metal `scene_fps` is the M3 interactive gate, not the oracle claim.  
 **Accuracy:** use their **existing** CPU refs when available (three-avbd f64/CpuRef, demo3d, sandbox CPU) plus GPU physical envelopes — never invent a home-grown Rust AVBD.
 
 Primary: [three-avbd](../inspiration/pinned/three-avbd) WebGPU. Also: avbd-sandbox GPU, beat-box Slang, Newton VBD GPU ideas, Jolt island/sleep patterns.
