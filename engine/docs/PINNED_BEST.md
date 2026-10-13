@@ -22,7 +22,8 @@ Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8
 | Adaptive colorCap + indirect empty colors | three-avbd | landed (indirect) |
 | JP smallest-free colour (not round id) | three-avbd | landed |
 | CSR prefix through 2^19 (scale bodies) | — | landed (was >65k bug) |
-| matchNearest contact warm-start | three-avbd | TODO |
+| matchNearest contact warm-start | three-avbd | landed (pair hash + nearest within prev manifold; n·n_prev>0.9) |
+| reuseContacts (SAT skip) | three-avbd | TODO (perf; pile accuracy unblocked by qsub fix) |
 | Primal multi-lane | three-avbd 8g | landed |
 | Contact manifold records (CSR/primal) | three-avbd 8b | landed (dual still per-contact) |
 | Island sleep + fully-asleep early-out | Jolt / three-avbd | landed (gate always; host skip) |

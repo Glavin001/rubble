@@ -606,10 +606,10 @@ Contact makeContactRow(
     ct.lambdaN = 0.0;
     ct.tangent2 = t2;
     ct.lambdaT1 = 0.0;
-    // Cold start: normal gets kStart / massPenalty in persist; friction starts at
-    // PENALTY_MIN=1 like three-avbd (massPenalty must not stiffen friction — that
-    // glued smash balls into brick walls).
-    ct.kN = gParams[0].kStart;
+    // Cold start like three-avbd: PENALTY_MIN=1, then persist applies massPenalty
+    // (k ≥ m/dt²). Flooring with kStart=1000 over-stiffened light Box Pile boxes
+    // on every warm-start miss and pumped energy.
+    ct.kN = 1.0;
     ct.kT = 1.0;
     ct.lambdaT2 = 0.0;
     ct.c0T1 = C0t1;
@@ -718,12 +718,12 @@ void emitManifold(CandidatePair pair, BodyState ba, BodyState bb, Collider ca, C
     if (mf.count <= 0) return;
     // Feature IDs must be geometric only (three-avbd). Cap 4 — matches BOX_MAX_CONTACTS.
     int n = mf.count > 4 ? 4 : mf.count;
-    // Dynamic-dynamic vertical faces on flat bricks: 2 diagonal corners. Full 4
-    // doubles Ring contacts vs local oracle (~75k vs ~45k; running-bond ≈2
-    // manifolds/brick). Unit-cube columns (half.y≥0.35) and static/plane keep 4.
+    // Dynamic-dynamic vertical faces on *demo bricks* only: 2 diagonal corners.
+    // Full 4 doubles Ring contacts vs local oracle (~75k vs ~45k; running-bond ≈2
+    // manifolds/brick). Unit cubes / random pile sizes / static/plane keep 4.
     bool bothDyn = bodyIsDynamic(ba) && bodyIsDynamic(bb);
-    bool flatBrick = min(ca.params.y, cb.params.y) < 0.35;
-    if (bothDyn && flatBrick && abs(mf.normal.y) > 0.85 && n >= 4)
+    bool demoBrick = isDemoBrickHalf(ca.params.xyz) && isDemoBrickHalf(cb.params.xyz);
+    if (bothDyn && demoBrick && abs(mf.normal.y) > 0.85 && n >= 4)
     {
         emitContactManifold(
             pair, ba, bb, ca, cb, mf.normal, margin, 2,
@@ -1005,11 +1005,25 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
 // Prev-contact warm-start hash in gConstraintIds (open address). Built after NP,
 // consumed by persist, then overwritten by CSR. Replaces O(n²) linear scan.
 static const uint CONTACT_HASH_EMPTY = 0xFFFFFFFFu;
+// three-avbd NEAREST_FRACTION: matchNearest tolerance as a fraction of the smaller
+// box's smallest full side. Gates warm-start so a far corner cannot steal λ.
+static const float NEAREST_FRACTION = 0.05;
 
-uint contactWarmKey(uint colA, uint colB, uint feature)
+// Pair-only key (three-avbd hashInsert stores manifolds by pair). Feature match and
+// matchNearest happen inside the previous contiguous manifold block.
+uint pairWarmKey(uint colA, uint colB)
 {
-    uint h = colA * 73856093u ^ colB * 19349663u ^ feature * 83492791u;
-    return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ feature ^ 0xA5A5A5A5u) : h;
+    uint h = colA * 73856093u ^ colB * 19349663u;
+    return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ 0xA5A5A5A5u) : h;
+}
+
+float colliderMinSide(Collider col)
+{
+    // Full extents; spheres use diameter = 2·radius (params.x).
+    if (col.shape == SHAPE_SPHERE)
+        return max(col.params.x * 2.0, 1e-6);
+    float3 h = col.params.xyz;
+    return max(2.0 * min(h.x, min(h.y, h.z)), 1e-6);
 }
 
 [shader("compute")]
@@ -1026,13 +1040,14 @@ void contact_hash_clear(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
 {
+    // Slot value = lowest prev-contact index of that pair (manifold block start).
     uint j = tid.x;
     uint prevN = gScratchAtomics[7];
     if (j >= prevN) return;
     uint prevOff = gScratchAtomics[8];
     Contact prev = gContacts[prevOff + j];
     if (prev.alive == 0) return;
-    uint key = contactWarmKey(prev.colliderA, prev.colliderB, prev.featureId);
+    uint key = pairWarmKey(prev.colliderA, prev.colliderB);
     uint n = gScratchAtomics[9];
     uint h = key & (n - 1u); // n is power of two
     for (uint probe = 0; probe < 64u; probe++)
@@ -1041,6 +1056,22 @@ void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
         uint was;
         InterlockedCompareExchange(gConstraintIds[slot], CONTACT_HASH_EMPTY, j, was);
         if (was == CONTACT_HASH_EMPTY) return;
+        Contact occupant = gContacts[prevOff + was];
+        if (occupant.alive != 0 &&
+            occupant.colliderA == prev.colliderA &&
+            occupant.colliderB == prev.colliderB)
+        {
+            // Same pair: keep the minimum index (start of the contiguous block).
+            uint cur = was;
+            while (j < cur)
+            {
+                uint got;
+                InterlockedCompareExchange(gConstraintIds[slot], cur, j, got);
+                if (got == cur) return;
+                cur = got;
+            }
+            return;
+        }
     }
 }
 
@@ -1048,7 +1079,8 @@ void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void persist_contacts(uint3 tid : SV_DispatchThreadID)
 {
-    // Exact featureId warm-start via contact hash (three-avbd hashInsert), then Eq. 19.
+    // three-avbd warm-start: exact featureId inside the previous pair manifold, else
+    // matchNearest (A-local anchor within NEAREST_FRACTION·minSide). Then Eq. 19.
     uint i = tid.x;
     uint n = gCounters[0].contactCount;
     if (i >= n) return;
@@ -1064,10 +1096,11 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     if (bothSleep) return;
 
     uint prevOff = gScratchAtomics[8];
+    uint prevN = gScratchAtomics[7];
     uint hashN = gScratchAtomics[9];
-    uint key = contactWarmKey(c.colliderA, c.colliderB, c.featureId);
+    uint key = pairWarmKey(c.colliderA, c.colliderB);
     uint h = key & (hashN - 1u);
-    uint bestJ = CONTACT_HASH_EMPTY;
+    uint startJ = CONTACT_HASH_EMPTY;
     for (uint probe = 0; probe < 64u; probe++)
     {
         uint slot = (h + probe) & (hashN - 1u);
@@ -1076,50 +1109,99 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         Contact prev = gContacts[prevOff + j];
         if (prev.alive != 0 &&
             prev.colliderA == c.colliderA &&
-            prev.colliderB == c.colliderB &&
-            prev.featureId == c.featureId)
+            prev.colliderB == c.colliderB)
         {
-            bestJ = j;
+            startJ = j;
             break;
+        }
+    }
+    uint bestJ = CONTACT_HASH_EMPTY;
+    if (startJ != CONTACT_HASH_EMPTY)
+    {
+        // Exact featureId within the previous contiguous manifold (≤8 pts).
+        for (uint k = 0u; k < 8u; k++)
+        {
+            uint j = startJ + k;
+            if (j >= prevN) break;
+            Contact prev = gContacts[prevOff + j];
+            if (prev.alive == 0 ||
+                prev.colliderA != c.colliderA ||
+                prev.colliderB != c.colliderB)
+                break;
+            if (prev.featureId == c.featureId)
+            {
+                bestJ = j;
+                break;
+            }
+        }
+        // matchNearest: nearest prev A-local anchor within 5% of smaller side.
+        if (bestJ == CONTACT_HASH_EMPTY)
+        {
+            Collider colA = gColliders[c.colliderA];
+            Collider colB = gColliders[c.colliderB];
+            float minSide = min(colliderMinSide(colA), colliderMinSide(colB));
+            float bestDist = NEAREST_FRACTION * minSide;
+            for (uint k = 0u; k < 8u; k++)
+            {
+                uint j = startJ + k;
+                if (j >= prevN) break;
+                Contact prev = gContacts[prevOff + j];
+                if (prev.alive == 0 ||
+                    prev.colliderA != c.colliderA ||
+                    prev.colliderB != c.colliderB)
+                    break;
+                float dist = length(prev.anchorA - c.anchorA);
+                if (dist <= bestDist)
+                {
+                    bestDist = dist;
+                    bestJ = j;
+                }
+            }
         }
     }
     if (bestJ != CONTACT_HASH_EMPTY)
     {
         Contact prev = gContacts[prevOff + bestJ];
-        c.lambdaN = prev.lambdaN;
-        c.lambdaT1 = prev.lambdaT1;
-        c.lambdaT2 = prev.lambdaT2;
-        c.kN = prev.kN;
-        c.kT = prev.kT;
-        // three-avbd: keep old anchors while static friction held (stick).
-        // Not for spheres — contact point slides over the surface as they roll;
-        // pinned anchors rotate with the body and glue/stop smash balls.
-        Collider colA = gColliders[c.colliderA];
-        Collider colB = gColliders[c.colliderB];
-        bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
-        if (prev._pad0 > 0.5 && !anySphere)
+        // Refuse warm-start across SAT axis flips: λ from the old normal on a new
+        // normal injects energy (random Box Pile). three-avbd avoids this via
+        // reuseContacts keeping the manifold; without reuse, require n·n_prev>0.9.
+        float nAgree = dot(prev.normal, c.normal);
+        if (nAgree > 0.9)
         {
-            c.anchorA = prev.anchorA;
-            c.anchorB = prev.anchorB;
-            float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
-            float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
-            float3 d = wb - wa;
-            c.c0N = dot(c.normal, d) + p.contactOffset;
-            c.c0T1 = dot(c.tangent1, d);
-            c.c0T2 = dot(c.tangent2, d);
-            c.penetration = c.c0N;
-            c._pad0 = 1.0;
+            c.lambdaN = prev.lambdaN;
+            c.lambdaT1 = prev.lambdaT1;
+            c.lambdaT2 = prev.lambdaT2;
+            c.kN = prev.kN;
+            c.kT = prev.kT;
+            // three-avbd: keep old anchors while static friction held (stick).
+            // Not for spheres — contact point slides over the surface as they roll;
+            // pinned anchors rotate with the body and glue/stop smash balls.
+            Collider colA = gColliders[c.colliderA];
+            Collider colB = gColliders[c.colliderB];
+            bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+            if (prev._pad0 > 0.5 && !anySphere)
+            {
+                c.anchorA = prev.anchorA;
+                c.anchorB = prev.anchorB;
+                float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
+                float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
+                float3 d = wb - wa;
+                c.c0N = dot(c.normal, d) + p.contactOffset;
+                c.c0T1 = dot(c.tangent1, d);
+                c.c0T2 = dot(c.tangent2, d);
+                c.penetration = c.c0N;
+                c._pad0 = 1.0;
+            }
         }
     }
 
     float dt = max(p.dt, 1e-8);
     float mA = ba.invMass > 1e-12 ? (1.0 / ba.invMass) : 1e20;
     float mB = bb.invMass > 1e-12 ? (1.0 / bb.invMass) : 1e20;
-    // three-avbd FLAG_MASS_PENALTY: kN ≥ min(m)/dt² so resting contacts hold under gravity
-    // with Jacobi. Friction rows keep the demo ramp from PENALTY_MIN — not massPenalty
-    // (three-avbd contactPenaltyMin applies to pen.x only).
+    // three-avbd FLAG_MASS_PENALTY: kN ≥ max(PENALTY_MIN, min(m)/dt²). Do not floor
+    // with kStart — three-avbd cold contacts ramp from 1, then massPenalty.
     float kMass = min(mA, mB) / (dt * dt);
-    c.kN = max(max(p.kStart, kMass), p.gamma * c.kN);
+    c.kN = max(max(1.0, kMass), p.gamma * c.kN);
     c.kT = max(1.0, p.gamma * c.kT);
     c.lambdaN *= p.alpha * p.gamma;
     c.lambdaT1 *= p.alpha * p.gamma;
@@ -1507,7 +1589,10 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
         float4 inertialAng = quatNormalize(float4(stash.mx.x, stash.mx.y, stash.mx.z, stash._pad0));
         float4 q = b.orientation;
         if (dot(q, inertialAng) < 0.0) inertialAng = -inertialAng;
-        float4 dq = quatMul(quatConjugate(inertialAng), q);
+        // three-avbd qsub(rot, inertialRot) = 2·vec(rot·conj(inertial)) — world-frame
+        // chart matching left-multiply quatApplyDelta / qadd. The conj-first order
+        // exploded randomly oriented Box Piles while axis-aligned stacks stayed fine.
+        float4 dq = quatMul(q, quatConjugate(inertialAng));
         float3 dangTarget = 2.0 * dq.xyz;
         if (dq.w < 0.0) dangTarget = -dangTarget;
         float dangLen = length(dangTarget);
