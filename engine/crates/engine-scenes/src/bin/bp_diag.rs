@@ -81,6 +81,32 @@ fn main() {
             }
         }
     }
+    if std::env::var("RESTLESS").is_ok() {
+        let thr: f32 = std::env::var("RESTLESS").ok().and_then(|s| s.parse().ok()).unwrap_or(0.25);
+        let mut near = 0u32;
+        let mut far = 0u32;
+        for b in &bodies {
+            if !b.is_dynamic() { continue; }
+            let v = glam::Vec3::from_array(b.linear_vel).length();
+            if v <= thr { continue; }
+            let r = (b.position[0] * b.position[0] + b.position[2] * b.position[2]).sqrt();
+            if r < 25.0 { near += 1; } else { far += 1; }
+        }
+        println!("restless(v>{thr}): near_xz25={near} far={far}");
+        let mut printed = 0u32;
+        for (i, b) in bodies.iter().enumerate() {
+            if !b.is_dynamic() { continue; }
+            let v = glam::Vec3::from_array(b.linear_vel).length();
+            if v <= thr { continue; }
+            let r = (b.position[0] * b.position[0] + b.position[2] * b.position[2]).sqrt();
+            if r < 25.0 {
+                let w = glam::Vec3::from_array(b.angular_vel).length();
+                println!("near_restless i={i} pos={:.2?} v={v:.3} w={w:.3} y={:.2}", b.position, b.position[1]);
+                printed += 1;
+                if printed >= 10 { break; }
+            }
+        }
+    }
 
     // Classify contacts: plane vs box-box, vertical vs horizontal normals.
     let colliders = unsafe {
@@ -89,7 +115,38 @@ fn main() {
             world.collider_count() as usize,
         )
     };
-    let mut plane_c = 0u32;
+        if std::env::var("LONG_MF").is_ok() {
+        let mut long = 0u32;
+        let mut max_d = 0.0f32;
+        let mut dyn_edges = 0u32;
+        let mut block = 0u32;
+        for m in world.download_manifolds() {
+            if m.contact_count == 0 { continue; }
+            let ba = colliders[m.collider_a as usize].body as usize;
+            let bb = colliders[m.collider_b as usize].body as usize;
+            if ba >= bodies.len() || bb >= bodies.len() { continue; }
+            let a = &bodies[ba];
+            let b = &bodies[bb];
+            if !a.is_dynamic() || !b.is_dynamic() { continue; }
+            dyn_edges += 1;
+            let pa = glam::Vec3::from_array(a.position);
+            let pb = glam::Vec3::from_array(b.position);
+            let d = pa.distance(pb);
+            max_d = max_d.max(d);
+            let va = glam::Vec3::from_array(a.linear_vel).length();
+            let vb = glam::Vec3::from_array(b.linear_vel).length();
+            let thr = world.params().sleep_lin;
+            if va > thr || vb > thr { block += 1; }
+            if d > 5.0 {
+                long += 1;
+                if long <= 8 {
+                    println!("long_dyn d={d:.2} a={ba}(v={va:.2}) b={bb}(v={vb:.2})");
+                }
+            }
+        }
+        println!("dyn_manifolds={dyn_edges} blocking_edges(v>sleep)={block} long_dyn(d>5)={long} max_d={max_d:.2}");
+    }
+let mut plane_c = 0u32;
     let mut box_c = 0u32;
     let mut other_c = 0u32;
     let mut vert = 0u32; // |ny| > 0.85
