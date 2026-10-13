@@ -41,7 +41,7 @@ fn main() {
         let lead = if scene.info.name == "Box Pile (32k)" {
             180 // three-avbd settled pile
         } else if scene.info.name == "Box Columns (100k)" {
-            120
+            180 // was 120; full-suite runs occasionally left ~30 awake / ~185 ms
         } else if ring {
             60
         } else {

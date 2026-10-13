@@ -67,7 +67,8 @@ Interactive gate: p50 ≤ 8.33 ms. Ring smash uses lead=60 (three-avbd). Settled
 | Brick Walls (27k) | ~7.2 | PASS |
 | Chain Mail (1.6k) | ~1.2 | PASS |
 | Box Columns (100k) settled | ~0 (asleep early-out) | PASS (plane@0.5, centres at 1+layer) |
-| Box Pile (32k) | ~7.8 | PASS 120 FPS |
+| Box Pile (32k) | ~7–9 (settling) | KE decays after qsub fix (was explode); stress until asleep |
+| Box Pile (4k) | — | KE ~300@300 / ~150@600, survival ~0.93 (was explode) |
 | Stack / Rope / Pyramid | &lt; 3 | PASS |
 | Brick Ring (28k) lead=60 | ~27 | stress (smash peak) |
 | Brick Ring (110k) | ~140+ | stress |
