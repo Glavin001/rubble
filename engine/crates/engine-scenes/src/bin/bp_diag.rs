@@ -174,10 +174,12 @@ fn main() {
             let i = ((v.len() as f32 - 1.0) * p).round() as usize;
             v[i.min(v.len()-1)]
         };
+        let deep = c0s.iter().filter(|&&c| c < -0.05).count();
+        let deep2 = c0s.iter().filter(|&&c| c < -0.2).count();
         println!(
-            "kN: p50={:.1} p90={:.1} p99={:.1} max={:.1} | c0N: p50={:.5} p90={:.5} p01={:.5}",
+            "kN: p50={:.1} p90={:.1} p99={:.1} max={:.1} | c0N: p50={:.5} p90={:.5} p01={:.5} deep<-0.05={} deep<-0.2={}",
             pct(&kns,0.5), pct(&kns,0.9), pct(&kns,0.99), kns.last().copied().unwrap_or(0.0),
-            pct(&c0s,0.5), pct(&c0s,0.9), pct(&c0s,0.01)
+            pct(&c0s,0.5), pct(&c0s,0.9), pct(&c0s,0.01), deep, deep2
         );
     }
     if std::env::var("GEN_HIST").is_ok() {
@@ -223,6 +225,37 @@ fn main() {
         );
     }
 
+
+    if std::env::var("DEEP_CLASS").is_ok() {
+        let bodies = world.download_bodies();
+        let mut plane_deep = 0u32;
+        let mut box_deep = 0u32;
+        let mut geom_vs_c0_err = 0u32;
+        let mut max_err = 0.0f32;
+        for ct in world.download_contacts() {
+            if ct.alive == 0 || ct.c0_n >= -0.05 { continue; }
+            let ca = ct.collider_a as usize;
+            let cb = ct.collider_b as usize;
+            let sa = colliders.get(ca).map(|c| c.shape).unwrap_or(0);
+            let sb = colliders.get(cb).map(|c| c.shape).unwrap_or(0);
+            let plane = sa == ShapeType::Plane as u32 || sb == ShapeType::Plane as u32;
+            if plane { plane_deep += 1; } else { box_deep += 1; }
+            let ba = bodies[colliders[ca].body as usize];
+            let bb = bodies[colliders[cb].body as usize];
+            let qa = glam::Quat::from_array(ba.orientation);
+            let qb = glam::Quat::from_array(bb.orientation);
+            let wa = glam::Vec3::from_array(ba.position) + qa * glam::Vec3::from_array(ct.anchor_a);
+            let wb = glam::Vec3::from_array(bb.position) + qb * glam::Vec3::from_array(ct.anchor_b);
+            let n = glam::Vec3::from_array(ct.normal);
+            let geom = n.dot(wb - wa) + 0.01; // margin
+            let err = (geom - ct.c0_n).abs();
+            if err > 0.05 { geom_vs_c0_err += 1; }
+            max_err = max_err.max(err);
+        }
+        println!(
+            "deep_class: plane={plane_deep} box={box_deep} geom_vs_c0_err(>5cm)={geom_vs_c0_err} max_err={max_err:.3}"
+        );
+    }
     if std::env::var("VEL_HIST").is_ok() {
         let mut lins: Vec<f32> = Vec::new();
         let mut angs: Vec<f32> = Vec::new();

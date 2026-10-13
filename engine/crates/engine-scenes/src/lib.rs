@@ -723,7 +723,8 @@ pub fn all_scenes() -> Vec<SceneDef> {
             info: SceneInfo {
                 name: "Box Pile (4k)",
                 group: "Scale tests (GPU)",
-                iterations: 10,
+                // 4 matches three-avbd settled-pile bench; 10+ ramps k harder and left more deep C0.
+                iterations: 4,
                 capacity: cap(8_192),
             },
             build: box_pile_4k,
@@ -732,8 +733,8 @@ pub fn all_scenes() -> Vec<SceneDef> {
             info: SceneInfo {
                 name: "Box Pile (32k)",
                 group: "Scale tests (GPU)",
-                // Match 4k settle quality; three-avbd settled-pile bench uses 4 for speed only.
-                iterations: 10,
+                // three-avbd settled pile bench uses 4.
+                iterations: 4,
                 capacity: cap(65_536),
             },
             build: box_pile_32k,
