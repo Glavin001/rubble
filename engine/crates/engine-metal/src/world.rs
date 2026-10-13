@@ -665,8 +665,15 @@ impl MetalWorld {
         };
         let prev_n = prev_contacts.min(self.capacity.max_contacts as u64).max(1);
         let reuse = (self.params.flags & engine_schema::FLAG_REUSE_CONTACTS) != 0;
+        // Settled piles: update_refs over all bodies was part of the ~9 ms floor with
+        // ~20 awake / few contacts. Refs only matter for reuse; skip when nearly asleep.
+        let mostly_asleep = self.last_counters.awake_count > 0
+            && self.last_counters.awake_count <= 64
+            && self.last_counters.contact_count <= 256;
         if reuse {
-            self.dispatch(&encoder, "update_refs", n_bodies);
+            if !mostly_asleep {
+                self.dispatch(&encoder, "update_refs", n_bodies);
+            }
             self.dispatch(&encoder, "contact_hash_clear", hash_n);
             self.dispatch(&encoder, "contact_hash_insert", prev_n);
         }
