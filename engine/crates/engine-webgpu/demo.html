@@ -477,6 +477,7 @@ struct VsOut {
       disp(pass, 'broadphase_clear', 131072);
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
+      nextPhase();
       disp(pass, 'narrowphase', narrowN);
       disp(pass, 'contact_hash_clear', hashN);
       disp(pass, 'contact_hash_insert', Math.max(prevContacts, 1));
@@ -575,7 +576,7 @@ struct VsOut {
 
     async function profilePhases() {
       if (!wantTimestamps) return '';
-      const n = 4;
+      const n = 5;
       const querySet = device.createQuerySet({ type: 'timestamp', count: n * 2 });
       const resolve = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
       const read = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -597,7 +598,7 @@ struct VsOut {
       const stamps = new BigUint64Array(read.getMappedRange().slice(0));
       read.unmap();
       const ms = (a, b) => Number(stamps[b] - stamps[a]) / 1e6;
-      const names = ['collision', 'graph', 'solve', 'sleep'];
+      const names = ['broadphase', 'narrowphase', 'graph', 'solve', 'sleep'];
       return names.map((name, k) => `${name} ${ms(k * 2, k * 2 + 1).toFixed(2)}`).join(' · ');
     }
 
@@ -707,7 +708,7 @@ struct VsOut {
     statusEl.textContent = `showing ${bodies.length - 1} bodies, then timing…`;
     const wallMs = await benchWall();
     const phases = await profilePhases();
-    statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases}`;
+    statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases} contacts ${last.contact} ov 0x${last.overflow.toString(16)}`;
     requestAnimationFrame(frame);
   </script>
 </body>
