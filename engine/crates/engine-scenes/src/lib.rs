@@ -346,6 +346,9 @@ pub fn box_pile(b: &mut SceneBuilder<'_>, n: u32, h: u32) {
         seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         (seed as f32) / (u32::MAX as f32)
     };
+    // Generate in three-avbd (z,x,y) order so sizes/orients match, then upload in
+    // Morton order (their spatialSort default) for cache-friendly body adjacency.
+    let mut specs: Vec<(Vec3, Vec3, Quat)> = Vec::with_capacity((n * n * h) as usize);
     for z in 0..h {
         for x in 0..n {
             for y in 0..n {
@@ -359,9 +362,6 @@ pub fn box_pile(b: &mut SceneBuilder<'_>, n: u32, h: u32) {
                     2.0 + z as f32 * 1.6,
                     (y as f32 - n as f32 / 2.0) * 1.6,
                 );
-                // three-avbd: mass = sx·sy·sz·density with density=1 (full extents).
-                let mass = 8.0 * half.x * half.y * half.z;
-                let id = b.add_box(pos, half, mass);
                 let q = Quat::from_xyzw(
                     rand() - 0.5,
                     rand() - 0.5,
@@ -369,11 +369,41 @@ pub fn box_pile(b: &mut SceneBuilder<'_>, n: u32, h: u32) {
                     rand() - 0.5,
                 )
                 .normalize();
-                let mut body = b.world_mut().body(id);
-                body.orientation = q.to_array();
-                b.world_mut().set_body(id, body);
+                specs.push((pos, half, q));
             }
         }
+    }
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for (pos, _, _) in &specs {
+        lo = lo.min(*pos);
+        hi = hi.max(*pos);
+    }
+    let spread = |mut x: u32| -> u32 {
+        x &= 0x3ff;
+        x = (x | (x << 16)) & 0x30000ff;
+        x = (x | (x << 8)) & 0x300f00f;
+        x = (x | (x << 4)) & 0x30c30c3;
+        x = (x | (x << 2)) & 0x9249249;
+        x
+    };
+    let mut order: Vec<usize> = (0..specs.len()).collect();
+    order.sort_by_key(|&i| {
+        let p = specs[i].0;
+        let q = |k: usize| -> u32 {
+            let t = ((p[k] - lo[k]) / (hi[k] - lo[k]).max(1e-9) * 1024.0).floor() as i32;
+            t.clamp(0, 1023) as u32
+        };
+        spread(q(0)) | (spread(q(1)) << 1) | (spread(q(2)) << 2)
+    });
+    for i in order {
+        let (pos, half, q) = specs[i];
+        // three-avbd: mass = sx·sy·sz·density with density=1 (full extents).
+        let mass = 8.0 * half.x * half.y * half.z;
+        let id = b.add_box(pos, half, mass);
+        let mut body = b.world_mut().body(id);
+        body.orientation = q.to_array();
+        b.world_mut().set_body(id, body);
     }
 }
 
