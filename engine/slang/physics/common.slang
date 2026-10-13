@@ -142,7 +142,7 @@ struct AvbdParams
     float trustLin;
     float trustAng;
     float pivotFloor;
-    float _pad1;
+    float gridCellSize; // three-avbd ≈ 2·maxSmallRadius; host sets each step
 };
 
 struct StepCounters

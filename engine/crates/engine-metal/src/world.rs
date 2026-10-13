@@ -487,6 +487,46 @@ impl MetalWorld {
         self.step_gpu_inner(wait)
     }
 
+    /// three-avbd cellSize ≈ 2·maxSmallRadius (exclude planes / oversized smash balls).
+    fn refresh_grid_cell_size(&mut self) {
+        let cols = unsafe {
+            std::slice::from_raw_parts(
+                self.colliders.contents() as *const Collider,
+                self.collider_count as usize,
+            )
+        };
+        let bodies = unsafe {
+            std::slice::from_raw_parts(
+                self.bodies.contents() as *const BodyState,
+                self.body_count as usize,
+            )
+        };
+        let mut max_r = 0.25f32;
+        for c in cols {
+            if c.shape == ShapeType::Plane as u32 {
+                continue;
+            }
+            let body = c.body as usize;
+            if body >= bodies.len() || bodies[body].inv_mass <= 0.0 {
+                continue;
+            }
+            let r = if c.shape == ShapeType::Sphere as u32 || c.shape == ShapeType::Capsule as u32 {
+                c.params[0]
+            } else if c.params[3] > 0.0 {
+                c.params[3]
+            } else {
+                (c.params[0] * c.params[0] + c.params[1] * c.params[1] + c.params[2] * c.params[2])
+                    .sqrt()
+            };
+            // Smash balls / large dynamics stay out of maxSmall (three-avbd largestSmall).
+            if r > 2.0 {
+                continue;
+            }
+            max_r = max_r.max(r);
+        }
+        self.params.grid_cell_size = (2.0 * max_r * 1.0001).max(0.5);
+    }
+
     fn step_gpu_inner(&mut self, wait: bool) -> Result<StepCounters, ExecError> {
         let wall_t0 = std::time::Instant::now();
         let cpu_t0 = std::time::Instant::now();
@@ -506,6 +546,7 @@ impl MetalWorld {
             self.steps_done = self.steps_done.saturating_add(1);
             return Ok(self.last_counters);
         }
+        self.refresh_grid_cell_size();
         self.sync_counters_host_to_gpu(true);
         self.write_scratch();
         // Avoid O(max_colors) host clears on huge capacities — only touch used slots.

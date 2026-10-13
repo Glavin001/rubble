@@ -33,7 +33,8 @@ pub struct AvbdParams {
     pub trust_lin: f32,
     pub trust_ang: f32,
     pub pivot_floor: f32,
-    pub _pad1: f32,
+    /// Broadphase grid cell size (three-avbd ≈ 2·maxSmallRadius). Host refreshes each step.
+    pub grid_cell_size: f32,
 }
 
 impl Default for AvbdParams {
@@ -61,7 +62,7 @@ impl Default for AvbdParams {
             trust_lin: 0.35,
             trust_ang: 0.5,
             pivot_floor: 1.0e-6,
-            _pad1: 0.0,
+            grid_cell_size: 2.0,
         }
     }
 }

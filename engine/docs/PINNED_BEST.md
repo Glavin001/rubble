@@ -24,6 +24,7 @@ Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8
 | CSR prefix through 2^19 (scale bodies) | — | landed (was >65k bug) |
 | matchNearest contact warm-start | three-avbd | landed (pair hash + nearest within prev manifold; n·n_prev>0.9) |
 | reuseContacts (SAT skip) | three-avbd | opt-in `FLAG_REUSE_CONTACTS` + updateRefs/generation (Box Pile on; Ring off) |
+| gridCellSize ≈ 2·maxSmallRadius | three-avbd | landed (`AvbdParams.grid_cell_size`; fixes pile tunnels) |
 | Primal multi-lane | three-avbd 8g | landed |
 | Contact manifold records (CSR/primal) | three-avbd 8b | landed (dual still per-contact) |
 | Island sleep + fully-asleep early-out | Jolt / three-avbd | landed (gate always; host skip) |
@@ -38,8 +39,8 @@ Do **not** gate on published M4 Max FINDINGS. Local Chrome numbers: `LOCAL_three
 |-------|----------------------|-------------------------|------|
 | Interactive demos | see `scene_fps` | — | ≤ 8.33 ms |
 | Wall Smash 2k | ~1.5 ms | 2.86 ms | **beat** |
-| Brick Ring 9k smash | ~3.3 ms wait / ~52k | wall 1.75 / gpuTotal **5.51** / 45k | **beats gpuTotal**; wallMs needs body ring |
-| Settled pile 32k | ~7–9 ms | wall 3.14 / gpuTotal **11.8** | **beats gpuTotal**; stress when >8.33 |
+| Brick Ring 9k smash | ~4.4–7 ms / ~58k | wall 1.75 / gpuTotal **5.51** / 45k | PASS ≥120 FPS; reclaim 3.3 ms after 8ap |
+| Settled pile 32k | settling (reuse~60%@600) | wall 3.14 / gpuTotal **11.8** | accuracy first (8ap); speed next |
 | Brick Ring 28k smash | ~9.2 ms | — | `stress` |
 | Box Columns 100k settled | ~0 ms asleep | 3.50 ms | PASS |
 
