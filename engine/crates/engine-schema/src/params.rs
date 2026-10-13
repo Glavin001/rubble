@@ -50,8 +50,8 @@ impl Default for AvbdParams {
             // tall stacks never drops below 0.05, so bodies never slept and KE pumped.
             sleep_lin: 0.15,
             sleep_ang: 0.15,
-            // Long enough that spaced Stack impacts finish bouncing before freeze.
-            sleep_time: 1.0,
+            // Island sleep gate protects stacks; 0.5s is enough once candidates agree.
+            sleep_time: 0.5,
             residual_exit: 1.0e-4,
             trust_lin: 0.35,
             trust_ang: 0.5,
