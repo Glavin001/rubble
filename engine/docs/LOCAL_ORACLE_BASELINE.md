@@ -60,12 +60,12 @@ Interactive gate: p50 ≤ 8.33 ms. Brick Ring smash peaks are `stress`. Settled 
 
 | Scene | p50 ms | note |
 |-------|--------|------|
-| Wall Smash (2k) @ 8 it | ~5.0 | PASS (oracle 2.86 @ 10 it — still catching up) |
-| Brick Walls (27k) | ~6.7 | PASS |
+| Wall Smash (2k) @ 8 it | ~4.4 | PASS (oracle 2.86 @ 10 it — still catching up) |
+| Brick Walls (27k) | ~6.5 | PASS |
 | Chain Mail (1.6k) | ~1.5 | PASS |
-| Box Columns (100k) settled | ~0 (asleep early-out) | PASS after lead; smash window ~70 ms |
+| Box Columns (100k) settled | ~0 (asleep early-out) | PASS (colours=3, matches oracle) |
 | Stack / Rope / Pyramid | &lt; 6 | PASS |
-| Brick Ring (28k) | ~10.7 | stress (NP-bound) |
+| Brick Ring (28k) | ~10.0–10.4 | stress (NP-bound; need manifolds/multi-lane) |
 | Brick Ring (110k) | ~90–100 | stress |
 
 ## three-avbd CPU log
