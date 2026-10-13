@@ -42,7 +42,7 @@ Do **not** gate on published M4 Max FINDINGS. Local Chrome numbers: `LOCAL_three
 | Brick Ring 9k smash | ~4.4–7 ms / ~58k | wall 1.75 / gpuTotal **5.51** / 45k | PASS ≥120 FPS; reclaim 3.3 ms after 8ap |
 | Settled pile 32k | settling (reuse~60%@600) | wall 3.14 / gpuTotal **11.8** | accuracy first (8ap); speed next |
 | Brick Ring 28k smash | ~9.2 ms | — | `stress` |
-| Box Pile 32k settled | **~9.5 ms** | 11.8 ms gpuTotal | STRESS (beats oracle; >8.33 interactive) |
+| Box Pile 32k settled | **~8.2–9.8 ms** | 11.8 ms gpuTotal | STRESS (beats oracle; flickers around 8.33) |
 | Box Columns 100k settled | ~0 ms asleep | 3.50 ms | PASS |
 
 `cargo run -p engine-scenes --release --bin scene_fps`
