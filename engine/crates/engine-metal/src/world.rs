@@ -204,6 +204,13 @@ impl MetalWorld {
         self.sleep_island_rounds = rounds.clamp(1, 16);
     }
 
+    pub fn set_default_friction(&mut self, friction: f32) {
+        let mats = unsafe {
+            std::slice::from_raw_parts_mut(self.materials.contents() as *mut Material, 64)
+        };
+        mats[0].friction = friction;
+    }
+
     pub fn add_material(&mut self, m: Material) -> u32 {
         let id = self.material_count;
         let mats = unsafe {
