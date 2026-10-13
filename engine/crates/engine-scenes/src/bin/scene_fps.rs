@@ -41,7 +41,7 @@ fn main() {
         let lead = if scene.info.name == "Box Pile (32k)" {
             1200 // post-collapse; oracle settled-pile bench is after long settle
         } else if scene.info.name == "Box Columns (100k)" {
-            180 // was 120; full-suite runs occasionally left ~30 awake / ~185 ms
+            300 // batch runs after smash scenes occasionally left ~50 awake / ~190 ms at 180
         } else if ring {
             60
         } else {

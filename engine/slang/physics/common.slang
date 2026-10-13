@@ -172,6 +172,7 @@ static const uint OVERFLOW_COLORS = 8u;
 static const uint CCD_BUDGET_EXHAUSTED = 16u;
 static const uint CCD_CANDIDATE_MISS = 32u;
 static const uint OVERFLOW_MANIFOLDS = 64u;
+static const uint OVERFLOW_BP_CHAIN = 128u;
 
 struct GpuCommand
 {

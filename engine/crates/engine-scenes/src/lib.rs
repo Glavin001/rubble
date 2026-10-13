@@ -859,6 +859,10 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         // Softer β than demo default 1e4: after gridCellSize fix, β=2e3 cuts flyers
         // (~50→~6) and KE (~100→~10) at 1200 without reopening deep C0. Override with PILE_BETA.
         params.beta_lin = 2_000.0;
+        // Default α=0.99 only puts 1% of C0 into Ĉ → 32k collapse left deep<-0.05≈700
+        // at step 1200. α=0.95 recovers penetration (32k deep≈70, 4k deep≈0–3) while
+        // keeping iters=4. Override with PILE_ALPHA.
+        params.alpha = 0.95;
         // Slightly looser/faster sleep so brief calm windows can commit an island
         // before a surface rock resets timers across the contact component.
         params.sleep_lin = 0.25;
@@ -903,6 +907,8 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     if scene.info.name.starts_with("Box Pile") {
         // Shallow gate: one rocker must not flood-revoke the whole pile (stacks keep 8).
         world.set_sleep_island_rounds(1);
+        // μ=0.7 settles deep C0 better than three-avbd's 0.5 on our Metal path; 0.5 left
+        // more flyers. PILE_MU overrides for A/B.
         let mu = std::env::var("PILE_MU")
             .ok()
             .and_then(|s| s.parse().ok())

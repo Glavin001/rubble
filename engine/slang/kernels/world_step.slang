@@ -468,10 +468,11 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     }
 
     float cellSize = max(gParams[0].gridCellSize, 0.5);
+    // three-avbd: with cellSize ≥ 2·maxSmallRadius, centre±1 (27 cells) covers every
+    // sphere overlap. We still walk the querier AABB cell span clamped to 2 cells +
+    // halo (matches prior green 4k piles); do not shrink cellSize below 2·r.
     int3 mn = int3(floor(box.mn / cellSize));
     int3 mx = int3(floor(box.mx / cellSize));
-    // With gridCellSize ≈ 2·radius, demo OBBs span ≤2 cells; this clamp is then safe.
-    // It was wrong when cellSize floored at 0.5 m for random piles (missed pairs → tunnels).
     mn = max(mn, mx - int3(1, 1, 1));
     mx = min(mx, mn + int3(1, 1, 1));
 
@@ -506,10 +507,14 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     {
         uint h = gridHash(x, y, z);
         uint cur = gConstraintIds[h];
+        // Dense pile hash slots can exceed a few hundred links (32k in ~2 m cells).
+        // Truncating at 256 silently dropped pairs → deep C0. Cap high; flag if hit.
         uint guard = 0;
-        while (cur != 0xFFFFFFFFu && guard < 256u)
+        while (cur != 0xFFFFFFFFu && guard < 4096u)
         {
             guard++;
+            if (guard == 4096u)
+                InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
             // Dynamic-dynamic once (higher index), PLUS awake→sleeping at any index:
             // smash balls are last, so cur>i alone never pairs them with sleeping
             // bricks (sleepers only keep static contacts and would not emit).

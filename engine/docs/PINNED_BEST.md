@@ -24,7 +24,7 @@ Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8
 | CSR prefix through 2^19 (scale bodies) | — | landed (was >65k bug) |
 | matchNearest contact warm-start | three-avbd | landed (pair hash + nearest within prev manifold; n·n_prev>0.9) |
 | reuseContacts (SAT skip) | three-avbd | opt-in `FLAG_REUSE_CONTACTS` + updateRefs/generation (Box Pile on; Ring off) |
-| gridCellSize ≈ 2·maxSmallRadius | three-avbd | landed (`AvbdParams.grid_cell_size`; fixes pile tunnels) |
+| gridCellSize ≈ 2·maxSmallRadius | three-avbd | landed (always 2·r; no 1.25 brick shortcut) |
 | Primal multi-lane | three-avbd 8g | landed |
 | Contact manifold records (CSR/primal) | three-avbd 8b | landed (dual still per-contact) |
 | Island sleep + fully-asleep early-out | Jolt / three-avbd | landed (gate always; host skip) |
