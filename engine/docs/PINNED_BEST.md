@@ -36,8 +36,8 @@ Do **not** gate on published M4 Max FINDINGS. Local Chrome numbers: `LOCAL_three
 | Scene | our Metal p50 (local) | three-avbd wall (local) | gate |
 |-------|----------------------|-------------------------|------|
 | Interactive demos | see `scene_fps` | — | ≤ 8.33 ms |
-| Wall Smash 2k | ~2.2 ms | 2.86 ms | **beat** |
-| Brick Ring 9k smash | ~3.7 ms (ball punches through) | 1.75 ms | chase (contacts still ~2×) |
+| Wall Smash 2k | ~1.5 ms | 2.86 ms | **beat** |
+| Brick Ring 9k smash | ~3.6 ms (ball punches through) | 1.75 ms | chase (contacts ~98k vs 45k) |
 | Brick Ring 28k smash | ~9.2 ms | — | `stress` |
 | Box Columns 100k settled | ~0 ms asleep | 3.50 ms | PASS |
 
