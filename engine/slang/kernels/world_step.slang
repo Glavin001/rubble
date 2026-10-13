@@ -3,31 +3,39 @@
 #include "../physics/atomics.slang"
 #include "../physics/box_collide.slang"
 
-RWStructuredBuffer<BodyState> gBodies;
+BIND(0) RWStructuredBuffer<BodyState> gBodies;
+#if !defined(ENGINE_WGSL)
 RWStructuredBuffer<BodyState> gBodiesPrev;
-RWStructuredBuffer<Collider> gColliders;
-RWStructuredBuffer<Material> gMaterials;
-RWStructuredBuffer<Contact> gContacts;
-RWStructuredBuffer<Joint> gJoints;
+#endif
+BIND(2) RWStructuredBuffer<Collider> gColliders;
+BIND(3) RWStructuredBuffer<Material> gMaterials;
+BIND(4) RWStructuredBuffer<Contact> gContacts;
+BIND(5) RWStructuredBuffer<Joint> gJoints;
+#if !defined(ENGINE_WGSL)
 RWStructuredBuffer<AvbdParams> gParams;
-RWStructuredBuffer<GpuCounters> gCounters;
-RWStructuredBuffer<GpuCommand> gCommands;
-RWStructuredBuffer<Aabb> gAabbs;
-RWStructuredBuffer<CandidatePair> gCandidates;
-RWStructuredBuffer<uint> gAwakeList;
-RWStructuredBuffer<AUint> gBodyColor;
-RWStructuredBuffer<AUint> gConstraintIndex; // CSR: body -> contact/joint indices
-RWStructuredBuffer<AUint> gConstraintIds;
-RWStructuredBuffer<uint> gColorLists;      // packed body indices per color
-RWStructuredBuffer<uint> gColorOffsets;    // color -> start in gColorLists
-RWStructuredBuffer<AUint> gColorCounts;
-RWStructuredBuffer<float3> gHullVerts;
-RWStructuredBuffer<AUint> gEvents;          // ring: type, id, ...
-RWStructuredBuffer<uint> gCcdFlags;        // per-body fast-motion flags
+#endif
+BIND(7) RWStructuredBuffer<GpuCounters> gCounters;
+BIND(8) RWStructuredBuffer<GpuCommand> gCommands;
+BIND(9) RWStructuredBuffer<Aabb> gAabbs;
+BIND(10) RWStructuredBuffer<CandidatePair> gCandidates;
+BIND(11) RWStructuredBuffer<uint> gAwakeList;
+BIND(12) RWStructuredBuffer<AUint> gBodyColor;
+#if !defined(ENGINE_WGSL)
+RWStructuredBuffer<AUint> gConstraintIndex;
+#endif // CSR: body -> contact/joint indices
+BIND(14) RWStructuredBuffer<AUint> gConstraintIds;
+BIND(15) RWStructuredBuffer<uint> gColorLists;      // packed body indices per color
+BIND(16) RWStructuredBuffer<uint> gColorOffsets;    // color -> start in gColorLists
+BIND(17) RWStructuredBuffer<AUint> gColorCounts;
+BIND(18) RWStructuredBuffer<float3> gHullVerts;
+BIND(19) RWStructuredBuffer<AUint> gEvents;          // ring: type, id, ...
+BIND(20) RWStructuredBuffer<uint> gCcdFlags;        // per-body fast-motion flags
 // Binding order must match engine-metal `bind_all` (declaration order → Metal [[buffer(N)]]).
-RWStructuredBuffer<AUint> gScratchAtomics;
-RWStructuredBuffer<uint> gPassUniform;     // length-1 view: host binds offset into 0..63 table
-RWStructuredBuffer<uint> gIndirectArgs;    // Metal MTLDispatchThreadgroupsIndirectArguments × maxColors
+BIND(21) RWStructuredBuffer<AUint> gScratchAtomics;
+#if !defined(ENGINE_WGSL)
+RWStructuredBuffer<uint> gPassUniform;
+#endif     // length-1 view: host binds offset into 0..63 table
+BIND(23) RWStructuredBuffer<uint> gIndirectArgs;    // Metal MTLDispatchThreadgroupsIndirectArguments × maxColors
 // Per-collider world OBB (filled in build_aabbs) — avoids rebuild in BP face-reject + NP.
 struct WorldObbGpu
 {
@@ -37,12 +45,33 @@ struct WorldObbGpu
     float4 axis1;
     float4 axis2;
 };
-RWStructuredBuffer<WorldObbGpu> gWorldObbs;
+BIND(24) RWStructuredBuffer<WorldObbGpu> gWorldObbs;
 // Appended (buffer 25+): do not insert earlier — Metal bind_all is declaration order.
-RWStructuredBuffer<Manifold> gManifolds;
+BIND(25) RWStructuredBuffer<Manifold> gManifolds;
 // Per-body reuse reference pose (three-avbd refsWGSL). pos.w unused; rot = (x,y,z,w).
 struct RefPoseGpu { float4 pos; float4 rot; };
-RWStructuredBuffer<RefPoseGpu> gRefPoses;
+BIND(26) RWStructuredBuffer<RefPoseGpu> gRefPoses;
+
+#if defined(ENGINE_WGSL)
+// Chrome caps storage buffers at 10 per stage: read-only host data rides in uniforms,
+// prev bodies live in gBodies[maxBodies..], CSR index in gConstraintIds[HOST_S(24)..].
+struct HostUniforms { AvbdParams params; uint4 s[8]; };
+struct PassUniform { uint v; uint _p0; uint _p1; uint _p2; };
+BIND(6) ConstantBuffer<HostUniforms> gHost;
+BIND(22) ConstantBuffer<PassUniform> gPass;
+#define PARAMS (gHost.params)
+#define HOST_S(k) (gHost.s[(k) >> 2][(k) & 3])
+#define PASS_U (gPass.v)
+#define BODY_PREV(i) gBodies[HOST_S(1) + (i)]
+#define CINDEX(i) gConstraintIds[HOST_S(24) + (i)]
+#else
+#define PARAMS (gParams[0])
+#define HOST_S(k) (gScratchAtomics[k])
+#define PASS_U (gPassUniform[0])
+#define BODY_PREV(i) gBodiesPrev[i]
+#define CINDEX(i) gConstraintIndex[i]
+#endif
+
 
 StepCounters loadCounters()
 {
@@ -81,10 +110,10 @@ void apply_commands(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     StepCounters c = loadCounters();
     if (i >= c.bodyCount && i >= 1) { /* commands counted separately */ }
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     // Commands are densely packed; host sets command count in counters.iteration temporarily? use candidateCount as cmdCount staging — better: use overflow high bits.
     // Convention: gCounters[0].iteration holds command count for this kernel only before solve resets it.
-    uint cmdCount = ALOAD(gScratchAtomics[0]);
+    uint cmdCount = HOST_S(0);
     if (i >= cmdCount) return;
     GpuCommand cmd = gCommands[i];
     if (cmd.op == CMD_WAKE_BODY)
@@ -128,7 +157,7 @@ void apply_commands(uint3 tid : SV_DispatchThreadID)
         gBodies[cmd.b] = nb;
         // Invalidate contacts involving this collider (current ping-pong half).
         uint nContacts = ALOAD(gCounters[0].contactCount);
-        uint curOff = ALOAD(gScratchAtomics[11]);
+        uint curOff = HOST_S(11);
         for (uint ci = 0; ci < nContacts; ci++)
         {
             Contact ct = gContacts[curOff + ci];
@@ -143,14 +172,14 @@ void apply_commands(uint3 tid : SV_DispatchThreadID)
 
 void predictOne(uint i)
 {
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     BodyState b = gBodies[i];
     // Sleeping/static: do not touch prev/pose (three-avbd mover compaction).
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     float dt = p.dt;
     // Adaptive warm-start: (v - v_prev)/dt along up (three-avbd / VBD). gBodiesPrev still
     // holds the previous step's snapshot (incl. that step's incoming velocity).
-    float3 prevVel = gBodiesPrev[i].linearVel;
+    float3 prevVel = BODY_PREV(i).linearVel;
     float3 accel = (b.linearVel - prevVel) / max(dt, 1e-8);
     float accelExt = accel.y * sign(p.gravityY);
     float accelWeight = clamp(accelExt / max(abs(p.gravityY), 1e-6), 0.0, 1.0);
@@ -166,7 +195,7 @@ void predictOne(uint i)
     float4 inertialAng = quatNormalize(
         b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
     // x⁻ snapshot for velocity extract (three-avbd initialPos).
-    gBodiesPrev[i] = b;
+    BODY_PREV(i) = b;
 
     if (!startAtRest)
     {
@@ -198,7 +227,7 @@ void predict_bodies(uint3 tid : SV_DispatchThreadID)
 void predict_bodies_listed(uint3 tid : SV_DispatchThreadID)
 {
     uint li = tid.x;
-    uint n = ALOAD(gScratchAtomics[7]);
+    uint n = HOST_S(7);
     if (li >= n) return;
     predictOne(gAwakeList[li]);
 }
@@ -250,7 +279,7 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     box.mn = mn; box.mx = mx; box._pad0 = 0; box._pad1 = asfloat(col.body);
     // Store at collider index offset by max_bodies — host allocates gAabbs sized max_bodies+max_colliders
     // Convention: collider AABBs start at index max_bodies. Host sets gScratchAtomics[1] = max_bodies.
-    uint base = ALOAD(gScratchAtomics[1]);
+    uint base = HOST_S(1);
     gAabbs[base + i] = box;
     // World OBB cache for box colliders (BP face-reject + narrowphase).
     if (col.shape == SHAPE_BOX)
@@ -341,7 +370,7 @@ void emitCandidate(uint i, uint j)
     uint b = max(i, j);
     uint slot;
     AADD3(gCounters[0].candidateCount, 1, slot);
-    uint maxCand = ALOAD(gScratchAtomics[2]);
+    uint maxCand = HOST_S(2);
     if (slot >= maxCand)
     {
         AOR2(gCounters[0].overflowFlags, OVERFLOW_CANDIDATES);
@@ -421,8 +450,8 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     Collider col = gColliders[i];
     if (col.shape == SHAPE_PLANE) return;
     // Insert sleeping too — awake movers must find them (island wake on impact).
-    uint base = ALOAD(gScratchAtomics[1]);
-    float cellSize = max(gParams[0].gridCellSize, 0.5);
+    uint base = HOST_S(1);
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
     Aabb box = gAabbs[base + i];
     float3 ext = box.mx - box.mn;
     // three-avbd isLarge: oversized *statics* stay out of the grid. Smash balls are
@@ -450,7 +479,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     BodyState b = gBodies[col.body];
     if (!bodyIsDynamic(b)) return;
     if (col.shape == SHAPE_PLANE) return;
-    uint base = ALOAD(gScratchAtomics[1]);
+    uint base = HOST_S(1);
     Aabb box = gAabbs[base + i];
     bool sleeper = bodyIsSleeping(b);
     // Probe OBB from build_aabbs cache (three-avbd findPairs loads querier once).
@@ -497,7 +526,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         return;
     }
 
-    float cellSize = max(gParams[0].gridCellSize, 0.5);
+    float cellSize = max(PARAMS.gridCellSize, 0.5);
     // three-avbd: with cellSize ≥ 2·maxSmallRadius, centre±1 (27 cells) covers every
     // sphere overlap. We still walk the querier AABB cell span clamped to 2 cells +
     // halo (matches prior green 4k piles); do not shrink cellSize below 2·r.
@@ -645,7 +674,7 @@ Contact makeContactRow(
     ct.c0T1 = C0t1;
     ct.c0T2 = C0t2;
     ct._pad0 = 0.0; // stick flag (1 = static friction held)
-    ct._pad1 = asfloat(ALOAD(gScratchAtomics[17])); // generated step (reuseContacts)
+    ct._pad1 = asfloat(HOST_S(17)); // generated step (reuseContacts)
     ct._pad2 = 0.0;
     return ct;
 }
@@ -660,8 +689,8 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
     if (!awakeA && !awakeB) return;
     float3 vRel = ba.linearVel - bb.linearVel;
     float wRel = length(ba.angularVel) + length(bb.angularVel);
-    float thresh = gParams[0].sleepLin;
-    if (dot(vRel, vRel) < thresh * thresh && wRel < gParams[0].sleepAng)
+    float thresh = PARAMS.sleepLin;
+    if (dot(vRel, vRel) < thresh * thresh && wRel < PARAMS.sleepAng)
         return;
     if (bodyIsDynamic(ba) && bodyIsSleeping(ba) && awakeB)
     {
@@ -687,8 +716,8 @@ void emitContactManifold(
     float3 pA3, float3 pB3, uint f3)
 {
     if (count <= 0) return;
-    uint maxC = ALOAD(gScratchAtomics[3]);
-    uint maxM = ALOAD(gScratchAtomics[10]);
+    uint maxC = HOST_S(3);
+    uint maxM = HOST_S(10);
     uint mslot;
     AADD3(gCounters[0].manifoldCount, 1, mslot);
     if (mslot >= maxM)
@@ -698,7 +727,7 @@ void emitContactManifold(
     }
     uint cStart;
     AADD3(gCounters[0].contactCount, (uint)count, cStart);
-    uint curOff = ALOAD(gScratchAtomics[11]);
+    uint curOff = HOST_S(11);
     if (cStart >= maxC || cStart + (uint)count > maxC)
     {
         AOR2(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
@@ -827,7 +856,7 @@ void update_refs(uint3 tid : SV_DispatchThreadID)
     BodyState b = gBodies[i];
     if (!bodyIsDynamic(b)) return;
     RefPoseGpu last = gRefPoses[i];
-    uint step = ALOAD(gScratchAtomics[17]);
+    uint step = HOST_S(17);
     bool noRef = dot(last.rot, last.rot) < 1e-12;
     // Same hemisphere as last.rot — q and -q are the same attitude; without this,
     // a solver sign flip looks like a ~2π turn and bumps generation every frame.
@@ -853,9 +882,9 @@ void update_refs(uint3 tid : SV_DispatchThreadID)
 // three-avbd reuseContacts. Opt-in via params.flags bit0 — Box Pile on, Ring off.
 bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float margin)
 {
-    uint prevOff = ALOAD(gScratchAtomics[8]);
-    uint prevN = ALOAD(gScratchAtomics[7]);
-    uint hashN = ALOAD(gScratchAtomics[9]);
+    uint prevOff = HOST_S(8);
+    uint prevN = HOST_S(7);
+    uint hashN = HOST_S(9);
     uint key = pairWarmKey(pair.colliderA, pair.colliderB);
     uint h = key & (hashN - 1u);
     uint startJ = CONTACT_HASH_EMPTY;
@@ -900,8 +929,8 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
     }
     if (count == 0u) return false;
 
-    uint maxC = ALOAD(gScratchAtomics[3]);
-    uint maxM = ALOAD(gScratchAtomics[10]);
+    uint maxC = HOST_S(3);
+    uint maxM = HOST_S(10);
     uint mslot;
     AADD3(gCounters[0].manifoldCount, 1, mslot);
     if (mslot >= maxM)
@@ -911,7 +940,7 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
     }
     uint cStart;
     AADD3(gCounters[0].contactCount, count, cStart);
-    uint curOff = ALOAD(gScratchAtomics[11]);
+    uint curOff = HOST_S(11);
     if (cStart >= maxC || cStart + count > maxC)
     {
         AOR2(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
@@ -969,12 +998,12 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     float3 posB = transformPoint(bb.position, bb.orientation, cb.localPos);
     float4 rotA = quatMul(ba.orientation, ca.localRot);
     float4 rotB = quatMul(bb.orientation, cb.localRot);
-    float margin = gParams[0].contactOffset;
+    float margin = PARAMS.contactOffset;
     float3 nrm; float pen; float3 pA; float3 pB;
     bool hit = false;
 
     // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
-    if ((gParams[0].flags & FLAG_REUSE_CONTACTS) != 0u &&
+    if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
         tryReuseContacts(pair, ba, bb, margin))
         return;
 
@@ -1183,7 +1212,7 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     Joint j = gJoints[i];
     BodyState a = gBodies[j.bodyA];
     BodyState b = gBodies[j.bodyB];
@@ -1215,7 +1244,7 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
 void contact_hash_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint i = tid.x;
-    uint n = ALOAD(gScratchAtomics[9]); // hash table word count
+    uint n = HOST_S(9); // hash table word count
     if (i >= n) return;
     ASTORE(gConstraintIds[i], CONTACT_HASH_EMPTY);
 }
@@ -1226,13 +1255,13 @@ void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
 {
     // Slot value = lowest prev-contact index of that pair (manifold block start).
     uint j = tid.x;
-    uint prevN = ALOAD(gScratchAtomics[7]);
+    uint prevN = HOST_S(7);
     if (j >= prevN) return;
-    uint prevOff = ALOAD(gScratchAtomics[8]);
+    uint prevOff = HOST_S(8);
     Contact prev = gContacts[prevOff + j];
     if (prev.alive == 0) return;
     uint key = pairWarmKey(prev.colliderA, prev.colliderB);
-    uint n = ALOAD(gScratchAtomics[9]);
+    uint n = HOST_S(9);
     uint h = key & (n - 1u); // n is power of two
     for (uint probe = 0; probe < 64u; probe++)
     {
@@ -1268,8 +1297,8 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     uint n = ALOAD(gCounters[0].contactCount);
     if (i >= n) return;
-    AvbdParams p = gParams[0];
-    uint curOff = ALOAD(gScratchAtomics[11]);
+    AvbdParams p = PARAMS;
+    uint curOff = HOST_S(11);
     Contact c = gContacts[curOff + i];
     if (c.alive == 0) return;
     BodyState ba = gBodies[gColliders[c.colliderA].body];
@@ -1279,9 +1308,9 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
     if (bothSleep) return;
 
-    uint prevOff = ALOAD(gScratchAtomics[8]);
-    uint prevN = ALOAD(gScratchAtomics[7]);
-    uint hashN = ALOAD(gScratchAtomics[9]);
+    uint prevOff = HOST_S(8);
+    uint prevN = HOST_S(7);
+    uint hashN = HOST_S(9);
     uint key = pairWarmKey(c.colliderA, c.colliderB);
     uint h = key & (hashN - 1u);
     uint startJ = CONTACT_HASH_EMPTY;
@@ -1411,7 +1440,7 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
 
 // --- CSR adjacency (three-avbd: degree → scan → scatter → sort) ----------------------------
 // Constraint id: [0, jointCount) = joints; jointCount + mi = manifold mi (Stage 8b).
-// gConstraintIndex[0..bodyCount]: degree then exclusive starts; [bodyCount] = total.
+// CINDEX(0..bodyCount): degree then exclusive starts; [bodyCount] = total.
 // gBodyColor reused as fill cursors during scatter (init_colors overwrites afterward).
 // gConstraintIds holds the packed adjacency list (after broadphase hash is done).
 
@@ -1427,7 +1456,7 @@ uint2 constraintEndpoints(uint id)
 void csrCountEndpoint(uint body)
 {
     if (!bodyIsDynamic(gBodies[body])) return;
-    AADD2(gConstraintIndex[body], 1);
+    AADD2(CINDEX(body), 1);
 }
 
 [shader("compute")]
@@ -1436,7 +1465,7 @@ void csr_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint i = tid.x;
     uint n = gCounters[0].bodyCount + 1u;
-    if (i < n) ASTORE(gConstraintIndex[i], 0);
+    if (i < n) ASTORE(CINDEX(i), 0);
 }
 
 [shader("compute")]
@@ -1475,7 +1504,7 @@ void csr_prefix_init(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     uint n = gCounters[0].bodyCount;
     if (i >= n) return;
-    ASTORE(gBodyColor[i], ALOAD(gConstraintIndex[i])); // degree
+    ASTORE(gBodyColor[i], ALOAD(CINDEX(i))); // degree
 }
 
 // Ping-pong Hillis–Steele step. Host packs pass_table[48+log] = offset | (ping<<31)
@@ -1488,7 +1517,7 @@ void csr_prefix_scan(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     uint n = gCounters[0].bodyCount;
     if (i >= n) return;
-    uint packed = gPassUniform[0];
+    uint packed = PASS_U;
     uint offset = packed & 0x7fffffffu;
     uint ping = packed >> 31;
     uint v;
@@ -1496,12 +1525,12 @@ void csr_prefix_scan(uint3 tid : SV_DispatchThreadID)
     {
         v = ALOAD(gBodyColor[i]);
         if (i >= offset) v += ALOAD(gBodyColor[i - offset]);
-        ASTORE(gConstraintIndex[i], v);
+        ASTORE(CINDEX(i), v);
     }
     else
     {
-        v = ALOAD(gConstraintIndex[i]);
-        if (i >= offset) v += ALOAD(gConstraintIndex[i - offset]);
+        v = ALOAD(CINDEX(i));
+        if (i >= offset) v += ALOAD(CINDEX(i - offset));
         ASTORE(gBodyColor[i], v);
     }
 }
@@ -1514,7 +1543,7 @@ void csr_prefix_swap(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     uint n = gCounters[0].bodyCount;
     if (i >= n) return;
-    ASTORE(gBodyColor[i], ALOAD(gConstraintIndex[i]));
+    ASTORE(gBodyColor[i], ALOAD(CINDEX(i)));
 }
 
 [shader("compute")]
@@ -1526,18 +1555,18 @@ void csr_prefix_finalize(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     uint n = gCounters[0].bodyCount;
     if (i > n) return;
-    uint ping = ALOAD(gScratchAtomics[12]);
+    uint ping = HOST_S(12);
     if (i == n)
     {
         uint last = 0u;
         if (n > 0u)
-            last = (ping == 0u) ? ALOAD(gConstraintIndex[n - 1u]) : ALOAD(gBodyColor[n - 1u]);
-        ASTORE(gConstraintIndex[n], last);
+            last = (ping == 0u) ? ALOAD(CINDEX(n - 1u)) : ALOAD(gBodyColor[n - 1u]);
+        ASTORE(CINDEX(n), last);
         return;
     }
-    uint incl_i = (ping == 0u) ? ALOAD(gConstraintIndex[i]) : ALOAD(gBodyColor[i]);
-    uint excl = (i == 0u) ? 0u : ((ping == 0u) ? ALOAD(gConstraintIndex[i - 1u]) : ALOAD(gBodyColor[i - 1u]));
-    ASTORE(gConstraintIndex[i], excl);
+    uint incl_i = (ping == 0u) ? ALOAD(CINDEX(i)) : ALOAD(gBodyColor[i]);
+    uint excl = (i == 0u) ? 0u : ((ping == 0u) ? ALOAD(CINDEX(i - 1u)) : ALOAD(gBodyColor[i - 1u]));
+    ASTORE(CINDEX(i), excl);
     ASTORE(gBodyColor[i], excl); // fill cursor
     incl_i = incl_i;
 }
@@ -1552,12 +1581,12 @@ void csr_prefix(uint3 tid : SV_DispatchThreadID)
     uint sum = 0;
     for (uint i = 0; i < n; i++)
     {
-        uint d = ALOAD(gConstraintIndex[i]);
-        ASTORE(gConstraintIndex[i], sum);
+        uint d = ALOAD(CINDEX(i));
+        ASTORE(CINDEX(i), sum);
         ASTORE(gBodyColor[i], sum);
         sum += d;
     }
-    ASTORE(gConstraintIndex[n], sum);
+    ASTORE(CINDEX(n), sum);
 }
 
 void csrFillEndpoint(uint body, uint id)
@@ -1605,8 +1634,8 @@ void csr_sort(uint3 tid : SV_DispatchThreadID)
     uint awakeN = ALOAD(gCounters[0].awakeCount);
     if (li >= awakeN) return;
     uint b = gAwakeList[li];
-    uint lo = ALOAD(gConstraintIndex[b]);
-    uint hi = ALOAD(gConstraintIndex[b + 1u]);
+    uint lo = ALOAD(CINDEX(b));
+    uint hi = ALOAD(CINDEX(b + 1u));
     uint nJ = gCounters[0].jointCount;
     for (uint i = lo + 1u; i < hi; i++)
     {
@@ -1645,7 +1674,7 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     uint awakeN = ALOAD(gCounters[0].awakeCount);
     if (li >= awakeN) return;
     uint body = gAwakeList[li];
-    uint round = gPassUniform[0];
+    uint round = PASS_U;
     // Height-biased JP priority: lower bodies win early rounds (bottom-up support).
     // Still assign smallest-free colours (not the round id) so the palette stays tight.
     bool heightBias = true;
@@ -1656,8 +1685,8 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     bool blocked = false;
     uint usedLo = 0u;
     uint usedHi = 0u;
-    uint lo = ALOAD(gConstraintIndex[body]);
-    uint hi = ALOAD(gConstraintIndex[body + 1u]);
+    uint lo = ALOAD(CINDEX(body));
+    uint hi = ALOAD(CINDEX(body + 1u));
     for (uint e = lo; e < hi; e++)
     {
         uint2 ends = constraintEndpoints(ALOAD(gConstraintIds[e]));
@@ -1740,7 +1769,7 @@ void pack_color_lists(uint3 tid : SV_DispatchThreadID)
     uint slot;
     AADD3(gColorCounts[color], 1, slot);
     // Second pass needed for offsets — host compact or prefix. Store body at atomic slot in scratch region.
-    uint maxB = ALOAD(gScratchAtomics[1]);
+    uint maxB = HOST_S(1);
     gColorLists[color * maxB + slot] = body;
 }
 
@@ -1752,7 +1781,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
     rhs = vec6Zero();
     BodyState b = gBodies[bodyIdx];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     float dt = p.dt;
     float dt2 = dt * dt;
 
@@ -1787,8 +1816,8 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
     }
 
     uint nJ = gCounters[0].jointCount;
-    uint alo = ALOAD(gConstraintIndex[bodyIdx]);
-    uint ahi = ALOAD(gConstraintIndex[bodyIdx + 1u]);
+    uint alo = ALOAD(CINDEX(bodyIdx));
+    uint ahi = ALOAD(CINDEX(bodyIdx + 1u));
     for (uint e = alo + lane; e < ahi; e += lanes)
     {
         uint id = ALOAD(gConstraintIds[e]);
@@ -1808,13 +1837,13 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             // ~0.1 rad/step; rotating anchors with it injects false C / friction drag.
             // Static bodies skip predict, so keep their (constant) current orientation.
             bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
-            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? gBodiesPrev[ba].orientation : bA.orientation;
-            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? gBodiesPrev[bb].orientation : bB.orientation;
+            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? BODY_PREV(ba).orientation : bA.orientation;
+            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? BODY_PREV(bb).orientation : bB.orientation;
             float4 rotSelf = isA ? rotA : rotB;
             // Displacement from x⁻ (three-avbd pairBody / evalContact Taylor C).
             // Static/sleeping skip predictOne so gBodiesPrev may be stale — treat Δ=0.
-            BodyState initA = gBodiesPrev[ba];
-            BodyState initB = gBodiesPrev[bb];
+            BodyState initA = BODY_PREV(ba);
+            BodyState initB = BODY_PREV(bb);
             bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
             bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
             float3 dLinA = moveA ? (bA.position - initA.position) : float3(0, 0, 0);
@@ -1907,7 +1936,7 @@ void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
 {
     BodyState b = gBodies[bodyIdx];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     uint floors = 0;
     Vec6 neg = rhs;
     for (int k = 0; k < 6; k++) neg.v[k] = -rhs.v[k];
@@ -1946,7 +1975,7 @@ groupshared float gsRhs[64 * 6];
 [numthreads(64, 1, 1)]
 void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
 {
-    uint color = gPassUniform[0];
+    uint color = PASS_U;
     uint count = ALOAD(gColorCounts[color]);
     uint lanes = primalLanesFor(count);
     uint threads = count * lanes;
@@ -1960,7 +1989,7 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
     Mat6 A = mat6Zero();
     Vec6 rhs = vec6Zero();
     uint bodyIdx = 0u;
-    uint maxB = ALOAD(gScratchAtomics[1]);
+    uint maxB = HOST_S(1);
     if (live)
     {
         bodyIdx = gColorLists[color * maxB + bodySlot];
@@ -2009,7 +2038,7 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
 void solve_primal_one(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x != 0) return;
-    solvePrimalForBody(gPassUniform[0]);
+    solvePrimalForBody(PASS_U);
 }
 
 [shader("compute")]
@@ -2019,10 +2048,10 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
     // Per-contact dual (Metal occupancy). CSR/primal still use manifolds (Stage 8b).
     uint i = tid.x;
     uint n = ALOAD(gCounters[0].contactCount);
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     if (i < n)
     {
-        uint curOff = ALOAD(gScratchAtomics[11]);
+        uint curOff = HOST_S(11);
         Contact c = gContacts[curOff + i];
         if (c.alive != 0)
         {
@@ -2039,11 +2068,11 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             Collider colA = gColliders[c.colliderA];
             Collider colB = gColliders[c.colliderB];
             bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
-            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? gBodiesPrev[ba].orientation : bA.orientation;
-            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? gBodiesPrev[bb].orientation : bB.orientation;
+            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? BODY_PREV(ba).orientation : bA.orientation;
+            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? BODY_PREV(bb).orientation : bB.orientation;
             // three-avbd evalContact: Ĉ = c0*(1-α) + J·(x-x⁻), not absolute geometric C.
-            BodyState initA = gBodiesPrev[ba];
-            BodyState initB = gBodiesPrev[bb];
+            BodyState initA = BODY_PREV(ba);
+            BodyState initB = BODY_PREV(bb);
             bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
             bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
             float3 dLinA = moveA ? (bA.position - initA.position) : float3(0, 0, 0);
@@ -2124,9 +2153,9 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     StepCounters c = loadCounters();
     if (i >= c.bodyCount) return;
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     BodyState b = gBodies[i];
-    BodyState initB = gBodiesPrev[i];
+    BodyState initB = BODY_PREV(i);
     gCcdFlags[i] = 0;
     if (!bodyIsDynamic(b)) return;
     if (bodyIsSleeping(b)) return;
@@ -2221,7 +2250,7 @@ void ccd_classify(uint3 tid : SV_DispatchThreadID)
     BodyState b = gBodies[i];
     gCcdFlags[i] = 0;
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     float speed = length(b.linearVel);
     float aspeed = length(b.angularVel);
     float radius = 0.5; // conservative; refined per-collider in full CCD
@@ -2243,7 +2272,7 @@ void ccd_sweep(uint3 tid : SV_DispatchThreadID)
     Collider col = gColliders[i];
     if (gCcdFlags[col.body] == 0) return;
     BodyState b = gBodies[col.body];
-    AvbdParams p = gParams[0];
+    AvbdParams p = PARAMS;
     float3 v = b.linearVel;
     float maxIter = 8.0;
     // Against planes only in this stretch slice

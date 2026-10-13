@@ -16,7 +16,9 @@ typealias AUint = Atomic<uint>;
 #define ACAS4(x, cmp, v, o) o = (x).compareExchange(cmp, v)
 // Groupshared-only exchange: All* lowers to textureBarrier(), which naga/wgpu reject.
 #define GROUP_SYNC() GroupMemoryBarrierWithGroupSync()
+#define BIND(n) [[vk::binding(n, 0)]]
 #else
+#define BIND(n)
 typealias AUint = uint;
 #define ALOAD(x) (x)
 #define ASTORE(x, v) (x) = (v)
