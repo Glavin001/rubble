@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>engine — WebGPU AVBD (10 boxes)</title>
+  <title>engine — WebGPU AVBD wall</title>
   <style>
     html, body { margin: 0; height: 100%; background: #12141a; color: #d7dbe6; font: 13px/1.4 ui-monospace, Menlo, monospace; }
     canvas { width: 100%; height: 100%; display: block; }
@@ -15,7 +15,7 @@
 <body>
   <canvas id="c"></canvas>
   <div id="hud">
-    <h1>Slang → WGSL · Chrome WebGPU</h1>
+    <h1>Slang → WGSL · wall smash, same scene size as three-avbd</h1>
     <div id="status" class="muted">starting…</div>
     <div id="err"></div>
   </div>
@@ -27,8 +27,8 @@
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
 
     const cap = {
-      maxBodies: 64, maxColliders: 64, maxContacts: 1024, maxJoints: 64,
-      maxCandidates: 4096, maxColors: 32, maxCommands: 64, maxHull: 64,
+      maxBodies: 4096, maxColliders: 4096, maxContacts: 32768, maxJoints: 64,
+      maxCandidates: 65536, maxColors: 32, maxCommands: 64, maxHull: 64,
     };
     const PASS_ALIGN = 256;
     const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
@@ -72,6 +72,7 @@
       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
       'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts',
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
+      'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize',
       'csr_scatter_contacts', 'csr_sort', 'init_colors', 'color_bodies',
       'pack_color_lists', 'write_color_args', 'predict_bodies', 'solve_primal_color',
       'solve_dual', 'extract_velocity_sleep', 'sleep_island_gate', 'sleep_island_commit',
@@ -100,7 +101,8 @@
       f32(v, o + 0, body.p[0]); f32(v, o + 4, body.p[1]); f32(v, o + 8, body.p[2]); f32(v, o + 12, body.invMass);
       f32(v, o + 16, 0); f32(v, o + 20, 0); f32(v, o + 24, 0); f32(v, o + 28, 1);
       f32(v, o + 32, body.invI[0]); f32(v, o + 36, body.invI[1]); f32(v, o + 40, body.invI[2]); u32(v, o + 44, body.flags);
-      f32(v, o + 48, 0); f32(v, o + 52, 0); f32(v, o + 56, 0); f32(v, o + 60, 0);
+      const vel = body.v || [0, 0, 0];
+      f32(v, o + 48, vel[0]); f32(v, o + 52, vel[1]); f32(v, o + 56, vel[2]); f32(v, o + 60, 0);
       f32(v, o + 64, 0); f32(v, o + 68, 0); f32(v, o + 72, 0); u32(v, o + 76, 0);
     }
 
@@ -114,7 +116,7 @@
     }
 
     const params = {
-      dt: 1 / 60, gravityY: -10, iterations: 4, flags: 0,
+      dt: 1 / 60, gravityY: -10, iterations: 10, flags: 0,
       alpha: 0.99, gamma: 0.999, betaLin: 10000, betaAng: 100,
       kStart: 1000, kMaxN: 1e10, kMaxT: 1e6, contactOffset: 0.01,
       sleepLin: 0.15, sleepAng: 0.15, sleepTime: 0.5, residualExit: 1e-4,
@@ -181,9 +183,16 @@ struct Body {
   linearVel: vec3f, sleepTimer: f32,
   angularVel: vec3f, generation: u32,
 };
+struct Collider {
+  body: u32, shape: u32, material: u32, generation: u32,
+  localPos: vec3f, density: f32,
+  localRot: vec4f,
+  params: vec4f,
+};
 struct Frame { viewProj: mat4x4<f32> };
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(1) var<uniform> frame: Frame;
+@group(0) @binding(2) var<storage, read> cols: array<Collider>;
 
 fn quatRotate(q: vec4f, v: vec3f) -> vec3f {
   let u = q.xyz;
@@ -198,12 +207,14 @@ struct VsOut {
 
 @vertex fn vs(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> VsOut {
   let b = bodies[inst + 1u];
-  let world = b.position + quatRotate(b.orientation, corner);
+  let col = cols[inst + 1u];
+  let half = col.shape == 0u ? vec3f(col.params.x) : col.params.xyz;
+  let world = b.position + quatRotate(b.orientation, corner * (half / 0.5));
   var o: VsOut;
   o.clip = frame.viewProj * vec4f(world, 1.0);
   o.normal = quatRotate(b.orientation, normal);
-  let t = f32(inst) / 9.0;
-  o.color = vec3f(0.92, 0.45 + 0.4 * t, 0.22);
+  let t = fract(b.position.y * 0.08 + b.position.x * 0.05);
+  o.color = col.shape == 0u ? vec3f(0.75, 0.78, 0.82) : vec3f(0.72, 0.38 + 0.35 * t, 0.22);
   return o;
 }
 
@@ -278,30 +289,46 @@ struct VsOut {
     const bodyBytes = new ArrayBuffer(sizes[0]);
     const colBytes = new ArrayBuffer(sizes[2]);
     const bodies = [];
-    const h = 0.5;
-    const inertia = (1 / 6) * (2 * h) * (2 * h);
-    const invI = 1 / inertia;
+    const colliders = [];
+    // three-avbd wall smash: 40 × 25 × 2 bricks (1 × 0.5 × 0.5) plus a sphere. Their Z-up
+    // is our Y-up. Density 0.6 matches their bricks; the ball is radius 2, density 20.
+    const brickMass = 0.6 * 1 * 0.5 * 0.5;
+    const brickI = (a, b) => 1 / ((brickMass / 12) * (a * a + b * b));
+    const brickInvI = [brickI(0.5, 0.5), brickI(1, 0.5), brickI(1, 0.5)];
+    const half = [0.5, 0.25, 0.25];
+    const brickR = Math.hypot(...half);
     bodies.push({ p: [0, 0, 0], invMass: 0, invI: [0, 0, 0], flags: 0 });
-    const gap = 1.05;
-    for (let row = 0; row < 4; row++) {
-      const n = 4 - row;
-      for (let i = 0; i < n; i++) {
-        bodies.push({
-          p: [(i - (n - 1) / 2) * gap, 2.2 + row * gap, (row - 1.5) * 0.15],
-          invMass: 1, invI: [invI, invI, invI], flags: 1 | 8,
-        });
+    colliders.push({ body: 0, shape: 4, density: 0, params: [0, 1, 0, 0.5] });
+    const w = 40, courses = 25;
+    for (let course = 0; course < courses; course++) {
+      const offset = course % 2 === 0 ? 0 : 0.5;
+      for (let x = 0; x < w; x++) {
+        for (let depth = 0; depth < 2; depth++) {
+          const id = bodies.length;
+          bodies.push({
+            p: [(x - w / 2) + offset, 0.75 + course * 0.5, depth * 0.5],
+            invMass: 1 / brickMass, invI: brickInvI, flags: 1 | 8,
+          });
+          colliders.push({ body: id, shape: 2, density: 0.6, params: [half[0], half[1], half[2], brickR] });
+        }
       }
     }
-    const r = Math.sqrt(3 * h * h);
-    params.gridCellSize = Math.max(0.5, 2 * r * 1.0001);
+    const radius = 2, density = 20;
+    const volume = (4 / 3) * Math.PI * radius ** 3;
+    const ballMass = density * volume;
+    const ballI = 0.4 * ballMass * radius * radius;
+    const ball = bodies.length;
+    bodies.push({
+      p: [0, 5, -25], invMass: 1 / ballMass, invI: [1 / ballI, 1 / ballI, 1 / ballI],
+      flags: 1 | 8, v: [0, 4, 30],
+    });
+    colliders.push({ body: ball, shape: 0, density, params: [radius, 0, 0, radius] });
+    params.gridCellSize = Math.max(0.5, 2 * brickR * 1.0001);
     bodies.forEach((b, i) => {
       writeBody(bodyBytes, i, b);
       writeBody(bodyBytes, cap.maxBodies + i, b);
     });
-    writeCollider(colBytes, 0, { body: 0, shape: 4, density: 0, params: [0, 1, 0, 0.5] });
-    for (let i = 1; i < bodies.length; i++) {
-      writeCollider(colBytes, i, { body: i, shape: 2, density: 1, params: [h, h, h, r] });
-    }
+    colliders.forEach((c, i) => writeCollider(colBytes, i, c));
     device.queue.writeBuffer(bufs[0], 0, bodyBytes);
     device.queue.writeBuffer(bufs[2], 0, colBytes);
 
@@ -397,7 +424,7 @@ struct VsOut {
       pass.dispatchWorkgroups(groups(threads), 1, 1);
     }
 
-    function encodeStep(enc) {
+    function encodeStep(enc, readback) {
       const nBodies = Math.max(bodyCount, 1);
       const nCols = Math.max(colliderCount, 1);
       const awake = last.awake === 0 ? nBodies : Math.max(1, Math.min(nBodies, last.awake * 2 + 256));
@@ -424,7 +451,17 @@ struct VsOut {
       disp(pass, 'build_awake_list', nBodies);
       disp(pass, 'csr_clear', nBodies + 1);
       disp(pass, 'csr_degree_contacts', manifoldN);
-      disp(pass, 'csr_prefix', 1);
+      if (bodyCount <= 512) {
+        disp(pass, 'csr_prefix', 1);
+      } else {
+        disp(pass, 'csr_prefix_init', nBodies);
+        let log = 0;
+        while ((1 << log) < bodyCount && log < 20) {
+          disp(pass, 'csr_prefix_scan', nBodies, 48 + log);
+          log++;
+        }
+        disp(pass, 'csr_prefix_finalize', nBodies + 1);
+      }
       disp(pass, 'csr_scatter_contacts', manifoldN);
       disp(pass, 'csr_sort', awake);
       disp(pass, 'init_colors', awake);
@@ -449,8 +486,55 @@ struct VsOut {
       }
       disp(pass, 'sleep_island_commit', nBodies);
       pass.end();
+      if (readback) {
+        enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
+        enc.copyBufferToBuffer(bufs[0], 80, bodyRead, 0, 16);
+      }
+    }
+
+    function submitPhysics() {
+      const enc = device.createCommandEncoder();
+      encodeStep(enc, false);
+      device.queue.submit([enc.finish()]);
+      parity ^= 1;
+      steps++;
+    }
+
+    async function readCounters() {
+      const enc = device.createCommandEncoder();
       enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
-      enc.copyBufferToBuffer(bufs[0], 80, bodyRead, 0, 16);
+      device.queue.submit([enc.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const c = new Uint32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+    }
+
+    // Same protocol as three-avbd compare(): drain the queue, median of short batches, best round.
+    async function benchWall() {
+      for (let i = 0; i < 30; i++) {
+        submitPhysics();
+        if (i % 10 === 9) {
+          await device.queue.onSubmittedWorkDone();
+          await readCounters();
+          statusEl.textContent = `lead-in ${i + 1}/30 · contacts ${last.contact}`;
+        }
+      }
+      await device.queue.onSubmittedWorkDone();
+      let best = Infinity;
+      for (let round = 0; round < 2; round++) {
+        const samples = [];
+        for (let batch = 0; batch < 5; batch++) {
+          const t = performance.now();
+          for (let i = 0; i < 10; i++) submitPhysics();
+          await device.queue.onSubmittedWorkDone();
+          samples.push((performance.now() - t) / 10);
+        }
+        samples.sort((a, b) => a - b);
+        best = Math.min(best, samples[2]);
+      }
+      await readCounters();
+      return best;
     }
 
     const cube = [];
@@ -459,12 +543,12 @@ struct VsOut {
     for (const [u, v, w] of axes) for (const sign of [-1, 1]) {
       const n = [0, 0, 0]; n[w] = sign;
       const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => {
-        const p = [0, 0, 0]; p[u] = a * h; p[v] = b * h; p[w] = sign * h; return p;
+        const p = [0, 0, 0]; p[u] = a * 0.5; p[v] = b * 0.5; p[w] = sign * 0.5; return p;
       });
       for (const tri of faces) for (const idx of tri) cube.push(...corners[idx], ...n);
     }
     const ground = [];
-    const G = 8;
+    const G = 48;
     const gy = 0.5;
     for (const [x, z] of [[-G, -G], [G, -G], [G, G], [-G, -G], [G, G], [-G, G]]) ground.push(x, gy, z);
     const boxVbo = device.createBuffer({ size: cube.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
@@ -491,7 +575,11 @@ struct VsOut {
       primitive: { cullMode: 'none' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     });
-    const boxBind = device.createBindGroup({ layout: boxPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: bufs[0] } }, { binding: 1, resource: { buffer: frameBuf } }] });
+    const boxBind = device.createBindGroup({ layout: boxPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: bufs[0] } },
+      { binding: 1, resource: { buffer: frameBuf } },
+      { binding: 2, resource: { buffer: bufs[2] } },
+    ] });
     const groundBind = device.createBindGroup({ layout: groundPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: bufs[0] } }, { binding: 1, resource: { buffer: frameBuf } }] });
     let depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
 
@@ -505,10 +593,10 @@ struct VsOut {
           depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
         }
         const aspect = canvas.width / canvas.height;
-        const view = lookAt([7.5, 5.5, 9.5], [0, 1.6, 0], [0, 1, 0]);
-        device.queue.writeBuffer(frameBuf, 0, mul(perspective(Math.PI / 4, aspect, 0.1, 100), view));
+        const view = lookAt([0, 16, -42], [0, 8, 0], [0, 1, 0]);
+        device.queue.writeBuffer(frameBuf, 0, mul(perspective(Math.PI / 5, aspect, 0.2, 400), view));
         const enc = device.createCommandEncoder();
-        encodeStep(enc);
+        encodeStep(enc, true);
         const rp = enc.beginRenderPass({
           colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.08, 0.09, 0.12, 1], loadOp: 'clear', storeOp: 'store' }],
           depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
@@ -526,12 +614,14 @@ struct VsOut {
         last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
         parity ^= 1;
         steps++;
-        statusEl.textContent = `${info.vendor || 'gpu'} · ${bodies.length - 1} boxes · step ${steps} · y ${y.toFixed(3)} · contacts ${last.contact} · awake ${last.awake} · ${(performance.now() - now).toFixed(1)} ms`;
+        statusEl.textContent = `${info.vendor || 'gpu'} · ${bodies.length - 1} bodies · wall ${wallMs.toFixed(2)} ms · step ${steps} · contacts ${last.contact} · awake ${last.awake} · frame ${(performance.now() - now).toFixed(1)} ms`;
         if (last.overflow) { running = false; fail('overflow flags 0x' + last.overflow.toString(16)); return; }
         requestAnimationFrame(frame);
       } catch (e) { running = false; fail(e); }
     }
-    statusEl.textContent = 'running';
+    statusEl.textContent = `timing ${bodies.length - 1} bodies, 10 iterations…`;
+    const wallMs = await benchWall();
+    statusEl.textContent = `wall ${wallMs.toFixed(2)} ms`;
     requestAnimationFrame(frame);
   </script>
 </body>
