@@ -226,11 +226,9 @@ void boxBuildFaceManifold(
     float3 mids[8];
     uint featurePrefix = uint((referenceIsA ? BOX_AXIS_FACE_A : BOX_AXIS_FACE_B) << 24)
         | (uint(referenceAxis) << 16) | (uint(incidentAxis) << 8);
-    // Vertical faces: full 4 corners. Horizontal faces on *demo bricks* only
-    // (half ≈ 0.5×0.25×0.25): keep 1 (Ring sides). A half.y<0.35 test also
-    // hit random Box Pile sizes and starved tumbling side contacts.
-    bool demoBrick = isDemoBrickHalf(boxA.half) && isDemoBrickHalf(boxB.half);
-    int maxPts = (abs(normalAB.y) > 0.85 || !demoBrick) ? BOX_MAX_CONTACTS : 1;
+    // Every clipped face keeps up to 4 corners, including brick side faces.
+    // Stacking faces were already at 4; the side-face cap of 1 halved gables contacts.
+    int maxPts = BOX_MAX_CONTACTS;
 
     for (int i = 0; i < count && m.count < maxPts; i++)
     {
