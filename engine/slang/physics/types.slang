@@ -11,6 +11,9 @@ public struct BodyState
     float sleepTimer;
     float3 angularVel;
     uint generation;
+    float3 initialPos;
+    float initialPad;
+    float4 initialRot;
 };
 
 public static const uint BODY_DYNAMIC = 1u;

@@ -13,6 +13,11 @@ struct BodyState
     float sleepTimer;
     float3 angularVel;
     uint generation;
+    // x⁻ pose, written by predict. Kept on this record so the primal does not
+    // chase gBodies[maxBodies + i] (a separate cache line per contact).
+    float3 initialPos;
+    float initialPad;
+    float4 initialRot;
 };
 
 static const uint BODY_DYNAMIC = 1u;

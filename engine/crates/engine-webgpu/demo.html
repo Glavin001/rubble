@@ -42,8 +42,8 @@
     function bufferSizes() {
       const b = (n, stride) => n * stride;
       const s = new Array(27).fill(256);
-      s[0] = b(cap.maxBodies * 2, 80);
-      s[1] = b(cap.maxBodies, 80);
+      s[0] = b(cap.maxBodies * 2, 112);
+      s[1] = b(cap.maxBodies, 112);
       s[2] = b(cap.maxColliders, 64);
       s[3] = b(64, 16);
       s[4] = b(cap.maxContacts * 2, 128);
@@ -100,7 +100,7 @@
     function u32(view, o, v) { view.setUint32(o, v, true); }
 
     function writeBody(buf, index, body) {
-      const o = index * 80;
+      const o = index * 112;
       const v = new DataView(buf);
       const q = body.q || [0, 0, 0, 1];
       const w = body.w || [0, 0, 0];
@@ -560,7 +560,7 @@ struct VsOut {
       pass.end();
       if (readback) {
         enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
-        enc.copyBufferToBuffer(bufs[0], 80, bodyRead, 0, 16);
+        enc.copyBufferToBuffer(bufs[0], 112, bodyRead, 0, 16);
       }
     }
 

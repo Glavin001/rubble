@@ -35,6 +35,9 @@ fn unit_box(body: u32, pos: [f32; 3]) -> (BodyState, Collider) {
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
             generation: 0,
+            initial_pos: [0.0; 3],
+            initial_pad: 0.0,
+            initial_rot: [0.0, 0.0, 0.0, 1.0],
         },
         Collider {
             body,

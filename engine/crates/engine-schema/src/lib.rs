@@ -89,7 +89,7 @@ pub enum JointType {
     MaxDistance = 6,
 }
 
-/// Hot body state (SoA-friendly AoS record, 80 bytes).
+/// Hot body state (112 bytes). `initial_pos` / `initial_rot` are the step-start pose.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct BodyState {
@@ -102,6 +102,9 @@ pub struct BodyState {
     pub sleep_timer: f32,
     pub angular_vel: [f32; 3],
     pub generation: u32,
+    pub initial_pos: [f32; 3],
+    pub initial_pad: f32,
+    pub initial_rot: [f32; 4],
 }
 
 impl BodyState {
@@ -115,8 +118,10 @@ impl BodyState {
             linear_vel: [0.0; 3],
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
-            // 0 matches three-avbd; reuseContacts rejects when contact.generated < body.generation.
             generation: 0,
+            initial_pos: [0.0; 3],
+            initial_pad: 0.0,
+            initial_rot: [0.0, 0.0, 0.0, 1.0],
         }
     }
 
@@ -136,6 +141,9 @@ impl BodyState {
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
             generation: 0,
+            initial_pos: [0.0; 3],
+            initial_pad: 0.0,
+            initial_rot: [0.0, 0.0, 0.0, 1.0],
         }
     }
 
@@ -289,7 +297,7 @@ mod tests {
     #[test]
     fn abi_sizes() {
         assert_eq!(size_of::<AbiProbe>(), 80);
-        assert_eq!(size_of::<BodyState>(), 80);
+        assert_eq!(size_of::<BodyState>(), 112);
         assert_eq!(size_of::<Collider>(), 64);
         assert_eq!(size_of::<Contact>(), 128);
         assert_eq!(size_of::<Manifold>(), 32);
