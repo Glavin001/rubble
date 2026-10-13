@@ -826,6 +826,11 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     {
         params.flags |= FLAG_REUSE_CONTACTS;
     }
+    if let Ok(v) = std::env::var("PILE_BETA") {
+        if let Ok(b) = v.parse::<f32>() {
+            params.beta_lin = b;
+        }
+    }
     world.set_params(params);
     {
         let mut b = SceneBuilder::new(&mut world);
