@@ -14,26 +14,26 @@ fn official_params(iterations: u32) -> AvbdParams {
     p
 }
 
-/// Intermediate accuracy gate: 5 pre-stacked unit boxes stay upright for 200 frames.
-/// Full three-avbd Stack (10 boxes, 900 frames, spaced drop) still fails — see
-/// `LOCAL_ORACLE_BASELINE.md` (Jacobi + contact persistence vs their GS manifolds).
+/// Pre-stacked 10 unit boxes settle for 900 frames (three-avbd Stack height; their
+/// scene is spaced — we gate the resting column first). Jacobi needs ~40 iters +
+/// sleep that can absorb residual jitter (see DECISIONS 8c).
 #[test]
 fn stack_settles_like_three_avbd_ref() {
     let mut world = MetalWorld::new(WorldCapacity::small()).unwrap();
-    world.set_params(official_params(20));
+    world.set_params(official_params(40));
     {
         let mut b = SceneBuilder::new(&mut world);
         b.add_ground_plane(0.0);
-        for i in 0..5u32 {
+        for i in 0..10u32 {
             b.add_box(Vec3::new(0.0, 0.5 + i as f32, 0.0), Vec3::splat(0.5), 1.0);
         }
     }
-    for _ in 0..200 {
+    for _ in 0..900 {
         world.step().unwrap();
     }
     let bodies = world.download_bodies();
     let dyn_bodies: Vec<_> = bodies.iter().filter(|b| b.is_dynamic()).collect();
-    assert_eq!(dyn_bodies.len(), 5);
+    assert_eq!(dyn_bodies.len(), 10);
     for (i, b) in dyn_bodies.iter().enumerate() {
         let y = b.position[1];
         let expected = 0.5 + i as f32;
@@ -43,12 +43,12 @@ fn stack_settles_like_three_avbd_ref() {
             "box {i}: y={y} expected≈{expected} (±{tol})"
         );
         assert!(
-            b.position[0].abs() < 0.05 && b.position[2].abs() < 0.05,
+            b.position[0].abs() < 0.08 && b.position[2].abs() < 0.08,
             "box {i} drifted laterally {:?}",
             b.position
         );
         let speed = glam::Vec3::from_array(b.linear_vel).length();
-        assert!(speed < 1.0, "box {i} still moving speed={speed}");
+        assert!(speed < 0.5, "box {i} still moving speed={speed}");
         assert!(y.is_finite());
     }
 }
