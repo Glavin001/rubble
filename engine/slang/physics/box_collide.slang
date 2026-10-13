@@ -330,17 +330,13 @@ BoxManifold collideBoxesCached(BoxObb boxA, BoxObb boxB, float margin)
         if (!boxTestAxis(boxA, boxB, delta, boxAxis(boxB, i), BOX_AXIS_FACE_B, -1, i, margin,
                          faceValid, faceSep, faceN, faceType, faceIA, faceIB))
             return m;
-    // Face-bias (0.95) almost never picks an edge when the face is already closing —
-    // skip 9 edge axes. three-avbd edgeAbsTol=0.01: only compete with edges near zero gap.
-    bool skipEdges = faceValid && faceSep < 0.01;
-    if (!skipEdges)
-    {
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                if (!boxTestAxis(boxA, boxB, delta, cross(boxAxis(boxA, i), boxAxis(boxB, j)),
-                                 BOX_AXIS_EDGE, i, j, margin, edgeValid, edgeSep, edgeN, edgeType, edgeIA, edgeIB))
-                    return m;
-    }
+    // Always evaluate edge axes (three-avbd). Skipping them when faceSep<0.01 was a
+    // perf shortcut that forced 4-point face manifolds for corner contacts.
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            if (!boxTestAxis(boxA, boxB, delta, cross(boxAxis(boxA, i), boxAxis(boxB, j)),
+                             BOX_AXIS_EDGE, i, j, margin, edgeValid, edgeSep, edgeN, edgeType, edgeIA, edgeIB))
+                return m;
 
     if (!faceValid) return m;
 
@@ -349,7 +345,8 @@ BoxManifold collideBoxesCached(BoxObb boxA, BoxObb boxB, float margin)
     int bestType = faceType;
     int bestIA = faceIA;
     int bestIB = faceIB;
-    // Face-biased SAT (three-avbd: edgeRelTol=0.95, edgeAbsTol=0.01).
+    // Face-biased SAT (three-avbd edgeRelTol=0.95, edgeAbsTol=0.01). Prefer the
+    // non-FLAG_FACE_BIAS form here — FLAG_FACE_BIAS raised Ring contact counts on Metal.
     if (edgeValid)
     {
         if (0.95 * edgeSep > faceSep + 0.01)
