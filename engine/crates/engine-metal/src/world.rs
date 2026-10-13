@@ -895,7 +895,7 @@ impl<'a> SceneBuilder<'a> {
             local_pos: [0.0; 3],
             density: dens,
             local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [box_half.x, box_half.y, box_half.z, box_half.max_element()],
+            params: [box_half.x, box_half.y, box_half.z, box_half.length()],
         });
         self.world.add_collider(Collider {
             body,
