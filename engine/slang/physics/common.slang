@@ -281,13 +281,14 @@ Vec6 vec6Zero()
 
 void mat6AddOuter(inout Mat6 a, Vec6 j, float k)
 {
-    // Written out: a 6×6 loop lowers to a WGSL break-loop and dominated the primal.
+    // Lower triangle only. solve6x6 equilibrates every slot, then factors a6, a12, a13,
+    // a18..a20, a24..a27, a30..a34 and the diagonal. The upper triangle is never read.
     float j0 = j.v[0], j1 = j.v[1], j2 = j.v[2], j3 = j.v[3], j4 = j.v[4], j5 = j.v[5];
-    a.m[0] += k * j0 * j0; a.m[1] += k * j0 * j1; a.m[2] += k * j0 * j2; a.m[3] += k * j0 * j3; a.m[4] += k * j0 * j4; a.m[5] += k * j0 * j5;
-    a.m[6] += k * j1 * j0; a.m[7] += k * j1 * j1; a.m[8] += k * j1 * j2; a.m[9] += k * j1 * j3; a.m[10] += k * j1 * j4; a.m[11] += k * j1 * j5;
-    a.m[12] += k * j2 * j0; a.m[13] += k * j2 * j1; a.m[14] += k * j2 * j2; a.m[15] += k * j2 * j3; a.m[16] += k * j2 * j4; a.m[17] += k * j2 * j5;
-    a.m[18] += k * j3 * j0; a.m[19] += k * j3 * j1; a.m[20] += k * j3 * j2; a.m[21] += k * j3 * j3; a.m[22] += k * j3 * j4; a.m[23] += k * j3 * j5;
-    a.m[24] += k * j4 * j0; a.m[25] += k * j4 * j1; a.m[26] += k * j4 * j2; a.m[27] += k * j4 * j3; a.m[28] += k * j4 * j4; a.m[29] += k * j4 * j5;
+    a.m[0] += k * j0 * j0;
+    a.m[6] += k * j1 * j0; a.m[7] += k * j1 * j1;
+    a.m[12] += k * j2 * j0; a.m[13] += k * j2 * j1; a.m[14] += k * j2 * j2;
+    a.m[18] += k * j3 * j0; a.m[19] += k * j3 * j1; a.m[20] += k * j3 * j2; a.m[21] += k * j3 * j3;
+    a.m[24] += k * j4 * j0; a.m[25] += k * j4 * j1; a.m[26] += k * j4 * j2; a.m[27] += k * j4 * j3; a.m[28] += k * j4 * j4;
     a.m[30] += k * j5 * j0; a.m[31] += k * j5 * j1; a.m[32] += k * j5 * j2; a.m[33] += k * j5 * j3; a.m[34] += k * j5 * j4; a.m[35] += k * j5 * j5;
 }
 
