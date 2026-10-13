@@ -815,6 +815,11 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     let mut world = MetalWorld::new(scene.info.capacity.clone())?;
     let mut params = AvbdParams::default();
     params.iterations = scene.info.iterations;
+    if let Ok(v) = std::env::var("PILE_ITERS") {
+        if let Ok(n) = v.parse::<u32>() {
+            params.iterations = n;
+        }
+    }
     // reuseContacts helps random Box Pile settle; on Metal it slows Brick Ring smash.
     if scene.info.name.starts_with("Box Pile")
         && std::env::var("NO_REUSE").is_err()

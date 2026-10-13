@@ -423,6 +423,9 @@ impl MetalWorld {
         s[18] = 0; // reuseContacts hit count (narrowphase)
         s[19] = 0; // reuse hash miss
         s[20] = 0; // reuse generation gate reject
+        s[21] = 0; // update_refs noRef
+        s[22] = 0; // update_refs linMove
+        s[23] = 0; // update_refs angMove
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {

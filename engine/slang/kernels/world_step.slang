@@ -795,14 +795,21 @@ void update_refs(uint3 tid : SV_DispatchThreadID)
     RefPoseGpu last = gRefPoses[i];
     uint step = gScratchAtomics[17];
     bool noRef = dot(last.rot, last.rot) < 1e-12;
-    bool moved = noRef
-        || length(b.position - last.pos.xyz) > REUSE_LIN_TOL
-        || length(quatSubVec(b.orientation, last.rot)) > REUSE_ANG_TOL;
+    // Same hemisphere as last.rot — q and -q are the same attitude; without this,
+    // a solver sign flip looks like a ~2π turn and bumps generation every frame.
+    float4 rot = b.orientation;
+    if (dot(rot, last.rot) < 0.0) rot = -rot;
+    bool linMove = length(b.position - last.pos.xyz) > REUSE_LIN_TOL;
+    bool angMove = length(quatSubVec(rot, last.rot)) > REUSE_ANG_TOL;
+    bool moved = noRef || linMove || angMove;
     if (moved)
     {
+        if (noRef) InterlockedAdd(gScratchAtomics[21], 1);
+        else if (linMove) InterlockedAdd(gScratchAtomics[22], 1);
+        else InterlockedAdd(gScratchAtomics[23], 1);
         RefPoseGpu r;
         r.pos = float4(b.position, 0.0);
-        r.rot = b.orientation;
+        r.rot = rot;
         gRefPoses[i] = r;
         b.generation = step;
         gBodies[i] = b;
