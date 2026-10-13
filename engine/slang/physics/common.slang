@@ -424,9 +424,9 @@ void contributeContact(
     inout Mat6 A, inout Vec6 rhs,
     Contact c, bool isA, float alpha, float3 bodyPos, float4 bodyRot,
     float3 C /* n,t1,t2 geometric residuals at current pose */,
-    float contactOffset)
+    float contactOffset, float3 rWorld)
 {
-    float3 r = isA ? quatRotate(bodyRot, c.anchorA) : quatRotate(bodyRot, c.anchorB);
+    float3 r = rWorld;
     float3 C0 = float3(c.c0N, c.c0T1, c.c0T2);
     // three-avbd: C0 includes margin on the normal; J·dq tracks geometric Δ only, so
     // Ĉ = (1-α)·C0 + (C_geom - C_geom0) = C - α·C0 + (margin, 0, 0).

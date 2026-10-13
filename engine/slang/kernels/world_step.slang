@@ -1904,7 +1904,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                     c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
                 c.penetration = C.x;
                 // C is already Ĉ; alpha=0 + margin=0 ⇒ contributeContact uses F = k·C + λ.
-                contributeContact(A, rhs, c, isA, 0.0, b.position, rotSelf, C, 0.0);
+                contributeContact(A, rhs, c, isA, 0.0, b.position, rotSelf, C, 0.0, isA ? rAW : rBW);
             }
         }
         else
