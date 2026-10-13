@@ -597,9 +597,11 @@ Contact makeContactRow(
     ct.lambdaN = 0.0;
     ct.tangent2 = t2;
     ct.lambdaT1 = 0.0;
-    // Cold start at kStart; persist_contacts raises to massPenalty (m/dt²) before solve.
+    // Cold start: normal gets kStart / massPenalty in persist; friction starts at
+    // PENALTY_MIN=1 like three-avbd (massPenalty must not stiffen friction — that
+    // glued smash balls into brick walls).
     ct.kN = gParams[0].kStart;
-    ct.kT = gParams[0].kStart;
+    ct.kT = 1.0;
     ct.lambdaT2 = 0.0;
     ct.c0T1 = C0t1;
     ct.c0T2 = C0t2;
@@ -810,36 +812,90 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     }
     else if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_SPHERE)
     {
+        // three-avbd sphereBox: closest point, or shallowest face when centre is inside.
         float3 local = quatRotate(quatConjugate(rotA), posB - posA);
         float3 half = ca.params.xyz;
-        float3 q = clamp(local, -half, half);
-        float3 diff = local - q;
-        float dist = length(diff);
-        float r = cb.params.x + margin;
-        if (dist < r)
+        float3 onBox = clamp(local, -half, half);
+        float3 d = local - onBox;
+        float dist = length(d);
+        float rGeo = cb.params.x;
+        float r = rGeo + margin;
+        float3 nLocal;
+        if (dist > 1e-8)
         {
+            if (dist < r)
+            {
+                hit = true;
+                nLocal = d / dist;
+                pen = r - dist;
+                nrm = quatRotate(rotA, nLocal);
+                pA = transformPoint(posA, rotA, onBox);
+                pB = posB - nrm * rGeo;
+            }
+        }
+        else
+        {
+            float3 depth = half - abs(local);
+            int k = 0;
+            if (depth.y < depth.x) k = 1;
+            if (depth.z < ((k == 0) ? depth.x : depth.y)) k = 2;
+            float pk = (k == 0) ? local.x : ((k == 1) ? local.y : local.z);
+            float hk = (k == 0) ? half.x : ((k == 1) ? half.y : half.z);
+            float dk = (k == 0) ? depth.x : ((k == 1) ? depth.y : depth.z);
+            float s = pk >= 0.0 ? 1.0 : -1.0;
+            nLocal = float3(0, 0, 0);
+            if (k == 0) { nLocal.x = s; onBox.x = s * hk; }
+            else if (k == 1) { nLocal.y = s; onBox.y = s * hk; }
+            else { nLocal.z = s; onBox.z = s * hk; }
             hit = true;
-            nrm = dist > 1e-8 ? quatRotate(rotA, diff / dist) : float3(0, 1, 0);
-            pen = r - dist;
-            pA = transformPoint(posA, rotA, q);
-            pB = posB - nrm * cb.params.x;
+            pen = r + dk;
+            nrm = quatRotate(rotA, nLocal);
+            pA = transformPoint(posA, rotA, onBox);
+            pB = posB - nrm * rGeo;
         }
     }
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_BOX)
     {
+        // Same geometry as box→sphere; flip normal so nrm is A→B (sphere→box).
         float3 local = quatRotate(quatConjugate(rotB), posA - posB);
         float3 half = cb.params.xyz;
-        float3 q = clamp(local, -half, half);
-        float3 diff = local - q;
-        float dist = length(diff);
-        float r = ca.params.x + margin;
-        if (dist < r)
+        float3 onBox = clamp(local, -half, half);
+        float3 d = local - onBox;
+        float dist = length(d);
+        float rGeo = ca.params.x;
+        float r = rGeo + margin;
+        float3 nLocal;
+        if (dist > 1e-8)
         {
+            if (dist < r)
+            {
+                hit = true;
+                nLocal = d / dist;
+                pen = r - dist;
+                nrm = -quatRotate(rotB, nLocal);
+                pB = transformPoint(posB, rotB, onBox);
+                pA = posA + nrm * rGeo;
+            }
+        }
+        else
+        {
+            float3 depth = half - abs(local);
+            int k = 0;
+            if (depth.y < depth.x) k = 1;
+            if (depth.z < ((k == 0) ? depth.x : depth.y)) k = 2;
+            float pk = (k == 0) ? local.x : ((k == 1) ? local.y : local.z);
+            float hk = (k == 0) ? half.x : ((k == 1) ? half.y : half.z);
+            float dk = (k == 0) ? depth.x : ((k == 1) ? depth.y : depth.z);
+            float s = pk >= 0.0 ? 1.0 : -1.0;
+            nLocal = float3(0, 0, 0);
+            if (k == 0) { nLocal.x = s; onBox.x = s * hk; }
+            else if (k == 1) { nLocal.y = s; onBox.y = s * hk; }
+            else { nLocal.z = s; onBox.z = s * hk; }
             hit = true;
-            nrm = dist > 1e-8 ? -quatRotate(rotB, diff / dist) : float3(0, 1, 0);
-            pen = r - dist;
-            pB = transformPoint(posB, rotB, q);
-            pA = posA + nrm * ca.params.x;
+            pen = r + dk;
+            nrm = -quatRotate(rotB, nLocal);
+            pB = transformPoint(posB, rotB, onBox);
+            pA = posA + nrm * rGeo;
         }
     }
     else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CAPSULE)
@@ -1013,7 +1069,12 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         c.kN = prev.kN;
         c.kT = prev.kT;
         // three-avbd: keep old anchors while static friction held (stick).
-        if (prev._pad0 > 0.5)
+        // Not for spheres — contact point slides over the surface as they roll;
+        // pinned anchors rotate with the body and glue/stop smash balls.
+        Collider colA = gColliders[c.colliderA];
+        Collider colB = gColliders[c.colliderB];
+        bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+        if (prev._pad0 > 0.5 && !anySphere)
         {
             c.anchorA = prev.anchorA;
             c.anchorB = prev.anchorB;
@@ -1032,10 +1093,11 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     float mA = ba.invMass > 1e-12 ? (1.0 / ba.invMass) : 1e20;
     float mB = bb.invMass > 1e-12 ? (1.0 / bb.invMass) : 1e20;
     // three-avbd FLAG_MASS_PENALTY: kN ≥ min(m)/dt² so resting contacts hold under gravity
-    // with Jacobi (was deferred to stick-only while cReg had a margin bug).
+    // with Jacobi. Friction rows keep the demo ramp from PENALTY_MIN — not massPenalty
+    // (three-avbd contactPenaltyMin applies to pen.x only).
     float kMass = min(mA, mB) / (dt * dt);
     c.kN = max(max(p.kStart, kMass), p.gamma * c.kN);
-    c.kT = max(max(p.kStart, kMass * 0.1), p.gamma * c.kT);
+    c.kT = max(1.0, p.gamma * c.kT);
     c.lambdaN *= p.alpha * p.gamma;
     c.lambdaT1 *= p.alpha * p.gamma;
     c.lambdaT2 *= p.alpha * p.gamma;
@@ -1424,21 +1486,30 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             // Manifold edge: load both bodies once, fold every contact point (three-avbd).
             Manifold mf = gManifolds[id - nJ];
             if (mf.contactCount == 0u) continue;
-            uint ba = gColliders[mf.colliderA].body;
-            uint bb = gColliders[mf.colliderB].body;
+            Collider colA = gColliders[mf.colliderA];
+            Collider colB = gColliders[mf.colliderB];
+            uint ba = colA.body;
+            uint bb = colB.body;
             bool isA = ba == bodyIdx;
             BodyState bA = gBodies[ba];
             BodyState bB = gBodies[bb];
+            // three-avbd: sphere lever arms at x⁻ (initialRot). A rolling sphere turns
+            // ~0.1 rad/step; rotating anchors with it injects false C / friction drag.
+            // Static bodies skip predict, so keep their (constant) current orientation.
+            bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? gBodiesPrev[ba].orientation : bA.orientation;
+            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? gBodiesPrev[bb].orientation : bB.orientation;
+            float4 rotSelf = isA ? rotA : rotB;
             for (uint ci = 0u; ci < mf.contactCount; ci++)
             {
                 Contact c = gContacts[mf.contactStart + ci];
                 if (c.alive == 0) continue;
-                float3 wa = transformPoint(bA.position, bA.orientation, c.anchorA);
-                float3 wb = transformPoint(bB.position, bB.orientation, c.anchorB);
+                float3 wa = transformPoint(bA.position, rotA, c.anchorA);
+                float3 wb = transformPoint(bB.position, rotB, c.anchorB);
                 float3 d = wb - wa;
                 float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
                 c.penetration = C.x;
-                contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation, C, p.contactOffset);
+                contributeContact(A, rhs, c, isA, p.alpha, b.position, rotSelf, C, p.contactOffset);
             }
         }
         else
@@ -1621,8 +1692,13 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             if (sleepA && sleepB) { /* leave λ/k */ }
             else
             {
-            float3 wa = transformPoint(bA.position, bA.orientation, c.anchorA);
-            float3 wb = transformPoint(bB.position, bB.orientation, c.anchorB);
+            Collider colA = gColliders[c.colliderA];
+            Collider colB = gColliders[c.colliderB];
+            bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? gBodiesPrev[ba].orientation : bA.orientation;
+            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? gBodiesPrev[bb].orientation : bB.orientation;
+            float3 wa = transformPoint(bA.position, rotA, c.anchorA);
+            float3 wb = transformPoint(bB.position, rotB, c.anchorB);
             float3 d = wb - wa;
             float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
             c.penetration = C.x;
@@ -1634,12 +1710,16 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             c.lambdaN = f.x;
             c.lambdaT1 = f.y;
             c.lambdaT2 = f.z;
-            // Penalty ramp (three-avbd: ramp when force in bounds)
+            // Penalty ramp (three-avbd dual): β|C| when force in bounds — not a flat
+            // β·0.1 (that exploded kT on every sticking dual and stopped smash balls).
             if (f.x < 0.0) c.kN = min(c.kN + p.betaLin * abs(cReg.x), p.kMaxN);
             float ft = length(float2(f.y, f.z));
             float bound = c.friction * (-f.x);
             if (ft <= bound + 1e-8)
-                c.kT = min(c.kT + p.betaLin * 0.1, p.kMaxT);
+            {
+                c.kT = min(c.kT + p.betaLin * abs(cReg.y), p.kMaxT);
+                c.kT = min(c.kT + p.betaLin * abs(cReg.z), p.kMaxT);
+            }
             // Stick only when friction force is inside the cone (three-avbd updateDual).
             float slip = length(float2(C.y, C.z));
             c._pad0 = (ft <= bound + 1e-8 && slip < 1.0e-5) ? 1.0 : 0.0;
