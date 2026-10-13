@@ -524,7 +524,14 @@ impl MetalWorld {
             }
             max_r = max_r.max(r);
         }
-        let mult = std::env::var("GRID_CELL_MULT").ok().and_then(|s| s.parse().ok()).unwrap_or(2.0);
+        // three-avbd uses 2·maxSmall. For compact demo bricks (r≲0.65) a 1.25× cell
+        // keeps Ring smash nearer ~3.5 ms; random piles (r≳1) keep the full 2× so the
+        // 2-cell query clamp cannot drop pairs.
+        let default_mult = if max_r < 0.7 { 1.25 } else { 2.0 };
+        let mult = std::env::var("GRID_CELL_MULT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default_mult);
         self.params.grid_cell_size = (mult * max_r * 1.0001).max(0.5);
     }
 

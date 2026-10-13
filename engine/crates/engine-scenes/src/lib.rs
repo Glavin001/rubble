@@ -859,6 +859,9 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         // Softer β than demo default 1e4: after gridCellSize fix, β=2e3 cuts flyers
         // (~50→~6) and KE (~100→~10) at 1200 without reopening deep C0. Override with PILE_BETA.
         params.beta_lin = 2_000.0;
+        // Slightly looser sleep so a few skaters/restless edge boxes do not pin the island.
+        params.sleep_lin = 0.25;
+        params.sleep_ang = 0.25;
     }
     if let Ok(v) = std::env::var("PILE_BETA") {
         if let Ok(b) = v.parse::<f32>() {
