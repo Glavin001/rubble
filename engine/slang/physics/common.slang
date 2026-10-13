@@ -281,9 +281,14 @@ Vec6 vec6Zero()
 
 void mat6AddOuter(inout Mat6 a, Vec6 j, float k)
 {
-    for (int r = 0; r < 6; r++)
-        for (int c = 0; c < 6; c++)
-            a.m[r * 6 + c] += k * j.v[r] * j.v[c];
+    // Written out: a 6×6 loop lowers to a WGSL break-loop and dominated the primal.
+    float j0 = j.v[0], j1 = j.v[1], j2 = j.v[2], j3 = j.v[3], j4 = j.v[4], j5 = j.v[5];
+    a.m[0] += k * j0 * j0; a.m[1] += k * j0 * j1; a.m[2] += k * j0 * j2; a.m[3] += k * j0 * j3; a.m[4] += k * j0 * j4; a.m[5] += k * j0 * j5;
+    a.m[6] += k * j1 * j0; a.m[7] += k * j1 * j1; a.m[8] += k * j1 * j2; a.m[9] += k * j1 * j3; a.m[10] += k * j1 * j4; a.m[11] += k * j1 * j5;
+    a.m[12] += k * j2 * j0; a.m[13] += k * j2 * j1; a.m[14] += k * j2 * j2; a.m[15] += k * j2 * j3; a.m[16] += k * j2 * j4; a.m[17] += k * j2 * j5;
+    a.m[18] += k * j3 * j0; a.m[19] += k * j3 * j1; a.m[20] += k * j3 * j2; a.m[21] += k * j3 * j3; a.m[22] += k * j3 * j4; a.m[23] += k * j3 * j5;
+    a.m[24] += k * j4 * j0; a.m[25] += k * j4 * j1; a.m[26] += k * j4 * j2; a.m[27] += k * j4 * j3; a.m[28] += k * j4 * j4; a.m[29] += k * j4 * j5;
+    a.m[30] += k * j5 * j0; a.m[31] += k * j5 * j1; a.m[32] += k * j5 * j2; a.m[33] += k * j5 * j3; a.m[34] += k * j5 * j4; a.m[35] += k * j5 * j5;
 }
 
 void mat6AddDiag(inout Mat6 a, float3 lin, float3 ang)
@@ -294,7 +299,8 @@ void mat6AddDiag(inout Mat6 a, float3 lin, float3 ang)
 
 void vec6AddScaled(inout Vec6 a, Vec6 j, float s)
 {
-    for (int i = 0; i < 6; i++) a.v[i] += j.v[i] * s;
+    a.v[0] += j.v[0] * s; a.v[1] += j.v[1] * s; a.v[2] += j.v[2] * s;
+    a.v[3] += j.v[3] * s; a.v[4] += j.v[4] * s; a.v[5] += j.v[5] * s;
 }
 
 Vec6 solve6x6(Mat6 A, Vec6 b, float pivotFloor, inout uint floorHits)
