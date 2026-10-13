@@ -72,6 +72,17 @@ struct Contact
     float _pad2; // ABI: keep Contact = 128 B (matches engine-schema)
 };
 
+// three-avbd Stage 8b: one CSR/dual edge per pair; contacts are a contiguous range.
+struct Manifold
+{
+    uint colliderA;
+    uint colliderB;
+    uint contactStart;
+    uint contactCount;
+    float3 normal;
+    float friction;
+};
+
 struct Joint
 {
     uint bodyA;
@@ -148,6 +159,10 @@ struct StepCounters
     uint sleepEvents;
     uint wakeEvents;
     uint iteration;
+    uint manifoldCount;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
 };
 
 static const uint OVERFLOW_CONTACTS = 1u;
@@ -156,6 +171,7 @@ static const uint OVERFLOW_JOINTS = 4u;
 static const uint OVERFLOW_COLORS = 8u;
 static const uint CCD_BUDGET_EXHAUSTED = 16u;
 static const uint CCD_CANDIDATE_MISS = 32u;
+static const uint OVERFLOW_MANIFOLDS = 64u;
 
 struct GpuCommand
 {

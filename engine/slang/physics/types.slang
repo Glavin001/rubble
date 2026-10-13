@@ -70,6 +70,16 @@ public struct Contact
     float _pad2; // ABI: keep Contact = 128 B (matches engine-schema)
 };
 
+public struct Manifold
+{
+    uint colliderA;
+    uint colliderB;
+    uint contactStart;
+    uint contactCount;
+    float3 normal;
+    float friction;
+};
+
 public struct Joint
 {
     uint bodyA;
@@ -146,12 +156,17 @@ public struct StepCounters
     uint sleepEvents;
     uint wakeEvents;
     uint iteration;
+    uint manifoldCount;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
 };
 
 public static const uint OVERFLOW_CONTACTS = 1u;
 public static const uint OVERFLOW_CANDIDATES = 2u;
 public static const uint OVERFLOW_JOINTS = 4u;
 public static const uint OVERFLOW_COLORS = 8u;
+public static const uint OVERFLOW_MANIFOLDS = 64u;
 public static const uint CCD_BUDGET_EXHAUSTED = 16u;
 public static const uint CCD_CANDIDATE_MISS = 32u;
 
