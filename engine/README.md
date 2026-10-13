@@ -49,7 +49,7 @@ Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
 | `crates/engine-metal` | M3 proof backend + benches |
 | `crates/engine-scenes` | Demo/benchmark scene builders + `demo_viewer` |
 | `crates/engine-oracles` | three-avbd / Newton / Jolt / demo3d adapters |
-| `crates/engine-webgpu` | SPIR-V → WGSL port |
+| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke` |
 | `crates/engine-cuda` | CUDA source emission |
 | `crates/engine-viewer` | Buffer-shared draw |
 | `conformance/` | Oracle scene schema + adapter JSON |
