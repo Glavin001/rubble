@@ -16,15 +16,22 @@ fn main() {
     env_logger::init();
     let budget_ms = 1000.0 / 120.0;
     println!("scene_fps gate: p50 ≤ {budget_ms:.3} ms (120 FPS)");
+    let filters: Vec<String> = std::env::args().skip(1).collect();
     let mut failed = 0u32;
     for scene in list_scenes() {
+        if !filters.is_empty()
+            && !filters
+                .iter()
+                .any(|f| scene.info.name.to_ascii_lowercase().contains(&f.to_ascii_lowercase()))
+        {
+            continue;
+        }
         // Smash-peak / collapsing piles sit on/over the 8.33 ms line on M3.
         // Box Columns settles like three-avbd (lead=120 → fully asleep early-out).
         let stress = matches!(
             scene.info.name,
             "Brick Ring (28k)"
                 | "Brick Ring (110k)"
-                | "Brick Walls (27k)"
                 | "Box Pile (32k)"
         );
         let settle = scene.info.name == "Box Columns (100k)";
