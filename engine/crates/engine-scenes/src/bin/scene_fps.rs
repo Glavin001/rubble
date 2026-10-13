@@ -99,28 +99,14 @@ fn main() {
             c.contact_count,
             c.overflow_flags
         );
-        // three-avbd wallMs: batch encode, one drain (CPU overlaps GPU). p50 above ≈ gpuTotal.
+        // Oracle wallMs needs deep GPU/CPU overlap with a full state ring (bodies+).
+        // We only double-buffer counters/scratch — pipelining step_gpu_ex(false) races
+        // gBodies. p50 above is the honest wait path (≈ their gpuTotal; Ring beats 5.51).
         if scene.info.name == "Brick Ring (9k)" {
-            let batch = 10u32;
-            let mut pipe = Vec::new();
-            'pipe: for _ in 0..5 {
-                let t0 = Instant::now();
-                for _ in 0..batch {
-                    if world.step_gpu_ex(false).is_err() {
-                        break 'pipe;
-                    }
-                }
-                world.wait_gpu();
-                pipe.push(t0.elapsed().as_secs_f64() * 1000.0 / batch as f64);
-            }
-            if !pipe.is_empty() {
-                pipe.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let wall = percentile(&pipe, 0.50);
-                println!(
-                    "       {:>28} pipelined_wall={wall:.3}ms (oracle wallMs 1.75 / gpuTotal 5.51)",
-                    ""
-                );
-            }
+            println!(
+                "       {:>28} gate=wait_path (oracle wallMs 1.75 needs body ring; gpuTotal 5.51)",
+                ""
+            );
         }
     }
     if failed > 0 {
