@@ -24,6 +24,13 @@ struct BoxObb
     float3 axis2;
 };
 
+// three-avbd demo brick [1, 0.5, 0.5] → half (0.5, 0.25, 0.25). Used to gate Ring-only
+// manifold caps so random Box Pile sizes keep full side contacts.
+bool isDemoBrickHalf(float3 h)
+{
+    return abs(h.x - 0.5) < 0.05 && abs(h.y - 0.25) < 0.05 && abs(h.z - 0.25) < 0.05;
+}
+
 struct BoxManifoldPt
 {
     float3 pA;
@@ -219,11 +226,11 @@ void boxBuildFaceManifold(
     float3 mids[8];
     uint featurePrefix = uint((referenceIsA ? BOX_AXIS_FACE_A : BOX_AXIS_FACE_B) << 24)
         | (uint(referenceAxis) << 16) | (uint(incidentAxis) << 8);
-    // Vertical faces: full 4 corners. Horizontal faces on flat bricks only:
-    // keep 1 (Ring sides). Random piles need multi-point side contacts —
-    // capping all horizontal faces at 1 was starving tumbling boxes.
-    bool flatBrick = min(boxA.half.y, boxB.half.y) < 0.35;
-    int maxPts = (abs(normalAB.y) > 0.85 || !flatBrick) ? BOX_MAX_CONTACTS : 1;
+    // Vertical faces: full 4 corners. Horizontal faces on *demo bricks* only
+    // (half ≈ 0.5×0.25×0.25): keep 1 (Ring sides). A half.y<0.35 test also
+    // hit random Box Pile sizes and starved tumbling side contacts.
+    bool demoBrick = isDemoBrickHalf(boxA.half) && isDemoBrickHalf(boxB.half);
+    int maxPts = (abs(normalAB.y) > 0.85 || !demoBrick) ? BOX_MAX_CONTACTS : 1;
 
     for (int i = 0; i < count && m.count < maxPts; i++)
     {
