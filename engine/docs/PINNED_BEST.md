@@ -23,7 +23,7 @@ Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8
 | matchNearest contact warm-start | three-avbd | TODO |
 | Primal multi-lane | three-avbd 8g | TODO |
 | Island sleep compact active set | Jolt | TODO (asleep_50k) |
-| Face-axis broadphase reject | three-avbd 8h | TODO |
+| Face-axis broadphase reject | three-avbd 8h | landed (OBB face axes, 1 mm gap) |
 
 ## Speed bars (local M3 Max only)
 
