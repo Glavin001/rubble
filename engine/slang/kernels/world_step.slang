@@ -1970,6 +1970,26 @@ void solvePrimalForBody(uint bodyIdx)
 // Multi-lane partial systems: ≤8 lanes ⇒ ≤8 bodies per workgroup.
 groupshared float gsA[64 * 36];
 groupshared float gsRhs[64 * 6];
+groupshared uint gsUniformLanes;
+
+void primalReduceStep(uint s, bool live, uint lane, uint local, inout Mat6 A, inout Vec6 rhs)
+{
+    if (live && lane < s)
+    {
+        uint other = local + s;
+        for (int i = 0; i < 36; i++) A.m[i] += gsA[other * 36 + i];
+        for (int i = 0; i < 6; i++) rhs.v[i] += gsRhs[other * 6 + i];
+        for (int i = 0; i < 36; i++) gsA[local * 36 + i] = A.m[i];
+        for (int i = 0; i < 6; i++) gsRhs[local * 6 + i] = rhs.v[i];
+    }
+    GROUP_SYNC();
+    if (live && lane < s)
+    {
+        for (int i = 0; i < 36; i++) A.m[i] = gsA[local * 36 + i];
+        for (int i = 0; i < 6; i++) rhs.v[i] = gsRhs[local * 6 + i];
+    }
+    GROUP_SYNC();
+}
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -1977,10 +1997,14 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
 {
     uint color = PASS_U;
     uint count = ALOAD(gColorCounts[color]);
-    uint lanes = primalLanesFor(count);
-    uint threads = count * lanes;
     uint gid = tid.x;
     uint local = lid.x;
+    // Storage loads are non-uniform in WGSL. Publish lanes through workgroup
+    // memory; the WGSL post-pass rewrites the read as workgroupUniformLoad.
+    if (local == 0u) gsUniformLanes = primalLanesFor(count);
+    GROUP_SYNC();
+    uint lanes = gsUniformLanes;
+    uint threads = count * lanes;
     uint bodySlot = gid / lanes;
     uint lane = local % lanes;
     uint slot = local / lanes; // body slot within the workgroup
@@ -1996,39 +2020,26 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
         primalAccumulate(bodyIdx, lane, lanes, A, rhs);
     }
 
+    // lanes is uniform (a function of the colour's body count). Barriers stay in
+    // uniform control flow: Chrome rejects a barrier inside a loop or after a return.
     if (lanes == 1u)
     {
         if (live) primalApply(bodyIdx, A, rhs);
-        return;
     }
-
-    // Store partials by local id; reduce lanes (three-avbd primalColor).
-    if (live)
+    else
     {
-        for (int i = 0; i < 36; i++) gsA[local * 36 + i] = A.m[i];
-        for (int i = 0; i < 6; i++) gsRhs[local * 6 + i] = rhs.v[i];
-    }
-    GROUP_SYNC();
-    // Halving reduction across lanes for each body slot
-    for (uint s = lanes >> 1; s > 0u; s >>= 1)
-    {
-        if (live && lane < s)
+        if (live)
         {
-            uint other = local + s;
-            for (int i = 0; i < 36; i++) A.m[i] += gsA[other * 36 + i];
-            for (int i = 0; i < 6; i++) rhs.v[i] += gsRhs[other * 6 + i];
             for (int i = 0; i < 36; i++) gsA[local * 36 + i] = A.m[i];
             for (int i = 0; i < 6; i++) gsRhs[local * 6 + i] = rhs.v[i];
         }
         GROUP_SYNC();
-        if (live && lane < s)
-        {
-            for (int i = 0; i < 36; i++) A.m[i] = gsA[local * 36 + i];
-            for (int i = 0; i < 6; i++) rhs.v[i] = gsRhs[local * 6 + i];
-        }
-        GROUP_SYNC();
+        // lanes is 2, 4, or 8. Unrolled halving (three-avbd primalColor).
+        if (lanes >= 8u) primalReduceStep(4u, live, lane, local, A, rhs);
+        if (lanes >= 4u) primalReduceStep(2u, live, lane, local, A, rhs);
+        primalReduceStep(1u, live, lane, local, A, rhs);
+        if (live && lane == 0u) primalApply(bodyIdx, A, rhs);
     }
-    if (live && lane == 0u) primalApply(bodyIdx, A, rhs);
 }
 
 // Small-scene GS: one body per dispatch (gPassUniform = body index). Host walks
