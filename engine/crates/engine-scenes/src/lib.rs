@@ -378,15 +378,15 @@ pub fn box_pile_32k(b: &mut SceneBuilder<'_>) {
 }
 
 pub fn box_columns(b: &mut SceneBuilder<'_>, n: u32, h: u32) {
-    // three-avbd: unit boxes stacked on a ground whose top is at 0.5 — bottom centre
-    // at y=0.5 so the first layer is pre-seated (a 0.5 m air drop was exploding 100k).
+    // three-avbd boxColumns (Z-up → Y-up): unit boxes at y = 1+layer so the first
+    // course sits on the ground slab top (y=0.5). Centre 0.5 penetrates 0.5 m.
     for x in 0..n {
         for z in 0..n {
             for y in 0..h {
                 b.add_box(
                     Vec3::new(
                         (x as f32 - n as f32 / 2.0) * 1.5,
-                        0.5 + y as f32,
+                        1.0 + y as f32,
                         (z as f32 - n as f32 / 2.0) * 1.5,
                     ),
                     Vec3::splat(0.5),
@@ -809,7 +809,11 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     world.set_params(params);
     {
         let mut b = SceneBuilder::new(&mut world);
-        b.add_ground_plane(0.0);
+        // Seat content on y=0.5 like three-avbd's ground top. A plane (not a box
+        // slab) keeps the large-scene broadphase simple: every dynamic already
+        // probes planes, and Box Columns 100k settles/sleeps on it. Brick Ring
+        // must not air-drop 0.5 m from a plane at y=0.
+        b.add_ground_plane(0.5);
         (scene.build)(&mut b);
     }
     Ok((world, &scene.info))

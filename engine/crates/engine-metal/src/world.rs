@@ -745,11 +745,18 @@ impl<'a> SceneBuilder<'a> {
         body
     }
 
-    /// Static box ground (three-avbd `ground()` XY extent). Top face at `top_y`.
-    /// Thickness is deep so Jacobi soft contacts can't tunnel through a 1-unit slab
-    /// and lose AABB overlap (thin slab + fall-through was wiping spaced Stack).
+    /// Static box ground (three-avbd `ground(extent)`). Top face at `top_y`.
+    /// `half_xz` is the horizontal half-extent (three-avbd: max(100, 2·extent)).
+    /// Thickness is deep so Jacobi soft contacts can't tunnel through a thin slab.
     pub fn add_ground_box(&mut self, top_y: f32) -> u32 {
+        self.add_ground_box_extent(top_y, 200.0)
+    }
+
+    pub fn add_ground_box_extent(&mut self, top_y: f32, half_xz: f32) -> u32 {
+        // Top face matches three-avbd (y=0.5). Thickness is deeper than their size.z=1
+        // slab: our Jacobi soft contacts otherwise tunnel through a thin floor at scale.
         let half_h = 25.0;
+        let hx = half_xz.max(50.0);
         let body = self.world.add_body(BodyState {
             position: [0.0, top_y - half_h, 0.0],
             inv_mass: 0.0,
@@ -769,7 +776,7 @@ impl<'a> SceneBuilder<'a> {
             local_pos: [0.0; 3],
             density: 0.0,
             local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [50.0, half_h, 50.0, half_h.max(50.0)],
+            params: [hx, half_h, hx, hx.max(half_h)],
         });
         body
     }

@@ -386,6 +386,13 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     uint base = gScratchAtomics[1];
     float cellSize = max(gParams[0].contactOffset * 16.0, 0.5);
     Aabb box = gAabbs[base + i];
+    float3 ext = box.mx - box.mn;
+    // three-avbd isLarge: keep oversized statics out of the hash grid; dynamics
+    // find them via the brute-force large-static pass in broadphase_query.
+    BodyState b = gBodies[col.body];
+    if (!bodyIsDynamic(b) &&
+        (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0))
+        return;
     float3 center = 0.5 * (box.mn + box.mx);
     int3 cc = int3(floor(center / cellSize));
     uint h = gridHash(cc.x, cc.y, cc.z);
@@ -486,6 +493,9 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         while (cur != 0xFFFFFFFFu && guard < 256u)
         {
             guard++;
+            // Dynamic-dynamic once (higher index). Statics are not in this hash (planes
+            // skip insert; large box grounds use the O(1) probe below) — keep the
+            // cur > i early-out so we do not touch every lower-index chain node.
             if (cur > i)
             {
                 Collider other = gColliders[cur];
@@ -493,7 +503,6 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                     !bodiesJointed(col.body, other.body) &&
                     other.shape != SHAPE_PLANE)
                 {
-                    // Sleeping others stay in the grid so impacts wake them.
                     Aabb ab = gAabbs[base + cur];
                     if (!(box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
                           box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
@@ -505,6 +514,29 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                 }
             }
             cur = gColorLists[cur];
+        }
+    }
+    // three-avbd isLarge: ground slab is collider 0 and skipped from the hash grid
+    // (one cell at its centre never covers the arena). Probe it O(1) per dynamic.
+    if (c.colliderCount > 0u && i != 0u)
+    {
+        uint j = 0u;
+        Collider other = gColliders[j];
+        BodyState ob = gBodies[other.body];
+        if (!bodyIsDynamic(ob) && other.shape != SHAPE_PLANE)
+        {
+            Aabb ab = gAabbs[base + j];
+            float3 ext = ab.mx - ab.mn;
+            if (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0)
+            {
+                if (!(box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
+                      box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
+                      box.mx.z < ab.mn.z || ab.mx.z < box.mn.z))
+                {
+                    if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, j, faceGap)))
+                        emitCandidate(i, j);
+                }
+            }
         }
     }
 }
