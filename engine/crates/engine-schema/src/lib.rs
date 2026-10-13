@@ -115,7 +115,8 @@ impl BodyState {
             linear_vel: [0.0; 3],
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
-            generation: 1,
+            // 0 matches three-avbd; reuseContacts rejects when contact.generated < body.generation.
+            generation: 0,
         }
     }
 
@@ -134,7 +135,7 @@ impl BodyState {
             linear_vel: [0.0; 3],
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
-            generation: 1,
+            generation: 0,
         }
     }
 

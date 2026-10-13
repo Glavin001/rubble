@@ -228,13 +228,13 @@ pub fn chain_mail(b: &mut SceneBuilder<'_>, n: u32) {
                     linear_vel: [0.0; 3],
                     sleep_timer: 0.0,
                     angular_vel: [0.0; 3],
-                    generation: 1,
+                    generation: 0,
                 });
                 b.world_mut().add_collider(engine_schema::Collider {
                     body,
                     shape: engine_schema::ShapeType::Box as u32,
                     material: 0,
-                    generation: 1,
+                    generation: 0,
                     local_pos: [0.0; 3],
                     density: 0.0,
                     local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -288,13 +288,13 @@ pub fn heavy_pendulum(b: &mut SceneBuilder<'_>, links: u32, ratio: f32) {
             linear_vel: [0.0; 3],
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
-            generation: 1,
+            generation: 0,
         });
         b.world_mut().add_collider(engine_schema::Collider {
             body,
             shape: engine_schema::ShapeType::Box as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: [0.0; 3],
             density: 0.0,
             local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -443,13 +443,13 @@ fn hanging_sphere_rope(b: &mut SceneBuilder<'_>, links: u32, start_y: f32, heavy
             linear_vel: [0.0; 3],
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
-            generation: 1,
+            generation: 0,
         });
         b.world_mut().add_collider(engine_schema::Collider {
             body,
             shape: engine_schema::ShapeType::Sphere as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: [0.0; 3],
             density: 0.0,
             local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -512,13 +512,13 @@ pub fn jointed_drop_small(b: &mut SceneBuilder<'_>) {
                     linear_vel: [0.0; 3],
                     sleep_timer: 0.0,
                     angular_vel: [0.0; 3],
-                    generation: 1,
+                    generation: 0,
                 });
                 b.world_mut().add_collider(engine_schema::Collider {
                     body,
                     shape: engine_schema::ShapeType::Box as u32,
                     material: 0,
-                    generation: 1,
+                    generation: 0,
                     local_pos: [0.0; 3],
                     density: 0.0,
                     local_rot: [0.0, 0.0, 0.0, 1.0],

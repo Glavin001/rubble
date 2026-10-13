@@ -38,6 +38,7 @@ pub struct MetalWorld {
     events: Buffer,
     ccd_flags: Buffer,
     world_obbs: Buffer,
+    ref_poses: Buffer,
     scratch: [Buffer; 2],
     /// Prefilled 0..63; each color/round dispatch binds a 4-byte offset (three-avbd pass const).
     pass_table: Buffer,
@@ -102,6 +103,12 @@ impl MetalWorld {
         let ccd_flags = alloc_u32(d, capacity.max_bodies);
         // WorldObbGpu = 5 × float4
         let world_obbs = alloc::<[f32; 20]>(d, capacity.max_colliders);
+        // RefPoseGpu = 2 × float4 (three-avbd reuseContacts updateRefs).
+        let ref_poses = alloc::<[f32; 8]>(d, capacity.max_bodies);
+        unsafe {
+            let n = capacity.max_bodies as usize * 8;
+            std::ptr::write_bytes(ref_poses.contents() as *mut u8, 0, n * 4);
+        }
         let scratch = [alloc_u32(d, 64), alloc_u32(d, 64)];
         // 96 slots: 0..47 identity (colour rounds / misc), 48..67 = 2^0..2^19 for CSR scan
         // (must cover max_bodies=524288; the old 16-slot table broke adjacency above 65k).
@@ -163,6 +170,7 @@ impl MetalWorld {
             events,
             ccd_flags,
             world_obbs,
+            ref_poses,
             scratch,
             pass_table,
             indirect_args,
@@ -328,6 +336,7 @@ impl MetalWorld {
         encoder.set_buffer(23, Some(&self.indirect_args), 0);
         encoder.set_buffer(24, Some(&self.world_obbs), 0);
         encoder.set_buffer(25, Some(&self.manifolds), 0);
+        encoder.set_buffer(26, Some(&self.ref_poses), 0);
     }
 
     fn dispatch(&self, encoder: &ComputeCommandEncoderRef, name: &str, threads: u64) {
@@ -410,6 +419,7 @@ impl MetalWorld {
         }
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
         s[13] = 0; // any sleep candidate (set by extract)
+        s[17] = self.steps_done; // step index for reuseContacts generation stamps
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
@@ -567,6 +577,7 @@ impl MetalWorld {
         let prev_n = prev_contacts.min(self.capacity.max_contacts as u64).max(1);
         let reuse = (self.params.flags & engine_schema::FLAG_REUSE_CONTACTS) != 0;
         if reuse {
+            self.dispatch(&encoder, "update_refs", n_bodies);
             self.dispatch(&encoder, "contact_hash_clear", hash_n);
             self.dispatch(&encoder, "contact_hash_insert", prev_n);
         }
@@ -817,13 +828,13 @@ impl<'a> SceneBuilder<'a> {
             linear_vel: [0.0; 3],
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
-            generation: 1,
+            generation: 0,
         });
         self.world.add_collider(Collider {
             body,
             shape: ShapeType::Plane as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: [0.0; 3],
             density: 0.0,
             local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -853,13 +864,13 @@ impl<'a> SceneBuilder<'a> {
             linear_vel: [0.0; 3],
             sleep_timer: 0.0,
             angular_vel: [0.0; 3],
-            generation: 1,
+            generation: 0,
         });
         self.world.add_collider(Collider {
             body,
             shape: ShapeType::Box as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: [0.0; 3],
             density: 0.0,
             local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -880,7 +891,7 @@ impl<'a> SceneBuilder<'a> {
             body,
             shape: ShapeType::Sphere as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: [0.0; 3],
             density: mass / ((4.0 / 3.0) * std::f32::consts::PI * radius.powi(3)),
             local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -901,7 +912,7 @@ impl<'a> SceneBuilder<'a> {
             body,
             shape: ShapeType::Box as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: [0.0; 3],
             density: mass / (8.0 * half.x * half.y * half.z),
             local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -925,7 +936,7 @@ impl<'a> SceneBuilder<'a> {
             body,
             shape: ShapeType::Capsule as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: [0.0; 3],
             density: mass / vol,
             local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -978,7 +989,7 @@ impl<'a> SceneBuilder<'a> {
             body,
             shape: ShapeType::Box as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: [0.0; 3],
             density: dens,
             local_rot: [0.0, 0.0, 0.0, 1.0],
@@ -988,7 +999,7 @@ impl<'a> SceneBuilder<'a> {
             body,
             shape: ShapeType::Sphere as u32,
             material: 0,
-            generation: 1,
+            generation: 0,
             local_pos: sphere_offset.to_array(),
             density: dens,
             local_rot: [0.0, 0.0, 0.0, 1.0],
