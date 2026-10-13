@@ -1823,7 +1823,10 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     {
         b.sleepTimer += dt;
         if (b.sleepTimer >= p.sleepTime)
+        {
             gCcdFlags[i] = 1; // candidate — sleep_island_commit after island gate
+            InterlockedOr(gScratchAtomics[13], 1);
+        }
     }
     else
     {
@@ -1840,6 +1843,8 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
 void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
 {
     // One thread per manifold (same connectivity as contacts, ~2–4× fewer).
+    // Ring smash: no sleep candidates → scratch[13]==0 → entire gate is a no-op.
+    if (gScratchAtomics[13] == 0u) return;
     uint i = tid.x;
     uint n = gCounters[0].manifoldCount;
     if (i >= n) return;

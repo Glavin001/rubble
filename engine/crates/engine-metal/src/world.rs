@@ -409,6 +409,7 @@ impl MetalWorld {
             log += 1;
         }
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
+        s[13] = 0; // any sleep candidate (set by extract)
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
