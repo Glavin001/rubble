@@ -43,13 +43,14 @@ Interactive gate: p50 ≤ 8.33 ms. Smash-peak rings/walls/columns are `stress`.
 
 | Scene | p50 ms | note |
 |-------|--------|------|
-| Wall Smash (2k) @ 8 it | ~7–8 | PASS |
-| Chain Mail (1.6k) | ~1.3 | PASS |
+| Wall Smash (2k) @ 8 it | ~6.2 | PASS |
+| Chain Mail (1.6k) | ~1.5 | PASS |
 | Sphere Pile (10k) | ~3.0 | PASS |
+| Brick Walls (27k) | ~8.2 | stress (on the line) |
 | Stack / Rope / Pyramid | &lt; 6 | PASS |
-| Brick Ring (28k) | ~17 | stress (smash peak) |
-| Brick Ring (110k) | ~83 | stress |
-| Box Columns (100k) | ~63 | stress |
+| Brick Ring (28k) | ~16 | stress (smash peak, all awake) |
+| Brick Ring (110k) | ~85 | stress |
+| Box Columns (100k) | ~65 | stress |
 
 **vs three-avbd GPU:** blocked until local Chrome/Dawn numbers exist. Do not gate on M4 Max published FINDINGS.
 
