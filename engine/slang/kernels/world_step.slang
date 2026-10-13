@@ -1189,6 +1189,15 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     InterlockedMax(gCounters[0].colorCount, free + 1);
 }
 
+// three-avbd primalLanes defaults → 1/2/4/8 threads per body by colour size.
+uint primalLanesFor(uint bodies)
+{
+    if (bodies == 0u || bodies >= 65536u) return 1u;
+    if (bodies >= 32768u) return 2u;
+    if (bodies >= 4096u) return 4u;
+    return 8u;
+}
+
 // Write Metal indirect threadgroup counts for each colour (0 groups ⇒ skipped).
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -1197,7 +1206,9 @@ void write_color_args(uint3 tid : SV_DispatchThreadID)
     uint c = tid.x;
     if (c >= 64u) return;
     uint n = gColorCounts[c];
-    uint groups = n == 0u ? 0u : (n + 63u) / 64u;
+    uint lanes = primalLanesFor(n);
+    uint threads = n * lanes;
+    uint groups = threads == 0u ? 0u : (threads + 63u) / 64u;
     gIndirectArgs[c * 3u + 0u] = groups;
     gIndirectArgs[c * 3u + 1u] = 1u;
     gIndirectArgs[c * 3u + 2u] = 1u;
@@ -1230,49 +1241,49 @@ void pack_color_lists(uint3 tid : SV_DispatchThreadID)
     gColorLists[color * maxB + slot] = body;
 }
 
-void solvePrimalForBody(uint bodyIdx)
+// Accumulate body Newton's system for adjacency entries lane, lane+lanes, ...
+// Lane 0 also adds the inertial mass block (three-avbd accumulate).
+void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 rhs)
 {
+    A = mat6Zero();
+    rhs = vec6Zero();
     BodyState b = gBodies[bodyIdx];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     AvbdParams p = gParams[0];
     float dt = p.dt;
     float dt2 = dt * dt;
 
-    float3 inertial = gAabbs[bodyIdx].mn;
-    // Build A and rhs. Official AVBD uses mass/inertia (not inverse) in M/h².
-    Mat6 A = mat6Zero();
-    Vec6 rhs = vec6Zero();
-    float mass = b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0;
-    float3 inertia = float3(
-        b.invInertia.x > 1e-12 ? (1.0 / b.invInertia.x) : 0.0,
-        b.invInertia.y > 1e-12 ? (1.0 / b.invInertia.y) : 0.0,
-        b.invInertia.z > 1e-12 ? (1.0 / b.invInertia.z) : 0.0);
-    mat6AddDiag(A, float3(mass, mass, mass) / dt2, inertia / dt2);
-    // rhs = M/h² (z - y)
-    float3 dp = b.position - inertial;
-    rhs.v[0] = (mass / dt2) * dp.x;
-    rhs.v[1] = (mass / dt2) * dp.y;
-    rhs.v[2] = (mass / dt2) * dp.z;
-    // Angular chart vs inertial orientation (stashed in AABB mx/_pad0 during predict).
-    Aabb stash = gAabbs[bodyIdx];
-    float4 inertialAng = quatNormalize(float4(stash.mx.x, stash.mx.y, stash.mx.z, stash._pad0));
-    float4 q = b.orientation;
-    if (dot(q, inertialAng) < 0.0) inertialAng = -inertialAng;
-    // Small-angle rotation taking inertial → current: 2 * Im(conj(qi)*q)
-    float4 dq = quatMul(quatConjugate(inertialAng), q);
-    float3 dangTarget = 2.0 * dq.xyz;
-    if (dq.w < 0.0) dangTarget = -dangTarget;
-    // Clamp chart residual so a bad stash cannot explode the 6×6.
-    float dangLen = length(dangTarget);
-    if (dangLen > 0.5) dangTarget *= 0.5 / dangLen;
-    rhs.v[3] = (inertia.x / dt2) * dangTarget.x;
-    rhs.v[4] = (inertia.y / dt2) * dangTarget.y;
-    rhs.v[5] = (inertia.z / dt2) * dangTarget.z;
+    if (lane == 0u)
+    {
+        float3 inertial = gAabbs[bodyIdx].mn;
+        float mass = b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0;
+        float3 inertia = float3(
+            b.invInertia.x > 1e-12 ? (1.0 / b.invInertia.x) : 0.0,
+            b.invInertia.y > 1e-12 ? (1.0 / b.invInertia.y) : 0.0,
+            b.invInertia.z > 1e-12 ? (1.0 / b.invInertia.z) : 0.0);
+        mat6AddDiag(A, float3(mass, mass, mass) / dt2, inertia / dt2);
+        float3 dp = b.position - inertial;
+        rhs.v[0] = (mass / dt2) * dp.x;
+        rhs.v[1] = (mass / dt2) * dp.y;
+        rhs.v[2] = (mass / dt2) * dp.z;
+        Aabb stash = gAabbs[bodyIdx];
+        float4 inertialAng = quatNormalize(float4(stash.mx.x, stash.mx.y, stash.mx.z, stash._pad0));
+        float4 q = b.orientation;
+        if (dot(q, inertialAng) < 0.0) inertialAng = -inertialAng;
+        float4 dq = quatMul(quatConjugate(inertialAng), q);
+        float3 dangTarget = 2.0 * dq.xyz;
+        if (dq.w < 0.0) dangTarget = -dangTarget;
+        float dangLen = length(dangTarget);
+        if (dangLen > 0.5) dangTarget *= 0.5 / dangLen;
+        rhs.v[3] = (inertia.x / dt2) * dangTarget.x;
+        rhs.v[4] = (inertia.y / dt2) * dangTarget.y;
+        rhs.v[5] = (inertia.z / dt2) * dangTarget.z;
+    }
 
     uint nJ = gCounters[0].jointCount;
     uint alo = gConstraintIndex[bodyIdx];
     uint ahi = gConstraintIndex[bodyIdx + 1u];
-    for (uint e = alo; e < ahi; e++)
+    for (uint e = alo + lane; e < ahi; e += lanes)
     {
         uint id = gConstraintIds[e];
         if (id >= nJ)
@@ -1337,25 +1348,26 @@ void solvePrimalForBody(uint bodyIdx)
             }
         }
     }
+}
 
+void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
+{
+    BodyState b = gBodies[bodyIdx];
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    AvbdParams p = gParams[0];
     uint floors = 0;
-    // A Δz = -rhs  => solve A x = -rhs
     Vec6 neg = rhs;
     for (int k = 0; k < 6; k++) neg.v[k] = -rhs.v[k];
     Vec6 dz = solve6x6(A, neg, p.pivotFloor, floors);
     if (floors > 0) InterlockedAdd(gCounters[0].pivotFloorHits, floors);
-
-    // Trust region
     float3 dlin = float3(dz.v[0], dz.v[1], dz.v[2]);
     float3 dang = float3(dz.v[3], dz.v[4], dz.v[5]);
-    float r = 0.5; // characteristic size fallback
+    float r = 0.5;
     float maxLin = p.trustLin * r;
     float len = length(dlin);
     if (len > maxLin && len > 1e-12) dlin *= maxLin / len;
     float alen = length(dang);
     if (alen > p.trustAng && alen > 1e-12) dang *= p.trustAng / alen;
-
-    // Portable finite check (isnan is not available on the WGSL path).
     if (dlin.x != dlin.x || dlin.y != dlin.y || dlin.z != dlin.z) return;
     if (dang.x != dang.x || dang.y != dang.y || dang.z != dang.z) return;
     b.position += dlin;
@@ -1363,17 +1375,76 @@ void solvePrimalForBody(uint bodyIdx)
     gBodies[bodyIdx] = b;
 }
 
+void solvePrimalForBody(uint bodyIdx)
+{
+    Mat6 A;
+    Vec6 rhs;
+    primalAccumulate(bodyIdx, 0u, 1u, A, rhs);
+    primalApply(bodyIdx, A, rhs);
+}
+
+// Multi-lane partial systems: ≤8 lanes ⇒ ≤8 bodies per workgroup.
+groupshared float gsA[64 * 36];
+groupshared float gsRhs[64 * 6];
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void solve_primal_color(uint3 tid : SV_DispatchThreadID)
+void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
 {
-    // Colour from gPassUniform (unique bind offset per dispatch — three-avbd pass constant).
     uint color = gPassUniform[0];
     uint count = gColorCounts[color];
-    uint li = tid.x;
-    if (li >= count) return;
+    uint lanes = primalLanesFor(count);
+    uint threads = count * lanes;
+    uint gid = tid.x;
+    uint local = lid.x;
+    uint bodySlot = gid / lanes;
+    uint lane = local % lanes;
+    uint slot = local / lanes; // body slot within the workgroup
+    bool live = gid < threads && bodySlot < count;
+
+    Mat6 A = mat6Zero();
+    Vec6 rhs = vec6Zero();
+    uint bodyIdx = 0u;
     uint maxB = gScratchAtomics[1];
-    solvePrimalForBody(gColorLists[color * maxB + li]);
+    if (live)
+    {
+        bodyIdx = gColorLists[color * maxB + bodySlot];
+        primalAccumulate(bodyIdx, lane, lanes, A, rhs);
+    }
+
+    if (lanes == 1u)
+    {
+        if (live) primalApply(bodyIdx, A, rhs);
+        return;
+    }
+
+    // Store partials by local id; reduce lanes (three-avbd primalColor).
+    if (live)
+    {
+        for (int i = 0; i < 36; i++) gsA[local * 36 + i] = A.m[i];
+        for (int i = 0; i < 6; i++) gsRhs[local * 6 + i] = rhs.v[i];
+    }
+    AllMemoryBarrierWithGroupSync();
+    // Halving reduction across lanes for each body slot
+    for (uint s = lanes >> 1; s > 0u; s >>= 1)
+    {
+        if (live && lane < s)
+        {
+            uint other = local + s;
+            for (int i = 0; i < 36; i++) A.m[i] += gsA[other * 36 + i];
+            for (int i = 0; i < 6; i++) rhs.v[i] += gsRhs[other * 6 + i];
+            for (int i = 0; i < 36; i++) gsA[local * 36 + i] = A.m[i];
+            for (int i = 0; i < 6; i++) gsRhs[local * 6 + i] = rhs.v[i];
+        }
+        AllMemoryBarrierWithGroupSync();
+        if (live && lane < s)
+        {
+            for (int i = 0; i < 36; i++) A.m[i] = gsA[local * 36 + i];
+            for (int i = 0; i < 6; i++) rhs.v[i] = gsRhs[local * 6 + i];
+        }
+        AllMemoryBarrierWithGroupSync();
+    }
+    if (live && lane == 0u) primalApply(bodyIdx, A, rhs);
 }
 
 // Small-scene GS: one body per dispatch (gPassUniform = body index). Host walks
