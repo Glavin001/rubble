@@ -1447,12 +1447,11 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     float dt = max(p.dt, 1e-8);
     float mA = ba.invMass > 1e-12 ? (1.0 / ba.invMass) : 1e20;
     float mB = bb.invMass > 1e-12 ? (1.0 / bb.invMass) : 1e20;
-    // three-avbd FLAG_MASS_PENALTY: kN ≥ max(PENALTY_MIN, min(m)/dt²). Tangential
-    // stiffness needs the same floor or Coulomb friction never reaches μN: a 3 m/s
-    // box on μ 0.5 only slowed to 2.1 m/s in 1.5 s while kT sat near 1.
+    // Normal stiffness is floored at m/dt². Tangential stiffness stays on the
+    // ramp: a sliding row drops k out of the Hessian and applies μN directly.
     float kMass = min(mA, mB) / (dt * dt);
     c.kN = max(max(1.0, kMass), p.gamma * c.kN);
-    c.kT = max(max(1.0, kMass), p.gamma * c.kT);
+    c.kT = max(1.0, p.gamma * c.kT);
     c.lambdaN *= p.alpha * p.gamma;
     c.lambdaT1 *= p.alpha * p.gamma;
     c.lambdaT2 *= p.alpha * p.gamma;
