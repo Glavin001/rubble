@@ -29,6 +29,8 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 8m. **BP sphere cull:** three-avbd testPair sphere test; box `params.w = length(half)`. Little Ring candidate change after face-reject; keep for parity.
 8p. **Large smash ball probe:** broadphase_query also O(1)-tests collider 0 and last if AABB-large (ring/wall balls). Do not skip inserting large *dynamics* — that left Columns with stragglers awake.
 8o. **Contact ping-pong:** swap halves of the 2× contact buffer instead of blitting prev each step (s[11]=current, s[8]=prev). Accuracy unchanged; blit was not the Ring bottleneck.
+8x. **Awake→sleeping BP pairs:** `cur > i` alone never pairs a trailing smash ball with sleeping lower-index bricks (sleepers only keep static contacts). Emit awake→sleeping at any index. Pre-sleeping the Ring reaches ~45k contacts (oracle) but weakens smash impulse and regresses p50 ~3.5→~6.2 ms — deferred.
+8y. **Horizontal face cap 2:** face manifolds with |n.y|≤0.85 keep 2 points (stacks keep 4). Mild Ring contact cut; Stack/Columns green.
 8w. **scene_fps filters:** CLI args substring-match scene names (was ignored). Brick Walls (27k) dropped from stress tag — regularly ≤8.33 ms.
 8v. **Face manifold cap:** BOX_MAX_CONTACTS=4 is required for Stack (cap 2 drops the bottom box through). Shallow-edge → ~45k Ring contacts but drifts Stack — still blocked.
 8u. **Per-manifold dual:** three-avbd loops contacts inside one manifold thread; on Metal that regressed Ring 9k ~3.6→~6.6 ms. Keep per-contact dual for occupancy.
