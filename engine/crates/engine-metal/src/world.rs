@@ -436,8 +436,12 @@ impl MetalWorld {
         // Size transient dispatches from last step (three-avbd argsPrev pattern).
         let prev_contacts = self.last_counters.contact_count.max(256) as u64;
         let narrow_n = (self.capacity.max_candidates as u64)
-            .min(n_cols.saturating_mul(64))
-            .max(prev_contacts.saturating_mul(2))
+            .min(n_cols.saturating_mul(32))
+            .max(
+                prev_contacts
+                    .saturating_add(prev_contacts / 4)
+                    .saturating_add(1024),
+            )
             .max(1);
         // Size to last count + 25% headroom (2× over-dispatch wasted bandwidth on smash peaks).
         let contact_dispatch = (self.capacity.max_contacts as u64)
