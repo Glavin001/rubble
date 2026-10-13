@@ -793,6 +793,28 @@ impl MetalWorld {
             *(self.scratch[done].contents() as *const u32).add(index)
         }
     }
+
+    /// Per-body JP colour ids (diagnostics).
+    pub fn download_body_colors(&self) -> Vec<u32> {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.body_color.contents() as *const u32,
+                self.body_count as usize,
+            )
+            .to_vec()
+        }
+    }
+
+    /// Manifold records for the last step (diagnostics).
+    pub fn download_manifolds(&self) -> Vec<Manifold> {
+        let n = self.last_counters.manifold_count as usize;
+        if n == 0 {
+            return Vec::new();
+        }
+        unsafe {
+            std::slice::from_raw_parts(self.manifolds.contents() as *const Manifold, n).to_vec()
+        }
+    }
 }
 
 impl PhysicsBackend for MetalWorld {
