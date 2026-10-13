@@ -29,6 +29,7 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 8m. **BP sphere cull:** three-avbd testPair sphere test; box `params.w = length(half)`. Little Ring candidate change after face-reject; keep for parity.
 8p. **Large smash ball probe:** broadphase_query also O(1)-tests collider 0 and last if AABB-large (ring/wall balls). Do not skip inserting large *dynamics* — that left Columns with stragglers awake.
 8o. **Contact ping-pong:** swap halves of the 2× contact buffer instead of blitting prev each step (s[11]=current, s[8]=prev). Accuracy unchanged; blit was not the Ring bottleneck.
+8u. **Per-manifold dual:** three-avbd loops contacts inside one manifold thread; on Metal that regressed Ring 9k ~3.6→~6.6 ms. Keep per-contact dual for occupancy.
 8t. **AABB margin pad:** shrinking box AABB pad from contactOffset to 1e-4 (closer to three-avbd) left Box Columns with stragglers awake (~197 ms). Keep margin inflation on AABBs for now.
 8s. **SAT sep > 0:** three-avbd `testAxis` rejects any positive separation; margin lives in C0 only. We had kept sep≤margin, which was intended to stabilize stacks but is not what the oracle does (stacks still green after the match).
 8r. **Smash friction:** dual kT ramp was `+β·0.1` every in-cone dual (≈+1000/iter) and kT inherited kStart/massPenalty. three-avbd ramps `β|C_t|` from PENALTY_MIN=1 with massPenalty on normal only. Flat ramp glued smash balls. Also: no stick-anchor reuse for spheres; sphere lever arms at x⁻ (initialRot); sphere-box interior uses shallowest-face push-out.
