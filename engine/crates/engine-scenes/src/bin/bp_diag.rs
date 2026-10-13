@@ -150,11 +150,57 @@ fn main() {
             0.0
         };
         println!(
-            "reuseContacts_hits={reuse}/{cand} ({rate:.3}) hash_miss={miss} gen_reject={gen_reject}"
+            "reuseContacts_hits={reuse}/{cand} ({rate:.3}) hash_miss={miss} gen_reject={gen_reject} refs_noRef={} lin={} ang={}",
+            world.scratch_u32(21),
+            world.scratch_u32(22),
+            world.scratch_u32(23),
         );
     }
 
     // Velocity percentiles (VEL_HIST=1)
+    if std::env::var("GEN_HIST").is_ok() {
+        let step = world.scratch_u32(17);
+        let bodies2 = world.download_bodies();
+        let mut gens: Vec<u32> = bodies2
+            .iter()
+            .filter(|b| b.is_dynamic())
+            .map(|b| b.generation)
+            .collect();
+        let n = gens.len() as u32;
+        let at_step = gens.iter().filter(|&&g| g == step).count() as u32;
+        gens.sort();
+        let gp = |p: f32| -> u32 {
+            if gens.is_empty() {
+                return 0;
+            }
+            let i = ((gens.len() as f32 - 1.0) * p).round() as usize;
+            gens[i.min(gens.len() - 1)]
+        };
+        let mut cg: Vec<u32> = world
+            .download_contacts()
+            .iter()
+            .filter(|c| c.alive != 0)
+            .map(|c| c._pad[1].to_bits())
+            .collect();
+        cg.sort();
+        let cp = |p: f32| -> u32 {
+            if cg.is_empty() {
+                return 0;
+            }
+            let i = ((cg.len() as f32 - 1.0) * p).round() as usize;
+            cg[i.min(cg.len() - 1)]
+        };
+        println!(
+            "gen: step={step} body p50={} p90={} max={} at_cur={at_step}/{n} | ct_gen p50={} p90={} max={}",
+            gp(0.5),
+            gp(0.9),
+            gens.last().copied().unwrap_or(0),
+            cp(0.5),
+            cp(0.9),
+            cg.last().copied().unwrap_or(0)
+        );
+    }
+
     if std::env::var("VEL_HIST").is_ok() {
         let mut lins: Vec<f32> = Vec::new();
         let mut angs: Vec<f32> = Vec::new();
