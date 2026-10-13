@@ -63,7 +63,7 @@ Interactive gate: p50 ≤ 8.33 ms. Ring smash uses lead=60 (three-avbd). Settled
 | Scene | p50 ms | note |
 |-------|--------|------|
 | Wall Smash (2k) @ 8 it | ~1.6–2.1 | **beats** oracle wallMs 2.86 and gpuTotal 10.81 |
-| Brick Ring (9k) @ 4 it | ~3.3 | **beats** oracle gpuTotal 5.51; contacts ~45–52k; wallMs 1.75 needs pipelined encode |
+| Brick Ring (9k) @ 4 it | ~3.3 | **beats** oracle gpuTotal 5.51; contacts ~45–52k; `pipelined_wall` still ~8–13 (oracle wallMs 1.75) |
 | Brick Walls (27k) | ~7.2 | PASS |
 | Chain Mail (1.6k) | ~1.2 | PASS |
 | Box Columns (100k) settled | ~0 (asleep early-out) | PASS (plane@0.5, centres at 1+layer) |
