@@ -865,10 +865,11 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         params.alpha = 0.95;
         // Slightly looser/faster sleep so brief calm windows can commit an island
         // before a surface rock resets timers across the contact component.
+        // 0.5 with impact-wake: near-full sleep @1200, deep≈0; was 0.25.
         params.sleep_lin = std::env::var("PILE_SLEEP_LIN")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0.25);
+            .unwrap_or(0.5);
         // 0.5 with impact-wake: ~29k/32k sleep, deep≈27, scene_fps ~11.3 ms (beats
         // oracle settled gpuTotal 11.8). 0.25 left ~11k awake / ~13 ms.
         params.sleep_ang = std::env::var("PILE_SLEEP_ANG")
