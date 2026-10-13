@@ -225,3 +225,35 @@ fn resting_brick_stack_does_not_gain_energy() {
         "resting stack still moving at {max_speed:.4} m/s after 180 steps (KE tail {first:.4} -> {second:.4})"
     );
 }
+
+/// A box sliding on the ground must slow down. μ = 0.5 and g = 10 give about 5 m/s² of drag.
+#[test]
+fn ground_friction_slows_a_sliding_box() {
+    let mut world = MetalWorld::new(WorldCapacity::small()).unwrap();
+    let mut p = official_params(10);
+    p.sleep_time = 1.0e9;
+    world.set_params(p);
+    let id = {
+        let mut b = SceneBuilder::new(&mut world);
+        b.add_ground_box(0.5);
+        b.add_box(Vec3::new(0.0, 1.0, 0.0), Vec3::splat(0.5), 1.0)
+    };
+    let mut body = world.body(id);
+    body.linear_vel = [3.0, 0.0, 0.0];
+    world.set_body(id, body);
+    let mut samples = Vec::new();
+    for step in 0..90 {
+        world.step().unwrap();
+        if step % 15 == 14 {
+            let b = world.body(id);
+            let speed = Vec3::from_array(b.linear_vel).length();
+            samples.push(format!("t={:.2}s y={:.3} v={speed:.3}", (step + 1) as f32 / 60.0, b.position[1]));
+        }
+    }
+    let speed = Vec3::from_array(world.body(id).linear_vel).length();
+    assert!(
+        speed < 1.0,
+        "friction did not slow the box: started at 3 m/s, still {speed:.3} m/s after 1.5 s (μ 0.5)\n{}",
+        samples.join(" ")
+    );
+}

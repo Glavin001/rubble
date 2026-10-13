@@ -17,7 +17,7 @@
   <div id="hud">
     <h1>Slang → WGSL · wall smash, same scene size as three-avbd</h1>
     <div id="status" class="muted">starting…</div>
-    <div id="legend" class="muted">Brick color is a position tint: redder toward −X and down, yellower toward +X and up. It is not speed, energy, or material. Drag to orbit, scroll to zoom, right-drag to pan.</div>
+    <div id="legend" class="muted">Keys 1 position tint, 2 awake/sleep, 3 speed. Friction μ 0.5. Drag to orbit, scroll to zoom, right-drag to pan.</div>
     <div id="err"></div>
   </div>
   <script type="module">
@@ -238,7 +238,7 @@ struct Collider {
   localRot: vec4f,
   params: vec4f,
 };
-struct Frame { viewProj: mat4x4<f32> };
+struct Frame { viewProj: mat4x4<f32>, mode: u32 };
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(1) var<uniform> frame: Frame;
 @group(0) @binding(2) var<storage, read> cols: array<Collider>;
@@ -263,9 +263,19 @@ struct VsOut {
   var o: VsOut;
   o.clip = frame.viewProj * vec4f(world, 1.0);
   o.normal = quatRotate(b.orientation, normal);
-  let t = fract(b.position.y * 0.08 + b.position.x * 0.05);
-  o.color = vec3f(0.72, 0.38 + 0.35 * t, 0.22);
-  if (col.shape == 0u) { o.color = vec3f(0.75, 0.78, 0.82); }
+  // 0 position tint, 1 awake/sleep, 2 speed. The ball stays gray.
+  if (col.shape == 0u) {
+    o.color = vec3f(0.75, 0.78, 0.82);
+  } else if (frame.mode == 1u) {
+    let sleeping = (b.flags & 4u) != 0u;
+    o.color = select(vec3f(0.95, 0.58, 0.16), vec3f(0.28, 0.48, 0.82), sleeping);
+  } else if (frame.mode == 2u) {
+    let t = clamp(length(b.linearVel) / 3.0, 0.0, 1.0);
+    o.color = mix(vec3f(0.22, 0.32, 0.48), vec3f(0.95, 0.22, 0.16), t);
+  } else {
+    let t = fract(b.position.y * 0.08 + b.position.x * 0.05);
+    o.color = vec3f(0.72, 0.38 + 0.35 * t, 0.22);
+  }
   return o;
 }
 
@@ -708,7 +718,29 @@ struct VsOut {
     const groundVbo = device.createBuffer({ size: ground.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(boxVbo, 0, new Float32Array(cube));
     device.queue.writeBuffer(groundVbo, 0, new Float32Array(ground));
-    const frameBuf = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const frameBuf = device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const frameScratch = new ArrayBuffer(80);
+    const frameF = new Float32Array(frameScratch);
+    const frameU = new Uint32Array(frameScratch);
+    let colorMode = 1;
+    function writeCamera(aspect) {
+      const view = mul(perspective(Math.PI / 5, aspect, 0.2, 400), lookAt(cameraEye(), target, [0, 1, 0]));
+      frameF.set(view);
+      frameU[16] = colorMode;
+      device.queue.writeBuffer(frameBuf, 0, frameScratch);
+    }
+    const colorNames = ['position tint (red −X/down, yellow +X/up)', 'awake amber, sleeping blue', 'speed: blue still, red above 3 m/s'];
+    function showLegend() {
+      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed. Friction μ 0.5. Drag to orbit, scroll to zoom, right-drag to pan.`;
+    }
+    showLegend();
+    addEventListener('keydown', (e) => {
+      if (e.key === '1') colorMode = 0;
+      else if (e.key === '2') colorMode = 1;
+      else if (e.key === '3') colorMode = 2;
+      else return;
+      showLegend();
+    });
     const boxMod = device.createShaderModule({ code: RENDER });
     const groundMod = device.createShaderModule({ code: RENDER });
     const boxPipe = device.createRenderPipeline({
@@ -744,7 +776,7 @@ struct VsOut {
         depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
       const aspect = canvas.width / Math.max(1, canvas.height);
-      device.queue.writeBuffer(frameBuf, 0, mul(perspective(Math.PI / 5, aspect, 0.2, 400), lookAt(cameraEye(), target, [0, 1, 0])));
+      writeCamera(aspect);
       const enc = device.createCommandEncoder();
       const rp = enc.beginRenderPass({
         colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.08, 0.09, 0.12, 1], loadOp: 'clear', storeOp: 'store' }],
@@ -767,8 +799,7 @@ struct VsOut {
           depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
         }
         const aspect = canvas.width / canvas.height;
-        const view = lookAt(cameraEye(), target, [0, 1, 0]);
-        device.queue.writeBuffer(frameBuf, 0, mul(perspective(Math.PI / 5, aspect, 0.2, 400), view));
+        writeCamera(aspect);
         const enc = device.createCommandEncoder();
         encodeStep(enc, true);
         const rp = enc.beginRenderPass({
