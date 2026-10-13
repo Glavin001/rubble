@@ -26,6 +26,7 @@ Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8
 | Primal multi-lane | three-avbd 8g | TODO |
 | Island sleep + fully-asleep early-out | Jolt / three-avbd | landed (gate always; host skip) |
 | Face-axis broadphase reject | three-avbd 8h | landed (OBB face axes, 1 mm gap) |
+| Cap face manifolds at 4 pts | — | landed (Stack/columns green; Ring ~10.4 ms) |
 
 ## Speed bars (local M3 Max only)
 
