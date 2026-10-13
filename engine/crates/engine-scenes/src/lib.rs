@@ -359,7 +359,9 @@ pub fn box_pile(b: &mut SceneBuilder<'_>, n: u32, h: u32) {
                     2.0 + z as f32 * 1.6,
                     (y as f32 - n as f32 / 2.0) * 1.6,
                 );
-                let id = b.add_box(pos, half, 1.0);
+                // three-avbd: mass = sx·sy·sz·density with density=1 (full extents).
+                let mass = 8.0 * half.x * half.y * half.z;
+                let id = b.add_box(pos, half, mass);
                 let q = Quat::from_xyzw(
                     rand() - 0.5,
                     rand() - 0.5,
