@@ -29,6 +29,7 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 8m. **BP sphere cull:** three-avbd testPair sphere test; box `params.w = length(half)`. Little Ring candidate change after face-reject; keep for parity.
 8p. **Large smash ball probe:** broadphase_query also O(1)-tests collider 0 and last if AABB-large (ring/wall balls). Do not skip inserting large *dynamics* — that left Columns with stragglers awake.
 8o. **Contact ping-pong:** swap halves of the 2× contact buffer instead of blitting prev each step (s[11]=current, s[8]=prev). Accuracy unchanged; blit was not the Ring bottleneck.
+8w. **scene_fps filters:** CLI args substring-match scene names (was ignored). Brick Walls (27k) dropped from stress tag — regularly ≤8.33 ms.
 8v. **Face manifold cap:** BOX_MAX_CONTACTS=4 is required for Stack (cap 2 drops the bottom box through). Shallow-edge → ~45k Ring contacts but drifts Stack — still blocked.
 8u. **Per-manifold dual:** three-avbd loops contacts inside one manifold thread; on Metal that regressed Ring 9k ~3.6→~6.6 ms. Keep per-contact dual for occupancy.
 8t. **AABB margin pad:** shrinking box AABB pad from contactOffset to 1e-4 (closer to three-avbd) left Box Columns with stragglers awake (~197 ms). Keep margin inflation on AABBs for now.

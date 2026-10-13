@@ -346,8 +346,8 @@ BoxManifold collideBoxesCached(BoxObb boxA, BoxObb boxB, float margin)
     int bestType = faceType;
     int bestIA = faceIA;
     int bestIB = faceIB;
-    // three-avbd FLAG_FACE_BIAS (default on). Shallow-edge overrides that cut Ring
-    // contacts (~110k→43k) also drift Stack / prevent Columns sleep — leave alone.
+    // three-avbd FLAG_FACE_BIAS (default on). Non-face-bias no longer cuts Ring
+    // contacts after smash/seating fixes (~100k either way); keep oracle pick.
     if (edgeValid)
     {
         if (edgeSep > 0.95 * faceSep + 0.01)
