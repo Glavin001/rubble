@@ -61,7 +61,7 @@ Interactive gate: p50 ≤ 8.33 ms. Ring smash uses lead=60 (three-avbd). Settled
 | Scene | p50 ms | note |
 |-------|--------|------|
 | Wall Smash (2k) @ 8 it | ~1.6–2.1 | **beats** local oracle 2.86 @ 10 it |
-| Brick Ring (9k) @ 4 it | ~3.58 isolated | PASS 120 FPS; chase oracle 1.75 (contacts ~88k vs 45k; smash punches through; pre-sleep hits ~45k but weak smash / ~6 ms) |
+| Brick Ring (9k) @ 4 it | ~3.58 isolated | PASS 120 FPS; chase oracle 1.75 (contacts ~75–88k vs 45k; smash punches through; pre-sleep hits ~45k but weak smash / ~6 ms) |
 | Brick Walls (27k) | ~7.2 | PASS |
 | Chain Mail (1.6k) | ~1.2 | PASS |
 | Box Columns (100k) settled | ~0 (asleep early-out) | PASS (plane@0.5, centres at 1+layer) |
