@@ -388,10 +388,10 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     float cellSize = max(gParams[0].contactOffset * 16.0, 0.5);
     Aabb box = gAabbs[base + i];
     float3 ext = box.mx - box.mn;
-    // three-avbd isLarge: keep oversized statics out of the hash grid; dynamics
-    // find them via the brute-force large-static pass in broadphase_query.
-    BodyState b = gBodies[col.body];
-    if (!bodyIsDynamic(b) &&
+    // three-avbd isLarge: oversized *statics* stay out of the grid. Smash balls are
+    // still inserted (single cell) but also probed from both ends in query.
+    BodyState bIns = gBodies[col.body];
+    if (!bodyIsDynamic(bIns) &&
         (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0))
         return;
     float3 center = 0.5 * (box.mn + box.mx);
@@ -529,28 +529,35 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             cur = gColorLists[cur];
         }
     }
-    // three-avbd isLarge: ground slab is collider 0 and skipped from the hash grid
-    // (one cell at its centre never covers the arena). Probe it O(1) per dynamic.
-    if (c.colliderCount > 0u && i != 0u)
+    // three-avbd isLarge: probe oversized colliders not in the grid. SceneBuilder
+    // puts ground first (0) and smash balls last — check both ends (O(1)).
+    for (uint t = 0u; t < 2u; t++)
     {
-        uint j = 0u;
+        if (c.colliderCount == 0u) break;
+        uint j = (t == 0u) ? 0u : (c.colliderCount - 1u);
+        if (j == i || (t == 1u && j == 0u)) continue;
         Collider other = gColliders[j];
+        if (other.shape == SHAPE_PLANE || other.body == col.body) continue;
+        Aabb ab = gAabbs[base + j];
+        float3 ext = ab.mx - ab.mn;
+        if (ext.x < cellSize * 4.0 && ext.y < cellSize * 4.0 && ext.z < cellSize * 4.0)
+            continue;
+        // Dynamic-dynamic once (higher index); dynamic-static always from mover.
         BodyState ob = gBodies[other.body];
-        if (!bodyIsDynamic(ob) && other.shape != SHAPE_PLANE)
+        if (bodyIsDynamic(ob) && j < i) continue;
+        if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
+        if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
+        if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
+        if (probeIsBox && other.shape == SHAPE_BOX && boxesSeparatedOnFaceAxis(probeObb, j, faceGap))
+            continue;
+        // Sphere large (smash ball): radius test.
+        if (other.shape == SHAPE_SPHERE)
         {
-            Aabb ab = gAabbs[base + j];
-            float3 ext = ab.mx - ab.mn;
-            if (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0)
-            {
-                if (!(box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
-                      box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
-                      box.mx.z < ab.mn.z || ab.mx.z < box.mn.z))
-                {
-                    if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, j, faceGap)))
-                        emitCandidate(i, j);
-                }
-            }
+            float3 d = b.position - ob.position;
+            float rr = other.params.x + (col.params.w > 0.0 ? col.params.w : length(col.params.xyz));
+            if (dot(d, d) > rr * rr) continue;
         }
+        emitCandidate(i, j);
     }
 }
 
