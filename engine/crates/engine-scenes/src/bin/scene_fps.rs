@@ -97,7 +97,7 @@ fn main() {
             c.overflow_flags
         );
         // three-avbd wallMs: batch encode, one drain (CPU overlaps GPU). p50 above ≈ gpuTotal.
-        if ring {
+        if scene.info.name == "Brick Ring (9k)" {
             let batch = 10u32;
             let mut pipe = Vec::new();
             'pipe: for _ in 0..5 {
@@ -114,7 +114,7 @@ fn main() {
                 pipe.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let wall = percentile(&pipe, 0.50);
                 println!(
-                    "       {:>28} pipelined_wall={wall:.3}ms (oracle Ring wallMs 1.75 / gpuTotal 5.51)",
+                    "       {:>28} pipelined_wall={wall:.3}ms (oracle wallMs 1.75 / gpuTotal 5.51)",
                     ""
                 );
             }
