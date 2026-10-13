@@ -559,9 +559,10 @@ impl MetalWorld {
 
         // Colour rounds: distinct pass_table offsets (NOT mid-encoder scratch rewrites).
         // Large smash scenes: hard-cap 10 JP rounds (colouring was visible in the non-solve base).
-        let color_cap = if self.body_count > 8192 { 10 } else { 16 };
-        let color_rounds = (self.last_counters.color_count.saturating_add(2))
-            .max(6)
+        // JP rounds: one past last colour is enough once the palette is stable.
+        let color_cap = if self.body_count > 8192 { 8 } else { 12 };
+        let color_rounds = (self.last_counters.color_count.saturating_add(1))
+            .max(4)
             .min(color_cap);
         for round in 0..color_rounds {
             self.dispatch_pass(&encoder, "color_bodies", awake_dispatch, round % 16);
