@@ -75,7 +75,7 @@ impl MetalWorld {
         let awake_list = alloc_u32(d, capacity.max_bodies);
         let body_color = alloc_u32(d, capacity.max_bodies);
         let constraint_index = alloc_u32(d, capacity.max_bodies + 1);
-        // Grid hash heads reuse [0..32768); also contact warm-start hash (pow2), then CSR.
+        // Grid hash heads reuse [0..GRID_HASH_SIZE); also contact warm-start hash, then CSR.
         let constraint_ids = alloc_u32(
             d,
             (2 * (capacity.max_contacts + capacity.max_joints))
@@ -489,7 +489,7 @@ impl MetalWorld {
         // O(1) joint-pair filter for broadphase (was O(joints) per candidate).
         self.dispatch(&encoder, "joint_hash_clear", 65536);
         self.dispatch(&encoder, "joint_hash_insert", n_joints);
-        self.dispatch(&encoder, "broadphase_clear", 32768);
+        self.dispatch(&encoder, "broadphase_clear", 131072);
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
         self.dispatch(&encoder, "narrowphase", narrow_n);

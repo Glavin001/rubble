@@ -230,7 +230,7 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-static const uint GRID_HASH_SIZE = 32768u;
+static const uint GRID_HASH_SIZE = 131072u;
 
 uint gridHash(int x, int y, int z)
 {
