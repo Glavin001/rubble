@@ -220,8 +220,8 @@ void boxBuildFaceManifold(
     uint featurePrefix = uint((referenceIsA ? BOX_AXIS_FACE_A : BOX_AXIS_FACE_B) << 24)
         | (uint(referenceAxis) << 16) | (uint(incidentAxis) << 8);
     // Vertical faces (stacks/columns): full 4 corners. Horizontal faces (Ring
-    // brick sides): keep 2 — cuts Ring contact traffic while Stack stays green.
-    int maxPts = abs(normalAB.y) > 0.85 ? BOX_MAX_CONTACTS : 2;
+    // brick sides): keep 1 — further Ring cut; Stack must stay green.
+    int maxPts = abs(normalAB.y) > 0.85 ? BOX_MAX_CONTACTS : 1;
 
     for (int i = 0; i < count && m.count < maxPts; i++)
     {
