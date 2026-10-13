@@ -859,9 +859,11 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         // Softer β than demo default 1e4: after gridCellSize fix, β=2e3 cuts flyers
         // (~50→~6) and KE (~100→~10) at 1200 without reopening deep C0. Override with PILE_BETA.
         params.beta_lin = 2_000.0;
-        // Slightly looser sleep so a few skaters/restless edge boxes do not pin the island.
+        // Slightly looser/faster sleep so brief calm windows can commit an island
+        // before a surface rock resets timers across the contact component.
         params.sleep_lin = 0.25;
         params.sleep_ang = 0.25;
+        params.sleep_time = 0.25;
     }
     if let Ok(v) = std::env::var("PILE_BETA") {
         if let Ok(b) = v.parse::<f32>() {
@@ -898,6 +900,10 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         }
     }
     world.set_params(params);
+    if scene.info.name.starts_with("Box Pile") {
+        // Shallow gate: one rocker must not flood-revoke the whole pile (stacks keep 8).
+        world.set_sleep_island_rounds(1);
+    }
     {
         let mut b = SceneBuilder::new(&mut world);
         // Seat content on y=0.5 like three-avbd's ground top. A plane (not a box

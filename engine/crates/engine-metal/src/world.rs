@@ -48,6 +48,8 @@ pub struct MetalWorld {
     body_count: u32,
     collider_count: u32,
     joint_count: u32,
+    /// Island-gate BFS rounds (8 for stacks; 2 for random piles so one rocker cannot pin all).
+    sleep_island_rounds: u32,
     material_count: u32,
     command_count: u32,
 
@@ -182,6 +184,7 @@ impl MetalWorld {
             body_count: 0,
             collider_count: 0,
             joint_count: 0,
+            sleep_island_rounds: 8,
             material_count: 1,
             command_count: 0,
             last_counters: StepCounters::default(),
@@ -195,6 +198,10 @@ impl MetalWorld {
 
     pub fn set_ccd_enabled(&mut self, on: bool) {
         self.enable_ccd = on;
+    }
+
+    pub fn set_sleep_island_rounds(&mut self, rounds: u32) {
+        self.sleep_island_rounds = rounds.clamp(1, 16);
     }
 
     pub fn add_material(&mut self, m: Material) -> u32 {
@@ -740,7 +747,8 @@ impl MetalWorld {
         // the stack below settles — columns tore apart and injected energy. Always run a
         // fixed handful of rounds (accuracy); manifolds cut the fan-out vs per-contact.
         if self.last_counters.manifold_count > 0 {
-            for _ in 0..8u32 {
+            let rounds = self.sleep_island_rounds.clamp(1, 16);
+            for _ in 0..rounds {
                 self.dispatch(&encoder, "sleep_island_gate", manifold_dispatch);
             }
         }
