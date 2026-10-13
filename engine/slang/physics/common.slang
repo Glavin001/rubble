@@ -67,8 +67,9 @@ struct Contact
     float lambdaT2;
     float c0T1;
     float c0T2;
-    float _pad0;
+    float _pad0; // stick flag (1 = static friction held)
     float _pad1;
+    float _pad2; // ABI: keep Contact = 128 B (matches engine-schema)
 };
 
 struct Joint
@@ -399,11 +400,15 @@ Vec6 jacobianLin(float3 n, float3 r, bool isBodyA)
 void contributeContact(
     inout Mat6 A, inout Vec6 rhs,
     Contact c, bool isA, float alpha, float3 bodyPos, float4 bodyRot,
-    float3 C /* n,t1,t2 residuals at current pose */)
+    float3 C /* n,t1,t2 geometric residuals at current pose */,
+    float contactOffset)
 {
     float3 r = isA ? quatRotate(bodyRot, c.anchorA) : quatRotate(bodyRot, c.anchorB);
     float3 C0 = float3(c.c0N, c.c0T1, c.c0T2);
-    float3 cReg = (1.0 - alpha) * C0 + (C - C0);
+    // three-avbd: C0 includes margin on the normal; J·dq tracks geometric Δ only, so
+    // Ĉ = (1-α)·C0 + (C_geom - C_geom0) = C - α·C0 + (margin, 0, 0).
+    // Using C - α·C0 alone drives compression at exact touch and explodes stacks.
+    float3 cReg = C - alpha * C0 + float3(contactOffset, 0.0, 0.0);
     float3 f = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
     f = projectContactForce(f, c.friction);
     Vec6 jN = jacobianLin(c.normal, r, isA);

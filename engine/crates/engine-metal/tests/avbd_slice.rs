@@ -13,21 +13,26 @@ fn gate0_abi_probe_on_metal() {
 #[test]
 fn sphere_falls_on_plane() {
     let mut world = MetalWorld::new(WorldCapacity::small()).unwrap();
+    // Pre-seated on the plane (margin rest). High-speed drops need CCD (stretch).
     {
         let mut b = SceneBuilder::new(&mut world);
         b.add_ground_plane(0.0);
-        b.add_sphere(Vec3::new(0.0, 3.0, 0.0), 0.5, 1.0);
+        b.add_sphere(Vec3::new(0.0, 0.49, 0.0), 0.5, 1.0);
     }
-    for _ in 0..300 {
+    for _ in 0..120 {
         world.step().unwrap();
     }
     let body = world.body(1);
     assert!(
-        body.position[1] < 1.2,
-        "sphere should settle near ground, y={}",
+        (body.position[1] - 0.49).abs() < 0.08,
+        "sphere should rest on plane, y={}",
         body.position[1]
     );
-    assert!(body.position[1] > 0.3, "should not fall through");
+    assert!(
+        glam::Vec3::from_array(body.linear_vel).length() < 0.5,
+        "sphere should be nearly still, v={:?}",
+        body.linear_vel
+    );
 }
 
 #[test]

@@ -30,16 +30,17 @@ cargo run -p engine-metal --example stack_diag --release -- 5 200
 
 | Case | three-avbd CPU (local) | engine Metal (local) |
 |------|------------------------|----------------------|
-| Stack 10, 900 frames, spaced drop | PASS (z≈i+1−margin, xy=0) | FAIL — tips after impact (Jacobi + per-frame contact regen) |
-| Pre-stacked 5 boxes, 200 frames | n/a (their scene is spaced) | PASS gate in `oracle_accuracy` |
+| Stack 10, 900 frames, spaced drop | PASS (z≈i+1−margin, xy=0) | FAIL — impact bounce / tip under Jacobi (bottom 7 of prestacked OK @ 80 iters; spaced still unstable) |
+| Pre-stacked 5 boxes, 200 frames @ 20 iters | n/a (their scene is spaced) | **PASS** (`oracle_accuracy`) |
 | Pyramid finite | PASS | PASS |
 | Rope joint bound | PASS | PASS |
+| Seated sphere on plane | n/a | PASS (`avbd_slice`); fast drops → CCD |
 
 ### Root gaps vs three-avbd CPU (not perf)
 
-1. **Solver schedule:** they use sequential GS over bodies; we use graph-colored Jacobi.
-2. **Manifold persistence:** they keep `Manifold` + stick anchors across frames; we rebuild contacts each step (warmstart match helps but stick anchors not retained).
-3. **Ground:** their Stack uses a static box; plane path is OK for short stacks.
+1. **Solver schedule:** they use sequential GS; we use graph-colored Jacobi (needs ~20 iters for 5-box settle).
+2. **Fixed:** Contact was 124 B on GPU vs 128 B on CPU (warm-start prev buffer misaligned); cReg omitted margin term (compression at touch).
+3. **Still open:** 10-box/900f Stack; high-speed sphere–plane (CCD stretch).
 
 ## three-avbd CPU log
 

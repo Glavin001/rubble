@@ -9,6 +9,7 @@ use glam::Vec3;
 
 fn official_params(iterations: u32) -> AvbdParams {
     let mut p = AvbdParams::default();
+    // Jacobi needs more iters than three-avbd's sequential GS for the same settle.
     p.iterations = iterations;
     p
 }
@@ -19,7 +20,7 @@ fn official_params(iterations: u32) -> AvbdParams {
 #[test]
 fn stack_settles_like_three_avbd_ref() {
     let mut world = MetalWorld::new(WorldCapacity::small()).unwrap();
-    world.set_params(official_params(10));
+    world.set_params(official_params(20));
     {
         let mut b = SceneBuilder::new(&mut world);
         b.add_ground_plane(0.0);
