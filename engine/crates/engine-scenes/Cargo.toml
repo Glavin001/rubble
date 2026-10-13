@@ -23,3 +23,7 @@ path = "src/bin/demo_viewer.rs"
 [[bin]]
 name = "scene_fps"
 path = "src/bin/scene_fps.rs"
+
+[[bin]]
+name = "gpu_vs_oracles"
+path = "src/bin/gpu_vs_oracles.rs"
