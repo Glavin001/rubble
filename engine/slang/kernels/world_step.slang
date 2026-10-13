@@ -131,20 +131,25 @@ void predictOne(uint i)
     float3 accel = (b.linearVel - prevVel) / max(dt, 1e-8);
     float accelExt = accel.y * sign(p.gravityY);
     float accelWeight = clamp(accelExt / max(abs(p.gravityY), 1e-6), 0.0, 1.0);
-    // three-avbd FLAG_START_AT_REST: skip extrapolation when nearly still so few-iter
-    // stacks do not pump from a bad warm start.
-    float slow = length(b.linearVel) + length(b.angularVel) * 0.5;
+    // three-avbd REST_SPEED: |v| + |ω|·radius (moment.w). Use max collider bound.
+    float radius = 0.5;
+    // Cheap proxy: AABB diagonal of first collider with this body (params.w for boxes).
+    // Full scan is O(colliders); keep 0.5 if unknown — close for pile cubes.
+    float slow = length(b.linearVel) + length(b.angularVel) * radius;
     bool startAtRest = slow < 0.1;
 
+    // three-avbd inertial target + qadd (not exp-map).
     float3 inertialLin = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (dt * dt);
-    float4 inertialAng = quatNormalize(quatApplyDelta(b.orientation, b.angularVel * dt));
+    float4 inertialAng = quatNormalize(
+        b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
     // x⁻ snapshot for velocity extract (three-avbd initialPos).
     gBodiesPrev[i] = b;
 
     if (!startAtRest)
     {
         b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
-        b.orientation = quatNormalize(quatApplyDelta(b.orientation, b.angularVel * dt));
+        b.orientation = quatNormalize(
+            b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
     }
     Aabb box;
     box.mn = inertialLin;
