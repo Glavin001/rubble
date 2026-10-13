@@ -62,7 +62,8 @@ impl MetalWorld {
         let bodies_prev = alloc::<BodyState>(d, capacity.max_bodies);
         let colliders = alloc::<Collider>(d, capacity.max_colliders);
         let materials = alloc::<Material>(d, 64);
-        let contacts = alloc::<Contact>(d, capacity.max_contacts);
+        // [0..max_contacts) = current; [max_contacts..2*max) = previous frame for warm-start.
+        let contacts = alloc::<Contact>(d, capacity.max_contacts.saturating_mul(2));
         let joints = alloc::<Joint>(d, capacity.max_joints);
         let params_buf = alloc::<AvbdParams>(d, 1);
         let counters = alloc::<StepCounters>(d, 1);
@@ -348,6 +349,9 @@ impl MetalWorld {
         if s[6] != 1 {
             s[6] = 0;
         }
+        // s[7] = previous contact count; s[8] = offset to prev contacts in gContacts
+        s[7] = self.last_counters.contact_count.min(self.capacity.max_contacts);
+        s[8] = self.capacity.max_contacts;
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
@@ -393,6 +397,16 @@ impl MetalWorld {
             }
         }
 
+        // Stash last frame's contacts for feature-id warm-start (shared storage memcpy).
+        let prev_n = self.last_counters.contact_count.min(self.capacity.max_contacts) as usize;
+        if prev_n > 0 {
+            let max_c = self.capacity.max_contacts as usize;
+            unsafe {
+                let base = self.contacts.contents() as *mut Contact;
+                std::ptr::copy_nonoverlapping(base, base.add(max_c), prev_n);
+            }
+        }
+
         let cb = self.device.queue.new_command_buffer();
         let encoder = cb.new_compute_command_encoder();
 
@@ -422,6 +436,9 @@ impl MetalWorld {
         }
         self.dispatch(&encoder, "predict_bodies", n_bodies);
         self.dispatch(&encoder, "build_aabbs", n_cols);
+        // O(1) joint-pair filter for broadphase (was O(joints) per candidate).
+        self.dispatch(&encoder, "joint_hash_clear", 65536);
+        self.dispatch(&encoder, "joint_hash_insert", n_joints);
         self.dispatch(&encoder, "broadphase_clear", 32768);
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
@@ -584,6 +601,34 @@ impl<'a> SceneBuilder<'a> {
             density: 0.0,
             local_rot: [0.0, 0.0, 0.0, 1.0],
             params: [0.0, 1.0, 0.0, y],
+        });
+        body
+    }
+
+    /// Static box ground matching three-avbd `ground()`: size [100,1,100] centered so the
+    /// top face lies at `top_y` (demo uses thickness 1 with centre at 0 ⇒ top at 0.5).
+    pub fn add_ground_box(&mut self, top_y: f32) -> u32 {
+        let half_h = 0.5;
+        let body = self.world.add_body(BodyState {
+            position: [0.0, top_y - half_h, 0.0],
+            inv_mass: 0.0,
+            orientation: [0.0, 0.0, 0.0, 1.0],
+            inv_inertia: [0.0; 3],
+            flags: 0,
+            linear_vel: [0.0; 3],
+            sleep_timer: 0.0,
+            angular_vel: [0.0; 3],
+            generation: 1,
+        });
+        self.world.add_collider(Collider {
+            body,
+            shape: ShapeType::Box as u32,
+            material: 0,
+            generation: 1,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [50.0, half_h, 50.0, 50.0],
         });
         body
     }

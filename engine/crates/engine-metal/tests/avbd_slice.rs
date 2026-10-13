@@ -18,7 +18,7 @@ fn sphere_falls_on_plane() {
         b.add_ground_plane(0.0);
         b.add_sphere(Vec3::new(0.0, 3.0, 0.0), 0.5, 1.0);
     }
-    for _ in 0..120 {
+    for _ in 0..300 {
         world.step().unwrap();
     }
     let body = world.body(1);

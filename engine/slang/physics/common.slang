@@ -66,6 +66,9 @@ struct Contact
     float kT;
     float lambdaT2;
     float c0T1;
+    float c0T2;
+    float _pad0;
+    float _pad1;
 };
 
 struct Joint
@@ -395,14 +398,13 @@ Vec6 jacobianLin(float3 n, float3 r, bool isBodyA)
 
 void contributeContact(
     inout Mat6 A, inout Vec6 rhs,
-    Contact c, bool isA, float alpha, float3 bodyPos, float4 bodyRot)
+    Contact c, bool isA, float alpha, float3 bodyPos, float4 bodyRot,
+    float3 C /* n,t1,t2 residuals at current pose */)
 {
     float3 r = isA ? quatRotate(bodyRot, c.anchorA) : quatRotate(bodyRot, c.anchorB);
-    float cReg = (1.0 - alpha) * c.c0N + (c.penetration - c.c0N);
-    float3 f;
-    f.x = c.kN * cReg + c.lambdaN;
-    f.y = c.kT * (1.0 - alpha) * c.c0T1 + c.lambdaT1;
-    f.z = c.lambdaT2;
+    float3 C0 = float3(c.c0N, c.c0T1, c.c0T2);
+    float3 cReg = (1.0 - alpha) * C0 + (C - C0);
+    float3 f = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
     f = projectContactForce(f, c.friction);
     Vec6 jN = jacobianLin(c.normal, r, isA);
     Vec6 jT1 = jacobianLin(c.tangent1, r, isA);
