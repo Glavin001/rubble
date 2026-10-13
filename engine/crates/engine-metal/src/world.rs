@@ -70,6 +70,11 @@ impl MetalWorld {
 
         let bodies = alloc::<BodyState>(d, capacity.max_bodies);
         let bodies_prev = alloc::<BodyState>(d, capacity.max_bodies);
+        // Uninitialized prevVel made frame-0 adaptive warm-start explode piles.
+        unsafe {
+            let n = capacity.max_bodies as usize * std::mem::size_of::<BodyState>();
+            std::ptr::write_bytes(bodies_prev.contents() as *mut u8, 0, n);
+        }
         let colliders = alloc::<Collider>(d, capacity.max_colliders);
         let materials = alloc::<Material>(d, 64);
         // [0..max_contacts) = current; [max_contacts..2*max) = previous frame for warm-start.
@@ -211,7 +216,14 @@ impl MetalWorld {
                 self.capacity.max_bodies as usize,
             )
         };
+        let prev = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.bodies_prev.contents() as *mut BodyState,
+                self.capacity.max_bodies as usize,
+            )
+        };
         bodies[id as usize] = state;
+        prev[id as usize] = state; // x⁻ = x until the first predictOne
         self.body_count += 1;
         id
     }
@@ -274,7 +286,14 @@ impl MetalWorld {
                 self.capacity.max_bodies as usize,
             )
         };
+        let prev = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.bodies_prev.contents() as *mut BodyState,
+                self.capacity.max_bodies as usize,
+            )
+        };
         bodies[id as usize] = state;
+        prev[id as usize] = state;
     }
 
     pub fn force_sleep(&mut self, id: u32) {
