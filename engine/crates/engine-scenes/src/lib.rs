@@ -373,13 +373,15 @@ pub fn box_pile_32k(b: &mut SceneBuilder<'_>) {
 }
 
 pub fn box_columns(b: &mut SceneBuilder<'_>, n: u32, h: u32) {
+    // three-avbd: unit boxes stacked on a ground whose top is at 0.5 — bottom centre
+    // at y=0.5 so the first layer is pre-seated (a 0.5 m air drop was exploding 100k).
     for x in 0..n {
         for z in 0..n {
             for y in 0..h {
                 b.add_box(
                     Vec3::new(
                         (x as f32 - n as f32 / 2.0) * 1.5,
-                        1.0 + y as f32,
+                        0.5 + y as f32,
                         (z as f32 - n as f32 / 2.0) * 1.5,
                     ),
                     Vec3::splat(0.5),

@@ -328,8 +328,9 @@ BoxManifold collideBoxesCached(BoxObb boxA, BoxObb boxB, float margin)
         if (!boxTestAxis(boxA, boxB, delta, boxAxis(boxB, i), BOX_AXIS_FACE_B, -1, i, margin,
                          faceValid, faceSep, faceN, faceType, faceIA, faceIB))
             return m;
-    // Deep face penetration: face-bias (0.95) almost never picks an edge — skip 9 edge axes.
-    bool skipEdges = faceValid && faceSep < -0.01;
+    // Penetrating face: face-bias (0.95) almost never picks an edge — skip 9 edge axes.
+    // three-avbd edgeAbsTol=0.01: only compete with edges when the face gap is near zero.
+    bool skipEdges = faceValid && faceSep < 0.0;
     if (!skipEdges)
     {
         for (int i = 0; i < 3; i++)
