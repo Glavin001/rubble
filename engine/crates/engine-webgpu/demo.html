@@ -508,12 +508,14 @@ struct VsOut {
       nextPhase();
       const colors = Math.min(Math.min(cap.maxColors, 32), Math.max(4, last.color + 1));
       for (let iter = 0; iter < params.iterations; iter++) {
+        if (beginPass && iter > 0) nextPhase();
         const primal = pipes.solve_primal_color;
         for (let color = 0; color < colors; color++) {
           pass.setPipeline(primal.pipeline);
           pass.setBindGroup(0, primal.bind, [color * PASS_ALIGN]);
           pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
         }
+        if (beginPass) nextPhase();
         disp(pass, 'solve_dual', contactN);
       }
       disp(pass, 'extract_velocity_sleep', nBodies);
@@ -576,7 +578,7 @@ struct VsOut {
 
     async function profilePhases() {
       if (!wantTimestamps) return '';
-      const n = 5;
+      const n = 3 + params.iterations * 2 + 1;
       const querySet = device.createQuerySet({ type: 'timestamp', count: n * 2 });
       const resolve = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
       const read = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -598,8 +600,15 @@ struct VsOut {
       const stamps = new BigUint64Array(read.getMappedRange().slice(0));
       read.unmap();
       const ms = (a, b) => Number(stamps[b] - stamps[a]) / 1e6;
-      const names = ['broadphase', 'narrowphase', 'graph', 'solve', 'sleep'];
-      return names.map((name, k) => `${name} ${ms(k * 2, k * 2 + 1).toFixed(2)}`).join(' · ');
+      const parts = ['broadphase', 'narrowphase', 'graph'];
+      let primal = 0, dual = 0;
+      for (let iter = 0; iter < params.iterations; iter++) {
+        primal += ms((3 + iter * 2) * 2, (3 + iter * 2) * 2 + 1);
+        dual += ms((4 + iter * 2) * 2, (4 + iter * 2) * 2 + 1);
+      }
+      const sleep = ms((3 + params.iterations * 2) * 2, (3 + params.iterations * 2) * 2 + 1);
+      return parts.map((name, k) => `${name} ${ms(k * 2, k * 2 + 1).toFixed(2)}`).join(' · ')
+        + ` · primal ${primal.toFixed(2)} · dual ${dual.toFixed(2)} · sleep ${sleep.toFixed(2)}`;
     }
 
     const cube = [];
