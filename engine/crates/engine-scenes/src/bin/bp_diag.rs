@@ -25,11 +25,13 @@ fn main() {
     let mut below = 0u32;
     let mut n = 0u32;
     let mut brick_ke = 0.0f32;
+    let mut n_sleeping = 0u32;
     for (i, b) in bodies.iter().enumerate() {
         if !b.is_dynamic() {
             continue;
         }
         n += 1;
+        if b.is_sleeping() { n_sleeping += 1; }
         let v = glam::Vec3::from_array(b.linear_vel).length();
         if v > best_v {
             best_v = v;
@@ -56,8 +58,8 @@ fn main() {
     };
     let ball_ke = 0.5 * bm * glam::Vec3::from_array(ball.linear_vel).length_squared();
     println!(
-        "steps={steps} awake={} contacts={} manifolds={} cand={} below1m={below}/{n} flying(v>1)={flying} ball_z={:.2} vz={:.2} ball_ke={ball_ke:.0} total_ke={:.0}",
-        c.awake_count,
+        "steps={steps} awake={} sleep_ev={} contacts={} manifolds={} cand={} below1m={below}/{n} flying(v>1)={flying} ball_z={:.2} vz={:.2} ball_ke={ball_ke:.0} total_ke={:.0} sleeping={n_sleeping}",
+        c.awake_count, c.sleep_events,
         c.contact_count,
         c.manifold_count,
         c.candidate_count,
