@@ -73,7 +73,7 @@
 
     const K = [
       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
-      'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts',
+      'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts',
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize',
       'csr_scatter_contacts', 'csr_sort', 'init_colors', 'color_bodies',
@@ -478,9 +478,17 @@ struct VsOut {
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
       nextPhase();
+      const reuse = (params.flags & 1) !== 0;
+      if (reuse) {
+        disp(pass, 'update_refs', nBodies);
+        disp(pass, 'contact_hash_clear', hashN);
+        disp(pass, 'contact_hash_insert', Math.max(prevContacts, 1));
+      }
       disp(pass, 'narrowphase', narrowN);
-      disp(pass, 'contact_hash_clear', hashN);
-      disp(pass, 'contact_hash_insert', Math.max(prevContacts, 1));
+      if (!reuse) {
+        disp(pass, 'contact_hash_clear', hashN);
+        disp(pass, 'contact_hash_insert', Math.max(prevContacts, 1));
+      }
       disp(pass, 'persist_contacts', contactN);
       nextPhase();
       disp(pass, 'build_awake_list', nBodies);
