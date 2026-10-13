@@ -158,6 +158,28 @@ fn main() {
     }
 
     // Velocity percentiles (VEL_HIST=1)
+
+    if std::env::var("KN_HIST").is_ok() {
+        let mut kns: Vec<f32> = Vec::new();
+        let mut c0s: Vec<f32> = Vec::new();
+        for ct in world.download_contacts() {
+            if ct.alive == 0 { continue; }
+            kns.push(ct.k_n);
+            c0s.push(ct.c0_n);
+        }
+        kns.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        c0s.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        let pct = |v: &[f32], p: f32| -> f32 {
+            if v.is_empty() { return 0.0; }
+            let i = ((v.len() as f32 - 1.0) * p).round() as usize;
+            v[i.min(v.len()-1)]
+        };
+        println!(
+            "kN: p50={:.1} p90={:.1} p99={:.1} max={:.1} | c0N: p50={:.5} p90={:.5} p01={:.5}",
+            pct(&kns,0.5), pct(&kns,0.9), pct(&kns,0.99), kns.last().copied().unwrap_or(0.0),
+            pct(&c0s,0.5), pct(&c0s,0.9), pct(&c0s,0.01)
+        );
+    }
     if std::env::var("GEN_HIST").is_ok() {
         let step = world.scratch_u32(17);
         let bodies2 = world.download_bodies();
