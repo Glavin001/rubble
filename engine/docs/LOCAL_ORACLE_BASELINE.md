@@ -50,12 +50,15 @@ cargo run -p engine-scenes --release --bin scene_fps
 | our native Metal `scene_fps` ↔ three-avbd Chrome `gpuTotal` | Cross-API hint only — useful for M3 interactive gate, **not** the claim that we beat their WebGPU stack. |
 | our Metal ↔ three-avbd wallMs | Unfair until we have a body/state ring (their wallMs pipelines encode∥GPU). |
 
-Commands for the fair path (in progress — full step still stubbed):
+Commands for the fair path (full physics step still stubbed; WGSL load proven):
 
 ```bash
 cd engine
-cargo run -p engine-webgpu --release --bin wgsl_smoke   # SPIR-V→WGSL coverage + wgpu load
-# Next: Chrome harness loading the same WGSL, same bench-cases as three-avbd bench3d
+cargo run -p engine-webgpu --release --bin wgsl_smoke    # SPIR-V→WGSL + native wgpu load
+cargo run -p engine-webgpu --release --bin wgsl_export   # write generated/wgsl/*.wgsl
+cd crates/engine-webgpu && python3 -m http.server 8765
+# Chrome (foreground tab): http://127.0.0.1:8765/chrome_wgsl_load.html
+# Next: full step + same bench-cases as three-avbd bench3d (gpuTotal / wallMs)
 ```
 
 ## Speed — three-avbd Chrome WebGPU (local M3 Max, 2026-10-13)

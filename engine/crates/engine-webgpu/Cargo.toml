@@ -24,3 +24,7 @@ anyhow.workspace = true
 [[bin]]
 name = "wgsl_smoke"
 path = "src/bin/wgsl_smoke.rs"
+
+[[bin]]
+name = "wgsl_export"
+path = "src/bin/wgsl_export.rs"
