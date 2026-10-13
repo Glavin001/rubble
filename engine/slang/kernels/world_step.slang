@@ -301,6 +301,42 @@ void broadphase_clear(uint3 tid : SV_DispatchThreadID)
     gConstraintIds[i] = 0xFFFFFFFFu;
 }
 
+// three-avbd Stage 8h: reject AABB-overlapping box pairs separated on a face axis
+// by more than `gap`. `probe` OBB is built once per broadphase thread.
+bool boxesSeparatedOnFaceAxis(BoxObb probe, Collider cb, BodyState bb, float gap)
+{
+    if (cb.shape != SHAPE_BOX) return false;
+    float3 cB = transformPoint(bb.position, bb.orientation, cb.localPos);
+    float4 qB = quatMul(bb.orientation, cb.localRot);
+    BoxObb other = makeBoxObb(cB, qB, cb.params.xyz);
+    float3 d = other.center - probe.center;
+    float3 hA = probe.half;
+    float3 hB = other.half;
+    float3 a0 = probe.axis0;
+    float3 a1 = probe.axis1;
+    float3 a2 = probe.axis2;
+    float3 b0 = other.axis0;
+    float3 b1 = other.axis1;
+    float3 b2 = other.axis2;
+    {
+        float rB = hB.x * abs(dot(a0, b0)) + hB.y * abs(dot(a0, b1)) + hB.z * abs(dot(a0, b2));
+        if (abs(dot(d, a0)) > hA.x + rB + gap) return true;
+        rB = hB.x * abs(dot(a1, b0)) + hB.y * abs(dot(a1, b1)) + hB.z * abs(dot(a1, b2));
+        if (abs(dot(d, a1)) > hA.y + rB + gap) return true;
+        rB = hB.x * abs(dot(a2, b0)) + hB.y * abs(dot(a2, b1)) + hB.z * abs(dot(a2, b2));
+        if (abs(dot(d, a2)) > hA.z + rB + gap) return true;
+    }
+    {
+        float rA = hA.x * abs(dot(b0, a0)) + hA.y * abs(dot(b0, a1)) + hA.z * abs(dot(b0, a2));
+        if (abs(dot(d, b0)) > hB.x + rA + gap) return true;
+        rA = hA.x * abs(dot(b1, a0)) + hA.y * abs(dot(b1, a1)) + hA.z * abs(dot(b1, a2));
+        if (abs(dot(d, b1)) > hB.y + rA + gap) return true;
+        rA = hA.x * abs(dot(b2, a0)) + hA.y * abs(dot(b2, a1)) + hA.z * abs(dot(b2, a2));
+        if (abs(dot(d, b2)) > hB.z + rA + gap) return true;
+    }
+    return false;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_insert(uint3 tid : SV_DispatchThreadID)
@@ -336,6 +372,16 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     uint base = gScratchAtomics[1];
     Aabb box = gAabbs[base + i];
     bool sleeper = bodyIsSleeping(b);
+    // Build probe OBB once (three-avbd findPairs loads the querier once).
+    bool probeIsBox = col.shape == SHAPE_BOX;
+    BoxObb probeObb;
+    if (probeIsBox)
+    {
+        float3 c0 = transformPoint(b.position, b.orientation, col.localPos);
+        float4 q0 = quatMul(b.orientation, col.localRot);
+        probeObb = makeBoxObb(c0, q0, col.params.xyz);
+    }
+    const float faceGap = 0.001;
 
     // Small scenes: exact pairwise (correctness). Large: uniform-grid hash.
     // Awake dynamics test everyone; sleepers only keep static contacts (ground) so a
@@ -363,7 +409,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                 if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
                 if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
             }
-            if (!shouldEmitPair(i, j)) continue;
+            if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, other, ob, faceGap)) continue;
             emitCandidate(i, j);
         }
         return;
@@ -423,7 +469,8 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                           box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
                           box.mx.z < ab.mn.z || ab.mx.z < box.mn.z))
                     {
-                        if (shouldEmitPair(i, cur))
+                        BodyState ob = gBodies[other.body];
+                        if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, other, ob, faceGap)))
                             emitCandidate(i, cur);
                     }
                 }
@@ -431,57 +478,6 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             cur = gColorLists[cur];
         }
     }
-}
-
-// three-avbd Stage 8h: reject AABB-overlapping box pairs separated on a face axis
-// by more than `gap` (narrowphase would miss them anyway). Rings of bricks overlap
-// AABBs far more than they touch.
-bool boxesSeparatedOnFaceAxis(Collider ca, BodyState ba, Collider cb, BodyState bb, float gap)
-{
-    if (ca.shape != SHAPE_BOX || cb.shape != SHAPE_BOX) return false;
-    float3 cA = transformPoint(ba.position, ba.orientation, ca.localPos);
-    float3 cB = transformPoint(bb.position, bb.orientation, cb.localPos);
-    float4 qA = quatMul(ba.orientation, ca.localRot);
-    float4 qB = quatMul(bb.orientation, cb.localRot);
-    float3 hA = ca.params.xyz;
-    float3 hB = cb.params.xyz;
-    float3 d = cB - cA;
-    float3 a0 = quatRotate(qA, float3(1, 0, 0));
-    float3 a1 = quatRotate(qA, float3(0, 1, 0));
-    float3 a2 = quatRotate(qA, float3(0, 0, 1));
-    float3 b0 = quatRotate(qB, float3(1, 0, 0));
-    float3 b1 = quatRotate(qB, float3(0, 1, 0));
-    float3 b2 = quatRotate(qB, float3(0, 0, 1));
-    // A's three face axes
-    {
-        float rB = hB.x * abs(dot(a0, b0)) + hB.y * abs(dot(a0, b1)) + hB.z * abs(dot(a0, b2));
-        if (abs(dot(d, a0)) > hA.x + rB + gap) return true;
-        rB = hB.x * abs(dot(a1, b0)) + hB.y * abs(dot(a1, b1)) + hB.z * abs(dot(a1, b2));
-        if (abs(dot(d, a1)) > hA.y + rB + gap) return true;
-        rB = hB.x * abs(dot(a2, b0)) + hB.y * abs(dot(a2, b1)) + hB.z * abs(dot(a2, b2));
-        if (abs(dot(d, a2)) > hA.z + rB + gap) return true;
-    }
-    // B's three face axes
-    {
-        float rA = hA.x * abs(dot(b0, a0)) + hA.y * abs(dot(b0, a1)) + hA.z * abs(dot(b0, a2));
-        if (abs(dot(d, b0)) > hB.x + rA + gap) return true;
-        rA = hA.x * abs(dot(b1, a0)) + hA.y * abs(dot(b1, a1)) + hA.z * abs(dot(b1, a2));
-        if (abs(dot(d, b1)) > hB.y + rA + gap) return true;
-        rA = hA.x * abs(dot(b2, a0)) + hA.y * abs(dot(b2, a1)) + hA.z * abs(dot(b2, a2));
-        if (abs(dot(d, b2)) > hB.z + rA + gap) return true;
-    }
-    return false;
-}
-
-bool shouldEmitPair(uint ia, uint ib)
-{
-    Collider ca = gColliders[ia];
-    Collider cb = gColliders[ib];
-    BodyState ba = gBodies[ca.body];
-    BodyState bb = gBodies[cb.body];
-    float gap = 0.001; // three-avbd 1 mm
-    if (boxesSeparatedOnFaceAxis(ca, ba, cb, bb, gap)) return false;
-    return true;
 }
 
 // Back-compat name used by CUDA/WebGPU build lists.
