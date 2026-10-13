@@ -19,12 +19,13 @@ fn main() {
     let h = n;
     let mut p = AvbdParams::default();
     p.iterations = 10;
+    let need = (n * n * h + 8).next_power_of_two().max(4096);
     let mut world = MetalWorld::new(WorldCapacity {
-        max_bodies: 4096,
-        max_colliders: 4096,
-        max_contacts: 65_536,
+        max_bodies: need,
+        max_colliders: need,
+        max_contacts: (need * 16).max(65_536),
         max_joints: 64,
-        max_candidates: 65_536,
+        max_candidates: (need * 32).max(65_536),
         max_colors: 64,
         max_commands: 4096,
         max_hull_vertices: 64,
