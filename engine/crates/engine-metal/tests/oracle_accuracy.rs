@@ -14,18 +14,24 @@ fn official_params(iterations: u32) -> AvbdParams {
     p
 }
 
-/// Pre-stacked 10 unit boxes settle for 900 frames (three-avbd Stack height; their
-/// scene is spaced — we gate the resting column first). Jacobi needs ~40 iters +
-/// sleep that can absorb residual jitter (see DECISIONS 8c).
+/// three-avbd `sceneStack`: 10 unit boxes at y = i·1.5+1 (spaced drop), 900 frames.
+/// CPU ref: |z-(i+1)| < 0.011·(i+1), lateral ~0, |v| < 1e-3. Y-up here; margin≈0.01.
 #[test]
 fn stack_settles_like_three_avbd_ref() {
     let mut world = MetalWorld::new(WorldCapacity::small()).unwrap();
-    world.set_params(official_params(40));
+    let mut p = official_params(40);
+    // Disable sleep for the oracle envelope (three-avbd Stack test has no sleep).
+    p.sleep_time = 1.0e9;
+    world.set_params(p);
     {
         let mut b = SceneBuilder::new(&mut world);
-        b.add_ground_plane(0.0);
+        b.add_ground_box(0.5);
         for i in 0..10u32 {
-            b.add_box(Vec3::new(0.0, 0.5 + i as f32, 0.0), Vec3::splat(0.5), 1.0);
+            b.add_box(
+                Vec3::new(0.0, i as f32 * 1.5 + 1.0, 0.0),
+                Vec3::splat(0.5),
+                1.0,
+            );
         }
     }
     for _ in 0..900 {
@@ -36,19 +42,20 @@ fn stack_settles_like_three_avbd_ref() {
     assert_eq!(dyn_bodies.len(), 10);
     for (i, b) in dyn_bodies.iter().enumerate() {
         let y = b.position[1];
-        let expected = 0.5 + i as f32;
-        let tol = 0.08 + 0.03 * i as f32;
+        let expected = (i as f32) + 1.0;
+        // three-avbd: 0.011*(i+1); allow a small GPU float band on top.
+        let tol = 0.011 * (i as f32 + 1.0) + 0.02;
         assert!(
             (y - expected).abs() < tol,
             "box {i}: y={y} expected≈{expected} (±{tol})"
         );
         assert!(
-            b.position[0].abs() < 0.08 && b.position[2].abs() < 0.08,
+            b.position[0].abs() < 1e-3 && b.position[2].abs() < 1e-3,
             "box {i} drifted laterally {:?}",
             b.position
         );
         let speed = glam::Vec3::from_array(b.linear_vel).length();
-        assert!(speed < 0.5, "box {i} still moving speed={speed}");
+        assert!(speed < 1e-2, "box {i} still moving speed={speed}");
         assert!(y.is_finite());
     }
 }

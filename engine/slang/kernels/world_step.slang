@@ -109,16 +109,20 @@ void predictOne(uint i)
     // Sleeping/static: do not touch prev/pose (three-avbd mover compaction).
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     float dt = p.dt;
-    // Adaptive warm-start + three-avbd GPU startAtRest (REST_SPEED=0.1). Required for
-    // short-stack settle / sphere_falls; spaced drop stacks still need better manifolds.
-    float3 accel = b.linearVel / max(dt, 1e-8);
+    // Adaptive warm-start: (v - v_prev)/dt along up (three-avbd / VBD). gBodiesPrev still
+    // holds the previous step's snapshot (incl. that step's incoming velocity).
+    float3 prevVel = gBodiesPrev[i].linearVel;
+    float3 accel = (b.linearVel - prevVel) / max(dt, 1e-8);
     float accelExt = accel.y * sign(p.gravityY);
     float accelWeight = clamp(accelExt / max(abs(p.gravityY), 1e-6), 0.0, 1.0);
+    // three-avbd FLAG_START_AT_REST: skip extrapolation when nearly still so few-iter
+    // stacks do not pump from a bad warm start.
     float slow = length(b.linearVel) + length(b.angularVel) * 0.5;
     bool startAtRest = slow < 0.1;
 
     float3 inertialLin = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (dt * dt);
     float4 inertialAng = quatNormalize(quatApplyDelta(b.orientation, b.angularVel * dt));
+    // x⁻ snapshot for velocity extract (three-avbd initialPos).
     gBodiesPrev[i] = b;
 
     if (!startAtRest)
@@ -306,8 +310,7 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     if (i >= c.colliderCount) return;
     Collider col = gColliders[i];
     if (col.shape == SHAPE_PLANE) return;
-    BodyState b = gBodies[col.body];
-    if (bodyIsSleeping(b) && bodyIsDynamic(b)) return;
+    // Insert sleeping too — awake movers must find them (island wake on impact).
     uint base = gScratchAtomics[1];
     float cellSize = max(gParams[0].contactOffset * 16.0, 0.5);
     Aabb box = gAabbs[base + i];
@@ -328,13 +331,15 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     if (i >= c.colliderCount) return;
     Collider col = gColliders[i];
     BodyState b = gBodies[col.body];
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    if (!bodyIsDynamic(b)) return;
     if (col.shape == SHAPE_PLANE) return;
     uint base = gScratchAtomics[1];
     Aabb box = gAabbs[base + i];
+    bool sleeper = bodyIsSleeping(b);
 
     // Small scenes: exact pairwise (correctness). Large: uniform-grid hash.
-    // Dynamic i must test all j (including static/planes with j < i).
+    // Awake dynamics test everyone; sleepers only keep static contacts (ground) so a
+    // later impact can wake the island without the floor dropping out for a frame.
     if (c.colliderCount <= 512u)
     {
         for (uint j = 0; j < c.colliderCount; j++)
@@ -343,10 +348,11 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             Collider other = gColliders[j];
             if (other.body == col.body) continue;
             BodyState ob = gBodies[other.body];
-            if (bodyIsSleeping(ob) && bodyIsSleeping(b)) continue;
+            bool otherStatic = !bodyIsDynamic(ob);
+            if (sleeper && !otherStatic) continue;
+            if (bodyIsSleeping(ob) && sleeper) continue;
             // Emit each dynamic-dynamic pair once (lower index). Dynamic vs static always
             // emits from the dynamic collider (three-avbd box ground, planes).
-            bool otherStatic = !bodyIsDynamic(ob);
             if (!otherStatic && j < i) continue;
             if (otherStatic && !bodyIsDynamic(b)) continue;
             if (bodiesJointed(col.body, other.body)) continue;
@@ -373,6 +379,26 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         if (gColliders[p].shape != SHAPE_PLANE) continue;
         emitCandidate(i, p);
     }
+    // Sleepers: keep contacts vs static boxes (thick ground) too — grid pair loop is
+    // awake-only below, so scan statics here.
+    if (sleeper)
+    {
+        for (uint j = 0; j < c.colliderCount; j++)
+        {
+            if (j == i) continue;
+            Collider other = gColliders[j];
+            if (other.body == col.body || other.shape == SHAPE_PLANE) continue;
+            BodyState ob = gBodies[other.body];
+            if (bodyIsDynamic(ob)) continue;
+            if (bodiesJointed(col.body, other.body)) continue;
+            Aabb ab = gAabbs[base + j];
+            if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
+            if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
+            if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
+            emitCandidate(i, j);
+        }
+        return;
+    }
     for (int z = mn.z - 1; z <= mx.z + 1; z++)
     for (int y = mn.y - 1; y <= mx.y + 1; y++)
     for (int x = mn.x - 1; x <= mx.x + 1; x++)
@@ -390,15 +416,12 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                     !bodiesJointed(col.body, other.body) &&
                     other.shape != SHAPE_PLANE)
                 {
-                    BodyState ob = gBodies[other.body];
-                    if (!bodyIsSleeping(ob))
-                    {
-                        Aabb ab = gAabbs[base + cur];
-                        if (!(box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
-                              box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
-                              box.mx.z < ab.mn.z || ab.mx.z < box.mn.z))
-                            emitCandidate(i, cur);
-                    }
+                    // Sleeping others stay in the grid so impacts wake them.
+                    Aabb ab = gAabbs[base + cur];
+                    if (!(box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
+                          box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
+                          box.mx.z < ab.mn.z || ab.mx.z < box.mn.z))
+                        emitCandidate(i, cur);
                 }
             }
             cur = gColorLists[cur];
@@ -1073,17 +1096,8 @@ void pack_color_lists(uint3 tid : SV_DispatchThreadID)
     gColorLists[color * maxB + slot] = body;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void solve_primal_color(uint3 tid : SV_DispatchThreadID)
+void solvePrimalForBody(uint bodyIdx)
 {
-    // Colour from gPassUniform (unique bind offset per dispatch — three-avbd pass constant).
-    uint color = gPassUniform[0];
-    uint count = gColorCounts[color];
-    uint li = tid.x;
-    if (li >= count) return;
-    uint maxB = gScratchAtomics[1];
-    uint bodyIdx = gColorLists[color * maxB + li];
     BodyState b = gBodies[bodyIdx];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     AvbdParams p = gParams[0];
@@ -1217,6 +1231,29 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
+void solve_primal_color(uint3 tid : SV_DispatchThreadID)
+{
+    // Colour from gPassUniform (unique bind offset per dispatch — three-avbd pass constant).
+    uint color = gPassUniform[0];
+    uint count = gColorCounts[color];
+    uint li = tid.x;
+    if (li >= count) return;
+    uint maxB = gScratchAtomics[1];
+    solvePrimalForBody(gColorLists[color * maxB + li]);
+}
+
+// Small-scene GS: one body per dispatch (gPassUniform = body index). Host walks
+// bodies high→low like three-avbd CPU so impacts propagate through stacks.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void solve_primal_one(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x != 0) return;
+    solvePrimalForBody(gPassUniform[0]);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
 void solve_dual(uint3 tid : SV_DispatchThreadID)
 {
     uint i = tid.x;
@@ -1275,6 +1312,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// gCcdFlags reused pre-CCD: 1 = sleep candidate (slow + timer elapsed) after extract_velocity.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
@@ -1285,6 +1323,7 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     AvbdParams p = gParams[0];
     BodyState b = gBodies[i];
     BodyState initB = gBodiesPrev[i];
+    gCcdFlags[i] = 0;
     if (!bodyIsDynamic(b)) return;
     if (bodyIsSleeping(b)) return;
 
@@ -1306,18 +1345,58 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     {
         b.sleepTimer += dt;
         if (b.sleepTimer >= p.sleepTime)
-        {
-            b.flags = (b.flags & ~BODY_AWAKE) | BODY_SLEEPING;
-            b.linearVel = float3(0, 0, 0);
-            b.angularVel = float3(0, 0, 0);
-            InterlockedAdd(gCounters[0].sleepEvents, 1);
-        }
+            gCcdFlags[i] = 1; // candidate — sleep_island_commit after island gate
     }
     else
     {
         b.sleepTimer = 0.0;
         b.flags |= BODY_AWAKE;
     }
+    gBodies[i] = b;
+}
+
+// If any dynamic contact neighbor is not a sleep candidate, revoke both. Repeating
+// this (host) propagates through the island so a stack sleeps together or not at all.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].contactCount;
+    if (i >= n) return;
+    Contact c = gContacts[i];
+    if (c.alive == 0) return;
+    uint ba = gColliders[c.colliderA].body;
+    uint bb = gColliders[c.colliderB].body;
+    BodyState a = gBodies[ba];
+    BodyState b = gBodies[bb];
+    bool dynA = bodyIsDynamic(a);
+    bool dynB = bodyIsDynamic(b);
+    if (!dynA || !dynB) return;
+    // Sleeping neighbor is fine (already out of the island). Awake non-candidate blocks.
+    bool okA = bodyIsSleeping(a) || gCcdFlags[ba] != 0;
+    bool okB = bodyIsSleeping(b) || gCcdFlags[bb] != 0;
+    if (!okA || !okB)
+    {
+        if (dynA && !bodyIsSleeping(a)) gCcdFlags[ba] = 0;
+        if (dynB && !bodyIsSleeping(b)) gCcdFlags[bb] = 0;
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sleep_island_commit(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    StepCounters c = gCounters[0];
+    if (i >= c.bodyCount) return;
+    BodyState b = gBodies[i];
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    if (gCcdFlags[i] == 0) return;
+    b.flags = (b.flags & ~BODY_AWAKE) | BODY_SLEEPING;
+    b.linearVel = float3(0, 0, 0);
+    b.angularVel = float3(0, 0, 0);
+    InterlockedAdd(gCounters[0].sleepEvents, 1);
     gBodies[i] = b;
 }
 
