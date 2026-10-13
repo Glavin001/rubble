@@ -715,6 +715,21 @@ void emitManifold(CandidatePair pair, BodyState ba, BodyState bb, Collider ca, C
     if (mf.count <= 0) return;
     // Feature IDs must be geometric only (three-avbd). Cap 4 — matches BOX_MAX_CONTACTS.
     int n = mf.count > 4 ? 4 : mf.count;
+    // Dynamic-dynamic vertical faces on flat bricks: 2 diagonal corners. Full 4
+    // doubles Ring contacts vs local oracle (~75k vs ~45k; running-bond ≈2
+    // manifolds/brick). Unit-cube columns (half.y≥0.35) and static/plane keep 4.
+    bool bothDyn = bodyIsDynamic(ba) && bodyIsDynamic(bb);
+    bool flatBrick = min(ca.params.y, cb.params.y) < 0.35;
+    if (bothDyn && flatBrick && abs(mf.normal.y) > 0.85 && n >= 4)
+    {
+        emitContactManifold(
+            pair, ba, bb, ca, cb, mf.normal, margin, 2,
+            mf.pts[0].pA, mf.pts[0].pB, mf.pts[0].feature,
+            mf.pts[2].pA, mf.pts[2].pB, mf.pts[2].feature,
+            float3(0, 0, 0), float3(0, 0, 0), 0u,
+            float3(0, 0, 0), float3(0, 0, 0), 0u);
+        return;
+    }
     emitContactManifold(
         pair, ba, bb, ca, cb, mf.normal, margin, n,
         mf.pts[0].pA, mf.pts[0].pB, mf.pts[0].feature,

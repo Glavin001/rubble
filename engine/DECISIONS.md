@@ -30,7 +30,9 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 8p. **Large smash ball probe:** broadphase_query also O(1)-tests collider 0 and last if AABB-large (ring/wall balls). Do not skip inserting large *dynamics* — that left Columns with stragglers awake.
 8o. **Contact ping-pong:** swap halves of the 2× contact buffer instead of blitting prev each step (s[11]=current, s[8]=prev). Accuracy unchanged; blit was not the Ring bottleneck.
 8x. **Awake→sleeping BP pairs:** `cur > i` alone never pairs a trailing smash ball with sleeping lower-index bricks (sleepers only keep static contacts). Emit awake→sleeping at any index. Pre-sleep + spatial wake reaches ~45–56k contacts with a real smash but p50 ~9.5 ms (FAIL 120) — deferred until cheaper than the all-awake ~3.58 ms path.
-8y. **Horizontal face cap 1:** face manifolds with |n.y|≤0.85 keep 1 point (stacks keep 4). Ring contacts ~74–88k; Stack/Columns green. Pair count (~29k manifolds) still dominates vs oracle ~14k.
+8y. **Horizontal face cap 1:** face manifolds with |n.y|≤0.85 keep 1 point (stacks keep 4). Pair count (~23k resting manifolds) is expected for running-bond (≈2 vertical supports/brick + ground + some side).
+8z. **Flat-brick vertical dyn-dyn = 2 diagonals:** full 4 on running-bond doubled Ring contacts (~75k vs oracle 45k). Cap 2 for flat bricks (half.y<0.35) → resting ~45k; unit-cube Columns keep 4 (cap 2 left ~15k awake). Static/plane keeps 4. Ring ~3.35 ms / ~52k still vs oracle 1.75 / 45k — kernel/reuse next.
+8aa. **AABB pad 1e-4 + geometric sphere cull:** match three-avbd testPair (was contactOffset inflate). Accuracy green; little Ring contact change once faceSeparated was in.
 8w. **scene_fps filters:** CLI args substring-match scene names (was ignored). Brick Walls (27k) dropped from stress tag — regularly ≤8.33 ms.
 8v. **Face manifold cap:** BOX_MAX_CONTACTS=4 is required for Stack (cap 2 drops the bottom box through). Shallow-edge → ~45k Ring contacts but drifts Stack — still blocked.
 8u. **Per-manifold dual:** three-avbd loops contacts inside one manifold thread; on Metal that regressed Ring 9k ~3.6→~6.6 ms. Keep per-contact dual for occupancy.
