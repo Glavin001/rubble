@@ -4,6 +4,9 @@
 //! (not native Metal `scene_fps` vs their browser `gpuTotal`). Metal remains the M3
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
+mod gpu;
+pub use gpu::WgpuSim;
+
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
 use std::borrow::Cow;

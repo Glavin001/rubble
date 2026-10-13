@@ -28,3 +28,7 @@ path = "src/bin/wgsl_smoke.rs"
 [[bin]]
 name = "wgsl_export"
 path = "src/bin/wgsl_export.rs"
+
+[[bin]]
+name = "wg_drop"
+path = "src/bin/wg_drop.rs"
