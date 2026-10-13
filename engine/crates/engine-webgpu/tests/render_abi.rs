@@ -66,3 +66,64 @@ fn demo_renderer_body_matches_solver_record() {
         "demo.html Collider is a different stride from the solver buffer"
     );
 }
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Unit-cube corners in (u, v), then the two triangles. Negative faces must
+/// reverse the order: the same CCW-(u,v) walk is clockwise when viewed from
+/// outside a negative-axis face, and backface culling drops it.
+fn cube_triangle(sign: f32, tri: usize, corner: usize) -> [f32; 2] {
+    let winding = if sign > 0.0 {
+        [[0, 1, 2], [0, 2, 3]]
+    } else {
+        [[0, 2, 1], [0, 3, 2]]
+    };
+    let uv = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+    let [a, b] = uv[winding[tri][corner]];
+    [a, b]
+}
+
+#[test]
+fn negative_cube_faces_point_outward() {
+    let src = include_str!("../demo.html");
+    assert!(
+        src.contains("sign > 0 ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]]"),
+        "demo cube keeps one winding for both face signs, so backface culling hides half the faces"
+    );
+    let axes = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
+    for axis in axes {
+        for &sign in &[-1.0f32, 1.0] {
+            let mut n = [0.0, 0.0, 0.0];
+            n[axis[2]] = sign;
+            let corner = |i: usize| {
+                let [a, b] = cube_triangle(sign, 0, i);
+                let mut p = [0.0, 0.0, 0.0];
+                p[axis[0]] = a * 0.5;
+                p[axis[1]] = b * 0.5;
+                p[axis[2]] = sign * 0.5;
+                p
+            };
+            let p0 = corner(0);
+            let p1 = corner(1);
+            let p2 = corner(2);
+            let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            let geom = cross(e1, e2);
+            assert!(
+                dot(geom, n) > 0.0,
+                "face axis {:?} sign {sign} winds inward: geom {geom:?} stored {n:?}",
+                axis
+            );
+        }
+    }
+}

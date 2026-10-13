@@ -164,3 +164,64 @@ fn pyramid_stays_finite() {
         assert!(b.position[1] > -2.0 && b.position[1] < 30.0);
     }
 }
+
+fn translational_ke(bodies: &[engine_schema::BodyState]) -> f32 {
+    bodies
+        .iter()
+        .filter(|b| b.is_dynamic())
+        .map(|b| {
+            let mass = if b.inv_mass > 1e-8 { 1.0 / b.inv_mass } else { 0.0 };
+            let v = Vec3::from_array(b.linear_vel);
+            0.5 * mass * v.length_squared()
+        })
+        .sum()
+}
+
+/// Demo bricks already resting on each other must not gain kinetic energy.
+/// A rising tail is the bounce/pump visible in the ring after the hit.
+#[test]
+fn resting_brick_stack_does_not_gain_energy() {
+    let mut world = MetalWorld::new(WorldCapacity::small()).unwrap();
+    let mut p = official_params(4);
+    p.sleep_time = 1.0e9;
+    world.set_params(p);
+    {
+        let mut b = SceneBuilder::new(&mut world);
+        b.add_ground_box(0.5);
+        let half = Vec3::new(0.5, 0.25, 0.25);
+        for i in 0..6u32 {
+            b.add_box(Vec3::new(0.0, 0.75 + i as f32 * 0.5, 0.0), half, 0.25);
+        }
+    }
+    let mut ke = Vec::with_capacity(180);
+    for _ in 0..180 {
+        world.step().unwrap();
+        ke.push(translational_ke(&world.download_bodies()));
+    }
+    let tail = &ke[90..];
+    let mid = tail.len() / 2;
+    let mean = |s: &[f32]| s.iter().sum::<f32>() / s.len() as f32;
+    let first = mean(&tail[..mid]);
+    let second = mean(&tail[mid..]);
+    let series: Vec<String> = ke
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 15 == 0)
+        .map(|(i, k)| format!("{i}:{k:.4}"))
+        .collect();
+    assert!(
+        second <= first + 0.02,
+        "resting stack gained energy: tail KE {first:.4} J -> {second:.4} J\n{}",
+        series.join(" ")
+    );
+    let max_speed = world
+        .download_bodies()
+        .into_iter()
+        .filter(|b| b.is_dynamic())
+        .map(|b| Vec3::from_array(b.linear_vel).length())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_speed < 0.05,
+        "resting stack still moving at {max_speed:.4} m/s after 180 steps (KE tail {first:.4} -> {second:.4})"
+    );
+}
