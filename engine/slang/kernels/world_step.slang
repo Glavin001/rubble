@@ -37,8 +37,11 @@ struct WorldObbGpu
     float4 axis2;
 };
 RWStructuredBuffer<WorldObbGpu> gWorldObbs;
-// Appended (buffer 25): do not insert earlier — Metal bind_all is declaration order.
+// Appended (buffer 25+): do not insert earlier — Metal bind_all is declaration order.
 RWStructuredBuffer<Manifold> gManifolds;
+// Per-body reuse reference pose (three-avbd refsWGSL). pos.w unused; rot = (x,y,z,w).
+struct RefPoseGpu { float4 pos; float4 rot; };
+RWStructuredBuffer<RefPoseGpu> gRefPoses;
 
 static const uint EVENT_SLEEP = 1u;
 static const uint EVENT_WAKE = 2u;
@@ -615,7 +618,7 @@ Contact makeContactRow(
     ct.c0T1 = C0t1;
     ct.c0T2 = C0t2;
     ct._pad0 = 0.0; // stick flag (1 = static friction held)
-    ct._pad1 = 0.0;
+    ct._pad1 = asfloat(gScratchAtomics[17]); // generated step (reuseContacts)
     ct._pad2 = 0.0;
     return ct;
 }
@@ -772,16 +775,43 @@ float colliderMinSide(Collider col)
 }
 
 static const uint FLAG_REUSE_CONTACTS = 1u;
+static const float REUSE_LIN_TOL = 0.002;
+static const float REUSE_ANG_TOL = 0.002;
 
-// three-avbd reuseContacts (velocity-gated). Opt-in via params.flags bit0 — on Metal
-// it slows Brick Ring smash; Box Pile settle enables it from the host.
+float3 quatSubVec(float4 a, float4 b)
+{
+    float4 d = quatMul(a, quatConjugate(b));
+    return 2.0 * d.xyz;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void update_refs(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (!bodyIsDynamic(b)) return;
+    RefPoseGpu last = gRefPoses[i];
+    uint step = gScratchAtomics[17];
+    bool noRef = dot(last.rot, last.rot) < 1e-12;
+    bool moved = noRef
+        || length(b.position - last.pos.xyz) > REUSE_LIN_TOL
+        || length(quatSubVec(b.orientation, last.rot)) > REUSE_ANG_TOL;
+    if (moved)
+    {
+        RefPoseGpu r;
+        r.pos = float4(b.position, 0.0);
+        r.rot = b.orientation;
+        gRefPoses[i] = r;
+        b.generation = step;
+        gBodies[i] = b;
+    }
+}
+
+// three-avbd reuseContacts. Opt-in via params.flags bit0 — Box Pile on, Ring off.
 bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float margin)
 {
-    // Looser than three-avbd's 2 mm pose tol (we gate on velocity until updateRefs).
-    float slow = length(ba.linearVel) + length(bb.linearVel)
-        + 0.5 * (length(ba.angularVel) + length(bb.angularVel));
-    if (slow > 0.2) return false;
-
     uint prevOff = gScratchAtomics[8];
     uint prevN = gScratchAtomics[7];
     uint hashN = gScratchAtomics[9];
@@ -803,6 +833,9 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
         }
     }
     if (startJ == CONTACT_HASH_EMPTY) return false;
+    // _pad1 = asfloat(generated step). Skip if either body moved after that.
+    uint generated = asuint(gContacts[prevOff + startJ]._pad1);
+    if (generated < max(ba.generation, bb.generation)) return false;
 
     uint count = 0u;
     for (uint k = 0u; k < 8u; k++)

@@ -78,13 +78,13 @@ fn rope_joint_error_bounded_like_three_avbd() {
                 linear_vel: [0.0; 3],
                 sleep_timer: 0.0,
                 angular_vel: [0.0; 3],
-                generation: 1,
+                generation: 0,
             });
             b.world_mut().add_collider(engine_schema::Collider {
                 body: id,
                 shape: engine_schema::ShapeType::Sphere as u32,
                 material: 0,
-                generation: 1,
+                generation: 0,
                 local_pos: [0.0; 3],
                 density: 0.0,
                 local_rot: [0.0, 0.0, 0.0, 1.0],

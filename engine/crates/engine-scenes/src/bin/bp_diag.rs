@@ -140,5 +140,36 @@ fn main() {
         }
         let surv = if n > 0 { hit as f32 / n as f32 } else { 0.0 };
         println!("warmstart_survival={surv:.3} ({hit}/{n})");
+
+    // Velocity percentiles (VEL_HIST=1)
+    if std::env::var("VEL_HIST").is_ok() {
+        let mut lins: Vec<f32> = Vec::new();
+        let mut angs: Vec<f32> = Vec::new();
+        let mut timers = 0u32;
+        for b in &bodies {
+            if !b.is_dynamic() { continue; }
+            let lv = glam::Vec3::from_array(b.linear_vel).length();
+            let av = glam::Vec3::from_array(b.angular_vel).length();
+            lins.push(lv);
+            angs.push(av);
+            if b.sleep_timer > 0.0 { timers += 1; }
+        }
+        lins.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        angs.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        let pct = |v: &[f32], p: f32| -> f32 {
+            if v.is_empty() { return 0.0; }
+            let i = ((v.len() as f32 - 1.0) * p).round() as usize;
+            v[i.min(v.len()-1)]
+        };
+        let under_sleep = lins.iter().filter(|&&v| v < 0.15).count();
+        let under_ang = angs.iter().filter(|&&v| v < 0.15).count();
+        println!(
+            "vel: lin p50={:.4} p90={:.4} p99={:.4} max={:.4} |ang p50={:.4} p90={:.4} p99={:.4}| under_sleepLin={}/{} under_sleepAng={}/{} sleepTimer>0={}",
+            pct(&lins,0.5), pct(&lins,0.9), pct(&lins,0.99), lins.last().copied().unwrap_or(0.0),
+            pct(&angs,0.5), pct(&angs,0.9), pct(&angs,0.99),
+            under_sleep, lins.len(), under_ang, angs.len(), timers
+        );
+    }
+
     }
 }
