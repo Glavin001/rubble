@@ -28,8 +28,16 @@ fn main() {
                 | "Box Pile (32k)"
         );
         let settle = scene.info.name == "Box Columns (100k)";
-        let lead = if settle { 120 } else { 5 };
-        let steps = if stress || settle { 20 } else { 40 };
+        // three-avbd brick-ring benches use lead=60 into the smash window.
+        let ring = scene.info.name.starts_with("Brick Ring");
+        let lead = if settle {
+            120
+        } else if ring {
+            60
+        } else {
+            5
+        };
+        let steps = if stress || settle || ring { 20 } else { 40 };
         let Ok((mut world, info)) = engine_scenes::build_world(scene.info.name) else {
             println!("FAIL  {} — build error", scene.info.name);
             failed += 1;

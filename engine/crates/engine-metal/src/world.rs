@@ -18,6 +18,7 @@ pub struct MetalWorld {
     colliders: Buffer,
     materials: Buffer,
     contacts: Buffer,
+    manifolds: Buffer,
     joints: Buffer,
     params_buf: Buffer,
     counters: Buffer,
@@ -66,6 +67,8 @@ impl MetalWorld {
         let materials = alloc::<Material>(d, 64);
         // [0..max_contacts) = current; [max_contacts..2*max) = previous frame for warm-start.
         let contacts = alloc::<Contact>(d, capacity.max_contacts.saturating_mul(2));
+        // One manifold per broadphase pair (≤ max_candidates).
+        let manifolds = alloc::<Manifold>(d, capacity.max_candidates);
         let joints = alloc::<Joint>(d, capacity.max_joints);
         let params_buf = alloc::<AvbdParams>(d, 1);
         let counters = alloc::<StepCounters>(d, 1);
@@ -131,6 +134,7 @@ impl MetalWorld {
             colliders,
             materials,
             contacts,
+            manifolds,
             joints,
             params_buf,
             counters,
@@ -305,6 +309,7 @@ impl MetalWorld {
         encoder.set_buffer(22, Some(&self.pass_table), 0);
         encoder.set_buffer(23, Some(&self.indirect_args), 0);
         encoder.set_buffer(24, Some(&self.world_obbs), 0);
+        encoder.set_buffer(25, Some(&self.manifolds), 0);
     }
 
     fn dispatch(&self, encoder: &ComputeCommandEncoderRef, name: &str, threads: u64) {
@@ -372,6 +377,8 @@ impl MetalWorld {
         s[9] = (prev.saturating_mul(4).max(1024) as u32)
             .next_power_of_two()
             .min(ids_len);
+        // s[10] = max manifolds (== max_candidates; one manifold per BP pair).
+        s[10] = self.capacity.max_candidates;
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
@@ -388,6 +395,10 @@ impl MetalWorld {
             sleep_events: 0,
             wake_events: 0,
             iteration: 0,
+            manifold_count: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         if !clear_transient {
             c = self.last_counters;
@@ -476,6 +487,15 @@ impl MetalWorld {
                     .max(n_cols.saturating_mul(4)),
             )
             .max(1);
+        // Manifolds ≤ candidates; size like narrowphase so the first smash frame is covered.
+        let prev_manifolds = self.last_counters.manifold_count.max(256) as u64;
+        let manifold_dispatch = (self.capacity.max_candidates as u64)
+            .min(narrow_n.max(
+                prev_manifolds
+                    .saturating_add(prev_manifolds / 4)
+                    .saturating_add(1024),
+            ))
+            .max(1);
 
         self.dispatch(&encoder, "apply_commands", self.command_count.max(1) as u64);
         let dirty = unsafe { *(self.scratch.contents() as *const u32).add(6) };
@@ -508,8 +528,9 @@ impl MetalWorld {
         self.dispatch(&encoder, "build_awake_list", n_bodies);
 
         // CSR adjacency (three-avbd degree → scan → scatter → sort). Overwrites grid hash.
+        // Degree/scatter walk manifolds (Stage 8b), not individual contact points.
         self.dispatch(&encoder, "csr_clear", n_bodies + 1);
-        self.dispatch(&encoder, "csr_degree_contacts", contact_dispatch);
+        self.dispatch(&encoder, "csr_degree_contacts", manifold_dispatch);
         self.dispatch(&encoder, "csr_degree_joints", n_joints);
         if self.body_count <= 512 {
             self.dispatch(&encoder, "csr_prefix", 1);
@@ -525,7 +546,7 @@ impl MetalWorld {
             }
             self.dispatch(&encoder, "csr_prefix_finalize", n_bodies + 1);
         }
-        self.dispatch(&encoder, "csr_scatter_contacts", contact_dispatch);
+        self.dispatch(&encoder, "csr_scatter_contacts", manifold_dispatch);
         self.dispatch(&encoder, "csr_scatter_joints", n_joints);
         self.dispatch(&encoder, "csr_sort", awake_dispatch);
 
@@ -549,6 +570,7 @@ impl MetalWorld {
         // three-avbd argsColors: indirect per colour (0 threadgroups ⇒ free). Same encoder so
         // Metal tracks the write→dispatch dependency without a CPU mid-step sync.
         // Colored Jacobi is enough once C0 is sampled at x⁻ (solve_primal_one kept for probes).
+        // Dual stays per-contact (occupancy); CSR/island use manifolds.
         let dual_n = contact_dispatch.max(n_joints);
         // Live colours + slack so a growing palette is not truncated mid-smash.
         let max_c = self
@@ -570,10 +592,10 @@ impl MetalWorld {
         // Island sleep gate: a body may sleep only if every dynamic contact neighbour is
         // also a candidate (or already asleep). Skipping this lets upper boxes freeze while
         // the stack below settles — columns tore apart and injected energy. Always run a
-        // fixed handful of rounds (accuracy); 8×contacts stays cheap vs the NP/solve base.
-        if self.last_counters.contact_count > 0 {
+        // fixed handful of rounds (accuracy); manifolds cut the fan-out vs per-contact.
+        if self.last_counters.manifold_count > 0 {
             for _ in 0..8u32 {
-                self.dispatch(&encoder, "sleep_island_gate", contact_dispatch);
+                self.dispatch(&encoder, "sleep_island_gate", manifold_dispatch);
             }
         }
         self.dispatch(&encoder, "sleep_island_commit", n_bodies);

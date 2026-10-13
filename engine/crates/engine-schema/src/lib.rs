@@ -201,6 +201,19 @@ pub struct Contact {
     pub _pad: [f32; 3],
 }
 
+/// Contact pair manifold (32 bytes) — three-avbd Stage 8b.
+/// CSR / dual / primal adjacency key one edge per manifold, not per contact point.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Manifold {
+    pub collider_a: u32,
+    pub collider_b: u32,
+    pub contact_start: u32,
+    pub contact_count: u32,
+    pub normal: [f32; 3],
+    pub friction: f32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Joint {
@@ -238,6 +251,10 @@ pub struct StepCounters {
     pub sleep_events: u32,
     pub wake_events: u32,
     pub iteration: u32,
+    pub manifold_count: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 impl Default for StepCounters {
@@ -261,6 +278,7 @@ pub const OVERFLOW_JOINTS: u32 = 4;
 pub const OVERFLOW_COLORS: u32 = 8;
 pub const CCD_BUDGET_EXHAUSTED: u32 = 16;
 pub const CCD_CANDIDATE_MISS: u32 = 32;
+pub const OVERFLOW_MANIFOLDS: u32 = 64;
 
 #[cfg(test)]
 mod tests {
@@ -273,6 +291,8 @@ mod tests {
         assert_eq!(size_of::<BodyState>(), 80);
         assert_eq!(size_of::<Collider>(), 64);
         assert_eq!(size_of::<Contact>(), 128);
+        assert_eq!(size_of::<Manifold>(), 32);
+        assert_eq!(size_of::<StepCounters>(), 64);
         assert_eq!(align_of::<BodyState>(), 4);
     }
 }

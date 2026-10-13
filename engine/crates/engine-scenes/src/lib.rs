@@ -82,6 +82,11 @@ pub fn brick_ring(b: &mut SceneBuilder<'_>, radius: f32, courses: u32, tier: u32
     );
 }
 
+/// Matches three-avbd `bench-cases` “Brick ring 9k” (`brickRing(s, 12, 20, 2, 10)`).
+pub fn brick_ring_9k(b: &mut SceneBuilder<'_>) {
+    brick_ring(b, 12.0, 20, 2, 10);
+}
+
 pub fn brick_ring_28k(b: &mut SceneBuilder<'_>) {
     brick_ring(b, 40.0, 20, 2, 10);
 }
@@ -602,6 +607,15 @@ fn cap(bodies: u32) -> WorldCapacity {
 
 pub fn all_scenes() -> Vec<SceneDef> {
     vec![
+        SceneDef {
+            info: SceneInfo {
+                name: "Brick Ring (9k)",
+                group: "Paper scenes (GPU)",
+                iterations: 4,
+                capacity: cap(16_384),
+            },
+            build: brick_ring_9k,
+        },
         SceneDef {
             info: SceneInfo {
                 name: "Brick Ring (28k)",

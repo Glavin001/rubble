@@ -37,6 +37,8 @@ struct WorldObbGpu
     float4 axis2;
 };
 RWStructuredBuffer<WorldObbGpu> gWorldObbs;
+// Appended (buffer 25): do not insert earlier — Metal bind_all is declaration order.
+RWStructuredBuffer<Manifold> gManifolds;
 
 static const uint EVENT_SLEEP = 1u;
 static const uint EVENT_WAKE = 2u;
@@ -516,25 +518,12 @@ void broadphase_grid(uint3 tid : SV_DispatchThreadID)
 }
 
 // Emit one contact. C0 matches three-avbd: n·(xB−xA)+margin with n = A→B (compression ⇒ C0 < 0).
-void emitContact(
+Contact makeContactRow(
     CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
-    float3 nrm, float3 pA, float3 pB, uint featureId, float margin)
+    float3 nrm, float3 pA, float3 pB, uint featureId, float margin, float mu)
 {
-    uint slot;
-    InterlockedAdd(gCounters[0].contactCount, 1, slot);
-    uint maxC = gScratchAtomics[3];
-    if (slot >= maxC)
-    {
-        InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
-        return;
-    }
-
-    Material ma = gMaterials[ca.material];
-    Material mb = gMaterials[cb.material];
-    float mu = sqrt(max(ma.friction, 0.0) * max(mb.friction, 0.0));
     float3 t1, t2;
     orthonormalBasis(nrm, t1, t2);
-
     // three-avbd: C0_n = n·(xB−xA) + margin (A→B). Equilibrium sits ~margin deep.
     float3 d0 = pB - pA;
     float C0n = dot(nrm, d0) + margin;
@@ -565,8 +554,11 @@ void emitContact(
     ct._pad0 = 0.0; // stick flag (1 = static friction held)
     ct._pad1 = 0.0;
     ct._pad2 = 0.0;
-    gContacts[slot] = ct;
+    return ct;
+}
 
+void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
+{
     // Wake only a sleeping body hit by an awake neighbour (island wake). Never clear
     // SLEEPING on resting pairs — that used to re-awake stacks every NP and pump KE.
     bool awakeA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
@@ -585,15 +577,101 @@ void emitContact(
     }
 }
 
+// three-avbd Stage 8b: one manifold record + contiguous contact points.
+void emitContactManifold(
+    CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
+    float3 nrm, float margin, int count,
+    float3 pA0, float3 pB0, uint f0,
+    float3 pA1, float3 pB1, uint f1,
+    float3 pA2, float3 pB2, uint f2,
+    float3 pA3, float3 pB3, uint f3)
+{
+    if (count <= 0) return;
+    uint maxC = gScratchAtomics[3];
+    uint maxM = gScratchAtomics[10];
+    uint mslot;
+    InterlockedAdd(gCounters[0].manifoldCount, 1, mslot);
+    if (mslot >= maxM)
+    {
+        InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_MANIFOLDS);
+        return;
+    }
+    uint cStart;
+    InterlockedAdd(gCounters[0].contactCount, (uint)count, cStart);
+    if (cStart >= maxC || cStart + (uint)count > maxC)
+    {
+        InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
+        // Zero any slots this thread reserved so persist/CSR never see garbage.
+        for (uint k = 0u; k < (uint)count && cStart + k < maxC; k++)
+        {
+            Contact z;
+            z.colliderA = 0; z.colliderB = 0; z.featureId = 0; z.alive = 0;
+            z.normal = float3(0, 0, 0); z.penetration = 0.0;
+            z.anchorA = float3(0, 0, 0); z.c0N = 0.0;
+            z.anchorB = float3(0, 0, 0); z.friction = 0.0;
+            z.tangent1 = float3(0, 0, 0); z.lambdaN = 0.0;
+            z.tangent2 = float3(0, 0, 0); z.lambdaT1 = 0.0;
+            z.kN = 0.0; z.kT = 0.0; z.lambdaT2 = 0.0;
+            z.c0T1 = 0.0; z.c0T2 = 0.0; z._pad0 = 0.0; z._pad1 = 0.0; z._pad2 = 0.0;
+            gContacts[cStart + k] = z;
+        }
+        Manifold dead;
+        dead.colliderA = pair.colliderA;
+        dead.colliderB = pair.colliderB;
+        dead.contactStart = 0;
+        dead.contactCount = 0;
+        dead.normal = nrm;
+        dead.friction = 0.0;
+        gManifolds[mslot] = dead;
+        return;
+    }
+
+    Material ma = gMaterials[ca.material];
+    Material mb = gMaterials[cb.material];
+    float mu = sqrt(max(ma.friction, 0.0) * max(mb.friction, 0.0));
+
+    gContacts[cStart] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA0, pB0, f0, margin, mu);
+    if (count > 1)
+        gContacts[cStart + 1u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA1, pB1, f1, margin, mu);
+    if (count > 2)
+        gContacts[cStart + 2u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA2, pB2, f2, margin, mu);
+    if (count > 3)
+        gContacts[cStart + 3u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA3, pB3, f3, margin, mu);
+
+    Manifold mf;
+    mf.colliderA = pair.colliderA;
+    mf.colliderB = pair.colliderB;
+    mf.contactStart = cStart;
+    mf.contactCount = (uint)count;
+    mf.normal = nrm;
+    mf.friction = mu;
+    gManifolds[mslot] = mf;
+    wakeFromContact(ba, bb, ca, cb);
+}
+
 void emitManifold(CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb, BoxManifold mf, float margin)
 {
     if (mf.count <= 0) return;
-    // Feature IDs must be geometric only (three-avbd). Pair key is redundant for
-    // per-pair matching and must not be mixed in — keep IDs stable across frames.
-    for (int k = 0; k < mf.count; k++)
-    {
-        emitContact(pair, ba, bb, ca, cb, mf.normal, mf.pts[k].pA, mf.pts[k].pB, mf.pts[k].feature, margin);
-    }
+    // Feature IDs must be geometric only (three-avbd). Cap 4 — matches BOX_MAX_CONTACTS.
+    int n = mf.count > 4 ? 4 : mf.count;
+    emitContactManifold(
+        pair, ba, bb, ca, cb, mf.normal, margin, n,
+        mf.pts[0].pA, mf.pts[0].pB, mf.pts[0].feature,
+        mf.pts[1].pA, mf.pts[1].pB, mf.pts[1].feature,
+        mf.pts[2].pA, mf.pts[2].pB, mf.pts[2].feature,
+        mf.pts[3].pA, mf.pts[3].pB, mf.pts[3].feature);
+}
+
+void emitContact(
+    CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
+    float3 nrm, float3 pA, float3 pB, uint featureId, float margin)
+{
+    emitContactManifold(
+        pair, ba, bb, ca, cb, nrm, margin, 1,
+        pA, pB, featureId,
+        float3(0, 0, 0), float3(0, 0, 0), 0u,
+        float3(0, 0, 0), float3(0, 0, 0), 0u,
+        float3(0, 0, 0), float3(0, 0, 0), 0u);
 }
 
 [shader("compute")]
@@ -927,7 +1005,7 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
 }
 
 // --- CSR adjacency (three-avbd: degree → scan → scatter → sort) ----------------------------
-// Constraint id: [0, jointCount) = joints; jointCount + ci = contact ci.
+// Constraint id: [0, jointCount) = joints; jointCount + mi = manifold mi (Stage 8b).
 // gConstraintIndex[0..bodyCount]: degree then exclusive starts; [bodyCount] = total.
 // gBodyColor reused as fill cursors during scatter (init_colors overwrites afterward).
 // gConstraintIds holds the packed adjacency list (after broadphase hash is done).
@@ -937,8 +1015,8 @@ uint2 constraintEndpoints(uint id)
     uint nJ = gCounters[0].jointCount;
     if (id < nJ)
         return uint2(gJoints[id].bodyA, gJoints[id].bodyB);
-    Contact c = gContacts[id - nJ];
-    return uint2(gColliders[c.colliderA].body, gColliders[c.colliderB].body);
+    Manifold m = gManifolds[id - nJ];
+    return uint2(gColliders[m.colliderA].body, gColliders[m.colliderB].body);
 }
 
 void csrCountEndpoint(uint body)
@@ -960,11 +1038,12 @@ void csr_clear(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void csr_degree_contacts(uint3 tid : SV_DispatchThreadID)
 {
+    // Name kept for host pipeline map; degrees manifolds (one edge per pair).
     uint i = tid.x;
-    uint n = gCounters[0].contactCount;
+    uint n = gCounters[0].manifoldCount;
     if (i >= n) return;
-    Contact c = gContacts[i];
-    if (c.alive == 0) return;
+    Manifold m = gManifolds[i];
+    if (m.contactCount == 0u) return;
     uint2 e = constraintEndpoints(gCounters[0].jointCount + i);
     csrCountEndpoint(e.x);
     csrCountEndpoint(e.y);
@@ -1070,10 +1149,10 @@ void csrFillEndpoint(uint body, uint id)
 void csr_scatter_contacts(uint3 tid : SV_DispatchThreadID)
 {
     uint i = tid.x;
-    uint n = gCounters[0].contactCount;
+    uint n = gCounters[0].manifoldCount;
     if (i >= n) return;
-    Contact c = gContacts[i];
-    if (c.alive == 0) return;
+    Manifold m = gManifolds[i];
+    if (m.contactCount == 0u) return;
     uint id = gCounters[0].jointCount + i;
     uint2 e = constraintEndpoints(id);
     csrFillEndpoint(e.x, id);
@@ -1092,7 +1171,7 @@ void csr_scatter_joints(uint3 tid : SV_DispatchThreadID)
     csrFillEndpoint(e.y, i);
 }
 
-// Deterministic adjacency order (three-avbd sortAdjacency) — joints first by id, then contacts.
+// Deterministic adjacency order (three-avbd sortAdjacency) — joints first by id, then manifolds.
 // Indexed by awake list so sleeping fields with high body ids stay cheap.
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -1288,18 +1367,25 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
         uint id = gConstraintIds[e];
         if (id >= nJ)
         {
-            uint ci = id - nJ;
-            Contact c = gContacts[ci];
-            if (c.alive == 0) continue;
-            uint ba = gColliders[c.colliderA].body;
-            uint bb = gColliders[c.colliderB].body;
+            // Manifold edge: load both bodies once, fold every contact point (three-avbd).
+            Manifold mf = gManifolds[id - nJ];
+            if (mf.contactCount == 0u) continue;
+            uint ba = gColliders[mf.colliderA].body;
+            uint bb = gColliders[mf.colliderB].body;
             bool isA = ba == bodyIdx;
-            float3 wa = transformPoint(gBodies[ba].position, gBodies[ba].orientation, c.anchorA);
-            float3 wb = transformPoint(gBodies[bb].position, gBodies[bb].orientation, c.anchorB);
-            float3 d = wb - wa;
-            float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
-            c.penetration = C.x;
-            contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation, C, p.contactOffset);
+            BodyState bA = gBodies[ba];
+            BodyState bB = gBodies[bb];
+            for (uint ci = 0u; ci < mf.contactCount; ci++)
+            {
+                Contact c = gContacts[mf.contactStart + ci];
+                if (c.alive == 0) continue;
+                float3 wa = transformPoint(bA.position, bA.orientation, c.anchorA);
+                float3 wb = transformPoint(bB.position, bB.orientation, c.anchorB);
+                float3 d = wb - wa;
+                float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
+                c.penetration = C.x;
+                contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation, C, p.contactOffset);
+            }
         }
         else
         {
@@ -1461,6 +1547,7 @@ void solve_primal_one(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void solve_dual(uint3 tid : SV_DispatchThreadID)
 {
+    // Per-contact dual (Metal occupancy). CSR/primal still use manifolds (Stage 8b).
     uint i = tid.x;
     uint n = gCounters[0].contactCount;
     AvbdParams p = gParams[0];
@@ -1575,13 +1662,14 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
 {
+    // One thread per manifold (same connectivity as contacts, ~2–4× fewer).
     uint i = tid.x;
-    uint n = gCounters[0].contactCount;
+    uint n = gCounters[0].manifoldCount;
     if (i >= n) return;
-    Contact c = gContacts[i];
-    if (c.alive == 0) return;
-    uint ba = gColliders[c.colliderA].body;
-    uint bb = gColliders[c.colliderB].body;
+    Manifold m = gManifolds[i];
+    if (m.contactCount == 0u) return;
+    uint ba = gColliders[m.colliderA].body;
+    uint bb = gColliders[m.colliderB].body;
     BodyState a = gBodies[ba];
     BodyState b = gBodies[bb];
     bool dynA = bodyIsDynamic(a);

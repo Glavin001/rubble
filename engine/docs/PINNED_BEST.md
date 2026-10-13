@@ -23,7 +23,8 @@ Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8
 | JP smallest-free colour (not round id) | three-avbd | landed |
 | CSR prefix through 2^19 (scale bodies) | — | landed (was >65k bug) |
 | matchNearest contact warm-start | three-avbd | TODO |
-| Primal multi-lane | three-avbd 8g | TODO |
+| Primal multi-lane | three-avbd 8g | landed |
+| Contact manifold records (CSR/primal) | three-avbd 8b | landed (dual still per-contact) |
 | Island sleep + fully-asleep early-out | Jolt / three-avbd | landed (gate always; host skip) |
 | Face-axis broadphase reject | three-avbd 8h | landed (OBB face axes, 1 mm gap) |
 | Cap face manifolds at 4 pts | — | landed (Stack/columns green; Ring ~10.4 ms) |
@@ -35,8 +36,9 @@ Do **not** gate on published M4 Max FINDINGS. Local Chrome numbers: `LOCAL_three
 | Scene | our Metal p50 (local) | three-avbd wall (local) | gate |
 |-------|----------------------|-------------------------|------|
 | Interactive demos | see `scene_fps` | — | ≤ 8.33 ms |
-| Wall Smash 2k | ~5.0 ms | 2.86 ms | chase |
-| Brick Ring 28k smash | ~10.7 ms | (9k = 1.75 ms) | `stress` |
+| Wall Smash 2k | ~2.2 ms | 2.86 ms | **beat** |
+| Brick Ring 9k smash | (scene_fps) | 1.75 ms | chase |
+| Brick Ring 28k smash | ~9.2 ms | — | `stress` |
 | Box Columns 100k settled | ~0 ms asleep | 3.50 ms | PASS |
 
 `cargo run -p engine-scenes --release --bin scene_fps`
