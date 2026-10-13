@@ -26,18 +26,21 @@ fn main() {
         {
             continue;
         }
-        // Smash-peak / collapsing piles sit on/over the 8.33 ms line on M3.
-        // Box Columns settles like three-avbd (lead=120 → fully asleep early-out).
+        // Smash-peak rings sit on/over the 8.33 ms line on M3.
+        // Box Columns / settled pile use long lead like three-avbd (asleep early-out).
         let stress = matches!(
             scene.info.name,
-            "Brick Ring (28k)"
-                | "Brick Ring (110k)"
-                | "Box Pile (32k)"
+            "Brick Ring (28k)" | "Brick Ring (110k)" | "Box Pile (32k)"
         );
-        let settle = scene.info.name == "Box Columns (100k)";
+        let settle = matches!(
+            scene.info.name,
+            "Box Columns (100k)" | "Box Pile (32k)"
+        );
         // three-avbd brick-ring benches use lead=60 into the smash window.
         let ring = scene.info.name.starts_with("Brick Ring");
-        let lead = if settle {
+        let lead = if scene.info.name == "Box Pile (32k)" {
+            180 // three-avbd settled pile
+        } else if scene.info.name == "Box Columns (100k)" {
             120
         } else if ring {
             60
