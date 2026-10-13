@@ -261,7 +261,7 @@ impl WgpuSim {
         self.read_body(id).position[1]
     }
 
-    fn read_body(&self, id: u32) -> BodyState {
+    pub fn read_body(&self, id: u32) -> BodyState {
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("body-read"),
             size: std::mem::size_of::<BodyState>() as u64,
@@ -475,6 +475,11 @@ impl WgpuSim {
     fn disp_indirect<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, color: u32) {
         if let Ok(only) = std::env::var("WG_ONLY") {
             if !only.split(',').any(|n| n.trim() == "solve_primal_color") {
+                return;
+            }
+        }
+        if let Ok(skip) = std::env::var("WG_SKIP") {
+            if skip.split(',').any(|n| n.trim() == "solve_primal_color") {
                 return;
             }
         }
