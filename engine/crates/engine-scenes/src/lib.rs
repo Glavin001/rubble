@@ -46,6 +46,11 @@ fn add_sphere_vel(
     let id = b.add_sphere(pos, radius, mass);
     let mut body = b.world_mut().body(id);
     body.linear_vel = vel.to_array();
+    // three-avbd rollingBall: ω = (−v_z/r, 0, 0) for +Z travel (Y-up).
+    let speed = vel.z;
+    if radius > 1e-6 && speed.abs() > 1e-6 {
+        body.angular_vel = [-speed / radius, 0.0, 0.0];
+    }
     b.world_mut().set_body(id, body);
     id
 }
