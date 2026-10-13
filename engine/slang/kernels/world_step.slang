@@ -462,7 +462,7 @@ void emitContact(
     ct.lambdaT2 = 0.0;
     ct.c0T1 = C0t1;
     ct.c0T2 = C0t2;
-    ct._pad0 = 0.0;
+    ct._pad0 = 0.0; // stick flag (1 = static friction held)
     ct._pad1 = 0.0;
     gContacts[slot] = ct;
 
@@ -731,13 +731,9 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         if (prev.colliderA != c.colliderA || prev.colliderB != c.colliderB) continue;
         if (prev.featureId == c.featureId)
         {
-            c.lambdaN = prev.lambdaN;
-            c.lambdaT1 = prev.lambdaT1;
-            c.lambdaT2 = prev.lambdaT2;
-            c.kN = prev.kN;
-            c.kT = prev.kT;
+            bestJ = j;
+            bestDist = 0.0;
             matched = true;
-            bestJ = 0xFFFFFFFFu;
             break;
         }
         BodyState pba = gBodies[gColliders[prev.colliderA].body];
@@ -745,8 +741,8 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         float3 pmid = 0.5 * (
             transformPoint(pba.position, pba.orientation, prev.anchorA) +
             transformPoint(pbb.position, pbb.orientation, prev.anchorB));
-        float3 d = mid - pmid;
-        float dist = dot(d, d);
+        float3 dd = mid - pmid;
+        float dist = dot(dd, dd);
         if (dist < bestDist)
         {
             bestDist = dist;
@@ -754,6 +750,8 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         }
     }
     if (!matched && bestJ != 0xFFFFFFFFu && bestDist < 0.05 * 0.05)
+        matched = true;
+    if (matched && bestJ != 0xFFFFFFFFu)
     {
         Contact prev = gContacts[prevOff + bestJ];
         c.lambdaN = prev.lambdaN;
@@ -761,7 +759,20 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         c.lambdaT2 = prev.lambdaT2;
         c.kN = prev.kN;
         c.kT = prev.kT;
-        matched = true;
+        // three-avbd: keep old anchors while static friction held (stick).
+        if (prev._pad0 > 0.5)
+        {
+            c.anchorA = prev.anchorA;
+            c.anchorB = prev.anchorB;
+            float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
+            float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
+            float3 d = wb - wa;
+            c.c0N = dot(c.normal, d) + p.contactOffset;
+            c.c0T1 = dot(c.tangent1, d);
+            c.c0T2 = dot(c.tangent2, d);
+            c.penetration = c.c0N;
+            c._pad0 = 1.0;
+        }
     }
 
     float dt = max(p.dt, 1e-8);
@@ -1241,7 +1252,13 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             c.lambdaT2 = f.z;
             // Penalty ramp (three-avbd: ramp when force in bounds)
             if (f.x < 0.0) c.kN = min(c.kN + p.betaLin * abs(cReg.x), p.kMaxN);
-            c.kT = min(c.kT + p.betaLin * 0.1, p.kMaxT);
+            float ft = length(float2(f.y, f.z));
+            float bound = c.friction * (-f.x);
+            if (ft <= bound + 1e-8)
+                c.kT = min(c.kT + p.betaLin * 0.1, p.kMaxT);
+            // Stick when tangential slip is tiny (three-avbd STICK_THRESH).
+            float slip = length(float2(C.y, C.z));
+            c._pad0 = (slip < 1.0e-5 && f.x < 0.0) ? 1.0 : 0.0;
             gContacts[i] = c;
         }
     }
