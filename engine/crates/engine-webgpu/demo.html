@@ -475,6 +475,7 @@ struct VsOut {
       };
       disp(pass, 'build_aabbs', nCols);
       disp(pass, 'broadphase_clear', 131072);
+      nextPhase();
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
       nextPhase();
@@ -586,7 +587,7 @@ struct VsOut {
 
     async function profilePhases() {
       if (!wantTimestamps) return '';
-      const n = 3 + params.iterations * 2 + 1;
+      const n = 4 + params.iterations * 2 + 1;
       const querySet = device.createQuerySet({ type: 'timestamp', count: n * 2 });
       const resolve = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
       const read = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -608,13 +609,13 @@ struct VsOut {
       const stamps = new BigUint64Array(read.getMappedRange().slice(0));
       read.unmap();
       const ms = (a, b) => Number(stamps[b] - stamps[a]) / 1e6;
-      const parts = ['broadphase', 'narrowphase', 'graph'];
+      const parts = ['aabbs', 'grid', 'narrowphase', 'graph'];
       let primal = 0, dual = 0;
       for (let iter = 0; iter < params.iterations; iter++) {
-        primal += ms((3 + iter * 2) * 2, (3 + iter * 2) * 2 + 1);
-        dual += ms((4 + iter * 2) * 2, (4 + iter * 2) * 2 + 1);
+        primal += ms((4 + iter * 2) * 2, (4 + iter * 2) * 2 + 1);
+        dual += ms((5 + iter * 2) * 2, (5 + iter * 2) * 2 + 1);
       }
-      const sleep = ms((3 + params.iterations * 2) * 2, (3 + params.iterations * 2) * 2 + 1);
+      const sleep = ms((4 + params.iterations * 2) * 2, (4 + params.iterations * 2) * 2 + 1);
       return parts.map((name, k) => `${name} ${ms(k * 2, k * 2 + 1).toFixed(2)}`).join(' · ')
         + ` · primal ${primal.toFixed(2)} · dual ${dual.toFixed(2)} · sleep ${sleep.toFixed(2)}`;
     }
