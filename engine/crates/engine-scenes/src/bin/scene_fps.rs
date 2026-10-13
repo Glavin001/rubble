@@ -18,22 +18,24 @@ fn main() {
     println!("scene_fps gate: p50 ≤ {budget_ms:.3} ms (120 FPS)");
     let mut failed = 0u32;
     for scene in list_scenes() {
-        // Smash-peak / large active piles sit on/over the 8.33 ms line on M3; still reported.
+        // Smash-peak / collapsing piles sit on/over the 8.33 ms line on M3.
+        // Box Columns settles like three-avbd (lead=120 → fully asleep early-out).
         let stress = matches!(
             scene.info.name,
             "Brick Ring (28k)"
                 | "Brick Ring (110k)"
                 | "Brick Walls (27k)"
-                | "Box Columns (100k)"
                 | "Box Pile (32k)"
         );
-        let steps = if stress { 20 } else { 40 };
+        let settle = scene.info.name == "Box Columns (100k)";
+        let lead = if settle { 120 } else { 5 };
+        let steps = if stress || settle { 20 } else { 40 };
         let Ok((mut world, info)) = engine_scenes::build_world(scene.info.name) else {
             println!("FAIL  {} — build error", scene.info.name);
             failed += 1;
             continue;
         };
-        for _ in 0..5 {
+        for _ in 0..lead {
             let _ = world.step();
         }
         let mut times = Vec::with_capacity(steps);

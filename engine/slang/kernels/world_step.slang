@@ -1124,45 +1124,69 @@ void csr_sort(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+uint jpPriority(uint body, uint round, bool heightBias)
+{
+    uint prio = heightBias
+        ? ((~asuint(gBodies[body].position.y)) + round * 0x85ebca6bu + body * 0x9e3779b9u)
+        : (body * 0x9e3779b9u ^ round * 0x85ebca6bu);
+    return prio ^ (prio >> 16);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void color_bodies(uint3 tid : SV_DispatchThreadID)
 {
-    // Jones-Plassmann on awake bodies; neighbours from CSR (not O(contacts)).
-    // Round index comes from gPassUniform[0] (host binds unique offset per dispatch).
+    // Jones-Plassmann: winners take the *smallest free* colour (three-avbd), not the
+    // round index — assigning round forced O(rounds) colours and killed parallelism.
     uint li = tid.x;
     uint awakeN = gCounters[0].awakeCount;
     if (li >= awakeN) return;
     uint body = gAwakeList[li];
     uint round = gPassUniform[0];
-    // Height-biased JP: lower bodies win early rounds so bottom-up color order
-    // (0…n) propagates support like three-avbd GS on stacks.
-    uint yBits = asuint(gBodies[body].position.y);
-    uint prio = (~yBits) + round * 0x85ebca6bu + body * 0x9e3779b9u;
-    prio ^= prio >> 16;
+    // Height-biased JP priority: lower bodies win early rounds (bottom-up support).
+    // Still assign smallest-free colours (not the round id) so the palette stays tight.
+    bool heightBias = true;
+    uint prio = jpPriority(body, round, heightBias);
 
     if (gBodyColor[body] != 0xFFFFFFFFu) return;
 
     bool blocked = false;
+    uint usedLo = 0u;
+    uint usedHi = 0u;
     uint lo = gConstraintIndex[body];
     uint hi = gConstraintIndex[body + 1u];
-    for (uint e = lo; e < hi && !blocked; e++)
+    for (uint e = lo; e < hi; e++)
     {
         uint2 ends = constraintEndpoints(gConstraintIds[e]);
         uint other = ends.x == body ? ends.y : ends.x;
         if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
-        if (gBodyColor[other] != 0xFFFFFFFFu) continue;
-        uint oyBits = asuint(gBodies[other].position.y);
-        uint op = (~oyBits) + round * 0x85ebca6bu + other * 0x9e3779b9u;
-        op ^= op >> 16;
-        if (op > prio || (op == prio && other > body)) blocked = true;
+        uint oc = gBodyColor[other];
+        if (oc == 0xFFFFFFFFu)
+        {
+            uint op = jpPriority(other, round, heightBias);
+            if (op > prio || (op == prio && other > body)) blocked = true;
+        }
+        else if (oc < 32u) usedLo |= 1u << oc;
+        else if (oc < 64u) usedHi |= 1u << (oc - 32u);
     }
+    if (blocked) return;
 
-    if (!blocked)
+    // Smallest colour not used by already-coloured neighbours (three-avbd smallestFree).
+    uint free = 63u;
+    if (~usedLo != 0u)
     {
-        gBodyColor[body] = round;
-        InterlockedMax(gCounters[0].colorCount, round + 1);
+        free = 0u;
+        uint bit = ~usedLo;
+        while ((bit & 1u) == 0u) { bit >>= 1u; free++; }
     }
+    else if (~usedHi != 0u)
+    {
+        free = 32u;
+        uint bit = ~usedHi;
+        while ((bit & 1u) == 0u) { bit >>= 1u; free++; }
+    }
+    gBodyColor[body] = free;
+    InterlockedMax(gCounters[0].colorCount, free + 1);
 }
 
 // Write Metal indirect threadgroup counts for each colour (0 groups ⇒ skipped).

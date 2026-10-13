@@ -49,6 +49,7 @@ pub struct MetalWorld {
 
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
+    steps_done: u32,
     pub chip: String,
 }
 
@@ -90,14 +91,15 @@ impl MetalWorld {
         // WorldObbGpu = 5 × float4
         let world_obbs = alloc::<[f32; 20]>(d, capacity.max_colliders);
         let scratch = alloc_u32(d, 64);
-        let pass_table = alloc_u32(d, 64);
+        // 96 slots: 0..47 identity (colour rounds / misc), 48..67 = 2^0..2^19 for CSR scan
+        // (must cover max_bodies=524288; the old 16-slot table broke adjacency above 65k).
+        let pass_table = alloc_u32(d, 96);
         {
-            let t = unsafe { std::slice::from_raw_parts_mut(pass_table.contents() as *mut u32, 64) };
+            let t = unsafe { std::slice::from_raw_parts_mut(pass_table.contents() as *mut u32, 96) };
             for (i, v) in t.iter_mut().enumerate() {
                 *v = i as u32;
             }
-            // Slots 48..63 = 2^(i-48) for CSR Hillis–Steele scan offsets.
-            for k in 0..16u32 {
+            for k in 0..20u32 {
                 t[48 + k as usize] = 1u32 << k;
             }
         }
@@ -156,6 +158,7 @@ impl MetalWorld {
             command_count: 0,
             last_counters: StepCounters::default(),
             last_timings: PhaseTimingsMs::default(),
+            steps_done: 0,
             chip,
         })
     }
@@ -401,6 +404,22 @@ impl MetalWorld {
     pub fn step_gpu(&mut self) -> Result<StepCounters, ExecError> {
         let wall_t0 = std::time::Instant::now();
         let cpu_t0 = std::time::Instant::now();
+        // Fully asleep world: skip the GPU step (sleeper BP was ~180 ms on 100k columns).
+        // Require a prior step so the initial awake_count==0 default does not no-op frame 0.
+        if self.steps_done > 0
+            && self.last_counters.awake_count == 0
+            && self.command_count == 0
+            && self.body_count > 0
+        {
+            let gpu_ms = wall_t0.elapsed().as_secs_f64() * 1000.0;
+            self.last_timings = PhaseTimingsMs {
+                total_gpu: gpu_ms,
+                cpu_submit: 0.0,
+                ..Default::default()
+            };
+            self.steps_done = self.steps_done.saturating_add(1);
+            return Ok(self.last_counters);
+        }
         self.sync_counters_host_to_gpu(true);
         self.write_scratch();
         // Avoid O(max_colors) host clears on huge capacities — only touch used slots.
@@ -498,7 +517,8 @@ impl MetalWorld {
             // Parallel Hillis–Steele exclusive scan (single-thread prefix is O(n) on GPU).
             self.dispatch(&encoder, "csr_prefix_init", n_bodies);
             let mut log = 0u32;
-            while (1u32 << log) < self.body_count && log < 16 {
+            // Offsets 2^0 .. 2^19 cover WorldCapacity::scale max_bodies (524288).
+            while (1u32 << log) < self.body_count && log < 20 {
                 self.dispatch_pass(&encoder, "csr_prefix_scan", n_bodies, 48 + log);
                 self.dispatch(&encoder, "csr_prefix_swap", n_bodies);
                 log += 1;
@@ -547,13 +567,12 @@ impl MetalWorld {
         }
 
         self.dispatch(&encoder, "extract_velocity_sleep", n_bodies);
-        // Island sleep only on small contact graphs (stacks). Large piles use per-body
-        // sleep — 32× contact passes would dominate Brick Ring / Wall Smash.
-        let small_island = self.body_count <= 256
-            && self.last_counters.contact_count <= 4096;
-        if small_island {
-            let gate_rounds = (self.body_count as u32).min(32).max(1);
-            for _ in 0..gate_rounds {
+        // Island sleep gate: a body may sleep only if every dynamic contact neighbour is
+        // also a candidate (or already asleep). Skipping this lets upper boxes freeze while
+        // the stack below settles — columns tore apart and injected energy. Always run a
+        // fixed handful of rounds (accuracy); 8×contacts stays cheap vs the NP/solve base.
+        if self.last_counters.contact_count > 0 {
+            for _ in 0..8u32 {
                 self.dispatch(&encoder, "sleep_island_gate", contact_dispatch);
             }
         }
@@ -572,6 +591,7 @@ impl MetalWorld {
 
         let counters = unsafe { *(self.counters.contents() as *const StepCounters) };
         self.last_counters = counters;
+        self.steps_done = self.steps_done.saturating_add(1);
         self.last_timings = PhaseTimingsMs {
             total_gpu: gpu_ms,
             cpu_submit,
