@@ -51,6 +51,8 @@ pub struct MetalWorld {
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
     steps_done: u32,
+    /// 0 → current contacts in [0, max); 1 → current in [max, 2max). Prev is the other half.
+    contacts_parity: u32,
     pub chip: String,
 }
 
@@ -163,6 +165,7 @@ impl MetalWorld {
             last_counters: StepCounters::default(),
             last_timings: PhaseTimingsMs::default(),
             steps_done: 0,
+            contacts_parity: 0,
             chip,
         })
     }
@@ -366,9 +369,13 @@ impl MetalWorld {
         if s[6] != 1 {
             s[6] = 0;
         }
-        // s[7] = previous contact count; s[8] = offset to prev contacts in gContacts
-        s[7] = self.last_counters.contact_count.min(self.capacity.max_contacts);
-        s[8] = self.capacity.max_contacts;
+        // s[7] = previous contact count; s[8] = offset to prev half; s[11] = current half.
+        let max_c = self.capacity.max_contacts;
+        s[7] = self.last_counters.contact_count.min(max_c);
+        let cur = if self.contacts_parity == 0 { 0 } else { max_c };
+        let prev = if self.contacts_parity == 0 { max_c } else { 0 };
+        s[8] = prev;
+        s[11] = cur;
         // s[9] = contact warm-start hash table size (power of two ≤ constraint_ids).
         let ids_len = (2 * (self.capacity.max_contacts + self.capacity.max_joints))
             .max(32768)
@@ -445,16 +452,7 @@ impl MetalWorld {
         }
 
         let cb = self.device.queue.new_command_buffer();
-        // Stash last frame's contacts for warm-start (GPU blit — was CPU memcpy of up to ~35MB).
-        let prev_n = self.last_counters.contact_count.min(self.capacity.max_contacts) as u64;
-        if prev_n > 0 {
-            let max_c = self.capacity.max_contacts as u64;
-            let bytes = prev_n * std::mem::size_of::<Contact>() as u64;
-            let blit = cb.new_blit_command_encoder();
-            blit.copy_from_buffer(&self.contacts, 0, &self.contacts, max_c * std::mem::size_of::<Contact>() as u64, bytes);
-            blit.end_encoding();
-        }
-
+        // Contact warm-start: ping-pong halves of gContacts (see contacts_parity). No blit.
         let encoder = cb.new_compute_command_encoder();
         // Bind once per encoder — rebinding 24 buffers every dispatch dominated large scenes.
         self.bind_all(&encoder);
@@ -620,6 +618,7 @@ impl MetalWorld {
 
         let counters = unsafe { *(self.counters.contents() as *const StepCounters) };
         self.last_counters = counters;
+        self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         self.last_timings = PhaseTimingsMs {
             total_gpu: gpu_ms,
@@ -647,8 +646,14 @@ impl MetalWorld {
         if n == 0 {
             return Vec::new();
         }
+        // After step, parity has flipped — last frame's current is now the prev half.
+        let base = if self.contacts_parity == 0 {
+            self.capacity.max_contacts as usize
+        } else {
+            0
+        };
         unsafe {
-            let ptr = self.contacts.contents() as *const Contact;
+            let ptr = (self.contacts.contents() as *const Contact).add(base);
             std::slice::from_raw_parts(ptr, n).to_vec()
         }
     }
