@@ -1212,6 +1212,9 @@ void csr_prefix_init(uint3 tid : SV_DispatchThreadID)
     gBodyColor[i] = gConstraintIndex[i]; // degree
 }
 
+// Ping-pong Hillis–Steele step. Host packs pass_table[48+log] = offset | (ping<<31)
+// (0⇒read bodyColor/write constraintIndex, 1⇒opposite). Fuses old scan+swap
+// (~14 fewer launches on Ring 9k).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void csr_prefix_scan(uint3 tid : SV_DispatchThreadID)
@@ -1219,16 +1222,29 @@ void csr_prefix_scan(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     uint n = gCounters[0].bodyCount;
     if (i >= n) return;
-    uint offset = gPassUniform[0];
-    uint v = gBodyColor[i];
-    if (i >= offset) v += gBodyColor[i - offset];
-    gConstraintIndex[i] = v;
+    uint packed = gPassUniform[0];
+    uint offset = packed & 0x7fffffffu;
+    uint ping = packed >> 31;
+    uint v;
+    if (ping == 0u)
+    {
+        v = gBodyColor[i];
+        if (i >= offset) v += gBodyColor[i - offset];
+        gConstraintIndex[i] = v;
+    }
+    else
+    {
+        v = gConstraintIndex[i];
+        if (i >= offset) v += gConstraintIndex[i - offset];
+        gBodyColor[i] = v;
+    }
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void csr_prefix_swap(uint3 tid : SV_DispatchThreadID)
 {
+    // Kept for pipeline map; ping-pong scan no longer needs it.
     uint i = tid.x;
     uint n = gCounters[0].bodyCount;
     if (i >= n) return;
@@ -1239,22 +1255,25 @@ void csr_prefix_swap(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void csr_prefix_finalize(uint3 tid : SV_DispatchThreadID)
 {
-    // Inclusive scan is in gBodyColor; convert to exclusive starts in constraint_index
-    // and leave fill cursors in gBodyColor (= exclusive start).
+    // Inclusive scan in constraintIndex if last ping was 0, else bodyColor.
+    // Host sets gScratchAtomics[12] = last ping (write_scratch).
     uint i = tid.x;
     uint n = gCounters[0].bodyCount;
     if (i > n) return;
+    uint ping = gScratchAtomics[12];
     if (i == n)
     {
-        gConstraintIndex[n] = (n == 0u) ? 0u : gBodyColor[n - 1u];
+        uint last = 0u;
+        if (n > 0u)
+            last = (ping == 0u) ? gConstraintIndex[n - 1u] : gBodyColor[n - 1u];
+        gConstraintIndex[n] = last;
         return;
     }
-    uint incl = gBodyColor[i];
-    uint excl = (i == 0u) ? 0u : gBodyColor[i - 1u];
+    uint incl_i = (ping == 0u) ? gConstraintIndex[i] : gBodyColor[i];
+    uint excl = (i == 0u) ? 0u : ((ping == 0u) ? gConstraintIndex[i - 1u] : gBodyColor[i - 1u]);
     gConstraintIndex[i] = excl;
     gBodyColor[i] = excl; // fill cursor
-    // Keep inclusive total on last element available via constraint_index[n] above.
-    incl = incl; // silence
+    incl_i = incl_i;
 }
 
 // Back-compat single-thread path for tiny worlds (tests).

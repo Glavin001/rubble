@@ -112,7 +112,8 @@ impl MetalWorld {
                 *v = i as u32;
             }
             for k in 0..20u32 {
-                t[48 + k as usize] = 1u32 << k;
+                // CSR ping-pong scan: offset in low bits, ping=(k%2) in bit 31.
+                t[48 + k as usize] = (1u32 << k) | ((k & 1) << 31);
             }
         }
         let indirect_args = alloc_u32(d, capacity.max_colors.max(64) * 3);
@@ -402,6 +403,12 @@ impl MetalWorld {
             .min(ids_len);
         // s[10] = max manifolds (== max_candidates; one manifold per BP pair).
         s[10] = self.capacity.max_candidates;
+        // s[12] = last CSR ping (ceil(log2(n))-1) & 1 for csr_prefix_finalize.
+        let mut log = 0u32;
+        while (1u32 << log) < self.body_count.max(1) && log < 20 {
+            log += 1;
+        }
+        s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
@@ -575,13 +582,12 @@ impl MetalWorld {
         if self.body_count <= 512 {
             self.dispatch(&encoder, "csr_prefix", 1);
         } else {
-            // Parallel Hillis–Steele exclusive scan (single-thread prefix is O(n) on GPU).
+            // Parallel Hillis–Steele exclusive scan (ping-pong; no swap dispatch).
             self.dispatch(&encoder, "csr_prefix_init", n_bodies);
             let mut log = 0u32;
             // Offsets 2^0 .. 2^19 cover WorldCapacity::scale max_bodies (524288).
             while (1u32 << log) < self.body_count && log < 20 {
                 self.dispatch_pass(&encoder, "csr_prefix_scan", n_bodies, 48 + log);
-                self.dispatch(&encoder, "csr_prefix_swap", n_bodies);
                 log += 1;
             }
             self.dispatch(&encoder, "csr_prefix_finalize", n_bodies + 1);
