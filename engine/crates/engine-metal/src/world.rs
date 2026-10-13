@@ -434,7 +434,9 @@ impl MetalWorld {
         if dirty != 0 || self.command_count > 0 {
             self.dispatch(&encoder, "recompute_inertia", n_bodies);
         }
-        self.dispatch(&encoder, "predict_bodies", n_bodies);
+        // three-avbd order: collide at x⁻ → topology → warm-start bodies → solve.
+        // C0 must be sampled before predict; NP-after-predict made impact C0 huge
+        // negative and blew spaced Stack.
         self.dispatch(&encoder, "build_aabbs", n_cols);
         // O(1) joint-pair filter for broadphase (was O(joints) per candidate).
         self.dispatch(&encoder, "joint_hash_clear", 65536);
@@ -471,18 +473,37 @@ impl MetalWorld {
         self.dispatch(&encoder, "pack_color_lists", awake_dispatch);
         self.dispatch(&encoder, "write_color_args", 64);
 
+        // Body warm-start AFTER NP (three-avbd warmStartBodies): stash inertial, advance pose.
+        self.dispatch(&encoder, "predict_bodies", n_bodies);
+
         // three-avbd argsColors: indirect per colour (0 threadgroups ⇒ free). Same encoder so
         // Metal tracks the write→dispatch dependency without a CPU mid-step sync.
+        // Small scenes: sequential GS (one body/dispatch, high→low) for stack impacts.
         let dual_n = contact_dispatch.max(n_joints);
         let max_c = self.capacity.max_colors.min(32);
+        let use_gs = self.body_count <= 64;
         for _iter in 0..self.params.iterations {
-            for color in 0..max_c {
-                self.dispatch_color_indirect(&encoder, color);
+            if use_gs {
+                // three-avbd CPU: for (b = n-1; b >= 0; b--) — top of add-order first.
+                for body in (0..self.body_count).rev() {
+                    self.dispatch_pass(&encoder, "solve_primal_one", 1, body);
+                }
+            } else {
+                for color in 0..max_c {
+                    self.dispatch_color_indirect(&encoder, color);
+                }
             }
             self.dispatch(&encoder, "solve_dual", dual_n);
         }
 
         self.dispatch(&encoder, "extract_velocity_sleep", n_bodies);
+        // Island sleep: revoke candidates that touch an awake non-candidate so a
+        // stack cannot put the bottom box to sleep while the top is still settling.
+        let gate_rounds = (self.body_count as u32).min(32).max(1);
+        for _ in 0..gate_rounds {
+            self.dispatch(&encoder, "sleep_island_gate", contact_dispatch);
+        }
+        self.dispatch(&encoder, "sleep_island_commit", n_bodies);
 
         if self.enable_ccd {
             self.dispatch(&encoder, "ccd_classify", n_bodies);

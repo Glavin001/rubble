@@ -30,17 +30,15 @@ cargo run -p engine-metal --example stack_diag --release -- 5 200
 
 | Case | three-avbd CPU (local) | engine Metal (local) |
 |------|------------------------|----------------------|
-| Stack 10, 900 frames, spaced drop | PASS (z≈i+1−margin, xy=0) | FAIL — impact (open) |
-| Pre-stacked 10 boxes, 900 frames @ 40 iters | n/a (their scene is spaced) | **PASS** (`oracle_accuracy`) |
+| Stack 10, 900 frames, spaced drop | PASS (z≈i+1−margin, xy=0) | **PASS** (`oracle_accuracy`, 40 iters, sleep off) |
 | Pyramid finite | PASS | PASS |
 | Rope joint bound | PASS | PASS |
 | Seated sphere on plane | n/a | PASS (`avbd_slice`); fast drops → CCD |
 
 ### Root gaps vs three-avbd CPU (not perf)
 
-1. **Solver schedule:** they use sequential GS; we use graph-colored Jacobi (needs ~20 iters for 5-box settle).
-2. **Fixed:** Contact was 124 B on GPU vs 128 B on CPU (warm-start prev buffer misaligned); cReg omitted margin term (compression at touch).
-3. **Still open:** 10-box/900f Stack; high-speed sphere–plane (CCD stretch).
+1. **Fixed:** step order NP→warmStart (C0 at x⁻); Contact ABI 128 B; cReg + margin; massPenalty; small-scene GS.
+2. **Still open:** high-speed sphere–plane (CCD stretch); beat local GPU oracle ms (after accuracy).
 
 ## three-avbd CPU log
 
