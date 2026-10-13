@@ -46,13 +46,15 @@ cargo run -p engine-scenes --release --bin scene_fps
 
 Adapter: `apple · metal-3`. Source: `LOCAL_three_avbd_gpu_bench.json`.
 
-| Scene | wall ms/step | contacts | colours |
-|-------|-------------|----------|---------|
-| Wall smash 2k @ 10 it | 2.86 | 19 675 | 17 |
-| Chain mail 1.6k @ 10 it | 1.13 | 9 | 5 |
-| Brick ring 9k @ 4 it | 1.75 | 45 554 | 10 |
-| Settled pile 32k @ 4 it | 3.14 | 120 445 | 11 |
-| Box columns 100k @ 4 it | 3.50 | 400 000 | 3 |
+**Measurement note:** three-avbd reports two numbers. `wallMs` pipelines a batch of steps then one queue drain (CPU encode overlaps GPU). `gpuTotal` is isolated per-step GPU timestamp time. Our `scene_fps` p50 is `commit`+`wait_until_completed` per step — comparable to **gpuTotal**, not wallMs. Pipelining on Metal needs double-buffered host counter/scratch writes (deferred).
+
+| Scene | wallMs | gpuTotal | contacts | colours |
+|-------|--------|----------|----------|---------|
+| Wall smash 2k @ 10 it | 2.86 | 10.81 | 19 675 | 17 |
+| Chain mail 1.6k @ 10 it | 1.13 | 3.15 | 9 | 5 |
+| Brick ring 9k @ 4 it | 1.75 | **5.51** | 45 554 | 10 |
+| Settled pile 32k @ 4 it | 3.14 | 11.8 | 120 445 | 11 |
+| Box columns 100k @ 4 it | 3.50 | 9.57 | 400 000 | 3 |
 
 ## Speed — our Metal `scene_fps` (local M3 Max)
 
@@ -60,8 +62,8 @@ Interactive gate: p50 ≤ 8.33 ms. Ring smash uses lead=60 (three-avbd). Settled
 
 | Scene | p50 ms | note |
 |-------|--------|------|
-| Wall Smash (2k) @ 8 it | ~1.6–2.1 | **beats** local oracle 2.86 @ 10 it |
-| Brick Ring (9k) @ 4 it | ~3.35 isolated | PASS 120 FPS; contacts ~45–52k (was ~75k; flat-brick vertical dyn-dyn diagonals); chase oracle 1.75 ms |
+| Wall Smash (2k) @ 8 it | ~1.6–2.1 | **beats** oracle wallMs 2.86 and gpuTotal 10.81 |
+| Brick Ring (9k) @ 4 it | ~3.3 | **beats** oracle gpuTotal 5.51; contacts ~45–52k; wallMs 1.75 needs pipelined encode |
 | Brick Walls (27k) | ~7.2 | PASS |
 | Chain Mail (1.6k) | ~1.2 | PASS |
 | Box Columns (100k) settled | ~0 (asleep early-out) | PASS (plane@0.5, centres at 1+layer) |
