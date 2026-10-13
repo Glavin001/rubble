@@ -66,7 +66,8 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 8n. **Ring contact gap:** ~97k contacts / ~30k pairs vs local oracle 45k (Wall Smash already matches). At lead=60 the ring is still mostly standing (only ~900/9k bricks below 1 m) — pair count is structural, not just points/manifold. Shallow-edge overrides reach ~45k but break Stack/Columns. Next: harder smash parity or stack-safe pair cull.
 9. **Unsupported three-avbd features** (cloth, soft, plastic, wind) stay out of rigid-body pass/fail gates.
 10. **Y-up vs Z-up:** keep engine Y-up; oracle fixtures convert `(x,y,z)→(x,z,y)`.
-8bf. **Structured `addConstraintRow` (same 6×6 outer product, no `Vec6`):** Chrome ring **2.35 ms**, primal **1.05** vs 2.26 / 0.85 with `mat6AddOuter`. Reverted. The primal gap is not the shape of that update.
+8bg. **Unrolled manifold points (at most 4) in the primal:** Chrome ring **2.40 ms**, primal still **0.85**. Reverted. The contact loop is not the primal gap.
+8bf. **Structured `addConstraintRow`** (same 6×6 outer product, no `Vec6`):** Chrome ring **2.35 ms**, primal **1.05** vs 2.26 / 0.85 with `mat6AddOuter`. Reverted. The primal gap is not the shape of that update.
 8be. **4 lanes above 512 bodies on WebGPU:** ring wall **2.44 ms** vs 2.26 ms at 8 lanes (primal still 0.85). Reverted. Chrome keeps the same 8/4/2/1 thresholds as Metal.
 8bd. **Ring contact reuse on Chrome:** flags bit0 plus `update_refs` before the narrowphase moved the ring from 2.26 ms to **2.46 ms** (narrowphase 0.39→0.46, primal 0.85→0.98, contacts ~43k). Same conclusion as Metal (8j). Left off.
 8bc. **Unrolled `solve6x6`** (same LDLT, no loops):** Chrome ring wall **2.63 → 2.26 ms**, primal **1.11 → 0.85**, dual 0.07, contacts ~38k, overflow 0. Oracle stack/slice still green. Still short of their 1.69 (solve 0.72). The primal is closer but not there.
