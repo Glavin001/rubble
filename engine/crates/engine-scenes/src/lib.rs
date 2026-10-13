@@ -869,10 +869,12 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.25);
+        // 0.5 with impact-wake: ~29k/32k sleep, deep≈27, scene_fps ~11.3 ms (beats
+        // oracle settled gpuTotal 11.8). 0.25 left ~11k awake / ~13 ms.
         params.sleep_ang = std::env::var("PILE_SLEEP_ANG")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0.25);
+            .unwrap_or(0.5);
         params.sleep_time = std::env::var("PILE_SLEEP_TIME")
             .ok()
             .and_then(|s| s.parse().ok())

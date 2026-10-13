@@ -476,17 +476,16 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     mn = max(mn, mx - int3(1, 1, 1));
     mx = min(mx, mn + int3(1, 1, 1));
 
+    // Sleepers emit nothing: frozen pose needs no ground manifold, and 32k sleeper–
+    // plane candidates dominated settled-pile ms. Awake neighbours still insert into
+    // the grid and wake sleepers on impact; a woken body re-acquires the plane next step.
+    if (sleeper)
+        return;
     for (uint p = 0; p < c.colliderCount; p++)
     {
         if (gColliders[p].shape != SHAPE_PLANE) continue;
         emitCandidate(i, p);
     }
-    // Sleepers: planes above keep ground contacts. Do NOT O(n) scan static boxes —
-    // with ~20k sleepers that was ~20k×32k and blew 32k pile past 45 ms. Thick-box
-    // ground (if any) is still found via the O(1) isLarge probe at the end; awake
-    // neighbours wake sleepers on impact (wakeFromContact).
-    if (sleeper)
-        return;
     for (int z = mn.z - 1; z <= mx.z + 1; z++)
     for (int y = mn.y - 1; y <= mx.y + 1; y++)
     for (int x = mn.x - 1; x <= mx.x + 1; x++)
