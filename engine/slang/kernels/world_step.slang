@@ -725,11 +725,53 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     gJoints[i] = j;
 }
 
+// Prev-contact warm-start hash in gConstraintIds (open address). Built after NP,
+// consumed by persist, then overwritten by CSR. Replaces O(n²) linear scan.
+static const uint CONTACT_HASH_EMPTY = 0xFFFFFFFFu;
+
+uint contactWarmKey(uint colA, uint colB, uint feature)
+{
+    uint h = colA * 73856093u ^ colB * 19349663u ^ feature * 83492791u;
+    return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ feature ^ 0xA5A5A5A5u) : h;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void contact_hash_clear(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gScratchAtomics[9]; // hash table word count
+    if (i >= n) return;
+    gConstraintIds[i] = CONTACT_HASH_EMPTY;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
+{
+    uint j = tid.x;
+    uint prevN = gScratchAtomics[7];
+    if (j >= prevN) return;
+    uint prevOff = gScratchAtomics[8];
+    Contact prev = gContacts[prevOff + j];
+    if (prev.alive == 0) return;
+    uint key = contactWarmKey(prev.colliderA, prev.colliderB, prev.featureId);
+    uint n = gScratchAtomics[9];
+    uint h = key & (n - 1u); // n is power of two
+    for (uint probe = 0; probe < 64u; probe++)
+    {
+        uint slot = (h + probe) & (n - 1u);
+        uint was;
+        InterlockedCompareExchange(gConstraintIds[slot], CONTACT_HASH_EMPTY, j, was);
+        if (was == CONTACT_HASH_EMPTY) return;
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void persist_contacts(uint3 tid : SV_DispatchThreadID)
 {
-    // Match featureId against previous-frame contacts (gContacts[offset..]), then Eq. 19 decay.
+    // Exact featureId warm-start via contact hash (three-avbd hashInsert), then Eq. 19.
     uint i = tid.x;
     uint n = gCounters[0].contactCount;
     if (i >= n) return;
@@ -743,24 +785,27 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
     if (bothSleep) return;
 
-    uint prevN = gScratchAtomics[7];
     uint prevOff = gScratchAtomics[8];
-    bool matched = false;
-    // three-avbd CPU: exact featureId only (matchNearest is a GPU opt, off for accuracy).
-    uint bestJ = 0xFFFFFFFFu;
-    for (uint j = 0; j < prevN; j++)
+    uint hashN = gScratchAtomics[9];
+    uint key = contactWarmKey(c.colliderA, c.colliderB, c.featureId);
+    uint h = key & (hashN - 1u);
+    uint bestJ = CONTACT_HASH_EMPTY;
+    for (uint probe = 0; probe < 64u; probe++)
     {
+        uint slot = (h + probe) & (hashN - 1u);
+        uint j = gConstraintIds[slot];
+        if (j == CONTACT_HASH_EMPTY) break;
         Contact prev = gContacts[prevOff + j];
-        if (prev.alive == 0) continue;
-        if (prev.colliderA != c.colliderA || prev.colliderB != c.colliderB) continue;
-        if (prev.featureId == c.featureId)
+        if (prev.alive != 0 &&
+            prev.colliderA == c.colliderA &&
+            prev.colliderB == c.colliderB &&
+            prev.featureId == c.featureId)
         {
             bestJ = j;
-            matched = true;
             break;
         }
     }
-    if (matched && bestJ != 0xFFFFFFFFu)
+    if (bestJ != CONTACT_HASH_EMPTY)
     {
         Contact prev = gContacts[prevOff + bestJ];
         c.lambdaN = prev.lambdaN;

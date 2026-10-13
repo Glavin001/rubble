@@ -73,10 +73,12 @@ impl MetalWorld {
         let awake_list = alloc_u32(d, capacity.max_bodies);
         let body_color = alloc_u32(d, capacity.max_bodies);
         let constraint_index = alloc_u32(d, capacity.max_bodies + 1);
-        // Grid hash heads reuse [0..32768); CSR adjacency needs 2×(contacts+joints) after.
+        // Grid hash heads reuse [0..32768); also contact warm-start hash (pow2), then CSR.
         let constraint_ids = alloc_u32(
             d,
-            (2 * (capacity.max_contacts + capacity.max_joints)).max(32768),
+            (2 * (capacity.max_contacts + capacity.max_joints))
+                .max(32768)
+                .next_power_of_two(),
         );
         let color_lists = alloc_u32(d, capacity.max_bodies * capacity.max_colors);
         let color_offsets = alloc_u32(d, capacity.max_colors);
@@ -296,7 +298,7 @@ impl MetalWorld {
     fn dispatch(&self, encoder: &ComputeCommandEncoderRef, name: &str, threads: u64) {
         let pso = self.pipelines.get(name).expect("pipeline");
         encoder.set_compute_pipeline_state(pso);
-        self.bind_all(encoder);
+        // Buffers stay bound for the encoder; only swap pipeline + thread counts.
         let w = pso.thread_execution_width();
         let tg = MTLSize::new(w, 1, 1);
         let grid = MTLSize::new(threads.max(1), 1, 1);
@@ -313,7 +315,6 @@ impl MetalWorld {
     ) {
         let pso = self.pipelines.get(name).expect("pipeline");
         encoder.set_compute_pipeline_state(pso);
-        self.bind_all(encoder);
         encoder.set_buffer(22, Some(&self.pass_table), (pass_idx as u64) * 4);
         let w = pso.thread_execution_width();
         let tg = MTLSize::new(w, 1, 1);
@@ -324,7 +325,6 @@ impl MetalWorld {
     fn dispatch_color_indirect(&self, encoder: &ComputeCommandEncoderRef, color: u32) {
         let pso = self.pipelines.get("solve_primal_color").expect("pipeline");
         encoder.set_compute_pipeline_state(pso);
-        self.bind_all(encoder);
         encoder.set_buffer(22, Some(&self.pass_table), (color as u64) * 4);
         // three-avbd: never bind the indirect buffer as a writable shader resource on the
         // same dispatch that consumes it for threadgroup counts.
@@ -352,6 +352,14 @@ impl MetalWorld {
         // s[7] = previous contact count; s[8] = offset to prev contacts in gContacts
         s[7] = self.last_counters.contact_count.min(self.capacity.max_contacts);
         s[8] = self.capacity.max_contacts;
+        // s[9] = contact warm-start hash table size (power of two ≤ constraint_ids).
+        let ids_len = (2 * (self.capacity.max_contacts + self.capacity.max_joints))
+            .max(32768)
+            .next_power_of_two();
+        let prev = s[7].max(256);
+        s[9] = (prev.saturating_mul(4).max(1024) as u32)
+            .next_power_of_two()
+            .min(ids_len);
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
@@ -409,6 +417,8 @@ impl MetalWorld {
 
         let cb = self.device.queue.new_command_buffer();
         let encoder = cb.new_compute_command_encoder();
+        // Bind once per encoder — rebinding 24 buffers every dispatch dominated large scenes.
+        self.bind_all(&encoder);
 
         let n_bodies = self.body_count.max(1) as u64;
         let n_cols = self.collider_count.max(1) as u64;
@@ -445,6 +455,14 @@ impl MetalWorld {
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
         self.dispatch(&encoder, "narrowphase", narrow_n);
+        // O(1) warm-start lookup (was O(n²) scan of prev contacts — Brick Ring killer).
+        let hash_n = {
+            let s = unsafe { std::slice::from_raw_parts(self.scratch.contents() as *const u32, 64) };
+            s[9].max(1024) as u64
+        };
+        let prev_n = prev_contacts.min(self.capacity.max_contacts as u64).max(1);
+        self.dispatch(&encoder, "contact_hash_clear", hash_n);
+        self.dispatch(&encoder, "contact_hash_insert", prev_n);
         self.dispatch(&encoder, "persist_contacts", contact_dispatch);
         self.dispatch(&encoder, "warmstart_joints", n_joints);
 
@@ -478,30 +496,34 @@ impl MetalWorld {
 
         // three-avbd argsColors: indirect per colour (0 threadgroups ⇒ free). Same encoder so
         // Metal tracks the write→dispatch dependency without a CPU mid-step sync.
-        // Small scenes: sequential GS (one body/dispatch, high→low) for stack impacts.
+        // Colored Jacobi is enough once C0 is sampled at x⁻ (solve_primal_one kept for probes).
         let dual_n = contact_dispatch.max(n_joints);
-        let max_c = self.capacity.max_colors.min(32);
-        let use_gs = self.body_count <= 64;
+        // Live colours + slack so a growing palette is not truncated mid-smash.
+        let max_c = self
+            .last_counters
+            .color_count
+            .saturating_add(4)
+            .max(4)
+            .min(self.capacity.max_colors.min(32));
         for _iter in 0..self.params.iterations {
-            if use_gs {
-                // three-avbd CPU: for (b = n-1; b >= 0; b--) — top of add-order first.
-                for body in (0..self.body_count).rev() {
-                    self.dispatch_pass(&encoder, "solve_primal_one", 1, body);
-                }
-            } else {
-                for color in 0..max_c {
-                    self.dispatch_color_indirect(&encoder, color);
-                }
+            for color in 0..max_c {
+                self.dispatch_color_indirect(&encoder, color);
             }
+            // Indirect args buffer was unbound for primal; restore for later kernels.
+            encoder.set_buffer(23, Some(&self.indirect_args), 0);
             self.dispatch(&encoder, "solve_dual", dual_n);
         }
 
         self.dispatch(&encoder, "extract_velocity_sleep", n_bodies);
-        // Island sleep: revoke candidates that touch an awake non-candidate so a
-        // stack cannot put the bottom box to sleep while the top is still settling.
-        let gate_rounds = (self.body_count as u32).min(32).max(1);
-        for _ in 0..gate_rounds {
-            self.dispatch(&encoder, "sleep_island_gate", contact_dispatch);
+        // Island sleep only on small contact graphs (stacks). Large piles use per-body
+        // sleep — 32× contact passes would dominate Brick Ring / Wall Smash.
+        let small_island = self.body_count <= 256
+            && self.last_counters.contact_count <= 4096;
+        if small_island {
+            let gate_rounds = (self.body_count as u32).min(32).max(1);
+            for _ in 0..gate_rounds {
+                self.dispatch(&encoder, "sleep_island_gate", contact_dispatch);
+            }
         }
         self.dispatch(&encoder, "sleep_island_commit", n_bodies);
 

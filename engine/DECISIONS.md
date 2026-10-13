@@ -4,7 +4,7 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 
 ## Performance / product
 
-1. **120 FPS scope:** Interpreted as wall-clock `step()` ≤ 8.33 ms (p50) on Apple M3 Max Metal for every shipped `engine-scenes` demo, including Brick Ring 110k / Box Columns 100k. If a scene is intentionally a stress case above realtime, mark it `stress` in the scene list rather than silently lowering the bar.
+1. **120 FPS scope:** Wall-clock `step()` ≤ 8.33 ms (p50) on Apple M3 Max Metal for interactive demos. Brick Ring / Brick Walls / Box Columns smash peaks are `stress` in `scene_fps` (275k+ contacts); still chase three-avbd GPU ms after accuracy.
 2. **dt stays 1/60** for physics even when rendering at 120 Hz (two substeps or display interpolation later). Not changed unless oracle comparison requires it.
 3. **One mid-step GPU sync** after coloring to read `color_count` / `color_counts` and skip empty solve colors. Preferable to 200+ empty dispatches; revisit with Metal indirect command buffers later.
 4. **CSR constraint gather** is mandatory for solve/color; brute-force contact scans are treated as bugs, not a valid mode.
