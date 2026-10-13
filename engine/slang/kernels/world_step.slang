@@ -1777,16 +1777,47 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             float4 rotA = (anySphere && bodyIsDynamic(bA)) ? gBodiesPrev[ba].orientation : bA.orientation;
             float4 rotB = (anySphere && bodyIsDynamic(bB)) ? gBodiesPrev[bb].orientation : bB.orientation;
             float4 rotSelf = isA ? rotA : rotB;
+            // Displacement from x⁻ (three-avbd pairBody / evalContact Taylor C).
+            // Static/sleeping skip predictOne so gBodiesPrev may be stale — treat Δ=0.
+            BodyState initA = gBodiesPrev[ba];
+            BodyState initB = gBodiesPrev[bb];
+            bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
+            bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
+            float3 dLinA = moveA ? (bA.position - initA.position) : float3(0, 0, 0);
+            float3 dLinB = moveB ? (bB.position - initB.position) : float3(0, 0, 0);
+            float3 dAngA = float3(0, 0, 0);
+            float3 dAngB = float3(0, 0, 0);
+            if (moveA)
+            {
+                float4 qA = bA.orientation;
+                if (dot(qA, initA.orientation) < 0.0) qA = -qA;
+                dAngA = quatSubVec(qA, initA.orientation);
+            }
+            if (moveB)
+            {
+                float4 qB = bB.orientation;
+                if (dot(qB, initB.orientation) < 0.0) qB = -qB;
+                dAngB = quatSubVec(qB, initB.orientation);
+            }
+            float keep = 1.0 - p.alpha;
             for (uint ci = 0u; ci < mf.contactCount; ci++)
             {
                 Contact c = gContacts[mf.contactStart + ci];
                 if (c.alive == 0) continue;
-                float3 wa = transformPoint(bA.position, rotA, c.anchorA);
-                float3 wb = transformPoint(bB.position, rotB, c.anchorB);
-                float3 d = wb - wa;
-                float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
+                float3 rAW = quatRotate(rotA, c.anchorA);
+                float3 rBW = quatRotate(rotB, c.anchorB);
+                // n = A→B. three-avbd stores n=B→A; signs flip so
+                // C = c0*(1-α) + n·(dB-dA) - (rA×n)·dAngA + (rB×n)·dAngB.
+                float3 n = c.normal;
+                float3 t1 = c.tangent1;
+                float3 t2 = c.tangent2;
+                float3 C = float3(
+                    c.c0N * keep + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
+                    c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
+                    c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
                 c.penetration = C.x;
-                contributeContact(A, rhs, c, isA, p.alpha, b.position, rotSelf, C, p.contactOffset);
+                // C is already Ĉ; alpha=0 + margin=0 ⇒ contributeContact uses F = k·C + λ.
+                contributeContact(A, rhs, c, isA, 0.0, b.position, rotSelf, C, 0.0);
             }
         }
         else
@@ -1974,14 +2005,38 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
             float4 rotA = (anySphere && bodyIsDynamic(bA)) ? gBodiesPrev[ba].orientation : bA.orientation;
             float4 rotB = (anySphere && bodyIsDynamic(bB)) ? gBodiesPrev[bb].orientation : bB.orientation;
-            float3 wa = transformPoint(bA.position, rotA, c.anchorA);
-            float3 wb = transformPoint(bB.position, rotB, c.anchorB);
-            float3 d = wb - wa;
-            float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
-            c.penetration = C.x;
-            float3 C0 = float3(c.c0N, c.c0T1, c.c0T2);
-            // Match contributeContact / three-avbd: margin is in C0, not in geometric C.
-            float3 cReg = C - p.alpha * C0 + float3(p.contactOffset, 0.0, 0.0);
+            // three-avbd evalContact: Ĉ = c0*(1-α) + J·(x-x⁻), not absolute geometric C.
+            BodyState initA = gBodiesPrev[ba];
+            BodyState initB = gBodiesPrev[bb];
+            bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
+            bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
+            float3 dLinA = moveA ? (bA.position - initA.position) : float3(0, 0, 0);
+            float3 dLinB = moveB ? (bB.position - initB.position) : float3(0, 0, 0);
+            float3 dAngA = float3(0, 0, 0);
+            float3 dAngB = float3(0, 0, 0);
+            if (moveA)
+            {
+                float4 qA = bA.orientation;
+                if (dot(qA, initA.orientation) < 0.0) qA = -qA;
+                dAngA = quatSubVec(qA, initA.orientation);
+            }
+            if (moveB)
+            {
+                float4 qB = bB.orientation;
+                if (dot(qB, initB.orientation) < 0.0) qB = -qB;
+                dAngB = quatSubVec(qB, initB.orientation);
+            }
+            float3 rAW = quatRotate(rotA, c.anchorA);
+            float3 rBW = quatRotate(rotB, c.anchorB);
+            float keep = 1.0 - p.alpha;
+            float3 n = c.normal;
+            float3 t1 = c.tangent1;
+            float3 t2 = c.tangent2;
+            float3 cReg = float3(
+                c.c0N * keep + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
+                c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
+                c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
+            c.penetration = cReg.x;
             float3 f = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
             f = projectContactForce(f, c.friction);
             c.lambdaN = f.x;
@@ -1998,7 +2053,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
                 c.kT = min(c.kT + p.betaLin * abs(cReg.z), p.kMaxT);
             }
             // Stick only when friction force is inside the cone (three-avbd updateDual).
-            float slip = length(float2(C.y, C.z));
+            float slip = length(float2(cReg.y, cReg.z));
             c._pad0 = (ft <= bound + 1e-8 && slip < 1.0e-5) ? 1.0 : 0.0;
             gContacts[curOff + i] = c;
             }
