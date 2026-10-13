@@ -345,11 +345,11 @@ BoxManifold collideBoxesCached(BoxObb boxA, BoxObb boxB, float margin)
     int bestType = faceType;
     int bestIA = faceIA;
     int bestIB = faceIB;
-    // Face-biased SAT (three-avbd edgeRelTol=0.95, edgeAbsTol=0.01). Prefer the
-    // non-FLAG_FACE_BIAS form here — FLAG_FACE_BIAS raised Ring contact counts on Metal.
+    // three-avbd FLAG_FACE_BIAS (default on). Shallow-edge overrides that cut Ring
+    // contacts (~110k→43k) also drift Stack / prevent Columns sleep — leave alone.
     if (edgeValid)
     {
-        if (0.95 * edgeSep > faceSep + 0.01)
+        if (edgeSep > 0.95 * faceSep + 0.01)
         {
             useEdge = true;
             bestN = edgeN;
