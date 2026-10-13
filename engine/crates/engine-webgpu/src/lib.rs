@@ -59,7 +59,12 @@ impl WebGpuWorld {
         }
         Self::direct_shaders()
             .iter()
-            .map(|(n, w)| ((*n).to_string(), Ok(cap_loop_iterations(w))))
+            .map(|(n, w)| {
+                (
+                    (*n).to_string(),
+                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(w))),
+                )
+            })
             .collect()
     }
 
@@ -268,6 +273,32 @@ fn fix_naga_loop_exits(src: &str) -> String {
 /// Hard cap on every WGSL loop. A non-terminating kernel on Apple Silicon can stall the
 /// window server and take the whole machine down, so no loop may run unbounded.
 pub const WGSL_LOOP_CAP: u32 = 1 << 16;
+
+/// Chrome treats a storage/workgroup load as non-uniform, so a later barrier
+/// inside `if (lanes == 1)` is rejected. `workgroupUniformLoad` makes it uniform.
+fn uniformize_workgroup_lanes(src: &str) -> String {
+    const NAME: &str = "gsUniformLanes_0";
+    if !src.contains(NAME) {
+        return src.to_string();
+    }
+    let mut out = String::with_capacity(src.len() + 256);
+    for line in src.lines() {
+        if line.contains("var<workgroup>") && line.contains(NAME) {
+            out.push_str(line);
+        } else {
+            out.push_str(
+                &line
+                    .replace(NAME, &format!("workgroupUniformLoad(&{NAME})"))
+                    .replace(
+                        "workgroupUniformLoad(&gsUniformLanes_0) =",
+                        "gsUniformLanes_0 =",
+                    ),
+            );
+        }
+        out.push('\n');
+    }
+    out
+}
 
 fn cap_loop_iterations(src: &str) -> String {
     let b = src.as_bytes();
