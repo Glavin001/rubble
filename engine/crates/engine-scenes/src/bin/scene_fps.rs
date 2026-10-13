@@ -39,7 +39,7 @@ fn main() {
         // three-avbd brick-ring benches use lead=60 into the smash window.
         let ring = scene.info.name.starts_with("Brick Ring");
         let lead = if scene.info.name == "Box Pile (32k)" {
-            180 // three-avbd settled pile
+            180 // three-avbd settled pile; we still have ~30k awake (STRESS)
         } else if scene.info.name == "Box Columns (100k)" {
             180 // was 120; full-suite runs occasionally left ~30 awake / ~185 ms
         } else if ring {
