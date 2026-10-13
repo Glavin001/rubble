@@ -76,6 +76,18 @@ pub fn compile(
     out: &Path,
     include_dirs: &[&Path],
 ) -> Result<()> {
+    compile_with_defines(source, entry, target, out, include_dirs, &[])
+}
+
+/// Like [`compile`], passing `-D NAME=VALUE` for each define (build-time target switches).
+pub fn compile_with_defines(
+    source: &Path,
+    entry: &str,
+    target: SlangTarget,
+    out: &Path,
+    include_dirs: &[&Path],
+    defines: &[(&str, &str)],
+) -> Result<()> {
     let slangc = find_slangc()?;
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
@@ -91,6 +103,9 @@ pub fn compile(
         .arg(out);
     for dir in include_dirs {
         cmd.arg("-I").arg(dir);
+    }
+    for (name, value) in defines {
+        cmd.arg(format!("-D{name}={value}"));
     }
     cmd.arg(source);
     let output = cmd

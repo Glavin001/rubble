@@ -163,7 +163,7 @@ impl WgpuSim {
                     },
                 )),
                 module: &module,
-                entry_point: Some("main"),
+                entry_point: None,
                 compilation_options: Default::default(),
                 cache: None,
             });

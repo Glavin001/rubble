@@ -1,4 +1,5 @@
-//! WebGPU backend: Slang → SPIR-V → naga → WGSL.
+//! WebGPU backend. Default: Slang → WGSL directly at build time (`-DENGINE_WGSL`, see
+//! `slang/physics/atomics.slang`). `WG_NAGA=1` selects the older Slang → SPIR-V → naga path.
 //!
 //! **Fair speed bar vs three-avbd:** same scenes in **Chrome WebGPU** on this machine
 //! (not native Metal `scene_fps` vs their browser `gpuTotal`). Metal remains the M3
@@ -17,6 +18,10 @@ pub struct WebGpuWorld {
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
     pub wgsl_shaders: Vec<(String, String)>,
+}
+
+mod direct {
+    include!(concat!(env!("OUT_DIR"), "/direct_wgsl.rs"));
 }
 
 fn spirv_entry_names() -> Vec<&'static str> {
@@ -47,8 +52,24 @@ impl WebGpuWorld {
         entry_list()
     }
 
-    /// Translate every SPIR-V entry to WGSL. Returns `(name, wgsl)` or `(name, err)`.
+    /// WGSL for every entry: `(name, wgsl)` or `(name, err)`.
     pub fn compile_shaders_report() -> Vec<(String, Result<String, String>)> {
+        if std::env::var_os("WG_NAGA").is_some() {
+            return Self::naga_shaders_report();
+        }
+        Self::direct_shaders()
+            .iter()
+            .map(|(n, w)| ((*n).to_string(), Ok(cap_loop_iterations(w))))
+            .collect()
+    }
+
+    /// Build-time Slang → WGSL modules (embedded; works on wasm32).
+    pub fn direct_shaders() -> &'static [(&'static str, &'static str)] {
+        direct::DIRECT_WGSL
+    }
+
+    /// Translate every SPIR-V entry to WGSL through naga.
+    pub fn naga_shaders_report() -> Vec<(String, Result<String, String>)> {
         let mut out = Vec::new();
         for name in entry_list() {
             let result = (|| -> anyhow::Result<String> {
@@ -249,23 +270,33 @@ fn fix_naga_loop_exits(src: &str) -> String {
 pub const WGSL_LOOP_CAP: u32 = 1 << 16;
 
 fn cap_loop_iterations(src: &str) -> String {
-    let mut out = String::with_capacity(src.len() + 4096);
-    let mut rest = src;
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len() + 8192);
+    let mut last = 0usize;
+    let mut i = 0usize;
     let mut k = 0usize;
-    while let Some(pos) = rest.find("loop {") {
-        let boundary = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
-        out.push_str(&rest[..pos]);
-        if boundary {
+    while let Some(rel) = src[i..].find("loop") {
+        let at = i + rel;
+        let after = at + 4;
+        let word = (at == 0 || !(b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_'))
+            && (after >= b.len() || !(b[after].is_ascii_alphanumeric() || b[after] == b'_'));
+        let mut j = after;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if word && j < b.len() && b[j] == b'{' {
+            out.push_str(&src[last..at]);
             out.push_str(&format!(
                 "var loopGuard{k}: u32 = 0u;\nloop {{\n loopGuard{k} += 1u; if (loopGuard{k} > {WGSL_LOOP_CAP}u) {{ break; }}\n"
             ));
             k += 1;
+            last = j + 1;
+            i = j + 1;
         } else {
-            out.push_str("loop {");
+            i = after;
         }
-        rest = &rest[pos + "loop {".len()..];
     }
-    out.push_str(rest);
+    out.push_str(&src[last..]);
     out
 }
 
@@ -319,13 +350,38 @@ mod tests {
 
     #[test]
     fn every_wgsl_loop_is_capped_and_valid() {
-        for (name, res) in WebGpuWorld::compile_shaders_report() {
+        for (name, res) in WebGpuWorld::naga_shaders_report() {
             let wgsl = res.unwrap_or_else(|e| panic!("{name}: {e}"));
             let loops = wgsl.matches("loop {").count();
             let guards = wgsl.matches("loopGuard").count() / 3;
             assert_eq!(loops, guards, "{name}: uncapped loop");
             let module = naga::front::wgsl::parse_str(&wgsl)
                 .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&wgsl)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn direct_wgsl_covers_every_entry_and_validates() {
+        let direct = WebGpuWorld::direct_shaders();
+        for name in WebGpuWorld::entry_names().iter().filter(|n| **n != "abi_roundtrip") {
+            assert!(
+                direct.iter().any(|(n, _)| n == name),
+                "{name}: missing direct WGSL"
+            );
+        }
+        for (name, res) in WebGpuWorld::compile_shaders_report() {
+            let wgsl = &res.unwrap();
+            let loops = direct.iter().find(|(n, _)| *n == name).unwrap().1;
+            let raw = loops.matches("loop").count();
+            assert_eq!(raw, wgsl.matches("loopGuard").count() / 3, "{name}: uncapped loop");
+            let module = naga::front::wgsl::parse_str(wgsl)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(wgsl)));
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
                 naga::valid::Capabilities::all(),

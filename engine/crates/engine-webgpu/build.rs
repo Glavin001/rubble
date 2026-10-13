@@ -1,5 +1,5 @@
 use anyhow::Result;
-use engine_slang_build::{compile, find_slangc, SlangTarget};
+use engine_slang_build::{compile, compile_with_defines, find_slangc, SlangTarget};
 use std::env;
 use std::path::PathBuf;
 
@@ -94,6 +94,41 @@ fn main() -> Result<()> {
             failed.len(),
             failed.join(", ")
         );
+    }
+
+    // Direct Slang → WGSL. `ENGINE_WGSL` switches atomic slots to Atomic<uint>
+    // (physics/atomics.slang); the WGSL is embedded so wasm32 needs no filesystem.
+    let wgsl_dir = PathBuf::from(env::var("OUT_DIR")?).join("wgsl");
+    std::fs::create_dir_all(&wgsl_dir)?;
+    let mut table = String::from("pub static DIRECT_WGSL: &[(&str, &str)] = &[\n");
+    let mut wgsl_failed = Vec::new();
+    for entry in WORLD_ENTRIES.iter().chain(std::iter::once(&"broadphase_grid")) {
+        let dest = wgsl_dir.join(format!("{entry}.wgsl"));
+        match compile_with_defines(
+            &world,
+            entry,
+            SlangTarget::Wgsl,
+            &dest,
+            &[],
+            &[("ENGINE_WGSL", "1")],
+        ) {
+            Ok(()) => table.push_str(&format!(
+                "    ({entry:?}, include_str!({:?})),\n",
+                dest.display().to_string()
+            )),
+            Err(e) => {
+                println!("cargo:warning=WGSL skip {entry}: {e}");
+                wgsl_failed.push(*entry);
+            }
+        }
+    }
+    table.push_str("];\n");
+    std::fs::write(
+        PathBuf::from(env::var("OUT_DIR")?).join("direct_wgsl.rs"),
+        table,
+    )?;
+    if !wgsl_failed.is_empty() {
+        println!("cargo:warning=direct WGSL failed: {}", wgsl_failed.join(", "));
     }
     Ok(())
 }
