@@ -903,6 +903,11 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     if scene.info.name.starts_with("Box Pile") {
         // Shallow gate: one rocker must not flood-revoke the whole pile (stacks keep 8).
         world.set_sleep_island_rounds(1);
+        let mu = std::env::var("PILE_MU")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.7);
+        world.set_default_friction(mu);
     }
     {
         let mut b = SceneBuilder::new(&mut world);
