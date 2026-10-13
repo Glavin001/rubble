@@ -46,9 +46,11 @@ impl Default for AvbdParams {
             k_max_n: 1.0e10,
             k_max_t: 1.0e6,
             contact_offset: 0.01,
-            sleep_lin: 0.05,
-            sleep_ang: 0.05,
-            sleep_time: 0.5,
+            // Slightly looser than demo3d's tiny thresholds: Jacobi residual jitter on
+            // tall stacks never drops below 0.05, so bodies never slept and KE pumped.
+            sleep_lin: 0.15,
+            sleep_ang: 0.15,
+            sleep_time: 0.25,
             residual_exit: 1.0e-4,
             trust_lin: 0.35,
             trust_ang: 0.5,

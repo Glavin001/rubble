@@ -466,14 +466,20 @@ void emitContact(
     ct._pad2 = 0.0;
     gContacts[slot] = ct;
 
-    if (bodyIsDynamic(ba))
+    // Wake only a sleeping body hit by an awake neighbour (island wake). Never clear
+    // SLEEPING on resting pairs — that used to re-awake stacks every NP and pump KE.
+    bool awakeA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
+    bool awakeB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    if (bodyIsDynamic(ba) && bodyIsSleeping(ba) && awakeB)
     {
         ba.flags = (ba.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        ba.sleepTimer = 0.0;
         gBodies[ca.body] = ba;
     }
-    if (bodyIsDynamic(bb))
+    if (bodyIsDynamic(bb) && bodyIsSleeping(bb) && awakeA)
     {
         bb.flags = (bb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        bb.sleepTimer = 0.0;
         gBodies[cb.body] = bb;
     }
 }

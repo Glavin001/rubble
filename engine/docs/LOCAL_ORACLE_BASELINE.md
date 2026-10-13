@@ -30,8 +30,8 @@ cargo run -p engine-metal --example stack_diag --release -- 5 200
 
 | Case | three-avbd CPU (local) | engine Metal (local) |
 |------|------------------------|----------------------|
-| Stack 10, 900 frames, spaced drop | PASS (z≈i+1−margin, xy=0) | FAIL — impact bounce / tip under Jacobi (bottom 7 of prestacked OK @ 80 iters; spaced still unstable) |
-| Pre-stacked 5 boxes, 200 frames @ 20 iters | n/a (their scene is spaced) | **PASS** (`oracle_accuracy`) |
+| Stack 10, 900 frames, spaced drop | PASS (z≈i+1−margin, xy=0) | FAIL — impact (open) |
+| Pre-stacked 10 boxes, 900 frames @ 40 iters | n/a (their scene is spaced) | **PASS** (`oracle_accuracy`) |
 | Pyramid finite | PASS | PASS |
 | Rope joint bound | PASS | PASS |
 | Seated sphere on plane | n/a | PASS (`avbd_slice`); fast drops → CCD |
