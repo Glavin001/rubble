@@ -320,12 +320,14 @@ impl MetalWorld {
         encoder.dispatch_threads(grid, tg);
     }
 
-    #[allow(dead_code)] // retained for zero-sync path once indirect hazards are validated
     fn dispatch_color_indirect(&self, encoder: &ComputeCommandEncoderRef, color: u32) {
         let pso = self.pipelines.get("solve_primal_color").expect("pipeline");
         encoder.set_compute_pipeline_state(pso);
         self.bind_all(encoder);
         encoder.set_buffer(22, Some(&self.pass_table), (color as u64) * 4);
+        // three-avbd: never bind the indirect buffer as a writable shader resource on the
+        // same dispatch that consumes it for threadgroup counts.
+        encoder.set_buffer(23, None, 0);
         let tg = MTLSize::new(64, 1, 1);
         encoder.dispatch_thread_groups_indirect(
             &self.indirect_args,
@@ -397,6 +399,12 @@ impl MetalWorld {
         let n_bodies = self.body_count.max(1) as u64;
         let n_cols = self.collider_count.max(1) as u64;
         let n_joints = self.joint_count.max(1) as u64;
+        // Size awake-only kernels from last step (three-avbd mover list).
+        let awake_dispatch = if self.last_counters.awake_count == 0 {
+            n_bodies
+        } else {
+            ((self.last_counters.awake_count as u64).saturating_mul(2) + 256).min(n_bodies).max(1)
+        };
         // Size transient dispatches from last step (three-avbd argsPrev pattern).
         let prev_contacts = self.last_counters.contact_count.max(256) as u64;
         let narrow_n = (self.capacity.max_candidates as u64)
@@ -421,6 +429,9 @@ impl MetalWorld {
         self.dispatch(&encoder, "persist_contacts", contact_dispatch);
         self.dispatch(&encoder, "warmstart_joints", n_joints);
 
+        // Awake list before CSR sort/colour (flags only — independent of contacts).
+        self.dispatch(&encoder, "build_awake_list", n_bodies);
+
         // CSR adjacency (three-avbd degree → scan → scatter → sort). Overwrites grid hash.
         self.dispatch(&encoder, "csr_clear", n_bodies + 1);
         self.dispatch(&encoder, "csr_degree_contacts", contact_dispatch);
@@ -428,10 +439,9 @@ impl MetalWorld {
         self.dispatch(&encoder, "csr_prefix", 1);
         self.dispatch(&encoder, "csr_scatter_contacts", contact_dispatch);
         self.dispatch(&encoder, "csr_scatter_joints", n_joints);
-        self.dispatch(&encoder, "csr_sort", n_bodies);
+        self.dispatch(&encoder, "csr_sort", awake_dispatch);
 
-        self.dispatch(&encoder, "build_awake_list", n_bodies);
-        self.dispatch(&encoder, "init_colors", n_bodies);
+        self.dispatch(&encoder, "init_colors", awake_dispatch);
 
         // Colour rounds: distinct pass_table offsets (NOT mid-encoder scratch rewrites).
         // Cap grows from last frame's colour count (three-avbd colour-cap heuristic).
@@ -439,58 +449,33 @@ impl MetalWorld {
             .max(8)
             .min(self.capacity.max_colors.min(32));
         for round in 0..color_rounds {
-            self.dispatch_pass(&encoder, "color_bodies", n_bodies, round);
+            self.dispatch_pass(&encoder, "color_bodies", awake_dispatch, round);
         }
-        self.dispatch(&encoder, "pack_color_lists", n_bodies);
+        self.dispatch(&encoder, "pack_color_lists", awake_dispatch);
         self.dispatch(&encoder, "write_color_args", 64);
 
-        encoder.end_encoding();
-        let mut cpu_submit = cpu_t0.elapsed().as_secs_f64() * 1000.0;
-        cb.commit();
-        cb.wait_until_completed();
-
-        // Mid-step sync (temporary): read colour buckets so solve dispatches match three-avbd
-        // argsColors sizing. Indirect-only path is preferred once Metal hazard tracking is proven.
-        let counters_mid = unsafe { *(self.counters.contents() as *const StepCounters) };
-        let color_n = counters_mid
-            .color_count
-            .max(1)
-            .min(self.capacity.max_colors.min(32));
-        let color_counts = unsafe {
-            std::slice::from_raw_parts(
-                self.color_counts.contents() as *const u32,
-                color_n as usize,
-            )
-        }
-        .to_vec();
-
-        let cpu_t1 = std::time::Instant::now();
-        let cb2 = self.device.queue.new_command_buffer();
-        let encoder2 = cb2.new_compute_command_encoder();
-        let dual_n = contact_dispatch.max(n_joints).max(counters_mid.contact_count.max(1) as u64);
+        // three-avbd argsColors: indirect per colour (0 threadgroups ⇒ free). Same encoder so
+        // Metal tracks the write→dispatch dependency without a CPU mid-step sync.
+        let dual_n = contact_dispatch.max(n_joints);
+        let max_c = self.capacity.max_colors.min(32);
         for _iter in 0..self.params.iterations {
-            for color in 0..color_n {
-                let n = color_counts[color as usize] as u64;
-                if n == 0 {
-                    continue;
-                }
-                self.dispatch_pass(&encoder2, "solve_primal_color", n, color);
+            for color in 0..max_c {
+                self.dispatch_color_indirect(&encoder, color);
             }
-            self.dispatch(&encoder2, "solve_dual", dual_n);
+            self.dispatch(&encoder, "solve_dual", dual_n);
         }
 
-        self.dispatch(&encoder2, "extract_velocity_sleep", n_bodies);
+        self.dispatch(&encoder, "extract_velocity_sleep", n_bodies);
 
         if self.enable_ccd {
-            self.dispatch(&encoder2, "ccd_classify", n_bodies);
-            self.dispatch(&encoder2, "ccd_sweep", n_cols);
+            self.dispatch(&encoder, "ccd_classify", n_bodies);
+            self.dispatch(&encoder, "ccd_sweep", n_cols);
         }
 
-        encoder2.end_encoding();
-        cpu_submit += cpu_t1.elapsed().as_secs_f64() * 1000.0;
-        cb2.commit();
-        cb2.wait_until_completed();
-        // Wall-clock includes both GPU phases (collision/CSR + solve).
+        encoder.end_encoding();
+        let cpu_submit = cpu_t0.elapsed().as_secs_f64() * 1000.0;
+        cb.commit();
+        cb.wait_until_completed();
         let gpu_ms = wall_t0.elapsed().as_secs_f64() * 1000.0;
 
         let counters = unsafe { *(self.counters.contents() as *const StepCounters) };
