@@ -40,21 +40,40 @@ fn groups(threads: u64) -> u32 {
     ((threads.max(1) + 63) / 64) as u32
 }
 
-fn bindings_of(wgsl: &str) -> Vec<u32> {
+struct Bind {
+    index: u32,
+    uniform: bool,
+}
+
+fn bindings_of(wgsl: &str) -> Vec<Bind> {
     let mut out = Vec::new();
-    let mut rest = wgsl;
-    while let Some(i) = rest.find("@binding(") {
-        rest = &rest[i + "@binding(".len()..];
+    for line in wgsl.lines() {
+        let Some(i) = line.find("@binding(") else {
+            continue;
+        };
+        let rest = &line[i + "@binding(".len()..];
         let end = rest.find(')').unwrap_or(0);
-        if let Ok(n) = rest[..end].trim().parse::<u32>() {
-            if !out.contains(&n) {
-                out.push(n);
-            }
+        let Ok(index) = rest[..end].trim().parse::<u32>() else {
+            continue;
+        };
+        if out.iter().any(|b: &Bind| b.index == index) {
+            continue;
         }
-        rest = &rest[end..];
+        out.push(Bind {
+            index,
+            uniform: line.contains("var<uniform"),
+        });
     }
-    out.sort_unstable();
+    out.sort_by_key(|b| b.index);
     out
+}
+
+/// Word offset where the CSR index lives inside `gConstraintIds` on the WGSL path.
+fn constraint_id_words(c: &WorldCapacity) -> u32 {
+    let words = (2 * (c.max_contacts + c.max_joints))
+        .max(32768)
+        .next_power_of_two() as u64;
+    words.max(131072) as u32
 }
 
 impl WgpuSim {
@@ -87,9 +106,13 @@ impl WgpuSim {
         let sizes = buffer_sizes(&capacity);
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         for (i, &bytes) in sizes.iter().enumerate() {
-            let usage = wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
+            let usage = wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC
+                | if i == 6 || i == 22 {
+                    wgpu::BufferUsages::UNIFORM
+                } else {
+                    wgpu::BufferUsages::STORAGE
+                }
                 | if i == 23 {
                     wgpu::BufferUsages::INDIRECT
                 } else {
@@ -132,15 +155,23 @@ impl WgpuSim {
             let wgsl = r.map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
             let binds = bindings_of(&wgsl);
             let mut entries = Vec::new();
-            for &b in &binds {
-                let dynamic = b == 22;
+            for b in &binds {
+                let dynamic = b.index == 22;
                 entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: b,
+                    binding: b.index,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        ty: if b.uniform {
+                            wgpu::BufferBindingType::Uniform
+                        } else {
+                            wgpu::BufferBindingType::Storage { read_only: false }
+                        },
                         has_dynamic_offset: dynamic,
-                        min_binding_size: None,
+                        min_binding_size: if dynamic {
+                            std::num::NonZeroU64::new(16)
+                        } else {
+                            None
+                        },
                     },
                     count: None,
                 });
@@ -169,16 +200,16 @@ impl WgpuSim {
             });
             let resources: Vec<wgpu::BindGroupEntry> = binds
                 .iter()
-                .map(|&b| wgpu::BindGroupEntry {
-                    binding: b,
-                    resource: if b == 22 {
+                .map(|b| wgpu::BindGroupEntry {
+                    binding: b.index,
+                    resource: if b.index == 22 {
                         wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: &bufs[22],
                             offset: 0,
-                            size: std::num::NonZeroU64::new(4),
+                            size: std::num::NonZeroU64::new(16),
                         })
                     } else {
-                        bufs[b as usize].as_entire_binding()
+                        bufs[b.index as usize].as_entire_binding()
                     },
                 })
                 .collect();
@@ -192,7 +223,7 @@ impl WgpuSim {
                 Pipe {
                     pipeline,
                     bind,
-                    dynamic_pass: binds.contains(&22),
+                    dynamic_pass: binds.iter().any(|b| b.index == 22),
                 },
             );
         }
@@ -231,14 +262,13 @@ impl WgpuSim {
     pub fn add_body(&mut self, body: BodyState) -> u32 {
         let id = self.body_count;
         self.host_bodies.push(body);
+        let stride = std::mem::size_of::<BodyState>() as u64;
+        self.queue
+            .write_buffer(&self.bufs[0], id as u64 * stride, bytes_of(&body));
+        // WGSL packs previous poses at gBodies[maxBodies + i].
         self.queue.write_buffer(
             &self.bufs[0],
-            id as u64 * std::mem::size_of::<BodyState>() as u64,
-            bytes_of(&body),
-        );
-        self.queue.write_buffer(
-            &self.bufs[1],
-            id as u64 * std::mem::size_of::<BodyState>() as u64,
+            (u64::from(self.capacity.max_bodies) + u64::from(id)) * stride,
             bytes_of(&body),
         );
         self.body_count += 1;
@@ -493,9 +523,7 @@ impl WgpuSim {
         let max_c = self.capacity.max_contacts;
         let cur = if self.contacts_parity == 0 { 0 } else { max_c };
         let prev = if self.contacts_parity == 0 { max_c } else { 0 };
-        let ids_len = (2 * (max_c + self.capacity.max_joints))
-            .max(32768)
-            .next_power_of_two();
+        let ids_len = constraint_id_words(&self.capacity);
         let prev_n = self.last_counters.contact_count.min(max_c).max(256);
         let mut s = [0u32; 64];
         s[1] = self.capacity.max_bodies;
@@ -512,6 +540,8 @@ impl WgpuSim {
         }
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
         s[17] = self.steps_done;
+        // CSR index region starts past the hash/id words inside gConstraintIds.
+        s[24] = ids_len;
         self.queue.write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
 
         let c = StepCounters {
@@ -521,7 +551,15 @@ impl WgpuSim {
             ..StepCounters::default()
         };
         self.queue.write_buffer(&self.bufs[7], 0, bytes_of(&c));
-        self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&self.params));
+        let mut packed = [[0u32; 4]; 8];
+        for i in 0..32 {
+            packed[i / 4][i % 4] = s[i];
+        }
+        let host = HostUniforms {
+            params: self.params,
+            s: packed,
+        };
+        self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
         let n = self.capacity.max_colors.min(64) as usize;
         let zeros = vec![0u32; n];
         self.queue
@@ -584,14 +622,18 @@ impl WgpuSim {
     }
 }
 
+/// Matches `HostUniforms` in `world_step.slang` (`AvbdParams` then `uint4 s[8]`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HostUniforms {
+    params: AvbdParams,
+    s: [[u32; 4]; 8],
+}
+
 fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     let b = |n: u32, stride: u64| n as u64 * stride;
-    let ids = (2 * (c.max_contacts + c.max_joints))
-        .max(32768)
-        .next_power_of_two() as u64
-        * 4;
     let mut s = [256u64; BIND_COUNT];
-    s[0] = b(c.max_bodies, 80);
+    s[0] = b(c.max_bodies.saturating_mul(2), 80);
     s[1] = b(c.max_bodies, 80);
     s[2] = b(c.max_colliders, 64);
     s[3] = b(64, 16);
@@ -605,7 +647,7 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[11] = b(c.max_bodies, 4);
     s[12] = b(c.max_bodies, 4);
     s[13] = b(c.max_bodies + 1, 4);
-    s[14] = ids.max(131072 * 4);
+    s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1) * 4;
     s[15] = b(c.max_bodies * c.max_colors, 4);
     s[16] = b(c.max_colors, 4);
     s[17] = b(c.max_colors, 4);
