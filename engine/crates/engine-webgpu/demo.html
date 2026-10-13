@@ -208,13 +208,15 @@ struct VsOut {
 @vertex fn vs(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> VsOut {
   let b = bodies[inst + 1u];
   let col = cols[inst + 1u];
-  let half = col.shape == 0u ? vec3f(col.params.x) : col.params.xyz;
+  var half = col.params.xyz;
+  if (col.shape == 0u) { half = vec3f(col.params.x); }
   let world = b.position + quatRotate(b.orientation, corner * (half / 0.5));
   var o: VsOut;
   o.clip = frame.viewProj * vec4f(world, 1.0);
   o.normal = quatRotate(b.orientation, normal);
   let t = fract(b.position.y * 0.08 + b.position.x * 0.05);
-  o.color = col.shape == 0u ? vec3f(0.75, 0.78, 0.82) : vec3f(0.72, 0.38 + 0.35 * t, 0.22);
+  o.color = vec3f(0.72, 0.38 + 0.35 * t, 0.22);
+  if (col.shape == 0u) { o.color = vec3f(0.75, 0.78, 0.82); }
   return o;
 }
 
@@ -240,7 +242,9 @@ struct VsOut {
     if (adapter.limits.minUniformBufferOffsetAlignment > PASS_ALIGN) {
       throw new Error('uniform offset alignment exceeds 256');
     }
+    const wantTimestamps = adapter.features.has('timestamp-query');
     const device = await adapter.requestDevice({
+      requiredFeatures: wantTimestamps ? ['timestamp-query'] : [],
       requiredLimits: {
         maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
         maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
@@ -424,7 +428,7 @@ struct VsOut {
       pass.dispatchWorkgroups(groups(threads), 1, 1);
     }
 
-    function encodeStep(enc, readback) {
+    function encodeStep(enc, readback, beginPass) {
       const nBodies = Math.max(bodyCount, 1);
       const nCols = Math.max(colliderCount, 1);
       const awake = last.awake === 0 ? nBodies : Math.max(1, Math.min(nBodies, last.awake * 2 + 256));
@@ -439,7 +443,12 @@ struct VsOut {
       const hashN = Math.min(nextPow2(Math.max(Math.max(prevContacts, 256) * 4, 1024)), idsLen);
 
       writeHost();
-      const pass = enc.beginComputePass();
+      let pass = beginPass ? beginPass() : enc.beginComputePass();
+      const nextPhase = () => {
+        if (!beginPass) return;
+        pass.end();
+        pass = beginPass();
+      };
       disp(pass, 'build_aabbs', nCols);
       disp(pass, 'broadphase_clear', 131072);
       disp(pass, 'broadphase_insert', nCols);
@@ -448,6 +457,7 @@ struct VsOut {
       disp(pass, 'contact_hash_clear', hashN);
       disp(pass, 'contact_hash_insert', Math.max(prevContacts, 1));
       disp(pass, 'persist_contacts', contactN);
+      nextPhase();
       disp(pass, 'build_awake_list', nBodies);
       disp(pass, 'csr_clear', nBodies + 1);
       disp(pass, 'csr_degree_contacts', manifoldN);
@@ -470,6 +480,7 @@ struct VsOut {
       disp(pass, 'pack_color_lists', awake);
       disp(pass, 'write_color_args', 64);
       disp(pass, 'predict_bodies', nBodies);
+      nextPhase();
       const colors = Math.min(Math.min(cap.maxColors, 32), Math.max(4, last.color + 1));
       for (let iter = 0; iter < params.iterations; iter++) {
         const primal = pipes.solve_primal_color;
@@ -481,6 +492,7 @@ struct VsOut {
         disp(pass, 'solve_dual', contactN);
       }
       disp(pass, 'extract_velocity_sleep', nBodies);
+      nextPhase();
       if (last.manifold > 0) {
         for (let i = 0; i < sleepRounds; i++) disp(pass, 'sleep_island_gate', manifoldN);
       }
@@ -537,6 +549,34 @@ struct VsOut {
       return best;
     }
 
+    async function profilePhases() {
+      if (!wantTimestamps) return '';
+      const n = 4;
+      const querySet = device.createQuerySet({ type: 'timestamp', count: n * 2 });
+      const resolve = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+      const read = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const enc = device.createCommandEncoder();
+      let i = 0;
+      encodeStep(enc, false, () => {
+        const pass = enc.beginComputePass({
+          timestampWrites: { querySet, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 },
+        });
+        i++;
+        return pass;
+      });
+      enc.resolveQuerySet(querySet, 0, n * 2, resolve, 0);
+      enc.copyBufferToBuffer(resolve, 0, read, 0, n * 16);
+      device.queue.submit([enc.finish()]);
+      parity ^= 1;
+      steps++;
+      await read.mapAsync(GPUMapMode.READ);
+      const stamps = new BigUint64Array(read.getMappedRange().slice(0));
+      read.unmap();
+      const ms = (a, b) => Number(stamps[b] - stamps[a]) / 1e6;
+      const names = ['collision', 'graph', 'solve', 'sleep'];
+      return names.map((name, k) => `${name} ${ms(k * 2, k * 2 + 1).toFixed(2)}`).join(' · ');
+    }
+
     const cube = [];
     const faces = [[0, 1, 2], [0, 2, 3]];
     const axes = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
@@ -581,7 +621,28 @@ struct VsOut {
       { binding: 2, resource: { buffer: bufs[2] } },
     ] });
     const groundBind = device.createBindGroup({ layout: groundPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: bufs[0] } }, { binding: 1, resource: { buffer: frameBuf } }] });
+    const renderErr = (await boxMod.getCompilationInfo()).messages.filter((m) => m.type === 'error');
+    if (renderErr.length) throw new Error(renderErr.map((m) => m.lineNum + ': ' + m.message).join('\n'));
     let depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+
+    function drawWorld() {
+      if (depth.width !== canvas.width || depth.height !== canvas.height) {
+        depth.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      }
+      const aspect = canvas.width / Math.max(1, canvas.height);
+      device.queue.writeBuffer(frameBuf, 0, mul(perspective(Math.PI / 5, aspect, 0.2, 400), lookAt([0, 16, -42], [0, 8, 0], [0, 1, 0])));
+      const enc = device.createCommandEncoder();
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.08, 0.09, 0.12, 1], loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
+      rp.setPipeline(boxPipe); rp.setBindGroup(0, boxBind); rp.setVertexBuffer(0, boxVbo); rp.draw(36, bodies.length - 1);
+      rp.end();
+      device.queue.submit([enc.finish()]);
+    }
+    drawWorld();
 
     const info = adapter.info || {};
     let running = true;
@@ -614,14 +675,15 @@ struct VsOut {
         last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
         parity ^= 1;
         steps++;
-        statusEl.textContent = `${info.vendor || 'gpu'} · ${bodies.length - 1} bodies · wall ${wallMs.toFixed(2)} ms · step ${steps} · contacts ${last.contact} · awake ${last.awake} · frame ${(performance.now() - now).toFixed(1)} ms`;
+        statusEl.textContent = `${info.vendor || 'gpu'} · ${bodies.length - 1} bodies · wall ${wallMs.toFixed(2)} ms · ${phases} · step ${steps} · contacts ${last.contact} · colors ${last.color} · frame ${(performance.now() - now).toFixed(1)} ms`;
         if (last.overflow) { running = false; fail('overflow flags 0x' + last.overflow.toString(16)); return; }
         requestAnimationFrame(frame);
       } catch (e) { running = false; fail(e); }
     }
-    statusEl.textContent = `timing ${bodies.length - 1} bodies, 10 iterations…`;
+    statusEl.textContent = `showing ${bodies.length - 1} bodies, then timing…`;
     const wallMs = await benchWall();
-    statusEl.textContent = `wall ${wallMs.toFixed(2)} ms`;
+    const phases = await profilePhases();
+    statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases}`;
     requestAnimationFrame(frame);
   </script>
 </body>

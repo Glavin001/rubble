@@ -448,7 +448,13 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     StepCounters c = loadCounters();
     if (i >= c.colliderCount) return;
     Collider col = gColliders[i];
-    if (col.shape == SHAPE_PLANE) return;
+    if (col.shape == SHAPE_PLANE)
+    {
+        uint slot;
+        AADD3(gScratchAtomics[42], 1, slot);
+        if (slot < 8u) ASTORE(gScratchAtomics[43u + slot], i);
+        return;
+    }
     // Insert sleeping too — awake movers must find them (island wake on impact).
     uint base = HOST_S(1);
     float cellSize = max(PARAMS.gridCellSize, 0.5);
@@ -460,6 +466,15 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     if (!bodyIsDynamic(bIns) &&
         (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0))
         return;
+    float radius = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    // Bigger than the cell (smash ball vs bricks): test from every dynamic, not one hash slot.
+    if (bodyIsDynamic(bIns) && radius > cellSize)
+    {
+        uint slot;
+        AADD3(gScratchAtomics[25], 1, slot);
+        if (slot < 16u) ASTORE(gScratchAtomics[26u + slot], i);
+        return;
+    }
     float3 center = 0.5 * (box.mn + box.mx);
     int3 cc = int3(floor(center / cellSize));
     uint h = gridHash(cc.x, cc.y, cc.z);
@@ -538,13 +553,26 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // Sleepers emit nothing: frozen pose needs no ground manifold, and 32k sleeper–
     // plane candidates dominated settled-pile ms. Awake neighbours still insert into
     // the grid and wake sleepers on impact; a woken body re-acquires the plane next step.
+    uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
+    for (uint k = 0u; k < nLarge; k++)
+    {
+        uint j = ALOAD(gScratchAtomics[26u + k]);
+        if (j == i) continue;
+        Collider other = gColliders[j];
+        if (other.body == col.body || bodiesJointed(col.body, other.body)) continue;
+        BodyState ob = gBodies[other.body];
+        if (bodyIsDynamic(ob) && j < i) continue;
+        Aabb ab = gAabbs[base + j];
+        if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
+        if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
+        if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
+        emitCandidate(i, j);
+    }
     if (sleeper)
         return;
-    for (uint p = 0; p < c.colliderCount; p++)
-    {
-        if (gColliders[p].shape != SHAPE_PLANE) continue;
-        emitCandidate(i, p);
-    }
+    uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
+    for (uint pi = 0u; pi < nPlanes; pi++)
+        emitCandidate(i, ALOAD(gScratchAtomics[43u + pi]));
     for (int z = mn.z - 1; z <= mx.z + 1; z++)
     for (int y = mn.y - 1; y <= mx.y + 1; y++)
     for (int x = mn.x - 1; x <= mx.x + 1; x++)
