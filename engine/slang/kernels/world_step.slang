@@ -915,9 +915,8 @@ void csr_degree_joints(uint3 tid : SV_DispatchThreadID)
     csrCountEndpoint(e.y);
 }
 
-// Parallel exclusive prefix (Hillis–Steele). Host runs offset = 1,2,4,... with
-// gScratchAtomics[8] = offset. Uses gBodyColor as scratch for the running sum, then
-// copies back to degree→start in constraint_index; final fill cursors stay in gBodyColor.
+// Parallel exclusive prefix (Hillis–Steele). Host binds gPassUniform = 1,2,4,... via
+// pass_table (no mid-encoder CPU scratch writes). gBodyColor holds the running sum.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void csr_prefix_init(uint3 tid : SV_DispatchThreadID)
@@ -935,10 +934,9 @@ void csr_prefix_scan(uint3 tid : SV_DispatchThreadID)
     uint i = tid.x;
     uint n = gCounters[0].bodyCount;
     if (i >= n) return;
-    uint offset = gScratchAtomics[8];
+    uint offset = gPassUniform[0];
     uint v = gBodyColor[i];
-    if (i >= offset) v += gConstraintIndex[i - offset];
-    // Write to constraint_index; next pass swaps roles via csr_prefix_swap.
+    if (i >= offset) v += gBodyColor[i - offset];
     gConstraintIndex[i] = v;
 }
 

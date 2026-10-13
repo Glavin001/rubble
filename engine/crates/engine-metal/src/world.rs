@@ -93,6 +93,10 @@ impl MetalWorld {
             for (i, v) in t.iter_mut().enumerate() {
                 *v = i as u32;
             }
+            // Slots 48..63 = 2^(i-48) for CSR Hillis–Steele scan offsets.
+            for k in 0..16u32 {
+                t[48 + k as usize] = 1u32 << k;
+            }
         }
         let indirect_args = alloc_u32(d, capacity.max_colors.max(64) * 3);
 
@@ -473,7 +477,19 @@ impl MetalWorld {
         self.dispatch(&encoder, "csr_clear", n_bodies + 1);
         self.dispatch(&encoder, "csr_degree_contacts", contact_dispatch);
         self.dispatch(&encoder, "csr_degree_joints", n_joints);
-        self.dispatch(&encoder, "csr_prefix", 1);
+        if self.body_count <= 512 {
+            self.dispatch(&encoder, "csr_prefix", 1);
+        } else {
+            // Parallel Hillis–Steele exclusive scan (single-thread prefix is O(n) on GPU).
+            self.dispatch(&encoder, "csr_prefix_init", n_bodies);
+            let mut log = 0u32;
+            while (1u32 << log) < self.body_count && log < 16 {
+                self.dispatch_pass(&encoder, "csr_prefix_scan", n_bodies, 48 + log);
+                self.dispatch(&encoder, "csr_prefix_swap", n_bodies);
+                log += 1;
+            }
+            self.dispatch(&encoder, "csr_prefix_finalize", n_bodies + 1);
+        }
         self.dispatch(&encoder, "csr_scatter_contacts", contact_dispatch);
         self.dispatch(&encoder, "csr_scatter_joints", n_joints);
         self.dispatch(&encoder, "csr_sort", awake_dispatch);
