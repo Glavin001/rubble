@@ -28,8 +28,9 @@ fn yaw_y(angle: f32) -> Quat {
 }
 
 fn add_brick(b: &mut SceneBuilder<'_>, x: f32, y: f32, z: f32, yaw: f32) -> u32 {
-    // Demo brick size [1, 0.5, 0.5] in Z-up → half extents (0.5, 0.25, 0.25) with Y = height.
-    let id = b.add_box(Vec3::new(x, y, z), Vec3::new(0.5, 0.25, 0.25), 1.0);
+    // Demo brick size [1, 0.5, 0.5] → half (0.5, 0.25, 0.25). three-avbd mass =
+    // volume×density = 0.25 (was 1.0, which stopped smash balls inside the wall).
+    let id = b.add_box(Vec3::new(x, y, z), Vec3::new(0.5, 0.25, 0.25), 0.25);
     let mut body = b.world_mut().body(id);
     body.orientation = yaw_y(yaw).to_array();
     b.world_mut().set_body(id, body);

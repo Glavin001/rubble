@@ -29,7 +29,8 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 8m. **BP sphere cull:** three-avbd testPair sphere test; box `params.w = length(half)`. Little Ring candidate change after face-reject; keep for parity.
 8p. **Large smash ball probe:** broadphase_query also O(1)-tests collider 0 and last if AABB-large (ring/wall balls). Do not skip inserting large *dynamics* — that left Columns with stragglers awake.
 8o. **Contact ping-pong:** swap halves of the 2× contact buffer instead of blitting prev each step (s[11]=current, s[8]=prev). Accuracy unchanged; blit was not the Ring bottleneck.
-8n. **Ring contact gap:** resting hist ~55% 4-point face manifolds (~110k contacts vs local oracle 45k). Wall Smash contact counts already match theirs and we beat their ms — Ring-specific. Next: stack-safe corner reduction, or solve/NP cost per contact.
+8q. **Brick mass:** three-avbd `mass = sx·sy·sz·density` → 0.25 for [1,0.5,0.5] bricks (we used 1.0). Heavier bricks lodged smash balls in the wall. Still ~86k Ring contacts after the fix.
+8n. **Ring contact gap:** ~97k contacts / ~30k pairs vs local oracle 45k (Wall Smash already matches). At lead=60 the ring is still mostly standing (only ~900/9k bricks below 1 m) — pair count is structural, not just points/manifold. Shallow-edge overrides reach ~45k but break Stack/Columns. Next: harder smash parity or stack-safe pair cull.
 9. **Unsupported three-avbd features** (cloth, soft, plastic, wind) stay out of rigid-body pass/fail gates.
 10. **Y-up vs Z-up:** keep engine Y-up; oracle fixtures convert `(x,y,z)→(x,z,y)`.
 
