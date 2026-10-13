@@ -21,11 +21,7 @@ fn main() {
         // Smash-peak paper scenes exceed 120 FPS on M3 with ~1e5–3e5 contacts; still reported.
         let stress = matches!(
             scene.info.name,
-            "Brick Ring (28k)"
-                | "Brick Ring (110k)"
-                | "Brick Walls (27k)"
-                | "Box Columns (100k)"
-                | "Box Pile (32k)"
+            "Brick Ring (28k)" | "Brick Ring (110k)" | "Brick Walls (27k)" | "Box Columns (100k)"
         );
         let steps = if stress { 20 } else { 40 };
         let Ok((mut world, info)) = engine_scenes::build_world(scene.info.name) else {
@@ -67,7 +63,7 @@ fn main() {
         };
         let c = world.last_counters();
         println!(
-            "{tag:6} {:28} bodies={:<6} awake={:<6} p50={:7.3}ms p95={:7.3}ms (~{:.0} FPS) colors={} contacts={}",
+            "{tag:6} {:28} bodies={:<6} awake={:<6} p50={:7.3}ms p95={:7.3}ms (~{:.0} FPS) colors={} cand={} contacts={} ov=0x{:x}",
             info.name,
             world.body_count(),
             c.awake_count,
@@ -75,7 +71,9 @@ fn main() {
             p95,
             fps,
             c.color_count,
-            c.contact_count
+            c.candidate_count,
+            c.contact_count,
+            c.overflow_flags
         );
     }
     if failed > 0 {
