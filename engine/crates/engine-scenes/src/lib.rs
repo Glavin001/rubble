@@ -631,7 +631,8 @@ pub fn all_scenes() -> Vec<SceneDef> {
             info: SceneInfo {
                 name: "Wall Smash (2k)",
                 group: "Paper scenes (GPU)",
-                iterations: 10,
+                // 8 iters: 120 FPS on M3 Max; 10 was ~8.5–9.5 ms p50 at smash peak.
+                iterations: 8,
                 capacity: WorldCapacity::small(),
             },
             build: wall_smash_2k,
