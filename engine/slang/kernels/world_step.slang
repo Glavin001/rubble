@@ -542,13 +542,9 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     }
 
     float cellSize = max(PARAMS.gridCellSize, 0.5);
-    // three-avbd: with cellSize ≥ 2·maxSmallRadius, centre±1 (27 cells) covers every
-    // sphere overlap. We still walk the querier AABB cell span clamped to 2 cells +
-    // halo (matches prior green 4k piles); do not shrink cellSize below 2·r.
-    int3 mn = int3(floor(box.mn / cellSize));
-    int3 mx = int3(floor(box.mx / cellSize));
-    mn = max(mn, mx - int3(1, 1, 1));
-    mx = min(mx, mn + int3(1, 1, 1));
+    // Cell is 2·maxSmallRadius, so the centre cell ±1 (27) covers every small overlap.
+    float3 center = 0.5 * (box.mn + box.mx);
+    int3 cc = int3(floor(center / cellSize));
 
     // Sleepers emit nothing: frozen pose needs no ground manifold, and 32k sleeper–
     // plane candidates dominated settled-pile ms. Awake neighbours still insert into
@@ -573,9 +569,9 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
     for (uint pi = 0u; pi < nPlanes; pi++)
         emitCandidate(i, ALOAD(gScratchAtomics[43u + pi]));
-    for (int z = mn.z - 1; z <= mx.z + 1; z++)
-    for (int y = mn.y - 1; y <= mx.y + 1; y++)
-    for (int x = mn.x - 1; x <= mx.x + 1; x++)
+    for (int z = cc.z - 1; z <= cc.z + 1; z++)
+    for (int y = cc.y - 1; y <= cc.y + 1; y++)
+    for (int x = cc.x - 1; x <= cc.x + 1; x++)
     {
         uint h = gridHash(x, y, z);
         uint cur = ALOAD(gConstraintIds[h]);
