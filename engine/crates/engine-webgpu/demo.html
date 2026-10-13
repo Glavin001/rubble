@@ -750,7 +750,7 @@ struct VsOut {
     statusEl.textContent = `showing ${bodies.length - 1} bodies, then timing…`;
     const wallMs = await benchWall();
     const phases = await profilePhases();
-    statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases} contacts ${last.contact} ov 0x${last.overflow.toString(16)}`;
+    statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases} contacts ${last.contact} candidates ${last.candidate} ov 0x${last.overflow.toString(16)}`;
     requestAnimationFrame(frame);
   </script>
 </body>
