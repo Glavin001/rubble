@@ -23,8 +23,9 @@ fn main() {
         ke += 0.5 * m * glam::Vec3::from_array(b.linear_vel).length_squared();
         if b.position[1] < 1.0 { below += 1; }
     }
+    let ball = &bodies[n as usize]; // ground + n dynamics; last dynamic
     println!(
-        "steps={steps} awake={} contacts={} cand={} y=[{ymin:.2},{ymax:.2}] below1m={below}/{n} ke={ke:.0}",
-        c.awake_count, c.contact_count, c.candidate_count
+        "steps={steps} awake={} contacts={} cand={} y=[{ymin:.2},{ymax:.2}] below1m={below}/{n} ke={ke:.0} ball_z={:.2} ball_vz={:.2}",
+        c.awake_count, c.contact_count, c.candidate_count, ball.position[2], ball.linear_vel[2]
     );
 }
