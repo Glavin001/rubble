@@ -818,16 +818,16 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
         float3 onBox = clamp(local, -half, half);
         float3 d = local - onBox;
         float dist = length(d);
+        // three-avbd sphereBox: geometric radius only; margin goes into C0 at emit.
         float rGeo = cb.params.x;
-        float r = rGeo + margin;
         float3 nLocal;
         if (dist > 1e-8)
         {
-            if (dist < r)
+            if (dist < rGeo)
             {
                 hit = true;
                 nLocal = d / dist;
-                pen = r - dist;
+                pen = rGeo - dist;
                 nrm = quatRotate(rotA, nLocal);
                 pA = transformPoint(posA, rotA, onBox);
                 pB = posB - nrm * rGeo;
@@ -848,7 +848,7 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
             else if (k == 1) { nLocal.y = s; onBox.y = s * hk; }
             else { nLocal.z = s; onBox.z = s * hk; }
             hit = true;
-            pen = r + dk;
+            pen = rGeo + dk;
             nrm = quatRotate(rotA, nLocal);
             pA = transformPoint(posA, rotA, onBox);
             pB = posB - nrm * rGeo;
@@ -863,15 +863,14 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
         float3 d = local - onBox;
         float dist = length(d);
         float rGeo = ca.params.x;
-        float r = rGeo + margin;
         float3 nLocal;
         if (dist > 1e-8)
         {
-            if (dist < r)
+            if (dist < rGeo)
             {
                 hit = true;
                 nLocal = d / dist;
-                pen = r - dist;
+                pen = rGeo - dist;
                 nrm = -quatRotate(rotB, nLocal);
                 pB = transformPoint(posB, rotB, onBox);
                 pA = posA + nrm * rGeo;
@@ -892,7 +891,7 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
             else if (k == 1) { nLocal.y = s; onBox.y = s * hk; }
             else { nLocal.z = s; onBox.z = s * hk; }
             hit = true;
-            pen = r + dk;
+            pen = rGeo + dk;
             nrm = -quatRotate(rotB, nLocal);
             pB = transformPoint(posB, rotB, onBox);
             pA = posA + nrm * rGeo;

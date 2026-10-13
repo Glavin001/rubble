@@ -108,9 +108,9 @@ bool boxTestAxis(
              + boxB.half.y * abs(dot(n, boxB.axis1))
              + boxB.half.z * abs(dot(n, boxB.axis2));
     float separation = distance - (rA + rB);
-    // three-avbd: keep pairs within collision margin so resting stacks don't drop
-    // all contacts on a 1e-4 gap (Jacobi soft contacts often sit slightly open).
-    if (separation > margin) return false;
+    // three-avbd testAxis: reject sep > 0. Margin belongs in C0 at emit only —
+    // keeping sep∈(0,margin] doubled Ring contact pairs vs the oracle.
+    if (separation > 0.0) return false;
     // Prefer strictly larger separation. On near-ties, keep the first axis (FACE_A
     // before FACE_B) so feature prefixes don't flip-flop on stacked boxes and kill warm-start.
     bool better = !bestValid || separation > bestSep + 1.0e-5;
@@ -300,7 +300,8 @@ void boxBuildEdgeContact(
         boxAddPt(m, mids, boxSupportPoint(boxA, normalAB), boxSupportPoint(boxB, -normalAB), feature);
 }
 
-// Returns manifold with normal A→B; count==0 if separated by more than `margin`.
+// Returns manifold with normal A→B; count==0 if separated (sep > 0). Margin is unused
+// in the SAT reject (kept for call-site parity); it is applied to C0 at emit.
 BoxManifold collideBoxesCached(BoxObb boxA, BoxObb boxB, float margin)
 {
     BoxManifold m;
@@ -374,7 +375,7 @@ BoxManifold collideBoxes(float3 cA, float4 qA, float3 hA, float3 cB, float4 qB, 
 }
 
 // Up to 8 corner contacts of an OBB against an infinite plane (normal pointing into free space).
-// Accepts corners within `margin` of the plane; points are geometric (margin goes into C0 at emit).
+// Geometric touch/penetration only (gap ≤ 0); margin goes into C0 at emit (three-avbd).
 BoxManifold collideBoxPlane(float3 cA, float4 qA, float3 hA, float3 planeN, float planeW, float margin)
 {
     BoxManifold m;
@@ -392,7 +393,7 @@ BoxManifold collideBoxPlane(float3 cA, float4 qA, float3 hA, float3 planeN, floa
             iz == 0 ? -hA.z : hA.z);
         float3 corner = transformPoint(cA, qA, local);
         float gap = dot(corner, pn) - planeW;
-        if (gap < margin)
+        if (gap <= 0.0)
         {
             float3 pB = corner - pn * gap; // on the geometric plane
             uint feature = uint(ix) | (uint(iy) << 1) | (uint(iz) << 2) | 0x04000000u;
