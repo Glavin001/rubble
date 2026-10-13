@@ -37,7 +37,7 @@ Do **not** gate on published M4 Max FINDINGS. Local Chrome numbers: `LOCAL_three
 |-------|----------------------|-------------------------|------|
 | Interactive demos | see `scene_fps` | — | ≤ 8.33 ms |
 | Wall Smash 2k | ~2.2 ms | 2.86 ms | **beat** |
-| Brick Ring 9k smash | (scene_fps) | 1.75 ms | chase |
+| Brick Ring 9k smash | ~3.3 ms | 1.75 ms | chase |
 | Brick Ring 28k smash | ~9.2 ms | — | `stress` |
 | Box Columns 100k settled | ~0 ms asleep | 3.50 ms | PASS |
 
