@@ -645,14 +645,18 @@ void contributeContact(
     // Ĉ = (1-α)·C0 + (C_geom - C_geom0) = C - α·C0 + (margin, 0, 0).
     // Using C - α·C0 alone drives compression at exact touch and explodes stacks.
     float3 cReg = C - alpha * C0 + float3(contactOffset, 0.0, 0.0);
-    float3 f = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
-    f = projectContactForce(f, c.friction);
+    float3 fRaw = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
+    float3 f = projectContactForce(fRaw, c.friction);
+    // At the friction bound the row is an inequality. Keeping k in the Hessian
+    // while the force is clamped makes dx ≈ μN/k, far below Coulomb μ g.
+    float kT = c.kT;
+    if (length(fRaw.yz) > length(f.yz) + 1e-4) kT = 0.0;
     Vec6 jN = jacobianLin(c.normal, r, isA);
     Vec6 jT1 = jacobianLin(c.tangent1, r, isA);
     Vec6 jT2 = jacobianLin(c.tangent2, r, isA);
     mat6AddOuter(A, jN, c.kN);
-    mat6AddOuter(A, jT1, c.kT);
-    mat6AddOuter(A, jT2, c.kT);
+    mat6AddOuter(A, jT1, kT);
+    mat6AddOuter(A, jT2, kT);
     vec6AddScaled(rhs, jN, f.x);
     vec6AddScaled(rhs, jT1, f.y);
     vec6AddScaled(rhs, jT2, f.z);
