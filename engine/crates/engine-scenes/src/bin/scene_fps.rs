@@ -65,15 +65,17 @@ fn main() {
         } else {
             "FAIL"
         };
+        let c = world.last_counters();
         println!(
-            "{tag:6} {:28} bodies={:<6} p50={:7.3}ms p95={:7.3}ms (~{:.0} FPS) colors={} contacts={}",
+            "{tag:6} {:28} bodies={:<6} awake={:<6} p50={:7.3}ms p95={:7.3}ms (~{:.0} FPS) colors={} contacts={}",
             info.name,
             world.body_count(),
+            c.awake_count,
             p50,
             p95,
             fps,
-            world.last_counters().color_count,
-            world.last_counters().contact_count
+            c.color_count,
+            c.contact_count
         );
     }
     if failed > 0 {
