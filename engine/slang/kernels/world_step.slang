@@ -597,21 +597,10 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_BOX)
     {
         // Inflated SAT (margin); clip still uses geometric OBBs via collideBoxes pad.
+        // collideBoxes already margin-SAT + clip; no second C&lt;margin filter.
         BoxManifold mf = collideBoxes(posA, rotA, ca.params.xyz, posB, rotB, cb.params.xyz, margin);
         if (mf.count > 0)
-        {
-            BoxManifold kept = mf;
-            kept.count = 0;
-            float3 mids[8];
-            for (int k = 0; k < mf.count; k++)
-            {
-                float C = dot(mf.normal, mf.pts[k].pB - mf.pts[k].pA);
-                if (C < margin)
-                    boxAddPt(kept, mids, mf.pts[k].pA, mf.pts[k].pB, mf.pts[k].feature);
-            }
-            kept.normal = mf.normal;
-            emitManifold(pair, ba, bb, ca, cb, kept, margin);
-        }
+            emitManifold(pair, ba, bb, ca, cb, mf, margin);
         return;
     }
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_PLANE)
