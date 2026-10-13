@@ -702,7 +702,8 @@ pub fn all_scenes() -> Vec<SceneDef> {
             info: SceneInfo {
                 name: "Box Pile (32k)",
                 group: "Scale tests (GPU)",
-                iterations: 8,
+                // Match 4k settle quality; three-avbd settled-pile bench uses 4 for speed only.
+                iterations: 10,
                 capacity: cap(65_536),
             },
             build: box_pile_32k,
@@ -815,7 +816,9 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     let mut params = AvbdParams::default();
     params.iterations = scene.info.iterations;
     // reuseContacts helps random Box Pile settle; on Metal it slows Brick Ring smash.
-    if scene.info.name.starts_with("Box Pile") {
+    if scene.info.name.starts_with("Box Pile")
+        && std::env::var("NO_REUSE").is_err()
+    {
         params.flags |= FLAG_REUSE_CONTACTS;
     }
     world.set_params(params);

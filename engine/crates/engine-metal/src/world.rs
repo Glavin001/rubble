@@ -420,6 +420,9 @@ impl MetalWorld {
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
         s[13] = 0; // any sleep candidate (set by extract)
         s[17] = self.steps_done; // step index for reuseContacts generation stamps
+        s[18] = 0; // reuseContacts hit count (narrowphase)
+        s[19] = 0; // reuse hash miss
+        s[20] = 0; // reuse generation gate reject
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
@@ -759,6 +762,14 @@ impl MetalWorld {
     /// Readback for diagnostics only.
     pub fn colliders_ptr(&self) -> *const Collider {
         self.colliders.contents() as *const Collider
+    }
+
+    /// Scratch atomics from the last completed step (slot = host_parity ^ 1).
+    pub fn scratch_u32(&self, index: usize) -> u32 {
+        let done = ((self.host_parity ^ 1) & 1) as usize;
+        unsafe {
+            *(self.scratch[done].contents() as *const u32).add(index)
+        }
     }
 }
 
