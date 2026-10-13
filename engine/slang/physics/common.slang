@@ -82,6 +82,8 @@ struct Joint
     float limitMin;
     float3 axisB;
     float limitMax;
+    float3 c0;
+    float _padC0;
     float lambda0;
     float lambda1;
     float lambda2;
@@ -418,10 +420,11 @@ void contributeContact(
 void contributeBallJoint(
     inout Mat6 A, inout Vec6 rhs,
     float3 bodyPos, float4 bodyRot, float3 localAnchor,
-    float3 C, float k, float3 lambda, bool isBodyA, float alpha)
+    float3 C, float3 C0, float k, float3 lambda, bool isBodyA, float alpha)
 {
     float3 r = quatRotate(bodyRot, localAnchor);
-    float3 Creg = (1.0 - alpha) * C;
+    // demo3d: C -= C0 * alpha  (infinite-stiffness stabilization)
+    float3 Creg = C - alpha * C0;
     for (int axis = 0; axis < 3; axis++)
     {
         float3 n = float3(axis == 0 ? 1.0 : 0.0, axis == 1 ? 1.0 : 0.0, axis == 2 ? 1.0 : 0.0);

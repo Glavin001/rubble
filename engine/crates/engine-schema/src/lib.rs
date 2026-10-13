@@ -214,6 +214,9 @@ pub struct Joint {
     pub limit_min: f32,
     pub axis_b: [f32; 3],
     pub limit_max: f32,
+    /// Constraint value at beginning of timestep (demo3d `C0Lin`).
+    pub c0: [f32; 3],
+    pub _pad_c0: f32,
     pub lambda: [f32; 6],
     pub k: [f32; 6],
 }

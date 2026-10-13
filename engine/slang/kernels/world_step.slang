@@ -22,6 +22,10 @@ RWStructuredBuffer<uint> gColorCounts;
 RWStructuredBuffer<float3> gHullVerts;
 RWStructuredBuffer<uint> gEvents;          // ring: type, id, ...
 RWStructuredBuffer<uint> gCcdFlags;        // per-body fast-motion flags
+// Binding order must match engine-metal `bind_all` (declaration order → Metal [[buffer(N)]]).
+RWStructuredBuffer<uint> gScratchAtomics;
+RWStructuredBuffer<uint> gPassUniform;     // length-1 view: host binds offset into 0..63 table
+RWStructuredBuffer<uint> gIndirectArgs;    // Metal MTLDispatchThreadgroupsIndirectArguments × maxColors
 
 static const uint EVENT_SLEEP = 1u;
 static const uint EVENT_WAKE = 2u;
@@ -30,8 +34,6 @@ static const uint EVENT_OVERFLOW = 4u;
 
 bool bodyIsDynamic(BodyState b) { return b.invMass > 0.0 && (b.flags & BODY_DYNAMIC) != 0u; }
 bool bodyIsSleeping(BodyState b) { return (b.flags & BODY_SLEEPING) != 0u; }
-
-RWStructuredBuffer<uint> gScratchAtomics;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -596,6 +598,38 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// demo3d Joint::initialize — store C0, decay λ/k (Eq. 19).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void warmstart_joints(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].jointCount;
+    if (i >= n) return;
+    AvbdParams p = gParams[0];
+    Joint j = gJoints[i];
+    BodyState a = gBodies[j.bodyA];
+    BodyState b = gBodies[j.bodyB];
+    float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
+    float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
+    j.c0 = wa - wb;
+    j.lambda0 *= p.alpha * p.gamma;
+    j.lambda1 *= p.alpha * p.gamma;
+    j.lambda2 *= p.alpha * p.gamma;
+    j.lambda3 *= p.alpha * p.gamma;
+    j.lambda4 *= p.alpha * p.gamma;
+    j.lambda5 *= p.alpha * p.gamma;
+    float kMin = p.kStart;
+    float kMax = max(j.stiffness, kMin);
+    j.k0 = clamp(j.k0 * p.gamma, kMin, kMax);
+    j.k1 = clamp(j.k1 * p.gamma, kMin, kMax);
+    j.k2 = clamp(j.k2 * p.gamma, kMin, kMax);
+    j.k3 = clamp(j.k3 * p.gamma, kMin, kMax);
+    j.k4 = clamp(j.k4 * p.gamma, kMin, kMax);
+    j.k5 = clamp(j.k5 * p.gamma, kMin, kMax);
+    gJoints[i] = j;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void persist_contacts(uint3 tid : SV_DispatchThreadID)
@@ -633,44 +667,167 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// --- CSR adjacency (three-avbd: degree → scan → scatter → sort) ----------------------------
+// Constraint id: [0, jointCount) = joints; jointCount + ci = contact ci.
+// gConstraintIndex[0..bodyCount]: degree then exclusive starts; [bodyCount] = total.
+// gBodyColor reused as fill cursors during scatter (init_colors overwrites afterward).
+// gConstraintIds holds the packed adjacency list (after broadphase hash is done).
+
+uint2 constraintEndpoints(uint id)
+{
+    uint nJ = gCounters[0].jointCount;
+    if (id < nJ)
+        return uint2(gJoints[id].bodyA, gJoints[id].bodyB);
+    Contact c = gContacts[id - nJ];
+    return uint2(gColliders[c.colliderA].body, gColliders[c.colliderB].body);
+}
+
+void csrCountEndpoint(uint body)
+{
+    if (!bodyIsDynamic(gBodies[body])) return;
+    InterlockedAdd(gConstraintIndex[body], 1);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_clear(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].bodyCount + 1u;
+    if (i < n) gConstraintIndex[i] = 0;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_degree_contacts(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].contactCount;
+    if (i >= n) return;
+    Contact c = gContacts[i];
+    if (c.alive == 0) return;
+    uint2 e = constraintEndpoints(gCounters[0].jointCount + i);
+    csrCountEndpoint(e.x);
+    csrCountEndpoint(e.y);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_degree_joints(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].jointCount;
+    if (i >= n) return;
+    uint2 e = constraintEndpoints(i);
+    csrCountEndpoint(e.x);
+    csrCountEndpoint(e.y);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void csr_prefix(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x != 0) return;
+    uint n = gCounters[0].bodyCount;
+    uint sum = 0;
+    for (uint i = 0; i < n; i++)
+    {
+        uint d = gConstraintIndex[i];
+        gConstraintIndex[i] = sum;
+        gBodyColor[i] = sum; // fill cursor
+        sum += d;
+    }
+    gConstraintIndex[n] = sum;
+}
+
+void csrFillEndpoint(uint body, uint id)
+{
+    if (!bodyIsDynamic(gBodies[body])) return;
+    uint slot;
+    InterlockedAdd(gBodyColor[body], 1, slot);
+    gConstraintIds[slot] = id;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_scatter_contacts(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].contactCount;
+    if (i >= n) return;
+    Contact c = gContacts[i];
+    if (c.alive == 0) return;
+    uint id = gCounters[0].jointCount + i;
+    uint2 e = constraintEndpoints(id);
+    csrFillEndpoint(e.x, id);
+    csrFillEndpoint(e.y, id);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_scatter_joints(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].jointCount;
+    if (i >= n) return;
+    uint2 e = constraintEndpoints(i);
+    csrFillEndpoint(e.x, i);
+    csrFillEndpoint(e.y, i);
+}
+
+// Deterministic adjacency order (three-avbd sortAdjacency) — joints first by id, then contacts.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_sort(uint3 tid : SV_DispatchThreadID)
+{
+    uint b = tid.x;
+    uint n = gCounters[0].bodyCount;
+    if (b >= n) return;
+    uint lo = gConstraintIndex[b];
+    uint hi = gConstraintIndex[b + 1u];
+    uint nJ = gCounters[0].jointCount;
+    for (uint i = lo + 1u; i < hi; i++)
+    {
+        uint id = gConstraintIds[i];
+        uint key0 = id < nJ ? 0u : 1u;
+        uint key1 = id < nJ ? id : (id - nJ);
+        uint j = i;
+        while (j > lo)
+        {
+            uint prev = gConstraintIds[j - 1u];
+            uint pk0 = prev < nJ ? 0u : 1u;
+            uint pk1 = prev < nJ ? prev : (prev - nJ);
+            if (key0 > pk0 || (key0 == pk0 && key1 >= pk1)) break;
+            gConstraintIds[j] = prev;
+            j--;
+        }
+        gConstraintIds[j] = id;
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void color_bodies(uint3 tid : SV_DispatchThreadID)
 {
-    // Jones-Plassmann style on awake bodies using contact graph (persistent body ids).
+    // Jones-Plassmann on awake bodies; neighbours from CSR (not O(contacts)).
+    // Round index comes from gPassUniform[0] (host binds unique offset per dispatch).
     uint li = tid.x;
     uint awakeN = gCounters[0].awakeCount;
     if (li >= awakeN) return;
     uint body = gAwakeList[li];
-    uint round = gScratchAtomics[4];
+    uint round = gPassUniform[0];
     uint prio = body * 0x9e3779b9u + round * 0x85ebca6bu;
     prio ^= prio >> 16;
 
+    if (gBodyColor[body] != 0xFFFFFFFFu) return;
+
     bool blocked = false;
-    uint nContacts = gCounters[0].contactCount;
-    for (uint ci = 0; ci < nContacts; ci++)
+    uint lo = gConstraintIndex[body];
+    uint hi = gConstraintIndex[body + 1u];
+    for (uint e = lo; e < hi && !blocked; e++)
     {
-        Contact c = gContacts[ci];
-        if (c.alive == 0) continue;
-        uint ba = gColliders[c.colliderA].body;
-        uint bb = gColliders[c.colliderB].body;
-        uint other = 0xFFFFFFFFu;
-        if (ba == body) other = bb;
-        else if (bb == body) other = ba;
-        else continue;
-        if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
-        if (gBodyColor[other] != 0xFFFFFFFFu) continue; // already colored
-        uint op = other * 0x9e3779b9u + round * 0x85ebca6bu;
-        op ^= op >> 16;
-        if (op > prio || (op == prio && other > body)) { blocked = true; break; }
-    }
-    // Joint edges
-    uint nJoints = gCounters[0].jointCount;
-    for (uint ji = 0; ji < nJoints && !blocked; ji++)
-    {
-        Joint j = gJoints[ji];
-        uint other = j.bodyA == body ? j.bodyB : (j.bodyB == body ? j.bodyA : 0xFFFFFFFFu);
-        if (other == 0xFFFFFFFFu) continue;
+        uint2 ends = constraintEndpoints(gConstraintIds[e]);
+        uint other = ends.x == body ? ends.y : ends.x;
         if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
         if (gBodyColor[other] != 0xFFFFFFFFu) continue;
         uint op = other * 0x9e3779b9u + round * 0x85ebca6bu;
@@ -678,11 +835,25 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
         if (op > prio || (op == prio && other > body)) blocked = true;
     }
 
-    if (!blocked && gBodyColor[body] == 0xFFFFFFFFu)
+    if (!blocked)
     {
         gBodyColor[body] = round;
         InterlockedMax(gCounters[0].colorCount, round + 1);
     }
+}
+
+// Write Metal indirect threadgroup counts for each colour (0 groups ⇒ skipped).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void write_color_args(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = tid.x;
+    if (c >= 64u) return;
+    uint n = gColorCounts[c];
+    uint groups = n == 0u ? 0u : (n + 63u) / 64u;
+    gIndirectArgs[c * 3u + 0u] = groups;
+    gIndirectArgs[c * 3u + 1u] = 1u;
+    gIndirectArgs[c * 3u + 2u] = 1u;
 }
 
 [shader("compute")]
@@ -715,7 +886,8 @@ void pack_color_lists(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void solve_primal_color(uint3 tid : SV_DispatchThreadID)
 {
-    uint color = gScratchAtomics[5];
+    // Colour from gPassUniform (unique bind offset per dispatch — three-avbd pass constant).
+    uint color = gPassUniform[0];
     uint count = gColorCounts[color];
     uint li = tid.x;
     if (li >= count) return;
@@ -758,74 +930,70 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID)
     rhs.v[4] = (inertia.y / dt2) * dangTarget.y;
     rhs.v[5] = (inertia.z / dt2) * dangTarget.z;
 
-    uint nContacts = gCounters[0].contactCount;
-    for (uint ci = 0; ci < nContacts; ci++)
+    uint nJ = gCounters[0].jointCount;
+    uint alo = gConstraintIndex[bodyIdx];
+    uint ahi = gConstraintIndex[bodyIdx + 1u];
+    for (uint e = alo; e < ahi; e++)
     {
-        Contact c = gContacts[ci];
-        if (c.alive == 0) continue;
-        uint ba = gColliders[c.colliderA].body;
-        uint bb = gColliders[c.colliderB].body;
-        if (ba != bodyIdx && bb != bodyIdx) continue;
-        bool isA = ba == bodyIdx;
-        // Refresh penetration
-        BodyState bo = gBodies[isA ? bb : ba];
-        Collider ca = gColliders[c.colliderA];
-        Collider cb = gColliders[c.colliderB];
-        float3 wa = transformPoint(gBodies[ba].position, gBodies[ba].orientation, c.anchorA);
-        float3 wb = transformPoint(gBodies[bb].position, gBodies[bb].orientation, c.anchorB);
-        c.penetration = dot(c.normal, wb - wa);
-        contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation);
-    }
-
-    uint nJoints = gCounters[0].jointCount;
-    for (uint ji = 0; ji < nJoints; ji++)
-    {
-        Joint j = gJoints[ji];
-        if (j.bodyA != bodyIdx && j.bodyB != bodyIdx) continue;
-        bool isA = j.bodyA == bodyIdx;
-        BodyState ba = gBodies[j.bodyA];
-        BodyState bb = gBodies[j.bodyB];
-        float3 wa = transformPoint(ba.position, ba.orientation, j.localAnchorA);
-        float3 wb = transformPoint(bb.position, bb.orientation, j.localAnchorB);
-        float3 C = wa - wb; // shared residual
-        float3 local = isA ? j.localAnchorA : j.localAnchorB;
-        float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
-        float k = max(j.stiffness, p.kStart);
-        contributeBallJoint(A, rhs, b.position, b.orientation, local, C, k, lam, isA, p.alpha);
-        if (j.jointType == JOINT_FIXED || j.jointType == JOINT_HINGE || j.jointType == JOINT_D6)
+        uint id = gConstraintIds[e];
+        if (id >= nJ)
         {
-            BodyState other = isA ? bb : ba;
-            float3 axis = isA ? j.axisA : j.axisB;
-            float3 worldAxis = quatRotate(b.orientation, axis);
-            float3 otherAxis = quatRotate(other.orientation, isA ? j.axisB : j.axisA);
-            float3 Cang = cross(worldAxis, otherAxis);
-            for (int ax = 0; ax < 3; ax++)
-            {
-                if (j.jointType == JOINT_HINGE && ax == 0) continue;
-                Vec6 jj = vec6Zero();
-                jj.v[3 + ax] = isA ? 1.0 : -1.0;
-                float f = k * (1.0 - p.alpha) * Cang[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
-                mat6AddOuter(A, jj, k);
-                vec6AddScaled(rhs, jj, f);
-            }
+            uint ci = id - nJ;
+            Contact c = gContacts[ci];
+            if (c.alive == 0) continue;
+            uint ba = gColliders[c.colliderA].body;
+            uint bb = gColliders[c.colliderB].body;
+            bool isA = ba == bodyIdx;
+            float3 wa = transformPoint(gBodies[ba].position, gBodies[ba].orientation, c.anchorA);
+            float3 wb = transformPoint(gBodies[bb].position, gBodies[bb].orientation, c.anchorB);
+            c.penetration = dot(c.normal, wb - wa);
+            contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation);
         }
-        if (j.jointType == JOINT_SLIDER)
+        else
         {
-            // Lock two axes perpendicular to slide axis (simplified).
-            float3 axis = normalize(j.axisA);
-            float3 mid = 0.5 * (wa + wb);
-            float3 d = wa - wb;
-            float3 radial = d - axis * dot(d, axis);
-            for (int ax = 0; ax < 3; ax++)
+            Joint j = gJoints[id];
+            bool isA = j.bodyA == bodyIdx;
+            BodyState ba = gBodies[j.bodyA];
+            BodyState bb = gBodies[j.bodyB];
+            float3 wa = transformPoint(ba.position, ba.orientation, j.localAnchorA);
+            float3 wb = transformPoint(bb.position, bb.orientation, j.localAnchorB);
+            float3 C = wa - wb;
+            float3 local = isA ? j.localAnchorA : j.localAnchorB;
+            float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
+            float k = max(j.k0, p.kStart);
+            contributeBallJoint(A, rhs, b.position, b.orientation, local, C, j.c0, k, lam, isA, p.alpha);
+            if (j.jointType == JOINT_FIXED || j.jointType == JOINT_HINGE || j.jointType == JOINT_D6)
             {
-                float3 n = float3(ax == 0 ? 1.0 : 0.0, ax == 1 ? 1.0 : 0.0, ax == 2 ? 1.0 : 0.0);
-                if (abs(dot(n, axis)) > 0.9) continue;
-                Vec6 jj = jacobianLin(n, isA ? (wa - b.position) : (wb - b.position), !isA);
-                float f = k * (1.0 - p.alpha) * radial[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
-                mat6AddOuter(A, jj, k);
-                vec6AddScaled(rhs, jj, f);
+                BodyState other = isA ? bb : ba;
+                float3 axis = isA ? j.axisA : j.axisB;
+                float3 worldAxis = quatRotate(b.orientation, axis);
+                float3 otherAxis = quatRotate(other.orientation, isA ? j.axisB : j.axisA);
+                float3 Cang = cross(worldAxis, otherAxis);
+                for (int ax = 0; ax < 3; ax++)
+                {
+                    if (j.jointType == JOINT_HINGE && ax == 0) continue;
+                    Vec6 jj = vec6Zero();
+                    jj.v[3 + ax] = isA ? 1.0 : -1.0;
+                    float f = k * (1.0 - p.alpha) * Cang[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
+                    mat6AddOuter(A, jj, k);
+                    vec6AddScaled(rhs, jj, f);
+                }
             }
-            mid = mid; // silence unused in some targets
+            if (j.jointType == JOINT_SLIDER)
+            {
+                float3 axis = normalize(j.axisA);
+                float3 d = wa - wb;
+                float3 radial = d - axis * dot(d, axis);
+                for (int ax = 0; ax < 3; ax++)
+                {
+                    float3 n = float3(ax == 0 ? 1.0 : 0.0, ax == 1 ? 1.0 : 0.0, ax == 2 ? 1.0 : 0.0);
+                    if (abs(dot(n, axis)) > 0.9) continue;
+                    Vec6 jj = jacobianLin(n, isA ? (wa - b.position) : (wb - b.position), !isA);
+                    float f = k * (1.0 - p.alpha) * radial[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
+                    mat6AddOuter(A, jj, k);
+                    vec6AddScaled(rhs, jj, f);
+                }
+            }
         }
     }
 
@@ -896,12 +1064,13 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
         float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
         float3 C = wa - wb; // shared with primal
-        float k = max(j.stiffness, p.kStart);
+        float k = max(j.k0, p.kStart);
         float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
-        float3 Creg = (1.0 - p.alpha) * C;
+        // demo3d dual: C_hat = C - alpha * C0
+        float3 Creg = C - p.alpha * j.c0;
         lam = k * Creg + lam;
         j.lambda0 = lam.x; j.lambda1 = lam.y; j.lambda2 = lam.z;
-        j.k0 = min(k + p.betaLin * length(Creg), p.kMaxN);
+        j.k0 = min(k + p.betaLin * length(Creg), min(j.stiffness, p.kMaxN));
         j.k1 = j.k0; j.k2 = j.k0;
         gJoints[i] = j;
     }

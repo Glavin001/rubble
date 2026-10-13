@@ -80,6 +80,8 @@ public struct Joint
     float limitMin;
     float3 axisB;
     float limitMax;
+    float3 c0;
+    float _padC0;
     float lambda0;
     float lambda1;
     float lambda2;

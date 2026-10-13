@@ -35,6 +35,10 @@ pub struct MetalWorld {
     events: Buffer,
     ccd_flags: Buffer,
     scratch: Buffer,
+    /// Prefilled 0..63; each color/round dispatch binds a 4-byte offset (three-avbd pass const).
+    pass_table: Buffer,
+    /// Metal MTLDispatchThreadgroupsIndirectArguments × max_colors.
+    indirect_args: Buffer,
 
     body_count: u32,
     collider_count: u32,
@@ -68,10 +72,10 @@ impl MetalWorld {
         let awake_list = alloc_u32(d, capacity.max_bodies);
         let body_color = alloc_u32(d, capacity.max_bodies);
         let constraint_index = alloc_u32(d, capacity.max_bodies + 1);
-        // Grid hash heads live in constraint_ids[0..32768); need at least that many.
+        // Grid hash heads reuse [0..32768); CSR adjacency needs 2×(contacts+joints) after.
         let constraint_ids = alloc_u32(
             d,
-            (capacity.max_contacts + capacity.max_joints).max(32768),
+            (2 * (capacity.max_contacts + capacity.max_joints)).max(32768),
         );
         let color_lists = alloc_u32(d, capacity.max_bodies * capacity.max_colors);
         let color_offsets = alloc_u32(d, capacity.max_colors);
@@ -80,6 +84,14 @@ impl MetalWorld {
         let events = alloc_u32(d, 65536);
         let ccd_flags = alloc_u32(d, capacity.max_bodies);
         let scratch = alloc_u32(d, 64);
+        let pass_table = alloc_u32(d, 64);
+        {
+            let t = unsafe { std::slice::from_raw_parts_mut(pass_table.contents() as *mut u32, 64) };
+            for (i, v) in t.iter_mut().enumerate() {
+                *v = i as u32;
+            }
+        }
+        let indirect_args = alloc_u32(d, capacity.max_colors.max(64) * 3);
 
         // Default material
         let mats = unsafe { std::slice::from_raw_parts_mut(materials.contents() as *mut Material, 64) };
@@ -124,6 +136,8 @@ impl MetalWorld {
             events,
             ccd_flags,
             scratch,
+            pass_table,
+            indirect_args,
             body_count: 0,
             collider_count: 0,
             joint_count: 0,
@@ -273,6 +287,9 @@ impl MetalWorld {
         encoder.set_buffer(19, Some(&self.events), 0);
         encoder.set_buffer(20, Some(&self.ccd_flags), 0);
         encoder.set_buffer(21, Some(&self.scratch), 0);
+        // Default pass uniform = slot 0; dispatch_pass overrides with an offset.
+        encoder.set_buffer(22, Some(&self.pass_table), 0);
+        encoder.set_buffer(23, Some(&self.indirect_args), 0);
     }
 
     fn dispatch(&self, encoder: &ComputeCommandEncoderRef, name: &str, threads: u64) {
@@ -283,6 +300,38 @@ impl MetalWorld {
         let tg = MTLSize::new(w, 1, 1);
         let grid = MTLSize::new(threads.max(1), 1, 1);
         encoder.dispatch_threads(grid, tg);
+    }
+
+    /// Bind gPassUniform to pass_table[pass_idx] so each encoded dispatch sees a distinct value.
+    fn dispatch_pass(
+        &self,
+        encoder: &ComputeCommandEncoderRef,
+        name: &str,
+        threads: u64,
+        pass_idx: u32,
+    ) {
+        let pso = self.pipelines.get(name).expect("pipeline");
+        encoder.set_compute_pipeline_state(pso);
+        self.bind_all(encoder);
+        encoder.set_buffer(22, Some(&self.pass_table), (pass_idx as u64) * 4);
+        let w = pso.thread_execution_width();
+        let tg = MTLSize::new(w, 1, 1);
+        let grid = MTLSize::new(threads.max(1), 1, 1);
+        encoder.dispatch_threads(grid, tg);
+    }
+
+    #[allow(dead_code)] // retained for zero-sync path once indirect hazards are validated
+    fn dispatch_color_indirect(&self, encoder: &ComputeCommandEncoderRef, color: u32) {
+        let pso = self.pipelines.get("solve_primal_color").expect("pipeline");
+        encoder.set_compute_pipeline_state(pso);
+        self.bind_all(encoder);
+        encoder.set_buffer(22, Some(&self.pass_table), (color as u64) * 4);
+        let tg = MTLSize::new(64, 1, 1);
+        encoder.dispatch_thread_groups_indirect(
+            &self.indirect_args,
+            (color as u64) * 12,
+            tg,
+        );
     }
 
     fn write_scratch(&self) {
@@ -324,98 +373,125 @@ impl MetalWorld {
             *(self.counters.contents() as *mut StepCounters) = c;
             *(self.params_buf.contents() as *mut AvbdParams) = self.params;
         }
-        // clear color counts
-        let cc = unsafe {
-            std::slice::from_raw_parts_mut(
-                self.color_counts.contents() as *mut u32,
-                self.capacity.max_colors as usize,
-            )
-        };
-        for v in cc.iter_mut() {
-            *v = 0;
-        }
     }
 
     pub fn step_gpu(&mut self) -> Result<StepCounters, ExecError> {
+        let wall_t0 = std::time::Instant::now();
         let cpu_t0 = std::time::Instant::now();
         self.sync_counters_host_to_gpu(true);
         self.write_scratch();
+        // Avoid O(max_colors) host clears on huge capacities — only touch used slots.
+        {
+            let n = self.capacity.max_colors.min(64) as usize;
+            let cc = unsafe {
+                std::slice::from_raw_parts_mut(self.color_counts.contents() as *mut u32, n)
+            };
+            for v in cc.iter_mut() {
+                *v = 0;
+            }
+        }
 
         let cb = self.device.queue.new_command_buffer();
         let encoder = cb.new_compute_command_encoder();
 
         let n_bodies = self.body_count.max(1) as u64;
         let n_cols = self.collider_count.max(1) as u64;
+        let n_joints = self.joint_count.max(1) as u64;
+        // Size transient dispatches from last step (three-avbd argsPrev pattern).
+        let prev_contacts = self.last_counters.contact_count.max(256) as u64;
+        let narrow_n = (self.capacity.max_candidates as u64)
+            .min(n_cols.saturating_mul(64))
+            .max(prev_contacts.saturating_mul(2))
+            .max(1);
+        let contact_dispatch = (self.capacity.max_contacts as u64)
+            .min(prev_contacts.saturating_mul(2).max(n_cols.saturating_mul(8)))
+            .max(1);
 
         self.dispatch(&encoder, "apply_commands", self.command_count.max(1) as u64);
-        // Inertia recompute only after reparent/spawn bursts (scratch[6] != 0).
         let dirty = unsafe { *(self.scratch.contents() as *const u32).add(6) };
         if dirty != 0 || self.command_count > 0 {
             self.dispatch(&encoder, "recompute_inertia", n_bodies);
         }
         self.dispatch(&encoder, "predict_bodies", n_bodies);
         self.dispatch(&encoder, "build_aabbs", n_cols);
-        // Broadphase: clear hash → insert → query (separate kernels; no CPU mid-encoder writes)
         self.dispatch(&encoder, "broadphase_clear", 32768);
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
-        // narrowphase: over-dispatch; kernel early-outs on candidateCount
-        self.dispatch(
-            &encoder,
-            "narrowphase",
-            (self.capacity.max_candidates as u64)
-                .min(n_cols.saturating_mul(64))
-                .max(1),
-        );
-        self.dispatch(
-            &encoder,
-            "persist_contacts",
-            (self.capacity.max_contacts as u64).min(n_cols.saturating_mul(8)).max(1),
-        );
+        self.dispatch(&encoder, "narrowphase", narrow_n);
+        self.dispatch(&encoder, "persist_contacts", contact_dispatch);
+        self.dispatch(&encoder, "warmstart_joints", n_joints);
+
+        // CSR adjacency (three-avbd degree → scan → scatter → sort). Overwrites grid hash.
+        self.dispatch(&encoder, "csr_clear", n_bodies + 1);
+        self.dispatch(&encoder, "csr_degree_contacts", contact_dispatch);
+        self.dispatch(&encoder, "csr_degree_joints", n_joints);
+        self.dispatch(&encoder, "csr_prefix", 1);
+        self.dispatch(&encoder, "csr_scatter_contacts", contact_dispatch);
+        self.dispatch(&encoder, "csr_scatter_joints", n_joints);
+        self.dispatch(&encoder, "csr_sort", n_bodies);
+
         self.dispatch(&encoder, "build_awake_list", n_bodies);
         self.dispatch(&encoder, "init_colors", n_bodies);
 
-        // Color rounds (up to max_colors)
-        for round in 0..self.capacity.max_colors.min(32) {
-            let s = unsafe { std::slice::from_raw_parts_mut(self.scratch.contents() as *mut u32, 64) };
-            s[4] = round;
-            self.dispatch(&encoder, "color_bodies", n_bodies);
+        // Colour rounds: distinct pass_table offsets (NOT mid-encoder scratch rewrites).
+        // Cap grows from last frame's colour count (three-avbd colour-cap heuristic).
+        let color_rounds = (self.last_counters.color_count.saturating_add(3))
+            .max(8)
+            .min(self.capacity.max_colors.min(32));
+        for round in 0..color_rounds {
+            self.dispatch_pass(&encoder, "color_bodies", n_bodies, round);
         }
         self.dispatch(&encoder, "pack_color_lists", n_bodies);
-
-        // Solve iterations × colors
-        for _iter in 0..self.params.iterations {
-            for color in 0..self.capacity.max_colors.min(32) {
-                let s =
-                    unsafe { std::slice::from_raw_parts_mut(self.scratch.contents() as *mut u32, 64) };
-                s[5] = color;
-                self.dispatch(&encoder, "solve_primal_color", n_bodies);
-            }
-            self.dispatch(
-                &encoder,
-                "solve_dual",
-                self.capacity
-                    .max_contacts
-                    .max(self.capacity.max_joints)
-                    .max(1) as u64,
-            );
-        }
-
-        self.dispatch(&encoder, "extract_velocity_sleep", n_bodies);
-
-        if self.enable_ccd {
-            self.dispatch(&encoder, "ccd_classify", n_bodies);
-            self.dispatch(&encoder, "ccd_sweep", n_cols);
-        }
+        self.dispatch(&encoder, "write_color_args", 64);
 
         encoder.end_encoding();
-        let cpu_submit = cpu_t0.elapsed().as_secs_f64() * 1000.0;
-
-        let gpu_t0 = std::time::Instant::now();
+        let mut cpu_submit = cpu_t0.elapsed().as_secs_f64() * 1000.0;
         cb.commit();
-        // Diagnostics / tests may wait; hot game path can omit wait and use shared events.
         cb.wait_until_completed();
-        let gpu_ms = gpu_t0.elapsed().as_secs_f64() * 1000.0;
+
+        // Mid-step sync (temporary): read colour buckets so solve dispatches match three-avbd
+        // argsColors sizing. Indirect-only path is preferred once Metal hazard tracking is proven.
+        let counters_mid = unsafe { *(self.counters.contents() as *const StepCounters) };
+        let color_n = counters_mid
+            .color_count
+            .max(1)
+            .min(self.capacity.max_colors.min(32));
+        let color_counts = unsafe {
+            std::slice::from_raw_parts(
+                self.color_counts.contents() as *const u32,
+                color_n as usize,
+            )
+        }
+        .to_vec();
+
+        let cpu_t1 = std::time::Instant::now();
+        let cb2 = self.device.queue.new_command_buffer();
+        let encoder2 = cb2.new_compute_command_encoder();
+        let dual_n = contact_dispatch.max(n_joints).max(counters_mid.contact_count.max(1) as u64);
+        for _iter in 0..self.params.iterations {
+            for color in 0..color_n {
+                let n = color_counts[color as usize] as u64;
+                if n == 0 {
+                    continue;
+                }
+                self.dispatch_pass(&encoder2, "solve_primal_color", n, color);
+            }
+            self.dispatch(&encoder2, "solve_dual", dual_n);
+        }
+
+        self.dispatch(&encoder2, "extract_velocity_sleep", n_bodies);
+
+        if self.enable_ccd {
+            self.dispatch(&encoder2, "ccd_classify", n_bodies);
+            self.dispatch(&encoder2, "ccd_sweep", n_cols);
+        }
+
+        encoder2.end_encoding();
+        cpu_submit += cpu_t1.elapsed().as_secs_f64() * 1000.0;
+        cb2.commit();
+        cb2.wait_until_completed();
+        // Wall-clock includes both GPU phases (collision/CSR + solve).
+        let gpu_ms = wall_t0.elapsed().as_secs_f64() * 1000.0;
 
         let counters = unsafe { *(self.counters.contents() as *const StepCounters) };
         self.last_counters = counters;
@@ -669,6 +745,8 @@ impl<'a> SceneBuilder<'a> {
             limit_min: 0.0,
             axis_b: [0.0, 1.0, 0.0],
             limit_max: 0.0,
+            c0: [0.0; 3],
+            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
         })
@@ -688,6 +766,8 @@ impl<'a> SceneBuilder<'a> {
             limit_min: 0.0,
             axis_b: [0.0, 1.0, 0.0],
             limit_max: 0.0,
+            c0: [0.0; 3],
+            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e5; 6],
         })
@@ -714,6 +794,8 @@ impl<'a> SceneBuilder<'a> {
             limit_min: -1.0,
             axis_b: axis.to_array(),
             limit_max: 1.0,
+            c0: [0.0; 3],
+            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
         })
@@ -740,6 +822,8 @@ impl<'a> SceneBuilder<'a> {
             limit_min: -std::f32::consts::PI,
             axis_b: axis.to_array(),
             limit_max: std::f32::consts::PI,
+            c0: [0.0; 3],
+            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
         })
@@ -766,6 +850,8 @@ impl<'a> SceneBuilder<'a> {
             limit_min: -std::f32::consts::PI,
             axis_b: axis.to_array(),
             limit_max: std::f32::consts::PI,
+            c0: [0.0; 3],
+            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
         })
