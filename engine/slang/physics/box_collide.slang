@@ -299,13 +299,11 @@ void boxBuildEdgeContact(
 }
 
 // Returns manifold with normal A→B; count==0 if separated by more than `margin`.
-BoxManifold collideBoxes(float3 cA, float4 qA, float3 hA, float3 cB, float4 qB, float3 hB, float margin)
+BoxManifold collideBoxesCached(BoxObb boxA, BoxObb boxB, float margin)
 {
     BoxManifold m;
     m.normal = float3(0, 1, 0);
     m.count = 0;
-    BoxObb boxA = makeBoxObb(cA, qA, hA);
-    BoxObb boxB = makeBoxObb(cB, qB, hB);
     float3 delta = boxB.center - boxA.center;
 
     bool faceValid = false;
@@ -368,6 +366,11 @@ BoxManifold collideBoxes(float3 cA, float4 qA, float3 hA, float3 cB, float4 qB, 
     else
         boxBuildFaceManifold(boxA, boxB, false, bestIB, bestN, m);
     return m;
+}
+
+BoxManifold collideBoxes(float3 cA, float4 qA, float3 hA, float3 cB, float4 qB, float3 hB, float margin)
+{
+    return collideBoxesCached(makeBoxObb(cA, qA, hA), makeBoxObb(cB, qB, hB), margin);
 }
 
 // Up to 8 corner contacts of an OBB against an infinite plane (normal pointing into free space).

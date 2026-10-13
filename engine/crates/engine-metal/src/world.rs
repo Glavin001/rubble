@@ -34,6 +34,7 @@ pub struct MetalWorld {
     hull_verts: Buffer,
     events: Buffer,
     ccd_flags: Buffer,
+    world_obbs: Buffer,
     scratch: Buffer,
     /// Prefilled 0..63; each color/round dispatch binds a 4-byte offset (three-avbd pass const).
     pass_table: Buffer,
@@ -86,6 +87,8 @@ impl MetalWorld {
         let hull_verts = alloc::<[f32; 4]>(d, capacity.max_hull_vertices);
         let events = alloc_u32(d, 65536);
         let ccd_flags = alloc_u32(d, capacity.max_bodies);
+        // WorldObbGpu = 5 × float4
+        let world_obbs = alloc::<[f32; 20]>(d, capacity.max_colliders);
         let scratch = alloc_u32(d, 64);
         let pass_table = alloc_u32(d, 64);
         {
@@ -142,6 +145,7 @@ impl MetalWorld {
             hull_verts,
             events,
             ccd_flags,
+            world_obbs,
             scratch,
             pass_table,
             indirect_args,
@@ -297,6 +301,7 @@ impl MetalWorld {
         // Default pass uniform = slot 0; dispatch_pass overrides with an offset.
         encoder.set_buffer(22, Some(&self.pass_table), 0);
         encoder.set_buffer(23, Some(&self.indirect_args), 0);
+        encoder.set_buffer(24, Some(&self.world_obbs), 0);
     }
 
     fn dispatch(&self, encoder: &ComputeCommandEncoderRef, name: &str, threads: u64) {
