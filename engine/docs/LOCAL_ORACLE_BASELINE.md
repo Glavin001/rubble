@@ -67,7 +67,7 @@ Interactive gate: p50 ≤ 8.33 ms. Ring smash uses lead=60 (three-avbd). Settled
 | Brick Walls (27k) | ~7.2 | PASS |
 | Chain Mail (1.6k) | ~1.2 | PASS |
 | Box Columns (100k) settled | ~0 (asleep early-out) | PASS (plane@0.5, centres at 1+layer) |
-| Box Pile (32k) | STRESS **~9.5 ms** | beats oracle settled gpuTotal 11.8; α=0.95 + impact-wake + sleep_ang=0.5 + sleeper BP skip; @1200 deep≈30–40, ~28k sleeping |
+| Box Pile (32k) | STRESS **~9.5–9.8 ms** | beats oracle settled gpuTotal 11.8; α=0.95 + impact-wake + sleep_lin/ang=0.5 + sleeper BP skip; @1200 deep≈0–1, ~32k sleeping |
 | Box Pile (4k) | ~1.4–2 ms PASS | @600: KE~5, deep≈0–5, majority sleeping |
 | Stack / Rope / Pyramid | &lt; 3 | PASS |
 | Brick Ring (28k) lead=60 | ~27 | stress (smash peak) |
