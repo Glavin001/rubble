@@ -26,10 +26,13 @@
     const fail = (e) => { errEl.textContent = String(e && e.stack || e); statusEl.textContent = 'stopped'; };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
 
-    const cap = {
-      maxBodies: 4096, maxColliders: 4096, maxContacts: 32768, maxJoints: 64,
-      maxCandidates: 65536, maxColors: 32, maxCommands: 64, maxHull: 64,
-    };
+    const scene = new URLSearchParams(location.search).get('scene') || 'wall';
+    const cap = scene === 'ring'
+      ? { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 }
+      : { maxBodies: 4096, maxColliders: 4096, maxContacts: 32768, maxJoints: 64, maxCandidates: 65536, maxColors: 32, maxCommands: 64, maxHull: 64 };
+    const lead = scene === 'ring' ? 60 : 30;
+    const eye = scene === 'ring' ? [32, 22, 14] : [0, 16, -42];
+    const look = scene === 'ring' ? [0, 5, 0] : [0, 8, 0];
     const PASS_ALIGN = 256;
     const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
     const constraintIdWords = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
@@ -98,12 +101,14 @@
     function writeBody(buf, index, body) {
       const o = index * 80;
       const v = new DataView(buf);
+      const q = body.q || [0, 0, 0, 1];
+      const w = body.w || [0, 0, 0];
       f32(v, o + 0, body.p[0]); f32(v, o + 4, body.p[1]); f32(v, o + 8, body.p[2]); f32(v, o + 12, body.invMass);
-      f32(v, o + 16, 0); f32(v, o + 20, 0); f32(v, o + 24, 0); f32(v, o + 28, 1);
+      f32(v, o + 16, q[0]); f32(v, o + 20, q[1]); f32(v, o + 24, q[2]); f32(v, o + 28, q[3]);
       f32(v, o + 32, body.invI[0]); f32(v, o + 36, body.invI[1]); f32(v, o + 40, body.invI[2]); u32(v, o + 44, body.flags);
       const vel = body.v || [0, 0, 0];
       f32(v, o + 48, vel[0]); f32(v, o + 52, vel[1]); f32(v, o + 56, vel[2]); f32(v, o + 60, 0);
-      f32(v, o + 64, 0); f32(v, o + 68, 0); f32(v, o + 72, 0); u32(v, o + 76, 0);
+      f32(v, o + 64, w[0]); f32(v, o + 68, w[1]); f32(v, o + 72, w[2]); u32(v, o + 76, 0);
     }
 
     function writeCollider(buf, index, c) {
@@ -116,7 +121,7 @@
     }
 
     const params = {
-      dt: 1 / 60, gravityY: -10, iterations: 10, flags: 0,
+      dt: 1 / 60, gravityY: -10, iterations: scene === 'ring' ? 4 : 10, flags: 0,
       alpha: 0.99, gamma: 0.999, betaLin: 10000, betaAng: 100,
       kStart: 1000, kMaxN: 1e10, kMaxT: 1e6, contactOffset: 0.01,
       sleepLin: 0.15, sleepAng: 0.15, sleepTime: 0.5, residualExit: 1e-4,
@@ -290,43 +295,62 @@ struct VsOut {
     }
     device.queue.writeBuffer(bufs[3], 0, mats);
 
+    if (scene === 'ring') document.querySelector('h1').textContent = 'Slang → WGSL · brick ring 9k, 4 iterations';
     const bodyBytes = new ArrayBuffer(sizes[0]);
     const colBytes = new ArrayBuffer(sizes[2]);
     const bodies = [];
     const colliders = [];
-    // three-avbd wall smash: 40 × 25 × 2 bricks (1 × 0.5 × 0.5) plus a sphere. Their Z-up
-    // is our Y-up. Density 0.6 matches their bricks; the ball is radius 2, density 20.
-    const brickMass = 0.6 * 1 * 0.5 * 0.5;
-    const brickI = (a, b) => 1 / ((brickMass / 12) * (a * a + b * b));
-    const brickInvI = [brickI(0.5, 0.5), brickI(1, 0.5), brickI(1, 0.5)];
     const half = [0.5, 0.25, 0.25];
     const brickR = Math.hypot(...half);
+    const brickInertia = (mass) => {
+      const inv = (a, b) => 1 / ((mass / 12) * (a * a + b * b));
+      return [inv(0.5, 0.5), inv(1, 0.5), inv(1, 0.5)];
+    };
     bodies.push({ p: [0, 0, 0], invMass: 0, invI: [0, 0, 0], flags: 0 });
     colliders.push({ body: 0, shape: 4, density: 0, params: [0, 1, 0, 0.5] });
-    const w = 40, courses = 25;
-    for (let course = 0; course < courses; course++) {
-      const offset = course % 2 === 0 ? 0 : 0.5;
-      for (let x = 0; x < w; x++) {
-        for (let depth = 0; depth < 2; depth++) {
-          const id = bodies.length;
-          bodies.push({
-            p: [(x - w / 2) + offset, 0.75 + course * 0.5, depth * 0.5],
-            invMass: 1 / brickMass, invI: brickInvI, flags: 1 | 8,
-          });
-          colliders.push({ body: id, shape: 2, density: 0.6, params: [half[0], half[1], half[2], brickR] });
+    const addBrick = (pos, angle, mass, density) => {
+      const id = bodies.length;
+      const s = Math.sin(angle / 2), c = Math.cos(angle / 2);
+      bodies.push({ p: pos, invMass: 1 / mass, invI: brickInertia(mass), flags: 1 | 8, q: [0, s, 0, c] });
+      colliders.push({ body: id, shape: 2, density, params: [half[0], half[1], half[2], brickR] });
+    };
+    const addBall = (pos, radius, density, vel, ang) => {
+      const mass = density * (4 / 3) * Math.PI * radius ** 3;
+      const inertia = 0.4 * mass * radius * radius;
+      const id = bodies.length;
+      bodies.push({ p: pos, invMass: 1 / mass, invI: [1 / inertia, 1 / inertia, 1 / inertia], flags: 1 | 8, v: vel, w: ang });
+      colliders.push({ body: id, shape: 0, density, params: [radius, 0, 0, radius] });
+    };
+    if (scene === 'ring') {
+      // three-avbd brickRing(12, 20, 2, 10). Their Z-up is our Y-up.
+      const radius = 12, courses = 20, tier = 2, rows = 10, mass = 0.25;
+      for (let c = 0; c < courses; c++) {
+        const depth = Math.max(1, rows - Math.floor(c / tier));
+        for (let j = 0; j < depth; j++) {
+          const r = radius + 0.25 + 0.52 * j;
+          const n = Math.floor((2 * Math.PI * (r - 0.25)) / 1.02);
+          for (let i = 0; i < n; i++) {
+            const a = ((i + (c % 2) * 0.5) / n) * 2 * Math.PI;
+            addBrick([r * Math.cos(a), 0.75 + 0.5 * c, r * Math.sin(a)], a + Math.PI / 2, mass, 1);
+          }
         }
       }
+      const ballR = courses / 5;
+      addBall([0, 0.5 + ballR, -(radius + 0.52 * rows + ballR + 2)], ballR, 10, [0, 0, 30], [-30 / ballR, 0, 0]);
+    } else {
+      const mass = 0.6 * 0.25;
+      const w = 40, courses = 25;
+      for (let course = 0; course < courses; course++) {
+        const offset = course % 2 === 0 ? 0 : 0.5;
+        for (let x = 0; x < w; x++) {
+          for (let depth = 0; depth < 2; depth++) {
+            addBrick([(x - w / 2) + offset, 0.75 + course * 0.5, depth * 0.5], 0, mass, 0.6);
+          }
+        }
+      }
+      addBall([0, 5, -25], 2, 20, [0, 4, 30], [0, 0, 0]);
     }
-    const radius = 2, density = 20;
-    const volume = (4 / 3) * Math.PI * radius ** 3;
-    const ballMass = density * volume;
-    const ballI = 0.4 * ballMass * radius * radius;
-    const ball = bodies.length;
-    bodies.push({
-      p: [0, 5, -25], invMass: 1 / ballMass, invI: [1 / ballI, 1 / ballI, 1 / ballI],
-      flags: 1 | 8, v: [0, 4, 30],
-    });
-    colliders.push({ body: ball, shape: 0, density, params: [radius, 0, 0, radius] });
+    if (bodies.length > cap.maxBodies) throw new Error(`${bodies.length} bodies exceed capacity ${cap.maxBodies}`);
     params.gridCellSize = Math.max(0.5, 2 * brickR * 1.0001);
     bodies.forEach((b, i) => {
       writeBody(bodyBytes, i, b);
@@ -524,12 +548,12 @@ struct VsOut {
 
     // Same protocol as three-avbd compare(): drain the queue, median of short batches, best round.
     async function benchWall() {
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < lead; i++) {
         submitPhysics();
         if (i % 10 === 9) {
           await device.queue.onSubmittedWorkDone();
           await readCounters();
-          statusEl.textContent = `lead-in ${i + 1}/30 · contacts ${last.contact}`;
+          statusEl.textContent = `lead-in ${i + 1}/${lead} · contacts ${last.contact} · ov 0x${last.overflow.toString(16)}`;
         }
       }
       await device.queue.onSubmittedWorkDone();
@@ -631,7 +655,7 @@ struct VsOut {
         depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
       const aspect = canvas.width / Math.max(1, canvas.height);
-      device.queue.writeBuffer(frameBuf, 0, mul(perspective(Math.PI / 5, aspect, 0.2, 400), lookAt([0, 16, -42], [0, 8, 0], [0, 1, 0])));
+      device.queue.writeBuffer(frameBuf, 0, mul(perspective(Math.PI / 5, aspect, 0.2, 400), lookAt(eye, look, [0, 1, 0])));
       const enc = device.createCommandEncoder();
       const rp = enc.beginRenderPass({
         colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.08, 0.09, 0.12, 1], loadOp: 'clear', storeOp: 'store' }],
@@ -654,7 +678,7 @@ struct VsOut {
           depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
         }
         const aspect = canvas.width / canvas.height;
-        const view = lookAt([0, 16, -42], [0, 8, 0], [0, 1, 0]);
+        const view = lookAt(eye, look, [0, 1, 0]);
         device.queue.writeBuffer(frameBuf, 0, mul(perspective(Math.PI / 5, aspect, 0.2, 400), view));
         const enc = device.createCommandEncoder();
         encodeStep(enc, true);
@@ -675,7 +699,7 @@ struct VsOut {
         last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
         parity ^= 1;
         steps++;
-        statusEl.textContent = `${info.vendor || 'gpu'} · ${bodies.length - 1} bodies · wall ${wallMs.toFixed(2)} ms · ${phases} · step ${steps} · contacts ${last.contact} · colors ${last.color} · frame ${(performance.now() - now).toFixed(1)} ms`;
+        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${bodies.length - 1} bodies · ${params.iterations} iters · ${wallMs.toFixed(2)} ms · ${phases} · step ${steps} · contacts ${last.contact} · ov 0x${last.overflow.toString(16)} · frame ${(performance.now() - now).toFixed(1)} ms`;
         if (last.overflow) { running = false; fail('overflow flags 0x' + last.overflow.toString(16)); return; }
         requestAnimationFrame(frame);
       } catch (e) { running = false; fail(e); }
