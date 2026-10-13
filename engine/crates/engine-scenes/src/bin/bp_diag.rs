@@ -66,6 +66,22 @@ fn main() {
         brick_ke
     );
 
+    if std::env::var("FLYERS").is_ok() {
+        let mut n = 0u32;
+        for (i, b) in bodies.iter().enumerate() {
+            if !b.is_dynamic() { continue; }
+            let v = glam::Vec3::from_array(b.linear_vel).length();
+            if v > 1.0 {
+                println!(
+                    "flyer i={i} pos={:.2?} v={:.3} y={:.2}",
+                    b.position, v, b.position[1]
+                );
+                n += 1;
+                if n >= 15 { break; }
+            }
+        }
+    }
+
     // Classify contacts: plane vs box-box, vertical vs horizontal normals.
     let colliders = unsafe {
         std::slice::from_raw_parts(
