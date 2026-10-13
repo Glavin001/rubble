@@ -226,6 +226,40 @@ fn main() {
     }
 
 
+    if std::env::var("COLOR_CHECK").is_ok() {
+        let colors = world.download_body_colors();
+        let manifolds = world.download_manifolds();
+        let mut same = 0u32;
+        let mut edges = 0u32;
+        for m in &manifolds {
+            if m.contact_count == 0 {
+                continue;
+            }
+            let ba = colliders[m.collider_a as usize].body as usize;
+            let bb = colliders[m.collider_b as usize].body as usize;
+            if ba >= colors.len() || bb >= colors.len() {
+                continue;
+            }
+            let ca = colors[ba];
+            let cb = colors[bb];
+            if ca == 0xffffffff || cb == 0xffffffff {
+                continue;
+            }
+            // Only dynamic-dynamic edges matter for Jacobi races.
+            if !bodies[ba].is_dynamic() || !bodies[bb].is_dynamic() {
+                continue;
+            }
+            edges += 1;
+            if ca == cb {
+                same += 1;
+            }
+        }
+        println!(
+            "color_check: dyn_edges={edges} same_color={same} color_count={}",
+            world.last_counters().color_count
+        );
+    }
+
     if std::env::var("DEEP_CLASS").is_ok() {
         let bodies = world.download_bodies();
         let mut plane_deep = 0u32;
