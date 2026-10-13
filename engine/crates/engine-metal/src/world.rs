@@ -439,8 +439,14 @@ impl MetalWorld {
             .min(n_cols.saturating_mul(64))
             .max(prev_contacts.saturating_mul(2))
             .max(1);
+        // Size to last count + 25% headroom (2× over-dispatch wasted bandwidth on smash peaks).
         let contact_dispatch = (self.capacity.max_contacts as u64)
-            .min(prev_contacts.saturating_mul(2).max(n_cols.saturating_mul(8)))
+            .min(
+                prev_contacts
+                    .saturating_add(prev_contacts / 4)
+                    .saturating_add(1024)
+                    .max(n_cols.saturating_mul(4)),
+            )
             .max(1);
 
         self.dispatch(&encoder, "apply_commands", self.command_count.max(1) as u64);
