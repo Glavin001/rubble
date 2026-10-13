@@ -53,6 +53,9 @@ fn ball_joint_rope_stays_connected() {
                 sleep_timer: 0.0,
                 angular_vel: [0.0; 3],
                 generation: 0,
+                initial_pos: [0.0; 3],
+                initial_pad: 0.0,
+                initial_rot: [0.0, 0.0, 0.0, 1.0],
             });
             b.world_mut().add_collider(engine_schema::Collider {
                 body,

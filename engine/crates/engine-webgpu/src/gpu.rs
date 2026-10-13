@@ -633,8 +633,8 @@ struct HostUniforms {
 fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     let b = |n: u32, stride: u64| n as u64 * stride;
     let mut s = [256u64; BIND_COUNT];
-    s[0] = b(c.max_bodies.saturating_mul(2), 80);
-    s[1] = b(c.max_bodies, 80);
+    s[0] = b(c.max_bodies.saturating_mul(2), std::mem::size_of::<engine_schema::BodyState>() as u64);
+    s[1] = b(c.max_bodies, std::mem::size_of::<engine_schema::BodyState>() as u64);
     s[2] = b(c.max_colliders, 64);
     s[3] = b(64, 16);
     s[4] = b(c.max_contacts.saturating_mul(2), 128);

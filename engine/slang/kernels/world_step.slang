@@ -195,6 +195,8 @@ void predictOne(uint i)
     float4 inertialAng = quatNormalize(
         b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
     // x⁻ snapshot for velocity extract (three-avbd initialPos).
+    float3 x0 = b.position;
+    float4 q0 = b.orientation;
     BODY_PREV(i) = b;
 
     if (!startAtRest)
@@ -209,6 +211,8 @@ void predictOne(uint i)
     box._pad0 = inertialAng.w;
     box._pad1 = 0.0;
     gAabbs[i] = box;
+    b.initialPos = x0;
+    b.initialRot = q0;
     gBodies[i] = b;
 }
 
@@ -1861,30 +1865,27 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             // ~0.1 rad/step; rotating anchors with it injects false C / friction drag.
             // Static bodies skip predict, so keep their (constant) current orientation.
             bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
-            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? BODY_PREV(ba).orientation : bA.orientation;
-            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? BODY_PREV(bb).orientation : bB.orientation;
+            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? bA.initialRot : bA.orientation;
+            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? bB.initialRot : bB.orientation;
             float4 rotSelf = isA ? rotA : rotB;
-            // Displacement from x⁻ (three-avbd pairBody / evalContact Taylor C).
-            // Static/sleeping skip predictOne so gBodiesPrev may be stale — treat Δ=0.
-            BodyState initA = BODY_PREV(ba);
-            BodyState initB = BODY_PREV(bb);
+            // Displacement from x⁻ stored on the body (predict). Static/sleeping stay at 0.
             bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
             bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
-            float3 dLinA = moveA ? (bA.position - initA.position) : float3(0, 0, 0);
-            float3 dLinB = moveB ? (bB.position - initB.position) : float3(0, 0, 0);
+            float3 dLinA = moveA ? (bA.position - bA.initialPos) : float3(0, 0, 0);
+            float3 dLinB = moveB ? (bB.position - bB.initialPos) : float3(0, 0, 0);
             float3 dAngA = float3(0, 0, 0);
             float3 dAngB = float3(0, 0, 0);
             if (moveA)
             {
                 float4 qA = bA.orientation;
-                if (dot(qA, initA.orientation) < 0.0) qA = -qA;
-                dAngA = quatSubVec(qA, initA.orientation);
+                if (dot(qA, bA.initialRot) < 0.0) qA = -qA;
+                dAngA = quatSubVec(qA, bA.initialRot);
             }
             if (moveB)
             {
                 float4 qB = bB.orientation;
-                if (dot(qB, initB.orientation) < 0.0) qB = -qB;
-                dAngB = quatSubVec(qB, initB.orientation);
+                if (dot(qB, bB.initialRot) < 0.0) qB = -qB;
+                dAngB = quatSubVec(qB, bB.initialRot);
             }
             float keep = 1.0 - p.alpha;
             for (uint ci = 0u; ci < mf.contactCount; ci++)
@@ -2103,28 +2104,26 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             Collider colA = gColliders[c.colliderA];
             Collider colB = gColliders[c.colliderB];
             bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
-            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? BODY_PREV(ba).orientation : bA.orientation;
-            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? BODY_PREV(bb).orientation : bB.orientation;
+            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? bA.initialRot : bA.orientation;
+            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? bB.initialRot : bB.orientation;
             // three-avbd evalContact: Ĉ = c0*(1-α) + J·(x-x⁻), not absolute geometric C.
-            BodyState initA = BODY_PREV(ba);
-            BodyState initB = BODY_PREV(bb);
             bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
             bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
-            float3 dLinA = moveA ? (bA.position - initA.position) : float3(0, 0, 0);
-            float3 dLinB = moveB ? (bB.position - initB.position) : float3(0, 0, 0);
+            float3 dLinA = moveA ? (bA.position - bA.initialPos) : float3(0, 0, 0);
+            float3 dLinB = moveB ? (bB.position - bB.initialPos) : float3(0, 0, 0);
             float3 dAngA = float3(0, 0, 0);
             float3 dAngB = float3(0, 0, 0);
             if (moveA)
             {
                 float4 qA = bA.orientation;
-                if (dot(qA, initA.orientation) < 0.0) qA = -qA;
-                dAngA = quatSubVec(qA, initA.orientation);
+                if (dot(qA, bA.initialRot) < 0.0) qA = -qA;
+                dAngA = quatSubVec(qA, bA.initialRot);
             }
             if (moveB)
             {
                 float4 qB = bB.orientation;
-                if (dot(qB, initB.orientation) < 0.0) qB = -qB;
-                dAngB = quatSubVec(qB, initB.orientation);
+                if (dot(qB, bB.initialRot) < 0.0) qB = -qB;
+                dAngB = quatSubVec(qB, bB.initialRot);
             }
             float3 rAW = quatRotate(rotA, c.anchorA);
             float3 rBW = quatRotate(rotB, c.anchorB);
