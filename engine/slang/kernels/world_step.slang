@@ -1309,8 +1309,16 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         {
             uint ba = gColliders[c.colliderA].body;
             uint bb = gColliders[c.colliderB].body;
-            float3 wa = transformPoint(gBodies[ba].position, gBodies[ba].orientation, c.anchorA);
-            float3 wb = transformPoint(gBodies[bb].position, gBodies[bb].orientation, c.anchorB);
+            BodyState bA = gBodies[ba];
+            BodyState bB = gBodies[bb];
+            // beat-box / three-avbd: dual stasis when both ends are asleep or static.
+            bool sleepA = !bodyIsDynamic(bA) || bodyIsSleeping(bA);
+            bool sleepB = !bodyIsDynamic(bB) || bodyIsSleeping(bB);
+            if (sleepA && sleepB) { /* leave λ/k */ }
+            else
+            {
+            float3 wa = transformPoint(bA.position, bA.orientation, c.anchorA);
+            float3 wb = transformPoint(bB.position, bB.orientation, c.anchorB);
             float3 d = wb - wa;
             float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
             c.penetration = C.x;
@@ -1332,6 +1340,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             float slip = length(float2(C.y, C.z));
             c._pad0 = (ft <= bound + 1e-8 && slip < 1.0e-5) ? 1.0 : 0.0;
             gContacts[i] = c;
+            }
         }
     }
     uint nJ = gCounters[0].jointCount;
