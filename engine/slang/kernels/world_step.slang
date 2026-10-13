@@ -771,6 +771,105 @@ float colliderMinSide(Collider col)
     return max(2.0 * min(h.x, min(h.y, h.z)), 1e-6);
 }
 
+static const uint FLAG_REUSE_CONTACTS = 1u;
+
+// three-avbd reuseContacts (velocity-gated). Opt-in via params.flags bit0 — on Metal
+// it slows Brick Ring smash; Box Pile settle enables it from the host.
+bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float margin)
+{
+    // Looser than three-avbd's 2 mm pose tol (we gate on velocity until updateRefs).
+    float slow = length(ba.linearVel) + length(bb.linearVel)
+        + 0.5 * (length(ba.angularVel) + length(bb.angularVel));
+    if (slow > 0.2) return false;
+
+    uint prevOff = gScratchAtomics[8];
+    uint prevN = gScratchAtomics[7];
+    uint hashN = gScratchAtomics[9];
+    uint key = pairWarmKey(pair.colliderA, pair.colliderB);
+    uint h = key & (hashN - 1u);
+    uint startJ = CONTACT_HASH_EMPTY;
+    for (uint probe = 0; probe < 64u; probe++)
+    {
+        uint slot = (h + probe) & (hashN - 1u);
+        uint j = gConstraintIds[slot];
+        if (j == CONTACT_HASH_EMPTY) break;
+        Contact prev = gContacts[prevOff + j];
+        if (prev.alive != 0 &&
+            prev.colliderA == pair.colliderA &&
+            prev.colliderB == pair.colliderB)
+        {
+            startJ = j;
+            break;
+        }
+    }
+    if (startJ == CONTACT_HASH_EMPTY) return false;
+
+    uint count = 0u;
+    for (uint k = 0u; k < 8u; k++)
+    {
+        uint j = startJ + k;
+        if (j >= prevN) break;
+        Contact prev = gContacts[prevOff + j];
+        if (prev.alive == 0 ||
+            prev.colliderA != pair.colliderA ||
+            prev.colliderB != pair.colliderB)
+            break;
+        count++;
+    }
+    if (count == 0u) return false;
+
+    uint maxC = gScratchAtomics[3];
+    uint maxM = gScratchAtomics[10];
+    uint mslot;
+    InterlockedAdd(gCounters[0].manifoldCount, 1, mslot);
+    if (mslot >= maxM)
+    {
+        InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_MANIFOLDS);
+        return true;
+    }
+    uint cStart;
+    InterlockedAdd(gCounters[0].contactCount, count, cStart);
+    uint curOff = gScratchAtomics[11];
+    if (cStart >= maxC || cStart + count > maxC)
+    {
+        InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
+        Manifold dead;
+        dead.colliderA = pair.colliderA;
+        dead.colliderB = pair.colliderB;
+        dead.contactStart = 0;
+        dead.contactCount = 0;
+        dead.normal = float3(0, 1, 0);
+        dead.friction = 0.0;
+        gManifolds[mslot] = dead;
+        return true;
+    }
+
+    Contact head = gContacts[prevOff + startJ];
+    for (uint k = 0u; k < count; k++)
+    {
+        Contact c = gContacts[prevOff + startJ + k];
+        c.alive = 1;
+        float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
+        float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
+        float3 d = wb - wa;
+        c.c0N = dot(c.normal, d) + margin;
+        c.c0T1 = dot(c.tangent1, d);
+        c.c0T2 = dot(c.tangent2, d);
+        c.penetration = c.c0N;
+        gContacts[curOff + cStart + k] = c;
+    }
+    Manifold mf;
+    mf.colliderA = pair.colliderA;
+    mf.colliderB = pair.colliderB;
+    mf.contactStart = curOff + cStart;
+    mf.contactCount = count;
+    mf.normal = head.normal;
+    mf.friction = head.friction;
+    gManifolds[mslot] = mf;
+    wakeFromContact(ba, bb, gColliders[pair.colliderA], gColliders[pair.colliderB]);
+    return true;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void narrowphase(uint3 tid : SV_DispatchThreadID)
@@ -794,6 +893,9 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     // Multi-point manifolds (demo3d / three-avbd) — required for stable stacks.
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_BOX)
     {
+        if ((gParams[0].flags & FLAG_REUSE_CONTACTS) != 0u &&
+            tryReuseContacts(pair, ba, bb, margin))
+            return;
         // World OBBs from build_aabbs cache (skip per-pair quat axis rebuild).
         BoxManifold mf = collideBoxesCached(
             worldObbFromCache(pair.colliderA), worldObbFromCache(pair.colliderB), margin);

@@ -123,7 +123,7 @@ public struct AvbdParams
     float dt;
     float gravityY;
     uint iterations;
-    uint _pad0;
+    uint flags; // bit0 = reuseContacts
     float alpha;
     float gamma;
     float betaLin;
