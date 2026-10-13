@@ -28,6 +28,8 @@ fn main() -> Result<()> {
         "apply_commands",
         "predict_bodies",
         "build_aabbs",
+        "joint_hash_clear",
+        "joint_hash_insert",
         "broadphase_clear",
         "broadphase_insert",
         "broadphase_query",

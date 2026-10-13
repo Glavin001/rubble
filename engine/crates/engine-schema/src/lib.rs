@@ -175,7 +175,7 @@ pub struct Material {
     pub _pad: f32,
 }
 
-/// Persistent contact row (112 bytes).
+/// Persistent contact row (128 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Contact {
@@ -197,6 +197,8 @@ pub struct Contact {
     pub k_t: f32,
     pub lambda_t2: f32,
     pub c0_t1: f32,
+    pub c0_t2: f32,
+    pub _pad: [f32; 3],
 }
 
 #[repr(C)]
@@ -270,7 +272,7 @@ mod tests {
         assert_eq!(size_of::<AbiProbe>(), 80);
         assert_eq!(size_of::<BodyState>(), 80);
         assert_eq!(size_of::<Collider>(), 64);
-        assert_eq!(size_of::<Contact>(), 112);
+        assert_eq!(size_of::<Contact>(), 128);
         assert_eq!(align_of::<BodyState>(), 4);
     }
 }

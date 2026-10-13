@@ -18,6 +18,8 @@ impl Pipelines {
             ("apply_commands", msl!("apply_commands")),
             ("predict_bodies", msl!("predict_bodies")),
             ("build_aabbs", msl!("build_aabbs")),
+            ("joint_hash_clear", msl!("joint_hash_clear")),
+            ("joint_hash_insert", msl!("joint_hash_insert")),
             ("broadphase_clear", msl!("broadphase_clear")),
             ("broadphase_insert", msl!("broadphase_insert")),
             ("broadphase_query", msl!("broadphase_query")),

@@ -13,11 +13,14 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 
 ## Accuracy / oracles
 
-7. **Primary numerical oracle:** three-avbd @ pinned SHA; avbd-demo3d for small seeded stacks; Newton/Jolt for qualitative settle only until adapters grow metrics.
-8. **Unsupported three-avbd features** (cloth, soft, plastic, wind) stay out of rigid-body pass/fail gates.
-9. **Y-up vs Z-up:** keep engine Y-up; oracle fixtures convert `(x,y,z)→(x,z,y)`.
+7. **Speed (after accuracy):** beat open-source **GPU** alternatives on **this machine** (M3 Max). Do not trust published ms from other GPUs. Primary local oracle: `three-avbd`; also run at most 1–2 other top GPU refs (sandbox / beat-box) locally. Record baselines under `engine/docs/LOCAL_ORACLE_BASELINE.md`.
+8. **Accuracy first:** correctness before any perf chase. Use pinned engines’ **existing** CPU refs (three-avbd f64/CpuRef, avbd-demo3d) for seeded checks when available; GPU physical envelopes always. Do **not** invent a home-grown Rust AVBD.
+8b. **Box contacts:** port demo3d/three-avbd SAT + face clipping (multi-point). Contact C0 = n·(xB−xA)+margin (A→B). Cold-start k = kStart only; massPenalty floor only after warm-start match. Feature + nearest-midpoint warm-start against previous-frame contact buffer.
+8c. **Full 10-box Stack (900f) still open:** local three-avbd CPU Stack passes; our Metal gate is 5-box/200f until Jacobi/manifold stick matches their GS persistence.
+9. **Unsupported three-avbd features** (cloth, soft, plastic, wind) stay out of rigid-body pass/fail gates.
+10. **Y-up vs Z-up:** keep engine Y-up; oracle fixtures convert `(x,y,z)→(x,z,y)`.
 
 ## Process
 
-10. **Iterative commits** on `feat/avbd-attempt-2`; revert via git if an optimization regresses accuracy or FPS.
-11. **Legacy `crates/rubble*`** is not modified for this goal; all work stays under `engine/`.
+11. **Iterative commits** on `feat/avbd-attempt-2`; revert via git if an optimization regresses accuracy or FPS.
+12. **Legacy `crates/rubble*`** is not modified for this goal; all work stays under `engine/`.

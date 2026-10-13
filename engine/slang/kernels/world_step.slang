@@ -1,5 +1,6 @@
 // Production phase entry points — one Slang source for Metal / SPIR-V / CUDA.
 #include "../physics/common.slang"
+#include "../physics/box_collide.slang"
 
 RWStructuredBuffer<BodyState> gBodies;
 RWStructuredBuffer<BodyState> gBodiesPrev;
@@ -101,41 +102,30 @@ void apply_commands(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void predict_bodies(uint3 tid : SV_DispatchThreadID)
+void predictOne(uint i)
 {
-    uint i = tid.x;
-    StepCounters c = gCounters[0];
-    if (i >= c.bodyCount) return;
     AvbdParams p = gParams[0];
     BodyState b = gBodies[i];
     // Sleeping/static: do not touch prev/pose (three-avbd mover compaction).
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
-    gBodiesPrev[i] = b;
-
     float dt = p.dt;
-    float3 accel = (b.linearVel - float3(0, 0, 0)) / max(dt, 1e-8); // prev vel stored unused; adaptive weight
-    // Adaptive warmstart weight from official demo
+    // Adaptive warm-start + three-avbd GPU startAtRest (REST_SPEED=0.1). Required for
+    // short-stack settle / sphere_falls; spaced drop stacks still need better manifolds.
+    float3 accel = b.linearVel / max(dt, 1e-8);
     float accelExt = accel.y * sign(p.gravityY);
     float accelWeight = clamp(accelExt / max(abs(p.gravityY), 1e-6), 0.0, 1.0);
+    float slow = length(b.linearVel) + length(b.angularVel) * 0.5;
+    bool startAtRest = slow < 0.1;
 
     float3 inertialLin = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (dt * dt);
     float4 inertialAng = quatNormalize(quatApplyDelta(b.orientation, b.angularVel * dt));
+    gBodiesPrev[i] = b;
 
-    // Store inertial in linearVel/angularVel temp? Use event buffer unused lanes — instead pack into prev
-    // We keep inertial in gBodiesPrev velocities as stash:
-    BodyState stash = b;
-    stash.linearVel = inertialLin;
-    stash.angularVel = inertialAng.xyz; // incomplete — use contacts unused
-    // Better: write warmstarted pose into body; stash initial in prev
-    BodyState initB = b;
-    gBodiesPrev[i] = initB;
-
-    b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
-    b.orientation = quatNormalize(quatApplyDelta(b.orientation, b.angularVel * dt));
-    // Stash inertial target into sleepTimer unused? No — use hull or scratch.
-    // Convention: gAabbs[i].mn = inertialLin, gAabbs[i].mx.x = inertialAng components via pad
+    if (!startAtRest)
+    {
+        b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
+        b.orientation = quatNormalize(quatApplyDelta(b.orientation, b.angularVel * dt));
+    }
     Aabb box;
     box.mn = inertialLin;
     box.mx = float3(inertialAng.x, inertialAng.y, inertialAng.z);
@@ -143,6 +133,26 @@ void predict_bodies(uint3 tid : SV_DispatchThreadID)
     box._pad1 = 0.0;
     gAabbs[i] = box;
     gBodies[i] = b;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void predict_bodies(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= gCounters[0].bodyCount) return;
+    predictOne(i);
+}
+
+// Previous-step awake list (host sets gScratchAtomics[7] = prev awake count).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void predict_bodies_listed(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = tid.x;
+    uint n = gScratchAtomics[7];
+    if (li >= n) return;
+    predictOne(gAwakeList[li]);
 }
 
 [shader("compute")]
@@ -201,15 +211,58 @@ uint gridHash(int x, int y, int z)
     return h & (GRID_HASH_SIZE - 1u);
 }
 
+// Open-addressed joint-pair set in gEvents (three-avbd / demo3d constrainedTo).
+// Replaces O(joints) scan that dominated Chain Mail / Jointed Drop broadphase.
+static const uint JOINT_HASH_SIZE = 65536u;
+static const uint JOINT_HASH_EMPTY = 0xFFFFFFFFu;
+
+uint jointPairKey(uint bodyA, uint bodyB)
+{
+    uint lo = min(bodyA, bodyB);
+    uint hi = max(bodyA, bodyB);
+    uint h = (lo * 73856093u) ^ (hi * 19349663u) ^ (lo << 16) ^ (hi >> 3);
+    // Must never equal EMPTY sentinel.
+    return h == JOINT_HASH_EMPTY ? (lo ^ 0xA5A5A5A5u) : h;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void joint_hash_clear(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    if (i >= JOINT_HASH_SIZE) return;
+    gEvents[i] = JOINT_HASH_EMPTY;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void joint_hash_insert(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint nJ = gCounters[0].jointCount;
+    if (i >= nJ) return;
+    Joint jj = gJoints[i];
+    uint key = jointPairKey(jj.bodyA, jj.bodyB);
+    uint h = key & (JOINT_HASH_SIZE - 1u);
+    for (uint probe = 0; probe < 64u; probe++)
+    {
+        uint slot = (h + probe) & (JOINT_HASH_SIZE - 1u);
+        uint prev;
+        InterlockedCompareExchange(gEvents[slot], JOINT_HASH_EMPTY, key, prev);
+        if (prev == JOINT_HASH_EMPTY || prev == key) return;
+    }
+}
+
 bool bodiesJointed(uint bodyA, uint bodyB)
 {
-    uint nJ = gCounters[0].jointCount;
-    for (uint ji = 0; ji < nJ; ji++)
+    uint key = jointPairKey(bodyA, bodyB);
+    uint h = key & (JOINT_HASH_SIZE - 1u);
+    for (uint probe = 0; probe < 64u; probe++)
     {
-        Joint jj = gJoints[ji];
-        if ((jj.bodyA == bodyA && jj.bodyB == bodyB) ||
-            (jj.bodyA == bodyB && jj.bodyB == bodyA))
-            return true;
+        uint slot = (h + probe) & (JOINT_HASH_SIZE - 1u);
+        uint v = gEvents[slot];
+        if (v == JOINT_HASH_EMPTY) return false;
+        if (v == key) return true;
     }
     return false;
 }
@@ -289,11 +342,13 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             if (j == i) continue;
             Collider other = gColliders[j];
             if (other.body == col.body) continue;
-            // Emit each unordered pair once from the lower collider index.
-            if (j < i && other.shape != SHAPE_PLANE) continue;
             BodyState ob = gBodies[other.body];
             if (bodyIsSleeping(ob) && bodyIsSleeping(b)) continue;
-            if (!bodyIsDynamic(ob) && other.shape != SHAPE_PLANE) continue;
+            // Emit each dynamic-dynamic pair once (lower index). Dynamic vs static always
+            // emits from the dynamic collider (three-avbd box ground, planes).
+            bool otherStatic = !bodyIsDynamic(ob);
+            if (!otherStatic && j < i) continue;
+            if (otherStatic && !bodyIsDynamic(b)) continue;
             if (bodiesJointed(col.body, other.body)) continue;
             if (other.shape != SHAPE_PLANE)
             {
@@ -359,6 +414,81 @@ void broadphase_grid(uint3 tid : SV_DispatchThreadID)
     broadphase_query(tid);
 }
 
+// Emit one contact. C0 matches three-avbd: n·(xB−xA)+margin with n = A→B (compression ⇒ C0 < 0).
+void emitContact(
+    CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
+    float3 nrm, float3 pA, float3 pB, uint featureId, float margin)
+{
+    uint slot;
+    InterlockedAdd(gCounters[0].contactCount, 1, slot);
+    uint maxC = gScratchAtomics[3];
+    if (slot >= maxC)
+    {
+        InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
+        return;
+    }
+
+    Material ma = gMaterials[ca.material];
+    Material mb = gMaterials[cb.material];
+    float mu = sqrt(max(ma.friction, 0.0) * max(mb.friction, 0.0));
+    float3 t1, t2;
+    orthonormalBasis(nrm, t1, t2);
+
+    // three-avbd: C0_n = n·(xB−xA) + margin (A→B). Equilibrium sits ~margin deep.
+    float3 d0 = pB - pA;
+    float C0n = dot(nrm, d0) + margin;
+    float C0t1 = dot(t1, d0);
+    float C0t2 = dot(t2, d0);
+
+    Contact ct;
+    ct.colliderA = pair.colliderA;
+    ct.colliderB = pair.colliderB;
+    ct.featureId = featureId;
+    ct.alive = 1;
+    ct.normal = nrm;
+    ct.penetration = C0n;
+    ct.anchorA = quatRotate(quatConjugate(ba.orientation), pA - ba.position);
+    ct.c0N = C0n;
+    ct.anchorB = quatRotate(quatConjugate(bb.orientation), pB - bb.position);
+    ct.friction = mu;
+    ct.tangent1 = t1;
+    ct.lambdaN = 0.0;
+    ct.tangent2 = t2;
+    ct.lambdaT1 = 0.0;
+    // New contacts start at kStart (demo3d / three-avbd CPU). massPenalty floor is applied
+    // in persist_contacts only after a warm-start match — cold-start m/dt² causes stack bounce.
+    ct.kN = gParams[0].kStart;
+    ct.kT = gParams[0].kStart;
+    ct.lambdaT2 = 0.0;
+    ct.c0T1 = C0t1;
+    ct.c0T2 = C0t2;
+    ct._pad0 = 0.0;
+    ct._pad1 = 0.0;
+    gContacts[slot] = ct;
+
+    if (bodyIsDynamic(ba))
+    {
+        ba.flags = (ba.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[ca.body] = ba;
+    }
+    if (bodyIsDynamic(bb))
+    {
+        bb.flags = (bb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[cb.body] = bb;
+    }
+}
+
+void emitManifold(CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb, BoxManifold mf, float margin)
+{
+    if (mf.count <= 0) return;
+    uint baseKey = pair.key;
+    for (int k = 0; k < mf.count; k++)
+    {
+        uint fid = baseKey ^ (mf.pts[k].feature * 0x9e3779b9u);
+        emitContact(pair, ba, bb, ca, cb, mf.normal, mf.pts[k].pA, mf.pts[k].pB, fid, margin);
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void narrowphase(uint3 tid : SV_DispatchThreadID)
@@ -373,9 +503,56 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     BodyState bb = gBodies[cb.body];
     float3 posA = transformPoint(ba.position, ba.orientation, ca.localPos);
     float3 posB = transformPoint(bb.position, bb.orientation, cb.localPos);
+    float4 rotA = quatMul(ba.orientation, ca.localRot);
+    float4 rotB = quatMul(bb.orientation, cb.localRot);
     float margin = gParams[0].contactOffset;
     float3 nrm; float pen; float3 pA; float3 pB;
     bool hit = false;
+
+    // Multi-point manifolds (demo3d / three-avbd) — required for stable stacks.
+    if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_BOX)
+    {
+        // Inflated SAT (margin); clip still uses geometric OBBs via collideBoxes pad.
+        BoxManifold mf = collideBoxes(posA, rotA, ca.params.xyz, posB, rotB, cb.params.xyz, margin);
+        if (mf.count > 0)
+        {
+            BoxManifold kept = mf;
+            kept.count = 0;
+            float3 mids[8];
+            for (int k = 0; k < mf.count; k++)
+            {
+                float C = dot(mf.normal, mf.pts[k].pB - mf.pts[k].pA);
+                if (C < margin)
+                    boxAddPt(kept, mids, mf.pts[k].pA, mf.pts[k].pB, mf.pts[k].feature);
+            }
+            kept.normal = mf.normal;
+            emitManifold(pair, ba, bb, ca, cb, kept, margin);
+        }
+        return;
+    }
+    if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_PLANE)
+    {
+        emitManifold(pair, ba, bb, ca, cb,
+            collideBoxPlane(posA, rotA, ca.params.xyz, cb.params.xyz, cb.params.w, margin), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_BOX)
+    {
+        // Swap to box-vs-plane then flip normal / points for A=plane, B=box.
+        BoxManifold mf = collideBoxPlane(posB, rotB, cb.params.xyz, ca.params.xyz, ca.params.w, margin);
+        if (mf.count > 0)
+        {
+            mf.normal = -mf.normal;
+            for (int k = 0; k < mf.count; k++)
+            {
+                float3 tmp = mf.pts[k].pA;
+                mf.pts[k].pA = mf.pts[k].pB;
+                mf.pts[k].pB = tmp;
+            }
+            emitManifold(pair, ba, bb, ca, cb, mf, margin);
+        }
+        return;
+    }
 
     if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_SPHERE)
     {
@@ -383,30 +560,29 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     }
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_PLANE)
     {
+        // Geometric points: sphere surface toward plane, plane projection.
         float3 pn = normalize(cb.params.xyz);
-        float d = dot(posA, pn) - cb.params.w - ca.params.x - margin;
-        if (d < 0.0)
+        float gap = dot(posA, pn) - cb.params.w - ca.params.x;
+        if (gap < margin)
         {
-            hit = true; nrm = -pn; pen = -d;
-            pA = posA + nrm * ca.params.x;
-            pB = posA + nrm * (ca.params.x - pen);
+            hit = true; nrm = -pn; pen = margin - gap;
+            pA = posA - pn * ca.params.x;
+            pB = pA - pn * gap; // on the geometric plane
         }
     }
     else if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_SPHERE)
     {
         float3 pn = normalize(ca.params.xyz);
-        float d = dot(posB, pn) - ca.params.w - cb.params.x - margin;
-        if (d < 0.0)
+        float gap = dot(posB, pn) - ca.params.w - cb.params.x;
+        if (gap < margin)
         {
-            hit = true; nrm = pn; pen = -d;
-            pB = posB - nrm * cb.params.x;
-            pA = posB - nrm * (cb.params.x - pen);
+            hit = true; nrm = pn; pen = margin - gap;
+            pB = posB - pn * cb.params.x;
+            pA = pB - pn * gap;
         }
     }
     else if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_SPHERE)
     {
-        // Sphere vs OBB: closest point
-        float4 rotA = quatMul(ba.orientation, ca.localRot);
         float3 local = quatRotate(quatConjugate(rotA), posB - posA);
         float3 half = ca.params.xyz;
         float3 q = clamp(local, -half, half);
@@ -424,7 +600,6 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     }
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_BOX)
     {
-        float4 rotB = quatMul(bb.orientation, cb.localRot);
         float3 local = quatRotate(quatConjugate(rotB), posA - posB);
         float3 half = cb.params.xyz;
         float3 q = clamp(local, -half, half);
@@ -442,19 +617,14 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     }
     else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CAPSULE)
     {
-        // Reject non-adjacent capsule pairs that only overlap via oversized bounds.
-        // Adjacent rope segments are already filtered by bodiesJointed in broadphase.
         float rA = ca.params.x;
         float rB = cb.params.x;
-        float4 rotA = quatMul(ba.orientation, ca.localRot);
-        float4 rotB = quatMul(bb.orientation, cb.localRot);
         float3 axA = quatRotate(rotA, float3(0, 1, 0));
         float3 axB = quatRotate(rotB, float3(0, 1, 0));
         float3 a0 = posA - axA * ca.params.y;
         float3 a1 = posA + axA * ca.params.y;
         float3 b0 = posB - axB * cb.params.y;
         float3 b1 = posB + axB * cb.params.y;
-        // Approximate: distance between segment midpoints minus half-lengths.
         float3 midA = 0.5 * (a0 + a1);
         float3 midB = 0.5 * (b0 + b1);
         float sep = length(midB - midA) - ca.params.y - cb.params.y;
@@ -463,7 +633,6 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     }
     else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_SPHERE)
     {
-        float4 rotA = quatMul(ba.orientation, ca.localRot);
         float3 axis = quatRotate(rotA, float3(0, 1, 0));
         float half = ca.params.y;
         float3 pa = posA - axis * half;
@@ -475,7 +644,6 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     }
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_CAPSULE)
     {
-        float4 rotB = quatMul(bb.orientation, cb.localRot);
         float3 axis = quatRotate(rotB, float3(0, 1, 0));
         float half = cb.params.y;
         float3 pa = posB - axis * half;
@@ -485,118 +653,15 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
         float3 closest = pa + ab * t;
         hit = sphereSphere(posA, ca.params.x, closest, cb.params.x, margin, nrm, pen, pA, pB);
     }
-    else if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_PLANE)
-    {
-        float3 pn = normalize(cb.params.xyz);
-        float4 rotA = quatMul(ba.orientation, ca.localRot);
-        float3 half = ca.params.xyz;
-        // Support point of box along -plane normal
-        float3 localN = quatRotate(quatConjugate(rotA), -pn);
-        float3 localSupport = float3(localN.x >= 0 ? half.x : -half.x,
-                                     localN.y >= 0 ? half.y : -half.y,
-                                     localN.z >= 0 ? half.z : -half.z);
-        float3 support = transformPoint(posA, rotA, localSupport);
-        float d = dot(support, pn) - cb.params.w - margin;
-        if (d < 0.0)
-        {
-            hit = true; nrm = -pn; pen = -d;
-            pA = support; pB = support - pn * d;
-        }
-    }
-    else if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_BOX)
-    {
-        float3 pn = normalize(ca.params.xyz);
-        float4 rotB = quatMul(bb.orientation, cb.localRot);
-        float3 half = cb.params.xyz;
-        float3 localN = quatRotate(quatConjugate(rotB), -pn);
-        float3 localSupport = float3(localN.x >= 0 ? half.x : -half.x,
-                                     localN.y >= 0 ? half.y : -half.y,
-                                     localN.z >= 0 ? half.z : -half.z);
-        float3 support = transformPoint(posB, rotB, localSupport);
-        float d = dot(support, pn) - ca.params.w - margin;
-        if (d < 0.0)
-        {
-            hit = true; nrm = pn; pen = -d;
-            pB = support; pA = support - pn * d;
-        }
-    }
-    else if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_BOX)
-    {
-        // Separating-axis on world AABB of OBBs (conservative); refine with sphere of half extents.
-        float rA = length(ca.params.xyz);
-        float rB = length(cb.params.xyz);
-        hit = sphereSphere(posA, rA, posB, rB, margin, nrm, pen, pA, pB);
-        if (hit)
-        {
-            // Clip penetration to OBB face estimate along nrm
-            float4 rotA = quatMul(ba.orientation, ca.localRot);
-            float4 rotB = quatMul(bb.orientation, cb.localRot);
-            float3 la = abs(quatRotate(quatConjugate(rotA), nrm)) * ca.params.xyz;
-            float3 lb = abs(quatRotate(quatConjugate(rotB), nrm)) * cb.params.xyz;
-            float extent = la.x + la.y + la.z + lb.x + lb.y + lb.z;
-            float centerSep = dot(posB - posA, nrm);
-            pen = extent + margin - abs(centerSep);
-            if (pen <= 0.0) hit = false;
-            else if (centerSep < 0.0) nrm = -nrm;
-        }
-    }
     else
     {
-        // Fallback: sphere bound (convex hulls use params.w)
         float rA = ca.params.w > 0.0 ? ca.params.w : length(ca.params.xyz);
         float rB = cb.params.w > 0.0 ? cb.params.w : length(cb.params.xyz);
         hit = sphereSphere(posA, rA, posB, rB, margin, nrm, pen, pA, pB);
     }
 
     if (!hit) return;
-
-    uint slot;
-    InterlockedAdd(gCounters[0].contactCount, 1, slot);
-    uint maxC = gScratchAtomics[3];
-    if (slot >= maxC)
-    {
-        InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
-        return;
-    }
-
-    Material ma = gMaterials[ca.material];
-    Material mb = gMaterials[cb.material];
-    float mu = sqrt(max(ma.friction, 0.0) * max(mb.friction, 0.0));
-    float3 t1, t2;
-    orthonormalBasis(nrm, t1, t2);
-
-    Contact ct;
-    ct.colliderA = pair.colliderA;
-    ct.colliderB = pair.colliderB;
-    ct.featureId = pair.key;
-    ct.alive = 1;
-    ct.normal = nrm;
-    ct.penetration = pen;
-    ct.anchorA = quatRotate(quatConjugate(ba.orientation), pA - ba.position);
-    ct.c0N = pen;
-    ct.anchorB = quatRotate(quatConjugate(bb.orientation), pB - bb.position);
-    ct.friction = mu;
-    ct.tangent1 = t1;
-    ct.lambdaN = 0.0;
-    ct.tangent2 = t2;
-    ct.lambdaT1 = 0.0;
-    ct.kN = gParams[0].kStart;
-    ct.kT = gParams[0].kStart;
-    ct.lambdaT2 = 0.0;
-    ct.c0T1 = 0.0;
-    gContacts[slot] = ct;
-
-    // Wake both
-    if (bodyIsDynamic(ba))
-    {
-        ba.flags = (ba.flags & ~BODY_SLEEPING) | BODY_AWAKE;
-        gBodies[ca.body] = ba;
-    }
-    if (bodyIsDynamic(bb))
-    {
-        bb.flags = (bb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
-        gBodies[cb.body] = bb;
-    }
+    emitContact(pair, ba, bb, ca, cb, nrm, pA, pB, pair.key, margin);
 }
 
 // demo3d Joint::initialize — store C0, decay λ/k (Eq. 19).
@@ -635,17 +700,77 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void persist_contacts(uint3 tid : SV_DispatchThreadID)
 {
-    // Warm-start match against previous contacts in gContacts[old] — host double-buffers
-    // For first full step: apply gamma/alpha to newly written contacts using feature id hash map in-place.
+    // Match featureId against previous-frame contacts (gContacts[offset..]), then Eq. 19 decay.
     uint i = tid.x;
     uint n = gCounters[0].contactCount;
     if (i >= n) return;
     AvbdParams p = gParams[0];
     Contact c = gContacts[i];
     if (c.alive == 0) return;
-    // Decay warm start for new contacts already zero; when matched, host/kernel sets lambdas.
-    c.kN = max(p.kStart, p.gamma * c.kN);
-    c.kT = max(p.kStart, p.gamma * c.kT);
+    BodyState ba = gBodies[gColliders[c.colliderA].body];
+    BodyState bb = gBodies[gColliders[c.colliderB].body];
+    bool bothSleep =
+        (!bodyIsDynamic(ba) || bodyIsSleeping(ba)) &&
+        (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
+    if (bothSleep) return;
+
+    uint prevN = gScratchAtomics[7];
+    uint prevOff = gScratchAtomics[8];
+    bool matched = false;
+    // Prefer exact featureId; else nearest midpoint on the same collider pair
+    // (clip vertex indices reorder under tiny rotations — three-avbd matchNearest).
+    float bestDist = 1e30;
+    uint bestJ = 0xFFFFFFFFu;
+    float3 mid = 0.5 * (
+        transformPoint(ba.position, ba.orientation, c.anchorA) +
+        transformPoint(bb.position, bb.orientation, c.anchorB));
+    for (uint j = 0; j < prevN; j++)
+    {
+        Contact prev = gContacts[prevOff + j];
+        if (prev.alive == 0) continue;
+        if (prev.colliderA != c.colliderA || prev.colliderB != c.colliderB) continue;
+        if (prev.featureId == c.featureId)
+        {
+            c.lambdaN = prev.lambdaN;
+            c.lambdaT1 = prev.lambdaT1;
+            c.lambdaT2 = prev.lambdaT2;
+            c.kN = prev.kN;
+            c.kT = prev.kT;
+            matched = true;
+            bestJ = 0xFFFFFFFFu;
+            break;
+        }
+        BodyState pba = gBodies[gColliders[prev.colliderA].body];
+        BodyState pbb = gBodies[gColliders[prev.colliderB].body];
+        float3 pmid = 0.5 * (
+            transformPoint(pba.position, pba.orientation, prev.anchorA) +
+            transformPoint(pbb.position, pbb.orientation, prev.anchorB));
+        float3 d = mid - pmid;
+        float dist = dot(d, d);
+        if (dist < bestDist)
+        {
+            bestDist = dist;
+            bestJ = j;
+        }
+    }
+    if (!matched && bestJ != 0xFFFFFFFFu && bestDist < 0.05 * 0.05)
+    {
+        Contact prev = gContacts[prevOff + bestJ];
+        c.lambdaN = prev.lambdaN;
+        c.lambdaT1 = prev.lambdaT1;
+        c.lambdaT2 = prev.lambdaT2;
+        c.kN = prev.kN;
+        c.kT = prev.kT;
+        matched = true;
+    }
+
+    float dt = max(p.dt, 1e-8);
+    float mA = ba.invMass > 1e-12 ? (1.0 / ba.invMass) : 1e20;
+    float mB = bb.invMass > 1e-12 ? (1.0 / bb.invMass) : 1e20;
+    // three-avbd GPU massPenalty: floor k at min(m)/dt² once the contact is persistent.
+    float kMass = matched ? (min(mA, mB) / (dt * dt)) : 0.0;
+    c.kN = max(max(p.kStart, kMass), p.gamma * c.kN);
+    c.kT = max(max(p.kStart, kMass * 0.1), p.gamma * c.kT);
     c.lambdaN *= p.alpha * p.gamma;
     c.lambdaT1 *= p.alpha * p.gamma;
     c.lambdaT2 *= p.alpha * p.gamma;
@@ -724,6 +849,66 @@ void csr_degree_joints(uint3 tid : SV_DispatchThreadID)
     csrCountEndpoint(e.y);
 }
 
+// Parallel exclusive prefix (Hillis–Steele). Host runs offset = 1,2,4,... with
+// gScratchAtomics[8] = offset. Uses gBodyColor as scratch for the running sum, then
+// copies back to degree→start in constraint_index; final fill cursors stay in gBodyColor.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_prefix_init(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].bodyCount;
+    if (i >= n) return;
+    gBodyColor[i] = gConstraintIndex[i]; // degree
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_prefix_scan(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].bodyCount;
+    if (i >= n) return;
+    uint offset = gScratchAtomics[8];
+    uint v = gBodyColor[i];
+    if (i >= offset) v += gConstraintIndex[i - offset];
+    // Write to constraint_index; next pass swaps roles via csr_prefix_swap.
+    gConstraintIndex[i] = v;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_prefix_swap(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = tid.x;
+    uint n = gCounters[0].bodyCount;
+    if (i >= n) return;
+    gBodyColor[i] = gConstraintIndex[i];
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void csr_prefix_finalize(uint3 tid : SV_DispatchThreadID)
+{
+    // Inclusive scan is in gBodyColor; convert to exclusive starts in constraint_index
+    // and leave fill cursors in gBodyColor (= exclusive start).
+    uint i = tid.x;
+    uint n = gCounters[0].bodyCount;
+    if (i > n) return;
+    if (i == n)
+    {
+        gConstraintIndex[n] = (n == 0u) ? 0u : gBodyColor[n - 1u];
+        return;
+    }
+    uint incl = gBodyColor[i];
+    uint excl = (i == 0u) ? 0u : gBodyColor[i - 1u];
+    gConstraintIndex[i] = excl;
+    gBodyColor[i] = excl; // fill cursor
+    // Keep inclusive total on last element available via constraint_index[n] above.
+    incl = incl; // silence
+}
+
+// Back-compat single-thread path for tiny worlds (tests).
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void csr_prefix(uint3 tid : SV_DispatchThreadID)
@@ -735,7 +920,7 @@ void csr_prefix(uint3 tid : SV_DispatchThreadID)
     {
         uint d = gConstraintIndex[i];
         gConstraintIndex[i] = sum;
-        gBodyColor[i] = sum; // fill cursor
+        gBodyColor[i] = sum;
         sum += d;
     }
     gConstraintIndex[n] = sum;
@@ -950,8 +1135,10 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID)
             bool isA = ba == bodyIdx;
             float3 wa = transformPoint(gBodies[ba].position, gBodies[ba].orientation, c.anchorA);
             float3 wb = transformPoint(gBodies[bb].position, gBodies[bb].orientation, c.anchorB);
-            c.penetration = dot(c.normal, wb - wa);
-            contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation);
+            float3 d = wb - wa;
+            float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
+            c.penetration = C.x;
+            contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation, C);
         }
         else
         {
@@ -1042,19 +1229,18 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             uint bb = gColliders[c.colliderB].body;
             float3 wa = transformPoint(gBodies[ba].position, gBodies[ba].orientation, c.anchorA);
             float3 wb = transformPoint(gBodies[bb].position, gBodies[bb].orientation, c.anchorB);
-            float pen = dot(c.normal, wb - wa);
-            c.penetration = pen;
-            float cReg = (1.0 - p.alpha) * c.c0N + (pen - c.c0N);
-            float3 f;
-            f.x = c.kN * cReg + c.lambdaN;
-            f.y = c.kT * (1.0 - p.alpha) * c.c0T1 + c.lambdaT1;
-            f.z = c.lambdaT2;
+            float3 d = wb - wa;
+            float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
+            c.penetration = C.x;
+            float3 C0 = float3(c.c0N, c.c0T1, c.c0T2);
+            float3 cReg = (1.0 - p.alpha) * C0 + (C - C0);
+            float3 f = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
             f = projectContactForce(f, c.friction);
             c.lambdaN = f.x;
             c.lambdaT1 = f.y;
             c.lambdaT2 = f.z;
-            // Penalty ramp
-            c.kN = min(c.kN + p.betaLin * abs(cReg), p.kMaxN);
+            // Penalty ramp (three-avbd: ramp when force in bounds)
+            if (f.x < 0.0) c.kN = min(c.kN + p.betaLin * abs(cReg.x), p.kMaxN);
             c.kT = min(c.kT + p.betaLin * 0.1, p.kMaxT);
             gContacts[i] = c;
         }

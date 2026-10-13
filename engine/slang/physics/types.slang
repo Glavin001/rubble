@@ -64,6 +64,9 @@ public struct Contact
     float kT;
     float lambdaT2;
     float c0T1;
+    float c0T2;
+    float _pad0;
+    float _pad1;
 };
 
 public struct Joint
