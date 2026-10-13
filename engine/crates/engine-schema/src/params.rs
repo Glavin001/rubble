@@ -3,6 +3,9 @@
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
+/// `AvbdParams::flags` bit: three-avbd reuseContacts (SAT-skip for still pairs).
+pub const FLAG_REUSE_CONTACTS: u32 = 1;
+
 /// Giles/Diaz/Yuksel AVBD parameters (avbd-demo3d `Solver::defaultParams`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
@@ -10,7 +13,9 @@ pub struct AvbdParams {
     pub dt: f32,
     pub gravity_y: f32,
     pub iterations: u32,
-    pub _pad0: u32,
+    /// Bit 0: reuseContacts (three-avbd SAT-skip for still pairs). Off by default —
+    /// on Metal it slows Brick Ring smash; enable for Box Pile settle.
+    pub flags: u32,
     /// Contact / constraint stabilization (paper α). Official demo: 0.99.
     pub alpha: f32,
     /// Warm-start decay. Official demo: 0.999.
@@ -37,7 +42,7 @@ impl Default for AvbdParams {
             dt: 1.0 / 60.0,
             gravity_y: -10.0,
             iterations: 10,
-            _pad0: 0,
+            flags: 0,
             alpha: 0.99,
             gamma: 0.999,
             beta_lin: 10_000.0,

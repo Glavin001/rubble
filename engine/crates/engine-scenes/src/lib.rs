@@ -5,7 +5,7 @@
 
 use engine_exec::PhysicsBackend;
 use engine_metal::{MetalWorld, SceneBuilder};
-use engine_schema::{AvbdParams, BodyState, WorldCapacity};
+use engine_schema::{AvbdParams, BodyState, WorldCapacity, FLAG_REUSE_CONTACTS};
 use glam::{Quat, Vec3};
 
 #[derive(Clone, Debug)]
@@ -814,6 +814,10 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     let mut world = MetalWorld::new(scene.info.capacity.clone())?;
     let mut params = AvbdParams::default();
     params.iterations = scene.info.iterations;
+    // reuseContacts helps random Box Pile settle; on Metal it slows Brick Ring smash.
+    if scene.info.name.starts_with("Box Pile") {
+        params.flags |= FLAG_REUSE_CONTACTS;
+    }
     world.set_params(params);
     {
         let mut b = SceneBuilder::new(&mut world);

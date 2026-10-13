@@ -23,7 +23,7 @@ Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8
 | JP smallest-free colour (not round id) | three-avbd | landed |
 | CSR prefix through 2^19 (scale bodies) | — | landed (was >65k bug) |
 | matchNearest contact warm-start | three-avbd | landed (pair hash + nearest within prev manifold; n·n_prev>0.9) |
-| reuseContacts (SAT skip) | three-avbd | blocked on Metal (Ring +3 ms); pile OK via qsub |
+| reuseContacts (SAT skip) | three-avbd | opt-in `FLAG_REUSE_CONTACTS` (Box Pile on; Ring off) |
 | Primal multi-lane | three-avbd 8g | landed |
 | Contact manifold records (CSR/primal) | three-avbd 8b | landed (dual still per-contact) |
 | Island sleep + fully-asleep early-out | Jolt / three-avbd | landed (gate always; host skip) |

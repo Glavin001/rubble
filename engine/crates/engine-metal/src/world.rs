@@ -556,8 +556,8 @@ impl MetalWorld {
         self.dispatch(&encoder, "broadphase_clear", 131072);
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
-        self.dispatch(&encoder, "narrowphase", narrow_n);
-        // O(1) warm-start lookup (was O(n²) scan of prev contacts — Brick Ring killer).
+        // Pair hash before NP when reuseContacts is on (three-avbd order); otherwise
+        // after NP is enough for persist-only warm-start.
         let hash_n = {
             let s = unsafe {
                 std::slice::from_raw_parts(self.scratch[self.host_slot()].contents() as *const u32, 64)
@@ -565,8 +565,16 @@ impl MetalWorld {
             s[9].max(1024) as u64
         };
         let prev_n = prev_contacts.min(self.capacity.max_contacts as u64).max(1);
-        self.dispatch(&encoder, "contact_hash_clear", hash_n);
-        self.dispatch(&encoder, "contact_hash_insert", prev_n);
+        let reuse = (self.params.flags & engine_schema::FLAG_REUSE_CONTACTS) != 0;
+        if reuse {
+            self.dispatch(&encoder, "contact_hash_clear", hash_n);
+            self.dispatch(&encoder, "contact_hash_insert", prev_n);
+        }
+        self.dispatch(&encoder, "narrowphase", narrow_n);
+        if !reuse {
+            self.dispatch(&encoder, "contact_hash_clear", hash_n);
+            self.dispatch(&encoder, "contact_hash_insert", prev_n);
+        }
         self.dispatch(&encoder, "persist_contacts", contact_dispatch);
         if self.joint_count > 0 {
             self.dispatch(&encoder, "warmstart_joints", n_joints);
