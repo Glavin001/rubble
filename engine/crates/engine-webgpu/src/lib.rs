@@ -227,14 +227,19 @@ fn fix_naga_loop_exits(src: &str) -> String {
         };
         let loop_open = before.len() - 1; // the '{' of `loop {`
         sites.push((loop_open, def_open + 1 + br, switch_close));
-        cursor = switch_close;
+        cursor = def_open + 1;
     }
-    let mut s = src.to_string();
-    for (i, &(loop_open, break_at, switch_close)) in sites.iter().enumerate().rev() {
+    let mut edits: Vec<(usize, String)> = Vec::new();
+    for (i, &(loop_open, break_at, switch_close)) in sites.iter().enumerate() {
         let flag = format!("nagaExit{i}");
-        s.insert_str(switch_close + 1, &format!("\n if ({flag}) {{ break; }}\n"));
-        s.insert_str(break_at, &format!("{flag} = true; "));
-        s.insert_str(loop_open + 1, &format!("\n var {flag} = false;\n"));
+        edits.push((switch_close + 1, format!("\n if ({flag}) {{ break; }}\n")));
+        edits.push((break_at, format!("{flag} = true; ")));
+        edits.push((loop_open + 1, format!("\n var {flag} = false;\n")));
+    }
+    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut s = src.to_string();
+    for (at, text) in edits {
+        s.insert_str(at, &text);
     }
     s
 }
