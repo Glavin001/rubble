@@ -832,10 +832,18 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
             break;
         }
     }
-    if (startJ == CONTACT_HASH_EMPTY) return false;
+    if (startJ == CONTACT_HASH_EMPTY)
+    {
+        InterlockedAdd(gScratchAtomics[19], 1); // reuse hash miss
+        return false;
+    }
     // _pad1 = asfloat(generated step). Skip if either body moved after that.
     uint generated = asuint(gContacts[prevOff + startJ]._pad1);
-    if (generated < max(ba.generation, bb.generation)) return false;
+    if (generated < max(ba.generation, bb.generation))
+    {
+        InterlockedAdd(gScratchAtomics[20], 1); // reuse generation gate
+        return false;
+    }
 
     uint count = 0u;
     for (uint k = 0u; k < 8u; k++)
@@ -900,6 +908,7 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
     mf.friction = head.friction;
     gManifolds[mslot] = mf;
     wakeFromContact(ba, bb, gColliders[pair.colliderA], gColliders[pair.colliderB]);
+    InterlockedAdd(gScratchAtomics[18], 1); // reuse hits
     return true;
 }
 
@@ -923,12 +932,14 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     float3 nrm; float pen; float3 pA; float3 pB;
     bool hit = false;
 
+    // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
+    if ((gParams[0].flags & FLAG_REUSE_CONTACTS) != 0u &&
+        tryReuseContacts(pair, ba, bb, margin))
+        return;
+
     // Multi-point manifolds (demo3d / three-avbd) — required for stable stacks.
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_BOX)
     {
-        if ((gParams[0].flags & FLAG_REUSE_CONTACTS) != 0u &&
-            tryReuseContacts(pair, ba, bb, margin))
-            return;
         // World OBBs from build_aabbs cache (skip per-pair quat axis rebuild).
         BoxManifold mf = collideBoxesCached(
             worldObbFromCache(pair.colliderA), worldObbFromCache(pair.colliderB), margin);
