@@ -669,6 +669,11 @@ impl MetalWorld {
         };
         bodies.to_vec()
     }
+
+    /// Readback for diagnostics only.
+    pub fn colliders_ptr(&self) -> *const Collider {
+        self.colliders.contents() as *const Collider
+    }
 }
 
 impl PhysicsBackend for MetalWorld {

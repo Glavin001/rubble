@@ -1,14 +1,21 @@
 use engine_exec::PhysicsBackend;
+use engine_schema::ShapeType;
 
 fn main() {
-    let name = std::env::args().nth(1).unwrap_or_else(|| "Brick Ring (9k)".into());
-    let steps: u32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(60);
+    let name = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "Brick Ring (9k)".into());
+    let steps: u32 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
     let (mut world, _) = engine_scenes::build_world(&name).expect("build");
     for _ in 0..steps {
         world.step().expect("step");
     }
     let c = world.last_counters();
     let bodies = world.download_bodies();
+    let contacts = world.download_contacts();
     let mut ball_i = 0usize;
     let mut best_v = 0.0f32;
     let mut flying = 0u32;
@@ -16,25 +23,100 @@ fn main() {
     let mut n = 0u32;
     let mut brick_ke = 0.0f32;
     for (i, b) in bodies.iter().enumerate() {
-        if !b.is_dynamic() { continue; }
+        if !b.is_dynamic() {
+            continue;
+        }
         n += 1;
         let v = glam::Vec3::from_array(b.linear_vel).length();
         if v > best_v {
             best_v = v;
             ball_i = i;
         }
-        if b.position[1] < 1.0 { below += 1; }
-        if v > 1.0 { flying += 1; }
-        let m = if b.inv_mass > 1e-12 { 1.0 / b.inv_mass } else { 0.0 };
-        // skip heaviest (ball) later
+        if b.position[1] < 1.0 {
+            below += 1;
+        }
+        if v > 1.0 {
+            flying += 1;
+        }
+        let m = if b.inv_mass > 1e-12 {
+            1.0 / b.inv_mass
+        } else {
+            0.0
+        };
         brick_ke += 0.5 * m * v * v;
     }
     let ball = &bodies[ball_i];
-    let bm = if ball.inv_mass > 1e-12 { 1.0 / ball.inv_mass } else { 0.0 };
+    let bm = if ball.inv_mass > 1e-12 {
+        1.0 / ball.inv_mass
+    } else {
+        0.0
+    };
     let ball_ke = 0.5 * bm * glam::Vec3::from_array(ball.linear_vel).length_squared();
     println!(
         "steps={steps} awake={} contacts={} manifolds={} cand={} below1m={below}/{n} flying(v>1)={flying} ball_z={:.2} vz={:.2} ball_ke={ball_ke:.0} total_ke={:.0}",
-        c.awake_count, c.contact_count, c.manifold_count, c.candidate_count,
-        ball.position[2], ball.linear_vel[2], brick_ke
+        c.awake_count,
+        c.contact_count,
+        c.manifold_count,
+        c.candidate_count,
+        ball.position[2],
+        ball.linear_vel[2],
+        brick_ke
+    );
+
+    // Classify contacts: plane vs box-box, vertical vs horizontal normals.
+    let colliders = unsafe {
+        std::slice::from_raw_parts(
+            world.colliders_ptr(),
+            world.collider_count() as usize,
+        )
+    };
+    let mut plane_c = 0u32;
+    let mut box_c = 0u32;
+    let mut other_c = 0u32;
+    let mut vert = 0u32; // |ny| > 0.85
+    let mut horiz = 0u32;
+    let mut pairs = std::collections::HashSet::new();
+    let mut pts_hist = [0u32; 9];
+    let mut pair_pts: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+    for ct in &contacts {
+        if ct.alive == 0 {
+            continue;
+        }
+        let ca = ct.collider_a as usize;
+        let cb = ct.collider_b as usize;
+        let sa = colliders.get(ca).map(|c| c.shape).unwrap_or(0);
+        let sb = colliders.get(cb).map(|c| c.shape).unwrap_or(0);
+        let plane = sa == ShapeType::Plane as u32 || sb == ShapeType::Plane as u32;
+        if plane {
+            plane_c += 1;
+        } else if sa == ShapeType::Box as u32 && sb == ShapeType::Box as u32 {
+            box_c += 1;
+        } else {
+            other_c += 1;
+        }
+        if ct.normal[1].abs() > 0.85 {
+            vert += 1;
+        } else {
+            horiz += 1;
+        }
+        let key = (ct.collider_a.min(ct.collider_b), ct.collider_a.max(ct.collider_b));
+        pairs.insert(key);
+        *pair_pts.entry(key).or_insert(0) += 1;
+    }
+    for (_k, pts) in &pair_pts {
+        let i = (*pts as usize).min(8);
+        pts_hist[i] += 1;
+    }
+    println!(
+        "classify: plane={plane_c} box-box={box_c} other={other_c} vert(|ny|>0.85)={vert} horiz={horiz} unique_pairs={}",
+        pairs.len()
+    );
+    println!(
+        "pts/pair hist: 1={} 2={} 3={} 4={} 5+={}",
+        pts_hist[1],
+        pts_hist[2],
+        pts_hist[3],
+        pts_hist[4],
+        pts_hist[5] + pts_hist[6] + pts_hist[7] + pts_hist[8]
     );
 }

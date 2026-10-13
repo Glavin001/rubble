@@ -189,18 +189,21 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     float3 worldPos = transformPoint(b.position, b.orientation, col.localPos);
     float4 worldRot = quatMul(b.orientation, col.localRot);
     float3 mn, mx;
-    float margin = gParams[0].contactOffset;
+    // three-avbd testPair pads world AABBs by 1e-4 only (f32 round-off). Inflating by
+    // contactOffset (~1 cm) pulled in ring-adjacent bricks that faceSeparated should
+    // still drop — but the fatter boxes also bloated grid occupancy. Margin stays in C0.
+    const float aabbPad = 1.0e-4;
     if (col.shape == SHAPE_SPHERE)
     {
-        worldAabbSphere(worldPos, col.params.x + margin, mn, mx);
+        worldAabbSphere(worldPos, col.params.x + aabbPad, mn, mx);
     }
     else if (col.shape == SHAPE_BOX)
     {
-        worldAabbBox(worldPos, worldRot, col.params.xyz + margin, mn, mx);
+        worldAabbBox(worldPos, worldRot, col.params.xyz + aabbPad, mn, mx);
     }
     else if (col.shape == SHAPE_CAPSULE)
     {
-        worldAabbCapsule(worldPos, worldRot, col.params.x + margin, col.params.y, mn, mx);
+        worldAabbCapsule(worldPos, worldRot, col.params.x + aabbPad, col.params.y, mn, mx);
     }
     else if (col.shape == SHAPE_PLANE)
     {
@@ -210,7 +213,7 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     else
     {
         // Convex: use sphere bound from params.w as radius hint
-        worldAabbSphere(worldPos, col.params.w + margin, mn, mx);
+        worldAabbSphere(worldPos, col.params.w + aabbPad, mn, mx);
     }
     Aabb box;
     box.mn = mn; box.mx = mx; box._pad0 = 0; box._pad1 = asfloat(col.body);
@@ -509,10 +512,11 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                 {
                     // three-avbd testPair: bounding spheres before AABB/face (rings/piles
                     // otherwise send 48-72% of pairs to NP only to find them apart).
+                    // Radii are geometric (moment.w / params.w); no contactOffset inflate.
                     float3 d = b.position - ob.position;
                     float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
                     float rB = other.params.w > 0.0 ? other.params.w : length(other.params.xyz);
-                    float rr = rA + rB + 2.0 * gParams[0].contactOffset;
+                    float rr = rA + rB;
                     if (dot(d, d) > rr * rr)
                     {
                         cur = gColorLists[cur];
