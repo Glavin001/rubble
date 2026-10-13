@@ -58,9 +58,10 @@ fn main() {
                 }
             }
             println!(
-                "t={step:3} awake={} contacts={} cand={} below1m={below}/{n} ball_xyz=({:.2},{:.2},{:.2}) v=({:.2},{:.2},{:.2}) ke={ke:.0}",
+                "t={step:3} awake={} contacts={} manifolds={} cand={} below1m={below}/{n} ball_xyz=({:.2},{:.2},{:.2}) v=({:.2},{:.2},{:.2}) ke={ke:.0}",
                 c.awake_count,
                 c.contact_count,
+                c.manifold_count,
                 c.candidate_count,
                 b.position[0],
                 b.position[1],
