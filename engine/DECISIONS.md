@@ -23,6 +23,7 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 8g. **CSR prefix must cover max_bodies:** Hillis–Steele pass_table offsets were only 2^0..2^15; above 65 536 bodies adjacency was corrupt and Box Columns (100k) exploded. Extended to 2^19. JP assigns *smallest-free* colour (not round id). Island sleep gate always (8 rounds). Fully-asleep steps early-out on host.
 8h. **Local three-avbd Chrome WebGPU (M3 Max):** see `docs/LOCAL_three_avbd_gpu_bench.json`. Wall smash 2.86 ms, brick ring 9k 1.75 ms, settled pile 32k 3.14 ms, box columns 100k 3.50 ms. Our seated+settled columns match colours=3 and sleep. Do not shrink BP halo/cellSize — that falsely “wins” Ring by dropping stack contacts.
 8i. **Primal multi-lane + Stage 8b manifolds (landed):** `primalAccumulate` / groupshared reduce; CSR/primal/island key **manifolds** (one edge per pair), dual stays per-contact for Metal occupancy. Wall Smash ~2.2 ms (beats local 2.86). Brick Ring 9k scene matches three-avbd params (`12,20,2,10`); 28k remains stress (~9 ms).
+8j. **NP dispatch sizing:** never `n_cols*32` — that over-dispatched Brick Ring 9k ~9× (292k threads vs ~33k candidates). Size from `last.candidate_count` (+50% headroom). Contact-reuse via `bodies_prev` delta was tried and **reverted** (regressed Ring/Smash); needs three-avbd `updateRefs` generations, not pose-delta.
 9. **Unsupported three-avbd features** (cloth, soft, plastic, wind) stay out of rigid-body pass/fail gates.
 10. **Y-up vs Z-up:** keep engine Y-up; oracle fixtures convert `(x,y,z)→(x,z,y)`.
 

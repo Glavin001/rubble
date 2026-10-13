@@ -469,13 +469,20 @@ impl MetalWorld {
             ((self.last_counters.awake_count as u64).saturating_mul(2) + 256).min(n_bodies).max(1)
         };
         // Size transient dispatches from last step (three-avbd argsPrev pattern).
+        // Do NOT use n_cols*32 — that over-dispatched NP ~9× on Brick Ring 9k (292k vs 33k).
         let prev_contacts = self.last_counters.contact_count.max(256) as u64;
+        let prev_cand = self.last_counters.candidate_count.max(256) as u64;
         let narrow_n = (self.capacity.max_candidates as u64)
-            .min(n_cols.saturating_mul(32))
-            .max(
-                prev_contacts
-                    .saturating_add(prev_contacts / 4)
-                    .saturating_add(1024),
+            .min(
+                prev_cand
+                    .saturating_add(prev_cand / 2)
+                    .saturating_add(2048)
+                    .max(n_cols.saturating_mul(4))
+                    .max(
+                        prev_contacts
+                            .saturating_add(prev_contacts / 4)
+                            .saturating_add(1024),
+                    ),
             )
             .max(1);
         // Size to last count + 25% headroom (2× over-dispatch wasted bandwidth on smash peaks).
