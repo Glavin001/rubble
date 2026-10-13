@@ -110,8 +110,9 @@ void predict_bodies(uint3 tid : SV_DispatchThreadID)
     if (i >= c.bodyCount) return;
     AvbdParams p = gParams[0];
     BodyState b = gBodies[i];
-    gBodiesPrev[i] = b;
+    // Sleeping/static: do not touch prev/pose (three-avbd mover compaction).
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    gBodiesPrev[i] = b;
 
     float dt = p.dt;
     float3 accel = (b.linearVel - float3(0, 0, 0)) / max(dt, 1e-8); // prev vel stored unused; adaptive weight
@@ -776,13 +777,15 @@ void csr_scatter_joints(uint3 tid : SV_DispatchThreadID)
 }
 
 // Deterministic adjacency order (three-avbd sortAdjacency) — joints first by id, then contacts.
+// Indexed by awake list so sleeping fields with high body ids stay cheap.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void csr_sort(uint3 tid : SV_DispatchThreadID)
 {
-    uint b = tid.x;
-    uint n = gCounters[0].bodyCount;
-    if (b >= n) return;
+    uint li = tid.x;
+    uint awakeN = gCounters[0].awakeCount;
+    if (li >= awakeN) return;
+    uint b = gAwakeList[li];
     uint lo = gConstraintIndex[b];
     uint hi = gConstraintIndex[b + 1u];
     uint nJ = gCounters[0].jointCount;
@@ -860,9 +863,10 @@ void write_color_args(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void init_colors(uint3 tid : SV_DispatchThreadID)
 {
-    uint i = tid.x;
-    if (i >= gCounters[0].bodyCount) return;
-    gBodyColor[i] = 0xFFFFFFFFu;
+    uint li = tid.x;
+    uint awakeN = gCounters[0].awakeCount;
+    if (li >= awakeN) return;
+    gBodyColor[gAwakeList[li]] = 0xFFFFFFFFu;
 }
 
 [shader("compute")]

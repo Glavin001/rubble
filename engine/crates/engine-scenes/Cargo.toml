@@ -19,3 +19,7 @@ log.workspace = true
 [[bin]]
 name = "demo_viewer"
 path = "src/bin/demo_viewer.rs"
+
+[[bin]]
+name = "scene_fps"
+path = "src/bin/scene_fps.rs"
