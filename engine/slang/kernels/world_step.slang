@@ -280,7 +280,10 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
         worldAabbSphere(worldPos, col.params.w + aabbPad, mn, mx);
     }
     Aabb box;
-    box.mn = mn; box.mx = mx; box._pad0 = 0; box._pad1 = asfloat(col.body);
+    box.mn = mn; box.mx = mx;
+    float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    box._pad0 = boundR;
+    box._pad1 = asfloat(col.body);
     // Store at collider index offset by max_bodies — host allocates gAabbs sized max_bodies+max_colliders
     // Convention: collider AABBs start at index max_bodies. Host sets gScratchAtomics[1] = max_bodies.
     uint base = HOST_S(1);
@@ -573,6 +576,8 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
     for (uint pi = 0u; pi < nPlanes; pi++)
         emitCandidate(i, ALOAD(gScratchAtomics[43u + pi]));
+    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    float3 cA = 0.5 * (box.mn + box.mx);
     for (int z = cc.z - 1; z <= cc.z + 1; z++)
     for (int y = cc.y - 1; y <= cc.y + 1; y++)
     for (int x = cc.x - 1; x <= cc.x + 1; x++)
@@ -587,6 +592,27 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             guard++;
             if (guard == 4096u)
                 AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+            // Sphere test from the cached AABB (center + radius in _pad0) before
+            // touching the collider or body. Same geometric radius as the old test.
+            Aabb ab = gAabbs[base + cur];
+            float rB = ab._pad0;
+            if (rB > 0.0)
+            {
+                float3 d = cA - 0.5 * (ab.mn + ab.mx);
+                float rr = rA + rB;
+                if (dot(d, d) > rr * rr)
+                {
+                    cur = gColorLists[cur];
+                    continue;
+                }
+            }
+            if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
+                box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
+                box.mx.z < ab.mn.z || ab.mx.z < box.mn.z)
+            {
+                cur = gColorLists[cur];
+                continue;
+            }
             // Dynamic-dynamic once (higher index), PLUS awake→sleeping at any index:
             // smash balls are last, so cur>i alone never pairs them with sleeping
             // bricks (sleepers only keep static contacts and would not emit).
@@ -600,26 +626,8 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                     !bodiesJointed(col.body, other.body) &&
                     other.shape != SHAPE_PLANE)
                 {
-                    // three-avbd testPair: bounding spheres before AABB/face (rings/piles
-                    // otherwise send 48-72% of pairs to NP only to find them apart).
-                    // Radii are geometric (moment.w / params.w); no contactOffset inflate.
-                    float3 d = b.position - ob.position;
-                    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
-                    float rB = other.params.w > 0.0 ? other.params.w : length(other.params.xyz);
-                    float rr = rA + rB;
-                    if (dot(d, d) > rr * rr)
-                    {
-                        cur = gColorLists[cur];
-                        continue;
-                    }
-                    Aabb ab = gAabbs[base + cur];
-                    if (!(box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
-                          box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
-                          box.mx.z < ab.mn.z || ab.mx.z < box.mn.z))
-                    {
-                        if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)))
-                            emitCandidate(i, cur);
-                    }
+                    if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)))
+                        emitCandidate(i, cur);
                 }
             }
             cur = gColorLists[cur];
