@@ -21,7 +21,9 @@ pub struct MetalWorld {
     manifolds: Buffer,
     joints: Buffer,
     params_buf: Buffer,
-    counters: Buffer,
+    /// Ping-pong so the CPU can prepare step N+1 while the GPU drains step N
+    /// (three-avbd wallMs). Index = `host_parity`.
+    counters: [Buffer; 2],
     commands: Buffer,
     aabbs: Buffer,
     candidates: Buffer,
@@ -31,12 +33,12 @@ pub struct MetalWorld {
     constraint_ids: Buffer,
     color_lists: Buffer,
     color_offsets: Buffer,
-    color_counts: Buffer,
+    color_counts: [Buffer; 2],
     hull_verts: Buffer,
     events: Buffer,
     ccd_flags: Buffer,
     world_obbs: Buffer,
-    scratch: Buffer,
+    scratch: [Buffer; 2],
     /// Prefilled 0..63; each color/round dispatch binds a 4-byte offset (three-avbd pass const).
     pass_table: Buffer,
     /// Metal MTLDispatchThreadgroupsIndirectArguments × max_colors.
@@ -53,6 +55,8 @@ pub struct MetalWorld {
     steps_done: u32,
     /// 0 → current contacts in [0, max); 1 → current in [max, 2max). Prev is the other half.
     contacts_parity: u32,
+    /// Which counters/scratch/color_counts slot the next encode uses.
+    host_parity: u32,
     pub chip: String,
 }
 
@@ -73,7 +77,7 @@ impl MetalWorld {
         let manifolds = alloc::<Manifold>(d, capacity.max_candidates);
         let joints = alloc::<Joint>(d, capacity.max_joints);
         let params_buf = alloc::<AvbdParams>(d, 1);
-        let counters = alloc::<StepCounters>(d, 1);
+        let counters = [alloc::<StepCounters>(d, 1), alloc::<StepCounters>(d, 1)];
         let commands = alloc::<GpuCommand>(d, capacity.max_commands);
         let aabbs = alloc::<AabbGpu>(d, capacity.max_bodies + capacity.max_colliders);
         let candidates = alloc::<CandidatePair>(d, capacity.max_candidates);
@@ -89,13 +93,16 @@ impl MetalWorld {
         );
         let color_lists = alloc_u32(d, capacity.max_bodies * capacity.max_colors);
         let color_offsets = alloc_u32(d, capacity.max_colors);
-        let color_counts = alloc_u32(d, capacity.max_colors);
+        let color_counts = [
+            alloc_u32(d, capacity.max_colors),
+            alloc_u32(d, capacity.max_colors),
+        ];
         let hull_verts = alloc::<[f32; 4]>(d, capacity.max_hull_vertices);
         let events = alloc_u32(d, 65536);
         let ccd_flags = alloc_u32(d, capacity.max_bodies);
         // WorldObbGpu = 5 × float4
         let world_obbs = alloc::<[f32; 20]>(d, capacity.max_colliders);
-        let scratch = alloc_u32(d, 64);
+        let scratch = [alloc_u32(d, 64), alloc_u32(d, 64)];
         // 96 slots: 0..47 identity (colour rounds / misc), 48..67 = 2^0..2^19 for CSR scan
         // (must cover max_bodies=524288; the old 16-slot table broke adjacency above 65k).
         let pass_table = alloc_u32(d, 96);
@@ -122,7 +129,8 @@ impl MetalWorld {
         let params = AvbdParams::default();
         unsafe {
             *(params_buf.contents() as *mut AvbdParams) = params;
-            *(counters.contents() as *mut StepCounters) = StepCounters::default();
+            *(counters[0].contents() as *mut StepCounters) = StepCounters::default();
+            *(counters[1].contents() as *mut StepCounters) = StepCounters::default();
         }
 
         Ok(Self {
@@ -166,6 +174,7 @@ impl MetalWorld {
             last_timings: PhaseTimingsMs::default(),
             steps_done: 0,
             contacts_parity: 0,
+            host_parity: 0,
             chip,
         })
     }
@@ -284,8 +293,13 @@ impl MetalWorld {
         &self.bodies
     }
 
+    fn host_slot(&self) -> usize {
+        (self.host_parity & 1) as usize
+    }
+
     fn bind_all(&self, encoder: &ComputeCommandEncoderRef) {
         // Binding order must match Slang declaration order in world_step.slang.
+        let slot = self.host_slot();
         encoder.set_buffer(0, Some(&self.bodies), 0);
         encoder.set_buffer(1, Some(&self.bodies_prev), 0);
         encoder.set_buffer(2, Some(&self.colliders), 0);
@@ -293,7 +307,7 @@ impl MetalWorld {
         encoder.set_buffer(4, Some(&self.contacts), 0);
         encoder.set_buffer(5, Some(&self.joints), 0);
         encoder.set_buffer(6, Some(&self.params_buf), 0);
-        encoder.set_buffer(7, Some(&self.counters), 0);
+        encoder.set_buffer(7, Some(&self.counters[slot]), 0);
         encoder.set_buffer(8, Some(&self.commands), 0);
         encoder.set_buffer(9, Some(&self.aabbs), 0);
         encoder.set_buffer(10, Some(&self.candidates), 0);
@@ -303,11 +317,11 @@ impl MetalWorld {
         encoder.set_buffer(14, Some(&self.constraint_ids), 0);
         encoder.set_buffer(15, Some(&self.color_lists), 0);
         encoder.set_buffer(16, Some(&self.color_offsets), 0);
-        encoder.set_buffer(17, Some(&self.color_counts), 0);
+        encoder.set_buffer(17, Some(&self.color_counts[slot]), 0);
         encoder.set_buffer(18, Some(&self.hull_verts), 0);
         encoder.set_buffer(19, Some(&self.events), 0);
         encoder.set_buffer(20, Some(&self.ccd_flags), 0);
-        encoder.set_buffer(21, Some(&self.scratch), 0);
+        encoder.set_buffer(21, Some(&self.scratch[slot]), 0);
         // Default pass uniform = slot 0; dispatch_pass overrides with an offset.
         encoder.set_buffer(22, Some(&self.pass_table), 0);
         encoder.set_buffer(23, Some(&self.indirect_args), 0);
@@ -358,7 +372,9 @@ impl MetalWorld {
     }
 
     fn write_scratch(&self) {
-        let s = unsafe { std::slice::from_raw_parts_mut(self.scratch.contents() as *mut u32, 64) };
+        let s = unsafe {
+            std::slice::from_raw_parts_mut(self.scratch[self.host_slot()].contents() as *mut u32, 64)
+        };
         s[0] = self.command_count;
         s[1] = self.capacity.max_bodies;
         s[2] = self.capacity.max_candidates;
@@ -414,12 +430,21 @@ impl MetalWorld {
             c.joint_count = self.joint_count;
         }
         unsafe {
-            *(self.counters.contents() as *mut StepCounters) = c;
+            *(self.counters[self.host_slot()].contents() as *mut StepCounters) = c;
             *(self.params_buf.contents() as *mut AvbdParams) = self.params;
         }
     }
 
     pub fn step_gpu(&mut self) -> Result<StepCounters, ExecError> {
+        self.step_gpu_inner(true)
+    }
+
+    /// Encode+commit; when `wait` is false, flip host buffers and return without draining.
+    pub fn step_gpu_ex(&mut self, wait: bool) -> Result<StepCounters, ExecError> {
+        self.step_gpu_inner(wait)
+    }
+
+    fn step_gpu_inner(&mut self, wait: bool) -> Result<StepCounters, ExecError> {
         let wall_t0 = std::time::Instant::now();
         let cpu_t0 = std::time::Instant::now();
         // Fully asleep world: skip the GPU step (sleeper BP was ~180 ms on 100k columns).
@@ -443,8 +468,9 @@ impl MetalWorld {
         // Avoid O(max_colors) host clears on huge capacities — only touch used slots.
         {
             let n = self.capacity.max_colors.min(64) as usize;
+            let slot = self.host_slot();
             let cc = unsafe {
-                std::slice::from_raw_parts_mut(self.color_counts.contents() as *mut u32, n)
+                std::slice::from_raw_parts_mut(self.color_counts[slot].contents() as *mut u32, n)
             };
             for v in cc.iter_mut() {
                 *v = 0;
@@ -503,7 +529,7 @@ impl MetalWorld {
             .max(1);
 
         self.dispatch(&encoder, "apply_commands", self.command_count.max(1) as u64);
-        let dirty = unsafe { *(self.scratch.contents() as *const u32).add(6) };
+        let dirty = unsafe { *(self.scratch[self.host_slot()].contents() as *const u32).add(6) };
         if dirty != 0 || self.command_count > 0 {
             self.dispatch(&encoder, "recompute_inertia", n_bodies);
         }
@@ -523,7 +549,9 @@ impl MetalWorld {
         self.dispatch(&encoder, "narrowphase", narrow_n);
         // O(1) warm-start lookup (was O(n²) scan of prev contacts — Brick Ring killer).
         let hash_n = {
-            let s = unsafe { std::slice::from_raw_parts(self.scratch.contents() as *const u32, 64) };
+            let s = unsafe {
+                std::slice::from_raw_parts(self.scratch[self.host_slot()].contents() as *const u32, 64)
+            };
             s[9].max(1024) as u64
         };
         let prev_n = prev_contacts.min(self.capacity.max_contacts as u64).max(1);
@@ -623,27 +651,48 @@ impl MetalWorld {
 
         encoder.end_encoding();
         let cpu_submit = cpu_t0.elapsed().as_secs_f64() * 1000.0;
+        let slot = self.host_slot();
         cb.commit();
+        self.contacts_parity ^= 1;
+        self.host_parity ^= 1;
+        self.steps_done = self.steps_done.saturating_add(1);
+        self.command_count = 0;
+        if !wait {
+            self.last_timings = PhaseTimingsMs {
+                total_gpu: wall_t0.elapsed().as_secs_f64() * 1000.0,
+                cpu_submit,
+                ..Default::default()
+            };
+            let _ = PHASE_GRAPH;
+            return Ok(self.last_counters);
+        }
         cb.wait_until_completed();
         let gpu_ms = wall_t0.elapsed().as_secs_f64() * 1000.0;
-
-        let counters = unsafe { *(self.counters.contents() as *const StepCounters) };
+        let counters = unsafe { *(self.counters[slot].contents() as *const StepCounters) };
         self.last_counters = counters;
-        self.contacts_parity ^= 1;
-        self.steps_done = self.steps_done.saturating_add(1);
         self.last_timings = PhaseTimingsMs {
             total_gpu: gpu_ms,
             cpu_submit,
             solve: gpu_ms * 0.5,
             ..Default::default()
         };
-        self.command_count = 0;
-
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
         let _ = PHASE_GRAPH;
         Ok(counters)
+    }
+
+    /// Drain the queue and refresh `last_counters` from the slot that just finished
+    /// (opposite of the next encode slot after an odd number of `step_gpu_ex(false)`).
+    pub fn wait_gpu(&mut self) {
+        let cb = self.device.queue.new_command_buffer();
+        cb.commit();
+        cb.wait_until_completed();
+        // Last completed step wrote slot = host_parity ^ 1 (we flipped after commit).
+        let done = ((self.host_parity ^ 1) & 1) as usize;
+        let counters = unsafe { *(self.counters[done].contents() as *const StepCounters) };
+        self.last_counters = counters;
     }
 
     /// Readback for tests/oracles only — never call from the hot game loop.
