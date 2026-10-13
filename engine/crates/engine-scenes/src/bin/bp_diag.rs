@@ -119,4 +119,26 @@ fn main() {
         pts_hist[4],
         pts_hist[5] + pts_hist[6] + pts_hist[7] + pts_hist[8]
     );
+
+    // Warm-start key survival over the last two steps (churn diagnosis).
+    {
+        let mut prev: std::collections::HashSet<(u32, u32, u32)> = std::collections::HashSet::new();
+        for ct in &contacts {
+            if ct.alive != 0 {
+                prev.insert((ct.collider_a.min(ct.collider_b), ct.collider_a.max(ct.collider_b), ct.feature_id));
+            }
+        }
+        world.step().expect("step");
+        let cur = world.download_contacts();
+        let mut hit = 0u32;
+        let mut n = 0u32;
+        for ct in &cur {
+            if ct.alive == 0 { continue; }
+            n += 1;
+            let k = (ct.collider_a.min(ct.collider_b), ct.collider_a.max(ct.collider_b), ct.feature_id);
+            if prev.contains(&k) { hit += 1; }
+        }
+        let surv = if n > 0 { hit as f32 / n as f32 } else { 0.0 };
+        println!("warmstart_survival={surv:.3} ({hit}/{n})");
+    }
 }
