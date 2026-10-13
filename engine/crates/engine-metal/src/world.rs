@@ -536,7 +536,9 @@ impl MetalWorld {
             ))
             .max(1);
 
-        self.dispatch(&encoder, "apply_commands", self.command_count.max(1) as u64);
+        if self.command_count > 0 {
+            self.dispatch(&encoder, "apply_commands", self.command_count as u64);
+        }
         let dirty = unsafe { *(self.scratch[self.host_slot()].contents() as *const u32).add(6) };
         if dirty != 0 || self.command_count > 0 {
             self.dispatch(&encoder, "recompute_inertia", n_bodies);
