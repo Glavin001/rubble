@@ -14,6 +14,9 @@ fn main() {
         world.step().expect("step");
     }
     let c = world.last_counters();
+    if std::env::var("GRID_CELL").is_ok() {
+        eprintln!("grid_cell_size={:.4}", world.params().grid_cell_size);
+    }
     let bodies = world.download_bodies();
     let contacts = world.download_contacts();
     let mut ball_i = 0usize;

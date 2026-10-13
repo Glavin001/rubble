@@ -524,7 +524,8 @@ impl MetalWorld {
             }
             max_r = max_r.max(r);
         }
-        self.params.grid_cell_size = (2.0 * max_r * 1.0001).max(0.5);
+        let mult = std::env::var("GRID_CELL_MULT").ok().and_then(|s| s.parse().ok()).unwrap_or(2.0);
+        self.params.grid_cell_size = (mult * max_r * 1.0001).max(0.5);
     }
 
     fn step_gpu_inner(&mut self, wait: bool) -> Result<StepCounters, ExecError> {
