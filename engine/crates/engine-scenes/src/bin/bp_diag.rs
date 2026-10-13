@@ -1,31 +1,30 @@
 use engine_exec::PhysicsBackend;
-use std::collections::HashMap;
 
 fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "Brick Ring (9k)".into());
-    let steps: u32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(5);
+    let steps: u32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(60);
     let (mut world, _) = engine_scenes::build_world(&name).expect("build");
     for _ in 0..steps {
         world.step().expect("step");
     }
     let c = world.last_counters();
-    let contacts = world.download_contacts();
-    let mut pair_n: HashMap<(u32, u32), u32> = HashMap::new();
-    for ct in &contacts {
-        if ct.alive == 0 { continue; }
-        let a = ct.collider_a.min(ct.collider_b);
-        let b = ct.collider_a.max(ct.collider_b);
-        *pair_n.entry((a, b)).or_insert(0) += 1;
-    }
-    let mut hist = [0u32; 5];
-    let mut plane = 0u32;
-    for ((a, _), n) in &pair_n {
-        let k = (*n).min(4) as usize;
-        hist[k] += 1;
-        if *a == 0 { plane += 1; }
+    let bodies = world.download_bodies();
+    let mut ymin = f32::INFINITY;
+    let mut ymax = f32::NEG_INFINITY;
+    let mut ke = 0.0f32;
+    let mut below = 0u32;
+    let mut n = 0u32;
+    for b in &bodies {
+        if !b.is_dynamic() { continue; }
+        n += 1;
+        ymin = ymin.min(b.position[1]);
+        ymax = ymax.max(b.position[1]);
+        let m = if b.inv_mass > 1e-12 { 1.0 / b.inv_mass } else { 0.0 };
+        ke += 0.5 * m * glam::Vec3::from_array(b.linear_vel).length_squared();
+        if b.position[1] < 1.0 { below += 1; }
     }
     println!(
-        "cand={} contacts={} pairs={} plane_pairs={} hist[1..4]=[{},{},{},{}]",
-        c.candidate_count, c.contact_count, pair_n.len(), plane, hist[1], hist[2], hist[3], hist[4]
+        "steps={steps} awake={} contacts={} cand={} y=[{ymin:.2},{ymax:.2}] below1m={below}/{n} ke={ke:.0}",
+        c.awake_count, c.contact_count, c.candidate_count
     );
 }
