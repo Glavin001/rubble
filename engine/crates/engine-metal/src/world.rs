@@ -578,10 +578,11 @@ impl MetalWorld {
         // Dual stays per-contact (occupancy); CSR/island use manifolds.
         let dual_n = contact_dispatch.max(n_joints);
         // Live colours + slack so a growing palette is not truncated mid-smash.
+        // Live colours + 1 slack (was +4; empty colour indirects still cost encoder time).
         let max_c = self
             .last_counters
             .color_count
-            .saturating_add(4)
+            .saturating_add(1)
             .max(4)
             .min(self.capacity.max_colors.min(32));
         for _iter in 0..self.params.iterations {
