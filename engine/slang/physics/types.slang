@@ -65,8 +65,9 @@ public struct Contact
     float lambdaT2;
     float c0T1;
     float c0T2;
-    float _pad0;
+    float _pad0; // stick flag (1 = static friction held)
     float _pad1;
+    float _pad2; // ABI: keep Contact = 128 B (matches engine-schema)
 };
 
 public struct Joint

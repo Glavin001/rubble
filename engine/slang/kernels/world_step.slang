@@ -455,8 +455,7 @@ void emitContact(
     ct.lambdaN = 0.0;
     ct.tangent2 = t2;
     ct.lambdaT1 = 0.0;
-    // New contacts start at kStart (demo3d / three-avbd CPU). massPenalty floor is applied
-    // in persist_contacts only after a warm-start match — cold-start m/dt² causes stack bounce.
+    // Cold start at kStart; persist_contacts raises to massPenalty (m/dt²) before solve.
     ct.kN = gParams[0].kStart;
     ct.kT = gParams[0].kStart;
     ct.lambdaT2 = 0.0;
@@ -464,6 +463,7 @@ void emitContact(
     ct.c0T2 = C0t2;
     ct._pad0 = 0.0; // stick flag (1 = static friction held)
     ct._pad1 = 0.0;
+    ct._pad2 = 0.0;
     gContacts[slot] = ct;
 
     if (bodyIsDynamic(ba))
@@ -481,11 +481,11 @@ void emitContact(
 void emitManifold(CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb, BoxManifold mf, float margin)
 {
     if (mf.count <= 0) return;
-    uint baseKey = pair.key;
+    // Feature IDs must be geometric only (three-avbd). Pair key is redundant for
+    // per-pair matching and must not be mixed in — keep IDs stable across frames.
     for (int k = 0; k < mf.count; k++)
     {
-        uint fid = baseKey ^ (mf.pts[k].feature * 0x9e3779b9u);
-        emitContact(pair, ba, bb, ca, cb, mf.normal, mf.pts[k].pA, mf.pts[k].pB, fid, margin);
+        emitContact(pair, ba, bb, ca, cb, mf.normal, mf.pts[k].pA, mf.pts[k].pB, mf.pts[k].feature, margin);
     }
 }
 
@@ -717,13 +717,8 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     uint prevN = gScratchAtomics[7];
     uint prevOff = gScratchAtomics[8];
     bool matched = false;
-    // Prefer exact featureId; else nearest midpoint on the same collider pair
-    // (clip vertex indices reorder under tiny rotations — three-avbd matchNearest).
-    float bestDist = 1e30;
+    // three-avbd CPU: exact featureId only (matchNearest is a GPU opt, off for accuracy).
     uint bestJ = 0xFFFFFFFFu;
-    float3 mid = 0.5 * (
-        transformPoint(ba.position, ba.orientation, c.anchorA) +
-        transformPoint(bb.position, bb.orientation, c.anchorB));
     for (uint j = 0; j < prevN; j++)
     {
         Contact prev = gContacts[prevOff + j];
@@ -732,25 +727,10 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
         if (prev.featureId == c.featureId)
         {
             bestJ = j;
-            bestDist = 0.0;
             matched = true;
             break;
         }
-        BodyState pba = gBodies[gColliders[prev.colliderA].body];
-        BodyState pbb = gBodies[gColliders[prev.colliderB].body];
-        float3 pmid = 0.5 * (
-            transformPoint(pba.position, pba.orientation, prev.anchorA) +
-            transformPoint(pbb.position, pbb.orientation, prev.anchorB));
-        float3 dd = mid - pmid;
-        float dist = dot(dd, dd);
-        if (dist < bestDist)
-        {
-            bestDist = dist;
-            bestJ = j;
-        }
     }
-    if (!matched && bestJ != 0xFFFFFFFFu && bestDist < 0.05 * 0.05)
-        matched = true;
     if (matched && bestJ != 0xFFFFFFFFu)
     {
         Contact prev = gContacts[prevOff + bestJ];
@@ -778,8 +758,9 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     float dt = max(p.dt, 1e-8);
     float mA = ba.invMass > 1e-12 ? (1.0 / ba.invMass) : 1e20;
     float mB = bb.invMass > 1e-12 ? (1.0 / bb.invMass) : 1e20;
-    // three-avbd GPU massPenalty: floor k at min(m)/dt² once the contact is persistent.
-    float kMass = matched ? (min(mA, mB) / (dt * dt)) : 0.0;
+    // three-avbd FLAG_MASS_PENALTY: kN ≥ min(m)/dt² so resting contacts hold under gravity
+    // with Jacobi (was deferred to stick-only while cReg had a margin bug).
+    float kMass = min(mA, mB) / (dt * dt);
     c.kN = max(max(p.kStart, kMass), p.gamma * c.kN);
     c.kT = max(max(p.kStart, kMass * 0.1), p.gamma * c.kT);
     c.lambdaN *= p.alpha * p.gamma;
@@ -1015,7 +996,10 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     if (li >= awakeN) return;
     uint body = gAwakeList[li];
     uint round = gPassUniform[0];
-    uint prio = body * 0x9e3779b9u + round * 0x85ebca6bu;
+    // Height-biased JP: lower bodies win early rounds so bottom-up color order
+    // (0…n) propagates support like three-avbd GS on stacks.
+    uint yBits = asuint(gBodies[body].position.y);
+    uint prio = (~yBits) + round * 0x85ebca6bu + body * 0x9e3779b9u;
     prio ^= prio >> 16;
 
     if (gBodyColor[body] != 0xFFFFFFFFu) return;
@@ -1029,7 +1013,8 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
         uint other = ends.x == body ? ends.y : ends.x;
         if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
         if (gBodyColor[other] != 0xFFFFFFFFu) continue;
-        uint op = other * 0x9e3779b9u + round * 0x85ebca6bu;
+        uint oyBits = asuint(gBodies[other].position.y);
+        uint op = (~oyBits) + round * 0x85ebca6bu + other * 0x9e3779b9u;
         op ^= op >> 16;
         if (op > prio || (op == prio && other > body)) blocked = true;
     }
@@ -1149,7 +1134,7 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID)
             float3 d = wb - wa;
             float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
             c.penetration = C.x;
-            contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation, C);
+            contributeContact(A, rhs, c, isA, p.alpha, b.position, b.orientation, C, p.contactOffset);
         }
         else
         {
@@ -1244,7 +1229,8 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             float3 C = float3(dot(c.normal, d), dot(c.tangent1, d), dot(c.tangent2, d));
             c.penetration = C.x;
             float3 C0 = float3(c.c0N, c.c0T1, c.c0T2);
-            float3 cReg = (1.0 - p.alpha) * C0 + (C - C0);
+            // Match contributeContact / three-avbd: margin is in C0, not in geometric C.
+            float3 cReg = C - p.alpha * C0 + float3(p.contactOffset, 0.0, 0.0);
             float3 f = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
             f = projectContactForce(f, c.friction);
             c.lambdaN = f.x;
@@ -1256,9 +1242,9 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             float bound = c.friction * (-f.x);
             if (ft <= bound + 1e-8)
                 c.kT = min(c.kT + p.betaLin * 0.1, p.kMaxT);
-            // Stick when tangential slip is tiny (three-avbd STICK_THRESH).
+            // Stick only when friction force is inside the cone (three-avbd updateDual).
             float slip = length(float2(C.y, C.z));
-            c._pad0 = (slip < 1.0e-5 && f.x < 0.0) ? 1.0 : 0.0;
+            c._pad0 = (ft <= bound + 1e-8 && slip < 1.0e-5) ? 1.0 : 0.0;
             gContacts[i] = c;
         }
     }

@@ -106,9 +106,13 @@ bool boxTestAxis(
              + boxB.half.y * abs(dot(n, boxB.axis1))
              + boxB.half.z * abs(dot(n, boxB.axis2));
     float separation = distance - (rA + rB);
-    margin = margin; // axis test stays geometric; margin used at emit / point filter
-    if (separation > 0.0) return false;
-    if (!bestValid || separation > bestSep)
+    // three-avbd: keep pairs within collision margin so resting stacks don't drop
+    // all contacts on a 1e-4 gap (Jacobi soft contacts often sit slightly open).
+    if (separation > margin) return false;
+    // Prefer strictly larger separation. On near-ties, keep the first axis (FACE_A
+    // before FACE_B) so feature prefixes don't flip-flop on stacked boxes and kill warm-start.
+    bool better = !bestValid || separation > bestSep + 1.0e-5;
+    if (better)
     {
         bestValid = true;
         bestSep = separation;
@@ -222,7 +226,13 @@ void boxBuildFaceManifold(
         float3 pReference = pIncident - refN * distance;
         float3 xA = referenceIsA ? pReference : pIncident;
         float3 xB = referenceIsA ? pIncident : pReference;
-        boxAddPt(m, mids, xA, xB, featurePrefix | uint(i & 0xff));
+        // Geometry-derived feature id (not clip loop order) — stops warm-start churn.
+        float3 rel = pReference - refC;
+        float u = dot(rel, refU) / max(extU, 1e-8);
+        float v = dot(rel, refV) / max(extV, 1e-8);
+        uint qu = uint(clamp(floor((u + 1.0) * 2.0), 0.0, 3.0));
+        uint qv = uint(clamp(floor((v + 1.0) * 2.0), 0.0, 3.0));
+        boxAddPt(m, mids, xA, xB, featurePrefix | (qu << 2) | qv);
     }
     if (m.count == 0)
     {
@@ -333,6 +343,7 @@ BoxManifold collideBoxes(float3 cA, float4 qA, float3 hA, float3 cB, float4 qB, 
     int bestType = faceType;
     int bestIA = faceIA;
     int bestIB = faceIB;
+    // Face-biased SAT (three-avbd: edgeRelTol=0.95, edgeAbsTol=0.01).
     if (edgeValid)
     {
         if (0.95 * edgeSep > faceSep + 0.01)

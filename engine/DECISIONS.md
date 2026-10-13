@@ -15,8 +15,8 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 
 7. **Speed (after accuracy):** beat open-source **GPU** alternatives on **this machine** (M3 Max). Do not trust published ms from other GPUs. Primary local oracle: `three-avbd`; also run at most 1–2 other top GPU refs (sandbox / beat-box) locally. Record baselines under `engine/docs/LOCAL_ORACLE_BASELINE.md`.
 8. **Accuracy first:** correctness before any perf chase. Use pinned engines’ **existing** CPU refs (three-avbd f64/CpuRef, avbd-demo3d) for seeded checks when available; GPU physical envelopes always. Do **not** invent a home-grown Rust AVBD.
-8b. **Box contacts:** port demo3d/three-avbd SAT + face clipping (multi-point). Contact C0 = n·(xB−xA)+margin (A→B). Cold-start k = kStart only; massPenalty floor only after warm-start match. Feature + nearest-midpoint warm-start against previous-frame contact buffer.
-8c. **Full 10-box Stack (900f) still open:** local three-avbd CPU Stack passes; our Metal gate is 5-box/200f until Jacobi/manifold stick matches their GS persistence.
+8b. **Box contacts:** port demo3d/three-avbd SAT + face clipping (multi-point). Contact C0 = n·(xB−xA)+margin (A→B). Contact ABI **128 B** (Slang `_pad0/_pad1/_pad2` must match `engine-schema`). cReg = C_geom − α·C0 + margin (margin only in C0, not double-subtracted). massPenalty k ≥ m/dt² every frame. Exact featureId warm-start only (no nearest). Face-bias 0.95/0.01; SAT face-axis ties keep first axis (stop FACE_A/B flip).
+8c. **Full 10-box Stack (900f) still open:** local three-avbd CPU Stack passes; Metal gate is **5-box/200f @ 20 Jacobi iters**. Prestacked 10: bottom ~7 layers OK at 40–80 iters, top layers bounce. Spaced drop needs stronger impact catch (GS gap). Ground box thickened so tunnel can't lose AABB. High-speed sphere–plane → CCD stretch.
 9. **Unsupported three-avbd features** (cloth, soft, plastic, wind) stay out of rigid-body pass/fail gates.
 10. **Y-up vs Z-up:** keep engine Y-up; oracle fixtures convert `(x,y,z)→(x,z,y)`.
 

@@ -513,6 +513,22 @@ impl MetalWorld {
     }
 
     /// Readback for tests/oracles only — never call from the hot game loop.
+    /// Shared-storage pointer to the current-frame contact buffer (for diagnostics).
+    pub fn contacts_ptr(&self) -> *const Contact {
+        self.contacts.contents() as *const Contact
+    }
+
+    pub fn download_contacts(&self) -> Vec<Contact> {
+        let n = self.last_counters.contact_count as usize;
+        if n == 0 {
+            return Vec::new();
+        }
+        unsafe {
+            let ptr = self.contacts.contents() as *const Contact;
+            std::slice::from_raw_parts(ptr, n).to_vec()
+        }
+    }
+
     pub fn download_bodies(&self) -> Vec<BodyState> {
         let bodies = unsafe {
             std::slice::from_raw_parts(
@@ -605,10 +621,11 @@ impl<'a> SceneBuilder<'a> {
         body
     }
 
-    /// Static box ground matching three-avbd `ground()`: size [100,1,100] centered so the
-    /// top face lies at `top_y` (demo uses thickness 1 with centre at 0 ⇒ top at 0.5).
+    /// Static box ground (three-avbd `ground()` XY extent). Top face at `top_y`.
+    /// Thickness is deep so Jacobi soft contacts can't tunnel through a 1-unit slab
+    /// and lose AABB overlap (thin slab + fall-through was wiping spaced Stack).
     pub fn add_ground_box(&mut self, top_y: f32) -> u32 {
-        let half_h = 0.5;
+        let half_h = 25.0;
         let body = self.world.add_body(BodyState {
             position: [0.0, top_y - half_h, 0.0],
             inv_mass: 0.0,
@@ -628,7 +645,7 @@ impl<'a> SceneBuilder<'a> {
             local_pos: [0.0; 3],
             density: 0.0,
             local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [50.0, half_h, 50.0, 50.0],
+            params: [50.0, half_h, 50.0, half_h.max(50.0)],
         });
         body
     }

@@ -6,7 +6,7 @@ use glam::Vec3;
 fn main() {
     let mut world = MetalWorld::new(WorldCapacity::small()).unwrap();
     let mut p = AvbdParams::default();
-    p.iterations = 10;
+    p.iterations = 20;
     world.set_params(p);
     let n = std::env::args()
         .nth(1)
