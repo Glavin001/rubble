@@ -25,6 +25,8 @@ impl Pipelines {
             ("broadphase_query", msl!("broadphase_query")),
             ("broadphase_grid", msl!("broadphase_grid")),
             ("narrowphase", msl!("narrowphase")),
+            ("contact_hash_clear", msl!("contact_hash_clear")),
+            ("contact_hash_insert", msl!("contact_hash_insert")),
             ("persist_contacts", msl!("persist_contacts")),
             ("warmstart_joints", msl!("warmstart_joints")),
             ("build_awake_list", msl!("build_awake_list")),

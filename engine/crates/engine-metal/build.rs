@@ -35,6 +35,8 @@ fn main() -> Result<()> {
         "broadphase_query",
         "broadphase_grid",
         "narrowphase",
+        "contact_hash_clear",
+        "contact_hash_insert",
         "persist_contacts",
         "warmstart_joints",
         "build_awake_list",
