@@ -5,7 +5,7 @@
 #define ENGINE_PHYSICS_BOX_COLLIDE_SLANG
 
 // Cap at 4 (face corners). three-avbd allows 8; 4 matches stack manifolds and cuts
-// Brick Ring contact traffic ~2× when clipping produced 5–8 points.
+// Brick Ring contact traffic ~2× when clipping produced 5–8 points. Cap 2 fails Stack.
 static const int BOX_MAX_CONTACTS = 4;
 static const int BOX_MAX_POLY = 16;
 static const float BOX_SAT_EPS = 1.0e-6;
