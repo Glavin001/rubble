@@ -67,8 +67,8 @@ Interactive gate: p50 ≤ 8.33 ms. Ring smash uses lead=60 (three-avbd). Settled
 | Brick Walls (27k) | ~7.2 | PASS |
 | Chain Mail (1.6k) | ~1.2 | PASS |
 | Box Columns (100k) settled | ~0 (asleep early-out) | PASS (plane@0.5, centres at 1+layer) |
-| Box Pile (32k) | STRESS ~28–44 ms | accuracy: @3600 deep~400, among-hashed reuse~84%, KE~230, ~1.7k sleeping; speed still open vs oracle settled 11.8 gpuTotal |
-| Box Pile (4k) | ~1.4–2 ms PASS | @600: KE~7, deep~0; among-hashed reuse ~87%@600 / ~95%@1200; ~300 sleeping with shallow island gate |
+| Box Pile (32k) | STRESS ~40–46 ms | accuracy after α=0.95: @1200 deep<-0.05≈70 (was ~700), deep<-0.2=0, KE~50, ~1.6k sleeping; speed still open vs oracle settled 11.8 gpuTotal (~31k still awake) |
+| Box Pile (4k) | ~1.4–2 ms PASS | @600 α=0.95: KE~2, deep<-0.05≈0–3; among-hashed reuse ~77%; ~300 sleeping |
 | Stack / Rope / Pyramid | &lt; 3 | PASS |
 | Brick Ring (28k) lead=60 | ~27 | stress (smash peak) |
 | Brick Ring (110k) | ~140+ | stress |

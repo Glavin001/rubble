@@ -538,14 +538,14 @@ impl MetalWorld {
             }
             max_r = max_r.max(r);
         }
-        // three-avbd uses 2·maxSmall. For compact demo bricks (r≲0.65) a 1.25× cell
-        // keeps Ring smash nearer ~3.5 ms; random piles (r≳1) keep the full 2× so the
-        // 2-cell query clamp cannot drop pairs.
-        let default_mult = if max_r < 0.7 { 1.25 } else { 2.0 };
+        // three-avbd: cellSize = 2·maxSmallRadius so findPairs' centre±1 (27 cells)
+        // covers every overlap. A smaller mult (e.g. 1.25 for Ring smash) leaves
+        // centres up to ~1.6 cells apart → missed pairs → tunnels. Override only for
+        // deliberate A/B via GRID_CELL_MULT.
         let mult = std::env::var("GRID_CELL_MULT")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(default_mult);
+            .unwrap_or(2.0);
         self.params.grid_cell_size = (mult * max_r * 1.0001).max(0.5);
     }
 

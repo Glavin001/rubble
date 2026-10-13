@@ -169,6 +169,7 @@ public static const uint OVERFLOW_COLORS = 8u;
 public static const uint OVERFLOW_MANIFOLDS = 64u;
 public static const uint CCD_BUDGET_EXHAUSTED = 16u;
 public static const uint CCD_CANDIDATE_MISS = 32u;
+public static const uint OVERFLOW_BP_CHAIN = 128u; // linked-list BP hit per-slot walk cap
 
 public struct GpuCommand
 {
