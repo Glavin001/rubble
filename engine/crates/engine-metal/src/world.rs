@@ -201,7 +201,8 @@ impl MetalWorld {
     }
 
     pub fn set_sleep_island_rounds(&mut self, rounds: u32) {
-        self.sleep_island_rounds = rounds.clamp(1, 16);
+        // 0 = skip island gate (independent sleep; piles). Stacks/columns keep ≥1.
+        self.sleep_island_rounds = rounds.min(16);
     }
 
     pub fn set_default_friction(&mut self, friction: f32) {
@@ -753,8 +754,8 @@ impl MetalWorld {
         // also a candidate (or already asleep). Skipping this lets upper boxes freeze while
         // the stack below settles — columns tore apart and injected energy. Always run a
         // fixed handful of rounds (accuracy); manifolds cut the fan-out vs per-contact.
-        if self.last_counters.manifold_count > 0 {
-            let rounds = self.sleep_island_rounds.clamp(1, 16);
+        if self.last_counters.manifold_count > 0 && self.sleep_island_rounds > 0 {
+            let rounds = self.sleep_island_rounds.min(16);
             for _ in 0..rounds {
                 self.dispatch(&encoder, "sleep_island_gate", manifold_dispatch);
             }

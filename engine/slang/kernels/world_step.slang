@@ -481,26 +481,12 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         if (gColliders[p].shape != SHAPE_PLANE) continue;
         emitCandidate(i, p);
     }
-    // Sleepers: keep contacts vs static boxes (thick ground) too — grid pair loop is
-    // awake-only below, so scan statics here.
+    // Sleepers: planes above keep ground contacts. Do NOT O(n) scan static boxes —
+    // with ~20k sleepers that was ~20k×32k and blew 32k pile past 45 ms. Thick-box
+    // ground (if any) is still found via the O(1) isLarge probe at the end; awake
+    // neighbours wake sleepers on impact (wakeFromContact).
     if (sleeper)
-    {
-        for (uint j = 0; j < c.colliderCount; j++)
-        {
-            if (j == i) continue;
-            Collider other = gColliders[j];
-            if (other.body == col.body || other.shape == SHAPE_PLANE) continue;
-            BodyState ob = gBodies[other.body];
-            if (bodyIsDynamic(ob)) continue;
-            if (bodiesJointed(col.body, other.body)) continue;
-            Aabb ab = gAabbs[base + j];
-            if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
-            if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
-            if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
-            emitCandidate(i, j);
-        }
         return;
-    }
     for (int z = mn.z - 1; z <= mx.z + 1; z++)
     for (int y = mn.y - 1; y <= mx.y + 1; y++)
     for (int x = mn.x - 1; x <= mx.x + 1; x++)
@@ -637,10 +623,17 @@ Contact makeContactRow(
 
 void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
 {
-    // Wake only a sleeping body hit by an awake neighbour (island wake). Never clear
-    // SLEEPING on resting pairs — that used to re-awake stacks every NP and pump KE.
+    // Wake only a sleeping body hit by an awake neighbour with meaningful relative
+    // speed (island wake). Resting pile contacts used to thrash sleep every NP frame
+    // (~1.5k sleeping / 31k awake despite KE~50). Never clear SLEEPING on calm pairs.
     bool awakeA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
     bool awakeB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    if (!awakeA && !awakeB) return;
+    float3 vRel = ba.linearVel - bb.linearVel;
+    float wRel = length(ba.angularVel) + length(bb.angularVel);
+    float thresh = gParams[0].sleepLin;
+    if (dot(vRel, vRel) < thresh * thresh && wRel < gParams[0].sleepAng)
+        return;
     if (bodyIsDynamic(ba) && bodyIsSleeping(ba) && awakeB)
     {
         ba.flags = (ba.flags & ~BODY_SLEEPING) | BODY_AWAKE;

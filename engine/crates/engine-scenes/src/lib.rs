@@ -865,9 +865,18 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         params.alpha = 0.95;
         // Slightly looser/faster sleep so brief calm windows can commit an island
         // before a surface rock resets timers across the contact component.
-        params.sleep_lin = 0.25;
-        params.sleep_ang = 0.25;
-        params.sleep_time = 0.25;
+        params.sleep_lin = std::env::var("PILE_SLEEP_LIN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.25);
+        params.sleep_ang = std::env::var("PILE_SLEEP_ANG")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.25);
+        params.sleep_time = std::env::var("PILE_SLEEP_TIME")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.25);
     }
     if let Ok(v) = std::env::var("PILE_BETA") {
         if let Ok(b) = v.parse::<f32>() {
@@ -905,8 +914,13 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     }
     world.set_params(params);
     if scene.info.name.starts_with("Box Pile") {
-        // Shallow gate: one rocker must not flood-revoke the whole pile (stacks keep 8).
-        world.set_sleep_island_rounds(1);
+        // Impact-wake + 1-round gate: ~19k/32k sleep @1200 with deep held. rounds=0
+        // sleeps a bit less. Stacks/columns keep default 8.
+        let rounds = std::env::var("PILE_ISLAND_ROUNDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        world.set_sleep_island_rounds(rounds);
         // μ=0.7 settles deep C0 better than three-avbd's 0.5 on our Metal path; 0.5 left
         // more flyers. PILE_MU overrides for A/B.
         let mu = std::env::var("PILE_MU")
