@@ -27,6 +27,16 @@ RWStructuredBuffer<uint> gCcdFlags;        // per-body fast-motion flags
 RWStructuredBuffer<uint> gScratchAtomics;
 RWStructuredBuffer<uint> gPassUniform;     // length-1 view: host binds offset into 0..63 table
 RWStructuredBuffer<uint> gIndirectArgs;    // Metal MTLDispatchThreadgroupsIndirectArguments × maxColors
+// Per-collider world OBB (filled in build_aabbs) — avoids rebuild in BP face-reject + NP.
+struct WorldObbGpu
+{
+    float4 center;
+    float4 half;
+    float4 axis0;
+    float4 axis1;
+    float4 axis2;
+};
+RWStructuredBuffer<WorldObbGpu> gWorldObbs;
 
 static const uint EVENT_SLEEP = 1u;
 static const uint EVENT_WAKE = 2u;
@@ -205,6 +215,19 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     // Convention: collider AABBs start at index max_bodies. Host sets gScratchAtomics[1] = max_bodies.
     uint base = gScratchAtomics[1];
     gAabbs[base + i] = box;
+    // World OBB cache for box colliders (BP face-reject + narrowphase).
+    if (col.shape == SHAPE_BOX)
+    {
+        float4 q = quatMul(b.orientation, col.localRot);
+        BoxObb obb = makeBoxObb(worldPos, q, col.params.xyz);
+        WorldObbGpu w;
+        w.center = float4(obb.center, 0.0);
+        w.half = float4(obb.half, 0.0);
+        w.axis0 = float4(obb.axis0, 0.0);
+        w.axis1 = float4(obb.axis1, 0.0);
+        w.axis2 = float4(obb.axis2, 0.0);
+        gWorldObbs[i] = w;
+    }
 }
 
 static const uint GRID_HASH_SIZE = 32768u;
@@ -301,14 +324,25 @@ void broadphase_clear(uint3 tid : SV_DispatchThreadID)
     gConstraintIds[i] = 0xFFFFFFFFu;
 }
 
+BoxObb worldObbFromCache(uint colliderIdx)
+{
+    WorldObbGpu w = gWorldObbs[colliderIdx];
+    BoxObb b;
+    b.center = w.center.xyz;
+    b.half = w.half.xyz;
+    b.axis0 = w.axis0.xyz;
+    b.axis1 = w.axis1.xyz;
+    b.axis2 = w.axis2.xyz;
+    return b;
+}
+
 // three-avbd Stage 8h: reject AABB-overlapping box pairs separated on a face axis
 // by more than `gap`. `probe` OBB is built once per broadphase thread.
-bool boxesSeparatedOnFaceAxis(BoxObb probe, Collider cb, BodyState bb, float gap)
+bool boxesSeparatedOnFaceAxis(BoxObb probe, uint otherCollider, float gap)
 {
+    Collider cb = gColliders[otherCollider];
     if (cb.shape != SHAPE_BOX) return false;
-    float3 cB = transformPoint(bb.position, bb.orientation, cb.localPos);
-    float4 qB = quatMul(bb.orientation, cb.localRot);
-    BoxObb other = makeBoxObb(cB, qB, cb.params.xyz);
+    BoxObb other = worldObbFromCache(otherCollider);
     float3 d = other.center - probe.center;
     float3 hA = probe.half;
     float3 hB = other.half;
@@ -372,15 +406,9 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     uint base = gScratchAtomics[1];
     Aabb box = gAabbs[base + i];
     bool sleeper = bodyIsSleeping(b);
-    // Build probe OBB once (three-avbd findPairs loads the querier once).
+    // Probe OBB from build_aabbs cache (three-avbd findPairs loads querier once).
     bool probeIsBox = col.shape == SHAPE_BOX;
-    BoxObb probeObb;
-    if (probeIsBox)
-    {
-        float3 c0 = transformPoint(b.position, b.orientation, col.localPos);
-        float4 q0 = quatMul(b.orientation, col.localRot);
-        probeObb = makeBoxObb(c0, q0, col.params.xyz);
-    }
+    BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
     const float faceGap = 0.001;
 
     // Small scenes: exact pairwise (correctness). Large: uniform-grid hash.
@@ -409,7 +437,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                 if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
                 if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
             }
-            if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, other, ob, faceGap)) continue;
+            if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, j, faceGap)) continue;
             emitCandidate(i, j);
         }
         return;
@@ -469,8 +497,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                           box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
                           box.mx.z < ab.mn.z || ab.mx.z < box.mn.z))
                     {
-                        BodyState ob = gBodies[other.body];
-                        if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, other, ob, faceGap)))
+                        if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)))
                             emitCandidate(i, cur);
                     }
                 }
@@ -592,9 +619,9 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     // Multi-point manifolds (demo3d / three-avbd) — required for stable stacks.
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_BOX)
     {
-        // Inflated SAT (margin); clip still uses geometric OBBs via collideBoxes pad.
-        // collideBoxes already margin-SAT + clip; no second C&lt;margin filter.
-        BoxManifold mf = collideBoxes(posA, rotA, ca.params.xyz, posB, rotB, cb.params.xyz, margin);
+        // World OBBs from build_aabbs cache (skip per-pair quat axis rebuild).
+        BoxManifold mf = collideBoxesCached(
+            worldObbFromCache(pair.colliderA), worldObbFromCache(pair.colliderB), margin);
         if (mf.count > 0)
             emitManifold(pair, ba, bb, ca, cb, mf, margin);
         return;
