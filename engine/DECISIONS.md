@@ -19,6 +19,7 @@ Decisions made autonomously while driving toward ≥120 FPS demos, oracle parity
 8c. **Spaced three-avbd Stack 10-box/900f: PASS** after matching their step order (NP/C0 at x⁻, then body warm-start) plus small-scene GS (`solve_primal_one` high→low). sleep_lin/ang=0.15, sleep_time=1.0 + island sleep gate (stack sleeps together). High-speed sphere–plane → CCD stretch.
 8d. **Step order (mandatory):** build_aabbs → broadphase → narrowphase/persist (C0 at x⁻) → CSR/color → predict/warmStartBodies → primal/dual → extract → island sleep. Predicting before NP made impact C0 huge-negative and exploded drops.
 8e. **Island sleep:** candidates revoked via `sleep_island_gate` over contacts so one box cannot sleep under an awake neighbor (was collapsing settled stacks). Sleeping bodies stay in broadphase insert; sleepers still query statics.
+8f. **Brick Ring bottleneck (local probe):** ~7 of ~14 ms is narrowphase (iters=0 still ~9 ms; disabling NP → ~5 ms). Face-axis BP reject (8h) cut candidates ~2×. Next: faster box manifolds / OBB cache / primal multi-lane — not more solver iters.
 9. **Unsupported three-avbd features** (cloth, soft, plastic, wind) stay out of rigid-body pass/fail gates.
 10. **Y-up vs Z-up:** keep engine Y-up; oracle fixtures convert `(x,y,z)→(x,z,y)`.
 
