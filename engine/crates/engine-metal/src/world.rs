@@ -497,12 +497,12 @@ impl MetalWorld {
         self.dispatch(&encoder, "init_colors", awake_dispatch);
 
         // Colour rounds: distinct pass_table offsets (NOT mid-encoder scratch rewrites).
-        // Cap grows from last frame's colour count (three-avbd colour-cap heuristic).
-        let color_rounds = (self.last_counters.color_count.saturating_add(3))
-            .max(8)
-            .min(self.capacity.max_colors.min(32));
+        // Cap grows from last frame's colour count; hard-cap 16 — 23+ JP rounds dominated smash.
+        let color_rounds = (self.last_counters.color_count.saturating_add(2))
+            .max(6)
+            .min(16);
         for round in 0..color_rounds {
-            self.dispatch_pass(&encoder, "color_bodies", awake_dispatch, round);
+            self.dispatch_pass(&encoder, "color_bodies", awake_dispatch, round % 16);
         }
         self.dispatch(&encoder, "pack_color_lists", awake_dispatch);
         self.dispatch(&encoder, "write_color_args", 64);
