@@ -100,15 +100,16 @@ void apply_commands(uint3 tid : SV_DispatchThreadID)
         BodyState nb = gBodies[cmd.b];
         nb.flags = (nb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
         gBodies[cmd.b] = nb;
-        // Invalidate contacts involving this collider
+        // Invalidate contacts involving this collider (current ping-pong half).
         uint nContacts = gCounters[0].contactCount;
+        uint curOff = gScratchAtomics[11];
         for (uint ci = 0; ci < nContacts; ci++)
         {
-            Contact ct = gContacts[ci];
+            Contact ct = gContacts[curOff + ci];
             if (ct.colliderA == cmd.a || ct.colliderB == cmd.a)
             {
                 ct.alive = 0;
-                gContacts[ci] = ct;
+                gContacts[curOff + ci] = ct;
             }
         }
     }
@@ -642,6 +643,7 @@ void emitContactManifold(
     }
     uint cStart;
     InterlockedAdd(gCounters[0].contactCount, (uint)count, cStart);
+    uint curOff = gScratchAtomics[11];
     if (cStart >= maxC || cStart + (uint)count > maxC)
     {
         InterlockedOr(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
@@ -657,7 +659,7 @@ void emitContactManifold(
             z.tangent2 = float3(0, 0, 0); z.lambdaT1 = 0.0;
             z.kN = 0.0; z.kT = 0.0; z.lambdaT2 = 0.0;
             z.c0T1 = 0.0; z.c0T2 = 0.0; z._pad0 = 0.0; z._pad1 = 0.0; z._pad2 = 0.0;
-            gContacts[cStart + k] = z;
+            gContacts[curOff + cStart + k] = z;
         }
         Manifold dead;
         dead.colliderA = pair.colliderA;
@@ -674,18 +676,18 @@ void emitContactManifold(
     Material mb = gMaterials[cb.material];
     float mu = sqrt(max(ma.friction, 0.0) * max(mb.friction, 0.0));
 
-    gContacts[cStart] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA0, pB0, f0, margin, mu);
+    gContacts[curOff + cStart] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA0, pB0, f0, margin, mu);
     if (count > 1)
-        gContacts[cStart + 1u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA1, pB1, f1, margin, mu);
+        gContacts[curOff + cStart + 1u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA1, pB1, f1, margin, mu);
     if (count > 2)
-        gContacts[cStart + 2u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA2, pB2, f2, margin, mu);
+        gContacts[curOff + cStart + 2u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA2, pB2, f2, margin, mu);
     if (count > 3)
-        gContacts[cStart + 3u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA3, pB3, f3, margin, mu);
+        gContacts[curOff + cStart + 3u] = makeContactRow(pair, ba, bb, ca, cb, nrm, pA3, pB3, f3, margin, mu);
 
     Manifold mf;
     mf.colliderA = pair.colliderA;
     mf.colliderB = pair.colliderB;
-    mf.contactStart = cStart;
+    mf.contactStart = curOff + cStart;
     mf.contactCount = (uint)count;
     mf.normal = nrm;
     mf.friction = mu;
@@ -965,7 +967,8 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     uint n = gCounters[0].contactCount;
     if (i >= n) return;
     AvbdParams p = gParams[0];
-    Contact c = gContacts[i];
+    uint curOff = gScratchAtomics[11];
+    Contact c = gContacts[curOff + i];
     if (c.alive == 0) return;
     BodyState ba = gBodies[gColliders[c.colliderA].body];
     BodyState bb = gBodies[gColliders[c.colliderB].body];
@@ -1029,7 +1032,7 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     c.lambdaN *= p.alpha * p.gamma;
     c.lambdaT1 *= p.alpha * p.gamma;
     c.lambdaT2 *= p.alpha * p.gamma;
-    gContacts[i] = c;
+    gContacts[curOff + i] = c;
 }
 
 [shader("compute")]
@@ -1597,7 +1600,8 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
     AvbdParams p = gParams[0];
     if (i < n)
     {
-        Contact c = gContacts[i];
+        uint curOff = gScratchAtomics[11];
+        Contact c = gContacts[curOff + i];
         if (c.alive != 0)
         {
             uint ba = gColliders[c.colliderA].body;
@@ -1632,7 +1636,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             // Stick only when friction force is inside the cone (three-avbd updateDual).
             float slip = length(float2(C.y, C.z));
             c._pad0 = (ft <= bound + 1e-8 && slip < 1.0e-5) ? 1.0 : 0.0;
-            gContacts[i] = c;
+            gContacts[curOff + i] = c;
             }
         }
     }
