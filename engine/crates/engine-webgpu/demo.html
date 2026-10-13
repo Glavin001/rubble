@@ -27,12 +27,13 @@
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
 
     const scene = new URLSearchParams(location.search).get('scene') || 'wall';
-    const cap = scene === 'ring'
+    const big = scene === 'ring' || scene === 'gables';
+    const cap = big
       ? { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 }
       : { maxBodies: 4096, maxColliders: 4096, maxContacts: 32768, maxJoints: 64, maxCandidates: 65536, maxColors: 32, maxCommands: 64, maxHull: 64 };
-    const lead = scene === 'ring' ? 60 : 30;
-    const eye = scene === 'ring' ? [32, 22, 14] : [0, 16, -42];
-    const look = scene === 'ring' ? [0, 5, 0] : [0, 8, 0];
+    const lead = big ? 60 : 30;
+    const eye = scene === 'gables' ? [0, 28, -40] : scene === 'ring' ? [32, 22, 14] : [0, 16, -42];
+    const look = scene === 'gables' ? [0, 6, 0] : scene === 'ring' ? [0, 5, 0] : [0, 8, 0];
     const PASS_ALIGN = 256;
     const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
     const constraintIdWords = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
@@ -121,7 +122,7 @@
     }
 
     const params = {
-      dt: 1 / 60, gravityY: -10, iterations: scene === 'ring' ? 4 : 10, flags: 0,
+      dt: 1 / 60, gravityY: -10, iterations: scene === 'gables' ? 3 : scene === 'ring' ? 4 : 10, flags: 0,
       alpha: 0.99, gamma: 0.999, betaLin: 10000, betaAng: 100,
       kStart: 1000, kMaxN: 1e10, kMaxT: 1e6, contactOffset: 0.01,
       sleepLin: 0.15, sleepAng: 0.15, sleepTime: 0.5, residualExit: 1e-4,
@@ -296,6 +297,7 @@ struct VsOut {
     device.queue.writeBuffer(bufs[3], 0, mats);
 
     if (scene === 'ring') document.querySelector('h1').textContent = 'Slang → WGSL · brick ring 9k, 4 iterations';
+    if (scene === 'gables') document.querySelector('h1').textContent = 'Slang → WGSL · brick gables 6.7k, 3 iterations';
     const bodyBytes = new ArrayBuffer(sizes[0]);
     const colBytes = new ArrayBuffer(sizes[2]);
     const bodies = [];
@@ -337,6 +339,28 @@ struct VsOut {
       }
       const ballR = courses / 5;
       addBall([0, 0.5 + ballR, -(radius + 0.52 * rows + ballR + 2)], ballR, 10, [0, 0, 30], [-30 / ballR, 0, 0]);
+    } else if (scene === 'gables') {
+      // three-avbd brickGables(4, 8, 20): 4×8 pyramids, 3 iterations.
+      const columns = 4, rows = 8, base = 20;
+      const pitchX = base + 2, pitchY = 5, mass = 0.25;
+      for (let cx = 0; cx < columns; cx++) {
+        for (let cy = 0; cy < rows; cy++) {
+          const x0 = (cx - (columns - 1) / 2) * pitchX;
+          const z = (cy - (rows - 1) / 2) * pitchY;
+          for (let k = 0; k < base; k++) {
+            const m = base - k;
+            for (let i = 0; i < m; i++) {
+              addBrick([x0 + (i - (m - 1) / 2) * 1.01, 0.75 + 0.5 * k, z], 0, mass, 1);
+            }
+          }
+        }
+      }
+      const ballR = base / 7;
+      for (const cx of [columns / 2 - 2, columns / 2 + 1]) {
+        const x = (cx - (columns - 1) / 2) * pitchX;
+        const z = -((rows - 1) / 2) * pitchY - ballR - 12;
+        addBall([x, 0.5 + ballR, z], ballR, 50, [0, 0, 30], [-30 / ballR, 0, 0]);
+      }
     } else {
       const mass = 0.6 * 0.25;
       const w = 40, courses = 25;
