@@ -1,7 +1,7 @@
 //! A/B: does random orientation cause Box Pile energy vs aligned equal cubes?
 use engine_exec::PhysicsBackend;
 use engine_metal::{MetalWorld, SceneBuilder};
-use engine_schema::{AvbdParams, WorldCapacity};
+use engine_schema::{AvbdParams, WorldCapacity, FLAG_REUSE_CONTACTS};
 use glam::{Quat, Vec3};
 
 fn main() {
@@ -30,6 +30,7 @@ fn main() {
         max_hull_vertices: 64,
     })
     .expect("mw");
+    p.flags |= FLAG_REUSE_CONTACTS;
     world.set_params(p);
     let mut seed = 12345u32;
     let mut rand = || {
