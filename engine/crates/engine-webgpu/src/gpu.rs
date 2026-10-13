@@ -456,6 +456,11 @@ impl WgpuSim {
                 return;
             }
         }
+        if let Ok(skip) = std::env::var("WG_SKIP") {
+            if skip.split(',').any(|n| n.trim() == name) {
+                return;
+            }
+        }
         let p = self.pipes.get(name).unwrap_or_else(|| panic!("missing {name}"));
         pass.set_pipeline(&p.pipeline);
         if p.dynamic_pass {

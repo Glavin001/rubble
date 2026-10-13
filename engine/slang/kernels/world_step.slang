@@ -440,29 +440,36 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // later impact can wake the island without the floor dropping out for a frame.
     if (c.colliderCount <= 512u)
     {
-        for (uint j = 0; j < c.colliderCount; j++)
+        // while + nested tests, not for/continue: SPIR-V→naga turns `continue` into a
+        // switch-break that never exits the loop (GPU hang on WebGPU).
+        uint j = 0u;
+        while (j < c.colliderCount)
         {
-            if (j == i) continue;
-            Collider other = gColliders[j];
-            if (other.body == col.body) continue;
-            BodyState ob = gBodies[other.body];
-            bool otherStatic = !bodyIsDynamic(ob);
-            if (sleeper && !otherStatic) continue;
-            if (bodyIsSleeping(ob) && sleeper) continue;
-            // Emit each dynamic-dynamic pair once (lower index). Dynamic vs static always
-            // emits from the dynamic collider (three-avbd box ground, planes).
-            if (!otherStatic && j < i) continue;
-            if (otherStatic && !bodyIsDynamic(b)) continue;
-            if (bodiesJointed(col.body, other.body)) continue;
-            if (other.shape != SHAPE_PLANE)
+            if (j != i)
             {
-                Aabb ab = gAabbs[base + j];
-                if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
-                if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
-                if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
+                Collider other = gColliders[j];
+                if (other.body != col.body)
+                {
+                    BodyState ob = gBodies[other.body];
+                    bool otherStatic = !bodyIsDynamic(ob);
+                    bool keep = true;
+                    if (sleeper && !otherStatic) keep = false;
+                    if (bodyIsSleeping(ob) && sleeper) keep = false;
+                    if (!otherStatic && j < i) keep = false;
+                    if (otherStatic && !bodyIsDynamic(b)) keep = false;
+                    if (bodiesJointed(col.body, other.body)) keep = false;
+                    if (keep && other.shape != SHAPE_PLANE)
+                    {
+                        Aabb ab = gAabbs[base + j];
+                        if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) keep = false;
+                        if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) keep = false;
+                        if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) keep = false;
+                    }
+                    if (keep && probeIsBox && boxesSeparatedOnFaceAxis(probeObb, j, faceGap)) keep = false;
+                    if (keep) emitCandidate(i, j);
+                }
             }
-            if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, j, faceGap)) continue;
-            emitCandidate(i, j);
+            j++;
         }
         return;
     }

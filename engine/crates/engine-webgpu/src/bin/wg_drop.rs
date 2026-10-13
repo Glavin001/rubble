@@ -44,21 +44,21 @@ fn main() -> anyhow::Result<()> {
     let mut params = engine_schema::AvbdParams::default();
     params.iterations = 4;
     sim.set_params(params);
-    for i in 0..30 {
+    for i in 0..180 {
         match sim.step() {
             Ok(c) => {
-                if i == 0 || i == 29 {
-                    println!(
-                        "step {i} y={:.3} bodies={} contacts={} cand={} colors={} awake={} ms={:.2} ov=0x{:x}",
-                        sim.body_y(box_id),
-                        c.body_count,
-                        c.contact_count,
-                        c.candidate_count,
-                        c.color_count,
-                        c.awake_count,
-                        sim.timings_ms(),
-                        c.overflow_flags
-                    );
+                if i % 30 == 0 || i == 179 || std::env::var_os("WG_EVERY").is_some() {
+                println!(
+                    "step {i} y={:.3} bodies={} contacts={} cand={} colors={} awake={} ms={:.2} ov=0x{:x}",
+                    sim.body_y(box_id),
+                    c.body_count,
+                    c.contact_count,
+                    c.candidate_count,
+                    c.color_count,
+                    c.awake_count,
+                    sim.timings_ms(),
+                    c.overflow_flags
+                );
                 }
             }
             Err(e) => {
