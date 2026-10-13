@@ -512,8 +512,11 @@ impl MetalWorld {
         // negative and blew spaced Stack.
         self.dispatch(&encoder, "build_aabbs", n_cols);
         // O(1) joint-pair filter for broadphase (was O(joints) per candidate).
-        self.dispatch(&encoder, "joint_hash_clear", 65536);
-        self.dispatch(&encoder, "joint_hash_insert", n_joints);
+        // Ring/Wall smash have zero joints — skip the 64k clear entirely.
+        if self.joint_count > 0 {
+            self.dispatch(&encoder, "joint_hash_clear", 65536);
+            self.dispatch(&encoder, "joint_hash_insert", n_joints);
+        }
         self.dispatch(&encoder, "broadphase_clear", 131072);
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
@@ -527,7 +530,9 @@ impl MetalWorld {
         self.dispatch(&encoder, "contact_hash_clear", hash_n);
         self.dispatch(&encoder, "contact_hash_insert", prev_n);
         self.dispatch(&encoder, "persist_contacts", contact_dispatch);
-        self.dispatch(&encoder, "warmstart_joints", n_joints);
+        if self.joint_count > 0 {
+            self.dispatch(&encoder, "warmstart_joints", n_joints);
+        }
 
         // Awake list before CSR sort/colour (flags only — independent of contacts).
         self.dispatch(&encoder, "build_awake_list", n_bodies);
@@ -536,7 +541,9 @@ impl MetalWorld {
         // Degree/scatter walk manifolds (Stage 8b), not individual contact points.
         self.dispatch(&encoder, "csr_clear", n_bodies + 1);
         self.dispatch(&encoder, "csr_degree_contacts", manifold_dispatch);
-        self.dispatch(&encoder, "csr_degree_joints", n_joints);
+        if self.joint_count > 0 {
+            self.dispatch(&encoder, "csr_degree_joints", n_joints);
+        }
         if self.body_count <= 512 {
             self.dispatch(&encoder, "csr_prefix", 1);
         } else {
@@ -552,7 +559,9 @@ impl MetalWorld {
             self.dispatch(&encoder, "csr_prefix_finalize", n_bodies + 1);
         }
         self.dispatch(&encoder, "csr_scatter_contacts", manifold_dispatch);
-        self.dispatch(&encoder, "csr_scatter_joints", n_joints);
+        if self.joint_count > 0 {
+            self.dispatch(&encoder, "csr_scatter_joints", n_joints);
+        }
         self.dispatch(&encoder, "csr_sort", awake_dispatch);
 
         self.dispatch(&encoder, "init_colors", awake_dispatch);

@@ -288,6 +288,9 @@ void joint_hash_insert(uint3 tid : SV_DispatchThreadID)
 
 bool bodiesJointed(uint bodyA, uint bodyB)
 {
+    // Ring/Wall have zero joints — skip the open-address probe entirely (and do not
+    // require a 64k clear of gEvents each step).
+    if (gCounters[0].jointCount == 0u) return false;
     uint key = jointPairKey(bodyA, bodyB);
     uint h = key & (JOINT_HASH_SIZE - 1u);
     for (uint probe = 0; probe < 64u; probe++)
