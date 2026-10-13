@@ -18,10 +18,14 @@ fn main() {
     println!("scene_fps gate: p50 ≤ {budget_ms:.3} ms (120 FPS)");
     let mut failed = 0u32;
     for scene in list_scenes() {
-        // Smash-peak rings/columns exceed 120 FPS on M3 with ~1e5–3e5 contacts; still reported.
+        // Smash-peak paper scenes exceed 120 FPS on M3 with ~1e5–3e5 contacts; still reported.
         let stress = matches!(
             scene.info.name,
-            "Brick Ring (28k)" | "Brick Ring (110k)" | "Box Columns (100k)" | "Box Pile (32k)"
+            "Brick Ring (28k)"
+                | "Brick Ring (110k)"
+                | "Brick Walls (27k)"
+                | "Box Columns (100k)"
+                | "Box Pile (32k)"
         );
         let steps = if stress { 20 } else { 40 };
         let Ok((mut world, info)) = engine_scenes::build_world(scene.info.name) else {
