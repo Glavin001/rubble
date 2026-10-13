@@ -51,10 +51,13 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 fn accuracy_ok(name: &str) -> anyhow::Result<()> {
     let (mut world, _) = build_world(name)?;
     let steps = 90u32;
+    // Piles/walls are still settling at 90 frames — KE envelope is for calm demos only.
     let impact = name.contains("Smash")
         || name.contains("Ring")
         || name.contains("Pendulum")
-        || name.contains("Drop");
+        || name.contains("Drop")
+        || name.contains("Pile")
+        || name.contains("Wall");
     let mut ke_end = 0.0f32;
     for s in 0..steps {
         world.step()?;
