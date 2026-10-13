@@ -753,6 +753,24 @@ void emitContact(
         float3(0, 0, 0), float3(0, 0, 0), 0u);
 }
 
+// Contact warm-start hash helpers (pair → first prev-contact index).
+static const uint CONTACT_HASH_EMPTY = 0xFFFFFFFFu;
+static const float NEAREST_FRACTION = 0.05;
+
+uint pairWarmKey(uint colA, uint colB)
+{
+    uint h = colA * 73856093u ^ colB * 19349663u;
+    return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ 0xA5A5A5A5u) : h;
+}
+
+float colliderMinSide(Collider col)
+{
+    if (col.shape == SHAPE_SPHERE)
+        return max(col.params.x * 2.0, 1e-6);
+    float3 h = col.params.xyz;
+    return max(2.0 * min(h.x, min(h.y, h.z)), 1e-6);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void narrowphase(uint3 tid : SV_DispatchThreadID)
@@ -1002,29 +1020,8 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     gJoints[i] = j;
 }
 
-// Prev-contact warm-start hash in gConstraintIds (open address). Built after NP,
-// consumed by persist, then overwritten by CSR. Replaces O(n²) linear scan.
-static const uint CONTACT_HASH_EMPTY = 0xFFFFFFFFu;
-// three-avbd NEAREST_FRACTION: matchNearest tolerance as a fraction of the smaller
-// box's smallest full side. Gates warm-start so a far corner cannot steal λ.
-static const float NEAREST_FRACTION = 0.05;
-
-// Pair-only key (three-avbd hashInsert stores manifolds by pair). Feature match and
-// matchNearest happen inside the previous contiguous manifold block.
-uint pairWarmKey(uint colA, uint colB)
-{
-    uint h = colA * 73856093u ^ colB * 19349663u;
-    return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ 0xA5A5A5A5u) : h;
-}
-
-float colliderMinSide(Collider col)
-{
-    // Full extents; spheres use diameter = 2·radius (params.x).
-    if (col.shape == SHAPE_SPHERE)
-        return max(col.params.x * 2.0, 1e-6);
-    float3 h = col.params.xyz;
-    return max(2.0 * min(h.x, min(h.y, h.z)), 1e-6);
-}
+// Prev-contact warm-start hash in gConstraintIds (open address). Built before NP
+// (reuseContacts + persist), then overwritten by CSR. Replaces O(n²) linear scan.
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
