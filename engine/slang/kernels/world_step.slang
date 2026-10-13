@@ -494,19 +494,21 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         while (cur != 0xFFFFFFFFu && guard < 256u)
         {
             guard++;
-            // Dynamic-dynamic once (higher index). Statics are not in this hash (planes
-            // skip insert; large box grounds use the O(1) probe below) — keep the
-            // cur > i early-out so we do not touch every lower-index chain node.
-            if (cur > i)
+            // Dynamic-dynamic once (higher index), PLUS awake→sleeping at any index:
+            // smash balls are last, so cur>i alone never pairs them with sleeping
+            // bricks (sleepers only keep static contacts and would not emit).
+            Collider other = gColliders[cur];
+            BodyState ob = gBodies[other.body];
+            bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
+            bool pairOnce = cur > i || (!sleeper && otherSleep);
+            if (pairOnce && cur != i)
             {
-                Collider other = gColliders[cur];
                 if (other.body != col.body &&
                     !bodiesJointed(col.body, other.body) &&
                     other.shape != SHAPE_PLANE)
                 {
                     // three-avbd testPair: bounding spheres before AABB/face (rings/piles
                     // otherwise send 48-72% of pairs to NP only to find them apart).
-                    BodyState ob = gBodies[other.body];
                     float3 d = b.position - ob.position;
                     float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
                     float rB = other.params.w > 0.0 ? other.params.w : length(other.params.xyz);
