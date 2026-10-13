@@ -219,9 +219,11 @@ void boxBuildFaceManifold(
     float3 mids[8];
     uint featurePrefix = uint((referenceIsA ? BOX_AXIS_FACE_A : BOX_AXIS_FACE_B) << 24)
         | (uint(referenceAxis) << 16) | (uint(incidentAxis) << 8);
-    // Vertical faces (stacks/columns): full 4 corners. Horizontal faces (Ring
-    // brick sides): keep 1 — further Ring cut; Stack must stay green.
-    int maxPts = abs(normalAB.y) > 0.85 ? BOX_MAX_CONTACTS : 1;
+    // Vertical faces: full 4 corners. Horizontal faces on flat bricks only:
+    // keep 1 (Ring sides). Random piles need multi-point side contacts —
+    // capping all horizontal faces at 1 was starving tumbling boxes.
+    bool flatBrick = min(boxA.half.y, boxB.half.y) < 0.35;
+    int maxPts = (abs(normalAB.y) > 0.85 || !flatBrick) ? BOX_MAX_CONTACTS : 1;
 
     for (int i = 0; i < count && m.count < maxPts; i++)
     {
