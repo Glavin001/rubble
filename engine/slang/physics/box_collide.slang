@@ -330,11 +330,16 @@ BoxManifold collideBoxes(float3 cA, float4 qA, float3 hA, float3 cB, float4 qB, 
         if (!boxTestAxis(boxA, boxB, delta, boxAxis(boxB, i), BOX_AXIS_FACE_B, -1, i, margin,
                          faceValid, faceSep, faceN, faceType, faceIA, faceIB))
             return m;
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            if (!boxTestAxis(boxA, boxB, delta, cross(boxAxis(boxA, i), boxAxis(boxB, j)),
-                             BOX_AXIS_EDGE, i, j, margin, edgeValid, edgeSep, edgeN, edgeType, edgeIA, edgeIB))
-                return m;
+    // Deep face penetration: face-bias (0.95) almost never picks an edge — skip 9 edge axes.
+    bool skipEdges = faceValid && faceSep < -0.02;
+    if (!skipEdges)
+    {
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                if (!boxTestAxis(boxA, boxB, delta, cross(boxAxis(boxA, i), boxAxis(boxB, j)),
+                                 BOX_AXIS_EDGE, i, j, margin, edgeValid, edgeSep, edgeN, edgeType, edgeIA, edgeIB))
+                    return m;
+    }
 
     if (!faceValid) return m;
 
