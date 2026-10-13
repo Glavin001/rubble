@@ -1,0 +1,21 @@
+[package]
+name = "engine-scenes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Demo/benchmark scenes ported from three-avbd (Z-up → Y-up)"
+
+[dependencies]
+engine-schema.workspace = true
+engine-metal.workspace = true
+engine-exec.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true
+
+[[bin]]
+name = "demo_viewer"
+path = "src/bin/demo_viewer.rs"

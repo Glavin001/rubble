@@ -1,5 +1,6 @@
 .DS_Store
 /target
+engine/target/
 Cargo.lock
 *.spv
 .claude/

@@ -1,0 +1,17 @@
+[package]
+name = "engine-cuda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CUDA grid-stride submission of the shared Slang phase graph (NVIDIA Linux)"
+
+[dependencies]
+engine-schema.workspace = true
+engine-exec.workspace = true
+engine-slang-build.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+[build-dependencies]
+engine-slang-build.workspace = true
+anyhow.workspace = true

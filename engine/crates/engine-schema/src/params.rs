@@ -1,0 +1,115 @@
+//! AVBD numerical mode `avbd_giles` — official 3D demo defaults.
+
+use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
+
+/// Giles/Diaz/Yuksel AVBD parameters (avbd-demo3d `Solver::defaultParams`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
+pub struct AvbdParams {
+    pub dt: f32,
+    pub gravity_y: f32,
+    pub iterations: u32,
+    pub _pad0: u32,
+    /// Contact / constraint stabilization (paper α). Official demo: 0.99.
+    pub alpha: f32,
+    /// Warm-start decay. Official demo: 0.999.
+    pub gamma: f32,
+    pub beta_lin: f32,
+    pub beta_ang: f32,
+    pub k_start: f32,
+    pub k_max_n: f32,
+    pub k_max_t: f32,
+    pub contact_offset: f32,
+    pub sleep_lin: f32,
+    pub sleep_ang: f32,
+    pub sleep_time: f32,
+    pub residual_exit: f32,
+    pub trust_lin: f32,
+    pub trust_ang: f32,
+    pub pivot_floor: f32,
+    pub _pad1: f32,
+}
+
+impl Default for AvbdParams {
+    fn default() -> Self {
+        Self {
+            dt: 1.0 / 60.0,
+            gravity_y: -10.0,
+            iterations: 10,
+            _pad0: 0,
+            alpha: 0.99,
+            gamma: 0.999,
+            beta_lin: 10_000.0,
+            beta_ang: 100.0,
+            k_start: 1_000.0,
+            k_max_n: 1.0e10,
+            k_max_t: 1.0e6,
+            contact_offset: 0.01,
+            sleep_lin: 0.05,
+            sleep_ang: 0.05,
+            sleep_time: 0.5,
+            residual_exit: 1.0e-4,
+            trust_lin: 0.35,
+            trust_ang: 0.5,
+            pivot_floor: 1.0e-6,
+            _pad1: 0.0,
+        }
+    }
+}
+
+/// Capacity and high-water configuration. Overflow fails the step.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorldCapacity {
+    pub max_bodies: u32,
+    pub max_colliders: u32,
+    pub max_contacts: u32,
+    pub max_joints: u32,
+    pub max_candidates: u32,
+    pub max_colors: u32,
+    pub max_commands: u32,
+    pub max_hull_vertices: u32,
+}
+
+impl Default for WorldCapacity {
+    fn default() -> Self {
+        Self {
+            max_bodies: 131_072,
+            max_colliders: 262_144,
+            max_contacts: 1_048_576,
+            max_joints: 262_144,
+            max_candidates: 2_097_152,
+            max_colors: 64,
+            max_commands: 65_536,
+            max_hull_vertices: 1_048_576,
+        }
+    }
+}
+
+impl WorldCapacity {
+    pub fn small() -> Self {
+        Self {
+            max_bodies: 4096,
+            max_colliders: 8192,
+            max_contacts: 32_768,
+            max_joints: 8192,
+            max_candidates: 65_536,
+            max_colors: 32,
+            max_commands: 4096,
+            max_hull_vertices: 65_536,
+        }
+    }
+
+    pub fn scale() -> Self {
+        Self {
+            max_bodies: 524_288,
+            max_colliders: 1_048_576,
+            max_contacts: 4_194_304,
+            max_joints: 524_288,
+            max_candidates: 8_388_608,
+            max_colors: 64,
+            max_commands: 131_072,
+            max_hull_vertices: 2_097_152,
+        }
+    }
+}

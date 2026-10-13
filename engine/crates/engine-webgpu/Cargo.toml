@@ -1,0 +1,21 @@
+[package]
+name = "engine-webgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebGPU / wgpu submission of the shared Slang phase graph (SPIR-V → naga → WGSL)"
+
+[dependencies]
+engine-schema.workspace = true
+engine-exec.workspace = true
+engine-slang-build.workspace = true
+bytemuck.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+anyhow.workspace = true
+log.workspace = true
+naga = { version = "24", features = ["spv-in", "wgsl-out"] }
+
+[build-dependencies]
+engine-slang-build.workspace = true
+anyhow.workspace = true

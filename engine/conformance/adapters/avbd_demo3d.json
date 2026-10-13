@@ -1,0 +1,10 @@
+{
+  "oracle": "avbd-demo3d",
+  "revision": "7701bd427d55ca5d03ea1fdf331912ded9169f4b",
+  "unsupported": ["gpu-scale", "convex-hull"],
+  "frame": "oracle=Z-up; engine=Y-up",
+  "notes": [
+    "Official demo parameter and residual tie-break",
+    "Numerical mode avbd_giles"
+  ]
+}

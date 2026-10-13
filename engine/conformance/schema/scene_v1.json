@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "engine scene v1",
+  "description": "Versioned scene/command ABI for oracle adapters (meters, kilograms, seconds, radians, Y-up, quat xyzw)",
+  "type": "object",
+  "required": ["version", "params", "bodies", "colliders"],
+  "properties": {
+    "version": { "const": 1 },
+    "seed": { "type": "integer" },
+    "params": {
+      "type": "object",
+      "properties": {
+        "dt": { "type": "number" },
+        "gravity_y": { "type": "number" },
+        "iterations": { "type": "integer" },
+        "alpha": { "type": "number" },
+        "gamma": { "type": "number" }
+      }
+    },
+    "bodies": { "type": "array" },
+    "colliders": { "type": "array" },
+    "joints": { "type": "array" },
+    "acceptance": {
+      "type": "object",
+      "properties": {
+        "max_position_error": { "type": "number" },
+        "max_penetration": { "type": "number" },
+        "max_joint_gap": { "type": "number" }
+      }
+    }
+  }
+}

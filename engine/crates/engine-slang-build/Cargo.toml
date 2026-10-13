@@ -1,0 +1,9 @@
+[package]
+name = "engine-slang-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Invoke offline slangc and embed generated Metal / SPIR-V / CUDA artifacts"
+
+[dependencies]
+anyhow.workspace = true

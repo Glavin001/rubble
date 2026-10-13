@@ -1,0 +1,10 @@
+{
+  "oracle": "JoltPhysics",
+  "revision": "0373ec0dd762e4bc2f6acdb08371ee84fa23c6db",
+  "unsupported": ["avbd-multipliers"],
+  "frame": "engine=Y-up",
+  "notes": [
+    "Independent rigid-body / sleep / LinearCast CCD behavior",
+    "Physical envelopes only, not bit-identical poses"
+  ]
+}
