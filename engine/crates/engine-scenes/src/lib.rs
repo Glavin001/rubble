@@ -633,7 +633,8 @@ pub fn all_scenes() -> Vec<SceneDef> {
                 group: "Paper scenes (GPU)",
                 // 8 iters: 120 FPS on M3 Max; 10 was ~8.5–9.5 ms p50 at smash peak.
                 iterations: 8,
-                capacity: WorldCapacity::small(),
+                // small() max_contacts=32k overflows mid-smash (~20k contacts + spikes).
+                capacity: cap(4_096),
             },
             build: wall_smash_2k,
         },
