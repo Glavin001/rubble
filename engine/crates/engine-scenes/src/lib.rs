@@ -862,6 +862,35 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
             params.beta_lin = b;
         }
     }
+    // three-avbd finishBody has no trust clamp; our trustLin·0.5 ≈ 0.175 m/primal
+    // can leave deep pile overlaps uncleared. PILE_TRUST=off disables the clamp.
+    if scene.info.name.starts_with("Box Pile") {
+        if let Ok(v) = std::env::var("PILE_TRUST") {
+            if v == "off" || v == "0" {
+                params.trust_lin = 1.0e6;
+                params.trust_ang = 1.0e6;
+            } else if let Ok(t) = v.parse::<f32>() {
+                params.trust_lin = t;
+            }
+        }
+        // Collapse tunnels ~4k deep contacts by step 180; α=0.99 only puts 1% of C0
+        // into Ĉ so recovery is glacial vs three-avbd's 94% reuse@600. PILE_ALPHA A/B.
+        if let Ok(v) = std::env::var("PILE_ALPHA") {
+            if let Ok(a) = v.parse::<f32>() {
+                params.alpha = a;
+            }
+        }
+        if let Ok(v) = std::env::var("PILE_DT") {
+            if let Ok(dt) = v.parse::<f32>() {
+                params.dt = dt;
+            }
+        }
+        if let Ok(v) = std::env::var("PILE_MARGIN") {
+            if let Ok(m) = v.parse::<f32>() {
+                params.contact_offset = m;
+            }
+        }
+    }
     world.set_params(params);
     {
         let mut b = SceneBuilder::new(&mut world);

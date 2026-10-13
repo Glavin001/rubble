@@ -174,12 +174,18 @@ fn main() {
             let i = ((v.len() as f32 - 1.0) * p).round() as usize;
             v[i.min(v.len()-1)]
         };
+        let margin = world.params().contact_offset;
         let deep = c0s.iter().filter(|&&c| c < -0.05).count();
         let deep2 = c0s.iter().filter(|&&c| c < -0.2).count();
+        // Geometric penetration depth along n (negative = overlap), independent of margin in C0.
+        let geoms: Vec<f32> = c0s.iter().map(|&c| c - margin).collect();
+        let gdeep = geoms.iter().filter(|&&g| g < -0.05).count();
+        let gdeep2 = geoms.iter().filter(|&&g| g < -0.2).count();
         println!(
-            "kN: p50={:.1} p90={:.1} p99={:.1} max={:.1} | c0N: p50={:.5} p90={:.5} p01={:.5} deep<-0.05={} deep<-0.2={}",
+            "kN: p50={:.1} p90={:.1} p99={:.1} max={:.1} | c0N: p50={:.5} p90={:.5} p01={:.5} deep<-0.05={} deep<-0.2={} | geom(c0-m): p01={:.5} deep<-0.05={} deep<-0.2={} (m={:.3})",
             pct(&kns,0.5), pct(&kns,0.9), pct(&kns,0.99), kns.last().copied().unwrap_or(0.0),
-            pct(&c0s,0.5), pct(&c0s,0.9), pct(&c0s,0.01), deep, deep2
+            pct(&c0s,0.5), pct(&c0s,0.9), pct(&c0s,0.01), deep, deep2,
+            pct(&geoms,0.01), gdeep, gdeep2, margin
         );
     }
     if std::env::var("GEN_HIST").is_ok() {
@@ -226,6 +232,34 @@ fn main() {
     }
 
 
+
+    if std::env::var("AABB_OV").is_ok() {
+        let bodies = world.download_bodies();
+        let mut pen_gt_aabb = 0u32;
+        let mut n = 0u32;
+        for ct in world.download_contacts() {
+            if ct.alive == 0 || ct.c0_n >= -0.05 { continue; }
+            let ca = ct.collider_a as usize;
+            let cb = ct.collider_b as usize;
+            if colliders[ca].shape != ShapeType::Box as u32 || colliders[cb].shape != ShapeType::Box as u32 {
+                continue;
+            }
+            let ba = &bodies[colliders[ca].body as usize];
+            let bb = &bodies[colliders[cb].body as usize];
+            let ha = glam::Vec3::new(colliders[ca].params[0], colliders[ca].params[1], colliders[ca].params[2]);
+            let hb = glam::Vec3::new(colliders[cb].params[0], colliders[cb].params[1], colliders[cb].params[2]);
+            // Conservative: sphere overlap depth
+            let ra = ha.length();
+            let rb = hb.length();
+            let d = (glam::Vec3::from_array(ba.position) - glam::Vec3::from_array(bb.position)).length();
+            let sphere_pen = (ra + rb) - d;
+            n += 1;
+            if -ct.c0_n > sphere_pen + 0.05 {
+                pen_gt_aabb += 1;
+            }
+        }
+        println!("aabb_ov: deep_box={n} c0_deeper_than_sphere={pen_gt_aabb}");
+    }
     if std::env::var("COLOR_CHECK").is_ok() {
         let colors = world.download_body_colors();
         let manifolds = world.download_manifolds();

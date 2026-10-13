@@ -399,7 +399,7 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     if (col.shape == SHAPE_PLANE) return;
     // Insert sleeping too — awake movers must find them (island wake on impact).
     uint base = gScratchAtomics[1];
-    float cellSize = max(gParams[0].contactOffset * 16.0, 0.5);
+    float cellSize = max(gParams[0].gridCellSize, 0.5);
     Aabb box = gAabbs[base + i];
     float3 ext = box.mx - box.mn;
     // three-avbd isLarge: oversized *statics* stay out of the grid. Smash balls are
@@ -467,9 +467,11 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         return;
     }
 
-    float cellSize = max(gParams[0].contactOffset * 16.0, 0.5);
+    float cellSize = max(gParams[0].gridCellSize, 0.5);
     int3 mn = int3(floor(box.mn / cellSize));
     int3 mx = int3(floor(box.mx / cellSize));
+    // With gridCellSize ≈ 2·radius, demo OBBs span ≤2 cells; this clamp is then safe.
+    // It was wrong when cellSize floored at 0.5 m for random piles (missed pairs → tunnels).
     mn = max(mn, mx - int3(1, 1, 1));
     mx = min(mx, mn + int3(1, 1, 1));
 

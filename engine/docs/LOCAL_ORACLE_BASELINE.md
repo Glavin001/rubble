@@ -63,12 +63,12 @@ Interactive gate: p50 ≤ 8.33 ms. Ring smash uses lead=60 (three-avbd). Settled
 | Scene | p50 ms | note |
 |-------|--------|------|
 | Wall Smash (2k) @ 8 it | ~1.6–2.1 | **beats** oracle wallMs 2.86 and gpuTotal 10.81 |
-| Brick Ring (9k) @ 4 it | ~3.3 | **beats** oracle gpuTotal 5.51; contacts ~45–52k; `pipelined_wall` still ~8–13 (oracle wallMs 1.75) |
+| Brick Ring (9k) @ 4 it | ~4.4–7 | PASS ≥120 FPS; contacts ~58k after gridCellSize fix; was ~3.3 / ~52k — recover in perf pass |
 | Brick Walls (27k) | ~7.2 | PASS |
 | Chain Mail (1.6k) | ~1.2 | PASS |
 | Box Columns (100k) settled | ~0 (asleep early-out) | PASS (plane@0.5, centres at 1+layer) |
-| Box Pile (32k) | ~31@600 (settling) | KE ~2.7k@600 after Morton+qadd; reuse ~10%; still cascading (oracle ~3 ms / 94% reuse) |
-| Box Pile (4k) | ~3.7@600 | KE ~90–180; reuse ~30%@600 → ~42%@2400 (gen_reject); survival ~0.94; Ring ~3.3 ms |
+| Box Pile (32k) | settling | @600: KE~2k, reuse ~60%, deep C0~80 (was KE~3k / reuse~10% / deep thousands) |
+| Box Pile (4k) | ~2 ms | @600: KE~90, reuse ~65%, deep C0~0–10, lin movers~100 (was reuse~30% / deep~2400) |
 | Stack / Rope / Pyramid | &lt; 3 | PASS |
 | Brick Ring (28k) lead=60 | ~27 | stress (smash peak) |
 | Brick Ring (110k) | ~140+ | stress |
