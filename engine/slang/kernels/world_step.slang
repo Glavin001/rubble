@@ -503,6 +503,18 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                     !bodiesJointed(col.body, other.body) &&
                     other.shape != SHAPE_PLANE)
                 {
+                    // three-avbd testPair: bounding spheres before AABB/face (rings/piles
+                    // otherwise send 48-72% of pairs to NP only to find them apart).
+                    BodyState ob = gBodies[other.body];
+                    float3 d = b.position - ob.position;
+                    float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+                    float rB = other.params.w > 0.0 ? other.params.w : length(other.params.xyz);
+                    float rr = rA + rB + 2.0 * gParams[0].contactOffset;
+                    if (dot(d, d) > rr * rr)
+                    {
+                        cur = gColorLists[cur];
+                        continue;
+                    }
                     Aabb ab = gAabbs[base + cur];
                     if (!(box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
                           box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
