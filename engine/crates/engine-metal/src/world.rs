@@ -818,7 +818,8 @@ impl<'a> SceneBuilder<'a> {
             local_pos: [0.0; 3],
             density: mass / (8.0 * half.x * half.y * half.z),
             local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [half.x, half.y, half.z, half.max_element()],
+            // params.w = bounding-sphere radius (three-avbd length(half)), used by BP sphere cull.
+            params: [half.x, half.y, half.z, half.length()],
         });
         body
     }
