@@ -1890,7 +1890,9 @@ void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
     if (dlin.x != dlin.x || dlin.y != dlin.y || dlin.z != dlin.z) return;
     if (dang.x != dang.x || dang.y != dang.y || dang.z != dang.z) return;
     b.position += dlin;
-    b.orientation = quatApplyDelta(b.orientation, dang);
+    // three-avbd qadd: normalize(q + ½·(δω,0)·q) — first-order chart matching
+    // Taylor C / qsub. Full exp-map quatApplyDelta disagrees for large δω.
+    b.orientation = quatNormalize(b.orientation + quatMul(float4(dang, 0.0), b.orientation) * 0.5);
     gBodies[bodyIdx] = b;
 }
 
