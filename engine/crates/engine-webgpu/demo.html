@@ -96,6 +96,14 @@
     const compactContacts = persistentContacts || qs.get('contacts') === 'compact' || (scene === 'ring110k' && !qs.has('contacts'));
     const manifoldPersistence = qs.get('persistence') === 'manifold';
     const fusedPersistence = compactContacts && qs.get('persistence') === 'fused';
+    // three-avbd hashInsert shape: one warm-hash thread per previous manifold
+    // rather than per previous contact. Same published heads; ring/gables
+    // checkpoints are bit-identical. Ring A/B/A 11.85/11.64/11.87 ms (repeat
+    // 11.68), insert 0.39->0.13 ms. hashInsert=contact keeps the control.
+    const hashInsertMode = qs.get('hashInsert') || (['ring110k', 'gables506k'].includes(scene) ? 'manifold' : 'contact');
+    if (!['contact', 'manifold'].includes(hashInsertMode))
+      throw new Error('hashInsert must be contact or manifold');
+    const manifoldHashInsert = hashInsertMode === 'manifold';
     const detailedProfile = qs.get('profile') === 'detail';
     const graphProfile = qs.get('profile') === 'graph';
     const spatialOrder = qs.get('order') === 'morton';
@@ -299,6 +307,7 @@
     const K = [
       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
+      ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
@@ -723,6 +732,7 @@ struct VsOut {
 
     const persistentEntries = {
       narrowphase: 'narrowphase_persistent', contact_hash_insert: 'contact_hash_insert_persistent',
+      contact_hash_insert_manifolds: 'contact_hash_insert_manifolds_persistent',
       persist_contacts: 'persist_contacts_persistent', persist_manifolds: 'persist_manifolds_persistent',
       persist_manifolds_compact: 'persist_manifolds_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
       solve_primal_sparse_compact: 'solve_primal_sparse_persistent',
@@ -849,6 +859,8 @@ struct VsOut {
       s[12] = log === 0 ? 0 : (log - 1) & 1;
       s[17] = steps;
       s[26] = incrementalColors ? 1 : 0; // history row + compact work slot 69
+      // s[13] receives the previous GPU manifold count in writeHost.
+      s[14] = manifoldHashInsert ? 1 : 0;
       s[24] = csrBase;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
@@ -870,6 +882,8 @@ struct VsOut {
       // Keep the previous GPU count before clearing counters. A benchmark queues
       // ten steps between CPU readbacks; last.contact is stale within that batch.
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
+      // manifoldCount (byte 48) sizes the per-manifold warm-hash insert.
+      if (steps > 0 && manifoldHashInsert) enc.copyBufferToBuffer(bufs[7], 48, bufs[6], 80 + 13 * 4, 4);
       enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 64);
       enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
     }
@@ -926,9 +940,12 @@ struct VsOut {
         if (detailedProfile) nextPhase();
         disp(pass, 'contact_hash_clear', hashN);
         if (detailedProfile) nextPhase();
-        dispWork(pass, 'contact_hash_insert', 68);
+        dispWork(pass, manifoldHashInsert ? 'contact_hash_insert_manifolds' : 'contact_hash_insert', 68);
         if (detailedProfile) nextPhase();
       }
+      // Narrowphase overwrites gManifolds, so the manifold insert must precede it.
+      if (!reuse && manifoldHashInsert)
+        throw new Error('hashInsert=manifold requires contact reuse (insert before narrowphase)');
       dispWork(pass, 'narrowphase', 64);
       disp(pass, 'write_work_args', 64);
       nextPhase();
@@ -1084,7 +1101,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact",
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1456,7 +1473,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1502,6 +1519,7 @@ struct VsOut {
       report.adjacency = physicalAdjacency ? "physical" : "append";
       report.order = spatialOrder ? "morton" : "construction";
       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
+      report.hashInsert = hashInsertMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
       restoreScene();
@@ -1526,7 +1544,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

@@ -1,0 +1,51 @@
+{
+  "purpose": "Independent re-baseline after handoff; no source changes. Rubble HEAD 15ea7b1, 69 production WGSL entries.",
+  "measuredAtUtc": "2026-10-14T20:34-20:55",
+  "environment": {
+    "machine": "Apple M3 Max 128GB, macOS 14.4 (Darwin 23.4.0)",
+    "browser": "Claude desktop in-app browser, Chrome/152.0.7977.130 (handoff used Chrome 155)",
+    "adapter": "apple / metal-3",
+    "referenceHead": "2bb1a318e9aad03640b4bce5b5d222484f0925f7 (working tree with pre-existing local bench changes)",
+    "sourceHashes": {
+      "world_step.slang": "a675d19f08cda15f",
+      "demo.html": "d9e0354e99755f65",
+      "physics-benchmark.mjs": "468bffcc46348108",
+      "reference wgsl-collision.ts": "6ef7024f0fc45198",
+      "reference wgsl-solve.ts": "0c139134a716ec24"
+    }
+  },
+  "ringThroughputBAB": {
+    "protocol": "three-avbd 2x5x10, lead 60, 4 iters, dt 1/60, all 110441 dynamics awake, overflow 0",
+    "reference1": {"wallMs": 10.23, "gpuMs": 10.16, "collision": 3.67, "adjacency": 0.26, "coloring": 0.46, "solve": 5.77, "contacts": 1174983, "colors": 11, "gpuMiB": 279, "precision": "UI 2 decimals"},
+    "rubble": {"wallMs": 12.02, "roundSamplesMs": [[11.87,11.97,12.43,12.06,12.02],[12.13,12.02,11.98,12.00,12.06]], "roundMedians": [12.02,12.02], "profile": "graph"},
+    "reference2": {"wallMs": 10.27, "gpuMs": 10.29, "collision": 3.74, "adjacency": 0.26, "coloring": 0.46, "solve": 5.83, "contacts": 1169451, "colors": 11},
+    "rubbleEarlierSameSession": {"wallMs": 12.09, "roundMedians": [12.26,12.09], "profile": "detail", "measuredAt": "2026-10-14T20:34:27.600Z"},
+    "rubbleDetailPhasesMs": {"aabbs": 0.07, "grid": 1.18, "refs": 0.07, "hashClear": 0.07, "hashInsert": 0.39, "narrowphase": 2.16, "warm": 1.11, "graph": 0.85, "primal": 4.19, "dual": 1.84, "sleep": 0.07},
+    "rubbleGraphPhasesMs": {"csrDegree": 0.13, "csrScatter": 0.07, "csrSort": 0.20, "colorInit": 0.07, "colorRepair": 0.20, "colorPack": 0.07, "predict": 0.07},
+    "gap": "Rubble +17.3% step time vs reference mean 10.25; target 8.333 needs -30.7%. Collision ~4.84 vs ref 3.7; primal+dual ~6.0 vs ref solve 5.8; graph 0.85 vs 0.72."
+  },
+  "gablesThroughput": {
+    "rubble": {"wallMs": 47.15, "roundMedians": [47.15,47.39], "contactLayout": "canonical128", "iterations": 3, "bodies": 505922, "phasesMs": {"aabbs": 0.52, "grid": 3.21, "refs": 0.26, "hashInsert": 0.85, "narrowphase": 7.01, "warm": 4.59, "graph": 3.74, "primal": 16.19, "dual": 10.49}},
+    "reference": {"wallMs": 26.66, "gpuMs": 26.61, "collision": 9.63, "adjacency": 0.98, "coloring": 1.51, "solve": 14.61, "contacts": 4102693, "colors": 9, "gpuMiB": 1218},
+    "gap": "Rubble 1.77x slower; dual 10.5 ms (canonical 128-byte contacts) is the outlier"
+  },
+  "ringLiveLoop": {"tps": 54, "fps": 54, "msPerFrame": 18.5, "maxTps": 61, "note": "per-frame await mapAsync + render; separate from physics throughput"},
+  "correctness": {
+    "gpuLibTests": "44/44 pass",
+    "browserUnitTests": "218/218 pass",
+    "sceneBuilders": "5/5", "spatialOrder": "6/6",
+    "nativeRing480PersistentSparse10": "PASS mean flank 1.1497 ball [-0.035727184,8.4884205,105.45146] (bit-identical to handoff)",
+    "nativeColumns": "4/4 PASS; 100k no-sleep step179 drift 0.1017",
+    "nativeCanonicalGables240": "PASS unhit mean/max 0.118626/0.330369",
+    "metalOracles": "18/18 PASS (lib 3, avbd_slice 7, columns_wgpu_parity 3, oracle_accuracy 5)",
+    "browserRing480": "PASS mean 1.181787 ball [-0.0303,8.4692,105.1912] contacts 1037330",
+    "browserGables240": "PASS unhit mean/max 0.117218/0.326607"
+  },
+  "kernelComparisonBytes": {
+    "note": "logical bytes from generated WGSL vs reference WGSL; Rubble copies whole 112B BodyState structs",
+    "dualPerContactPerIter": {"reference": 125, "rubble": 348},
+    "primalPerEdge": {"reference": 164, "rubble": 260},
+    "hashInsertPerStep": {"reference": "~5 MB (per manifold)", "rubble": "~227 MB (per contact)"},
+    "persistence": {"reference": "inline in narrowphase, ~150 B/contact", "rubble": "separate pass ~1.0-1.6 KB loaded/contact"}
+  }
+}

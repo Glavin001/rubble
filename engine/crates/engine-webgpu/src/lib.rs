@@ -530,6 +530,7 @@ mod tests {
         for name in [
             "narrowphase_persistent",
             "contact_hash_insert_persistent",
+            "contact_hash_insert_manifolds_persistent",
             "persist_contacts_persistent",
             "persist_manifolds_persistent",
             "solve_primal_color_persistent",

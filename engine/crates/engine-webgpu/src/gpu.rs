@@ -20,6 +20,8 @@ pub struct WgpuSim {
     persistent_contacts: bool,
     sparse_start: u32,
     manifold_persistence: bool,
+    /// Opt-in three-avbd shape: warm-hash insert per previous manifold.
+    pub(crate) manifold_hash_insert: bool,
     fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -94,6 +96,7 @@ fn persistent_entry(name: &str) -> &str {
         "apply_commands" => "apply_commands_persistent",
         "narrowphase" => "narrowphase_persistent",
         "contact_hash_insert" => "contact_hash_insert_persistent",
+        "contact_hash_insert_manifolds" => "contact_hash_insert_manifolds_persistent",
         "persist_contacts" => "persist_contacts_persistent",
         "persist_manifolds" | "persist_manifolds_compact" => "persist_manifolds_persistent",
         "pack_solver_contacts" => "pack_solver_pairs_persistent",
@@ -346,6 +349,7 @@ impl WgpuSim {
                 && std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Ok("fused"),
             manifold_persistence: std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref()
                 == Ok("1"),
+            manifold_hash_insert: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("manifold"),
             device,
             queue,
             capacity,
@@ -567,8 +571,18 @@ impl WgpuSim {
         if reuse {
             self.disp(&mut pass, "update_refs", n_bodies, None);
             self.disp(&mut pass, "contact_hash_clear", hash_n, None);
-            self.disp_work(&mut pass, "contact_hash_insert", 68, None);
+            let insert = if self.manifold_hash_insert {
+                "contact_hash_insert_manifolds"
+            } else {
+                "contact_hash_insert"
+            };
+            self.disp_work(&mut pass, insert, 68, None);
         }
+        // Narrowphase overwrites gManifolds; the manifold insert must precede it.
+        assert!(
+            reuse || !self.manifold_hash_insert,
+            "ENGINE_HASH_INSERT=manifold requires contact reuse"
+        );
         self.disp_work(&mut pass, "narrowphase", 64, None);
         self.disp(&mut pass, "write_work_args", 64, None);
         if !reuse {
@@ -785,7 +799,11 @@ impl WgpuSim {
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
         s[17] = self.steps_done;
         s[26] = 1; // incremental coloring: history row + compact work slot 69
-                   // CSR index region starts past the hash/id words inside gConstraintIds.
+        if self.manifold_hash_insert {
+            s[13] = self.last_counters.manifold_count;
+            s[14] = 1;
+        }
+        // CSR index region starts past the hash/id words inside gConstraintIds.
         s[24] = ids_len;
         s[4] = self.capacity.max_colors.min(32);
         self.queue
