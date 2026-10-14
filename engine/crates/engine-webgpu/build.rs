@@ -9,6 +9,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "solve_primal_sparse",
     "solve_primal_sparse_compact",
     "solve_primal_sparse_persistent",
+    "narrowphase_copy_persistent",
+    "persist_contacts_copy_persistent",
     "apply_commands",
     "apply_commands_persistent",
     "narrowphase_persistent",
@@ -90,6 +92,7 @@ fn main() -> Result<()> {
     let world = slang_root.join("kernels/world_step.slang");
     let compact = slang_root.join("kernels/compact_solve.slang");
     let persistent = slang_root.join("kernels/persistent_solve.slang");
+    let reuse_copy = slang_root.join("kernels/reuse_copy.slang");
     let abi = slang_root.join("kernels/abi_probe.slang");
     compile(
         &abi,
@@ -104,7 +107,9 @@ fn main() -> Result<()> {
     for entry in WORLD_ENTRIES {
         let dest = out.join(format!("{entry}.spv"));
         match compile(
-            if entry.ends_with("_persistent") {
+            if entry.ends_with("_copy_persistent") {
+                &reuse_copy
+            } else if entry.ends_with("_persistent") {
                 &persistent
             } else if entry.ends_with("_compact")
                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
@@ -155,7 +160,9 @@ fn main() -> Result<()> {
     {
         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
         match compile_with_defines(
-            if entry.ends_with("_persistent") {
+            if entry.ends_with("_copy_persistent") {
+                &reuse_copy
+            } else if entry.ends_with("_persistent") {
                 &persistent
             } else if entry.ends_with("_compact")
                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")

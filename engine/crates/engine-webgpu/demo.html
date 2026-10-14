@@ -114,6 +114,15 @@
     // previous run, so lookups never load previous contacts to compare keys.
     const warmRecordHash = hashInsertMode === 'record';
     const manifoldHashInsert = hashInsertMode === 'manifold' || warmRecordHash;
+    // Narrowphase finishes reused copies for moving pairs; persistence skips
+    // points tagged final (8eh). Gables pass/copy 30.95/30.19/30.98/30.21 ms,
+    // ring 11.37/11.27/11.38/11.27 ms. reuse=pass keeps the separate-pass control.
+    const reuseMode = qs.get('reuse') || (['ring110k', 'gables506k'].includes(scene) && persistentContacts
+      && !manifoldPersistence && !fusedPersistence ? 'copy' : 'pass');
+    if (!['pass', 'copy'].includes(reuseMode)) throw new Error('reuse must be pass or copy');
+    if (reuseMode === 'copy' && (!persistentContacts || manifoldPersistence || fusedPersistence))
+      throw new Error('reuse=copy requires persistent contacts with per-contact persistence');
+    const reuseCopy = reuseMode === 'copy';
     // Broadphase grid table scaled to >=2x colliders (three-avbd sizes its grid
     // at 2x body capacity); scenes up to 65536 colliders keep 131072 heads.
     // Gables fixed/scaled: 36.92/35.00/36.34/34.50 ms, grid 3.28->1.90 ms, with
@@ -326,6 +335,7 @@
       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
+      ...(reuseCopy ? ['narrowphase_copy_persistent', 'persist_contacts_copy_persistent'] : []),
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
@@ -975,7 +985,7 @@ struct VsOut {
       // Narrowphase overwrites gManifolds, so the manifold insert must precede it.
       if (!reuse && manifoldHashInsert)
         throw new Error('hashInsert=manifold requires contact reuse (insert before narrowphase)');
-      dispWork(pass, 'narrowphase', 64);
+      dispWork(pass, reuseCopy ? 'narrowphase_copy_persistent' : 'narrowphase', 64);
       disp(pass, 'write_work_args', 64);
       nextPhase();
       if (!reuse) {
@@ -985,7 +995,7 @@ struct VsOut {
         if (detailedProfile) nextPhase();
       }
       if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
-      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
       nextPhase();
       disp(pass, 'build_awake_list', nBodies);
       disp(pass, 'write_work_args', 64);
@@ -1132,7 +1142,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1554,7 +1564,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, grid: gridMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1601,6 +1611,7 @@ struct VsOut {
       report.order = spatialOrder ? "morton" : "construction";
       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
       report.hashInsert = hashInsertMode;
+      report.reuse = reuseMode;
       report.grid = gridMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
@@ -1626,7 +1637,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, grid: gridMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

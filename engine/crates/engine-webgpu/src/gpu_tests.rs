@@ -3370,6 +3370,14 @@ fn persistent_fused_warmstart_preserves_history_and_refreshes_pair_cache() {
     mixed_contact_reuse_fixture(true, true);
 }
 
+/// Narrowphase-finished reused copies (`reuse=copy`) must reproduce the same
+/// retained anchors, single decay, cold initialization, generations and owner
+/// tags as the separate persistence pass.
+#[test]
+fn reuse_copy_matches_separate_persistence_semantics() {
+    mixed_contact_reuse_fixture_mode(true, false, true);
+}
+
 #[test]
 fn persistent_dual_updates_hot_state_without_corrupting_metadata_or_history() {
     let cap = WorldCapacity::small();
@@ -3578,6 +3586,10 @@ fn persistent_dual_updates_hot_state_without_corrupting_metadata_or_history() {
 }
 
 fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
+    mixed_contact_reuse_fixture_mode(persistent, fused, false);
+}
+
+fn mixed_contact_reuse_fixture_mode(persistent: bool, fused: bool, copy: bool) {
     let mut sim = if persistent {
         WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
     } else {
@@ -3681,8 +3693,9 @@ fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
     let hash_n = (previous.len().max(256) * 4).next_power_of_two() as u64;
     for parity in 0..2 {
         for reuse in [false, true] {
-            let context =
-                format!("persistent={persistent}, fused={fused}, parity={parity}, reuse={reuse}");
+            let context = format!(
+                "persistent={persistent}, fused={fused}, copy={copy}, parity={parity}, reuse={reuse}"
+            );
             sim.contacts_parity = parity;
             sim.params.flags = (sim.params.flags & !1) | u32::from(reuse);
             sim.write_host_uniforms();
@@ -3724,12 +3737,23 @@ fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
                     previous.len() as u64,
                     None,
                 );
-                sim.disp(&mut pass, "narrowphase", count as u64, None);
+                sim.disp(
+                    &mut pass,
+                    if copy {
+                        "narrowphase_copy_persistent"
+                    } else {
+                        "narrowphase"
+                    },
+                    count as u64,
+                    None,
+                );
                 sim.disp(&mut pass, "write_work_args", 64, None);
                 sim.disp_work(
                     &mut pass,
                     if fused {
                         "persist_manifolds_compact"
+                    } else if copy {
+                        "persist_contacts_copy_persistent"
                     } else {
                         "persist_contacts"
                     },
@@ -3762,7 +3786,9 @@ fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
                     for absolute in mf.contact_start..mf.contact_start + mf.contact_count {
                         let local = (absolute - cur) as usize;
                         let tag = hot[local * 16 + 15];
-                        assert_eq!(tag & 0x7fff_ffff, owner as u32 + 1,
+                        // Owner bits only: stick (bit 31) and narrowphase-final (bit 29)
+                        // may legitimately remain set.
+                        assert_eq!(tag & 0x1fff_ffff, owner as u32 + 1,
                             "{context}, manifold={owner}, point={local}: persistence lost the current owner or left the transient reuse bit set; the next dual would read the wrong pair");
                     }
                     if fused {

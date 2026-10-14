@@ -1033,8 +1033,23 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
     }
 
     Contact head = READ_CONTACT(prevOff + startJ);
+#if defined(ENGINE_REUSE_COPY)
+    // Moving pairs: finish the reused copy here (exactly persistContact's reused
+    // path) and mark it final. Pairs at rest defer so later wakeups still count.
+    bool atRest = contactPairAtRest(ba, bb);
+#endif
     for (uint k = 0u; k < count; k++)
     {
+#if defined(ENGINE_REUSE_COPY)
+        if (!atRest)
+        {
+            Contact c = READ_CONTACT(prevOff + startJ + k);
+            c.alive = 1;
+            storeFinalPersistentContact(curOff + cStart + k, mslot,
+                finishWarmContact(refreshReusedContact(c, ba, bb), ba, bb));
+            continue;
+        }
+#endif
         // Defer the full copy/transform to the coalesced per-contact persistence
         // pass. Encode the exact source index in the transient alive word.
         MARK_REUSED_CONTACT(curOff + cStart + k, mslot, startJ + k + 2u);
@@ -1441,6 +1456,46 @@ void insertWarmRecord(uint m, uint j, uint count, uint colA, uint colB)
     AOR2(gCounters[0].overflowFlags, OVERFLOW_WARM_HASH);
 }
 
+// Step-start constraint offsets of a reused point at current poses.
+Contact refreshReusedContact(Contact c, BodyState ba, BodyState bb)
+{
+    AvbdParams p = PARAMS;
+    float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
+    float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
+    float3 d = wb - wa;
+    c.c0N = dot(c.normal, d) + p.contactOffset;
+    c.c0T1 = dot(c.tangent1, d);
+    c.c0T2 = dot(c.tangent2, d);
+    c.penetration = c.c0N;
+    return c;
+}
+
+// Mass-floored normal penalty, independent tangent ramps and λ decay.
+Contact finishWarmContact(Contact c, BodyState ba, BodyState bb)
+{
+    AvbdParams p = PARAMS;
+    c.alive = 1;
+
+    float dt = max(p.dt, 1e-8);
+    float mA = ba.invMass > 1e-12 ? (1.0 / ba.invMass) : 1e20;
+    float mB = bb.invMass > 1e-12 ? (1.0 / bb.invMass) : 1e20;
+    // Normal stiffness is floored at m/dt²; each tangent ramps independently.
+    float kMass = min(mA, mB) / (dt * dt);
+    c.kN = max(max(1.0, kMass), p.gamma * c.kN);
+    c.kT = max(1.0, p.gamma * c.kT);
+    c._pad2 = max(1.0, p.gamma * c._pad2);
+    c.lambdaN *= p.alpha * p.gamma;
+    c.lambdaT1 *= p.alpha * p.gamma;
+    c.lambdaT2 *= p.alpha * p.gamma;
+    return c;
+}
+
+bool contactPairAtRest(BodyState ba, BodyState bb)
+{
+    return (!bodyIsDynamic(ba) || bodyIsSleeping(ba)) &&
+        (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
+}
+
 // Shared point update; callers choose contact or manifold scheduling. Pair bodies
 // are immutable during persistence, so manifold scheduling can load them once.
 Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState bb)
@@ -1448,24 +1503,13 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
     AvbdParams p = PARAMS;
     uint curOff = HOST_S(11);
     c.alive = 1;
-    bool bothSleep =
-        (!bodyIsDynamic(ba) || bodyIsSleeping(ba)) &&
-        (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
-    if (bothSleep)
+    if (contactPairAtRest(ba, bb))
     {
         STORE_CONTACT(curOff + i, c);
         return c;
     }
     if (reused)
-    {
-        float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
-        float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
-        float3 d = wb - wa;
-        c.c0N = dot(c.normal, d) + p.contactOffset;
-        c.c0T1 = dot(c.tangent1, d);
-        c.c0T2 = dot(c.tangent2, d);
-        c.penetration = c.c0N;
-    }
+        c = refreshReusedContact(c, ba, bb);
     else
     {
         uint prevOff = HOST_S(8);
@@ -1583,19 +1627,7 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
             }
         }
     }
-    c.alive = 1;
-
-    float dt = max(p.dt, 1e-8);
-    float mA = ba.invMass > 1e-12 ? (1.0 / ba.invMass) : 1e20;
-    float mB = bb.invMass > 1e-12 ? (1.0 / bb.invMass) : 1e20;
-    // Normal stiffness is floored at m/dt²; each tangent ramps independently.
-    float kMass = min(mA, mB) / (dt * dt);
-    c.kN = max(max(1.0, kMass), p.gamma * c.kN);
-    c.kT = max(1.0, p.gamma * c.kT);
-    c._pad2 = max(1.0, p.gamma * c._pad2);
-    c.lambdaN *= p.alpha * p.gamma;
-    c.lambdaT1 *= p.alpha * p.gamma;
-    c.lambdaT2 *= p.alpha * p.gamma;
+    c = finishWarmContact(c, ba, bb);
     STORE_CONTACT(curOff + i, c);
     return c;
 }
@@ -1607,6 +1639,9 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (i >= ALOAD(gCounters[0].contactCount)) return;
     uint curOff = HOST_S(11);
+#if defined(ENGINE_REUSE_COPY)
+    if ((gSolverPoints[curOff + i].pairAndStick & PERSIST_FINAL) != 0u) return;
+#endif
     uint state = CONTACT_STATE(curOff + i);
     if (state == 0u) return;
     bool reused = state >= 2u;
