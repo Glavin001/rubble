@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta http-equiv="Cache-Control" content="no-store" />
   <title>engine — WebGPU AVBD wall</title>
   <style>
     html, body { margin: 0; height: 100%; background: #12141a; color: #d7dbe6; font: 13px/1.4 ui-monospace, Menlo, monospace; }
@@ -239,9 +240,11 @@ struct Collider {
   params: vec4f,
 };
 struct Frame { viewProj: mat4x4<f32>, mode: u32 };
+struct Eye { pos: vec3f, _pad: f32 };
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(1) var<uniform> frame: Frame;
 @group(0) @binding(2) var<storage, read> cols: array<Collider>;
+@group(0) @binding(3) var<uniform> eye: Eye;
 
 fn quatRotate(q: vec4f, v: vec3f) -> vec3f {
   let u = q.xyz;
@@ -252,17 +255,28 @@ struct VsOut {
   @builtin(position) clip: vec4f,
   @location(0) normal: vec3f,
   @location(1) color: vec3f,
+  @location(2) world: vec3f,
+  @location(3) center: vec3f,
+  @location(4) radius: f32,
 };
 
 @vertex fn vs(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> VsOut {
   let b = bodies[inst + 1u];
   let col = cols[inst + 1u];
   var half = col.params.xyz;
-  if (col.shape == 0u) { half = vec3f(col.params.x); }
+  var radius = 0.0;
+  if (col.shape == 0u) {
+    // Bounds cube of half-extent r; fragment ray-hits the sphere so corners do not stick out.
+    half = vec3f(col.params.x);
+    radius = col.params.x;
+  }
   let world = b.position + quatRotate(b.orientation, corner * (half / 0.5));
   var o: VsOut;
   o.clip = frame.viewProj * vec4f(world, 1.0);
   o.normal = quatRotate(b.orientation, normal);
+  o.world = world;
+  o.center = b.position;
+  o.radius = radius;
   // 0 position tint, 1 awake/sleep, 2 speed. The ball stays gray.
   if (col.shape == 0u) {
     o.color = vec3f(0.75, 0.78, 0.82);
@@ -280,7 +294,19 @@ struct VsOut {
 }
 
 @fragment fn fs(i: VsOut) -> @location(0) vec4f {
-  let n = normalize(i.normal);
+  var n = normalize(i.normal);
+  if (i.radius > 0.0) {
+    let rd = normalize(i.world - eye.pos);
+    let oc = eye.pos - i.center;
+    let b = dot(oc, rd);
+    let c = dot(oc, oc) - i.radius * i.radius;
+    let h = b * b - c;
+    if (h < 0.0) { discard; }
+    var tHit = -b - sqrt(h);
+    if (tHit < 0.0) { tHit = -b + sqrt(h); }
+    if (tHit < 0.0) { discard; }
+    n = normalize((eye.pos + rd * tHit) - i.center);
+  }
   let light = normalize(vec3f(0.35, 0.85, 0.4));
   let ndl = max(dot(n, light), 0.0);
   return vec4f(i.color * (0.28 + 0.72 * ndl), 1.0);
@@ -290,8 +316,19 @@ struct VsOut {
   var o: VsOut;
   o.clip = frame.viewProj * vec4f(corner, 1.0);
   o.normal = vec3f(0.0, 1.0, 0.0);
+  // Keep bodies live in this entry point so auto-layout still binds slot 0.
   o.color = vec3f(0.22, 0.24, 0.28) + bodies[0].position * 0.0;
+  o.world = corner;
+  o.center = corner;
+  o.radius = 0.0;
   return o;
+}
+
+@fragment fn fsGround(i: VsOut) -> @location(0) vec4f {
+  let n = normalize(i.normal);
+  let light = normalize(vec3f(0.35, 0.85, 0.4));
+  let ndl = max(dot(n, light), 0.0);
+  return vec4f(i.color * (0.28 + 0.72 * ndl), 1.0);
 }
 `;
 
@@ -442,11 +479,17 @@ struct VsOut {
       statusEl.textContent = 'compiling ' + name;
       const src = await (await fetch(`./generated/wgsl/${name}.wgsl`)).text();
       const module = device.createShaderModule({ label: name, code: src });
+      // Force frontend validation now so createComputePipeline cannot hang forever
+      // on a deferred compile error (Chrome async path has been wedging here).
+      if (module.getCompilationInfo) {
+        const info = await module.getCompilationInfo();
+        const err = info.messages.find((m) => m.type === 'error');
+        if (err) throw new Error(`${name}: ${err.message}`);
+      }
       sources[name] = { src, module };
     }
 
     statusEl.textContent = 'creating pipelines…';
-    device.pushErrorScope('validation');
     const pipes = {};
     for (const name of K) {
       const binds = bindingsOf(sources[name].src);
@@ -461,11 +504,17 @@ struct VsOut {
         })),
       });
       statusEl.textContent = 'pipeline ' + name;
-      const pipeline = await device.createComputePipelineAsync({
+      const tPipe = performance.now();
+      // Sync create: createComputePipelineAsync was hanging on sleep_island_commit
+      // after the large narrowphase / solve_primal modules on Chrome Metal.
+      device.pushErrorScope('validation');
+      const pipeline = device.createComputePipeline({
         label: name,
         layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
         compute: { module: sources[name].module, entryPoint: name },
       });
+      const pipeErr = await device.popErrorScope();
+      if (pipeErr) throw new Error(`${name}: ${pipeErr.message}`);
       const bind = device.createBindGroup({
         label: name,
         layout,
@@ -475,9 +524,13 @@ struct VsOut {
         })),
       });
       pipes[name] = { pipeline, bind, dynamic: binds.some((b) => b.index === 22) };
+      statusEl.textContent = `pipeline ${name} ${(performance.now() - tPipe).toFixed(0)}ms`;
+      // Let the HUD paint and the GPU compiler breathe between large kernels.
+      await new Promise((r) => requestAnimationFrame(r));
     }
-    const pipeErr = await device.popErrorScope();
-    if (pipeErr) throw pipeErr;
+
+    statusEl.textContent = 'pipelines ready · building renderer…';
+    await new Promise((r) => requestAnimationFrame(r));
 
     const staging = device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const bodyRead = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -636,14 +689,23 @@ struct VsOut {
       last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
     }
 
-    // Same protocol as three-avbd compare(): drain the queue, median of short batches, best round.
+    function restoreScene() {
+      device.queue.writeBuffer(bufs[0], 0, bodyBytes);
+      device.queue.writeBuffer(bufs[2], 0, colBytes);
+      parity = 0;
+      steps = 0;
+      last = { contact: 0, candidate: 0, awake: 0, color: 0, manifold: 0, overflow: 0 };
+    }
+
+    // Fair three-avbd protocol (blind lead-in + median of 10-step batches). Runs only
+    // after the user has watched the impact, then restores for continued viewing.
     async function benchWall() {
       for (let i = 0; i < lead; i++) {
         submitPhysics();
         if (i % 10 === 9) {
           await device.queue.onSubmittedWorkDone();
           await readCounters();
-          statusEl.textContent = `lead-in ${i + 1}/${lead} · contacts ${last.contact} · ov 0x${last.overflow.toString(16)}`;
+          statusEl.textContent = `timing lead-in ${i + 1}/${lead} · contacts ${last.contact}`;
         }
       }
       await device.queue.onSubmittedWorkDone();
@@ -722,12 +784,17 @@ struct VsOut {
     const frameScratch = new ArrayBuffer(80);
     const frameF = new Float32Array(frameScratch);
     const frameU = new Uint32Array(frameScratch);
+    const eyeBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const eyeScratch = new Float32Array(4);
     let colorMode = 1;
     function writeCamera(aspect) {
-      const view = mul(perspective(Math.PI / 5, aspect, 0.2, 400), lookAt(cameraEye(), target, [0, 1, 0]));
+      const cam = cameraEye();
+      const view = mul(perspective(Math.PI / 5, aspect, 0.2, 400), lookAt(cam, target, [0, 1, 0]));
       frameF.set(view);
       frameU[16] = colorMode;
       device.queue.writeBuffer(frameBuf, 0, frameScratch);
+      eyeScratch[0] = cam[0]; eyeScratch[1] = cam[1]; eyeScratch[2] = cam[2]; eyeScratch[3] = 0;
+      device.queue.writeBuffer(eyeBuf, 0, eyeScratch);
     }
     const colorNames = ['position tint (red −X/down, yellow +X/up)', 'awake amber, sleeping blue', 'speed: blue still, red above 3 m/s'];
     function showLegend() {
@@ -741,8 +808,17 @@ struct VsOut {
       else return;
       showLegend();
     });
-    const boxMod = device.createShaderModule({ code: RENDER });
-    const groundMod = device.createShaderModule({ code: RENDER });
+    statusEl.textContent = 'render shader…';
+    const boxMod = device.createShaderModule({ label: 'render-boxes', code: RENDER });
+    const groundMod = device.createShaderModule({ label: 'render-ground', code: RENDER });
+    for (const mod of [boxMod, groundMod]) {
+      if (!mod.getCompilationInfo) continue;
+      const info = await mod.getCompilationInfo();
+      const err = info.messages.find((m) => m.type === 'error');
+      if (err) throw new Error(`render: ${err.message}`);
+    }
+    statusEl.textContent = 'render pipeline…';
+    device.pushErrorScope('validation');
     const boxPipe = device.createRenderPipeline({
       layout: 'auto',
       vertex: {
@@ -756,19 +832,24 @@ struct VsOut {
     const groundPipe = device.createRenderPipeline({
       layout: 'auto',
       vertex: { module: groundMod, entryPoint: 'vsGround', buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }] },
-      fragment: { module: groundMod, entryPoint: 'fs', targets: [{ format }] },
+      fragment: { module: groundMod, entryPoint: 'fsGround', targets: [{ format }] },
       primitive: { cullMode: 'none' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
     });
+    const renderErr = await device.popErrorScope();
+    if (renderErr) throw new Error(`render pipeline: ${renderErr.message}`);
+    device.pushErrorScope('validation');
     const boxBind = device.createBindGroup({ layout: boxPipe.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: bufs[0] } },
       { binding: 1, resource: { buffer: frameBuf } },
       { binding: 2, resource: { buffer: bufs[2] } },
+      { binding: 3, resource: { buffer: eyeBuf } },
     ] });
     const groundBind = device.createBindGroup({ layout: groundPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: bufs[0] } }, { binding: 1, resource: { buffer: frameBuf } }] });
-    const renderErr = (await boxMod.getCompilationInfo()).messages.filter((m) => m.type === 'error');
-    if (renderErr.length) throw new Error(renderErr.map((m) => m.lineNum + ': ' + m.message).join('\n'));
+    const bindErr = await device.popErrorScope();
+    if (bindErr) throw new Error(`render bind: ${bindErr.message}`);
     let depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + (e.error && e.error.message || e.error)));
 
     function drawWorld() {
       if (depth.width !== canvas.width || depth.height !== canvas.height) {
@@ -779,7 +860,7 @@ struct VsOut {
       writeCamera(aspect);
       const enc = device.createCommandEncoder();
       const rp = enc.beginRenderPass({
-        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.08, 0.09, 0.12, 1], loadOp: 'clear', storeOp: 'store' }],
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
       rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
@@ -791,6 +872,9 @@ struct VsOut {
 
     const info = adapter.info || {};
     let running = true;
+    let wallMs = 0;
+    let phases = '';
+    let benchStarted = false;
     async function frame(now) {
       if (!running) return;
       try {
@@ -803,7 +887,7 @@ struct VsOut {
         const enc = device.createCommandEncoder();
         encodeStep(enc, true);
         const rp = enc.beginRenderPass({
-          colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.08, 0.09, 0.12, 1], loadOp: 'clear', storeOp: 'store' }],
+          colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
           depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
         });
         rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
@@ -813,21 +897,33 @@ struct VsOut {
         await staging.mapAsync(GPUMapMode.READ);
         await bodyRead.mapAsync(GPUMapMode.READ);
         const c = new Uint32Array(staging.getMappedRange().slice(0));
-        const y = new Float32Array(bodyRead.getMappedRange().slice(0))[1];
         staging.unmap();
         bodyRead.unmap();
         last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
         parity ^= 1;
         steps++;
-        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${bodies.length - 1} bodies · ${params.iterations} iters · ${wallMs.toFixed(2)} ms · ${phases} · step ${steps} · contacts ${last.contact} · ov 0x${last.overflow.toString(16)} · frame ${(performance.now() - now).toFixed(1)} ms`;
+        const wallLabel = wallMs > 0 ? `${wallMs.toFixed(2)} ms` : 'timing after impact…';
+        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${bodies.length - 1} bodies · ${params.iterations} iters · ${wallLabel} ${phases} · step ${steps} · contacts ${last.contact} · ov 0x${last.overflow.toString(16)} · frame ${(performance.now() - now).toFixed(1)} ms`;
         if (last.overflow) { running = false; fail('overflow flags 0x' + last.overflow.toString(16)); return; }
+
+        // Watch the smash first. Fair wall timing runs once after the ball has hit,
+        // then the scene is restored so playback continues from the start again.
+        if (!benchStarted && steps >= lead) {
+          benchStarted = true;
+          statusEl.textContent = `impact shown · measuring wall time (${bodies.length - 1} bodies)…`;
+          restoreScene();
+          await device.queue.onSubmittedWorkDone();
+          wallMs = await benchWall();
+          phases = await profilePhases();
+          restoreScene();
+          await device.queue.onSubmittedWorkDone();
+          drawWorld();
+          statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases} · replaying from start…`;
+        }
         requestAnimationFrame(frame);
       } catch (e) { running = false; fail(e); }
     }
-    statusEl.textContent = `showing ${bodies.length - 1} bodies, then timing…`;
-    const wallMs = await benchWall();
-    const phases = await profilePhases();
-    statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases} contacts ${last.contact} candidates ${last.candidate} ov 0x${last.overflow.toString(16)}`;
+    statusEl.textContent = `playing ${bodies.length - 1} bodies from the start…`;
     requestAnimationFrame(frame);
   </script>
 </body>

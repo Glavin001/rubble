@@ -100,6 +100,10 @@ fn negative_cube_faces_point_outward() {
         src.contains("sign > 0 ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]]"),
         "demo cube keeps one winding for both face signs, so backface culling hides half the faces"
     );
+    assert!(
+        src.contains("if (h < 0.0) { discard; }"),
+        "spheres must be ray-tested; a cube of half-extent r sticks out past the collider at the corners"
+    );
     let axes = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
     for axis in axes {
         for &sign in &[-1.0f32, 1.0] {
