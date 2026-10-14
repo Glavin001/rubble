@@ -43,7 +43,8 @@ for(const value of ['-1','33','2.5','invalid']) {
 // wrong alias can bind 32-byte metadata to a shader expecting 128-byte contacts;
 // WebGPU robust access may hide that mistake as missing collision work.
 for (const [query, expectedMode] of [
-  ['?scene=ring110k', 'persistent'], ['?scene=gables506k', 'canonical'],
+  ['?scene=ring110k', 'persistent'], ['?scene=gables506k', 'persistent'],
+  ['?scene=gables506k&contacts=canonical', 'canonical'], ['?scene=columns', 'canonical'],
   ['?scene=ring110k&contacts=canonical', 'canonical'],
   ['?scene=ring110k&contacts=compact', 'compact'],
   ['?scene=gables506k&contacts=persistent', 'persistent'],
