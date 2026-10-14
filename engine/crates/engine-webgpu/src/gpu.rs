@@ -36,8 +36,12 @@ pub struct WgpuSim {
     chip: String,
 }
 
+/// WebGPU `maxComputeWorkgroupsPerDimension` default is 65535. A 2^22-thread
+/// dispatch is 65536 groups and invalidates the command buffer (columns 100k).
 fn groups(threads: u64) -> u32 {
-    ((threads.max(1) + 63) / 64) as u32
+    const MAX_WG: u32 = 65535;
+    let g = ((threads.max(1) + 63) / 64) as u32;
+    g.min(MAX_WG)
 }
 
 struct Bind {
@@ -390,9 +394,12 @@ impl WgpuSim {
         let ids_len = (2 * (self.capacity.max_contacts + self.capacity.max_joints))
             .max(32768)
             .next_power_of_two();
+        // Largest pow2 thread count with workgroups ≤ 65535 (2^22 → 65536 groups = invalid).
+        const MAX_POW2_DISPATCH: u32 = 1 << 21;
         let hash_n = (prev_contacts.max(256).saturating_mul(4).max(1024) as u32)
             .next_power_of_two()
-            .min(ids_len) as u64;
+            .min(ids_len)
+            .min(MAX_POW2_DISPATCH) as u64;
         let reuse = (self.params.flags & FLAG_REUSE_CONTACTS) != 0;
         if reuse {
             self.disp(&mut pass, "update_refs", n_bodies, None);
@@ -533,7 +540,13 @@ impl WgpuSim {
         s[3] = max_c;
         s[7] = self.last_counters.contact_count.min(max_c);
         s[8] = prev;
-        s[9] = prev_n.saturating_mul(4).max(1024).next_power_of_two().min(ids_len);
+        const MAX_POW2_DISPATCH: u32 = 1 << 21;
+        s[9] = prev_n
+            .saturating_mul(4)
+            .max(1024)
+            .next_power_of_two()
+            .min(ids_len)
+            .min(MAX_POW2_DISPATCH);
         s[10] = self.capacity.max_candidates;
         s[11] = cur;
         let mut log = 0u32;
