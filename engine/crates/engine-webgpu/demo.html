@@ -527,12 +527,12 @@ struct VsOut {
       });
       pipes[name] = { pipeline, bind, dynamic: binds.some((b) => b.index === 22) };
       statusEl.textContent = `pipeline ${name} ${(performance.now() - tPipe).toFixed(0)}ms`;
-      // Let the HUD paint and the GPU compiler breathe between large kernels.
-      await new Promise((r) => requestAnimationFrame(r));
+      // setTimeout — not rAF: background tabs throttle rAF and freeze load between kernels.
+      await new Promise((r) => setTimeout(r, 0));
     }
 
     statusEl.textContent = 'pipelines ready · building renderer…';
-    await new Promise((r) => requestAnimationFrame(r));
+    await new Promise((r) => setTimeout(r, 0));
 
     const staging = device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const bodyRead = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -900,8 +900,12 @@ struct VsOut {
     let wallMs = 0;
     let phases = '';
     let benchStarted = false;
+    let measuring = false;
     async function frame(now) {
       if (!running) return;
+      // Skip overlapping rAF ticks while benchWall awaits — concurrent mapAsync on
+      // staging hung the replay at step 1 after measuring.
+      if (measuring) { requestAnimationFrame(frame); return; }
       try {
         if (depth.width !== canvas.width || depth.height !== canvas.height) {
           depth.destroy();
@@ -935,18 +939,23 @@ struct VsOut {
         // then the scene is restored so playback continues from the start again.
         if (!benchStarted && steps >= lead) {
           benchStarted = true;
+          measuring = true;
           statusEl.textContent = `impact shown · measuring wall time (${bodies.length - 1} bodies)…`;
-          restoreScene();
-          await device.queue.onSubmittedWorkDone();
-          wallMs = await benchWall();
-          phases = await profilePhases();
-          restoreScene();
-          await device.queue.onSubmittedWorkDone();
-          drawWorld();
-          statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases} · replaying from start…`;
+          try {
+            restoreScene();
+            await device.queue.onSubmittedWorkDone();
+            wallMs = await benchWall();
+            phases = await profilePhases();
+            restoreScene();
+            await device.queue.onSubmittedWorkDone();
+            drawWorld();
+            statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases} · replaying from start…`;
+          } finally {
+            measuring = false;
+          }
         }
         requestAnimationFrame(frame);
-      } catch (e) { running = false; fail(e); }
+      } catch (e) { running = false; measuring = false; fail(e); }
     }
     statusEl.textContent = `playing ${bodies.length - 1} bodies from the start…`;
     requestAnimationFrame(frame);
