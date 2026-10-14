@@ -13,7 +13,21 @@ typealias AUint = Atomic<uint>;
 #define AOR2(x, v) (x).or(v)
 #define AMAX2(x, v) (x).max(v)
 #define AXCHG3(x, v, o) o = (x).exchange(v)
-#define ACAS4(x, cmp, v, o) o = (x).compareExchange(cmp, v)
+// WGSL only exposes atomicCompareExchangeWeak. A spurious fail returns old==cmp
+// without storing; callers that treat old==cmp as success then drop hash inserts
+// (contact warm-start / joint hash) and pump KE on large piles. Retry until the
+// value leaves cmp or the CAS reports a different occupant.
+#define ACAS4(x, cmp, v, o)                                                 \
+    {                                                                       \
+        for (uint _casK = 0u; _casK < 32u; _casK++)                         \
+        {                                                                   \
+            (o) = (x).compareExchange((cmp), (v));                          \
+            if ((o) != (cmp))                                               \
+                break;                                                      \
+            if ((x).load() != (cmp))                                        \
+                break;                                                      \
+        }                                                                   \
+    }
 // Groupshared-only exchange: All* lowers to textureBarrier(), which naga/wgpu reject.
 #define GROUP_SYNC() GroupMemoryBarrierWithGroupSync()
 #define BIND(n) [[vk::binding(n, 0)]]

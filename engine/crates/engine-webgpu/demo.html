@@ -772,7 +772,14 @@ struct VsOut {
       : null;
     let bodyCount = bodies.length;
     let colliderCount = bodies.length;
-    let last = { contact: 0, candidate: 0, awake: 0, color: 0, manifold: 0, overflow: 0 };
+    // Seed dispatch sizes so frame 0 / bench lead-ins without per-step readback
+    // do not use a 1024-slot contact hash for 100k-body scenes.
+    const seedContacts = Math.min(cap.maxContacts, Math.max(256, (bodies.length - 1) * 4));
+    const seedCand = Math.min(cap.maxCandidates, Math.max(256, (bodies.length - 1) * 8));
+    let last = {
+      contact: seedContacts, candidate: seedCand, awake: bodies.length - 1,
+      color: 3, manifold: Math.floor(seedContacts / 4), overflow: 0,
+    };
     let parity = 0;
     let steps = 0;
     const sleepRounds = cfg.sleepRounds;
@@ -809,7 +816,10 @@ struct VsOut {
       s[3] = cap.maxContacts;
       s[7] = Math.min(last.contact, cap.maxContacts);
       s[8] = parity === 0 ? cap.maxContacts : 0;
-      const hash = Math.min(nextPow2(Math.max(prevN * 4, 1024)), idsLen);
+      // Must match encodeStep hashN: ≤ MAX_POW2_DISPATCH so clear/insert cover the
+      // whole table. Uncapped 2^22 → 65536 workgroups (Invalid CommandBuffer) and a
+      // dispatch/host size mismatch that leaves stale hash slots when clamped.
+      const hash = Math.min(nextPow2(Math.max(prevN * 4, 1024)), idsLen, MAX_POW2_DISPATCH);
       s[9] = hash;
       s[10] = cap.maxCandidates;
       s[11] = parity === 0 ? 0 : cap.maxContacts;
@@ -968,7 +978,10 @@ struct VsOut {
       device.queue.writeBuffer(bufs[2], 0, colBytes);
       parity = 0;
       steps = 0;
-      last = { contact: 0, candidate: 0, awake: 0, color: 0, manifold: 0, overflow: 0 };
+      last = {
+        contact: seedContacts, candidate: seedCand, awake: bodies.length - 1,
+        color: 3, manifold: Math.floor(seedContacts / 4), overflow: 0,
+      };
     }
 
     // Fair three-avbd protocol (blind lead-in + median of 10-step batches). Runs only
