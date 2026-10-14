@@ -2213,8 +2213,9 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
 // pinned three-avbd, whose one-lane threshold is 2^31 rather than 65536.
 uint primalLanesFor(uint bodies)
 {
-    if (bodies == 0u || bodies >= 65536u) return 1u;
-    if (bodies >= 32768u) return 2u;
+    // Never one lane per body: gables' ~184k-body colors measured 1/2/4/8 lanes
+    // at 32.2/31.1/30.9/31.4 ms (decision 8eg); the ring is neutral.
+    if (bodies == 0u) return 1u;
     if (bodies >= 4096u) return 4u;
     return 8u;
 }
