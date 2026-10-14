@@ -73,15 +73,20 @@
     const scene = qs.get('scene') || 'wall';
     // Match engine-scenes `cap(bodies)`: contacts≥bodies·16, candidates≥bodies·32 (pow2).
     // Ring 9k used to ship maxContacts=131k; Metal smash peaks ~90–150k → overflow 0x1 freeze.
+    // WebGPU maxComputeWorkgroupsPerDimension = 65535 ⇒ at most 65535×64 threads per
+    // dispatch. 2^22 threads → 65536 groups (columns crash). Cap pow2 sizes at 2^21.
+    const MAX_WG = 65535;
+    const MAX_DISPATCH_THREADS = MAX_WG * 64; // 4_193_920
+    const MAX_POW2_DISPATCH = 1 << 21; // 2_097_152 — largest pow2 with groups ≤ 32768
     const nextPow2Cap = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
     const sceneCap = (bodies, extras = {}) => {
       const b = nextPow2Cap(Math.max(bodies, 4096));
       return {
         maxBodies: b,
         maxColliders: nextPow2Cap(Math.max(bodies * 2, 8192)),
-        maxContacts: nextPow2Cap(Math.max(bodies * 16, 32768)),
+        maxContacts: Math.min(nextPow2Cap(Math.max(bodies * 16, 32768)), MAX_POW2_DISPATCH),
         maxJoints: extras.maxJoints ?? 64,
-        maxCandidates: nextPow2Cap(Math.max(bodies * 32, 65536)),
+        maxCandidates: Math.min(nextPow2Cap(Math.max(bodies * 32, 65536)), MAX_POW2_DISPATCH),
         maxColors: 32,
         maxCommands: 64,
         maxHull: 64,
@@ -822,7 +827,9 @@ struct VsOut {
       enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
     }
 
-    function groups(threads) { return Math.ceil(Math.max(threads, 1) / 64); }
+    function groups(threads) {
+      return Math.min(MAX_WG, Math.ceil(Math.max(threads, 1) / 64));
+    }
     function disp(pass, name, threads, passIdx) {
       const p = pipes[name];
       pass.setPipeline(p.pipeline);
@@ -843,7 +850,12 @@ struct VsOut {
         Math.max(prevContacts + Math.floor(prevContacts / 4) + 1024, nCols * 4));
       const manifoldN = Math.max(narrowN, Math.max(last.manifold, 256) + Math.floor(Math.max(last.manifold, 256) / 4) + 1024);
       const idsLen = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
-      const hashN = Math.min(nextPow2(Math.max(Math.max(prevContacts, 256) * 4, 1024)), idsLen);
+      // hashN must be pow2 (mask = n-1) and ≤ MAX_POW2_DISPATCH so clear/insert fit in one WG pass.
+      const hashN = Math.min(
+        nextPow2(Math.max(Math.max(prevContacts, 256) * 4, 1024)),
+        idsLen,
+        MAX_POW2_DISPATCH,
+      );
 
       writeHost(enc);
       let pass = beginPass ? beginPass() : enc.beginComputePass();
