@@ -1,0 +1,578 @@
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -814,10 +814,22 @@
+     Material mb = gMaterials[cb.material];
+     float mu = sqrt(max(ma.friction, 0.0) * max(mb.friction, 0.0));
+ 
++#if defined(ENGINE_LEAN_WARM)
++    // Lean warm start: one history lookup per pair (sWarmHead), final record
++    // written once. Pairs at rest defer to the pass, which sees later wakeups.
++    bool atRest = contactPairAtRest(ba, bb);
++#endif
+     for (int k = 0; k < count; k++)
+     {
+         BoxManifoldPt pt = points.pts[k];
++#if defined(ENGINE_LEAN_WARM)
++        Contact row = makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu);
++        if (!atRest) row = finishWarmContact(warmFromHistory(row, sWarmHead, ba, bb), ba, bb);
++        storePersistentContact(curOff + cStart + k, mslot, row);
++        if (atRest) gSolverPoints[curOff + cStart + k].pairAndStick |= PERSIST_PENDING;
++#else
+         STORE_NEW_CONTACT(curOff + cStart + k, mslot, makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu));
++#endif
+     }
+ 
+     Manifold mf;
+@@ -906,6 +918,11 @@
+     }
+ }
+ 
++#if defined(ENGINE_LEAN_WARM)
++// Previous-block head of the pair this narrowphase thread is processing.
++static uint sWarmHead = 0xFFFFFFFFu;
++#endif
++
+ // three-avbd reuseContacts. Opt-in via params.flags bit0.
+ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float margin)
+ {
+@@ -933,6 +950,9 @@
+     {
+         return false;
+     }
++#if defined(ENGINE_LEAN_WARM)
++    sWarmHead = startJ;
++#endif
+     // _pad1 = asfloat(generated step). Skip if either body moved after that.
+     uint generated = asuint(READ_CONTACT(prevOff + startJ)._pad1);
+     if (generated < max(ba.generation, bb.generation))
+@@ -981,8 +1001,21 @@
+     }
+ 
+     Contact head = READ_CONTACT(prevOff + startJ);
++#if defined(ENGINE_LEAN_WARM)
++    bool atRest = contactPairAtRest(ba, bb);
++#endif
+     for (uint k = 0u; k < count; k++)
+     {
++#if defined(ENGINE_LEAN_WARM)
++        if (!atRest)
++        {
++            Contact c = READ_CONTACT(prevOff + startJ + k);
++            c.alive = 1;
++            STORE_NEW_CONTACT(curOff + cStart + k, mslot,
++                finishWarmContact(refreshReusedContact(c, ba, bb), ba, bb));
++            continue;
++        }
++#endif
+         // Defer the full copy/transform to the coalesced per-contact persistence
+         // pass. Encode the exact source index in the transient alive word.
+         MARK_REUSED_CONTACT(curOff + cStart + k, mslot, startJ + k + 2u);
+@@ -1020,6 +1053,11 @@
+     bool hit = false;
+ 
+     // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
++#if defined(ENGINE_LEAN_WARM)
++    sWarmHead = CONTACT_HASH_EMPTY;
++    if ((PARAMS.flags & FLAG_REUSE_CONTACTS) == 0u && HOST_S(7) != 0u)
++        sWarmHead = findWarmHead(pair.colliderA, pair.colliderB);
++#endif
+     if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
+         tryReuseContacts(pair, ba, bb, margin))
+         return;
+@@ -1360,61 +1398,73 @@
+     }
+ }
+ 
+-// Shared point update; callers choose contact or manifold scheduling. Pair bodies
+-// are immutable during persistence, so manifold scheduling can load them once.
+-Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState bb)
++// First live history index of pair (colA, colB) in the previous contact set,
++// or CONTACT_HASH_EMPTY. One probe per pair (three-avbd hashFind).
++uint findWarmHead(uint colA, uint colB)
+ {
+-    AvbdParams p = PARAMS;
+-    uint curOff = HOST_S(11);
+-    c.alive = 1;
+-    bool bothSleep =
+-        (!bodyIsDynamic(ba) || bodyIsSleeping(ba)) &&
+-        (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
+-    if (bothSleep)
++    uint prevOff = HOST_S(8);
++    uint hashN = HOST_S(9);
++    uint key = pairWarmKey(colA, colB);
++    uint h = key & (hashN - 1u);
++    for (uint probe = 0; probe < 64u; probe++)
+     {
+-        STORE_CONTACT(curOff + i, c);
+-        return c;
+-    }
+-    if (reused)
+-    {
+-        float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
+-        float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
+-        float3 d = wb - wa;
+-        c.c0N = dot(c.normal, d) + p.contactOffset;
+-        c.c0T1 = dot(c.tangent1, d);
+-        c.c0T2 = dot(c.tangent2, d);
+-        c.penetration = c.c0N;
+-    }
+-    else
+-    {
+-        uint prevOff = HOST_S(8);
+-        uint prevN = HOST_S(7);
+-        uint hashN = HOST_S(9);
+-        uint key = pairWarmKey(c.colliderA, c.colliderB);
+-        uint h = key & (hashN - 1u);
+-        uint startJ = CONTACT_HASH_EMPTY;
+-        for (uint probe = 0; probe < 64u; probe++)
++        uint slot = (h + probe) & (hashN - 1u);
++        uint j = ALOAD(gConstraintIds[slot]);
++        if (j == CONTACT_HASH_EMPTY) break;
++        Contact prev = READ_CONTACT(prevOff + j);
++        if (prev.alive != 0 &&
++            prev.colliderA == colA &&
++            prev.colliderB == colB)
+         {
+-            uint slot = (h + probe) & (hashN - 1u);
+-            uint j = ALOAD(gConstraintIds[slot]);
+-            if (j == CONTACT_HASH_EMPTY) break;
++            return j;
++        }
++    }
++    return CONTACT_HASH_EMPTY;
++}
++
++// Feature/nearest matching of a freshly generated point against the previous
++// block of its pair starting at startJ, then force/penalty/stick inheritance.
++Contact warmFromHistory(Contact c, uint startJ, BodyState ba, BodyState bb)
++{
++    AvbdParams p = PARAMS;
++    uint prevOff = HOST_S(8);
++    uint prevN = HOST_S(7);
++    uint bestJ = CONTACT_HASH_EMPTY;
++    if (startJ != CONTACT_HASH_EMPTY)
++    {
++        // Feature IDs are quantized on the reference face, so all four corners
++        // of a small box on a large slab can share an ID. Pick the nearest
++        // anchor among matches, not the first: reusing one sticking corner's
++        // anchor/force for the entire manifold removes the support polygon.
++        float bestFeatureDist = 1e30;
++        for (uint k = 0u; k < 8u; k++)
++        {
++            uint j = startJ + k;
++            if (j >= prevN) break;
+             Contact prev = READ_CONTACT(prevOff + j);
+-            if (prev.alive != 0 &&
+-                prev.colliderA == c.colliderA &&
+-                prev.colliderB == c.colliderB)
+-            {
+-                startJ = j;
++            if (prev.alive == 0 ||
++                prev.colliderA != c.colliderA ||
++                prev.colliderB != c.colliderB)
+                 break;
++            if (prev.featureId == c.featureId)
++            {
++                float3 deltaA = prev.anchorA - c.anchorA;
++                float3 deltaB = prev.anchorB - c.anchorB;
++                float dist = dot(deltaA, deltaA) + dot(deltaB, deltaB);
++                if (dist < bestFeatureDist)
++                {
++                    bestFeatureDist = dist;
++                    bestJ = j;
++                }
+             }
+         }
+-        uint bestJ = CONTACT_HASH_EMPTY;
+-        if (startJ != CONTACT_HASH_EMPTY)
++        // matchNearest: nearest prev A-local anchor within 5% of smaller side.
++        if (bestJ == CONTACT_HASH_EMPTY)
+         {
+-            // Feature IDs are quantized on the reference face, so all four corners
+-            // of a small box on a large slab can share an ID. Pick the nearest
+-            // anchor among matches, not the first: reusing one sticking corner's
+-            // anchor/force for the entire manifold removes the support polygon.
+-            float bestFeatureDist = 1e30;
++            Collider colA = gColliders[c.colliderA];
++            Collider colB = gColliders[c.colliderB];
++            float minSide = min(colliderMinSide(colA), colliderMinSide(colB));
++            float bestDist = NEAREST_FRACTION * minSide;
+             for (uint k = 0u; k < 8u; k++)
+             {
+                 uint j = startJ + k;
+@@ -1424,80 +1474,72 @@
+                     prev.colliderA != c.colliderA ||
+                     prev.colliderB != c.colliderB)
+                     break;
+-                if (prev.featureId == c.featureId)
++                float dist = length(prev.anchorA - c.anchorA);
++                if (dist <= bestDist)
+                 {
+-                    float3 deltaA = prev.anchorA - c.anchorA;
+-                    float3 deltaB = prev.anchorB - c.anchorB;
+-                    float dist = dot(deltaA, deltaA) + dot(deltaB, deltaB);
+-                    if (dist < bestFeatureDist)
+-                    {
+-                        bestFeatureDist = dist;
+-                        bestJ = j;
+-                    }
++                    bestDist = dist;
++                    bestJ = j;
+                 }
+             }
+-            // matchNearest: nearest prev A-local anchor within 5% of smaller side.
+-            if (bestJ == CONTACT_HASH_EMPTY)
+-            {
+-                Collider colA = gColliders[c.colliderA];
+-                Collider colB = gColliders[c.colliderB];
+-                float minSide = min(colliderMinSide(colA), colliderMinSide(colB));
+-                float bestDist = NEAREST_FRACTION * minSide;
+-                for (uint k = 0u; k < 8u; k++)
+-                {
+-                    uint j = startJ + k;
+-                    if (j >= prevN) break;
+-                    Contact prev = READ_CONTACT(prevOff + j);
+-                    if (prev.alive == 0 ||
+-                        prev.colliderA != c.colliderA ||
+-                        prev.colliderB != c.colliderB)
+-                        break;
+-                    float dist = length(prev.anchorA - c.anchorA);
+-                    if (dist <= bestDist)
+-                    {
+-                        bestDist = dist;
+-                        bestJ = j;
+-                    }
+-                }
+-            }
+         }
+-        if (bestJ != CONTACT_HASH_EMPTY)
++    }
++    if (bestJ != CONTACT_HASH_EMPTY)
++    {
++        Contact prev = READ_CONTACT(prevOff + bestJ);
++        // Refuse warm-start across SAT axis flips: λ from the old normal on a new
++        // normal injects energy (random Box Pile). three-avbd avoids this via
++        // reuseContacts keeping the manifold; without reuse, require n·n_prev>0.9.
++        float nAgree = dot(prev.normal, c.normal);
++        if (nAgree > 0.9)
+         {
+-            Contact prev = READ_CONTACT(prevOff + bestJ);
+-            // Refuse warm-start across SAT axis flips: λ from the old normal on a new
+-            // normal injects energy (random Box Pile). three-avbd avoids this via
+-            // reuseContacts keeping the manifold; without reuse, require n·n_prev>0.9.
+-            float nAgree = dot(prev.normal, c.normal);
+-            if (nAgree > 0.9)
++            c.lambdaN = prev.lambdaN;
++            c.lambdaT1 = prev.lambdaT1;
++            c.lambdaT2 = prev.lambdaT2;
++            c.kN = prev.kN;
++            c.kT = prev.kT;
++            c._pad2 = prev._pad2;
++            // three-avbd: keep old anchors while static friction held (stick).
++            // Not for spheres — contact point slides over the surface as they roll;
++            // pinned anchors rotate with the body and glue/stop smash balls.
++            Collider colA = gColliders[c.colliderA];
++            Collider colB = gColliders[c.colliderB];
++            bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
++            if (prev._pad0 > 0.5 && !anySphere)
+             {
+-                c.lambdaN = prev.lambdaN;
+-                c.lambdaT1 = prev.lambdaT1;
+-                c.lambdaT2 = prev.lambdaT2;
+-                c.kN = prev.kN;
+-                c.kT = prev.kT;
+-                c._pad2 = prev._pad2;
+-                // three-avbd: keep old anchors while static friction held (stick).
+-                // Not for spheres — contact point slides over the surface as they roll;
+-                // pinned anchors rotate with the body and glue/stop smash balls.
+-                Collider colA = gColliders[c.colliderA];
+-                Collider colB = gColliders[c.colliderB];
+-                bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+-                if (prev._pad0 > 0.5 && !anySphere)
+-                {
+-                    c.anchorA = prev.anchorA;
+-                    c.anchorB = prev.anchorB;
+-                    float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
+-                    float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
+-                    float3 d = wb - wa;
+-                    c.c0N = dot(c.normal, d) + p.contactOffset;
+-                    c.c0T1 = dot(c.tangent1, d);
+-                    c.c0T2 = dot(c.tangent2, d);
+-                    c.penetration = c.c0N;
+-                    c._pad0 = 1.0;
+-                }
++                c.anchorA = prev.anchorA;
++                c.anchorB = prev.anchorB;
++                float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
++                float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
++                float3 d = wb - wa;
++                c.c0N = dot(c.normal, d) + p.contactOffset;
++                c.c0T1 = dot(c.tangent1, d);
++                c.c0T2 = dot(c.tangent2, d);
++                c.penetration = c.c0N;
++                c._pad0 = 1.0;
+             }
+         }
+     }
++    return c;
++}
++
++// Step-start constraint offsets of a reused point at current poses.
++Contact refreshReusedContact(Contact c, BodyState ba, BodyState bb)
++{
++    AvbdParams p = PARAMS;
++    float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
++    float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
++    float3 d = wb - wa;
++    c.c0N = dot(c.normal, d) + p.contactOffset;
++    c.c0T1 = dot(c.tangent1, d);
++    c.c0T2 = dot(c.tangent2, d);
++    c.penetration = c.c0N;
++    return c;
++}
++
++// Mass-floored normal penalty, independent tangent ramps and λ decay.
++Contact finishWarmContact(Contact c, BodyState ba, BodyState bb)
++{
++    AvbdParams p = PARAMS;
+     c.alive = 1;
+ 
+     float dt = max(p.dt, 1e-8);
+@@ -1511,6 +1553,31 @@
+     c.lambdaN *= p.alpha * p.gamma;
+     c.lambdaT1 *= p.alpha * p.gamma;
+     c.lambdaT2 *= p.alpha * p.gamma;
++    return c;
++}
++
++bool contactPairAtRest(BodyState ba, BodyState bb)
++{
++    return (!bodyIsDynamic(ba) || bodyIsSleeping(ba)) &&
++        (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
++}
++
++// Shared point update; callers choose contact or manifold scheduling. Pair bodies
++// are immutable during persistence, so manifold scheduling can load them once.
++Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState bb)
++{
++    uint curOff = HOST_S(11);
++    c.alive = 1;
++    if (contactPairAtRest(ba, bb))
++    {
++        STORE_CONTACT(curOff + i, c);
++        return c;
++    }
++    if (reused)
++        c = refreshReusedContact(c, ba, bb);
++    else
++        c = warmFromHistory(c, findWarmHead(c.colliderA, c.colliderB), ba, bb);
++    c = finishWarmContact(c, ba, bb);
+     STORE_CONTACT(curOff + i, c);
+     return c;
+ }
+@@ -1522,6 +1589,10 @@
+     uint i = dispatchIndex(tid);
+     if (i >= ALOAD(gCounters[0].contactCount)) return;
+     uint curOff = HOST_S(11);
++#if defined(ENGINE_LEAN_WARM)
++    // Only reused marks and pairs deferred at rest remain; others are final.
++    if ((gSolverPoints[curOff + i].pairAndStick & (PERSIST_REUSED | PERSIST_PENDING)) == 0u) return;
++#endif
+     uint state = CONTACT_STATE(curOff + i);
+     if (state == 0u) return;
+     bool reused = state >= 2u;
+--- a/engine/slang/physics/contact_storage.slang
++++ b/engine/slang/physics/contact_storage.slang
+@@ -22,7 +22,14 @@
+     float3 normal; float friction;
+ };
+ BIND(4) RWStructuredBuffer<ContactMeta> gContactMeta;
++#if defined(ENGINE_LEAN_WARM)
++// Lean narrowphase finalizes most points itself; points whose pair was at rest
++// during narrowphase carry PERSIST_PENDING until the persistence pass clears it.
++static const uint PERSIST_OWNER_MASK = 0x1FFFFFFFu;
++static const uint PERSIST_PENDING = 0x20000000u;
++#else
+ static const uint PERSIST_OWNER_MASK = 0x3FFFFFFFu;
++#endif
+ static const uint PERSIST_REUSED = 0x40000000u;
+ 
+ uint persistentContactState(uint absolute)
+--- a/engine/crates/engine-webgpu/build.rs
++++ b/engine/crates/engine-webgpu/build.rs
+@@ -9,6 +9,8 @@
+     "solve_primal_sparse",
+     "solve_primal_sparse_compact",
+     "solve_primal_sparse_persistent",
++    "narrowphase_lean_persistent",
++    "persist_contacts_lean_persistent",
+     "apply_commands",
+     "apply_commands_persistent",
+     "narrowphase_persistent",
+@@ -90,6 +92,7 @@
+     let world = slang_root.join("kernels/world_step.slang");
+     let compact = slang_root.join("kernels/compact_solve.slang");
+     let persistent = slang_root.join("kernels/persistent_solve.slang");
++    let lean = slang_root.join("kernels/lean_warm.slang");
+     let abi = slang_root.join("kernels/abi_probe.slang");
+     compile(
+         &abi,
+@@ -104,7 +107,9 @@
+     for entry in WORLD_ENTRIES {
+         let dest = out.join(format!("{entry}.spv"));
+         match compile(
+-            if entry.ends_with("_persistent") {
++            if entry.ends_with("_lean_persistent") {
++                &lean
++            } else if entry.ends_with("_persistent") {
+                 &persistent
+             } else if entry.ends_with("_compact")
+                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+@@ -155,7 +160,9 @@
+     {
+         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
+         match compile_with_defines(
+-            if entry.ends_with("_persistent") {
++            if entry.ends_with("_lean_persistent") {
++                &lean
++            } else if entry.ends_with("_persistent") {
+                 &persistent
+             } else if entry.ends_with("_compact")
+                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+--- a/engine/crates/engine-webgpu/demo.html
++++ b/engine/crates/engine-webgpu/demo.html
+@@ -104,6 +104,13 @@
+     if (!['contact', 'manifold'].includes(hashInsertMode))
+       throw new Error('hashInsert must be contact or manifold');
+     const manifoldHashInsert = hashInsertMode === 'manifold';
++    // Opt-in lean warm start: narrowphase finalizes points with one history
++    // lookup per pair; the persistence pass only finishes deferred points.
++    const warmMode = qs.get('warm') || 'pass';
++    if (!['pass', 'lean'].includes(warmMode)) throw new Error('warm must be pass or lean');
++    if (warmMode === 'lean' && !persistentContacts) throw new Error('warm=lean requires persistent contacts');
++    if (warmMode === 'lean' && (manifoldPersistence || fusedPersistence)) throw new Error('warm=lean replaces per-contact persistence only');
++    const leanWarm = warmMode === 'lean';
+     const detailedProfile = qs.get('profile') === 'detail';
+     const graphProfile = qs.get('profile') === 'graph';
+     // Diagnostic: one timestamped pass per primal color (and the sparse tail).
+@@ -310,6 +317,7 @@
+       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
+       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
+       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
++      ...(leanWarm ? ['narrowphase_lean_persistent', 'persist_contacts_lean_persistent'] : []),
+       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
+       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
+       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
+@@ -948,7 +956,7 @@
+       // Narrowphase overwrites gManifolds, so the manifold insert must precede it.
+       if (!reuse && manifoldHashInsert)
+         throw new Error('hashInsert=manifold requires contact reuse (insert before narrowphase)');
+-      dispWork(pass, 'narrowphase', 64);
++      dispWork(pass, leanWarm ? 'narrowphase_lean_persistent' : 'narrowphase', 64);
+       disp(pass, 'write_work_args', 64);
+       nextPhase();
+       if (!reuse) {
+@@ -958,7 +966,7 @@
+         if (detailedProfile) nextPhase();
+       }
+       if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
+-      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
++      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : leanWarm ? 'persist_contacts_lean_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+       nextPhase();
+       disp(pass, 'build_awake_list', nBodies);
+       disp(pass, 'write_work_args', 64);
+@@ -1105,7 +1113,7 @@
+         totalBodies: bodyCount,
+         dynamicBodies: bodyCount - 1,
+         iterations: params.iterations,
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, warm: warmMode,
+         dt: params.dt,
+         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
+         userAgent: navigator.userAgent,
+@@ -1491,7 +1499,7 @@
+             const report = {
+               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+               coloring: incrementalColors ? "reuse" : "rebuild",
+-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
++              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, warm: warmMode, colors: last.color,
+               contacts: last.contact, awake: last.awake, overflow: last.overflow,
+               settle: pre, initialMaxY,
+             };
+@@ -1538,6 +1546,7 @@
+       report.order = spatialOrder ? "morton" : "construction";
+       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
+       report.hashInsert = hashInsertMode;
++      report.warm = warmMode;
+       // Exercise reset too: stale warm-start data from the completed run must not
+       // contaminate the first frame or the benchmark's lead-in.
+       restoreScene();
+@@ -1562,7 +1571,7 @@
+       const report = {
+         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+         coloring: incrementalColors ? "reuse" : "rebuild",
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, warm: warmMode, colors: last.color,
+         contacts: last.contact, awake: last.awake, overflow: last.overflow,
+       };
+       console.log('BENCH', JSON.stringify(report));
+--- a/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
++++ b/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
+@@ -97,7 +97,7 @@
+         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
+         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
+-        manifoldHashInsert:false,
++        manifoldHashInsert:false, leanWarm:false,
+         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
+         sleepRounds:8, PASS_ALIGN:256, bufs:[],
+         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+@@ -208,7 +208,7 @@
+     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
+-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert,
++    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, leanWarm:false,
+     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
+     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
+@@ -278,7 +278,7 @@
+       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
+-      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true,
++      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, leanWarm:false,
+       physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix:true,
+       sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+       writeHost() {}, disp(p,name) { trace.push({name, phase:p.id}); },
+--- a/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
++++ b/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
+@@ -64,7 +64,7 @@
+     lead: 0, scene: 'ring110k', bodyCount: 110442,
+     params: {iterations: 4, dt: 1/60}, stablePacking: true, persistentContacts: true,
+     compactContacts: true, sparseStart: 32, parallelColorPrefix:false, physicalAdjacency: true, spatialOrder: false,
+-    fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', info: {}, navigator: {userAgent: 'test'},
++    fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', warmMode: 'pass', info: {}, navigator: {userAgent: 'test'},
+     last: {awake: 110441}, submitPhysics() {}, device: {queue: {async onSubmittedWorkDone() {}}},
+     async readCounters() { assert.equal(measuring, false); events.push('counters'); },
+     async readColorBuckets() { assert.equal(measuring, false); events.push('buckets'); return [60000,50441]; },
+@@ -104,7 +104,7 @@
+     copyBufferToBuffer() {}, finish() { return this; },
+   };
+   const context = {
+-    params: {iterations, flags: reuse ? 1 : 0}, detailedProfile, graphProfile, compactContacts, parity: 0, steps: 166, wantTimestamps: true,
++    params: {iterations, flags: reuse ? 1 : 0}, detailedProfile, graphProfile, colorProfile: false, compactContacts, parity: 0, steps: 166, wantTimestamps: true,
+     performance: {now() { return clock; }},
+     GPUBufferUsage: {QUERY_RESOLVE: 1, COPY_SRC: 2, MAP_READ: 4, COPY_DST: 8},
+     GPUMapMode: {READ: 1}, BigUint64Array,
+--- /dev/null
++++ b/engine/slang/kernels/lean_warm.slang
+@@ -0,0 +1,8 @@
++// Opt-in lean warm start: narrowphase finalizes warm-started points with one
++// history lookup per pair; the persistence pass handles only deferred points.
++#define ENGINE_COMPACT_SOLVE 1
++#define ENGINE_PERSISTENT_CONTACTS 1
++#define ENGINE_LEAN_WARM 1
++#define narrowphase narrowphase_lean_persistent
++#define persist_contacts persist_contacts_lean_persistent
++#include "world_step.slang"
