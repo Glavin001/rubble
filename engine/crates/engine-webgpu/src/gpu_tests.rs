@@ -1203,9 +1203,9 @@ fn color_dispatch_respects_palette_and_preserves_work_slots() {
         (4095, 512),
         (4096, 256),
         (32767, 2048),
-        (32768, 1024),
-        (65535, 2048),
-        (65536, 1024),
+        (32768, 2048),
+        (65535, 4096),
+        (65536, 4096),
     ];
     for palette in [1usize, 7, 32] {
         let mut host = HostUniforms {
@@ -1678,7 +1678,8 @@ fn primal_reduction_tail_fixture(layout: &str) {
             body.position
         );
     }
-    for (count, lanes) in [(67u32, 8u32), (4097, 4), (32769, 2), (65536, 1)] {
+    // Shipped policy (primalLanesFor): eight lanes below 4096 bodies, four at or above.
+    for (count, lanes) in [(67u32, 8u32), (4095, 8), (4096, 4), (32769, 4), (65536, 4)] {
         let mut order = vec![ACTIVE; count as usize];
         for id in 0..ACTIVE {
             order[(count - ACTIVE + id) as usize] = id;
