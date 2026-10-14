@@ -98,6 +98,7 @@ fn gables_506k_keeps_unhit_walls_standing_and_both_balls_advancing() {
         let mut unhit_max = 0.0f32;
         let mut unhit_worst = 1usize;
         let mut unhit_over_limit = 0u32;
+        let mut offenders = Vec::new();
         for (id, body) in bodies.iter().enumerate().skip(1) {
             assert!(
                 body.position
@@ -121,6 +122,7 @@ fn gables_506k_keeps_unhit_walls_standing_and_both_balls_advancing() {
                     }
                     if drift >= 0.6 {
                         unhit_over_limit += 1;
+                        offenders.push(id);
                     }
                 }
                 assert!(step > 20 || drift < 0.3,
@@ -128,9 +130,50 @@ fn gables_506k_keeps_unhit_walls_standing_and_both_balls_advancing() {
             }
         }
         let mean_drift = unhit_total / f64::from(unhit_count);
+        // Locate each offender in the pinned layout: column, wall row, course and
+        // horizontal distance from the nearest smashed wall (columns 6/9 span
+        // ±14.645 m at the base). Debris strikes cluster near impacted walls and
+        // the balls' rows; structural failures appear anywhere.
+        let describe = |id: usize| {
+            let local = (id - 1) % (68 * 465);
+            let (row, mut within) = (local / 465, local % 465);
+            let mut course = 0;
+            while within >= 30 - course {
+                within -= 30 - course;
+                course += 1;
+            }
+            let x = initial[id][0];
+            let gap = [-48.0f32, 48.0]
+                .iter()
+                .map(|c| ((x - c).abs() - 14.645).max(0.0))
+                .fold(f32::MAX, f32::min);
+            // Nearest displaced (>1 m) brick from a smashed column: debris that
+            // reached this brick, as opposed to an isolated support failure.
+            let here = bodies[id].position;
+            let debris = (1..first_ball)
+                .filter(|&j| matches!((j - 1) / (68 * 465), 6 | 9))
+                .filter(|&j| {
+                    (0..3)
+                        .map(|a| (bodies[j].position[a] - initial[j][a]).powi(2))
+                        .sum::<f32>()
+                        > 1.0
+                })
+                .map(|j| {
+                    (
+                        j,
+                        (0..3)
+                            .map(|a| (bodies[j].position[a] - here[a]).powi(2))
+                            .sum::<f32>()
+                            .sqrt(),
+                    )
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            format!("brick {id} column={} row={row} course={course} smashedWallGap={gap:.2}m initial={:?} actual={:?} velocity={:?} nearestDebris={:?}",
+                (id - 1) / (68 * 465), initial[id], bodies[id].position, bodies[id].linear_vel, debris)
+        };
         assert!(mean_drift < 0.2 && unhit_max < 0.6,
-            "gables step {step}: unhit columns collapsed (mean height drift={mean_drift:.6} m, max={unhit_max:.6} m, bricks over 0.60 m={unhit_over_limit}); worst brick {unhit_worst}, column={}, initial={:?}, actual={:?}, velocity={:?}; pinned three-avbd at step 240 is mean 0.118 m / max 0.328 m; check support, warm starts and coloring",
-            (unhit_worst - 1) / (68 * 465), initial[unhit_worst], bodies[unhit_worst].position, bodies[unhit_worst].linear_vel);
+            "gables step {step}: unhit columns collapsed (mean height drift={mean_drift:.6} m, max={unhit_max:.6} m, bricks over 0.60 m={unhit_over_limit}); worst {}; all offenders (first 10): [{}]; pinned three-avbd at step 240 is mean 0.118 m / max 0.328 m; check support, warm starts and coloring",
+            describe(unhit_worst), offenders.iter().take(10).map(|&id| describe(id)).collect::<Vec<_>>().join("; "));
         let reference_forward = match step {
             1 => -183.28572,
             10 => -178.78572,

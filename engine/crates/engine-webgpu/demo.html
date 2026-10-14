@@ -91,9 +91,13 @@
     const stablePacking = qs.get('packing') !== 'atomic';
     // Full ring persistent/control/persistent: 12.76/14.75/12.71 ms on M3 Max.
     // Persistent 64-byte hot + 32-byte cold history saves 256 MiB at ring capacity.
-    // Other scenes remain opt-in; compact/canonical retain comparison controls.
-    const persistentContacts = qs.get('contacts') === 'persistent' || (scene === 'ring110k' && !qs.has('contacts'));
-    const compactContacts = persistentContacts || qs.get('contacts') === 'compact' || (scene === 'ring110k' && !qs.has('contacts'));
+    // Gables persistent/canonical: 35.87/47.47 ms; browser gables240 passes. The
+    // native persistent gables gate fails only through column-9 debris striking
+    // column 10 (decision 8ea), so native keeps canonical. Other scenes opt in;
+    // compact/canonical retain comparison controls.
+    const persistentByDefault = ['ring110k', 'gables506k'].includes(scene) && !qs.has('contacts');
+    const persistentContacts = qs.get('contacts') === 'persistent' || persistentByDefault;
+    const compactContacts = persistentContacts || qs.get('contacts') === 'compact';
     const manifoldPersistence = qs.get('persistence') === 'manifold';
     const fusedPersistence = compactContacts && qs.get('persistence') === 'fused';
     // three-avbd hashInsert shape: one warm-hash thread per previous manifold
