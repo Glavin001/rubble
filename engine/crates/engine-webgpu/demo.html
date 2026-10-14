@@ -18,6 +18,12 @@
       border-radius: 4px; padding: 3px 8px; font: inherit; max-width: 28rem;
     }
     #sceneSelect:focus { outline: 1px solid #6b7a9e; }
+    #rates {
+      display: flex; gap: 1.25rem; margin: 0 0 6px; font: 600 14px/1.3 ui-sans-serif, system-ui, sans-serif;
+    }
+    #rates .rate { color: #d7dbe6; }
+    #rates .rate span { color: #8b93a7; font-weight: 500; font-size: 12px; margin-left: 4px; }
+    #rates .ms { color: #8b93a7; font-weight: 500; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -27,6 +33,10 @@
     <div id="sceneRow">
       <label for="sceneSelect">Scene</label>
       <select id="sceneSelect"></select>
+    </div>
+    <div id="rates">
+      <div class="rate">TPS <strong id="tpsVal">—</strong><span>physics</span> <span class="ms" id="stepMsVal"></span></div>
+      <div class="rate">FPS <strong id="fpsVal">—</strong><span>render</span> <span class="ms" id="frameMsVal"></span></div>
     </div>
     <div id="status" class="muted">starting…</div>
     <div id="legend" class="muted">Keys 1 position tint, 2 awake/sleep, 3 speed. Friction μ 0.5. Drag to orbit, scroll to zoom, right-drag to pan.</div>
@@ -850,7 +860,8 @@ struct VsOut {
       disp(pass, 'write_color_args', 64);
       disp(pass, 'predict_bodies', nBodies);
       nextPhase();
-      const colors = Math.min(Math.min(cap.maxColors, 32), Math.max(4, last.color + 1));
+      // Floor 16 like Metal/three-avbd — lagging last.color skipped early pyramid colours.
+      const colors = Math.min(Math.min(cap.maxColors, 32), Math.max(16, last.color + 1));
       for (let iter = 0; iter < params.iterations; iter++) {
         if (beginPass && iter > 0) nextPhase();
         const primal = pipes.solve_primal_color;
@@ -1104,16 +1115,61 @@ struct VsOut {
     drawWorld();
 
     const info = adapter.info || {};
+    const tpsVal = document.getElementById('tpsVal');
+    const fpsVal = document.getElementById('fpsVal');
+    const stepMsVal = document.getElementById('stepMsVal');
+    const frameMsVal = document.getElementById('frameMsVal');
     let running = true;
     let wallMs = 0;
     let phases = '';
     let benchStarted = false;
     let measuring = false;
+    // Rolling 1 s windows: TPS = physics steps/s, FPS = rAF presents/s (can diverge if
+    // measuring pauses steps, or if multiple steps per frame are added later).
+    let rateWindowStart = performance.now();
+    let rateSteps = 0;
+    let rateFrames = 0;
+    let rateStepMsSum = 0;
+    let rateFrameMsSum = 0;
+    let showTps = 0;
+    let showFps = 0;
+    let showStepMs = 0;
+    let showFrameMs = 0;
+    function bumpRates(didStep, stepMs, frameMs) {
+      rateFrames++;
+      rateFrameMsSum += frameMs;
+      if (didStep) {
+        rateSteps++;
+        rateStepMsSum += stepMs;
+      }
+      const elapsed = performance.now() - rateWindowStart;
+      if (elapsed >= 1000) {
+        const sec = elapsed / 1000;
+        showTps = rateSteps / sec;
+        showFps = rateFrames / sec;
+        showStepMs = rateSteps > 0 ? rateStepMsSum / rateSteps : 0;
+        showFrameMs = rateFrames > 0 ? rateFrameMsSum / rateFrames : 0;
+        tpsVal.textContent = showTps.toFixed(0);
+        fpsVal.textContent = showFps.toFixed(0);
+        stepMsVal.textContent = showStepMs > 0 ? `${showStepMs.toFixed(1)} ms/step` : '';
+        frameMsVal.textContent = showFrameMs > 0 ? `${showFrameMs.toFixed(1)} ms/frame` : '';
+        window.__RATES__ = { tps: showTps, fps: showFps, stepMs: showStepMs, frameMs: showFrameMs };
+        rateWindowStart = performance.now();
+        rateSteps = 0;
+        rateFrames = 0;
+        rateStepMsSum = 0;
+        rateFrameMsSum = 0;
+      }
+    }
     async function frame(now) {
       if (!running) return;
       // Skip overlapping rAF ticks while benchWall awaits — concurrent mapAsync on
-      // staging hung the replay at step 1 after measuring.
-      if (measuring) { requestAnimationFrame(frame); return; }
+      // staging hung the replay at step 1 after measuring. Still count FPS.
+      if (measuring) {
+        bumpRates(false, 0, performance.now() - now);
+        requestAnimationFrame(frame);
+        return;
+      }
       try {
         if (depth.width !== canvas.width || depth.height !== canvas.height) {
           depth.destroy();
@@ -1121,6 +1177,7 @@ struct VsOut {
         }
         const aspect = canvas.width / canvas.height;
         writeCamera(aspect);
+        const tStep0 = performance.now();
         const enc = device.createCommandEncoder();
         encodeStep(enc, true);
         const rp = enc.beginRenderPass({
@@ -1136,9 +1193,11 @@ struct VsOut {
         const c = new Uint32Array(staging.getMappedRange().slice(0));
         staging.unmap();
         bodyRead.unmap();
+        const stepMs = performance.now() - tStep0;
         last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
         parity ^= 1;
         steps++;
+        bumpRates(true, stepMs, performance.now() - now);
         if (cfg.settled && (steps === 1 || steps % 30 === 0 || steps === lead)) {
           await sampleSettle();
         }
@@ -1147,7 +1206,7 @@ struct VsOut {
           ? ` · sleep ${settle.sleeping}/${dyn} · KE ${settle.ke.toFixed(1)} · max|v| ${settle.maxV.toFixed(3)} · h ${settle.maxY.toFixed(2)}/${initialMaxY.toFixed(2)}`
           : '';
         const wallLabel = wallMs > 0 ? `${wallMs.toFixed(2)} ms` : (cfg.settled ? 'timing after settle…' : 'timing after impact…');
-        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${params.iterations} iters · ${wallLabel} ${phases} · step ${steps} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)} · frame ${(performance.now() - now).toFixed(1)} ms`;
+        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${params.iterations} iters · wall ${wallLabel} ${phases} · step ${steps} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)}`;
         if (last.overflow) { running = false; fail('overflow flags 0x' + last.overflow.toString(16)); return; }
 
         // Smash: watch impact first. Settled: watch lead-in settle, then fair wall timing.
