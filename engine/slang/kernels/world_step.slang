@@ -431,8 +431,13 @@ BoxObb worldObbFromCache(uint colliderIdx)
 // by more than `gap`. `probe` OBB is built once per broadphase thread.
 bool boxesSeparatedOnFaceAxis(BoxObb probe, uint otherCollider, float gap)
 {
-    Collider cb = gColliders[otherCollider];
-    if (cb.shape != SHAPE_BOX) return false;
+    return boxesSeparatedOnFaceAxisShape(probe, otherCollider, gColliders[otherCollider].shape, gap);
+}
+
+// Callers that already hold the candidate collider pass its shape directly.
+bool boxesSeparatedOnFaceAxisShape(BoxObb probe, uint otherCollider, uint otherShape, float gap)
+{
+    if (otherShape != SHAPE_BOX) return false;
     BoxObb other = worldObbFromCache(otherCollider);
     float3 d = other.center - probe.center;
     float3 hA = probe.half;
@@ -646,16 +651,21 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             // smash balls are last, so cur>i alone never pairs them with sleeping
             // bricks (sleepers only keep static contacts and would not emit).
             Collider other = gColliders[cur];
-            BodyState ob = gBodies[other.body];
-            bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
-            bool pairOnce = cur > i || (!sleeper && otherSleep);
+            // The partner body is needed only for the lower-index sleeper case;
+            // higher-index candidates are owned here regardless of its flags.
+            bool pairOnce = cur > i;
+            if (!pairOnce && !sleeper)
+            {
+                BodyState ob = gBodies[other.body];
+                pairOnce = bodyIsDynamic(ob) && bodyIsSleeping(ob);
+            }
             if (pairOnce && cur != i)
             {
                 if (other.body != col.body &&
                     !bodiesJointed(col.body, other.body) &&
                     other.shape != SHAPE_PLANE)
                 {
-                    if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)))
+                    if (!(probeIsBox && boxesSeparatedOnFaceAxisShape(probeObb, cur, other.shape, faceGap)))
                         emitCandidate(i, cur);
                 }
             }
