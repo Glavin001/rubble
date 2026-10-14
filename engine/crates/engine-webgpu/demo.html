@@ -7,11 +7,12 @@
   <style>
     html, body { margin: 0; height: 100%; background: #12141a; color: #d7dbe6; font: 13px/1.4 ui-monospace, Menlo, monospace; }
     canvas { width: 100%; height: 100%; display: block; touch-action: none; }
-    #hud { position: fixed; top: 12px; left: 14px; max-width: 46rem; }
+    #hud { position: fixed; top: 12px; left: 14px; max-width: 42rem; }
     h1 { font: 600 15px/1.3 ui-sans-serif, system-ui, sans-serif; margin: 0 0 4px; }
     .muted { color: #8b93a7; }
-    #err { color: #ff8b8b; white-space: pre-wrap; }
-    #sceneRow { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+    #err { color: #ff8b8b; white-space: pre-wrap; margin-top: 4px; }
+    #warn { color: #e6c07b; white-space: pre-wrap; margin-top: 4px; display: none; }
+    #sceneRow { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
     #sceneRow label { color: #8b93a7; }
     #sceneSelect {
       background: #1c2030; color: #d7dbe6; border: 1px solid #3a4158;
@@ -19,12 +20,17 @@
     }
     #sceneSelect:focus { outline: 1px solid #6b7a9e; }
     #rates {
-      display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; margin: 0 0 6px;
-      font: 600 14px/1.3 ui-sans-serif, system-ui, sans-serif;
+      display: grid;
+      grid-template-columns: auto auto;
+      column-gap: 1.75rem;
+      row-gap: 2px;
+      margin: 0 0 8px;
+      font: 600 13px/1.35 ui-sans-serif, system-ui, sans-serif;
+      color: #d7dbe6;
     }
-    #rates .rate { color: #d7dbe6; }
-    #rates .rate span { color: #8b93a7; font-weight: 500; font-size: 12px; margin-left: 4px; }
-    #rates .ms { color: #8b93a7; font-weight: 500; font-size: 12px; }
+    #rates .lbl { color: #8b93a7; font-weight: 500; min-width: 4.5rem; }
+    #rates .val { font-variant-numeric: tabular-nums; min-width: 2.5rem; }
+    #rates .sub { color: #8b93a7; font-weight: 500; font-size: 11px; margin-left: 6px; }
   </style>
 </head>
 <body>
@@ -36,43 +42,70 @@
       <select id="sceneSelect"></select>
     </div>
     <div id="rates">
-      <div class="rate">TPS <strong id="tpsVal">—</strong><span>physics</span> <span class="ms" id="stepMsVal"></span></div>
-      <div class="rate">Max TPS <strong id="maxTpsVal">—</strong><span>from ms/step</span></div>
-      <div class="rate">FPS <strong id="fpsVal">—</strong><span>render</span> <span class="ms" id="frameMsVal"></span></div>
-      <div class="rate">Max FPS <strong id="maxFpsVal">—</strong><span>from ms/frame</span></div>
+      <div><span class="lbl">TPS</span> <strong class="val" id="tpsVal">—</strong><span class="sub" id="stepMsVal"></span></div>
+      <div><span class="lbl">Max TPS</span> <strong class="val" id="maxTpsVal">—</strong><span class="sub">uncapped</span></div>
+      <div><span class="lbl">FPS</span> <strong class="val" id="fpsVal">—</strong><span class="sub" id="frameMsVal"></span></div>
+      <div><span class="lbl">Max FPS</span> <strong class="val" id="maxFpsVal">—</strong><span class="sub">uncapped</span></div>
     </div>
     <div id="status" class="muted">starting…</div>
     <div id="legend" class="muted">Keys 1 position tint, 2 awake/sleep, 3 speed. Friction μ 0.5. Drag to orbit, scroll to zoom, right-drag to pan.</div>
+    <div id="warn"></div>
     <div id="err"></div>
   </div>
   <script type="module">
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
+    const warnEl = document.getElementById('warn');
     const canvas = document.getElementById('c');
     const fail = (e) => { errEl.textContent = String(e && e.stack || e); statusEl.textContent = 'stopped'; };
+    const warnOnce = (() => {
+      const seen = new Set();
+      return (msg) => {
+        if (seen.has(msg)) return;
+        seen.add(msg);
+        warnEl.style.display = 'block';
+        warnEl.textContent = (warnEl.textContent ? warnEl.textContent + '\n' : '') + msg;
+      };
+    })();
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
 
     const qs = new URLSearchParams(location.search);
     const scene = qs.get('scene') || 'wall';
+    // Match engine-scenes `cap(bodies)`: contacts≥bodies·16, candidates≥bodies·32 (pow2).
+    // Ring 9k used to ship maxContacts=131k; Metal smash peaks ~90–150k → overflow 0x1 freeze.
+    const nextPow2Cap = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+    const sceneCap = (bodies, extras = {}) => {
+      const b = nextPow2Cap(Math.max(bodies, 4096));
+      return {
+        maxBodies: b,
+        maxColliders: nextPow2Cap(Math.max(bodies * 2, 8192)),
+        maxContacts: nextPow2Cap(Math.max(bodies * 16, 32768)),
+        maxJoints: extras.maxJoints ?? 64,
+        maxCandidates: nextPow2Cap(Math.max(bodies * 32, 65536)),
+        maxColors: 32,
+        maxCommands: 64,
+        maxHull: 64,
+      };
+    };
     // Capacities mirror three-avbd bench-cases tiers (small / paper / large / steady).
     const SCENES = {
       wall: {
         title: 'wall smash 2k, 10 iterations',
         lead: 30, iterations: 10, settled: false, sleepRounds: 8, friction: 0.5,
         eye: [0, 16, -42], look: [0, 8, 0], far: 400, ground: 48,
-        cap: { maxBodies: 4096, maxColliders: 4096, maxContacts: 32768, maxJoints: 64, maxCandidates: 65536, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        cap: sceneCap(4096),
       },
       ring: {
         title: 'brick ring 9k, 4 iterations',
         lead: 60, iterations: 4, settled: false, sleepRounds: 8, friction: 0.5,
         eye: [32, 22, 14], look: [0, 5, 0], far: 400, ground: 48,
-        cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        cap: sceneCap(16384), // contacts 262144 — was 131072 (overflow mid-smash)
       },
       gables: {
         title: 'brick gables 6.7k, 3 iterations',
         lead: 60, iterations: 3, settled: false, sleepRounds: 8, friction: 0.5,
         eye: [0, 28, -40], look: [0, 6, 0], far: 400, ground: 80,
-        cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        cap: sceneCap(16384),
       },
       pyramid: {
         // levels via ?levels=N (default 30). Match three-avbd: reuseContacts + full 4-pt faces.
@@ -81,7 +114,7 @@
         eye: [28, 22, 28], look: [0, 6, 0], far: 400, ground: 64,
         levels: Math.max(2, Math.min(50, Number(qs.get('levels') || 30) || 30)),
         flags: 1, // FLAG_REUSE_CONTACTS — three-avbd default
-        cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 262144, maxJoints: 64, maxCandidates: 524288, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        cap: sceneCap(16384),
       },
       pile: {
         title: 'settled pile 32k, 4 iterations',
@@ -89,26 +122,26 @@
         eye: [48, 36, 48], look: [0, 8, 0], far: 800, ground: 96,
         // Box Pile scene defaults (DECISIONS 8af–8av)
         flags: 1, alpha: 0.95, betaLin: 2000, sleepLin: 0.5, sleepAng: 0.5, sleepTime: 0.25,
-        cap: { maxBodies: 65536, maxColliders: 65536, maxContacts: 524288, maxJoints: 64, maxCandidates: 1048576, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        cap: sceneCap(65536),
       },
       columns: {
         title: 'box columns 100k, 4 iterations',
         lead: 180, iterations: 4, settled: true, sleepRounds: 8, friction: 0.5,
         eye: [90, 40, 90], look: [0, 6, 0], far: 1200, ground: 200,
         flags: 1, // three-avbd reuseContacts default
-        cap: { maxBodies: 131072, maxColliders: 131072, maxContacts: 1048576, maxJoints: 64, maxCandidates: 2097152, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        cap: sceneCap(131072),
       },
       ring110k: {
         title: 'brick ring 110k, 4 iterations',
         lead: 60, iterations: 4, settled: false, sleepRounds: 8, friction: 0.5,
         eye: [140, 60, 40], look: [0, 12, 0], far: 2000, ground: 220,
-        cap: { maxBodies: 131072, maxColliders: 131072, maxContacts: 1048576, maxJoints: 64, maxCandidates: 2097152, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        cap: sceneCap(131072),
       },
       gables506k: {
         title: 'brick gables 506k, 3 iterations',
         lead: 60, iterations: 3, settled: false, sleepRounds: 8, friction: 0.5,
         eye: [0, 80, -120], look: [0, 10, 0], far: 4000, ground: 600,
-        cap: { maxBodies: 524288, maxColliders: 524288, maxContacts: 2097152, maxJoints: 64, maxCandidates: 4194304, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        cap: sceneCap(524288),
       },
     };
     const cfg = SCENES[scene];
@@ -1222,7 +1255,16 @@ struct VsOut {
           : '';
         const wallLabel = wallMs > 0 ? `${wallMs.toFixed(2)} ms` : (cfg.settled ? 'timing after settle…' : 'timing after impact…');
         statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${params.iterations} iters · wall ${wallLabel} ${phases} · step ${steps} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)}`;
-        if (last.overflow) { running = false; fail('overflow flags 0x' + last.overflow.toString(16)); return; }
+        // Overflow used to hard-stop the page mid-smash. Caps now match Metal; still warn
+        // without freezing so a residual spike is visible and replay continues.
+        if (last.overflow) {
+          const bits = [];
+          if (last.overflow & 1) bits.push('contacts');
+          if (last.overflow & 2) bits.push('candidates');
+          if (last.overflow & 64) bits.push('manifolds');
+          if (last.overflow & 128) bits.push('bp_chain');
+          warnOnce(`overflow 0x${last.overflow.toString(16)} (${bits.join('|') || 'flags'}) · contacts ${last.contact}/${cap.maxContacts} · continuing`);
+        }
 
         // Smash: watch impact first. Settled: watch lead-in settle, then fair wall timing.
         // After measuring, restore so playback continues from the start again.
