@@ -761,17 +761,17 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
     float thresh = PARAMS.sleepLin;
     if (dot(vRel, vRel) < thresh * thresh && wRel < PARAMS.sleepAng)
         return;
+    // Store only the wake fields: a whole-body store from this thread's
+    // narrowphase-start copy could overwrite fields other work updated.
     if (bodyIsDynamic(ba) && bodyIsSleeping(ba) && awakeB)
     {
-        ba.flags = (ba.flags & ~BODY_SLEEPING) | BODY_AWAKE;
-        ba.sleepTimer = 0.0;
-        gBodies[ca.body] = ba;
+        gBodies[ca.body].flags = (ba.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[ca.body].sleepTimer = 0.0;
     }
     if (bodyIsDynamic(bb) && bodyIsSleeping(bb) && awakeA)
     {
-        bb.flags = (bb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
-        bb.sleepTimer = 0.0;
-        gBodies[cb.body] = bb;
+        gBodies[cb.body].flags = (bb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[cb.body].sleepTimer = 0.0;
     }
 }
 
@@ -946,8 +946,7 @@ void update_refs(uint3 tid : SV_DispatchThreadID)
         r.pos = float4(b.position, 0.0);
         r.rot = rot;
         gRefPoses[i] = r;
-        b.generation = step;
-        gBodies[i] = b;
+        gBodies[i].generation = step;
     }
 }
 
