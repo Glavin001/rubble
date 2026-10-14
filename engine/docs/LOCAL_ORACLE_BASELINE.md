@@ -80,7 +80,7 @@ Adapter: `apple · metal-3`. Source: `LOCAL_three_avbd_gpu_bench.json` (small+st
 
 ### Settled brick pyramid (oracle hold — local Chrome)
 
-`inspiration/pinned/three-avbd/settle-pyramid.html?levels=30` (reuseContacts+startAtRest): after 180 steps **maxZ 14.98/15.25**, **KE≈0.06**, contacts stable ~140 480, colours 13. Our Metal Pyramid 30 still collapses (height→~10, KE thousands) — JP rounds floored to 16 (was 4–8) and priority matched; remaining gap is reuse (~1% vs ~94%) / warm-start churn.
+`inspiration/pinned/three-avbd/settle-pyramid.html?levels=30` (reuseContacts+startAtRest): after 180 steps **maxZ 14.98/15.25**, **KE≈0.06**, contacts stable ~140 480, colours 13. Our Metal Pyramid 30 (8cb): **maxY≈15.08/15.25**, **KE≈0.1**, reuse~88%, warmstart~0.997 @180 — holds. Gate: keep friction `kT` unless saturated and `|v_t|>0.1`.
 
 ## Speed — our Metal `scene_fps` (local M3 Max)
 

@@ -110,6 +110,41 @@ fn main() {
         }
     }
 
+
+    if std::env::var("C0_STATS").is_ok() {
+        let contacts = world.download_contacts();
+        let mut n = 0u32;
+        let mut sum = 0.0f64;
+        let mut min_c0 = f32::INFINITY;
+        let mut max_c0 = f32::NEG_INFINITY;
+        let mut neg = 0u32;
+        for c in &contacts {
+            if c.alive == 0 { continue; }
+            let c0 = c.c0_n;
+            n += 1;
+            sum += c0 as f64;
+            min_c0 = min_c0.min(c0);
+            max_c0 = max_c0.max(c0);
+            if c0 < 0.0 { neg += 1; }
+        }
+        println!("C0_STATS n={n} mean={:.6} min={min_c0:.4} max={max_c0:.4} neg={neg}", sum / n.max(1) as f64);
+    }
+    if std::env::var("REST_SPEED_STATS").is_ok() {
+        let mut over = 0u32;
+        let mut sum_v = 0.0f64;
+        let mut n = 0u32;
+        for b in &bodies {
+            if !b.is_dynamic() { continue; }
+            let v = glam::Vec3::from_array(b.linear_vel).length();
+            let w = glam::Vec3::from_array(b.angular_vel).length();
+            let slow = v + w * 0.5;
+            n += 1;
+            sum_v += slow as f64;
+            if slow >= 0.1 { over += 1; }
+        }
+        println!("REST_SPEED_STATS n={n} mean_slow={:.4} over_0.1={over}", sum_v / n.max(1) as f64);
+    }
+
     // Classify contacts: plane vs box-box, vertical vs horizontal normals.
     let colliders = unsafe {
         std::slice::from_raw_parts(
