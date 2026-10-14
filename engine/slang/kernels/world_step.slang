@@ -190,10 +190,12 @@ void predictOne(uint i)
     float3 inertialLin = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (dt * dt);
     float4 inertialAng = quatNormalize(
         b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
-    // x⁻ snapshot for velocity extract (three-avbd initialPos).
+    // x⁻ snapshot for velocity extract (three-avbd initialPos). The previous-body
+    // row is only read for this step's incoming velocity; the pose lives in
+    // initialPos/initialRot, so store just that field.
     float3 x0 = b.position;
     float4 q0 = b.orientation;
-    BODY_PREV(i) = b;
+    BODY_PREV(i).linearVel = b.linearVel;
 
     if (!startAtRest)
     {
@@ -207,9 +209,11 @@ void predictOne(uint i)
     box._pad0 = inertialAng.w;
     box._pad1 = 0.0;
     gAabbs[i] = box;
-    b.initialPos = x0;
-    b.initialRot = q0;
-    gBodies[i] = b;
+    // Store only the fields prediction changes (velocities/mass/flags untouched).
+    gBodies[i].position = b.position;
+    gBodies[i].orientation = b.orientation;
+    gBodies[i].initialPos = x0;
+    gBodies[i].initialRot = q0;
 }
 
 [shader("compute")]
@@ -3107,15 +3111,15 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     if (i >= gCounters[0].bodyCount) return;
     AvbdParams p = PARAMS;
     BodyState b = gBodies[i];
-    BodyState initB = BODY_PREV(i);
     gCcdFlags[i] = 0;
     if (!bodyIsDynamic(b)) return;
     if (bodyIsSleeping(b)) return;
 
+    // Step-start pose x⁻ was saved on the body by prediction (initialPos/Rot).
     float dt = max(p.dt, 1e-8);
-    b.linearVel = (b.position - initB.position) / dt;
+    b.linearVel = (b.position - b.initialPos) / dt;
     // Angular velocity from quat delta
-    float4 q0 = initB.orientation;
+    float4 q0 = b.initialRot;
     float4 q1 = b.orientation;
     // Ensure same hemisphere
     if (dot(q0, q1) < 0.0) q1 = -q1;
@@ -3140,7 +3144,10 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
         b.sleepTimer = 0.0;
         b.flags |= BODY_AWAKE;
     }
-    gBodies[i] = b;
+    gBodies[i].linearVel = b.linearVel;
+    gBodies[i].angularVel = b.angularVel;
+    gBodies[i].sleepTimer = b.sleepTimer;
+    gBodies[i].flags = b.flags;
 }
 
 // If any dynamic contact neighbor is not a sleep candidate, revoke both. Repeating
