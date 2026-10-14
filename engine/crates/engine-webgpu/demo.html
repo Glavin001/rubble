@@ -171,9 +171,11 @@
       trustLin: 0.35, trustAng: 0.5, pivotFloor: 1e-6, gridCellSize: 2,
     };
 
+    const packHostBytes = new ArrayBuffer(208);
+    const packHostView = new DataView(packHostBytes);
+    const packHostU8 = new Uint8Array(packHostBytes);
     function packHost(scratch) {
-      const bytes = new ArrayBuffer(208);
-      const v = new DataView(bytes);
+      const v = packHostView;
       const nums = [
         params.dt, params.gravityY, params.iterations, params.flags,
         params.alpha, params.gamma, params.betaLin, params.betaAng,
@@ -184,7 +186,7 @@
       const uintFields = new Set([2, 3]);
       nums.forEach((n, i) => uintFields.has(i) ? u32(v, i * 4, n) : f32(v, i * 4, n));
       for (let i = 0; i < 32; i++) u32(v, 80 + i * 4, scratch[i] || 0);
-      return bytes;
+      return packHostBytes;
     }
 
     function lookAt(eye, at, up) {
@@ -541,10 +543,27 @@ struct VsOut {
     let steps = 0;
     const sleepRounds = 1;
 
+    // Reused every step — allocating these in writeHost showed up as wall−GPU gap on ring.
+    const scratchU32 = new Uint32Array(64);
+    // Must match bufs[17] size from bufferSizes (maxColors × 4), not a larger pad.
+    const colorCountWords = cap.maxColors;
+    const colorCountsBytes = colorCountWords * 4;
+    // One queue upload + GPU copies into the four step buffers (cheaper than 4 writeBuffers).
+    const hostUpload = device.createBuffer({
+      size: 256 + 256 + 64 + colorCountsBytes,
+      usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    const hostUploadCpu = new ArrayBuffer(256 + 256 + 64 + colorCountsBytes);
+    const hostScratchView = new Uint32Array(hostUploadCpu, 0, 64);
+    const hostParamsView = new Uint8Array(hostUploadCpu, 256, 208);
+    const hostCountersView = new Uint32Array(hostUploadCpu, 512, 16);
+    const hostColorsView = new Uint32Array(hostUploadCpu, 576, colorCountWords);
+
     function scratchWords() {
       const idsLen = csrBase;
       const prevN = Math.min(Math.max(last.contact, 256), cap.maxContacts);
-      const s = new Uint32Array(64);
+      const s = scratchU32;
+      s.fill(0);
       s[1] = cap.maxBodies;
       s[2] = cap.maxCandidates;
       s[3] = cap.maxContacts;
@@ -562,15 +581,21 @@ struct VsOut {
       return s;
     }
 
-    function writeHost() {
+    function writeHost(enc) {
       const s = scratchWords();
-      device.queue.writeBuffer(bufs[21], 0, s);
-      device.queue.writeBuffer(bufs[6], 0, packHost(s));
-      const counters = new Uint32Array(16);
-      counters[0] = bodyCount;
-      counters[1] = colliderCount;
-      device.queue.writeBuffer(bufs[7], 0, counters);
-      device.queue.writeBuffer(bufs[17], 0, new Uint32Array(cap.maxColors));
+      packHost(s);
+      hostScratchView.set(s);
+      hostParamsView.set(packHostU8);
+      hostCountersView.fill(0);
+      hostCountersView[0] = bodyCount;
+      hostCountersView[1] = colliderCount;
+      hostColorsView.fill(0);
+      device.queue.writeBuffer(hostUpload, 0, hostUploadCpu);
+      // Prefer GPU copies from one upload — four tiny writeBuffers were ~0.3 ms of ring wall.
+      enc.copyBufferToBuffer(hostUpload, 0, bufs[21], 0, 256);
+      enc.copyBufferToBuffer(hostUpload, 256, bufs[6], 0, 208);
+      enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 64);
+      enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
     }
 
     function groups(threads) { return Math.ceil(Math.max(threads, 1) / 64); }
@@ -596,7 +621,7 @@ struct VsOut {
       const idsLen = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
       const hashN = Math.min(nextPow2(Math.max(Math.max(prevContacts, 256) * 4, 1024)), idsLen);
 
-      writeHost();
+      writeHost(enc);
       let pass = beginPass ? beginPass() : enc.beginComputePass();
       const nextPhase = () => {
         if (!beginPass) return;
