@@ -106,6 +106,8 @@
     const manifoldHashInsert = hashInsertMode === 'manifold';
     const detailedProfile = qs.get('profile') === 'detail';
     const graphProfile = qs.get('profile') === 'graph';
+    // Diagnostic: one timestamped pass per primal color (and the sparse tail).
+    const colorProfile = qs.get('profile') === 'colors';
     const spatialOrder = qs.get('order') === 'morton';
     const physicalAdjacency = qs.get('adjacency') !== 'append';
     const regressionKind = qs.get('check');
@@ -1004,10 +1006,12 @@ struct VsOut {
         if (beginPass && iter > 0) nextPhase();
         const primal = pipes[compactContacts ? "solve_primal_color_compact" : "solve_primal_color"];
         for (let color = 0; color < Math.min(colors, sparseStart); color++) {
+          if (beginPass && colorProfile && color > 0) nextPhase();
           pass.setPipeline(primal.pipeline);
           pass.setBindGroup(0, primal.bind, [color * PASS_ALIGN]);
           pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
         }
+        if (beginPass && colorProfile && sparseStart < colors && sparseStart > 0) nextPhase();
         if (sparseStart < colors) disp(pass, compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, sparseStart);
         if (beginPass) nextPhase();
         dispWork(pass, compactContacts ? 'solve_dual_compact' : 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
@@ -1134,7 +1138,7 @@ struct VsOut {
         [name, median(samples.map(sample => sample[name]))]));
       phaseSamples = {
         protocol: 'split-pass-timestamps-with-paired-completion-v1',
-        detail: graphProfile ? 'graph' : detailedProfile ? 'collision' : 'phases',
+        detail: graphProfile ? 'graph' : detailedProfile ? 'collision' : colorProfile ? 'colors' : 'phases',
         caveat: 'Extra pass boundaries and per-step readback perturb execution. These later steps are not the batched throughput window. Phase medians need not sum to the median total.',
         measuredAt: new Date().toISOString(), phasesMs, ...totals, samples,
       };
@@ -1147,7 +1151,11 @@ struct VsOut {
       // drains our queue; it does not prove isolation from other GPU clients.
       await device.queue.onSubmittedWorkDone();
       const parts = preSolveProfileParts();
-      const n = parts.length + params.iterations * 2 + 1;
+      const colorsEncoded = colorProfile ? Math.min(cap.maxColors, 32) : 0;
+      const primalPasses = colorProfile
+        ? Math.max(Math.min(colorsEncoded, sparseStart) + (sparseStart < colorsEncoded && sparseStart > 0 ? 1 : 0), 1)
+        : 1;
+      const n = parts.length + params.iterations * (primalPasses + 1) + 1;
       const querySet = device.createQuerySet({ type: 'timestamp', count: n * 2 });
       const resolve = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
       const read = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -1179,12 +1187,22 @@ struct VsOut {
           return Number(stamps[b] - stamps[a]) / 1e6;
         };
         let primal = 0, dual = 0;
+        const perColor = new Array(primalPasses).fill(0);
         for (let iter = 0; iter < params.iterations; iter++) {
-          primal += ms((parts.length + iter * 2) * 2, (parts.length + iter * 2) * 2 + 1);
-          dual += ms((parts.length + 1 + iter * 2) * 2, (parts.length + 1 + iter * 2) * 2 + 1);
+          const base = parts.length + iter * (primalPasses + 1);
+          for (let c = 0; c < primalPasses; c++) {
+            const t = ms((base + c) * 2, (base + c) * 2 + 1);
+            perColor[c] += t;
+            primal += t;
+          }
+          dual += ms((base + primalPasses) * 2, (base + primalPasses) * 2 + 1);
         }
-        const sleep = ms((parts.length + params.iterations * 2) * 2, (parts.length + params.iterations * 2) * 2 + 1);
-        const phasesMs = { ...Object.fromEntries(parts.map((name, k) => [name, ms(k * 2, k * 2 + 1)])), primal, dual, sleep };
+        const last = parts.length + params.iterations * (primalPasses + 1);
+        const sleep = ms(last * 2, last * 2 + 1);
+        const colorPhases = colorProfile
+          ? Object.fromEntries(perColor.map((t, c) => [c < Math.min(colorsEncoded, sparseStart) ? `color${c}` : 'tail', t]))
+          : {};
+        const phasesMs = { ...Object.fromEntries(parts.map((name, k) => [name, ms(k * 2, k * 2 + 1)])), primal, ...colorPhases, dual, sleep };
         return {
           step: steps, passCount: i, phasesMs,
           gpuPhasesMs: Object.values(phasesMs).reduce((sum, value) => sum + value, 0),

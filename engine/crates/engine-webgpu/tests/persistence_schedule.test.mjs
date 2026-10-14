@@ -92,7 +92,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         return p;
       };
       const context = {
-        detailedProfile, graphProfile, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
+        detailedProfile, graphProfile, colorProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
         cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
@@ -204,7 +204,7 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false}) {
   const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
     dispatchWorkgroupsIndirect() { trace.push({name:'primal'}); }, end() {}}; passes.push(p); return p; };
   const context = {
-    detailedProfile, graphProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
+    detailedProfile, graphProfile:false, colorProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
@@ -265,3 +265,34 @@ test('host upload publishes the previous GPU manifold count before counters rese
   }
 });
 
+
+// profile=colors splits every primal color (and the sparse tail) into its own
+// timestamped pass; the profiler's pass count must match the shipped encoder.
+for (const sparseStart of [10, 32, 0]) {
+  test(`color profile isolates every encoded primal color (sparseStart=${sparseStart})`, () => {
+    const passes = [], trace = [];
+    const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
+      dispatchWorkgroupsIndirect() { trace.push({name:'primal', phase:p.id}); }, end() {}}; passes.push(p); return p; };
+    const context = {
+      detailedProfile:false, graphProfile:false, colorProfile:true, bodyCount:110442, colliderCount:110442,
+      last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+      nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+      persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
+      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true,
+      physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix:true,
+      sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+      writeHost() {}, disp(p,name) { trace.push({name, phase:p.id}); },
+      dispWork(p,name) { trace.push({name, phase:p.id}); }, encoder:{beginComputePass:pass},
+    };
+    runInNewContext(`${source}\nencodeStep(encoder, false, encoder.beginComputePass)`, context);
+    const prefix = Math.min(32, sparseStart), tail = sparseStart < 32 ? 1 : 0;
+    const primalPasses = Math.max(prefix + (tail && sparseStart > 0 ? 1 : 0), 1);
+    // Same formula as profileOneStep: parts(9: aabbs,grid,narrowphase,warm,graph) + iterations*(primal+dual) + sleep.
+    assert.equal(passes.length, 5 + 4 * (primalPasses + 1) + 1,
+      'profile=colors pass count must equal the profiler expectation or every color label shifts.');
+    for (const p of new Set(trace.filter(c=>c.name==='primal').map(c=>c.phase)))
+      assert.equal(trace.filter(c=>c.phase===p && c.name==='primal').length, 1, 'Each color must own one timestamp interval.');
+    assert.ok(trace.filter(c=>c.name==='solve_dual_compact').every(c=>!trace.some(o=>o.phase===c.phase && o.name.startsWith('primal'))),
+      'Dual stays in its own interval, never charged to a color.');
+  });
+}
