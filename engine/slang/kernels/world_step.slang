@@ -1583,6 +1583,43 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+groupshared uint gsAwakeFlags[64];
+groupshared uint gsAwakeBase;
+
+// Same set as build_awake_list, but each workgroup publishes its awake bodies as
+// one ascending run with a single global atomic: no per-body contention on
+// awakeCount, and body-indexed reads through gAwakeList stay coalesced.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void build_awake_list_ordered(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
+{
+    uint i = dispatchIndex(tid);
+    uint local = lid.x;
+    bool awake = false;
+    if (i < gCounters[0].bodyCount)
+    {
+        BodyState b = gBodies[i];
+        awake = bodyIsDynamic(b) && !bodyIsSleeping(b);
+    }
+    gsAwakeFlags[local] = awake ? 1u : 0u;
+    GROUP_SYNC();
+    if (local == 0u)
+    {
+        uint total = 0u;
+        for (uint k = 0u; k < 64u; k++) total += gsAwakeFlags[k];
+        uint base = 0u;
+        if (total != 0u) AADD3(gCounters[0].awakeCount, total, base);
+        gsAwakeBase = base;
+    }
+    GROUP_SYNC();
+    if (awake)
+    {
+        uint rank = 0u;
+        for (uint k = 0u; k < local; k++) rank += gsAwakeFlags[k];
+        gAwakeList[gsAwakeBase + rank] = i;
+    }
+}
+
 // --- CSR adjacency (three-avbd: degree → scan → scatter → sort) ----------------------------
 // Constraint id: [0, jointCount) = joints; jointCount + mi = manifold mi (Stage 8b).
 // CINDEX(0..bodyCount): degree then exclusive starts; [bodyCount] = total.

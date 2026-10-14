@@ -3902,3 +3902,98 @@ fn color_tile_prefix_matches_cpu_for_ragged_ranges_at_full_scene_scale() {
         }
     }
 }
+
+/// The ordered awake list must contain exactly the awake dynamic bodies (same
+/// set and count as the per-body atomic list), with each 64-body workgroup
+/// published as one ascending contiguous run. Static, sleeping and empty
+/// groups must contribute nothing; a wrong rank double-writes or skips a slot.
+#[test]
+fn ordered_awake_list_matches_atomic_set_in_ascending_group_runs() {
+    let sim = WgpuSim::new(WorldCapacity::small()).expect("GPU adapter required");
+    const N: u32 = 300;
+    let bodies: Vec<BodyState> = (0..N)
+        .map(|i| {
+            // group 2 (128..192) is entirely asleep; others mix static/sleep/awake.
+            let (inv_mass, flags) = if (128..192).contains(&i) {
+                (1.0, 5)
+            } else {
+                match i % 7 {
+                    0 => (0.0, 0),
+                    3 => (1.0, 5),
+                    _ => (1.0, 9),
+                }
+            };
+            BodyState {
+                inv_mass,
+                flags,
+                orientation: [0.0, 0.0, 0.0, 1.0],
+                ..BodyState::zeroed()
+            }
+        })
+        .collect();
+    let expected: Vec<u32> = (0..N)
+        .filter(|&i| bodies[i as usize].inv_mass > 0.0 && bodies[i as usize].flags & 4 == 0)
+        .collect();
+    sim.queue
+        .write_buffer(&sim.bufs[0], 0, bytemuck::cast_slice(&bodies));
+    for kernel in ["build_awake_list", "build_awake_list_ordered"] {
+        sim.queue.write_buffer(
+            &sim.bufs[7],
+            0,
+            bytes_of(&StepCounters {
+                body_count: N,
+                ..Default::default()
+            }),
+        );
+        sim.queue
+            .write_buffer(&sim.bufs[11], 0, bytemuck::cast_slice(&vec![u32::MAX; 512]));
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            sim.disp(&mut pass, kernel, N as u64, None);
+        }
+        sim.queue.submit([enc.finish()]);
+        let counters: StepCounters = download(&sim, 7, 0, 1)[0];
+        let list: Vec<u32> = download(&sim, 11, 0, 512);
+        let n = counters.awake_count as usize;
+        assert_eq!(n, expected.len(), "{kernel}: awake count");
+        let mut got = list[..n].to_vec();
+        assert!(
+            list[n..].iter().all(|&v| v == u32::MAX),
+            "{kernel}: wrote past awakeCount"
+        );
+        if kernel == "build_awake_list_ordered" {
+            // Runs from one workgroup are contiguous and ascending.
+            for w in got.windows(2) {
+                if w[0] / 64 == w[1] / 64 {
+                    assert!(
+                        w[0] < w[1],
+                        "{kernel}: group run not ascending: {} then {}",
+                        w[0],
+                        w[1]
+                    );
+                }
+            }
+            for g in 0..=(N / 64) {
+                let pos: Vec<usize> = got
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &b)| b / 64 == g)
+                    .map(|(p, _)| p)
+                    .collect();
+                if let (Some(&a), Some(&b)) = (pos.first(), pos.last()) {
+                    assert_eq!(
+                        b - a + 1,
+                        pos.len(),
+                        "{kernel}: group {g} run is not contiguous"
+                    );
+                }
+            }
+        }
+        got.sort_unstable();
+        assert_eq!(
+            got, expected,
+            "{kernel}: awake set differs (missing, duplicated or sleeping/static bodies)"
+        );
+    }
+}

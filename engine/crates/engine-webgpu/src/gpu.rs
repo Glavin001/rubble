@@ -25,6 +25,8 @@ pub struct WgpuSim {
     /// Opt-in: pack SolverPairs right after collision so graph kernels read
     /// body endpoints in one load (persistent storage only).
     pub(crate) early_pairs: bool,
+    /// Opt-in: one ascending awake-list run per workgroup (one atomic per group).
+    pub(crate) ordered_awake: bool,
     fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -353,6 +355,7 @@ impl WgpuSim {
             manifold_persistence: std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref()
                 == Ok("1"),
             manifold_hash_insert: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("manifold"),
+            ordered_awake: std::env::var("ENGINE_ORDERED_AWAKE").as_deref() == Ok("1"),
             early_pairs: {
                 let early = std::env::var("ENGINE_EARLY_PAIRS").as_deref() == Ok("1");
                 assert!(
@@ -642,7 +645,12 @@ impl WgpuSim {
                 _ => name,
             }
         };
-        self.disp(&mut pass, "build_awake_list", n_bodies, None);
+        let awake_list = if self.ordered_awake {
+            "build_awake_list_ordered"
+        } else {
+            "build_awake_list"
+        };
+        self.disp(&mut pass, awake_list, n_bodies, None);
         self.disp(&mut pass, "write_work_args", 64, None);
         self.disp(&mut pass, "csr_clear", n_bodies + 1, None);
         self.disp_work(&mut pass, graph("csr_degree_contacts"), 66, None);
