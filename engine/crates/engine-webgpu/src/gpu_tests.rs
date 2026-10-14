@@ -3902,3 +3902,177 @@ fn color_tile_prefix_matches_cpu_for_ragged_ranges_at_full_scene_scale() {
         }
     }
 }
+
+/// Record warm hash (`hashInsert=record`): one four-word slot per previous
+/// manifold holding a unique claim, the pair key and its live run. The fixture
+/// gives 20 pairs one shared bucket, three blocks per pair (so duplicate pairs
+/// must resolve to the minimum live run like the per-contact minimum-head merge),
+/// dead first corners, fully dead blocks, a zero-count overflow manifold and a
+/// poisoned record past the published count. An undersized table must raise
+/// OVERFLOW_WARM_HASH instead of silently dropping warm starts.
+#[test]
+fn record_warm_hash_resolves_minimum_live_runs_and_flags_exhaustion() {
+    use std::collections::BTreeMap;
+    const SLOTS: u32 = 256;
+    fn key(a: u32, b: u32) -> u32 {
+        let h = a.wrapping_mul(73856093) ^ b.wrapping_mul(19349663);
+        if h == u32::MAX {
+            a ^ b ^ 0xa5a5a5a5
+        } else {
+            h
+        }
+    }
+    let mut points = Vec::new();
+    for block in 0..3 {
+        // 20 colliding pairs keep the shared cluster (53 live records) within
+        // the 64-probe limit; the 32-slot case below must exhaust instead.
+        for pair in 0..20u32 {
+            let id = if block == 1 { 19 - pair } else { pair };
+            for corner in 0..4 {
+                points.push(Contact {
+                    collider_a: 1,
+                    collider_b: 2 + id * 1024,
+                    alive: u32::from(corner != 0 && !(block == 0 && id % 3 == 0)),
+                    feature_id: 0x8000_0000 | corner,
+                    _pad: [0.0, f32::from_bits(7), 0.0],
+                    ..Contact::zeroed()
+                });
+            }
+        }
+    }
+    let mut expected = BTreeMap::new();
+    for (i, c) in points.iter().enumerate().filter(|(_, c)| c.alive != 0) {
+        expected
+            .entry((c.collider_a, c.collider_b))
+            .or_insert(i as u32);
+    }
+    let mut manifolds: Vec<Manifold> = (0..points.len() as u32 / 4)
+        .map(|run| Manifold {
+            collider_a: points[run as usize * 4].collider_a,
+            collider_b: points[run as usize * 4].collider_b,
+            contact_start: run * 4,
+            contact_count: 4,
+            ..Manifold::zeroed()
+        })
+        .collect();
+    manifolds.push(Manifold {
+        collider_a: 1,
+        collider_b: 2,
+        ..Manifold::zeroed()
+    });
+    let published = manifolds.len() as u32;
+    manifolds.push(Manifold {
+        collider_a: 1,
+        collider_b: 999,
+        contact_start: 1,
+        contact_count: 4,
+        ..Manifold::zeroed()
+    });
+    // Live run of each manifold as the per-contact lookup would count it.
+    let live_runs: Vec<Option<(u32, u32)>> = manifolds[..published as usize]
+        .iter()
+        .map(|m| {
+            let first = (m.contact_start..m.contact_start + m.contact_count)
+                .find(|&j| points[j as usize].alive != 0)?;
+            Some((first, m.contact_start + m.contact_count - first))
+        })
+        .collect();
+    let live = live_runs.iter().flatten().count();
+    for persistent in [false, true] {
+        let sim = if persistent {
+            WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
+        } else {
+            WgpuSim::new(WorldCapacity::small())
+        }
+        .expect("GPU adapter required for record warm hash regression");
+        for (parity, slots) in [(0u32, SLOTS), (1, SLOTS), (0, 32)] {
+            let context = format!("persistent={persistent}, parity={parity}, slots={slots}");
+            let offset = parity * sim.capacity.max_contacts;
+            write_contact_fixture(&sim, offset, &points, &vec![0; points.len()]);
+            let absolute: Vec<Manifold> = manifolds
+                .iter()
+                .map(|m| Manifold {
+                    contact_start: m.contact_start + if m.contact_count > 0 { offset } else { 0 },
+                    ..*m
+                })
+                .collect();
+            sim.queue
+                .write_buffer(&sim.bufs[25], 0, bytemuck::cast_slice(&absolute));
+            sim.queue
+                .write_buffer(&sim.bufs[7], 0, bytes_of(&StepCounters::default()));
+            let before = contact_storage_words(&sim, offset, points.len());
+            let mut host = HostUniforms {
+                params: sim.params,
+                s: [[0; 4]; 8],
+            };
+            host.s[1][3] = points.len() as u32; // previous contacts
+            host.s[2][0] = offset;
+            host.s[2][1] = slots;
+            host.s[2][2] = manifolds.len() as u32 + 8;
+            host.s[3][1] = published;
+            host.s[3][2] = 1; // per-manifold slot 68
+            host.s[3][3] = 1; // record slots
+            sim.queue.write_buffer(&sim.bufs[6], 0, bytes_of(&host));
+            let mut enc = sim.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                sim.disp(&mut pass, "contact_hash_clear", u64::from(slots) * 4, None);
+                sim.disp(&mut pass, "write_work_args", 64, None);
+                sim.disp_work(&mut pass, "contact_hash_insert_manifolds", 68, None);
+            }
+            sim.queue.submit([enc.finish()]);
+            let flags = download::<StepCounters>(&sim, 7, 0, 1)[0].overflow_flags;
+            if (slots as usize) < live {
+                assert_ne!(flags & 256, 0,
+                    "{context}: {live} live manifolds cannot fit {slots} slots; exhaustion must raise OVERFLOW_WARM_HASH instead of silently losing warm starts");
+                continue;
+            }
+            assert_eq!(flags, 0, "{context}: unexpected overflow 0x{flags:x}");
+            let table: Vec<u32> = download(&sim, 14, 0, slots as usize * 4);
+            let claimed: Vec<usize> = (0..slots as usize)
+                .filter(|&s| table[s * 4] != u32::MAX)
+                .collect();
+            assert_eq!(claimed.len(), live,
+                "{context}: one record per previous manifold with a live point; zero-count, fully dead and past-count manifolds publish nothing");
+            for &s in &claimed {
+                let m = table[s * 4] as usize - 1;
+                assert!(
+                    m < published as usize,
+                    "{context}: slot {s} claimed by unpublished manifold {m}"
+                );
+                let (first, run) = live_runs[m]
+                    .unwrap_or_else(|| panic!("{context}: dead manifold {m} published a record"));
+                assert_eq!(
+                    (table[s * 4 + 1], table[s * 4 + 2]),
+                    (manifolds[m].collider_a, manifolds[m].collider_b),
+                    "{context}: slot {s} for manifold {m} stores the wrong pair key"
+                );
+                assert_eq!((table[s * 4 + 3] & 0x0fff_ffff, table[s * 4 + 3] >> 28), (first, run),
+                    "{context}: manifold {m} run (start, length) differs from the first live point and remaining block");
+            }
+            // Emulate the shader lookup: scan to EMPTY, keep the minimum start.
+            for (&pair, &first) in &expected {
+                let mut best: Option<(u32, u32)> = None;
+                for probe in 0..64 {
+                    let s = ((key(pair.0, pair.1) + probe) & (slots - 1)) as usize;
+                    if table[s * 4] == u32::MAX {
+                        break;
+                    }
+                    if (table[s * 4 + 1], table[s * 4 + 2]) == pair {
+                        let start = table[s * 4 + 3] & 0x0fff_ffff;
+                        if best.map_or(true, |(b, _)| start < b) {
+                            best = Some((start, table[s * 4 + 3] >> 28));
+                        }
+                    }
+                }
+                assert_eq!(best, Some((first, 3)),
+                    "{context}, pair={pair:?}: lookup must reach the minimum live run ({first}, 3) before EMPTY; duplicates must not shadow the earliest history");
+            }
+            assert_eq!(
+                contact_storage_words(&sim, offset, points.len()),
+                before,
+                "{context}: building records modified contact metadata, tags or force history"
+            );
+        }
+    }
+}

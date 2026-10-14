@@ -22,6 +22,8 @@ pub struct WgpuSim {
     manifold_persistence: bool,
     /// Opt-in three-avbd shape: warm-hash insert per previous manifold.
     pub(crate) manifold_hash_insert: bool,
+    /// Record warm hash: 16-byte slots carrying the pair key and previous run.
+    pub(crate) warm_record_hash: bool,
     fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -349,7 +351,11 @@ impl WgpuSim {
                 && std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Ok("fused"),
             manifold_persistence: std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref()
                 == Ok("1"),
-            manifold_hash_insert: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("manifold"),
+            manifold_hash_insert: matches!(
+                std::env::var("ENGINE_HASH_INSERT").as_deref(),
+                Ok("manifold") | Ok("record")
+            ),
+            warm_record_hash: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("record"),
             device,
             queue,
             capacity,
@@ -535,7 +541,6 @@ impl WgpuSim {
         let n_bodies = self.body_count.max(1) as u64;
         let n_cols = self.collider_count.max(1) as u64;
         let n_joints = self.joint_count.max(1) as u64;
-        let prev_contacts = self.last_counters.contact_count.max(256) as u64;
 
         self.write_host_uniforms();
         let mut enc = self
@@ -563,15 +568,14 @@ impl WgpuSim {
         self.disp(&mut pass, "broadphase_query", n_cols, None);
         self.disp(&mut pass, "write_work_args", 64, None);
 
-        let ids_len = (2 * (self.capacity.max_contacts + self.capacity.max_joints))
-            .max(32768)
-            .next_power_of_two();
-        // One entry per manifold; bound hash memory/work independently of tiled dispatch.
-        const MAX_WARM_HASH: u32 = 1 << 21;
-        let hash_n = (prev_contacts.max(256).saturating_mul(4).max(1024) as u32)
-            .next_power_of_two()
-            .min(ids_len)
-            .min(MAX_WARM_HASH) as u64;
+        // Same size the uniforms publish; records clear four words per slot.
+        let prev_n = self
+            .last_counters
+            .contact_count
+            .min(self.capacity.max_contacts)
+            .max(256);
+        let hash_n =
+            u64::from(self.warm_hash_slots(prev_n)) * if self.warm_record_hash { 4 } else { 1 };
         let reuse = (self.params.flags & FLAG_REUSE_CONTACTS) != 0;
         if reuse {
             self.disp(&mut pass, "update_refs", n_bodies, None);
@@ -789,6 +793,27 @@ impl WgpuSim {
             .min(constraint_id_words(&self.capacity))
     }
 
+    /// Warm hash size in slots: one word per slot (heads), or four-word record
+    /// slots at ~2x manifolds, never below 4x bodies, within the pre-CSR region.
+    fn warm_hash_slots(&self, prev_contacts: u32) -> u32 {
+        let ids_len = constraint_id_words(&self.capacity);
+        if self.warm_record_hash {
+            (prev_contacts / 2)
+                .max(4 * self.body_count)
+                .max(1024)
+                .next_power_of_two()
+                .min(ids_len / 4)
+        } else {
+            const MAX_WARM_HASH: u32 = 1 << 21;
+            prev_contacts
+                .saturating_mul(4)
+                .max(1024)
+                .next_power_of_two()
+                .min(ids_len)
+                .min(MAX_WARM_HASH)
+        }
+    }
+
     fn write_host_uniforms(&self) {
         let max_c = self.capacity.max_contacts;
         let cur = if self.contacts_parity == 0 { 0 } else { max_c };
@@ -801,13 +826,8 @@ impl WgpuSim {
         s[3] = max_c;
         s[7] = self.last_counters.contact_count.min(max_c);
         s[8] = prev;
-        const MAX_WARM_HASH: u32 = 1 << 21;
-        s[9] = prev_n
-            .saturating_mul(4)
-            .max(1024)
-            .next_power_of_two()
-            .min(ids_len)
-            .min(MAX_WARM_HASH);
+        s[9] = self.warm_hash_slots(prev_n);
+        s[15] = u32::from(self.warm_record_hash);
         s[10] = self.capacity.max_candidates;
         s[11] = cur;
         let mut log = 0u32;
