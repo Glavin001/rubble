@@ -757,7 +757,8 @@ pub fn all_scenes() -> Vec<SceneDef> {
             info: SceneInfo {
                 name: "Box Columns (100k)",
                 group: "Scale tests (GPU)",
-                iterations: 6,
+                // three-avbd steady tier uses 4.
+                iterations: 4,
                 capacity: WorldCapacity::scale(),
             },
             build: box_columns_100k,
