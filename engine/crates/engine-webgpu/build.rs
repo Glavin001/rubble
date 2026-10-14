@@ -6,7 +6,19 @@ use std::path::PathBuf;
 /// Same world_step entries as `engine-metal`, minus `broadphase_grid` (thin wrapper;
 /// slangc SIGSEGV on SPIR-V — runtime aliases to `broadphase_query`).
 const WORLD_ENTRIES: &[&str] = &[
+    "solve_primal_sparse",
+    "solve_primal_sparse_compact",
+    "solve_primal_sparse_persistent",
     "apply_commands",
+    "apply_commands_persistent",
+    "narrowphase_persistent",
+    "contact_hash_insert_persistent",
+    "persist_contacts_persistent",
+    "persist_manifolds_persistent",
+    "pack_solver_pairs_persistent",
+    "solve_primal_color_persistent",
+    "solve_primal_one_persistent",
+    "solve_dual_persistent",
     "predict_bodies",
     "build_aabbs",
     "joint_hash_clear",
@@ -19,12 +31,17 @@ const WORLD_ENTRIES: &[&str] = &[
     "contact_hash_clear",
     "contact_hash_insert",
     "persist_contacts",
+    "persist_manifolds",
+    "persist_manifolds_compact",
     "warmstart_joints",
     "build_awake_list",
     "csr_clear",
     "csr_degree_contacts",
     "csr_degree_joints",
     "csr_prefix",
+    "csr_prefix_blocks",
+    "csr_prefix_block_sums",
+    "csr_prefix_add",
     "csr_prefix_init",
     "csr_prefix_scan",
     "csr_prefix_swap",
@@ -32,10 +49,22 @@ const WORLD_ENTRIES: &[&str] = &[
     "csr_scatter_contacts",
     "csr_scatter_joints",
     "csr_sort",
+    "csr_sort_append",
     "color_bodies",
     "init_colors",
     "pack_color_lists",
+    "count_color_tiles",
+    "prefix_color_tiles",
+    "prefix_color_tiles_parallel",
+    "scatter_color_tiles",
     "write_color_args",
+    "write_work_args",
+    "write_sleep_args",
+    "clear_solver_contacts",
+    "pack_solver_contacts",
+    "solve_primal_color_compact",
+    "solve_primal_one_compact",
+    "solve_dual_compact",
     "solve_primal_color",
     "solve_primal_one",
     "solve_dual",
@@ -57,6 +86,8 @@ fn main() -> Result<()> {
     let _ = find_slangc()?;
 
     let world = slang_root.join("kernels/world_step.slang");
+    let compact = slang_root.join("kernels/compact_solve.slang");
+    let persistent = slang_root.join("kernels/persistent_solve.slang");
     let abi = slang_root.join("kernels/abi_probe.slang");
     compile(
         &abi,
@@ -70,7 +101,21 @@ fn main() -> Result<()> {
     let mut failed = Vec::new();
     for entry in WORLD_ENTRIES {
         let dest = out.join(format!("{entry}.spv"));
-        match compile(&world, entry, SlangTarget::Spirv, &dest, &[]) {
+        match compile(
+            if entry.ends_with("_persistent") {
+                &persistent
+            } else if entry.ends_with("_compact")
+                || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+            {
+                &compact
+            } else {
+                &world
+            },
+            entry,
+            SlangTarget::Spirv,
+            &dest,
+            &[],
+        ) {
             Ok(()) => ok.push((*entry).to_string()),
             Err(e) => {
                 println!("cargo:warning=SPIR-V skip {entry}: {e}");
@@ -102,10 +147,21 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&wgsl_dir)?;
     let mut table = String::from("pub static DIRECT_WGSL: &[(&str, &str)] = &[\n");
     let mut wgsl_failed = Vec::new();
-    for entry in WORLD_ENTRIES.iter().chain(std::iter::once(&"broadphase_grid")) {
+    for entry in WORLD_ENTRIES
+        .iter()
+        .chain(std::iter::once(&"broadphase_grid"))
+    {
         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
         match compile_with_defines(
-            &world,
+            if entry.ends_with("_persistent") {
+                &persistent
+            } else if entry.ends_with("_compact")
+                || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+            {
+                &compact
+            } else {
+                &world
+            },
             entry,
             SlangTarget::Wgsl,
             &dest,
@@ -128,7 +184,10 @@ fn main() -> Result<()> {
         table,
     )?;
     if !wgsl_failed.is_empty() {
-        println!("cargo:warning=direct WGSL failed: {}", wgsl_failed.join(", "));
+        println!(
+            "cargo:warning=direct WGSL failed: {}",
+            wgsl_failed.join(", ")
+        );
     }
     Ok(())
 }

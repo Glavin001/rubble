@@ -24,7 +24,8 @@ pub struct SceneDef {
 }
 
 fn yaw_y(angle: f32) -> Quat {
-    Quat::from_rotation_y(angle)
+    // Y/Z exchange reverses handedness; rotation is an axial vector.
+    Quat::from_rotation_y(-angle)
 }
 
 fn add_brick(b: &mut SceneBuilder<'_>, x: f32, y: f32, z: f32, yaw: f32) -> u32 {
@@ -37,6 +38,10 @@ fn add_brick(b: &mut SceneBuilder<'_>, x: f32, y: f32, z: f32, yaw: f32) -> u32 
     id
 }
 
+fn rolling_angular_velocity(speed: f32, radius: f32) -> Vec3 {
+    Vec3::new(speed / radius, 0.0, 0.0)
+}
+
 fn add_sphere_vel(
     b: &mut SceneBuilder<'_>,
     pos: Vec3,
@@ -47,10 +52,10 @@ fn add_sphere_vel(
     let id = b.add_sphere(pos, radius, mass);
     let mut body = b.world_mut().body(id);
     body.linear_vel = vel.to_array();
-    // three-avbd rollingBall: ω = (−v_z/r, 0, 0) for +Z travel (Y-up).
+    // Y/Z exchange negates the axial angular velocity: +v_z/r rolls along +Z.
     let speed = vel.z;
     if radius > 1e-6 && speed.abs() > 1e-6 {
-        body.angular_vel = [-speed / radius, 0.0, 0.0];
+        body.angular_vel = rolling_angular_velocity(speed, radius).to_array();
     }
     b.world_mut().set_body(id, body);
     id
@@ -875,10 +880,12 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
             params.iterations = n;
         }
     }
-    // three-avbd defaults reuseContacts=true. On for settle scenes; Ring smash leaves it off.
+    // three-avbd defaults reuseContacts=true for both settling and impact scenes.
     if (scene.info.name.starts_with("Box Pile")
         || scene.info.name.starts_with("Pyramid")
-        || scene.info.name.starts_with("Box Columns"))
+        || scene.info.name.starts_with("Box Columns")
+        || scene.info.name.starts_with("Brick Ring")
+        || scene.info.name.starts_with("Brick Gables"))
         && std::env::var("NO_REUSE").is_err()
     {
         params.flags |= FLAG_REUSE_CONTACTS;
@@ -929,7 +936,9 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     // Pyramid/Columns keep default trustLin unless TRUST=off. three-avbd has no clamp, but
     // with our residual first-frame seating (REST_SPEED over for ~75% of Pyramid 30 @step1)
     // unclamped corrections detonated; clamp contains while reuse/startAtRest catch up.
-    if (scene.info.name.starts_with("Pyramid") || scene.info.name.starts_with("Box Columns"))
+    if (scene.info.name.starts_with("Pyramid") || scene.info.name.starts_with("Box Columns")
+        || scene.info.name.starts_with("Brick Ring")
+        || scene.info.name.starts_with("Brick Gables"))
         && std::env::var("TRUST").ok().as_deref() == Some("off")
     {
         params.trust_lin = 1.0e6;
@@ -976,18 +985,50 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         // three-avbd `ground(extent)` is a static box slab (top at 0.5), not a plane.
         // Pyramid 30 collapsed on our infinite plane (contacts churned 117k→92k on step 1);
         // box-box ground matches the oracle manifold path. Ring/Pile/Columns same.
-        let extent: f32 = if scene.info.name.starts_with("Pyramid") {
-            30.0 * 0.6
-        } else if scene.info.name.starts_with("Box Columns") {
-            100.0 * 1.5
-        } else if scene.info.name.starts_with("Box Pile") {
-            40.0 * 1.6
-        } else {
-            200.0
+        let ring_extent = match scene.info.name {
+            "Brick Ring (9k)" => Some(22.0),
+            "Brick Ring (28k)" => Some(50.0),
+            "Brick Ring (110k)" => Some(90.0),
+            _ => None,
         };
+        let extent: f32 = if let Some(extent) = ring_extent { extent }
+        else if scene.info.name.starts_with("Pyramid") { 30.0 * 0.6 }
+        else if scene.info.name.starts_with("Box Columns") { 100.0 * 1.5 }
+        else if scene.info.name.starts_with("Box Pile") { 40.0 * 1.6 }
+        else { 200.0 };
         let half_xz = (4.0 * extent).max(200.0) * 0.5;
-        b.add_ground_box_extent(0.5, half_xz);
+        if ring_extent.is_some() {
+            b.add_box(Vec3::ZERO, Vec3::new(half_xz, 0.5, half_xz), 0.0);
+        } else {
+            b.add_ground_box_extent(0.5, half_xz);
+        }
         (scene.build)(&mut b);
     }
     Ok((world, &scene.info))
+}
+
+#[cfg(test)]
+mod scene_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn ring_bricks_are_tangent_after_z_up_to_y_up_conversion() {
+        for i in 0..97 {
+            let angle = i as f32 * std::f32::consts::TAU / 97.0;
+            let radial = Vec3::new(angle.cos(), 0.0, angle.sin());
+            let long_axis = yaw_y(angle + std::f32::consts::FRAC_PI_2) * Vec3::X;
+            assert!(radial.dot(long_axis).abs() < 1e-6,
+                "ring brick at angle {angle} points into neighbouring rings; Y/Z exchange must reverse yaw handedness");
+        }
+    }
+
+    #[test]
+    fn rolling_sphere_has_no_slip_at_ground_contact() {
+        for radius in [4.0, 8.0, 30.0 / 7.0] {
+            let contact_velocity = Vec3::new(0.0, 0.0, 30.0)
+                + rolling_angular_velocity(30.0, radius).cross(Vec3::new(0.0, -radius, 0.0));
+            assert!(contact_velocity.length() < 1e-6,
+                "radius {radius}: sphere spins against its travel, contact velocity={contact_velocity:?}");
+        }
+    }
 }

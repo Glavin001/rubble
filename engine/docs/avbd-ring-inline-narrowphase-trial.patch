@@ -1,0 +1,345 @@
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -817,7 +817,11 @@
+     for (int k = 0; k < count; k++)
+     {
+         BoxManifoldPt pt = points.pts[k];
+-        STORE_NEW_CONTACT(curOff + cStart + k, mslot, makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu));
++        Contact c = makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu);
++#if defined(ENGINE_INLINE_NARROWPHASE_WARM)
++        c = persistContact(cStart + k, c, false, ba, bb);
++#endif
++        STORE_NEW_CONTACT(curOff + cStart + k, mslot, c);
+     }
+ 
+     Manifold mf;
+@@ -985,7 +989,13 @@
+     {
+         // Defer the full copy/transform to the coalesced per-contact persistence
+         // pass. Encode the exact source index in the transient alive word.
++#if defined(ENGINE_INLINE_NARROWPHASE_WARM)
++        Contact c = READ_CONTACT(prevOff + startJ + k);
++        c = persistContact(cStart + k, c, true, ba, bb);
++        STORE_NEW_CONTACT(curOff + cStart + k, mslot, c);
++#else
+         MARK_REUSED_CONTACT(curOff + cStart + k, mslot, startJ + k + 2u);
++#endif
+     }
+     Manifold mf;
+     mf.colliderA = pair.colliderA;
+@@ -1338,7 +1348,9 @@
+         (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
+     if (bothSleep)
+     {
+-        STORE_CONTACT(curOff + i, c);
++        #if !defined(ENGINE_INLINE_NARROWPHASE_WARM)
++    STORE_CONTACT(curOff + i, c);
++#endif
+         return c;
+     }
+     if (reused)
+@@ -1477,7 +1489,9 @@
+     c.lambdaN *= p.alpha * p.gamma;
+     c.lambdaT1 *= p.alpha * p.gamma;
+     c.lambdaT2 *= p.alpha * p.gamma;
++    #if !defined(ENGINE_INLINE_NARROWPHASE_WARM)
+     STORE_CONTACT(curOff + i, c);
++#endif
+     return c;
+ }
+ 
+--- a/engine/crates/engine-webgpu/build.rs
++++ b/engine/crates/engine-webgpu/build.rs
+@@ -6,6 +6,7 @@
+ /// Same world_step entries as `engine-metal`, minus `broadphase_grid` (thin wrapper;
+ /// slangc SIGSEGV on SPIR-V — runtime aliases to `broadphase_query`).
+ const WORLD_ENTRIES: &[&str] = &[
++    "narrowphase_initialized_persistent",
+     "solve_primal_sparse",
+     "solve_primal_sparse_compact",
+     "solve_primal_sparse_persistent",
+@@ -88,6 +89,7 @@
+     let world = slang_root.join("kernels/world_step.slang");
+     let compact = slang_root.join("kernels/compact_solve.slang");
+     let persistent = slang_root.join("kernels/persistent_solve.slang");
++    let initialized = slang_root.join("kernels/initialized_narrowphase.slang");
+     let abi = slang_root.join("kernels/abi_probe.slang");
+     compile(
+         &abi,
+@@ -102,7 +104,9 @@
+     for entry in WORLD_ENTRIES {
+         let dest = out.join(format!("{entry}.spv"));
+         match compile(
+-            if entry.ends_with("_persistent") {
++            if *entry == "narrowphase_initialized_persistent" {
++                &initialized
++            } else if entry.ends_with("_persistent") {
+                 &persistent
+             } else if entry.ends_with("_compact")
+                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+@@ -153,7 +157,9 @@
+     {
+         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
+         match compile_with_defines(
+-            if entry.ends_with("_persistent") {
++            if *entry == "narrowphase_initialized_persistent" {
++                &initialized
++            } else if entry.ends_with("_persistent") {
+                 &persistent
+             } else if entry.ends_with("_compact")
+                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+--- a/engine/crates/engine-webgpu/src/gpu.rs
++++ b/engine/crates/engine-webgpu/src/gpu.rs
+@@ -228,7 +228,7 @@
+         let shaders = crate::WebGpuWorld::compile_shaders_report();
+         let mut pipes = HashMap::new();
+         for (name, canonical) in &shaders {
+-            if name.ends_with("_persistent") {
++            if name.ends_with("_persistent") && !(persistent_contacts && name == "narrowphase_initialized_persistent") {
+                 continue;
+             }
+             let entry = if persistent_contacts {
+--- a/engine/crates/engine-webgpu/src/gpu_tests.rs
++++ b/engine/crates/engine-webgpu/src/gpu_tests.rs
+@@ -3257,17 +3257,22 @@
+ /// the independent fixture expectations, without losing or duplicating warm starts.
+ #[test]
+ fn contact_reuse_preserves_mixed_pairs_history_halves_and_warmstart() {
+-    mixed_contact_reuse_fixture(false, false);
++    mixed_contact_reuse_fixture(false, false, false);
+ }
+ 
+ #[test]
+ fn persistent_contacts_preserve_reuse_features_generation_and_both_history_halves() {
+-    mixed_contact_reuse_fixture(true, false);
++    mixed_contact_reuse_fixture(true, false, false);
++}
++
++#[test]
++fn narrowphase_initialization_preserves_mixed_pairs_and_exactly_once_warmstart() {
++    mixed_contact_reuse_fixture(true, false, true);
+ }
+ 
+ #[test]
+ fn persistent_fused_warmstart_preserves_history_and_refreshes_pair_cache() {
+-    mixed_contact_reuse_fixture(true, true);
++    mixed_contact_reuse_fixture(true, true, false);
+ }
+ 
+ #[test]
+@@ -3477,7 +3482,7 @@
+     }
+ }
+ 
+-fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
++fn mixed_contact_reuse_fixture(persistent: bool, fused: bool, initialized: bool) {
+     let mut sim = if persistent {
+         WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
+     } else {
+@@ -3582,7 +3587,7 @@
+     for parity in 0..2 {
+         for reuse in [false, true] {
+             let context =
+-                format!("persistent={persistent}, fused={fused}, parity={parity}, reuse={reuse}");
++                format!("persistent={persistent}, fused={fused}, initialized={initialized}, parity={parity}, reuse={reuse}");
+             sim.contacts_parity = parity;
+             sim.params.flags = (sim.params.flags & !1) | u32::from(reuse);
+             sim.write_host_uniforms();
+@@ -3624,9 +3629,9 @@
+                     previous.len() as u64,
+                     None,
+                 );
+-                sim.disp(&mut pass, "narrowphase", count as u64, None);
++                sim.disp(&mut pass, if initialized { "narrowphase_initialized_persistent" } else { "narrowphase" }, count as u64, None);
+                 sim.disp(&mut pass, "write_work_args", 64, None);
+-                sim.disp_work(
++                if !initialized { sim.disp_work(
+                     &mut pass,
+                     if fused {
+                         "persist_manifolds_compact"
+@@ -3635,7 +3640,7 @@
+                     },
+                     if fused { 66 } else { 65 },
+                     None,
+-                );
++                ); }
+             }
+             sim.queue.submit([enc.finish()]);
+             let c = download::<StepCounters>(&sim, 7, 0, 1)[0];
+@@ -3705,6 +3710,17 @@
+                     "{context}, pair {id}: expected one sphere point or four distinct rectangular support corners");
+                 let reused = reuse && id % 5 != 0 && id % 4 != 0;
+                 for point in points {
++                    if id % 5 == 0 {
++                        // No prior manifold exists for this pair. Geometry alone
++                        // is insufficient: cold support needs the mass/dt² floor.
++                        let expected_kn = 1.0 / (sim.params.dt * sim.params.dt);
++                        assert_eq!([point.lambda_n, point.lambda_t1, point.lambda_t2], [0.0; 3],
++                            "{context}, cold pair {id}: forces must start at zero; unrelated history leaked into a new contact");
++                        assert!((point.k_n - expected_kn).abs() <= expected_kn * 1e-6,
++                            "{context}, cold pair {id}: normal penalty={} expected mass/dt²={expected_kn}; contact initialization was omitted or applied with the wrong body mass", point.k_n);
++                        assert_eq!([point.k_t, point._pad[2]], [1.0; 2],
++                            "{context}, cold pair {id}: tangent penalties must start independently at one, without inheriting normal stiffness");
++                    }
+                     assert_eq!(point._pad[1].to_bits(), if reused { 20 } else { 22 },
+                         "{context}, pair {id}: stale-generation and cold pairs must regenerate; eligible pairs must retain their generation");
+                     assert!(
+--- a/engine/crates/engine-webgpu/demo.html
++++ b/engine/crates/engine-webgpu/demo.html
+@@ -94,6 +94,9 @@
+     // Other scenes remain opt-in; compact/canonical retain comparison controls.
+     const persistentContacts = qs.get('contacts') === 'persistent' || (scene === 'ring110k' && !qs.has('contacts'));
+     const compactContacts = persistentContacts || qs.get('contacts') === 'compact' || (scene === 'ring110k' && !qs.has('contacts'));
++    const inlineNarrowphase = qs.get('persistence') === 'narrowphase';
++    if (inlineNarrowphase && (scene !== 'ring110k' || !persistentContacts))
++      throw new Error('narrowphase initialization trial requires the all-awake persistent ring');
+     const manifoldPersistence = qs.get('persistence') === 'manifold';
+     const fusedPersistence = compactContacts && qs.get('persistence') === 'fused';
+     const detailedProfile = qs.get('profile') === 'detail';
+@@ -722,7 +725,7 @@
+     device.queue.writeBuffer(bufs[2], 0, colBytes);
+ 
+     const persistentEntries = {
+-      narrowphase: 'narrowphase_persistent', contact_hash_insert: 'contact_hash_insert_persistent',
++      narrowphase: inlineNarrowphase ? 'narrowphase_initialized_persistent' : 'narrowphase_persistent', contact_hash_insert: 'contact_hash_insert_persistent',
+       persist_contacts: 'persist_contacts_persistent', persist_manifolds: 'persist_manifolds_persistent',
+       persist_manifolds_compact: 'persist_manifolds_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
+       solve_primal_sparse_compact: 'solve_primal_sparse_persistent',
+@@ -939,7 +942,7 @@
+         if (detailedProfile) nextPhase();
+       }
+       if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
+-      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
++      if (!inlineNarrowphase) dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+       nextPhase();
+       disp(pass, 'build_awake_list', nBodies);
+       disp(pass, 'write_work_args', 64);
+@@ -1084,7 +1087,7 @@
+         totalBodies: bodyCount,
+         dynamicBodies: bodyCount - 1,
+         iterations: params.iterations,
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact",
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: inlineNarrowphase ? "narrowphase" : fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact",
+         dt: params.dt,
+         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
+         userAgent: navigator.userAgent,
+@@ -1456,7 +1459,7 @@
+             const report = {
+               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+               coloring: incrementalColors ? "reuse" : "rebuild",
+-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", colors: last.color,
++              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: inlineNarrowphase ? "narrowphase" : fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", colors: last.color,
+               contacts: last.contact, awake: last.awake, overflow: last.overflow,
+               settle: pre, initialMaxY,
+             };
+@@ -1526,7 +1529,7 @@
+       const report = {
+         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+         coloring: incrementalColors ? "reuse" : "rebuild",
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", colors: last.color,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: inlineNarrowphase ? "narrowphase" : fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", colors: last.color,
+         contacts: last.contact, awake: last.awake, overflow: last.overflow,
+       };
+       console.log('BENCH', JSON.stringify(report));
+--- a/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
++++ b/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
+@@ -64,7 +64,7 @@
+     lead: 0, scene: 'ring110k', bodyCount: 110442,
+     params: {iterations: 4, dt: 1/60}, stablePacking: true, persistentContacts: true,
+     compactContacts: true, sparseStart: 32, parallelColorPrefix:false, physicalAdjacency: true, spatialOrder: false,
+-    fusedPersistence: false, manifoldPersistence: false, info: {}, navigator: {userAgent: 'test'},
++    inlineNarrowphase: false, fusedPersistence: false, manifoldPersistence: false, info: {}, navigator: {userAgent: 'test'},
+     last: {awake: 110441}, submitPhysics() {}, device: {queue: {async onSubmittedWorkDone() {}}},
+     async readCounters() { assert.equal(measuring, false); events.push('counters'); },
+     async readColorBuckets() { assert.equal(measuring, false); events.push('buckets'); return [60000,50441]; },
+--- a/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
++++ b/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
+@@ -43,7 +43,7 @@
+ // wrong alias can bind 32-byte metadata to a shader expecting 128-byte contacts;
+ // WebGPU robust access may hide that mistake as missing collision work.
+ for (const [query, expectedMode] of [
+-  ['?scene=ring110k', 'persistent'], ['?scene=gables506k', 'canonical'],
++  ['?scene=ring110k', 'persistent'], ['?scene=ring110k&persistence=narrowphase', 'persistent'], ['?scene=gables506k', 'canonical'],
+   ['?scene=ring110k&contacts=canonical', 'canonical'],
+   ['?scene=ring110k&contacts=compact', 'compact'],
+   ['?scene=gables506k&contacts=persistent', 'persistent'],
+@@ -66,7 +66,7 @@
+     assert.equal(output.sizes[27],expectedMode === 'persistent' ? cap.maxContacts*2*64 : expectedMode === 'compact' ? cap.maxContacts*64 : 64,
+       'Persistent solver points must allocate both halves; single-frame scratch is insufficient after the first swap.');
+     const expected = expectedMode === 'persistent'
+-      ? ['narrowphase_persistent','contact_hash_insert_persistent','persist_contacts_persistent',
++      ? [query.includes('persistence=narrowphase') ? 'narrowphase_initialized_persistent' : 'narrowphase_persistent','contact_hash_insert_persistent','persist_contacts_persistent',
+         'persist_manifolds_persistent','pack_solver_pairs_persistent','solve_primal_color_persistent','solve_dual_persistent']
+       : ['narrowphase','contact_hash_insert','persist_contacts','persist_manifolds_compact',
+         'pack_solver_contacts','solve_primal_color_compact','solve_dual_compact'];
+@@ -74,12 +74,13 @@
+   });
+ }
+ 
+-for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', 'persistent-fused']) {
++for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', 'persistent-fused', 'persistent-inline']) {
+   for (const profiling of [false, true]) {
+     for (const [detailedProfile,reuse,graphProfile] of [[false,true,false],[true,true,false],[true,false,false],[false,true,true],[false,false,true]]) {
+     for (const [sparseStart,parallelColorPrefix] of [[8,false],[32,false],[8,true]]) {
+     test(`shipped encoder preserves persistence dependencies (${mode}, profiling=${profiling}, detail=${detailedProfile}, graph=${graphProfile}, reuse=${reuse}, sparseStart=${sparseStart}, parallelPrefix=${parallelColorPrefix})`, () => {
+       const persistentContacts = mode.startsWith('persistent');
++      const inlineNarrowphase = mode === 'persistent-inline';
+       const fused = mode === 'fused' || mode === 'persistent-fused';
+       const trace = [], passes = [];
+       const pass = () => {
+@@ -96,7 +97,7 @@
+         cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
+-        manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
++        inlineNarrowphase, manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
+         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
+         sleepRounds:8, PASS_ALIGN:256, bufs:[],
+         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+@@ -108,12 +109,14 @@
+       runInNewContext(`${source}\nencodeStep(encoder, false, begin)`, context);
+       const positions = name => trace.flatMap((call,i) => call.name === name ? [i] : []);
+       const persistence = fused ? 'persist_manifolds_compact' : mode === 'manifold' ? 'persist_manifolds' : 'persist_contacts';
+-      assert.equal(positions(persistence).length,1,'Warm-start must run once, not decay forces twice.');
+-      const at = positions(persistence)[0];
++      assert.equal(positions(persistence).length,inlineNarrowphase ? 0 : 1,'Warm-start must run exactly once: inline initialization must not be followed by a second decay pass.');
++      const at = inlineNarrowphase ? positions('narrowphase')[0] : positions(persistence)[0];
++      if (!inlineNarrowphase) {
+       assert.equal(trace[at].slot,(fused || mode === 'manifold') ? 66 : 65,
+         'Persistence dispatch must use the current GPU manifold/contact count, not a stale CPU estimate.');
+       assert.ok(positions('narrowphase')[0] < at && at < positions('predict_bodies')[0],
+         'Warm start evaluates current step-start poses after collision generation and before prediction.');
++      }
+       const clears = positions('clear_solver_contacts'), packs = positions('pack_solver_contacts');
+       if (persistentContacts) {
+         assert.equal(clears.length,0,'Persistent points are initialized by narrowphase; clearing here destroys current ownership and warm-start state.');
+@@ -156,7 +159,7 @@
+         assert.equal(phase('contact_hash_clear'),3,'Hash clearing must have its own timestamp interval.');
+         assert.equal(phase('contact_hash_insert'),4,'Hash insertion must have its own timestamp interval.');
+         assert.equal(phase('narrowphase'),reuse?5:2,'Narrowphase timing must exclude hash/reference work.');
+-        assert.equal(phase(persistence),reuse?6:5,'Persistence must not be charged to hash insertion.');
++        if (!inlineNarrowphase) assert.equal(phase(persistence),reuse?6:5,'Persistence must not be charged to hash insertion.');
+         if(reuse) assert.equal(phase('update_refs'),2);
+       }
+       if (profiling && graphProfile) {
+@@ -182,3 +185,11 @@
+ 
+ }
+ 
++
++for (const query of ['?scene=columns&persistence=narrowphase', '?scene=gables506k&contacts=persistent&persistence=narrowphase', '?scene=ring110k&contacts=canonical&persistence=narrowphase']) {
++  test(`inline initialization rejects unsupported sleeping/storage configurations (${query})`, () => {
++    const mode=html.slice(html.indexOf('const qs ='),html.indexOf('const regressionKind ='));
++    assert.throws(()=>runInNewContext(mode,{URLSearchParams,location:{search:query}}), /requires the all-awake persistent ring/,
++      'Inline warm initialization must not silently run with sleeping bodies or the canonical contact ABI.');
++  });
++}
+--- /dev/null
++++ b/engine/slang/kernels/initialized_narrowphase.slang
+@@ -0,0 +1,6 @@
++// Trial for all-awake scenes: initialize contacts before their first store.
++#define ENGINE_COMPACT_SOLVE 1
++#define ENGINE_PERSISTENT_CONTACTS 1
++#define ENGINE_INLINE_NARROWPHASE_WARM 1
++#define narrowphase narrowphase_initialized_persistent
++#include "world_step.slang"

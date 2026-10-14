@@ -1,0 +1,225 @@
+{
+  "classification": "Post-reboot full ring compact/canonical/compact comparison; about 10% lower physics wall time, still below 120 FPS.",
+  "conditions": {
+    "hardware": "Apple M3 Max 128 GB",
+    "browser": "Chrome 155 Codex in-app, apple metal-3",
+    "overlappingGpuTestsOrCompilerWork": false,
+    "sequentialFreshScenes": true
+  },
+  "protocol": {
+    "name": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "untimedStepsPerRound": 3,
+    "stepsPerBatch": 10,
+    "rounds": 2,
+    "batchesPerRound": 5,
+    "wallStatistic": "minimum round median",
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "awake": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "overflow": 0,
+    "packing": "stable",
+    "adjacency": "physical"
+  },
+  "runs": [
+    {
+      "layout": "compact64",
+      "wallMs": 17.93,
+      "roundMediansMs": [
+        17.93,
+        18.29
+      ],
+      "batchMeansMs": [
+        [
+          17.52,
+          17.73,
+          17.93,
+          18.2,
+          18.37
+        ],
+        [
+          18.37,
+          18.23,
+          18.2,
+          18.3,
+          18.29
+        ]
+      ],
+      "contacts": 1170124,
+      "colors": 11,
+      "primalMs": 5.373952,
+      "dualMs": 2.686976,
+      "measuredAt": "2026-10-14T10:57:10.039Z"
+    },
+    {
+      "layout": "canonical128",
+      "wallMs": 19.98,
+      "roundMediansMs": [
+        20.2,
+        19.98
+      ],
+      "batchMeansMs": [
+        [
+          19.92,
+          20.2,
+          20.53,
+          20.74,
+          20.01
+        ],
+        [
+          20.03,
+          19.76,
+          19.98,
+          20.18,
+          19.78
+        ]
+      ],
+      "contacts": 1169639,
+      "colors": 13,
+      "primalMs": 6.488064,
+      "dualMs": 3.60448,
+      "measuredAt": "2026-10-14T10:57:37.330Z"
+    },
+    {
+      "layout": "compact64",
+      "wallMs": 17.9,
+      "roundMediansMs": [
+        18.25,
+        17.9
+      ],
+      "batchMeansMs": [
+        [
+          17.76,
+          17.68,
+          18.29,
+          18.25,
+          18.52
+        ],
+        [
+          18.03,
+          17.7,
+          17.7,
+          17.9,
+          18.12
+        ]
+      ],
+      "contacts": 1170124,
+      "colors": 11,
+      "primalMs": 5.439488,
+      "dualMs": 2.686976,
+      "measuredAt": "2026-10-14T10:57:59.007Z"
+    }
+  ],
+  "precision": "CPU batch means rounded to 0.01 ms. Phase times are medians from later split-pass steps, not the throughput window. Colors and contacts vary by numerical trajectory.",
+  "memoryTradeoff": "Adds 64 bytes of scratch per contact capacity: 128 MiB for ring; canonical persistence storage retained.",
+  "sourceSha256": {
+    "engine/crates/engine-webgpu/demo.html": "4d017264ea754b360373217ee400fe9c1e0af604d58301b68d6af0de8c54d5d8",
+    "engine/slang/kernels/world_step.slang": "330f7274a4ce43a08980a81b85182e803fd4ad17554dff8373e866e03dfbb55a",
+    "engine/slang/kernels/compact_solve.slang": "a739fde32aa3cb7b4e4d87a59b594ce8bf90b8d8db2ac1b9e1c04453fb0bc40c",
+    "engine/crates/engine-webgpu/generated/wgsl/solve_primal_color_compact.wgsl": "af9ac8df78d515fb2f52bd57fe1c22684442ed8cbda43e8f40b0ccb594911b0a",
+    "engine/crates/engine-webgpu/generated/wgsl/solve_dual_compact.wgsl": "c0c860b720baa78faee529dfa24541874384ef2344dde878f55581460e53b360"
+  },
+  "correctness": {
+    "browserCompactPhysicalRing480Reset": {
+      "passed": true,
+      "initialContacts": 1284737,
+      "finalMeanFlankDrift": 1.1323928920263766,
+      "finalBall": [
+        -0.09077981859445572,
+        8.496644020080566,
+        105.17994689941406
+      ]
+    },
+    "nativeCompactPhysical": {
+      "libraryTests": 26,
+      "columnsTests": 4,
+      "gables240": {
+        "passed": true,
+        "unhitMeanDrift": 0.118626,
+        "unhitMaxDrift": 0.407622
+      },
+      "ring480": {
+        "passed": true,
+        "meanFlankDrift": 1.1597,
+        "ball": [
+          -0.026785998,
+          8.470856,
+          105.590324
+        ]
+      }
+    },
+    "expandedCompactPublicationTest": "passed all five endpoint scenarios across both buffer halves",
+    "metal": {
+      "library": 3,
+      "avbdSlice": 7,
+      "columnsParity": 3,
+      "accuracyOracles": 5,
+      "maxColumnsPositionDelta": 0.000779
+    },
+    "javascript": {
+      "timingAndProfiling": 10,
+      "sceneParity": 5
+    },
+    "nativeCanonicalPhysical": {
+      "columnsTests": 4,
+      "gables240": {
+        "passed": true,
+        "awake": 505922,
+        "unhitMeanDrift": 0.118615,
+        "unhitMaxDrift": 0.508853
+      }
+    }
+  },
+  "allBatchesWithin120Hz": false,
+  "budgetMs": 8.333333333333334,
+  "shippedDefaultVerification": {
+    "measuredAt": "2026-10-14T11:03:14.674Z",
+    "url": "http://127.0.0.1:8765/demo.html?scene=ring110k&check=ring&bench=1",
+    "passedRing480AndReset": true,
+    "wallMs": 18.1,
+    "roundMediansMs": [
+      18.18,
+      18.1
+    ],
+    "batchMeansMs": [
+      [
+        17.88,
+        18.12,
+        18.34,
+        18.18,
+        18.27
+      ],
+      [
+        17.75,
+        18.24,
+        18.17,
+        18.1,
+        18.05
+      ]
+    ],
+    "workload": {
+      "start": {
+        "contact": 1182327,
+        "candidate": 229948,
+        "awake": 110441,
+        "color": 16,
+        "manifold": 226838,
+        "overflow": 0
+      },
+      "end": {
+        "contact": 1170124,
+        "candidate": 253348,
+        "awake": 110441,
+        "color": 11,
+        "manifold": 244332,
+        "overflow": 0
+      }
+    },
+    "sourceSha256": {
+      "engine/crates/engine-webgpu/demo.html": "a6e3219650ed7ac1078d242722618afd91b71d0f66b94ee24ac45fbbf46c901f",
+      "engine/crates/engine-webgpu/physics-benchmark.mjs": "468bffcc46348108548a48448e04f93ff68478c86339795eb743b5dab61c22b7"
+    }
+  }
+}

@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGPU dispatch overhead diagnostic</title>
+<style>body{font:16px system-ui;margin:2rem;background:#15171c;color:#eceff5}button{font:inherit;padding:.5rem}pre{white-space:pre-wrap}</style>
+<h1>WebGPU dispatch overhead diagnostic</h1>
+<p>Measures trivial GPU work with 0, 1, 32 and 128 dispatches, then 128 separate passes and a 32 MiB streaming buffer. Each case verifies its output. This is a driver/browser diagnostic, not a physics benchmark.</p>
+<p id="visibility"></p><button id="run">Run diagnostic</button><pre id="status">Ready</pre>
+<script type="module">
+import { measurePhysicsBatches } from './physics-benchmark.mjs';
+const button = document.querySelector('#run'), status = document.querySelector('#status');
+const visibility=document.querySelector('#visibility');
+const showVisibility=()=>{visibility.textContent=`Page: ${document.visibilityState}; focused: ${document.hasFocus()}`;};
+showVisibility();document.addEventListener('visibilitychange',showVisibility);window.addEventListener('focus',showVisibility);window.addEventListener('blur',showVisibility);
+button.onclick = async () => {
+  button.disabled = true;
+  let device;
+  try {
+    const adapter = await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
+    if (!adapter) throw new Error('No hardware WebGPU adapter available');
+    device = await adapter.requestDevice();
+    device.addEventListener('uncapturederror', event => { status.textContent += `\nGPU ERROR: ${event.error.message}`; });
+    const groupSize=Number(new URLSearchParams(location.search).get('group')||64);
+    if(![64,256].includes(groupSize)) throw new Error('group must be 64 or 256');
+    const shaderResponse=await fetch('./dispatch-diagnostic.wgsl');
+    if(!shaderResponse.ok) throw new Error(`Diagnostic shader load failed: ${shaderResponse.status}`);
+    const pipeline = await device.createComputePipelineAsync({layout:'auto',compute:{module:device.createShaderModule({code:await shaderResponse.text()}),entryPoint:'main',constants:{groupSize}}});
+    const results=[];
+    const pageState={visibility:document.visibilityState,focused:document.hasFocus()};
+    for(const [dispatches,splitPasses,elements] of [[0,false,64],[1,false,64],[32,false,64],[128,false,64],[128,true,64],[1,false,8388608],[4,false,8388608],[4,true,8388608]]) {
+      device.pushErrorScope('validation');
+      const bytes=Math.max(elements,groupSize)*4;
+      const lanes=bytes/4;
+      const output=device.createBuffer({size:bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+      const readback=device.createBuffer({size:bytes,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+      const bind=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]});
+      status.textContent=`Measuring ${dispatches} dispatches, ${splitPasses?'separate':'single'} pass, ${bytes} bytes…`;
+      let submittedSteps=0;
+      const step=()=>{
+        const enc=device.createCommandEncoder();
+        let pass=enc.beginComputePass();
+        pass.setPipeline(pipeline);pass.setBindGroup(0,bind);
+        for(let i=0;i<dispatches;i++) {
+          if(splitPasses && i>0) {pass.end();pass=enc.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,bind);}
+          pass.dispatchWorkgroups(Math.min(lanes/groupSize,32768),Math.ceil(lanes/groupSize/32768));
+        }
+        pass.end();device.queue.submit([enc.finish()]);submittedSteps++;
+      };
+      for(let i=0;i<10;i++) step();
+      const timing=await measurePhysicsBatches({step,drain:()=>device.queue.onSubmittedWorkDone()});
+      const enc=device.createCommandEncoder();enc.copyBufferToBuffer(output,0,readback,0,bytes);device.queue.submit([enc.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const data=new Uint32Array(readback.getMappedRange());
+      const expected=submittedSteps*dispatches;
+      for(let i=0;i<data.length;i++) if(data[i]!==expected) throw new Error(`Dispatch coverage failure: ${dispatches} dispatches, split=${splitPasses}, lane ${i}: got ${data[i]}, expected ${expected}. Timings are invalid if work is omitted.`);
+      readback.unmap();
+      const validationError=await device.popErrorScope();
+      if(validationError) throw new Error(`GPU validation invalidates diagnostic: ${validationError.message}`);
+      results.push({dispatches,splitPasses,bytes,submittedSteps,verifiedLanes:lanes,groupSize,expected,rounds:timing.rounds,wallMs:timing.wallMs,protocol:timing.protocol,
+        logicalReadWriteGBps:dispatches*bytes*2/(timing.wallMs*1e6)});
+      output.destroy();readback.destroy();
+    }
+    const report={pageState,endPageState:{visibility:document.visibilityState,focused:document.hasFocus()},measuredAt:new Date().toISOString(),adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture},userAgent:navigator.userAgent,results};
+    status.textContent=JSON.stringify(report,null,2);console.log('DISPATCH_DIAGNOSTIC',JSON.stringify(report));
+  } catch(error) {status.textContent=`FAILED: ${error.stack||error}`;console.error(error);}
+  finally {device?.destroy();button.disabled=false;}
+};
+</script>

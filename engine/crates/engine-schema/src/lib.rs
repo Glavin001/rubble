@@ -207,6 +207,7 @@ pub struct Contact {
     pub lambda_t2: f32,
     pub c0_t1: f32,
     pub c0_t2: f32,
+    /// GPU contact metadata: stick flag, generation bits, second tangent penalty.
     pub _pad: [f32; 3],
 }
 
@@ -261,6 +262,7 @@ pub struct StepCounters {
     pub wake_events: u32,
     pub iteration: u32,
     pub manifold_count: u32,
+    /// Number of bodies scheduled for incremental recoloring (GPU ABI byte 52).
     pub _pad0: u32,
     pub _pad1: u32,
     pub _pad2: u32,

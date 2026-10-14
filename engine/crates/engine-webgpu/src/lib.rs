@@ -62,7 +62,19 @@ impl WebGpuWorld {
             .map(|(n, w)| {
                 (
                     (*n).to_string(),
-                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(w))),
+                    Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
+                        .starts_with("solve_primal_sparse")
+                    {
+                        // These entries access buffers only. Slang over-lowers
+                        // DeviceMemoryBarrierWithGroupSync to a texture barrier
+                        // unavailable in the supported WGSL/Naga version.
+                        w.replace(
+                            "storageBarrier(); textureBarrier(); workgroupBarrier();",
+                            "storageBarrier(); workgroupBarrier();",
+                        )
+                    } else {
+                        w.to_string()
+                    }))),
                 )
             })
             .collect()
@@ -97,10 +109,7 @@ impl WebGpuWorld {
                 // exits the switch and the loop increments forever (GPU hang).
                 Ok(cap_loop_iterations(&fix_naga_loop_exits(&wgsl)))
             })();
-            out.push((
-                (*name).to_string(),
-                result.map_err(|e| format!("{e:#}")),
-            ));
+            out.push(((*name).to_string(), result.map_err(|e| format!("{e:#}"))));
         }
         out
     }
@@ -233,9 +242,13 @@ fn fix_naga_loop_exits(src: &str) -> String {
             cursor = switch_at + "switch 0i".len();
             continue;
         }
-        let Some(open_rel) = src[switch_at..].find('{') else { break };
+        let Some(open_rel) = src[switch_at..].find('{') else {
+            break;
+        };
         let switch_open = switch_at + open_rel;
-        let Some(switch_close) = matching_brace(src, switch_open) else { break };
+        let Some(switch_close) = matching_brace(src, switch_open) else {
+            break;
+        };
         let default_at = match src[switch_at..switch_close].find("default:") {
             Some(p) => switch_at + p,
             None => {
@@ -243,9 +256,13 @@ fn fix_naga_loop_exits(src: &str) -> String {
                 continue;
             }
         };
-        let Some(def_rel) = src[default_at..].find('{') else { break };
+        let Some(def_rel) = src[default_at..].find('{') else {
+            break;
+        };
         let def_open = default_at + def_rel;
-        let Some(def_close) = matching_brace(src, def_open) else { break };
+        let Some(def_close) = matching_brace(src, def_open) else {
+            break;
+        };
         let body = &src[def_open + 1..def_close];
         let Some(br) = first_else_break(body) else {
             cursor = switch_close;
@@ -400,7 +417,10 @@ mod tests {
     #[test]
     fn direct_wgsl_covers_every_entry_and_validates() {
         let direct = WebGpuWorld::direct_shaders();
-        for name in WebGpuWorld::entry_names().iter().filter(|n| **n != "abi_roundtrip") {
+        for name in WebGpuWorld::entry_names()
+            .iter()
+            .filter(|n| **n != "abi_roundtrip")
+        {
             assert!(
                 direct.iter().any(|(n, _)| n == name),
                 "{name}: missing direct WGSL"
@@ -410,7 +430,11 @@ mod tests {
             let wgsl = &res.unwrap();
             let loops = direct.iter().find(|(n, _)| *n == name).unwrap().1;
             let raw = loops.matches("loop").count();
-            assert_eq!(raw, wgsl.matches("loopGuard").count() / 3, "{name}: uncapped loop");
+            assert_eq!(
+                raw,
+                wgsl.matches("loopGuard").count() / 3,
+                "{name}: uncapped loop"
+            );
             let module = naga::front::wgsl::parse_str(wgsl)
                 .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(wgsl)));
             naga::valid::Validator::new(
@@ -419,6 +443,431 @@ mod tests {
             )
             .validate(&module)
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn compact_primal_reads_64_byte_points_without_canonical_contact_binding() {
+        for name in ["solve_primal_color_compact", "solve_primal_one_compact"] {
+            let source = WebGpuWorld::compile_shaders_report()
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .expect("compact entry must be exported")
+                .1
+                .unwrap();
+            let module = naga::front::wgsl::parse_str(&source).unwrap();
+            let globals: Vec<_> = module.global_variables.iter().map(|(_, g)| g).collect();
+            assert!(!globals.iter().any(|g| g.binding.as_ref().is_some_and(|b| b.binding == 4)), "{name}: compact primal still reads canonical 128-byte contacts; hot-path traffic reduction was not compiled");
+            let points = globals
+                .iter()
+                .find(|g| g.binding.as_ref().is_some_and(|b| b.binding == 27))
+                .expect("compact point binding missing");
+            let naga::TypeInner::Array { base, stride, .. } = module.types[points.ty].inner else {
+                panic!("compact points must be an array");
+            };
+            assert_eq!(stride,64,"{name}: solver point stride changed; host allocations and bandwidth contract require 64 bytes");
+            let naga::TypeInner::Struct { ref members, span } = module.types[base].inner else {
+                panic!("compact points must be structs");
+            };
+            assert_eq!(span, 64);
+            assert_eq!(
+                members.iter().map(|m| m.offset).collect::<Vec<_>>(),
+                vec![0, 12, 16, 28, 32, 44, 48, 60],
+                "{name}: compact field offsets differ from the packing ABI"
+            );
+            assert!(
+                globals
+                    .iter()
+                    .filter(|g| matches!(g.space, naga::AddressSpace::Storage { .. }))
+                    .count()
+                    <= 10,
+                "{name}: exceeds browser storage-buffer budget"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_solvers_use_cached_body_pairs_without_collider_indirection() {
+        for name in [
+            "solve_primal_color_compact",
+            "solve_primal_one_compact",
+            "solve_dual_compact",
+        ] {
+            let source = WebGpuWorld::compile_shaders_report()
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .expect("compact entry must be exported")
+                .1
+                .unwrap();
+            let module = naga::front::wgsl::parse_str(&source).unwrap();
+            let globals: Vec<_> = module.global_variables.iter().map(|(_, g)| g).collect();
+            for (binding, resource) in [(2, "colliders"), (25, "canonical manifolds")] {
+                assert!(!globals.iter().any(|g| g.binding.as_ref().is_some_and(|b| b.binding == binding)),
+                    "{name}: still reads {resource}; cached solver pairs must remove collider-to-body lookups from every solver iteration");
+            }
+            let pairs = globals
+                .iter()
+                .find(|g| g.binding.as_ref().is_some_and(|b| b.binding == 28))
+                .expect("compact solver pair binding missing");
+            let naga::TypeInner::Array { base, stride, .. } = module.types[pairs.ty].inner else {
+                panic!("{name}: solver pairs must be an array");
+            };
+            assert_eq!(
+                stride, 32,
+                "{name}: solver pair stride differs from host allocation"
+            );
+            let naga::TypeInner::Struct { ref members, span } = module.types[base].inner else {
+                panic!("{name}: solver pairs must be structs");
+            };
+            assert_eq!(span, 32);
+            assert_eq!(members.iter().map(|m| m.offset).collect::<Vec<_>>(), vec![0,4,8,12,16,28],
+                "{name}: solver pair body IDs, point range, sphere flag or normal/friction offsets changed");
+        }
+    }
+
+    #[test]
+    fn persistent_contact_kernels_keep_hot_cold_layouts_and_omit_copyback() {
+        for name in [
+            "narrowphase_persistent",
+            "contact_hash_insert_persistent",
+            "persist_contacts_persistent",
+            "persist_manifolds_persistent",
+            "solve_primal_color_persistent",
+            "solve_dual_persistent",
+        ] {
+            let source = WebGpuWorld::compile_shaders_report()
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .expect("persistent entry must be exported")
+                .1
+                .unwrap();
+            let module = naga::front::wgsl::parse_str(&source).unwrap();
+            let globals: Vec<_> = module.global_variables.iter().map(|(_, g)| g).collect();
+            let solver = name.starts_with("solve_");
+            for (binding, expected_stride) in [(4, 32), (27, 64)] {
+                let view = globals
+                    .iter()
+                    .find(|g| g.binding.as_ref().is_some_and(|b| b.binding == binding));
+                if solver && binding == 4 {
+                    assert!(view.is_none(), "{name}: solver still accesses cold contact metadata/canonical copyback; persistent forces must remain in hot storage");
+                    continue;
+                }
+                let view =
+                    view.unwrap_or_else(|| panic!("{name}: missing contact binding {binding}"));
+                let naga::TypeInner::Array { base, stride, .. } = module.types[view.ty].inner
+                else {
+                    panic!("{name}: contact storage must be an array")
+                };
+                assert_eq!(
+                    stride, expected_stride,
+                    "{name}: binding {binding} stride disagrees with host allocation"
+                );
+                if binding == 4 {
+                    let naga::TypeInner::Struct { ref members, .. } = module.types[base].inner
+                    else {
+                        panic!("metadata must be a struct")
+                    };
+                    assert_eq!(
+                        members.iter().map(|m| m.offset).collect::<Vec<_>>(),
+                        vec![0, 4, 8, 12, 16, 28]
+                    );
+                    for field in [2, 3] {
+                        assert!(matches!(module.types[members[field].ty].inner,naga::TypeInner::Scalar(naga::Scalar {kind:naga::ScalarKind::Uint,width:4})),
+                            "{name}: feature/generation field {field} must retain all 32 unsigned bits independently of owner/reuse/stick flags");
+                    }
+                }
+            }
+            assert!(
+                globals
+                    .iter()
+                    .filter(|g| matches!(g.space, naga::AddressSpace::Storage { .. }))
+                    .count()
+                    <= 10,
+                "{name}: persistent layout exceeds the browser's ten storage-buffer budget"
+            );
+        }
+    }
+
+    #[test]
+    fn collision_clipping_uses_pointer_arguments_and_eight_vertex_scratch() {
+        for name in ["narrowphase"] {
+            let source = WebGpuWorld::compile_shaders_report()
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .expect("collision entry must be exported")
+                .1
+                .unwrap();
+            let module = naga::front::wgsl::parse_str(&source).expect("valid collision WGSL");
+            let clip = module
+                .functions
+                .iter()
+                .find(|(_, f)| {
+                    f.name
+                        .as_deref()
+                        .is_some_and(|n| n.starts_with("boxClipPoly"))
+                })
+                .expect("clipping function must be present")
+                .1;
+            for index in [0, 4] {
+                let naga::TypeInner::Pointer {
+                    base,
+                    space: naga::AddressSpace::Function,
+                } = module.types[clip.arguments[index].ty].inner
+                else {
+                    panic!("{name} clip argument {index}: array passed by value; four clipping planes must share local scratch without copying whole polygons");
+                };
+                let naga::TypeInner::Array {
+                    size: naga::ArraySize::Constant(size),
+                    ..
+                } = module.types[base].inner
+                else {
+                    panic!("{name}: clipping scratch must be a fixed vertex array");
+                };
+                assert_eq!(size.get(), 8,
+                    "{name}: four half-plane clips of a convex quad need exactly eight slots; smaller drops support points, larger increases shader scratch");
+            }
+        }
+    }
+
+    #[test]
+    fn production_contact_reuse_has_no_shared_diagnostic_counter_buffer() {
+        for name in ["update_refs", "narrowphase"] {
+            let shaders = WebGpuWorld::compile_shaders_report();
+            let source = shaders
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap()
+                .1
+                .as_ref()
+                .unwrap();
+            let module = naga::front::wgsl::parse_str(source).expect("valid reuse shader");
+            assert!(!module.global_variables.iter().any(|(_, global)|
+                global.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 21)),
+                "{name}: production contact reuse binds the shared scratch/statistics buffer. The removed hit/miss/generation diagnostics serialized every body/pair on six global atomic counters; keep optional instrumentation out of the default performance path.");
+        }
+    }
+
+    #[test]
+    fn sparse_color_barrier_lowering_preserves_buffer_visibility_and_has_no_textures() {
+        // Slang emits a texture barrier alongside storage/workgroup barriers.
+        // Removing it is legal ONLY while these entry points access no textures.
+        for (name, result) in WebGpuWorld::compile_shaders_report() {
+            if !name.starts_with("solve_primal_sparse") {
+                continue;
+            }
+            let source = result.unwrap();
+            let module = naga::front::wgsl::parse_str(&source).expect("valid sparse shader");
+            assert!(!module.types.iter().any(|(_,ty)| matches!(ty.inner,
+                naga::TypeInner::Image{..} | naga::TypeInner::Sampler{..})),
+                "{name}: texture resources invalidate the buffer-only barrier lowering; retain the appropriate texture synchronization before adding textures");
+            assert!(source.contains("storageBarrier(); workgroupBarrier();"),
+                "{name}: later colors depend on earlier pose writes; preserve storage visibility AND workgroup execution synchronization");
+            assert!(
+                !source.contains("textureBarrier"),
+                "{name}: unsupported Slang texture barrier escaped lowering"
+            );
+        }
+    }
+
+    #[test]
+    fn primal_topology_uses_plain_loads_and_writes_only_pose_fields() {
+        fn stores(block: &naga::Block, out: &mut Vec<naga::Handle<naga::Expression>>) {
+            for statement in block.iter() {
+                match statement {
+                    naga::Statement::Store { pointer, .. } => out.push(*pointer),
+                    naga::Statement::Block(b) => stores(b, out),
+                    naga::Statement::If { accept, reject, .. } => {
+                        stores(accept, out);
+                        stores(reject, out);
+                    }
+                    naga::Statement::Switch { cases, .. } => {
+                        for case in cases {
+                            stores(&case.body, out);
+                        }
+                    }
+                    naga::Statement::Loop {
+                        body, continuing, ..
+                    } => {
+                        stores(body, out);
+                        stores(continuing, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (name, source) in WebGpuWorld::compile_shaders_report()
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("solve_primal_"))
+        {
+            let source = source.unwrap();
+            let module = naga::front::wgsl::parse_str(&source).expect("valid primal WGSL");
+            for binding in if name.starts_with("solve_primal_color") {
+                &[14, 17][..]
+            } else {
+                &[14][..]
+            } {
+                let views: Vec<_> = module
+                    .global_variables
+                    .iter()
+                    .filter(|(_, g)| {
+                        g.binding
+                            .as_ref()
+                            .is_some_and(|b| b.group == 0 && b.binding == *binding)
+                    })
+                    .collect();
+                assert_eq!(views.len(), 1, "{name}: binding {binding} must retain exactly one topology view after entry-point elimination");
+                let naga::TypeInner::Array { base, .. } = module.types[views[0].1.ty].inner else {
+                    panic!("topology must remain a u32 array");
+                };
+                assert!(matches!(module.types[base].inner, naga::TypeInner::Scalar(_)),
+                    "{name}: binding {binding} still uses atomic topology loads inside every solver iteration; construction has finished before primal dispatch");
+            }
+            let mut pose_stores = 0;
+            for function in module
+                .functions
+                .iter()
+                .map(|(_, f)| f)
+                .chain(module.entry_points.iter().map(|e| &e.function))
+            {
+                let mut pointers = Vec::new();
+                stores(&function.body, &mut pointers);
+                for mut pointer in pointers {
+                    let mut member = None;
+                    loop {
+                        pointer = match function.expressions[pointer] {
+                            naga::Expression::AccessIndex { base, index } => {
+                                member = Some(index);
+                                base
+                            }
+                            naga::Expression::Access { base, .. } => base,
+                            _ => break,
+                        };
+                    }
+                    let naga::Expression::GlobalVariable(g) = function.expressions[pointer] else {
+                        continue;
+                    };
+                    let global = &module.global_variables[g];
+                    if !global
+                        .binding
+                        .as_ref()
+                        .is_some_and(|b| b.group == 0 && b.binding == 0)
+                    {
+                        continue;
+                    }
+                    let naga::TypeInner::Array { base, .. } = module.types[global.ty].inner else {
+                        panic!("body array ABI");
+                    };
+                    let naga::TypeInner::Struct { ref members, .. } = module.types[base].inner
+                    else {
+                        panic!("body struct ABI");
+                    };
+                    let field = member.map(|i| &members[i as usize]);
+                    assert!(field.is_some_and(|f| f.offset == 0 || f.offset == 16),
+                        "{name}: primal writes non-pose body field {:?}; full 112-byte BodyState stores waste bandwidth and risk overwriting unrelated state", field.and_then(|f| f.name.as_ref()));
+                    pose_stores += 1;
+                }
+            }
+            assert_eq!(
+                pose_stores, 2,
+                "{name}: publish exactly position and orientation after the Newton solve"
+            );
+        }
+    }
+
+    #[test]
+    fn count_only_kernels_do_not_load_unrelated_atomic_counters() {
+        // These kernels need immutable body/collider counts; reparent commands
+        // additionally read the contact count in their invalidation branch. Loading a
+        // whole StepCounters snapshot emits ten atomic reads for every body on
+        // WGSL, including counters being incremented by neighbouring threads.
+        // Check parsed IR rather than generated identifiers or text formatting.
+        let entries = [
+            "apply_commands",
+            "build_aabbs",
+            "broadphase_insert",
+            "broadphase_query",
+            "build_awake_list",
+            "extract_velocity_sleep",
+            "sleep_island_commit",
+            "ccd_classify",
+            "ccd_sweep",
+            "recompute_inertia",
+        ];
+        let shaders = WebGpuWorld::compile_shaders_report();
+        for name in entries {
+            let source = shaders
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("missing count-access regression kernel {name}"))
+                .1
+                .as_ref()
+                .unwrap();
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            let mut unexpected = Vec::new();
+            let mut atomic_offsets = Vec::new();
+            for function in module
+                .functions
+                .iter()
+                .map(|(_, f)| f)
+                .chain(module.entry_points.iter().map(|e| &e.function))
+            {
+                for (_, expr) in function.expressions.iter() {
+                    let naga::Expression::Load { pointer } = expr else {
+                        continue;
+                    };
+                    let naga::Expression::AccessIndex { index: member, .. } =
+                        function.expressions[*pointer]
+                    else {
+                        continue;
+                    };
+                    let mut root = *pointer;
+                    loop {
+                        root = match function.expressions[root] {
+                            naga::Expression::AccessIndex { base, .. }
+                            | naga::Expression::Access { base, .. } => base,
+                            _ => break,
+                        };
+                    }
+                    let naga::Expression::GlobalVariable(global) = function.expressions[root]
+                    else {
+                        continue;
+                    };
+                    let global = &module.global_variables[global];
+                    if !global
+                        .binding
+                        .as_ref()
+                        .is_some_and(|b| b.group == 0 && b.binding == 7)
+                    {
+                        continue;
+                    }
+                    let naga::TypeInner::Array { base, .. } = module.types[global.ty].inner else {
+                        panic!("{name}: counter buffer ABI is no longer an array");
+                    };
+                    let naga::TypeInner::Struct { ref members, .. } = module.types[base].inner
+                    else {
+                        panic!("{name}: counter buffer element is no longer a struct");
+                    };
+                    let field = &members[member as usize];
+                    if matches!(module.types[field.ty].inner, naga::TypeInner::Atomic(_)) {
+                        atomic_offsets.push(field.offset);
+                        unexpected.push(format!(
+                            "{} at byte {} in {}",
+                            field.name.as_deref().unwrap_or("unnamed counter"),
+                            field.offset,
+                            function.name.as_deref().unwrap_or("entry point")
+                        ));
+                    }
+                }
+            }
+            atomic_offsets.sort_unstable();
+            let expected = if name == "apply_commands" {
+                vec![8]
+            } else {
+                vec![]
+            };
+            assert_eq!(atomic_offsets, expected,
+                "{name}: unrelated atomic counter reads per invocation: {unexpected:?}. Read bodyCount/colliderCount directly; a full counter snapshot can cause GPU contention at 100k–506k scale. Atomic increments remain allowed.");
         }
     }
 }

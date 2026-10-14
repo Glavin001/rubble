@@ -48,11 +48,17 @@
       <div><span class="lbl">Max FPS</span> <strong class="val" id="maxFpsVal">—</strong><span class="sub">uncapped</span></div>
     </div>
     <div id="status" class="muted">starting…</div>
+    <div id="mode" class="muted" hidden></div>
     <div id="legend" class="muted">Keys 1 position tint, 2 awake/sleep, 3 speed. Friction μ 0.5. Drag to orbit, scroll to zoom, right-drag to pan.</div>
     <div id="warn"></div>
     <div id="err"></div>
   </div>
   <script type="module">
+    import { brickQuaternion, groundHalfExtent, boxInvInertia, sphereMassProperties, buildRing, buildGables } from "./scene-builders.mjs";
+    import { mortonSceneOrder, restoreSceneOrder } from "./spatial-order.mjs";
+    import { runRingRegression } from "./ring-regression.mjs";
+    import { runGablesRegression } from "./gables-regression.mjs";
+    import { measurePhysicsBatches, assertBenchmarkWorkload } from "./physics-benchmark.mjs?v=2";
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
@@ -71,22 +77,61 @@
 
     const qs = new URLSearchParams(location.search);
     const scene = qs.get('scene') || 'wall';
-    // Match engine-scenes `cap(bodies)`: contacts≥bodies·16, candidates≥bodies·32 (pow2).
-    // Ring 9k used to ship maxContacts=131k; Metal smash peaks ~90–150k → overflow 0x1 freeze.
-    // WebGPU maxComputeWorkgroupsPerDimension = 65535 ⇒ at most 65535×64 threads per
-    // dispatch. 2^22 threads → 65536 groups (columns crash). Cap pow2 sizes at 2^21.
-    const MAX_WG = 65535;
-    const MAX_DISPATCH_THREADS = MAX_WG * 64; // 4_193_920
-    const MAX_POW2_DISPATCH = 1 << 21; // 2_097_152 — largest pow2 with groups ≤ 32768
+    const benchmarkOnly = qs.get('bench') === 'only';
+    const benchmarkEnabled = qs.get('bench') === '1' || benchmarkOnly;
+    // Diagnostic switches retain identical scenes and solver iteration counts.
+    const incrementalColors = qs.get('coloring') !== 'rebuild';
+    // Ring-only measured default; sparse=32 retains the separate-color control.
+    const sparseStart = qs.has('sparse') ? Number(qs.get('sparse')) : scene === 'ring110k' ? 10 : 32;
+    if (!Number.isInteger(sparseStart) || sparseStart < 0 || sparseStart > 32)
+      throw new Error('sparse must be an integer color index from 0 through 32');
+    // One workgroup/color avoids the serial scan across thousands of tiles.
+    // Keep prefix=serial as an identical-order performance control.
+    const parallelColorPrefix = qs.get('prefix') !== 'serial';
+    const stablePacking = qs.get('packing') !== 'atomic';
+    // Full ring persistent/control/persistent: 12.76/14.75/12.71 ms on M3 Max.
+    // Persistent 64-byte hot + 32-byte cold history saves 256 MiB at ring capacity.
+    // Other scenes remain opt-in; compact/canonical retain comparison controls.
+    const persistentContacts = qs.get('contacts') === 'persistent' || (scene === 'ring110k' && !qs.has('contacts'));
+    const compactContacts = persistentContacts || qs.get('contacts') === 'compact' || (scene === 'ring110k' && !qs.has('contacts'));
+    const manifoldPersistence = qs.get('persistence') === 'manifold';
+    const fusedPersistence = compactContacts && qs.get('persistence') === 'fused';
+    const detailedProfile = qs.get('profile') === 'detail';
+    const graphProfile = qs.get('profile') === 'graph';
+    const spatialOrder = qs.get('order') === 'morton';
+    const physicalAdjacency = qs.get('adjacency') !== 'append';
+    const regressionKind = qs.get('check');
+    const regressionEnabled = ['ring', 'gables'].includes(regressionKind);
+    const regressionSteps = regressionKind === 'gables' ? 240 : 480;
+    if (regressionEnabled || benchmarkEnabled) {
+      const modeEl = document.getElementById('mode');
+      modeEl.hidden = false;
+      modeEl.append(regressionEnabled
+        ? `Automated check: rendering pauses during ${regressionSteps} physics steps, then stops after the result. `
+        : benchmarkOnly ? 'Physics benchmark: fixed lead-in and timing window, then stops. '
+        : 'Benchmark mode: playback pauses for measurement, then restarts. ');
+      const liveLink = document.createElement('a');
+      const liveUrl = new URL(location.href);
+      liveUrl.searchParams.delete('check');
+      liveUrl.searchParams.delete('bench');
+      liveLink.href = liveUrl.href;
+      liveLink.textContent = 'Open uninterrupted live demo';
+      liveLink.style.color = '#b8d7ff';
+      modeEl.append(liveLink);
+    }
+    // Allocate enough contacts for the benchmark, independently of dispatch size.
+    // Large dispatches tile across Y; the 2M default bounds memory for smaller scenes.
+    const DEFAULT_CONTACT_CAP = 1 << 21;
+    const MAX_WARM_HASH = 1 << 21; // ample slots for one entry per manifold
     const nextPow2Cap = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
     const sceneCap = (bodies, extras = {}) => {
       const b = nextPow2Cap(Math.max(bodies, 4096));
       return {
         maxBodies: b,
         maxColliders: nextPow2Cap(Math.max(bodies * 2, 8192)),
-        maxContacts: Math.min(nextPow2Cap(Math.max(bodies * 16, 32768)), MAX_POW2_DISPATCH),
+        maxContacts: Math.min(nextPow2Cap(Math.max(bodies * 16, 32768)), DEFAULT_CONTACT_CAP),
         maxJoints: extras.maxJoints ?? 64,
-        maxCandidates: Math.min(nextPow2Cap(Math.max(bodies * 32, 65536)), MAX_POW2_DISPATCH),
+        maxCandidates: Math.min(nextPow2Cap(Math.max(bodies * 32, 65536)), DEFAULT_CONTACT_CAP),
         maxColors: 32,
         maxCommands: 64,
         maxHull: 64,
@@ -103,13 +148,13 @@
       ring: {
         title: 'brick ring 9k, 4 iterations',
         lead: 60, iterations: 4, settled: false, sleepRounds: 8, friction: 0.5,
-        eye: [32, 22, 14], look: [0, 5, 0], far: 400, ground: 48,
+        eye: [32, 22, 14], look: [0, 5, 0], far: 400, ground: 22, flags: 1, sleepTime: 1e6,
         cap: sceneCap(16384), // contacts 262144 — was 131072 (overflow mid-smash)
       },
       gables: {
         title: 'brick gables 6.7k, 3 iterations',
         lead: 60, iterations: 3, settled: false, sleepRounds: 8, friction: 0.5,
-        eye: [0, 28, -40], look: [0, 6, 0], far: 400, ground: 80,
+        eye: [0, 28, -40], look: [0, 6, 0], far: 400, ground: 44, flags: 1,
         cap: sceneCap(16384),
       },
       pyramid: {
@@ -139,14 +184,14 @@
       ring110k: {
         title: 'brick ring 110k, 4 iterations',
         lead: 60, iterations: 4, settled: false, sleepRounds: 8, friction: 0.5,
-        eye: [140, 60, 40], look: [0, 12, 0], far: 2000, ground: 220,
+        eye: [140, 60, 40], look: [0, 12, 0], far: 2000, ground: 90, flags: 1, sleepTime: 1e6,
         cap: sceneCap(131072),
       },
       gables506k: {
         title: 'brick gables 506k, 3 iterations',
         lead: 60, iterations: 3, settled: false, sleepRounds: 8, friction: 0.5,
-        eye: [0, 80, -120], look: [0, 10, 0], far: 4000, ground: 600,
-        cap: sceneCap(524288),
+        eye: [0, 80, -120], look: [0, 10, 0], far: 4000, ground: 256, flags: 1, sleepTime: 1e6,
+        cap: { ...sceneCap(524288), maxContacts: 6 * 1048576, maxCandidates: 4 * 1048576 },
       },
     };
     const cfg = SCENES[scene];
@@ -162,6 +207,7 @@
     sceneSelect.addEventListener('change', () => {
       const next = new URL(location.href);
       next.searchParams.set('scene', sceneSelect.value);
+      next.searchParams.delete('check');
       if (sceneSelect.value !== 'pyramid') next.searchParams.delete('levels');
       location.href = next.href;
     });
@@ -217,12 +263,12 @@
 
     function bufferSizes() {
       const b = (n, stride) => n * stride;
-      const s = new Array(27).fill(256);
+      const s = new Array(29).fill(256);
       s[0] = b(cap.maxBodies * 2, 112);
       s[1] = b(cap.maxBodies, 112);
       s[2] = b(cap.maxColliders, 64);
       s[3] = b(64, 16);
-      s[4] = b(cap.maxContacts * 2, 128);
+      s[4] = b(cap.maxContacts * 2, persistentContacts ? 32 : 128);
       s[5] = b(cap.maxJoints, 256);
       s[6] = 256;
       s[7] = 256;
@@ -233,29 +279,35 @@
       s[12] = b(cap.maxBodies, 4);
       s[13] = b(cap.maxBodies + 1, 4);
       s[14] = (csrBase + cap.maxBodies + 1) * 4;
-      s[15] = b(cap.maxBodies * cap.maxColors, 4);
-      s[16] = b(cap.maxColors, 4);
+      s[15] = b(cap.maxBodies * (cap.maxColors + 2), 4);
+      s[16] = b(cap.maxColors * Math.max(1, Math.ceil(cap.maxBodies / 64)), 4);
       s[17] = b(cap.maxColors, 4);
       s[18] = b(cap.maxHull, 16);
       s[19] = 65536 * 4;
       s[20] = b(cap.maxBodies, 4);
       s[21] = 64 * 4;
       s[22] = 96 * PASS_ALIGN;
-      s[23] = b(Math.max(cap.maxColors, 64) * 3, 4);
+      s[23] = b(Math.max(cap.maxColors, 70) * 3, 4);
       s[24] = b(cap.maxColliders, 80);
       s[25] = b(cap.maxCandidates, 32);
       s[26] = b(cap.maxBodies, 32);
+      s[27] = compactContacts ? b(cap.maxContacts * (persistentContacts ? 2 : 1), 64) : 64;
+      s[28] = compactContacts ? b(cap.maxCandidates, 32) : 32;
       return s;
     }
 
     const K = [
       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
-      'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts',
+      'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
-      'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize',
-      'csr_scatter_contacts', 'csr_sort', 'init_colors', 'color_bodies',
-      'pack_color_lists', 'write_color_args', 'predict_bodies', 'solve_primal_color',
-      'solve_dual', 'extract_velocity_sleep', 'sleep_island_gate', 'sleep_island_commit',
+      'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
+      'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
+      'csr_scatter_contacts', 'csr_sort', 'csr_sort_append', 'init_colors', 'color_bodies',
+      'pack_color_lists', 'write_color_args', 'write_work_args', 'predict_bodies', 'solve_primal_color',
+      ...(sparseStart < 32 ? [compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse'] : []),
+      'count_color_tiles', 'prefix_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
+      ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
+      'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
     ];
 
     function bindingsOf(wgsl) {
@@ -500,6 +552,11 @@ struct VsOut {
     addEventListener('resize', configure);
 
     const sizes = bufferSizes();
+    console.log("GPU_LIMITS", JSON.stringify({ maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize, maxBufferSize: device.limits.maxBufferSize, contactCapacity: cap.maxContacts }));
+    for (const [i, size] of sizes.entries()) {
+      if (size > Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize))
+        throw new Error(`Scene buffer ${i} needs ${size} bytes; this adapter supports ${device.limits.maxStorageBufferBindingSize} bytes per storage binding`);
+    }
     const usage = (i) => {
       let u = GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
       u |= (i === 6 || i === 22) ? GPUBufferUsage.UNIFORM : GPUBufferUsage.STORAGE;
@@ -532,19 +589,13 @@ struct VsOut {
     const half = [0.5, 0.25, 0.25];
     const brickR = Math.hypot(...half);
     let maxSmallR = brickR;
-    const brickInertia = (mass) => {
-      const inv = (a, b) => 1 / ((mass / 12) * (a * a + b * b));
-      return [inv(0.5, 0.5), inv(1, 0.5), inv(1, 0.5)];
-    };
-    const boxInertia = (mass, hx, hy, hz) => {
-      const inv = (a, b) => 1 / ((mass / 12) * (a * a + b * b));
-      return [inv(hy * 2, hz * 2), inv(hx * 2, hz * 2), inv(hx * 2, hy * 2)];
-    };
+    const brickInertia = mass => boxInvInertia(mass, ...half);
+    const boxInertia = boxInvInertia;
     // Static ground box slab (three-avbd / Metal): top at y=0.5. Deep half-height so
     // soft Jacobi contacts cannot tunnel. Was an infinite plane — columns 100k exploded
     // on WebGPU while Metal (box ground) held height.
-    const groundHalfH = 25;
-    const groundHalfXZ = Math.max(50, (cfg.ground || 200) * 2);
+    const groundHalfH = (scene.startsWith("ring") || scene.startsWith("gables")) ? 0.5 : 25;
+    const groundHalfXZ = groundHalfExtent(cfg.ground || 200);
     bodies.push({
       p: [0, 0.5 - groundHalfH, 0], invMass: 0, invI: [0, 0, 0], flags: 0,
     });
@@ -555,8 +606,8 @@ struct VsOut {
     maxSmallR = Math.max(maxSmallR, 0.5); // keep grid from using the huge ground radius
     const addBrick = (pos, angle, mass, density) => {
       const id = bodies.length;
-      const s = Math.sin(angle / 2), c = Math.cos(angle / 2);
-      bodies.push({ p: pos, invMass: 1 / mass, invI: brickInertia(mass), flags: 1 | 8, q: [0, s, 0, c] });
+      const q = brickQuaternion(angle);
+      bodies.push({ p: pos, invMass: 1 / mass, invI: brickInertia(mass), flags: 1 | 8, q });
       colliders.push({ body: id, shape: 2, density, params: [half[0], half[1], half[2], brickR] });
     };
     const addBox = (pos, hx, hy, hz, mass, q) => {
@@ -567,58 +618,20 @@ struct VsOut {
       colliders.push({ body: id, shape: 2, density: 1, params: [hx, hy, hz, r] });
     };
     const addBall = (pos, radius, density, vel, ang) => {
-      const mass = density * (4 / 3) * Math.PI * radius ** 3;
-      const inertia = 0.4 * mass * radius * radius;
+      const { mass, invInertia } = sphereMassProperties(radius, density);
       const id = bodies.length;
-      bodies.push({ p: pos, invMass: 1 / mass, invI: [1 / inertia, 1 / inertia, 1 / inertia], flags: 1 | 8, v: vel, w: ang });
+      bodies.push({ p: pos, invMass: 1 / mass, invI: [invInertia, invInertia, invInertia], flags: 1 | 8, v: vel, w: ang });
       colliders.push({ body: id, shape: 0, density, params: [radius, 0, 0, radius] });
-    };
-    const buildRing = (radius, courses, tier, rows) => {
-      const mass = 0.25;
-      for (let c = 0; c < courses; c++) {
-        const depth = Math.max(1, rows - Math.floor(c / tier));
-        for (let j = 0; j < depth; j++) {
-          const r = radius + 0.25 + 0.52 * j;
-          const n = Math.floor((2 * Math.PI * (r - 0.25)) / 1.02);
-          for (let i = 0; i < n; i++) {
-            const a = ((i + (c % 2) * 0.5) / n) * 2 * Math.PI;
-            addBrick([r * Math.cos(a), 0.75 + 0.5 * c, r * Math.sin(a)], a + Math.PI / 2, mass, 1);
-          }
-        }
-      }
-      const ballR = courses / 5;
-      addBall([0, 0.5 + ballR, -(radius + 0.52 * rows + ballR + 2)], ballR, 10, [0, 0, 30], [-30 / ballR, 0, 0]);
-    };
-    const buildGables = (columns, rows, base) => {
-      const pitchX = base + 2, pitchY = 5, mass = 0.25;
-      for (let cx = 0; cx < columns; cx++) {
-        for (let cy = 0; cy < rows; cy++) {
-          const x0 = (cx - (columns - 1) / 2) * pitchX;
-          const z = (cy - (rows - 1) / 2) * pitchY;
-          for (let k = 0; k < base; k++) {
-            const m = base - k;
-            for (let i = 0; i < m; i++) {
-              addBrick([x0 + (i - (m - 1) / 2) * 1.01, 0.75 + 0.5 * k, z], 0, mass, 1);
-            }
-          }
-        }
-      }
-      const ballR = base / 7;
-      for (const cx of [columns / 2 - 2, columns / 2 + 1]) {
-        const x = (cx - (columns - 1) / 2) * pitchX;
-        const z = -((rows - 1) / 2) * pitchY - ballR - 12;
-        addBall([x, 0.5 + ballR, z], ballR, 50, [0, 0, 30], [-30 / ballR, 0, 0]);
-      }
     };
     statusEl.textContent = `building ${scene}…`;
     if (scene === 'ring') {
-      buildRing(12, 20, 2, 10);
+      buildRing(addBrick, addBall, 12, 20, 2, 10);
     } else if (scene === 'ring110k') {
-      buildRing(80, 40, 4, 10);
+      buildRing(addBrick, addBall, 80, 40, 4, 10);
     } else if (scene === 'gables') {
-      buildGables(4, 8, 20);
+      buildGables(addBrick, addBall, 4, 8, 20);
     } else if (scene === 'gables506k') {
-      buildGables(16, 68, 30);
+      buildGables(addBrick, addBall, 16, 68, 30);
     } else if (scene === 'pyramid') {
       const levels = cfg.levels, mass = 0.25;
       const nBodies = (levels * (levels + 1) * (2 * levels + 1)) / 6;
@@ -698,18 +711,28 @@ struct VsOut {
     }
     if (bodies.length > cap.maxBodies) throw new Error(`${bodies.length} bodies exceed capacity ${cap.maxBodies}`);
     params.gridCellSize = Math.max(0.5, 2 * maxSmallR * 1.0001);
-    bodies.forEach((b, i) => {
-      writeBody(bodyBytes, i, b);
-      writeBody(bodyBytes, cap.maxBodies + i, b);
+    const storageOrder = spatialOrder ? mortonSceneOrder(bodies, colliders) : null;
+    bodies.forEach((b, sceneId) => {
+      const gpu = storageOrder ? storageOrder.sceneToGpu[sceneId] : sceneId;
+      writeBody(bodyBytes, gpu, b);
+      writeBody(bodyBytes, cap.maxBodies + gpu, b);
+      writeCollider(colBytes, gpu, { ...colliders[sceneId], body: gpu });
     });
-    colliders.forEach((c, i) => writeCollider(colBytes, i, c));
     device.queue.writeBuffer(bufs[0], 0, bodyBytes);
     device.queue.writeBuffer(bufs[2], 0, colBytes);
 
+    const persistentEntries = {
+      narrowphase: 'narrowphase_persistent', contact_hash_insert: 'contact_hash_insert_persistent',
+      persist_contacts: 'persist_contacts_persistent', persist_manifolds: 'persist_manifolds_persistent',
+      persist_manifolds_compact: 'persist_manifolds_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
+      solve_primal_sparse_compact: 'solve_primal_sparse_persistent',
+      solve_primal_color_compact: 'solve_primal_color_persistent', solve_dual_compact: 'solve_dual_persistent',
+    };
+    const shaderEntry = name => persistentContacts ? (persistentEntries[name] || name) : name;
     const sources = {};
     for (const name of K) {
       statusEl.textContent = 'compiling ' + name;
-      const src = await (await fetch(`./generated/wgsl/${name}.wgsl`)).text();
+      const src = await (await fetch(`./generated/wgsl/${shaderEntry(name)}.wgsl`, { cache: 'no-store' })).text();
       const module = device.createShaderModule({ label: name, code: src });
       // Force frontend validation now so createComputePipeline cannot hang forever
       // on a deferred compile error (Chrome async path has been wedging here).
@@ -721,6 +744,7 @@ struct VsOut {
       sources[name] = { src, module };
     }
 
+    console.log('SHADER_BYTES', JSON.stringify(Object.fromEntries(Object.entries(sources).map(([name, source]) => [name, source.src.length]))));
     statusEl.textContent = 'creating pipelines…';
     const pipes = {};
     for (const name of K) {
@@ -743,7 +767,7 @@ struct VsOut {
       const pipeline = device.createComputePipeline({
         label: name,
         layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-        compute: { module: sources[name].module, entryPoint: name },
+        compute: { module: sources[name].module, entryPoint: shaderEntry(name) },
       });
       const pipeErr = await device.popErrorScope();
       if (pipeErr) throw new Error(`${name}: ${pipeErr.message}`);
@@ -765,9 +789,8 @@ struct VsOut {
     await new Promise((r) => setTimeout(r, 0));
 
     const staging = device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    const bodyRead = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     // Full body buffer for settle KE / height samples (settled scenes only).
-    const bodySnap = cfg.settled
+    const bodySnap = (cfg.settled || qs.has("check"))
       ? device.createBuffer({ size: sizes[0], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })
       : null;
     let bodyCount = bodies.length;
@@ -814,12 +837,10 @@ struct VsOut {
       s[1] = cap.maxBodies;
       s[2] = cap.maxCandidates;
       s[3] = cap.maxContacts;
-      s[7] = Math.min(last.contact, cap.maxContacts);
+      s[7] = steps === 0 ? 0 : Math.min(last.contact, cap.maxContacts);
       s[8] = parity === 0 ? cap.maxContacts : 0;
-      // Must match encodeStep hashN: ≤ MAX_POW2_DISPATCH so clear/insert cover the
-      // whole table. Uncapped 2^22 → 65536 workgroups (Invalid CommandBuffer) and a
-      // dispatch/host size mismatch that leaves stale hash slots when clamped.
-      const hash = Math.min(nextPow2(Math.max(prevN * 4, 1024)), idsLen, MAX_POW2_DISPATCH);
+      // One hash entry per manifold; host field and clear dispatch must agree.
+      const hash = Math.min(nextPow2(Math.max(prevN * 4, 1024)), idsLen, MAX_WARM_HASH);
       s[9] = hash;
       s[10] = cap.maxCandidates;
       s[11] = parity === 0 ? 0 : cap.maxContacts;
@@ -827,7 +848,9 @@ struct VsOut {
       while ((1 << log) < Math.max(bodyCount, 1) && log < 20) log++;
       s[12] = log === 0 ? 0 : (log - 1) & 1;
       s[17] = steps;
+      s[26] = incrementalColors ? 1 : 0; // history row + compact work slot 69
       s[24] = csrBase;
+      s[4] = Math.min(cap.maxColors, 32);
       return s;
     }
 
@@ -844,38 +867,43 @@ struct VsOut {
       // Prefer GPU copies from one upload — four tiny writeBuffers were ~0.3 ms of ring wall.
       enc.copyBufferToBuffer(hostUpload, 0, bufs[21], 0, 256);
       enc.copyBufferToBuffer(hostUpload, 256, bufs[6], 0, 208);
+      // Keep the previous GPU count before clearing counters. A benchmark queues
+      // ten steps between CPU readbacks; last.contact is stale within that batch.
+      if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
       enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 64);
       enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
     }
 
     function groups(threads) {
-      return Math.min(MAX_WG, Math.ceil(Math.max(threads, 1) / 64));
+      const n = Math.ceil(Math.max(threads, 1) / 64);
+      return [Math.min(n, 32768), Math.ceil(n / 32768), 1];
     }
     function disp(pass, name, threads, passIdx) {
       const p = pipes[name];
       pass.setPipeline(p.pipeline);
       if (p.dynamic) pass.setBindGroup(0, p.bind, [(passIdx || 0) * PASS_ALIGN]);
       else pass.setBindGroup(0, p.bind);
-      pass.dispatchWorkgroups(groups(threads), 1, 1);
+      pass.dispatchWorkgroups(...groups(threads));
+    }
+
+    function dispWork(pass, name, slot, passIdx = 0) {
+      const p = pipes[name];
+      pass.setPipeline(p.pipeline);
+      if (p.dynamic) pass.setBindGroup(0, p.bind, [passIdx * PASS_ALIGN]);
+      else pass.setBindGroup(0, p.bind);
+      pass.dispatchWorkgroupsIndirect(bufs[23], slot * 12);
     }
 
     function encodeStep(enc, readback, beginPass) {
       const nBodies = Math.max(bodyCount, 1);
       const nCols = Math.max(colliderCount, 1);
-      const awake = last.awake === 0 ? nBodies : Math.max(1, Math.min(nBodies, last.awake * 2 + 256));
       const prevContacts = Math.max(last.contact, 256);
-      const prevCand = Math.max(last.candidate, 256);
-      const narrowN = Math.min(cap.maxCandidates,
-        Math.max(prevCand + Math.floor(prevCand / 2) + 2048, nCols * 4, prevContacts + Math.floor(prevContacts / 4) + 1024));
-      const contactN = Math.min(cap.maxContacts,
-        Math.max(prevContacts + Math.floor(prevContacts / 4) + 1024, nCols * 4));
-      const manifoldN = Math.max(narrowN, Math.max(last.manifold, 256) + Math.floor(Math.max(last.manifold, 256) / 4) + 1024);
       const idsLen = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
-      // hashN must be pow2 (mask = n-1) and ≤ MAX_POW2_DISPATCH so clear/insert fit in one WG pass.
+      // Hash size is a power of two (mask = n-1).
       const hashN = Math.min(
         nextPow2(Math.max(Math.max(prevContacts, 256) * 4, 1024)),
         idsLen,
-        MAX_POW2_DISPATCH,
+        MAX_WARM_HASH,
       );
 
       writeHost(enc);
@@ -890,68 +918,91 @@ struct VsOut {
       nextPhase();
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
+      disp(pass, 'write_work_args', 64);
       nextPhase();
       const reuse = (params.flags & 1) !== 0;
       if (reuse) {
         disp(pass, 'update_refs', nBodies);
+        if (detailedProfile) nextPhase();
         disp(pass, 'contact_hash_clear', hashN);
-        disp(pass, 'contact_hash_insert', Math.max(prevContacts, 1));
+        if (detailedProfile) nextPhase();
+        dispWork(pass, 'contact_hash_insert', 68);
+        if (detailedProfile) nextPhase();
       }
-      disp(pass, 'narrowphase', narrowN);
+      dispWork(pass, 'narrowphase', 64);
+      disp(pass, 'write_work_args', 64);
       nextPhase();
       if (!reuse) {
         disp(pass, 'contact_hash_clear', hashN);
-        disp(pass, 'contact_hash_insert', Math.max(prevContacts, 1));
+        if (detailedProfile) nextPhase();
+        dispWork(pass, 'contact_hash_insert', 68);
+        if (detailedProfile) nextPhase();
       }
-      disp(pass, 'persist_contacts', contactN);
+      if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
+      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
       nextPhase();
       disp(pass, 'build_awake_list', nBodies);
+      disp(pass, 'write_work_args', 64);
+      if (graphProfile) nextPhase();
       disp(pass, 'csr_clear', nBodies + 1);
-      disp(pass, 'csr_degree_contacts', manifoldN);
+      dispWork(pass, 'csr_degree_contacts', 66);
+      if (graphProfile) nextPhase();
       if (bodyCount <= 512) {
         disp(pass, 'csr_prefix', 1);
       } else {
-        disp(pass, 'csr_prefix_init', nBodies);
-        let log = 0;
-        while ((1 << log) < bodyCount && log < 20) {
-          disp(pass, 'csr_prefix_scan', nBodies, 48 + log);
-          log++;
-        }
-        disp(pass, 'csr_prefix_finalize', nBodies + 1);
+        disp(pass, 'csr_prefix_blocks', Math.ceil(nBodies / 4));
+        disp(pass, 'csr_prefix_block_sums', 64);
+        disp(pass, 'csr_prefix_add', nBodies);
       }
-      disp(pass, 'csr_scatter_contacts', manifoldN);
-      disp(pass, 'csr_sort', awake);
-      disp(pass, 'init_colors', awake);
-      // three-avbd defaults to 16 JP rounds. Floor 16 (was color+1 → 4 on frame 0).
-      const colorRounds = Math.min(cap.maxColors, Math.max(16, last.color + 1));
-      for (let round = 0; round < colorRounds; round++) disp(pass, 'color_bodies', awake, round % 16);
-      disp(pass, 'pack_color_lists', awake);
+      if (graphProfile) nextPhase();
+      dispWork(pass, 'csr_scatter_contacts', 66);
+      if (graphProfile) nextPhase();
+      dispWork(pass, physicalAdjacency ? 'csr_sort' : 'csr_sort_append', 67);
+      if (graphProfile) nextPhase();
+      dispWork(pass, 'init_colors', 67);
+      disp(pass, 'write_work_args', 64);
+      if (graphProfile) nextPhase();
+      // JP dependency depth exceeds 16 on the active 110k ring.
+      const colorRounds = 32;
+      for (let round = 0; round < colorRounds; round++) dispWork(pass, 'color_bodies', incrementalColors ? 69 : 67, round % 16);
+      if (graphProfile) nextPhase();
+      if (stablePacking) {
+        disp(pass, 'count_color_tiles', nBodies);
+        disp(pass, parallelColorPrefix ? 'prefix_color_tiles_parallel' : 'prefix_color_tiles', parallelColorPrefix ? Math.min(cap.maxColors, 64) * 64 : 64);
+        disp(pass, 'scatter_color_tiles', nBodies);
+      } else {
+        dispWork(pass, 'pack_color_lists', 67);
+      }
       disp(pass, 'write_color_args', 64);
+      if (graphProfile) nextPhase();
       disp(pass, 'predict_bodies', nBodies);
       nextPhase();
-      // Floor 16 like Metal/three-avbd — lagging last.color skipped early pyramid colours.
-      const colors = Math.min(Math.min(cap.maxColors, 32), Math.max(16, last.color + 1));
+      // Cover newly introduced colours even inside batches without readbacks.
+      const colors = Math.min(cap.maxColors, 32);
+      if (compactContacts && !fusedPersistence) {
+        if (!persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
+        dispWork(pass, 'pack_solver_contacts', 66);
+      }
       for (let iter = 0; iter < params.iterations; iter++) {
         if (beginPass && iter > 0) nextPhase();
-        const primal = pipes.solve_primal_color;
-        for (let color = 0; color < colors; color++) {
+        const primal = pipes[compactContacts ? "solve_primal_color_compact" : "solve_primal_color"];
+        for (let color = 0; color < Math.min(colors, sparseStart); color++) {
           pass.setPipeline(primal.pipeline);
           pass.setBindGroup(0, primal.bind, [color * PASS_ALIGN]);
           pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
         }
+        if (sparseStart < colors) disp(pass, compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, sparseStart);
         if (beginPass) nextPhase();
-        disp(pass, 'solve_dual', contactN);
+        dispWork(pass, compactContacts ? 'solve_dual_compact' : 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
       }
       disp(pass, 'extract_velocity_sleep', nBodies);
       nextPhase();
-      if (last.manifold > 0) {
-        for (let i = 0; i < sleepRounds; i++) disp(pass, 'sleep_island_gate', manifoldN);
-      }
-      disp(pass, 'sleep_island_commit', nBodies);
+      disp(pass, 'write_sleep_args', 64);
+      for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
+      dispWork(pass, 'sleep_island_commit', 67);
       pass.end();
       if (readback) {
         enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
-        enc.copyBufferToBuffer(bufs[0], 112, bodyRead, 0, 16);
       }
     }
 
@@ -971,6 +1022,27 @@ struct VsOut {
       const c = new Uint32Array(staging.getMappedRange().slice(0));
       staging.unmap();
       last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+      if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
+    }
+
+    // Read outside the throughput window: bucket distribution determines how
+    // many cooperative lanes execute each body's primal solve.
+    async function readColorBuckets() {
+      const bytes = cap.maxColors * 4;
+      const readback = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      try {
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(bufs[17], 0, readback, 0, bytes);
+        device.queue.submit([enc.finish()]);
+        await readback.mapAsync(GPUMapMode.READ);
+        const counts = Array.from(new Uint32Array(readback.getMappedRange()));
+        readback.unmap();
+        const total = counts.reduce((sum, count) => sum + count, 0);
+        if (total !== last.awake) throw new Error(`Color buckets cover ${total} bodies, but awake count is ${last.awake}; refusing invalid benchmark coverage.`);
+        return counts;
+      } finally {
+        readback.destroy();
+      }
     }
 
     function restoreScene() {
@@ -986,6 +1058,7 @@ struct VsOut {
 
     // Fair three-avbd protocol (blind lead-in + median of 10-step batches). Runs only
     // after the user has watched the impact, then restores for continued viewing.
+    let timingSamples;
     async function benchWall() {
       for (let i = 0; i < lead; i++) {
         submitPhysics();
@@ -995,56 +1068,117 @@ struct VsOut {
           statusEl.textContent = `timing lead-in ${i + 1}/${lead} · contacts ${last.contact}`;
         }
       }
-      await device.queue.onSubmittedWorkDone();
-      let best = Infinity;
-      for (let round = 0; round < 2; round++) {
-        const samples = [];
-        for (let batch = 0; batch < 5; batch++) {
-          const t = performance.now();
-          for (let i = 0; i < 10; i++) submitPhysics();
-          await device.queue.onSubmittedWorkDone();
-          samples.push((performance.now() - t) / 10);
-        }
-        samples.sort((a, b) => a - b);
-        best = Math.min(best, samples[2]);
-      }
       await readCounters();
-      return best;
+      const workloadStart = { ...last, colorBuckets: await readColorBuckets() };
+      const validateWorkload = stage => assertBenchmarkWorkload({
+        scene, totalBodies: bodyCount, iterations: params.iterations, dt: params.dt, counters: last, stage,
+      });
+      validateWorkload('after lead-in');
+      timingSamples = await measurePhysicsBatches({
+        step: submitPhysics,
+        drain: () => device.queue.onSubmittedWorkDone(),
+      });
+      Object.assign(timingSamples, {
+        measuredAt: new Date().toISOString(),
+        leadSteps: lead,
+        totalBodies: bodyCount,
+        dynamicBodies: bodyCount - 1,
+        iterations: params.iterations,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact",
+        dt: params.dt,
+        adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
+        userAgent: navigator.userAgent,
+      });
+      await readCounters();
+      validateWorkload('after timed window');
+      timingSamples.workload = { start: workloadStart, end: { ...last, colorBuckets: await readColorBuckets() } };
+      return timingSamples.wallMs;
     }
 
+    let phaseSamples;
+    function preSolveProfileParts() {
+      const graph = graphProfile
+        ? ['awake', 'csrDegree', 'csrPrefix', 'csrScatter', 'csrSort', 'colorInit', 'colorRepair', 'colorPack', 'predict']
+        : ['graph'];
+      if (!detailedProfile) return ['aabbs', 'grid', 'narrowphase', 'warm', ...graph];
+      return (params.flags & 1) !== 0
+        ? ['aabbs', 'grid', 'refs', 'hashClear', 'hashInsert', 'narrowphase', 'warm', ...graph]
+        : ['aabbs', 'grid', 'narrowphase', 'hashClear', 'hashInsert', 'warm', ...graph];
+    }
     async function profilePhases() {
+      phaseSamples = undefined;
       if (!wantTimestamps) return '';
-      const n = 5 + params.iterations * 2 + 1;
+      const samples = [];
+      for (let i = 0; i < 10; i++) samples.push(await profileOneStep());
+      const median = values => values.sort((a, b) => a - b)[values.length >> 1];
+      const phasesMs = Object.fromEntries(Object.keys(samples[0].phasesMs).map(name =>
+        [name, median(samples.map(sample => sample.phasesMs[name]))]));
+      const totals = Object.fromEntries(['gpuPhasesMs', 'gpuSpanMs', 'encodeMs', 'submitToReadbackMs', 'completionMs'].map(name =>
+        [name, median(samples.map(sample => sample[name]))]));
+      phaseSamples = {
+        protocol: 'split-pass-timestamps-with-paired-completion-v1',
+        detail: graphProfile ? 'graph' : detailedProfile ? 'collision' : 'phases',
+        caveat: 'Extra pass boundaries and per-step readback perturb execution. These later steps are not the batched throughput window. Phase medians need not sum to the median total.',
+        measuredAt: new Date().toISOString(), phasesMs, ...totals, samples,
+      };
+      return Object.entries(phasesMs).map(([name, value]) => `${name} ${value.toFixed(2)}`).join(' · ')
+        + ` · profiled GPU span ${totals.gpuSpanMs.toFixed(2)} / completion ${totals.completionMs.toFixed(2)} ms`;
+    }
+
+    async function profileOneStep() {
+      // Exclude previously queued work from this sample's CPU interval. This
+      // drains our queue; it does not prove isolation from other GPU clients.
+      await device.queue.onSubmittedWorkDone();
+      const parts = preSolveProfileParts();
+      const n = parts.length + params.iterations * 2 + 1;
       const querySet = device.createQuerySet({ type: 'timestamp', count: n * 2 });
       const resolve = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
       const read = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      const enc = device.createCommandEncoder();
-      let i = 0;
-      encodeStep(enc, false, () => {
-        const pass = enc.beginComputePass({
-          timestampWrites: { querySet, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 },
+      try {
+        const startedAt = performance.now();
+        const enc = device.createCommandEncoder();
+        let i = 0;
+        encodeStep(enc, false, () => {
+          const pass = enc.beginComputePass({
+            timestampWrites: { querySet, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 },
+          });
+          i++;
+          return pass;
         });
-        i++;
-        return pass;
-      });
-      enc.resolveQuerySet(querySet, 0, n * 2, resolve, 0);
-      enc.copyBufferToBuffer(resolve, 0, read, 0, n * 16);
-      device.queue.submit([enc.finish()]);
-      parity ^= 1;
-      steps++;
-      await read.mapAsync(GPUMapMode.READ);
-      const stamps = new BigUint64Array(read.getMappedRange().slice(0));
-      read.unmap();
-      const ms = (a, b) => Number(stamps[b] - stamps[a]) / 1e6;
-      const parts = ['aabbs', 'grid', 'narrowphase', 'warm', 'graph'];
-      let primal = 0, dual = 0;
-      for (let iter = 0; iter < params.iterations; iter++) {
-        primal += ms((5 + iter * 2) * 2, (5 + iter * 2) * 2 + 1);
-        dual += ms((6 + iter * 2) * 2, (6 + iter * 2) * 2 + 1);
+        if (i !== n) throw new Error(`Physics profiler expected ${n} passes, encoded ${i}; update phase boundaries before trusting timings.`);
+        enc.resolveQuerySet(querySet, 0, n * 2, resolve, 0);
+        enc.copyBufferToBuffer(resolve, 0, read, 0, n * 16);
+        const command = enc.finish();
+        const submittedAt = performance.now();
+        device.queue.submit([command]);
+        parity ^= 1;
+        steps++;
+        await read.mapAsync(GPUMapMode.READ);
+        const completedAt = performance.now();
+        const stamps = new BigUint64Array(read.getMappedRange().slice(0));
+        read.unmap();
+        const ms = (a, b) => {
+          if (stamps[b] < stamps[a]) throw new Error(`Physics profiler timestamp ${b} precedes ${a}; GPU timing sample is invalid.`);
+          return Number(stamps[b] - stamps[a]) / 1e6;
+        };
+        let primal = 0, dual = 0;
+        for (let iter = 0; iter < params.iterations; iter++) {
+          primal += ms((parts.length + iter * 2) * 2, (parts.length + iter * 2) * 2 + 1);
+          dual += ms((parts.length + 1 + iter * 2) * 2, (parts.length + 1 + iter * 2) * 2 + 1);
+        }
+        const sleep = ms((parts.length + params.iterations * 2) * 2, (parts.length + params.iterations * 2) * 2 + 1);
+        const phasesMs = { ...Object.fromEntries(parts.map((name, k) => [name, ms(k * 2, k * 2 + 1)])), primal, dual, sleep };
+        return {
+          step: steps, passCount: i, phasesMs,
+          gpuPhasesMs: Object.values(phasesMs).reduce((sum, value) => sum + value, 0),
+          gpuSpanMs: ms(0, n * 2 - 1),
+          encodeMs: submittedAt - startedAt,
+          submitToReadbackMs: completedAt - submittedAt,
+          completionMs: completedAt - startedAt,
+        };
+      } finally {
+        querySet.destroy(); resolve.destroy(); read.destroy();
       }
-      const sleep = ms((5 + params.iterations * 2) * 2, (5 + params.iterations * 2) * 2 + 1);
-      return parts.map((name, k) => `${name} ${ms(k * 2, k * 2 + 1).toFixed(2)}`).join(' · ')
-        + ` · primal ${primal.toFixed(2)} · dual ${dual.toFixed(2)} · sleep ${sleep.toFixed(2)}`;
     }
 
     async function sampleSettle() {
@@ -1273,12 +1407,11 @@ struct VsOut {
         rp.end();
         device.queue.submit([enc.finish()]);
         await staging.mapAsync(GPUMapMode.READ);
-        await bodyRead.mapAsync(GPUMapMode.READ);
         const c = new Uint32Array(staging.getMappedRange().slice(0));
         staging.unmap();
-        bodyRead.unmap();
         const stepMs = performance.now() - tStep0;
         last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+        if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
         parity ^= 1;
         steps++;
         bumpRates(true, stepMs, performance.now() - now);
@@ -1289,8 +1422,10 @@ struct VsOut {
         const settleLabel = cfg.settled && settle.sampleStep
           ? ` · sleep ${settle.sleeping}/${dyn} · KE ${settle.ke.toFixed(1)} · max|v| ${settle.maxV.toFixed(3)} · h ${settle.maxY.toFixed(2)}/${initialMaxY.toFixed(2)}`
           : '';
-        const wallLabel = wallMs > 0 ? `${wallMs.toFixed(2)} ms` : (cfg.settled ? 'timing after settle…' : 'timing after impact…');
-        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${params.iterations} iters · wall ${wallLabel} ${phases} · step ${steps} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)}`;
+        const timingLabel = wallMs > 0 ? `wall ${wallMs.toFixed(2)} ms ${phases}`
+          : benchmarkEnabled ? (cfg.settled ? 'timing after settle…' : 'timing after impact…')
+          : 'live playback';
+        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${params.iterations} iters · ${timingLabel} · step ${steps} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)}`;
         // Overflow used to hard-stop the page mid-smash. Caps now match Metal; still warn
         // without freezing so a residual spike is visible and replay continues.
         if (last.overflow) {
@@ -1304,7 +1439,7 @@ struct VsOut {
 
         // Smash: watch impact first. Settled: watch lead-in settle, then fair wall timing.
         // After measuring, restore so playback continues from the start again.
-        if (!benchStarted && steps >= lead) {
+        if (benchmarkEnabled && !benchStarted && steps >= lead) {
           benchStarted = true;
           measuring = true;
           statusEl.textContent = cfg.settled
@@ -1319,7 +1454,9 @@ struct VsOut {
             phases = await profilePhases();
             if (cfg.settled) await sampleSettle();
             const report = {
-              scene, bodies: dyn, iterations: params.iterations, wallMs, phases,
+              scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+              coloring: incrementalColors ? "reuse" : "rebuild",
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1337,8 +1474,68 @@ struct VsOut {
         requestAnimationFrame(frame);
       } catch (e) { running = false; measuring = false; fail(e); }
     }
-    statusEl.textContent = `playing ${bodies.length - 1} bodies from the start…`;
-    requestAnimationFrame(frame);
+    if (regressionEnabled) {
+      const expectedScene = regressionKind === 'gables' ? 'gables506k' : 'ring110k';
+      if (scene !== expectedScene) throw new Error(`${regressionKind} regression requires scene=${expectedScene}`);
+      params.sleepTime = 1e6;
+      const readSnapshot = async () => {
+        await readCounters();
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(bufs[0], 0, bodySnap, 0, bodies.length * 112);
+        device.queue.submit([enc.finish()]);
+        await bodySnap.mapAsync(GPUMapMode.READ);
+        const bytes = bodySnap.getMappedRange().slice(0);
+        bodySnap.unmap();
+        return { bytes: storageOrder ? restoreSceneOrder(bytes, storageOrder.gpuToScene) : bytes, counters: { ...last } };
+      };
+      const runRegression = regressionKind === 'gables' ? runGablesRegression : runRingRegression;
+      const report = await runRegression({
+        initial: bodies, submit: submitPhysics, read: readSnapshot,
+        batchSize: qs.get('batch') === '1' ? 1 : 10,
+        progress: async n => { statusEl.textContent = `checking active ${scene} · step ${n}/${regressionSteps}`; await device.queue.onSubmittedWorkDone(); },
+      });
+      report.coloring = incrementalColors ? "reuse" : "rebuild";
+      report.sparseStart = sparseStart;
+      report.colorPrefix = parallelColorPrefix ? "parallel" : "serial";
+      report.packing = stablePacking ? "stable" : "atomic";
+      report.contactLayout = persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128";
+      report.adjacency = physicalAdjacency ? "physical" : "append";
+      report.order = spatialOrder ? "morton" : "construction";
+      report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
+      // Exercise reset too: stale warm-start data from the completed run must not
+      // contaminate the first frame or the benchmark's lead-in.
+      restoreScene();
+      submitPhysics();
+      const reset = await readSnapshot();
+      const resetContactsOk = regressionKind === 'gables' ? reset.counters.contact === 3916802 : reset.counters.contact >= 1_250_000;
+      if (!resetContactsOk || reset.counters.overflow)
+        throw new Error(`${regressionKind} reset lost first-frame contacts or overflowed`);
+      restoreScene();
+      if (benchmarkEnabled) {
+        report.wallMs = await benchWall();
+        report.timingSamples = timingSamples;
+        report.phases = await profilePhases();
+        report.phaseSamples = phaseSamples;
+      }
+      console.log('REGRESSION', JSON.stringify(report));
+      statusEl.textContent = `PASS · ${report.bodies} active bodies · ${report.steps} steps${benchmarkEnabled ? ` · wall ${report.wallMs.toFixed(2)} ms · ${report.phases}` : ""}`;
+      drawWorld();
+    } else if (benchmarkOnly) {
+      const wallMs = await benchWall();
+      const phases = await profilePhases();
+      const report = {
+        scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+        coloring: incrementalColors ? "reuse" : "rebuild",
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", colors: last.color,
+        contacts: last.contact, awake: last.awake, overflow: last.overflow,
+      };
+      console.log('BENCH', JSON.stringify(report));
+      statusEl.textContent = `Measured · ${report.bodies} active bodies · physics wall ${wallMs.toFixed(2)} ms/step · ${phases}`;
+      drawWorld();
+    } else {
+      statusEl.textContent = `playing ${bodies.length - 1} bodies from the start…`;
+      requestAnimationFrame(frame);
+    }
   </script>
 </body>
 </html>

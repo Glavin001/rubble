@@ -1,0 +1,249 @@
+{
+  "change": "Persistent 64-byte hot points and 32-byte cold metadata, both history halves; no point repack or final dual copyback",
+  "status": "Adopted for browser ring only; 120 FPS and full parity remain open",
+  "protocol": {
+    "dynamicBodies": 110441,
+    "totalBodies": 110442,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "statistic": "minimum round median"
+  },
+  "conditions": "Serial Chrome 155 in-app browser on Apple M3 Max; no native GPU tests or compilation during timing",
+  "runs": [
+    {
+      "variant": "persistent A",
+      "measuredAt": "2026-10-14T12:38:27.945Z",
+      "wallMs": 12.76,
+      "batchesMs": [
+        [
+          12.69,
+          12.8,
+          12.89,
+          12.85,
+          12.77
+        ],
+        [
+          12.76,
+          12.98,
+          12.89,
+          12.63,
+          12.59
+        ]
+      ],
+      "primalMs": 4.063232,
+      "dualMs": 1.703936,
+      "warmMs": 1.114112
+    },
+    {
+      "variant": "compact control",
+      "measuredAt": "2026-10-14T12:46:04.063Z",
+      "wallMs": 14.75,
+      "batchesMs": [
+        [
+          14.57,
+          14.75,
+          14.97,
+          14.91,
+          14.58
+        ],
+        [
+          14.91,
+          14.88,
+          14.87,
+          14.8,
+          14.81
+        ]
+      ],
+      "primalMs": 5.046272,
+      "dualMs": 2.490368,
+      "warmMs": 1.31072
+    },
+    {
+      "variant": "persistent B",
+      "measuredAt": "2026-10-14T12:47:17.749Z",
+      "wallMs": 12.71,
+      "batchesMs": [
+        [
+          12.65,
+          13.21,
+          13.12,
+          12.92,
+          13.01
+        ],
+        [
+          12.7,
+          12.72,
+          12.71,
+          12.76,
+          12.58
+        ]
+      ],
+      "primalMs": 4.128768,
+      "dualMs": 1.703936,
+      "warmMs": 1.114112
+    }
+  ],
+  "identicalWorkloadAllRuns": {
+    "start": {
+      "contacts": 1184245,
+      "candidates": 230244,
+      "manifolds": 227155,
+      "colors": 15,
+      "awake": 110441,
+      "overflow": 0
+    },
+    "end": {
+      "contacts": 1174316,
+      "candidates": 256703,
+      "manifolds": 246481,
+      "colors": 11,
+      "awake": 110441,
+      "overflow": 0
+    }
+  },
+  "phaseCaveat": "Later split-pass/readback profile; primal includes pair preparation, so its change is not solely faster Newton arithmetic",
+  "memoryMiB": {
+    "compactCanonicalHistory": 512,
+    "compactPointScratch": 128,
+    "persistentHotHistory": 256,
+    "persistentColdHistory": 128,
+    "pairCacheBothModes": 64,
+    "saved": 256
+  },
+  "validation": {
+    "focusedRustTests": "38 passed in one serial suite; includes persistent fused pair-cache and current-owner regression",
+    "javascriptTests": "53 passed in benchmark, profiling and persistence scheduling suites",
+    "nativePersistent": "ring480 and all four columns tests passed",
+    "browserPersistentRing": {
+      "steps": 480,
+      "passed": true,
+      "meanFlankDrift": 1.1817874610691919,
+      "ball": [
+        -0.03025226481258869,
+        8.46918773651123,
+        105.19124603271484
+      ],
+      "awake": 110441,
+      "overflow": 0,
+      "resetPassed": true,
+      "defaultModeVerifiedAt": "2026-10-14T13:03:36.977Z",
+      "defaultModeMatchesExplicitPersistent": true
+    },
+    "browserPersistentGables": {
+      "measuredAt": "2026-10-14T12:51:43.621Z",
+      "steps": 240,
+      "passed": true,
+      "meanUnhitDrift": 0.11725152522349752,
+      "maxUnhitDrift": 0.32761669158935547,
+      "awake": 505922,
+      "contacts": 4058103,
+      "overflow": 0,
+      "resetPassed": true
+    },
+    "nativePersistentGables": {
+      "passed": false,
+      "steps": 240,
+      "bricksOverBound": 5,
+      "bound": 0.6,
+      "maxUnhitDrift": 3.00113,
+      "worstBody": 318697,
+      "column": 10,
+      "cause": "Unresolved; worse than older compact failure, not attributed to clipping or floating-point differences without evidence"
+    },
+    "nativeCanonicalGables": {
+      "passed": true,
+      "steps": 240,
+      "meanUnhitDrift": 0.118626,
+      "maxUnhitDrift": 0.330369
+    },
+    "sharedMetal": "18 tests passed: library3, avbd_slice7, oracle_accuracy5, columns parity3; maximum columns delta 0.000107 m"
+  },
+  "reference": "Last measured three-avbd 10.22 ms was earlier, not a fresh A/B in this experiment",
+  "allBatchesWithin120Hz": false,
+  "sourceSha256": {
+    "engine/slang/kernels/world_step.slang": "ab5db0a6faf1b6a5a0506cddc3f8330e404fc9fdf252380fafbe4ce5da3d0911",
+    "engine/slang/physics/contact_storage.slang": "0e8e884db46f14ad3ff20094c98270fef3f68a7cb9fe13c92253008c783458cc",
+    "engine/slang/kernels/persistent_solve.slang": "65b36ef7ecd8f43c9dce833cf3de06bf3a4f9e4b0ee0fdf66b1d21fe63f567cc",
+    "engine/crates/engine-webgpu/demo.html": "755ee3cddd743e3cb2d44c48906a40d1ab68ed645d73eb5be9eb639a2e6495dd",
+    "engine/crates/engine-webgpu/src/gpu.rs": "21158ba7a797183329b080cc817f6125fe910d8669a832e2130b7e911f84bcbb",
+    "engine/crates/engine-webgpu/generated/wgsl/solve_primal_color_persistent.wgsl": "2892c5b069db1c2a0fe4e9c39cf147f4d9dd0360f86230ed097bf474344a6a23",
+    "engine/crates/engine-webgpu/generated/wgsl/solve_dual_persistent.wgsl": "0cd750a3fb6645fd449505d1a994bc0b88a63a93304814fc8e0306e88c14facc"
+  },
+  "rejectedFollowups": [
+    {
+      "variant": "per-manifold primal tangent basis",
+      "measuredAt": "2026-10-14T12:59:34.992Z",
+      "wallMs": 12.81,
+      "batchesMs": [
+        [
+          12.53,
+          13.03,
+          13.26,
+          12.89,
+          12.71
+        ],
+        [
+          12.81,
+          12.93,
+          13.02,
+          12.71,
+          12.74
+        ]
+      ],
+      "primalMs": 4.063232,
+      "status": "Reverted; no improvement, not promoted to full correctness validation"
+    },
+    {
+      "variant": "restored control",
+      "measuredAt": "2026-10-14T13:01:20.197Z",
+      "wallMs": 12.7,
+      "batchesMs": [
+        [
+          12.65,
+          12.78,
+          12.85,
+          12.76,
+          12.91
+        ],
+        [
+          12.91,
+          12.7,
+          12.65,
+          12.6,
+          12.96
+        ]
+      ],
+      "primalMs": 4.063232,
+      "warmMs": 1.048576
+    },
+    {
+      "variant": "persistent fused warm start",
+      "measuredAt": "2026-10-14T13:01:42.231Z",
+      "wallMs": 13.44,
+      "batchesMs": [
+        [
+          13.2,
+          13.65,
+          13.44,
+          13.69,
+          13.73
+        ],
+        [
+          13.52,
+          13.22,
+          13.5,
+          13.44,
+          13.05
+        ]
+      ],
+      "primalMs": 4.128768,
+      "warmMs": 1.507328,
+      "status": "Existing opt-in retained; slower, not promoted to default or full-scene accuracy validation"
+    }
+  ]
+}

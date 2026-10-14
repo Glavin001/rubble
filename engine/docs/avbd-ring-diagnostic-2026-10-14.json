@@ -1,0 +1,89 @@
+{
+  "measuredAt": "2026-10-14T08:07:48.748Z",
+  "scene": "ring110k",
+  "totalBodies": 110442,
+  "dynamicBodies": 110441,
+  "iterations": 4,
+  "dt": 0.016666666666666666,
+  "correctness": {
+    "browserSteps": 480,
+    "passed": true,
+    "resetPassed": true,
+    "initialContacts": 1284737,
+    "finalMeanFlankDrift": 1.2191467342467948,
+    "finalBall": [
+      0.08504689484834671,
+      8.472813606262207,
+      105.21778106689453
+    ],
+    "finalAwake": 110441,
+    "overflow": 0
+  },
+  "timing": {
+    "protocol": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "stepsPerBatch": 10,
+    "untimedStepsPerRound": 3,
+    "measuredSteps": 100,
+    "rounds": [
+      {
+        "samplesMs": [
+          210.489999999851,
+          229.6,
+          210.4,
+          223.11999999955296,
+          228.88000000044704
+        ],
+        "medianMs": 223.11999999955296
+      },
+      {
+        "samplesMs": [
+          236.8,
+          236.010000000149,
+          231.089999999851,
+          238.5,
+          244.8
+        ],
+        "medianMs": 236.8
+      }
+    ],
+    "wallMs": 223.11999999955296,
+    "budgetMs": 8.333333333333334,
+    "allBatchesWithin120Hz": false,
+    "gpuPhaseMediansMs": {
+      "aabbs": 8.06,
+      "grid": 1.7,
+      "narrowphase": 63.31,
+      "warm": 1.77,
+      "graph": 25.03,
+      "primal": 171.9,
+      "dual": 27.07,
+      "sleep": 0.07
+    }
+  },
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "device": "",
+    "description": ""
+  },
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+  "conditions": {
+    "isolationVerified": false,
+    "ownNativeGpuWorkloadsConcurrent": false,
+    "gpuReportedUtilizationWhileOwnWorkIdle": 100,
+    "referenceEarlierSameBrowserWallMs": 220.9,
+    "referenceEarlierSameBrowserTotalBodies": 110442,
+    "referenceEarlierSameBrowserIterations": 4,
+    "interpretation": "Diagnostic only. System GPU activity remained high when our work was idle, both implementations were much slower than earlier measurements, and this is not an isolated A/B/A comparison. No speedup, parity or 120 FPS claim."
+  },
+  "sha256": {
+    "engine/slang/kernels/world_step.slang": "10ee3dba33b2a3550c377c5c9a1bb11d4232f24f83504e029e6172a40b45bc88",
+    "engine/crates/engine-webgpu/demo.html": "b8087145c20846cfddaf95c7789616aa58f4685644d28e309afa31c0b5f577a1",
+    "engine/crates/engine-webgpu/physics-benchmark.mjs": "1219ed00d6d7216b20f2494be937e3cc457627340bf5dc22407ac517a3e724a0",
+    "engine/crates/engine-webgpu/generated/wgsl/solve_primal_color.wgsl": "174f2b3d206e34a292275b90718cace63a9d01e0bfc5cf4b5da946a4361c6c95",
+    "engine/crates/engine-webgpu/generated/wgsl/broadphase_query.wgsl": "41e815de9e008609d539419457a552f6580ce0bfb978fad798f856d043559b9c",
+    "inspiration/pinned/three-avbd/src/avbd3d/bench-cases.ts": "ec9b2f929306f7d2116f3eae8f19f774c53c1aca5c1d4ac74e0d7700d5832f0b",
+    "inspiration/pinned/three-avbd/src/avbd3d/bench-scenes.ts": "9b941d515845f326d88005012b3ac4968ab16bda0199f7cc0bd883aaf8f59ee6"
+  }
+}

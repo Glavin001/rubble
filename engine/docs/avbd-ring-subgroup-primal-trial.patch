@@ -1,0 +1,294 @@
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -2656,6 +2656,74 @@
+     GROUP_SYNC();
+ }
+ 
++#if defined(ENGINE_WGSL) && defined(ENGINE_PERSISTENT_CONTACTS)
++groupshared AUint gsWaveCounter;
++// Prototype: subgroup membership must not be inferred from local invocation IDs.
++__target_intrinsic(wgsl, "subgroupShuffle($0, $1)")
++float primalShuffle(float value, uint lane);
++void primalWaveReduce(uint s, uint lane, inout Mat6 A, inout Vec6 rhs)
++{
++    uint source = WaveGetLaneIndex() ^ s;
++    float a0 = primalShuffle(A.m[0], source);
++    float a1 = primalShuffle(A.m[6], source);
++    float a2 = primalShuffle(A.m[7], source);
++    float a3 = primalShuffle(A.m[12], source);
++    float a4 = primalShuffle(A.m[13], source);
++    float a5 = primalShuffle(A.m[14], source);
++    float a6 = primalShuffle(A.m[18], source);
++    float a7 = primalShuffle(A.m[19], source);
++    float a8 = primalShuffle(A.m[20], source);
++    float a9 = primalShuffle(A.m[21], source);
++    float a10 = primalShuffle(A.m[24], source);
++    float a11 = primalShuffle(A.m[25], source);
++    float a12 = primalShuffle(A.m[26], source);
++    float a13 = primalShuffle(A.m[27], source);
++    float a14 = primalShuffle(A.m[28], source);
++    float a15 = primalShuffle(A.m[30], source);
++    float a16 = primalShuffle(A.m[31], source);
++    float a17 = primalShuffle(A.m[32], source);
++    float a18 = primalShuffle(A.m[33], source);
++    float a19 = primalShuffle(A.m[34], source);
++    float a20 = primalShuffle(A.m[35], source);
++    float r0 = primalShuffle(rhs.v[0], source);
++    float r1 = primalShuffle(rhs.v[1], source);
++    float r2 = primalShuffle(rhs.v[2], source);
++    float r3 = primalShuffle(rhs.v[3], source);
++    float r4 = primalShuffle(rhs.v[4], source);
++    float r5 = primalShuffle(rhs.v[5], source);
++    if (lane < s)
++    {
++        A.m[0] += a0;
++        A.m[6] += a1;
++        A.m[7] += a2;
++        A.m[12] += a3;
++        A.m[13] += a4;
++        A.m[14] += a5;
++        A.m[18] += a6;
++        A.m[19] += a7;
++        A.m[20] += a8;
++        A.m[21] += a9;
++        A.m[24] += a10;
++        A.m[25] += a11;
++        A.m[26] += a12;
++        A.m[27] += a13;
++        A.m[28] += a14;
++        A.m[30] += a15;
++        A.m[31] += a16;
++        A.m[32] += a17;
++        A.m[33] += a18;
++        A.m[34] += a19;
++        A.m[35] += a20;
++        rhs.v[0] += r0;
++        rhs.v[1] += r1;
++        rhs.v[2] += r2;
++        rhs.v[3] += r3;
++        rhs.v[4] += r4;
++        rhs.v[5] += r5;
++    }
++}
++#endif
++
+ [shader("compute")]
+ [numthreads(64, 1, 1)]
+ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
+@@ -2666,9 +2734,26 @@
+     uint local = lid.x;
+     // Storage loads are non-uniform in WGSL. Publish lanes through workgroup
+     // memory; the WGSL post-pass rewrites the read as workgroupUniformLoad.
+-    if (local == 0u) gsUniformLanes = primalLanesFor(count);
++    if (local == 0u)
++    {
++#if defined(ENGINE_WGSL) && defined(ENGINE_PERSISTENT_CONTACTS)
++        gsUniformLanes = primalLanesFor(count) | (WaveGetLaneCount() << 8u);
++        ASTORE(gsWaveCounter, 0u);
++#else
++        gsUniformLanes = primalLanesFor(count);
++#endif
++    }
+     GROUP_SYNC();
+     uint lanes = gsUniformLanes;
++#if defined(ENGINE_WGSL) && defined(ENGINE_PERSISTENT_CONTACTS)
++    uint waveSize = lanes >> 8u;
++    lanes &= 255u;
++    uint waveBase = 0u;
++    if (WaveGetLaneIndex() == 0u) AADD3(gsWaveCounter, WaveGetLaneCount(), waveBase);
++    waveBase = WaveReadLaneFirst(waveBase);
++    local = waveBase + WaveGetLaneIndex();
++    gid = gid - lid.x + local;
++#endif
+     uint threads = count * lanes;
+     uint bodySlot = gid / lanes;
+     uint lane = local % lanes;
+@@ -2694,9 +2779,26 @@
+     else
+     {
+         // lanes is 2, 4, or 8. Unrolled halving (three-avbd primalColor).
++#if defined(ENGINE_WGSL) && defined(ENGINE_PERSISTENT_CONTACTS)
++        if (waveSize >= lanes)
++        {
++        if (lanes >= 8u) primalWaveReduce(4u, lane, A, rhs);
++        if (lanes >= 4u) primalWaveReduce(2u, lane, A, rhs);
++        primalWaveReduce(1u, lane, A, rhs);
++        }
++        else
++        {
++            // Four-lane subgroups cannot contain an eight-lane body. Preserve
++            // the shared-memory tree across those complete subgroups instead.
++            if (lanes >= 8u) primalReduceStep(4u, live, lane, slot, A, rhs);
++            if (lanes >= 4u) primalReduceStep(2u, live, lane, slot, A, rhs);
++            primalReduceStep(1u, live, lane, slot, A, rhs);
++        }
++#else
+         if (lanes >= 8u) primalReduceStep(4u, live, lane, slot, A, rhs);
+         if (lanes >= 4u) primalReduceStep(2u, live, lane, slot, A, rhs);
+         primalReduceStep(1u, live, lane, slot, A, rhs);
++#endif
+         if (live && lane == 0u) primalApply(bodyIdx, A, rhs);
+     }
+ }
+--- a/engine/crates/engine-webgpu/src/gpu.rs
++++ b/engine/crates/engine-webgpu/src/gpu.rs
+@@ -156,6 +156,12 @@
+             force_fallback_adapter: false,
+         }))
+         .ok_or_else(|| anyhow::anyhow!("no wgpu adapter"))?;
++        if persistent_contacts {
++            let limits = adapter.limits();
++            anyhow::ensure!(limits.min_subgroup_size >= 4 && limits.max_subgroup_size <= 64,
++                "subgroup trial requires complete 4..64-lane subgroups, got {}..{}",
++                limits.min_subgroup_size, limits.max_subgroup_size);
++        }
+         let info = adapter.get_info();
+         let align = adapter.limits().min_storage_buffer_offset_alignment;
+         if u64::from(align) > PASS_ALIGN {
+@@ -164,7 +170,7 @@
+         let (device, queue) = pollster::block_on(adapter.request_device(
+             &wgpu::DeviceDescriptor {
+                 label: Some("engine-webgpu-sim"),
+-                required_features: wgpu::Features::empty(),
++                required_features: if persistent_contacts { wgpu::Features::SUBGROUP } else { wgpu::Features::empty() },
+                 required_limits: adapter.limits(),
+                 memory_hints: Default::default(),
+             },
+@@ -283,7 +289,7 @@
+             });
+             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                 label: Some(&name),
+-                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
++                source: wgpu::ShaderSource::Wgsl(wgsl.replace("enable subgroups;", "").into()),
+             });
+             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                 label: Some(&name),
+--- a/engine/crates/engine-webgpu/src/lib.rs
++++ b/engine/crates/engine-webgpu/src/lib.rs
+@@ -396,6 +396,13 @@
+ mod tests {
+     use super::*;
+ 
++    // Naga 24 recognizes subgroup operations behind the device feature but
++    // predates the WGSL enable directive. Browser exports retain the directive.
++    fn parse_trial_wgsl(src: &str) -> Result<naga::Module, naga::front::wgsl::ParseError> {
++        naga::front::wgsl::parse_str(&src.replace("enable subgroups;", ""))
++    }
++
++
+     #[test]
+     fn every_wgsl_loop_is_capped_and_valid() {
+         for (name, res) in WebGpuWorld::naga_shaders_report() {
+@@ -403,7 +410,7 @@
+             let loops = wgsl.matches("loop {").count();
+             let guards = wgsl.matches("loopGuard").count() / 3;
+             assert_eq!(loops, guards, "{name}: uncapped loop");
+-            let module = naga::front::wgsl::parse_str(&wgsl)
++            let module = parse_trial_wgsl(&wgsl)
+                 .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&wgsl)));
+             naga::valid::Validator::new(
+                 naga::valid::ValidationFlags::all(),
+@@ -435,7 +442,7 @@
+                 wgsl.matches("loopGuard").count() / 3,
+                 "{name}: uncapped loop"
+             );
+-            let module = naga::front::wgsl::parse_str(wgsl)
++            let module = parse_trial_wgsl(wgsl)
+                 .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(wgsl)));
+             naga::valid::Validator::new(
+                 naga::valid::ValidationFlags::all(),
+@@ -455,7 +462,7 @@
+                 .expect("compact entry must be exported")
+                 .1
+                 .unwrap();
+-            let module = naga::front::wgsl::parse_str(&source).unwrap();
++            let module = parse_trial_wgsl(&source).unwrap();
+             let globals: Vec<_> = module.global_variables.iter().map(|(_, g)| g).collect();
+             assert!(!globals.iter().any(|g| g.binding.as_ref().is_some_and(|b| b.binding == 4)), "{name}: compact primal still reads canonical 128-byte contacts; hot-path traffic reduction was not compiled");
+             let points = globals
+@@ -499,7 +506,7 @@
+                 .expect("compact entry must be exported")
+                 .1
+                 .unwrap();
+-            let module = naga::front::wgsl::parse_str(&source).unwrap();
++            let module = parse_trial_wgsl(&source).unwrap();
+             let globals: Vec<_> = module.global_variables.iter().map(|(_, g)| g).collect();
+             for (binding, resource) in [(2, "colliders"), (25, "canonical manifolds")] {
+                 assert!(!globals.iter().any(|g| g.binding.as_ref().is_some_and(|b| b.binding == binding)),
+@@ -541,7 +548,7 @@
+                 .expect("persistent entry must be exported")
+                 .1
+                 .unwrap();
+-            let module = naga::front::wgsl::parse_str(&source).unwrap();
++            let module = parse_trial_wgsl(&source).unwrap();
+             let globals: Vec<_> = module.global_variables.iter().map(|(_, g)| g).collect();
+             let solver = name.starts_with("solve_");
+             for (binding, expected_stride) in [(4, 32), (27, 64)] {
+@@ -597,7 +604,7 @@
+                 .expect("collision entry must be exported")
+                 .1
+                 .unwrap();
+-            let module = naga::front::wgsl::parse_str(&source).expect("valid collision WGSL");
++            let module = parse_trial_wgsl(&source).expect("valid collision WGSL");
+             let clip = module
+                 .functions
+                 .iter()
+@@ -640,7 +647,7 @@
+                 .1
+                 .as_ref()
+                 .unwrap();
+-            let module = naga::front::wgsl::parse_str(source).expect("valid reuse shader");
++            let module = parse_trial_wgsl(source).expect("valid reuse shader");
+             assert!(!module.global_variables.iter().any(|(_, global)|
+                 global.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 21)),
+                 "{name}: production contact reuse binds the shared scratch/statistics buffer. The removed hit/miss/generation diagnostics serialized every body/pair on six global atomic counters; keep optional instrumentation out of the default performance path.");
+@@ -656,7 +663,7 @@
+                 continue;
+             }
+             let source = result.unwrap();
+-            let module = naga::front::wgsl::parse_str(&source).expect("valid sparse shader");
++            let module = parse_trial_wgsl(&source).expect("valid sparse shader");
+             assert!(!module.types.iter().any(|(_,ty)| matches!(ty.inner,
+                 naga::TypeInner::Image{..} | naga::TypeInner::Sampler{..})),
+                 "{name}: texture resources invalidate the buffer-only barrier lowering; retain the appropriate texture synchronization before adding textures");
+@@ -700,7 +707,7 @@
+             .filter(|(name, _)| name.starts_with("solve_primal_"))
+         {
+             let source = source.unwrap();
+-            let module = naga::front::wgsl::parse_str(&source).expect("valid primal WGSL");
++            let module = parse_trial_wgsl(&source).expect("valid primal WGSL");
+             for binding in if name.starts_with("solve_primal_color") {
+                 &[14, 17][..]
+             } else {
+@@ -802,7 +809,7 @@
+                 .1
+                 .as_ref()
+                 .unwrap();
+-            let module = naga::front::wgsl::parse_str(source)
++            let module = parse_trial_wgsl(source)
+                 .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+             let mut unexpected = Vec::new();
+             let mut atomic_offsets = Vec::new();
+--- a/engine/crates/engine-webgpu/demo.html
++++ b/engine/crates/engine-webgpu/demo.html
+@@ -529,9 +529,11 @@
+     if (adapter.limits.minUniformBufferOffsetAlignment > PASS_ALIGN) {
+       throw new Error('uniform offset alignment exceeds 256');
+     }
++    if (persistentContacts && !(adapter.info.subgroupMinSize >= 4 && adapter.info.subgroupMaxSize <= 64))
++      throw new Error('subgroup trial requires complete 4..64-lane subgroups');
+     const wantTimestamps = adapter.features.has('timestamp-query');
+     const device = await adapter.requestDevice({
+-      requiredFeatures: wantTimestamps ? ['timestamp-query'] : [],
++      requiredFeatures: [...(wantTimestamps ? ['timestamp-query'] : []), ...(persistentContacts ? ['subgroups'] : [])],
+       requiredLimits: {
+         maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
+         maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+@@ -1087,6 +1089,7 @@
+         sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact",
+         dt: params.dt,
+         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
++        primalReduction: "subgroup-shuffle-trial", subgroupMinSize: info.subgroupMinSize, subgroupMaxSize: info.subgroupMaxSize,
+         userAgent: navigator.userAgent,
+       });
+       await readCounters();

@@ -24,6 +24,7 @@ fn main() -> Result<()> {
     )?;
 
     let world = slang_root.join("kernels/world_step.slang");
+    let compact = slang_root.join("kernels/compact_solve.slang");
     let entries = [
         "apply_commands",
         "predict_bodies",
@@ -39,12 +40,17 @@ fn main() -> Result<()> {
         "contact_hash_clear",
         "contact_hash_insert",
         "persist_contacts",
+        "persist_manifolds",
+        "persist_manifolds_compact",
         "warmstart_joints",
         "build_awake_list",
         "csr_clear",
         "csr_degree_contacts",
         "csr_degree_joints",
         "csr_prefix",
+        "csr_prefix_blocks",
+        "csr_prefix_block_sums",
+        "csr_prefix_add",
         "csr_prefix_init",
         "csr_prefix_scan",
         "csr_prefix_swap",
@@ -52,10 +58,21 @@ fn main() -> Result<()> {
         "csr_scatter_contacts",
         "csr_scatter_joints",
         "csr_sort",
+        "csr_sort_append",
         "color_bodies",
         "init_colors",
         "pack_color_lists",
+        "count_color_tiles",
+        "prefix_color_tiles",
+        "scatter_color_tiles",
         "write_color_args",
+        "write_work_args",
+        "write_sleep_args",
+        "clear_solver_contacts",
+        "pack_solver_contacts",
+        "solve_primal_color_compact",
+        "solve_primal_one_compact",
+        "solve_dual_compact",
         "solve_primal_color",
         "solve_primal_one",
         "solve_dual",
@@ -68,7 +85,13 @@ fn main() -> Result<()> {
     ];
     for entry in entries {
         compile(
-            &world,
+            if entry.ends_with("_compact")
+                || (entry == "pack_solver_contacts" || entry == "clear_solver_contacts")
+            {
+                &compact
+            } else {
+                &world
+            },
             entry,
             SlangTarget::Metal,
             &msl_dir.join(format!("{entry}.metal")),
@@ -84,6 +107,10 @@ fn main() -> Result<()> {
     for entry in entries.iter().chain(["abi_roundtrip"].iter()) {
         let src = if *entry == "abi_roundtrip" {
             &abi
+        } else if entry.ends_with("_compact")
+            || (*entry == "pack_solver_contacts" || *entry == "clear_solver_contacts")
+        {
+            &compact
         } else {
             &world
         };

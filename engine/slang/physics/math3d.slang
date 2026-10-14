@@ -27,9 +27,10 @@ public float4 quatConjugate(float4 q)
 
 public float3 quatRotate(float4 q, float3 v)
 {
-    float3 u = q.xyz;
-    float s = q.w;
-    return 2.0 * dot(u, v) * u + (s * s - dot(u, u)) * v + 2.0 * s * cross(u, v);
+    // Unit-quaternion form also leaves the rotation axis exact in f32. The
+    // expanded q*v*conj(q) scales it by dot(q,q), losing touching ring contacts.
+    float3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
 }
 
 // Integrate local rotation increment (Rodrigues-style chart) onto a unit quaternion.

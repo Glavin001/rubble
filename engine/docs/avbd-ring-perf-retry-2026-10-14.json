@@ -1,0 +1,275 @@
+{
+  "classification": "Diagnostic retry after Codex restart, with native GPU tests stopped; slowdown persists. No 120 FPS or parity claim.",
+  "measuredAt": "2026-10-14T10:09:59.142Z",
+  "conditions": {
+    "nativeRingTest": "completed successfully before either browser run",
+    "overlappingNativeGpuTests": false,
+    "overlappingCompilerWork": false,
+    "browser": "fresh Codex in-app session, Chrome 155 / apple metal-3",
+    "hardware": "Apple M3 Max, Mac15,9, 128 GB",
+    "externalGpuIsolation": "not proven; Activity Monitor identified own ring test while active, then Codex GPU process and WindowServer. No external heavy GPU process identified.",
+    "referenceSuite": "Ring completed; navigated away from subsequent jointed-drop case before running Rubble."
+  },
+  "earlierBaselineMs": {
+    "rubble": 20.8,
+    "threeAvbd": 10.2,
+    "source": "avbd-regression-notes.md, historical measurements; different source state"
+  },
+  "reference": {
+    "scene": "Brick ring 110k",
+    "iterations": 4,
+    "bodies": 110442,
+    "contacts": 1169673,
+    "colors": 11,
+    "wallMs": 216.77,
+    "gpuTotalMs": 288.36,
+    "gpuPhasesMs": {
+      "collision": 17.63,
+      "adjacency": 6.49,
+      "coloring": 80.02,
+      "solve": 180.75
+    },
+    "gpuMB": 279,
+    "precision": "displayed values rounded to 0.01 ms",
+    "source": "unmodified pinned bench3d.html paper tier"
+  },
+  "rubble": {
+    "scene": "ring110k",
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "awake": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contacts": 1172540,
+    "colors": 12,
+    "overflow": 0,
+    "coloring": "reuse",
+    "packing": "stable",
+    "contactLayout": "canonical128",
+    "adjacency": "append",
+    "wallMs": 227.2,
+    "roundMediansMs": [
+      227.2,
+      243.2
+    ],
+    "batchMeansMs": [
+      [
+        219.88,
+        227.2,
+        229.62,
+        236.08,
+        226.41
+      ],
+      [
+        255.87,
+        242.6,
+        262.09,
+        234.51,
+        243.2
+      ]
+    ],
+    "phaseSamples": [
+      {
+        "step": 167,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 16.05632,
+          "grid": 9.568256,
+          "narrowphase": 70.975488,
+          "warm": 1.769472,
+          "graph": 40.108032,
+          "primal": 168.886272,
+          "dual": 30.998528,
+          "sleep": 0.065536
+        },
+        "gpuPhasesMs": 338.427904,
+        "gpuSpanMs": 312.082432,
+        "encodeMs": 0.2,
+        "submitToReadbackMs": 326.3,
+        "completionMs": 326.5
+      },
+      {
+        "step": 168,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 8.060928,
+          "grid": 17.563648,
+          "narrowphase": 156.237824,
+          "warm": 1.572864,
+          "graph": 8.060928,
+          "primal": 177.864704,
+          "dual": 21.037056,
+          "sleep": 0
+        },
+        "gpuPhasesMs": 390.397952,
+        "gpuSpanMs": 278.069248,
+        "encodeMs": 0.3,
+        "submitToReadbackMs": 293.2,
+        "completionMs": 293.5
+      },
+      {
+        "step": 169,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 7.995392,
+          "grid": 1.6384,
+          "narrowphase": 77.33248,
+          "warm": 1.769472,
+          "graph": 40.108032,
+          "primal": 157.876224,
+          "dual": 42.139648,
+          "sleep": 0.065536
+        },
+        "gpuPhasesMs": 328.925184,
+        "gpuSpanMs": 312.147968,
+        "encodeMs": 0.2,
+        "submitToReadbackMs": 321.5,
+        "completionMs": 321.7
+      },
+      {
+        "step": 170,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 0.065536,
+          "grid": 1.6384,
+          "narrowphase": 156.30336,
+          "warm": 1.441792,
+          "graph": 32.047104,
+          "primal": 183.894016,
+          "dual": 25.165824,
+          "sleep": 0.065536
+        },
+        "gpuPhasesMs": 400.621568,
+        "gpuSpanMs": 304.152576,
+        "encodeMs": 0.2,
+        "submitToReadbackMs": 311.3,
+        "completionMs": 311.5
+      },
+      {
+        "step": 171,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 0.065536,
+          "grid": 9.633792,
+          "narrowphase": 126.746624,
+          "warm": 1.703936,
+          "graph": 32.047104,
+          "primal": 167.051264,
+          "dual": 18.874368,
+          "sleep": 0.065536
+        },
+        "gpuPhasesMs": 356.18816,
+        "gpuSpanMs": 305.07008,
+        "encodeMs": 0.2,
+        "submitToReadbackMs": 312.5,
+        "completionMs": 312.7
+      },
+      {
+        "step": 172,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 22.740992,
+          "grid": 9.568256,
+          "narrowphase": 153.157632,
+          "warm": 1.703936,
+          "graph": 32.11264,
+          "primal": 148.832256,
+          "dual": 20.054016,
+          "sleep": 0.065536
+        },
+        "gpuPhasesMs": 388.235264,
+        "gpuSpanMs": 294.780928,
+        "encodeMs": 0.1,
+        "submitToReadbackMs": 294.6,
+        "completionMs": 294.7
+      },
+      {
+        "step": 173,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 0.131072,
+          "grid": 1.572864,
+          "narrowphase": 126.222336,
+          "warm": 6.750208,
+          "graph": 24.051712,
+          "primal": 159.842304,
+          "dual": 41.025536,
+          "sleep": 0.065536
+        },
+        "gpuPhasesMs": 359.661568,
+        "gpuSpanMs": 281.083904,
+        "encodeMs": 0.3,
+        "submitToReadbackMs": 296.2,
+        "completionMs": 296.5
+      },
+      {
+        "step": 174,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 17.301504,
+          "grid": 1.900544,
+          "narrowphase": 283.508736,
+          "warm": 11.79648,
+          "graph": 39.059456,
+          "primal": 204.537856,
+          "dual": 13.565952,
+          "sleep": 0.065536
+        },
+        "gpuPhasesMs": 571.736064,
+        "gpuSpanMs": 322.43712,
+        "encodeMs": 0.1,
+        "submitToReadbackMs": 327.8,
+        "completionMs": 327.9
+      },
+      {
+        "step": 175,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 0.065536,
+          "grid": 1.6384,
+          "narrowphase": 77.463552,
+          "warm": 1.6384,
+          "graph": 48.103424,
+          "primal": 175.833088,
+          "dual": 40.108032,
+          "sleep": 0
+        },
+        "gpuPhasesMs": 344.850432,
+        "gpuSpanMs": 343.998464,
+        "encodeMs": 0.2,
+        "submitToReadbackMs": 350.4,
+        "completionMs": 350.6
+      },
+      {
+        "step": 176,
+        "passCount": 14,
+        "phasesMs": {
+          "aabbs": 15.990784,
+          "grid": 33.619968,
+          "narrowphase": 81.59232,
+          "warm": 3.801088,
+          "graph": 19.464192,
+          "primal": 168.624128,
+          "dual": 26.411008,
+          "sleep": 0.065536
+        },
+        "gpuPhasesMs": 349.569024,
+        "gpuSpanMs": 288.161792,
+        "encodeMs": 0.3,
+        "submitToReadbackMs": 295.6,
+        "completionMs": 295.9
+      }
+    ]
+  },
+  "precision": "CPU durations rounded to 0.1 ms and batch means to 0.01 ms; GPU timestamps retained to 0.000001 ms.",
+  "finding": "Within the same submitted step, phase-duration sums can exceed the first-to-last GPU timestamp span. Step 174: 571.736064 ms summed phases vs 322.437120 ms span vs 327.9 ms CPU completion. Do not interpret phase sums as additive cost percentages. Mechanism remains unresolved.",
+  "budgetMs": 8.333333333333334,
+  "allBatchesWithin120Hz": false,
+  "sourceSha256": {
+    "engine/crates/engine-webgpu/demo.html": "4d017264ea754b360373217ee400fe9c1e0af604d58301b68d6af0de8c54d5d8",
+    "engine/slang/kernels/world_step.slang": "330f7274a4ce43a08980a81b85182e803fd4ad17554dff8373e866e03dfbb55a",
+    "engine/crates/engine-webgpu/generated/wgsl/csr_sort_append.wgsl": "06a9f916b2c4ab7cbed49d8a36fec8c828e4d57f4e00cfa3b1d3fbd30f34df2e",
+    "inspiration/pinned/three-avbd/src/avbd3d/bench-cases.ts": "ec9b2f929306f7d2116f3eae8f19f774c53c1aca5c1d4ac74e0d7700d5832f0b",
+    "inspiration/pinned/three-avbd/src/avbd3d/gpu/solver.ts": "964e56bf86efa8599d6133e3d43c5ceb6f671a3dd2b57e99a3b79d08fbdd6b84"
+  }
+}

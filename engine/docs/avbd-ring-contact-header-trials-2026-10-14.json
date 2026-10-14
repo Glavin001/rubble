@@ -1,0 +1,420 @@
+{
+  "date": "2026-10-14",
+  "scene": "ring110k",
+  "baseline": {
+    "timestamp": "2026-10-14T18:47:03.498Z",
+    "wallMs": 11.410000000055879,
+    "physicsFps": 87.64241893033328,
+    "protocol": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "untimedStepsPerRound": 3,
+    "stepsPerBatch": 10,
+    "measuredSteps": 100,
+    "rounds": [
+      {
+        "samplesMs": [
+          11.259999999962748,
+          11.380000000074507,
+          11.559999999962747,
+          11.479999999981374,
+          11.410000000055879
+        ],
+        "medianMs": 11.410000000055879
+      },
+      {
+        "samplesMs": [
+          11.419999999925494,
+          11.410000000055879,
+          11.459999999962747,
+          11.35,
+          11.25
+        ],
+        "medianMs": 11.410000000055879
+      }
+    ],
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "sparseStart": 10,
+    "colorPrefix": "parallel",
+    "packing": "stable",
+    "contactLayout": "persistent64+32",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "",
+      "description": ""
+    },
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+    "workload": {
+      "start": {
+        "contact": 1184245,
+        "candidate": 230244,
+        "awake": 110441,
+        "color": 15,
+        "manifold": 227155,
+        "overflow": 0,
+        "colorBuckets": [
+          38216,
+          36641,
+          21457,
+          9780,
+          2747,
+          1068,
+          297,
+          121,
+          63,
+          28,
+          9,
+          6,
+          4,
+          2,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "end": {
+        "contact": 1174316,
+        "candidate": 256703,
+        "awake": 110441,
+        "color": 11,
+        "manifold": 246481,
+        "overflow": 0,
+        "colorBuckets": [
+          36437,
+          33636,
+          20681,
+          10740,
+          4398,
+          2539,
+          1244,
+          548,
+          183,
+          33,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "phasesMs": {
+      "aabbs": 0.065536,
+      "grid": 1.179648,
+      "narrowphase": 2.490368,
+      "warm": 1.048576,
+      "graph": 0.917504,
+      "primal": 3.8666240000000003,
+      "dual": 1.6384,
+      "sleep": 0.065536
+    },
+    "phaseCaveat": "Later split-pass timestamp samples perturb execution; not the batched throughput window.",
+    "allBatchesWithin120Hz": false
+  },
+  "experiments": [
+    {
+      "name": "ForceInline loadPersistentContact",
+      "timestamp": "2026-10-14T18:49:28.699Z",
+      "wallMs": 11.459999999962747,
+      "batchesMs": [
+        [
+          11.4,
+          11.429999999981373,
+          11.6,
+          11.55,
+          11.46000000005588
+        ],
+        [
+          11.479999999981374,
+          11.409999999962746,
+          11.470000000018626,
+          11.459999999962747,
+          11.430000000074505
+        ]
+      ],
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.114112,
+        "narrowphase": 2.490368,
+        "warm": 1.114112,
+        "graph": 0.917504,
+        "primal": 3.9321599999999997,
+        "dual": 1.7039360000000001,
+        "sleep": 0.065536
+      },
+      "generatedBytes": {
+        "contact_hash_insert_persistent": 16242,
+        "narrowphase_persistent": 89574,
+        "persist_contacts_persistent": 35336
+      },
+      "finding": "Loader inlined but tangent helper and complete contact field assignments remain in generated hash insertion. No throughput gain."
+    },
+    {
+      "name": "Explicit header-only reads",
+      "timestamp": "2026-10-14T18:51:31.059Z",
+      "wallMs": 11.429999999981373,
+      "batchesMs": [
+        [
+          11.270000000018626,
+          11.470000000018626,
+          11.520000000018626,
+          11.479999999981374,
+          11.479999999981374
+        ],
+        [
+          11.469999999925495,
+          11.430000000074505,
+          11.429999999981373,
+          11.38999999994412,
+          11.390000000037253
+        ]
+      ],
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.179648,
+        "narrowphase": 2.490368,
+        "warm": 1.048576,
+        "graph": 0.917504,
+        "primal": 3.93216,
+        "dual": 1.7039360000000001,
+        "sleep": 0.065536
+      },
+      "generatedBytes": {
+        "contact_hash_insert_persistent": 9204,
+        "narrowphase_persistent": 83899,
+        "persist_contacts_persistent": 22441
+      },
+      "finding": "Removed tangent reconstruction and full payload loads from hash insertion; no measured throughput gain."
+    }
+  ],
+  "protocol": "Same full 110441 awake dynamic bodies, four iterations, 60 lead steps, two rounds of three untimed steps and five ten-step batches. Report minimum round median; phases are later split-pass samples and perturb execution.",
+  "workloadComparison": "Both candidates have exactly identical start/end contact, candidate, awake, color, manifold, overflow and color-bucket snapshots to baseline; verified against browser BENCH objects.",
+  "baselineGeneratedModules": {
+    "contact_hash_insert_persistent": {
+      "bytes": 12018,
+      "sha256": "25d3dd40a637e62722ab04f61f1ff963f130b370f3d34c36e91d6181b764ab02"
+    },
+    "narrowphase_persistent": {
+      "bytes": 83495,
+      "sha256": "3fb06999da1505eaca2899bd7c79a0346e54cec21d427e2facf74de68d65a0de"
+    },
+    "persist_contacts_persistent": {
+      "bytes": 22029,
+      "sha256": "2d56dafd3a702ac4f40b3abf3ce0bffa9067504b95f39ee4005bec5abc34fdd0"
+    }
+  },
+  "decision": "Discard both source experiments; preserve the new independent warm-start hash collision regression.",
+  "validation": {
+    "eachCandidateExistingGpuTestsPassed": 43,
+    "newCollisionRegressionPassedOnHeaderCandidate": true,
+    "mutationCheck": {
+      "mutation": "Omit contact_hash_insert invocation j==5, a live head preceding later duplicate blocks.",
+      "result": "Expected failure",
+      "diagnostic": "persistent=false, parity=0, repeat=0, pair=(1, 1026): minimum live head 5 must be reachable before EMPTY; a hole from weak CAS or a wrong duplicate head loses manifold warm-start support. Found Some(249), expected Some(5).",
+      "removed": true
+    },
+    "restoredProductionGpuTestsPassed": 44,
+    "restoredProductionSourceMatchesBackup": true,
+    "retainedTestSha256": "1519a3fbafb7f086c5274f4f95773c6a1e6e7e128951d0eb6fc59e1ce67e7e68",
+    "exportedProductionModulesMatchBaselineHashes": true
+  },
+  "limitations": [
+    "No concurrent GPU tests or compilation during browser measurements.",
+    "Full long-scene gates not rerun for discarded candidates.",
+    "Pinned reference not remeasured.",
+    "120 FPS and full ring/gables parity remain open."
+  ],
+  "sourceSha256": {
+    "inlineContactStorage": "55e38aecd03c74a01d011e2d467def6efbdf970f70844ca6e66bf296d88890ce",
+    "headerContactStorage": "46b31237072fe41647c3addb71013a018f255ad3b6a92d85d3dcc0de9ea4546a",
+    "headerWorldStep": "fc9b59265ea00e83f705053fa87292861ac54a78991dafa637cedd0056d61d42",
+    "productionContactStorage": "0e8e884db46f14ad3ff20094c98270fef3f68a7cb9fe13c92253008c783458cc",
+    "productionWorldStep": "a675d19f08cda15fb0c84f445389a55ac032289d7f2c997b43796f76097157f4"
+  },
+  "restoredControl": {
+    "timestamp": "2026-10-14T18:54:06.547Z",
+    "wallMs": 11.43999999994412,
+    "physicsFps": 87.41258741301438,
+    "protocol": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "untimedStepsPerRound": 3,
+    "stepsPerBatch": 10,
+    "measuredSteps": 100,
+    "rounds": [
+      {
+        "samplesMs": [
+          11.269999999925494,
+          11.540000000037253,
+          11.529999999981374,
+          11.56000000005588,
+          11.529999999981374
+        ],
+        "medianMs": 11.529999999981374
+      },
+      {
+        "samplesMs": [
+          11.480000000074506,
+          11.43999999994412,
+          11.45,
+          11.390000000037253,
+          11.359999999962747
+        ],
+        "medianMs": 11.43999999994412
+      }
+    ],
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "sparseStart": 10,
+    "colorPrefix": "parallel",
+    "packing": "stable",
+    "contactLayout": "persistent64+32",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "",
+      "description": ""
+    },
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+    "workload": {
+      "start": {
+        "contact": 1184245,
+        "candidate": 230244,
+        "awake": 110441,
+        "color": 15,
+        "manifold": 227155,
+        "overflow": 0,
+        "colorBuckets": [
+          38216,
+          36641,
+          21457,
+          9780,
+          2747,
+          1068,
+          297,
+          121,
+          63,
+          28,
+          9,
+          6,
+          4,
+          2,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "end": {
+        "contact": 1174316,
+        "candidate": 256703,
+        "awake": 110441,
+        "color": 11,
+        "manifold": 246481,
+        "overflow": 0,
+        "colorBuckets": [
+          36437,
+          33636,
+          20681,
+          10740,
+          4398,
+          2539,
+          1244,
+          548,
+          183,
+          33,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "phasesMs": {
+      "aabbs": 0.065536,
+      "grid": 1.114112,
+      "narrowphase": 2.490368,
+      "warm": 1.114112,
+      "graph": 0.917504,
+      "primal": 3.8666240000000003,
+      "dual": 1.7039360000000001,
+      "sleep": 0.065536
+    },
+    "phaseCaveat": "Later split-pass timestamp samples perturb execution; not the batched throughput window.",
+    "allBatchesWithin120Hz": false
+  }
+}

@@ -61,7 +61,7 @@ public struct GpuCounters
     AUint wakeEvents;
     uint iteration;
     AUint manifoldCount;
-    uint _pad0;
+    AUint recolorCount; // ABI byte 52: compact pending-color work count
     uint _pad1;
     uint _pad2;
 };

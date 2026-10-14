@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
         match sim.step() {
             Ok(c) => {
                 if i % 30 == 0 || i == 179 || std::env::var_os("WG_EVERY").is_some() {
-                println!(
+                    println!(
                     "step {i} y={:.3} bodies={} contacts={} cand={} colors={} awake={} ms={:.2} ov=0x{:x}",
                     sim.body_y(box_id),
                     c.body_count,

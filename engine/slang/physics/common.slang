@@ -56,7 +56,7 @@ struct Contact
     uint colliderA;
     uint colliderB;
     uint featureId;
-    uint alive;
+    uint alive; // 0 dead, 1 live; during NP only, >=2 encodes previous contact index + 2
     float3 normal;
     float penetration;
     float3 anchorA;
@@ -74,7 +74,7 @@ struct Contact
     float c0T2;
     float _pad0; // stick flag (1 = static friction held)
     float _pad1;
-    float _pad2; // ABI: keep Contact = 128 B (matches engine-schema)
+    float _pad2; // second tangent penalty kT2; occupies the old padding word (128 B ABI)
 };
 
 // three-avbd Stage 8b: one CSR/dual edge per pair; contacts are a contiguous range.
@@ -234,9 +234,10 @@ float4 quatConjugate(float4 q) { return float4(-q.x, -q.y, -q.z, q.w); }
 
 float3 quatRotate(float4 q, float3 v)
 {
-    float3 u = q.xyz;
-    float s = q.w;
-    return 2.0 * dot(u, v) * u + (s * s - dot(u, u)) * v + 2.0 * s * cross(u, v);
+    // Unit-quaternion form also leaves the rotation axis exact in f32. The
+    // expanded q*v*conj(q) scales it by dot(q,q), losing touching ring contacts.
+    float3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
 }
 
 float4 quatApplyDelta(float4 q, float3 dTheta)
@@ -637,7 +638,7 @@ void contributeContact(
     inout Mat6 A, inout Vec6 rhs,
     Contact c, bool isA, float alpha, float3 bodyPos, float4 bodyRot,
     float3 C /* n,t1,t2 geometric residuals at current pose */,
-    float contactOffset, float3 rWorld, float slipSpeed)
+    float contactOffset, float3 rWorld)
 {
     float3 r = rWorld;
     float3 C0 = float3(c.c0N, c.c0T1, c.c0T2);
@@ -645,18 +646,16 @@ void contributeContact(
     // Ĉ = (1-α)·C0 + (C_geom - C_geom0) = C - α·C0 + (margin, 0, 0).
     // Using C - α·C0 alone drives compression at exact touch and explodes stacks.
     float3 cReg = C - alpha * C0 + float3(contactOffset, 0.0, 0.0);
-    float3 fRaw = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
+    float3 fRaw = float3(c.kN, c.kT, c._pad2) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
     float3 f = projectContactForce(fRaw, c.friction);
-    // Kinetic (8bv): saturated + fast tangential slip → drop kT so μN integrates on the
-    // inertial Hessian. Settle/near-stick (slipSpeed ≤ REST_SPEED) keep kT like three-avbd.
-    float kT = c.kT;
-    if (length(fRaw.yz) > length(f.yz) + 1e-4 && slipSpeed > 0.1) kT = 0.0;
+    // Keep the Hessian penalties for both tangent rows, as in three-avbd.
+    // Dropping a saturated row's stiffness makes the Newton step overshoot.
     Vec6 jN = jacobianLin(c.normal, r, isA);
     Vec6 jT1 = jacobianLin(c.tangent1, r, isA);
     Vec6 jT2 = jacobianLin(c.tangent2, r, isA);
     mat6AddOuter(A, jN, c.kN);
-    mat6AddOuter(A, jT1, kT);
-    mat6AddOuter(A, jT2, kT);
+    mat6AddOuter(A, jT1, c.kT);
+    mat6AddOuter(A, jT2, c._pad2);
     vec6AddScaled(rhs, jN, f.x);
     vec6AddScaled(rhs, jT1, f.y);
     vec6AddScaled(rhs, jT2, f.z);

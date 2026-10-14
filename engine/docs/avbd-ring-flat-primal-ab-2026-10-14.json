@@ -1,0 +1,298 @@
+{
+  "objectiveStatus": "Open: 120 physics FPS and pinned-reference parity are not achieved.",
+  "protocol": {
+    "name": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "measuredSteps": 100,
+    "statistic": "minimum round median"
+  },
+  "scene": {
+    "name": "ring110k",
+    "totalBodies": 110442,
+    "activeDynamics": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contactLayout": "persistent64+32",
+    "packing": "stable",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact"
+  },
+  "browser": {
+    "name": "Codex in-app browser",
+    "version": "Chrome 155",
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "experiment": "Flatten the primal manifold/contact loops into one point loop, retaining pair motion, rotations, normal and friction across adjacent points. Equations and per-lane contact order unchanged.",
+  "decision": "Revert the slower flat-loop shader; retain expanded mixed joint/contact adjacency-order regression.",
+  "runs": [
+    {
+      "name": "flat primal traversal",
+      "measuredAt": "2026-10-14T17:51:14.627Z",
+      "wallMs": 12.93,
+      "rounds": [
+        [
+          12.61,
+          12.9,
+          13.16,
+          12.97,
+          12.96
+        ],
+        [
+          12.98,
+          12.82,
+          12.97,
+          12.92,
+          12.93
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1183075,
+          "candidate": 230335,
+          "awake": 110441,
+          "color": 14,
+          "manifold": 227178,
+          "overflow": 0,
+          "colorBuckets": [
+            38239,
+            36562,
+            21455,
+            9778,
+            2780,
+            1075,
+            305,
+            125,
+            68,
+            32,
+            9,
+            8,
+            3,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1171026,
+          "candidate": 256822,
+          "awake": 110441,
+          "color": 12,
+          "manifold": 246796,
+          "overflow": 0,
+          "colorBuckets": [
+            36383,
+            33695,
+            20620,
+            10690,
+            4456,
+            2483,
+            1294,
+            577,
+            200,
+            36,
+            5,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.114112,
+        "narrowphase": 2.490368,
+        "warm": 1.048576,
+        "graph": 1.31072,
+        "primal": 4.849664,
+        "dual": 1.703936,
+        "sleep": 0.065536
+      }
+    },
+    {
+      "name": "restored production control",
+      "measuredAt": "2026-10-14T17:52:40.265Z",
+      "wallMs": 12.16,
+      "rounds": [
+        [
+          12.21,
+          12.29,
+          12.33,
+          12.24,
+          12.3
+        ],
+        [
+          12.16,
+          12.16,
+          12.19,
+          12.11,
+          12.17
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "phasesMs": {
+        "aabbs": 0.131072,
+        "grid": 1.179648,
+        "narrowphase": 2.490368,
+        "warm": 1.048576,
+        "graph": 1.31072,
+        "primal": 4.128768,
+        "dual": 1.6384,
+        "sleep": 0.065536
+      }
+    }
+  ],
+  "validation": {
+    "experimentalFocusedTestsPassed": 40,
+    "newCoverage": "Compare ordered/interleaved/reversed adjacency against one ordered canonical reference for both contact halves and serial/1/2/4/8-lane compact solves. Includes mixed joints, compound collider mappings, sphere arms, empty manifolds and dead points. Protect inactive endpoint bytes.",
+    "mutation": {
+      "description": "Initial flat traversal reset the point index but did not clear the previous manifold count before processing a joint. Existing ordered-only test passed; expanded interleaved-order regression failed. Clearing the count fixed it.",
+      "order": "interleaved",
+      "half": 0,
+      "lanes": 0,
+      "body": 0,
+      "component": 0,
+      "actual": 0.007468795,
+      "expected": 0.009582635,
+      "tolerance": 3e-06
+    },
+    "longSceneGates": "Not run for discarded shader; restore exact previously validated production shader to preserve columns and oracles.",
+    "restoredFocusedTestsPassed": 40
+  },
+  "sourceSha256": {
+    "trial": "abacb189f7398d19c6d9619bce3e2a85674cc6297f580e62d1a0c84fb6e2c36a",
+    "restored": "c0203e8dccfb0c0f59d579bf16d7d2c2c7b3a6f0a62fad0f666c3a5200ec8405"
+  },
+  "caveats": [
+    "Serial browser measurements; no overlap with native GPU tests or shader compilation.",
+    "Phase values are separate later split-pass timestamp samples; they perturb execution and are not the batched throughput window.",
+    "Raw batch means rounded to 0.01 ms. No individual-step deadline guarantee.",
+    "Changing generated code changed trajectories slightly; full workload counters retained.",
+    "No new reference timing in this experiment."
+  ],
+  "nextHypothesis": "Test one-workgroup execution of sparse tail colors, with storage barriers between colors and complete chunk coverage. Pinned three-avbd has primalSparse; Rubble currently dispatches every color separately. Preserve arbitrary tail size with fallback/coverage tests. Reference caveat: fuseSparseColors defaults false and its current selection restricts use to <=1024 active bodies; it is not an enabled 110k-ring advantage. Applying it to large-scene sparse buckets would be a new experiment, not copying the reference benchmark configuration."
+}

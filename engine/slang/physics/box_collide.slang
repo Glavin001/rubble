@@ -4,10 +4,12 @@
 #ifndef ENGINE_PHYSICS_BOX_COLLIDE_SLANG
 #define ENGINE_PHYSICS_BOX_COLLIDE_SLANG
 
-// Cap at 4 (face corners). three-avbd allows 8; 4 matches stack manifolds and cuts
-// Brick Ring contact traffic ~2× when clipping produced 5–8 points. Cap 2 fails Stack.
-static const int BOX_MAX_CONTACTS = 4;
-static const int BOX_MAX_POLY = 16;
+// The intersection of two rotated rectangular faces can have eight vertices.
+// Keep the whole support polygon: taking its first four biases forces and topples rings.
+static const int BOX_MAX_CONTACTS = 8;
+// Clipping a convex quad against four half-planes adds at most four
+// vertices. Match three-avbd: retain all eight without 16-vertex copies.
+static const int BOX_MAX_POLY = 8;
 static const float BOX_SAT_EPS = 1.0e-6;
 static const float BOX_PLANE_EPS = 1.0e-5;
 static const float BOX_MERGE_DIST_SQ = 1.0e-6;
@@ -133,7 +135,9 @@ bool boxTestAxis(
     return true;
 }
 
-int boxClipPoly(float3 inV[16], int inCount, float3 planeN, float planeOffset, out float3 outV[16])
+// inout lowers to a WGSL function pointer instead of an array value. The
+// source is read-only here; callers alternate two distinct scratch arrays.
+int boxClipPoly(inout float3 inV[8], int inCount, float3 planeN, float planeOffset, out float3 outV[8])
 {
     int outCount = 0;
     if (inCount <= 0) return 0;
@@ -206,8 +210,8 @@ void boxBuildFaceManifold(
     float ieU, ieV;
     boxFaceAxes(incidentBox, incidentAxis, iu, iv, ieU, ieV);
 
-    float3 clip0[16];
-    float3 clip1[16];
+    float3 clip0[8];
+    float3 clip1[8];
     clip0[0] = faceC + iu * ieU + iv * ieV;
     clip0[1] = faceC - iu * ieU + iv * ieV;
     clip0[2] = faceC - iu * ieU - iv * ieV;
@@ -226,8 +230,7 @@ void boxBuildFaceManifold(
     float3 mids[8];
     uint featurePrefix = uint((referenceIsA ? BOX_AXIS_FACE_A : BOX_AXIS_FACE_B) << 24)
         | (uint(referenceAxis) << 16) | (uint(incidentAxis) << 8);
-    // Every clipped face keeps up to 4 corners, including brick side faces.
-    // Stacking faces were already at 4; the side-face cap of 1 halved gables contacts.
+    // Keep every clipped corner, matching three-avbd, including rotated stacking faces.
     int maxPts = BOX_MAX_CONTACTS;
 
     for (int i = 0; i < count && m.count < maxPts; i++)

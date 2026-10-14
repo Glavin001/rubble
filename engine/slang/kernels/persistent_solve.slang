@@ -1,0 +1,14 @@
+// Opt-in persistent hot/cold storage. Keep canonical exports as the control.
+#define ENGINE_COMPACT_SOLVE 1
+#define ENGINE_PERSISTENT_CONTACTS 1
+#define apply_commands apply_commands_persistent
+#define narrowphase narrowphase_persistent
+#define contact_hash_insert contact_hash_insert_persistent
+#define persist_contacts persist_contacts_persistent
+#define persist_manifolds persist_manifolds_persistent
+#define pack_solver_contacts pack_solver_pairs_persistent
+#define solve_primal_color solve_primal_color_persistent
+#define solve_primal_one solve_primal_one_persistent
+#define solve_dual solve_dual_persistent
+#define solve_primal_sparse solve_primal_sparse_persistent
+#include "world_step.slang"

@@ -1,0 +1,49 @@
+{
+  "measuredAt": "2026-10-14T11:31:12.325Z",
+  "url": "http://127.0.0.1:8765/demo.html?scene=ring110k&bench=only&profile=detail",
+  "purpose": "Fresh retry confirming recovery from the approximately 200 ms slowdown after the user's Mac restart.",
+  "adapter": { "vendor": "apple", "architecture": "metal-3" },
+  "browser": "Codex in-app browser, Chrome 155",
+  "protocol": "three-avbd-2x5x10",
+  "leadSteps": 60,
+  "untimedStepsPerRound": 3,
+  "stepsPerBatch": 10,
+  "measuredSteps": 100,
+  "rounds": [
+    { "samplesMs": [17.470000000018626, 17.7, 17.9, 18.060000000009314, 17.86999999997206], "medianMs": 17.86999999997206 },
+    { "samplesMs": [17.689999999990686, 17.729999999981374, 17.83000000002794, 17.56999999997206, 17.5], "medianMs": 17.689999999990686 }
+  ],
+  "wallMs": 17.689999999990686,
+  "wallStatistic": "minimum of the two round medians",
+  "totalBodies": 110442,
+  "dynamicBodies": 110441,
+  "iterations": 4,
+  "dt": 0.016666666666666666,
+  "contactLayout": "compact64",
+  "packing": "stable",
+  "adjacency": "physical",
+  "order": "construction",
+  "persistence": "contact",
+  "workload": {
+    "start": { "contact": 1181436, "candidate": 229974, "awake": 110441, "color": 16, "manifold": 226701, "overflow": 0 },
+    "end": { "contact": 1169450, "candidate": 254916, "awake": 110441, "color": 11, "manifold": 245632, "overflow": 0 }
+  },
+  "profile": {
+    "protocol": "split-pass-timestamps-with-paired-completion-v1",
+    "detail": "collision",
+    "passCount": 17,
+    "phasesMs": { "aabbs": 0.065536, "grid": 1.6384, "refs": 0.065536, "hashClear": 0.065536, "hashInsert": 0.262144, "narrowphase": 4.456448, "warm": 1.31072, "graph": 1.31072, "primal": 5.2428799999999995, "dual": 2.6214399999999998, "sleep": 0.065536 },
+    "gpuSpanMs": 17.104896,
+    "completionMs": 20.899999999906868,
+    "caveat": "Phase medians use ten later steps, 167–176, with extra pass boundaries and per-step readback. They are separate from throughput batches and perturb execution. Timestamp granularity is 0.065536 ms."
+  },
+  "referenceComparison": {
+    "wallMs": 10.22,
+    "source": "avbd-ring-post-reboot-2026-10-14.json",
+    "caveat": "Earlier post-reboot reference measurement, not rerun alongside this confirmation."
+  },
+  "validation": { "profilingScheduleAndBenchmarkTestsPassed": 36, "physicsOraclesRerun": false },
+  "budgetMs": 8.333333333333334,
+  "allBatchesWithin120Hz": false,
+  "conclusion": "The approximately 200 ms slowdown is absent in this fresh measurement. The original slowdown's cause is not established. The 120 FPS and three-avbd parity objectives remain open."
+}

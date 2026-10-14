@@ -9,6 +9,8 @@ New 3D GPU rigid-body physics engine. **Not** an extension of the legacy `crates
 - **CCD:** stretch goal (`ccd_classify` / `ccd_sweep`)
 
 See [TOOLCHAIN.md](TOOLCHAIN.md) for slangc and pinned inspiration revisions.
+For the browser demo and automated scale/correctness checks, see
+[Slang/WebGPU regression checks](crates/engine-webgpu/README.md).
 
 ## Quick start (Metal)
 
