@@ -446,6 +446,8 @@ pub fn box_columns_100k(b: &mut SceneBuilder<'_>) {
 }
 
 pub fn pyramid(b: &mut SceneBuilder<'_>, levels: u32) {
+    // Match three-avbd brickPyramid: centres at 0.75 + level*0.5 (no pre-sink). Collision
+    // margin seats them; FINDINGS: pre-sink did not fix wall buckle and skewed first C0.
     for level in 0..levels {
         let n = levels - level;
         for x in 0..n {
@@ -923,10 +925,11 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
             params.trust_lin = t;
         }
     }
-    // Settled stacks/pyramids: match three-avbd (no trust clamp) unless TRUST is set.
+    // Pyramid/Columns keep default trustLin unless TRUST=off. three-avbd has no clamp, but
+    // with our residual first-frame seating (REST_SPEED over for ~75% of Pyramid 30 @step1)
+    // unclamped corrections detonated; clamp contains while reuse/startAtRest catch up.
     if (scene.info.name.starts_with("Pyramid") || scene.info.name.starts_with("Box Columns"))
-        && std::env::var("TRUST").is_err()
-        && std::env::var("PILE_TRUST").is_err()
+        && std::env::var("TRUST").ok().as_deref() == Some("off")
     {
         params.trust_lin = 1.0e6;
         params.trust_ang = 1.0e6;
@@ -969,11 +972,20 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
     }
     {
         let mut b = SceneBuilder::new(&mut world);
-        // Seat content on y=0.5 like three-avbd's ground top. A plane (not a box
-        // slab) keeps the large-scene broadphase simple: every dynamic already
-        // probes planes, and Box Columns 100k settles/sleeps on it. Brick Ring
-        // must not air-drop 0.5 m from a plane at y=0.
-        b.add_ground_plane(0.5);
+        // three-avbd `ground(extent)` is a static box slab (top at 0.5), not a plane.
+        // Pyramid 30 collapsed on our infinite plane (contacts churned 117k→92k on step 1);
+        // box-box ground matches the oracle manifold path. Ring/Pile/Columns same.
+        let extent: f32 = if scene.info.name.starts_with("Pyramid") {
+            30.0 * 0.6
+        } else if scene.info.name.starts_with("Box Columns") {
+            100.0 * 1.5
+        } else if scene.info.name.starts_with("Box Pile") {
+            40.0 * 1.6
+        } else {
+            200.0
+        };
+        let half_xz = (4.0 * extent).max(200.0) * 0.5;
+        b.add_ground_box_extent(0.5, half_xz);
         (scene.build)(&mut b);
     }
     Ok((world, &scene.info))

@@ -742,13 +742,14 @@ impl MetalWorld {
         // Colored Jacobi is enough once C0 is sampled at x⁻ (solve_primal_one kept for probes).
         // Dual stays per-contact (occupancy); CSR/island use manifolds.
         let dual_n = contact_dispatch.max(n_joints);
-        // Live colours + slack so a growing palette is not truncated mid-smash.
-        // Live colours + 1 slack (was +4; empty colour indirects still cost encoder time).
+        // Solve every colour bucket. last_counters.color_count lags one step, so a floor of 4
+        // skipped Pyramid 30 colours 4–5 on early frames (palette was already 6–13) and pumped
+        // Jacobi KE. three-avbd starts colorCap at ≥8 and grows; empty indirects are free.
         let max_c = self
             .last_counters
             .color_count
             .saturating_add(1)
-            .max(4)
+            .max(16)
             .min(self.capacity.max_colors.min(32));
         for _iter in 0..self.params.iterations {
             for color in 0..max_c {

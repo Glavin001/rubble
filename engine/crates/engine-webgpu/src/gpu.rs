@@ -425,12 +425,14 @@ impl WgpuSim {
         self.disp(&mut pass, "csr_scatter_contacts", manifold_dispatch, None);
         self.disp(&mut pass, "csr_sort", awake_dispatch, None);
         self.disp(&mut pass, "init_colors", awake_dispatch, None);
-        let color_cap = if self.body_count > 8192 { 8 } else { 12 };
+        // Match Metal / three-avbd: ≥16 JP rounds, colorCap ≤32 (was hard-capped at 8 for
+        // body_count>8192 — under-coloured Pyramid 30 vs oracle's ~13 colours).
+        let color_cap = self.capacity.max_colors.min(32);
         let color_rounds = self
             .last_counters
             .color_count
             .saturating_add(1)
-            .max(4)
+            .max(16)
             .min(color_cap);
         for round in 0..color_rounds {
             self.disp(&mut pass, "color_bodies", awake_dispatch, Some(round % 16));
@@ -444,7 +446,7 @@ impl WgpuSim {
             .last_counters
             .color_count
             .saturating_add(1)
-            .max(4)
+            .max(16)
             .min(self.capacity.max_colors.min(32));
         for _iter in 0..self.params.iterations {
             for color in 0..max_c {

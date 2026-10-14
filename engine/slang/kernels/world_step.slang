@@ -1899,8 +1899,14 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                     c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
                     c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
                 c.penetration = C.x;
+                // Tangential slip speed from step displacement (predict + primal). Sliding
+                // boxes have |v_t|≫REST_SPEED; settle corrections stay slow → keep kT.
+                float3 dLinRel = dLinB - dLinA;
+                float slipSpeed = length(float2(dot(t1, dLinRel), dot(t2, dLinRel)))
+                    / max(p.dt, 1e-8);
                 // C is already Ĉ; alpha=0 + margin=0 ⇒ contributeContact uses F = k·C + λ.
-                contributeContact(A, rhs, c, isA, 0.0, b.position, rotSelf, C, 0.0, isA ? rAW : rBW);
+                contributeContact(A, rhs, c, isA, 0.0, b.position, rotSelf, C, 0.0,
+                    isA ? rAW : rBW, slipSpeed);
             }
         }
         else

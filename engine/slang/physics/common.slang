@@ -637,7 +637,7 @@ void contributeContact(
     inout Mat6 A, inout Vec6 rhs,
     Contact c, bool isA, float alpha, float3 bodyPos, float4 bodyRot,
     float3 C /* n,t1,t2 geometric residuals at current pose */,
-    float contactOffset, float3 rWorld)
+    float contactOffset, float3 rWorld, float slipSpeed)
 {
     float3 r = rWorld;
     float3 C0 = float3(c.c0N, c.c0T1, c.c0T2);
@@ -647,10 +647,10 @@ void contributeContact(
     float3 cReg = C - alpha * C0 + float3(contactOffset, 0.0, 0.0);
     float3 fRaw = float3(c.kN, c.kT, c.kT) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
     float3 f = projectContactForce(fRaw, c.friction);
-    // At the friction bound the row is an inequality. Keeping k in the Hessian
-    // while the force is clamped makes dx ≈ μN/k, far below Coulomb μ g.
+    // Kinetic (8bv): saturated + fast tangential slip → drop kT so μN integrates on the
+    // inertial Hessian. Settle/near-stick (slipSpeed ≤ REST_SPEED) keep kT like three-avbd.
     float kT = c.kT;
-    if (length(fRaw.yz) > length(f.yz) + 1e-4) kT = 0.0;
+    if (length(fRaw.yz) > length(f.yz) + 1e-4 && slipSpeed > 0.1) kT = 0.0;
     Vec6 jN = jacobianLin(c.normal, r, isA);
     Vec6 jT1 = jacobianLin(c.tangent1, r, isA);
     Vec6 jT2 = jacobianLin(c.tangent2, r, isA);
