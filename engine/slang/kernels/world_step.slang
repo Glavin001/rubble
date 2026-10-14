@@ -1674,6 +1674,22 @@ uint2 constraintEndpoints(uint id)
     return uint2(gColliders[m.colliderA].body, gColliders[m.colliderB].body);
 }
 
+#if defined(ENGINE_WGSL)
+// CSR edge partners, parallel to the adjacency ids. The candidate buffer is dead
+// after narrowphase until the next broadphase and holds four words per candidate,
+// at least the 2·(manifolds + joints) adjacency edges. CSR scatter writes each
+// edge's partner once; sort permutes it with the ids; coloring then reads one
+// word per edge instead of deriving manifold → colliders → bodies every pass.
+BIND(10) RWStructuredBuffer<uint> gEdgePartner;
+uint csrPartner(uint body, uint e) { return gEdgePartner[e]; }
+#else
+uint csrPartner(uint body, uint e)
+{
+    uint2 ends = constraintEndpoints(ALOAD(gConstraintIds[e]));
+    return ends.x == body ? ends.y : ends.x;
+}
+#endif
+
 void csrCountEndpoint(uint body)
 {
     if (!bodyIsDynamic(gBodies[body])) return;
@@ -1889,12 +1905,15 @@ void csr_prefix(uint3 tid : SV_DispatchThreadID)
     ASTORE(CINDEX(n), sum);
 }
 
-void csrFillEndpoint(uint body, uint id)
+void csrFillEndpoint(uint body, uint partner, uint id)
 {
     if (!bodyIsDynamic(gBodies[body])) return;
     uint slot;
     AADD3(gBodyColor[body], 1, slot);
     ASTORE(gConstraintIds[slot], id);
+#if defined(ENGINE_WGSL)
+    if (slot < HOST_S(10) * 4u) gEdgePartner[slot] = partner;
+#endif
 }
 
 [shader("compute")]
@@ -1908,8 +1927,8 @@ void csr_scatter_contacts(uint3 tid : SV_DispatchThreadID)
     if (m.contactCount == 0u) return;
     uint id = gCounters[0].jointCount + i;
     uint2 e = constraintEndpoints(id);
-    csrFillEndpoint(e.x, id);
-    csrFillEndpoint(e.y, id);
+    csrFillEndpoint(e.x, e.y, id);
+    csrFillEndpoint(e.y, e.x, id);
 }
 
 [shader("compute")]
@@ -1920,8 +1939,8 @@ void csr_scatter_joints(uint3 tid : SV_DispatchThreadID)
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
     uint2 e = constraintEndpoints(i);
-    csrFillEndpoint(e.x, i);
-    csrFillEndpoint(e.y, i);
+    csrFillEndpoint(e.x, e.y, i);
+    csrFillEndpoint(e.y, e.x, i);
 }
 
 // Diagnostic control: old append-ID ordering. Atomic emission changes these IDs
@@ -1978,32 +1997,54 @@ bool csrKeyLess(uint4 a, uint4 b)
         (a.y == b.y && (a.z < b.z || (a.z == b.z && a.w < b.w)))));
 }
 
+// Same order as csrKeyLess(csrPhysicalKey(...)) but reads the cached partner:
+// joints (id order) before manifolds, manifolds by partner body; only edges
+// sharing a partner load collider ids for the tie-break.
+bool csrEdgeLess(uint body, uint idA, uint partnerA, uint idB, uint partnerB)
+{
+    uint nJ = gCounters[0].jointCount;
+    bool jointA = idA < nJ, jointB = idB < nJ;
+    if (jointA != jointB) return jointA;
+    if (jointA) return idA < idB;
+    if (partnerA != partnerB) return partnerA < partnerB;
+    return csrKeyLess(csrPhysicalKey(body, idA), csrPhysicalKey(body, idB));
+}
+
 // Max-heap sift. A large impactor may have thousands of incident manifolds;
 // unlike insertion sort, heap construction/extraction cannot become quadratic.
 void csrSiftDown(uint body, uint lo, uint count, uint root)
 {
     uint id = ALOAD(gConstraintIds[lo + root]);
-    uint4 key = csrPhysicalKey(body, id);
+    uint partner = csrPartner(body, lo + root);
     for (uint depth = 0u; depth < 32u; depth++)
     {
         if (root >= count / 2u) break; // includes count 0/1, avoids child overflow
         uint child = root * 2u + 1u;
         uint childId = ALOAD(gConstraintIds[lo + child]);
-        uint4 childKey = csrPhysicalKey(body, childId);
+        uint childPartner = csrPartner(body, lo + child);
         if (child + 1u < count)
         {
             uint rightId = ALOAD(gConstraintIds[lo + child + 1u]);
-            uint4 rightKey = csrPhysicalKey(body, rightId);
-            if (csrKeyLess(childKey, rightKey))
+            uint rightPartner = csrPartner(body, lo + child + 1u);
+            if (csrEdgeLess(body, childId, childPartner, rightId, rightPartner))
             {
-                child++; childId = rightId; childKey = rightKey;
+                child++; childId = rightId; childPartner = rightPartner;
             }
         }
-        if (!csrKeyLess(key, childKey)) break;
+        if (!csrEdgeLess(body, id, partner, childId, childPartner)) break;
         ASTORE(gConstraintIds[lo + root], childId);
+        csrSetPartner(lo + root, childPartner);
         root = child;
     }
     ASTORE(gConstraintIds[lo + root], id);
+    csrSetPartner(lo + root, partner);
+}
+
+void csrSetPartner(uint e, uint partner)
+{
+#if defined(ENGINE_WGSL)
+    gEdgePartner[e] = partner;
+#endif
 }
 
 [shader("compute")]
@@ -2022,16 +2063,19 @@ void csr_sort(uint3 tid : SV_DispatchThreadID)
         for (uint i = lo + 1u; i < hi; i++)
         {
             uint id = ALOAD(gConstraintIds[i]);
-            uint4 key = csrPhysicalKey(body, id);
+            uint partner = csrPartner(body, i);
             uint j = i;
             while (j > lo)
             {
                 uint prev = ALOAD(gConstraintIds[j - 1u]);
-                if (!csrKeyLess(key, csrPhysicalKey(body, prev))) break;
+                uint prevPartner = csrPartner(body, j - 1u);
+                if (!csrEdgeLess(body, id, partner, prev, prevPartner)) break;
                 ASTORE(gConstraintIds[j], prev);
+                csrSetPartner(j, prevPartner);
                 j--;
             }
             ASTORE(gConstraintIds[j], id);
+            csrSetPartner(j, partner);
         }
     }
     else
@@ -2057,8 +2101,12 @@ void csr_sort(uint3 tid : SV_DispatchThreadID)
             {
                 uint largest = ALOAD(gConstraintIds[lo]);
                 uint last = ALOAD(gConstraintIds[lo + end]);
+                uint largestPartner = csrPartner(body, lo);
+                uint lastPartner = csrPartner(body, lo + end);
                 ASTORE(gConstraintIds[lo], last);
                 ASTORE(gConstraintIds[lo + end], largest);
+                csrSetPartner(lo, lastPartner);
+                csrSetPartner(lo + end, largestPartner);
                 csrSiftDown(body, lo, end, 0u);
                 end--;
             }
@@ -2095,8 +2143,7 @@ uint compactPreviousColor(uint body)
     uint hi = ALOAD(CINDEX(body + 1u));
     for (uint e = lo; e < hi; e++)
     {
-        uint2 ends = constraintEndpoints(ALOAD(gConstraintIds[e]));
-        uint other = ends.x == body ? ends.y : ends.x;
+        uint other = csrPartner(body, e);
         if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
         uint op = jpPriority(other);
         if (op > prio || (op == prio && other > body)) return previous;
@@ -2131,8 +2178,7 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     uint hi = ALOAD(CINDEX(body + 1u));
     for (uint e = lo; e < hi; e++)
     {
-        uint2 ends = constraintEndpoints(ALOAD(gConstraintIds[e]));
-        uint other = ends.x == body ? ends.y : ends.x;
+        uint other = csrPartner(body, e);
         if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
         uint oc = ALOAD(gBodyColor[other]);
         if (oc == 0xFFFFFFFFu)
@@ -2242,8 +2288,7 @@ void init_colors(uint3 tid : SV_DispatchThreadID)
             uint hi = ALOAD(CINDEX(body + 1u));
             for (uint e = lo; e < hi; e++)
             {
-                uint2 ends = constraintEndpoints(ALOAD(gConstraintIds[e]));
-                uint other = ends.x == body ? ends.y : ends.x;
+                uint other = csrPartner(body, e);
                 if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
                 // Read immutable history, never this dispatch's partially
                 // initialized colors. A new conflict clears its lower-priority

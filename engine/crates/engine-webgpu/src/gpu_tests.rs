@@ -2592,16 +2592,21 @@ fn incremental_coloring_reuses_valid_history_and_repairs_new_conflicts() {
             .write_buffer(&sim.bufs[25], 0, bytemuck::cast_slice(&manifolds));
         let mut offsets = vec![0u32];
         let mut adjacency = Vec::new();
+        let mut partners = Vec::new();
         for body in 0..8 {
             for (id, &(a, b)) in edges.iter().enumerate() {
                 if body == a || body == b {
                     adjacency.push(id as u32);
+                    partners.push(if body == a { b } else { a });
                 }
             }
             offsets.push(adjacency.len() as u32);
         }
         sim.queue
             .write_buffer(&sim.bufs[14], 0, bytemuck::cast_slice(&adjacency));
+        // WebGPU coloring reads CSR scatter's per-edge partner array (binding 10).
+        sim.queue
+            .write_buffer(&sim.bufs[10], 0, bytemuck::cast_slice(&partners));
         sim.queue
             .write_buffer(&sim.bufs[14], csr_offset, bytemuck::cast_slice(&offsets));
         // Deliberately scramble awake-list order: the compact work list must
@@ -3035,6 +3040,27 @@ fn adjacency_order_uses_physical_neighbors_across_append_permutations_and_high_d
             upload[3..3 + count as usize].copy_from_slice(&ids);
             sim.queue
                 .write_buffer(&sim.bufs[14], 0, bytemuck::cast_slice(&upload));
+            // CSR scatter's partner array (binding 10) must be permuted with the ids.
+            let partner = |id: u32| {
+                if id < 3 {
+                    joints[id as usize].body_b
+                } else {
+                    key(id)[1]
+                }
+            };
+            let partners: Vec<u32> = upload
+                .iter()
+                .enumerate()
+                .map(|(k, &id)| {
+                    if (3..3 + count as usize).contains(&k) {
+                        partner(id)
+                    } else {
+                        sentinel
+                    }
+                })
+                .collect();
+            sim.queue
+                .write_buffer(&sim.bufs[10], 0, bytemuck::cast_slice(&partners));
             sim.queue.write_buffer(
                 &sim.bufs[14],
                 u64::from(constraint_id_words(&sim.capacity)) * 4,
@@ -3058,7 +3084,17 @@ fn adjacency_order_uses_physical_neighbors_across_append_permutations_and_high_d
             }
             sim.queue.submit([enc.finish()]);
             let actual: Vec<u32> = download(&sim, 14, 0, upload.len());
+            let sorted_partners: Vec<u32> = download(&sim, 10, 0, upload.len());
             ids.sort_by_key(|&id| key(id));
+            for k in 0..upload.len() {
+                let expected_partner = if (3..3 + count as usize).contains(&k) {
+                    partner(actual[k])
+                } else {
+                    sentinel
+                };
+                assert_eq!(sorted_partners[k], expected_partner,
+                    "degree={degree}, permutation={permutation}: partner of CSR slot {k} (id {}) was not moved with its id; coloring would test the wrong neighbour", actual[k]);
+            }
             assert_eq!(
                 &actual[..3],
                 &[sentinel; 3],
