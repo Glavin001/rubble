@@ -1,0 +1,266 @@
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -2410,6 +2410,39 @@
+         packSolverPoint(index - cur, mi, c);
+     }
+ #endif
++}
++#endif
++
++#if defined(ENGINE_SOLVER_EDGES)
++// Per-CSR-edge solver records: everything the primal needs before it can issue
++// point, pair and partner-body loads, so those loads no longer wait on the
++// edge id -> SolverPair hop. x = constraint id (joints < nJ), y = contactStart,
++// z = countAndSphere, w = partner body | EDGE_IS_A when the solved body is A.
++BIND(29) RWStructuredBuffer<uint4> gSolverEdges;
++static const uint EDGE_IS_A = 0x80000000u;
++
++[shader("compute")]
++[numthreads(64, 1, 1)]
++void pack_solver_edges(uint3 tid : SV_DispatchThreadID)
++{
++    uint t = dispatchIndex(tid);
++    if (t >= ALOAD(gCounters[0].awakeCount)) return;
++    uint body = gAwakeList[t];
++    uint nJ = gCounters[0].jointCount;
++    uint hi = SOLVE_INDEX(body + 1u);
++    for (uint e = SOLVE_INDEX(body); e < hi; e++)
++    {
++        uint id = SOLVE_ID(e);
++        uint4 rec = uint4(id, 0u, 0u, 0u);
++        if (id >= nJ)
++        {
++            SolverPair pair = gSolverPairs[id - nJ];
++            bool isA = pair.bodyA == body;
++            rec = uint4(id, pair.contactStart, pair.countAndSphere,
++                (isA ? pair.bodyB : pair.bodyA) | (isA ? EDGE_IS_A : 0u));
++        }
++        gSolverEdges[e] = rec;
++    }
+ }
+ #endif
+ 
+@@ -2460,12 +2493,27 @@
+     uint ahi = SOLVE_INDEX(bodyIdx + 1u);
+     for (uint e = alo + lane; e < ahi; e += lanes)
+     {
++#if defined(ENGINE_SOLVER_EDGES)
++        uint4 rec = gSolverEdges[e];
++        uint id = rec.x;
++#else
+         uint id = SOLVE_ID(e);
++#endif
+         if (id >= nJ)
+         {
+             // Manifold edge: load both bodies once, fold every contact point (three-avbd).
+-#if defined(ENGINE_COMPACT_SOLVE)
++#if defined(ENGINE_SOLVER_EDGES)
++            uint contactCount = rec.z & ~SOLVER_SPHERE;
++            uint contactStart = rec.y;
++            if (contactCount == 0u) continue;
++            bool isA = (rec.w & EDGE_IS_A) != 0u;
++            uint partner = rec.w & ~EDGE_IS_A;
++            uint ba = isA ? bodyIdx : partner, bb = isA ? partner : bodyIdx;
++            bool anySphere = (rec.z & SOLVER_SPHERE) != 0u;
++            // Normal/friction only; issued alongside the point loads.
+             SolverPair pair = gSolverPairs[id - nJ];
++#elif defined(ENGINE_COMPACT_SOLVE)
++            SolverPair pair = gSolverPairs[id - nJ];
+             uint contactCount = pair.countAndSphere & ~SOLVER_SPHERE;
+             uint contactStart = pair.contactStart;
+             if (contactCount == 0u) continue;
+@@ -2481,7 +2529,9 @@
+             uint ba = colA.body, bb = colB.body;
+             bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+ #endif
++#if !defined(ENGINE_SOLVER_EDGES)
+             bool isA = ba == bodyIdx;
++#endif
+             BodyState bA = gBodies[ba];
+             BodyState bB = gBodies[bb];
+             // Sphere lever arms use step-start rotation; static poses stay current.
+--- a/engine/crates/engine-webgpu/build.rs
++++ b/engine/crates/engine-webgpu/build.rs
+@@ -9,6 +9,9 @@
+     "solve_primal_sparse",
+     "solve_primal_sparse_compact",
+     "solve_primal_sparse_persistent",
++    "pack_solver_edges_persistent",
++    "solve_primal_color_edges_persistent",
++    "solve_primal_sparse_edges_persistent",
+     "apply_commands",
+     "apply_commands_persistent",
+     "narrowphase_persistent",
+@@ -90,6 +93,7 @@
+     let world = slang_root.join("kernels/world_step.slang");
+     let compact = slang_root.join("kernels/compact_solve.slang");
+     let persistent = slang_root.join("kernels/persistent_solve.slang");
++    let edges = slang_root.join("kernels/edges_solve.slang");
+     let abi = slang_root.join("kernels/abi_probe.slang");
+     compile(
+         &abi,
+@@ -104,7 +108,9 @@
+     for entry in WORLD_ENTRIES {
+         let dest = out.join(format!("{entry}.spv"));
+         match compile(
+-            if entry.ends_with("_persistent") {
++            if entry.ends_with("_edges_persistent") {
++                &edges
++            } else if entry.ends_with("_persistent") {
+                 &persistent
+             } else if entry.ends_with("_compact")
+                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+@@ -155,7 +161,9 @@
+     {
+         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
+         match compile_with_defines(
+-            if entry.ends_with("_persistent") {
++            if entry.ends_with("_edges_persistent") {
++                &edges
++            } else if entry.ends_with("_persistent") {
+                 &persistent
+             } else if entry.ends_with("_compact")
+                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+--- a/engine/crates/engine-webgpu/demo.html
++++ b/engine/crates/engine-webgpu/demo.html
+@@ -104,6 +104,12 @@
+     if (!['contact', 'manifold'].includes(hashInsertMode))
+       throw new Error('hashInsert must be contact or manifold');
+     const manifoldHashInsert = hashInsertMode === 'manifold';
++    // Opt-in per-CSR-edge solver records (persistent storage only): the primal
++    // reads contact range/partner from the edge, not via edge id -> SolverPair.
++    const edgesMode = qs.get('edges') || 'id';
++    if (!['id', 'record'].includes(edgesMode)) throw new Error('edges must be id or record');
++    if (edgesMode === 'record' && !persistentContacts) throw new Error('edges=record requires persistent contacts');
++    const primalEdges = edgesMode === 'record';
+     const detailedProfile = qs.get('profile') === 'detail';
+     const graphProfile = qs.get('profile') === 'graph';
+     // Diagnostic: one timestamped pass per primal color (and the sparse tail).
+@@ -273,7 +279,7 @@
+ 
+     function bufferSizes() {
+       const b = (n, stride) => n * stride;
+-      const s = new Array(29).fill(256);
++      const s = new Array(30).fill(256);
+       s[0] = b(cap.maxBodies * 2, 112);
+       s[1] = b(cap.maxBodies, 112);
+       s[2] = b(cap.maxColliders, 64);
+@@ -303,6 +309,8 @@
+       s[26] = b(cap.maxBodies, 32);
+       s[27] = compactContacts ? b(cap.maxContacts * (persistentContacts ? 2 : 1), 64) : 64;
+       s[28] = compactContacts ? b(cap.maxCandidates, 32) : 32;
++      // One 16-byte record per CSR edge: two per manifold plus two per joint.
++      s[29] = primalEdges ? b(2 * (cap.maxCandidates + cap.maxJoints), 16) : 16;
+       return s;
+     }
+ 
+@@ -310,6 +318,8 @@
+       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
+       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
+       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
++      ...(primalEdges ? ['pack_solver_edges_persistent', 'solve_primal_color_edges_persistent',
++        ...(sparseStart < 32 ? ['solve_primal_sparse_edges_persistent'] : [])] : []),
+       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
+       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
+       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
+@@ -1001,10 +1011,12 @@
+       if (compactContacts && !fusedPersistence) {
+         if (!persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
+         dispWork(pass, 'pack_solver_contacts', 66);
++        // Records need final CSR order and packed pairs; one thread per awake body.
++        if (primalEdges) dispWork(pass, 'pack_solver_edges_persistent', 67);
+       }
+       for (let iter = 0; iter < params.iterations; iter++) {
+         if (beginPass && iter > 0) nextPhase();
+-        const primal = pipes[compactContacts ? "solve_primal_color_compact" : "solve_primal_color"];
++        const primal = pipes[primalEdges ? 'solve_primal_color_edges_persistent' : compactContacts ? "solve_primal_color_compact" : "solve_primal_color"];
+         for (let color = 0; color < Math.min(colors, sparseStart); color++) {
+           if (beginPass && colorProfile && color > 0) nextPhase();
+           pass.setPipeline(primal.pipeline);
+@@ -1012,7 +1024,7 @@
+           pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
+         }
+         if (beginPass && colorProfile && sparseStart < colors && sparseStart > 0) nextPhase();
+-        if (sparseStart < colors) disp(pass, compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, sparseStart);
++        if (sparseStart < colors) disp(pass, primalEdges ? 'solve_primal_sparse_edges_persistent' : compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, sparseStart);
+         if (beginPass) nextPhase();
+         dispWork(pass, compactContacts ? 'solve_dual_compact' : 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
+       }
+@@ -1105,7 +1117,7 @@
+         totalBodies: bodyCount,
+         dynamicBodies: bodyCount - 1,
+         iterations: params.iterations,
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, edges: edgesMode,
+         dt: params.dt,
+         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
+         userAgent: navigator.userAgent,
+@@ -1491,7 +1503,7 @@
+             const report = {
+               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+               coloring: incrementalColors ? "reuse" : "rebuild",
+-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
++              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, edges: edgesMode, colors: last.color,
+               contacts: last.contact, awake: last.awake, overflow: last.overflow,
+               settle: pre, initialMaxY,
+             };
+@@ -1538,6 +1550,7 @@
+       report.order = spatialOrder ? "morton" : "construction";
+       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
+       report.hashInsert = hashInsertMode;
++      report.edges = edgesMode;
+       // Exercise reset too: stale warm-start data from the completed run must not
+       // contaminate the first frame or the benchmark's lead-in.
+       restoreScene();
+@@ -1562,7 +1575,7 @@
+       const report = {
+         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+         coloring: incrementalColors ? "reuse" : "rebuild",
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, edges: edgesMode, colors: last.color,
+         contacts: last.contact, awake: last.awake, overflow: last.overflow,
+       };
+       console.log('BENCH', JSON.stringify(report));
+--- a/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
++++ b/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
+@@ -97,7 +97,7 @@
+         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
+         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
+-        manifoldHashInsert:false,
++        manifoldHashInsert:false, primalEdges:false,
+         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
+         sleepRounds:8, PASS_ALIGN:256, bufs:[],
+         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+@@ -208,7 +208,7 @@
+     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
+-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert,
++    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, primalEdges:false,
+     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
+     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
+--- a/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
++++ b/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
+@@ -64,7 +64,7 @@
+     lead: 0, scene: 'ring110k', bodyCount: 110442,
+     params: {iterations: 4, dt: 1/60}, stablePacking: true, persistentContacts: true,
+     compactContacts: true, sparseStart: 32, parallelColorPrefix:false, physicalAdjacency: true, spatialOrder: false,
+-    fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', info: {}, navigator: {userAgent: 'test'},
++    fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', edgesMode: 'id', info: {}, navigator: {userAgent: 'test'},
+     last: {awake: 110441}, submitPhysics() {}, device: {queue: {async onSubmittedWorkDone() {}}},
+     async readCounters() { assert.equal(measuring, false); events.push('counters'); },
+     async readColorBuckets() { assert.equal(measuring, false); events.push('buckets'); return [60000,50441]; },
+--- /dev/null
++++ b/engine/slang/kernels/edges_solve.slang
+@@ -0,0 +1,9 @@
++// Opt-in persistent solve reading per-edge solver records (ENGINE_SOLVER_EDGES).
++// Separate exports keep the production persistent entries byte-identical.
++#define ENGINE_COMPACT_SOLVE 1
++#define ENGINE_PERSISTENT_CONTACTS 1
++#define ENGINE_SOLVER_EDGES 1
++#define pack_solver_edges pack_solver_edges_persistent
++#define solve_primal_color solve_primal_color_edges_persistent
++#define solve_primal_sparse solve_primal_sparse_edges_persistent
++#include "world_step.slang"
