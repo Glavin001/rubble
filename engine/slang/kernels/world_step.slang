@@ -348,7 +348,14 @@ void joint_hash_insert(uint3 tid : SV_DispatchThreadID)
     {
         uint slot = (h + probe) & (JOINT_HASH_SIZE - 1u);
         uint prev;
-        ACAS4(gEvents[slot], JOINT_HASH_EMPTY, key, prev);
+        // Spin on the same slot when WGSL weak CAS spuriously fails. Advancing
+        // the probe would leave an EMPTY hole and break open-address lookups.
+        for (uint spin = 0u; spin < 64u; spin++)
+        {
+            ACAS4(gEvents[slot], JOINT_HASH_EMPTY, key, prev);
+            if (prev != JOINT_HASH_EMPTY) break;
+            if (ALOAD(gEvents[slot]) == key) return;
+        }
         if (prev == JOINT_HASH_EMPTY || prev == key) return;
     }
 }
@@ -1290,7 +1297,14 @@ void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
     {
         uint slot = (h + probe) & (n - 1u);
         uint was;
-        ACAS4(gConstraintIds[slot], CONTACT_HASH_EMPTY, j, was);
+        // Spin on the same slot when WGSL weak CAS spuriously fails. Advancing
+        // the probe would leave an EMPTY hole and break open-address lookups.
+        for (uint spin = 0u; spin < 64u; spin++)
+        {
+            ACAS4(gConstraintIds[slot], CONTACT_HASH_EMPTY, j, was);
+            if (was != CONTACT_HASH_EMPTY) break;
+            if (ALOAD(gConstraintIds[slot]) == j) return;
+        }
         if (was == CONTACT_HASH_EMPTY) return;
         Contact occupant = gContacts[prevOff + was];
         if (occupant.alive != 0 &&
@@ -1302,7 +1316,12 @@ void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
             while (j < cur)
             {
                 uint got;
-                ACAS4(gConstraintIds[slot], cur, j, got);
+                for (uint spin = 0u; spin < 64u; spin++)
+                {
+                    ACAS4(gConstraintIds[slot], cur, j, got);
+                    if (got != cur) break;
+                    if (ALOAD(gConstraintIds[slot]) == j) return;
+                }
                 if (got == cur) return;
                 cur = got;
             }

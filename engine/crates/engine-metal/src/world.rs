@@ -441,9 +441,14 @@ impl MetalWorld {
             .max(32768)
             .next_power_of_two();
         let prev = s[7].max(256);
+        // Cap at 2^21: WebGPU max workgroups/dim is 65535 → 2^22 threads is invalid,
+        // and demo/wgpu share this host field. Larger tables also left uncleared slots
+        // when dispatch was clamped without matching s[9].
+        const MAX_POW2_DISPATCH: u32 = 1 << 21;
         s[9] = (prev.saturating_mul(4).max(1024) as u32)
             .next_power_of_two()
-            .min(ids_len);
+            .min(ids_len)
+            .min(MAX_POW2_DISPATCH);
         // s[10] = max manifolds (== max_candidates; one manifold per BP pair).
         s[10] = self.capacity.max_candidates;
         // s[12] = last CSR ping (ceil(log2(n))-1) & 1 for csr_prefix_finalize.
