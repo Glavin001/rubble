@@ -63,7 +63,7 @@ cd crates/engine-webgpu && python3 -m http.server 8765
 
 ## Speed — three-avbd Chrome WebGPU (local M3 Max, 2026-10-13)
 
-Adapter: `apple · metal-3`. Source: `LOCAL_three_avbd_gpu_bench.json`.
+Adapter: `apple · metal-3`. Source: `LOCAL_three_avbd_gpu_bench.json` (small+steady) and `LOCAL_three_avbd_paper_large_steady.json` (paper+large+steady).
 
 **Measurement note:** three-avbd reports two numbers. `wallMs` pipelines a batch of steps then one queue drain (CPU encode overlaps GPU). `gpuTotal` is isolated per-step GPU timestamp time. Our Metal `scene_fps` p50 is `commit`+`wait_until_completed` per step — a **cross-API** proxy for gpuTotal, not the fair WebGPU bar.
 
@@ -72,8 +72,15 @@ Adapter: `apple · metal-3`. Source: `LOCAL_three_avbd_gpu_bench.json`.
 | Wall smash 2k @ 10 it | 2.86 | 10.81 | 19 675 | 17 |
 | Chain mail 1.6k @ 10 it | 1.13 | 3.15 | 9 | 5 |
 | Brick ring 9k @ 4 it | 1.75 | **5.51** | 45 554 | 10 |
-| Settled pile 32k @ 4 it | 3.14 | 11.8 | 120 445 | 11 |
-| Box columns 100k @ 4 it | 3.50 | 9.57 | 400 000 | 3 |
+| Brick ring 110k @ 4 it | 10.97 | 11.47 | 1 170 611 | 11 |
+| Jointed drop 34k @ 10 it | 7.23 | 6.95 | 108 507 | 30 |
+| Brick gables 506k @ 3 it | 29.99 | 29.62 | 4 102 693 | 9 |
+| Settled pile 32k @ 4 it | 3.58 | 3.41 | 126 119 | 13 |
+| Box columns 100k @ 4 it | 4.10 | 4.00 | 400 000 | 3 |
+
+### Settled brick pyramid (oracle hold — local Chrome)
+
+`inspiration/pinned/three-avbd/settle-pyramid.html?levels=30` (reuseContacts+startAtRest): after 180 steps **maxZ 14.98/15.25**, **KE≈0.06**, contacts stable ~140 480, colours 13. Our Metal Pyramid 30 still collapses (height→~10, KE thousands) — JP rounds floored to 16 (was 4–8) and priority matched; remaining gap is reuse (~1% vs ~94%) / warm-start churn.
 
 ## Speed — our Metal `scene_fps` (local M3 Max)
 
