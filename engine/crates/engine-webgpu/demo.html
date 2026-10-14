@@ -1441,8 +1441,37 @@ struct VsOut {
         rateFrameMsSum = 0;
       }
     }
+    // Live playback pipelines counter readback instead of draining the GPU every
+    // frame: up to LIVE_IN_FLIGHT frames stay queued and counters arrive one or two
+    // frames late. Dispatch sizes are GPU-driven; host sizing tolerates stale
+    // counts (benchmarks already run ten-step batches between readbacks).
+    const LIVE_IN_FLIGHT = 2;
+    const liveFree = Array.from({ length: LIVE_IN_FLIGHT }, () =>
+      device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    const livePending = new Set();
+    let liveError = null;
+    let lastCompletion = 0;
+    let liveStepMs = 0;
+    async function drainLive() {
+      await Promise.all([...livePending]);
+      if (liveError) throw liveError;
+    }
+    function readLiveCounters(buf) {
+      const c = new Uint32Array(buf.getMappedRange().slice(0));
+      buf.unmap();
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+      if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
+    }
+
     async function frame(now) {
       if (!running) return;
+      if (liveError) { running = false; fail(liveError); return; }
+      // Bound latency: wait for a readback slot instead of queueing more steps.
+      // Nothing is drawn on these ticks, so they do not count as frames.
+      if (!measuring && liveFree.length === 0) {
+        requestAnimationFrame(frame);
+        return;
+      }
       // Skip overlapping rAF ticks while benchWall awaits — concurrent mapAsync on
       // staging hung the replay at step 1 after measuring. Still count FPS.
       if (measuring) {
@@ -1457,9 +1486,8 @@ struct VsOut {
         }
         const aspect = canvas.width / canvas.height;
         writeCamera(aspect);
-        const tStep0 = performance.now();
         const enc = device.createCommandEncoder();
-        encodeStep(enc, true);
+        encodeStep(enc, false);
         const rp = enc.beginRenderPass({
           colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
           depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
@@ -1467,16 +1495,22 @@ struct VsOut {
         rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
         rp.setPipeline(boxPipe); rp.setBindGroup(0, boxBind); rp.setVertexBuffer(0, boxVbo); rp.draw(36, bodies.length - 1);
         rp.end();
+        const readback = liveFree.pop();
+        enc.copyBufferToBuffer(bufs[7], 0, readback, 0, 64);
         device.queue.submit([enc.finish()]);
-        await staging.mapAsync(GPUMapMode.READ);
-        const c = new Uint32Array(staging.getMappedRange().slice(0));
-        staging.unmap();
-        const stepMs = performance.now() - tStep0;
-        last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
-        if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
         parity ^= 1;
         steps++;
-        bumpRates(true, stepMs, performance.now() - now);
+        const pending = readback.mapAsync(GPUMapMode.READ).then(() => {
+          readLiveCounters(readback);
+          liveFree.push(readback);
+          // Completion interval: per-step GPU throughput while the queue stays busy.
+          const t = performance.now();
+          if (lastCompletion > 0) liveStepMs = t - lastCompletion;
+          lastCompletion = t;
+        }).catch(e => { liveError = liveError || e; });
+        livePending.add(pending);
+        pending.finally(() => livePending.delete(pending));
+        bumpRates(true, liveStepMs, performance.now() - now);
         if (cfg.settled && (steps === 1 || steps % 30 === 0 || steps === lead)) {
           await sampleSettle();
         }
@@ -1504,6 +1538,8 @@ struct VsOut {
         if (benchmarkEnabled && !benchStarted && steps >= lead) {
           benchStarted = true;
           measuring = true;
+          await drainLive();
+          lastCompletion = 0;
           statusEl.textContent = cfg.settled
             ? `settled · measuring wall time (${dyn} bodies)…`
             : `impact shown · measuring wall time (${dyn} bodies)…`;

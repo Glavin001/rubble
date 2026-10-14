@@ -338,3 +338,36 @@ test('record warm hash slots cover manifolds even with a stale contact seed', ()
   assert.ok(slots(4062927, 505923, true, 16777216) * 4 <= 16777216, 'Record words must end before the CSR index region.');
   assert.equal(slots(1184245, 110442, false), 2097152, 'Head mode keeps one word per slot and the 2^21 cap.');
 });
+
+// Live playback pipelines counter readback (two frames in flight). Execute the
+// shipped helpers: draining must wait for every queued readback, decoded counters
+// must use the GPU counter layout, and an incomplete coloring must still stop
+// playback even though it is reported a frame late.
+test('live readback ring drains queued frames and surfaces late coloring overflow', async () => {
+  const block = html.slice(html.indexOf('const LIVE_IN_FLIGHT'), html.indexOf('async function frame('));
+  const counters = new Uint32Array(16);
+  counters[2] = 1174316; counters[4] = 256703; counters[5] = 110441; counters[6] = 11; counters[12] = 246481;
+  const makeBuffer = () => ({ getMappedRange: () => counters.buffer.slice(0), unmap() { this.unmapped = true; } });
+  const device = { createBuffer: makeBuffer };
+  const ctx = runInNewContext(`${block}\n({ liveFree, livePending, drainLive, readLiveCounters, get last() { return last; }, setError(e) { liveError = e; } })`,
+    { device, GPUBufferUsage: { MAP_READ: 1, COPY_DST: 8 }, last: null, Promise, Set, Array, Uint32Array, Error });
+  assert.equal(ctx.liveFree.length, 2, 'Two frames in flight bound latency to two physics steps.');
+  let resolve;
+  const pending = new Promise(r => { resolve = r; });
+  ctx.livePending.add(pending);
+  let drained = false;
+  const drain = ctx.drainLive().then(() => { drained = true; });
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(drained, false, 'Benchmarks must not start while live frames are still queued.');
+  resolve();
+  await drain;
+  assert.equal(drained, true);
+  const buf = makeBuffer();
+  ctx.readLiveCounters(buf);
+  assert.deepEqual({ ...ctx.last }, { contact: 1174316, candidate: 256703, awake: 110441, color: 11, manifold: 246481, overflow: 0 });
+  assert.ok(buf.unmapped, 'Readback buffers must be unmapped before reuse.');
+  counters[7] = 8;
+  assert.throws(() => ctx.readLiveCounters(makeBuffer()), /Graph coloring is incomplete/);
+  ctx.setError(new Error('late coloring overflow'));
+  await assert.rejects(ctx.drainLive(), /late coloring overflow/, 'A deferred readback failure must stop the next drain.');
+});
