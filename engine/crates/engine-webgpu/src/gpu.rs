@@ -24,6 +24,8 @@ pub struct WgpuSim {
     pub(crate) manifold_hash_insert: bool,
     /// Record warm hash: 16-byte slots carrying the pair key and previous run.
     pub(crate) warm_record_hash: bool,
+    /// Narrowphase finishes reused copies (persistent contacts only).
+    pub(crate) reuse_copy: bool,
     fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -233,7 +235,11 @@ impl WgpuSim {
         let shaders = crate::WebGpuWorld::compile_shaders_report();
         let mut pipes = HashMap::new();
         for (name, canonical) in &shaders {
-            if name.ends_with("_persistent") {
+            // Persistent variants load under their canonical aliases; reuse-copy
+            // entries keep their own names (they have no canonical twin).
+            if name.ends_with("_persistent")
+                && !(persistent_contacts && name.ends_with("_copy_persistent"))
+            {
                 continue;
             }
             let entry = if persistent_contacts {
@@ -356,6 +362,8 @@ impl WgpuSim {
                 Ok("manifold") | Ok("record")
             ),
             warm_record_hash: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("record"),
+            reuse_copy: persistent_contacts
+                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy"),
             device,
             queue,
             capacity,
@@ -592,7 +600,16 @@ impl WgpuSim {
             reuse || !self.manifold_hash_insert,
             "ENGINE_HASH_INSERT=manifold requires contact reuse"
         );
-        self.disp_work(&mut pass, "narrowphase", 64, None);
+        self.disp_work(
+            &mut pass,
+            if self.reuse_copy {
+                "narrowphase_copy_persistent"
+            } else {
+                "narrowphase"
+            },
+            64,
+            None,
+        );
         self.disp(&mut pass, "write_work_args", 64, None);
         if !reuse {
             self.disp(&mut pass, "contact_hash_clear", hash_n, None);
@@ -607,6 +624,8 @@ impl WgpuSim {
                 "persist_manifolds_compact"
             } else if self.manifold_persistence {
                 "persist_manifolds"
+            } else if self.reuse_copy {
+                "persist_contacts_copy_persistent"
             } else {
                 "persist_contacts"
             },
