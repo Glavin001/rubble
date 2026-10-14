@@ -1,0 +1,201 @@
+{
+  "classification": "Spatial upload experiment; total-wall difference below 1% and comparable to variation. Construction order remains default.",
+  "conditions": {
+    "hardware": "Apple M3 Max, 128 GB",
+    "browser": "Codex in-app Chrome 155, apple metal-3",
+    "serialFreshScenes": true,
+    "overlappingGpuTestsOrCompilation": false
+  },
+  "protocol": {
+    "name": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contactLayout": "compact64",
+    "adjacency": "physical",
+    "persistence": "contact",
+    "packing": "stable"
+  },
+  "ordering": "Pinned 10-bit Morton routine in its Z-up axes, after undoing our Y/Z coordinate exchange. Static ground stays at GPU index zero for renderer compatibility. All scene IDs preserved through inverse readback mapping.",
+  "runs": [
+    {
+      "order": "morton",
+      "time": "2026-10-14T11:22:34.064Z",
+      "wallMs": 17.63,
+      "roundMediansMs": [
+        17.76,
+        17.63
+      ],
+      "batchMeansMs": [
+        [
+          17.16,
+          17.46,
+          17.76,
+          17.89,
+          18.0
+        ],
+        [
+          17.88,
+          17.63,
+          17.82,
+          17.34,
+          17.24
+        ]
+      ],
+      "phasesMs": {
+        "grid": 1.507328,
+        "narrowphase": 4.849664,
+        "warm": 1.376256,
+        "graph": 1.31072,
+        "primal": 5.24288,
+        "dual": 2.62144
+      }
+    },
+    {
+      "order": "construction",
+      "time": "2026-10-14T11:23:21.261Z",
+      "wallMs": 17.78,
+      "roundMediansMs": [
+        17.82,
+        17.78
+      ],
+      "batchMeansMs": [
+        [
+          17.54,
+          17.82,
+          18.1,
+          17.71,
+          17.92
+        ],
+        [
+          18.06,
+          17.8,
+          17.54,
+          17.78,
+          17.69
+        ]
+      ],
+      "phasesMs": {
+        "grid": 1.6384,
+        "narrowphase": 4.849664,
+        "warm": 1.31072,
+        "graph": 1.31072,
+        "primal": 5.24288,
+        "dual": 2.686976
+      }
+    },
+    {
+      "order": "morton",
+      "time": "2026-10-14T11:23:56.208Z",
+      "wallMs": 17.74,
+      "roundMediansMs": [
+        17.74,
+        17.81
+      ],
+      "batchMeansMs": [
+        [
+          17.2,
+          17.74,
+          17.81,
+          17.71,
+          17.92
+        ],
+        [
+          17.85,
+          17.81,
+          17.85,
+          17.36,
+          17.36
+        ]
+      ],
+      "phasesMs": {
+        "grid": 1.507328,
+        "narrowphase": 4.9152,
+        "warm": 1.376256,
+        "graph": 1.31072,
+        "primal": 5.24288,
+        "dual": 2.62144
+      }
+    }
+  ],
+  "workload": {
+    "mortonStart": {
+      "contact": 1183371,
+      "candidate": 230189,
+      "awake": 110441,
+      "color": 15,
+      "manifold": 227111,
+      "overflow": 0
+    },
+    "mortonEnd": {
+      "contact": 1169378,
+      "candidate": 254674,
+      "awake": 110441,
+      "color": 15,
+      "manifold": 245185,
+      "overflow": 0
+    },
+    "constructionStart": {
+      "contact": 1181436,
+      "candidate": 229974,
+      "awake": 110441,
+      "color": 16,
+      "manifold": 226701,
+      "overflow": 0
+    },
+    "constructionEnd": {
+      "contact": 1169450,
+      "candidate": 254916,
+      "awake": 110441,
+      "color": 11,
+      "manifold": 245632,
+      "overflow": 0
+    }
+  },
+  "precision": "Batch means rounded to 0.01 ms; phases are later split-pass medians, not the throughput window.",
+  "validation": {
+    "javascriptTests": 24,
+    "newSpatialTests": 6,
+    "browserMortonRing480AndReset": {
+      "passed": true,
+      "awake": 110441,
+      "initialContacts": 1284737,
+      "finalMeanFlankDrift": 1.2430844410130444,
+      "ball": [
+        0.07793815433979034,
+        8.493675231933594,
+        105.34275817871094
+      ],
+      "overflow": 0
+    },
+    "browserMortonGables240AndReset": {
+      "passed": true,
+      "awake": 505922,
+      "initialContacts": 3916802,
+      "finalMeanUnhitDrift": 0.11773569167435864,
+      "finalMaxUnhitDrift": 0.3270273208618164,
+      "balls": [
+        [
+          -47.981605529785156,
+          4.776890754699707,
+          -73.78593444824219
+        ],
+        [
+          48.08835220336914,
+          4.7770161628723145,
+          -73.77983856201172
+        ]
+      ],
+      "overflow": 0
+    }
+  },
+  "sourceSha256": {
+    "engine/crates/engine-webgpu/demo.html": "7bf0ceb261627e8f3179cb48004ee4024b4d0a2d95ad41c0b2f35bf270a86af9",
+    "engine/crates/engine-webgpu/spatial-order.mjs": "25b023300f6ae69c984a557ef69b83dbd4fee03afc4c43cea7b6cc45c2a10a25",
+    "inspiration/pinned/three-avbd/src/avbd3d/gpu/solver.ts": "964e56bf86efa8599d6133e3d43c5ceb6f671a3dd2b57e99a3b79d08fbdd6b84"
+  },
+  "budgetMs": 8.333333333333334,
+  "allBatchesWithin120Hz": false
+}

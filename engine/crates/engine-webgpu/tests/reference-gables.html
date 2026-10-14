@@ -1,0 +1,49 @@
+<!-- Reproduce physical checkpoints: copy to
+inspiration/pinned/three-avbd/rubble-gables-check.html and open it through the
+pinned repo's Vite server. No reference implementation source is modified.
+The output uses Y-up coordinates and maps body IDs through refToGpu: raw GPU
+order is Morton-sorted and cannot be compared directly with construction order.
+This harness intentionally records no performance claim. -->
+<!doctype html><meta charset="utf-8"><title>Gables reference checkpoint capture</title><pre id="status">building pinned reference…</pre>
+<script type="module">
+import { Solver } from './src/avbd3d/ref/solver.ts';
+import { brickGables } from './src/avbd3d/bench-scenes.ts';
+import { GpuSolver3D } from './src/avbd3d/gpu/solver.ts';
+import { BODY_FLOATS, B_POS, B_ROT, B_VEL, B_ANGVEL } from './src/avbd3d/gpu/layout.ts';
+const status = document.querySelector('#status');
+try {
+ const adapter = await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
+ const device = await adapter.requestDevice({requiredLimits:{maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize,maxStorageBuffersPerShaderStage:adapter.limits.maxStorageBuffersPerShaderStage}});
+ const ref = new Solver(); brickGables(ref); ref.iterations=3;
+ const initial=ref.bodies.map(b=>Array.from(b.positionLin));
+ const gpu=new GpuSolver3D(device,ref,{bodyCapacity:ref.bodies.length+16});
+ const samples=[];
+ for(let step=1;step<=240;step++) {
+  gpu.step();
+  if(step%10===0) { await device.queue.onSubmittedWorkDone();status.textContent=`reference gables: step ${step}/240`; }
+  let counters;
+  if(step%30===0 || [1,10,20,60,120,240].includes(step)) {
+   counters=await gpu.readCounters();
+   if(counters.overflow) throw new Error(`reference overflow at ${step}: ${JSON.stringify(counters)}`);
+   if(step%30===0) gpu.adapt(counters);
+  }
+  if(![1,10,20,60,120,240].includes(step)) continue;
+  const poses=await gpu.readBodies(); let maxDrift=0,total=0,count=0,maxSpeed=0;
+  for(let id=1;id<initial.length;id++) {
+   const o=gpu.refToGpu[id]*BODY_FLOATS;
+   for(const base of [B_POS,B_ROT,B_VEL,B_ANGVEL]) for(let a=0;a<(base===B_ROT?4:3);a++)
+    if(!Number.isFinite(poses[o+base+a])) throw new Error(`nonfinite body ${id}, step ${step}`);
+   if(id<initial.length-2) {
+    const cx=Math.floor((id-1)/(68*465));
+    if(cx!==6 && cx!==9) {const d=Math.abs(poses[o+B_POS+2]-initial[id][2]);maxDrift=Math.max(maxDrift,d);total+=d;count++;}
+   }
+   maxSpeed=Math.max(maxSpeed,Math.hypot(...poses.slice(o+B_VEL,o+B_VEL+3)));
+  }
+  const balls=[initial.length-2,initial.length-1].map(id=>{const o=gpu.refToGpu[id]*BODY_FLOATS;return [poses[o+B_POS],poses[o+B_POS+2],poses[o+B_POS+1]]});
+  const sample={step,meanDrift:total/count,maxDrift,maxSpeed,balls,...counters};samples.push(sample);
+  console.log('GABLES_REFERENCE',JSON.stringify(sample));
+ }
+ gpu.destroy();device.destroy();status.textContent=JSON.stringify({passed:true,bodyCount:initial.length,samples},null,2);
+ console.log('GABLES_REFERENCE_DONE',JSON.stringify({passed:true,bodyCount:initial.length,samples}));
+} catch(e) {status.textContent=String(e.stack||e);console.error(e);}
+</script>

@@ -110,23 +110,6 @@ fn add_columns_wgpu(sim: &mut WgpuSim, n: u32, h: u32) {
     }
 }
 
-fn max_y_metal(world: &MetalWorld) -> f32 {
-    world
-        .download_bodies()
-        .iter()
-        .filter(|b| b.is_dynamic())
-        .map(|b| b.position[1])
-        .fold(f32::NEG_INFINITY, f32::max)
-}
-
-fn max_y_wgpu(sim: &WgpuSim, n_dyn: u32) -> f32 {
-    let mut m = f32::NEG_INFINITY;
-    for i in 1..=n_dyn {
-        m = m.max(sim.read_body(i).position[1]);
-    }
-    m
-}
-
 fn run_pair(n: u32, h: u32, steps: u32) {
     let n_dyn = n * n * h;
     let cap = capacity_for(n_dyn);
@@ -142,32 +125,48 @@ fn run_pair(n: u32, h: u32, steps: u32) {
     wg.set_params(params);
     add_columns_wgpu(&mut wg, n, h);
 
-    for s in 0..steps {
-        let cm = metal.step().unwrap();
-        let cw = wg.step().unwrap();
-        if s == 0 || s == steps - 1 || s % 10 == 9 {
-            let ym = max_y_metal(&metal);
-            let yw = max_y_wgpu(&wg, n_dyn);
-            println!(
-                "n={n} t={s}: metal_y={ym:.2} wgpu_y={yw:.2} contacts m/w={}/{} awake m/w={}/{}",
-                cm.contact_count, cw.contact_count, cm.awake_count, cw.awake_count
-            );
+    for step in 0..steps {
+        metal.step().expect("Metal step must not overflow");
+        wg.step().expect("WGSL step must not overflow");
+        if step % 30 != 29 && step + 1 != steps {
+            continue;
         }
+        let m = metal.download_bodies();
+        let w = wg.download_bodies();
+        assert_eq!(m.len(), w.len(), "backend body counts differ");
+        let mut worst = 0.0f32;
+        for id in 1..m.len() {
+            let expected_y = 1.0 + ((id - 1) as u32 % h) as f32;
+            for (backend, b) in [("Metal", &m[id]), ("WGSL", &w[id])] {
+                assert!(
+                    b.position.iter().all(|x| x.is_finite()),
+                    "{backend}: step {step}, body {id} is nonfinite"
+                );
+                assert!((b.position[1] - expected_y).abs() < 0.15,
+                    "{backend}: step {step}, body {id} lost its column layer: y={} expected={expected_y}", b.position[1]);
+            }
+            let delta = (0..3)
+                .map(|axis| (m[id].position[axis] - w[id].position[axis]).abs())
+                .fold(0.0, f32::max);
+            worst = worst.max(delta);
+            assert!(delta < 0.02,
+                "step {step}, body {id}/{n_dyn}: Metal/WGSL position divergence {delta:.5} m exceeds 2 cm; Metal={:?}, WGSL={:?}", m[id].position, w[id].position);
+        }
+        println!("{n_dyn} bodies, step {step}: maximum Metal/WGSL position delta={worst:.6} m");
     }
-    let ym = max_y_metal(&metal);
-    let yw = max_y_wgpu(&wg, n_dyn);
-    assert!(
-        yw < ym * 1.5 + 2.0,
-        "wgpu exploded vs metal: wgpu_y={yw} metal_y={ym}"
-    );
 }
 
 #[test]
 fn columns_16k_metal_vs_wgpu() {
-    run_pair(40, 10, 30);
+    run_pair(40, 10, 180);
 }
 
 #[test]
 fn columns_25k_metal_vs_wgpu() {
-    run_pair(50, 10, 30);
+    run_pair(50, 10, 180);
+}
+
+#[test]
+fn columns_100k_metal_vs_wgpu() {
+    run_pair(100, 10, 180);
 }

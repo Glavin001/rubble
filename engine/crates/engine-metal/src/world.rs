@@ -39,6 +39,8 @@ pub struct MetalWorld {
     ccd_flags: Buffer,
     world_obbs: Buffer,
     ref_poses: Buffer,
+    solver_points: Buffer,
+    compact_contacts: bool,
     scratch: [Buffer; 2],
     /// Prefilled 0..63; each color/round dispatch binds a 4-byte offset (three-avbd pass const).
     pass_table: Buffer,
@@ -99,8 +101,16 @@ impl MetalWorld {
                 .max(32768)
                 .next_power_of_two(),
         );
-        let color_lists = alloc_u32(d, capacity.max_bodies * capacity.max_colors);
-        let color_offsets = alloc_u32(d, capacity.max_colors);
+        let color_lists = alloc_u32(d, capacity.max_bodies * (capacity.max_colors + 2));
+        unsafe {
+            let history = (color_lists.contents() as *mut u32)
+                .add((capacity.max_bodies * capacity.max_colors.min(32)) as usize);
+            std::ptr::write_bytes(history, 0, capacity.max_bodies as usize);
+        }
+        let color_offsets = alloc_u32(
+            d,
+            capacity.max_colors * capacity.max_bodies.div_ceil(64).max(1),
+        );
         let color_counts = [
             alloc_u32(d, capacity.max_colors),
             alloc_u32(d, capacity.max_colors),
@@ -112,6 +122,19 @@ impl MetalWorld {
         let world_obbs = alloc::<[f32; 20]>(d, capacity.max_colliders);
         // RefPoseGpu = 2 × float4 (three-avbd reuseContacts updateRefs).
         let ref_poses = alloc::<[f32; 8]>(d, capacity.max_bodies);
+        let compact_contacts = std::env::var("ENGINE_COMPACT_CONTACTS").as_deref() == Ok("1");
+        anyhow::ensure!(
+            capacity.max_candidates < 0x7fff_ffff,
+            "compact pair index exceeds 31 bits"
+        );
+        let solver_points = alloc::<[f32; 16]>(
+            d,
+            if compact_contacts {
+                capacity.max_contacts
+            } else {
+                1
+            },
+        );
         unsafe {
             let n = capacity.max_bodies as usize * 8;
             std::ptr::write_bytes(ref_poses.contents() as *mut u8, 0, n * 4);
@@ -121,7 +144,8 @@ impl MetalWorld {
         // (must cover max_bodies=524288; the old 16-slot table broke adjacency above 65k).
         let pass_table = alloc_u32(d, 96);
         {
-            let t = unsafe { std::slice::from_raw_parts_mut(pass_table.contents() as *mut u32, 96) };
+            let t =
+                unsafe { std::slice::from_raw_parts_mut(pass_table.contents() as *mut u32, 96) };
             for (i, v) in t.iter_mut().enumerate() {
                 *v = i as u32;
             }
@@ -130,10 +154,11 @@ impl MetalWorld {
                 t[48 + k as usize] = (1u32 << k) | ((k & 1) << 31);
             }
         }
-        let indirect_args = alloc_u32(d, capacity.max_colors.max(64) * 3);
+        let indirect_args = alloc_u32(d, capacity.max_colors.max(70) * 3);
 
         // Default material
-        let mats = unsafe { std::slice::from_raw_parts_mut(materials.contents() as *mut Material, 64) };
+        let mats =
+            unsafe { std::slice::from_raw_parts_mut(materials.contents() as *mut Material, 64) };
         mats[0] = Material {
             friction: 0.5,
             restitution: 0.0,
@@ -178,6 +203,8 @@ impl MetalWorld {
             ccd_flags,
             world_obbs,
             ref_poses,
+            solver_points,
+            compact_contacts,
             scratch,
             pass_table,
             indirect_args,
@@ -365,17 +392,33 @@ impl MetalWorld {
         encoder.set_buffer(19, Some(&self.events), 0);
         encoder.set_buffer(20, Some(&self.ccd_flags), 0);
         encoder.set_buffer(21, Some(&self.scratch[slot]), 0);
-        // Default pass uniform = slot 0; dispatch_pass overrides with an offset.
+        // Default pass uniform = slot 0; indirect dispatches override the offset.
         encoder.set_buffer(22, Some(&self.pass_table), 0);
         encoder.set_buffer(23, Some(&self.indirect_args), 0);
         encoder.set_buffer(24, Some(&self.world_obbs), 0);
         encoder.set_buffer(25, Some(&self.manifolds), 0);
         encoder.set_buffer(26, Some(&self.ref_poses), 0);
+        encoder.set_buffer(27, Some(&self.solver_points), 0);
     }
 
     fn dispatch(&self, encoder: &ComputeCommandEncoderRef, name: &str, threads: u64) {
+        if name == "write_work_args" || name == "write_color_args" || name == "write_sleep_args" {
+            encoder.set_buffer(23, Some(&self.indirect_args), 0);
+        }
         let pso = self.pipelines.get(name).expect("pipeline");
         encoder.set_compute_pipeline_state(pso);
+        if name == "csr_prefix_blocks"
+            || name == "csr_prefix_block_sums"
+            || name == "count_color_tiles"
+        {
+            // Cooperative scans require all 64 lanes, including padding in the
+            // last group. SIMD width (32 on Apple) is not the workgroup width.
+            encoder.dispatch_thread_groups(
+                MTLSize::new(threads.max(1).div_ceil(64), 1, 1),
+                MTLSize::new(64, 1, 1),
+            );
+            return;
+        }
         // Buffers stay bound for the encoder; only swap pipeline + thread counts.
         let w = pso.thread_execution_width();
         let tg = MTLSize::new(w, 1, 1);
@@ -383,49 +426,55 @@ impl MetalWorld {
         encoder.dispatch_threads(grid, tg);
     }
 
-    /// Bind gPassUniform to pass_table[pass_idx] so each encoded dispatch sees a distinct value.
-    fn dispatch_pass(
+    fn dispatch_work(
         &self,
         encoder: &ComputeCommandEncoderRef,
         name: &str,
-        threads: u64,
+        slot: u32,
         pass_idx: u32,
     ) {
-        let pso = self.pipelines.get(name).expect("pipeline");
-        encoder.set_compute_pipeline_state(pso);
-        encoder.set_buffer(22, Some(&self.pass_table), (pass_idx as u64) * 4);
-        let w = pso.thread_execution_width();
-        let tg = MTLSize::new(w, 1, 1);
-        let grid = MTLSize::new(threads.max(1), 1, 1);
-        encoder.dispatch_threads(grid, tg);
+        encoder.set_compute_pipeline_state(self.pipelines.get(name).expect("pipeline"));
+        encoder.set_buffer(22, Some(&self.pass_table), pass_idx as u64 * 4);
+        encoder.set_buffer(23, None, 0);
+        encoder.dispatch_thread_groups_indirect(
+            &self.indirect_args,
+            slot as u64 * 12,
+            MTLSize::new(64, 1, 1),
+        );
     }
 
     fn dispatch_color_indirect(&self, encoder: &ComputeCommandEncoderRef, color: u32) {
-        let pso = self.pipelines.get("solve_primal_color").expect("pipeline");
+        let pso = self
+            .pipelines
+            .get(if self.compact_contacts {
+                "solve_primal_color_compact"
+            } else {
+                "solve_primal_color"
+            })
+            .expect("pipeline");
         encoder.set_compute_pipeline_state(pso);
         encoder.set_buffer(22, Some(&self.pass_table), (color as u64) * 4);
         // three-avbd: never bind the indirect buffer as a writable shader resource on the
         // same dispatch that consumes it for threadgroup counts.
         encoder.set_buffer(23, None, 0);
         let tg = MTLSize::new(64, 1, 1);
-        encoder.dispatch_thread_groups_indirect(
-            &self.indirect_args,
-            (color as u64) * 12,
-            tg,
-        );
+        encoder.dispatch_thread_groups_indirect(&self.indirect_args, (color as u64) * 12, tg);
     }
 
     fn write_scratch(&self) {
         let s = unsafe {
-            std::slice::from_raw_parts_mut(self.scratch[self.host_slot()].contents() as *mut u32, 64)
+            std::slice::from_raw_parts_mut(
+                self.scratch[self.host_slot()].contents() as *mut u32,
+                64,
+            )
         };
         s[0] = self.command_count;
         s[1] = self.capacity.max_bodies;
         s[2] = self.capacity.max_candidates;
         s[3] = self.capacity.max_contacts;
-        s[4] = 0; // color round
+        s[4] = self.capacity.max_colors.min(32);
         s[5] = 0; // current color
-        // s[6] set by callers for inertia dirty; default clear each step
+                  // s[6] set by callers for inertia dirty; default clear each step
         if s[6] != 1 {
             s[6] = 0;
         }
@@ -441,14 +490,13 @@ impl MetalWorld {
             .max(32768)
             .next_power_of_two();
         let prev = s[7].max(256);
-        // Cap at 2^21: WebGPU max workgroups/dim is 65535 → 2^22 threads is invalid,
-        // and demo/wgpu share this host field. Larger tables also left uncleared slots
-        // when dispatch was clamped without matching s[9].
-        const MAX_POW2_DISPATCH: u32 = 1 << 21;
+        // One entry per manifold; bound hash memory/work independently of dispatch size.
+        // The clear pass uses exactly this host size.
+        const MAX_WARM_HASH: u32 = 1 << 21;
         s[9] = (prev.saturating_mul(4).max(1024) as u32)
             .next_power_of_two()
             .min(ids_len)
-            .min(MAX_POW2_DISPATCH);
+            .min(MAX_WARM_HASH);
         // s[10] = max manifolds (== max_candidates; one manifold per BP pair).
         s[10] = self.capacity.max_candidates;
         // s[12] = last CSR ping (ceil(log2(n))-1) & 1 for csr_prefix_finalize.
@@ -459,6 +507,7 @@ impl MetalWorld {
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
         s[13] = 0; // any sleep candidate (set by extract)
         s[17] = self.steps_done; // step index for reuseContacts generation stamps
+        s[26] = 1; // incremental coloring: history row + compact work slot 69
         s[18] = 0; // reuseContacts hit count (narrowphase)
         s[19] = 0; // reuse hash miss
         s[20] = 0; // reuse generation gate reject
@@ -598,47 +647,6 @@ impl MetalWorld {
         let n_bodies = self.body_count.max(1) as u64;
         let n_cols = self.collider_count.max(1) as u64;
         let n_joints = self.joint_count.max(1) as u64;
-        // Size awake-only kernels from last step (three-avbd mover list).
-        let awake_dispatch = if self.last_counters.awake_count == 0 {
-            n_bodies
-        } else {
-            ((self.last_counters.awake_count as u64).saturating_mul(2) + 256).min(n_bodies).max(1)
-        };
-        // Size transient dispatches from last step (three-avbd argsPrev pattern).
-        // Do NOT use n_cols*32 — that over-dispatched NP ~9× on Brick Ring 9k (292k vs 33k).
-        let prev_contacts = self.last_counters.contact_count.max(256) as u64;
-        let prev_cand = self.last_counters.candidate_count.max(256) as u64;
-        let narrow_n = (self.capacity.max_candidates as u64)
-            .min(
-                prev_cand
-                    .saturating_add(prev_cand / 2)
-                    .saturating_add(2048)
-                    .max(n_cols.saturating_mul(4))
-                    .max(
-                        prev_contacts
-                            .saturating_add(prev_contacts / 4)
-                            .saturating_add(1024),
-                    ),
-            )
-            .max(1);
-        // Size to last count + 25% headroom (2× over-dispatch wasted bandwidth on smash peaks).
-        let contact_dispatch = (self.capacity.max_contacts as u64)
-            .min(
-                prev_contacts
-                    .saturating_add(prev_contacts / 4)
-                    .saturating_add(1024)
-                    .max(n_cols.saturating_mul(4)),
-            )
-            .max(1);
-        // Manifolds ≤ candidates; size like narrowphase so the first smash frame is covered.
-        let prev_manifolds = self.last_counters.manifold_count.max(256) as u64;
-        let manifold_dispatch = (self.capacity.max_candidates as u64)
-            .min(narrow_n.max(
-                prev_manifolds
-                    .saturating_add(prev_manifolds / 4)
-                    .saturating_add(1024),
-            ))
-            .max(1);
 
         if self.command_count > 0 {
             self.dispatch(&encoder, "apply_commands", self.command_count as u64);
@@ -660,15 +668,18 @@ impl MetalWorld {
         self.dispatch(&encoder, "broadphase_clear", 131072);
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
+        self.dispatch(&encoder, "write_work_args", 64);
         // Pair hash before NP when reuseContacts is on (three-avbd order); otherwise
         // after NP is enough for persist-only warm-start.
         let hash_n = {
             let s = unsafe {
-                std::slice::from_raw_parts(self.scratch[self.host_slot()].contents() as *const u32, 64)
+                std::slice::from_raw_parts(
+                    self.scratch[self.host_slot()].contents() as *const u32,
+                    64,
+                )
             };
             s[9].max(1024) as u64
         };
-        let prev_n = prev_contacts.min(self.capacity.max_contacts as u64).max(1);
         let reuse = (self.params.flags & engine_schema::FLAG_REUSE_CONTACTS) != 0;
         // Settled piles: update_refs over all bodies was part of the ~9 ms floor with
         // ~20 awake / few contacts. Refs only matter for reuse; skip when nearly asleep.
@@ -680,63 +691,55 @@ impl MetalWorld {
                 self.dispatch(&encoder, "update_refs", n_bodies);
             }
             self.dispatch(&encoder, "contact_hash_clear", hash_n);
-            self.dispatch(&encoder, "contact_hash_insert", prev_n);
+            self.dispatch_work(&encoder, "contact_hash_insert", 68, 0);
         }
-        self.dispatch(&encoder, "narrowphase", narrow_n);
+        self.dispatch_work(&encoder, "narrowphase", 64, 0);
+        self.dispatch(&encoder, "write_work_args", 64);
         if !reuse {
             self.dispatch(&encoder, "contact_hash_clear", hash_n);
-            self.dispatch(&encoder, "contact_hash_insert", prev_n);
+            self.dispatch_work(&encoder, "contact_hash_insert", 68, 0);
         }
-        self.dispatch(&encoder, "persist_contacts", contact_dispatch);
+        self.dispatch_work(&encoder, "persist_contacts", 65, 0);
         if self.joint_count > 0 {
             self.dispatch(&encoder, "warmstart_joints", n_joints);
         }
 
         // Awake list before CSR sort/colour (flags only — independent of contacts).
         self.dispatch(&encoder, "build_awake_list", n_bodies);
+        self.dispatch(&encoder, "write_work_args", 64);
 
         // CSR adjacency (three-avbd degree → scan → scatter → sort). Overwrites grid hash.
         // Degree/scatter walk manifolds (Stage 8b), not individual contact points.
         self.dispatch(&encoder, "csr_clear", n_bodies + 1);
-        self.dispatch(&encoder, "csr_degree_contacts", manifold_dispatch);
+        self.dispatch_work(&encoder, "csr_degree_contacts", 66, 0);
         if self.joint_count > 0 {
             self.dispatch(&encoder, "csr_degree_joints", n_joints);
         }
         if self.body_count <= 512 {
             self.dispatch(&encoder, "csr_prefix", 1);
         } else {
-            // Parallel Hillis–Steele exclusive scan (ping-pong; no swap dispatch).
-            self.dispatch(&encoder, "csr_prefix_init", n_bodies);
-            let mut log = 0u32;
-            // Offsets 2^0 .. 2^19 cover WorldCapacity::scale max_bodies (524288).
-            while (1u32 << log) < self.body_count && log < 20 {
-                self.dispatch_pass(&encoder, "csr_prefix_scan", n_bodies, 48 + log);
-                log += 1;
-            }
-            self.dispatch(&encoder, "csr_prefix_finalize", n_bodies + 1);
+            self.dispatch(&encoder, "csr_prefix_blocks", (n_bodies + 3) / 4);
+            self.dispatch(&encoder, "csr_prefix_block_sums", 64);
+            self.dispatch(&encoder, "csr_prefix_add", n_bodies);
         }
-        self.dispatch(&encoder, "csr_scatter_contacts", manifold_dispatch);
+        self.dispatch_work(&encoder, "csr_scatter_contacts", 66, 0);
         if self.joint_count > 0 {
             self.dispatch(&encoder, "csr_scatter_joints", n_joints);
         }
-        self.dispatch(&encoder, "csr_sort", awake_dispatch);
+        self.dispatch_work(&encoder, "csr_sort", 67, 0);
 
-        self.dispatch(&encoder, "init_colors", awake_dispatch);
+        self.dispatch_work(&encoder, "init_colors", 67, 0);
+        self.dispatch(&encoder, "write_work_args", 64);
 
-        // Colour rounds: three-avbd defaults to 16 JP rounds (adapts ≤32 on clashes).
-        // Deriving rounds from last colour_count (often 4–8) under-coloured Pyramid 30 vs the
-        // oracle's ~13 colours and pumped KE. Floor 16 like three-avbd.
-        let color_cap = self.capacity.max_colors.min(32);
-        let color_rounds = self
-            .last_counters
-            .color_count
-            .saturating_add(1)
-            .max(16)
-            .min(color_cap);
+        // A colour count is not the JP dependency depth. The active 110k
+        // ring still has uncoloured bodies after 16 rounds at step 60.
+        let color_rounds = 32;
         for round in 0..color_rounds {
-            self.dispatch_pass(&encoder, "color_bodies", awake_dispatch, round % 16);
+            self.dispatch_work(&encoder, "color_bodies", 69, round % 16);
         }
-        self.dispatch(&encoder, "pack_color_lists", awake_dispatch);
+        self.dispatch(&encoder, "count_color_tiles", n_bodies);
+        self.dispatch(&encoder, "prefix_color_tiles", 64);
+        self.dispatch(&encoder, "scatter_color_tiles", n_bodies);
         self.dispatch(&encoder, "write_color_args", 64);
 
         // Body warm-start AFTER NP (three-avbd warmStartBodies): stash inertial, advance pose.
@@ -746,37 +749,43 @@ impl MetalWorld {
         // Metal tracks the write→dispatch dependency without a CPU mid-step sync.
         // Colored Jacobi is enough once C0 is sampled at x⁻ (solve_primal_one kept for probes).
         // Dual stays per-contact (occupancy); CSR/island use manifolds.
-        let dual_n = contact_dispatch.max(n_joints);
-        // Solve every colour bucket. last_counters.color_count lags one step, so a floor of 4
-        // skipped Pyramid 30 colours 4–5 on early frames (palette was already 6–13) and pumped
-        // Jacobi KE. three-avbd starts colorCap at ≥8 and grows; empty indirects are free.
-        let max_c = self
-            .last_counters
-            .color_count
-            .saturating_add(1)
-            .max(16)
-            .min(self.capacity.max_colors.min(32));
-        for _iter in 0..self.params.iterations {
+        // Dispatch the full palette; empty GPU indirect buckets cost no work.
+        let max_c = self.capacity.max_colors.min(32);
+        if self.compact_contacts {
+            self.dispatch_work(&encoder, "clear_solver_contacts", 65, 0);
+            self.dispatch_work(&encoder, "pack_solver_contacts", 66, 0);
+        }
+        for iter in 0..self.params.iterations {
             for color in 0..max_c {
                 self.dispatch_color_indirect(&encoder, color);
             }
             // Indirect args buffer was unbound for primal; restore for later kernels.
             encoder.set_buffer(23, Some(&self.indirect_args), 0);
-            self.dispatch(&encoder, "solve_dual", dual_n);
+            self.dispatch_work(
+                &encoder,
+                if self.compact_contacts {
+                    "solve_dual_compact"
+                } else {
+                    "solve_dual"
+                },
+                65,
+                u32::from(iter + 1 == self.params.iterations),
+            );
         }
 
         self.dispatch(&encoder, "extract_velocity_sleep", n_bodies);
+        self.dispatch(&encoder, "write_sleep_args", 64);
         // Island sleep gate: a body may sleep only if every dynamic contact neighbour is
         // also a candidate (or already asleep). Skipping this lets upper boxes freeze while
         // the stack below settles — columns tore apart and injected energy. Always run a
         // fixed handful of rounds (accuracy); manifolds cut the fan-out vs per-contact.
-        if self.last_counters.manifold_count > 0 && self.sleep_island_rounds > 0 {
+        if self.sleep_island_rounds > 0 {
             let rounds = self.sleep_island_rounds.min(16);
             for _ in 0..rounds {
-                self.dispatch(&encoder, "sleep_island_gate", manifold_dispatch);
+                self.dispatch_work(&encoder, "sleep_island_gate", 66, 0);
             }
         }
-        self.dispatch(&encoder, "sleep_island_commit", n_bodies);
+        self.dispatch_work(&encoder, "sleep_island_commit", 67, 0);
 
         if self.enable_ccd {
             self.dispatch(&encoder, "ccd_classify", n_bodies);
@@ -870,9 +879,7 @@ impl MetalWorld {
     /// Scratch atomics from the last completed step (slot = host_parity ^ 1).
     pub fn scratch_u32(&self, index: usize) -> u32 {
         let done = ((self.host_parity ^ 1) & 1) as usize;
-        unsafe {
-            *(self.scratch[done].contents() as *const u32).add(index)
-        }
+        unsafe { *(self.scratch[done].contents() as *const u32).add(index) }
     }
 
     /// Per-body JP colour ids (diagnostics).
@@ -1049,7 +1056,9 @@ impl<'a> SceneBuilder<'a> {
             (1.0 / 12.0) * mass * (h.x * h.x + h.z * h.z),
             (1.0 / 12.0) * mass * (h.x * h.x + h.y * h.y),
         );
-        let body = self.world.add_body(BodyState::dynamic(pos, Quat::IDENTITY, mass, inertia));
+        let body = self
+            .world
+            .add_body(BodyState::dynamic(pos, Quat::IDENTITY, mass, inertia));
         self.world.add_collider(Collider {
             body,
             shape: ShapeType::Box as u32,
@@ -1220,14 +1229,7 @@ impl<'a> SceneBuilder<'a> {
         })
     }
 
-    pub fn add_d6(
-        &mut self,
-        a: u32,
-        b: u32,
-        anchor_a: Vec3,
-        anchor_b: Vec3,
-        axis: Vec3,
-    ) -> u32 {
+    pub fn add_d6(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3, axis: Vec3) -> u32 {
         self.world.add_joint(Joint {
             body_a: a,
             body_b: b,
@@ -1248,14 +1250,7 @@ impl<'a> SceneBuilder<'a> {
         })
     }
 
-    pub fn add_hinge(
-        &mut self,
-        a: u32,
-        b: u32,
-        anchor_a: Vec3,
-        anchor_b: Vec3,
-        axis: Vec3,
-    ) -> u32 {
+    pub fn add_hinge(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3, axis: Vec3) -> u32 {
         self.world.add_joint(Joint {
             body_a: a,
             body_b: b,
@@ -1305,12 +1300,7 @@ impl<'a> SceneBuilder<'a> {
             let pos = start + Vec3::new(0.0, -(i as f32) * seg_len, 0.0);
             let id = self.add_capsule(pos, radius, half, 0.2);
             if let Some(p) = prev {
-                self.add_ball_joint(
-                    p,
-                    id,
-                    Vec3::new(0.0, -half, 0.0),
-                    Vec3::new(0.0, half, 0.0),
-                );
+                self.add_ball_joint(p, id, Vec3::new(0.0, -half, 0.0), Vec3::new(0.0, half, 0.0));
             }
             prev = Some(id);
         }
@@ -1322,6 +1312,208 @@ impl<'a> SceneBuilder<'a> {
             let z = (i / 600) as f32 * spacing;
             let id = self.add_sphere(origin + Vec3::new(x, 0.5, z), spacing * 0.4, 1.0);
             self.world.force_sleep(id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    #[test]
+    fn stable_color_tiles_use_full_workgroups_and_keep_body_order() {
+        let mut world = MetalWorld::new(WorldCapacity {
+            max_colors: 7,
+            ..WorldCapacity::small()
+        })
+        .expect("Metal GPU required for stable color packing regression");
+        for n in [1u32, 63, 64, 65, 129] {
+            world.body_count = n;
+            world.write_scratch();
+            unsafe {
+                *(world.counters[0].contents() as *mut StepCounters) = StepCounters {
+                    body_count: n,
+                    awake_count: n - 1,
+                    ..Default::default()
+                };
+                let bodies = std::slice::from_raw_parts_mut(
+                    world.bodies.contents() as *mut BodyState,
+                    n as usize,
+                );
+                let colors = std::slice::from_raw_parts_mut(
+                    world.body_color.contents() as *mut u32,
+                    n as usize,
+                );
+                for i in 0..n as usize {
+                    bodies[i] = BodyState {
+                        inv_mass: if i == 0 { 0.0 } else { 1.0 },
+                        flags: if i == 0 { 0 } else { 9 },
+                        ..bytemuck::Zeroable::zeroed()
+                    };
+                    colors[i] = (i % 3) as u32;
+                }
+                std::slice::from_raw_parts_mut(
+                    world.color_lists.contents() as *mut u32,
+                    (world.capacity.max_bodies * (world.capacity.max_colors + 2)) as usize,
+                )
+                .fill(u32::MAX);
+            }
+            let cb = world.device.queue.new_command_buffer();
+            let encoder = cb.new_compute_command_encoder();
+            world.bind_all(&encoder);
+            world.dispatch(&encoder, "count_color_tiles", n as u64);
+            world.dispatch(&encoder, "prefix_color_tiles", 64);
+            world.dispatch(&encoder, "scatter_color_tiles", n as u64);
+            encoder.end_encoding();
+            cb.commit();
+            cb.wait_until_completed();
+            assert_eq!(cb.status(), MTLCommandBufferStatus::Completed, "n={n}: stable packing requires complete 64-lane workgroups, including the padded last tile");
+            unsafe {
+                let counts =
+                    std::slice::from_raw_parts(world.color_counts[0].contents() as *const u32, 7);
+                let lists = std::slice::from_raw_parts(
+                    world.color_lists.contents() as *const u32,
+                    (world.capacity.max_bodies * world.capacity.max_colors) as usize,
+                );
+                for color in 0..7u32 {
+                    let expected: Vec<u32> = (1..n).filter(|i| i % 3 == color).collect();
+                    assert_eq!(
+                        counts[color as usize] as usize,
+                        expected.len(),
+                        "n={n} color={color}: missing lanes or incorrect tile prefix"
+                    );
+                    let start = (color * world.capacity.max_bodies) as usize;
+                    assert_eq!(
+                        &lists[start..start + expected.len()],
+                        &expected,
+                        "n={n} color={color}: Metal color bucket lost stable body order"
+                    );
+                    assert_eq!(
+                        lists[start + expected.len()],
+                        u32::MAX,
+                        "n={n} color={color}: partial tile wrote beyond the live bucket"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn color_dispatch_respects_palette_and_preserves_work_slots() {
+        for palette in [1u32, 7, 32] {
+            let world = MetalWorld::new(WorldCapacity {
+                max_colors: palette,
+                ..WorldCapacity::small()
+            })
+            .expect("Metal GPU required for color dispatch bounds regression");
+            world.write_scratch();
+            // Allocate exactly the configured count buffer. Slots after the
+            // palette are canaries; never execute their indirect arguments.
+            unsafe {
+                std::slice::from_raw_parts_mut(
+                    world.color_counts[0].contents() as *mut u32,
+                    palette as usize,
+                )
+                .fill(1);
+                *(world.color_counts[0].contents() as *mut u32) = 0;
+                std::slice::from_raw_parts_mut(world.indirect_args.contents() as *mut u32, 70 * 3)
+                    .fill(0xdeadbeef);
+            }
+            let cb = world.device.queue.new_command_buffer();
+            let encoder = cb.new_compute_command_encoder();
+            world.bind_all(&encoder);
+            world.dispatch(&encoder, "write_color_args", 64);
+            encoder.end_encoding();
+            cb.commit();
+            cb.wait_until_completed();
+            assert_eq!(cb.status(), MTLCommandBufferStatus::Completed,
+                "Metal color args failed for palette={palette}; count-buffer reads must stay inside the allocation");
+            let args = unsafe {
+                std::slice::from_raw_parts(world.indirect_args.contents() as *const u32, 70 * 3)
+            };
+            for slot in 0..70usize {
+                let expected = if slot < palette as usize {
+                    [u32::from(slot != 0), 1, 1]
+                } else {
+                    [0xdeadbeef; 3]
+                };
+                assert_eq!(&args[slot * 3..slot * 3 + 3], &expected,
+                    "palette={palette}, slot={slot}: color args touched a slot outside the palette or failed to publish an active bucket; a 64-thread launch must not read 64 color counts unconditionally");
+            }
+        }
+    }
+
+    #[test]
+    fn csr_block_scan_uses_complete_workgroups_on_metal() {
+        let mut world = MetalWorld::new(WorldCapacity {
+            max_bodies: 16386,
+            max_contacts: 1024,
+            max_candidates: 1024,
+            ..WorldCapacity::small()
+        })
+        .expect("Metal GPU required for cooperative CSR scan regression");
+        // 257 and 513 require padded workgroups. 16385 also needs more than
+        // one block sum per lane in the second pass. Never run scatter here:
+        // corrupt offsets must produce a diagnostic assertion, not GPU OOB work.
+        for n in [1u32, 255, 256, 257, 513, 16385] {
+            world.body_count = n;
+            let degrees: Vec<u32> = (0..n).map(|i| (i * 7 + 3) % 11).collect();
+            unsafe {
+                let indices = std::slice::from_raw_parts_mut(
+                    world.constraint_index.contents() as *mut u32,
+                    n as usize + 2,
+                );
+                indices[..n as usize].copy_from_slice(&degrees);
+                indices[n as usize] = 0xdeadbeef;
+                indices[n as usize + 1] = 0xfeedface;
+                *(world.counters[0].contents() as *mut StepCounters) = StepCounters {
+                    body_count: n,
+                    ..StepCounters::default()
+                };
+            }
+            let cb = world.device.queue.new_command_buffer();
+            let encoder = cb.new_compute_command_encoder();
+            world.bind_all(&encoder);
+            world.dispatch(&encoder, "csr_prefix_blocks", u64::from((n + 3) / 4));
+            world.dispatch(&encoder, "csr_prefix_block_sums", 64);
+            world.dispatch(&encoder, "csr_prefix_add", n.into());
+            encoder.end_encoding();
+            cb.commit();
+            cb.wait_until_completed();
+            assert_eq!(
+                cb.status(),
+                MTLCommandBufferStatus::Completed,
+                "Metal CSR scan failed before readback for {n} bodies"
+            );
+            let (indices, cursors) = unsafe {
+                (
+                    std::slice::from_raw_parts(
+                        world.constraint_index.contents() as *const u32,
+                        n as usize + 2,
+                    ),
+                    std::slice::from_raw_parts(
+                        world.body_color.contents() as *const u32,
+                        n as usize,
+                    ),
+                )
+            };
+            let mut expected = 0;
+            for i in 0..=n as usize {
+                assert_eq!(indices[i], expected,
+                    "Metal CSR offset {i}/{n} is wrong: cooperative scans require 64 lanes and a padded final workgroup, not the GPU SIMD width");
+                if i < n as usize {
+                    assert_eq!(
+                        cursors[i], expected,
+                        "Metal CSR scatter cursor {i}/{n} was not published"
+                    );
+                    expected += degrees[i];
+                }
+            }
+            assert_eq!(
+                indices[n as usize + 1],
+                0xfeedface,
+                "Metal CSR scan wrote beyond its end offset for {n} bodies"
+            );
         }
     }
 }

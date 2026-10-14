@@ -1,0 +1,107 @@
+{
+  "referenceReport": {
+    "machine": "apple \u00b7 metal-3",
+    "adapter": "apple \u00b7 metal-3",
+    "source": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+    "date": "2026-10-14",
+    "timestamps": true,
+    "results": [
+      {
+        "scene": "Brick ring 110k",
+        "iterations": 4,
+        "bodies": 110442,
+        "joints": 0,
+        "contacts": 1170548,
+        "colors": 11,
+        "clashes": 0,
+        "overflow": 0,
+        "wallMs": 10.31000000005588,
+        "gpu": {
+          "total": 10.092544,
+          "collision": 3.60448,
+          "adjacency": 0.262144,
+          "coloring": 0.524288,
+          "solve": 5.701632
+        },
+        "buildMs": 1662.2000000001863,
+        "gpuBytes": 292579900,
+        "paper": "9.8 ms (3.5 solve)"
+      },
+      {
+        "scene": "Jointed drop 34k (71k joints)",
+        "iterations": 10,
+        "bodies": 34097,
+        "joints": 71064,
+        "contacts": 108507,
+        "colors": 30,
+        "clashes": 0,
+        "overflow": 0,
+        "wallMs": 6.690000000037253,
+        "gpu": {
+          "total": 6.094848,
+          "collision": 1.179648,
+          "adjacency": 0.131072,
+          "coloring": 0.196608,
+          "solve": 4.653056
+        },
+        "buildMs": 361.5,
+        "gpuBytes": 103995248,
+        "paper": "16 ms"
+      },
+      {
+        "scene": "Brick gables 506k",
+        "iterations": 3,
+        "bodies": 505923,
+        "joints": 0,
+        "contacts": 4102693,
+        "colors": 9,
+        "clashes": 0,
+        "overflow": 0,
+        "wallMs": 26.320000000018627,
+        "gpu": {
+          "total": 26.607616,
+          "collision": 9.437184,
+          "adjacency": 0.98304,
+          "coloring": 1.6384,
+          "solve": 14.41792
+        },
+        "buildMs": 3947.4000000003725,
+        "gpuBytes": 1276901708,
+        "paper": "17.6 ms (10.3 solve)"
+      }
+    ]
+  },
+  "reportFileModifiedAt": "2026-10-14T20:05:37.962219+00:00",
+  "referenceHead": "2bb1a318e9aad03640b4bce5b5d222484f0925f7",
+  "limitations": [
+    "Reference export was delayed; do not treat its measurements as back-to-back with subsequent Rubble runs.",
+    "Reference report retains exact median wall and phase times but does not expose raw batch samples.",
+    "Pinned checkout has pre-existing local changes; actual source hashes recorded."
+  ],
+  "referenceSourceSha256": {
+    "src/avbd3d/bench-cases.ts": "ec9b2f929306f7d2116f3eae8f19f774c53c1aca5c1d4ac74e0d7700d5832f0b",
+    "src/avbd3d/bench-scenes.ts": "9b941d515845f326d88005012b3ac4968ab16bda0199f7cc0bd883aaf8f59ee6",
+    "src/avbd3d/gpu/solver.ts": "964e56bf86efa8599d6133e3d43c5ceb6f671a3dd2b57e99a3b79d08fbdd6b84",
+    "src/avbd3d/gpu/wgsl-collision.ts": "6ef7024f0fc451987a111d86da5458618bd037a0f8f0d342ff59847fc3c4f08f",
+    "src/avbd3d/gpu/wgsl-solve.ts": "0c139134a716ec246371deec36c93d650e44bd45db13cf4bea7fa66fc4d38e55",
+    "src/avbd3d/gpu/layout.ts": "5f284db90b9ba4edc19ae1211b598519c7aafab9f1a9407b12c5e5681371a030",
+    "src/avbd2d/gpu/timing.ts": "e00f9b57014c2081908e637d7029f4217f6447a4c8832b558b5449019b9363f2"
+  },
+  "refreshedReferenceDisplayed": {
+    "scene": "Brick ring 110k",
+    "iterations": 4,
+    "totalBodies": 110442,
+    "contacts": 1169844,
+    "colors": 11,
+    "wallMs": 9.99,
+    "gpuMs": 9.9,
+    "phasesMs": {
+      "collision": 3.54,
+      "adjacency": 0.26,
+      "coloring": 0.52,
+      "solve": 5.57
+    },
+    "gpuMiB": 279,
+    "precision": "Rendered UI values rounded to two decimals; export did not produce a newer file, so stale download was excluded."
+  }
+}

@@ -1,12 +1,10 @@
-//! Smoke: small column grid holds height on the wgpu/WGSL path.
+//! Settled columns must preserve every layer across GPU workgroups, without energy growth.
 use engine_schema::{
     AvbdParams, BodyState, Collider, ShapeType, WorldCapacity, FLAG_REUSE_CONTACTS,
 };
 use engine_webgpu::WgpuSim;
 
-#[test]
-fn columns_10k_holds_height() {
-    let n = 32u32;
+fn columns_hold(n: u32, sleep_enabled: bool) {
     let h = 10u32;
     let bodies = n * n * h + 1;
     let mut sim = WgpuSim::new(WorldCapacity {
@@ -23,6 +21,9 @@ fn columns_10k_holds_height() {
     let mut params = AvbdParams::default();
     params.iterations = 4;
     params.flags |= FLAG_REUSE_CONTACTS;
+    if !sleep_enabled {
+        params.sleep_time = 1.0e6;
+    }
     sim.set_params(params);
 
     let half_h = 25.0f32;
@@ -56,7 +57,6 @@ fn columns_10k_holds_height() {
     let mass = 1.0f32;
     let inertia = (1.0 / 6.0) * mass;
     let r = (0.75f32).sqrt();
-    let mut n_dyn = 0u32;
     for x in 0..n {
         for z in 0..n {
             for y in 0..h {
@@ -89,29 +89,86 @@ fn columns_10k_holds_height() {
                     local_rot: [0.0, 0.0, 0.0, 1.0],
                     params: [hx_b, hx_b, hx_b, r],
                 });
-                n_dyn += 1;
             }
         }
     }
 
-    let mut ymax0 = 10.0f32;
-    for s in 0..60 {
-        let c = sim.step().expect("step");
-        if s == 0 || s == 59 {
+    let initial = sim.download_bodies();
+    let dynamic_count = n * n * h;
+    // Three seconds includes warm start, sleep transition, and subsequent steps.
+    // 15 cm permits normal contact compression but rejects a lost box layer.
+    for s in 0..180 {
+        let c = sim.step().expect("step without overflow");
+        if !sleep_enabled {
+            assert_eq!(
+                c.awake_count, dynamic_count,
+                "step {s}: active-body coverage lost to sleep"
+            );
+        }
+        if s == 0 || s % 30 == 29 {
+            let snapshot = sim.download_bodies();
+            let mut max_drift = 0.0f32;
             let mut ymax = f32::NEG_INFINITY;
-            for i in 1..=n_dyn {
-                ymax = ymax.max(sim.read_body(i).position[1]);
-            }
-            if s == 0 {
-                ymax0 = ymax;
-            }
-            println!("t={s}: maxY={ymax:.2} contacts={} ov=0x{:x}", c.contact_count, c.overflow_flags);
-            if s == 59 {
+            let mut ke = 0.0f32;
+            let mut max_v = 0.0f32;
+            for (i, b) in snapshot.iter().skip(1).enumerate() {
                 assert!(
-                    ymax > ymax0 * 0.7 && ymax < ymax0 * 1.5,
-                    "unstable maxY={ymax} initial={ymax0}"
+                    b.position
+                        .iter()
+                        .chain(b.orientation.iter())
+                        .chain(b.linear_vel.iter())
+                        .chain(b.angular_vel.iter())
+                        .all(|x| x.is_finite()),
+                    "step {s}: body {} has a nonfinite pose or velocity",
+                    i + 1
+                );
+                let id = i + 1;
+                let expected_y = initial[id].position[1];
+                let drift = (b.position[1] - expected_y).abs();
+                assert!(drift < 0.15,
+                    "step {s}, body {id}/{dynamic_count}: column layer drifted {drift:.4} m; expected y={expected_y}, actual pose={:?}. Check CSR offsets and warm-start support anchors.", b.position);
+                for axis in [0, 2] {
+                    assert!(
+                        (b.position[axis] - initial[id].position[axis]).abs() < 0.1,
+                        "step {s}, body {id}: column toppled sideways: initial={:?}, actual={:?}",
+                        initial[id].position,
+                        b.position
+                    );
+                }
+                max_drift = max_drift.max((b.position[1] - expected_y).abs());
+                ymax = ymax.max(b.position[1]);
+                let v2 = b.linear_vel.iter().map(|v| v * v).sum::<f32>();
+                ke += 0.5 * v2 / b.inv_mass;
+                max_v = max_v.max(v2.sqrt());
+            }
+            println!("n={} t={s}: maxY={ymax:.4} drift={max_drift:.4} KE={ke:.4} maxV={max_v:.4} contacts={} awake={} ov=0x{:x}", n*n*h, c.contact_count, c.awake_count, c.overflow_flags);
+            if s == 179 {
+                assert!(max_v < 0.1, "columns did not settle: maxV={max_v}");
+                assert!(
+                    ke < 0.001 * (n * n * h) as f32,
+                    "columns gained energy: KE={ke}"
                 );
             }
         }
     }
+}
+
+#[test]
+fn columns_10k_holds_height() {
+    columns_hold(32, true);
+}
+
+#[test]
+fn columns_25k_holds_height() {
+    columns_hold(50, true);
+}
+
+#[test]
+fn columns_100k_holds_height() {
+    columns_hold(100, true);
+}
+
+#[test]
+fn columns_100k_stays_stable_with_sleep_disabled() {
+    columns_hold(100, false);
 }

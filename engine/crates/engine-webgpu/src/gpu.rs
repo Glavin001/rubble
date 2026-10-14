@@ -6,7 +6,7 @@ use engine_exec::{ExecError, PhaseTimingsMs};
 use engine_schema::*;
 use std::collections::HashMap;
 
-const BIND_COUNT: usize = 27;
+const BIND_COUNT: usize = 29;
 const PASS_ALIGN: u64 = 256;
 
 struct Pipe {
@@ -16,6 +16,11 @@ struct Pipe {
 }
 
 pub struct WgpuSim {
+    compact_contacts: bool,
+    persistent_contacts: bool,
+    sparse_start: u32,
+    manifold_persistence: bool,
+    fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     capacity: WorldCapacity,
@@ -36,12 +41,16 @@ pub struct WgpuSim {
     chip: String,
 }
 
-/// WebGPU `maxComputeWorkgroupsPerDimension` default is 65535. A 2^22-thread
-/// dispatch is 65536 groups and invalidates the command buffer (columns 100k).
-fn groups(threads: u64) -> u32 {
-    const MAX_WG: u32 = 65535;
-    let g = ((threads.max(1) + 63) / 64) as u32;
-    g.min(MAX_WG)
+/// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
+fn groups(threads: u64) -> (u32, u32) {
+    let g = threads.max(1).div_ceil(64);
+    let x = g.min(32768);
+    let y = g.div_ceil(32768);
+    assert!(
+        y <= 65535,
+        "dispatch exceeds WebGPU's two-dimensional workgroup limit"
+    );
+    (x as u32, y as u32)
 }
 
 struct Bind {
@@ -80,8 +89,63 @@ fn constraint_id_words(c: &WorldCapacity) -> u32 {
     words.max(131072) as u32
 }
 
+fn persistent_entry(name: &str) -> &str {
+    match name {
+        "apply_commands" => "apply_commands_persistent",
+        "narrowphase" => "narrowphase_persistent",
+        "contact_hash_insert" => "contact_hash_insert_persistent",
+        "persist_contacts" => "persist_contacts_persistent",
+        "persist_manifolds" | "persist_manifolds_compact" => "persist_manifolds_persistent",
+        "pack_solver_contacts" => "pack_solver_pairs_persistent",
+        "solve_primal_color_compact" => "solve_primal_color_persistent",
+        "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
+        "solve_primal_one_compact" => "solve_primal_one_persistent",
+        "solve_dual_compact" => "solve_dual_persistent",
+        _ => name,
+    }
+}
+
 impl WgpuSim {
     pub fn new(capacity: WorldCapacity) -> anyhow::Result<Self> {
+        if std::env::var("ENGINE_PERSISTENT_CONTACTS").as_deref() == Ok("1") {
+            return Self::new_with_persistent_contacts(capacity);
+        }
+        Self::new_with_compact_contacts(
+            capacity,
+            std::env::var("ENGINE_COMPACT_CONTACTS").as_deref() == Ok("1"),
+        )
+    }
+
+    pub fn new_with_compact_contacts(
+        capacity: WorldCapacity,
+        compact_contacts: bool,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_contact_storage(capacity, compact_contacts, false)
+    }
+
+    pub fn new_with_persistent_contacts(capacity: WorldCapacity) -> anyhow::Result<Self> {
+        Self::new_with_contact_storage(capacity, true, true)
+    }
+
+    fn new_with_contact_storage(
+        capacity: WorldCapacity,
+        compact_contacts: bool,
+        persistent_contacts: bool,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            capacity.max_colliders < 0x7fff_ffff,
+            "grid collider ID overlaps awake-dynamic flag or empty sentinel"
+        );
+        if persistent_contacts {
+            anyhow::ensure!(
+                capacity.max_candidates < 0x3fff_ffff,
+                "persistent owner index exceeds 30 bits"
+            );
+        }
+        anyhow::ensure!(
+            capacity.max_candidates < 0x7fff_ffff,
+            "compact pair index exceeds 31 bits"
+        );
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL,
             ..Default::default()
@@ -107,7 +171,15 @@ impl WgpuSim {
             None,
         ))?;
 
-        let sizes = buffer_sizes(&capacity);
+        let mut sizes = buffer_sizes(&capacity);
+        if persistent_contacts {
+            sizes[4] = u64::from(capacity.max_contacts) * 2 * 32;
+            sizes[27] = u64::from(capacity.max_contacts) * 2 * 64;
+        }
+        if !compact_contacts {
+            sizes[27] = 64;
+            sizes[28] = 32;
+        }
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         for (i, &bytes) in sizes.iter().enumerate() {
             let usage = wgpu::BufferUsages::COPY_DST
@@ -155,8 +227,33 @@ impl WgpuSim {
 
         let shaders = crate::WebGpuWorld::compile_shaders_report();
         let mut pipes = HashMap::new();
-        for (name, r) in shaders {
-            let wgsl = r.map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
+        for (name, canonical) in &shaders {
+            if name.ends_with("_persistent") {
+                continue;
+            }
+            let entry = if persistent_contacts {
+                persistent_entry(name)
+            } else {
+                name.as_str()
+            };
+            let r = if entry == name {
+                canonical
+            } else {
+                &shaders
+                    .iter()
+                    .find(|(n, _)| n == entry)
+                    .ok_or_else(|| anyhow::anyhow!("missing persistent shader {entry}"))?
+                    .1
+            };
+            if !compact_contacts
+                && (name.ends_with("_compact") || name.ends_with("_solver_contacts"))
+            {
+                continue;
+            }
+            let wgsl = r
+                .as_ref()
+                .map_err(|e| anyhow::anyhow!("{entry}: {e}"))?
+                .clone();
             let binds = bindings_of(&wgsl);
             let mut entries = Vec::new();
             for b in &binds {
@@ -190,13 +287,13 @@ impl WgpuSim {
             });
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(&name),
-                layout: Some(&device.create_pipeline_layout(
-                    &wgpu::PipelineLayoutDescriptor {
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some(&name),
                         bind_group_layouts: &[&layout],
                         push_constant_ranges: &[],
-                    },
-                )),
+                    }),
+                ),
                 module: &module,
                 entry_point: None,
                 compilation_options: Default::default(),
@@ -223,7 +320,7 @@ impl WgpuSim {
                 entries: &resources,
             });
             pipes.insert(
-                name,
+                name.clone(),
                 Pipe {
                     pipeline,
                     bind,
@@ -234,6 +331,21 @@ impl WgpuSim {
 
         let _ = mats;
         Ok(Self {
+            compact_contacts,
+            persistent_contacts,
+            sparse_start: if capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8 {
+                std::env::var("ENGINE_SPARSE_COLORS")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(32)
+                    .min(32)
+            } else {
+                32
+            },
+            fused_persistence: compact_contacts
+                && std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Ok("fused"),
+            manifold_persistence: std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref()
+                == Ok("1"),
             device,
             queue,
             capacity,
@@ -264,31 +376,60 @@ impl WgpuSim {
     }
 
     pub fn add_body(&mut self, body: BodyState) -> u32 {
-        let id = self.body_count;
-        self.host_bodies.push(body);
-        let stride = std::mem::size_of::<BodyState>() as u64;
-        self.queue
-            .write_buffer(&self.bufs[0], id as u64 * stride, bytes_of(&body));
-        // WGSL packs previous poses at gBodies[maxBodies + i].
-        self.queue.write_buffer(
-            &self.bufs[0],
-            (u64::from(self.capacity.max_bodies) + u64::from(id)) * stride,
-            bytes_of(&body),
+        self.add_bodies(std::slice::from_ref(&body)).start
+    }
+
+    /// Append a scene-sized batch with one upload for current poses and one for
+    /// previous poses. A write per body can exhaust Metal staging allocations
+    /// before the first submission on half-million-body scenes.
+    pub fn add_bodies(&mut self, bodies: &[BodyState]) -> std::ops::Range<u32> {
+        let start = self.body_count;
+        let count = u32::try_from(bodies.len()).expect("body batch exceeds u32 index space");
+        assert!(
+            count <= self.capacity.max_bodies.saturating_sub(start),
+            "body upload exceeds capacity: {start} existing + {count} new > {}",
+            self.capacity.max_bodies
         );
-        self.body_count += 1;
-        id
+        if count > 0 {
+            let stride = std::mem::size_of::<BodyState>() as u64;
+            let bytes = bytemuck::cast_slice(bodies);
+            self.queue
+                .write_buffer(&self.bufs[0], u64::from(start) * stride, bytes);
+            // WGSL packs previous poses at gBodies[maxBodies + i].
+            self.queue.write_buffer(
+                &self.bufs[0],
+                (u64::from(self.capacity.max_bodies) + u64::from(start)) * stride,
+                bytes,
+            );
+            self.host_bodies.extend_from_slice(bodies);
+            self.body_count += count;
+        }
+        start..self.body_count
     }
 
     pub fn add_collider(&mut self, col: Collider) -> u32 {
-        let id = self.collider_count;
-        self.host_cols.push(col);
-        self.queue.write_buffer(
-            &self.bufs[2],
-            id as u64 * std::mem::size_of::<Collider>() as u64,
-            bytes_of(&col),
+        self.add_colliders(std::slice::from_ref(&col)).start
+    }
+
+    /// Append collider records in one contiguous upload, preserving body indices.
+    pub fn add_colliders(&mut self, colliders: &[Collider]) -> std::ops::Range<u32> {
+        let start = self.collider_count;
+        let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
+        assert!(
+            count <= self.capacity.max_colliders.saturating_sub(start),
+            "collider upload exceeds capacity: {start} existing + {count} new > {}",
+            self.capacity.max_colliders
         );
-        self.collider_count += 1;
-        id
+        if count > 0 {
+            self.queue.write_buffer(
+                &self.bufs[2],
+                u64::from(start) * std::mem::size_of::<Collider>() as u64,
+                bytemuck::cast_slice(colliders),
+            );
+            self.host_cols.extend_from_slice(colliders);
+            self.collider_count += count;
+        }
+        start..self.collider_count
     }
 
     pub fn body_y(&self, id: u32) -> f32 {
@@ -296,22 +437,70 @@ impl WgpuSim {
     }
 
     pub fn read_body(&self, id: u32) -> BodyState {
+        self.read_body_range(id, 1)[0]
+    }
+
+    /// Download one snapshot, avoiding a GPU synchronization per body in
+    /// scale diagnostics and cross-backend comparisons.
+    pub fn download_bodies(&self) -> Vec<BodyState> {
+        self.read_body_range(0, self.body_count)
+    }
+
+    fn read_body_range(&self, first: u32, count: u32) -> Vec<BodyState> {
+        assert!(first <= self.body_count && count <= self.body_count - first);
+        self.read_buffer_range(
+            0,
+            first as u64 * std::mem::size_of::<BodyState>() as u64,
+            count as usize,
+        )
+    }
+
+    /// Slow diagnostic readback: no two active endpoints may be solved in the
+    /// same colour dispatch. Report the first offending body/manifold explicitly.
+    pub fn validate_contact_coloring(&self) -> Result<(), String> {
+        let bodies = self.download_bodies();
+        let colors: Vec<u32> = self.read_buffer_range(12, 0, self.body_count as usize);
+        let active = |id: usize| bodies[id].is_dynamic() && !bodies[id].is_sleeping();
+        for id in 0..bodies.len() {
+            if active(id) && colors[id] >= self.capacity.max_colors {
+                return Err(format!("body {id} has unfinished/out-of-range colour {}; assigning unfinished bodies to colour zero introduces concurrent constraint writes", colors[id]));
+            }
+        }
+        let manifolds: Vec<Manifold> =
+            self.read_buffer_range(25, 0, self.last_counters.manifold_count as usize);
+        for (id, m) in manifolds.iter().enumerate() {
+            if m.contact_count == 0 {
+                continue;
+            }
+            let a = self.host_cols[m.collider_a as usize].body as usize;
+            let b = self.host_cols[m.collider_b as usize].body as usize;
+            if active(a) && active(b) && colors[a] == colors[b] {
+                return Err(format!("manifold {id}: active bodies {a} and {b} share colour {} and would race in the primal solver", colors[a]));
+            }
+        }
+        Ok(())
+    }
+
+    fn read_buffer_range<T: bytemuck::Pod>(
+        &self,
+        binding: usize,
+        offset: u64,
+        count: usize,
+    ) -> Vec<T> {
+        if count == 0 {
+            return Vec::new();
+        }
+        let size = count as u64 * std::mem::size_of::<T>() as u64;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("body-read"),
-            size: std::mem::size_of::<BodyState>() as u64,
+            size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        enc.copy_buffer_to_buffer(
-            &self.bufs[0],
-            id as u64 * std::mem::size_of::<BodyState>() as u64,
-            &staging,
-            0,
-            std::mem::size_of::<BodyState>() as u64,
-        );
+        enc.copy_buffer_to_buffer(&self.bufs[binding], offset, &staging, 0, size);
         self.queue.submit([enc.finish()]);
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -321,10 +510,10 @@ impl WgpuSim {
         let _ = self.device.poll(wgpu::Maintain::Wait);
         rx.recv().unwrap().unwrap();
         let data = slice.get_mapped_range();
-        let body: BodyState = *bytemuck::from_bytes(&data[..std::mem::size_of::<BodyState>()]);
+        let bodies = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         staging.unmap();
-        body
+        bodies
     }
 
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
@@ -342,34 +531,7 @@ impl WgpuSim {
         let n_bodies = self.body_count.max(1) as u64;
         let n_cols = self.collider_count.max(1) as u64;
         let n_joints = self.joint_count.max(1) as u64;
-        let awake_dispatch = if self.last_counters.awake_count == 0 {
-            n_bodies
-        } else {
-            ((self.last_counters.awake_count as u64).saturating_mul(2) + 256)
-                .min(n_bodies)
-                .max(1)
-        };
         let prev_contacts = self.last_counters.contact_count.max(256) as u64;
-        let prev_cand = self.last_counters.candidate_count.max(256) as u64;
-        let narrow_n = (self.capacity.max_candidates as u64).min(
-            prev_cand
-                .saturating_add(prev_cand / 2)
-                .saturating_add(2048)
-                .max(n_cols.saturating_mul(4))
-                .max(prev_contacts.saturating_add(prev_contacts / 4).saturating_add(1024)),
-        );
-        let contact_dispatch = (self.capacity.max_contacts as u64).min(
-            prev_contacts
-                .saturating_add(prev_contacts / 4)
-                .saturating_add(1024)
-                .max(n_cols.saturating_mul(4)),
-        );
-        let prev_manifolds = self.last_counters.manifold_count.max(256) as u64;
-        let manifold_dispatch = narrow_n.max(
-            prev_manifolds
-                .saturating_add(prev_manifolds / 4)
-                .saturating_add(1024),
-        );
 
         self.write_host_uniforms();
         let mut enc = self
@@ -390,84 +552,126 @@ impl WgpuSim {
         self.disp(&mut pass, "broadphase_clear", 131072, None);
         self.disp(&mut pass, "broadphase_insert", n_cols, None);
         self.disp(&mut pass, "broadphase_query", n_cols, None);
+        self.disp(&mut pass, "write_work_args", 64, None);
 
         let ids_len = (2 * (self.capacity.max_contacts + self.capacity.max_joints))
             .max(32768)
             .next_power_of_two();
-        // Largest pow2 thread count with workgroups ≤ 65535 (2^22 → 65536 groups = invalid).
-        const MAX_POW2_DISPATCH: u32 = 1 << 21;
+        // One entry per manifold; bound hash memory/work independently of tiled dispatch.
+        const MAX_WARM_HASH: u32 = 1 << 21;
         let hash_n = (prev_contacts.max(256).saturating_mul(4).max(1024) as u32)
             .next_power_of_two()
             .min(ids_len)
-            .min(MAX_POW2_DISPATCH) as u64;
+            .min(MAX_WARM_HASH) as u64;
         let reuse = (self.params.flags & FLAG_REUSE_CONTACTS) != 0;
         if reuse {
             self.disp(&mut pass, "update_refs", n_bodies, None);
             self.disp(&mut pass, "contact_hash_clear", hash_n, None);
-            self.disp(&mut pass, "contact_hash_insert", prev_contacts.max(1), None);
+            self.disp_work(&mut pass, "contact_hash_insert", 68, None);
         }
-        self.disp(&mut pass, "narrowphase", narrow_n, None);
+        self.disp_work(&mut pass, "narrowphase", 64, None);
+        self.disp(&mut pass, "write_work_args", 64, None);
         if !reuse {
             self.disp(&mut pass, "contact_hash_clear", hash_n, None);
-            self.disp(&mut pass, "contact_hash_insert", prev_contacts.max(1), None);
+            self.disp_work(&mut pass, "contact_hash_insert", 68, None);
         }
-        self.disp(&mut pass, "persist_contacts", contact_dispatch, None);
+        if self.fused_persistence && !self.persistent_contacts {
+            self.disp_work(&mut pass, "clear_solver_contacts", 65, None);
+        }
+        self.disp_work(
+            &mut pass,
+            if self.fused_persistence {
+                "persist_manifolds_compact"
+            } else if self.manifold_persistence {
+                "persist_manifolds"
+            } else {
+                "persist_contacts"
+            },
+            if self.fused_persistence || self.manifold_persistence {
+                66
+            } else {
+                65
+            },
+            None,
+        );
         if self.joint_count > 0 {
             self.disp(&mut pass, "warmstart_joints", n_joints, None);
         }
         self.disp(&mut pass, "build_awake_list", n_bodies, None);
+        self.disp(&mut pass, "write_work_args", 64, None);
         self.disp(&mut pass, "csr_clear", n_bodies + 1, None);
-        self.disp(&mut pass, "csr_degree_contacts", manifold_dispatch, None);
+        self.disp_work(&mut pass, "csr_degree_contacts", 66, None);
         if self.body_count <= 512 {
             self.disp(&mut pass, "csr_prefix", 1, None);
         } else {
-            self.disp(&mut pass, "csr_prefix_init", n_bodies, None);
-            let mut log = 0u32;
-            while (1u32 << log) < self.body_count && log < 20 {
-                self.disp(&mut pass, "csr_prefix_scan", n_bodies, Some(48 + log));
-                log += 1;
-            }
-            self.disp(&mut pass, "csr_prefix_finalize", n_bodies + 1, None);
+            self.disp(&mut pass, "csr_prefix_blocks", (n_bodies + 3) / 4, None);
+            self.disp(&mut pass, "csr_prefix_block_sums", 64, None);
+            self.disp(&mut pass, "csr_prefix_add", n_bodies, None);
         }
-        self.disp(&mut pass, "csr_scatter_contacts", manifold_dispatch, None);
-        self.disp(&mut pass, "csr_sort", awake_dispatch, None);
-        self.disp(&mut pass, "init_colors", awake_dispatch, None);
-        // Match Metal / three-avbd: ≥16 JP rounds, colorCap ≤32 (was hard-capped at 8 for
-        // body_count>8192 — under-coloured Pyramid 30 vs oracle's ~13 colours).
-        let color_cap = self.capacity.max_colors.min(32);
-        let color_rounds = self
-            .last_counters
-            .color_count
-            .saturating_add(1)
-            .max(16)
-            .min(color_cap);
+        self.disp_work(&mut pass, "csr_scatter_contacts", 66, None);
+        self.disp_work(&mut pass, "csr_sort", 67, None);
+        self.disp_work(&mut pass, "init_colors", 67, None);
+        self.disp(&mut pass, "write_work_args", 64, None);
+        // A colour count is not the JP dependency depth. The active 110k
+        // ring still has uncoloured bodies after 16 rounds at step 60.
+        let color_rounds = 32;
         for round in 0..color_rounds {
-            self.disp(&mut pass, "color_bodies", awake_dispatch, Some(round % 16));
+            self.disp_work(&mut pass, "color_bodies", 69, Some(round % 16));
         }
-        self.disp(&mut pass, "pack_color_lists", awake_dispatch, None);
+        self.disp(&mut pass, "count_color_tiles", n_bodies, None);
+        self.disp(
+            &mut pass,
+            "prefix_color_tiles_parallel",
+            u64::from(self.capacity.max_colors.min(32)) * 64,
+            None,
+        );
+        self.disp(&mut pass, "scatter_color_tiles", n_bodies, None);
         self.disp(&mut pass, "write_color_args", 64, None);
         self.disp(&mut pass, "predict_bodies", n_bodies, None);
 
-        let dual_n = contact_dispatch.max(n_joints);
-        let max_c = self
-            .last_counters
-            .color_count
-            .saturating_add(1)
-            .max(16)
-            .min(self.capacity.max_colors.min(32));
-        for _iter in 0..self.params.iterations {
-            for color in 0..max_c {
+        // Dispatch the full palette; empty GPU indirect buckets cost no work.
+        let max_c = self.capacity.max_colors.min(32);
+        if self.compact_contacts && !self.fused_persistence {
+            if !self.persistent_contacts {
+                self.disp_work(&mut pass, "clear_solver_contacts", 65, None);
+            }
+            self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
+        }
+        for iter in 0..self.params.iterations {
+            for color in 0..max_c.min(self.sparse_start) {
                 self.disp_indirect(&mut pass, color);
             }
-            self.disp(&mut pass, "solve_dual", dual_n, None);
+            if self.sparse_start < max_c {
+                self.disp(
+                    &mut pass,
+                    if self.compact_contacts {
+                        "solve_primal_sparse_compact"
+                    } else {
+                        "solve_primal_sparse"
+                    },
+                    64,
+                    Some(self.sparse_start),
+                );
+            }
+            self.disp_work(
+                &mut pass,
+                if self.compact_contacts {
+                    "solve_dual_compact"
+                } else {
+                    "solve_dual"
+                },
+                65,
+                Some(u32::from(iter + 1 == self.params.iterations)),
+            );
         }
         self.disp(&mut pass, "extract_velocity_sleep", n_bodies, None);
-        if self.last_counters.manifold_count > 0 && self.sleep_island_rounds > 0 {
+        self.disp(&mut pass, "write_sleep_args", 64, None);
+        if self.sleep_island_rounds > 0 {
             for _ in 0..self.sleep_island_rounds.min(16) {
-                self.disp(&mut pass, "sleep_island_gate", manifold_dispatch, None);
+                self.disp_work(&mut pass, "sleep_island_gate", 66, None);
             }
         }
-        self.disp(&mut pass, "sleep_island_commit", n_bodies, None);
+        self.disp_work(&mut pass, "sleep_island_commit", 67, None);
         drop(pass);
         self.queue.submit([enc.finish()]);
 
@@ -500,7 +704,10 @@ impl WgpuSim {
                 return;
             }
         }
-        let p = self.pipes.get(name).unwrap_or_else(|| panic!("missing {name}"));
+        let p = self
+            .pipes
+            .get(name)
+            .unwrap_or_else(|| panic!("missing {name}"));
         pass.set_pipeline(&p.pipeline);
         if p.dynamic_pass {
             let idx = pass_idx.unwrap_or(0);
@@ -508,7 +715,25 @@ impl WgpuSim {
         } else {
             pass.set_bind_group(0, &p.bind, &[]);
         }
-        pass.dispatch_workgroups(groups(threads), 1, 1);
+        let (x, y) = groups(threads);
+        pass.dispatch_workgroups(x, y, 1);
+    }
+
+    fn disp_work<'a>(
+        &'a self,
+        pass: &mut wgpu::ComputePass<'a>,
+        name: &str,
+        slot: u32,
+        pass_idx: Option<u32>,
+    ) {
+        let p = &self.pipes[name];
+        pass.set_pipeline(&p.pipeline);
+        if p.dynamic_pass {
+            pass.set_bind_group(0, &p.bind, &[pass_idx.unwrap_or(0) * PASS_ALIGN as u32]);
+        } else {
+            pass.set_bind_group(0, &p.bind, &[]);
+        }
+        pass.dispatch_workgroups_indirect(&self.bufs[23], slot as u64 * 12);
     }
 
     fn disp_indirect<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, color: u32) {
@@ -522,7 +747,11 @@ impl WgpuSim {
                 return;
             }
         }
-        let p = &self.pipes["solve_primal_color"];
+        let p = &self.pipes[if self.compact_contacts {
+            "solve_primal_color_compact"
+        } else {
+            "solve_primal_color"
+        }];
         pass.set_pipeline(&p.pipeline);
         pass.set_bind_group(0, &p.bind, &[color * PASS_ALIGN as u32]);
         pass.dispatch_workgroups_indirect(&self.bufs[23], (color as u64) * 12);
@@ -540,13 +769,13 @@ impl WgpuSim {
         s[3] = max_c;
         s[7] = self.last_counters.contact_count.min(max_c);
         s[8] = prev;
-        const MAX_POW2_DISPATCH: u32 = 1 << 21;
+        const MAX_WARM_HASH: u32 = 1 << 21;
         s[9] = prev_n
             .saturating_mul(4)
             .max(1024)
             .next_power_of_two()
             .min(ids_len)
-            .min(MAX_POW2_DISPATCH);
+            .min(MAX_WARM_HASH);
         s[10] = self.capacity.max_candidates;
         s[11] = cur;
         let mut log = 0u32;
@@ -555,9 +784,12 @@ impl WgpuSim {
         }
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
         s[17] = self.steps_done;
-        // CSR index region starts past the hash/id words inside gConstraintIds.
+        s[26] = 1; // incremental coloring: history row + compact work slot 69
+                   // CSR index region starts past the hash/id words inside gConstraintIds.
         s[24] = ids_len;
-        self.queue.write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
+        s[4] = self.capacity.max_colors.min(32);
+        self.queue
+            .write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
 
         let c = StepCounters {
             body_count: self.body_count,
@@ -648,8 +880,14 @@ struct HostUniforms {
 fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     let b = |n: u32, stride: u64| n as u64 * stride;
     let mut s = [256u64; BIND_COUNT];
-    s[0] = b(c.max_bodies.saturating_mul(2), std::mem::size_of::<engine_schema::BodyState>() as u64);
-    s[1] = b(c.max_bodies, std::mem::size_of::<engine_schema::BodyState>() as u64);
+    s[0] = b(
+        c.max_bodies.saturating_mul(2),
+        std::mem::size_of::<engine_schema::BodyState>() as u64,
+    );
+    s[1] = b(
+        c.max_bodies,
+        std::mem::size_of::<engine_schema::BodyState>() as u64,
+    );
     s[2] = b(c.max_colliders, 64);
     s[3] = b(64, 16);
     s[4] = b(c.max_contacts.saturating_mul(2), 128);
@@ -663,17 +901,23 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[12] = b(c.max_bodies, 4);
     s[13] = b(c.max_bodies + 1, 4);
     s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1) * 4;
-    s[15] = b(c.max_bodies * c.max_colors, 4);
-    s[16] = b(c.max_colors, 4);
+    s[15] = b(c.max_bodies * (c.max_colors + 2), 4);
+    s[16] = b(c.max_colors * c.max_bodies.div_ceil(64).max(1), 4);
     s[17] = b(c.max_colors, 4);
     s[18] = b(c.max_hull_vertices, 16);
     s[19] = 65536 * 4;
     s[20] = b(c.max_bodies, 4);
     s[21] = 64 * 4;
     s[22] = 96 * PASS_ALIGN;
-    s[23] = b(c.max_colors.max(64) * 3, 4);
+    s[23] = b(c.max_colors.max(70) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);
     s[26] = b(c.max_bodies, 32);
+    s[27] = b(c.max_contacts, 64);
+    s[28] = b(c.max_candidates, 32);
     s
 }
+
+#[cfg(test)]
+#[path = "gpu_tests.rs"]
+mod tests;

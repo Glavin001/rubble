@@ -1,0 +1,289 @@
+{
+  "change": "Linked broadphase entries encode awake-dynamic ownership in bit 31; query fetches the next link before geometry and rejects pairs owned by a lower-index awake dynamic",
+  "protocol": {
+    "scene": "ring110k",
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "wallStatistic": "minimum round median"
+  },
+  "conditions": "Serial Chrome 155 on Apple M3 Max; no native GPU tests or compilation during timing",
+  "experiments": [
+    {
+      "variant": "counting-sort grid, no early flag",
+      "measuredAt": "2026-10-14T13:11:52.437Z",
+      "wallMs": 12.86,
+      "gridMs": 1.703936,
+      "batchesMs": [
+        [
+          12.7,
+          12.86,
+          13.17,
+          13.17,
+          12.82
+        ],
+        [
+          13.11,
+          13.06,
+          12.97,
+          12.7,
+          12.69
+        ]
+      ],
+      "retained": false
+    },
+    {
+      "variant": "counting-sort grid with early flag",
+      "measuredAt": "2026-10-14T13:14:47.450Z",
+      "wallMs": 12.36,
+      "gridMs": 1.31072,
+      "batchesMs": [
+        [
+          12.2,
+          12.42,
+          12.51,
+          12.44,
+          12.63
+        ],
+        [
+          12.36,
+          12.53,
+          12.61,
+          12.29,
+          12.26
+        ]
+      ],
+      "retained": false
+    },
+    {
+      "variant": "linked grid, next-link prefetch, no flag",
+      "measuredAt": "2026-10-14T13:15:08.195Z",
+      "wallMs": 12.41,
+      "gridMs": 1.376256,
+      "batchesMs": [
+        [
+          12.38,
+          12.88,
+          12.61,
+          12.67,
+          12.49
+        ],
+        [
+          12.52,
+          12.74,
+          12.41,
+          12.4,
+          12.32
+        ]
+      ],
+      "retained": false
+    },
+    {
+      "variant": "linked grid, prefetch and early flag, before experiment cleanup",
+      "measuredAt": "2026-10-14T13:16:31.175Z",
+      "wallMs": 12.25,
+      "gridMs": 1.114112,
+      "batchesMs": [
+        [
+          12.12,
+          12.33,
+          12.32,
+          12.31,
+          12.25
+        ],
+        [
+          12.25,
+          12.52,
+          12.46,
+          12.1,
+          12.17
+        ]
+      ]
+    }
+  ],
+  "workloadAllExperiments": {
+    "start": {
+      "contacts": 1184245,
+      "candidates": 230244,
+      "awake": 110441,
+      "colors": 15,
+      "manifolds": 227155,
+      "overflow": 0
+    },
+    "end": {
+      "contacts": 1174316,
+      "candidates": 256703,
+      "awake": 110441,
+      "colors": 11,
+      "manifolds": 246481,
+      "overflow": 0
+    }
+  },
+  "profileCaveat": "Later split-pass/readback samples perturb execution; phase medians are separate from throughput batches",
+  "validation": {
+    "focusedWebGpu": "39 passed; independent 641-body all-pairs oracle expects 6084 unique touching pairs, checks all bucket chains and canaries; sleeping endpoint ordering, large-body ownership and cell aliases also tested",
+    "browserUnitTests": 53,
+    "nativePersistent": "ring480 and all four columns tests passed with unchanged bounds",
+    "nativeCanonicalGables": {
+      "steps": 240,
+      "passed": true,
+      "unhitMean": 0.118626,
+      "unhitMax": 0.330369
+    },
+    "sharedMetal": "18 tests passed: library3, avbd_slice7, columns_wgpu_parity3, oracle_accuracy5; max column position delta 0.000213 m",
+    "browserRing": {
+      "measuredAt": "2026-10-14T13:24:25.118Z",
+      "passed": true,
+      "steps": 480,
+      "resetPassed": true,
+      "awake": 110441,
+      "meanFlankDrift": 1.1817874610691919,
+      "ball": [
+        -0.03025226481258869,
+        8.46918773651123,
+        105.19124603271484
+      ],
+      "contacts": 1037330,
+      "overflow": 0,
+      "matchesPreviousCheckpoints": true
+    },
+    "browserCanonicalGables": {
+      "measuredAt": "2026-10-14T13:25:11.960Z",
+      "passed": true,
+      "steps": 240,
+      "resetPassed": true,
+      "awake": 505922,
+      "meanUnhitDrift": 0.11721765612202996,
+      "maxUnhitDrift": 0.32660675048828125,
+      "balls": [
+        [
+          -48.019500732421875,
+          4.77689266204834,
+          -73.83258819580078
+        ],
+        [
+          48.073787689208984,
+          4.776981830596924,
+          -73.76162719726562
+        ]
+      ],
+      "contacts": 4060011,
+      "overflow": 0
+    },
+    "browserPersistentGables": {
+      "measuredAt": "2026-10-14T13:26:01.625Z",
+      "passed": true,
+      "steps": 240,
+      "resetPassed": true,
+      "awake": 505922,
+      "meanUnhitDrift": 0.11725152522349752,
+      "maxUnhitDrift": 0.32761669158935547,
+      "balls": [
+        [
+          -48.06863784790039,
+          4.776975631713867,
+          -73.75572967529297
+        ],
+        [
+          48.031795501708984,
+          4.776887893676758,
+          -73.75567626953125
+        ]
+      ],
+      "contacts": 4058103,
+      "overflow": 0,
+      "matchesPreviousCheckpoints": true
+    }
+  },
+  "open": "120 FPS and full reference parity remain unmet; native persistent gables accuracy discrepancy remains unresolved",
+  "finalComparison": [
+    {
+      "variant": "optimized A",
+      "measuredAt": "2026-10-14T13:21:41.326Z",
+      "wallMs": 12.26,
+      "gridMs": 1.179648,
+      "batchesMs": [
+        [
+          12.17,
+          12.33,
+          12.39,
+          12.26,
+          12.2
+        ],
+        [
+          12.31,
+          12.27,
+          12.34,
+          12.51,
+          12.22
+        ]
+      ]
+    },
+    {
+      "variant": "original control",
+      "measuredAt": "2026-10-14T13:22:43.123Z",
+      "wallMs": 12.74,
+      "gridMs": 1.6384,
+      "batchesMs": [
+        [
+          12.65,
+          12.99,
+          13.33,
+          12.73,
+          12.74
+        ],
+        [
+          12.67,
+          13.01,
+          12.65,
+          12.8,
+          12.77
+        ]
+      ]
+    },
+    {
+      "variant": "optimized B",
+      "measuredAt": "2026-10-14T13:23:54.035Z",
+      "wallMs": 12.32,
+      "gridMs": 1.179648,
+      "batchesMs": [
+        [
+          12.12,
+          12.52,
+          12.71,
+          12.29,
+          12.32
+        ],
+        [
+          12.43,
+          12.52,
+          12.49,
+          12.41,
+          12.2
+        ]
+      ]
+    }
+  ],
+  "originalControlSha256": {
+    "engine/slang/kernels/world_step.slang": "ab5db0a6faf1b6a5a0506cddc3f8330e404fc9fdf252380fafbe4ce5da3d0911",
+    "engine/crates/engine-webgpu/generated/wgsl/broadphase_insert.wgsl": "1b31c52f3a1756b8e7c667459dfae54080daa4a330cc10d92d7fcf46e807ce05",
+    "engine/crates/engine-webgpu/generated/wgsl/broadphase_query.wgsl": "41e815de9e008609d539419457a552f6580ce0bfb978fad798f856d043559b9c"
+  },
+  "finding": "Retain linked-list prefetch and awake-dynamic ownership flag; remove counting-sort kernels, host routing and scratch allocation. Clean new/original/new: 12.26/12.74/12.32 ms, about 3.3-3.8% less physics wall time, with identical timed-window counters. Grid phase falls about 28% (1.6384 to 1.179648 ms). No scene reduction or extra allocation.",
+  "sourceSha256": {
+    "engine/slang/kernels/world_step.slang": "c0203e8dccfb0c0f59d579bf16d7d2c2c7b3a6f0a62fad0f666c3a5200ec8405",
+    "engine/crates/engine-webgpu/src/gpu.rs": "93256f5f6dbb3c40c07074d9e2a7d5123ab25615ac2009759d0349890a1807b5",
+    "engine/crates/engine-webgpu/src/gpu_tests.rs": "68be1cff53760df1dfc4a0b878f72a104c3b579722f9f4c71a55212dcd55b47b",
+    "engine/crates/engine-webgpu/demo.html": "755ee3cddd743e3cb2d44c48906a40d1ab68ed645d73eb5be9eb639a2e6495dd",
+    "engine/crates/engine-webgpu/generated/wgsl/broadphase_insert.wgsl": "a00eb0dd8823ef5b1d75117e1813dee9a2a50edb6f79e6f5476a76faba020c72",
+    "engine/crates/engine-webgpu/generated/wgsl/broadphase_query.wgsl": "91785aa84270314c52de3b3c30be89b0027a53663df60d8f609615bdf784b4c2"
+  },
+  "allBatchesWithin120Hz": false,
+  "reference": "No fresh three-avbd run in this experiment; the earlier same-machine ring reference was 10.22 ms, so no reference speed parity claim."
+}
