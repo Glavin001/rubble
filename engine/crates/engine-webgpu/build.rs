@@ -9,6 +9,11 @@ const WORLD_ENTRIES: &[&str] = &[
     "solve_primal_sparse",
     "solve_primal_sparse_compact",
     "solve_primal_sparse_persistent",
+    "csr_degree_contacts_pairs",
+    "csr_scatter_contacts_pairs",
+    "csr_sort_pairs",
+    "init_colors_pairs",
+    "color_bodies_pairs",
     "apply_commands",
     "apply_commands_persistent",
     "narrowphase_persistent",
@@ -90,6 +95,7 @@ fn main() -> Result<()> {
     let world = slang_root.join("kernels/world_step.slang");
     let compact = slang_root.join("kernels/compact_solve.slang");
     let persistent = slang_root.join("kernels/persistent_solve.slang");
+    let early_pairs = slang_root.join("kernels/early_pairs.slang");
     let abi = slang_root.join("kernels/abi_probe.slang");
     compile(
         &abi,
@@ -104,7 +110,9 @@ fn main() -> Result<()> {
     for entry in WORLD_ENTRIES {
         let dest = out.join(format!("{entry}.spv"));
         match compile(
-            if entry.ends_with("_persistent") {
+            if entry.ends_with("_pairs") {
+                &early_pairs
+            } else if entry.ends_with("_persistent") {
                 &persistent
             } else if entry.ends_with("_compact")
                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
@@ -155,7 +163,9 @@ fn main() -> Result<()> {
     {
         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
         match compile_with_defines(
-            if entry.ends_with("_persistent") {
+            if entry.ends_with("_pairs") {
+                &early_pairs
+            } else if entry.ends_with("_persistent") {
                 &persistent
             } else if entry.ends_with("_compact")
                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")

@@ -108,6 +108,13 @@
     if (!['contact', 'manifold'].includes(hashInsertMode))
       throw new Error('hashInsert must be contact or manifold');
     const manifoldHashInsert = hashInsertMode === 'manifold';
+    // Opt-in: pack SolverPairs right after collision so CSR/coloring read body
+    // endpoints in one load instead of manifold -> collider -> body.
+    const pairsMode = qs.get('pairs') || 'late';
+    if (!['late', 'early'].includes(pairsMode)) throw new Error('pairs must be late or early');
+    if (pairsMode === 'early' && !persistentContacts) throw new Error('pairs=early requires persistent contacts');
+    const earlyPairs = pairsMode === 'early';
+    const graphEntry = name => earlyPairs && ['csr_degree_contacts', 'csr_scatter_contacts', 'csr_sort', 'init_colors', 'color_bodies'].includes(name) ? name + '_pairs' : name;
     // Broadphase grid table scaled to >=2x colliders (three-avbd sizes its grid
     // at 2x body capacity); scenes up to 65536 colliders keep 131072 heads.
     // Gables fixed/scaled: 36.92/35.00/36.34/34.50 ms, grid 3.28->1.90 ms, with
@@ -324,6 +331,7 @@
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
       'csr_scatter_contacts', 'csr_sort', 'csr_sort_append', 'init_colors', 'color_bodies',
+      ...(earlyPairs ? ['csr_degree_contacts_pairs', 'csr_scatter_contacts_pairs', 'csr_sort_pairs', 'init_colors_pairs', 'color_bodies_pairs'] : []),
       'pack_color_lists', 'write_color_args', 'write_work_args', 'predict_bodies', 'solve_primal_color',
       ...(sparseStart < 32 ? [compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse'] : []),
       'count_color_tiles', 'prefix_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
@@ -976,11 +984,13 @@ struct VsOut {
       if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
       dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
       nextPhase();
+      // Manifolds are final after collision; pack pairs before the graph reads them.
+      if (earlyPairs) dispWork(pass, 'pack_solver_contacts', 66);
       disp(pass, 'build_awake_list', nBodies);
       disp(pass, 'write_work_args', 64);
       if (graphProfile) nextPhase();
       disp(pass, 'csr_clear', nBodies + 1);
-      dispWork(pass, 'csr_degree_contacts', 66);
+      dispWork(pass, graphEntry('csr_degree_contacts'), 66);
       if (graphProfile) nextPhase();
       if (bodyCount <= 512) {
         disp(pass, 'csr_prefix', 1);
@@ -990,16 +1000,16 @@ struct VsOut {
         disp(pass, 'csr_prefix_add', nBodies);
       }
       if (graphProfile) nextPhase();
-      dispWork(pass, 'csr_scatter_contacts', 66);
+      dispWork(pass, graphEntry('csr_scatter_contacts'), 66);
       if (graphProfile) nextPhase();
-      dispWork(pass, physicalAdjacency ? 'csr_sort' : 'csr_sort_append', 67);
+      dispWork(pass, physicalAdjacency ? graphEntry('csr_sort') : 'csr_sort_append', 67);
       if (graphProfile) nextPhase();
-      dispWork(pass, 'init_colors', 67);
+      dispWork(pass, graphEntry('init_colors'), 67);
       disp(pass, 'write_work_args', 64);
       if (graphProfile) nextPhase();
       // JP dependency depth exceeds 16 on the active 110k ring.
       const colorRounds = 32;
-      for (let round = 0; round < colorRounds; round++) dispWork(pass, 'color_bodies', incrementalColors ? 69 : 67, round % 16);
+      for (let round = 0; round < colorRounds; round++) dispWork(pass, graphEntry('color_bodies'), incrementalColors ? 69 : 67, round % 16);
       if (graphProfile) nextPhase();
       if (stablePacking) {
         disp(pass, 'count_color_tiles', nBodies);
@@ -1016,7 +1026,7 @@ struct VsOut {
       const colors = Math.min(cap.maxColors, 32);
       if (compactContacts && !fusedPersistence) {
         if (!persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
-        dispWork(pass, 'pack_solver_contacts', 66);
+        if (!earlyPairs) dispWork(pass, 'pack_solver_contacts', 66);
       }
       for (let iter = 0; iter < params.iterations; iter++) {
         if (beginPass && iter > 0) nextPhase();
@@ -1121,7 +1131,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, pairs: pairsMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1507,7 +1517,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, pairs: pairsMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1554,6 +1564,7 @@ struct VsOut {
       report.order = spatialOrder ? "morton" : "construction";
       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
       report.hashInsert = hashInsertMode;
+      report.pairs = pairsMode;
       report.grid = gridMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
@@ -1579,7 +1590,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, pairs: pairsMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

@@ -22,6 +22,9 @@ pub struct WgpuSim {
     manifold_persistence: bool,
     /// Opt-in three-avbd shape: warm-hash insert per previous manifold.
     pub(crate) manifold_hash_insert: bool,
+    /// Opt-in: pack SolverPairs right after collision so graph kernels read
+    /// body endpoints in one load (persistent storage only).
+    pub(crate) early_pairs: bool,
     fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -350,6 +353,14 @@ impl WgpuSim {
             manifold_persistence: std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref()
                 == Ok("1"),
             manifold_hash_insert: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("manifold"),
+            early_pairs: {
+                let early = std::env::var("ENGINE_EARLY_PAIRS").as_deref() == Ok("1");
+                assert!(
+                    !early || persistent_contacts,
+                    "ENGINE_EARLY_PAIRS=1 needs persistent contacts"
+                );
+                early
+            },
             device,
             queue,
             capacity,
@@ -616,10 +627,25 @@ impl WgpuSim {
         if self.joint_count > 0 {
             self.disp(&mut pass, "warmstart_joints", n_joints, None);
         }
+        // Manifolds are final after collision; pack pairs before the graph reads them.
+        if self.early_pairs {
+            self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
+        }
+        let early = self.early_pairs;
+        let graph = |name: &'static str| -> &'static str {
+            match (early, name) {
+                (true, "csr_degree_contacts") => "csr_degree_contacts_pairs",
+                (true, "csr_scatter_contacts") => "csr_scatter_contacts_pairs",
+                (true, "csr_sort") => "csr_sort_pairs",
+                (true, "init_colors") => "init_colors_pairs",
+                (true, "color_bodies") => "color_bodies_pairs",
+                _ => name,
+            }
+        };
         self.disp(&mut pass, "build_awake_list", n_bodies, None);
         self.disp(&mut pass, "write_work_args", 64, None);
         self.disp(&mut pass, "csr_clear", n_bodies + 1, None);
-        self.disp_work(&mut pass, "csr_degree_contacts", 66, None);
+        self.disp_work(&mut pass, graph("csr_degree_contacts"), 66, None);
         if self.body_count <= 512 {
             self.disp(&mut pass, "csr_prefix", 1, None);
         } else {
@@ -627,15 +653,15 @@ impl WgpuSim {
             self.disp(&mut pass, "csr_prefix_block_sums", 64, None);
             self.disp(&mut pass, "csr_prefix_add", n_bodies, None);
         }
-        self.disp_work(&mut pass, "csr_scatter_contacts", 66, None);
-        self.disp_work(&mut pass, "csr_sort", 67, None);
-        self.disp_work(&mut pass, "init_colors", 67, None);
+        self.disp_work(&mut pass, graph("csr_scatter_contacts"), 66, None);
+        self.disp_work(&mut pass, graph("csr_sort"), 67, None);
+        self.disp_work(&mut pass, graph("init_colors"), 67, None);
         self.disp(&mut pass, "write_work_args", 64, None);
         // A colour count is not the JP dependency depth. The active 110k
         // ring still has uncoloured bodies after 16 rounds at step 60.
         let color_rounds = 32;
         for round in 0..color_rounds {
-            self.disp_work(&mut pass, "color_bodies", 69, Some(round % 16));
+            self.disp_work(&mut pass, graph("color_bodies"), 69, Some(round % 16));
         }
         self.disp(&mut pass, "count_color_tiles", n_bodies, None);
         self.disp(
@@ -654,7 +680,9 @@ impl WgpuSim {
             if !self.persistent_contacts {
                 self.disp_work(&mut pass, "clear_solver_contacts", 65, None);
             }
-            self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
+            if !self.early_pairs {
+                self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
+            }
         }
         for iter in 0..self.params.iterations {
             for color in 0..max_c.min(self.sparse_start) {
