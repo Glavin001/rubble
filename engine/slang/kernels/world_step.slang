@@ -819,22 +819,9 @@ void emitManifold(CandidatePair pair, BodyState ba, BodyState bb, Collider ca, C
 {
     if (mf.count <= 0) return;
     // Feature IDs must be geometric only (three-avbd). Cap 4 — matches BOX_MAX_CONTACTS.
+    // Always emit full face manifolds (three-avbd). A prior Ring-only 2-diagonal cap on
+    // demo-brick vertical faces starved Pyramid 30 settle (oracle holds maxZ≈15; we collapsed).
     int n = mf.count > 4 ? 4 : mf.count;
-    // Dynamic-dynamic vertical faces on *demo bricks* only: 2 diagonal corners.
-    // Full 4 doubles Ring contacts vs local oracle (~75k vs ~45k; running-bond ≈2
-    // manifolds/brick). Unit cubes / random pile sizes / static/plane keep 4.
-    bool bothDyn = bodyIsDynamic(ba) && bodyIsDynamic(bb);
-    bool demoBrick = isDemoBrickHalf(ca.params.xyz) && isDemoBrickHalf(cb.params.xyz);
-    if (bothDyn && demoBrick && abs(mf.normal.y) > 0.85 && n >= 4)
-    {
-        emitContactManifold(
-            pair, ba, bb, ca, cb, mf.normal, margin, 2,
-            mf.pts[0].pA, mf.pts[0].pB, mf.pts[0].feature,
-            mf.pts[2].pA, mf.pts[2].pB, mf.pts[2].feature,
-            float3(0, 0, 0), float3(0, 0, 0), 0u,
-            float3(0, 0, 0), float3(0, 0, 0), 0u);
-        return;
-    }
     emitContactManifold(
         pair, ba, bb, ca, cb, mf.normal, margin, n,
         mf.pts[0].pA, mf.pts[0].pB, mf.pts[0].feature,
@@ -1692,12 +1679,16 @@ void csr_sort(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-uint jpPriority(uint body, uint round, bool heightBias)
+// three-avbd `priority`: hash32(i + 0x9e3779b9) — independent of round / height.
+uint jpPriority(uint body)
 {
-    uint prio = heightBias
-        ? ((~asuint(gBodies[body].position.y)) + round * 0x85ebca6bu + body * 0x9e3779b9u)
-        : (body * 0x9e3779b9u ^ round * 0x85ebca6bu);
-    return prio ^ (prio >> 16);
+    uint x = body + 0x9e3779b9u;
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
 }
 
 [shader("compute")]
@@ -1710,11 +1701,7 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     uint awakeN = ALOAD(gCounters[0].awakeCount);
     if (li >= awakeN) return;
     uint body = gAwakeList[li];
-    uint round = PASS_U;
-    // Height-biased JP priority: lower bodies win early rounds (bottom-up support).
-    // Still assign smallest-free colours (not the round id) so the palette stays tight.
-    bool heightBias = true;
-    uint prio = jpPriority(body, round, heightBias);
+    uint prio = jpPriority(body);
 
     if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) return;
 
@@ -1731,7 +1718,7 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
         uint oc = ALOAD(gBodyColor[other]);
         if (oc == 0xFFFFFFFFu)
         {
-            uint op = jpPriority(other, round, heightBias);
+            uint op = jpPriority(other);
             if (op > prio || (op == prio && other > body)) blocked = true;
         }
         else if (oc < 32u) usedLo |= 1u << oc;

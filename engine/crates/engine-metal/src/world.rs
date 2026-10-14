@@ -718,12 +718,15 @@ impl MetalWorld {
 
         self.dispatch(&encoder, "init_colors", awake_dispatch);
 
-        // Colour rounds: distinct pass_table offsets (NOT mid-encoder scratch rewrites).
-        // Large smash scenes: hard-cap 10 JP rounds (colouring was visible in the non-solve base).
-        // JP rounds: one past last colour is enough once the palette is stable.
-        let color_cap = if self.body_count > 8192 { 8 } else { 12 };
-        let color_rounds = (self.last_counters.color_count.saturating_add(1))
-            .max(4)
+        // Colour rounds: three-avbd defaults to 16 JP rounds (adapts ≤32 on clashes).
+        // Deriving rounds from last colour_count (often 4–8) under-coloured Pyramid 30 vs the
+        // oracle's ~13 colours and pumped KE. Floor 16 like three-avbd.
+        let color_cap = self.capacity.max_colors.min(32);
+        let color_rounds = self
+            .last_counters
+            .color_count
+            .saturating_add(1)
+            .max(16)
             .min(color_cap);
         for round in 0..color_rounds {
             self.dispatch_pass(&encoder, "color_bodies", awake_dispatch, round % 16);

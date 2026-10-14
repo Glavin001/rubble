@@ -1,0 +1,68 @@
+{
+ "machine": "M3 Max local",
+ "adapter": "apple \u00b7 metal-3",
+ "date": "2026-10-13",
+ "source": "Chrome WebGPU bench3d.html (paper+large+steady tiers)",
+ "results": [
+  {
+   "scene": "Brick ring 110k",
+   "iterations": 4,
+   "bodies": 110442,
+   "joints": 0,
+   "contacts": 1170611,
+   "colors": 11,
+   "wallMs": 10.97,
+   "gpuTotal": 11.47,
+   "collision": 4.13,
+   "solve": 6.23
+  },
+  {
+   "scene": "Jointed drop 34k (71k joints)",
+   "iterations": 10,
+   "bodies": 34097,
+   "joints": 71064,
+   "contacts": 108507,
+   "colors": 30,
+   "wallMs": 7.23,
+   "gpuTotal": 6.95,
+   "collision": 1.18,
+   "solve": 4.98
+  },
+  {
+   "scene": "Brick gables 506k",
+   "iterations": 3,
+   "bodies": 505923,
+   "joints": 0,
+   "contacts": 4102693,
+   "colors": 9,
+   "wallMs": 29.99,
+   "gpuTotal": 29.62,
+   "collision": 10.49,
+   "solve": 16.19
+  },
+  {
+   "scene": "Settled pile 32k",
+   "iterations": 4,
+   "bodies": 32001,
+   "joints": 0,
+   "contacts": 126119,
+   "colors": 13,
+   "wallMs": 3.58,
+   "gpuTotal": 3.41,
+   "collision": 1.7,
+   "solve": 1.38
+  },
+  {
+   "scene": "Box columns 100k",
+   "iterations": 4,
+   "bodies": 100001,
+   "joints": 0,
+   "contacts": 400000,
+   "colors": 3,
+   "wallMs": 4.1,
+   "gpuTotal": 4.0,
+   "collision": 1.51,
+   "solve": 1.9
+  }
+ ]
+}

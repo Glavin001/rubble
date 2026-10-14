@@ -7,7 +7,7 @@ fn main() {
     println!("{name} iters={} steps={steps}", info.iterations);
     for s in 0..steps {
         world.step().unwrap();
-        if s % 10 == 9 || s + 1 == steps {
+        if s < 5 || s % 10 == 9 || s + 1 == steps {
             let bodies = world.download_bodies();
             let mut ymin = f32::INFINITY;
             let mut ymax = f32::NEG_INFINITY;

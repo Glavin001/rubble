@@ -780,6 +780,15 @@ pub fn all_scenes() -> Vec<SceneDef> {
         },
         SceneDef {
             info: SceneInfo {
+                name: "Pyramid 30",
+                group: "Contacts & friction",
+                iterations: 10,
+                capacity: cap(16_384),
+            },
+            build: |b| pyramid(b, 30),
+        },
+        SceneDef {
+            info: SceneInfo {
                 name: "Stack",
                 group: "Contacts & friction",
                 iterations: 10,
@@ -863,11 +872,17 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
             params.iterations = n;
         }
     }
-    // reuseContacts helps random Box Pile settle; on Metal it slows Brick Ring smash.
-    if scene.info.name.starts_with("Box Pile")
+    // three-avbd defaults reuseContacts=true. On for settle scenes; Ring smash leaves it off.
+    if (scene.info.name.starts_with("Box Pile")
+        || scene.info.name.starts_with("Pyramid")
+        || scene.info.name.starts_with("Box Columns"))
         && std::env::var("NO_REUSE").is_err()
     {
         params.flags |= FLAG_REUSE_CONTACTS;
+    }
+    // Soft β/α/sleep are Box Pile only (random drop). Pyramid/Columns keep demo defaults
+    // (β=1e4, α=0.99) — three-avbd pyramid 30 holds with those.
+    if scene.info.name.starts_with("Box Pile") {
         // Softer β than demo default 1e4: after gridCellSize fix, β=2e3 cuts flyers
         // (~50→~6) and KE (~100→~10) at 1200 without reopening deep C0. Override with PILE_BETA.
         params.beta_lin = 2_000.0;
@@ -898,17 +913,25 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
             params.beta_lin = b;
         }
     }
-    // three-avbd finishBody has no trust clamp; our trustLin·0.5 ≈ 0.175 m/primal
-    // can leave deep pile overlaps uncleared. PILE_TRUST=off disables the clamp.
-    if scene.info.name.starts_with("Box Pile") {
-        if let Ok(v) = std::env::var("PILE_TRUST") {
-            if v == "off" || v == "0" {
-                params.trust_lin = 1.0e6;
-                params.trust_ang = 1.0e6;
-            } else if let Ok(t) = v.parse::<f32>() {
-                params.trust_lin = t;
-            }
+    // three-avbd finishBody has no trust clamp. TRUST=off (or PILE_TRUST=off) disables ours.
+    // Pyramid 30: oracle holds with no clamp; our trustLin·r ≈ 0.175 m/primal was a suspect.
+    if let Ok(v) = std::env::var("TRUST").or_else(|_| std::env::var("PILE_TRUST")) {
+        if v == "off" || v == "0" {
+            params.trust_lin = 1.0e6;
+            params.trust_ang = 1.0e6;
+        } else if let Ok(t) = v.parse::<f32>() {
+            params.trust_lin = t;
         }
+    }
+    // Settled stacks/pyramids: match three-avbd (no trust clamp) unless TRUST is set.
+    if (scene.info.name.starts_with("Pyramid") || scene.info.name.starts_with("Box Columns"))
+        && std::env::var("TRUST").is_err()
+        && std::env::var("PILE_TRUST").is_err()
+    {
+        params.trust_lin = 1.0e6;
+        params.trust_ang = 1.0e6;
+    }
+    if scene.info.name.starts_with("Box Pile") {
         // Collapse tunnels ~4k deep contacts by step 180; α=0.99 only puts 1% of C0
         // into Ĉ so recovery is glacial vs three-avbd's 94% reuse@600. PILE_ALPHA A/B.
         if let Ok(v) = std::env::var("PILE_ALPHA") {

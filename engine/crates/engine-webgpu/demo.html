@@ -51,10 +51,13 @@
         cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 },
       },
       pyramid: {
-        title: 'settled pyramid 30 levels (~9.5k), 10 iterations',
+        // levels via ?levels=N (default 30). Match three-avbd: reuseContacts + full 4-pt faces.
+        title: 'settled pyramid',
         lead: 180, iterations: 10, settled: true, sleepRounds: 8, friction: 0.5,
         eye: [28, 22, 28], look: [0, 6, 0], far: 400, ground: 64,
-        cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 },
+        levels: Math.max(2, Math.min(50, Number(qs.get('levels') || 30) || 30)),
+        flags: 1, // FLAG_REUSE_CONTACTS — three-avbd default
+        cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 262144, maxJoints: 64, maxCandidates: 524288, maxColors: 32, maxCommands: 64, maxHull: 64 },
       },
       pile: {
         title: 'settled pile 32k, 4 iterations',
@@ -68,6 +71,7 @@
         title: 'box columns 100k, 4 iterations',
         lead: 180, iterations: 4, settled: true, sleepRounds: 8, friction: 0.5,
         eye: [90, 40, 90], look: [0, 6, 0], far: 1200, ground: 200,
+        flags: 1, // three-avbd reuseContacts default
         cap: { maxBodies: 131072, maxColliders: 131072, maxContacts: 1048576, maxJoints: 64, maxCandidates: 2097152, maxColors: 32, maxCommands: 64, maxHull: 64 },
       },
       ring110k: {
@@ -206,6 +210,9 @@
       const vel = body.v || [0, 0, 0];
       f32(v, o + 48, vel[0]); f32(v, o + 52, vel[1]); f32(v, o + 56, vel[2]); f32(v, o + 60, 0);
       f32(v, o + 64, w[0]); f32(v, o + 68, w[1]); f32(v, o + 72, w[2]); u32(v, o + 76, 0);
+      // initialPos/Rot = pose so frame-0 x⁻ / warm-start match Metal (zeros left a 0-quat).
+      f32(v, o + 80, body.p[0]); f32(v, o + 84, body.p[1]); f32(v, o + 88, body.p[2]); f32(v, o + 92, 0);
+      f32(v, o + 96, q[0]); f32(v, o + 100, q[1]); f32(v, o + 104, q[2]); f32(v, o + 108, q[3]);
     }
 
     function writeCollider(buf, index, c) {
@@ -526,7 +533,9 @@ struct VsOut {
     } else if (scene === 'gables506k') {
       buildGables(16, 68, 30);
     } else if (scene === 'pyramid') {
-      const levels = 30, mass = 0.25;
+      const levels = cfg.levels, mass = 0.25;
+      const nBodies = (levels * (levels + 1) * (2 * levels + 1)) / 6;
+      document.querySelector('h1').textContent = `Slang → WGSL · settled pyramid ${levels} levels (~${Math.round(nBodies)}), 10 iterations`;
       for (let level = 0; level < levels; level++) {
         const n = levels - level;
         for (let x = 0; x < n; x++) {
@@ -808,7 +817,8 @@ struct VsOut {
       disp(pass, 'csr_scatter_contacts', manifoldN);
       disp(pass, 'csr_sort', awake);
       disp(pass, 'init_colors', awake);
-      const colorRounds = Math.min(12, Math.max(4, last.color + 1));
+      // three-avbd defaults to 16 JP rounds. Floor 16 (was color+1 → 4 on frame 0).
+      const colorRounds = Math.min(cap.maxColors, Math.max(16, last.color + 1));
       for (let round = 0; round < colorRounds; round++) disp(pass, 'color_bodies', awake, round % 16);
       disp(pass, 'pack_color_lists', awake);
       disp(pass, 'write_color_args', 64);
