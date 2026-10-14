@@ -868,6 +868,38 @@ uint pairWarmKey(uint colA, uint colB)
     return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ 0xA5A5A5A5u) : h;
 }
 
+// Record warm hash (HOST_S(15) != 0): HOST_S(9) slots of four words in
+// gConstraintIds — claim (previous manifold + 1, unique so weak-CAS success is
+// unambiguous), collider A, collider B, and run start | run length << 28. A
+// lookup reads one slot line per probe instead of loading previous contacts.
+static const uint WARM_RUN_SHIFT = 28u;
+bool warmRecords() { return HOST_S(15) != 0u; }
+
+bool findWarmRecord(uint colA, uint colB, out uint startJ, out uint count)
+{
+    startJ = CONTACT_HASH_EMPTY; count = 0u;
+    uint slots = HOST_S(9);
+    uint h = pairWarmKey(colA, colB) & (slots - 1u);
+    // Scan to EMPTY and keep the lowest run start, matching the per-contact
+    // hash's minimum-head merge if a pair ever owned two previous manifolds.
+    for (uint probe = 0; probe < 64u; probe++)
+    {
+        uint w = ((h + probe) & (slots - 1u)) * 4u;
+        if (ALOAD(gConstraintIds[w]) == CONTACT_HASH_EMPTY) break;
+        if (ALOAD(gConstraintIds[w + 1u]) == colA && ALOAD(gConstraintIds[w + 2u]) == colB)
+        {
+            uint run = ALOAD(gConstraintIds[w + 3u]);
+            uint j = run & ((1u << WARM_RUN_SHIFT) - 1u);
+            if (j < startJ)
+            {
+                startJ = j;
+                count = run >> WARM_RUN_SHIFT;
+            }
+        }
+    }
+    return startJ != CONTACT_HASH_EMPTY;
+}
+
 float colliderMinSide(Collider col)
 {
     if (col.shape == SHAPE_SPHERE)
@@ -921,9 +953,20 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
     uint prevOff = HOST_S(8);
     uint prevN = HOST_S(7);
     uint hashN = HOST_S(9);
+    uint startJ = CONTACT_HASH_EMPTY;
+    uint count = 0u;
+    if (warmRecords())
+    {
+        // Run start and length were resolved once per manifold at insert time.
+        if (!findWarmRecord(pair.colliderA, pair.colliderB, startJ, count)) return false;
+        // _pad1 = asfloat(generated step). Skip if either body moved after that.
+        uint generated = asuint(READ_CONTACT(prevOff + startJ)._pad1);
+        if (generated < max(ba.generation, bb.generation)) return false;
+    }
+    else
+    {
     uint key = pairWarmKey(pair.colliderA, pair.colliderB);
     uint h = key & (hashN - 1u);
-    uint startJ = CONTACT_HASH_EMPTY;
     for (uint probe = 0; probe < 64u; probe++)
     {
         uint slot = (h + probe) & (hashN - 1u);
@@ -949,7 +992,6 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
         return false;
     }
 
-    uint count = 0u;
     for (uint k = 0u; k < 8u; k++)
     {
         uint j = startJ + k;
@@ -960,6 +1002,7 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
             prev.colliderB != pair.colliderB)
             break;
         count++;
+    }
     }
     if (count == 0u) return false;
 
@@ -1270,7 +1313,7 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
 void contact_hash_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    uint n = HOST_S(9); // hash table word count
+    uint n = HOST_S(9) * (warmRecords() ? 4u : 1u); // hash table word count
     if (i >= n) return;
     ASTORE(gConstraintIds[i], CONTACT_HASH_EMPTY);
 }
@@ -1363,10 +1406,39 @@ void contact_hash_insert_manifolds(uint3 tid : SV_DispatchThreadID)
         if (j >= prevN) return;
         if (CONTACT_STATE(prevOff + j) != 0u)
         {
-            insertWarmHead(j, mf.colliderA, mf.colliderB, prevOff);
+            // Persistence marks every point of a live manifold alive and overflow
+            // only zeroes points of zero-count manifolds, so the run from j is the
+            // rest of this block (at most eight, within the previous set).
+            if (warmRecords())
+                insertWarmRecord(m, j, min(min(start + mf.contactCount - j, 8u), prevN - j),
+                    mf.colliderA, mf.colliderB);
+            else insertWarmHead(j, mf.colliderA, mf.colliderB, prevOff);
             return;
         }
     }
+}
+
+void insertWarmRecord(uint m, uint j, uint count, uint colA, uint colB)
+{
+    uint claim = m + 1u;
+    uint slots = HOST_S(9);
+    uint h = pairWarmKey(colA, colB) & (slots - 1u);
+    for (uint probe = 0; probe < 64u; probe++)
+    {
+        uint w = ((h + probe) & (slots - 1u)) * 4u;
+        uint was;
+        // ACAS4 retries spurious weak-CAS failures; the claim is unique, so the
+        // slot holding it after an EMPTY result proves this thread won it.
+        ACAS4(gConstraintIds[w], CONTACT_HASH_EMPTY, claim, was);
+        if (was == CONTACT_HASH_EMPTY && ALOAD(gConstraintIds[w]) == claim)
+        {
+            ASTORE(gConstraintIds[w + 1u], colA);
+            ASTORE(gConstraintIds[w + 2u], colB);
+            ASTORE(gConstraintIds[w + 3u], j | (count << WARM_RUN_SHIFT));
+            return;
+        }
+    }
+    AOR2(gCounters[0].overflowFlags, OVERFLOW_WARM_HASH);
 }
 
 // Shared point update; callers choose contact or manifold scheduling. Pair bodies
@@ -1402,6 +1474,10 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
         uint key = pairWarmKey(c.colliderA, c.colliderB);
         uint h = key & (hashN - 1u);
         uint startJ = CONTACT_HASH_EMPTY;
+        uint runCount;
+        if (warmRecords())
+            findWarmRecord(c.colliderA, c.colliderB, startJ, runCount);
+        else
         for (uint probe = 0; probe < 64u; probe++)
         {
             uint slot = (h + probe) & (hashN - 1u);
