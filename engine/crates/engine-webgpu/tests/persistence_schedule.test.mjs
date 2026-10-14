@@ -98,7 +98,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
-        manifoldHashInsert:false, gridHashWords:() => 0,
+        manifoldHashInsert:false, earlyPairs:false, graphEntry:n=>n, gridHashWords:() => 0,
         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
         sleepRounds:8, PASS_ALIGN:256, bufs:[],
         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
@@ -209,7 +209,7 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false}) {
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0,
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, earlyPairs:false, graphEntry:n=>n, gridHashWords:() => 0,
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
@@ -243,7 +243,7 @@ test('host upload publishes the previous GPU manifold count before counters rese
   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
     const copies = [];
     const context = {
-      manifoldHashInsert, gridHashWords:() => 0, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
+      manifoldHashInsert, earlyPairs:false, graphEntry:n=>n, gridHashWords:() => 0, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
       last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
@@ -279,7 +279,7 @@ for (const sparseStart of [10, 32, 0]) {
       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
-      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0,
+      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, earlyPairs:false, graphEntry:n=>n, gridHashWords:() => 0,
       physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix:true,
       sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
       writeHost() {}, disp(p,name) { trace.push({name, phase:p.id}); },
@@ -314,11 +314,42 @@ test('broadphase grid table scales with colliders and clears every head', () => 
     detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
     last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
     nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576,
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, earlyPairs:false, graphEntry:n=>n, gridHashWords:() => 1048576,
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:32, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads}); }, dispWork() {}, encoder:{beginComputePass:pass},
   });
   assert.equal(trace.find(c=>c.name==='broadphase_clear').threads, 1048576,
     'The clear must cover every head HOST_S(16) addresses; stale heads link last step\'s colliders into new buckets.');
+});
+
+// Opt-in early SolverPairs: pack right after collision, then route the five
+// graph kernels that read manifold endpoints to the pair-reading entries.
+test('early pairs are packed before the graph and not repacked before the solve', () => {
+  const html2 = html;
+  const mode = html2.slice(html2.indexOf('const qs ='), html2.indexOf('const regressionKind ='));
+  assert.throws(()=>runInNewContext(mode,{URLSearchParams,location:{search:'?scene=columns&pairs=early'}}),/requires persistent contacts/);
+  assert.throws(()=>runInNewContext(mode,{URLSearchParams,location:{search:'?scene=ring110k&pairs=soon'}}),/pairs must be late or early/);
+  const graphEntry = runInNewContext(`${mode}\ngraphEntry`,{URLSearchParams,location:{search:'?scene=ring110k&pairs=early'}});
+  const trace = [];
+  const pass = () => ({setPipeline() {}, setBindGroup() {}, dispatchWorkgroupsIndirect() { trace.push('primal'); }, end() {}});
+  runInNewContext(`${source}\nencodeStep(encoder, false, undefined)`, {
+    detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:110442, colliderCount:110442,
+    last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+    nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152, gridHashWords:() => 262144,
+    persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, earlyPairs:true, graphEntry,
+    physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
+    sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+    writeHost() {}, disp(p,name) { trace.push(name); }, dispWork(p,name) { trace.push(name); },
+    encoder:{beginComputePass:pass},
+  });
+  const at = name => trace.indexOf(name);
+  assert.equal(trace.filter(n=>n==='pack_solver_contacts').length,1,'Pairs are packed exactly once per step.');
+  assert.ok(at('persist_contacts') < at('pack_solver_contacts') && at('pack_solver_contacts') < at('csr_degree_contacts_pairs'),
+    'Pack after collision/persistence (manifolds final) and before any graph kernel reads pair endpoints.');
+  for (const name of ['csr_degree_contacts','csr_scatter_contacts','csr_sort','init_colors','color_bodies']) {
+    assert.equal(at(name),-1,`${name} must use the _pairs entry; the late variant would read stale pair memory.`);
+    assert.ok(at(name + '_pairs') >= 0);
+  }
 });

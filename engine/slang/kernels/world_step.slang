@@ -1594,8 +1594,15 @@ uint2 constraintEndpoints(uint id)
     uint nJ = gCounters[0].jointCount;
     if (id < nJ)
         return uint2(gJoints[id].bodyA, gJoints[id].bodyB);
+#if defined(ENGINE_EARLY_SOLVER_PAIRS)
+    // Pairs are packed right after collision: one load instead of the
+    // manifold -> collider -> body chain on every graph edge.
+    SolverPair pair = gSolverPairs[id - nJ];
+    return uint2(pair.bodyA, pair.bodyB);
+#else
     Manifold m = gManifolds[id - nJ];
     return uint2(gColliders[m.colliderA].body, gColliders[m.colliderB].body);
+#endif
 }
 
 void csrCountEndpoint(uint body)
@@ -1890,8 +1897,14 @@ uint4 csrPhysicalKey(uint body, uint id)
     uint nJ = gCounters[0].jointCount;
     if (id < nJ) return uint4(0u, id, 0u, 0u);
     Manifold mf = gManifolds[id - nJ];
+#if defined(ENGINE_EARLY_SOLVER_PAIRS)
+    SolverPair pair = gSolverPairs[id - nJ]; // independent of the manifold load
+    uint a = pair.bodyA;
+    uint b = pair.bodyB;
+#else
     uint a = gColliders[mf.colliderA].body;
     uint b = gColliders[mf.colliderB].body;
+#endif
     return uint4(1u, a == body ? b : a,
         min(mf.colliderA, mf.colliderB), max(mf.colliderA, mf.colliderB));
 }
