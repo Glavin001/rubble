@@ -1266,6 +1266,49 @@ void contact_hash_clear(uint3 tid : SV_DispatchThreadID)
     ASTORE(gConstraintIds[i], CONTACT_HASH_EMPTY);
 }
 
+// Publish history index j (a live block head) for pair (colA, colB).
+void insertWarmHead(uint j, uint colA, uint colB, uint prevOff)
+{
+    uint key = pairWarmKey(colA, colB);
+    uint n = HOST_S(9);
+    uint h = key & (n - 1u); // n is power of two
+    for (uint probe = 0; probe < 64u; probe++)
+    {
+        uint slot = (h + probe) & (n - 1u);
+        uint was;
+        // Spin on the same slot when WGSL weak CAS spuriously fails. Advancing
+        // the probe would leave an EMPTY hole and break open-address lookups.
+        for (uint spin = 0u; spin < 64u; spin++)
+        {
+            ACAS4(gConstraintIds[slot], CONTACT_HASH_EMPTY, j, was);
+            if (was != CONTACT_HASH_EMPTY) break;
+            if (ALOAD(gConstraintIds[slot]) == j) return;
+        }
+        if (was == CONTACT_HASH_EMPTY) return;
+        Contact occupant = READ_CONTACT(prevOff + was);
+        if (occupant.alive != 0 &&
+            occupant.colliderA == colA &&
+            occupant.colliderB == colB)
+        {
+            // Same pair: keep the minimum index (start of the contiguous block).
+            uint cur = was;
+            while (j < cur)
+            {
+                uint got;
+                for (uint spin = 0u; spin < 64u; spin++)
+                {
+                    ACAS4(gConstraintIds[slot], cur, j, got);
+                    if (got != cur) break;
+                    if (ALOAD(gConstraintIds[slot]) == j) return;
+                }
+                if (got == cur) return;
+                cur = got;
+            }
+            return;
+        }
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
@@ -1286,41 +1329,32 @@ void contact_hash_insert(uint3 tid : SV_DispatchThreadID)
         if (before.alive != 0 && before.colliderA == prev.colliderA &&
             before.colliderB == prev.colliderB) return;
     }
-    uint key = pairWarmKey(prev.colliderA, prev.colliderB);
-    uint n = HOST_S(9);
-    uint h = key & (n - 1u); // n is power of two
-    for (uint probe = 0; probe < 64u; probe++)
+    insertWarmHead(j, prev.colliderA, prev.colliderB, prevOff);
+}
+
+// three-avbd hashInsert: one thread per previous manifold instead of per point.
+// Publishes the same value as contact_hash_insert (first live point of each
+// block), so lookups are unchanged. Opt-in via HOST_S(14); HOST_S(13) holds the
+// previous manifold count. Precondition: gManifolds still holds the previous
+// step, i.e. dispatch before narrowphase (contact reuse enabled).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void contact_hash_insert_manifolds(uint3 tid : SV_DispatchThreadID)
+{
+    uint m = dispatchIndex(tid);
+    if (m >= min(HOST_S(13), HOST_S(10))) return;
+    Manifold mf = gManifolds[m];
+    uint prevOff = HOST_S(8);
+    uint prevN = HOST_S(7);
+    if (mf.contactCount == 0u || mf.contactStart < prevOff) return;
+    uint start = mf.contactStart - prevOff;
+    for (uint k = 0u; k < min(mf.contactCount, 8u); k++)
     {
-        uint slot = (h + probe) & (n - 1u);
-        uint was;
-        // Spin on the same slot when WGSL weak CAS spuriously fails. Advancing
-        // the probe would leave an EMPTY hole and break open-address lookups.
-        for (uint spin = 0u; spin < 64u; spin++)
+        uint j = start + k;
+        if (j >= prevN) return;
+        if (CONTACT_STATE(prevOff + j) != 0u)
         {
-            ACAS4(gConstraintIds[slot], CONTACT_HASH_EMPTY, j, was);
-            if (was != CONTACT_HASH_EMPTY) break;
-            if (ALOAD(gConstraintIds[slot]) == j) return;
-        }
-        if (was == CONTACT_HASH_EMPTY) return;
-        Contact occupant = READ_CONTACT(prevOff + was);
-        if (occupant.alive != 0 &&
-            occupant.colliderA == prev.colliderA &&
-            occupant.colliderB == prev.colliderB)
-        {
-            // Same pair: keep the minimum index (start of the contiguous block).
-            uint cur = was;
-            while (j < cur)
-            {
-                uint got;
-                for (uint spin = 0u; spin < 64u; spin++)
-                {
-                    ACAS4(gConstraintIds[slot], cur, j, got);
-                    if (got != cur) break;
-                    if (ALOAD(gConstraintIds[slot]) == j) return;
-                }
-                if (got == cur) return;
-                cur = got;
-            }
+            insertWarmHead(j, mf.colliderA, mf.colliderB, prevOff);
             return;
         }
     }
@@ -2076,7 +2110,9 @@ void write_work_args(uint3 tid : SV_DispatchThreadID)
     writeDispatchArgs(65u, max(min(ALOAD(gCounters[0].contactCount), HOST_S(3)), gCounters[0].jointCount));
     writeDispatchArgs(66u, min(ALOAD(gCounters[0].manifoldCount), HOST_S(10)));
     writeDispatchArgs(67u, ALOAD(gCounters[0].awakeCount));
-    writeDispatchArgs(68u, min(HOST_S(7), HOST_S(3)));
+    // Slot 68 = warm-hash insert work: previous manifolds (opt-in) or contacts.
+    writeDispatchArgs(68u, HOST_S(14) != 0u ? min(HOST_S(13), HOST_S(10))
+                                            : min(HOST_S(7), HOST_S(3)));
     // Opt-in keeps hosts without a history row / slot 69 compatible.
     if (HOST_S(26) != 0u) writeDispatchArgs(69u, ALOAD(gCounters[0].recolorCount));
 }

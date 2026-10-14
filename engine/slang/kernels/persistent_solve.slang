@@ -4,6 +4,7 @@
 #define apply_commands apply_commands_persistent
 #define narrowphase narrowphase_persistent
 #define contact_hash_insert contact_hash_insert_persistent
+#define contact_hash_insert_manifolds contact_hash_insert_manifolds_persistent
 #define persist_contacts persist_contacts_persistent
 #define persist_manifolds persist_manifolds_persistent
 #define pack_solver_contacts pack_solver_pairs_persistent

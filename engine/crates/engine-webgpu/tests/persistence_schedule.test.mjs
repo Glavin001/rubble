@@ -97,6 +97,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
+        manifoldHashInsert:false,
         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
         sleepRounds:8, PASS_ALIGN:256, bufs:[],
         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
@@ -181,3 +182,86 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
 }
 
 }
+
+// Opt-in three-avbd hashInsert shape. Runs the shipped mode parser, host upload
+// and encoder: per-manifold insertion reads the previous step's gManifolds, so it
+// must use the copied GPU manifold count and run before narrowphase overwrites it.
+const modeSource = html.slice(html.indexOf('const qs ='), html.indexOf('const regressionKind ='));
+for (const [query, expected] of [['?scene=ring110k','manifold'],['?scene=gables506k','manifold'],
+  ['?scene=columns','contact'],['?scene=ring110k&hashInsert=contact','contact'],
+  ['?scene=gables506k&hashInsert=contact','contact'],['?scene=columns&hashInsert=manifold','manifold']]) {
+  test(`hash insert mode parses explicitly (${query})`, () => {
+    assert.equal(runInNewContext(`${modeSource}\nhashInsertMode`,{URLSearchParams,location:{search:query}}),expected);
+  });
+}
+test('invalid hash insert mode fails before allocating GPU work', () => {
+  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=ring110k&hashInsert=pair'}}),
+    /hashInsert must be contact or manifold/);
+});
+
+function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false}) {
+  const trace = [], passes = [];
+  const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
+    dispatchWorkgroupsIndirect() { trace.push({name:'primal'}); }, end() {}}; passes.push(p); return p; };
+  const context = {
+    detailedProfile, graphProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
+    cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+    nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+    persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert,
+    physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
+    sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+    writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
+    dispWork(p,name,slot) { trace.push({name,slot,phase:p.id}); },
+    encoder:{beginComputePass:pass}, begin:detailedProfile ? pass : undefined,
+  };
+  runInNewContext(`${source}\nencodeStep(encoder, false, begin)`, context);
+  return trace;
+}
+for (const detailedProfile of [false, true]) {
+  test(`per-manifold hash insert replaces the per-contact insert before narrowphase (detail=${detailedProfile})`, () => {
+    const trace = encodeTrace({reuse:true, manifoldHashInsert:true, detailedProfile});
+    const at = name => trace.flatMap((c,i)=>c.name===name?[i]:[]);
+    assert.equal(at('contact_hash_insert').length,0,'Per-contact insert must not also run; two inserters race the same table.');
+    assert.equal(at('contact_hash_insert_manifolds').length,1);
+    const insert = trace[at('contact_hash_insert_manifolds')[0]];
+    assert.equal(insert.slot,68,'Insert must use GPU work slot 68 (previous manifold count when HOST_S(14) is set).');
+    assert.ok(at('contact_hash_clear')[0] < at('contact_hash_insert_manifolds')[0] &&
+      at('contact_hash_insert_manifolds')[0] < at('narrowphase')[0],
+      'Previous manifolds are overwritten by narrowphase: insert must follow the clear and precede narrowphase.');
+    if (detailedProfile) assert.equal(insert.phase,4,'Per-manifold insert keeps the hashInsert timestamp interval.');
+  });
+}
+test('per-manifold hash insert is rejected when reuse would place it after narrowphase', () => {
+  assert.throws(()=>encodeTrace({reuse:false, manifoldHashInsert:true}),/requires contact reuse/);
+  assert.doesNotThrow(()=>encodeTrace({reuse:false, manifoldHashInsert:false}));
+});
+
+test('host upload publishes the previous GPU manifold count before counters reset', () => {
+  const hostSource = html.slice(html.indexOf('function scratchWords()'), html.indexOf('function groups('));
+  for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
+    const copies = [];
+    const context = {
+      manifoldHashInsert, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
+      csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
+      last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
+      scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
+      hostScratchView:new Uint32Array(64), hostParamsView:new Uint8Array(208),
+      hostCountersView:new Uint32Array(16), hostColorsView:new Uint32Array(32),
+      device:{queue:{writeBuffer() {}}}, hostUpload:'upload', hostUploadCpu:null, colorCountsBytes:128,
+      bufs:Array.from({length:32},(_,i)=>`b${i}`),
+    };
+    const s = runInNewContext(`${hostSource}\nconst s = scratchWords(); writeHost({copyBufferToBuffer(...a){ copies.push(a); }}); s`,
+      {...context, copies});
+    assert.equal(s[14], manifoldHashInsert ? 1 : 0, 'HOST_S(14) selects the per-manifold slot-68 count.');
+    const manifoldCopy = copies.findIndex(c=>c[0]==='b7' && c[1]===48 && c[2]==='b6' && c[3]===80+13*4 && c[4]===4);
+    const reset = copies.findIndex(c=>c[0]==='upload' && c[2]==='b7');
+    if (manifoldHashInsert && steps > 0) {
+      assert.ok(manifoldCopy >= 0,'Previous manifoldCount (counter byte 48) must reach HOST_S(13); a stale CPU count omits batch work.');
+      assert.ok(manifoldCopy < reset,'Copy the manifold count before the host counter reset zeroes it.');
+    } else {
+      assert.equal(manifoldCopy,-1,'No previous manifolds exist on step 0, and the control must not change uniforms.');
+    }
+  }
+});
+

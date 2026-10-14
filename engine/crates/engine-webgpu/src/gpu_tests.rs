@@ -927,6 +927,31 @@ fn contact_hash_preserves_colliding_pair_heads_across_dead_gaps_and_history_halv
             .or_insert(i as u32);
     }
     assert_eq!(expected.len(), 32);
+    // Previous-step manifolds for the per-manifold (three-avbd hashInsert) shape:
+    // one per contiguous four-point block, then a zero-count overflow record.
+    // A poisoned record past the published count would add a 33rd pair.
+    let mut manifolds: Vec<Manifold> = (0..points.len() as u32 / 4)
+        .map(|run| Manifold {
+            collider_a: points[run as usize * 4].collider_a,
+            collider_b: points[run as usize * 4].collider_b,
+            contact_start: run * 4,
+            contact_count: 4,
+            ..Manifold::zeroed()
+        })
+        .collect();
+    manifolds.push(Manifold {
+        collider_a: 1,
+        collider_b: 2,
+        ..Manifold::zeroed()
+    });
+    let published_manifolds = manifolds.len() as u32;
+    manifolds.push(Manifold {
+        collider_a: 1,
+        collider_b: 999,
+        contact_start: 1,
+        contact_count: 4,
+        ..Manifold::zeroed()
+    });
     let bucket = key(1, 2) & (HASH_WORDS - 1);
     assert!(expected
         .keys()
@@ -938,10 +963,19 @@ fn contact_hash_preserves_colliding_pair_heads_across_dead_gaps_and_history_halv
             WgpuSim::new(WorldCapacity::small())
         }
         .expect("GPU adapter required for warm-start hash regression");
-        for parity in 0..2 {
+        for (parity, per_manifold) in (0..2).flat_map(|p| [(p, false), (p, true)]) {
             let offset = parity * sim.capacity.max_contacts;
             let owners = vec![0; points.len()];
             write_contact_fixture(&sim, offset, &points, &owners);
+            let absolute: Vec<Manifold> = manifolds
+                .iter()
+                .map(|m| Manifold {
+                    contact_start: m.contact_start + if m.contact_count > 0 { offset } else { 0 },
+                    ..*m
+                })
+                .collect();
+            sim.queue
+                .write_buffer(&sim.bufs[25], 0, bytemuck::cast_slice(&absolute));
             let before = contact_storage_words(&sim, offset, points.len());
             let mut host = HostUniforms {
                 params: sim.params,
@@ -950,14 +984,24 @@ fn contact_hash_preserves_colliding_pair_heads_across_dead_gaps_and_history_halv
             host.s[1][3] = points.len() as u32;
             host.s[2][0] = offset;
             host.s[2][1] = HASH_WORDS;
+            host.s[2][2] = manifolds.len() as u32 + 8; // manifold capacity
+            host.s[3][1] = published_manifolds;
+            host.s[3][2] = u32::from(per_manifold);
             sim.queue.write_buffer(&sim.bufs[6], 0, bytes_of(&host));
             for repeat in 0..4 {
-                let context = format!("persistent={persistent}, parity={parity}, repeat={repeat}");
+                let context = format!("persistent={persistent}, parity={parity}, per_manifold={per_manifold}, repeat={repeat}");
                 let mut enc = sim.device.create_command_encoder(&Default::default());
                 {
                     let mut pass = enc.begin_compute_pass(&Default::default());
                     sim.disp(&mut pass, "contact_hash_clear", HASH_WORDS as u64, None);
-                    sim.disp(&mut pass, "contact_hash_insert", points.len() as u64, None);
+                    if per_manifold {
+                        // Production dispatch: GPU-written slot 68 must cover the
+                        // published manifold count, not the contact count.
+                        sim.disp(&mut pass, "write_work_args", 64, None);
+                        sim.disp_work(&mut pass, "contact_hash_insert_manifolds", 68, None);
+                    } else {
+                        sim.disp(&mut pass, "contact_hash_insert", points.len() as u64, None);
+                    }
                 }
                 sim.queue.submit([enc.finish()]);
                 let table: Vec<u32> = download(&sim, 14, 0, HASH_WORDS as usize);
@@ -1070,13 +1114,20 @@ fn hash_clear_covers_more_than_one_webgpu_dispatch_row() {
 #[test]
 fn work_dispatch_uses_current_counts_including_large_contact_growth() {
     let sim = WgpuSim::new(WorldCapacity::small()).expect("GPU adapter required");
-    let mut host = HostUniforms {
-        params: sim.params,
-        s: [[u32::MAX; 4]; 8],
-    };
-    host.s[1][3] = 987654;
-    sim.queue.write_buffer(&sim.bufs[6], 0, bytes_of(&host));
-    for contacts in [0u32, 1, 64, 65, 1_170_611, 4_102_693, (1 << 23) + 17] {
+    // per_manifold: HOST_S(14) selects the previous manifold count HOST_S(13)
+    // (three-avbd hashInsert shape) for slot 68 instead of previous contacts.
+    for (per_manifold, contacts) in [false, true]
+        .into_iter()
+        .flat_map(|m| [0u32, 1, 64, 65, 1_170_611, 4_102_693, (1 << 23) + 17].map(|c| (m, c)))
+    {
+        let mut host = HostUniforms {
+            params: sim.params,
+            s: [[u32::MAX; 4]; 8],
+        };
+        host.s[1][3] = 987654;
+        host.s[3][1] = 246_481;
+        host.s[3][2] = u32::from(per_manifold);
+        sim.queue.write_buffer(&sim.bufs[6], 0, bytes_of(&host));
         let c = StepCounters {
             candidate_count: 765432,
             contact_count: contacts,
@@ -1098,7 +1149,7 @@ fn work_dispatch_uses_current_counts_including_large_contact_growth() {
             c.contact_count,
             c.manifold_count,
             c.awake_count,
-            987654,
+            if per_manifold { 246_481 } else { 987654 },
             12345,
         ]
         .into_iter()
@@ -1112,7 +1163,7 @@ fn work_dispatch_uses_current_counts_including_large_contact_growth() {
                 slot + 64
             );
             assert!(a[0] as u64 * a[1] as u64 >= expected_groups,
-                "work slot {} missed current-frame work: count={n}, args={a:?}. Prior-frame estimates truncate first-frame ring/gables contacts.", slot + 64);
+                "work slot {} (per_manifold={per_manifold}) missed current-frame work: count={n}, args={a:?}. Prior-frame estimates truncate first-frame ring/gables contacts; slot 68 must follow the selected warm-hash insert granularity.", slot + 64);
             assert_eq!(
                 a,
                 &[
