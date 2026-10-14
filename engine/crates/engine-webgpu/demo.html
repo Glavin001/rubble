@@ -19,7 +19,8 @@
     }
     #sceneSelect:focus { outline: 1px solid #6b7a9e; }
     #rates {
-      display: flex; gap: 1.25rem; margin: 0 0 6px; font: 600 14px/1.3 ui-sans-serif, system-ui, sans-serif;
+      display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; margin: 0 0 6px;
+      font: 600 14px/1.3 ui-sans-serif, system-ui, sans-serif;
     }
     #rates .rate { color: #d7dbe6; }
     #rates .rate span { color: #8b93a7; font-weight: 500; font-size: 12px; margin-left: 4px; }
@@ -36,7 +37,9 @@
     </div>
     <div id="rates">
       <div class="rate">TPS <strong id="tpsVal">—</strong><span>physics</span> <span class="ms" id="stepMsVal"></span></div>
+      <div class="rate">Max TPS <strong id="maxTpsVal">—</strong><span>from ms/step</span></div>
       <div class="rate">FPS <strong id="fpsVal">—</strong><span>render</span> <span class="ms" id="frameMsVal"></span></div>
+      <div class="rate">Max FPS <strong id="maxFpsVal">—</strong><span>from ms/frame</span></div>
     </div>
     <div id="status" class="muted">starting…</div>
     <div id="legend" class="muted">Keys 1 position tint, 2 awake/sleep, 3 speed. Friction μ 0.5. Drag to orbit, scroll to zoom, right-drag to pan.</div>
@@ -1117,6 +1120,8 @@ struct VsOut {
     const info = adapter.info || {};
     const tpsVal = document.getElementById('tpsVal');
     const fpsVal = document.getElementById('fpsVal');
+    const maxTpsVal = document.getElementById('maxTpsVal');
+    const maxFpsVal = document.getElementById('maxFpsVal');
     const stepMsVal = document.getElementById('stepMsVal');
     const frameMsVal = document.getElementById('frameMsVal');
     let running = true;
@@ -1126,6 +1131,7 @@ struct VsOut {
     let measuring = false;
     // Rolling 1 s windows: TPS = physics steps/s, FPS = rAF presents/s (can diverge if
     // measuring pauses steps, or if multiple steps per frame are added later).
+    // Max TPS/FPS = 1000/ms — headroom if uncapped by display refresh / rAF.
     let rateWindowStart = performance.now();
     let rateSteps = 0;
     let rateFrames = 0;
@@ -1133,6 +1139,8 @@ struct VsOut {
     let rateFrameMsSum = 0;
     let showTps = 0;
     let showFps = 0;
+    let showMaxTps = 0;
+    let showMaxFps = 0;
     let showStepMs = 0;
     let showFrameMs = 0;
     function bumpRates(didStep, stepMs, frameMs) {
@@ -1149,11 +1157,18 @@ struct VsOut {
         showFps = rateFrames / sec;
         showStepMs = rateSteps > 0 ? rateStepMsSum / rateSteps : 0;
         showFrameMs = rateFrames > 0 ? rateFrameMsSum / rateFrames : 0;
+        showMaxTps = showStepMs > 1e-6 ? 1000 / showStepMs : 0;
+        showMaxFps = showFrameMs > 1e-6 ? 1000 / showFrameMs : 0;
         tpsVal.textContent = showTps.toFixed(0);
         fpsVal.textContent = showFps.toFixed(0);
+        maxTpsVal.textContent = showMaxTps > 0 ? showMaxTps.toFixed(0) : '—';
+        maxFpsVal.textContent = showMaxFps > 0 ? showMaxFps.toFixed(0) : '—';
         stepMsVal.textContent = showStepMs > 0 ? `${showStepMs.toFixed(1)} ms/step` : '';
         frameMsVal.textContent = showFrameMs > 0 ? `${showFrameMs.toFixed(1)} ms/frame` : '';
-        window.__RATES__ = { tps: showTps, fps: showFps, stepMs: showStepMs, frameMs: showFrameMs };
+        window.__RATES__ = {
+          tps: showTps, fps: showFps, maxTps: showMaxTps, maxFps: showMaxFps,
+          stepMs: showStepMs, frameMs: showFrameMs,
+        };
         rateWindowStart = performance.now();
         rateSteps = 0;
         rateFrames = 0;
