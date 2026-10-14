@@ -98,7 +98,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
-        manifoldHashInsert:false,
+        manifoldHashInsert:false, gridHashWords:() => 0,
         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
         sleepRounds:8, PASS_ALIGN:256, bufs:[],
         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
@@ -209,7 +209,7 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false}) {
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert,
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0,
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
@@ -243,7 +243,7 @@ test('host upload publishes the previous GPU manifold count before counters rese
   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
     const copies = [];
     const context = {
-      manifoldHashInsert, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
+      manifoldHashInsert, gridHashWords:() => 0, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
       last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
@@ -279,7 +279,7 @@ for (const sparseStart of [10, 32, 0]) {
       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
-      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true,
+      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0,
       physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix:true,
       sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
       writeHost() {}, disp(p,name) { trace.push({name, phase:p.id}); },
@@ -297,3 +297,28 @@ for (const sparseStart of [10, 32, 0]) {
       'Dual stays in its own interval, never charged to a color.');
   });
 }
+
+// Grid table sizing shipped in the host: >=2x colliders, never below the
+// shader default, never past the CSR region, and explicit in the uniforms.
+test('broadphase grid table scales with colliders and clears every head', () => {
+  const sizing = html.slice(html.indexOf('function gridHashWords()'), html.indexOf('function scratchWords()'));
+  const nextPow2 = n => 2 ** Math.ceil(Math.log2(n));
+  for (const [gridMode, colliderCount, expected] of [['scaled', 110442, 262144], ['scaled', 505923, 1048576],
+    ['scaled', 1000, 131072], ['scaled', 4_000_000, 4194304], ['fixed', 505923, 0]]) {
+    const words = runInNewContext(`${sizing}\ngridHashWords()`, {gridMode, colliderCount, nextPow2, csrBase: 4194304});
+    assert.equal(words, expected, `${gridMode} grid for ${colliderCount} colliders`);
+  }
+  const trace = [];
+  const pass = () => ({id:0, setPipeline() {}, setBindGroup() {}, dispatchWorkgroupsIndirect() {}, end() {}});
+  runInNewContext(`${source}\nencodeStep(encoder, false)`, {
+    detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
+    last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
+    nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576,
+    physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:32, parallelColorPrefix:true,
+    sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+    writeHost() {}, disp(p,name,threads) { trace.push({name,threads}); }, dispWork() {}, encoder:{beginComputePass:pass},
+  });
+  assert.equal(trace.find(c=>c.name==='broadphase_clear').threads, 1048576,
+    'The clear must cover every head HOST_S(16) addresses; stale heads link last step\'s colliders into new buckets.');
+});

@@ -108,6 +108,12 @@
     if (!['contact', 'manifold'].includes(hashInsertMode))
       throw new Error('hashInsert must be contact or manifold');
     const manifoldHashInsert = hashInsertMode === 'manifold';
+    // Broadphase grid table scaled to >=2x colliders (three-avbd sizes its grid
+    // at 2x body capacity); scenes up to 65536 colliders keep 131072 heads.
+    // Gables fixed/scaled: 36.92/35.00/36.34/34.50 ms, grid 3.28->1.90 ms, with
+    // unchanged workload snapshots. grid=fixed keeps the old table as control.
+    const gridMode = qs.get('grid') || 'scaled';
+    if (!['fixed', 'scaled'].includes(gridMode)) throw new Error('grid must be fixed or scaled');
     const detailedProfile = qs.get('profile') === 'detail';
     const graphProfile = qs.get('profile') === 'graph';
     // Diagnostic: one timestamped pass per primal color (and the sparse tail).
@@ -845,6 +851,11 @@ struct VsOut {
     const hostCountersView = new Uint32Array(hostUploadCpu, 512, 16);
     const hostColorsView = new Uint32Array(hostUploadCpu, 576, colorCountWords);
 
+    // 0 keeps the shader's fixed 131072-head table.
+    function gridHashWords() {
+      return gridMode === 'scaled' ? Math.min(nextPow2(Math.max(2 * colliderCount, 131072)), csrBase) : 0;
+    }
+
     function scratchWords() {
       const idsLen = csrBase;
       const prevN = Math.min(Math.max(last.contact, 256), cap.maxContacts);
@@ -867,6 +878,7 @@ struct VsOut {
       s[26] = incrementalColors ? 1 : 0; // history row + compact work slot 69
       // s[13] receives the previous GPU manifold count in writeHost.
       s[14] = manifoldHashInsert ? 1 : 0;
+      s[16] = gridHashWords();
       s[24] = csrBase;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
@@ -934,7 +946,7 @@ struct VsOut {
         pass = beginPass();
       };
       disp(pass, 'build_aabbs', nCols);
-      disp(pass, 'broadphase_clear', 131072);
+      disp(pass, 'broadphase_clear', gridHashWords() || 131072);
       nextPhase();
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
@@ -1109,7 +1121,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1495,7 +1507,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1542,6 +1554,7 @@ struct VsOut {
       report.order = spatialOrder ? "morton" : "construction";
       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
       report.hashInsert = hashInsertMode;
+      report.grid = gridMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
       restoreScene();
@@ -1566,7 +1579,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

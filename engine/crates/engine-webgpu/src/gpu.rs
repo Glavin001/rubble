@@ -553,7 +553,12 @@ impl WgpuSim {
             self.disp(&mut pass, "joint_hash_clear", 65536, None);
             self.disp(&mut pass, "joint_hash_insert", n_joints, None);
         }
-        self.disp(&mut pass, "broadphase_clear", 131072, None);
+        self.disp(
+            &mut pass,
+            "broadphase_clear",
+            u64::from(self.grid_hash_words()),
+            None,
+        );
         self.disp(&mut pass, "broadphase_insert", n_cols, None);
         self.disp(&mut pass, "broadphase_query", n_cols, None);
         self.disp(&mut pass, "write_work_args", 64, None);
@@ -771,6 +776,19 @@ impl WgpuSim {
         pass.dispatch_workgroups_indirect(&self.bufs[23], (color as u64) * 12);
     }
 
+    /// Broadphase grid heads: at least twice the colliders (three-avbd), so
+    /// 506k gables avoids ~4 colliders per bucket; small scenes keep 131072.
+    /// `ENGINE_GRID=fixed` keeps the fixed table as a comparison control.
+    fn grid_hash_words(&self) -> u32 {
+        if std::env::var("ENGINE_GRID").as_deref() == Ok("fixed") {
+            return 131072;
+        }
+        (2 * self.collider_count)
+            .max(131072)
+            .next_power_of_two()
+            .min(constraint_id_words(&self.capacity))
+    }
+
     fn write_host_uniforms(&self) {
         let max_c = self.capacity.max_contacts;
         let cur = if self.contacts_parity == 0 { 0 } else { max_c };
@@ -799,6 +817,7 @@ impl WgpuSim {
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
         s[17] = self.steps_done;
         s[26] = 1; // incremental coloring: history row + compact work slot 69
+        s[16] = self.grid_hash_words();
         if self.manifold_hash_insert {
             s[13] = self.last_counters.manifold_count;
             s[14] = 1;

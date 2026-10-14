@@ -304,10 +304,19 @@ static const uint GRID_HASH_SIZE = 131072u;
 static const uint GRID_AWAKE_DYNAMIC = 0x80000000u;
 static const uint GRID_COLLIDER_MASK = 0x7FFFFFFFu;
 
+// Power-of-two grid table size from the host (HOST_S(16)); 0 keeps the fixed
+// table for hosts that do not size it (Metal). Heads live in gConstraintIds
+// before the contact hash and CSR reuse that region later in the step.
+uint gridHashSize()
+{
+    uint n = HOST_S(16);
+    return n != 0u ? n : GRID_HASH_SIZE;
+}
+
 uint gridHash(int x, int y, int z)
 {
     uint h = (uint)x * 73856093u ^ (uint)y * 19349663u ^ (uint)z * 83492791u;
-    return h & (GRID_HASH_SIZE - 1u);
+    return h & (gridHashSize() - 1u);
 }
 
 // Open-addressed joint-pair set in gEvents (three-avbd / demo3d constrainedTo).
@@ -402,7 +411,7 @@ void emitCandidate(uint i, uint j)
 void broadphase_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    if (i >= GRID_HASH_SIZE) return;
+    if (i >= gridHashSize()) return;
     ASTORE(gConstraintIds[i], 0xFFFFFFFFu);
 }
 

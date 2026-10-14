@@ -434,9 +434,17 @@ fn broadphase_pairs_are_unique_across_large_body_order_and_hash_aliases() {
 
 #[test]
 fn broadphase_linked_buckets_preserve_membership_and_match_bruteforce_pairs() {
+    // Host-sized grid tables (HOST_S(16)): the default, a 1024-head table that
+    // forces heavy aliasing across all 641 colliders, and a smaller power of
+    // two (small capacity caps the region at 131072 heads, like the host does).
+    for buckets in [131072usize, 1024, 65536] {
+        broadphase_linked_buckets_case(buckets);
+    }
+}
+
+fn broadphase_linked_buckets_case(buckets: usize) {
     use std::collections::BTreeSet;
     const N: usize = 641; // Grid path and partial final workgroup.
-    const BUCKETS: usize = 131072;
     let mut sim = WgpuSim::new_with_compact_contacts(WorldCapacity::small(), false)
         .expect("GPU adapter required for grid pair coverage");
     sim.params.grid_cell_size = 1.25;
@@ -468,6 +476,10 @@ fn broadphase_linked_buckets_preserve_membership_and_match_bruteforce_pairs() {
         });
     }
     sim.write_host_uniforms();
+    // Override HOST_S(16) in the uploaded uniforms with this case's table size.
+    let s16 = std::mem::size_of::<AvbdParams>() as u64 + 16 * 4;
+    sim.queue
+        .write_buffer(&sim.bufs[6], s16, bytemuck::bytes_of(&(buckets as u32)));
     const CANARY: u32 = 0xfedc_ba98;
     sim.queue.write_buffer(
         &sim.bufs[15],
@@ -478,15 +490,15 @@ fn broadphase_linked_buckets_preserve_membership_and_match_bruteforce_pairs() {
     {
         let mut pass = enc.begin_compute_pass(&Default::default());
         sim.disp(&mut pass, "build_aabbs", N as u64, None);
-        sim.disp(&mut pass, "broadphase_clear", BUCKETS as u64, None);
+        sim.disp(&mut pass, "broadphase_clear", buckets as u64, None);
         sim.disp(&mut pass, "broadphase_insert", N as u64, None);
         sim.disp(&mut pass, "broadphase_query", N as u64, None);
     }
     sim.queue.submit([enc.finish()]);
-    let heads: Vec<u32> = download(&sim, 14, 0, BUCKETS);
+    let heads: Vec<u32> = download(&sim, 14, 0, buckets);
     let links: Vec<u32> = download(&sim, 15, 0, N);
     let mut seen = vec![false; N];
-    for h in 0..BUCKETS {
+    for h in 0..buckets {
         let mut encoded = heads[h];
         while encoded != u32::MAX {
             assert_ne!(
@@ -501,10 +513,10 @@ fn broadphase_linked_buckets_preserve_membership_and_match_bruteforce_pairs() {
             let expected = ((cell[0].wrapping_mul(73856093)
                 ^ cell[1].wrapping_mul(19349663)
                 ^ cell[2].wrapping_mul(83492791))
-                & 131071) as usize;
+                & (buckets as u32 - 1)) as usize;
             assert_eq!(
                 h, expected,
-                "collider={id}: insertion assigned the wrong signed-coordinate hash bucket"
+                "buckets={buckets}, collider={id}: insertion ignored the host grid size or assigned the wrong signed-coordinate hash bucket"
             );
             encoded = links[id];
         }
@@ -532,7 +544,7 @@ fn broadphase_linked_buckets_preserve_membership_and_match_bruteforce_pairs() {
         );
         assert!(
             actual.insert(key),
-            "Duplicate pair {key:?}: hash buckets still require exact-cell filtering"
+            "buckets={buckets}: duplicate pair {key:?}: hash buckets still require exact-cell filtering"
         );
     }
     let mut expected = BTreeSet::new();
@@ -545,7 +557,7 @@ fn broadphase_linked_buckets_preserve_membership_and_match_bruteforce_pairs() {
     }
     let missing: Vec<_> = expected.difference(&actual).take(8).collect();
     let extra: Vec<_> = actual.difference(&expected).take(8).collect();
-    assert!(actual==expected,"Filtered linked grid differs from independent all-pairs touching-box oracle: missing={missing:?}, extra={extra:?}, actual={}, expected={}",actual.len(),expected.len());
+    assert!(actual==expected,"buckets={buckets}: filtered linked grid differs from independent all-pairs touching-box oracle: missing={missing:?}, extra={extra:?}, actual={}, expected={}",actual.len(),expected.len());
 }
 
 #[test]
