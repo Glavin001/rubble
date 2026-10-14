@@ -28,14 +28,68 @@
     const fail = (e) => { errEl.textContent = String(e && e.stack || e); statusEl.textContent = 'stopped'; };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
 
-    const scene = new URLSearchParams(location.search).get('scene') || 'wall';
-    const big = scene === 'ring' || scene === 'gables';
-    const cap = big
-      ? { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 }
-      : { maxBodies: 4096, maxColliders: 4096, maxContacts: 32768, maxJoints: 64, maxCandidates: 65536, maxColors: 32, maxCommands: 64, maxHull: 64 };
-    const lead = big ? 60 : 30;
-    const eye0 = scene === 'gables' ? [0, 28, -40] : scene === 'ring' ? [32, 22, 14] : [0, 16, -42];
-    const look0 = scene === 'gables' ? [0, 6, 0] : scene === 'ring' ? [0, 5, 0] : [0, 8, 0];
+    const qs = new URLSearchParams(location.search);
+    const scene = qs.get('scene') || 'wall';
+    // Capacities mirror three-avbd bench-cases tiers (small / paper / large / steady).
+    const SCENES = {
+      wall: {
+        title: 'wall smash 2k, 10 iterations',
+        lead: 30, iterations: 10, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [0, 16, -42], look: [0, 8, 0], far: 400, ground: 48,
+        cap: { maxBodies: 4096, maxColliders: 4096, maxContacts: 32768, maxJoints: 64, maxCandidates: 65536, maxColors: 32, maxCommands: 64, maxHull: 64 },
+      },
+      ring: {
+        title: 'brick ring 9k, 4 iterations',
+        lead: 60, iterations: 4, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [32, 22, 14], look: [0, 5, 0], far: 400, ground: 48,
+        cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 },
+      },
+      gables: {
+        title: 'brick gables 6.7k, 3 iterations',
+        lead: 60, iterations: 3, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [0, 28, -40], look: [0, 6, 0], far: 400, ground: 80,
+        cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 },
+      },
+      pyramid: {
+        title: 'settled pyramid 30 levels (~9.5k), 10 iterations',
+        lead: 180, iterations: 10, settled: true, sleepRounds: 8, friction: 0.5,
+        eye: [28, 22, 28], look: [0, 6, 0], far: 400, ground: 64,
+        cap: { maxBodies: 16384, maxColliders: 16384, maxContacts: 131072, maxJoints: 64, maxCandidates: 262144, maxColors: 32, maxCommands: 64, maxHull: 64 },
+      },
+      pile: {
+        title: 'settled pile 32k, 4 iterations',
+        lead: 180, iterations: 4, settled: true, sleepRounds: 1, friction: 0.7,
+        eye: [48, 36, 48], look: [0, 8, 0], far: 800, ground: 96,
+        // Box Pile scene defaults (DECISIONS 8af–8av)
+        flags: 1, alpha: 0.95, betaLin: 2000, sleepLin: 0.5, sleepAng: 0.5, sleepTime: 0.25,
+        cap: { maxBodies: 65536, maxColliders: 65536, maxContacts: 524288, maxJoints: 64, maxCandidates: 1048576, maxColors: 32, maxCommands: 64, maxHull: 64 },
+      },
+      columns: {
+        title: 'box columns 100k, 4 iterations',
+        lead: 180, iterations: 4, settled: true, sleepRounds: 8, friction: 0.5,
+        eye: [90, 40, 90], look: [0, 6, 0], far: 1200, ground: 200,
+        cap: { maxBodies: 131072, maxColliders: 131072, maxContacts: 1048576, maxJoints: 64, maxCandidates: 2097152, maxColors: 32, maxCommands: 64, maxHull: 64 },
+      },
+      ring110k: {
+        title: 'brick ring 110k, 4 iterations',
+        lead: 60, iterations: 4, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [140, 60, 40], look: [0, 12, 0], far: 2000, ground: 220,
+        cap: { maxBodies: 131072, maxColliders: 131072, maxContacts: 1048576, maxJoints: 64, maxCandidates: 2097152, maxColors: 32, maxCommands: 64, maxHull: 64 },
+      },
+      gables506k: {
+        title: 'brick gables 506k, 3 iterations',
+        lead: 60, iterations: 3, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [0, 80, -120], look: [0, 10, 0], far: 4000, ground: 600,
+        cap: { maxBodies: 524288, maxColliders: 524288, maxContacts: 2097152, maxJoints: 64, maxCandidates: 4194304, maxColors: 32, maxCommands: 64, maxHull: 64 },
+      },
+    };
+    const cfg = SCENES[scene];
+    if (!cfg) throw new Error(`unknown scene ${scene}; try ${Object.keys(SCENES).join(', ')}`);
+    const cap = cfg.cap;
+    const lead = cfg.lead;
+    const eye0 = cfg.eye;
+    const look0 = cfg.look;
+    document.querySelector('h1').textContent = `Slang → WGSL · ${cfg.title}`;
     let target = look0.slice();
     const toEye = [eye0[0] - look0[0], eye0[1] - look0[1], eye0[2] - look0[2]];
     let orbitDist = Math.hypot(...toEye);
@@ -74,7 +128,7 @@
     });
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
-      orbitDist = Math.max(2, Math.min(400, orbitDist * Math.exp(e.deltaY * 0.0012)));
+      orbitDist = Math.max(2, Math.min(cfg.far, orbitDist * Math.exp(e.deltaY * 0.0012)));
     }, { passive: false });
     const PASS_ALIGN = 256;
     const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
@@ -164,10 +218,10 @@
     }
 
     const params = {
-      dt: 1 / 60, gravityY: -10, iterations: scene === 'gables' ? 3 : scene === 'ring' ? 4 : 10, flags: 0,
-      alpha: 0.99, gamma: 0.999, betaLin: 10000, betaAng: 100,
+      dt: 1 / 60, gravityY: -10, iterations: cfg.iterations, flags: cfg.flags || 0,
+      alpha: cfg.alpha ?? 0.99, gamma: 0.999, betaLin: cfg.betaLin ?? 10000, betaAng: 100,
       kStart: 1000, kMaxN: 1e10, kMaxT: 1e6, contactOffset: 0.01,
-      sleepLin: 0.15, sleepAng: 0.15, sleepTime: 0.5, residualExit: 1e-4,
+      sleepLin: cfg.sleepLin ?? 0.15, sleepAng: cfg.sleepAng ?? 0.15, sleepTime: cfg.sleepTime ?? 0.5, residualExit: 1e-4,
       trustLin: 0.35, trustAng: 0.5, pivotFloor: 1e-6, gridCellSize: 2,
     };
 
@@ -384,21 +438,24 @@ struct VsOut {
     const mats = new ArrayBuffer(64 * 16);
     const mv = new DataView(mats);
     for (let i = 0; i < 64; i++) {
-      f32(mv, i * 16, 0.5); f32(mv, i * 16 + 4, 0); f32(mv, i * 16 + 8, 0.01); f32(mv, i * 16 + 12, 0);
+      f32(mv, i * 16, cfg.friction); f32(mv, i * 16 + 4, 0); f32(mv, i * 16 + 8, 0.01); f32(mv, i * 16 + 12, 0);
     }
     device.queue.writeBuffer(bufs[3], 0, mats);
 
-    if (scene === 'ring') document.querySelector('h1').textContent = 'Slang → WGSL · brick ring 9k, 4 iterations';
-    if (scene === 'gables') document.querySelector('h1').textContent = 'Slang → WGSL · brick gables 6.7k, 3 iterations';
     const bodyBytes = new ArrayBuffer(sizes[0]);
     const colBytes = new ArrayBuffer(sizes[2]);
     const bodies = [];
     const colliders = [];
     const half = [0.5, 0.25, 0.25];
     const brickR = Math.hypot(...half);
+    let maxSmallR = brickR;
     const brickInertia = (mass) => {
       const inv = (a, b) => 1 / ((mass / 12) * (a * a + b * b));
       return [inv(0.5, 0.5), inv(1, 0.5), inv(1, 0.5)];
+    };
+    const boxInertia = (mass, hx, hy, hz) => {
+      const inv = (a, b) => 1 / ((mass / 12) * (a * a + b * b));
+      return [inv(hy * 2, hz * 2), inv(hx * 2, hz * 2), inv(hx * 2, hy * 2)];
     };
     bodies.push({ p: [0, 0, 0], invMass: 0, invI: [0, 0, 0], flags: 0 });
     colliders.push({ body: 0, shape: 4, density: 0, params: [0, 1, 0, 0.5] });
@@ -408,6 +465,13 @@ struct VsOut {
       bodies.push({ p: pos, invMass: 1 / mass, invI: brickInertia(mass), flags: 1 | 8, q: [0, s, 0, c] });
       colliders.push({ body: id, shape: 2, density, params: [half[0], half[1], half[2], brickR] });
     };
+    const addBox = (pos, hx, hy, hz, mass, q) => {
+      const id = bodies.length;
+      const r = Math.hypot(hx, hy, hz);
+      maxSmallR = Math.max(maxSmallR, r);
+      bodies.push({ p: pos, invMass: 1 / mass, invI: boxInertia(mass, hx, hy, hz), flags: 1 | 8, q: q || [0, 0, 0, 1] });
+      colliders.push({ body: id, shape: 2, density: 1, params: [hx, hy, hz, r] });
+    };
     const addBall = (pos, radius, density, vel, ang) => {
       const mass = density * (4 / 3) * Math.PI * radius ** 3;
       const inertia = 0.4 * mass * radius * radius;
@@ -415,9 +479,8 @@ struct VsOut {
       bodies.push({ p: pos, invMass: 1 / mass, invI: [1 / inertia, 1 / inertia, 1 / inertia], flags: 1 | 8, v: vel, w: ang });
       colliders.push({ body: id, shape: 0, density, params: [radius, 0, 0, radius] });
     };
-    if (scene === 'ring') {
-      // three-avbd brickRing(12, 20, 2, 10). Their Z-up is our Y-up.
-      const radius = 12, courses = 20, tier = 2, rows = 10, mass = 0.25;
+    const buildRing = (radius, courses, tier, rows) => {
+      const mass = 0.25;
       for (let c = 0; c < courses; c++) {
         const depth = Math.max(1, rows - Math.floor(c / tier));
         for (let j = 0; j < depth; j++) {
@@ -431,9 +494,8 @@ struct VsOut {
       }
       const ballR = courses / 5;
       addBall([0, 0.5 + ballR, -(radius + 0.52 * rows + ballR + 2)], ballR, 10, [0, 0, 30], [-30 / ballR, 0, 0]);
-    } else if (scene === 'gables') {
-      // three-avbd brickGables(4, 8, 20): 4×8 pyramids, 3 iterations.
-      const columns = 4, rows = 8, base = 20;
+    };
+    const buildGables = (columns, rows, base) => {
       const pitchX = base + 2, pitchY = 5, mass = 0.25;
       for (let cx = 0; cx < columns; cx++) {
         for (let cy = 0; cy < rows; cy++) {
@@ -453,6 +515,77 @@ struct VsOut {
         const z = -((rows - 1) / 2) * pitchY - ballR - 12;
         addBall([x, 0.5 + ballR, z], ballR, 50, [0, 0, 30], [-30 / ballR, 0, 0]);
       }
+    };
+    statusEl.textContent = `building ${scene}…`;
+    if (scene === 'ring') {
+      buildRing(12, 20, 2, 10);
+    } else if (scene === 'ring110k') {
+      buildRing(80, 40, 4, 10);
+    } else if (scene === 'gables') {
+      buildGables(4, 8, 20);
+    } else if (scene === 'gables506k') {
+      buildGables(16, 68, 30);
+    } else if (scene === 'pyramid') {
+      const levels = 30, mass = 0.25;
+      for (let level = 0; level < levels; level++) {
+        const n = levels - level;
+        for (let x = 0; x < n; x++) {
+          for (let z = 0; z < n; z++) {
+            addBrick([
+              (x - (n - 1) / 2) * 1.05,
+              0.75 + level * 0.5,
+              (z - (n - 1) / 2) * 0.55,
+            ], 0, mass, 1);
+          }
+        }
+      }
+    } else if (scene === 'pile') {
+      // three-avbd boxPile(40, 20); generate (z,x,y) then Morton-upload.
+      let seed = 12345;
+      const rand = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 2 ** 32; };
+      const n = 40, h = 20;
+      const specs = [];
+      for (let z = 0; z < h; z++) {
+        for (let x = 0; x < n; x++) {
+          for (let y = 0; y < n; y++) {
+            const hx = 0.25 + rand() * 0.35, hy = 0.25 + rand() * 0.35, hz = 0.25 + rand() * 0.35;
+            const pos = [(x - n / 2) * 1.6, 2 + z * 1.6, (y - n / 2) * 1.6];
+            let qx = rand() - 0.5, qy = rand() - 0.5, qz = rand() - 0.5, qw = rand() - 0.5;
+            const ql = Math.hypot(qx, qy, qz, qw) || 1;
+            specs.push({ pos, hx, hy, hz, q: [qx / ql, qy / ql, qz / ql, qw / ql] });
+          }
+        }
+      }
+      let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (const s of specs) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], s.pos[k]); hi[k] = Math.max(hi[k], s.pos[k]); }
+      const spread = (x) => {
+        x &= 0x3ff;
+        x = (x | (x << 16)) & 0x30000ff;
+        x = (x | (x << 8)) & 0x300f00f;
+        x = (x | (x << 4)) & 0x30c30c3;
+        x = (x | (x << 2)) & 0x9249249;
+        return x;
+      };
+      const order = specs.map((_, i) => i).sort((ia, ib) => {
+        const morton = (p) => {
+          const q = (k) => Math.max(0, Math.min(1023, Math.floor((p[k] - lo[k]) / Math.max(hi[k] - lo[k], 1e-9) * 1024)));
+          return spread(q(0)) | (spread(q(1)) << 1) | (spread(q(2)) << 2);
+        };
+        return morton(specs[ia].pos) - morton(specs[ib].pos);
+      });
+      for (const i of order) {
+        const s = specs[i];
+        addBox(s.pos, s.hx, s.hy, s.hz, 8 * s.hx * s.hy * s.hz, s.q);
+      }
+    } else if (scene === 'columns') {
+      const n = 100, h = 10;
+      for (let x = 0; x < n; x++) {
+        for (let z = 0; z < n; z++) {
+          for (let y = 0; y < h; y++) {
+            addBox([(x - n / 2) * 1.5, 1 + y, (z - n / 2) * 1.5], 0.5, 0.5, 0.5, 1);
+          }
+        }
+      }
     } else {
       const mass = 0.6 * 0.25;
       const w = 40, courses = 25;
@@ -467,7 +600,7 @@ struct VsOut {
       addBall([0, 5, -25], 2, 20, [0, 4, 30], [0, 0, 0]);
     }
     if (bodies.length > cap.maxBodies) throw new Error(`${bodies.length} bodies exceed capacity ${cap.maxBodies}`);
-    params.gridCellSize = Math.max(0.5, 2 * brickR * 1.0001);
+    params.gridCellSize = Math.max(0.5, 2 * maxSmallR * 1.0001);
     bodies.forEach((b, i) => {
       writeBody(bodyBytes, i, b);
       writeBody(bodyBytes, cap.maxBodies + i, b);
@@ -536,12 +669,22 @@ struct VsOut {
 
     const staging = device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const bodyRead = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    // Full body buffer for settle KE / height samples (settled scenes only).
+    const bodySnap = cfg.settled
+      ? device.createBuffer({ size: sizes[0], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })
+      : null;
     let bodyCount = bodies.length;
     let colliderCount = bodies.length;
     let last = { contact: 0, candidate: 0, awake: 0, color: 0, manifold: 0, overflow: 0 };
     let parity = 0;
     let steps = 0;
-    const sleepRounds = 1;
+    const sleepRounds = cfg.sleepRounds;
+    let settle = { ke: 0, maxV: 0, maxY: 0, minY: 0, sleeping: 0, sampleStep: 0 };
+    const initialMaxY = (() => {
+      let m = 0;
+      for (let i = 1; i < bodies.length; i++) m = Math.max(m, bodies[i].p[1]);
+      return m;
+    })();
 
     // Reused every step — allocating these in writeHost showed up as wall−GPU gap on ring.
     const scratchU32 = new Uint32Array(64);
@@ -785,6 +928,35 @@ struct VsOut {
         + ` · primal ${primal.toFixed(2)} · dual ${dual.toFixed(2)} · sleep ${sleep.toFixed(2)}`;
     }
 
+    async function sampleSettle() {
+      if (!bodySnap) return settle;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(bufs[0], 0, bodySnap, 0, bodies.length * 112);
+      device.queue.submit([enc.finish()]);
+      await bodySnap.mapAsync(GPUMapMode.READ);
+      const dv = new DataView(bodySnap.getMappedRange().slice(0, bodies.length * 112));
+      bodySnap.unmap();
+      let ke = 0, maxV = 0, maxY = -Infinity, minY = Infinity, sleeping = 0;
+      for (let i = 1; i < bodies.length; i++) {
+        const o = i * 112;
+        const invM = dv.getFloat32(o + 12, true);
+        if (!(invM > 0)) continue;
+        const y = dv.getFloat32(o + 4, true);
+        const flags = dv.getUint32(o + 44, true);
+        const vx = dv.getFloat32(o + 48, true), vy = dv.getFloat32(o + 52, true), vz = dv.getFloat32(o + 56, true);
+        const wx = dv.getFloat32(o + 64, true), wy = dv.getFloat32(o + 68, true), wz = dv.getFloat32(o + 72, true);
+        const speed = Math.hypot(vx, vy, vz);
+        const mass = 1 / invM;
+        ke += 0.5 * mass * (vx * vx + vy * vy + vz * vz + wx * wx + wy * wy + wz * wz);
+        maxV = Math.max(maxV, speed);
+        maxY = Math.max(maxY, y);
+        minY = Math.min(minY, y);
+        if (flags & 4) sleeping++;
+      }
+      settle = { ke, maxV, maxY, minY, sleeping, sampleStep: steps };
+      return settle;
+    }
+
     const cube = [];
     const axes = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
     for (const [u, v, w] of axes) for (const sign of [-1, 1]) {
@@ -798,7 +970,7 @@ struct VsOut {
       for (const tri of wind) for (const idx of tri) cube.push(...corners[idx], ...n);
     }
     const ground = [];
-    const G = 48;
+    const G = cfg.ground;
     const gy = 0.5;
     for (const [x, z] of [[-G, -G], [G, -G], [G, G], [-G, -G], [G, G], [-G, G]]) ground.push(x, gy, z);
     const boxVbo = device.createBuffer({ size: cube.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
@@ -814,7 +986,7 @@ struct VsOut {
     let colorMode = 1;
     function writeCamera(aspect) {
       const cam = cameraEye();
-      const view = mul(perspective(Math.PI / 5, aspect, 0.2, 400), lookAt(cam, target, [0, 1, 0]));
+      const view = mul(perspective(Math.PI / 5, aspect, 0.2, cfg.far), lookAt(cam, target, [0, 1, 0]));
       frameF.set(view);
       frameU[16] = colorMode;
       device.queue.writeBuffer(frameBuf, 0, frameScratch);
@@ -823,7 +995,7 @@ struct VsOut {
     }
     const colorNames = ['position tint (red −X/down, yellow +X/up)', 'awake amber, sleeping blue', 'speed: blue still, red above 3 m/s'];
     function showLegend() {
-      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed. Friction μ 0.5. Drag to orbit, scroll to zoom, right-drag to pan.`;
+      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed. Friction μ ${cfg.friction}. Drag to orbit, scroll to zoom, right-drag to pan. Scenes: ?scene=wall|ring|gables|pyramid|pile|columns|ring110k|gables506k`;
     }
     showLegend();
     addEventListener('keydown', (e) => {
@@ -931,25 +1103,45 @@ struct VsOut {
         last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
         parity ^= 1;
         steps++;
-        const wallLabel = wallMs > 0 ? `${wallMs.toFixed(2)} ms` : 'timing after impact…';
-        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${bodies.length - 1} bodies · ${params.iterations} iters · ${wallLabel} ${phases} · step ${steps} · contacts ${last.contact} · ov 0x${last.overflow.toString(16)} · frame ${(performance.now() - now).toFixed(1)} ms`;
+        if (cfg.settled && (steps === 1 || steps % 30 === 0 || steps === lead)) {
+          await sampleSettle();
+        }
+        const dyn = bodies.length - 1;
+        const settleLabel = cfg.settled && settle.sampleStep
+          ? ` · sleep ${settle.sleeping}/${dyn} · KE ${settle.ke.toFixed(1)} · max|v| ${settle.maxV.toFixed(3)} · h ${settle.maxY.toFixed(2)}/${initialMaxY.toFixed(2)}`
+          : '';
+        const wallLabel = wallMs > 0 ? `${wallMs.toFixed(2)} ms` : (cfg.settled ? 'timing after settle…' : 'timing after impact…');
+        statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${params.iterations} iters · ${wallLabel} ${phases} · step ${steps} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)} · frame ${(performance.now() - now).toFixed(1)} ms`;
         if (last.overflow) { running = false; fail('overflow flags 0x' + last.overflow.toString(16)); return; }
 
-        // Watch the smash first. Fair wall timing runs once after the ball has hit,
-        // then the scene is restored so playback continues from the start again.
+        // Smash: watch impact first. Settled: watch lead-in settle, then fair wall timing.
+        // After measuring, restore so playback continues from the start again.
         if (!benchStarted && steps >= lead) {
           benchStarted = true;
           measuring = true;
-          statusEl.textContent = `impact shown · measuring wall time (${bodies.length - 1} bodies)…`;
+          statusEl.textContent = cfg.settled
+            ? `settled · measuring wall time (${dyn} bodies)…`
+            : `impact shown · measuring wall time (${dyn} bodies)…`;
           try {
+            if (cfg.settled) await sampleSettle();
+            const pre = { ...settle };
             restoreScene();
             await device.queue.onSubmittedWorkDone();
             wallMs = await benchWall();
             phases = await profilePhases();
+            if (cfg.settled) await sampleSettle();
+            const report = {
+              scene, bodies: dyn, iterations: params.iterations, wallMs, phases,
+              contacts: last.contact, awake: last.awake, overflow: last.overflow,
+              settle: pre, initialMaxY,
+            };
+            window.__BENCH__ = report;
+            console.log('BENCH', JSON.stringify(report));
             restoreScene();
             await device.queue.onSubmittedWorkDone();
             drawWorld();
-            statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases} · replaying from start…`;
+            const ok = !cfg.settled || (pre.ke < dyn * 0.05 && pre.maxV < 0.5 && pre.maxY > initialMaxY * 0.7);
+            statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases}${cfg.settled ? ` · settle KE ${pre.ke.toFixed(1)} sleep ${pre.sleeping}/${dyn} h ${pre.maxY.toFixed(2)}/${initialMaxY.toFixed(2)} ${ok ? 'STABLE' : 'UNSTABLE'}` : ''} · replaying…`;
           } finally {
             measuring = false;
           }
