@@ -104,7 +104,7 @@ function fixture({ graphProfile = false, detailedProfile = false, reuse = true, 
     copyBufferToBuffer() {}, finish() { return this; },
   };
   const context = {
-    params: {iterations, flags: reuse ? 1 : 0}, detailedProfile, graphProfile, compactContacts, parity: 0, steps: 166, wantTimestamps: true,
+    params: {iterations, flags: reuse ? 1 : 0}, detailedProfile, graphProfile, colorProfile: false, compactContacts, parity: 0, steps: 166, wantTimestamps: true,
     performance: {now() { return clock; }},
     GPUBufferUsage: {QUERY_RESOLVE: 1, COPY_SRC: 2, MAP_READ: 4, COPY_DST: 8},
     GPUMapMode: {READ: 1}, BigUint64Array,
