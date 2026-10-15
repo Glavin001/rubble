@@ -1085,7 +1085,9 @@ impl WgpuSim {
         s[18] = self.grid_levels;
         s[20] = u32::from(grid_split());
         s[21] = self.np_defer_limit;
-        s[22] = 1; // degree-aware primal lanes; gColorCounts holds 64 + 64 words
+        // Degree-aware primal lanes for convex/compound scenes (high-degree bodies).
+        // Box benchmarks keep their validated lane order (see gables_hold).
+        s[22] = u32::from(self.has_convex);
         s[23] = u32::from(self.has_filters);
         if self.manifold_hash_insert {
             s[13] = self.last_counters.manifold_count;

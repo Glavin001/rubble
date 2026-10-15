@@ -163,7 +163,7 @@ example to replace a fractured chunk. The JS `HullArena` mirrors the Rust one.
 | Indirect slots 70..72 | Convex args (buffer sized ≥ 73 slots). |
 | `GpuCounters` bytes 44 and 60 | `convexSmall` / `convexLarge` (`StepCounters::convex_sat_small/large`; byte 56 is the two-pass narrowphase deferred count). |
 | `HOST_S(18)` | Grid levels. |
-| `HOST_S(22)` | Degree-aware primal lanes (needs `gColorCounts` ≥ 128 words). |
+| `HOST_S(22)` | Degree-aware primal lanes (needs `gColorCounts` ≥ 128 words); hosts enable it for scenes with convex colliders, so box benchmarks keep their validated lane order. |
 | Scratch 51 | Occupied grid levels. |
 | Scratch 53..63 | Oversized-static list for the hierarchical grid (count + 10 IDs). |
 | `HOST_S(23)` | Collision filters present. |
@@ -251,6 +251,21 @@ Record:
 The baseline to beat is the retired path's dense 10k × 64-vertex prisms run:
 about 282 ms/tick, with roughly 96 ms of narrowphase and 106 ms of solve
 (`fracture/convex-validation.json`).
+
+## Measured results (2026-10-14, Apple M3 Max)
+
+Full data: [`convex-gpu-validation-2026-10-14.json`](convex-gpu-validation-2026-10-14.json).
+
+| Workload | Retired fracture path | Now |
+|---|---|---|
+| 10k active 64-vertex prisms, reuse off (Chrome WebGPU) | 281.8 ms/tick | 15.9 ms/tick wall, 10.8 ms GPU (SAT 6.2, clip 2.0, solve 1.8) |
+| 10k bodies x 4 child hulls, reuse on (Chrome WebGPU) | n/a | 9.3 ms/tick wall, 6.1 ms GPU |
+| 30k small hulls, reuse on (Chrome WebGPU) | n/a | 10.7 ms/tick wall, 6.1 ms GPU |
+| House level 1 after impact (568 awake, 2,253 hulls) | 141–219 ms profiled step, solve 86–136 ms | 4.2–7.0 ms GPU, solve 1.9–3.9 ms |
+| Metal `scene_fps` Convex Pile / Compounds / Rubble | n/a | p50 1.6 / 2.9 / 3.0 ms |
+
+All GPU correctness suites pass: WebGPU, Metal, browser conformance, work-list
+row limits, and the arch regression.
 
 ## Known limitations and follow-ups
 
