@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {parseFractureGlb,EXTENSION} from './asset.mjs';
-import {buildScene,buildRow,principalAxes,rotate,inverseRotate,add,sub,hullView,hullBase,colliderVertices} from './geometry.mjs';
+import {buildScene,buildRow,buildGrid,principalAxes,rotate,inverseRotate,add,sub,hullView,hullBase,colliderVertices} from './geometry.mjs';
 const bytes=await readFile(new URL('./assets/masonry-arch.glb',import.meta.url));
 const buffer=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
 const asset=parseFractureGlb(buffer);
@@ -109,4 +109,24 @@ test('a row of level-3 houses shares hulls and the projectile rolls through ever
  assert.equal(row.projectileArc,false);assert.ok(row.projectileMass>=5*one.selected.reduce((s,f)=>s+f.mass,0),'the ball carries enough momentum for the row');
  assert.ok(row.colliders.filter(c=>c.shape===0).every(c=>c.params[0]===row.projectileRadius));
  assert.deepEqual(row.capacity,{candidatesPerCollider:8,contactsPerCollider:8,maxColors:64,colorRounds:64});
+});
+
+test('a 7x7 grid of level-2 houses offsets copies in x and z and fires down the middle column',async()=>{
+ const data=await readFile(new URL('./assets/veneer-house.glb',import.meta.url));
+ const house=parseFractureGlb(data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength));
+ const one=buildScene(house,2),grid=buildGrid(house,2,{columns:7,rows:7});
+ const frags=one.projectileStart-1;
+ assert.equal(grid.copies,49);assert.equal(grid.instanceStride,frags);
+ assert.equal(grid.projectileStart,1+49*frags);
+ assert.equal(grid.colliders.filter(c=>c.shape===3).length,49*one.colliders.filter(c=>c.shape===3).length);
+ assert.ok(grid.columnPitch>one.extentX&&grid.rowPitch>one.extentZ,'houses do not overlap');
+ // Copy (row r, column c) is copy 0 shifted by (c·pitchX, 0, r·pitchZ).
+ for(const [r,c] of [[0,0],[3,3],[6,6],[2,5]]){const k=r*7+c;for(const i of [1,frags]){
+  const a=grid.bodies[i],b=grid.bodies[i+k*frags];
+  assert.ok(Math.abs(b.p[0]-a.p[0]-c*grid.columnPitch)<1e-9);assert.equal(b.p[1],a.p[1]);
+  assert.ok(Math.abs(b.p[2]-a.p[2]-r*grid.rowPitch)<1e-9);assert.deepEqual(b.q,a.q);
+ }}
+ // The shot runs along +z down the middle column (x = 0 for an odd column count).
+ assert.equal(grid.rowShot.origin[0],0);assert.deepEqual(grid.rowShot.direction,[0,0,1]);
+ assert.ok(grid.rowShot.origin[2]<-grid.rowLength/2);
 });

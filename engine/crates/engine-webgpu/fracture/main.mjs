@@ -1,11 +1,11 @@
 import {parseFractureGlb} from './asset.mjs';
-import {buildScene,buildRow} from './geometry.mjs';
+import {buildScene,buildGrid} from './geometry.mjs';
 import {createSimulation} from './simulation.mjs';
 import {createRenderer} from './render.mjs';
 import {createRates} from './rates.mjs';
 const $=id=>document.getElementById(id),status=$('status');
 let device,asset,scene,sim,renderer,running=false,released=false,loading=true,frame=Promise.resolve(),loadTail=Promise.resolve(),last=0,accumulator=0;
-let currentRates=null,copies=1,maxHullVertices;
+let currentRates=null,layout=null,maxHullVertices;
 // Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
 const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
 const rates=createRates(value=>{
@@ -29,24 +29,25 @@ function shoot(ray){
  return shotQueue;
 }
 async function loadLevel(level){
- let next;try{next=copies>1?buildRow(asset,level,{copies,maxHullVertices}):buildScene(asset,level,{maxHullVertices})}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
+ let next;try{next=layout?buildGrid(asset,level,{...layout,maxHullVertices}):buildScene(asset,level,{maxHullVertices})}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- $('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=scene.colliders.filter(c=>c.shape===3).length;$('bonds').textContent=scene.bonds.length*copies;$('release').textContent='Start simulation';
+ const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=scene.colliders.filter(c=>c.shape===3).length;$('bonds').textContent=scene.bonds.length*copies;$('release').textContent='Start simulation';
  $('fire').hidden=!scene.rowShot;
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
  const what=copies>1?`${copies} houses · ${scene.bodies.length-1-scene.projectileCount} bodies · `:'';
  setStatus(`${what}${(asset.bytes/1048576).toFixed(2)} MB · ${asset.library.material.length} materials${skipped} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
- copies=entry.copies??1;maxHullVertices=entry.maxHullVertices;
+ layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;
  const start=performance.now(),next=parseFractureGlb(bytes);const ms=performance.now()-start;
  asset=next;$('scene').value=sampleKey;const levels=[...new Set(asset.physics.fragments.map(f=>f.level))].sort((a,b)=>a-b);
  $('level').replaceChildren(...levels.map(l=>new Option(`Level ${l} · ${asset.physics.fragments.filter(f=>f.level===l).length} fragments`,l)));$('filename').textContent=name;
  const level=levels.includes(entry.level)?entry.level:levels[0];$('level').value=String(level);
  await loadLevel(level);window.__FRACTURE_DEMO__.parseMs=ms;
 }
-const samples={house:{file:'veneer-house.glb',label:'house'},row:{file:'veneer-house-hull16.glb',label:'20 houses',copies:20,level:3,maxHullVertices:16},arch:{file:'masonry-arch.glb',label:'arch'}};
+const samples={house:{file:'veneer-house.glb',label:'house'},row:{file:'veneer-house-hull16.glb',label:'20 houses',layout:{columns:1,rows:20},level:3,maxHullVertices:16},
+ grid:{file:'veneer-house.glb',label:'49 houses',layout:{columns:7,rows:7},level:2},arch:{file:'masonry-arch.glb',label:'arch'}};
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  setStatus(`Fetching baked ${entry.label}…`);

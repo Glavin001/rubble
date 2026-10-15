@@ -50,6 +50,13 @@ at 40 m/s along the ground through the whole row (`__FRACTURE_DEMO__.fireRow()`;
 and 8 contacts per collider and 64 colours and colouring rounds, and runs with a
 16-vertex hull limit: a larger hull is a load error, never reduced.
 
+**49 houses · Level 2 in a 7×7 grid** uses the bundled `veneer-house.glb` (64-vertex
+hull limit; 154,742 bodies, 245,882 hulls) and fires the ball down the middle
+column. On an M3 Max an all-asleep step costs 2.6 ms of GPU time and the peak after
+the shot ~38 ms (~114k awake, ~880k contacts). Unbonded pieces knock over
+neighbouring houses, so most of the grid ends up awake. The 16-vertex re-bake
+measured the same peak with 15% more pieces, so the grid keeps the original asset.
+
 `veneer-house-hull16.glb` is a fresh Shardwright bake of the same source
 (`benchmarks/assets/veneer_house.glb`, seed 1337) with `assets/veneer-house-hull16.toml`
 (building_lite plus `max_hull_vertices = 16`, enforced by its `collision_shapes`
