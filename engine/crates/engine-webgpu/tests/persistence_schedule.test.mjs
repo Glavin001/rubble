@@ -98,7 +98,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
-        manifoldHashInsert:false, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
+        manifoldHashInsert:false, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
         sleepRounds:8, PASS_ALIGN:256, bufs:[],
         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
@@ -228,7 +228,7 @@ test('np=split without reuse=copy fails before allocating GPU work', () => {
     /np must be fused or split/);
 });
 
-function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=false, earlyPairPack=false}) {
+function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=false, earlyPairPack=false, persistList=false, localRepair=false, carryRest=false}) {
   const trace = [], passes = [];
   const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
     dispatchWorkgroupsIndirect() { trace.push({name:'primal'}); }, end() {}}; passes.push(p); return p; };
@@ -237,7 +237,7 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:npSplit, npSplit, earlyPairPack, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:npSplit, npSplit, earlyPairPack, persistList, localRepair, carryRest, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
@@ -303,6 +303,83 @@ for (const earlyPairPack of [false, true]) {
   });
 }
 
+// Persist work list (8em).
+for (const [query, mode] of [['?scene=ring110k','list'],['?scene=gables506k','list'],
+  ['?scene=columns','scan'],['?scene=ring110k&persist=scan','scan'],['?scene=ring110k&reuse=pass','scan']]) {
+  test(`persist mode parses explicitly (${query})`, () => {
+    assert.equal(runInNewContext(`${modeSource}\npersistMode`,{URLSearchParams,location:{search:query}}),mode);
+  });
+}
+test('persist=list without reuse=copy fails before allocating GPU work', () => {
+  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=ring110k&reuse=pass&persist=list'}}),
+    /persist=list requires reuse=copy/);
+});
+test('persist list runs from slot 70 with the overflow scan on slot 71, after narrowphase work args', () => {
+  const trace = encodeTrace({reuse:true, manifoldHashInsert:true, npSplit:true, earlyPairPack:true, persistList:true});
+  const at = name => trace.flatMap((c,i)=>c.name===name?[i]:[]);
+  const list = at('persist_list_copy_persistent'), scan = at('persist_contacts_copy_persistent');
+  assert.equal(list.length,1); assert.equal(scan.length,1);
+  assert.equal(trace[list[0]].slot,70,'The list pass must be sized by the listed count, not every contact.');
+  assert.equal(trace[scan[0]].slot,71,'The scan must use slot 71, which is zero unless the list overflowed.');
+  const fresh = at('narrowphase_fresh_copy_persistent')[0];
+  assert.ok(at('write_work_args').some(i => i > fresh && i < list[0]),
+    'Slots 70/71 are written after narrowphase; a stale count would skip or repeat persistence.');
+  assert.ok(list[0] < scan[0] && scan[0] < at('pack_solver_contacts')[0]);
+});
+
+// Local incremental color repair (8en).
+for (const [query, mode] of [['?scene=ring110k','local'],['?scene=gables506k','local'],
+  ['?scene=ring110k&repair=rounds','rounds'],['?scene=ring110k&coloring=rebuild','rounds']]) {
+  test(`color repair mode parses explicitly (${query})`, () => {
+    assert.equal(runInNewContext(`${modeSource}\nrepairMode`,{URLSearchParams,location:{search:query}}),mode);
+  });
+}
+test('repair=local without incremental coloring fails before allocating GPU work', () => {
+  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=ring110k&coloring=rebuild&repair=local'}}),
+    /repair=local requires incremental coloring/);
+});
+for (const localRepair of [false, true]) {
+  test(`local repair runs once between slot-69 work args and the global rounds (local=${localRepair})`, () => {
+    const trace = encodeTrace({reuse:true, manifoldHashInsert:true, npSplit:true, earlyPairPack:true, persistList:true, localRepair});
+    const at = name => trace.flatMap((c,i)=>c.name===name?[i]:[]);
+    const local = at('color_bodies_local'), rounds = at('color_bodies');
+    assert.equal(rounds.length, 32, 'The global rounds stay as the fallback for large repair lists.');
+    assert.equal(local.length, localRepair ? 1 : 0);
+    if (localRepair) {
+      const init = at('init_colors')[0];
+      assert.ok(init < local[0] && at('write_work_args').some(i => i > init && i < local[0]) && local[0] < rounds[0],
+        'Local repair needs the repair list and its slot-69 decision, and must finish before any global round.');
+      assert.equal(trace[local[0]].threads, 64, 'One workgroup owns the whole repair list.');
+    }
+  });
+}
+
+// Resting-pair carry across sleep (8ep).
+for (const [query, mode] of [['?scene=ring110k','carry'],['?scene=ring','carry'],['?scene=ring110k&rest=drop','drop']]) {
+  test(`rest mode parses explicitly (${query})`, () => {
+    assert.equal(runInNewContext(`${modeSource}\nrestMode`,{URLSearchParams,location:{search:query}}),mode);
+  });
+}
+test('invalid rest mode fails before allocating GPU work', () => {
+  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=ring&rest=keep'}}),
+    /rest must be carry or drop/);
+});
+for (const carryRest of [false, true]) {
+  test(`resting pairs are carried after the broadphase and before narrowphase reads them (carry=${carryRest})`, () => {
+    const trace = encodeTrace({reuse:true, manifoldHashInsert:true, npSplit:true, earlyPairPack:true, persistList:true, localRepair:true, carryRest});
+    const at = name => trace.flatMap((c,i)=>c.name===name?[i]:[]);
+    const carry = at('carry_rest_pairs');
+    assert.equal(carry.length, carryRest ? 1 : 0);
+    if (carryRest) {
+      assert.equal(trace[carry[0]].slot, 72, 'Carry runs over the previous manifolds published in slot 72.');
+      assert.ok(at('broadphase_query')[0] < carry[0] && carry[0] < at('narrowphase_defer_copy_persistent')[0],
+        'Carry appends candidates after the broadphase and must read gManifolds before narrowphase overwrites them.');
+      assert.ok(at('write_work_args').some(i => i > carry[0] && i < at('narrowphase_defer_copy_persistent')[0]),
+        'Slot 64 must be recounted after carried candidates, or narrowphase skips them.');
+    }
+  });
+}
+
 test('per-manifold hash insert is rejected when reuse would place it after narrowphase', () => {
   assert.throws(()=>encodeTrace({reuse:false, manifoldHashInsert:true}),/requires contact reuse/);
   assert.doesNotThrow(()=>encodeTrace({reuse:false, manifoldHashInsert:false}));
@@ -313,7 +390,7 @@ test('host upload publishes the previous GPU manifold count before counters rese
   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
     const copies = [];
     const context = {
-      manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152), steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
+      manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152), steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
       last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
@@ -326,6 +403,15 @@ test('host upload publishes the previous GPU manifold count before counters rese
       {...context, copies});
     assert.equal(s[14], manifoldHashInsert ? 1 : 0, 'HOST_S(14) selects the per-manifold slot-68 count.');
     assert.equal(s[20], 0, 'HOST_S(20) stays 0 unless grid=split.');
+    assert.equal(s[22], 0, 'HOST_S(22) stays 0 unless persist=list.');
+    assert.equal(s[27], 0, 'HOST_S(27) stays 0 unless repair=local.');
+    assert.equal(s[28], 0, 'HOST_S(28) stays 0 unless rest=carry.');
+    assert.equal(runInNewContext(`${hostSource}\nscratchWords()[28]`, {...context, carryRest:true}), 1,
+      'rest=carry must reach HOST_S(28), or sleepers drop resting pairs and nothing carries them.');
+    assert.equal(runInNewContext(`${hostSource}\nscratchWords()[27]`, {...context, localRepair:true}), 1,
+      'repair=local must reach HOST_S(27), or slot 69 keeps the global rounds and the local pass exits.');
+    assert.equal(runInNewContext(`${hostSource}\nscratchWords()[22]`, {...context, persistList:true}), 1,
+      'persist=list must reach HOST_S(22), or narrowphase never lists contacts and slot 70 stays empty.');
     assert.equal(runInNewContext(`${hostSource}\nscratchWords()[20]`, {...context, gridSplit:true}), 1,
       'grid=split must reach HOST_S(20), or the shader keeps one table while the host clears two.');
     const manifoldCopy = copies.findIndex(c=>c[0]==='b7' && c[1]===48 && c[2]==='b6' && c[3]===80+13*4 && c[4]===4);
@@ -352,7 +438,7 @@ for (const sparseStart of [10, 32, 0]) {
       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
-      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
+      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
       physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix:true,
       sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
       writeHost() {}, disp(p,name) { trace.push({name, phase:p.id}); },
@@ -400,7 +486,7 @@ test('broadphase grid table scales with colliders and clears every head', () => 
     detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
     last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
     nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576, gridSplit, reuseCopy:false, npSplit:false, earlyPairPack:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576, gridSplit, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:32, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads}); }, dispWork() {}, encoder:{beginComputePass:pass},

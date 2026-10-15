@@ -31,9 +31,9 @@ struct ConvexWork
 };
 static const uint CONVEX_WORK_FAST = 0x01000000u;
 static const uint CONVEX_WORK_EDGE_VALID = 0x80000000u;
-static const uint CONVEX_SLOT_SMALL_GROUPS = 70u;
-static const uint CONVEX_SLOT_LARGE_GROUPS = 71u;
-static const uint CONVEX_SLOT_PAIRS = 72u;
+static const uint CONVEX_SLOT_SMALL_GROUPS = 74u;
+static const uint CONVEX_SLOT_LARGE_GROUPS = 75u;
+static const uint CONVEX_SLOT_PAIRS = 76u;
 
 // Appended after every world_step binding (Metal assigns buffer indices in
 // declaration order; WGSL uses the explicit binding). Sized maxCandidates: each

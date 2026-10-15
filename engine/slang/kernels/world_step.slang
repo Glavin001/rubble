@@ -348,6 +348,19 @@ uint gridHashSize()
 // awake pair is still found once and emitted as (min, max) like before.
 bool gridSplit() { return HOST_S(20) != 0u; }
 
+// Opt-in resting-pair carry (8ep, HOST_S(28) != 0): a pair whose bodies are
+// both at rest (static or sleeping) is re-emitted from last step's manifolds
+// instead of the broadphase, so its warm-start λ/k survive sleep and a woken
+// body does not restart its resting contacts cold. Sleepers then emit no
+// rest pairs themselves (no duplicates); awake bodies still emit theirs.
+// WGSL hosts only: Metal's HOST_S(k) reads gScratchAtomics, whose words 26+
+// hold the large-body list.
+#if defined(ENGINE_WGSL)
+bool carryRestPairs() { return HOST_S(28) != 0u; }
+#else
+bool carryRestPairs() { return false; }
+#endif
+
 uint gridHash(int x, int y, int z)
 {
     uint h = (uint)x * 73856093u ^ (uint)y * 19349663u ^ (uint)z * 83492791u;
@@ -420,7 +433,7 @@ bool bodiesJointed(uint bodyA, uint bodyB)
     return false;
 }
 
-// Collision filtering (per collider; HOST_S(23) != 0 when any filter is set).
+// Collision filtering (per collider; HOST_S(30) != 0 when any filter is set).
 // Collider.generation: categories (bits 0..15) | mask (bits 16..31); 0 means
 // "every category, collides with everything". Collider.material bits 16..31:
 // signed group; a shared positive group always collides and a shared negative
@@ -443,7 +456,7 @@ uint materialIndex(Collider c) { return c.material & 0xFFFFu; }
 void emitCandidate(uint i, uint j)
 {
     if (i == j) return;
-    if (HOST_S(23) != 0u && collidersFilteredOut(i, j)) return;
+    if (HOST_S(30) != 0u && collidersFilteredOut(i, j)) return;
     uint a = min(i, j);
     uint b = max(i, j);
     uint slot;
@@ -724,7 +737,10 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
         AADD2(gScratchAtomics[52], 1u); // non-empty other table
     }
     AXCHG3(gConstraintIds[h], entry, prev);
-    gColorLists[i] = prev;
+    // Split grids keep the next link in the AABB's spare word (8eo): queries
+    // then fetch link and bounds with one load. The legacy grid keeps gColorLists.
+    if (gridSplit()) gAabbs[base + i]._pad1 = asfloat(prev);
+    else gColorLists[i] = prev;
 }
 
 // Own cell (index 0), then the 13 neighbours lexicographically after it.
@@ -755,12 +771,12 @@ void gridScanCell(uint i, Collider col, BodyState b, Aabb box, float3 cA, float 
     {
         uint cur = link & GRID_COLLIDER_MASK;
         bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
-        link = gColorLists[cur];
+        Aabb ab = gAabbs[base + cur];
+        link = asuint(ab._pad1);
         guard++;
         if (guard == 4096u)
             AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
         if (cur == i || (ownCell && awakeEntry && cur <= i)) continue;
-        Aabb ab = gAabbs[base + cur];
         int3 candidateCell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
         if (any(candidateCell != cell)) continue;
         float rB = ab._pad0;
@@ -835,9 +851,12 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                     BodyState ob = gBodies[other.body];
                     bool otherStatic = !bodyIsDynamic(ob);
                     bool keep = true;
-                    if (sleeper && !otherStatic) keep = false;
+                    if (sleeper && (!otherStatic || carryRestPairs())) keep = false;
                     if (bodyIsSleeping(ob) && sleeper) keep = false;
-                    if (!otherStatic && j < i) keep = false;
+                    // Lower-index dynamics own the pair, unless asleep: sleepers
+                    // never query, so an awake body must emit its sleeping
+                    // neighbours at any index (as the grid path does).
+                    if (!otherStatic && j < i && !(bodyIsSleeping(ob) && !sleeper)) keep = false;
                     if (otherStatic && !bodyIsDynamic(b)) keep = false;
                     if (bodiesJointed(col.body, other.body)) keep = false;
                     if (keep && other.shape != SHAPE_PLANE)
@@ -877,6 +896,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         // Small→large owns this pair regardless of indices. Only large→large
         // needs index ordering; a large centre-cell query cannot cover its surface.
         if (queryLarge && bodyIsDynamic(ob) && j < i) continue;
+        if (sleeper && carryRestPairs() && bodyIsSleeping(ob)) continue; // carried
         Aabb ab = gAabbs[base + j];
         if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
         if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
@@ -1086,6 +1106,68 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
 }
 
 // three-avbd Stage 8b: one manifold record + contiguous contact points.
+#if defined(ENGINE_REUSE_COPY)
+// Opt-in persist work list (8em, HOST_S(22) != 0). Contacts that still need the
+// persistence pass (fresh points and reused pairs at rest) are listed, eight
+// local indices per record, in the unused top of gManifolds: manifold slots
+// never exceed the candidate count, so records [n, maxM) are free during
+// narrowphase. gCounters._pad2 counts listed contacts. Once it exceeds the
+// capacity the list is ignored and the full per-contact scan runs instead, so
+// every contact is persisted exactly once in either mode.
+bool persistListEnabled() { return HOST_S(22) != 0u; }
+
+uint persistListCapacity()
+{
+    uint maxM = HOST_S(10);
+    uint capacity = (maxM - min(ALOAD(gCounters[0].candidateCount), maxM)) * 8u;
+    // HOST_S(23) != 0 caps the list (tests exercise the overflow scan).
+    return HOST_S(23) != 0u ? min(capacity, HOST_S(23)) : capacity;
+}
+
+void persistListWrite(uint slot, uint value)
+{
+    uint rec = HOST_S(10) - 1u - (slot >> 3u);
+    switch (slot & 7u)
+    {
+    case 0u: gManifolds[rec].colliderA = value; break;
+    case 1u: gManifolds[rec].colliderB = value; break;
+    case 2u: gManifolds[rec].contactStart = value; break;
+    case 3u: gManifolds[rec].contactCount = value; break;
+    case 4u: gManifolds[rec].normal.x = asfloat(value); break;
+    case 5u: gManifolds[rec].normal.y = asfloat(value); break;
+    case 6u: gManifolds[rec].normal.z = asfloat(value); break;
+    default: gManifolds[rec].friction = asfloat(value); break;
+    }
+}
+
+uint persistListRead(uint slot)
+{
+    Manifold m = gManifolds[HOST_S(10) - 1u - (slot >> 3u)];
+    switch (slot & 7u)
+    {
+    case 0u: return m.colliderA;
+    case 1u: return m.colliderB;
+    case 2u: return m.contactStart;
+    case 3u: return m.contactCount;
+    case 4u: return asuint(m.normal.x);
+    case 5u: return asuint(m.normal.y);
+    case 6u: return asuint(m.normal.z);
+    default: return asuint(m.friction);
+    }
+}
+
+// Lists local contact indices [first, first + count) for the persistence pass.
+void persistListAppend(uint first, uint count)
+{
+    if (!persistListEnabled()) return;
+    uint k;
+    AADD3(gCounters[0]._pad2, count, k);
+    if (k + count > persistListCapacity()) return; // overflow: the scan pass runs
+    for (uint c = 0u; c < count; c++)
+        persistListWrite(k + c, first + c);
+}
+#endif
+
 void emitContactManifold(
     CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
     BoxManifold points, float margin)
@@ -1142,6 +1224,9 @@ void emitContactManifold(
         BoxManifoldPt pt = points.pts[k];
         STORE_NEW_CONTACT(curOff + cStart + k, mslot, makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu));
     }
+#if defined(ENGINE_REUSE_COPY)
+    persistListAppend(cStart, (uint)count);
+#endif
 
     Manifold mf;
     mf.colliderA = pair.colliderA;
@@ -1317,6 +1402,9 @@ void emitReusedRun(uint colA, uint colB, uint startJ, uint count, BodyState ba, 
         // pass. Encode the exact source index in the transient alive word.
         MARK_REUSED_CONTACT(curOff + cStart + k, mslot, startJ + k + 2u);
     }
+#if defined(ENGINE_REUSE_COPY)
+    if (atRest) persistListAppend(cStart, count);
+#endif
     Manifold mf;
     mf.colliderA = colA;
     mf.colliderB = colB;
@@ -2072,16 +2160,9 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
     return c;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void persist_contacts(uint3 tid : SV_DispatchThreadID)
+void persistContactAt(uint i)
 {
-    uint i = dispatchIndex(tid);
-    if (i >= ALOAD(gCounters[0].contactCount)) return;
     uint curOff = HOST_S(11);
-#if defined(ENGINE_REUSE_COPY)
-    if ((gSolverPoints[curOff + i].pairAndStick & PERSIST_FINAL) != 0u) return;
-#endif
     uint state = CONTACT_STATE(curOff + i);
     if (state == 0u) return;
     bool reused = state >= 2u;
@@ -2090,6 +2171,31 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     BodyState bb = gBodies[gColliders[c.colliderB].body];
     persistContact(i, c, reused, ba, bb);
 }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void persist_contacts(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= ALOAD(gCounters[0].contactCount)) return;
+#if defined(ENGINE_REUSE_COPY)
+    if ((gSolverPoints[HOST_S(11) + i].pairAndStick & PERSIST_FINAL) != 0u) return;
+#endif
+    persistContactAt(i);
+}
+
+#if defined(ENGINE_REUSE_COPY)
+// Persist only the listed contacts; ignored when the list overflowed.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void persist_list(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = dispatchIndex(tid);
+    // Dispatched over work slot 70, which is zero when the list overflowed.
+    if (k >= ALOAD(gCounters[0]._pad2)) return;
+    persistContactAt(persistListRead(k));
+}
+#endif
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -2645,21 +2751,11 @@ uint compactPreviousColor(uint body)
     return min(previous, free + 1u);
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void color_bodies(uint3 tid : SV_DispatchThreadID)
+// One Jones-Plassmann attempt for an uncolored body: false while a
+// higher-priority uncolored neighbour blocks it.
+bool jpTryColor(uint body)
 {
-    // Jones-Plassmann: winners take the *smallest free* colour (three-avbd), not the
-    // round index — assigning round forced O(rounds) colours and killed parallelism.
-    uint li = dispatchIndex(tid);
-    bool incremental = HOST_S(26) != 0u;
-    uint workN = incremental ? ALOAD(gCounters[0].recolorCount) : ALOAD(gCounters[0].awakeCount);
-    if (li >= workN) return;
-    uint body = incremental ? gCcdFlags[li] : gAwakeList[li];
     uint prio = jpPriority(body);
-
-    if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) return;
-
     bool blocked = false;
     uint usedLo = 0u;
     uint usedHi = 0u;
@@ -2678,7 +2774,7 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
         else if (oc < 32u) usedLo |= 1u << oc;
         else if (oc < 64u) usedHi |= 1u << (oc - 32u);
     }
-    if (blocked) return;
+    if (blocked) return false;
 
     // Smallest colour not used by already-coloured neighbours (three-avbd smallestFree).
     uint free = 63u;
@@ -2696,6 +2792,67 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     }
     ASTORE(gBodyColor[body], free);
     AMAX2(gCounters[0].colorCount, free + 1);
+    return true;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void color_bodies(uint3 tid : SV_DispatchThreadID)
+{
+    // Jones-Plassmann: winners take the *smallest free* colour (three-avbd), not the
+    // round index — assigning round forced O(rounds) colours and killed parallelism.
+    uint li = dispatchIndex(tid);
+    bool incremental = HOST_S(26) != 0u;
+    uint workN = incremental ? ALOAD(gCounters[0].recolorCount) : ALOAD(gCounters[0].awakeCount);
+    if (li >= workN) return;
+    uint body = incremental ? gCcdFlags[li] : gAwakeList[li];
+    if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) return;
+    jpTryColor(body);
+}
+
+// Opt-in local repair (8en, HOST_S(27) != 0): a small incremental repair list
+// is colored by one workgroup looping JP rounds behind storage barriers, and
+// write_work_args zeroes slot 69 so the 32 global rounds launch nothing. The
+// highest-priority uncolored body always colors, and every uncolored neighbour
+// is itself on the list, so each round progresses.
+static const uint LOCAL_COLOR_LIMIT = 4096u;
+bool localColoring()
+{
+#if defined(ENGINE_WGSL)
+    // WGSL hosts only: Metal's HOST_S(27) is a large-body list word.
+    return HOST_S(27) != 0u && HOST_S(26) != 0u &&
+        ALOAD(gCounters[0].recolorCount) <= LOCAL_COLOR_LIMIT;
+#else
+    return false;
+#endif
+}
+
+groupshared AUint gsColorRemaining;
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void color_bodies_local(uint3 lid : SV_GroupThreadID)
+{
+    uint local = lid.x;
+    if (local == 0u) gsUniformLanes = localColoring() ? 1u : 0u;
+    GROUP_SYNC();
+    if (gsUniformLanes == 0u) return;
+    uint workN = ALOAD(gCounters[0].recolorCount);
+    for (uint round = 0u; round < LOCAL_COLOR_LIMIT; round++)
+    {
+        if (local == 0u) ASTORE(gsColorRemaining, 0u);
+        GROUP_SYNC();
+        for (uint li = local; li < workN; li += 256u)
+        {
+            uint body = gCcdFlags[li];
+            if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) continue;
+            if (!jpTryColor(body)) AOR2(gsColorRemaining, 1u);
+        }
+        DeviceMemoryBarrierWithGroupSync();
+        if (local == 0u) gsUniformLanes = ALOAD(gsColorRemaining);
+        GROUP_SYNC();
+        if (gsUniformLanes == 0u) break;
+    }
 }
 
 // Adaptive 1/2/4/8 threads per body by colour size. This tuning differs from
@@ -2709,7 +2866,7 @@ uint primalLanesFor(uint bodies)
     return 8u;
 }
 
-// Degree-aware lanes (opt-in, HOST_S(22) != 0; host sizes gColorCounts to 128
+// Degree-aware lanes (opt-in, HOST_S(29) != 0; host sizes gColorCounts to 128
 // words): gColorCounts[64 + c] holds colour c's largest CSR degree. A compound
 // body with hundreds of manifolds otherwise holds its whole colour dispatch
 // while 8 lanes walk its edges serially. Widen to 16/32/64 lanes when the
@@ -2718,7 +2875,7 @@ static const uint COLOR_DEGREE_BASE = 64u;
 uint primalLanesForDegree(uint bodies, uint maxDegree)
 {
     uint lanes = primalLanesFor(bodies);
-    if (HOST_S(22) == 0u || bodies == 0u) return lanes;
+    if (HOST_S(29) == 0u || bodies == 0u) return lanes;
     uint want = lanes;
     while (want < 64u && maxDegree > want * 8u) want *= 2u;
     while (want > lanes && bodies * want > 65536u) want /= 2u;
@@ -2751,6 +2908,26 @@ void writeDispatchArgs(uint slot, uint threads)
     gIndirectArgs[slot * 3u + 2u] = 1u;
 }
 
+// Re-emit last step's resting pairs as candidates (8ep). Runs after the
+// broadphase and before narrowphase overwrites gManifolds; dispatched over
+// work slot 72 (HOST_S(13) = previous GPU manifold count). Narrowphase reuses
+// them through the at-rest path, which copies the contacts unchanged.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void carry_rest_pairs(uint3 tid : SV_DispatchThreadID)
+{
+    if (!carryRestPairs() || HOST_S(17) == 0u) return;
+    uint m = dispatchIndex(tid);
+    if (m >= min(HOST_S(13), HOST_S(10))) return;
+    Manifold mf = gManifolds[m];
+    if (mf.contactCount == 0u) return;
+    BodyState ba = gBodies[gColliders[mf.colliderA].body];
+    BodyState bb = gBodies[gColliders[mf.colliderB].body];
+    if (!bodyIsDynamic(ba) && !bodyIsDynamic(bb)) return;
+    if (!contactPairAtRest(ba, bb)) return;
+    emitCandidate(mf.colliderA, mf.colliderB);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void write_work_args(uint3 tid : SV_DispatchThreadID)
@@ -2764,9 +2941,24 @@ void write_work_args(uint3 tid : SV_DispatchThreadID)
     writeDispatchArgs(68u, HOST_S(14) != 0u ? min(HOST_S(13), HOST_S(10))
                                             : min(HOST_S(7), HOST_S(3)));
     // Opt-in keeps hosts without a history row / slot 69 compatible.
-    if (HOST_S(26) != 0u) writeDispatchArgs(69u, ALOAD(gCounters[0].recolorCount));
+    // Local repair (HOST_S(27)) colors small lists itself; slot 69 then stays empty.
+    if (HOST_S(26) != 0u)
+        writeDispatchArgs(69u, localColoring() ? 0u : ALOAD(gCounters[0].recolorCount));
+    // Resting-pair carry (8ep): previous manifolds, published by the host.
+    if (carryRestPairs()) writeDispatchArgs(72u, min(HOST_S(13), HOST_S(10)));
     // Slot 73: previous contacts, for whole-step manifold reuse (any hash mode).
     writeDispatchArgs(73u, min(HOST_S(7), HOST_S(3)));
+#if defined(ENGINE_REUSE_COPY)
+    // Persist work list (8em): slot 70 = listed contacts, slot 71 = the full
+    // scan, which runs only when the list overflowed.
+    if (persistListEnabled())
+    {
+        uint listed = ALOAD(gCounters[0]._pad2);
+        bool complete = listed <= persistListCapacity();
+        writeDispatchArgs(70u, complete ? listed : 0u);
+        writeDispatchArgs(71u, complete ? 0u : min(ALOAD(gCounters[0].contactCount), HOST_S(3)));
+    }
+#endif
 }
 
 // Write Metal indirect threadgroup counts for each colour (0 groups ⇒ skipped).
@@ -2782,7 +2974,7 @@ void write_color_args(uint3 tid : SV_DispatchThreadID)
     uint n = ALOAD(gColorCounts[c]);
     if (n != 0u) AMAX2(gCounters[0].colorCount, c + 1u);
     uint lanes = primalLanesForDegree(
-        n, HOST_S(22) != 0u ? ALOAD(gColorCounts[COLOR_DEGREE_BASE + c]) : 0u);
+        n, HOST_S(29) != 0u ? ALOAD(gColorCounts[COLOR_DEGREE_BASE + c]) : 0u);
     uint threads = n * lanes;
     writeDispatchArgs(c, threads);
 }
@@ -3356,7 +3548,7 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
     // memory; the WGSL post-pass rewrites the read as workgroupUniformLoad.
     if (local == 0u)
         gsUniformLanes = primalLanesForDegree(
-            count, HOST_S(22) != 0u ? SOLVE_COUNT(COLOR_DEGREE_BASE + color) : 0u);
+            count, HOST_S(29) != 0u ? SOLVE_COUNT(COLOR_DEGREE_BASE + color) : 0u);
     GROUP_SYNC();
     uint lanes = gsUniformLanes;
     uint threads = count * lanes;

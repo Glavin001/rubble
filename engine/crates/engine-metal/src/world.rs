@@ -75,7 +75,7 @@ pub struct MetalWorld {
     grid_levels: u32,
     /// (collider count, base cell, levels): recomputed only when colliders change.
     grid_cache: Option<(u32, f32, u32)>,
-    /// Any collider carries a collision filter (scratch s[21]).
+    /// Any collider carries a collision filter (scratch s[30]).
     has_filters: bool,
     /// The last step's manifolds still describe the scene (whole-step reuse).
     manifolds_valid: bool,
@@ -175,7 +175,7 @@ impl MetalWorld {
         }
         // Colour slots 0..63, work slots 64..69, convex slots 70..72.
         // Colour slots 0..63, work 64..69, convex 70..72, previous contacts 73.
-        let indirect_args = alloc_u32(d, capacity.max_colors.max(74) * 3);
+        let indirect_args = alloc_u32(d, capacity.max_colors.max(77) * 3);
         let convex_work = alloc::<[u32; 8]>(d, capacity.max_candidates);
         // Every hull arena starts with the unit cube reused by box/hull pairs.
         {
@@ -641,11 +641,11 @@ impl MetalWorld {
         s[19] = 0; // reuse hash miss
         s[20] = 0; // split broadphase grids (WebGPU opt-in; off on Metal)
         s[21] = 0; // two-pass narrowphase tail cap (unused on Metal)
-        s[22] = u32::from(self.has_convex); // degree-aware primal lanes for convex/compound scenes
-        s[23] = u32::from(self.has_filters); // collision filters present
         s[21] = 0; // update_refs noRef
         s[22] = 0; // update_refs linMove
         s[23] = 0; // update_refs angMove
+        s[29] = u32::from(self.has_convex); // degree-aware primal lanes for convex/compound scenes
+        s[30] = u32::from(self.has_filters); // collision filters present
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
@@ -666,7 +666,9 @@ impl MetalWorld {
             _pad0: 0,
             convex_sat_small: 0,
             narrowphase_deferred: 0,
+            _pad2: 0,
             convex_sat_large: 0,
+            _pad3: [0; 3],
         };
         if !clear_transient {
             c = self.last_counters;
@@ -867,9 +869,9 @@ impl MetalWorld {
             encoder.set_buffer(27, Some(&self.convex_work), 0);
             self.dispatch_work(&encoder, "convex_classify", 64, 0);
             self.dispatch(&encoder, "convex_write_args", 64);
-            self.dispatch_work(&encoder, "convex_sat_small", 70, 0);
-            self.dispatch_work(&encoder, "convex_sat_large", 71, 0);
-            self.dispatch_work(&encoder, "convex_manifold", 72, 0);
+            self.dispatch_work(&encoder, "convex_sat_small", 74, 0);
+            self.dispatch_work(&encoder, "convex_sat_large", 75, 0);
+            self.dispatch_work(&encoder, "convex_manifold", 76, 0);
             encoder.set_buffer(27, Some(&self.solver_points), 0);
         }
         }

@@ -43,7 +43,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       s[20] = b(cap.maxBodies, 4);
       s[21] = 64 * 4;
       s[22] = 96 * PASS_ALIGN;
-      s[23] = b(Math.max(cap.maxColors, 74) * 3, 4); // colours, work 64..69, convex 70..72, prev 73
+      s[23] = b(Math.max(cap.maxColors, 77) * 3, 4); // colours, work 64..73, convex 74..76
       s[24] = b(cap.maxColliders, 80);
       s[25] = b(cap.maxCandidates, 32);
       s[26] = b(cap.maxBodies, 32);
@@ -244,7 +244,8 @@ params.gridCellSize=grid.base;
     await new Promise((r) => setTimeout(r, 0));
 
 
-const staging=device.createBuffer({size:64,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+const COUNTER_BYTES=80; // GpuCounters: 20 words (convexLarge at byte 64)
+const staging=device.createBuffer({size:COUNTER_BYTES,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
 const snapshot=device.createBuffer({size:scene.bodies.length*112,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
 const bodyCount=bodies.length,colliderCount=colliders.length,sleepRounds=Math.max(0,Math.min(16,cfg.sleepRounds??8));
 let last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0},steps=0,parity=0,shots=0;
@@ -256,14 +257,14 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     const colorCountsBytes = colorCountWords * 4;
     // One queue upload + GPU copies into the four step buffers (cheaper than 4 writeBuffers).
     const hostUpload = device.createBuffer({
-      size: 256 + 256 + 64 + colorCountsBytes,
+      size: 256 + 256 + 96 + colorCountsBytes,
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    const hostUploadCpu = new ArrayBuffer(256 + 256 + 64 + colorCountsBytes);
+    const hostUploadCpu = new ArrayBuffer(256 + 256 + 96 + colorCountsBytes);
     const hostScratchView = new Uint32Array(hostUploadCpu, 0, 64);
     const hostParamsView = new Uint8Array(hostUploadCpu, 256, 208);
-    const hostCountersView = new Uint32Array(hostUploadCpu, 512, 16);
-    const hostColorsView = new Uint32Array(hostUploadCpu, 576, colorCountWords);
+    const hostCountersView = new Uint32Array(hostUploadCpu, 512, COUNTER_BYTES / 4);
+    const hostColorsView = new Uint32Array(hostUploadCpu, 608, colorCountWords);
     // Previous contacts bound the warm hash; host field and clear dispatch must agree.
     const hashN = Math.min(nextPow2(Math.max(cap.maxContacts * 4, 1024)), csrBase, MAX_WARM_HASH);
 
@@ -285,8 +286,8 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       s[16] = gridHashWords;
       s[17] = initialized ? Math.max(1, steps) : 0;
       s[18] = grid.levels;   // hierarchical broadphase levels
-      s[22] = 1;             // degree-aware primal lanes (bufs[17] holds 128 words)
-      s[23] = hasFilters ? 1 : 0; // collision filters present
+      s[29] = 1;             // degree-aware primal lanes (bufs[17] holds 128 words)
+      s[30] = hasFilters ? 1 : 0; // collision filters present
       s[24] = csrBase;
       return s;
     }
@@ -307,8 +308,8 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       // Keep the previous GPU count before clearing counters. A benchmark queues
       // ten steps between CPU readbacks; last.contact is stale within that batch.
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
-      enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 64);
-      enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
+      enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, COUNTER_BYTES);
+      enc.copyBufferToBuffer(hostUpload, 608, bufs[17], 0, colorCountsBytes);
     }
 
     function groups(threads) {
@@ -353,10 +354,10 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
         dispWork(pass, 'convex_classify', 64);
         disp(pass, 'convex_write_args', 64);
         pass = phase('convexClassify');
-        dispWork(pass, 'convex_sat_small', 70);
-        dispWork(pass, 'convex_sat_large', 71);
+        dispWork(pass, 'convex_sat_small', 74);
+        dispWork(pass, 'convex_sat_large', 75);
         pass = phase('convexSat');
-        dispWork(pass, 'convex_manifold', 72);
+        dispWork(pass, 'convex_manifold', 76);
         pass = phase('convexManifold');
       }
       return pass;
@@ -433,7 +434,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       dispWork(pass, 'sleep_island_commit', 67);
       if (beginPass) phase('sleep');
       pass.end();
-      if (readback) enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
+      if (readback) enc.copyBufferToBuffer(bufs[7], 0, staging, 0, COUNTER_BYTES);
     }
 
     let manifoldsValid = false;
@@ -449,12 +450,12 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
 
     async function readCounters() {
       const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
+      enc.copyBufferToBuffer(bufs[7], 0, staging, 0, COUNTER_BYTES);
       device.queue.submit([enc.finish()]);
       await staging.mapAsync(GPUMapMode.READ);
       const c = new Uint32Array(staging.getMappedRange().slice(0));
       staging.unmap();
-      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], convexSmall: c[11], convexLarge: c[15] };
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], convexSmall: c[11], convexLarge: c[16] };
     }
 
 

@@ -192,7 +192,7 @@ fn run_mode(scene: &Scene, candidates: &[CandidatePair], mode: u32, grid_words: 
     scratch[16] = grid_words;
     scratch[17] = if mode >= 1 { 0 } else { 1 }; // first step builds sleeping bounds
     scratch[18] = if mode >= 1 { levels } else { 0 };
-    scratch[23] = u32::from(scene.colliders.iter().any(CollisionFilter::is_set));
+    scratch[30] = u32::from(scene.colliders.iter().any(CollisionFilter::is_set)); // filters (HOST_S(30))
     bytes.extend_from_slice(bytemuck::cast_slice(&scratch));
     bytes.extend_from_slice(bytemuck::cast_slice(&scene.bodies));
     bytes.extend_from_slice(bytemuck::cast_slice(&scene.colliders));
@@ -208,10 +208,11 @@ fn run_mode(scene: &Scene, candidates: &[CandidatePair], mode: u32, grid_words: 
     let status = Command::new(bin).arg(&input).arg(&output).output().unwrap();
     assert!(status.status.success(), "harness failed: {}", String::from_utf8_lossy(&status.stderr));
     let out = std::fs::read(&output).unwrap();
-    let counters: StepCounters = *bytemuck::from_bytes(&out[..64]);
+    let header = std::mem::size_of::<StepCounters>();
+    let counters: StepCounters = bytemuck::pod_read_unaligned(&out[..header]);
     let nc = counters.contact_count as usize;
     let nm = counters.manifold_count as usize;
-    let mut at = 64;
+    let mut at = header;
     let contacts = bytemuck::cast_slice::<u8, Contact>(&out[at..at + nc * 128]).to_vec();
     at += nc * 128;
     let manifolds = bytemuck::cast_slice::<u8, Manifold>(&out[at..at + nm * 32]).to_vec();

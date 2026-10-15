@@ -268,8 +268,12 @@ pub struct StepCounters {
     pub _pad0: u32,
     /// Two-pass narrowphase deferred pairs (GPU ABI byte 56).
     pub narrowphase_deferred: u32,
-    /// Convex SAT pairs in the large bucket (GPU ABI byte 60).
+    /// Persist work-list length (GPU ABI byte 60).
+    pub _pad2: u32,
+    /// Convex SAT pairs in the large bucket (GPU ABI byte 64).
     pub convex_sat_large: u32,
+    /// Pads the block to 80 bytes (GPU ABI bytes 68..79).
+    pub _pad3: [u32; 3],
 }
 
 impl Default for StepCounters {
@@ -307,7 +311,7 @@ mod tests {
         assert_eq!(size_of::<Collider>(), 64);
         assert_eq!(size_of::<Contact>(), 128);
         assert_eq!(size_of::<Manifold>(), 32);
-        assert_eq!(size_of::<StepCounters>(), 64);
+        assert_eq!(size_of::<StepCounters>(), 80);
         assert_eq!(align_of::<BodyState>(), 4);
     }
 }

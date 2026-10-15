@@ -493,7 +493,8 @@ fn broadphase_linked_buckets_case(buckets: usize, split: bool) {
         s16 + 4 * 4,
         bytemuck::bytes_of(&u32::from(split)),
     );
-    let tables = if split { 2 } else { 1 };    const CANARY: u32 = 0xfedc_ba98;
+    let tables = if split { 2 } else { 1 };
+    const CANARY: u32 = 0xfedc_ba98;
     sim.queue.write_buffer(
         &sim.bufs[15],
         N as u64 * 4,
@@ -507,20 +508,33 @@ fn broadphase_linked_buckets_case(buckets: usize, split: bool) {
     sim.queue.submit([enc.finish()]);
     // Sleepers keep their last AABB, so refit awake and then put every third body to sleep.
     for id in (0..N).filter(|&id| sleeping(id)) {
-        let offset = (id * std::mem::size_of::<BodyState>()
-            + std::mem::offset_of!(BodyState, flags)) as u64;
-        sim.queue.write_buffer(&sim.bufs[0], offset, bytemuck::bytes_of(&5u32));
+        let offset =
+            (id * std::mem::size_of::<BodyState>() + std::mem::offset_of!(BodyState, flags)) as u64;
+        sim.queue
+            .write_buffer(&sim.bufs[0], offset, bytemuck::bytes_of(&5u32));
     }
     let mut enc = sim.device.create_command_encoder(&Default::default());
     {
         let mut pass = enc.begin_compute_pass(&Default::default());
-        sim.disp(&mut pass, "broadphase_clear", (buckets * tables) as u64, None);
+        sim.disp(
+            &mut pass,
+            "broadphase_clear",
+            (buckets * tables) as u64,
+            None,
+        );
         sim.disp(&mut pass, "broadphase_insert", N as u64, None);
         sim.disp(&mut pass, "broadphase_query", N as u64, None);
     }
     sim.queue.submit([enc.finish()]);
     let heads: Vec<u32> = download(&sim, 14, 0, buckets * tables);
-    let links: Vec<u32> = download(&sim, 15, 0, N);
+    // Split grids keep each collider's next link in its AABB's spare word (8eo).
+    let links: Vec<u32> = if split {
+        let base = u64::from(sim.capacity.max_bodies) * 32;
+        let words: Vec<u32> = download(&sim, 9, base, N * 8);
+        words.chunks(8).map(|aabb| aabb[7]).collect()
+    } else {
+        download(&sim, 15, 0, N)
+    };
     let mut seen = vec![false; N];
     for slot in 0..buckets * tables {
         let mut encoded = heads[slot];
@@ -862,8 +876,17 @@ fn persistent_csr_from_packed_pairs_matches_manifold_endpoints() {
     // Collider c belongs to body PERM[c]: reading collider ids as bodies fails.
     const PERM: [u32; BODIES as usize] = [0, 7, 3, 11, 5, 9, 1, 10, 2, 6, 4, 8];
     let edges: Vec<(u32, u32, u32)> = vec![
-        (1, 2, 4), (2, 3, 4), (0, 4, 1), (5, 6, 0), (6, 7, 2), (7, 8, 4), (3, 9, 1),
-        (9, 10, 4), (10, 11, 3), (1, 11, 2), (4, 8, 4),
+        (1, 2, 4),
+        (2, 3, 4),
+        (0, 4, 1),
+        (5, 6, 0),
+        (6, 7, 2),
+        (7, 8, 4),
+        (3, 9, 1),
+        (9, 10, 4),
+        (10, 11, 3),
+        (1, 11, 2),
+        (4, 8, 4),
     ];
     let mut results = Vec::new();
     for persistent in [false, true] {
@@ -952,10 +975,16 @@ fn persistent_csr_from_packed_pairs_matches_manifold_endpoints() {
         for e in offsets[body]..offsets[body + 1] {
             let (a, b, _) = edges[ids[e as usize] as usize];
             let (ba, bb) = (PERM[a as usize], PERM[b as usize]);
-            assert!(ba as usize == body || bb as usize == body,
-                "body {body}, edge {e}: adjacency lists manifold {} that does not touch it", ids[e as usize]);
-            assert_eq!(partners[e as usize], if ba as usize == body { bb } else { ba },
-                "body {body}, edge {e}: partner array must name the other body");
+            assert!(
+                ba as usize == body || bb as usize == body,
+                "body {body}, edge {e}: adjacency lists manifold {} that does not touch it",
+                ids[e as usize]
+            );
+            assert_eq!(
+                partners[e as usize],
+                if ba as usize == body { bb } else { ba },
+                "body {body}, edge {e}: partner array must name the other body"
+            );
         }
     }
     assert_eq!(results[0], results[1],
@@ -2672,6 +2701,118 @@ fn bulk_scene_upload_preserves_append_indices_and_previous_poses() {
     assert_eq!(sim.collider_count, 3);
 }
 
+/// Local incremental repair (8en): one workgroup looping JP rounds must give
+/// exactly the colors of the 32 global rounds (JP is schedule-independent: a
+/// body colors once every higher-priority neighbour has), valid and complete,
+/// and must leave slot 69 empty so the global rounds launch nothing.
+#[test]
+fn local_color_repair_matches_global_rounds_on_a_lattice() {
+    const NX: u32 = 12;
+    const NY: u32 = 12;
+    const NZ: u32 = 4;
+    const N: u32 = NX * NY * NZ; // 576: every body on the repair list
+    let id = |x: u32, y: u32, z: u32| x + NX * (y + NY * z);
+    let mut adjacency: Vec<Vec<u32>> = vec![Vec::new(); N as usize];
+    for z in 0..NZ {
+        for y in 0..NY {
+            for x in 0..NX {
+                let a = id(x, y, z);
+                for (dx, dy, dz) in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)] {
+                    let (bx, by, bz) = (x + dx, y + dy, z + dz);
+                    if bx < NX && by < NY && bz < NZ {
+                        let b = id(bx, by, bz);
+                        adjacency[a as usize].push(b);
+                        adjacency[b as usize].push(a);
+                    }
+                }
+            }
+        }
+    }
+    let mut results = Vec::new();
+    for local in [false, true] {
+        let mut sim = WgpuSim::new(WorldCapacity {
+            max_bodies: 1024,
+            max_colliders: 1024,
+            max_contacts: 16384,
+            max_candidates: 16384,
+            ..WorldCapacity::small()
+        })
+        .expect("GPU adapter required for local color repair");
+        let bodies: Vec<BodyState> = (0..N)
+            .map(|_| BodyState {
+                orientation: [0.0, 0.0, 0.0, 1.0],
+                inv_mass: 1.0,
+                flags: 9,
+                ..BodyState::zeroed()
+            })
+            .collect();
+        sim.add_bodies(&bodies);
+        let mut offsets = vec![0u32];
+        let mut ids = Vec::new();
+        let mut partners = Vec::new();
+        for (body, list) in adjacency.iter().enumerate() {
+            let mut sorted = list.clone();
+            sorted.sort_unstable();
+            for &other in &sorted {
+                ids.push((body as u32).min(other) * N + (body as u32).max(other));
+                partners.push(other);
+            }
+            offsets.push(ids.len() as u32);
+        }
+        let csr_offset = u64::from(constraint_id_words(&sim.capacity)) * 4;
+        sim.queue
+            .write_buffer(&sim.bufs[14], 0, bytemuck::cast_slice(&ids));
+        sim.queue
+            .write_buffer(&sim.bufs[10], 0, bytemuck::cast_slice(&partners));
+        sim.queue
+            .write_buffer(&sim.bufs[14], csr_offset, bytemuck::cast_slice(&offsets));
+        let awake: Vec<u32> = (0..N).collect();
+        sim.queue
+            .write_buffer(&sim.bufs[11], 0, bytemuck::cast_slice(&awake));
+        sim.local_repair = local;
+        sim.steps_done = 1; // no reset: zero history invalidates every body
+        sim.write_host_uniforms();
+        let counters = StepCounters {
+            body_count: N,
+            collider_count: 0,
+            awake_count: N,
+            ..StepCounters::default()
+        };
+        sim.queue.write_buffer(&sim.bufs[7], 0, bytes_of(&counters));
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            sim.disp(&mut pass, "csr_sort", u64::from(N), None);
+            sim.disp(&mut pass, "init_colors", u64::from(N), None);
+            sim.disp(&mut pass, "write_work_args", 64, None);
+            if local {
+                sim.disp(&mut pass, "color_bodies_local", 64, None);
+            }
+            for _ in 0..32 {
+                sim.disp_work(&mut pass, "color_bodies", 69, None);
+            }
+        }
+        sim.queue.submit([enc.finish()]);
+        let pending = download::<StepCounters>(&sim, 7, 0, 1)[0]._pad0;
+        assert_eq!(pending, N, "local={local}: every body must be on the repair list");
+        let args: Vec<u32> = download(&sim, 23, 69 * 12, 1);
+        assert_eq!(args[0], if local { 0 } else { (N + 63) / 64 },
+            "local={local}: slot 69 must be empty exactly when the local pass owns the repair");
+        let colors: Vec<u32> = download(&sim, 12, 0, N as usize);
+        for (body, list) in adjacency.iter().enumerate() {
+            assert!(colors[body] < 64, "local={local}, body {body}: left uncolored");
+            for &other in list {
+                assert_ne!(colors[body], colors[other as usize],
+                    "local={local}: adjacent bodies {body} and {other} share color {}", colors[body]);
+            }
+        }
+        results.push(colors);
+    }
+    let diff = (0..N as usize).find(|&b| results[0][b] != results[1][b]);
+    assert!(diff.is_none(),
+        "body {:?}: local repair chose a different color than the global rounds; JP must be schedule-independent", diff);
+}
+
 #[test]
 fn incremental_coloring_reuses_valid_history_and_repairs_new_conflicts() {
     let mut sim = WgpuSim::new(WorldCapacity {
@@ -3520,17 +3661,28 @@ fn persistent_fused_warmstart_preserves_history_and_refreshes_pair_cache() {
 /// tags as the separate persistence pass.
 #[test]
 fn reuse_copy_matches_separate_persistence_semantics() {
-    mixed_contact_reuse_fixture_mode(true, false, true, None);
+    mixed_contact_reuse_fixture_mode(true, false, true, None, None);
 }
 
 /// Two-pass narrowphase (`np=split`): the reuse pass defers fresh pairs to the
 /// candidate tail and the shape pass emits them, so the result must match the
 /// fused copy exactly up to manifold order. Limits 0 (whole tail), 3 (most fresh
 /// pairs fall back inline) and 1 cover the deferred, mixed and inline paths.
+/// Persist work list (`persist=list`): only fresh points and reused pairs at
+/// rest are persisted, from the list, with the same results as the full scan.
+/// Limit 0 keeps the whole region; limit 5 overflows, so the list is ignored
+/// and the scan pass (slot 71) must persist every point exactly once.
+#[test]
+fn persist_list_matches_full_scan_and_falls_back_on_overflow() {
+    for limit in [0u32, 5] {
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(0), Some(limit));
+    }
+}
+
 #[test]
 fn two_pass_narrowphase_matches_fused_reuse_copy() {
     for limit in [0u32, 3, 1] {
-        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit));
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit), None);
     }
 }
 
@@ -3742,7 +3894,7 @@ fn persistent_dual_updates_hot_state_without_corrupting_metadata_or_history() {
 }
 
 fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
-    mixed_contact_reuse_fixture_mode(persistent, fused, false, None);
+    mixed_contact_reuse_fixture_mode(persistent, fused, false, None, None);
 }
 
 fn mixed_contact_reuse_fixture_mode(
@@ -3750,6 +3902,7 @@ fn mixed_contact_reuse_fixture_mode(
     fused: bool,
     copy: bool,
     np_split: Option<u32>,
+    persist_list: Option<u32>,
 ) {
     let mut sim = if persistent {
         WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
@@ -3855,10 +4008,12 @@ fn mixed_contact_reuse_fixture_mode(
     for parity in 0..2 {
         for reuse in [false, true] {
             let context = format!(
-                "persistent={persistent}, fused={fused}, copy={copy}, np_split={np_split:?}, parity={parity}, reuse={reuse}"
+                "persistent={persistent}, fused={fused}, copy={copy}, np_split={np_split:?}, persist_list={persist_list:?}, parity={parity}, reuse={reuse}"
             );
             sim.contacts_parity = parity;
             sim.np_defer_limit = np_split.unwrap_or(0);
+            sim.persist_list = persist_list.is_some();
+            sim.persist_list_limit = persist_list.unwrap_or(0);
             sim.params.flags = (sim.params.flags & !1) | u32::from(reuse);
             sim.write_host_uniforms();
             let cur = parity * sim.capacity.max_contacts;
@@ -3900,8 +4055,18 @@ fn mixed_contact_reuse_fixture_mode(
                     None,
                 );
                 if np_split.is_some() {
-                    sim.disp(&mut pass, "narrowphase_defer_copy_persistent", count as u64, None);
-                    sim.disp(&mut pass, "narrowphase_fresh_copy_persistent", count as u64, None);
+                    sim.disp(
+                        &mut pass,
+                        "narrowphase_defer_copy_persistent",
+                        count as u64,
+                        None,
+                    );
+                    sim.disp(
+                        &mut pass,
+                        "narrowphase_fresh_copy_persistent",
+                        count as u64,
+                        None,
+                    );
                 } else {
                     sim.disp(
                         &mut pass,
@@ -3914,19 +4079,24 @@ fn mixed_contact_reuse_fixture_mode(
                         None,
                     );
                 }
-                sim.disp(&mut pass, "write_work_args", 64, None);
-                sim.disp_work(
-                    &mut pass,
-                    if fused {
-                        "persist_manifolds_compact"
-                    } else if copy {
-                        "persist_contacts_copy_persistent"
-                    } else {
-                        "persist_contacts"
-                    },
-                    if fused { 66 } else { 65 },
-                    None,
-                );
+                sim.disp(&mut pass, sim.work_args_entry(), 64, None);
+                if persist_list.is_some() {
+                    sim.disp_work(&mut pass, "persist_list_copy_persistent", 70, None);
+                    sim.disp_work(&mut pass, "persist_contacts_copy_persistent", 71, None);
+                } else {
+                    sim.disp_work(
+                        &mut pass,
+                        if fused {
+                            "persist_manifolds_compact"
+                        } else if copy {
+                            "persist_contacts_copy_persistent"
+                        } else {
+                            "persist_contacts"
+                        },
+                        if fused { 66 } else { 65 },
+                        None,
+                    );
+                }
             }
             sim.queue.submit([enc.finish()]);
             let c = download::<StepCounters>(&sim, 7, 0, 1)[0];
@@ -3934,6 +4104,18 @@ fn mixed_contact_reuse_fixture_mode(
                 c.overflow_flags, 0,
                 "{context}: fixture must complete without overflow"
             );
+            if let Some(limit) = persist_list {
+                // Fresh contacts and reused pairs at rest are listed (ABI byte 60);
+                // every reused pair here moves, so only fresh pairs' points count.
+                let listed: u32 = (1..count)
+                    .filter(|id| !reuse || id % 5 == 0 || id % 4 == 0)
+                    .map(|id| if id % 3 == 1 { 1 } else { 4 })
+                    .sum();
+                assert_eq!(c._pad2, listed,
+                    "{context}: the persist list must hold exactly the points still awaiting persistence");
+                assert!(limit == 0 || listed > limit,
+                    "{context}: the capped case must overflow, or the scan fallback goes untested");
+            }
             if np_split.is_some() {
                 // Every pair the reuse pass rejects is counted once (ABI byte 56),
                 // whether it was deferred or tested inline past the limit.
@@ -4020,6 +4202,11 @@ fn mixed_contact_reuse_fixture_mode(
                     }
                     assert_eq!(point._pad[1].to_bits(), if reused { 20 } else { 22 },
                         "{context}, pair {id}: stale-generation and cold pairs must regenerate; eligible pairs must retain their generation");
+                    // Persistence floors every point's normal penalty at m/dt² (unit
+                    // masses, static ground): an unpersisted point keeps its raw row.
+                    let floor = 1.0 / (sim.params.dt * sim.params.dt);
+                    assert!(point.k_n >= floor * (1.0 - 1e-6),
+                        "{context}, pair {id}, feature {:#x}: normal penalty {} below the m/dt² floor {floor}; this point skipped persistence", point.feature_id, point.k_n);
                     assert!(
                         point
                             .normal
@@ -4578,4 +4765,144 @@ fn convex_pairs_bypass_the_two_pass_narrowphase_tail() {
     assert!(single.manifold_count > 10);
     assert!(split.convex_sat_small + split.convex_sat_large > 0 || !b.is_empty(), "hull pairs reached the convex stages");
     assert_eq!(a.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(), b.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(), "same manifold pairs");
+}
+
+/// Settled stacks fall asleep; waking one body must not jolt it or cascade.
+/// Sleepers neither query the broadphase nor keep their resting contacts, so a
+/// woken body used to restart those contacts cold, sag, and wake its
+/// neighbours in a wave (seen as ring110k&sleep=on churning).
+fn wake_disturbance(nx: u32, nz: u32, height: u32, carry: bool) -> (u32, f32, u32) {
+    wake_disturbance_mode(nx, nz, height, carry, true)
+}
+
+/// `sleep = false` is the control: the same settle time and window, never asleep.
+fn wake_disturbance_mode(nx: u32, nz: u32, height: u32, carry: bool, sleep: bool) -> (u32, f32, u32) {
+    let columns = nx * nz;
+    let bodies = columns * height + 1;
+    let mut sim = WgpuSim::new_with_persistent_contacts(WorldCapacity {
+        max_bodies: 4096,
+        max_colliders: 4096,
+        max_contacts: 1 << 16,
+        max_joints: 64,
+        max_candidates: 1 << 16,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .expect("GPU adapter required for sleep/wake stability");
+    // Browser ring/gables defaults; the 3-column case keeps the per-contact
+    // warm hash of the small demo scenes (carry must not need manifold insert).
+    sim.reuse_copy = true;
+    sim.np_split = true;
+    sim.persist_list = true;
+    sim.manifold_hash_insert = columns > 3;
+    sim.warm_record_hash = columns > 3;
+    sim.local_repair = true;
+    sim.carry_rest = carry;
+    let mut params = AvbdParams::default();
+    params.iterations = 4;
+    params.flags |= 1; // reuse contacts
+    if !sleep {
+        params.sleep_time = 1.0e6;
+    }
+    sim.set_params(params);
+    sim.add_body(BodyState {
+        position: [0.0, -24.5, 0.0],
+        orientation: [0.0, 0.0, 0.0, 1.0],
+        ..BodyState::zeroed()
+    });
+    sim.add_collider(Collider {
+        body: 0,
+        shape: ShapeType::Box as u32,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [50.0, 25.0, 50.0, 50.0],
+        ..Collider::zeroed()
+    });
+    for c in 0..columns {
+        for y in 0..height {
+            let pos = [(c % nx) as f32 * 1.5, 0.5 + y as f32, (c / nx) as f32 * 1.5];
+            let id = sim.add_body(BodyState {
+                position: pos,
+                orientation: [0.0, 0.0, 0.0, 1.0],
+                inv_mass: 1.0,
+                inv_inertia: [6.0; 3],
+                flags: 9,
+                initial_pos: pos,
+                initial_rot: [0.0, 0.0, 0.0, 1.0],
+                ..BodyState::zeroed()
+            });
+            sim.add_collider(Collider {
+                body: id,
+                shape: ShapeType::Box as u32,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: [0.5, 0.5, 0.5, 0.8660254],
+                ..Collider::zeroed()
+            });
+        }
+    }
+    let mut settled = false;
+    for _ in 0..600 {
+        if sim.step().expect("step").awake_count == 0 {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled || !sleep, "{bodies} bodies never fell asleep");
+    let before = sim.download_bodies();
+    // Wake the top box of the first column only.
+    let top = height as usize; // body 0 is ground, first column is 1..=height
+    let mut woke = before[top];
+    woke.flags = 9;
+    woke.sleep_timer = 0.0;
+    let offset = (top * std::mem::size_of::<BodyState>()) as u64;
+    sim.queue.write_buffer(&sim.bufs[0], offset, bytes_of(&woke));
+    sim.last_counters.awake_count = 1;
+    let mut max_awake = 0u32;
+    let mut max_disp = 0.0f32;
+    let mut woke_others = 0u32;
+    for _ in 0..90 {
+        let c = sim.step().expect("step");
+        max_awake = max_awake.max(c.awake_count);
+        let now = sim.download_bodies();
+        if std::env::var("WAKE_DEBUG").is_ok() {
+            eprintln!("step contacts={} manifolds={} candidates={} awake={} top y {:.4} -> {:.4} flags {}",
+                c.contact_count, c.manifold_count, c.candidate_count, c.awake_count,
+                before[top].position[1], now[top].position[1], now[top].flags);
+        }
+        for b in 1..now.len() {
+            let d: f32 = (0..3)
+                .map(|k| (now[b].position[k] - before[b].position[k]).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            max_disp = max_disp.max(d);
+        }
+        if c.awake_count == 0 {
+            break;
+        }
+    }
+    let now = sim.download_bodies();
+    for b in 1..now.len() {
+        if b != top && now[b].sleep_timer != before[b].sleep_timer {
+            woke_others += 1;
+        }
+    }
+    (max_awake, max_disp, woke_others)
+}
+
+#[test]
+fn waking_a_sleeping_stack_does_not_jolt_or_cascade() {
+    // 3 columns use the exact small-scene broadphase; 64 columns (577 colliders) the grid.
+    for (nx, nz) in [(3u32, 1u32), (8, 8)] {
+        // Control: the same stack never sleeps and creeps a little over the window.
+        let (_, creep, _) = wake_disturbance_mode(nx, nz, 9, true, false);
+        let (max_awake, max_disp, woke_others) = wake_disturbance(nx, nz, 9, true);
+        let (_, cold_disp, _) = wake_disturbance(nx, nz, 9, false);
+        eprintln!("wake {nx}x{nz}: carry {max_disp} m (awake {max_awake}, others woken {woke_others}), cold restart {cold_disp} m, never-asleep creep {creep} m");
+        let limit = 1.5 * creep + 5e-5;
+        assert_eq!(woke_others, 0, "{nx}x{nz}: waking one top box woke {woke_others} sleeping neighbours");
+        assert!(max_disp <= limit,
+            "{nx}x{nz}: waking one top box moved bodies {max_disp} m, more than 1.5x the never-asleep creep {creep} m; resting contacts lost their warm start while asleep");
+        assert!(cold_disp > limit,
+            "{nx}x{nz}: dropping resting pairs ({cold_disp} m) no longer exceeds the limit {limit} m; this test no longer discriminates");
+    }
 }
