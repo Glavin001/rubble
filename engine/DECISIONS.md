@@ -239,3 +239,32 @@ Changes:
 - The small-path ownership rule now exempts sleeping partners.
 
 The same native ring now settles to zero awake bodies by step ~210, with no re-wakes. A new GPU test wakes one top box in 3 columns (small path, per-contact hash) and in 64 columns (grid, record hash). With carry it moves 0.51 mm, against 0.80 mm cold and 0.40 mm creep for a stack that never sleeps. The test requires ≤1.5× the creep plus 50 µm, no woken neighbours, and the cold restart failing the limit. Browser default is `rest=carry` (`rest=drop` keeps the control); native uses `ENGINE_REST=carry`. The new `HOST_S(27)`/`HOST_S(28)` flags are WGSL-only, because Metal reads host slots from `gScratchAtomics`, whose words 26+ hold the large-body list. Evidence: `docs/avbd-sleep-rest-carry-2026-10-15.json`.
+
+## Vehicles (`slang/kernels/vehicle_step.slang`, `crates/engine-vehicle`)
+
+v1. **Raycast wheels as rows on the chassis, not bodies.** Suspension, bump stop, anti-roll, tyre friction, pitch/roll limit and aero act only on the chassis, so a vehicle adds no CSR/colour edges and costs one body. `vehicle_prepare`/`vehicle_iterate` write a 6×6 block into the `gAabbs` tail; `primalAccumulate` adds it for `BODY_VEHICLE` bodies (block index in `BodyState.initialPad`). Precomputing is exact: nothing else moves the chassis between the vehicle pass and its primal. The hot primal kernel keeps its 10 WGSL storage bindings.
+
+v2. **Wheel spin solved exactly per iteration.** A first version condensed the spin DoF with a fixed Schur complement and back-substituted linearly. With a saturated tyre the coupling stiffness `R²k` against `I/dt²` made convergence ~2.5%/iteration (launch traction at half the expected value). Dropping the stiffness instead let the light wheel overshoot. Each wheel now solves its 1-D monotone piecewise-linear equation exactly (tyre and brake limits included) and contributes the Schur complement of the regime it lands in.
+
+v3. **Friction bound uses the curve's falling branch.** Jolt curves give μ(0) = 0; with step-start slip a tyre that started slipping mid-step had no grip for a step. The bound is `μ(max(slip, slip_peak))`; the AVBD penalty supplies the elastic region. Stick anchors carried across steps hold parked cars on a 12° slope with zero measured drift.
+
+v4. **Destruction-ready, not destruction.** Parts own chassis colliders; a part is attached iff its colliders belong to the chassis, so a fracture system can sever with `CMD_REPARENT` alone. Severed wheels/parts activate parked bodies on the GPU (point velocity, wheel spin, analytic mass/inertia removal) with a collision grace via `Collider.generation` (= ignored body + 1). `MountDesc` is reserved; nothing breaks automatically yet.
+
+v5. **Large statics and large-vs-small-static broadphase.** Statics wider than a cell are listed (scratch 53..63, reset in `broadphase_clear` because Metal does not rewrite GPU-owned scratch words); past 10 the legacy endpoint probe applies. Large dynamics (vehicle chassis) now walk the grid cells under their AABB for small statics, which never query. `broadphase_clear` also resets scratch words 25/42 (the large-dynamic and plane lists), which Metal never rewrote between steps.
+
+v6. **Wheel queries walk the broadphase grid.** They are dispatched right after `broadphase_query`, while the cell heads and links still describe x⁻ (the contact hash and CSR reuse that scratch later). Each 64-lane workgroup walks the cells its segment crosses, plus planes, large dynamics and listed large statics. The original full scan stays behind a header flag as the oracle; the two match bit for bit on an obstacle course. Query rates (Jolt) skip probes, staggered per wheel, and slide the contact along the last hit plane, which is stored in ground-body space.
+
+v7. **Tracks: spin groups, box friction, and a steering brake.** Every wheel of a track shares the leader's spin y, so the exact 1-D solve sums the group's rows, and the Schur complement becomes `Σ k JᵀJ − u uᵀ/A`. Jolt's left/right sync alone does not steer here: an implicit tyre row returns a synced track to ground speed within the iteration loop. So the inner track gets a bounded servo toward `ratio × outer` speed, and its reaction torque drives the outer track (a regenerative steering differential, without which steering from a standstill only braked). Two settings keep pivots and fast turns sane:
+* Box friction, so drive force does not eat scrub capacity.
+* A lateral-g ratio cap, so a fixed 0.6 ratio does not spin a 20 m/s tank out.
+
+Jolt's lateral friction of 2 left the pivot on the stick/slip edge: it stalled at 8 iterations and spun at 10. The tank preset uses 1.
+
+v8. **Motorcycle lean needs Jolt's linear compensation.** An angular-only lean row rotates the chassis about its COM, dragging both contact patches sideways. The resulting lateral friction enters the next target lean, and the bike oscillated into a slide on any steer input. Adding the linear force `−m·(Δω × r̄)`, with r̄ the load-weighted contact offset, makes it roll about the tyres; a left steer then settles into a steady lean.
+
+v9. **Wheel loads are capped and wheels ignore dynamic obstacles they could not climb (found by play-testing).** A monster truck driving into a stack of 40 kg crates was thrown 300+ m: a crate inside a wheel's sphere cast read as full compression, and the stiff bump stop answered with 0.7–1.25 MN on one wheel (normal loads are 5–10 kN). The ground body is held fixed during the step, so the crate also received hundreds of m/s. Three changes, now covered by a regression test:
+* Each wheel's normal load is capped at `bump_max_force`, else 8× an even share of the weight over the attached wheels. Past the cap the row is a constant force.
+* The velocity change a wheel's reaction gives a dynamic ground body is capped at their relative speed plus 2 m/s.
+* Ray and sphere hits on dynamic bodies nearer than the wheel could climb (centre at full bump) are ignored, so a crate under a wheel is left to the chassis contacts instead of shoving that corner up. Static ground keeps the bump stop for hard landings.
+
+Rollovers in the 49-vehicle traffic scene dropped from about 6 to 4 in 12 s, and lone vehicles circling at constant input never roll.

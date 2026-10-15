@@ -24,6 +24,8 @@ static const uint BODY_DYNAMIC = 1u;
 static const uint BODY_KINEMATIC = 2u;
 static const uint BODY_SLEEPING = 4u;
 static const uint BODY_AWAKE = 8u;
+// Vehicle chassis: initialPad holds asfloat(gAabbs index) of its 4-entry wheel block.
+static const uint BODY_VEHICLE = 16u;
 
 struct Collider
 {
