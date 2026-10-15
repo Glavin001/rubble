@@ -2694,6 +2694,118 @@ fn bulk_scene_upload_preserves_append_indices_and_previous_poses() {
     assert_eq!(sim.collider_count, 3);
 }
 
+/// Local incremental repair (8en): one workgroup looping JP rounds must give
+/// exactly the colors of the 32 global rounds (JP is schedule-independent: a
+/// body colors once every higher-priority neighbour has), valid and complete,
+/// and must leave slot 69 empty so the global rounds launch nothing.
+#[test]
+fn local_color_repair_matches_global_rounds_on_a_lattice() {
+    const NX: u32 = 12;
+    const NY: u32 = 12;
+    const NZ: u32 = 4;
+    const N: u32 = NX * NY * NZ; // 576: every body on the repair list
+    let id = |x: u32, y: u32, z: u32| x + NX * (y + NY * z);
+    let mut adjacency: Vec<Vec<u32>> = vec![Vec::new(); N as usize];
+    for z in 0..NZ {
+        for y in 0..NY {
+            for x in 0..NX {
+                let a = id(x, y, z);
+                for (dx, dy, dz) in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)] {
+                    let (bx, by, bz) = (x + dx, y + dy, z + dz);
+                    if bx < NX && by < NY && bz < NZ {
+                        let b = id(bx, by, bz);
+                        adjacency[a as usize].push(b);
+                        adjacency[b as usize].push(a);
+                    }
+                }
+            }
+        }
+    }
+    let mut results = Vec::new();
+    for local in [false, true] {
+        let mut sim = WgpuSim::new(WorldCapacity {
+            max_bodies: 1024,
+            max_colliders: 1024,
+            max_contacts: 16384,
+            max_candidates: 16384,
+            ..WorldCapacity::small()
+        })
+        .expect("GPU adapter required for local color repair");
+        let bodies: Vec<BodyState> = (0..N)
+            .map(|_| BodyState {
+                orientation: [0.0, 0.0, 0.0, 1.0],
+                inv_mass: 1.0,
+                flags: 9,
+                ..BodyState::zeroed()
+            })
+            .collect();
+        sim.add_bodies(&bodies);
+        let mut offsets = vec![0u32];
+        let mut ids = Vec::new();
+        let mut partners = Vec::new();
+        for (body, list) in adjacency.iter().enumerate() {
+            let mut sorted = list.clone();
+            sorted.sort_unstable();
+            for &other in &sorted {
+                ids.push((body as u32).min(other) * N + (body as u32).max(other));
+                partners.push(other);
+            }
+            offsets.push(ids.len() as u32);
+        }
+        let csr_offset = u64::from(constraint_id_words(&sim.capacity)) * 4;
+        sim.queue
+            .write_buffer(&sim.bufs[14], 0, bytemuck::cast_slice(&ids));
+        sim.queue
+            .write_buffer(&sim.bufs[10], 0, bytemuck::cast_slice(&partners));
+        sim.queue
+            .write_buffer(&sim.bufs[14], csr_offset, bytemuck::cast_slice(&offsets));
+        let awake: Vec<u32> = (0..N).collect();
+        sim.queue
+            .write_buffer(&sim.bufs[11], 0, bytemuck::cast_slice(&awake));
+        sim.local_repair = local;
+        sim.steps_done = 1; // no reset: zero history invalidates every body
+        sim.write_host_uniforms();
+        let counters = StepCounters {
+            body_count: N,
+            collider_count: 0,
+            awake_count: N,
+            ..StepCounters::default()
+        };
+        sim.queue.write_buffer(&sim.bufs[7], 0, bytes_of(&counters));
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            sim.disp(&mut pass, "csr_sort", u64::from(N), None);
+            sim.disp(&mut pass, "init_colors", u64::from(N), None);
+            sim.disp(&mut pass, "write_work_args", 64, None);
+            if local {
+                sim.disp(&mut pass, "color_bodies_local", 64, None);
+            }
+            for _ in 0..32 {
+                sim.disp_work(&mut pass, "color_bodies", 69, None);
+            }
+        }
+        sim.queue.submit([enc.finish()]);
+        let pending = download::<StepCounters>(&sim, 7, 0, 1)[0]._pad0;
+        assert_eq!(pending, N, "local={local}: every body must be on the repair list");
+        let args: Vec<u32> = download(&sim, 23, 69 * 12, 1);
+        assert_eq!(args[0], if local { 0 } else { (N + 63) / 64 },
+            "local={local}: slot 69 must be empty exactly when the local pass owns the repair");
+        let colors: Vec<u32> = download(&sim, 12, 0, N as usize);
+        for (body, list) in adjacency.iter().enumerate() {
+            assert!(colors[body] < 64, "local={local}, body {body}: left uncolored");
+            for &other in list {
+                assert_ne!(colors[body], colors[other as usize],
+                    "local={local}: adjacent bodies {body} and {other} share color {}", colors[body]);
+            }
+        }
+        results.push(colors);
+    }
+    let diff = (0..N as usize).find(|&b| results[0][b] != results[1][b]);
+    assert!(diff.is_none(),
+        "body {:?}: local repair chose a different color than the global rounds; JP must be schedule-independent", diff);
+}
+
 #[test]
 fn incremental_coloring_reuses_valid_history_and_repairs_new_conflicts() {
     let mut sim = WgpuSim::new(WorldCapacity {

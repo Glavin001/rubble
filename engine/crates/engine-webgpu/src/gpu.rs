@@ -30,6 +30,8 @@ pub struct WgpuSim {
     pub(crate) np_split: bool,
     /// Persist work list (8em, HOST_S(22)); requires reuse copy.
     pub(crate) persist_list: bool,
+    /// Local incremental color repair (8en, HOST_S(27)).
+    pub(crate) local_repair: bool,
     /// Test hook: caps the persist list (HOST_S(23)); 0 uses the whole region.
     pub(crate) persist_list_limit: u32,
     /// Test hook: caps deferred pairs (HOST_S(21)); 0 uses the whole tail.
@@ -386,6 +388,7 @@ impl WgpuSim {
                 && std::env::var("ENGINE_NP").as_deref() == Ok("split"),
             np_defer_limit: 0,
             persist_list_limit: 0,
+            local_repair: std::env::var("ENGINE_REPAIR").as_deref() == Ok("local"),
             persist_list: persistent_contacts
                 && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
                 && std::env::var("ENGINE_PERSIST").as_deref() == Ok("list"),
@@ -701,6 +704,10 @@ impl WgpuSim {
         // A colour count is not the JP dependency depth. The active 110k
         // ring still has uncoloured bodies after 16 rounds at step 60.
         let color_rounds = 32;
+        if self.local_repair {
+            // Slot 69 is zero when the local pass handled the repair list.
+            self.disp(&mut pass, "color_bodies_local", 64, None);
+        }
         for round in 0..color_rounds {
             self.disp_work(&mut pass, "color_bodies", 69, Some(round % 16));
         }
@@ -917,6 +924,7 @@ impl WgpuSim {
         s[21] = self.np_defer_limit;
         s[22] = u32::from(self.persist_list);
         s[23] = self.persist_list_limit;
+        s[27] = u32::from(self.local_repair);
         if self.manifold_hash_insert {
             s[13] = self.last_counters.manifold_count;
             s[14] = 1;
