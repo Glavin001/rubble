@@ -74,10 +74,10 @@ public struct GpuCounters
     AUint pivotFloorHits;
     AUint sleepEvents;
     AUint wakeEvents;
-    uint iteration;
+    AUint convexSmall;  // ABI byte 44: convex SAT pairs, small bucket (front of list)
     AUint manifoldCount;
     AUint recolorCount; // ABI byte 52: compact pending-color work count
-    AUint convexSmall;  // ABI byte 56: convex SAT pairs, small bucket (front of list)
+    AUint _pad1;        // ABI byte 56: two-pass narrowphase deferred count (8ek)
     AUint convexLarge;  // ABI byte 60: convex SAT pairs, large bucket (back of list)
 };
 #endif

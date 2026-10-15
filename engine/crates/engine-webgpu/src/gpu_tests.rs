@@ -437,14 +437,22 @@ fn broadphase_linked_buckets_preserve_membership_and_match_bruteforce_pairs() {
     // Host-sized grid tables (HOST_S(16)): the default, a 1024-head table that
     // forces heavy aliasing across all 641 colliders, and a smaller power of
     // two (small capacity caps the region at 131072 heads, like the host does).
+    // Split grids (HOST_S(20)) walk only forward awake cells; every third body
+    // sleeps so the other table and the awake→sleeper rule are both covered.
+    // Two split tables must fit the small capacity's pre-CSR region (the host
+    // caps them at half of it), so split skips the 131072-head case.
     for buckets in [131072usize, 1024, 65536] {
-        broadphase_linked_buckets_case(buckets);
+        broadphase_linked_buckets_case(buckets, false);
+    }
+    for buckets in [1024usize, 65536] {
+        broadphase_linked_buckets_case(buckets, true);
     }
 }
 
-fn broadphase_linked_buckets_case(buckets: usize) {
+fn broadphase_linked_buckets_case(buckets: usize, split: bool) {
     use std::collections::BTreeSet;
     const N: usize = 641; // Grid path and partial final workgroup.
+    let sleeping = |id: usize| id % 3 == 1;
     let mut sim = WgpuSim::new_with_compact_contacts(WorldCapacity::small(), false)
         .expect("GPU adapter required for grid pair coverage");
     sim.params.grid_cell_size = 1.25;
@@ -480,7 +488,12 @@ fn broadphase_linked_buckets_case(buckets: usize) {
     let s16 = std::mem::size_of::<AvbdParams>() as u64 + 16 * 4;
     sim.queue
         .write_buffer(&sim.bufs[6], s16, bytemuck::bytes_of(&(buckets as u32)));
-    const CANARY: u32 = 0xfedc_ba98;
+    sim.queue.write_buffer(
+        &sim.bufs[6],
+        s16 + 4 * 4,
+        bytemuck::bytes_of(&u32::from(split)),
+    );
+    let tables = if split { 2 } else { 1 };    const CANARY: u32 = 0xfedc_ba98;
     sim.queue.write_buffer(
         &sim.bufs[15],
         N as u64 * 4,
@@ -490,24 +503,44 @@ fn broadphase_linked_buckets_case(buckets: usize) {
     {
         let mut pass = enc.begin_compute_pass(&Default::default());
         sim.disp(&mut pass, "build_aabbs", N as u64, None);
-        sim.disp(&mut pass, "broadphase_clear", buckets as u64, None);
+    }
+    sim.queue.submit([enc.finish()]);
+    // Sleepers keep their last AABB, so refit awake and then put every third body to sleep.
+    for id in (0..N).filter(|&id| sleeping(id)) {
+        let offset = (id * std::mem::size_of::<BodyState>()
+            + std::mem::offset_of!(BodyState, flags)) as u64;
+        sim.queue.write_buffer(&sim.bufs[0], offset, bytemuck::bytes_of(&5u32));
+    }
+    let mut enc = sim.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = enc.begin_compute_pass(&Default::default());
+        sim.disp(&mut pass, "broadphase_clear", (buckets * tables) as u64, None);
         sim.disp(&mut pass, "broadphase_insert", N as u64, None);
         sim.disp(&mut pass, "broadphase_query", N as u64, None);
     }
     sim.queue.submit([enc.finish()]);
-    let heads: Vec<u32> = download(&sim, 14, 0, buckets);
+    let heads: Vec<u32> = download(&sim, 14, 0, buckets * tables);
     let links: Vec<u32> = download(&sim, 15, 0, N);
     let mut seen = vec![false; N];
-    for h in 0..buckets {
-        let mut encoded = heads[h];
+    for slot in 0..buckets * tables {
+        let mut encoded = heads[slot];
+        let h = slot % buckets;
         while encoded != u32::MAX {
-            assert_ne!(
-                encoded & 0x8000_0000,
-                0,
-                "Awake dynamic entry lacks early ownership flag"
-            );
             let id = (encoded & 0x7fff_ffff) as usize;
-            assert!(id<N && !seen[id],"bucket={h}, collider={id}: linked grid lost bijection; encoded links must be masked before indexing and may not form cycles");
+            assert!(id<N && !seen[id],"split={split}, slot={slot}, collider={id}: linked grid lost bijection; encoded links must be masked before indexing and may not form cycles");
+            assert_eq!(
+                encoded & 0x8000_0000 != 0,
+                !sleeping(id),
+                "collider={id}: only awake dynamic entries carry the early ownership flag"
+            );
+            if split {
+                assert_eq!(
+                    slot >= buckets,
+                    sleeping(id),
+                    "split grid, collider={id}, slot={slot}: awake entries belong in [0, {buckets}), others in [{buckets}, {})",
+                    2 * buckets
+                );
+            }
             seen[id] = true;
             let cell = centers[id].map(|x| (x / 1.25).floor() as i32 as u32);
             let expected = ((cell[0].wrapping_mul(73856093)
@@ -544,20 +577,23 @@ fn broadphase_linked_buckets_case(buckets: usize) {
         );
         assert!(
             actual.insert(key),
-            "buckets={buckets}: duplicate pair {key:?}: hash buckets still require exact-cell filtering"
+            "split={split}, buckets={buckets}: duplicate pair {key:?}: hash buckets still require exact-cell filtering"
         );
     }
     let mut expected = BTreeSet::new();
     for a in 0..N {
         for b in a + 1..N {
-            if (0..3).all(|axis| (centers[a][axis] - centers[b][axis]).abs() <= 0.7501) {
+            // Sleepers do not query, so sleeper–sleeper pairs are never emitted.
+            if !(sleeping(a) && sleeping(b))
+                && (0..3).all(|axis| (centers[a][axis] - centers[b][axis]).abs() <= 0.7501)
+            {
                 expected.insert((a as u32, b as u32));
             }
         }
     }
     let missing: Vec<_> = expected.difference(&actual).take(8).collect();
     let extra: Vec<_> = actual.difference(&expected).take(8).collect();
-    assert!(actual==expected,"buckets={buckets}: filtered linked grid differs from independent all-pairs touching-box oracle: missing={missing:?}, extra={extra:?}, actual={}, expected={}",actual.len(),expected.len());
+    assert!(actual==expected,"split={split}, buckets={buckets}: filtered linked grid differs from independent all-pairs touching-box oracle: missing={missing:?}, extra={extra:?}, actual={}, expected={}",actual.len(),expected.len());
 }
 
 #[test]
@@ -815,6 +851,115 @@ fn warmstart_duplicate_corner_fixture(entry: &str) {
             "second tangent penalty must decay independently on reused contacts"
         );
     }
+}
+
+/// Persistent hosts pack solver pairs before the graph and CSR degree/scatter
+/// read their body ids (8el). The adjacency must match the manifold → collider →
+/// body derivation exactly, skipping empty manifolds and static endpoints.
+#[test]
+fn persistent_csr_from_packed_pairs_matches_manifold_endpoints() {
+    const BODIES: u32 = 12;
+    // Collider c belongs to body PERM[c]: reading collider ids as bodies fails.
+    const PERM: [u32; BODIES as usize] = [0, 7, 3, 11, 5, 9, 1, 10, 2, 6, 4, 8];
+    let edges: Vec<(u32, u32, u32)> = vec![
+        (1, 2, 4), (2, 3, 4), (0, 4, 1), (5, 6, 0), (6, 7, 2), (7, 8, 4), (3, 9, 1),
+        (9, 10, 4), (10, 11, 3), (1, 11, 2), (4, 8, 4),
+    ];
+    let mut results = Vec::new();
+    for persistent in [false, true] {
+        let cap = WorldCapacity::small();
+        let mut sim = if persistent {
+            WgpuSim::new_with_persistent_contacts(cap)
+        } else {
+            WgpuSim::new_with_compact_contacts(cap, true)
+        }
+        .expect("GPU adapter required");
+        for c in 0..BODIES {
+            sim.add_body(BodyState {
+                orientation: [0.0, 0.0, 0.0, 1.0],
+                inv_mass: if c == 0 { 0.0 } else { 1.0 },
+                flags: if c == 0 { 0 } else { 9 }, // body 0 is static
+                ..BodyState::zeroed()
+            });
+        }
+        for c in 0..BODIES {
+            sim.add_collider(Collider {
+                body: PERM[c as usize],
+                shape: ShapeType::Box as u32,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                ..Collider::zeroed()
+            });
+        }
+        let manifolds: Vec<Manifold> = edges
+            .iter()
+            .enumerate()
+            .map(|(i, &(a, b, count))| Manifold {
+                collider_a: a,
+                collider_b: b,
+                contact_start: i as u32 * 4,
+                contact_count: count,
+                normal: [0.0, 1.0, 0.0],
+                ..Manifold::zeroed()
+            })
+            .collect();
+        sim.write_host_uniforms();
+        sim.queue
+            .write_buffer(&sim.bufs[25], 0, bytemuck::cast_slice(&manifolds));
+        let counters = StepCounters {
+            body_count: BODIES,
+            collider_count: BODIES,
+            manifold_count: manifolds.len() as u32,
+            ..StepCounters::default()
+        };
+        sim.queue.write_buffer(&sim.bufs[7], 0, bytes_of(&counters));
+        let n = manifolds.len() as u64;
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            if persistent {
+                sim.disp(&mut pass, "pack_solver_contacts", n, None);
+            }
+            sim.disp(&mut pass, "csr_clear", u64::from(BODIES) + 1, None);
+            sim.disp(&mut pass, "csr_degree_contacts", n, None);
+            sim.disp(&mut pass, "csr_prefix", 1, None);
+            sim.disp(&mut pass, "csr_scatter_contacts", n, None);
+            sim.disp(&mut pass, "csr_sort", u64::from(BODIES), None);
+        }
+        sim.queue.submit([enc.finish()]);
+        let csr_offset = u64::from(constraint_id_words(&sim.capacity)) * 4;
+        let offsets: Vec<u32> = download(&sim, 14, csr_offset, BODIES as usize + 1);
+        let total = offsets[BODIES as usize] as usize;
+        let ids: Vec<u32> = download(&sim, 14, 0, total);
+        let partners: Vec<u32> = download(&sim, 10, 0, total);
+        results.push((offsets, ids, partners));
+    }
+    // Independent oracle: dynamic endpoints only, empty manifolds skipped.
+    let mut expected_degree = vec![0u32; BODIES as usize];
+    for &(a, b, count) in &edges {
+        if count == 0 {
+            continue;
+        }
+        for body in [PERM[a as usize], PERM[b as usize]] {
+            if body != 0 {
+                expected_degree[body as usize] += 1;
+            }
+        }
+    }
+    let (offsets, ids, partners) = &results[1];
+    for body in 0..BODIES as usize {
+        assert_eq!(offsets[body + 1] - offsets[body], expected_degree[body],
+            "body {body}: packed-pair CSR degree differs from the manifold oracle; endpoints must be bodies, not colliders, and empty manifolds must be skipped");
+        for e in offsets[body]..offsets[body + 1] {
+            let (a, b, _) = edges[ids[e as usize] as usize];
+            let (ba, bb) = (PERM[a as usize], PERM[b as usize]);
+            assert!(ba as usize == body || bb as usize == body,
+                "body {body}, edge {e}: adjacency lists manifold {} that does not touch it", ids[e as usize]);
+            assert_eq!(partners[e as usize], if ba as usize == body { bb } else { ba },
+                "body {body}, edge {e}: partner array must name the other body");
+        }
+    }
+    assert_eq!(results[0], results[1],
+        "persistent CSR (packed pairs) must be identical to the compact manifold-derived CSR, including sorted order");
 }
 
 #[test]
@@ -1203,9 +1348,9 @@ fn color_dispatch_respects_palette_and_preserves_work_slots() {
         (4095, 512),
         (4096, 256),
         (32767, 2048),
-        (32768, 1024),
-        (65535, 2048),
-        (65536, 1024),
+        (32768, 2048),
+        (65535, 4096),
+        (65536, 4096),
     ];
     for palette in [1usize, 7, 32] {
         let mut host = HostUniforms {
@@ -1678,7 +1823,8 @@ fn primal_reduction_tail_fixture(layout: &str) {
             body.position
         );
     }
-    for (count, lanes) in [(67u32, 8u32), (4097, 4), (32769, 2), (65536, 1)] {
+    // Shipped policy (primalLanesFor): eight lanes below 4096 bodies, four at or above.
+    for (count, lanes) in [(67u32, 8u32), (4095, 8), (4096, 4), (32769, 4), (65536, 4)] {
         let mut order = vec![ACTIVE; count as usize];
         for id in 0..ACTIVE {
             order[(count - ACTIVE + id) as usize] = id;
@@ -2592,16 +2738,21 @@ fn incremental_coloring_reuses_valid_history_and_repairs_new_conflicts() {
             .write_buffer(&sim.bufs[25], 0, bytemuck::cast_slice(&manifolds));
         let mut offsets = vec![0u32];
         let mut adjacency = Vec::new();
+        let mut partners = Vec::new();
         for body in 0..8 {
             for (id, &(a, b)) in edges.iter().enumerate() {
                 if body == a || body == b {
                     adjacency.push(id as u32);
+                    partners.push(if body == a { b } else { a });
                 }
             }
             offsets.push(adjacency.len() as u32);
         }
         sim.queue
             .write_buffer(&sim.bufs[14], 0, bytemuck::cast_slice(&adjacency));
+        // WebGPU coloring reads CSR scatter's per-edge partner array (binding 10).
+        sim.queue
+            .write_buffer(&sim.bufs[10], 0, bytemuck::cast_slice(&partners));
         sim.queue
             .write_buffer(&sim.bufs[14], csr_offset, bytemuck::cast_slice(&offsets));
         // Deliberately scramble awake-list order: the compact work list must
@@ -3035,6 +3186,27 @@ fn adjacency_order_uses_physical_neighbors_across_append_permutations_and_high_d
             upload[3..3 + count as usize].copy_from_slice(&ids);
             sim.queue
                 .write_buffer(&sim.bufs[14], 0, bytemuck::cast_slice(&upload));
+            // CSR scatter's partner array (binding 10) must be permuted with the ids.
+            let partner = |id: u32| {
+                if id < 3 {
+                    joints[id as usize].body_b
+                } else {
+                    key(id)[1]
+                }
+            };
+            let partners: Vec<u32> = upload
+                .iter()
+                .enumerate()
+                .map(|(k, &id)| {
+                    if (3..3 + count as usize).contains(&k) {
+                        partner(id)
+                    } else {
+                        sentinel
+                    }
+                })
+                .collect();
+            sim.queue
+                .write_buffer(&sim.bufs[10], 0, bytemuck::cast_slice(&partners));
             sim.queue.write_buffer(
                 &sim.bufs[14],
                 u64::from(constraint_id_words(&sim.capacity)) * 4,
@@ -3058,7 +3230,17 @@ fn adjacency_order_uses_physical_neighbors_across_append_permutations_and_high_d
             }
             sim.queue.submit([enc.finish()]);
             let actual: Vec<u32> = download(&sim, 14, 0, upload.len());
+            let sorted_partners: Vec<u32> = download(&sim, 10, 0, upload.len());
             ids.sort_by_key(|&id| key(id));
+            for k in 0..upload.len() {
+                let expected_partner = if (3..3 + count as usize).contains(&k) {
+                    partner(actual[k])
+                } else {
+                    sentinel
+                };
+                assert_eq!(sorted_partners[k], expected_partner,
+                    "degree={degree}, permutation={permutation}: partner of CSR slot {k} (id {}) was not moved with its id; coloring would test the wrong neighbour", actual[k]);
+            }
             assert_eq!(
                 &actual[..3],
                 &[sentinel; 3],
@@ -3333,6 +3515,25 @@ fn persistent_fused_warmstart_preserves_history_and_refreshes_pair_cache() {
     mixed_contact_reuse_fixture(true, true);
 }
 
+/// Narrowphase-finished reused copies (`reuse=copy`) must reproduce the same
+/// retained anchors, single decay, cold initialization, generations and owner
+/// tags as the separate persistence pass.
+#[test]
+fn reuse_copy_matches_separate_persistence_semantics() {
+    mixed_contact_reuse_fixture_mode(true, false, true, None);
+}
+
+/// Two-pass narrowphase (`np=split`): the reuse pass defers fresh pairs to the
+/// candidate tail and the shape pass emits them, so the result must match the
+/// fused copy exactly up to manifold order. Limits 0 (whole tail), 3 (most fresh
+/// pairs fall back inline) and 1 cover the deferred, mixed and inline paths.
+#[test]
+fn two_pass_narrowphase_matches_fused_reuse_copy() {
+    for limit in [0u32, 3, 1] {
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit));
+    }
+}
+
 #[test]
 fn persistent_dual_updates_hot_state_without_corrupting_metadata_or_history() {
     let cap = WorldCapacity::small();
@@ -3541,6 +3742,15 @@ fn persistent_dual_updates_hot_state_without_corrupting_metadata_or_history() {
 }
 
 fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
+    mixed_contact_reuse_fixture_mode(persistent, fused, false, None);
+}
+
+fn mixed_contact_reuse_fixture_mode(
+    persistent: bool,
+    fused: bool,
+    copy: bool,
+    np_split: Option<u32>,
+) {
     let mut sim = if persistent {
         WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
     } else {
@@ -3644,9 +3854,11 @@ fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
     let hash_n = (previous.len().max(256) * 4).next_power_of_two() as u64;
     for parity in 0..2 {
         for reuse in [false, true] {
-            let context =
-                format!("persistent={persistent}, fused={fused}, parity={parity}, reuse={reuse}");
+            let context = format!(
+                "persistent={persistent}, fused={fused}, copy={copy}, np_split={np_split:?}, parity={parity}, reuse={reuse}"
+            );
             sim.contacts_parity = parity;
+            sim.np_defer_limit = np_split.unwrap_or(0);
             sim.params.flags = (sim.params.flags & !1) | u32::from(reuse);
             sim.write_host_uniforms();
             let cur = parity * sim.capacity.max_contacts;
@@ -3687,12 +3899,28 @@ fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
                     previous.len() as u64,
                     None,
                 );
-                sim.disp(&mut pass, "narrowphase", count as u64, None);
+                if np_split.is_some() {
+                    sim.disp(&mut pass, "narrowphase_defer_copy_persistent", count as u64, None);
+                    sim.disp(&mut pass, "narrowphase_fresh_copy_persistent", count as u64, None);
+                } else {
+                    sim.disp(
+                        &mut pass,
+                        if copy {
+                            "narrowphase_copy_persistent"
+                        } else {
+                            "narrowphase"
+                        },
+                        count as u64,
+                        None,
+                    );
+                }
                 sim.disp(&mut pass, "write_work_args", 64, None);
                 sim.disp_work(
                     &mut pass,
                     if fused {
                         "persist_manifolds_compact"
+                    } else if copy {
+                        "persist_contacts_copy_persistent"
                     } else {
                         "persist_contacts"
                     },
@@ -3706,6 +3934,15 @@ fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
                 c.overflow_flags, 0,
                 "{context}: fixture must complete without overflow"
             );
+            if np_split.is_some() {
+                // Every pair the reuse pass rejects is counted once (ABI byte 56),
+                // whether it was deferred or tested inline past the limit.
+                let fresh = (1..=count)
+                    .filter(|id| !reuse || id % 5 == 0 || id % 4 == 0 || *id == count)
+                    .count() as u32;
+                assert_eq!(c.narrowphase_deferred, fresh,
+                    "{context}: two-pass narrowphase must hand every non-reused pair to shape tests exactly once");
+            }
             assert_eq!(
                 c.manifold_count,
                 count - 1,
@@ -3725,7 +3962,9 @@ fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
                     for absolute in mf.contact_start..mf.contact_start + mf.contact_count {
                         let local = (absolute - cur) as usize;
                         let tag = hot[local * 16 + 15];
-                        assert_eq!(tag & 0x7fff_ffff, owner as u32 + 1,
+                        // Owner bits only: stick (bit 31) and narrowphase-final (bit 29)
+                        // may legitimately remain set.
+                        assert_eq!(tag & 0x1fff_ffff, owner as u32 + 1,
                             "{context}, manifold={owner}, point={local}: persistence lost the current owner or left the transient reuse bit set; the next dual would read the wrong pair");
                     }
                     if fused {
@@ -4305,4 +4544,38 @@ fn whole_step_manifold_reuse_reproduces_previous_manifolds_on_gpu() {
         assert_eq!(after.contact_count, before.contact_count);
         assert_eq!(set(&sim), full, "reused manifolds equal the previous set (persistent {persistent})");
     }
+}
+
+/// Upstream's opt-in reuse-copy and two-pass narrowphase modes: hull pairs must
+/// skip the shape tail and still reach the convex stages, with the same
+/// manifolds as the single-pass narrowphase.
+#[test]
+fn convex_pairs_bypass_the_two_pass_narrowphase_tail() {
+    let run = |split: bool| -> (StepCounters, Vec<(u32, u32, u32)>) {
+        let (mut sim, _) = convex_pile_sim(0, true);
+        sim.reuse_copy = split;
+        sim.np_split = split;
+        let mut params = sim.params;
+        params.iterations = 2;
+        sim.set_params(params);
+        let mut arena = HullArena::new();
+        let lib = convex_library();
+        for i in 0..12 {
+            let h = &lib[i % lib.len()];
+            let lo = h.vertices.iter().map(|v| v.y).fold(f32::INFINITY, f32::min);
+            sim.add_convex_body(&mut arena, std::slice::from_ref(h), glam::Vec3::new(i as f32 * 0.45, -lo - 0.003, 0.0), glam::Quat::IDENTITY, 500.0);
+        }
+        sim.step().unwrap();
+        sim.step().unwrap();
+        let c = sim.last_counters;
+        let m: Vec<Manifold> = download(&sim, 25, 0, c.manifold_count as usize);
+        let mut v: Vec<_> = m.iter().map(|m| (m.collider_a, m.collider_b, m.contact_count)).collect();
+        v.sort_unstable();
+        (c, v)
+    };
+    let (single, a) = run(false);
+    let (split, b) = run(true);
+    assert!(single.manifold_count > 10);
+    assert!(split.convex_sat_small + split.convex_sat_large > 0 || !b.is_empty(), "hull pairs reached the convex stages");
+    assert_eq!(a.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(), b.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(), "same manifold pairs");
 }

@@ -72,7 +72,7 @@ colliders; set `ENGINE_GRID_LEVELS=on|off` to force it either way.
 - **Insertion.** Each collider is inserted once, at the level whose cell
   (`base·2^level`, where base is the median diameter) covers its bound.
 - **Queries.** A collider queries its own level and every coarser level's 27
-  cells, skipping empty levels via an occupied-level mask in scratch slot 52.
+  cells, skipping empty levels via an occupied-level mask in scratch slot 51.
 - **Sleeping and fixed colliders.** Fine sleeping or fixed colliders still query
   coarse movers.
 - **Oversized statics** go to a 10-entry list (scratch 53..63), tested by every mover.
@@ -138,7 +138,7 @@ collider means compound children can differ. Set it with
   negative group never does, overriding categories.
 - **Where it runs:** the test is in `emitCandidate`, so every broadphase path
   filters identically.
-- **Cost:** none when unused, because hosts set `HOST_S(21)` only when some
+- **Cost:** none when unused, because hosts set `HOST_S(23)` only when some
   collider carries a filter.
 
 **Runtime hull management.** `HullArena` provides:
@@ -161,12 +161,12 @@ example to replace a fractured chunk. The JS `HullArena` mirrors the Rust one.
 |---|---|
 | Binding 29 | `gConvexWork` (`maxCandidates` × 32 B). Declared last, so Metal assigns buffer 27; the Metal host rebinds 27 around the convex dispatches. |
 | Indirect slots 70..72 | Convex args (buffer sized ≥ 73 slots). |
-| `GpuCounters` bytes 56 and 60 | `convexSmall` / `convexLarge` (`StepCounters::convex_sat_small/large`). |
+| `GpuCounters` bytes 44 and 60 | `convexSmall` / `convexLarge` (`StepCounters::convex_sat_small/large`; byte 56 is the two-pass narrowphase deferred count). |
 | `HOST_S(18)` | Grid levels. |
-| `HOST_S(20)` | Degree-aware primal lanes (needs `gColorCounts` ≥ 128 words). |
-| Scratch 52 | Occupied grid levels. |
+| `HOST_S(22)` | Degree-aware primal lanes (needs `gColorCounts` ≥ 128 words). |
+| Scratch 51 | Occupied grid levels. |
 | Scratch 53..63 | Oversized-static list for the hierarchical grid (count + 10 IDs). |
-| `HOST_S(21)` | Collision filters present. |
+| `HOST_S(23)` | Collision filters present. |
 | Indirect slot 73 | Previous contacts (whole-step manifold reuse). |
 
 This removes the old collisions: binding 27 as fracture hits versus solver

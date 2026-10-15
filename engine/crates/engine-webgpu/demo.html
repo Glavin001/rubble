@@ -114,12 +114,44 @@
     // previous run, so lookups never load previous contacts to compare keys.
     const warmRecordHash = hashInsertMode === 'record';
     const manifoldHashInsert = hashInsertMode === 'manifold' || warmRecordHash;
+    // Narrowphase finishes reused copies for moving pairs; persistence skips
+    // points tagged final (8eh). Gables pass/copy 30.95/30.19/30.98/30.21 ms,
+    // ring 11.37/11.27/11.38/11.27 ms. reuse=pass keeps the separate-pass control.
+    const reuseMode = qs.get('reuse') || (['ring110k', 'gables506k'].includes(scene) && persistentContacts
+      && !manifoldPersistence && !fusedPersistence ? 'copy' : 'pass');
+    if (!['pass', 'copy'].includes(reuseMode)) throw new Error('reuse must be pass or copy');
+    if (reuseMode === 'copy' && (!persistentContacts || manifoldPersistence || fusedPersistence))
+      throw new Error('reuse=copy requires persistent contacts with per-contact persistence');
+    const reuseCopy = reuseMode === 'copy';
+    // np=split (8ek): the reuse pass compacts fresh pairs into the candidate
+    // tail, then a shape-test pass runs SAT without reuse-copy lanes idling it.
+    // Ring fused/split 11.04/10.70/11.01/10.67 ms; gables 29.57/27.48,
+    // 29.11/27.25 ms (narrowphase 7.60->4.92), identical workload snapshots.
+    const npMode = qs.get('np') || (reuseCopy ? 'split' : 'fused');
+    if (!['fused', 'split'].includes(npMode)) throw new Error('np must be fused or split');
+    if (npMode === 'split' && !reuseCopy) throw new Error('np=split requires reuse=copy');
+    const npSplit = npMode === 'split';
+    // endpoints=pairs (8el): solver pairs are packed before the graph, so CSR
+    // degree and scatter read body ids from the 32-byte pair instead of
+    // manifold -> two colliders (three-avbd TopoItem shape). Manifold
+    // persistence packs pairs itself; the separate pack moves ahead otherwise.
+    const endpointsMode = qs.get('endpoints') || (persistentContacts ? 'pairs' : 'manifold');
+    if (!['manifold', 'pairs'].includes(endpointsMode)) throw new Error('endpoints must be manifold or pairs');
+    if (endpointsMode === 'pairs' && !persistentContacts) throw new Error('endpoints=pairs requires persistent contacts');
+    const pairEndpoints = endpointsMode === 'pairs';
+    const earlyPairPack = pairEndpoints && !fusedPersistence && !manifoldPersistence;
     // Broadphase grid table scaled to >=2x colliders (three-avbd sizes its grid
     // at 2x body capacity); scenes up to 65536 colliders keep 131072 heads.
     // Gables fixed/scaled: 36.92/35.00/36.34/34.50 ms, grid 3.28->1.90 ms, with
     // unchanged workload snapshots. grid=fixed keeps the old table as control.
-    const gridMode = qs.get('grid') || 'scaled';
-    if (!['fixed', 'scaled'].includes(gridMode)) throw new Error('grid must be fixed or scaled');
+    // grid=split (8ej) gives awake dynamics their own table, so awake queriers
+    // walk their own cell plus 13 forward cells; sleepers and small statics stay
+    // in a second, fully walked table. Ring scaled/split 11.04/10.92/11.05/10.86/
+    // 11.02/10.82 ms (grid 1.11->0.92) with identical workload snapshots; gables
+    // was neutral (29.34/29.15/29.37 ms), so it keeps scaled.
+    const gridMode = qs.get('grid') || (scene === 'ring110k' ? 'split' : 'scaled');
+    if (!['fixed', 'scaled', 'split'].includes(gridMode)) throw new Error('grid must be fixed, scaled or split');
+    const gridSplit = gridMode === 'split';
     const detailedProfile = qs.get('profile') === 'detail';
     const graphProfile = qs.get('profile') === 'graph';
     // Diagnostic: one timestamped pass per primal color (and the sparse tail).
@@ -284,6 +316,7 @@
     }, { passive: false });
     const PASS_ALIGN = 256;
     const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+    const prevPow2 = (n) => { let p = 1; while (p * 2 <= n) p <<= 1; return p; };
     const constraintIdWords = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
     const csrBase = Math.max(constraintIdWords, 131072);
 
@@ -326,6 +359,8 @@
       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
+      ...(reuseCopy ? ['narrowphase_copy_persistent', 'persist_contacts_copy_persistent'] : []),
+      ...(npSplit ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
@@ -755,6 +790,8 @@ struct VsOut {
       persist_manifolds_compact: 'persist_manifolds_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
       solve_primal_sparse_compact: 'solve_primal_sparse_persistent',
       solve_primal_color_compact: 'solve_primal_color_persistent', solve_dual_compact: 'solve_dual_persistent',
+      ...(pairEndpoints ? {csr_degree_contacts: 'csr_degree_contacts_persistent',
+        csr_scatter_contacts: 'csr_scatter_contacts_persistent'} : {}),
     };
     const shaderEntry = name => persistentContacts ? (persistentEntries[name] || name) : name;
     const sources = {};
@@ -868,8 +905,15 @@ struct VsOut {
     }
 
     // 0 keeps the shader's fixed 131072-head table.
+    // Split grids keep awake and other heads in two tables below csrBase.
     function gridHashWords() {
-      return gridMode === 'scaled' ? Math.min(nextPow2(Math.max(2 * colliderCount, 131072)), csrBase) : 0;
+      if (gridMode === 'fixed') return 0;
+      const words = nextPow2(Math.max(2 * colliderCount, 131072));
+      return gridSplit ? Math.min(words, prevPow2(csrBase >> 1)) : Math.min(words, csrBase);
+    }
+
+    function gridClearWords() {
+      return (gridHashWords() || 131072) * (gridSplit ? 2 : 1);
     }
 
     function scratchWords() {
@@ -895,6 +939,7 @@ struct VsOut {
       // s[13] receives the previous GPU manifold count in writeHost.
       s[14] = manifoldHashInsert ? 1 : 0;
       s[16] = gridHashWords();
+      s[20] = gridSplit ? 1 : 0;
       s[24] = csrBase;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
@@ -957,7 +1002,7 @@ struct VsOut {
         pass = beginPass();
       };
       disp(pass, 'build_aabbs', nCols);
-      disp(pass, 'broadphase_clear', gridHashWords() || 131072);
+      disp(pass, 'broadphase_clear', gridClearWords());
       nextPhase();
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
@@ -975,7 +1020,10 @@ struct VsOut {
       // Narrowphase overwrites gManifolds, so the manifold insert must precede it.
       if (!reuse && manifoldHashInsert)
         throw new Error('hashInsert=manifold requires contact reuse (insert before narrowphase)');
-      dispWork(pass, 'narrowphase', 64);
+      if (npSplit) {
+        dispWork(pass, 'narrowphase_defer_copy_persistent', 64);
+        dispWork(pass, 'narrowphase_fresh_copy_persistent', 64);
+      } else dispWork(pass, reuseCopy ? 'narrowphase_copy_persistent' : 'narrowphase', 64);
       disp(pass, 'write_work_args', 64);
       nextPhase();
       if (!reuse) {
@@ -985,7 +1033,8 @@ struct VsOut {
         if (detailedProfile) nextPhase();
       }
       if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
-      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+      if (earlyPairPack) dispWork(pass, 'pack_solver_contacts', 66);
       nextPhase();
       disp(pass, 'build_awake_list', nBodies);
       disp(pass, 'write_work_args', 64);
@@ -1025,7 +1074,7 @@ struct VsOut {
       nextPhase();
       // Cover newly introduced colours even inside batches without readbacks.
       const colors = Math.min(cap.maxColors, 32);
-      if (compactContacts && !fusedPersistence) {
+      if (compactContacts && !fusedPersistence && !earlyPairPack) {
         if (!persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
         dispWork(pass, 'pack_solver_contacts', 66);
       }
@@ -1132,7 +1181,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1441,8 +1490,37 @@ struct VsOut {
         rateFrameMsSum = 0;
       }
     }
+    // Live playback pipelines counter readback instead of draining the GPU every
+    // frame: up to LIVE_IN_FLIGHT frames stay queued and counters arrive one or two
+    // frames late. Dispatch sizes are GPU-driven; host sizing tolerates stale
+    // counts (benchmarks already run ten-step batches between readbacks).
+    const LIVE_IN_FLIGHT = 2;
+    const liveFree = Array.from({ length: LIVE_IN_FLIGHT }, () =>
+      device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    const livePending = new Set();
+    let liveError = null;
+    let lastCompletion = 0;
+    let liveStepMs = 0;
+    async function drainLive() {
+      await Promise.all([...livePending]);
+      if (liveError) throw liveError;
+    }
+    function readLiveCounters(buf) {
+      const c = new Uint32Array(buf.getMappedRange().slice(0));
+      buf.unmap();
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+      if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
+    }
+
     async function frame(now) {
       if (!running) return;
+      if (liveError) { running = false; fail(liveError); return; }
+      // Bound latency: wait for a readback slot instead of queueing more steps.
+      // Nothing is drawn on these ticks, so they do not count as frames.
+      if (!measuring && liveFree.length === 0) {
+        requestAnimationFrame(frame);
+        return;
+      }
       // Skip overlapping rAF ticks while benchWall awaits — concurrent mapAsync on
       // staging hung the replay at step 1 after measuring. Still count FPS.
       if (measuring) {
@@ -1457,9 +1535,8 @@ struct VsOut {
         }
         const aspect = canvas.width / canvas.height;
         writeCamera(aspect);
-        const tStep0 = performance.now();
         const enc = device.createCommandEncoder();
-        encodeStep(enc, true);
+        encodeStep(enc, false);
         const rp = enc.beginRenderPass({
           colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
           depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
@@ -1467,16 +1544,22 @@ struct VsOut {
         rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
         rp.setPipeline(boxPipe); rp.setBindGroup(0, boxBind); rp.setVertexBuffer(0, boxVbo); rp.draw(36, bodies.length - 1);
         rp.end();
+        const readback = liveFree.pop();
+        enc.copyBufferToBuffer(bufs[7], 0, readback, 0, 64);
         device.queue.submit([enc.finish()]);
-        await staging.mapAsync(GPUMapMode.READ);
-        const c = new Uint32Array(staging.getMappedRange().slice(0));
-        staging.unmap();
-        const stepMs = performance.now() - tStep0;
-        last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
-        if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
         parity ^= 1;
         steps++;
-        bumpRates(true, stepMs, performance.now() - now);
+        const pending = readback.mapAsync(GPUMapMode.READ).then(() => {
+          readLiveCounters(readback);
+          liveFree.push(readback);
+          // Completion interval: per-step GPU throughput while the queue stays busy.
+          const t = performance.now();
+          if (lastCompletion > 0) liveStepMs = t - lastCompletion;
+          lastCompletion = t;
+        }).catch(e => { liveError = liveError || e; });
+        livePending.add(pending);
+        pending.finally(() => livePending.delete(pending));
+        bumpRates(true, liveStepMs, performance.now() - now);
         if (cfg.settled && (steps === 1 || steps % 30 === 0 || steps === lead)) {
           await sampleSettle();
         }
@@ -1504,6 +1587,8 @@ struct VsOut {
         if (benchmarkEnabled && !benchStarted && steps >= lead) {
           benchStarted = true;
           measuring = true;
+          await drainLive();
+          lastCompletion = 0;
           statusEl.textContent = cfg.settled
             ? `settled · measuring wall time (${dyn} bodies)…`
             : `impact shown · measuring wall time (${dyn} bodies)…`;
@@ -1518,7 +1603,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1565,7 +1650,10 @@ struct VsOut {
       report.order = spatialOrder ? "morton" : "construction";
       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
       report.hashInsert = hashInsertMode;
+      report.reuse = reuseMode;
       report.grid = gridMode;
+      report.np = npMode;
+      report.endpoints = endpointsMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
       restoreScene();
@@ -1590,7 +1678,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

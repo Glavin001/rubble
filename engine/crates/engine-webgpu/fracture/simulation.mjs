@@ -285,8 +285,8 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       s[16] = gridHashWords;
       s[17] = initialized ? Math.max(1, steps) : 0;
       s[18] = grid.levels;   // hierarchical broadphase levels
-      s[20] = 1;             // degree-aware primal lanes (bufs[17] holds 128 words)
-      s[21] = hasFilters ? 1 : 0; // collision filters present
+      s[22] = 1;             // degree-aware primal lanes (bufs[17] holds 128 words)
+      s[23] = hasFilters ? 1 : 0; // collision filters present
       s[24] = csrBase;
       return s;
     }
@@ -454,7 +454,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       await staging.mapAsync(GPUMapMode.READ);
       const c = new Uint32Array(staging.getMappedRange().slice(0));
       staging.unmap();
-      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], convexSmall: c[14], convexLarge: c[15] };
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], convexSmall: c[11], convexLarge: c[15] };
     }
 
 
