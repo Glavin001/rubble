@@ -60,6 +60,19 @@ test('bundled house imports its building parts, compound hulls and finer hierarc
  const fine=buildScene(house,1);
  assert.equal(fine.selected.length,567);
  assert.equal(fine.colliders.filter(c=>c.shape===3).length,2253);
- assert.throws(()=>buildScene(house,2),/Fragment 1401, hull 3590: Degenerate zero-volume hull/);
- assert.throws(()=>buildScene(house,3),/Fragment 5162, hull 8777: Degenerate zero-volume hull/);
+ // Finer levels bake a few flat (zero-volume) sheets into compounds. They are
+ // dropped; every fragment keeps real hulls, and nothing is thickened.
+ for(const [level,flat,first] of [[2,35,{fragment:1401,hull:3590}],[3,36,{fragment:5162,hull:8777}]]){
+  const scene=buildScene(house,level);
+  assert.equal(scene.selected.length,house.physics.levelFragmentCount[level]);
+  assert.equal(scene.skippedHulls.length,flat,`level ${level}: flat hulls skipped`);
+  assert.deepEqual(scene.skippedHulls[0],first);
+  for(const {hull} of scene.skippedHulls){
+   const v=house.physics.hulls[hull].vertices,span=[0,1,2].map(k=>Math.max(...v.map(p=>p[k]))-Math.min(...v.map(p=>p[k])));
+   assert.ok(span.some(x=>x<1e-9),`hull ${hull} skipped although it has volume`);
+  }
+  for(const f of scene.selected){const {id}=scene.byId.get(f.id);assert.ok(scene.colliders.some(c=>c.body===id&&c.shape===3),`level ${level}: fragment ${f.id} lost all hulls`)}
+  const total=scene.selected.reduce((s,f)=>s+f.hullCount,0);
+  assert.equal(scene.colliders.filter(c=>c.shape===3).length,total-flat);
+ }
 });

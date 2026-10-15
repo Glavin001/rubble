@@ -31,7 +31,8 @@ async function loadLevel(level){
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
  $('fragments').textContent=scene.selected.length;$('hulls').textContent=scene.colliders.filter(c=>c.shape===3).length;$('bonds').textContent=scene.bonds.length;$('release').textContent='Start simulation';
- setStatus(`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.library.material.length} materials · click the model to shoot`);
+ const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped`:'';
+ setStatus(`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.library.material.length} materials${skipped} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey=""){
  const start=performance.now(),next=parseFractureGlb(bytes);const ms=performance.now()-start;
