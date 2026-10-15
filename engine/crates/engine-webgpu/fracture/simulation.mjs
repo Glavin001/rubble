@@ -1,4 +1,4 @@
-import {gridConfig,filterWords} from './geometry.mjs';
+import {gridConfig,filterWords,JOINT_BYTES} from './geometry.mjs';
 // WebGPU host submission of Rubble's shared Slang AVBD kernels (persistent
 // hot/cold contacts, convex hull narrowphase, hierarchical broadphase). The
 // schedule mirrors engine-webgpu/src/gpu.rs in its persistent-contact mode.
@@ -6,6 +6,7 @@ export async function createSimulation(device, scene, onProgress = () => {}) {
 const statusEl = {set textContent(v) {onProgress(v)}};
 const cfg = {friction:0.5, iterations:8, sleepRounds:8, ...scene.params};
 const MAX_WARM_HASH = 1 << 21;
+const BOND_WAKE_ROUNDS = 8;
 const PASS_ALIGN=256;
 const nextPow2=n=>2**Math.ceil(Math.log2(Math.max(1,n)));
 const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity};
@@ -14,7 +15,10 @@ const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity}
 let incremental=budget.incrementalColoring??false;
 const cap={maxBodies:nextPow2(Math.max(64,scene.bodies.length)),maxColliders:nextPow2(Math.max(64,scene.colliders.length)),
  maxContacts:nextPow2(Math.max(4096,scene.colliders.length*budget.contactsPerCollider)),maxCandidates:nextPow2(Math.max(4096,scene.colliders.length*budget.candidatesPerCollider)),
- maxJoints:1,maxColors:budget.maxColors??32,maxCommands:1,maxHull:Math.max(64,scene.hullData.length/4)};
+ maxJoints:Math.max(1,scene.joints?.length??0),maxColors:budget.maxColors??32,maxCommands:1,maxHull:Math.max(64,scene.hullData.length/4)};
+const jointCount=scene.joints?.length??0;
+// Joint-pair hash (world_step jointHashSize): >= 65536 slots and 2x the joints.
+const jointHashSlots=nextPow2(Math.max(2*jointCount,65536));
 const constraintIdWords=nextPow2(Math.max(32768,2*(cap.maxContacts+cap.maxJoints)));
 const csrBase=Math.max(constraintIdWords,131072);
 // Broadphase grid heads: twice the colliders, within the pre-CSR id region.
@@ -28,7 +32,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       s[2] = b(cap.maxColliders, 64);
       s[3] = b(64, 16);
       s[4] = b(cap.maxContacts * 2, 32);   // persistent ContactMeta (cold)
-      s[5] = b(cap.maxJoints, 256);
+      s[5] = b(cap.maxJoints, JOINT_BYTES);
       s[6] = 256;
       s[7] = 256;
       s[8] = b(cap.maxCommands, 64);
@@ -43,7 +47,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       s[16] = b(cap.maxColors * Math.max(1, Math.ceil(cap.maxBodies / 64)), 4);
       s[17] = b(128, 4);                     // colour counts 0..63 + max degrees 64..127
       s[18] = b(cap.maxHull, 16);
-      s[19] = 65536 * 4;
+      s[19] = jointHashSlots * 3 * 4;      // joint hash: index + body pair per slot
       s[20] = b(cap.maxBodies, 4);
       s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
       s[22] = 96 * PASS_ALIGN;
@@ -73,7 +77,8 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_sort',
       'init_colors', 'color_bodies', 'color_bodies_local', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
       'record_color_degrees', 'write_color_args', 'predict_bodies', 'pack_solver_contacts', 'solve_primal_color',
-      'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
+      'solve_dual', 'extract_velocity_sleep',
+      'joint_hash_clear', 'joint_hash_insert', 'bond_wake', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
     ];
     let hasConvex = scene.colliders.some((c) => c.shape === 3);
     const filterOf = (c) => filterWords(c.filter, c.material || 0);
@@ -177,8 +182,22 @@ try {
 const bodyBytes=new ArrayBuffer(sizes[0]),colBytes=new ArrayBuffer(sizes[2]);
 const bodies=scene.bodies,colliders=scene.colliders;
 bodies.forEach((b,i)=>{writeBody(bodyBytes,i,b);writeBody(bodyBytes,cap.maxBodies+i,b)});
+// Bond joints (Joint, 192 bytes; see common.slang): fixed penalty k0..k5
+// (normal, u, v, about u, about v, about normal) in the bond frame.
+const jointBytes=new ArrayBuffer(Math.max(JOINT_BYTES,jointCount*JOINT_BYTES));
+(scene.joints??[]).forEach((j,i)=>{const v=new DataView(jointBytes,i*JOINT_BYTES);
+  v.setUint32(0,j.bodyA,true);v.setUint32(4,j.bodyB,true);v.setUint32(8,7,true);v.setUint32(12,0,true);
+  j.anchorA.forEach((x,k)=>v.setFloat32(16+4*k,x,true));v.setFloat32(28,1e30,true);
+  j.anchorB.forEach((x,k)=>v.setFloat32(32+4*k,x,true));
+  j.rest.forEach((x,k)=>v.setFloat32(48+4*k,x,true));      // axisA.xyz + limitMin: rest relative rotation
+  j.normal.forEach((x,k)=>v.setFloat32(64+4*k,x,true));    // axisB: bond normal in A's frame
+  (j.frameU??[0,0,0]).forEach((x,k)=>v.setFloat32(144+4*k,x,true)); // frameU: bond u axis in A's frame
+  j.strength.forEach((x,k)=>v.setFloat32(160+4*k,x,true));
+  for(let k=0;k<6;k++)v.setFloat32(120+4*k,j.k[k],true);
+});
 colliders.forEach((c,i)=>writeCollider(colBytes,i,c));
 device.queue.writeBuffer(bufs[0],0,bodyBytes);device.queue.writeBuffer(bufs[2],0,colBytes);
+device.queue.writeBuffer(bufs[5],0,jointBytes);
 device.queue.writeBuffer(bufs[18],0,scene.hullData);
 let hullRecordsCapacity=cap.maxHull;
 // Hierarchical size-level grid; build_aabbs initialises sleeping bounds on the
@@ -309,6 +328,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       hostCountersView.fill(0);
       hostCountersView[0] = bodyCount;
       hostCountersView[1] = colliderCount;
+      hostCountersView[3] = jointCount;
       hostColorsView.fill(0);
       device.queue.writeBuffer(hostUpload, 0, hostUploadCpu);
       // Prefer GPU copies from one upload — four tiny writeBuffers were ~0.3 ms of ring wall.
@@ -346,6 +366,11 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     function encodeCollision(pass, phase, reuse) {
       const nCols = Math.max(colliderCount, 1), nBodies = Math.max(bodyCount, 1);
       disp(pass, 'build_aabbs', nCols);
+      if (jointCount) {
+        // Exact bonded-pair set for the broadphase (broken bonds are left out).
+        disp(pass, 'joint_hash_clear', jointHashSlots);
+        disp(pass, 'joint_hash_insert', jointCount);
+      }
       pass = phase('bounds');
       disp(pass, 'broadphase_clear', gridHashWords);
       disp(pass, 'broadphase_insert', nCols);
@@ -399,11 +424,18 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
         dispWork(pass, 'contact_hash_insert', 68);
       }
       dispWork(pass, 'persist_contacts', 65);
+      if (jointCount) {
+        // Bonded bodies wake together (one bond hop per round), then the
+        // awake bonds capture their step-start violation.
+        for (let round = 0; round < BOND_WAKE_ROUNDS; round++) disp(pass, 'bond_wake', jointCount);
+        disp(pass, 'warmstart_joints', jointCount);
+      }
       pass = phase('persistence');
       disp(pass, 'build_awake_list', nBodies);
       disp(pass, 'write_work_args', 64);
       disp(pass, 'csr_clear', nBodies + 1);
       dispWork(pass, 'csr_degree_contacts', 66);
+      if (jointCount) disp(pass, 'csr_degree_joints', jointCount);
       if (bodyCount <= 512) {
         disp(pass, 'csr_prefix', 1);
       } else {
@@ -413,6 +445,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
         disp(pass, 'csr_prefix_add', nBodies);
       }
       dispWork(pass, 'csr_scatter_contacts', 66);
+      if (jointCount) disp(pass, 'csr_scatter_joints', jointCount);
       dispWork(pass, 'csr_sort', 67);
       pass = phase('graph');
       dispWork(pass, 'init_colors', 67);
@@ -522,6 +555,23 @@ return {
      manifolds:new Uint32Array(await read(bufs[25],0,last.manifold*32))};
  },
  get shots(){return shots},
+ // Joint lambda0..5 and k0..5 per joint (preloading, diagnostics).
+ async jointState(){
+   if(!jointCount)return {lambda:[],k:[]};
+   const size=jointCount*JOINT_BYTES,read=device.createBuffer({size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+   try{const enc=device.createCommandEncoder();enc.copyBufferToBuffer(bufs[5],0,read,0,size);device.queue.submit([enc.finish()]);
+     await read.mapAsync(GPUMapMode.READ);const f=new Float32Array(read.getMappedRange().slice(0));read.unmap();const w=JOINT_BYTES/4;
+     return {lambda:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+24,i*w+30))),k:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+30,i*w+36)))};}
+   finally{read.destroy()}
+ },
+ // Joint flags (bit 0 = broken), read back for tests and the HUD.
+ async jointFlags(){
+   if(!jointCount)return new Uint32Array(0);
+   const size=jointCount*JOINT_BYTES,read=device.createBuffer({size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+   try{const enc=device.createCommandEncoder();enc.copyBufferToBuffer(bufs[5],0,read,0,size);device.queue.submit([enc.finish()]);
+     await read.mapAsync(GPUMapMode.READ);const v=new Uint32Array(read.getMappedRange().slice(0));read.unmap();
+     return Uint32Array.from({length:jointCount},(_,i)=>v[i*JOINT_BYTES/4+3]);}finally{read.destroy()}
+ },
  set incrementalColoring(v){incremental=!!v},
  // Live solver parameters (dt, iterations, ...), packed again every step.
  get params(){return params},
@@ -582,6 +632,7 @@ return {
    for(let i=0;i<bufs.length;i++)if(![0,2,3,18,22].includes(i))enc.clearBuffer(bufs[i]);
    device.queue.submit([enc.finish()]);
    device.queue.writeBuffer(bufs[0],0,bodyBytes);device.queue.writeBuffer(bufs[2],0,colBytes);
+   device.queue.writeBuffer(bufs[5],0,jointBytes);
    steps=0;parity=0;shots=0;initialized=false;last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0};
  },
  dispose(){for(const b of [...bufs,staging,snapshot,hostUpload])b.destroy();},

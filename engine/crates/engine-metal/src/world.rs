@@ -135,7 +135,8 @@ impl MetalWorld {
             alloc_u32(d, capacity.max_colors.max(128)),
         ];
         let hull_verts = alloc::<[f32; 4]>(d, capacity.max_hull_vertices);
-        let events = alloc_u32(d, 65536);
+        // Joint-pair hash: three words per slot (joint index, body pair).
+        let events = alloc_u32(d, engine_schema::joint_hash_size(capacity.max_joints) * 3);
         let ccd_flags = alloc_u32(d, capacity.max_bodies);
         // WorldObbGpu = 5 × float4
         let world_obbs = alloc::<[f32; 20]>(d, capacity.max_colliders);
@@ -828,7 +829,7 @@ impl MetalWorld {
         // O(1) joint-pair filter for broadphase (was O(joints) per candidate).
         // Ring/Wall smash have zero joints — skip the 64k clear entirely.
         if self.joint_count > 0 {
-            self.dispatch(&encoder, "joint_hash_clear", 65536);
+            self.dispatch(&encoder, "joint_hash_clear", u64::from(engine_schema::joint_hash_size(self.joint_count)));
             self.dispatch(&encoder, "joint_hash_insert", n_joints);
         }
         self.dispatch(&encoder, "broadphase_clear", 131072);
@@ -1377,6 +1378,11 @@ impl<'a> SceneBuilder<'a> {
             _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
+            frame_u: [0.0; 3],
+            _pad_frame_u: 0.0,
+            strength: [0.0; 4],
+            c0_ang: [0.0; 3],
+            _pad_c0_ang: 0.0,
         })
     }
 
@@ -1398,6 +1404,11 @@ impl<'a> SceneBuilder<'a> {
             _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e5; 6],
+            frame_u: [0.0; 3],
+            _pad_frame_u: 0.0,
+            strength: [0.0; 4],
+            c0_ang: [0.0; 3],
+            _pad_c0_ang: 0.0,
         })
     }
 
@@ -1426,6 +1437,11 @@ impl<'a> SceneBuilder<'a> {
             _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
+            frame_u: [0.0; 3],
+            _pad_frame_u: 0.0,
+            strength: [0.0; 4],
+            c0_ang: [0.0; 3],
+            _pad_c0_ang: 0.0,
         })
     }
 
@@ -1447,6 +1463,11 @@ impl<'a> SceneBuilder<'a> {
             _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
+            frame_u: [0.0; 3],
+            _pad_frame_u: 0.0,
+            strength: [0.0; 4],
+            c0_ang: [0.0; 3],
+            _pad_c0_ang: 0.0,
         })
     }
 
@@ -1468,6 +1489,11 @@ impl<'a> SceneBuilder<'a> {
             _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
+            frame_u: [0.0; 3],
+            _pad_frame_u: 0.0,
+            strength: [0.0; 4],
+            c0_ang: [0.0; 3],
+            _pad_c0_ang: 0.0,
         })
     }
 

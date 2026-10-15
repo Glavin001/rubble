@@ -378,24 +378,38 @@ uint gridHash(int x, int y, int z)
 
 // Open-addressed joint-pair set in gEvents (three-avbd / demo3d constrainedTo).
 // Replaces O(joints) scan that dominated Chain Mail / Jointed Drop broadphase.
-static const uint JOINT_HASH_SIZE = 65536u;
+// Each slot is claimed with its joint's index; the inserter then stores the
+// body pair in two parallel arrays (gEvents[size + slot], [2 size + slot]), so
+// lookups compare the real pair (no false "jointed" answers from hash
+// collisions) without binding gJoints. The table is at least 65536 slots and at
+// least twice the joint count; hosts size gEvents to 3 x jointHashSize() words.
+// Broken bonds are left out, so their bodies collide again.
+static const uint JOINT_HASH_MIN = 65536u;
 static const uint JOINT_HASH_EMPTY = 0xFFFFFFFFu;
+static const uint JOINT_HASH_PROBES = 64u;
 
-uint jointPairKey(uint bodyA, uint bodyB)
+uint jointHashSize()
+{
+    uint v = max(2u * gCounters[0].jointCount, JOINT_HASH_MIN) - 1u;
+    v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
+    return v + 1u;
+}
+
+uint jointPairHash(uint bodyA, uint bodyB)
 {
     uint lo = min(bodyA, bodyB);
     uint hi = max(bodyA, bodyB);
-    uint h = (lo * 73856093u) ^ (hi * 19349663u) ^ (lo << 16) ^ (hi >> 3);
-    // Must never equal EMPTY sentinel.
-    return h == JOINT_HASH_EMPTY ? (lo ^ 0xA5A5A5A5u) : h;
+    return (lo * 73856093u) ^ (hi * 19349663u) ^ (lo << 16) ^ (hi >> 3);
 }
+
+bool jointBroken(Joint j) { return (j.flags & JOINT_FLAG_BROKEN) != 0u; }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void joint_hash_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    if (i >= JOINT_HASH_SIZE) return;
+    if (i >= jointHashSize()) return;
     ASTORE(gEvents[i], JOINT_HASH_EMPTY);
 }
 
@@ -407,37 +421,47 @@ void joint_hash_insert(uint3 tid : SV_DispatchThreadID)
     uint nJ = gCounters[0].jointCount;
     if (i >= nJ) return;
     Joint jj = gJoints[i];
-    uint key = jointPairKey(jj.bodyA, jj.bodyB);
-    uint h = key & (JOINT_HASH_SIZE - 1u);
-    for (uint probe = 0; probe < 64u; probe++)
+    if (jointBroken(jj)) return;
+    uint mask = jointHashSize() - 1u;
+    uint h = jointPairHash(jj.bodyA, jj.bodyB) & mask;
+    for (uint probe = 0; probe < JOINT_HASH_PROBES; probe++)
     {
-        uint slot = (h + probe) & (JOINT_HASH_SIZE - 1u);
-        uint prev;
-        // Spin on the same slot when WGSL weak CAS spuriously fails. Advancing
-        // the probe would leave an EMPTY hole and break open-address lookups.
-        for (uint spin = 0u; spin < 64u; spin++)
+        uint slot = (h + probe) & mask;
+        // Retry the same slot while WGSL's weak CAS fails spuriously: advancing
+        // would leave an EMPTY hole and break open-address lookups.
+        uint owner = JOINT_HASH_EMPTY;
+        for (uint spin = 0u; spin < 64u && owner == JOINT_HASH_EMPTY; spin++)
         {
-            ACAS4(gEvents[slot], JOINT_HASH_EMPTY, key, prev);
-            if (prev != JOINT_HASH_EMPTY) break;
-            if (ALOAD(gEvents[slot]) == key) return;
+            uint prev;
+            ACAS4(gEvents[slot], JOINT_HASH_EMPTY, i, prev);
+            owner = ALOAD(gEvents[slot]);
         }
-        if (prev == JOINT_HASH_EMPTY || prev == key) return;
+        if (owner == i)
+        {
+            uint size = mask + 1u;
+            ASTORE(gEvents[size + slot], min(jj.bodyA, jj.bodyB));
+            ASTORE(gEvents[2u * size + slot], max(jj.bodyA, jj.bodyB));
+            return;
+        }
     }
+    AOR2(gCounters[0].overflowFlags, OVERFLOW_JOINTS);
 }
 
 bool bodiesJointed(uint bodyA, uint bodyB)
 {
     // Ring/Wall have zero joints — skip the open-address probe entirely (and do not
-    // require a 64k clear of gEvents each step).
+    // require a clear of gEvents each step).
     if (gCounters[0].jointCount == 0u) return false;
-    uint key = jointPairKey(bodyA, bodyB);
-    uint h = key & (JOINT_HASH_SIZE - 1u);
-    for (uint probe = 0; probe < 64u; probe++)
+    uint lo = min(bodyA, bodyB);
+    uint hi = max(bodyA, bodyB);
+    uint mask = jointHashSize() - 1u;
+    uint h = jointPairHash(lo, hi) & mask;
+    for (uint probe = 0; probe < JOINT_HASH_PROBES; probe++)
     {
-        uint slot = (h + probe) & (JOINT_HASH_SIZE - 1u);
-        uint v = ALOAD(gEvents[slot]);
-        if (v == JOINT_HASH_EMPTY) return false;
-        if (v == key) return true;
+        uint slot = (h + probe) & mask;
+        if (ALOAD(gEvents[slot]) == JOINT_HASH_EMPTY) return false;
+        if (ALOAD(gEvents[mask + 1u + slot]) == lo && ALOAD(gEvents[2u * (mask + 1u) + slot]) == hi)
+            return true;
     }
     return false;
 }
@@ -1339,6 +1363,9 @@ float colliderMinSide(Collider col)
 }
 
 static const uint FLAG_REUSE_CONTACTS = 1u;
+// Preload: bonds carry load but never break (hosts settle a structure under its
+// own weight before it is put to sleep, so it wakes in static equilibrium).
+static const uint FLAG_BOND_PRELOAD = 2u;
 static const float REUSE_LIN_TOL = 0.002;
 static const float REUSE_ANG_TOL = 0.002;
 
@@ -1845,6 +1872,82 @@ void narrowphase_fresh(uint3 tid : SV_DispatchThreadID)
 }
 
 // demo3d Joint::initialize — store C0, decay λ/k (Eq. 19).
+// Bond angular violation, world frame: the rotation taking B's rest
+// orientation (A's orientation times the rest relative rotation q0, stored in
+// axisA.xyz + limitMin) to B's current one, as a rotation vector. For small
+// angles it is thetaB - thetaA, so its Jacobian is -I on A and +I on B.
+float3 bondAngularError(Joint j, BodyState a, BodyState b)
+{
+    float4 target = quatMul(a.orientation, float4(j.axisA, j.limitMin));
+    float4 dq = quatMul(b.orientation, quatConjugate(target));
+    return 2.0 * (dq.w < 0.0 ? -dq.xyz : dq.xyz);
+}
+
+// Bond frame in world space: normal (A->B), u, v.
+float3x3 bondFrame(Joint j, BodyState a)
+{
+    float3 n = normalize(quatRotate(a.orientation, j.axisB));
+    float3 u = normalize(quatRotate(a.orientation, j.frameU));
+    return float3x3(n, u, cross(n, u));
+}
+
+// Bond row violations in the bond frame, stabilized as AVBD does for hard
+// constraints (C - alpha C0): linear rows (normal, u, v) of C = anchorA -
+// anchorB and angular rows (about u, v, normal) of thetaB - thetaA. Pulling
+// apart along the A->B normal makes the normal row negative.
+void bondViolation(Joint j, BodyState a, BodyState b, float alpha, out float3 lin, out float3 ang)
+{
+    float3x3 F = bondFrame(j, a);
+    float3 C = transformPoint(a.position, a.orientation, j.localAnchorA)
+             - transformPoint(b.position, b.orientation, j.localAnchorB) - alpha * j.c0;
+    float3 Cang = bondAngularError(j, a, b) - alpha * j.c0Ang;
+    lin = float3(dot(C, F[0]), dot(C, F[1]), dot(C, F[2]));
+    ang = float3(dot(Cang, F[1]), dot(Cang, F[2]), dot(Cang, F[0]));
+}
+
+// Shardwright's bond utilization (tools/sim): tension plus bending against
+// their capacities, compression, and shear; > 1 breaks. Torsion is not part
+// of the reference criterion.
+bool bondOverloaded(Joint j, float3 lin, float3 ang)
+{
+    float tension = max(-lin.x, 0.0);
+    float compression = max(lin.x, 0.0);
+    float shear = length(lin.yz);
+    float bending = length(ang.xy);
+    float4 cap = j.strength;
+    float u = (cap.x > 0.0 ? tension / cap.x : 0.0) + (cap.w > 0.0 ? bending / cap.w : 0.0);
+    if (cap.y > 0.0) u = max(u, compression / cap.y);
+    if (cap.z > 0.0) u = max(u, shear / cap.z);
+    return u > 1.0;
+}
+
+// Wake through intact bonds (one hop per dispatch; hosts run a few rounds): a
+// sleeping body bonded to an awake one must move with it, or it would act as a
+// fixed anchor and overload the bond. Bonded islands sleep together (gate).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void bond_wake(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].jointCount) return;
+    Joint j = gJoints[i];
+    if (j.jointType != JOINT_BOND || jointBroken(j)) return;
+    BodyState a = gBodies[j.bodyA];
+    BodyState b = gBodies[j.bodyB];
+    bool sleepA = bodyIsDynamic(a) && bodyIsSleeping(a);
+    bool sleepB = bodyIsDynamic(b) && bodyIsSleeping(b);
+    if (sleepA && bodyMoving(b))
+    {
+        gBodies[j.bodyA].flags = (a.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[j.bodyA].sleepTimer = 0.0;
+    }
+    if (sleepB && bodyMoving(a))
+    {
+        gBodies[j.bodyB].flags = (b.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[j.bodyB].sleepTimer = 0.0;
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void warmstart_joints(uint3 tid : SV_DispatchThreadID)
@@ -1856,6 +1959,22 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     Joint j = gJoints[i];
     BodyState a = gBodies[j.bodyA];
     BodyState b = gBodies[j.bodyB];
+    if (j.jointType == JOINT_BOND)
+    {
+        // Broken bonds are inert; a bond between two bodies that are both
+        // asleep or static stays frozen, like the sleeping contacts it stands
+        // for. Its penalty is fixed (proportional to the baked springs); only
+        // the multipliers decay, as for every AVBD constraint.
+        if (jointBroken(j) || (!bodyMoving(a) && !bodyMoving(b))) return;
+        j.c0 = transformPoint(a.position, a.orientation, j.localAnchorA)
+             - transformPoint(b.position, b.orientation, j.localAnchorB);
+        j.c0Ang = bondAngularError(j, a, b);
+        float decay = p.alpha * p.gamma;
+        j.lambda0 *= decay; j.lambda1 *= decay; j.lambda2 *= decay;
+        j.lambda3 *= decay; j.lambda4 *= decay; j.lambda5 *= decay;
+        gJoints[i] = j;
+        return;
+    }
     float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
     float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
     j.c0 = wa - wb;
@@ -2344,6 +2463,7 @@ void csr_degree_joints(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
+    if (jointBroken(gJoints[i])) return;
     uint2 e = constraintEndpoints(i);
     csrCountEndpoint(e.x);
     csrCountEndpoint(e.y);
@@ -2561,6 +2681,7 @@ void csr_scatter_joints(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
+    if (jointBroken(gJoints[i])) return;
     uint2 e = constraintEndpoints(i);
     csrFillEndpoint(e.x, e.y, i);
     csrFillEndpoint(e.y, e.x, i);
@@ -3408,9 +3529,37 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
         else
         {
             Joint j = gJoints[id];
+            if (jointBroken(j)) continue;
             bool isA = j.bodyA == bodyIdx;
             BodyState ba = gBodies[j.bodyA];
             BodyState bb = gBodies[j.bodyB];
+            if (j.jointType == JOINT_BOND)
+            {
+                // Six AVBD rows in the bond frame: f = k Creg + lambda.
+                float3x3 F = bondFrame(j, ba);
+                float3 lin, ang;
+                bondViolation(j, ba, bb, p.alpha, lin, ang);
+                float3 r = quatRotate(b.orientation, isA ? j.localAnchorA : j.localAnchorB);
+                float kLin[3] = { j.k0, j.k1, j.k2 };
+                float lLin[3] = { j.lambda0, j.lambda1, j.lambda2 };
+                // Angular rows in frame order (normal, u, v) -> stored (u, v, normal).
+                float kAng[3] = { j.k5, j.k3, j.k4 };
+                float lAng[3] = { j.lambda5, j.lambda3, j.lambda4 };
+                float cAng[3] = { ang.z, ang.x, ang.y };
+                float s = isA ? -1.0 : 1.0;
+                for (int row = 0; row < 3; row++)
+                {
+                    float3 d = F[row];
+                    Vec6 jl = jacobianLin(d, r, !isA);
+                    mat6AddOuter(A, jl, kLin[row]);
+                    vec6AddScaled(rhs, jl, kLin[row] * lin[row] + lLin[row]);
+                    Vec6 ja = vec6Zero();
+                    ja.v[3] = s * d.x; ja.v[4] = s * d.y; ja.v[5] = s * d.z;
+                    mat6AddOuter(A, ja, kAng[row]);
+                    vec6AddScaled(rhs, ja, kAng[row] * cAng[row] + lAng[row]);
+                }
+                continue;
+            }
             float3 wa = transformPoint(ba.position, ba.orientation, j.localAnchorA);
             float3 wb = transformPoint(bb.position, bb.orientation, j.localAnchorB);
             float3 C = wa - wb;
@@ -3793,6 +3942,23 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         Joint j = gJoints[i];
         BodyState a = gBodies[j.bodyA];
         BodyState b = gBodies[j.bodyB];
+        if (j.jointType == JOINT_BOND)
+        {
+            // Frozen while both ends sleep or are static, inert once broken.
+            if (jointBroken(j) || (!bodyMoving(a) && !bodyMoving(b))) return;
+            float3 cl, ca;
+            bondViolation(j, a, b, p.alpha, cl, ca);
+            float3 lin = float3(j.lambda0, j.lambda1, j.lambda2) + float3(j.k0, j.k1, j.k2) * cl;
+            float3 ang = float3(j.lambda3, j.lambda4, j.lambda5) + float3(j.k3, j.k4, j.k5) * ca;
+            j.lambda0 = lin.x; j.lambda1 = lin.y; j.lambda2 = lin.z;
+            j.lambda3 = ang.x; j.lambda4 = ang.y; j.lambda5 = ang.z;
+            // The final iteration's forces decide breaking; a broken bond drops
+            // out of the hash, CSR and solve from the next step on.
+            if (PASS_U != 0u && (p.flags & FLAG_BOND_PRELOAD) == 0u && bondOverloaded(j, lin, ang))
+                j.flags |= JOINT_FLAG_BROKEN;
+            gJoints[i] = j;
+            return;
+        }
         float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
         float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
         float3 C = wa - wb; // shared with primal
@@ -3867,7 +4033,8 @@ void write_sleep_args(uint3 tid : SV_DispatchThreadID)
 {
     if (dispatchIndex(tid) != 0u) return;
     bool anyCandidate = ALOAD(gScratchAtomics[13]) != 0u;
-    writeDispatchArgs(66u, anyCandidate ? min(ALOAD(gCounters[0].manifoldCount), HOST_S(10)) : 0u);
+    // Manifolds, then joints (bonds join islands), one thread each.
+    writeDispatchArgs(66u, anyCandidate ? min(ALOAD(gCounters[0].manifoldCount), HOST_S(10)) + gCounters[0].jointCount : 0u);
     writeDispatchArgs(67u, anyCandidate ? gCounters[0].bodyCount : 0u);
 }
 
@@ -3879,12 +4046,24 @@ void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
     // Ring smash: no sleep candidates → scratch[13]==0 → entire gate is a no-op.
     if (ALOAD(gScratchAtomics[13]) == 0u) return;
     uint i = dispatchIndex(tid);
-    uint n = ALOAD(gCounters[0].manifoldCount);
-    if (i >= n) return;
-    Manifold m = gManifolds[i];
-    if (m.contactCount == 0u) return;
-    uint ba = gColliders[m.colliderA].body;
-    uint bb = gColliders[m.colliderB].body;
+    uint n = min(ALOAD(gCounters[0].manifoldCount), HOST_S(10));
+    uint ba, bb;
+    if (i < n)
+    {
+        Manifold m = gManifolds[i];
+        if (m.contactCount == 0u) return;
+        ba = gColliders[m.colliderA].body;
+        bb = gColliders[m.colliderB].body;
+    }
+    else
+    {
+        // Intact bonds tie their bodies into one island, like contacts.
+        if (i - n >= gCounters[0].jointCount) return;
+        Joint j = gJoints[i - n];
+        if (j.jointType != JOINT_BOND || jointBroken(j)) return;
+        ba = j.bodyA;
+        bb = j.bodyB;
+    }
     BodyState a = gBodies[ba];
     BodyState b = gBodies[bb];
     bool dynA = bodyIsDynamic(a);

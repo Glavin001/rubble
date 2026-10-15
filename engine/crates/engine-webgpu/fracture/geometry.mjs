@@ -6,6 +6,72 @@ export const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1
 export const norm=a=>scale(a,1/(Math.hypot(...a)||1));
 export const rotate=(q,v)=>add(v,scale(cross(q.slice(0,3),add(cross(q.slice(0,3),v),scale(v,q[3]))),2));
 export const inverseRotate=(q,v)=>rotate([-q[0],-q[1],-q[2],q[3]],v);
+export const quatMul=(a,b)=>[a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],
+  a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2]];
+export const quatConjugate=q=>[-q[0],-q[1],-q[2],q[3]];
+
+// Break capacities of a baked bond, as Shardwright's reference stress solver
+// computes them (tools/sim): ft is the bond's interface-material tensile
+// strength, else the weaker fragment material's; fc the weaker compressive
+// strength; k the baked strength scale. Bearings (ft = 0) resist with 0.05 fc.
+// Returns [tension N, compression N, shear N, bending N m].
+export function bondCapacities(asset, bond, strengthScale=1) {
+  const lib=asset.library,fragments=asset.physics.fragments;
+  const strengths=f=>{const m=lib.material[fragments[f].materialIds[0]??0]??{};const ft=m.tensile_strength??1e6;return [ft,m.compressive_strength??10*ft]};
+  const [fta,fca]=strengths(bond.a),[ftb,fcb]=bond.b>=0?strengths(bond.b):[fta,fca];
+  const iface=bond.composition[0]?.interfaceMaterial??-1;
+  const ifm=iface>=0?lib.interface_material[iface-lib.material.length]:null;
+  const ft=ifm?.tensile_strength??Math.min(fta,ftb),fc=Math.min(fca,fcb);
+  const k=bond.strengthScale*strengthScale,c=Math.max(bond.extentHalf[0],bond.extentHalf[1],1e-6);
+  const fte=ft>0?ft:0.05*fc;
+  return [Math.max(fte*bond.area*k,1e-6),Math.max(fc*bond.area*k,1e-6),Math.max(1.5*fte*bond.area*k,1e-6),Math.max(fte*Math.min(bond.iUU,bond.iVV)/c*k,1e-9)];
+}
+
+export const JOINT_BOND=7, JOINT_BYTES=192;
+
+// AVBD penalty for bonds: one scene-wide factor maps the physical springs to
+// solver stiffness, so rows keep the bake's relative stiffness (and so their
+// share of load in redundant structures); the multipliers carry the load. The
+// median bond's normal row sits at BOND_PENALTY_SCALE x the median lighter
+// body's m/h^2. At steady state a bond acts like a spring of iterations x k:
+// 0.5 holds statics to ~0.03 mm / 0.1 deg under 125 kg (bond-regression.mjs).
+// Rows stiffer than BOND_PENALTY_CAP x their lighter body's inertial term
+// (m/h^2, smallest I/h^2) are capped: past ~20x a bonded cluster locks in
+// Gauss-Seidel (a released pair hangs in the air) and f32 6x6 solves lose
+// precision; the few capped rows are still the stiffest in the structure.
+export const BOND_PENALTY_SCALE=0.5, BOND_PENALTY_CAP=5;
+export function scaleBondSprings(joints, bodies, dt, scale=BOND_PENALTY_SCALE, cap=BOND_PENALTY_CAP) {
+  if(!joints.length)return joints;
+  const median=v=>{const s=[...v].sort((a,b)=>a-b);return s[s.length>>1]};
+  const inertial=i=>bodies[i]?.invMass>0?{m:1/bodies[i].invMass,I:1/Math.max(...bodies[i].invI)}:{m:Infinity,I:Infinity};
+  const lighter=j=>{const a=inertial(j.bodyA),b=inertial(j.bodyB);return {m:Math.min(a.m,b.m),I:Math.min(a.I,b.I)}};
+  const s=scale*median(joints.map(j=>lighter(j).m))/(dt*dt)/median(joints.map(j=>j.k[0]));
+  return joints.map(j=>{const {m,I}=lighter(j),capLin=cap*m/(dt*dt),capAng=cap*I/(dt*dt);
+    return {...j,k:j.k.map((x,r)=>Math.min(x*s,r<3?capLin:capAng))}});
+}
+
+// Elastic bond springs, Shardwright's reference model (frac-validate
+// network.rs, StiffnessModel::Spec): series compliances along the normal from
+// each fragment's centroid (distA, distB) plus the interface layer,
+//   ce = dA/E_A + dB/E_B + t/E_i,  cg = dA/G_A + dB/G_B + t/G_i,
+//   kn = A/ce, ks = A/cg, ktu = Iuu/ce, ktv = Ivv/ce, kt = J/cg.
+// World bonds (b = -1) have no B side. Returns [kn, ks, ks, ktu, ktv, kt] in
+// the bond frame (normal, u, v | bending about u, v, torsion about normal).
+export function bondSprings(asset, bond) {
+  const lib=asset.library,fragments=asset.physics.fragments;
+  const elastic=f=>{const m=lib.material[fragments[f].materialIds[0]??0]??{};
+    // Anisotropic (wood): longitudinal E and shear G, as frac-material elastic().
+    if(m.anisotropy)return [m.anisotropy.E_long??m.anisotropy.e_long,m.anisotropy.G??m.anisotropy.g];
+    if(m.youngs_modulus!=null)return [m.youngs_modulus,m.youngs_modulus/(2*(1+(m.poisson??0.2)))];
+    return [1e9,1e9/2.4]};
+  const [ea,ga]=elastic(bond.a),[eb,gb]=bond.b>=0?elastic(bond.b):[Infinity,Infinity];
+  const iface=bond.composition[0]?.interfaceMaterial??-1,im=iface>=0?lib.interface_material[iface-lib.material.length]:null;
+  const em=im?(im.youngs_modulus??ea):1,gm=im?(im.shear_modulus??em/2.4):1,tm=im?(im.thickness??0):0;
+  const da=Math.max(bond.distA,1e-9),db=bond.b>=0?Math.max(bond.distB,1e-9):0;
+  const ce=da/ea+(Number.isFinite(eb)?db/eb:0)+(tm>0?tm/em:0),cg=da/ga+(Number.isFinite(gb)?db/gb:0)+(tm>0?tm/gm:0);
+  const ks=bond.area/cg;
+  return [bond.area/ce,ks,ks,bond.iUU/ce,bond.iVV/ce,bond.polarMoment/cg];
+}
 
 // Symmetric inertia eigenbasis: keep the off-diagonals, then rotate geometry
 // into principal axes because the AVBD body ABI stores diagonal inverse inertia.
@@ -265,17 +331,21 @@ export function gridConfig(colliders) {
 // shares the single house's hull records (same arena offsets) and render mesh
 // (drawn instanced), so GPU memory grows only with bodies and colliders. The
 // projectile is a heavy ball rolled along the ground down the middle column.
-export function buildGrid(asset, level, {columns=1, rows=20, gap=2.5, projectileRadius=1.6, projectileMass=200000, projectileSpeed=40, maxHullVertices}={}) {
-  const one=buildScene(asset,level,{maxHullVertices}),frags=one.projectileStart-1,copies=columns*rows;
+// base: an already built (e.g. bond-preloaded) single-house scene to replicate.
+export function buildGrid(asset, level, {columns=1, rows=20, gap=2.5, projectileRadius=1.6, projectileMass=200000, projectileSpeed=40, maxHullVertices, base}={}) {
+  const one=base??buildScene(asset,level,{maxHullVertices}),frags=one.projectileStart-1,copies=columns*rows;
   const pitchX=one.extentX+gap,pitchZ=one.extentZ+gap;
   const width=pitchX*(columns-1)+one.extentX,length=pitchZ*(rows-1)+one.extentZ;
-  const bodies=[one.bodies[0]],colliders=[one.colliders[0]];
+  const bodies=[one.bodies[0]],colliders=[one.colliders[0]],joints=[];
   const houseColliders=one.colliders.filter(c=>c.body>=1&&c.body<one.projectileStart);
   const offsetX=c=>(c-(columns-1)/2)*pitchX;
   for(let r=0;r<rows;r++)for(let c=0;c<columns;c++){
     const dx=offsetX(c),dz=(r-(rows-1)/2)*pitchZ,base=(r*columns+c)*frags;
     for(let i=1;i<one.projectileStart;i++){const b=one.bodies[i];bodies.push({...b,p:[b.p[0]+dx,b.p[1],b.p[2]+dz]})}
     for(const col of houseColliders)colliders.push({...col,body:col.body+base});
+    // World-anchored bonds keep body 0 and move their world anchor with the copy.
+    for(const j of one.joints)joints.push(j.world?{...j,bodyA:j.bodyA+base,anchorB:[j.anchorB[0]+dx,j.anchorB[1],j.anchorB[2]+dz]}
+      :{...j,bodyA:j.bodyA+base,bodyB:j.bodyB+base});
   }
   const projectileStart=bodies.length,projectileVertices=[];
   for(let slot=0;slot<one.projectileCount;slot++){
@@ -286,7 +356,7 @@ export function buildGrid(asset, level, {columns=1, rows=20, gap=2.5, projectile
     for(let v=0;v<stride;v+=10){const o=slot*stride+v;projectileVertices.push(src[o]/r0*projectileRadius,src[o+1]/r0*projectileRadius,src[o+2]/r0*projectileRadius,src[o+3],src[o+4],src[o+5],src[o+6],src[o+7],src[o+8],id)}
   }
   const span=Math.max(width,length),shotX=offsetX(Math.floor(columns/2));
-  return {...one,bodies,colliders,projectileStart,projectileRadius,projectileMass,projectileSpeed,projectileArc:false,
+  return {...one,bodies,colliders,joints,projectileStart,projectileRadius,projectileMass,projectileSpeed,projectileArc:false,
     projectileVertices:new Float32Array(projectileVertices),copies,columns,rows,instanceStride:frags,
     rowPitch:pitchZ,columnPitch:pitchX,rowLength:length,gridWidth:width,
     extent:Math.max(one.extent,span),center:[0,one.height*.5,0],gridCellSize:gridConfig(colliders).base,
@@ -352,7 +422,19 @@ export function buildScene(asset, level, {maxHullVertices}={}) {
     }
   }
   const bonds=asset.physics.bonds.filter(b=>b.level===level);
-  // Bonds are inspection-only; initially sleeping pieces wake on projectile impact.
+  // Each bond becomes a breakable weld (JOINT_BOND) at its centroid: all six
+  // DOF locked at the baked rest pose, breaking at the bond's capacities. World
+  // bonds (b = -1, anchors) weld to the static ground body 0.
+  const joints=[];
+  for(const b of bonds){
+    const A=byId.get(b.a),B=b.b>=0?byId.get(b.b):null;if(!A||(b.b>=0&&!B))continue;
+    const c=add(b.centroid,placement),qA=A.q,qB=B?B.q:[0,0,0,1];
+    joints.push({bodyA:A.id,bodyB:B?B.id:0,
+      anchorA:inverseRotate(qA,sub(c,bodies[A.id].p)),anchorB:B?inverseRotate(qB,sub(c,bodies[B.id].p)):c,
+      rest:quatMul(quatConjugate(qA),qB),normal:inverseRotate(qA,b.normal),frameU:inverseRotate(qA,b.frameU),
+      strength:bondCapacities(asset,b),k:bondSprings(asset,b),world:!B});
+  }
+  const scaledJoints=scaleBondSprings(joints,bodies,1/120);
   for(const b of bonds){
     const a=byId.get(b.a),other=byId.get(b.b);if(!a)continue;
     const endpoints=other?[[a,[0,0,0]],[other,[0,0,0]]]:[[a,[0,0,0]],[null,add(b.centroid,placement)]];
@@ -374,7 +456,7 @@ export function buildScene(asset, level, {maxHullVertices}={}) {
       for(const n of [a,b,c,a,c,d])projectileVertices.push(...scale(n,projectileRadius),...n,1,.3,.08,id);
     }
   }
-  return {projectileStart,projectileCount,projectileRadius,projectileMass,projectileVertices:new Float32Array(projectileVertices),bodies,colliders,hullData:arena.data,skippedHulls,vertices:new Float32Array(vertices),lines:new Float32Array(lines),selected,bonds,byId,
+  return {projectileStart,projectileCount,projectileRadius,projectileMass,projectileVertices:new Float32Array(projectileVertices),bodies,colliders,joints:scaledJoints,hullData:arena.data,skippedHulls,vertices:new Float32Array(vertices),lines:new Float32Array(lines),selected,bonds,byId,
     extent,extentX:hi[0]-lo[0],extentZ:hi[2]-lo[2],height,copies:1,instanceStride:0,center:[0,height*.5+placement[1]+lo[1],0],gridCellSize:gridConfig(colliders).base,
     params:{flags:1,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
 }
