@@ -1169,18 +1169,10 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
     return true;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void narrowphase(uint3 tid : SV_DispatchThreadID)
+// Shape tests and emission for one candidate that did not reuse contacts.
+[ForceInline]
+void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState ba, BodyState bb)
 {
-    uint i = dispatchIndex(tid);
-    uint n = ALOAD(gCounters[0].candidateCount);
-    if (i >= n) return;
-    CandidatePair pair = gCandidates[i];
-    Collider ca = gColliders[pair.colliderA];
-    Collider cb = gColliders[pair.colliderB];
-    BodyState ba = gBodies[ca.body];
-    BodyState bb = gBodies[cb.body];
     float3 posA = transformPoint(ba.position, ba.orientation, ca.localPos);
     float3 posB = transformPoint(bb.position, bb.orientation, cb.localPos);
     float4 rotA = quatMul(ba.orientation, ca.localRot);
@@ -1188,11 +1180,6 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     float margin = PARAMS.contactOffset;
     float3 nrm; float pen; float3 pA; float3 pB;
     bool hit = false;
-
-    // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
-    if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
-        tryReuseContacts(pair, ba, bb, margin))
-        return;
 
     // Multi-point manifolds (demo3d / three-avbd) — required for stable stacks.
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_BOX)
@@ -1389,6 +1376,75 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
 
     if (!hit) return;
     emitContact(pair, ba, bb, ca, cb, nrm, pA, pB, pair.key, margin);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void narrowphase(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    uint n = ALOAD(gCounters[0].candidateCount);
+    if (i >= n) return;
+    CandidatePair pair = gCandidates[i];
+    Collider ca = gColliders[pair.colliderA];
+    Collider cb = gColliders[pair.colliderB];
+    BodyState ba = gBodies[ca.body];
+    BodyState bb = gBodies[cb.body];
+    // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
+    if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
+        tryReuseContacts(pair, ba, bb, PARAMS.contactOffset))
+        return;
+    narrowphaseShapes(pair, ca, cb, ba, bb);
+}
+
+// Opt-in two-pass narrowphase (8ek): reuse first, then shape tests over a
+// compacted list, so warps no longer run both the reuse copy and box SAT.
+// Deferred pairs are copied to the unused tail of gCandidates (counted in
+// gCounters._pad1); when the tail is full a pair is tested inline instead.
+// HOST_S(21) != 0 caps the tail (tests exercise the inline fallback).
+uint narrowphaseDeferCapacity(uint n)
+{
+    uint cap = HOST_S(2);
+    uint tail = cap - min(n, cap);
+    return HOST_S(21) != 0u ? min(tail, HOST_S(21)) : tail;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void narrowphase_defer(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    uint n = ALOAD(gCounters[0].candidateCount);
+    if (i >= n) return;
+    CandidatePair pair = gCandidates[i];
+    Collider ca = gColliders[pair.colliderA];
+    Collider cb = gColliders[pair.colliderB];
+    BodyState ba = gBodies[ca.body];
+    BodyState bb = gBodies[cb.body];
+    if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
+        tryReuseContacts(pair, ba, bb, PARAMS.contactOffset))
+        return;
+    uint k;
+    AADD3(gCounters[0]._pad1, 1u, k);
+    if (k < narrowphaseDeferCapacity(n))
+    {
+        gCandidates[HOST_S(2) - 1u - k] = pair;
+        return;
+    }
+    narrowphaseShapes(pair, ca, cb, ba, bb);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void narrowphase_fresh(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = dispatchIndex(tid);
+    uint n = ALOAD(gCounters[0].candidateCount);
+    if (k >= min(ALOAD(gCounters[0]._pad1), narrowphaseDeferCapacity(n))) return;
+    CandidatePair pair = gCandidates[HOST_S(2) - 1u - k];
+    Collider ca = gColliders[pair.colliderA];
+    Collider cb = gColliders[pair.colliderB];
+    narrowphaseShapes(pair, ca, cb, gBodies[ca.body], gBodies[cb.body]);
 }
 
 // demo3d Joint::initialize — store C0, decay λ/k (Eq. 19).

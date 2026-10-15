@@ -10,6 +10,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "solve_primal_sparse_compact",
     "solve_primal_sparse_persistent",
     "narrowphase_copy_persistent",
+    "narrowphase_defer_copy_persistent",
+    "narrowphase_fresh_copy_persistent",
     "persist_contacts_copy_persistent",
     "apply_commands",
     "apply_commands_persistent",
