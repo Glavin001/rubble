@@ -27,7 +27,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
 
     function bufferSizes() {
       const b = (n, stride) => n * stride;
-      const s = new Array(30).fill(256);
+      const s = new Array(31).fill(256);
       s[0] = b(cap.maxBodies * 2, 112);
       s[1] = b(cap.maxBodies, 112);
       s[2] = b(cap.maxColliders, 64);
@@ -59,6 +59,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       s[27] = b(cap.maxContacts * 2, 64);  // persistent SolverPoint (hot)
       s[28] = b(cap.maxCandidates, 32);    // solver pairs
       s[29] = b(cap.maxCandidates, 32);    // convex SAT work list
+      s[30] = nextPow2(Math.max(1024, cap.maxCandidates)) * 8; // SAT separating-feature cache
       return s;
     }
 

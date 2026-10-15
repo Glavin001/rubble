@@ -80,6 +80,10 @@ int main(int argc, char** argv)
     // Previous contacts live in the other half: [maxContacts, 2·maxContacts).
     bind(g.gManifolds_0, sManifolds, nCandidates);
     bind(g.gConvexWork_0, sWork, nCandidates);
+    std::vector<uint8_t> sSatCache;
+    // SAT separating-feature cache: next power of two >= max(1024, max candidates).
+    size_t satSlots = 1024; while (satSlots < nCandidates) satSlots <<= 1;
+    bind(g.gSatCache_0, sSatCache, satSlots);
     std::vector<uint8_t> sColorLists;
     bind(g.gConstraintIds_0, sConstraintIds, gridWords > (1u << 16) ? gridWords : (1u << 16));
     bind(g.gColorLists_0, sColorLists, nColliders + 64);
