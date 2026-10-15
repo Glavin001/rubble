@@ -136,7 +136,10 @@ function tick(now){
    }else{
     // Bound outstanding work. Slow ticks get one tick per frame, rather than
     // four serial GPU waits starving camera input and rendering.
-    const budget=Math.max(1,Math.min(4,Math.floor(12/Math.max(sim.timing.wallMs,0.1))));
+    // Overlapped ticks (opt-in) queue without waiting for counters, so the
+    // frame can carry the whole backlog (the simulation caps ticks in flight).
+    const overlap=$('overlap-ticks').checked;
+    const budget=overlap?4:Math.max(1,Math.min(4,Math.floor(12/Math.max(sim.timing.wallMs,0.1))));
     ticks=Math.min(budget,Math.floor(accumulator*stepHz()));
     if(ticks){
      accumulator-=ticks/stepHz();
@@ -144,7 +147,7 @@ function tick(now){
      // the physics is the same, only spread over several frames.
      const heavy=sim.timing.wallMs>SLICED_STEP_MS&&!(sim.timing.sliced&&sim.counters.awake<SLICE_EXIT_AWAKE);
      if(heavy){ticks=0;if(sim.beginSlicedStep()&&sim.submitSlices(1))sim.finishSlicedStep().then(()=>{if(!document.hidden)rates.step(sim.timing)}).catch(fail)}
-     else work=sim.step(ticks);
+     else work=sim.step(ticks,{wait:!overlap});
     }
    }
   }
