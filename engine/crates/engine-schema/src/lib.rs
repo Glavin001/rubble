@@ -290,8 +290,14 @@ pub struct StepCounters {
     pub _pad2: u32,
     /// Convex SAT pairs in the large bucket (GPU ABI byte 64).
     pub convex_sat_large: u32,
-    /// Pads the block to 80 bytes (GPU ABI bytes 68..79).
-    pub _pad3: [u32; 3],
+    /// One past the last Jones-Plassmann round that left a body blocked
+    /// (GPU ABI byte 68); hosts size the next step's colouring rounds from it.
+    pub color_rounds: u32,
+    /// Colouring rounds the host allows this step (GPU ABI byte 72), read by
+    /// the single-workgroup tail.
+    pub color_round_limit: u32,
+    /// Pads the block to 80 bytes (GPU ABI byte 76).
+    pub _pad3: u32,
 }
 
 impl Default for StepCounters {
