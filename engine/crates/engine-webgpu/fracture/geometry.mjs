@@ -261,19 +261,21 @@ export function gridConfig(colliders) {
   return {base,levels};
 }
 
-// A row of identical houses along +z. Every copy shares the single house's hull
-// records (same arena offsets) and render mesh (drawn instanced), so GPU memory
-// grows only with bodies and colliders. The projectile is a heavy ball rolled
-// along the ground through the whole row.
-export function buildRow(asset, level, {copies=20, gap=2.5, projectileRadius=1.6, projectileMass=200000, projectileSpeed=40, maxHullVertices}={}) {
-  const one=buildScene(asset,level,{maxHullVertices}),frags=one.projectileStart-1;
-  const pitch=one.extentZ+gap,length=pitch*(copies-1)+one.extentZ;
+// A grid of identical houses (columns along +x, rows along +z). Every copy
+// shares the single house's hull records (same arena offsets) and render mesh
+// (drawn instanced), so GPU memory grows only with bodies and colliders. The
+// projectile is a heavy ball rolled along the ground down the middle column.
+export function buildGrid(asset, level, {columns=1, rows=20, gap=2.5, projectileRadius=1.6, projectileMass=200000, projectileSpeed=40, maxHullVertices}={}) {
+  const one=buildScene(asset,level,{maxHullVertices}),frags=one.projectileStart-1,copies=columns*rows;
+  const pitchX=one.extentX+gap,pitchZ=one.extentZ+gap;
+  const width=pitchX*(columns-1)+one.extentX,length=pitchZ*(rows-1)+one.extentZ;
   const bodies=[one.bodies[0]],colliders=[one.colliders[0]];
   const houseColliders=one.colliders.filter(c=>c.body>=1&&c.body<one.projectileStart);
-  for(let k=0;k<copies;k++){
-    const dz=(k-(copies-1)/2)*pitch,base=k*frags;
-    for(let i=1;i<one.projectileStart;i++){const b=one.bodies[i];bodies.push({...b,p:[b.p[0],b.p[1],b.p[2]+dz]})}
-    for(const c of houseColliders)colliders.push({...c,body:c.body+base});
+  const offsetX=c=>(c-(columns-1)/2)*pitchX;
+  for(let r=0;r<rows;r++)for(let c=0;c<columns;c++){
+    const dx=offsetX(c),dz=(r-(rows-1)/2)*pitchZ,base=(r*columns+c)*frags;
+    for(let i=1;i<one.projectileStart;i++){const b=one.bodies[i];bodies.push({...b,p:[b.p[0]+dx,b.p[1],b.p[2]+dz]})}
+    for(const col of houseColliders)colliders.push({...col,body:col.body+base});
   }
   const projectileStart=bodies.length,projectileVertices=[];
   for(let slot=0;slot<one.projectileCount;slot++){
@@ -283,17 +285,24 @@ export function buildRow(asset, level, {copies=20, gap=2.5, projectileRadius=1.6
     const src=one.projectileVertices,stride=src.length/one.projectileCount,r0=one.projectileRadius;
     for(let v=0;v<stride;v+=10){const o=slot*stride+v;projectileVertices.push(src[o]/r0*projectileRadius,src[o+1]/r0*projectileRadius,src[o+2]/r0*projectileRadius,src[o+3],src[o+4],src[o+5],src[o+6],src[o+7],src[o+8],id)}
   }
+  const span=Math.max(width,length),shotX=offsetX(Math.floor(columns/2));
   return {...one,bodies,colliders,projectileStart,projectileRadius,projectileMass,projectileSpeed,projectileArc:false,
-    projectileVertices:new Float32Array(projectileVertices),copies,instanceStride:frags,rowPitch:pitch,rowLength:length,
-    extent:Math.max(one.extent,length),center:[0,one.height*.5,0],gridCellSize:gridConfig(colliders).base,
+    projectileVertices:new Float32Array(projectileVertices),copies,columns,rows,instanceStride:frags,
+    rowPitch:pitchZ,columnPitch:pitchX,rowLength:length,gridWidth:width,
+    extent:Math.max(one.extent,span),center:[0,one.height*.5,0],gridCellSize:gridConfig(colliders).base,
     // Measured on house level 2 after impact: ~3 candidates and ~5 contacts per
     // collider. Eight each keeps headroom without gigabytes of contact buffers.
     // ~100k pieces wake behind the ball; their contact graph can need more than
     // 32 Jones-Plassmann rounds (and headroom past 32 colours; kernels allow 64).
     capacity:{candidatesPerCollider:8,contactsPerCollider:8,maxColors:64,colorRounds:64},
-    camera:{yaw:1.15,pitch:.32,distance:length*.8,minDistance:3},
+    camera:{yaw:columns>1?.75:1.15,pitch:columns>1?.5:.32,distance:span*.8,minDistance:3},
     // Ready-made shot: from beyond the first house, rolling along +z at ground level.
-    rowShot:{origin:[0,projectileRadius+.02,-length/2-projectileRadius-8],direction:[0,0,1]}};
+    rowShot:{origin:[shotX,projectileRadius+.02,-length/2-projectileRadius-8],direction:[0,0,1]}};
+}
+
+// A single row of `copies` houses along +z (a one-column grid).
+export function buildRow(asset, level, {copies=20, ...options}={}) {
+  return buildGrid(asset, level, {...options, columns:1, rows:copies});
 }
 
 export function buildScene(asset, level, {maxHullVertices}={}) {
@@ -366,6 +375,6 @@ export function buildScene(asset, level, {maxHullVertices}={}) {
     }
   }
   return {projectileStart,projectileCount,projectileRadius,projectileMass,projectileVertices:new Float32Array(projectileVertices),bodies,colliders,hullData:arena.data,skippedHulls,vertices:new Float32Array(vertices),lines:new Float32Array(lines),selected,bonds,byId,
-    extent,extentZ:hi[2]-lo[2],height,copies:1,instanceStride:0,center:[0,height*.5+placement[1]+lo[1],0],gridCellSize:gridConfig(colliders).base,
+    extent,extentX:hi[0]-lo[0],extentZ:hi[2]-lo[2],height,copies:1,instanceStride:0,center:[0,height*.5+placement[1]+lo[1],0],gridCellSize:gridConfig(colliders).base,
     params:{flags:1,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
 }
