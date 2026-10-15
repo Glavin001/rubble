@@ -28,7 +28,7 @@ fn harness() -> &'static Path {
         let slangc = engine_slang_build::find_slangc().expect("slangc is required for this test");
         let mut cmd = Command::new(slangc);
         cmd.arg(&slang).args(["-target", "cpp", "-DENGINE_CPU_TEST=1"]);
-        for e in ["convex_classify", "convex_sat_small", "convex_sat_large", "convex_manifold", "build_aabbs", "broadphase_clear", "broadphase_insert", "broadphase_query", "narrowphase", "reuse_all_manifolds"] {
+        for e in ["convex_classify", "convex_bucket", "convex_sat_small", "convex_sat_large", "convex_manifold", "build_aabbs", "broadphase_clear", "broadphase_insert", "broadphase_query", "narrowphase", "reuse_all_manifolds"] {
             cmd.args(["-entry", e, "-stage", "compute"]);
         }
         let out = cmd.arg("-o").arg(&generated).output().unwrap();

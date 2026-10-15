@@ -92,6 +92,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "reuse_all_manifolds_persistent",
     "convex_classify",
     "convex_classify_persistent",
+    "convex_bucket",
     "convex_write_args",
     "convex_sat_small",
     "convex_sat_large",

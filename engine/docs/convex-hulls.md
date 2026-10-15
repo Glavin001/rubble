@@ -60,7 +60,8 @@ UPDATE_HULL_GOLDEN=1 cargo test -p engine-schema golden
 | Bounds | `build_aabbs` | Exact per-vertex AABB plus local-AABB OBB cache; sleeping bodies' bounds are built on step 0 |
 | Broadphase | `broadphase_insert/query` | Hierarchical size-level grid when `HOST_S(18)` = levels > 0 |
 | Narrowphase | `narrowphase` | Reuse first; hull pairs deferred via `candidate._pad = CONVEX_DEFER \| hint` |
-| Classify | `convex_classify` (slot 64) | Plane, sphere and capsule pairs emit contacts; hull/hull and hull/box pairs are compacted into the small (front) or large (back) SAT bucket |
+| Classify | `convex_classify` (slot 64) | Plane, sphere and capsule pairs emit contacts |
+| Bucket | `convex_bucket` (slot 64) | Hull/hull and hull/box pairs not proven separated by the box test or the SAT's cached separating feature are compacted into the small (front) or large (back) SAT bucket |
 | Args | `convex_write_args` | Slots 74, 75 (balanced 2-D rows) and 76 |
 | SAT | `convex_sat_small` (slot 74) | 16 lanes per pair, 4 pairs per workgroup; V ≤ 16, F ≤ 32, E ≤ 48 |
 | SAT | `convex_sat_large` (slot 75) | 64 lanes per pair |

@@ -23,6 +23,7 @@ fn main() -> Result<()> {
         "ccd_classify",
         "ccd_sweep",
         "convex_classify",
+        "convex_bucket",
         "convex_write_args",
         "convex_sat_small",
         "convex_sat_large",
