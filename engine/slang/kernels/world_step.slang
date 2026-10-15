@@ -222,6 +222,14 @@ void predictOne(uint i)
 void predict_bodies(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
+    // PASS_U == 1: one thread per entry of this step's awake list (the only
+    // bodies predictOne changes); hosts dispatch it from the awake-count slot.
+    if (PASS_U == 1u)
+    {
+        if (i >= ALOAD(gCounters[0].awakeCount)) return;
+        predictOne(gAwakeList[i]);
+        return;
+    }
     if (i >= gCounters[0].bodyCount) return;
     predictOne(i);
 }
@@ -4132,7 +4140,15 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
 void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    if (i >= gCounters[0].bodyCount) return;
+    // PASS_U == 1: this step's awake list only. Every other body returns below
+    // without effect, and gCcdFlags is read only for awake dynamic bodies
+    // (sleep gate, commit), so leaving theirs untouched is equivalent.
+    if (PASS_U == 1u)
+    {
+        if (i >= ALOAD(gCounters[0].awakeCount)) return;
+        i = gAwakeList[i];
+    }
+    else if (i >= gCounters[0].bodyCount) return;
     AvbdParams p = PARAMS;
     BodyState b = gBodies[i];
     gCcdFlags[i] = 0;
@@ -4235,7 +4251,13 @@ void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
 void sleep_island_commit(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    if (i >= gCounters[0].bodyCount) return;
+    // PASS_U == 1: this step's awake list (others return below anyway).
+    if (PASS_U == 1u)
+    {
+        if (i >= ALOAD(gCounters[0].awakeCount)) return;
+        i = gAwakeList[i];
+    }
+    else if (i >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[i];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     if (gCcdFlags[i] == 0) return;
