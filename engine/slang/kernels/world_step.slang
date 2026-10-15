@@ -317,6 +317,12 @@ uint gridHashSize()
     return n != 0u ? n : GRID_HASH_SIZE;
 }
 
+// Opt-in split grids (HOST_S(20) != 0): awake dynamics and everything else
+// (sleepers, small statics) get separate head tables so awake queriers can walk
+// only their own cell plus the 13 forward neighbours of the awake table; each
+// awake pair is still found once and emitted as (min, max) like before.
+bool gridSplit() { return HOST_S(20) != 0u; }
+
 uint gridHash(int x, int y, int z)
 {
     uint h = (uint)x * 73856093u ^ (uint)y * 19349663u ^ (uint)z * 83492791u;
@@ -415,8 +421,10 @@ void emitCandidate(uint i, uint j)
 void broadphase_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    if (i >= gridHashSize()) return;
+    // Split grids (HOST_S(20) != 0): awake heads [0, n), other heads [n, 2n).
+    if (i >= gridHashSize() * (gridSplit() ? 2u : 1u)) return;
     ASTORE(gConstraintIds[i], 0xFFFFFFFFu);
+    if (i == 0u && gridSplit()) ASTORE(gScratchAtomics[52], 0u);
 }
 
 BoxObb worldObbFromCache(uint colliderIdx)
@@ -503,9 +511,82 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     int3 cc = int3(floor(center / cellSize));
     uint h = gridHash(cc.x, cc.y, cc.z);
     uint prev;
-    uint entry = i | ((bodyIsDynamic(bIns) && !bodyIsSleeping(bIns)) ? GRID_AWAKE_DYNAMIC : 0u);
+    bool awake = bodyIsDynamic(bIns) && !bodyIsSleeping(bIns);
+    uint entry = i | (awake ? GRID_AWAKE_DYNAMIC : 0u);
+    if (gridSplit() && !awake)
+    {
+        h += gridHashSize();
+        AADD2(gScratchAtomics[52], 1u); // non-empty other table
+    }
     AXCHG3(gConstraintIds[h], entry, prev);
     gColorLists[i] = prev;
+}
+
+// Own cell (index 0), then the 13 neighbours lexicographically after it.
+int3 gridForwardOffset(uint c)
+{
+    if (c == 0u) return int3(0, 0, 0);
+    if (c <= 9u)
+    {
+        uint k = c - 1u; // dz = +1: all nine (dx, dy)
+        return int3(int(k % 3u) - 1, int(k / 3u) - 1, 1);
+    }
+    if (c <= 12u) return int3(int(c - 10u) - 1, 1, 0); // dz = 0, dy = +1
+    return int3(1, 0, 0);                              // dz = 0, dy = 0, dx = +1
+}
+
+// One cell of a split table. In the awake table every visited pair belongs to
+// this querier (forward cell) or to the higher index (own cell); the other
+// table keeps the legacy sleeper/static rule. Geometry tests match the full scan.
+void gridScanCell(uint i, Collider col, BodyState b, Aabb box, float3 cA, float rA,
+    bool probeIsBox, BoxObb probeObb, float faceGap, float cellSize, int3 cell,
+    uint tableBase, bool ownCell)
+{
+    uint base = HOST_S(1);
+    bool sleeper = bodyIsSleeping(b);
+    uint link = ALOAD(gConstraintIds[tableBase + gridHash(cell.x, cell.y, cell.z)]);
+    uint guard = 0;
+    while (link != 0xFFFFFFFFu && guard < 4096u)
+    {
+        uint cur = link & GRID_COLLIDER_MASK;
+        bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
+        link = gColorLists[cur];
+        guard++;
+        if (guard == 4096u)
+            AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        if (cur == i || (ownCell && awakeEntry && cur <= i)) continue;
+        Aabb ab = gAabbs[base + cur];
+        int3 candidateCell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
+        if (any(candidateCell != cell)) continue;
+        float rB = ab._pad0;
+        if (rB > 0.0)
+        {
+            float3 d = cA - 0.5 * (ab.mn + ab.mx);
+            float rr = rA + rB;
+            if (dot(d, d) > rr * rr) continue;
+        }
+        if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
+            box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
+            box.mx.z < ab.mn.z || ab.mx.z < box.mn.z)
+            continue;
+        Collider other = gColliders[cur];
+        bool keep;
+        if (awakeEntry)
+            keep = true;
+        else
+        {
+            BodyState ob = gBodies[other.body];
+            bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
+            keep = cur > i || (!sleeper && otherSleep);
+        }
+        if (!keep || other.body == col.body || bodiesJointed(col.body, other.body) ||
+            other.shape == SHAPE_PLANE)
+            continue;
+        if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)) continue;
+        // Awake pairs keep the (lower, higher) order the full scan emitted.
+        if (awakeEntry) emitCandidate(min(i, cur), max(i, cur));
+        else emitCandidate(i, cur);
+    }
 }
 
 [shader("compute")]
@@ -598,7 +679,26 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     for (uint pi = 0u; pi < nPlanes; pi++)
         emitCandidate(i, ALOAD(gScratchAtomics[43u + pi]));
     float3 cA = 0.5 * (box.mn + box.mx);
-    if (!queryLarge)
+    if (!queryLarge && gridSplit())
+    {
+        // Awake table: own cell (higher index owns) + 13 forward cells (all).
+        for (uint c = 0u; c < 14u; c++)
+        {
+            int3 off = gridForwardOffset(c);
+            gridScanCell(i, col, b, box, cA, rA, probeIsBox, probeObb, faceGap, cellSize,
+                cc + off, 0u, c == 0u);
+        }
+        // Other table (sleepers, small statics): full stencil, skipped when empty.
+        if (ALOAD(gScratchAtomics[52]) != 0u)
+        {
+            for (int z = cc.z - 1; z <= cc.z + 1; z++)
+            for (int y = cc.y - 1; y <= cc.y + 1; y++)
+            for (int x = cc.x - 1; x <= cc.x + 1; x++)
+                gridScanCell(i, col, b, box, cA, rA, probeIsBox, probeObb, faceGap, cellSize,
+                    int3(x, y, z), gridHashSize(), false);
+        }
+    }
+    else if (!queryLarge)
     {
     for (int z = cc.z - 1; z <= cc.z + 1; z++)
     for (int y = cc.y - 1; y <= cc.y + 1; y++)

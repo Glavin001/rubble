@@ -437,14 +437,22 @@ fn broadphase_linked_buckets_preserve_membership_and_match_bruteforce_pairs() {
     // Host-sized grid tables (HOST_S(16)): the default, a 1024-head table that
     // forces heavy aliasing across all 641 colliders, and a smaller power of
     // two (small capacity caps the region at 131072 heads, like the host does).
+    // Split grids (HOST_S(20)) walk only forward awake cells; every third body
+    // sleeps so the other table and the awake→sleeper rule are both covered.
+    // Two split tables must fit the small capacity's pre-CSR region (the host
+    // caps them at half of it), so split skips the 131072-head case.
     for buckets in [131072usize, 1024, 65536] {
-        broadphase_linked_buckets_case(buckets);
+        broadphase_linked_buckets_case(buckets, false);
+    }
+    for buckets in [1024usize, 65536] {
+        broadphase_linked_buckets_case(buckets, true);
     }
 }
 
-fn broadphase_linked_buckets_case(buckets: usize) {
+fn broadphase_linked_buckets_case(buckets: usize, split: bool) {
     use std::collections::BTreeSet;
     const N: usize = 641; // Grid path and partial final workgroup.
+    let sleeping = |id: usize| id % 3 == 1;
     let mut sim = WgpuSim::new_with_compact_contacts(WorldCapacity::small(), false)
         .expect("GPU adapter required for grid pair coverage");
     sim.params.grid_cell_size = 1.25;
@@ -480,7 +488,12 @@ fn broadphase_linked_buckets_case(buckets: usize) {
     let s16 = std::mem::size_of::<AvbdParams>() as u64 + 16 * 4;
     sim.queue
         .write_buffer(&sim.bufs[6], s16, bytemuck::bytes_of(&(buckets as u32)));
-    const CANARY: u32 = 0xfedc_ba98;
+    sim.queue.write_buffer(
+        &sim.bufs[6],
+        s16 + 4 * 4,
+        bytemuck::bytes_of(&u32::from(split)),
+    );
+    let tables = if split { 2 } else { 1 };    const CANARY: u32 = 0xfedc_ba98;
     sim.queue.write_buffer(
         &sim.bufs[15],
         N as u64 * 4,
@@ -490,24 +503,44 @@ fn broadphase_linked_buckets_case(buckets: usize) {
     {
         let mut pass = enc.begin_compute_pass(&Default::default());
         sim.disp(&mut pass, "build_aabbs", N as u64, None);
-        sim.disp(&mut pass, "broadphase_clear", buckets as u64, None);
+    }
+    sim.queue.submit([enc.finish()]);
+    // Sleepers keep their last AABB, so refit awake and then put every third body to sleep.
+    for id in (0..N).filter(|&id| sleeping(id)) {
+        let offset = (id * std::mem::size_of::<BodyState>()
+            + std::mem::offset_of!(BodyState, flags)) as u64;
+        sim.queue.write_buffer(&sim.bufs[0], offset, bytemuck::bytes_of(&5u32));
+    }
+    let mut enc = sim.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = enc.begin_compute_pass(&Default::default());
+        sim.disp(&mut pass, "broadphase_clear", (buckets * tables) as u64, None);
         sim.disp(&mut pass, "broadphase_insert", N as u64, None);
         sim.disp(&mut pass, "broadphase_query", N as u64, None);
     }
     sim.queue.submit([enc.finish()]);
-    let heads: Vec<u32> = download(&sim, 14, 0, buckets);
+    let heads: Vec<u32> = download(&sim, 14, 0, buckets * tables);
     let links: Vec<u32> = download(&sim, 15, 0, N);
     let mut seen = vec![false; N];
-    for h in 0..buckets {
-        let mut encoded = heads[h];
+    for slot in 0..buckets * tables {
+        let mut encoded = heads[slot];
+        let h = slot % buckets;
         while encoded != u32::MAX {
-            assert_ne!(
-                encoded & 0x8000_0000,
-                0,
-                "Awake dynamic entry lacks early ownership flag"
-            );
             let id = (encoded & 0x7fff_ffff) as usize;
-            assert!(id<N && !seen[id],"bucket={h}, collider={id}: linked grid lost bijection; encoded links must be masked before indexing and may not form cycles");
+            assert!(id<N && !seen[id],"split={split}, slot={slot}, collider={id}: linked grid lost bijection; encoded links must be masked before indexing and may not form cycles");
+            assert_eq!(
+                encoded & 0x8000_0000 != 0,
+                !sleeping(id),
+                "collider={id}: only awake dynamic entries carry the early ownership flag"
+            );
+            if split {
+                assert_eq!(
+                    slot >= buckets,
+                    sleeping(id),
+                    "split grid, collider={id}, slot={slot}: awake entries belong in [0, {buckets}), others in [{buckets}, {})",
+                    2 * buckets
+                );
+            }
             seen[id] = true;
             let cell = centers[id].map(|x| (x / 1.25).floor() as i32 as u32);
             let expected = ((cell[0].wrapping_mul(73856093)
@@ -544,20 +577,23 @@ fn broadphase_linked_buckets_case(buckets: usize) {
         );
         assert!(
             actual.insert(key),
-            "buckets={buckets}: duplicate pair {key:?}: hash buckets still require exact-cell filtering"
+            "split={split}, buckets={buckets}: duplicate pair {key:?}: hash buckets still require exact-cell filtering"
         );
     }
     let mut expected = BTreeSet::new();
     for a in 0..N {
         for b in a + 1..N {
-            if (0..3).all(|axis| (centers[a][axis] - centers[b][axis]).abs() <= 0.7501) {
+            // Sleepers do not query, so sleeper–sleeper pairs are never emitted.
+            if !(sleeping(a) && sleeping(b))
+                && (0..3).all(|axis| (centers[a][axis] - centers[b][axis]).abs() <= 0.7501)
+            {
                 expected.insert((a as u32, b as u32));
             }
         }
     }
     let missing: Vec<_> = expected.difference(&actual).take(8).collect();
     let extra: Vec<_> = actual.difference(&expected).take(8).collect();
-    assert!(actual==expected,"buckets={buckets}: filtered linked grid differs from independent all-pairs touching-box oracle: missing={missing:?}, extra={extra:?}, actual={}, expected={}",actual.len(),expected.len());
+    assert!(actual==expected,"split={split}, buckets={buckets}: filtered linked grid differs from independent all-pairs touching-box oracle: missing={missing:?}, extra={extra:?}, actual={}, expected={}",actual.len(),expected.len());
 }
 
 #[test]

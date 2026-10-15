@@ -1,0 +1,43 @@
+{
+  "decision": "8ej",
+  "change": "Opt-in split broadphase grid (HOST_S(20)). Awake dynamics insert into table [0,n), sleepers and small statics into [n,2n). Awake queriers walk their own cell (the higher index owns the pair) plus the 13 lexicographically forward cells of the awake table, and the full 27-cell stencil of the other table, which is skipped when its insert counter (scratch 52) is zero. Awake pairs are emitted as (min,max), as before. Geometry filters are symmetric (face-axis test covers both boxes' axes with abs()). Browser grid=split is the ring110k default; gables keeps scaled. Native ENGINE_GRID=split.",
+  "browser": "Chrome 152 (Claude app), Metal-3, three-avbd-2x5x10 protocol, interleaved",
+  "ring_ms": {
+    "sequence": [
+      "scaled 11.04",
+      "split 10.92",
+      "split 10.86",
+      "scaled 11.05",
+      "split 10.82",
+      "scaled 11.02"
+    ],
+    "gridPhase": {
+      "scaled": 1.11,
+      "split": 0.92
+    },
+    "workload": "identical end snapshot: contact 1173483, candidate 257281, manifold 247294, colors 12, overflow 0"
+  },
+  "gables_ms": {
+    "sequence": [
+      "split 29.34",
+      "scaled 29.15",
+      "split 29.37"
+    ],
+    "gridPhase": {
+      "scaled": 1.84,
+      "split": 1.57
+    },
+    "verdict": "neutral or slightly worse on wall time; gables keeps scaled"
+  },
+  "gates": {
+    "gpuLib": "46/46; lattice test now runs split tables (1024/65536 heads) with every third body asleep against the brute-force oracle, and asserts table placement; dropping one forward cell fails with missing pairs",
+    "browserUnit": "258/258 (mode parsing, split sizing below csrBase, clear covers both tables, HOST_S(20) upload)",
+    "browserRing480": "PASS, every sample bit-identical to grid=scaled (mean 1.217517997515979, max 19.8282)",
+    "browserGables240": "PASS 0.1172912589201891/0.3304786682128906 (unchanged from 8ei)",
+    "native": {
+      "ring480Columns_ENGINE_GRID_split": "PASS; ring mean 1.1753 / flank 19.7299, every sample bit-identical to ENGINE_GRID unset (scaled); columns pass, including sleep (other table populated at t=59)",
+      "canonicalGables240": "PASS 0.118635/0.328483 (unchanged from 8ei)",
+      "metal": "18/18"
+    }
+  }
+}
