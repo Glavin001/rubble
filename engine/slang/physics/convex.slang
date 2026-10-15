@@ -284,17 +284,28 @@ float3 contactAccumDir(ContactAccum acc, int k)
     return acc.v - acc.u;
 }
 
+// Candidates within this distance of a slot's best are ties, kept by the lower
+// feature id. Coplanar face vertices tie on depth and on axis-aligned extremes,
+// and letting f32 noise pick among them swapped the kept support points every
+// step: resting pieces rocked between the alternatives and never slept.
+static const float CONTACT_TIE = 1.0e-4;
+
+bool contactAccumBetter(float s, uint feature, float best, uint bestFeature)
+{
+    return s > best + CONTACT_TIE || (s > best - CONTACT_TIE && feature < bestFeature);
+}
+
 void contactAccumAdd(inout ContactAccum acc, float3 p, float depth, uint feature)
 {
     if (depth > acc.limit) return;
-    if (-depth > acc.score[0])
+    if (contactAccumBetter(-depth, feature, acc.score[0], acc.feature[0]))
     {
         acc.score[0] = -depth; acc.point[0] = p; acc.depth[0] = depth; acc.feature[0] = feature;
     }
     for (int k = 0; k < CONVEX_DIRS; k++)
     {
         float s = dot(contactAccumDir(acc, k), p);
-        if (s > acc.score[k + 1])
+        if (contactAccumBetter(s, feature, acc.score[k + 1], acc.feature[k + 1]))
         {
             acc.score[k + 1] = s; acc.point[k + 1] = p; acc.depth[k + 1] = depth; acc.feature[k + 1] = feature;
         }

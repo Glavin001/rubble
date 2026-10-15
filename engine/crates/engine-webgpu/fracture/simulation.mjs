@@ -653,6 +653,18 @@ return {
      points:new Float32Array(await read(bufs[27],base*64,last.contact*64)),
      manifolds:new Uint32Array(await read(bufs[25],0,last.manifold*32))};
  },
+ // Read-only view of the last step's contacts (no collision pass), for debugging.
+ async readContacts(){
+   await readCounters();
+   const read=async(buffer,offset,size)=>{
+     if(!size)return new ArrayBuffer(0);
+     const temp=device.createBuffer({size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+     try{const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,offset,temp,0,size);device.queue.submit([e.finish()]);await temp.mapAsync(GPUMapMode.READ);return temp.getMappedRange().slice(0)}finally{temp.destroy()}
+   };
+   const base=parity===0?cap.maxContacts:0;
+   return {counters:{...last},base,meta:new Uint32Array(await read(bufs[4],base*32,last.contact*32)),
+     points:new Float32Array(await read(bufs[27],base*64,last.contact*64))};
+ },
  get shots(){return shots},
  // Joint lambda0..5 and k0..5 per joint (preloading, diagnostics).
  async jointState(){
