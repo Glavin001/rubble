@@ -160,6 +160,7 @@ its MIT copyright/license is preserved in `engine/slang/THIRD_PARTY_LICENSES.txt
 ## Verification
 
 ```sh
+nvm use   # .nvmrc: Node 22.22 (node:module stripTypeScriptTypes needs >= 22.13)
 node --test engine/crates/engine-webgpu/fracture/asset.test.mjs engine/crates/engine-webgpu/fracture/convex.test.mjs engine/crates/engine-webgpu/fracture/simulation.test.mjs
 cargo test --manifest-path engine/Cargo.toml -p engine-oracles --test convex_slang_cpu
 ```
