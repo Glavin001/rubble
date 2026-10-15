@@ -6,12 +6,13 @@
 </style></head><body>
 <canvas id="view" aria-label="Interactive view of a pre-fractured building. Click to shoot a sphere, drag to orbit and scroll to zoom."></canvas>
 <aside><div class="brand"><span class="mark"></span><span class="eyebrow">Rubble / experiments</span></div><h1>Fracture lab</h1><p>Bake once in Shardwright.<br>Bring the pieces to life in WebGPU.</p>
-<label class="eyebrow" for="scene">Scene</label><select id="scene"><option value="house" selected>House · 131 building parts</option><option value="arch">Masonry arch · 23 pieces</option><option value="" disabled>Custom GLB</option></select>
+<label class="eyebrow" for="scene">Scene</label><select id="scene"><option value="house" selected>House · 131 building parts</option><option value="row">20 houses · Level 3 in a row</option><option value="arch">Masonry arch · 23 pieces</option><option value="" disabled>Custom GLB</option></select>
 <label class="file"><strong id="filename">Loading house…</strong><span>Choose or drop a fractured .glb</span><input id="file" type="file" accept=".glb" aria-label="Open fractured GLB"></label>
 <label class="eyebrow" for="level">Fracture level</label><select id="level" disabled></select>
 <div class="actions"><button class="primary" id="release" disabled>Start simulation</button><button id="reset" disabled>Reset</button></div>
+<button id="fire" hidden disabled style="width:100%;margin-top:8px">Fire the wrecking ball through the row</button>
 <section class="performance" aria-label="Live performance"><div class="stats">
-<div title="Completed physics ticks per wall-clock second; target 120"><strong id="tps">—</strong><span>Physics TPS</span><small id="step-ms">target 120 TPS</small></div>
+<div title="Completed physics ticks per wall-clock second; target 120"><strong id="tps">—</strong><span>Physics TPS</span><small id="step-ms">target TPS</small></div>
 <div title="Rendered frames per wall-clock second, including time waiting for physics"><strong id="fps">—</strong><span>Render FPS</span><small id="frame-ms">frames / second</small></div>
 <div title="Simulated time divided by real time; 1.00× means real time"><strong id="sim-speed">—</strong><span>Sim speed</span><small>1.00× = real time</small></div>
 </div><p id="timing" title="Wall-clock timings, not GPU timestamp measurements. Wait includes queued GPU work and readback synchronization.">TPS counts physics ticks; FPS counts rendered frames.</p></section>

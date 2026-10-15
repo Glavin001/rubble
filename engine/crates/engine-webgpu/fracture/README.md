@@ -39,6 +39,25 @@ The house includes four levels: **131 / 567 / 3,158 / 5,905 fragments**. The arc
 has **23 / 165 / 171 / 392**. Only one level is active at a time. The house defaults
 to level 0 because the current browser host and convex path are still experimental;
 finer levels increase collision work substantially. Assets load only on selection.
+Levels 2 and 3 bake 35 and 36 flat (zero-volume) sheets into compound fragments;
+the importer skips those hulls (every fragment keeps real ones) and says so.
+
+**20 houses · Level 3 in a row** places twenty level-3 houses along +z (131,840
+bodies, 133,280 hulls) from `assets/veneer-house-hull16.glb`. Copies share one
+hull arena and draw instanced. “Fire the wrecking ball” rolls a 1.6 m, 200 t ball
+at 40 m/s along the ground through the whole row (`__FRACTURE_DEMO__.fireRow()`;
+`benchmarkRow()` records per-phase GPU timings). The scene budgets 8 candidates
+and 8 contacts per collider and 64 colours and colouring rounds, and runs with a
+16-vertex hull limit: a larger hull is a load error, never reduced.
+
+`veneer-house-hull16.glb` is a fresh Shardwright bake of the same source
+(`benchmarks/assets/veneer_house.glb`, seed 1337) with `assets/veneer-house-hull16.toml`
+(building_lite plus `max_hull_vertices = 16`, enforced by its `collision_shapes`
+gate), exported with `export-glb --uncompressed`. Current Shardwright fractures
+this source into 142 / 614 / 3,619 / 6,592 fragments, more than the bundled
+house's bake, independent of the cap. Level 0 has one 7 m slab hull whose stored
+faces are 16 µm non-planar, beyond the f32 allowance of the convexity check, so
+that level is rejected; the row uses level 3.
 
 Drop another Shardwright fracture GLB onto the page or use the file picker.
 “Download extracted physics metadata” exposes the parsed physical asset and

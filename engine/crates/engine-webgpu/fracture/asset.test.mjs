@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {parseFractureGlb,EXTENSION} from './asset.mjs';
-import {buildScene,principalAxes,rotate,inverseRotate,add,sub,hullView,hullBase,colliderVertices} from './geometry.mjs';
+import {buildScene,buildRow,principalAxes,rotate,inverseRotate,add,sub,hullView,hullBase,colliderVertices} from './geometry.mjs';
 const bytes=await readFile(new URL('./assets/masonry-arch.glb',import.meta.url));
 const buffer=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
 const asset=parseFractureGlb(buffer);
@@ -75,4 +75,38 @@ test('bundled house imports its building parts, compound hulls and finer hierarc
   const total=scene.selected.reduce((s,f)=>s+f.hullCount,0);
   assert.equal(scene.colliders.filter(c=>c.shape===3).length,total-flat);
  }
+});
+
+test('a row of level-3 houses shares hulls and the projectile rolls through every house',async()=>{
+ // Re-baked by Shardwright with a 16-vertex hull cap (assets/veneer-house-hull16.toml).
+ const data=await readFile(new URL('./assets/veneer-house-hull16.glb',import.meta.url));
+ const house=parseFractureGlb(data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength));
+ assert.deepEqual(house.physics.levelFragmentCount,[142,614,3619,6592]);
+ assert.ok(house.physics.hulls.every(h=>h.vertices.length<=16),'the bake honoured its 16-vertex cap');
+ const one=buildScene(house,3,{maxHullVertices:16}),row=buildRow(house,3,{copies:20,maxHullVertices:16});
+ assert.equal(one.skippedHulls.length,23);
+ assert.throws(()=>buildScene(house,3,{maxHullVertices:8}),/configured limit is 8 \(hard maximum 64\)/);
+ const frags=one.projectileStart-1,houseCols=one.colliders.filter(c=>c.shape===3);
+ assert.equal(row.instanceStride,frags);assert.equal(row.copies,20);
+ assert.equal(row.projectileStart,1+20*frags);
+ assert.equal(row.bodies.length,row.projectileStart+row.projectileCount);
+ assert.equal(row.colliders.filter(c=>c.shape===3).length,20*houseCols.length);
+ assert.equal(row.hullData.length,one.hullData.length,'every copy reuses the single hull arena');
+ // Copy k is copy 0 shifted along z only, with colliders on the matching bodies.
+ for(const k of [0,7,19])for(const i of [1,frags>>1,frags]){
+  const a=row.bodies[i],b=row.bodies[i+k*frags];
+  assert.deepEqual([b.p[0],b.p[1]],[a.p[0],a.p[1]]);assert.ok(Math.abs(b.p[2]-a.p[2]-k*row.rowPitch)<1e-9);
+  assert.deepEqual(b.q,a.q);assert.equal(b.flags,5);
+ }
+ for(let k=0;k<20;k++)for(const [j,c] of houseCols.entries()){const r=row.colliders[1+k*houseCols.length+j];if(j%97)continue;assert.equal(r.body,c.body+k*frags);assert.deepEqual(r.params,c.params)}
+ // Houses do not overlap one another.
+ assert.ok(row.rowPitch>one.extentZ);
+ // The ready-made shot starts before the first house at ground level and heads
+ // down the row's axis, through the middle of every house.
+ const {origin,direction}=row.rowShot,zs=row.bodies.slice(1,row.projectileStart).map(b=>b.p[2]);
+ assert.deepEqual(direction,[0,0,1]);assert.ok(origin[2]+row.projectileRadius<zs.reduce((m,z)=>Math.min(m,z),Infinity));
+ assert.ok(Math.abs(origin[1]-row.projectileRadius)<.05);assert.equal(origin[0],0);
+ assert.equal(row.projectileArc,false);assert.ok(row.projectileMass>=5*one.selected.reduce((s,f)=>s+f.mass,0),'the ball carries enough momentum for the row');
+ assert.ok(row.colliders.filter(c=>c.shape===0).every(c=>c.params[0]===row.projectileRadius));
+ assert.deepEqual(row.capacity,{candidatesPerCollider:8,contactsPerCollider:8,maxColors:64,colorRounds:64});
 });
