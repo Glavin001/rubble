@@ -11,6 +11,8 @@ New 3D GPU rigid-body physics engine. **Not** an extension of the legacy `crates
 See [TOOLCHAIN.md](TOOLCHAIN.md) for slangc and pinned inspiration revisions.
 For the browser demo and automated scale/correctness checks, see
 [Slang/WebGPU regression checks](crates/engine-webgpu/README.md).
+Vehicles (raycast wheels solved inside AVBD, drivetrain, tanks and motorcycles, severable parts, drivable
+WebGPU demo `vehicle.html`): see [docs/vehicles.md](docs/vehicles.md).
 
 ## Quick start (Metal)
 
@@ -51,7 +53,8 @@ Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
 | `crates/engine-metal` | M3 proof backend + benches |
 | `crates/engine-scenes` | Demo/benchmark scene builders + `demo_viewer` |
 | `crates/engine-oracles` | three-avbd / Newton / Jolt / demo3d adapters |
-| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke` |
+| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke`; `vehicle.html` |
+| `crates/engine-vehicle` | Vehicle descriptors, presets, GPU record packing, host bookkeeping |
 | `crates/engine-cuda` | CUDA source emission |
 | `crates/engine-viewer` | Buffer-shared draw |
 | `conformance/` | Oracle scene schema + adapter JSON |

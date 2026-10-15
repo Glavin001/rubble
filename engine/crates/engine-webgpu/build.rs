@@ -86,6 +86,22 @@ const WORLD_ENTRIES: &[&str] = &[
     "ccd_classify",
     "ccd_sweep",
     "recompute_inertia",
+    // Vehicle controller (slang/kernels/vehicle_step.slang).
+    "vehicle_input",
+    "wheel_query",
+    "vehicle_prepare",
+    "vehicle_iterate",
+    "vehicle_post",
+    "raycast_batch",
+];
+
+const VEHICLE_ENTRIES: &[&str] = &[
+    "vehicle_input",
+    "wheel_query",
+    "vehicle_prepare",
+    "vehicle_iterate",
+    "vehicle_post",
+    "raycast_batch",
 ];
 
 fn main() -> Result<()> {
@@ -102,6 +118,7 @@ fn main() -> Result<()> {
     let persistent = slang_root.join("kernels/persistent_solve.slang");
     let reuse_copy = slang_root.join("kernels/reuse_copy.slang");
     let abi = slang_root.join("kernels/abi_probe.slang");
+    let vehicle = slang_root.join("kernels/vehicle_step.slang");
     compile(
         &abi,
         "abi_roundtrip",
@@ -115,7 +132,9 @@ fn main() -> Result<()> {
     for entry in WORLD_ENTRIES {
         let dest = out.join(format!("{entry}.spv"));
         match compile(
-            if entry.ends_with("_copy_persistent") {
+            if VEHICLE_ENTRIES.contains(entry) {
+                &vehicle
+            } else if entry.ends_with("_copy_persistent") {
                 &reuse_copy
             } else if entry.ends_with("_persistent") {
                 &persistent
@@ -168,7 +187,9 @@ fn main() -> Result<()> {
     {
         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
         match compile_with_defines(
-            if entry.ends_with("_copy_persistent") {
+            if VEHICLE_ENTRIES.contains(entry) {
+                &vehicle
+            } else if entry.ends_with("_copy_persistent") {
                 &reuse_copy
             } else if entry.ends_with("_persistent") {
                 &persistent

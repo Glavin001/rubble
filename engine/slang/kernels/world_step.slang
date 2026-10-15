@@ -303,6 +303,9 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
 }
 
 static const uint GRID_HASH_SIZE = 131072u;
+// Oversized-static list in gScratchAtomics (words 53..63; host zeroes them each step).
+static const uint LARGE_STATIC_COUNT = 53u;
+static const uint LARGE_STATIC_CAP = 10u;
 // Heads/links carry immutable broadphase eligibility alongside the collider ID.
 // Collider IDs occupy 31 bits; 0xffffffff remains the empty-list sentinel.
 static const uint GRID_AWAKE_DYNAMIC = 0x80000000u;
@@ -408,6 +411,15 @@ bool bodiesJointed(uint bodyA, uint bodyB)
     return false;
 }
 
+// Per-collider body filter: Collider.generation = ignored body + 1 (0 = none).
+// Vehicles use it as a grace period so a severed wheel or part does not explode
+// out of the chassis it was attached to.
+bool pairFiltered(Collider a, Collider b)
+{
+    return (a.generation != 0u && a.generation - 1u == b.body) ||
+           (b.generation != 0u && b.generation - 1u == a.body);
+}
+
 void emitCandidate(uint i, uint j)
 {
     if (i == j) return;
@@ -438,6 +450,14 @@ void broadphase_clear(uint3 tid : SV_DispatchThreadID)
     if (i >= gridHashSize() * (gridSplit() ? 2u : 1u)) return;
     ASTORE(gConstraintIds[i], 0xFFFFFFFFu);
     if (i == 0u && gridSplit()) ASTORE(gScratchAtomics[52], 0u);
+    // Metal hosts do not rewrite GPU-owned scratch words each step: reset the
+    // large-dynamic (25), plane (42) and large-static (53) list counts here.
+    if (i == 0u)
+    {
+        ASTORE(gScratchAtomics[25], 0u);
+        ASTORE(gScratchAtomics[42], 0u);
+        ASTORE(gScratchAtomics[LARGE_STATIC_COUNT], 0u);
+    }
 }
 
 BoxObb worldObbFromCache(uint colliderIdx)
@@ -508,6 +528,20 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     float3 ext = box.mx - box.mn;
     // Oversized statics are probed separately; large dynamics use the explicit list.
     BodyState bIns = gBodies[col.body];
+    // Statics wider than a cell (ramps, walls, ground) cannot be found from the
+    // 27-cell stencil. List up to LARGE_STATIC_CAP (scratch 53 = count, 54..63);
+    // past the cap keep the legacy behaviour (grid, or endpoint probe if huge).
+    float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    if (!bodyIsDynamic(bIns) && boundR > 0.5 * cellSize)
+    {
+        uint slot;
+        AADD3(gScratchAtomics[LARGE_STATIC_COUNT], 1, slot);
+        if (slot < LARGE_STATIC_CAP)
+        {
+            ASTORE(gScratchAtomics[LARGE_STATIC_COUNT + 1u + slot], i);
+            return;
+        }
+    }
     if (!bodyIsDynamic(bIns) &&
         (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0))
         return;
@@ -595,7 +629,7 @@ void gridScanCell(uint i, Collider col, BodyState b, Aabb box, float3 cA, float 
             bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
             keep = cur > i || (!sleeper && otherSleep);
         }
-        if (!keep || other.body == col.body || bodiesJointed(col.body, other.body) ||
+        if (!keep || other.body == col.body || (bodiesJointed(col.body, other.body) || pairFiltered(col, other)) ||
             other.shape == SHAPE_PLANE)
             continue;
         if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)) continue;
@@ -648,7 +682,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                     // neighbours at any index (as the grid path does).
                     if (!otherStatic && j < i && !(bodyIsSleeping(ob) && !sleeper)) keep = false;
                     if (otherStatic && !bodyIsDynamic(b)) keep = false;
-                    if (bodiesJointed(col.body, other.body)) keep = false;
+                    if ((bodiesJointed(col.body, other.body) || pairFiltered(col, other))) keep = false;
                     if (keep && other.shape != SHAPE_PLANE)
                     {
                         Aabb ab = gAabbs[base + j];
@@ -681,7 +715,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         uint j = ALOAD(gScratchAtomics[26u + k]);
         if (j == i) continue;
         Collider other = gColliders[j];
-        if (other.body == col.body || bodiesJointed(col.body, other.body)) continue;
+        if (other.body == col.body || (bodiesJointed(col.body, other.body) || pairFiltered(col, other))) continue;
         BodyState ob = gBodies[other.body];
         // Small→large owns this pair regardless of indices. Only large→large
         // needs index ordering; a large centre-cell query cannot cover its surface.
@@ -776,7 +810,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             if (pairOnce && cur != i)
             {
                 if (other.body != col.body &&
-                    !bodiesJointed(col.body, other.body) &&
+                    !(bodiesJointed(col.body, other.body) || pairFiltered(col, other)) &&
                     other.shape != SHAPE_PLANE)
                 {
                     if (!(probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)))
@@ -786,18 +820,71 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         }
     }
     }
-    // Oversized statics are not in the grid/list. The scene builder puts ground
-    // at an endpoint. Large dynamics were already handled exactly once above.
-    for (uint t = 0u; t < 2u; t++)
+    if (queryLarge)
+    {
+        // Large dynamics (vehicle chassis, smash balls) do not use the 27-cell
+        // stencil. Small dynamics and sleepers find them through the large list;
+        // small statics never query, so walk the grid cells under this AABB for them.
+        int3 lo = int3(floor(box.mn / cellSize));
+        int3 hi = int3(floor(box.mx / cellSize));
+        int3 span = hi - lo + int3(1, 1, 1);
+        if (span.x * span.y * span.z <= 512)
+        {
+            uint tableBase = gridSplit() ? gridHashSize() : 0u;
+            for (int z = lo.z; z <= hi.z; z++)
+            for (int y = lo.y; y <= hi.y; y++)
+            for (int x = lo.x; x <= hi.x; x++)
+            {
+                uint link = ALOAD(gConstraintIds[tableBase + gridHash(x, y, z)]);
+                uint guard = 0u;
+                while (link != 0xFFFFFFFFu && guard < 4096u)
+                {
+                    uint cur = link & GRID_COLLIDER_MASK;
+                    Aabb ab = gAabbs[base + cur];
+                    link = gridSplit() ? asuint(ab._pad1) : gColorLists[cur];
+                    guard++;
+                    int3 cell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
+                    if (cell.x != x || cell.y != y || cell.z != z) continue;
+                    if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
+                        box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
+                        box.mx.z < ab.mn.z || ab.mx.z < box.mn.z)
+                        continue;
+                    Collider other = gColliders[cur];
+                    if (other.body == col.body || other.shape == SHAPE_PLANE) continue;
+                    if (bodyIsDynamic(gBodies[other.body])) continue;
+                    if ((bodiesJointed(col.body, other.body) || pairFiltered(col, other))) continue;
+                    if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)) continue;
+                    emitCandidate(i, cur);
+                }
+            }
+        }
+    }
+    // Oversized statics are not in the grid. broadphase_insert lists up to
+    // LARGE_STATIC_CAP of them; on overflow the legacy endpoint probe (ground at
+    // collider 0 or last) applies. Large dynamics were handled exactly once above.
+    uint nLargeStatic = ALOAD(gScratchAtomics[LARGE_STATIC_COUNT]);
+    uint nListed = min(nLargeStatic, LARGE_STATIC_CAP);
+    bool listOverflow = nLargeStatic > LARGE_STATIC_CAP;
+    uint nProbe = nListed + (listOverflow ? 2u : 0u);
+    for (uint t = 0u; t < nProbe; t++)
     {
         if (gCounters[0].colliderCount == 0u) break;
-        uint j = (t == 0u) ? 0u : (gCounters[0].colliderCount - 1u);
-        if (j == i || (t == 1u && j == 0u)) continue;
+        bool endpoint = t >= nListed;
+        uint j = !endpoint ? ALOAD(gScratchAtomics[LARGE_STATIC_COUNT + 1u + t])
+            : ((t == nListed) ? 0u : (gCounters[0].colliderCount - 1u));
+        if (j == i || (endpoint && t > nListed && j == 0u)) continue;
+        if (endpoint)
+        {
+            bool listed = false;
+            for (uint u = 0u; u < nListed; u++)
+                if (ALOAD(gScratchAtomics[LARGE_STATIC_COUNT + 1u + u]) == j) listed = true;
+            if (listed) continue;
+        }
         Collider other = gColliders[j];
         if (other.shape == SHAPE_PLANE || other.body == col.body) continue;
         Aabb ab = gAabbs[base + j];
         float3 ext = ab.mx - ab.mn;
-        if (ext.x < cellSize * 4.0 && ext.y < cellSize * 4.0 && ext.z < cellSize * 4.0)
+        if (endpoint && ext.x < cellSize * 4.0 && ext.y < cellSize * 4.0 && ext.z < cellSize * 4.0)
             continue;
         // Dynamic-static always from the mover.
         BodyState ob = gBodies[other.body];
@@ -2944,6 +3031,44 @@ void pack_solver_contacts(uint3 tid : SV_DispatchThreadID)
 }
 #endif
 
+// Vehicle block: 4 Aabb records (32 floats) = lower-triangle H (21, primalReduceStep
+// order), gradient g (6), active flag. Written by vehicle_step.slang kernels.
+void addVehicleBlock(inout Mat6 A, inout Vec6 rhs, uint at)
+{
+    Aabb e3 = gAabbs[at + 3u];
+    if (e3._pad0 == 0.0) return; // float 27: block inactive
+    Aabb e0 = gAabbs[at];
+    Aabb e1 = gAabbs[at + 1u];
+    Aabb e2 = gAabbs[at + 2u];
+    A.m[0] += e0.mn.x;
+    A.m[6] += e0.mn.y;
+    A.m[7] += e0.mn.z;
+    A.m[12] += e0._pad0;
+    A.m[13] += e0.mx.x;
+    A.m[14] += e0.mx.y;
+    A.m[18] += e0.mx.z;
+    A.m[19] += e0._pad1;
+    A.m[20] += e1.mn.x;
+    A.m[21] += e1.mn.y;
+    A.m[24] += e1.mn.z;
+    A.m[25] += e1._pad0;
+    A.m[26] += e1.mx.x;
+    A.m[27] += e1.mx.y;
+    A.m[28] += e1.mx.z;
+    A.m[30] += e1._pad1;
+    A.m[31] += e2.mn.x;
+    A.m[32] += e2.mn.y;
+    A.m[33] += e2.mn.z;
+    A.m[34] += e2._pad0;
+    A.m[35] += e2.mx.x;
+    rhs.v[0] += e2.mx.y;
+    rhs.v[1] += e2.mx.z;
+    rhs.v[2] += e2._pad1;
+    rhs.v[3] += e3.mn.x;
+    rhs.v[4] += e3.mn.y;
+    rhs.v[5] += e3.mn.z;
+}
+
 // Accumulate body Newton's system for adjacency entries lane, lane+lanes, ...
 // Lane 0 also adds the inertial mass block (three-avbd accumulate).
 void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 rhs)
@@ -2984,6 +3109,9 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
         rhs.v[3] = (inertia.x / dt2) * dangTarget.x;
         rhs.v[4] = (inertia.y / dt2) * dangTarget.y;
         rhs.v[5] = (inertia.z / dt2) * dangTarget.z;
+        // Vehicle chassis: wheel rows are unary, so vehicle_prepare/iterate fold them
+        // (wheel spin condensed) into one 6×6 block at this exact pose.
+        if ((b.flags & BODY_VEHICLE) != 0u) addVehicleBlock(A, rhs, asuint(b.initialPad));
     }
 
     uint nJ = gCounters[0].jointCount;

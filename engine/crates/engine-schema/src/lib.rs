@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub mod commands;
 pub mod handles;
 pub mod params;
+pub mod vehicle;
 
 pub use commands::*;
 pub use handles::*;
