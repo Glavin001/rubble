@@ -2,6 +2,7 @@ import {add,scale,sub,dot,cross,norm} from './geometry.mjs';
 const shader=`
 struct Body {p:vec4f,q:vec4f,invI:vec4f,v:vec4f,w:vec4f,initialP:vec4f,initialQ:vec4f};
 @group(0) @binding(0) var<storage,read> bodies:array<Body>;
+// instanceStride.y = colour mode: 0 materials, 1 sleep state.
 struct View {vp:mat4x4f,instanceStride:vec4u};
 @group(0) @binding(1) var<uniform> view:View;
 struct Out {@builtin(position) p:vec4f,@location(0) n:vec3f,@location(1) color:vec3f,@location(2) world:vec3f};
@@ -11,7 +12,13 @@ fn rotate(q:vec4f,v:vec3f)->vec3f{return v+2.*cross(q.xyz,cross(q.xyz,v)+q.w*v);
  // (body 0 is the shared static ground).
  let index=select(u32(id)+copy*view.instanceStride.x,0u,u32(id)==0u);
  let body=bodies[index];let world=body.p.xyz+rotate(body.q,p);var o:Out;
- o.p=view.vp*vec4f(world,1.);o.n=rotate(body.q,n);o.color=color;o.world=world;return o;
+ o.p=view.vp*vec4f(world,1.);o.n=rotate(body.q,n);o.color=color;o.world=world;
+ if(view.instanceStride.y==1u&&index!=0u){
+  // Body flags live in invI.w: dynamic 1, sleeping 4, awake 8.
+  let flags=bitcast<u32>(body.invI.w);
+  o.color=select(select(vec3f(.45,.45,.48),vec3f(.25,.45,.85),(flags&4u)!=0u),vec3f(1.,.45,.12),(flags&1u)!=0u&&(flags&4u)==0u);
+ }
+ return o;
 }
 @fragment fn fs(o:Out)->@location(0) vec4f{
  let light=.38+.62*max(0.,dot(normalize(o.n),normalize(vec3f(-.5,1.,.7))));
@@ -62,12 +69,25 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const cancel=()=>drag=null;
  const wheel=e=>{e.preventDefault();distance=Math.max(scene.camera?.minDistance??scene.extent*.35,Math.min(scene.extent*8,distance*Math.exp(e.deltaY*.001)))};
  canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerup',up);canvas.addEventListener('pointercancel',cancel);canvas.addEventListener('wheel',wheel,{passive:false});
- return {aim,draw(showBonds){
+ let stamps=null,colorMode=0;
+ return {aim,
+ // 0: materials; 1: sleep state (awake orange, asleep blue, static grey).
+ set colorMode(mode){colorMode=mode|0},
+ // GPU time of one frame's render pass (ms), via timestamps.
+ async profileDraw(showBonds=false){
+  if(!device.features.has('timestamp-query'))return null;
+  const q=device.createQuerySet({type:'timestamp',count:2}),res=device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),rd=device.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+  try{stamps={querySet:q,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1};this.draw(showBonds);stamps=null;
+   const enc=device.createCommandEncoder();enc.resolveQuerySet(q,0,2,res,0);enc.copyBufferToBuffer(res,0,rd,0,16);device.queue.submit([enc.finish()]);
+   await rd.mapAsync(GPUMapMode.READ);const t=new BigUint64Array(rd.getMappedRange().slice(0));return Number(t[1]-t[0])/1e6}
+  finally{stamps=null;q.destroy();res.destroy();rd.destroy()}
+ },
+ draw(showBonds){
   const dpr=Math.min(devicePixelRatio,2),w=Math.max(1,Math.round(canvas.clientWidth*dpr)),h=Math.max(1,Math.round(canvas.clientHeight*dpr));
   if(w!==width||h!==height){width=canvas.width=w;height=canvas.height=h;depth?.destroy();depth=device.createTexture({size:[w,h],format:'depth24plus',usage:GPUTextureUsage.RENDER_ATTACHMENT});}
   const {eye,target}=camera();
-  device.queue.writeBuffer(uniform,0,matrix(eye,target,w/h,.02,Math.max(500,scene.extent*50)));device.queue.writeBuffer(uniform,64,new Uint32Array([scene.instanceStride||0,0,0,0]));
- const enc=device.createCommandEncoder(),pass=enc.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[.035,.055,.075,1],loadOp:'clear',storeOp:'store'}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'}});
+  device.queue.writeBuffer(uniform,0,matrix(eye,target,w/h,.02,Math.max(500,scene.extent*50)));device.queue.writeBuffer(uniform,64,new Uint32Array([scene.instanceStride||0,colorMode,0,0]));
+ const enc=device.createCommandEncoder(),pass=enc.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[.035,.055,.075,1],loadOp:'clear',storeOp:'store'}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'},...(stamps?{timestampWrites:stamps}:{})});
   pass.setBindGroup(0,bind);pass.setPipeline(ground);pass.setVertexBuffer(0,floor);pass.draw(6);pass.setPipeline(solid);pass.setVertexBuffer(0,mesh);pass.draw(scene.vertices.length/10,scene.copies||1);
   if(simulation.shots){pass.setVertexBuffer(0,projectiles);pass.draw(simulation.shots*scene.projectileVertices.length/scene.projectileCount/10)}
   if(showBonds&&scene.lines.length){pass.setPipeline(wire);pass.setVertexBuffer(0,lines);pass.draw(scene.lines.length/10,scene.copies||1)}pass.end();device.queue.submit([enc.finish()]);

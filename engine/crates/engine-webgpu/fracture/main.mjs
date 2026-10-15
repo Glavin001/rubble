@@ -40,6 +40,7 @@ async function loadLevel(level){
   next=layout?buildGrid(asset,level,{...layout,maxHullVertices,base:one}):one}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
+ renderer.colorMode=$('show-sleep').checked?1:0;
  const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=scene.colliders.filter(c=>c.shape===3).length;$('bonds').textContent=scene.bonds.length*copies;$('release').textContent='Start simulation';
  $('fire').hidden=!scene.rowShot;
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
@@ -68,6 +69,7 @@ $('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
+$('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').checked?1:0};
 $('solve-bonds').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});

@@ -7,6 +7,7 @@ const statusEl = {set textContent(v) {onProgress(v)}};
 const cfg = {friction:0.5, iterations:8, sleepRounds:8, ...scene.params};
 const MAX_WARM_HASH = 1 << 21;
 const BOND_WAKE_ROUNDS = 8;
+const SPARSE_AWAKE = 256;
 const PASS_ALIGN=256;
 const nextPow2=n=>2**Math.ceil(Math.log2(Math.max(1,n)));
 const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity};
@@ -65,7 +66,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
     const ENTRY = {
       narrowphase: 'narrowphase_persistent', contact_hash_insert: 'contact_hash_insert_persistent',
       persist_contacts: 'persist_contacts_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
-      solve_primal_color: 'solve_primal_color_persistent', solve_dual: 'solve_dual_persistent',
+      solve_primal_color: 'solve_primal_color_persistent', solve_primal_sparse: 'solve_primal_sparse_persistent', solve_dual: 'solve_dual_persistent',
       convex_classify: 'convex_classify_persistent', convex_manifold: 'convex_manifold_persistent',
       reuse_all_manifolds: 'reuse_all_manifolds_persistent',
     };
@@ -76,7 +77,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       'persist_contacts', 'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_sort',
       'init_colors', 'color_bodies', 'color_bodies_local', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
-      'record_color_degrees', 'write_color_args', 'predict_bodies', 'pack_solver_contacts', 'solve_primal_color',
+      'record_color_degrees', 'write_color_args', 'predict_bodies', 'pack_solver_contacts', 'solve_primal_color', 'solve_primal_sparse',
       'solve_dual', 'extract_velocity_sleep',
       'joint_hash_clear', 'joint_hash_insert', 'bond_wake', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
     ];
@@ -467,12 +468,20 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       pass = phase('topology');
       // Current-step indirect arguments skip empty colors without a CPU estimate.
       const colors = Math.min(cap.maxColors, 64);
+      // Few awake bodies: one workgroup walks every colour in order (barrier
+      // between colours, same per-body solve), one dispatch per iteration
+      // instead of one per palette colour. Correct for any count; the previous
+      // step's awake count only chooses the faster path.
+      const sparse = last.awake <= SPARSE_AWAKE;
       for (let iter = 0; iter < params.iterations; iter++) {
+        if (sparse) disp(pass, 'solve_primal_sparse', 64, 0);
+        else {
         const primal = pipes.solve_primal_color;
         for (let color = 0; color < colors; color++) {
           pass.setPipeline(primal.pipeline);
           pass.setBindGroup(0, primal.bind, [color * PASS_ALIGN]);
           pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
+        }
         }
         dispWork(pass, 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
       }
@@ -514,6 +523,30 @@ return {
  // phase (bounds, broadphase, narrowphase, convex classify/SAT/manifold,
  // persistence, topology, solve, sleep). Pass boundaries add latency, so
  // {singlePass:true} times the whole step in one pass for an honest total.
+ // One timestamped pass per dispatch, totals by kernel name (ms). Pass
+ // boundaries add a little per dispatch, so compare kernels, not the sum.
+ async profileKernels(){
+   if(!device.features.has('timestamp-query'))return {supported:false};
+   const max=4096,query=device.createQuerySet({type:'timestamp',count:max});
+   const resolve=device.createBuffer({size:max*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});
+   const read=device.createBuffer({size:max*8,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+   try{
+     const enc=device.createCommandEncoder(),names=[];let pipe=null,group=null,offsets;
+     const run=fn=>{const i=names.length;if(2*i+1>=max)throw new Error('too many dispatches to profile');names.push(pipe.label);
+       const p=enc.beginComputePass({timestampWrites:{querySet:query,beginningOfPassWriteIndex:2*i,endOfPassWriteIndex:2*i+1}});
+       p.setPipeline(pipe);if(offsets)p.setBindGroup(0,group,offsets);else p.setBindGroup(0,group);fn(p);p.end()};
+     const proxy={setPipeline(x){pipe=x},setBindGroup(i,g,o){group=g;offsets=o},
+       dispatchWorkgroups(...a){run(p=>p.dispatchWorkgroups(...a))},dispatchWorkgroupsIndirect(b,o){run(p=>p.dispatchWorkgroupsIndirect(b,o))},end(){}};
+     encodeStep(enc,false,()=>proxy);
+     const n=names.length;
+     enc.resolveQuerySet(query,0,n*2,resolve,0);enc.copyBufferToBuffer(resolve,0,read,0,n*16);
+     device.queue.submit([enc.finish()]);initialized=true;parity^=1;steps++;manifoldsValid=true;
+     await read.mapAsync(GPUMapMode.READ);const t=new BigUint64Array(read.getMappedRange().slice(0));
+     const kernels={};for(let i=0;i<n;i++){const k=kernels[names[i]]??={ms:0,count:0};k.ms+=Number(t[2*i+1]-t[2*i])/1e6;k.count++}
+     await readCounters();
+     return {supported:true,dispatches:n,kernels,counters:{...last}};
+   }finally{query.destroy();resolve.destroy();read.destroy()}
+ },
  async profileStep({singlePass=false}={}){
    if(!device.features.has('timestamp-query'))return {supported:false};
    const query=device.createQuerySet({type:'timestamp',count:64});
