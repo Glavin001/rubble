@@ -1088,7 +1088,8 @@ void broadphase_grid(uint3 tid : SV_DispatchThreadID)
     broadphase_query(tid);
 }
 
-// Emit one contact. C0 matches three-avbd: n·(xB−xA)+margin with n = A→B (compression ⇒ C0 < 0).
+// Emit one contact. C0 matches three-avbd: n·(xB−xA)+margin with n = A→B (compression ⇒ C0 < 0),
+// or the bare gap under FLAG_CONTACT_GAP (see contactC0N).
 Contact makeContactRow(
     CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
     float3 nrm, float3 pA, float3 pB, uint featureId, float margin, float mu)
@@ -1097,7 +1098,7 @@ Contact makeContactRow(
     orthonormalBasis(nrm, t1, t2);
     // three-avbd: C0_n = n·(xB−xA) + margin (A→B). Equilibrium sits ~margin deep.
     float3 d0 = pB - pA;
-    float C0n = dot(nrm, d0) + margin;
+    float C0n = contactC0N(dot(nrm, d0), margin);
     float C0t1 = dot(t1, d0);
     float C0t2 = dot(t2, d0);
 
@@ -1366,6 +1367,28 @@ static const uint FLAG_REUSE_CONTACTS = 1u;
 // Preload: bonds carry load but never break (hosts settle a structure under its
 // own weight before it is put to sleep, so it wakes in static equilibrium).
 static const uint FLAG_BOND_PRELOAD = 2u;
+// params.flags bit 5: contacts target zero gap. The margin (contactOffset) only
+// widens detection, so a contact exists before touch and acts at touch. Without
+// it (three-avbd), C0 = gap + margin and resting bodies sit ~margin deep.
+static const uint FLAG_CONTACT_GAP = 32u;
+// params.flags bit 6: the inertial block uses the world inertia R·diag(I)·Rᵀ
+// (R at the inertial target). Without it (three-avbd) the principal moments are
+// applied on world axes, which is only right for isotropic or axis-aligned bodies.
+static const uint FLAG_WORLD_INERTIA = 64u;
+
+// Step-start normal offset of a contact whose signed gap is n·(xB−xA).
+float contactC0N(float gap, float margin)
+{
+    return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u ? gap : gap + margin;
+}
+
+// α-regularized step-start normal offset. α absorbs initial penetration; with
+// FLAG_CONTACT_GAP a positive gap is real clearance, not error, so it is kept
+// whole (the row then stops the bodies exactly at touch).
+float contactC0NReg(float c0N, float keep)
+{
+    return ((PARAMS.flags & FLAG_CONTACT_GAP) != 0u && c0N > 0.0) ? c0N : c0N * keep;
+}
 static const float REUSE_LIN_TOL = 0.002;
 static const float REUSE_ANG_TOL = 0.002;
 
@@ -2138,7 +2161,7 @@ Contact refreshReusedContact(Contact c, BodyState ba, BodyState bb)
     float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
     float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
     float3 d = wb - wa;
-    c.c0N = dot(c.normal, d) + p.contactOffset;
+    c.c0N = contactC0N(dot(c.normal, d), p.contactOffset);
     c.c0T1 = dot(c.tangent1, d);
     c.c0T2 = dot(c.tangent2, d);
     c.penetration = c.c0N;
@@ -2293,7 +2316,7 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
                     float3 wa = transformPoint(ba.position, ba.orientation, c.anchorA);
                     float3 wb = transformPoint(bb.position, bb.orientation, c.anchorB);
                     float3 d = wb - wa;
-                    c.c0N = dot(c.normal, d) + p.contactOffset;
+                    c.c0N = contactC0N(dot(c.normal, d), p.contactOffset);
                     c.c0T1 = dot(c.tangent1, d);
                     c.c0T2 = dot(c.tangent2, d);
                     c.penetration = c.c0N;
@@ -3429,7 +3452,6 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             b.invInertia.x > 1e-12 ? (1.0 / b.invInertia.x) : 0.0,
             b.invInertia.y > 1e-12 ? (1.0 / b.invInertia.y) : 0.0,
             b.invInertia.z > 1e-12 ? (1.0 / b.invInertia.z) : 0.0);
-        mat6AddDiag(A, float3(mass, mass, mass) / dt2, inertia / dt2);
         float3 dp = b.position - inertial;
         rhs.v[0] = (mass / dt2) * dp.x;
         rhs.v[1] = (mass / dt2) * dp.y;
@@ -3446,9 +3468,29 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
         if (dq.w < 0.0) dangTarget = -dangTarget;
         float dangLen = length(dangTarget);
         if (dangLen > 0.5) dangTarget *= 0.5 / dangLen;
-        rhs.v[3] = (inertia.x / dt2) * dangTarget.x;
-        rhs.v[4] = (inertia.y / dt2) * dangTarget.y;
-        rhs.v[5] = (inertia.z / dt2) * dangTarget.z;
+        if ((p.flags & FLAG_WORLD_INERTIA) != 0u)
+        {
+            mat6AddDiag(A, float3(mass, mass, mass) / dt2, float3(0, 0, 0));
+            float3 e0 = quatRotate(inertialAng, float3(1, 0, 0));
+            float3 e1 = quatRotate(inertialAng, float3(0, 1, 0));
+            float3 e2 = quatRotate(inertialAng, float3(0, 0, 1));
+            float3 i = inertia / dt2;
+            float3 Iw[3];
+            for (int r = 0; r < 3; r++)
+                Iw[r] = i.x * e0[r] * e0 + i.y * e1[r] * e1 + i.z * e2[r] * e2;
+            for (int r = 0; r < 3; r++)
+            {
+                for (int c = 0; c < 3; c++) A.m[(3 + r) * 6 + 3 + c] += Iw[r][c];
+                rhs.v[3 + r] = dot(Iw[r], dangTarget);
+            }
+        }
+        else
+        {
+            mat6AddDiag(A, float3(mass, mass, mass) / dt2, inertia / dt2);
+            rhs.v[3] = (inertia.x / dt2) * dangTarget.x;
+            rhs.v[4] = (inertia.y / dt2) * dangTarget.y;
+            rhs.v[5] = (inertia.z / dt2) * dangTarget.z;
+        }
     }
 
     uint nJ = gCounters[0].jointCount;
@@ -3520,7 +3562,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 float3 t1 = c.tangent1;
                 float3 t2 = c.tangent2;
                 float3 C = float3(
-                    c.c0N * keep + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
+                    contactC0NReg(c.c0N, keep) + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
                     c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
                     c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
                 c.penetration = C.x;
@@ -3893,7 +3935,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             float3 t1 = c.tangent1;
             float3 t2 = c.tangent2;
             float3 cReg = float3(
-                c.c0N * keep + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
+                contactC0NReg(c.c0N, keep) + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
                 c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
                 c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
             c.penetration = cReg.x;
