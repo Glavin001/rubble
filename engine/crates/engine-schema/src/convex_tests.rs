@@ -140,7 +140,7 @@ fn point_cloud_hull_is_closed_and_convex() {
 }
 
 #[test]
-fn large_clouds_are_reduced_to_64_vertices() {
+fn hulls_over_64_vertices_are_an_error_not_reduced() {
     let pts: Vec<Vec3> = (0..500)
         .map(|i| {
             let phi = (i as f32 + 0.5) / 500.0;
@@ -149,11 +149,44 @@ fn large_clouds_are_reduced_to_64_vertices() {
             Vec3::new(r * theta.cos(), 2.0 * phi - 1.0, r * theta.sin())
         })
         .collect();
-    let h = ConvexHull::from_points(&pts).unwrap();
-    assert!(h.vertices.len() <= HULL_MAX_VERTICES);
+    // Every point of a sphere sampling is a hull vertex: 500 > 64.
+    match ConvexHull::from_points(&pts) {
+        Err(HullError::TooManyVertices { got, max }) => assert_eq!((got, max), (500, HULL_MAX_VERTICES)),
+        other => panic!("expected TooManyVertices, got {other:?}"),
+    }
+    // The first 64 points (a cap of the same sphere) are all kept, unchanged.
+    let h = ConvexHull::from_points(&pts[..64]).unwrap();
+    assert_eq!(h.vertices.len(), 64);
     assert!(h.faces.len() <= HULL_MAX_FACES && h.edges.len() <= HULL_MAX_EDGES);
-    assert!(h.closed);
     check_hull(&h);
+}
+
+#[test]
+fn arena_vertex_limit_rejects_larger_hulls_and_keeps_smaller_ones() {
+    let ring = |n: usize| -> ConvexHull {
+        let pts: Vec<Vec3> = (0..n)
+            .map(|i| {
+                let t = (i % (n / 2)) as f32 / (n / 2) as f32 * std::f32::consts::TAU;
+                Vec3::new(t.cos(), if i < n / 2 { -0.5 } else { 0.5 }, t.sin())
+            })
+            .collect();
+        ConvexHull::from_points(&pts).unwrap()
+    };
+    assert!(matches!(HullArena::with_max_vertices(7), Err(HullError::VertexLimit(7))));
+    assert!(matches!(HullArena::with_max_vertices(65), Err(HullError::VertexLimit(65))));
+    assert_eq!(HullArena::new().max_vertices(), HULL_MAX_VERTICES);
+    let mut arena = HullArena::with_max_vertices(16).unwrap();
+    let small = ring(16);
+    let large = ring(18);
+    assert_eq!(small.vertices.len(), 16);
+    assert!(arena.insert(&small).is_ok(), "a hull at the limit is accepted");
+    let len = arena.len();
+    match arena.insert(&large) {
+        Err(HullError::TooManyVertices { got: 18, max: 16 }) => {}
+        other => panic!("expected TooManyVertices, got {other:?}"),
+    }
+    assert_eq!(arena.len(), len, "a rejected hull leaves the arena unchanged");
+    assert!(HullArena::new().insert(&large).is_ok(), "the default arena allows 64");
 }
 
 #[test]
@@ -433,4 +466,33 @@ fn collision_filter_round_trips_and_matches_box2d_rules() {
     CollisionFilter { categories: 0xFFFF, mask: 0xFFFF, group: -2 }.apply(&mut b);
     assert!(!CollisionFilter::allows(&a, &b), "shared negative group never collides");
     assert_eq!(CollisionFilter::of(&a).group, -2);
+}
+
+/// A box `center ± half` (corner bit i = x | y<<1 | z<<2) as six quads, plus a
+/// ninth vertex `lift` above the centre of its +y face.
+fn offset_box(center: Vec3, half: f32, lift: f32) -> (Vec<Vec3>, Vec<u32>, Vec<u32>) {
+    let mut v: Vec<Vec3> = (0..8)
+        .map(|i| {
+            let s = |b: u32| if i & b != 0 { half } else { -half };
+            center + Vec3::new(s(1), s(2), s(4))
+        })
+        .collect();
+    v.push(center + Vec3::new(0.0, half + lift, 0.0));
+    let faces: [[u32; 4]; 6] = [[0, 2, 6, 4], [1, 5, 7, 3], [0, 4, 5, 1], [2, 3, 7, 6], [0, 1, 3, 2], [4, 6, 7, 5]];
+    (v, vec![4; 6], faces.iter().flatten().copied().collect())
+}
+
+#[test]
+fn convexity_check_matches_f32_precision_of_the_input_frame() {
+    // 3 µm above a face, 6 m from the origin: f32 rounding of stored coordinates,
+    // not a real bump. The old span-relative check (1.7 µm here) rejected it.
+    let (v, sizes, idx) = offset_box(Vec3::new(6.0, 0.0, 0.0), 0.25, 3e-6);
+    let h = ConvexHull::from_faces(&v, &sizes, &idx).expect("f32-noise hull loads");
+    assert_eq!(&h.vertices[..8], &v[..8], "box vertices are kept exactly");
+    // 1 mm above the face is genuinely outside the hull and still rejected.
+    let (v, sizes, idx) = offset_box(Vec3::new(6.0, 0.0, 0.0), 0.25, 1e-3);
+    assert!(matches!(ConvexHull::from_faces(&v, &sizes, &idx), Err(HullError::NonConvex)));
+    // Near the origin the tolerance stays span-relative: 3 µm is rejected there.
+    let (v, sizes, idx) = offset_box(Vec3::ZERO, 0.25, 3e-6);
+    assert!(matches!(ConvexHull::from_faces(&v, &sizes, &idx), Err(HullError::NonConvex)));
 }
