@@ -1566,24 +1566,6 @@ struct VsOut {
     // frame: up to LIVE_IN_FLIGHT frames stay queued and counters arrive one or two
     // frames late. Dispatch sizes are GPU-driven; host sizing tolerates stale
     // counts (benchmarks already run ten-step batches between readbacks).
-    const LIVE_IN_FLIGHT = 2;
-    const liveFree = Array.from({ length: LIVE_IN_FLIGHT }, () =>
-      device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
-    const livePending = new Set();
-    let liveError = null;
-    let lastCompletion = 0;
-    let liveStepMs = 0;
-    async function drainLive() {
-      await Promise.all([...livePending]);
-      if (liveError) throw liveError;
-    }
-    function readLiveCounters(buf) {
-      const c = new Uint32Array(buf.getMappedRange().slice(0));
-      buf.unmap();
-      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
-      if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
-    }
-
     // ?stopAt=N freezes live playback at step N (still rendering) so runs can be
     // compared at the same step, e.g. sleep=on vs sleep=off screenshots.
     const stopAt = Math.max(0, Number(qs.get('stopAt')) || 0);
@@ -1601,6 +1583,24 @@ struct VsOut {
       for (let i = 0; i < bodies.length; i++) out.set(f.subarray(i * 28, i * 28 + 3), i * 3);
       return { step: steps, positions: Array.from(out), initial: bodies.map((b) => b.p) };
     };
+
+    const LIVE_IN_FLIGHT = 2;
+    const liveFree = Array.from({ length: LIVE_IN_FLIGHT }, () =>
+      device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    const livePending = new Set();
+    let liveError = null;
+    let lastCompletion = 0;
+    let liveStepMs = 0;
+    async function drainLive() {
+      await Promise.all([...livePending]);
+      if (liveError) throw liveError;
+    }
+    function readLiveCounters(buf) {
+      const c = new Uint32Array(buf.getMappedRange().slice(0));
+      buf.unmap();
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+      if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
+    }
 
     async function frame(now) {
       if (!running) return;
