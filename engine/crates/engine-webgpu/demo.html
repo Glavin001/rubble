@@ -19,6 +19,8 @@
       border-radius: 4px; padding: 3px 8px; font: inherit; max-width: 28rem;
     }
     #sceneSelect:focus { outline: 1px solid #6b7a9e; }
+    #sleepLabel { display: flex; align-items: center; gap: 5px; margin-left: 10px; color: #d7dbe6; cursor: pointer; }
+    #sleepLabel.locked { color: #8b93a7; cursor: default; }
     #rates {
       display: grid;
       grid-template-columns: auto auto;
@@ -40,6 +42,9 @@
     <div id="sceneRow">
       <label for="sceneSelect">Scene</label>
       <select id="sceneSelect"></select>
+      <label id="sleepLabel" for="sleepToggle" title="Let resting bodies fall asleep (URL: sleep=on|off)">
+        <input type="checkbox" id="sleepToggle"> Sleep
+      </label>
     </div>
     <div id="rates">
       <div><span class="lbl">TPS</span> <strong class="val" id="tpsVal">—</strong><span class="sub" id="stepMsVal"></span></div>
@@ -438,6 +443,32 @@
       sleepLin: cfg.sleepLin ?? 0.15, sleepAng: cfg.sleepAng ?? 0.15, sleepTime: cfg.sleepTime ?? 0.5, residualExit: 1e-4,
       trustLin: 0.35, trustAng: 0.5, pivotFloor: 1e-6, gridCellSize: 2,
     };
+
+    // Sleep toggle. Scenes matching three-avbd (no sleeping) default to a 1e6 s
+    // timer; ?sleep=on|off overrides the scene default and stays in the URL.
+    // Changes apply from the next step (packHost runs every step); turning sleep
+    // off keeps already-sleeping bodies asleep until something wakes them.
+    const SLEEP_OFF_TIME = 1e6;
+    const sceneSleepTime = cfg.sleepTime ?? 0.5;
+    const sleepEnabledTime = sceneSleepTime < SLEEP_OFF_TIME ? sceneSleepTime : 0.5;
+    const sleepQuery = qs.get('sleep');
+    if (sleepQuery !== null && !['on', 'off'].includes(sleepQuery)) throw new Error('sleep must be on or off');
+    const setSleepEnabled = (on) => { params.sleepTime = on ? sleepEnabledTime : SLEEP_OFF_TIME; };
+    setSleepEnabled(sleepQuery !== null ? sleepQuery === 'on' : sceneSleepTime < SLEEP_OFF_TIME);
+    const sleepToggle = document.getElementById('sleepToggle');
+    const sleepLabel = document.getElementById('sleepLabel');
+    function syncSleepToggle(locked) {
+      sleepToggle.checked = params.sleepTime < SLEEP_OFF_TIME;
+      sleepToggle.disabled = !!locked;
+      sleepLabel.classList.toggle('locked', !!locked);
+    }
+    syncSleepToggle(false);
+    sleepToggle.addEventListener('change', () => {
+      setSleepEnabled(sleepToggle.checked);
+      const next = new URL(location.href);
+      next.searchParams.set('sleep', sleepToggle.checked ? 'on' : 'off');
+      history.replaceState(null, '', next.href);
+    });
 
     const packHostBytes = new ArrayBuffer(208);
     const packHostView = new DataView(packHostBytes);
@@ -1651,7 +1682,8 @@ struct VsOut {
     if (regressionEnabled) {
       const expectedScene = regressionKind === 'gables' ? 'gables506k' : 'ring110k';
       if (scene !== expectedScene) throw new Error(`${regressionKind} regression requires scene=${expectedScene}`);
-      params.sleepTime = 1e6;
+      params.sleepTime = SLEEP_OFF_TIME;
+      syncSleepToggle(true); // regression oracles assume no sleeping
       const readSnapshot = async () => {
         await readCounters();
         const enc = device.createCommandEncoder();
@@ -1679,6 +1711,7 @@ struct VsOut {
       report.hashInsert = hashInsertMode;
       report.reuse = reuseMode;
       report.grid = gridMode;
+      report.sleepTime = params.sleepTime;
       report.np = npMode;
       report.persist = persistMode;
       report.repair = repairMode;
