@@ -493,7 +493,8 @@ fn broadphase_linked_buckets_case(buckets: usize, split: bool) {
         s16 + 4 * 4,
         bytemuck::bytes_of(&u32::from(split)),
     );
-    let tables = if split { 2 } else { 1 };    const CANARY: u32 = 0xfedc_ba98;
+    let tables = if split { 2 } else { 1 };
+    const CANARY: u32 = 0xfedc_ba98;
     sim.queue.write_buffer(
         &sim.bufs[15],
         N as u64 * 4,
@@ -507,14 +508,20 @@ fn broadphase_linked_buckets_case(buckets: usize, split: bool) {
     sim.queue.submit([enc.finish()]);
     // Sleepers keep their last AABB, so refit awake and then put every third body to sleep.
     for id in (0..N).filter(|&id| sleeping(id)) {
-        let offset = (id * std::mem::size_of::<BodyState>()
-            + std::mem::offset_of!(BodyState, flags)) as u64;
-        sim.queue.write_buffer(&sim.bufs[0], offset, bytemuck::bytes_of(&5u32));
+        let offset =
+            (id * std::mem::size_of::<BodyState>() + std::mem::offset_of!(BodyState, flags)) as u64;
+        sim.queue
+            .write_buffer(&sim.bufs[0], offset, bytemuck::bytes_of(&5u32));
     }
     let mut enc = sim.device.create_command_encoder(&Default::default());
     {
         let mut pass = enc.begin_compute_pass(&Default::default());
-        sim.disp(&mut pass, "broadphase_clear", (buckets * tables) as u64, None);
+        sim.disp(
+            &mut pass,
+            "broadphase_clear",
+            (buckets * tables) as u64,
+            None,
+        );
         sim.disp(&mut pass, "broadphase_insert", N as u64, None);
         sim.disp(&mut pass, "broadphase_query", N as u64, None);
     }
@@ -862,8 +869,17 @@ fn persistent_csr_from_packed_pairs_matches_manifold_endpoints() {
     // Collider c belongs to body PERM[c]: reading collider ids as bodies fails.
     const PERM: [u32; BODIES as usize] = [0, 7, 3, 11, 5, 9, 1, 10, 2, 6, 4, 8];
     let edges: Vec<(u32, u32, u32)> = vec![
-        (1, 2, 4), (2, 3, 4), (0, 4, 1), (5, 6, 0), (6, 7, 2), (7, 8, 4), (3, 9, 1),
-        (9, 10, 4), (10, 11, 3), (1, 11, 2), (4, 8, 4),
+        (1, 2, 4),
+        (2, 3, 4),
+        (0, 4, 1),
+        (5, 6, 0),
+        (6, 7, 2),
+        (7, 8, 4),
+        (3, 9, 1),
+        (9, 10, 4),
+        (10, 11, 3),
+        (1, 11, 2),
+        (4, 8, 4),
     ];
     let mut results = Vec::new();
     for persistent in [false, true] {
@@ -952,10 +968,16 @@ fn persistent_csr_from_packed_pairs_matches_manifold_endpoints() {
         for e in offsets[body]..offsets[body + 1] {
             let (a, b, _) = edges[ids[e as usize] as usize];
             let (ba, bb) = (PERM[a as usize], PERM[b as usize]);
-            assert!(ba as usize == body || bb as usize == body,
-                "body {body}, edge {e}: adjacency lists manifold {} that does not touch it", ids[e as usize]);
-            assert_eq!(partners[e as usize], if ba as usize == body { bb } else { ba },
-                "body {body}, edge {e}: partner array must name the other body");
+            assert!(
+                ba as usize == body || bb as usize == body,
+                "body {body}, edge {e}: adjacency lists manifold {} that does not touch it",
+                ids[e as usize]
+            );
+            assert_eq!(
+                partners[e as usize],
+                if ba as usize == body { bb } else { ba },
+                "body {body}, edge {e}: partner array must name the other body"
+            );
         }
     }
     assert_eq!(results[0], results[1],
@@ -3520,17 +3542,28 @@ fn persistent_fused_warmstart_preserves_history_and_refreshes_pair_cache() {
 /// tags as the separate persistence pass.
 #[test]
 fn reuse_copy_matches_separate_persistence_semantics() {
-    mixed_contact_reuse_fixture_mode(true, false, true, None);
+    mixed_contact_reuse_fixture_mode(true, false, true, None, None);
 }
 
 /// Two-pass narrowphase (`np=split`): the reuse pass defers fresh pairs to the
 /// candidate tail and the shape pass emits them, so the result must match the
 /// fused copy exactly up to manifold order. Limits 0 (whole tail), 3 (most fresh
 /// pairs fall back inline) and 1 cover the deferred, mixed and inline paths.
+/// Persist work list (`persist=list`): only fresh points and reused pairs at
+/// rest are persisted, from the list, with the same results as the full scan.
+/// Limit 0 keeps the whole region; limit 5 overflows, so the list is ignored
+/// and the scan pass (slot 71) must persist every point exactly once.
+#[test]
+fn persist_list_matches_full_scan_and_falls_back_on_overflow() {
+    for limit in [0u32, 5] {
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(0), Some(limit));
+    }
+}
+
 #[test]
 fn two_pass_narrowphase_matches_fused_reuse_copy() {
     for limit in [0u32, 3, 1] {
-        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit));
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit), None);
     }
 }
 
@@ -3742,7 +3775,7 @@ fn persistent_dual_updates_hot_state_without_corrupting_metadata_or_history() {
 }
 
 fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
-    mixed_contact_reuse_fixture_mode(persistent, fused, false, None);
+    mixed_contact_reuse_fixture_mode(persistent, fused, false, None, None);
 }
 
 fn mixed_contact_reuse_fixture_mode(
@@ -3750,6 +3783,7 @@ fn mixed_contact_reuse_fixture_mode(
     fused: bool,
     copy: bool,
     np_split: Option<u32>,
+    persist_list: Option<u32>,
 ) {
     let mut sim = if persistent {
         WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
@@ -3855,10 +3889,12 @@ fn mixed_contact_reuse_fixture_mode(
     for parity in 0..2 {
         for reuse in [false, true] {
             let context = format!(
-                "persistent={persistent}, fused={fused}, copy={copy}, np_split={np_split:?}, parity={parity}, reuse={reuse}"
+                "persistent={persistent}, fused={fused}, copy={copy}, np_split={np_split:?}, persist_list={persist_list:?}, parity={parity}, reuse={reuse}"
             );
             sim.contacts_parity = parity;
             sim.np_defer_limit = np_split.unwrap_or(0);
+            sim.persist_list = persist_list.is_some();
+            sim.persist_list_limit = persist_list.unwrap_or(0);
             sim.params.flags = (sim.params.flags & !1) | u32::from(reuse);
             sim.write_host_uniforms();
             let cur = parity * sim.capacity.max_contacts;
@@ -3900,8 +3936,18 @@ fn mixed_contact_reuse_fixture_mode(
                     None,
                 );
                 if np_split.is_some() {
-                    sim.disp(&mut pass, "narrowphase_defer_copy_persistent", count as u64, None);
-                    sim.disp(&mut pass, "narrowphase_fresh_copy_persistent", count as u64, None);
+                    sim.disp(
+                        &mut pass,
+                        "narrowphase_defer_copy_persistent",
+                        count as u64,
+                        None,
+                    );
+                    sim.disp(
+                        &mut pass,
+                        "narrowphase_fresh_copy_persistent",
+                        count as u64,
+                        None,
+                    );
                 } else {
                     sim.disp(
                         &mut pass,
@@ -3914,19 +3960,24 @@ fn mixed_contact_reuse_fixture_mode(
                         None,
                     );
                 }
-                sim.disp(&mut pass, "write_work_args", 64, None);
-                sim.disp_work(
-                    &mut pass,
-                    if fused {
-                        "persist_manifolds_compact"
-                    } else if copy {
-                        "persist_contacts_copy_persistent"
-                    } else {
-                        "persist_contacts"
-                    },
-                    if fused { 66 } else { 65 },
-                    None,
-                );
+                sim.disp(&mut pass, sim.work_args_entry(), 64, None);
+                if persist_list.is_some() {
+                    sim.disp_work(&mut pass, "persist_list_copy_persistent", 70, None);
+                    sim.disp_work(&mut pass, "persist_contacts_copy_persistent", 71, None);
+                } else {
+                    sim.disp_work(
+                        &mut pass,
+                        if fused {
+                            "persist_manifolds_compact"
+                        } else if copy {
+                            "persist_contacts_copy_persistent"
+                        } else {
+                            "persist_contacts"
+                        },
+                        if fused { 66 } else { 65 },
+                        None,
+                    );
+                }
             }
             sim.queue.submit([enc.finish()]);
             let c = download::<StepCounters>(&sim, 7, 0, 1)[0];
@@ -3934,6 +3985,18 @@ fn mixed_contact_reuse_fixture_mode(
                 c.overflow_flags, 0,
                 "{context}: fixture must complete without overflow"
             );
+            if let Some(limit) = persist_list {
+                // Fresh contacts and reused pairs at rest are listed (ABI byte 60);
+                // every reused pair here moves, so only fresh pairs' points count.
+                let listed: u32 = (1..count)
+                    .filter(|id| !reuse || id % 5 == 0 || id % 4 == 0)
+                    .map(|id| if id % 3 == 1 { 1 } else { 4 })
+                    .sum();
+                assert_eq!(c._pad2, listed,
+                    "{context}: the persist list must hold exactly the points still awaiting persistence");
+                assert!(limit == 0 || listed > limit,
+                    "{context}: the capped case must overflow, or the scan fallback goes untested");
+            }
             if np_split.is_some() {
                 // Every pair the reuse pass rejects is counted once (ABI byte 56),
                 // whether it was deferred or tested inline past the limit.
@@ -4020,6 +4083,11 @@ fn mixed_contact_reuse_fixture_mode(
                     }
                     assert_eq!(point._pad[1].to_bits(), if reused { 20 } else { 22 },
                         "{context}, pair {id}: stale-generation and cold pairs must regenerate; eligible pairs must retain their generation");
+                    // Persistence floors every point's normal penalty at m/dt² (unit
+                    // masses, static ground): an unpersisted point keeps its raw row.
+                    let floor = 1.0 / (sim.params.dt * sim.params.dt);
+                    assert!(point.k_n >= floor * (1.0 - 1e-6),
+                        "{context}, pair {id}, feature {:#x}: normal penalty {} below the m/dt² floor {floor}; this point skipped persistence", point.feature_id, point.k_n);
                     assert!(
                         point
                             .normal

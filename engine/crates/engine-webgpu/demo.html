@@ -131,6 +131,13 @@
     if (!['fused', 'split'].includes(npMode)) throw new Error('np must be fused or split');
     if (npMode === 'split' && !reuseCopy) throw new Error('np=split requires reuse=copy');
     const npSplit = npMode === 'split';
+    // persist=list (8em): narrowphase lists the contacts that still need the
+    // persistence pass, so it skips the per-contact scan of finished copies.
+    // Gables scan/list warm 1.97/1.44 ms (wall 26.66/26.13); ring 10.44/10.19.
+    const persistMode = qs.get('persist') || (reuseCopy ? 'list' : 'scan');
+    if (!['scan', 'list'].includes(persistMode)) throw new Error('persist must be scan or list');
+    if (persistMode === 'list' && !reuseCopy) throw new Error('persist=list requires reuse=copy');
+    const persistList = persistMode === 'list';
     // endpoints=pairs (8el): solver pairs are packed before the graph, so CSR
     // degree and scatter read body ids from the 32-byte pair instead of
     // manifold -> two colliders (three-avbd TopoItem shape). Manifold
@@ -346,7 +353,7 @@
       s[20] = b(cap.maxBodies, 4);
       s[21] = 64 * 4;
       s[22] = 96 * PASS_ALIGN;
-      s[23] = b(Math.max(cap.maxColors, 70) * 3, 4);
+      s[23] = b(Math.max(cap.maxColors, 72) * 3, 4);
       s[24] = b(cap.maxColliders, 80);
       s[25] = b(cap.maxCandidates, 32);
       s[26] = b(cap.maxBodies, 32);
@@ -361,6 +368,7 @@
       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
       ...(reuseCopy ? ['narrowphase_copy_persistent', 'persist_contacts_copy_persistent'] : []),
       ...(npSplit ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
+      ...(persistList ? ['persist_list_copy_persistent'] : []),
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
@@ -790,6 +798,7 @@ struct VsOut {
       persist_manifolds_compact: 'persist_manifolds_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
       solve_primal_sparse_compact: 'solve_primal_sparse_persistent',
       solve_primal_color_compact: 'solve_primal_color_persistent', solve_dual_compact: 'solve_dual_persistent',
+      ...(persistList ? {write_work_args: 'write_work_args_copy_persistent'} : {}),
       ...(pairEndpoints ? {csr_degree_contacts: 'csr_degree_contacts_persistent',
         csr_scatter_contacts: 'csr_scatter_contacts_persistent'} : {}),
     };
@@ -940,6 +949,7 @@ struct VsOut {
       s[14] = manifoldHashInsert ? 1 : 0;
       s[16] = gridHashWords();
       s[20] = gridSplit ? 1 : 0;
+      s[22] = persistList ? 1 : 0;
       s[24] = csrBase;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
@@ -1033,7 +1043,12 @@ struct VsOut {
         if (detailedProfile) nextPhase();
       }
       if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
-      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+      // List mode: slot 70 covers listed contacts; slot 71 runs the full scan
+      // only when the list overflowed (both written after narrowphase).
+      if (persistList) {
+        dispWork(pass, 'persist_list_copy_persistent', 70);
+        dispWork(pass, 'persist_contacts_copy_persistent', 71);
+      } else dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
       if (earlyPairPack) dispWork(pass, 'pack_solver_contacts', 66);
       nextPhase();
       disp(pass, 'build_awake_list', nBodies);
@@ -1181,7 +1196,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, endpoints: endpointsMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1603,7 +1618,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1653,6 +1668,7 @@ struct VsOut {
       report.reuse = reuseMode;
       report.grid = gridMode;
       report.np = npMode;
+      report.persist = persistMode;
       report.endpoints = endpointsMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
@@ -1678,7 +1694,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));
