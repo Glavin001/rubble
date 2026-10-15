@@ -254,7 +254,7 @@ export function buildScene(asset, level) {
   if(!selected.length)throw new Error('No fragments at this level');
   const bodies=[{p:[0,0,0],q:[0,0,0,1],invMass:0,invI:[0,0,0],flags:0}];
   const colliders=[{body:0,shape:4,density:0,params:[0,1,0,0]}];
-  const arena=new HullArena(),vertices=[],lines=[],byId=new Map();
+  const arena=new HullArena(),vertices=[],lines=[],byId=new Map(),skippedHulls=[];
   let lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
   for(const f of selected)for(const h of asset.physics.hulls.slice(f.hullBegin,f.hullBegin+f.hullCount))for(const v of h.vertices)for(let k=0;k<3;k++){lo[k]=Math.min(lo[k],v[k]);hi[k]=Math.max(hi[k],v[k]);}
   if(!lo.every(Number.isFinite))throw new Error('Selected level has no collision hulls');
@@ -265,11 +265,21 @@ export function buildScene(asset, level) {
     const {q,moments}=principalAxes(f.inertia),id=bodies.length;
     const body={p:add(f.com,placement),q,invMass:1/f.mass,invI:moments.map(x=>1/x),flags:5};
     bodies.push(body);byId.set(f.id,{id,f,q});
+    let kept=0;
     for(let h=f.hullBegin;h<f.hullBegin+f.hullCount;h++){
       const verts=asset.physics.hulls[h].vertices.map(v=>inverseRotate(q,sub(v,f.com)));
-      let child;try{child=appendHull(arena,verts,asset.physics.hullFaces[h])}catch(e){throw new Error(`Fragment ${f.id}, hull ${h}: ${e.message}`)}
+      let child;
+      try{child=appendHull(arena,verts,asset.physics.hullFaces[h])}catch(e){
+        // A zero-volume child (a flat sheet baked into a compound) adds no
+        // collision volume and no mass: mass/inertia come from the fragment.
+        // Drop it only while the fragment keeps real hulls; never thicken it.
+        if(/zero-volume/.test(e.message)){skippedHulls.push({fragment:f.id,hull:h});continue}
+        throw new Error(`Fragment ${f.id}, hull ${h}: ${e.message}`);
+      }
       colliders.push({body:id,shape:3,density:f.mass/Math.max(f.volume,1e-12),params:child.params,localPos:child.localPos});
+      kept++;
     }
+    if(!kept)throw new Error(`Fragment ${f.id}: every collision hull has zero volume; recook the source collision asset`);
     const node=asset.json.nodes[f.node],mesh=asset.json.meshes[node?.mesh];
     if(!mesh)throw new Error(`Fragment ${f.id} has no render mesh`);
     for(const prim of mesh.primitives){
@@ -306,7 +316,7 @@ export function buildScene(asset, level) {
       for(const n of [a,b,c,a,c,d])projectileVertices.push(...scale(n,projectileRadius),...n,1,.3,.08,id);
     }
   }
-  return {projectileStart,projectileCount,projectileRadius,projectileMass,projectileVertices:new Float32Array(projectileVertices),bodies,colliders,hullData:arena.data,vertices:new Float32Array(vertices),lines:new Float32Array(lines),selected,bonds,byId,
+  return {projectileStart,projectileCount,projectileRadius,projectileMass,projectileVertices:new Float32Array(projectileVertices),bodies,colliders,hullData:arena.data,skippedHulls,vertices:new Float32Array(vertices),lines:new Float32Array(lines),selected,bonds,byId,
     extent,height,center:[0,height*.5+placement[1]+lo[1],0],gridCellSize:gridConfig(colliders).base,
     params:{flags:1,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
 }
