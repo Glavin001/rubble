@@ -527,7 +527,14 @@ fn broadphase_linked_buckets_case(buckets: usize, split: bool) {
     }
     sim.queue.submit([enc.finish()]);
     let heads: Vec<u32> = download(&sim, 14, 0, buckets * tables);
-    let links: Vec<u32> = download(&sim, 15, 0, N);
+    // Split grids keep each collider's next link in its AABB's spare word (8eo).
+    let links: Vec<u32> = if split {
+        let base = u64::from(sim.capacity.max_bodies) * 32;
+        let words: Vec<u32> = download(&sim, 9, base, N * 8);
+        words.chunks(8).map(|aabb| aabb[7]).collect()
+    } else {
+        download(&sim, 15, 0, N)
+    };
     let mut seen = vec![false; N];
     for slot in 0..buckets * tables {
         let mut encoded = heads[slot];

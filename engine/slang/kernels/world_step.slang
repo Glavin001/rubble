@@ -519,7 +519,10 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
         AADD2(gScratchAtomics[52], 1u); // non-empty other table
     }
     AXCHG3(gConstraintIds[h], entry, prev);
-    gColorLists[i] = prev;
+    // Split grids keep the next link in the AABB's spare word (8eo): queries
+    // then fetch link and bounds with one load. The legacy grid keeps gColorLists.
+    if (gridSplit()) gAabbs[base + i]._pad1 = asfloat(prev);
+    else gColorLists[i] = prev;
 }
 
 // Own cell (index 0), then the 13 neighbours lexicographically after it.
@@ -550,12 +553,12 @@ void gridScanCell(uint i, Collider col, BodyState b, Aabb box, float3 cA, float 
     {
         uint cur = link & GRID_COLLIDER_MASK;
         bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
-        link = gColorLists[cur];
+        Aabb ab = gAabbs[base + cur];
+        link = asuint(ab._pad1);
         guard++;
         if (guard == 4096u)
             AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
         if (cur == i || (ownCell && awakeEntry && cur <= i)) continue;
-        Aabb ab = gAabbs[base + cur];
         int3 candidateCell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
         if (any(candidateCell != cell)) continue;
         float rB = ab._pad0;
