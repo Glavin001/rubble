@@ -158,7 +158,8 @@ impl MetalWorld {
             let n = capacity.max_bodies as usize * 8;
             std::ptr::write_bytes(ref_poses.contents() as *mut u8, 0, n * 4);
         }
-        let scratch = [alloc_u32(d, 64), alloc_u32(d, 64)];
+        // 0..63 host words and per-step counters; 64..79 the uniform grid's large list.
+        let scratch = [alloc_u32(d, 96), alloc_u32(d, 96)];
         // 96 slots: 0..47 identity (colour rounds / misc), 48..67 = 2^0..2^19 for CSR scan
         // (must cover max_bodies=524288; the old 16-slot table broke adjacency above 65k).
         let pass_table = alloc_u32(d, 96);
@@ -638,6 +639,7 @@ impl MetalWorld {
         s[42] = 0;
         s[51] = 0;
         s[53] = 0;
+        s[31] = 0; // hierarchical levels holding a moving collider
         s[19] = 0; // reuse hash miss
         s[20] = 0; // split broadphase grids (WebGPU opt-in; off on Metal)
         s[21] = 0; // two-pass narrowphase tail cap (unused on Metal)

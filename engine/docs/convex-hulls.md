@@ -166,6 +166,7 @@ example to replace a fractured chunk. The JS `HullArena` mirrors the Rust one.
 | `HOST_S(29)` | Degree-aware primal lanes (needs `gColorCounts` ≥ 128 words); hosts enable it for scenes with convex colliders, so box benchmarks keep their validated lane order. |
 | Scratch 51 | Occupied grid levels. |
 | Scratch 53..63 | Oversized-static list for the hierarchical grid (count + 10 IDs). |
+| Scratch 64..79 | Uniform grid's large dynamic list (count at 25). It used to sit at 26..41, which Metal also reads as `HOST_S(26..30)`; Metal's scratch is now 96 words. |
 | `HOST_S(30)` | Collision filters present (`HOST_S(22)`/`(23)` are the persist list, 27/28 local repair and carry). |
 | Indirect slot 73 | Previous contacts (whole-step manifold reuse). |
 
@@ -268,10 +269,6 @@ All GPU correctness suites pass: WebGPU, Metal, browser conformance, work-list
 row limits, and the arch regression.
 
 ## Known limitations and follow-ups
-
-- **Pre-existing Metal overlap.** On Metal, the legacy uniform grid's large-body
-  list (scratch 26..41) overlaps `HOST_S(26)` (incremental colouring). The
-  hierarchical grid avoids it by using scratch 53..63.
 
 - **Reuse is absolute, not relative.** Contact reuse still uses the absolute
   pose generation (`update_refs`). Reuse based on the relative pose (Jolt style)

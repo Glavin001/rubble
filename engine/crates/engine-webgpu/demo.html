@@ -370,7 +370,7 @@
       s[18] = b(cap.maxHull, 16);
       s[19] = 65536 * 4;
       s[20] = b(cap.maxBodies, 4);
-      s[21] = 64 * 4;
+      s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
       s[22] = 96 * PASS_ALIGN;
       s[23] = b(Math.max(cap.maxColors, 73) * 3, 4);
       s[24] = b(cap.maxColliders, 80);

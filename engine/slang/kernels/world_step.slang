@@ -279,21 +279,30 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     {
         // Exact bounds from every transformed vertex: one pass per collider, not
         // per pair, and far tighter than a radius about the collider origin.
+        // One matrix per collider: 9 FMAs per vertex instead of a quaternion
+        // rotation (the hull may be shared, but its pose is per collider).
         HullRef h = hullOf(col);
+        float3 ax = quatRotate(worldRot, float3(1, 0, 0));
+        float3 ay = quatRotate(worldRot, float3(0, 1, 0));
+        float3 az = quatRotate(worldRot, float3(0, 0, 1));
         mn = float3(1e30, 1e30, 1e30);
         mx = float3(-1e30, -1e30, -1e30);
         for (uint v = 0u; v < h.nv; v++)
         {
-            float3 p = transformPoint(worldPos, worldRot, hullVertex(h, v));
+            float3 l = hullVertex(h, v);
+            float3 p = ax * l.x + ay * l.y + az * l.z;
             mn = min(mn, p);
             mx = max(mx, p);
         }
-        mn -= aabbPad;
-        mx += aabbPad;
+        mn += worldPos - aabbPad;
+        mx += worldPos + aabbPad;
     }
     Aabb box;
     box.mn = mn; box.mx = mx;
     float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    // The hierarchical grid needs every AABB half extent ≤ _pad0; a capsule's
+    // reaches radius + half height, beyond length(radius, half height).
+    if (col.shape == SHAPE_CAPSULE) boundR = col.params.x + col.params.y;
     box._pad0 = boundR;
     box._pad1 = asfloat(col.body);
     // Store at collider index offset by max_bodies — host allocates gAabbs sized max_bodies+max_colliders
@@ -542,8 +551,15 @@ bool boxesSeparatedOnFaceAxis(BoxObb probe, uint otherCollider, float gap)
 // movers never visit fine cells). Colliders beyond the top level (oversized
 // statics) go to the explicit large list, tested by every mover.
 static const uint HIER_LEVEL_MASK_SLOT = 51u;
-// Oversized statics: count at 53, up to 10 collider IDs at 54..63. Kept clear of
-// the legacy large list (25..41), which overlaps Metal's HOST_S(26).
+// Uniform-grid large dynamics: count at 25, up to 16 IDs at 64..79. Metal reads
+// HOST_S(k) from these same scratch words, so the IDs must stay clear of every
+// host word (0..31): at 26..41 they overwrote HOST_S(26..30) mid-step.
+static const uint LEGACY_LARGE_BASE = 64u;
+// Levels holding at least one moving collider (scratch 31, zeroed by every host
+// each step). Sleeping/static queriers only pair with movers, so they skip
+// every level without one, and return at once when none is coarser than them.
+static const uint HIER_MOVING_MASK_SLOT = 31u;
+// Oversized statics: count at 53, up to 10 collider IDs at 54..63.
 static const uint HIER_LARGE_COUNT_SLOT = 53u;
 static const uint HIER_LARGE_MAX = 10u;
 
@@ -605,6 +621,7 @@ void hierInsert(uint i)
     // Occupied-level mask (scratch 51, zeroed by the host each step): queries
     // skip empty levels, so the host can keep slack levels for f32 rounding.
     AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], 1u << level);
+    if (bodyMoving(gBodies[col.body])) AOR2(gScratchAtomics[HIER_MOVING_MASK_SLOT], 1u << level);
     uint prev;
     AXCHG3(gConstraintIds[hierHash(hierCell(box, level), level)], i, prev);
     gColorLists[i] = prev;
@@ -646,17 +663,28 @@ void hierQuery(uint i)
         }
     }
     uint count = gCounters[0].colliderCount;
-    uint occupied = ALOAD(gScratchAtomics[HIER_LEVEL_MASK_SLOT]);
+    // Movers may pair with anything; others only with movers at coarser levels.
+    uint occupied = active ? ALOAD(gScratchAtomics[HIER_LEVEL_MASK_SLOT])
+                           : ALOAD(gScratchAtomics[HIER_MOVING_MASK_SLOT]) & ~((2u << own) - 1u);
+    if ((occupied >> own) == 0u) return;
     for (uint level = own; level < levels; level++)
     {
-        if (!active && level == own) continue;
         if (((occupied >> level) & 1u) == 0u) continue;
+        // A level-L collider's AABB centre lies in its cell and its half extent
+        // is at most half a cell (the same bound the 27-cell scan relies on), so
+        // only centres within aa ± cell/2 can overlap. That range is a subset of
+        // the 27 cells: about 8 at the own level and 1-8 at coarser levels.
+        float cs = hierCellSize(level);
+        int3 lo = int3(floor((aa.mn - 0.5 * cs) / cs));
+        int3 hi = int3(floor((aa.mx + 0.5 * cs) / cs));
         int3 center = hierCell(aa, level);
-        for (int z = -1; z <= 1; z++)
-        for (int y = -1; y <= 1; y++)
-        for (int x = -1; x <= 1; x++)
+        lo = max(lo, center - 1);
+        hi = min(hi, center + 1);
+        for (int z = lo.z; z <= hi.z; z++)
+        for (int y = lo.y; y <= hi.y; y++)
+        for (int x = lo.x; x <= hi.x; x++)
         {
-            int3 cell = center + int3(x, y, z);
+            int3 cell = int3(x, y, z);
             uint j = ALOAD(gConstraintIds[hierHash(cell, level)]);
             uint guard = 0u;
             while (j != 0xFFFFFFFFu && guard < count)
@@ -722,7 +750,7 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     {
         uint slot;
         AADD3(gScratchAtomics[25], 1, slot);
-        if (slot < 16u) ASTORE(gScratchAtomics[26u + slot], i);
+        if (slot < 16u) ASTORE(gScratchAtomics[LEGACY_LARGE_BASE + slot], i);
         return;
     }
     float3 center = 0.5 * (box.mn + box.mx);
@@ -888,7 +916,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
     for (uint k = 0u; k < nLarge; k++)
     {
-        uint j = ALOAD(gScratchAtomics[26u + k]);
+        uint j = ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k]);
         if (j == i) continue;
         Collider other = gColliders[j];
         if (other.body == col.body || bodiesJointed(col.body, other.body)) continue;
