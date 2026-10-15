@@ -20,6 +20,8 @@ const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity}
 // Incremental colouring recolours only changed neighbourhoods but lets the
 // palette drift (more solve passes); fresh colouring is the default.
 const colorRoundLimit=Math.min(64,budget.colorRounds??32);
+// Per-body passes (predict, velocity/sleep, sleep commit) over the awake list.
+const listedPasses=budget.awakeListPasses!==false;
 let incremental=budget.incrementalColoring??false;
 const cap={maxBodies:nextPow2(Math.max(64,scene.bodies.length)),maxColliders:nextPow2(Math.max(64,scene.colliders.length)),
  maxContacts:nextPow2(Math.max(4096,scene.colliders.length*budget.contactsPerCollider)),maxCandidates:nextPow2(Math.max(4096,scene.colliders.length*budget.candidatesPerCollider)),
@@ -500,7 +502,8 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       disp(pass, 'scatter_color_tiles', nBodies);
       dispWork(pass, 'record_color_degrees', 67);
       disp(pass, 'write_color_args', 64);
-      disp(pass, 'predict_bodies', nBodies);
+      if (listedPasses) dispWork(pass, 'predict_bodies', 67, 1); // awake list (slot 67: awake count)
+      else disp(pass, 'predict_bodies', nBodies);
       dispWork(pass, 'pack_solver_contacts', 66);
       pass = phase('topology');
       // Current-step indirect arguments skip empty colors without a CPU estimate.
@@ -535,10 +538,11 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
         if (beginPass && iter + 1 === (params.iterations >> 1)) pass = phase('solveHalf');
       }
       pass = phase('solve');
-      disp(pass, 'extract_velocity_sleep', nBodies);
+      if (listedPasses) dispWork(pass, 'extract_velocity_sleep', 67, 1); // awake list
+      else disp(pass, 'extract_velocity_sleep', nBodies);
       disp(pass, 'write_sleep_args', 64);
       for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
-      dispWork(pass, 'sleep_island_commit', 67);
+      dispWork(pass, 'sleep_island_commit', 67, listedPasses ? 1 : 0); // awake list
       if (beginPass) phase('sleep');
       pass.end();
       if (readback) enc.copyBufferToBuffer(bufs[7], 0, staging, 0, COUNTER_BYTES);
