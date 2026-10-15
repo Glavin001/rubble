@@ -647,7 +647,7 @@ return {
      try{const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,offset,temp,0,size);device.queue.submit([e.finish()]);await temp.mapAsync(GPUMapMode.READ);return temp.getMappedRange().slice(0)}finally{temp.destroy()}
    };
    const base=parity===0?0:cap.maxContacts;
-   return {counters:{...last},pairs:new Uint32Array(await read(bufs[10],0,last.candidate*16)),
+   return {counters:{...last},base,pairs:new Uint32Array(await read(bufs[10],0,last.candidate*16)),
      bounds:new Float32Array(await read(bufs[9],cap.maxBodies*32,colliderCount*32)),
      contacts:new Uint32Array(await read(bufs[4],base*32,last.contact*32)),
      points:new Float32Array(await read(bufs[27],base*64,last.contact*64)),
