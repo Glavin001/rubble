@@ -40,6 +40,29 @@ static const uint CONVEX_SLOT_PAIRS = 76u;
 // candidate contributes at most one item, so the two buckets never collide.
 BIND(29) RWStructuredBuffer<ConvexWork> gConvexWork;
 
+// Separating-feature cache for hull pairs (box3d b3SATCache, for separated
+// pairs): a direct-mapped table indexed by a hash of the collider pair, holding
+// (verification hash, feature). Any axis on which the hulls are separated
+// proves the pair has no contact, so stale entries, hash collisions and racing
+// writes only lower the hit rate; they can never change a result. Size is a
+// power of two sized from the candidate capacity (satCacheSlot).
+BIND(30) RWStructuredBuffer<uint2> gSatCache;
+static const uint SAT_CACHE_FACE_A = 1u;
+static const uint SAT_CACHE_FACE_B = 2u;
+static const uint SAT_CACHE_EDGE = 3u;
+// Skip only when the cached axis separates by more than this (m): the full
+// SAT then certainly finds a positive separation too.
+static const float SAT_CACHE_MARGIN = 1e-4;
+// Slots: next power of two >= max(1024, max candidates); hosts size gSatCache
+// to match (GetDimensions is unavailable on Metal).
+uint satCacheSlot(uint a, uint b)
+{
+    uint v = max(HOST_S(2), 1024u) - 1u;
+    v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
+    return ((a * 0x9E3779B1u) ^ (b * 0x85EBCA77u) ^ (b >> 7)) & v;
+}
+uint satCacheCheck(uint a, uint b) { return (a * 0xC2B2AE3Du) ^ (b * 0x27D4EB2Fu) ^ 0x165667B1u; }
+
 // Exact early-out for hull pairs: each hull lies inside the box of its local
 // AABB, so boxes separated on any of the 15 OBB axes mean the hulls are
 // separated, and the cooperative SAT would report no contact. The broadphase

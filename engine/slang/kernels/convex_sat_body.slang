@@ -31,6 +31,8 @@ groupshared float CS(gsScore)[64];
 groupshared float CS(gsSep)[64];
 groupshared uint CS(gsKey)[64];
 groupshared float CS(gsFaceSep)[CSAT_PAIRS];
+groupshared uint CS(gsSkip)[CSAT_PAIRS];   // 1: a cached axis proved separation
+groupshared uint CS(gsCached)[CSAT_PAIRS]; // cached feature for this pair, 0 = none
 groupshared uint CS(gsFaceKey)[CSAT_PAIRS];
 
 struct CS(SatLane)
@@ -48,6 +50,8 @@ struct CS(SatLane)
     float3 tRel;
     float3 interiorA;
     float3 interiorB;
+    uint colA;
+    uint colB;
 };
 
 CS(SatLane) CS(satLane)(uint3 group, uint lane)
@@ -77,6 +81,8 @@ CS(SatLane) CS(satLane)(uint3 group, uint lane)
         ConvexWork w = gConvexWork[s.slot];
         CandidatePair pair = gCandidates[w.candidate];
         s.hint = pair._pad & 0x3FFFFu;
+        s.colA = pair.colliderA;
+        s.colB = pair.colliderB;
         Collider ca = gColliders[pair.colliderA];
         Collider cb = gColliders[pair.colliderB];
         fa = colliderFrame(ca, gBodies[ca.body]);
@@ -146,6 +152,89 @@ void CS(phaseLoad)(CS(SatLane) s)
         CS(gsBE)[eOff + e] = hullWord(s.hb, s.hb.edgeWord + e);
 }
 
+// Cache phase (after load): look up the pair's cached separating feature and
+// project both hulls on its axis, strided over the segment (A max in gsScore,
+// B min in gsSep), then reduce. Axis d points from A to B; sep = min_B - max_A.
+float3 CS(cachedAxis)(CS(SatLane) s, uint feature)
+{
+    uint fOff = s.seg * CSAT_MAXF;
+    uint vOff = s.seg * CSAT_MAXV;
+    uint eOff = s.seg * CSAT_MAXE;
+    uint type = feature >> 16;
+    uint i1 = (feature >> 8) & 255u;
+    uint i2 = feature & 255u;
+    if (type == SAT_CACHE_FACE_A) return i1 < s.ha.nf ? CS(gsAP)[fOff + i1].xyz : float3(0, 0, 0);
+    if (type == SAT_CACHE_FACE_B) return i1 < s.hb.nf ? -CS(gsBP)[fOff + i1].xyz : float3(0, 0, 0);
+    if (type != SAT_CACHE_EDGE || i1 >= s.ha.ne || i2 >= s.hb.ne) return float3(0, 0, 0);
+    uint e1 = CS(gsAE)[eOff + i1];
+    uint e2 = CS(gsBE)[eOff + i2];
+    float3 da = CS(gsAV)[vOff + ((e1 >> 8) & 255u)].xyz - CS(gsAV)[vOff + (e1 & 255u)].xyz;
+    float3 db = CS(gsBV)[vOff + ((e2 >> 8) & 255u)].xyz - CS(gsBV)[vOff + (e2 & 255u)].xyz;
+    float3 n = cross(da, db);
+    float len = length(n);
+    if (len < 1e-12) return float3(0, 0, 0);
+    n /= len;
+    return dot(n, s.interiorB - s.interiorA) < 0.0 ? -n : n;
+}
+
+void CS(phaseCacheProject)(CS(SatLane) s)
+{
+    if (s.l == 0u)
+    {
+        uint feature = 0u;
+        // Params flag 8 (diagnostic) disables lookups, to compare outputs.
+        if (s.valid && (PARAMS.flags & 8u) == 0u)
+        {
+            uint2 e = gSatCache[satCacheSlot(s.colA, s.colB)];
+            if (e.x == satCacheCheck(s.colA, s.colB)) feature = e.y;
+        }
+        CS(gsCached)[s.seg] = feature;
+        CS(gsSkip)[s.seg] = 0u;
+    }
+}
+
+void CS(phaseCacheSpan)(CS(SatLane) s)
+{
+    float maxA = -1e30;
+    float minB = 1e30;
+    uint feature = CS(gsCached)[s.seg];
+    if (s.valid && feature != 0u)
+    {
+        float3 d = CS(cachedAxis)(s, feature);
+        uint vOff = s.seg * CSAT_MAXV;
+        if (dot(d, d) > 0.5)
+        {
+            for (uint v = s.l; v < s.ha.nv; v += CSAT_LANES) maxA = max(maxA, dot(CS(gsAV)[vOff + v].xyz, d));
+            for (uint v = s.l; v < s.hb.nv; v += CSAT_LANES) minB = min(minB, dot(CS(gsBV)[vOff + v].xyz, d));
+        }
+        else
+        {
+            maxA = 1e30; // unusable axis: no proof
+        }
+    }
+    CS(gsScore)[s.lane] = maxA;
+    CS(gsSep)[s.lane] = minB;
+}
+
+void CS(phaseCacheReduce)(CS(SatLane) s, uint stride)
+{
+    if (s.l < stride)
+    {
+        uint o = s.lane + stride;
+        CS(gsScore)[s.lane] = max(CS(gsScore)[s.lane], CS(gsScore)[o]);
+        CS(gsSep)[s.lane] = min(CS(gsSep)[s.lane], CS(gsSep)[o]);
+    }
+}
+
+void CS(phaseCacheDecide)(CS(SatLane) s)
+{
+    if (s.l == 0u && s.valid && CS(gsCached)[s.seg] != 0u &&
+        CS(gsSep)[s.lane] - CS(gsScore)[s.lane] > SAT_CACHE_MARGIN)
+        CS(gsSkip)[s.seg] = 1u;
+}
+
+bool CS(skipped)(CS(SatLane) s) { return CS(gsSkip)[s.seg] != 0u; }
+
 // Phase 2: face axes strided over the segment; the previous frame's face gets
 // a small hysteresis bonus (stable features and warm starts).
 void CS(phaseFaces)(CS(SatLane) s)
@@ -157,7 +246,7 @@ void CS(phaseFaces)(CS(SatLane) s)
     float bestScore = -1e30;
     float bestSep = -1e30;
     uint bestKey = 0xFFFFFFFFu;
-    uint faces = s.ha.nf + s.hb.nf;
+    uint faces = CS(skipped)(s) ? 0u : s.ha.nf + s.hb.nf;
     for (uint f = s.l; f < faces; f += CSAT_LANES)
     {
         bool fromA = f < s.ha.nf;
@@ -231,7 +320,7 @@ void CS(phaseEdges)(CS(SatLane) s)
     uint eOff = s.seg * CSAT_MAXE;
     bool closedBoth = hullClosed(s.ha) && hullClosed(s.hb);
     uint hintEdge = (s.hint >> 16) == CONVEX_FEATURE_EDGE ? (s.hint & 0xFFFFu) : 0xFFFFFFFFu;
-    bool doEdges = s.valid && CS(gsFaceSep)[s.seg] <= 0.0 && !CS(fastFace)(s);
+    bool doEdges = s.valid && !CS(skipped)(s) && CS(gsFaceSep)[s.seg] <= 0.0 && !CS(fastFace)(s);
     float edgeScore = -1e30;
     float edgeSep = -1e30;
     uint edgeKey = 0xFFFFFFFFu;
@@ -304,6 +393,17 @@ void CS(phaseEdges)(CS(SatLane) s)
 void CS(phaseFinish)(CS(SatLane) s)
 {
     if (!s.valid || s.l != 0u) return;
+    if (CS(skipped)(s))
+    {
+        // A cached axis proved separation: exactly what the full SAT reports.
+        ConvexWork sw = gConvexWork[s.slot];
+        sw.normalSep = float4(0, 1, 0, 1.0);
+        sw.feature = 0u;
+        sw._pad0 = 0u;
+        sw._pad1 = asuint(-1e30);
+        gConvexWork[s.slot] = sw;
+        return;
+    }
     uint vOff = s.seg * CSAT_MAXV;
     uint fOff = s.seg * CSAT_MAXF;
     uint eOff = s.seg * CSAT_MAXE;
@@ -352,6 +452,18 @@ void CS(phaseFinish)(CS(SatLane) s)
             idx1 = faceKey - 128u;
         }
     }
+    if (type == 0u)
+    {
+        // Separated: remember the feature that proved it for the next step.
+        uint feature = 0u;
+        if (faceSep > 0.0)
+            feature = faceKey < 128u ? (SAT_CACHE_FACE_A << 16) | (faceKey << 8)
+                                     : (SAT_CACHE_FACE_B << 16) | ((faceKey - 128u) << 8);
+        else if (edgeHit && edgeSep > 0.0)
+            feature = (SAT_CACHE_EDGE << 16) | edgeKey;
+        if (feature != 0u)
+            gSatCache[satCacheSlot(s.colA, s.colB)] = uint2(satCacheCheck(s.colA, s.colB), feature);
+    }
     w.normalSep = float4(quatRotate(s.fb.q, nB), sep);
     w.feature = type | (idx1 << 8) | (idx2 << 16) | ((fast && type != CONVEX_FEATURE_EDGE) ? CONVEX_WORK_FAST : 0u);
     // Best edge pair as well: an empty face patch falls back to it.
@@ -367,6 +479,17 @@ void CSAT_ENTRY(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     CS(SatLane) s = CS(satLane)(group, lane);
     CS(phaseLoad)(s);
+    CS(phaseCacheProject)(s);
+    GROUP_SYNC();
+    CS(phaseCacheSpan)(s);
+    GROUP_SYNC();
+    [ForceUnroll]
+    for (uint stride = CSAT_LANES / 2u; stride > 0u; stride >>= 1u)
+    {
+        CS(phaseCacheReduce)(s, stride);
+        GROUP_SYNC();
+    }
+    CS(phaseCacheDecide)(s);
     GROUP_SYNC();
     CS(phaseFaces)(s);
     GROUP_SYNC();
@@ -396,6 +519,11 @@ void CSAT_ENTRY(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 void CSAT_ENTRY(uint3 group : SV_GroupID)
 {
     for (uint lane = 0u; lane < 64u; lane++) CS(phaseLoad)(CS(satLane)(group, lane));
+    for (uint lane = 0u; lane < 64u; lane++) CS(phaseCacheProject)(CS(satLane)(group, lane));
+    for (uint lane = 0u; lane < 64u; lane++) CS(phaseCacheSpan)(CS(satLane)(group, lane));
+    for (uint stride = CSAT_LANES / 2u; stride > 0u; stride >>= 1u)
+        for (uint lane = 0u; lane < 64u; lane++) CS(phaseCacheReduce)(CS(satLane)(group, lane), stride);
+    for (uint lane = 0u; lane < 64u; lane++) CS(phaseCacheDecide)(CS(satLane)(group, lane));
     for (uint lane = 0u; lane < 64u; lane++) CS(phaseFaces)(CS(satLane)(group, lane));
     for (uint stride = CSAT_LANES / 2u; stride > 0u; stride >>= 1u)
         for (uint lane = 0u; lane < 64u; lane++) CS(phaseReduce)(CS(satLane)(group, lane), stride);

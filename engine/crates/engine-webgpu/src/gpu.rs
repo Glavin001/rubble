@@ -7,7 +7,7 @@ use engine_schema::convex::HullArena;
 use engine_schema::*;
 use std::collections::HashMap;
 
-const BIND_COUNT: usize = 30;
+const BIND_COUNT: usize = 31;
 const PASS_ALIGN: u64 = 256;
 
 struct Pipe {
@@ -1295,6 +1295,8 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[27] = b(c.max_contacts, 64);
     s[28] = b(c.max_candidates, 32);
     s[29] = b(c.max_candidates, 32);
+    // SAT separating-feature cache (convex_step gSatCache): uint2 slots, power of two.
+    s[30] = u64::from(c.max_candidates.max(1024).next_power_of_two()) * 8;
     s
 }
 

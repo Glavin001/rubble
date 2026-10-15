@@ -67,6 +67,9 @@ pub struct MetalWorld {
     /// the slot compact solves use for solver points, so convex dispatches
     /// rebind 27 around themselves.
     convex_work: Buffer,
+    /// SAT separating-feature cache (Slang gSatCache, Metal buffer 28 in the
+    /// SAT entries; nothing else uses 28). Power of two >= max(1024, candidates).
+    sat_cache: Buffer,
     /// Host copy of the hull arena uploaded to `hull_verts`.
     pub hull_arena: engine_schema::convex::HullArena,
     /// Any convex hull collider: schedules the convex_* narrowphase entries.
@@ -179,6 +182,7 @@ impl MetalWorld {
         // Colour slots 0..63, work 64..69, convex 70..72, previous contacts 73.
         let indirect_args = alloc_u32(d, capacity.max_colors.max(77) * 3);
         let convex_work = alloc::<[u32; 8]>(d, capacity.max_candidates);
+        let sat_cache = alloc::<[u32; 2]>(d, capacity.max_candidates.max(1024).next_power_of_two());
         // Every hull arena starts with the unit cube reused by box/hull pairs.
         {
             let arena = engine_schema::convex::HullArena::new();
@@ -258,6 +262,7 @@ impl MetalWorld {
             host_parity: 0,
             chip,
             convex_work,
+            sat_cache,
             hull_arena: engine_schema::convex::HullArena::new(),
             has_convex: false,
             grid_levels: 0,
@@ -870,6 +875,7 @@ impl MetalWorld {
             // Hull pairs deferred by narrowphase. gConvexWork is buffer 27 in the
             // convex entries; restore the solver points binding afterwards.
             encoder.set_buffer(27, Some(&self.convex_work), 0);
+            encoder.set_buffer(28, Some(&self.sat_cache), 0);
             self.dispatch_work(&encoder, "convex_classify", 64, 0);
             self.dispatch(&encoder, "convex_write_args", 64);
             self.dispatch_work(&encoder, "convex_sat_small", 74, 0);
