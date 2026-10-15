@@ -46,13 +46,16 @@ const bitsf32=x=>{bitsU32[0]=x>>>0;return bitsF32[0]};
 // weld for adjacency only; vertex records and order are kept. Coplanar patches
 // merge into planar convex loops; when that fails ('Degenerate convex face')
 // the raw faces are kept and adjacency is left uncertified.
-export function cookHull(vertices, topology) {
-  try{return cookFaces(vertices,topology,true)}catch(error){
+// sourceScale: largest |coordinate| of the frame the vertices were stored in as
+// f32 (e.g. the asset frame before moving a fragment into its body frame); the
+// convexity check allows that frame's rounding. Defaults to these vertices.
+export function cookHull(vertices, topology, {sourceScale=0}={}) {
+  try{return cookFaces(vertices,topology,true,sourceScale)}catch(error){
     if(error.message!=='Degenerate convex face')throw error;
-    return cookFaces(vertices,topology,false);
+    return cookFaces(vertices,topology,false,sourceScale);
   }
 }
-function cookFaces(vertices, topology, normalizeFaces) {
+function cookFaces(vertices, topology, normalizeFaces, sourceScale=0) {
   if(vertices.length<4||vertices.length>HULL_MAX_VERTICES)throw new Error('Convex hull needs 4–64 finite vertices');
   if(vertices.some(v=>v.length!==3||!v.every(Number.isFinite)))throw new Error('Convex hull has non-finite coordinates');
   const center=scale(vertices.reduce((a,v)=>add(a,v),[0,0,0]),1/vertices.length);
@@ -66,6 +69,9 @@ function cookFaces(vertices, topology, normalizeFaces) {
   const thickness=planeLength>0?Math.max(...relative.map(v=>Math.abs(dot(v,plane))/planeLength)):0;
   if(!planeLength||thickness<=Math.max(span*1e-8,1e-10))throw new Error('Degenerate zero-volume hull: recook the source collision asset');
   const tol=Math.max(span*1e-6,1e-9),planes=[],raws=[];let offset=0;
+  // Convexity is judged against the input's f32 precision (~|x|·2^-24 per
+  // coordinate, amplified by small faces); merging and packed bytes are unchanged.
+  const convexTol=Math.max(tol,Math.max(sourceScale,...vertices.map(v=>Math.max(...v.map(Math.abs))))*2**-20);
   for(const count of topology.sizes){
     if(count<3||count>64)throw new Error('Convex face size outside 3..64');
     const face=topology.indices.slice(offset,offset+count);offset+=count;
@@ -92,7 +98,7 @@ function cookFaces(vertices, topology, normalizeFaces) {
       loop=lower.slice(0,-1).concat(upper.slice(0,-1)).map(p=>p.i);
     }
     if(loop.length<3)throw new Error('Degenerate convex face');
-    if(normalizeFaces&&vertices.some(p=>dot(n,p)-d>tol*2))throw new Error('Non-convex collision hull');
+    if(normalizeFaces&&vertices.some(p=>dot(n,p)-d>convexTol*2))throw new Error('Non-convex collision hull');
     faces.push({n,ids:loop});
   }
   if(faces.length<4)throw new Error('Degenerate zero-volume hull: recook the source collision asset');
@@ -157,8 +163,13 @@ export function packHull(hull){
 // and writes are recorded as dirty record ranges for incremental uploads.
 // The unit cube always sits at record 0 (box/hull pairs) and is permanent.
 export class HullArena {
-  constructor(){this.words=[];this.dedup=new Map();this.blocks=new Map();this.free=[];this.dirty=[];if(this.insert(cuboidHull())!==0)throw new Error('unit cube must be record 0')}
+  // maxVertices: engine-wide hull limit (8..64, matching engine-schema's
+  // HullArena::with_max_vertices). Larger hulls are rejected, never reduced.
+  constructor({maxVertices=HULL_MAX_VERTICES}={}){
+    if(!(maxVertices>=8&&maxVertices<=HULL_MAX_VERTICES))throw new Error(`Hull vertex limit ${maxVertices} is outside 8..${HULL_MAX_VERTICES}`);
+    this.maxVertices=maxVertices;this.words=[];this.dedup=new Map();this.blocks=new Map();this.free=[];this.dirty=[];if(this.insert(cuboidHull())!==0)throw new Error('unit cube must be record 0')}
   insert(hull){
+    if(hull.vertices.length>this.maxVertices)throw new Error(`Convex hull has ${hull.vertices.length} vertices; the configured limit is ${this.maxVertices} (hard maximum ${HULL_MAX_VERTICES}). Re-export the asset with fewer hull vertices or raise the limit`);
     const words=packHull(hull),key=words.join(',');
     if(this.dedup.has(key)){const base=this.dedup.get(key);this.blocks.get(base).refs++;return base}
     const len=words.length/4,base=this.#allocate(len);
@@ -209,8 +220,8 @@ export const hullParams=(base,scaleFactor,radius)=>[bitsf32((base|HULL_PARAM_TAG
 export const hullBase=params=>f32bits(params[0])&HULL_BASE_MASK;
 
 // Cook, recentre and insert one compound child; returns collider fields.
-export function appendHull(arena, vertices, topology) {
-  const {hull,offset}=recenterHull(cookHull(vertices,topology)),base=arena.insert(hull);
+export function appendHull(arena, vertices, topology, cookOptions) {
+  const {hull,offset}=recenterHull(cookHull(vertices,topology,cookOptions)),base=arena.insert(hull);
   return {params:hullParams(base,1,hullBoundingRadius(hull)),localPos:offset,hull};
 }
 
@@ -242,19 +253,55 @@ export function colliderBounds(scene,c,body=scene.bodies[c.body]) {
 // Hierarchical broadphase sizing: base = median diameter; levels cover every
 // collider (mirrors hierarchical_grid in engine-schema and hierLevel in Slang).
 export function gridConfig(colliders) {
-  const radius=c=>c.params[3]>0?c.params[3]:Math.hypot(c.params[0],c.params[1],c.params[2]);
+  // Matches build_aabbs: capsules (shape 1) reach radius + half height.
+  const radius=c=>c.shape===1?c.params[0]+c.params[1]:c.params[3]>0?c.params[3]:Math.hypot(c.params[0],c.params[1],c.params[2]);
   const diameters=colliders.filter(c=>c.shape!==4).map(c=>2*radius(c)+0.0004).sort((a,b)=>a-b);
   const base=Math.fround(Math.max(.001,diameters[Math.floor(diameters.length/2)]||1)*(1+1e-5));
   const levels=Math.min(31,Math.max(2,2+Math.ceil(Math.log2(Math.max(1,(diameters.at(-1)||base)/base)))));
   return {base,levels};
 }
 
-export function buildScene(asset, level) {
+// A row of identical houses along +z. Every copy shares the single house's hull
+// records (same arena offsets) and render mesh (drawn instanced), so GPU memory
+// grows only with bodies and colliders. The projectile is a heavy ball rolled
+// along the ground through the whole row.
+export function buildRow(asset, level, {copies=20, gap=2.5, projectileRadius=1.6, projectileMass=200000, projectileSpeed=40, maxHullVertices}={}) {
+  const one=buildScene(asset,level,{maxHullVertices}),frags=one.projectileStart-1;
+  const pitch=one.extentZ+gap,length=pitch*(copies-1)+one.extentZ;
+  const bodies=[one.bodies[0]],colliders=[one.colliders[0]];
+  const houseColliders=one.colliders.filter(c=>c.body>=1&&c.body<one.projectileStart);
+  for(let k=0;k<copies;k++){
+    const dz=(k-(copies-1)/2)*pitch,base=k*frags;
+    for(let i=1;i<one.projectileStart;i++){const b=one.bodies[i];bodies.push({...b,p:[b.p[0],b.p[1],b.p[2]+dz]})}
+    for(const c of houseColliders)colliders.push({...c,body:c.body+base});
+  }
+  const projectileStart=bodies.length,projectileVertices=[];
+  for(let slot=0;slot<one.projectileCount;slot++){
+    const id=bodies.length;
+    bodies.push({p:[slot*4,-1000,0],q:[0,0,0,1],invMass:0,invI:[0,0,0],flags:0});
+    colliders.push({body:id,shape:0,density:0,params:[projectileRadius,0,0,0]});
+    const src=one.projectileVertices,stride=src.length/one.projectileCount,r0=one.projectileRadius;
+    for(let v=0;v<stride;v+=10){const o=slot*stride+v;projectileVertices.push(src[o]/r0*projectileRadius,src[o+1]/r0*projectileRadius,src[o+2]/r0*projectileRadius,src[o+3],src[o+4],src[o+5],src[o+6],src[o+7],src[o+8],id)}
+  }
+  return {...one,bodies,colliders,projectileStart,projectileRadius,projectileMass,projectileSpeed,projectileArc:false,
+    projectileVertices:new Float32Array(projectileVertices),copies,instanceStride:frags,rowPitch:pitch,rowLength:length,
+    extent:Math.max(one.extent,length),center:[0,one.height*.5,0],gridCellSize:gridConfig(colliders).base,
+    // Measured on house level 2 after impact: ~3 candidates and ~5 contacts per
+    // collider. Eight each keeps headroom without gigabytes of contact buffers.
+    // ~100k pieces wake behind the ball; their contact graph can need more than
+    // 32 Jones-Plassmann rounds (and headroom past 32 colours; kernels allow 64).
+    capacity:{candidatesPerCollider:8,contactsPerCollider:8,maxColors:64,colorRounds:64},
+    camera:{yaw:1.15,pitch:.32,distance:length*.8,minDistance:3},
+    // Ready-made shot: from beyond the first house, rolling along +z at ground level.
+    rowShot:{origin:[0,projectileRadius+.02,-length/2-projectileRadius-8],direction:[0,0,1]}};
+}
+
+export function buildScene(asset, level, {maxHullVertices}={}) {
   const selected=asset.physics.fragments.filter(f=>f.level===level);
   if(!selected.length)throw new Error('No fragments at this level');
   const bodies=[{p:[0,0,0],q:[0,0,0,1],invMass:0,invI:[0,0,0],flags:0}];
   const colliders=[{body:0,shape:4,density:0,params:[0,1,0,0]}];
-  const arena=new HullArena(),vertices=[],lines=[],byId=new Map(),skippedHulls=[];
+  const arena=new HullArena({maxVertices:maxHullVertices}),vertices=[],lines=[],byId=new Map(),skippedHulls=[];
   let lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
   for(const f of selected)for(const h of asset.physics.hulls.slice(f.hullBegin,f.hullBegin+f.hullCount))for(const v of h.vertices)for(let k=0;k<3;k++){lo[k]=Math.min(lo[k],v[k]);hi[k]=Math.max(hi[k],v[k]);}
   if(!lo.every(Number.isFinite))throw new Error('Selected level has no collision hulls');
@@ -267,9 +314,11 @@ export function buildScene(asset, level) {
     bodies.push(body);byId.set(f.id,{id,f,q});
     let kept=0;
     for(let h=f.hullBegin;h<f.hullBegin+f.hullCount;h++){
-      const verts=asset.physics.hulls[h].vertices.map(v=>inverseRotate(q,sub(v,f.com)));
+      const source=asset.physics.hulls[h].vertices,verts=source.map(v=>inverseRotate(q,sub(v,f.com)));
+      // The asset stores hulls as f32 in its own frame; judge convexity at that precision.
+      const sourceScale=source.reduce((m,v)=>Math.max(m,Math.abs(v[0]),Math.abs(v[1]),Math.abs(v[2])),0);
       let child;
-      try{child=appendHull(arena,verts,asset.physics.hullFaces[h])}catch(e){
+      try{child=appendHull(arena,verts,asset.physics.hullFaces[h],{sourceScale})}catch(e){
         // A zero-volume child (a flat sheet baked into a compound) adds no
         // collision volume and no mass: mass/inertia come from the fragment.
         // Drop it only while the fragment keeps real hulls; never thicken it.
@@ -317,6 +366,6 @@ export function buildScene(asset, level) {
     }
   }
   return {projectileStart,projectileCount,projectileRadius,projectileMass,projectileVertices:new Float32Array(projectileVertices),bodies,colliders,hullData:arena.data,skippedHulls,vertices:new Float32Array(vertices),lines:new Float32Array(lines),selected,bonds,byId,
-    extent,height,center:[0,height*.5+placement[1]+lo[1],0],gridCellSize:gridConfig(colliders).base,
+    extent,extentZ:hi[2]-lo[2],height,copies:1,instanceStride:0,center:[0,height*.5+placement[1]+lo[1],0],gridCellSize:gridConfig(colliders).base,
     params:{flags:1,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
 }

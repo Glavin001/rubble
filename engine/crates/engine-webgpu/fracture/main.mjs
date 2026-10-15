@@ -1,24 +1,26 @@
 import {parseFractureGlb} from './asset.mjs';
-import {buildScene} from './geometry.mjs';
+import {buildScene,buildRow} from './geometry.mjs';
 import {createSimulation} from './simulation.mjs';
 import {createRenderer} from './render.mjs';
 import {createRates} from './rates.mjs';
 const $=id=>document.getElementById(id),status=$('status');
 let device,asset,scene,sim,renderer,running=false,released=false,loading=true,frame=Promise.resolve(),loadTail=Promise.resolve(),last=0,accumulator=0;
-let currentRates=null;
+let currentRates=null,copies=1,maxHullVertices;
+// Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
+const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
 const rates=createRates(value=>{
  currentRates=value;
  $('tps').textContent=value?value.tps.toFixed(value.tps>0&&value.tps<10?1:0):'—';
  $('fps').textContent=value?value.fps.toFixed(value.fps>0&&value.fps<10?1:0):'—';
  $('sim-speed').textContent=value?`${value.speed.toFixed(2)}×`:'—';
- $('step-ms').textContent=value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:'target 120 TPS';
+ $('step-ms').textContent=value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:`target ${stepHz()} TPS`;
  $('frame-ms').textContent=value?`${value.frameMs.toFixed(1)} ms/frame`:'frames / second';
  $('timing').textContent=value?.stepMs?`Physics: ${value.encodeMs.toFixed(1)} ms CPU submit + ${value.waitMs.toFixed(1)} ms GPU / readback wait`:'TPS counts physics ticks; FPS counts rendered frames.';
-});
+},undefined,()=>stepHz());
 document.addEventListener('visibilitychange',()=>{last=0;accumulator=0;rates.reset()});
 const setStatus=text=>{status.textContent=text;status.classList.remove('error')};
 const fail=e=>{console.error(e);running=false;status.textContent=e.message;status.classList.add('error');$('release').textContent=released?'Resume':'Start simulation'};
-const controls=enabled=>{for(const id of ['release','reset','level','metadata'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
+const controls=enabled=>{for(const id of ['release','reset','level','metadata','fire'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
 function serializeLoad(task){const result=loadTail.catch(()=>{}).then(async()=>{loading=true;running=false;controls(false);await frame;rates.reset();try{await task()}catch(e){fail(e)}finally{loading=false;last=0;rates.reset();controls(!!sim)}});loadTail=result;return result}
 let shotQueue=Promise.resolve();
 function shoot(ray){
@@ -27,28 +29,33 @@ function shoot(ray){
  return shotQueue;
 }
 async function loadLevel(level){
- let next;try{next=buildScene(asset,level)}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
+ let next;try{next=copies>1?buildRow(asset,level,{copies,maxHullVertices}):buildScene(asset,level,{maxHullVertices})}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- $('fragments').textContent=scene.selected.length;$('hulls').textContent=scene.colliders.filter(c=>c.shape===3).length;$('bonds').textContent=scene.bonds.length;$('release').textContent='Start simulation';
- const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped`:'';
- setStatus(`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.library.material.length} materials${skipped} · click the model to shoot`);
+ $('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=scene.colliders.filter(c=>c.shape===3).length;$('bonds').textContent=scene.bonds.length*copies;$('release').textContent='Start simulation';
+ $('fire').hidden=!scene.rowShot;
+ const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
+ const what=copies>1?`${copies} houses · ${scene.bodies.length-1-scene.projectileCount} bodies · `:'';
+ setStatus(`${what}${(asset.bytes/1048576).toFixed(2)} MB · ${asset.library.material.length} materials${skipped} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
-async function importBytes(bytes,name,sampleKey=""){
+async function importBytes(bytes,name,sampleKey="",entry={}){
+ copies=entry.copies??1;maxHullVertices=entry.maxHullVertices;
  const start=performance.now(),next=parseFractureGlb(bytes);const ms=performance.now()-start;
  asset=next;$('scene').value=sampleKey;const levels=[...new Set(asset.physics.fragments.map(f=>f.level))].sort((a,b)=>a-b);
  $('level').replaceChildren(...levels.map(l=>new Option(`Level ${l} · ${asset.physics.fragments.filter(f=>f.level===l).length} fragments`,l)));$('filename').textContent=name;
- await loadLevel(levels[0]);window.__FRACTURE_DEMO__.parseMs=ms;
+ const level=levels.includes(entry.level)?entry.level:levels[0];$('level').value=String(level);
+ await loadLevel(level);window.__FRACTURE_DEMO__.parseMs=ms;
 }
-const samples={house:{file:'veneer-house.glb',label:'house'},arch:{file:'masonry-arch.glb',label:'arch'}};
+const samples={house:{file:'veneer-house.glb',label:'house'},row:{file:'veneer-house-hull16.glb',label:'20 houses',copies:20,level:3,maxHullVertices:16},arch:{file:'masonry-arch.glb',label:'arch'}};
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  setStatus(`Fetching baked ${entry.label}…`);
  const response=await fetch(`./assets/${entry.file}`);
  if(!response.ok)throw new Error('Bundled asset missing. Follow README.md to export it.');
- await importBytes(await response.arrayBuffer(),entry.file,key);
+ await importBytes(await response.arrayBuffer(),entry.file,key,entry);
 });
 $('sample').onclick=()=>sample();
+$('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
@@ -60,6 +67,21 @@ window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
 window.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');const f=e.dataTransfer.files[0];if(f&&device)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))});
 window.__FRACTURE_DEMO__={get ready(){return !loading&&!!sim},get asset(){return asset},get scene(){return scene},get simulation(){return sim},get renderer(){return renderer},get rates(){return currentRates},
  async shootRay(origin,direction){running=false;await frame;return sim.launch(origin,direction)},
+ async fireRow(){running=false;await frame;return sim.launch(scene.rowShot.origin,scene.rowShot.direction)},
+ // Repeatable row benchmark: fire, then every `every` steps record wall ms per
+ // step, the ball, counters and (optionally) a per-phase GPU profile.
+ async benchmarkRow({steps=600,every=60,profile=true}={}){
+  running=false;await frame;const id=sim.launch(scene.rowShot.origin,scene.rowShot.direction),log=[];
+  for(let done=0;done<steps;){
+   const n=Math.min(every,steps-done),t=performance.now();for(let k=0;k<n;k+=4)await sim.step(Math.min(4,n-k));done+=n;
+   const ms=(performance.now()-t)/n,snap=await sim.snapshot(),c=sim.counters,o=id*28;
+   const p=profile?await sim.profileStep():null;if(p)done++;
+   log.push({step:done,wallMs:+ms.toFixed(2),ballZ:+snap[o+2].toFixed(1),ballVz:+snap[o+14].toFixed(1),awake:c.awake,contacts:c.contact,
+    candidates:c.candidate,small:c.convexSmall,large:c.convexLarge,colors:c.color,overflow:c.overflow,
+    gpuMs:p?+p.gpuMs.toFixed(2):null,phases:p?Object.fromEntries(Object.entries(p.phases).map(([k,v])=>[k,+v.toFixed(2)])):null});
+  }
+  renderer.draw($('show-bonds').checked);return log;
+ },
  async stepFrames(count){running=false;await frame;for(let i=0;i<count;i++)await sim.step();renderer.draw($('show-bonds').checked);return sim.counters},
  async snapshot(){await frame;return sim.snapshot()},reset:()=>serializeLoad(async()=>sim.reset()),load:sample,selectLevel:level=>serializeLoad(async()=>{$("level").value=String(level);await loadLevel(level)})};
 function tick(now){
@@ -67,17 +89,17 @@ function tick(now){
  if(!loading&&renderer){frame=(async()=>{try{
   let work=null,ticks=0;
   if(running){
-   accumulator=Math.min(accumulator+elapsed,4/120);
+   accumulator=Math.min(accumulator+elapsed,4/stepHz());
    // Bound outstanding work. Slow ticks get one tick per frame, rather than
    // four serial GPU waits starving camera input and rendering.
    const budget=Math.max(1,Math.min(4,Math.floor(12/Math.max(sim.timing.wallMs,0.1))));
-   ticks=Math.min(budget,Math.floor(accumulator*120));
-   if(ticks){accumulator-=ticks/120;work=sim.step(ticks)}
+   ticks=Math.min(budget,Math.floor(accumulator*stepHz()));
+   if(ticks){accumulator-=ticks/stepHz();work=sim.step(ticks)}
   }
   // Queue the draw immediately behind physics; do not wait for CPU stats first.
   renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
-  if(running){const c=sim.counters;setStatus(`${sim.shots}/16 shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/120).toFixed(1)} s`)}
+  if(running){const c=sim.counters;setStatus(`${sim.shots}/16 shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
   if(!document.hidden)rates.frame();
  }catch(e){fail(e)}})();frame.finally(()=>requestAnimationFrame(tick))}else requestAnimationFrame(tick);
 }

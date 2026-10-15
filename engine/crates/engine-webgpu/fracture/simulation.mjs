@@ -8,9 +8,13 @@ const cfg = {friction:0.5, iterations:8, sleepRounds:8, ...scene.params};
 const MAX_WARM_HASH = 1 << 21;
 const PASS_ALIGN=256;
 const nextPow2=n=>2**Math.ceil(Math.log2(Math.max(1,n)));
+const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity};
+// Incremental colouring recolours only changed neighbourhoods but lets the
+// palette drift (more solve passes); fresh colouring is the default.
+let incremental=budget.incrementalColoring??false;
 const cap={maxBodies:nextPow2(Math.max(64,scene.bodies.length)),maxColliders:nextPow2(Math.max(64,scene.colliders.length)),
- maxContacts:nextPow2(Math.max(4096,scene.colliders.length*32)),maxCandidates:nextPow2(Math.max(4096,scene.colliders.length*64)),
- maxJoints:1,maxColors:32,maxCommands:1,maxHull:Math.max(64,scene.hullData.length/4)};
+ maxContacts:nextPow2(Math.max(4096,scene.colliders.length*budget.contactsPerCollider)),maxCandidates:nextPow2(Math.max(4096,scene.colliders.length*budget.candidatesPerCollider)),
+ maxJoints:1,maxColors:budget.maxColors??32,maxCommands:1,maxHull:Math.max(64,scene.hullData.length/4)};
 const constraintIdWords=nextPow2(Math.max(32768,2*(cap.maxContacts+cap.maxJoints)));
 const csrBase=Math.max(constraintIdWords,131072);
 // Broadphase grid heads: twice the colliders, within the pre-CSR id region.
@@ -41,7 +45,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       s[18] = b(cap.maxHull, 16);
       s[19] = 65536 * 4;
       s[20] = b(cap.maxBodies, 4);
-      s[21] = 64 * 4;
+      s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
       s[22] = 96 * PASS_ALIGN;
       s[23] = b(Math.max(cap.maxColors, 77) * 3, 4); // colours, work 64..73, convex 74..76
       s[24] = b(cap.maxColliders, 80);
@@ -67,7 +71,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       'convex_classify', 'convex_write_args', 'convex_sat_small', 'convex_sat_large', 'convex_manifold', 'reuse_all_manifolds',
       'persist_contacts', 'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_sort',
-      'init_colors', 'color_bodies', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
+      'init_colors', 'color_bodies', 'color_bodies_local', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
       'record_color_degrees', 'write_color_args', 'predict_bodies', 'pack_solver_contacts', 'solve_primal_color',
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
     ];
@@ -274,7 +278,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       s[1] = cap.maxBodies;
       s[2] = cap.maxCandidates;
       s[3] = cap.maxContacts;
-      s[4] = Math.min(cap.maxColors, 32);
+      s[4] = Math.min(cap.maxColors, 64);
       s[7] = steps === 0 ? 0 : Math.min(last.contact, cap.maxContacts);
       s[8] = parity === 0 ? cap.maxContacts : 0;
       s[9] = hashN;
@@ -285,6 +289,11 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       s[12] = log === 0 ? 0 : (log - 1) & 1;
       s[16] = gridHashWords;
       s[17] = initialized ? Math.max(1, steps) : 0;
+      // Incremental colouring (as the Rust host): colours persist in a history
+      // row and only bodies whose neighbourhood changed recolour (work slot 69);
+      // small repair lists are coloured by one workgroup (local repair).
+      s[26] = incremental ? 1 : 0;
+      s[27] = incremental ? 1 : 0;
       s[18] = grid.levels;   // hierarchical broadphase levels
       s[29] = 1;             // degree-aware primal lanes (bufs[17] holds 128 words)
       s[30] = hasFilters ? 1 : 0; // collision filters present
@@ -340,6 +349,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       pass = phase('bounds');
       disp(pass, 'broadphase_clear', gridHashWords);
       disp(pass, 'broadphase_insert', nCols);
+      pass = phase('broadphaseInsert');
       disp(pass, 'broadphase_query', nCols);
       disp(pass, 'write_work_args', 64);
       pass = phase('broadphase');
@@ -355,6 +365,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
         disp(pass, 'convex_write_args', 64);
         pass = phase('convexClassify');
         dispWork(pass, 'convex_sat_small', 74);
+        pass = phase('convexSatSmall');
         dispWork(pass, 'convex_sat_large', 75);
         pass = phase('convexSat');
         dispWork(pass, 'convex_manifold', 76);
@@ -403,13 +414,18 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       }
       dispWork(pass, 'csr_scatter_contacts', 66);
       dispWork(pass, 'csr_sort', 67);
+      pass = phase('graph');
       dispWork(pass, 'init_colors', 67);
       disp(pass, 'write_work_args', 64);
       // Complete graph coloring before solving; the shader reports unfinished colors.
-      for (let round = 0; round < 32; round++) dispWork(pass, 'color_bodies', 67, round % 16);
+      // Slot 69 is zero when the local pass handled the repair list. Dense debris
+      // (100k awake pieces) can need more than 32 Jones-Plassmann rounds.
+      if (incremental) disp(pass, 'color_bodies_local', 64);
+      for (let round = 0; round < (budget.colorRounds ?? 32); round++) dispWork(pass, 'color_bodies', incremental ? 69 : 67, round % 16);
+      pass = phase('coloring');
       // Stable per-colour body order (locality across every primal iteration).
       disp(pass, 'count_color_tiles', nBodies);
-      disp(pass, 'prefix_color_tiles_parallel', Math.min(cap.maxColors, 32) * 64);
+      disp(pass, 'prefix_color_tiles_parallel', Math.min(cap.maxColors, 64) * 64);
       disp(pass, 'scatter_color_tiles', nBodies);
       dispWork(pass, 'record_color_degrees', 67);
       disp(pass, 'write_color_args', 64);
@@ -417,7 +433,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       dispWork(pass, 'pack_solver_contacts', 66);
       pass = phase('topology');
       // Current-step indirect arguments skip empty colors without a CPU estimate.
-      const colors = Math.min(cap.maxColors, 32);
+      const colors = Math.min(cap.maxColors, 64);
       for (let iter = 0; iter < params.iterations; iter++) {
         const primal = pipes.solve_primal_color;
         for (let color = 0; color < colors; color++) {
@@ -506,13 +522,16 @@ return {
      manifolds:new Uint32Array(await read(bufs[25],0,last.manifold*32))};
  },
  get shots(){return shots},
- launch(origin,direction){
+ set incrementalColoring(v){incremental=!!v},
+ // Live solver parameters (dt, iterations, ...), packed again every step.
+ get params(){return params},
+ launch(origin,direction,{speed,arc=scene.projectileArc??true}={}){
    if(shots>=scene.projectileCount)throw new Error('All 16 projectiles fired. Reset to reload.');
    if(![...origin,...direction].every(Number.isFinite))throw new Error('Invalid projectile ray');
    const id=scene.projectileStart+shots,mass=scene.projectileMass,r=scene.projectileRadius;
-   const speed=Math.max(5,Math.min(18,scene.extent*3));
+   speed??=scene.projectileSpeed??Math.max(5,Math.min(18,scene.extent*3));
    const distance=Math.max(r,scene.center.reduce((sum,x,i)=>sum+(x-origin[i])*direction[i],0));
-   const v=direction.map(x=>x*speed);v[1]+=.5*9.81*distance/speed;
+   const v=direction.map(x=>x*speed);if(arc)v[1]+=.5*9.81*distance/speed;
    const body={p:origin,q:[0,0,0,1],v,invMass:1/mass,invI:Array(3).fill(1/(.4*mass*r*r)),flags:9};
    const bytes=new ArrayBuffer(112);writeBody(bytes,0,body);
    device.queue.writeBuffer(bufs[0],id*112,bytes);device.queue.writeBuffer(bufs[0],(cap.maxBodies+id)*112,bytes);manifoldsValid=false;
