@@ -649,7 +649,9 @@ void hierInsert(uint i)
     if (bodyMoving(gBodies[col.body])) AOR2(gScratchAtomics[HIER_MOVING_MASK_SLOT], 1u << level);
     uint prev;
     AXCHG3(gConstraintIds[hierHash(hierCell(box, level), level)], i, prev);
-    gColorLists[i] = prev;
+    // The chain link lives in the AABB's spare word, as in the split grid:
+    // a query hop then fetches link and bounds with one load.
+    gAabbs[HOST_S(1) + i]._pad1 = asfloat(prev);
 }
 
 void hierQuery(uint i)
@@ -715,12 +717,13 @@ void hierQuery(uint i)
             while (j != 0xFFFFFFFFu && guard < count)
             {
                 guard++;
-                uint next = gColorLists[j];
                 Aabb ab = gAabbs[base + j];
+                uint next = asuint(ab._pad1);
                 // Hash buckets alias: accept only colliders whose true cell/level
-                // is this one, so no pair is visited twice.
-                if (j != i && hierLevel(ab._pad0) == level &&
-                    all(hierCell(ab, level) == cell) && aabbOverlap(aa, ab))
+                // is this one, so no pair is visited twice. The overlap test runs
+                // first: it rejects most entries before the log2/floor checks.
+                if (j != i && aabbOverlap(aa, ab) && hierLevel(ab._pad0) == level &&
+                    all(hierCell(ab, level) == cell))
                 {
                     Collider b = gColliders[j];
                     if (b.body != a.body)
