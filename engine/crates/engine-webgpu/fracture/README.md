@@ -80,6 +80,13 @@ checks that no two pieces start interpenetrating.
   the GPU step is 3.5-4.2 ms (box-box contacts, no hull SAT), about 4x faster than
   the hull suburb. The remaining cost is mostly the primal's per-colour dispatches.
 
+**49 box-built houses in a 7×7 grid** puts the same cuboid house on the dense
+grid layout. Measured live in the browser on an M3 Max after the row shot
+(wall-clock ticks including counter readback): 145-166 ticks/s for physics alone
+and 79-86 ticks/s with a frame rendered every tick; 19 of 49 houses collapse by
+20 s and up to ~20k pieces are awake. The hull grid of the same layout runs at
+~33 ticks/s.
+
 ### Breakable bonds (experimental, opt-in)
 
 “Breakable bonds (experimental)” turns each baked bond of the selected level into

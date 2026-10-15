@@ -70,7 +70,8 @@ async function importBytes(bytes,name,sampleKey="",entry={}){
 const samples={house:{file:'veneer-house.glb',label:'house'},row:{file:'veneer-house-hull16.glb',label:'20 houses',layout:{columns:1,rows:20},level:3,maxHullVertices:16},
  grid:{file:'veneer-house.glb',label:'49 houses',layout:{columns:7,rows:7},level:2},
  suburb:{file:'veneer-house.glb',label:'48 houses',layout:{suburb:true},level:2},
- cuboids:{procedural:'cuboid',label:'48 cuboid houses',layout:{suburb:true}},arch:{file:'masonry-arch.glb',label:'arch'}};
+ cuboids:{procedural:'cuboid',label:'48 cuboid houses',layout:{suburb:true}},
+ cuboidGrid:{procedural:'cuboid',label:'49 cuboid houses',layout:{columns:7,rows:7}},arch:{file:'masonry-arch.glb',label:'arch'}};
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  if(entry.procedural){
