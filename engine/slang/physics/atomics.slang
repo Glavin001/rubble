@@ -62,7 +62,7 @@ public struct GpuCounters
     uint iteration;
     AUint manifoldCount;
     AUint recolorCount; // ABI byte 52: compact pending-color work count
-    uint _pad1;
+    AUint _pad1;        // ABI byte 56: two-pass narrowphase deferred count (8ek)
     uint _pad2;
 };
 #endif

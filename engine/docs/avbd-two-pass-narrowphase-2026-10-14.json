@@ -1,0 +1,49 @@
+{
+  "decision": "8ek",
+  "change": "Two-pass narrowphase under reuse=copy. narrowphase_defer tries contact reuse; pairs it rejects are counted in gCounters._pad1 (ABI byte 56) and copied to the unused tail of gCandidates (index maxCandidates-1-k), or tested inline when the tail is full. narrowphase_fresh then runs the shape tests over that compacted list. Warps no longer run the reuse copy and box SAT side by side. Both passes use work slot 64 inside the narrowphase interval. The shape code moved into a [ForceInline] narrowphaseShapes helper that the fused kernel also calls. Browser np=split is the default wherever reuse=copy runs; np=fused keeps the control. Native ENGINE_NP=split. HOST_S(21) caps the tail for tests only.",
+  "browser": "Chrome 152 (Claude app), Metal-3, three-avbd-2x5x10 protocol, interleaved",
+  "ring_ms": {
+    "sequence_profile_detail": [
+      "split 10.65 (narrowphase 1.84)",
+      "fused 11.13 (narrowphase 2.29, before [ForceInline])"
+    ],
+    "sequence": [
+      "fused 11.04",
+      "split 10.70",
+      "fused 11.01",
+      "split 10.67"
+    ],
+    "after_force_inline": [
+      "fused 10.92",
+      "split 10.59"
+    ],
+    "workload": "identical end snapshot: contact 1173483, candidate 257281, manifold 247294, colors 12, overflow 0"
+  },
+  "gables_ms": {
+    "sequence_profile_detail": [
+      "split 27.48 (narrowphase 4.92)",
+      "fused 29.57 (narrowphase 7.60)"
+    ],
+    "after_force_inline": [
+      "fused 29.11",
+      "split 27.25"
+    ],
+    "workload": "identical end snapshot: contact 4059393, candidate 981443, manifold 977719, colors 10, overflow 0"
+  },
+  "reference_context": {
+    "ring_ms": "10.23/10.27 (baseline evidence)",
+    "gables_ms": "26.66 (baseline evidence)"
+  },
+  "gates": {
+    "gpuLib": "47/47; two_pass_narrowphase_matches_fused_reuse_copy runs the mixed reuse fixture with tail limits 0/3/1 (deferred, mixed, inline fallback) and asserts every rejected pair is counted once; dropping the last deferred pair fails it",
+    "browserUnit": "266/266 (np parsing/default, rejection without reuse=copy, defer->fresh order in one timestamp interval before work args)",
+    "browserRing480": "PASS, every sample bit-identical to 8ej (mean 1.217517997515979)",
+    "browserGables240": "PASS, bit-identical 0.1172912589201891/0.3304786682128906",
+    "native": {
+      "ring480Columns_ENGINE_NP_split_ENGINE_GRID_split": "PASS; ring mean 1.1753 / flank 19.7299, bit-identical to 8ej",
+      "canonicalGables240": "PASS 0.118635/0.328483 (unchanged)",
+      "persistentGables240Diagnostic_ENGINE_NP_split": "PASS 0.118657/0.330531 (diagnostic only; native default stays canonical)",
+      "metal": "18/18"
+    }
+  }
+}

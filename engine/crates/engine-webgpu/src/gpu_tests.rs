@@ -3411,7 +3411,18 @@ fn persistent_fused_warmstart_preserves_history_and_refreshes_pair_cache() {
 /// tags as the separate persistence pass.
 #[test]
 fn reuse_copy_matches_separate_persistence_semantics() {
-    mixed_contact_reuse_fixture_mode(true, false, true);
+    mixed_contact_reuse_fixture_mode(true, false, true, None);
+}
+
+/// Two-pass narrowphase (`np=split`): the reuse pass defers fresh pairs to the
+/// candidate tail and the shape pass emits them, so the result must match the
+/// fused copy exactly up to manifold order. Limits 0 (whole tail), 3 (most fresh
+/// pairs fall back inline) and 1 cover the deferred, mixed and inline paths.
+#[test]
+fn two_pass_narrowphase_matches_fused_reuse_copy() {
+    for limit in [0u32, 3, 1] {
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit));
+    }
 }
 
 #[test]
@@ -3622,10 +3633,15 @@ fn persistent_dual_updates_hot_state_without_corrupting_metadata_or_history() {
 }
 
 fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
-    mixed_contact_reuse_fixture_mode(persistent, fused, false);
+    mixed_contact_reuse_fixture_mode(persistent, fused, false, None);
 }
 
-fn mixed_contact_reuse_fixture_mode(persistent: bool, fused: bool, copy: bool) {
+fn mixed_contact_reuse_fixture_mode(
+    persistent: bool,
+    fused: bool,
+    copy: bool,
+    np_split: Option<u32>,
+) {
     let mut sim = if persistent {
         WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
     } else {
@@ -3730,9 +3746,10 @@ fn mixed_contact_reuse_fixture_mode(persistent: bool, fused: bool, copy: bool) {
     for parity in 0..2 {
         for reuse in [false, true] {
             let context = format!(
-                "persistent={persistent}, fused={fused}, copy={copy}, parity={parity}, reuse={reuse}"
+                "persistent={persistent}, fused={fused}, copy={copy}, np_split={np_split:?}, parity={parity}, reuse={reuse}"
             );
             sim.contacts_parity = parity;
+            sim.np_defer_limit = np_split.unwrap_or(0);
             sim.params.flags = (sim.params.flags & !1) | u32::from(reuse);
             sim.write_host_uniforms();
             let cur = parity * sim.capacity.max_contacts;
@@ -3773,16 +3790,21 @@ fn mixed_contact_reuse_fixture_mode(persistent: bool, fused: bool, copy: bool) {
                     previous.len() as u64,
                     None,
                 );
-                sim.disp(
-                    &mut pass,
-                    if copy {
-                        "narrowphase_copy_persistent"
-                    } else {
-                        "narrowphase"
-                    },
-                    count as u64,
-                    None,
-                );
+                if np_split.is_some() {
+                    sim.disp(&mut pass, "narrowphase_defer_copy_persistent", count as u64, None);
+                    sim.disp(&mut pass, "narrowphase_fresh_copy_persistent", count as u64, None);
+                } else {
+                    sim.disp(
+                        &mut pass,
+                        if copy {
+                            "narrowphase_copy_persistent"
+                        } else {
+                            "narrowphase"
+                        },
+                        count as u64,
+                        None,
+                    );
+                }
                 sim.disp(&mut pass, "write_work_args", 64, None);
                 sim.disp_work(
                     &mut pass,
@@ -3803,6 +3825,15 @@ fn mixed_contact_reuse_fixture_mode(persistent: bool, fused: bool, copy: bool) {
                 c.overflow_flags, 0,
                 "{context}: fixture must complete without overflow"
             );
+            if np_split.is_some() {
+                // Every pair the reuse pass rejects is counted once (ABI byte 56),
+                // whether it was deferred or tested inline past the limit.
+                let fresh = (1..=count)
+                    .filter(|id| !reuse || id % 5 == 0 || id % 4 == 0 || *id == count)
+                    .count() as u32;
+                assert_eq!(c._pad1, fresh,
+                    "{context}: two-pass narrowphase must hand every non-reused pair to shape tests exactly once");
+            }
             assert_eq!(
                 c.manifold_count,
                 count - 1,

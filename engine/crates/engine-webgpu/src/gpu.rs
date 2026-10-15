@@ -26,6 +26,10 @@ pub struct WgpuSim {
     pub(crate) warm_record_hash: bool,
     /// Narrowphase finishes reused copies (persistent contacts only).
     pub(crate) reuse_copy: bool,
+    /// Two-pass narrowphase (8ek): reuse, then shape tests over compacted pairs.
+    pub(crate) np_split: bool,
+    /// Test hook: caps deferred pairs (HOST_S(21)); 0 uses the whole tail.
+    pub(crate) np_defer_limit: u32,
     fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -370,6 +374,10 @@ impl WgpuSim {
             warm_record_hash: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("record"),
             reuse_copy: persistent_contacts
                 && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy"),
+            np_split: persistent_contacts
+                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
+                && std::env::var("ENGINE_NP").as_deref() == Ok("split"),
+            np_defer_limit: 0,
             device,
             queue,
             capacity,
@@ -606,16 +614,21 @@ impl WgpuSim {
             reuse || !self.manifold_hash_insert,
             "ENGINE_HASH_INSERT=manifold requires contact reuse"
         );
-        self.disp_work(
-            &mut pass,
-            if self.reuse_copy {
-                "narrowphase_copy_persistent"
-            } else {
-                "narrowphase"
-            },
-            64,
-            None,
-        );
+        if self.np_split {
+            self.disp_work(&mut pass, "narrowphase_defer_copy_persistent", 64, None);
+            self.disp_work(&mut pass, "narrowphase_fresh_copy_persistent", 64, None);
+        } else {
+            self.disp_work(
+                &mut pass,
+                if self.reuse_copy {
+                    "narrowphase_copy_persistent"
+                } else {
+                    "narrowphase"
+                },
+                64,
+                None,
+            );
+        }
         self.disp(&mut pass, "write_work_args", 64, None);
         if !reuse {
             self.disp(&mut pass, "contact_hash_clear", hash_n, None);
@@ -867,6 +880,7 @@ impl WgpuSim {
         s[26] = 1; // incremental coloring: history row + compact work slot 69
         s[16] = self.grid_hash_words();
         s[20] = u32::from(grid_split());
+        s[21] = self.np_defer_limit;
         if self.manifold_hash_insert {
             s[13] = self.last_counters.manifold_count;
             s[14] = 1;
