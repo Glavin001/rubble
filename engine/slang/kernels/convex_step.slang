@@ -129,7 +129,7 @@ void convex_classify(uint3 tid : SV_DispatchThreadID)
         HullRef hb = hullOf(cb);
         // FLAG 4 (diagnostic) disables the early-out, to compare outputs.
         if ((PARAMS.flags & 4u) == 0u && hullBoxesSeparated(ha, colliderFrame(ca, gBodies[ca.body]), hb, colliderFrame(cb, gBodies[cb.body]),
-                               HULL_BOX_SEPARATION_MARGIN))
+                               HULL_BOX_SEPARATION_MARGIN + speculativeMargin()))
             return;
         bool small = ha.nv <= 16u && hb.nv <= 16u && ha.nf <= 32u && hb.nf <= 32u &&
                      ha.ne <= 48u && hb.ne <= 48u;
@@ -154,21 +154,22 @@ void convex_classify(uint3 tid : SV_DispatchThreadID)
     BodyState bb = gBodies[cb.body];
     Frame fa = colliderFrame(ca, ba);
     Frame fb = colliderFrame(cb, bb);
+    float spec = speculativeMargin();
     BoxManifold mf;
     mf.count = 0;
     mf.normal = float3(0, 1, 0);
     if (ca.shape == SHAPE_CONVEX && cb.shape == SHAPE_PLANE)
-        mf = convexPlaneManifold(hullOf(ca), fa, cb.params.xyz, cb.params.w, true);
+        mf = convexPlaneManifold(hullOf(ca), fa, cb.params.xyz, cb.params.w, true, spec);
     else if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_CONVEX)
-        mf = convexPlaneManifold(hullOf(cb), fb, ca.params.xyz, ca.params.w, false);
+        mf = convexPlaneManifold(hullOf(cb), fb, ca.params.xyz, ca.params.w, false, spec);
     else if (ca.shape == SHAPE_CONVEX && cb.shape == SHAPE_SPHERE)
-        mf = convexSphereManifold(hullOf(ca), fa, fb.p, cb.params.x, true);
+        mf = convexSphereManifold(hullOf(ca), fa, fb.p, cb.params.x, true, spec);
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_CONVEX)
-        mf = convexSphereManifold(hullOf(cb), fb, fa.p, ca.params.x, false);
+        mf = convexSphereManifold(hullOf(cb), fb, fa.p, ca.params.x, false, spec);
     else if (ca.shape == SHAPE_CONVEX && cb.shape == SHAPE_CAPSULE)
-        mf = convexCapsuleManifold(hullOf(ca), fa, fb, cb.params.x, cb.params.y, true);
+        mf = convexCapsuleManifold(hullOf(ca), fa, fb, cb.params.x, cb.params.y, true, spec);
     else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CONVEX)
-        mf = convexCapsuleManifold(hullOf(cb), fb, fa, ca.params.x, ca.params.y, false);
+        mf = convexCapsuleManifold(hullOf(cb), fb, fa, ca.params.x, ca.params.y, false, spec);
     if (mf.count > 0)
         emitContactManifold(pair, ba, bb, ca, cb, mf, PARAMS.contactOffset);
 }
@@ -251,13 +252,14 @@ void convex_manifold(uint3 tid : SV_DispatchThreadID)
     HullRef ha = hullOf(ca);
     HullRef hb = hullOf(cb);
     float3 n = w.normalSep.xyz;
+    float spec = speculativeMargin();
     BoxManifold mf;
     if (type == CONVEX_FEATURE_EDGE)
         mf = convexEdgeManifold(ha, fa, hb, fb, idx1, idx2, n);
     else if (type == CONVEX_FEATURE_FACE_A)
-        mf = convexFaceManifold(ha, fa, hb, fb, idx1, true, n, false);
+        mf = convexFaceManifold(ha, fa, hb, fb, idx1, true, n, false, spec);
     else
-        mf = convexFaceManifold(hb, fb, ha, fa, idx1, false, n, false);
+        mf = convexFaceManifold(hb, fb, ha, fa, idx1, false, n, false, spec);
     if (mf.count == 0 && type != CONVEX_FEATURE_EDGE)
     {
         // Face bias kept a face whose patch clips empty: the overlap is edge-
@@ -280,15 +282,15 @@ void convex_manifold(uint3 tid : SV_DispatchThreadID)
             edgeSep = convexEdgeQueryScalar(ha, fa, hb, fb, ea, eb, unused);
             edgeValid = edgeSep > -1e29;
         }
-        if (edgeValid && edgeSep > 0.0) return;
+        if (edgeValid && edgeSep > spec) return;
         if (edgeValid)
             mf = convexEdgeManifold(ha, fa, hb, fb, ea, eb, convexEdgeAxis(ha, fa, hb, fb, ea, eb));
         if (mf.count == 0)
         {
             if (type == CONVEX_FEATURE_FACE_A)
-                mf = convexFaceManifold(ha, fa, hb, fb, idx1, true, n, true);
+                mf = convexFaceManifold(ha, fa, hb, fb, idx1, true, n, true, spec);
             else
-                mf = convexFaceManifold(hb, fb, ha, fa, idx1, false, n, true);
+                mf = convexFaceManifold(hb, fb, ha, fa, idx1, false, n, true, spec);
         }
     }
     if (mf.count > 0)
