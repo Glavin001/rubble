@@ -57,6 +57,57 @@ the shot ~38 ms (~114k awake, ~880k contacts). Unbonded pieces knock over
 neighbouring houses, so most of the grid ends up awake. The 16-vertex re-bake
 measured the same peak with 15% more pieces, so the grid keeps the original asset.
 
+### Breakable bonds (experimental, opt-in)
+
+“Breakable bonds (experimental)” turns each baked bond of the selected level into
+a `JOINT_BOND` weld (`world_step.slang`):
+
+- **Rows.** Six AVBD rows in the bond frame (normal, u, v; bending about u and v;
+  torsion) about the baked rest pose. Each row has a fixed penalty and an
+  accumulated multiplier.
+- **Penalties.** They are Shardwright's elastic springs (`kn = A/ce`, `ks = A/cg`,
+  `ktu,v = Iuu,vv/ce`, `kt = J/cg`; `geometry.mjs bondSprings`) times one
+  scene-wide factor, so redundant bonds share load in the bake's proportions.
+  Rows stiffer than 5× their lighter body's inertial term are capped:
+  stiffer rows lock bonded clusters in Gauss-Seidel.
+- **Breaking.** A bond breaks when `max(Fn⁺/T + M/Mcap, Fn⁻/C, V/S) > 1` on the
+  step's final iteration. The capacities come from Shardwright's reference
+  stress solver: material and interface strengths × area × strength scale
+  (`bondCapacities`). Broken bonds leave the exact joint-pair hash, so their
+  pieces collide again.
+- **Sleep and wake.** Bonds join sleep islands and wake their partners.
+- **Preloading.** The scene first settles one house with breaking off
+  (`bonds.mjs preloadBonds`) and starts every copy from those poses.
+
+`bond-regression.mjs` checks the welds on the GPU:
+
+| Case | Result |
+|---|---|
+| Strong hang | holds within 0.03 mm |
+| Weak hang | breaks |
+| Resting in compression | holds |
+| Cantilever | 0.1° tilt |
+| Weak bending | breaks |
+| Bonded pair released from rest | falls and lands intact |
+
+**Measured on house scenes (M3 Max), not yet good enough to enable by default.**
+With 8 iterations a whole house of per-fragment welds never fully settles:
+- long spans creep (roof pieces still sag after 6 s);
+- 20 g slivers jitter;
+- a woken house therefore never sleeps, and about 1% of its bonds break under
+  self-weight.
+
+| | 49-house grid | 20-house row |
+|---|---|---|
+| Peak GPU per step | ~30 ms (38 ms unbonded) | ~36 ms |
+| Bonds broken | 11% | 47% (Level 3) |
+| Idle (all asleep) per step | 6.4 ms | 5.7 ms |
+
+The likely fix is structural: simulate each intact bonded island as one compound
+rigid body (exactly rigid, sleeps, one body per standing house), evaluate bonds
+with a stress solver, and split islands where bonds break, as Shardwright's own
+reference simulator does.
+
 `veneer-house-hull16.glb` is a fresh Shardwright bake of the same source
 (`benchmarks/assets/veneer_house.glb`, seed 1337) with `assets/veneer-house-hull16.toml`
 (building_lite plus `max_hull_vertices = 16`, enforced by its `collision_shapes`

@@ -769,7 +769,7 @@ impl WgpuSim {
         if collide {
         self.disp(&mut pass, "build_aabbs", n_cols, None);
         if self.joint_count > 0 {
-            self.disp(&mut pass, "joint_hash_clear", 65536, None);
+            self.disp(&mut pass, "joint_hash_clear", u64::from(engine_schema::joint_hash_size(self.joint_count)), None);
             self.disp(&mut pass, "joint_hash_insert", n_joints, None);
         }
         self.disp(
@@ -1282,7 +1282,7 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[16] = b(c.max_colors * c.max_bodies.div_ceil(64).max(1), 4);
     s[17] = b(c.max_colors.max(128), 4);
     s[18] = b(c.max_hull_vertices, 16);
-    s[19] = 65536 * 4;
+    s[19] = u64::from(engine_schema::joint_hash_size(c.max_joints)) * 3 * 4;
     s[20] = b(c.max_bodies, 4);
     s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
     s[22] = 96 * PASS_ALIGN;

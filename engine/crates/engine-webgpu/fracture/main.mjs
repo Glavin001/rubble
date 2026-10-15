@@ -1,6 +1,7 @@
 import {parseFractureGlb} from './asset.mjs';
 import {buildScene,buildGrid} from './geometry.mjs';
 import {createSimulation} from './simulation.mjs';
+import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
 import {createRates} from './rates.mjs';
 const $=id=>document.getElementById(id),status=$('status');
@@ -29,7 +30,14 @@ function shoot(ray){
  return shotQueue;
 }
 async function loadLevel(level){
- let next;try{next=layout?buildGrid(asset,level,{...layout,maxHullVertices}):buildScene(asset,level,{maxHullVertices})}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
+ let next;try{
+  // Settle one house under its own weight first, so every copy starts asleep in
+  // static equilibrium (bonds carrying their load) rather than at zero force.
+  // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
+  const built=buildScene(asset,level,{maxHullVertices});
+  if($('solve-bonds').checked)setStatus('Settling bonds under self-weight…');
+  const one=$('solve-bonds').checked?await preloadBonds(device,built):{...built,joints:[]};
+  next=layout?buildGrid(asset,level,{...layout,maxHullVertices,base:one}):one}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
  const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=scene.colliders.filter(c=>c.shape===3).length;$('bonds').textContent=scene.bonds.length*copies;$('release').textContent='Start simulation';
@@ -60,13 +68,14 @@ $('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
+$('solve-bonds').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
 $('metadata').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify({physics:asset.physics,materialLibrary:asset.library},null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='fracture-metadata.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();document.body.classList.add('drop')});
 window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
 window.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');const f=e.dataTransfer.files[0];if(f&&device)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))});
-window.__FRACTURE_DEMO__={get ready(){return !loading&&!!sim},get asset(){return asset},get scene(){return scene},get simulation(){return sim},get renderer(){return renderer},get rates(){return currentRates},
+window.__FRACTURE_DEMO__={get ready(){return !loading&&!!sim},get device(){return device},get asset(){return asset},get scene(){return scene},get simulation(){return sim},get renderer(){return renderer},get rates(){return currentRates},
  async shootRay(origin,direction){running=false;await frame;return sim.launch(origin,direction)},
  async fireRow(){running=false;await frame;return sim.launch(scene.rowShot.origin,scene.rowShot.direction)},
  // Repeatable row benchmark: fire, then every `every` steps record wall ms per

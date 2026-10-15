@@ -107,3 +107,18 @@ test('whole-step manifold reuse, hull growth and collider swaps schedule correct
   for(const d of log.dispatches)for(const e of d.bound.g.entries)assert.ok(!e.resource.buffer.destroyed,`${d.name} still bound to a destroyed buffer`);
   sim.dispose();
 });
+
+test('bond joints schedule the joint hash, wake, warm start and CSR kernels against valid bindings',{skip:!haveWgsl&&'run wgsl_export first'},async()=>{
+  const sc=scene(8);
+  // Weld neighbouring hulls in pairs (and one to the world).
+  sc.joints=[1,3,5].map(a=>({bodyA:a,bodyB:a+1,anchorA:[.45,0,0],anchorB:[-.45,0,0],rest:[0,0,0,1],normal:[1,0,0],frameU:[0,1,0],strength:[1e4,1e5,1e4,1e3],k:[1e5,1e5,1e5,1e4,1e4,1e4]}));
+  sc.joints.push({bodyA:7,bodyB:0,anchorA:[0,-.5,0],anchorB:[6.3,.5,0],rest:[0,0,0,1],normal:[0,-1,0],frameU:[1,0,0],strength:[1e4,1e5,1e4,1e3],k:[1e5,1e5,1e5,1e4,1e4,1e4]});
+  const {device,log}=mockDevice(),sim=await createSimulation(device,sc);
+  await sim.step(2);
+  const names=new Set(log.dispatches.map(d=>d.name));
+  for(const k of ['joint_hash_clear','joint_hash_insert','bond_wake','warmstart_joints','csr_degree_joints','csr_scatter_joints'])assert.ok(names.has(k),`missing ${k}`);
+  for(const d of log.dispatches)for(const e of d.bound.g.entries)assert.ok(e.resource.buffer&&!e.resource.buffer.destroyed,`${d.name} binding ${e.binding}`);
+  const events=log.buffers.find(b=>b.label==='AVBD 19'),joints=log.buffers.find(b=>b.label==='AVBD 5');
+  assert.ok(events.size>=65536*3*4,'joint hash: three words per slot');assert.ok(joints.size>=4*192,'Joint is 192 bytes');
+  sim.dispose();
+});

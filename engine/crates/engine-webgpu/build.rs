@@ -44,6 +44,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "persist_manifolds",
     "persist_manifolds_compact",
     "warmstart_joints",
+    "bond_wake",
     "build_awake_list",
     "csr_clear",
     "csr_degree_contacts",

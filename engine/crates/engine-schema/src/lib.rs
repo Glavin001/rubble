@@ -88,6 +88,15 @@ pub enum JointType {
     D6 = 4,
     Distance = 5,
     MaxDistance = 6,
+    /// Breakable weld (all six DOF) carrying `Joint::strength` capacities.
+    Bond = 7,
+}
+
+/// Slots in the joint-pair hash (`jointHashSize()` in world_step.slang): a power
+/// of two, at least 65536 and twice the joint count. `gEvents` needs three
+/// words per slot (joint index, then the body pair).
+pub fn joint_hash_size(joints: u32) -> u32 {
+    (joints.saturating_mul(2)).max(65536).next_power_of_two()
 }
 
 /// Hot body state (112 bytes). `initial_pos` / `initial_rot` are the step-start pose.
@@ -245,6 +254,15 @@ pub struct Joint {
     pub _pad_c0: f32,
     pub lambda: [f32; 6],
     pub k: [f32; 6],
+    /// Bond joints: the bond frame's u axis in body A's frame (normal: `axis_b`).
+    pub frame_u: [f32; 3],
+    pub _pad_frame_u: f32,
+    /// Bond break capacities: tension (N), compression (N), shear (N), bending
+    /// moment (N m); <= 0 means that mode never breaks.
+    pub strength: [f32; 4],
+    /// Bond angular violation at step start (GPU-owned).
+    pub c0_ang: [f32; 3],
+    pub _pad_c0_ang: f32,
 }
 
 #[repr(C)]
