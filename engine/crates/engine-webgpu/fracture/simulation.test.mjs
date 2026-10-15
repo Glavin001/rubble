@@ -59,8 +59,10 @@ test('browser host schedules every core + convex kernel against valid bindings',
   await sim.inspectCollisions();
   sim.reset();await sim.step(1);
   const names=new Set(log.dispatches.map(d=>d.name));
-  for(const k of ['convex_classify','convex_write_args','convex_sat_small','convex_sat_large','convex_manifold','record_color_degrees','csr_prefix','count_color_tiles','pack_solver_contacts','solve_primal_color','solve_dual','write_sleep_args'])
+  for(const k of ['convex_classify','convex_write_args','convex_sat_small','convex_sat_large','convex_manifold','record_color_degrees','csr_prefix','count_color_tiles','pack_solver_contacts','solve_dual','write_sleep_args'])
     assert.ok(names.has(k),`missing dispatch ${k}`);
+  // Few awake bodies: one workgroup walks every colour per iteration.
+  assert.ok(names.has('solve_primal_sparse'),'sparse primal with few awake bodies');
   const argsBuffer=log.buffers.find(b=>b.label==='AVBD 23');
   for(const d of log.dispatches){
     if(d.indirect){assert.equal(d.buf,argsBuffer);assert.ok(d.offset+12<=argsBuffer.size,`${d.name} slot ${d.offset/12} outside args`)}
@@ -82,6 +84,7 @@ test('bodies above 512 use the three-dispatch block CSR scan',{skip:!haveWgsl&&'
   await sim.step(1);
   const names=new Set(log.dispatches.map(d=>d.name));
   for(const k of ['csr_prefix_blocks','csr_prefix_block_sums','csr_prefix_add'])assert.ok(names.has(k),k);
+  assert.ok(names.has('solve_primal_color'),'many awake bodies: one dispatch per colour');
   assert.ok(!names.has('csr_prefix'));
   const profile=await sim.profileStep();assert.equal(profile.supported,false);
   sim.dispose();

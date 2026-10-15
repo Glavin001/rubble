@@ -3011,7 +3011,10 @@ uint primalLanesFor(uint bodies)
     // Never one lane per body: gables' ~184k-body colors measured 1/2/4/8 lanes
     // at 32.2/31.1/30.9/31.4 ms (decision 8eg); the ring is neutral.
     if (bodies == 0u) return 1u;
-    if (bodies >= 4096u) return 4u;
+    // Convex scenes (HOST_S(29)): hull bodies walk several manifolds each, and
+    // 8 lanes hide that latency (49-house grid peak: 4/8/16 lanes measured
+    // 11.3/10.0/11.7 ms); box scenes keep their validated 4.
+    if (bodies >= 4096u) return HOST_S(29) != 0u ? 8u : 4u;
     return 8u;
 }
 
@@ -3773,7 +3776,8 @@ void solve_primal_sparse(uint3 lid : SV_GroupThreadID)
     uint lane = local % 8u;
     uint slot = local / 8u;
     uint maxB = HOST_S(1);
-    if (local == 0u) gsUniformLanes = min(ALOAD(gCounters[0].colorCount), min(HOST_S(4), 32u));
+    // Every colour the palette can hold (gColorCounts has 64 colour slots).
+    if (local == 0u) gsUniformLanes = min(ALOAD(gCounters[0].colorCount), min(HOST_S(4), COLOR_DEGREE_BASE));
     GROUP_SYNC();
     uint colorLimit = gsUniformLanes;
     for (uint color = PASS_U; color < colorLimit; color++)
