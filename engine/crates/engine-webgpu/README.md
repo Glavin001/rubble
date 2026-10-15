@@ -22,7 +22,7 @@ support) for scene parity. This imports the pinned three-avbd builder directly a
 compares every ring/gables body, including rotations, masses, inertia and velocities:
 
 ```sh
-node --experimental-transform-types --test engine/crates/engine-webgpu/tests/scene_builders.test.ts
+node --test engine/crates/engine-webgpu/tests/scene_builders.test.mjs
 node --test engine/crates/engine-webgpu/tests/physics_benchmark.test.mjs engine/crates/engine-webgpu/tests/demo_profiling.test.mjs engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
 node --test engine/crates/engine-webgpu/tests/spatial_order.test.mjs
 ```

@@ -1,23 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {stripTypeScriptTypes} from 'node:module';
+import {createHash} from 'node:crypto';
 import {runInNewContext} from 'node:vm';
 import {mortonSceneOrder,restoreSceneOrder} from '../spatial-order.mjs';
 import {buildRing,buildGables,brickQuaternion,boxInvInertia,sphereMassProperties} from '../scene-builders.mjs';
 
-// Execute the actual pinned Morton routine as the ordering oracle; do not copy
-// the bit interleaving into the test. The renderer requires our ground at index 0.
-const reference = readFileSync(new URL('../../../../inspiration/pinned/three-avbd/src/avbd3d/gpu/solver.ts',import.meta.url),'utf8');
-const start = reference.indexOf('function mortonOrder('), end = reference.indexOf('/** Evaluated lazily',start);
-assert.ok(start >= 0 && end > start,'Pinned Morton function extraction must remain valid.');
-const oracle = runInNewContext(stripTypeScriptTypes(reference.slice(start,end))+'\nmortonOrder');
+// Expected orders come from the pinned three-avbd Morton routine, recorded in
+// fixtures/three-avbd-reference.json by fixtures/generate-three-avbd-reference.ts
+// (the only code that reads the gitignored inspiration/ checkout).
+const reference = JSON.parse(readFileSync(new URL('./fixtures/three-avbd-reference.json',import.meta.url),'utf8'));
+const sha256 = order => createHash('sha256').update(new Uint8Array(Uint32Array.from(order).buffer)).digest('hex');
 
-function verify(bodies,colliders,label) {
+function expectOrder(actual,expected,label) {
+  if (Array.isArray(expected)) {
+    assert.deepEqual(actual,expected,`${label}: Z-up Morton order or stable ties differ from pinned three-avbd.`);
+    return;
+  }
+  assert.equal(actual.length,expected.count,`${label}: body count`);
+  for (const [gpu,scene] of expected.samples)
+    assert.equal(actual[gpu],scene,`${label}: GPU slot ${gpu} holds scene body ${actual[gpu]}, pinned three-avbd uploads ${scene}.`);
+  assert.equal(sha256(actual),expected.sha256,`${label}: Morton order differs from pinned three-avbd ${reference.revision}.`);
+}
+
+function verify(bodies,colliders,label,expected) {
   const before = bodies.map(b=>b.p.slice());
   const {gpuToScene,sceneToGpu} = mortonSceneOrder(bodies,colliders);
-  const expected = [0,...oracle(bodies.map(b=>({positionLin:[b.p[0],b.p[2],b.p[1]]}))).filter(id=>id !== 0)];
-  assert.deepEqual(Array.from(gpuToScene),expected,`${label}: Z-up Morton order or stable ties differ from pinned three-avbd.`);
+  expectOrder(Array.from(gpuToScene),expected,label);
   assert.equal(gpuToScene[0],0,'Ground must stay at renderer/collider index zero.');
   const packed = new Uint32Array(bodies.length * 28);
   for (let gpu = 0; gpu < bodies.length; gpu++) {
@@ -38,10 +47,9 @@ function verify(bodies,colliders,label) {
 }
 
 test('Morton upload handles negative coordinates, coincident bodies, degenerate axes and renderer ground',()=>{
-  for (const positions of [ [[0,0,0]], [[0,0,0],[0,0,0],[0,0,0]],
-    [[0,0,0],[12,0,-8],[-12,0,8],[1,0,3],[1,0,3],[0,0,-8]] ]) {
+  for (const {positions,order} of reference.morton.edgeCases) {
     const bodies=positions.map((p,id)=>({p,invMass:id?1:0}));
-    verify(bodies,bodies.map((_,body)=>({body})), 'edge case');
+    verify(bodies,bodies.map((_,body)=>({body})), 'edge case', order);
   }
 });
 
@@ -55,7 +63,7 @@ for (const [name,build,count] of [
     build((p,a,mass)=>add({p,q:brickQuaternion(a),invMass:1/mass,invI:boxInvInertia(mass,.5,.25,.25),flags:9},{shape:2,params:[.5,.25,.25]}),
       (p,r,density,v,w)=>{const m=sphereMassProperties(r,density);add({p,invMass:1/m.mass,invI:[m.invInertia,m.invInertia,m.invInertia],v,w,flags:9},{shape:0,params:[r,0,0]});});
     assert.equal(bodies.length,count,'Do not reduce scene scale to improve timing.');
-    const map=verify(bodies,colliders,name);
+    const map=verify(bodies,colliders,name,reference.morton[name]);
     for(let id=count-2;id<count;id++) assert.equal(map.gpuToScene[map.sceneToGpu[id]],id,'Impactor identity must survive spatial upload.');
     assert.ok(map.gpuToScene.some((id,gpu)=>id!==gpu),'This fixture must actually exercise a nonidentity permutation.');
   });

@@ -27,7 +27,7 @@ The parent has already pruned unused counter snapshots, implemented incremental 
 
 ## Scene and scale: largely aligned, with remaining numerical differences
 
-The actual large ring has **110,440 bricks + one dynamic sphere + one static ground = 110,442 total bodies**. Some reference comments still say 110,332 bricks; trust the builder and direct comparison test, not that prose. `tests/scene_builders.test.ts:20-51` imports the pinned builder itself and compares every body's position, quaternion, mass, inverse inertia, velocity and angular velocity. It also checks the ground and rolling contact velocity.
+The actual large ring has **110,440 bricks + one dynamic sphere + one static ground = 110,442 total bodies**. Some reference comments still say 110,332 bricks; trust the builder and direct comparison test, not that prose. `tests/scene_builders.test.mjs` compares sampled bodies (position, quaternion, mass, inverse inertia, velocity, angular velocity) and whole-scene totals against `tests/fixtures/three-avbd-reference.json`, generated from the pinned builder by `tests/fixtures/generate-three-avbd-reference.ts`. It also checks the ground and rolling contact velocity.
 
 Reference `src/avbd3d/bench-scenes.ts:14-17,53-57,88-123` builds a radius-80 ring, 40 courses, tier 4, ten rows at the base; bricks have full sizes 1 × 0.5 × 0.5, mass 0.25, 2% circumferential gaps and 0.52 m radial pitch. Ball radius is 8, density 10, speed 30, center at reference `[0,-95.2,8.5]`; ground is 360 × 360 × 1 centered at zero. Rubble `scene-builders.mjs:1-36` and `demo.html:568-605` match after the Y/Z reflection. Rotation and angular velocity correctly change sign under that reflection; the sphere rolls along +Z at angular velocity `[3.75,0,0]`. Ground top is Y=0.5. The deep ground used by columns is intentionally separate and should remain intact.
 
@@ -156,7 +156,7 @@ The parent is running these measurements and validations serially. No timing res
 4. Design compact internal contacts and pair metadata with explicit ABI migration boundaries. This is the strongest remaining memory opportunity, but must be kept separate from speculative math changes and from the independent fracture work.
 5. Optimize the measured residual: counting-sort grid, pair-centric persistence, lane thresholds or safe command scheduling. Reject experiments that merely shift cost or loosen physics.
 
-Useful existing test entry points: `tests/scene_builders.test.ts`, `src/gpu_tests.rs`, `tests/ring_hold.rs`, `ring-regression.mjs`, `tests/columns_hold.rs`, `tests/gables_hold.rs`, `engine-metal/tests/oracle_accuracy.rs`, `engine-metal/tests/avbd_slice.rs`. Failures should state the physical invariant, offending body/pair/field, expected/actual value and likely violated stage contract. Avoid tests that only search source text when a generated IR or actual GPU invariant can be asserted.
+Useful existing test entry points: `tests/scene_builders.test.mjs`, `src/gpu_tests.rs`, `tests/ring_hold.rs`, `ring-regression.mjs`, `tests/columns_hold.rs`, `tests/gables_hold.rs`, `engine-metal/tests/oracle_accuracy.rs`, `engine-metal/tests/avbd_slice.rs`. Failures should state the physical invariant, offending body/pair/field, expected/actual value and likely violated stage contract. Avoid tests that only search source text when a generated IR or actual GPU invariant can be asserted.
 
 ## Validation update from implementation work
 
