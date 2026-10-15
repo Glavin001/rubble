@@ -82,10 +82,20 @@ fn main() -> Result<()> {
         "ccd_classify",
         "ccd_sweep",
         "recompute_inertia",
+        "record_color_degrees",
+        "reuse_all_manifolds",
+        "convex_classify",
+        "convex_write_args",
+        "convex_sat_small",
+        "convex_sat_large",
+        "convex_manifold",
     ];
+    let convex = slang_root.join("kernels/convex_step.slang");
     for entry in entries {
         compile(
-            if entry.ends_with("_compact")
+            if entry.starts_with("convex_") {
+                &convex
+            } else if entry.ends_with("_compact")
                 || (entry == "pack_solver_contacts" || entry == "clear_solver_contacts")
             {
                 &compact
@@ -107,6 +117,8 @@ fn main() -> Result<()> {
     for entry in entries.iter().chain(["abi_roundtrip"].iter()) {
         let src = if *entry == "abi_roundtrip" {
             &abi
+        } else if entry.starts_with("convex_") {
+            &convex
         } else if entry.ends_with("_compact")
             || (*entry == "pack_solver_contacts" || *entry == "clear_solver_contacts")
         {

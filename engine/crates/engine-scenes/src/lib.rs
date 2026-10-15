@@ -651,6 +651,118 @@ pub fn jointed_drop_small(b: &mut SceneBuilder<'_>) {
     }
 }
 
+// ---- convex hull scenes ---------------------------------------------------------
+
+fn scene_rand(seed: &mut u32) -> f32 {
+    *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+    (*seed >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// A small library of rubble-like hulls: random clouds (8–24 points), prisms
+/// and a 64-vertex bipyramid. Shared hull records exercise arena dedup.
+fn hull_library(seed: &mut u32, size: f32) -> Vec<engine_schema::convex::ConvexHull> {
+    use engine_schema::convex::ConvexHull;
+    let mut hulls = Vec::new();
+    for k in 0..12 {
+        let n = 8 + (k % 5) * 4;
+        let pts: Vec<Vec3> = (0..n)
+            .map(|_| {
+                Vec3::new(scene_rand(seed) - 0.5, (scene_rand(seed) - 0.5) * 0.7, scene_rand(seed) - 0.5) * size
+            })
+            .collect();
+        hulls.push(ConvexHull::from_points(&pts).expect("rubble hull"));
+    }
+    for sides in [3usize, 5, 6, 8] {
+        let pts: Vec<Vec3> = (0..2 * sides)
+            .map(|i| {
+                let t = (i % sides) as f32 / sides as f32 * std::f32::consts::TAU;
+                Vec3::new(t.cos() * 0.5, if i < sides { -0.35 } else { 0.35 }, t.sin() * 0.5) * size
+            })
+            .collect();
+        hulls.push(ConvexHull::from_points(&pts).expect("prism hull"));
+    }
+    let mut ring: Vec<Vec3> = (0..62)
+        .map(|i| {
+            let t = i as f32 / 62.0 * std::f32::consts::TAU;
+            Vec3::new(t.cos() * 0.5, 0.0, t.sin() * 0.5) * size
+        })
+        .collect();
+    ring.extend([Vec3::Y * 0.45 * size, -Vec3::Y * 0.45 * size]);
+    hulls.push(ConvexHull::from_points(&ring).expect("bipyramid hull"));
+    hulls
+}
+
+/// Rubble dropped in a jittered grid onto a ground slab. `children` hulls per
+/// body form compounds (offset in the body frame, so openings stay open).
+pub fn convex_pile(b: &mut SceneBuilder<'_>, n: u32, h: u32, children: u32, size: f32) {
+    let mut seed = 2026u32;
+    let lib = hull_library(&mut seed, size);
+    b.add_ground_box_extent(0.0, (n as f32 * size * 1.6).max(50.0));
+    let spacing = size * if children > 1 { 2.4 } else { 1.5 };
+    for y in 0..h {
+        for z in 0..n {
+            for x in 0..n {
+                let pos = Vec3::new(
+                    (x as f32 - n as f32 / 2.0) * spacing,
+                    1.0 + y as f32 * spacing,
+                    (z as f32 - n as f32 / 2.0) * spacing,
+                );
+                let rot = Quat::from_xyzw(
+                    scene_rand(&mut seed) - 0.5,
+                    scene_rand(&mut seed) - 0.5,
+                    scene_rand(&mut seed) - 0.5,
+                    scene_rand(&mut seed) - 0.5,
+                )
+                .normalize();
+                let hulls: Vec<_> = (0..children)
+                    .map(|k| {
+                        let mut hull = lib[(scene_rand(&mut seed) * lib.len() as f32) as usize % lib.len()].clone();
+                        if children > 1 {
+                            let off = Vec3::new(
+                                if k & 1 == 0 { -0.45 } else { 0.45 },
+                                if k & 2 == 0 { 0.0 } else { 0.6 },
+                                0.0,
+                            ) * size;
+                            for v in &mut hull.vertices {
+                                *v += off;
+                            }
+                            for f in &mut hull.faces {
+                                f.d += f.normal.dot(off);
+                            }
+                        }
+                        hull
+                    })
+                    .collect();
+                b.add_convex_hull(&hulls, pos, rot, 1.0);
+            }
+        }
+    }
+}
+
+pub fn convex_pile_10k(b: &mut SceneBuilder<'_>) {
+    convex_pile(b, 25, 16, 1, 0.6);
+}
+
+pub fn convex_compounds_10k(b: &mut SceneBuilder<'_>) {
+    convex_pile(b, 25, 16, 4, 0.6);
+}
+
+pub fn convex_rubble_30k(b: &mut SceneBuilder<'_>) {
+    convex_pile(b, 40, 19, 1, 0.35);
+}
+
+fn convex_cap(bodies: u32, colliders: u32) -> WorldCapacity {
+    WorldCapacity {
+        max_bodies: bodies.next_power_of_two().max(4096),
+        max_colliders: colliders.next_power_of_two().max(8192),
+        max_contacts: (colliders * 24).next_power_of_two().max(32_768),
+        max_joints: 8192,
+        max_candidates: (colliders * 32).next_power_of_two().max(65_536),
+        max_hull_vertices: 65_536,
+        ..WorldCapacity::default()
+    }
+}
+
 fn cap(bodies: u32) -> WorldCapacity {
     WorldCapacity {
         max_bodies: bodies.next_power_of_two().max(4096),
@@ -737,6 +849,33 @@ pub fn all_scenes() -> Vec<SceneDef> {
                 capacity: WorldCapacity::small(),
             },
             build: heavy_pendulum_default,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Convex Pile (10k)",
+                group: "Convex hulls (GPU)",
+                iterations: 4,
+                capacity: convex_cap(10_001, 10_001),
+            },
+            build: convex_pile_10k,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Convex Compounds (10k)",
+                group: "Convex hulls (GPU)",
+                iterations: 4,
+                capacity: convex_cap(10_001, 40_001),
+            },
+            build: convex_compounds_10k,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Convex Rubble (30k)",
+                group: "Convex hulls (GPU)",
+                iterations: 4,
+                capacity: convex_cap(30_401, 30_401),
+            },
+            build: convex_rubble_30k,
         },
         SceneDef {
             info: SceneInfo {
@@ -885,7 +1024,8 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         || scene.info.name.starts_with("Pyramid")
         || scene.info.name.starts_with("Box Columns")
         || scene.info.name.starts_with("Brick Ring")
-        || scene.info.name.starts_with("Brick Gables"))
+        || scene.info.name.starts_with("Brick Gables")
+        || scene.info.name.starts_with("Convex"))
         && std::env::var("NO_REUSE").is_err()
     {
         params.flags |= FLAG_REUSE_CONTACTS;
@@ -1029,6 +1169,21 @@ mod scene_conversion_tests {
                 + rolling_angular_velocity(30.0, radius).cross(Vec3::new(0.0, -radius, 0.0));
             assert!(contact_velocity.length() < 1e-6,
                 "radius {radius}: sphere spins against its travel, contact velocity={contact_velocity:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod convex_scene_tests {
+    #[test]
+    fn hull_library_cooks_closed_hulls_within_limits() {
+        let mut seed = 2026u32;
+        for size in [0.35f32, 0.6] {
+            for h in super::hull_library(&mut seed, size) {
+                assert!(h.closed, "library hull adjacency certified");
+                assert!(h.vertices.len() <= 64 && h.faces.len() <= 128 && h.edges.len() <= 192);
+                assert!(h.mass_properties(1.0).volume > 0.0);
+            }
         }
     }
 }

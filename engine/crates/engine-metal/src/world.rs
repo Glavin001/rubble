@@ -63,6 +63,24 @@ pub struct MetalWorld {
     /// Which counters/scratch/color_counts slot the next encode uses.
     host_parity: u32,
     pub chip: String,
+    /// Convex SAT work list (Slang gConvexWork). Metal assigns it buffer 27,
+    /// the slot compact solves use for solver points, so convex dispatches
+    /// rebind 27 around themselves.
+    convex_work: Buffer,
+    /// Host copy of the hull arena uploaded to `hull_verts`.
+    pub hull_arena: engine_schema::convex::HullArena,
+    /// Any convex hull collider: schedules the convex_* narrowphase entries.
+    has_convex: bool,
+    /// Hierarchical broadphase size levels (0 = uniform grid).
+    grid_levels: u32,
+    /// (collider count, base cell, levels): recomputed only when colliders change.
+    grid_cache: Option<(u32, f32, u32)>,
+    /// Any collider carries a collision filter (scratch s[21]).
+    has_filters: bool,
+    /// The last step's manifolds still describe the scene (whole-step reuse).
+    manifolds_valid: bool,
+    /// Next step reuses every previous manifold (cleared after use).
+    reuse_next: bool,
 }
 
 impl MetalWorld {
@@ -111,9 +129,10 @@ impl MetalWorld {
             d,
             capacity.max_colors * capacity.max_bodies.div_ceil(64).max(1),
         );
+        // Colour counts (0..63) and per-colour max CSR degrees (64..127).
         let color_counts = [
-            alloc_u32(d, capacity.max_colors),
-            alloc_u32(d, capacity.max_colors),
+            alloc_u32(d, capacity.max_colors.max(128)),
+            alloc_u32(d, capacity.max_colors.max(128)),
         ];
         let hull_verts = alloc::<[f32; 4]>(d, capacity.max_hull_vertices);
         let events = alloc_u32(d, 65536);
@@ -154,7 +173,23 @@ impl MetalWorld {
                 t[48 + k as usize] = (1u32 << k) | ((k & 1) << 31);
             }
         }
-        let indirect_args = alloc_u32(d, capacity.max_colors.max(70) * 3);
+        // Colour slots 0..63, work slots 64..69, convex slots 70..72.
+        // Colour slots 0..63, work 64..69, convex 70..72, previous contacts 73.
+        let indirect_args = alloc_u32(d, capacity.max_colors.max(74) * 3);
+        let convex_work = alloc::<[u32; 8]>(d, capacity.max_candidates);
+        // Every hull arena starts with the unit cube reused by box/hull pairs.
+        {
+            let arena = engine_schema::convex::HullArena::new();
+            let records = arena.records();
+            assert!(records.len() <= capacity.max_hull_vertices as usize);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    records.as_ptr(),
+                    hull_verts.contents() as *mut [u32; 4],
+                    records.len(),
+                );
+            }
+        }
 
         // Default material
         let mats =
@@ -220,6 +255,14 @@ impl MetalWorld {
             contacts_parity: 0,
             host_parity: 0,
             chip,
+            convex_work,
+            hull_arena: engine_schema::convex::HullArena::new(),
+            has_convex: false,
+            grid_levels: 0,
+            grid_cache: None,
+            has_filters: false,
+            manifolds_valid: false,
+            reuse_next: false,
         })
     }
 
@@ -264,6 +307,7 @@ impl MetalWorld {
                 self.capacity.max_bodies as usize,
             )
         };
+        self.manifolds_valid = false;
         bodies[id as usize] = state;
         prev[id as usize] = state; // x⁻ = x until the first predictOne
         self.body_count += 1;
@@ -281,7 +325,80 @@ impl MetalWorld {
         };
         cols[id as usize] = col;
         self.collider_count += 1;
+        self.has_convex |= col.shape == ShapeType::ConvexHull as u32;
+        self.has_filters |= engine_schema::convex::CollisionFilter::is_set(&col);
+        self.manifolds_valid = false;
         id
+    }
+
+    /// Replace a collider (e.g. swap a fractured chunk's hull or its filter).
+    /// Release the old hull with `release_hull` once nothing uses it.
+    pub fn set_collider(&mut self, id: u32, col: Collider) {
+        assert!(id < self.collider_count, "collider {id} out of range");
+        let cols = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.colliders.contents() as *mut Collider,
+                self.capacity.max_colliders as usize,
+            )
+        };
+        cols[id as usize] = col;
+        self.has_convex |= col.shape == ShapeType::ConvexHull as u32;
+        self.has_filters = cols[..self.collider_count as usize]
+            .iter()
+            .any(engine_schema::convex::CollisionFilter::is_set);
+        self.grid_cache = None;
+        self.manifolds_valid = false;
+    }
+
+    /// Drop one arena reference to a hull; its records are reused once free.
+    pub fn release_hull(&mut self, base: u32) -> bool {
+        self.manifolds_valid = false;
+        self.hull_arena.release(base)
+    }
+
+    /// Insert one hull into the world's arena (shared when identical), growing
+    /// the buffer when needed, and upload only the changed records.
+    pub fn insert_hull(&mut self, hull: &engine_schema::convex::ConvexHull) -> u32 {
+        let base = self.hull_arena.insert(hull).expect("hull arena range");
+        self.sync_hull_arena();
+        base
+    }
+
+    /// Grow `hull_verts` (power of two, contents preserved) and copy dirty ranges.
+    fn sync_hull_arena(&mut self) {
+        let needed = self.hull_arena.len() as u32;
+        if needed > self.capacity.max_hull_vertices {
+            let records = needed.next_power_of_two();
+            let grown = alloc::<[u32; 4]>(&self.device.device, records);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    self.hull_verts.contents() as *const u8,
+                    grown.contents() as *mut u8,
+                    self.capacity.max_hull_vertices as usize * 16,
+                );
+            }
+            self.hull_verts = grown;
+            self.capacity.max_hull_vertices = records;
+        }
+        let dirty = self.hull_arena.take_dirty();
+        let records = self.hull_arena.records();
+        for r in dirty {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    records[r.start as usize..r.end as usize].as_ptr(),
+                    (self.hull_verts.contents() as *mut [u32; 4]).add(r.start as usize),
+                    (r.end - r.start) as usize,
+                );
+            }
+        }
+        self.manifolds_valid = false;
+    }
+
+    /// Replace the hull arena and upload it whole (growing the buffer if needed).
+    pub fn set_hulls(&mut self, arena: &engine_schema::convex::HullArena) {
+        self.hull_arena = arena.clone();
+        self.hull_arena.mark_all_dirty();
+        self.sync_hull_arena();
     }
 
     pub fn add_joint(&mut self, joint: Joint) -> u32 {
@@ -309,6 +426,7 @@ impl MetalWorld {
         };
         cmds[id as usize] = cmd;
         self.command_count += 1;
+        self.manifolds_valid = false;
     }
 
     pub fn body(&self, id: u32) -> BodyState {
@@ -334,6 +452,7 @@ impl MetalWorld {
                 self.capacity.max_bodies as usize,
             )
         };
+        self.manifolds_valid = false;
         bodies[id as usize] = state;
         prev[id as usize] = state;
     }
@@ -402,7 +521,11 @@ impl MetalWorld {
     }
 
     fn dispatch(&self, encoder: &ComputeCommandEncoderRef, name: &str, threads: u64) {
-        if name == "write_work_args" || name == "write_color_args" || name == "write_sleep_args" {
+        if name == "write_work_args"
+            || name == "write_color_args"
+            || name == "write_sleep_args"
+            || name == "convex_write_args"
+        {
             encoder.set_buffer(23, Some(&self.indirect_args), 0);
         }
         let pso = self.pipelines.get(name).expect("pipeline");
@@ -508,9 +631,16 @@ impl MetalWorld {
         s[13] = 0; // any sleep candidate (set by extract)
         s[17] = self.steps_done; // step index for reuseContacts generation stamps
         s[26] = 1; // incremental coloring: history row + compact work slot 69
-        s[18] = 0; // reuseContacts hit count (narrowphase)
+        s[18] = self.grid_levels; // hierarchical broadphase levels (0 = uniform grid)
+        // Per-step broadphase counters (the WebGPU hosts rewrite all 64 words):
+        // legacy large list (25), planes (42), level mask (52), oversized statics (53).
+        s[25] = 0;
+        s[42] = 0;
+        s[52] = 0;
+        s[53] = 0;
         s[19] = 0; // reuse hash miss
-        s[20] = 0; // reuse generation gate reject
+        s[20] = 1; // degree-aware primal lanes (colour counts sized 128 words)
+        s[21] = u32::from(self.has_filters); // collision filters present
         s[21] = 0; // update_refs noRef
         s[22] = 0; // update_refs linMove
         s[23] = 0; // update_refs angMove
@@ -532,8 +662,8 @@ impl MetalWorld {
             iteration: 0,
             manifold_count: 0,
             _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            convex_sat_small: 0,
+            convex_sat_large: 0,
         };
         if !clear_transient {
             c = self.last_counters;
@@ -548,6 +678,14 @@ impl MetalWorld {
     }
 
     pub fn step_gpu(&mut self) -> Result<StepCounters, ExecError> {
+        self.step_gpu_inner(true)
+    }
+
+    /// three-avbd `reuseManifolds`: skip bounds, broadphase and narrowphase and
+    /// carry every previous manifold forward (persistence re-evaluates C0). Falls
+    /// back to a full step when the scene changed since the last step.
+    pub fn step_reuse_manifolds(&mut self) -> Result<StepCounters, ExecError> {
+        self.reuse_next = true;
         self.step_gpu_inner(true)
     }
 
@@ -570,6 +708,25 @@ impl MetalWorld {
                 self.body_count as usize,
             )
         };
+        let hier = match std::env::var("ENGINE_GRID_LEVELS").as_deref() {
+            Ok("off") => false,
+            Ok("on") => true,
+            _ => self.has_convex,
+        };
+        if hier {
+            let (base, levels) = match self.grid_cache {
+                Some((n, base, levels)) if n == self.collider_count => (base, levels),
+                _ => {
+                    let (base, levels) = engine_schema::convex::hierarchical_grid(cols, bodies);
+                    self.grid_cache = Some((self.collider_count, base, levels));
+                    (base, levels)
+                }
+            };
+            self.params.grid_cell_size = base;
+            self.grid_levels = levels;
+            return;
+        }
+        self.grid_levels = 0;
         let mut max_r = 0.25f32;
         for c in cols {
             if c.shape == ShapeType::Plane as u32 {
@@ -628,7 +785,7 @@ impl MetalWorld {
         self.write_scratch();
         // Avoid O(max_colors) host clears on huge capacities — only touch used slots.
         {
-            let n = self.capacity.max_colors.min(64) as usize;
+            let n = 128usize;
             let slot = self.host_slot();
             let cc = unsafe {
                 std::slice::from_raw_parts_mut(self.color_counts[slot].contents() as *mut u32, n)
@@ -658,6 +815,8 @@ impl MetalWorld {
         // three-avbd order: collide at x⁻ → topology → warm-start bodies → solve.
         // C0 must be sampled before predict; NP-after-predict made impact C0 huge
         // negative and blew spaced Stack.
+        let reuse_manifolds = std::mem::take(&mut self.reuse_next) && self.manifolds_valid;
+        if !reuse_manifolds {
         self.dispatch(&encoder, "build_aabbs", n_cols);
         // O(1) joint-pair filter for broadphase (was O(joints) per candidate).
         // Ring/Wall smash have zero joints — skip the 64k clear entirely.
@@ -668,6 +827,7 @@ impl MetalWorld {
         self.dispatch(&encoder, "broadphase_clear", 131072);
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
+        }
         self.dispatch(&encoder, "write_work_args", 64);
         // Pair hash before NP when reuseContacts is on (three-avbd order); otherwise
         // after NP is enough for persist-only warm-start.
@@ -686,6 +846,10 @@ impl MetalWorld {
         let mostly_asleep = self.last_counters.awake_count > 0
             && self.last_counters.awake_count <= 64
             && self.last_counters.contact_count <= 256;
+        if reuse_manifolds {
+            // Every previous run becomes this step's manifold; no hash needed.
+            self.dispatch_work(&encoder, "reuse_all_manifolds", 73, 0);
+        } else {
         if reuse {
             if !mostly_asleep {
                 self.dispatch(&encoder, "update_refs", n_bodies);
@@ -694,8 +858,20 @@ impl MetalWorld {
             self.dispatch_work(&encoder, "contact_hash_insert", 68, 0);
         }
         self.dispatch_work(&encoder, "narrowphase", 64, 0);
+        if self.has_convex {
+            // Hull pairs deferred by narrowphase. gConvexWork is buffer 27 in the
+            // convex entries; restore the solver points binding afterwards.
+            encoder.set_buffer(27, Some(&self.convex_work), 0);
+            self.dispatch_work(&encoder, "convex_classify", 64, 0);
+            self.dispatch(&encoder, "convex_write_args", 64);
+            self.dispatch_work(&encoder, "convex_sat_small", 70, 0);
+            self.dispatch_work(&encoder, "convex_sat_large", 71, 0);
+            self.dispatch_work(&encoder, "convex_manifold", 72, 0);
+            encoder.set_buffer(27, Some(&self.solver_points), 0);
+        }
+        }
         self.dispatch(&encoder, "write_work_args", 64);
-        if !reuse {
+        if !reuse && !reuse_manifolds {
             self.dispatch(&encoder, "contact_hash_clear", hash_n);
             self.dispatch_work(&encoder, "contact_hash_insert", 68, 0);
         }
@@ -740,6 +916,8 @@ impl MetalWorld {
         self.dispatch(&encoder, "count_color_tiles", n_bodies);
         self.dispatch(&encoder, "prefix_color_tiles", 64);
         self.dispatch(&encoder, "scatter_color_tiles", n_bodies);
+        // Per-colour max CSR degree for degree-aware primal lanes (scratch s[20]).
+        self.dispatch_work(&encoder, "record_color_degrees", 67, 0);
         self.dispatch(&encoder, "write_color_args", 64);
 
         // Body warm-start AFTER NP (three-avbd warmStartBodies): stash inertial, advance pose.
@@ -807,12 +985,15 @@ impl MetalWorld {
                 ..Default::default()
             };
             let _ = PHASE_GRAPH;
+            // Unwaited: overflow is unknown until wait_gpu; manifolds were produced.
+            self.manifolds_valid = true;
             return Ok(self.last_counters);
         }
         cb.wait_until_completed();
         let gpu_ms = wall_t0.elapsed().as_secs_f64() * 1000.0;
         let counters = unsafe { *(self.counters[slot].contents() as *const StepCounters) };
         self.last_counters = counters;
+        self.manifolds_valid = counters.overflow_flags == 0;
         self.last_timings = PhaseTimingsMs {
             total_gpu: gpu_ms,
             cpu_submit,
@@ -1096,26 +1277,38 @@ impl<'a> SceneBuilder<'a> {
         body
     }
 
+    /// Dynamic body made of convex hulls (one hull, or a compound). Hulls are in
+    /// one input frame; `pos`/`rot` place that frame. Mass and inertia are the
+    /// compound's, from uniform `density`; children keep their own colliders.
     pub fn add_convex_hull(
         &mut self,
+        hulls: &[engine_schema::convex::ConvexHull],
         pos: Vec3,
-        half_extents: Vec3,
-        mass: f32,
-        hull_vertex_base: u32,
-        hull_vertex_count: u32,
+        rot: Quat,
+        density: f32,
     ) -> u32 {
-        // Box-bounded convex: params = (half.xyz, bound_radius); vertex range in generation/material spare via params.w encoding index.
-        let body = self.add_box(pos, half_extents, mass);
-        let cols = unsafe {
-            std::slice::from_raw_parts_mut(
-                self.world.colliders.contents() as *mut Collider,
-                self.world.capacity.max_colliders as usize,
-            )
-        };
-        let id = self.world.collider_count - 1;
-        cols[id as usize].shape = ShapeType::ConvexHull as u32;
-        cols[id as usize].params[3] = half_extents.max_element() * 1.732;
-        let _ = (hull_vertex_base, hull_vertex_count);
+        let cooked = engine_schema::convex::cook_body(hulls, density);
+        let (p, q) = cooked.body_pose(pos, rot);
+        let body = self
+            .world
+            .add_body(BodyState::dynamic(p, q, cooked.mass, cooked.inertia));
+        for child in &cooked.children {
+            let base = self.world.insert_hull(&child.hull);
+            self.world.add_collider(Collider {
+                body,
+                shape: ShapeType::ConvexHull as u32,
+                material: 0,
+                generation: 0,
+                local_pos: child.local_pos.to_array(),
+                density,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: engine_schema::convex::convex_collider_params(
+                    base,
+                    1.0,
+                    child.hull.bounding_radius(),
+                ),
+            });
+        }
         body
     }
 

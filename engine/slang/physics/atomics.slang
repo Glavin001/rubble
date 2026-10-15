@@ -31,6 +31,21 @@ typealias AUint = Atomic<uint>;
 // Groupshared-only exchange: All* lowers to textureBarrier(), which naga/wgpu reject.
 #define GROUP_SYNC() GroupMemoryBarrierWithGroupSync()
 #define BIND(n) [[vk::binding(n, 0)]]
+#elif defined(ENGINE_CPU_TEST)
+// CPU conformance harness (slangc -target cpp): threads run sequentially, so
+// plain read-modify-writes are exact and barriers are no-ops. Kernels that need
+// cross-lane barriers are instantiated with one lane per item for this target.
+typealias AUint = uint;
+#define ALOAD(x) (x)
+#define ASTORE(x, v) (x) = (v)
+#define AADD2(x, v) (x) += (v)
+#define AADD3(x, v, o) do { (o) = (x); (x) += (v); } while (false)
+#define AOR2(x, v) (x) |= (v)
+#define AMAX2(x, v) (x) = max((x), (v))
+#define AXCHG3(x, v, o) do { (o) = (x); (x) = (v); } while (false)
+#define ACAS4(x, cmp, v, o) do { (o) = (x); if ((o) == (cmp)) (x) = (v); } while (false)
+#define GROUP_SYNC()
+#define BIND(n)
 #else
 #define BIND(n)
 typealias AUint = uint;
@@ -62,7 +77,7 @@ public struct GpuCounters
     uint iteration;
     AUint manifoldCount;
     AUint recolorCount; // ABI byte 52: compact pending-color work count
-    uint _pad1;
-    uint _pad2;
+    AUint convexSmall;  // ABI byte 56: convex SAT pairs, small bucket (front of list)
+    AUint convexLarge;  // ABI byte 60: convex SAT pairs, large bucket (back of list)
 };
 #endif

@@ -29,7 +29,7 @@ BIND(14) RWStructuredBuffer<AUint> gConstraintIds;
 BIND(15) RWStructuredBuffer<uint> gColorLists;      // packed colors + optional history/compacted-history rows
 BIND(16) RWStructuredBuffer<uint> gColorOffsets;    // stable packing: per-color tile counts/exclusive starts
 BIND(17) RWStructuredBuffer<AUint> gColorCounts;
-BIND(18) RWStructuredBuffer<float3> gHullVerts;
+BIND(18) RWStructuredBuffer<uint4> gHulls;           // packed convex hull arena (ABI v2)
 BIND(19) RWStructuredBuffer<AUint> gEvents;          // ring: type, id, ...
 BIND(20) RWStructuredBuffer<uint> gCcdFlags;        // compact recolor list, then per-body sleep/CCD flags
 // Binding order must match engine-metal `bind_all` (declaration order → Metal [[buffer(N)]]).
@@ -87,6 +87,7 @@ BIND(17) RWStructuredBuffer<uint> gSolveColorCounts;
 
 
 #include "../physics/contact_storage.slang"
+#include "../physics/convex.slang"
 
 // WebGPU limits each dispatch dimension to 65535 workgroups. Large workloads
 // use rows of 32768 groups (2^21 threads); never clamp away contacts/hash slots.
@@ -240,9 +241,10 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     if (i >= gCounters[0].colliderCount) return;
     Collider col = gColliders[i];
     BodyState b = gBodies[col.body];
-    if (bodyIsSleeping(b) && bodyIsDynamic(b))
+    // Keep a sleeping body's previous AABB/OBB, but build them on the first step:
+    // scenes may start asleep (pre-fractured rubble) and still need bounds.
+    if (bodyIsSleeping(b) && bodyIsDynamic(b) && HOST_S(17) > 0u)
     {
-        // Keep previous AABB; skip refit
         return;
     }
     float3 worldPos = transformPoint(b.position, b.orientation, col.localPos);
@@ -271,8 +273,19 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     }
     else
     {
-        // Convex: use sphere bound from params.w as radius hint
-        worldAabbSphere(worldPos, col.params.w + aabbPad, mn, mx);
+        // Exact bounds from every transformed vertex: one pass per collider, not
+        // per pair, and far tighter than a radius about the collider origin.
+        HullRef h = hullOf(col);
+        mn = float3(1e30, 1e30, 1e30);
+        mx = float3(-1e30, -1e30, -1e30);
+        for (uint v = 0u; v < h.nv; v++)
+        {
+            float3 p = transformPoint(worldPos, worldRot, hullVertex(h, v));
+            mn = min(mn, p);
+            mx = max(mx, p);
+        }
+        mn -= aabbPad;
+        mx += aabbPad;
     }
     Aabb box;
     box.mn = mn; box.mx = mx;
@@ -283,7 +296,19 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     // Convention: collider AABBs start at index max_bodies. Host sets gScratchAtomics[1] = max_bodies.
     uint base = HOST_S(1);
     gAabbs[base + i] = box;
-    // World OBB cache for box colliders (BP face-reject + narrowphase).
+    // World OBB cache for box colliders (BP face-reject + narrowphase). Convex
+    // hulls cache their local AABB as a conservative OBB for the same rejection.
+    if (col.shape == SHAPE_CONVEX)
+    {
+        HullRef h = hullOf(col);
+        WorldObbGpu w;
+        w.center = float4(transformPoint(worldPos, worldRot, hullLocalCenter(h)), 0.0);
+        w.half = float4(hullLocalHalf(h), 0.0);
+        w.axis0 = float4(quatRotate(worldRot, float3(1, 0, 0)), 0.0);
+        w.axis1 = float4(quatRotate(worldRot, float3(0, 1, 0)), 0.0);
+        w.axis2 = float4(quatRotate(worldRot, float3(0, 0, 1)), 0.0);
+        gWorldObbs[i] = w;
+    }
     if (col.shape == SHAPE_BOX)
     {
         float4 q = quatMul(b.orientation, col.localRot);
@@ -385,9 +410,30 @@ bool bodiesJointed(uint bodyA, uint bodyB)
     return false;
 }
 
+// Collision filtering (per collider; HOST_S(21) != 0 when any filter is set).
+// Collider.generation: categories (bits 0..15) | mask (bits 16..31); 0 means
+// "every category, collides with everything". Collider.material bits 16..31:
+// signed group; a shared positive group always collides and a shared negative
+// group never does, overriding categories (Box2D-style), for e.g. ragdolls or
+// the chunks of one fractured compound.
+bool collidersFilteredOut(uint i, uint j)
+{
+    Collider a = gColliders[i];
+    Collider b = gColliders[j];
+    int ga = int(a.material) >> 16;
+    int gb = int(b.material) >> 16;
+    if (ga != 0 && ga == gb) return ga < 0;
+    uint fa = a.generation == 0u ? 0xFFFFFFFFu : a.generation;
+    uint fb = b.generation == 0u ? 0xFFFFFFFFu : b.generation;
+    return ((fa & 0xFFFFu) & (fb >> 16)) == 0u || ((fb & 0xFFFFu) & (fa >> 16)) == 0u;
+}
+
+uint materialIndex(Collider c) { return c.material & 0xFFFFu; }
+
 void emitCandidate(uint i, uint j)
 {
     if (i == j) return;
+    if (HOST_S(21) != 0u && collidersFilteredOut(i, j)) return;
     uint a = min(i, j);
     uint b = max(i, j);
     uint slot;
@@ -432,7 +478,7 @@ BoxObb worldObbFromCache(uint colliderIdx)
 bool boxesSeparatedOnFaceAxis(BoxObb probe, uint otherCollider, float gap)
 {
     Collider cb = gColliders[otherCollider];
-    if (cb.shape != SHAPE_BOX) return false;
+    if (!shapeHasHull(cb.shape)) return false;
     BoxObb other = worldObbFromCache(otherCollider);
     float3 d = other.center - probe.center;
     float3 hA = probe.half;
@@ -462,12 +508,171 @@ bool boxesSeparatedOnFaceAxis(BoxObb probe, uint otherCollider, float gap)
     return false;
 }
 
+// ---- Hierarchical size-level grid (HOST_S(18) = level count; 0 = uniform grid) ----
+// Geometric levels in the spirit of three-avbd's fine/coarse ownership. Each
+// collider is inserted once, at the level whose cell (base·2^level) covers its
+// bound diameter, so compound children and mixed hull sizes never inflate the
+// cell of the whole scene. A collider queries its own and every coarser level's
+// 27 cells; fixed/sleeping fine colliders still query coarse movers (coarse
+// movers never visit fine cells). Colliders beyond the top level (oversized
+// statics) go to the explicit large list, tested by every mover.
+static const uint HIER_LEVEL_MASK_SLOT = 52u;
+// Oversized statics: count at 53, up to 10 collider IDs at 54..63. Kept clear of
+// the legacy large list (25..41), which overlaps Metal's HOST_S(26).
+static const uint HIER_LARGE_COUNT_SLOT = 53u;
+static const uint HIER_LARGE_MAX = 10u;
+
+uint hierLevel(float radius)
+{
+    float diameter = 2.0 * radius + 0.0004;
+    return uint(max(0.0, ceil(log2(max(diameter / PARAMS.gridCellSize, 1.0)))));
+}
+
+float hierCellSize(uint level) { return PARAMS.gridCellSize * exp2(float(level)); }
+
+int3 hierCell(Aabb a, uint level)
+{
+    return int3(floor((a.mn + a.mx) * (0.5 / hierCellSize(level))));
+}
+
+uint hierHash(int3 c, uint level)
+{
+    return (gridHash(c.x, c.y, c.z) ^ (level * 2654435769u)) & (gridHashSize() - 1u);
+}
+
+bool aabbOverlap(Aabb a, Aabb b)
+{
+    return all(a.mn <= b.mx) && all(b.mn <= a.mx);
+}
+
+bool bodyMoving(BodyState b) { return bodyIsDynamic(b) && !bodyIsSleeping(b); }
+
+// AABB and plane n·x = w: true when the box lies entirely above the plane.
+bool aabbAbovePlane(Aabb a, float4 plane)
+{
+    float3 n = normalize(plane.xyz);
+    float3 c = 0.5 * (a.mn + a.mx);
+    float3 e = 0.5 * (a.mx - a.mn);
+    return dot(n, c) - dot(abs(n), e) - plane.w > 0.0;
+}
+
+void hierInsert(uint i)
+{
+    Collider col = gColliders[i];
+    if (col.shape == SHAPE_PLANE)
+    {
+        uint slot;
+        AADD3(gScratchAtomics[42], 1, slot);
+        if (slot < 8u) ASTORE(gScratchAtomics[43u + slot], i);
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        return;
+    }
+    Aabb box = gAabbs[HOST_S(1) + i];
+    uint level = hierLevel(box._pad0);
+    if (level >= HOST_S(18))
+    {
+        uint slot;
+        AADD3(gScratchAtomics[HIER_LARGE_COUNT_SLOT], 1, slot);
+        if (slot < HIER_LARGE_MAX) ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + slot], i);
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        return;
+    }
+    // Occupied-level mask (scratch 52, zeroed by the host each step): queries
+    // skip empty levels, so the host can keep slack levels for f32 rounding.
+    AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], 1u << level);
+    uint prev;
+    AXCHG3(gConstraintIds[hierHash(hierCell(box, level), level)], i, prev);
+    gColorLists[i] = prev;
+}
+
+void hierQuery(uint i)
+{
+    Collider a = gColliders[i];
+    if (a.shape == SHAPE_PLANE) return;
+    BodyState ba = gBodies[a.body];
+    bool active = bodyMoving(ba);
+    uint base = HOST_S(1);
+    Aabb aa = gAabbs[base + i];
+    uint own = hierLevel(aa._pad0);
+    uint levels = HOST_S(18);
+    // Oversized colliders are static by host contract; movers find them.
+    if (own >= levels) return;
+    bool probeHasObb = shapeHasHull(a.shape);
+    BoxObb probe = probeHasObb ? worldObbFromCache(i)
+                               : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    const float faceGap = 0.001;
+    if (active)
+    {
+        uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
+        for (uint pi = 0u; pi < nPlanes; pi++)
+        {
+            uint j = ALOAD(gScratchAtomics[43u + pi]);
+            if (!aabbAbovePlane(aa, gColliders[j].params)) emitCandidate(i, j);
+        }
+        uint nLarge = min(ALOAD(gScratchAtomics[HIER_LARGE_COUNT_SLOT]), HIER_LARGE_MAX);
+        for (uint k = 0u; k < nLarge; k++)
+        {
+            uint j = ALOAD(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + k]);
+            Collider b = gColliders[j];
+            if (b.body == a.body || bodiesJointed(a.body, b.body)) continue;
+            if (!aabbOverlap(aa, gAabbs[base + j])) continue;
+            if (probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)) continue;
+            emitCandidate(i, j);
+        }
+    }
+    uint count = gCounters[0].colliderCount;
+    uint occupied = ALOAD(gScratchAtomics[HIER_LEVEL_MASK_SLOT]);
+    for (uint level = own; level < levels; level++)
+    {
+        if (!active && level == own) continue;
+        if (((occupied >> level) & 1u) == 0u) continue;
+        int3 center = hierCell(aa, level);
+        for (int z = -1; z <= 1; z++)
+        for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++)
+        {
+            int3 cell = center + int3(x, y, z);
+            uint j = ALOAD(gConstraintIds[hierHash(cell, level)]);
+            uint guard = 0u;
+            while (j != 0xFFFFFFFFu && guard < count)
+            {
+                guard++;
+                uint next = gColorLists[j];
+                Aabb ab = gAabbs[base + j];
+                // Hash buckets alias: accept only colliders whose true cell/level
+                // is this one, so no pair is visited twice.
+                if (j != i && hierLevel(ab._pad0) == level &&
+                    all(hierCell(ab, level) == cell) && aabbOverlap(aa, ab))
+                {
+                    Collider b = gColliders[j];
+                    if (b.body != a.body)
+                    {
+                        bool other = bodyMoving(gBodies[b.body]);
+                        bool owner = level > own || (active && (!other || i < j));
+                        if ((active || other) && owner &&
+                            !bodiesJointed(a.body, b.body) &&
+                            !(probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)))
+                            emitCandidate(i, j);
+                    }
+                }
+                j = next;
+            }
+            if (j != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        }
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_insert(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
     if (i >= gCounters[0].colliderCount) return;
+    if (HOST_S(18) != 0u)
+    {
+        hierInsert(i);
+        return;
+    }
     Collider col = gColliders[i];
     if (col.shape == SHAPE_PLANE)
     {
@@ -510,6 +715,11 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
     if (i >= gCounters[0].colliderCount) return;
+    if (HOST_S(18) != 0u)
+    {
+        hierQuery(i);
+        return;
+    }
     Collider col = gColliders[i];
     BodyState b = gBodies[col.body];
     if (!bodyIsDynamic(b)) return;
@@ -518,7 +728,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     Aabb box = gAabbs[base + i];
     bool sleeper = bodyIsSleeping(b);
     // Probe OBB from build_aabbs cache (three-avbd findPairs loads querier once).
-    bool probeIsBox = col.shape == SHAPE_BOX;
+    bool probeIsBox = shapeHasHull(col.shape);
     BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
     const float faceGap = 0.001;
 
@@ -681,7 +891,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
         if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
         if (box.mx.z < ab.mn.z || ab.mx.z < box.mn.z) continue;
-        if (probeIsBox && other.shape == SHAPE_BOX && boxesSeparatedOnFaceAxis(probeObb, j, faceGap))
+        if (probeIsBox && shapeHasHull(other.shape) && boxesSeparatedOnFaceAxis(probeObb, j, faceGap))
             continue;
         // Sphere large (smash ball): radius test.
         if (other.shape == SHAPE_SPHERE)
@@ -819,8 +1029,8 @@ void emitContactManifold(
         return;
     }
 
-    Material ma = gMaterials[ca.material];
-    Material mb = gMaterials[cb.material];
+    Material ma = gMaterials[materialIndex(ca)];
+    Material mb = gMaterials[materialIndex(cb)];
     float mu = sqrt(max(ma.friction, 0.0) * max(mb.friction, 0.0));
 
     for (int k = 0; k < count; k++)
@@ -868,10 +1078,45 @@ uint pairWarmKey(uint colA, uint colB)
     return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ 0xA5A5A5A5u) : h;
 }
 
+// Record warm hash (HOST_S(15) != 0): HOST_S(9) slots of four words in
+// gConstraintIds — claim (previous manifold + 1, unique so weak-CAS success is
+// unambiguous), collider A, collider B, and run start | run length << 28. A
+// lookup reads one slot line per probe instead of loading previous contacts.
+static const uint WARM_RUN_SHIFT = 28u;
+bool warmRecords() { return HOST_S(15) != 0u; }
+
+bool findWarmRecord(uint colA, uint colB, out uint startJ, out uint count)
+{
+    startJ = CONTACT_HASH_EMPTY; count = 0u;
+    uint slots = HOST_S(9);
+    uint h = pairWarmKey(colA, colB) & (slots - 1u);
+    // Scan to EMPTY and keep the lowest run start, matching the per-contact
+    // hash's minimum-head merge if a pair ever owned two previous manifolds.
+    for (uint probe = 0; probe < 64u; probe++)
+    {
+        uint w = ((h + probe) & (slots - 1u)) * 4u;
+        if (ALOAD(gConstraintIds[w]) == CONTACT_HASH_EMPTY) break;
+        if (ALOAD(gConstraintIds[w + 1u]) == colA && ALOAD(gConstraintIds[w + 2u]) == colB)
+        {
+            uint run = ALOAD(gConstraintIds[w + 3u]);
+            uint j = run & ((1u << WARM_RUN_SHIFT) - 1u);
+            if (j < startJ)
+            {
+                startJ = j;
+                count = run >> WARM_RUN_SHIFT;
+            }
+        }
+    }
+    return startJ != CONTACT_HASH_EMPTY;
+}
+
 float colliderMinSide(Collider col)
 {
     if (col.shape == SHAPE_SPHERE)
         return max(col.params.x * 2.0, 1e-6);
+    // Convex params.xyz are (tagged base, scale, 0); params.w bounds the hull.
+    if (col.shape == SHAPE_CONVEX)
+        return max(col.params.w, 1e-6);
     float3 h = col.params.xyz;
     return max(2.0 * min(h.x, min(h.y, h.z)), 1e-6);
 }
@@ -916,14 +1161,84 @@ void update_refs(uint3 tid : SV_DispatchThreadID)
 }
 
 // three-avbd reuseContacts. Opt-in via params.flags bit0.
+// Copy one previous contact run (contiguous, same collider pair) into this
+// step as a manifold whose points persistence resolves from the previous half.
+void emitReusedRun(uint colA, uint colB, uint startJ, uint count)
+{
+    uint prevOff = HOST_S(8);
+    uint maxC = HOST_S(3);
+    uint maxM = HOST_S(10);
+    uint mslot;
+    AADD3(gCounters[0].manifoldCount, 1, mslot);
+    if (mslot >= maxM)
+    {
+        AOR2(gCounters[0].overflowFlags, OVERFLOW_MANIFOLDS);
+        return;
+    }
+    uint cStart;
+    AADD3(gCounters[0].contactCount, count, cStart);
+    uint curOff = HOST_S(11);
+    if (cStart >= maxC || cStart + count > maxC)
+    {
+        AOR2(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
+        Manifold dead;
+        dead.colliderA = colA;
+        dead.colliderB = colB;
+        dead.contactStart = 0;
+        dead.contactCount = 0;
+        dead.normal = float3(0, 1, 0);
+        dead.friction = 0.0;
+        gManifolds[mslot] = dead;
+        return;
+    }
+
+    Contact head = READ_CONTACT(prevOff + startJ);
+    for (uint k = 0u; k < count; k++)
+    {
+        // Defer the full copy/transform to the coalesced per-contact persistence
+        // pass. Encode the exact source index in the transient alive word.
+        MARK_REUSED_CONTACT(curOff + cStart + k, mslot, startJ + k + 2u);
+    }
+    Manifold mf;
+    mf.colliderA = colA;
+    mf.colliderB = colB;
+    mf.contactStart = curOff + cStart;
+    mf.contactCount = count;
+    mf.normal = head.normal;
+    mf.friction = head.friction;
+    gManifolds[mslot] = mf;
+}
+
 bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float margin)
 {
+    uint prevFeature;
+    return tryReuseContactsHint(pair, ba, bb, margin, prevFeature);
+}
+
+// As tryReuseContacts; also reports the previous run's first feature ID (0 if
+// the pair had no previous contacts) so convex SAT can start from that axis.
+bool tryReuseContactsHint(CandidatePair pair, BodyState ba, BodyState bb, float margin, out uint prevFeature)
+{
+    prevFeature = 0u;
     uint prevOff = HOST_S(8);
     uint prevN = HOST_S(7);
     uint hashN = HOST_S(9);
+    uint startJ = CONTACT_HASH_EMPTY;
+    uint count = 0u;
+    if (warmRecords())
+    {
+        // Run start and length were resolved once per manifold at insert time.
+        if (!findWarmRecord(pair.colliderA, pair.colliderB, startJ, count)) return false;
+        // _pad1 = asfloat(generated step). Skip if either body moved after that.
+        Contact first = READ_CONTACT(prevOff + startJ);
+        prevFeature = first.featureId;
+        uint generated = asuint(first._pad1);
+        if (generated < max(ba.generation, bb.generation)) return false;
+    }
+    else
+    {
     uint key = pairWarmKey(pair.colliderA, pair.colliderB);
     uint h = key & (hashN - 1u);
-    uint startJ = CONTACT_HASH_EMPTY;
     for (uint probe = 0; probe < 64u; probe++)
     {
         uint slot = (h + probe) & (hashN - 1u);
@@ -943,13 +1258,14 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
         return false;
     }
     // _pad1 = asfloat(generated step). Skip if either body moved after that.
-    uint generated = asuint(READ_CONTACT(prevOff + startJ)._pad1);
+    Contact first = READ_CONTACT(prevOff + startJ);
+    prevFeature = first.featureId;
+    uint generated = asuint(first._pad1);
     if (generated < max(ba.generation, bb.generation))
     {
         return false;
     }
 
-    uint count = 0u;
     for (uint k = 0u; k < 8u; k++)
     {
         uint j = startJ + k;
@@ -961,51 +1277,42 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
             break;
         count++;
     }
+    }
     if (count == 0u) return false;
-
-    uint maxC = HOST_S(3);
-    uint maxM = HOST_S(10);
-    uint mslot;
-    AADD3(gCounters[0].manifoldCount, 1, mslot);
-    if (mslot >= maxM)
-    {
-        AOR2(gCounters[0].overflowFlags, OVERFLOW_MANIFOLDS);
-        return true;
-    }
-    uint cStart;
-    AADD3(gCounters[0].contactCount, count, cStart);
-    uint curOff = HOST_S(11);
-    if (cStart >= maxC || cStart + count > maxC)
-    {
-        AOR2(gCounters[0].overflowFlags, OVERFLOW_CONTACTS);
-        Manifold dead;
-        dead.colliderA = pair.colliderA;
-        dead.colliderB = pair.colliderB;
-        dead.contactStart = 0;
-        dead.contactCount = 0;
-        dead.normal = float3(0, 1, 0);
-        dead.friction = 0.0;
-        gManifolds[mslot] = dead;
-        return true;
-    }
-
-    Contact head = READ_CONTACT(prevOff + startJ);
-    for (uint k = 0u; k < count; k++)
-    {
-        // Defer the full copy/transform to the coalesced per-contact persistence
-        // pass. Encode the exact source index in the transient alive word.
-        MARK_REUSED_CONTACT(curOff + cStart + k, mslot, startJ + k + 2u);
-    }
-    Manifold mf;
-    mf.colliderA = pair.colliderA;
-    mf.colliderB = pair.colliderB;
-    mf.contactStart = curOff + cStart;
-    mf.contactCount = count;
-    mf.normal = head.normal;
-    mf.friction = head.friction;
-    gManifolds[mslot] = mf;
+    emitReusedRun(pair.colliderA, pair.colliderB, startJ, count);
     wakeFromContact(ba, bb, gColliders[pair.colliderA], gColliders[pair.colliderB]);
     return true;
+}
+
+// Whole-step manifold reuse (three-avbd reuseManifolds): skip bounds, broadphase
+// and narrowphase, and carry every previous contact run forward; persistence
+// re-evaluates C0 from the anchors. One thread per previous contact (slot 73);
+// each run's head emits it. Hosts only schedule this while the previous step's
+// manifolds are valid (no scene, filter, hull or command changes since).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void reuse_all_manifolds(uint3 tid : SV_DispatchThreadID)
+{
+    uint j = dispatchIndex(tid);
+    uint prevN = min(HOST_S(7), HOST_S(3));
+    if (j >= prevN) return;
+    uint prevOff = HOST_S(8);
+    Contact c = READ_CONTACT(prevOff + j);
+    if (c.alive == 0u) return;
+    if (j > 0u)
+    {
+        Contact before = READ_CONTACT(prevOff + j - 1u);
+        if (before.alive != 0u && before.colliderA == c.colliderA && before.colliderB == c.colliderB)
+            return;
+    }
+    uint count = 1u;
+    while (count < 8u && j + count < prevN)
+    {
+        Contact next = READ_CONTACT(prevOff + j + count);
+        if (next.alive == 0u || next.colliderA != c.colliderA || next.colliderB != c.colliderB) break;
+        count++;
+    }
+    emitReusedRun(c.colliderA, c.colliderB, j, count);
 }
 
 [shader("compute")]
@@ -1029,9 +1336,19 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     bool hit = false;
 
     // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
+    uint prevFeature = 0u;
     if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
-        tryReuseContacts(pair, ba, bb, margin))
+        tryReuseContactsHint(pair, ba, bb, margin, prevFeature))
         return;
+
+    // Hull pairs run in convex_classify / convex_sat_* / convex_manifold. Those
+    // entries bind the hull arena and the convex work list; this one stays within
+    // the WebGPU storage-buffer budget. Carry the previous SAT feature forward.
+    if (ca.shape == SHAPE_CONVEX || cb.shape == SHAPE_CONVEX)
+    {
+        gCandidates[i]._pad = CONVEX_DEFER | convexHintFromFeature(prevFeature);
+        return;
+    }
 
     // Multi-point manifolds (demo3d / three-avbd) — required for stable stacks.
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_BOX)
@@ -1270,7 +1587,7 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
 void contact_hash_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    uint n = HOST_S(9); // hash table word count
+    uint n = HOST_S(9) * (warmRecords() ? 4u : 1u); // hash table word count
     if (i >= n) return;
     ASTORE(gConstraintIds[i], CONTACT_HASH_EMPTY);
 }
@@ -1363,10 +1680,39 @@ void contact_hash_insert_manifolds(uint3 tid : SV_DispatchThreadID)
         if (j >= prevN) return;
         if (CONTACT_STATE(prevOff + j) != 0u)
         {
-            insertWarmHead(j, mf.colliderA, mf.colliderB, prevOff);
+            // Persistence marks every point of a live manifold alive and overflow
+            // only zeroes points of zero-count manifolds, so the run from j is the
+            // rest of this block (at most eight, within the previous set).
+            if (warmRecords())
+                insertWarmRecord(m, j, min(min(start + mf.contactCount - j, 8u), prevN - j),
+                    mf.colliderA, mf.colliderB);
+            else insertWarmHead(j, mf.colliderA, mf.colliderB, prevOff);
             return;
         }
     }
+}
+
+void insertWarmRecord(uint m, uint j, uint count, uint colA, uint colB)
+{
+    uint claim = m + 1u;
+    uint slots = HOST_S(9);
+    uint h = pairWarmKey(colA, colB) & (slots - 1u);
+    for (uint probe = 0; probe < 64u; probe++)
+    {
+        uint w = ((h + probe) & (slots - 1u)) * 4u;
+        uint was;
+        // ACAS4 retries spurious weak-CAS failures; the claim is unique, so the
+        // slot holding it after an EMPTY result proves this thread won it.
+        ACAS4(gConstraintIds[w], CONTACT_HASH_EMPTY, claim, was);
+        if (was == CONTACT_HASH_EMPTY && ALOAD(gConstraintIds[w]) == claim)
+        {
+            ASTORE(gConstraintIds[w + 1u], colA);
+            ASTORE(gConstraintIds[w + 2u], colB);
+            ASTORE(gConstraintIds[w + 3u], j | (count << WARM_RUN_SHIFT));
+            return;
+        }
+    }
+    AOR2(gCounters[0].overflowFlags, OVERFLOW_WARM_HASH);
 }
 
 // Shared point update; callers choose contact or manifold scheduling. Pair bodies
@@ -1402,6 +1748,10 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
         uint key = pairWarmKey(c.colliderA, c.colliderB);
         uint h = key & (hashN - 1u);
         uint startJ = CONTACT_HASH_EMPTY;
+        uint runCount;
+        if (warmRecords())
+            findWarmRecord(c.colliderA, c.colliderB, startJ, runCount);
+        else
         for (uint probe = 0; probe < 64u; probe++)
         {
             uint slot = (h + probe) & (hashN - 1u);
@@ -2097,6 +2447,35 @@ uint primalLanesFor(uint bodies)
     return 8u;
 }
 
+// Degree-aware lanes (opt-in, HOST_S(20) != 0; host sizes gColorCounts to 128
+// words): gColorCounts[64 + c] holds colour c's largest CSR degree. A compound
+// body with hundreds of manifolds otherwise holds its whole colour dispatch
+// while 8 lanes walk its edges serially. Widen to 16/32/64 lanes when the
+// colour is small enough that the extra threads stay under 64k.
+static const uint COLOR_DEGREE_BASE = 64u;
+uint primalLanesForDegree(uint bodies, uint maxDegree)
+{
+    uint lanes = primalLanesFor(bodies);
+    if (HOST_S(20) == 0u || bodies == 0u) return lanes;
+    uint want = lanes;
+    while (want < 64u && maxDegree > want * 8u) want *= 2u;
+    while (want > lanes && bodies * want > 65536u) want /= 2u;
+    return max(lanes, want);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void record_color_degrees(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= ALOAD(gCounters[0].awakeCount)) return;
+    uint body = gAwakeList[li];
+    uint color = ALOAD(gBodyColor[body]);
+    if (color >= min(HOST_S(4), COLOR_DEGREE_BASE)) return;
+    uint degree = ALOAD(CINDEX(body + 1u)) - ALOAD(CINDEX(body));
+    AMAX2(gColorCounts[COLOR_DEGREE_BASE + color], degree);
+}
+
 // Slots 0..63 are colour dispatches. Slots 64..67 are the *current* step's
 // candidate, contact/joint, manifold and awake counts; slot 68 is previous contacts.
 // Hosts opting into incremental coloring (HOST_S(26)) also allocate slot 69.
@@ -2124,6 +2503,8 @@ void write_work_args(uint3 tid : SV_DispatchThreadID)
                                             : min(HOST_S(7), HOST_S(3)));
     // Opt-in keeps hosts without a history row / slot 69 compatible.
     if (HOST_S(26) != 0u) writeDispatchArgs(69u, ALOAD(gCounters[0].recolorCount));
+    // Slot 73: previous contacts, for whole-step manifold reuse (any hash mode).
+    writeDispatchArgs(73u, min(HOST_S(7), HOST_S(3)));
 }
 
 // Write Metal indirect threadgroup counts for each colour (0 groups ⇒ skipped).
@@ -2138,7 +2519,8 @@ void write_color_args(uint3 tid : SV_DispatchThreadID)
     if (c >= min(HOST_S(4), 64u)) return;
     uint n = ALOAD(gColorCounts[c]);
     if (n != 0u) AMAX2(gCounters[0].colorCount, c + 1u);
-    uint lanes = primalLanesFor(n);
+    uint lanes = primalLanesForDegree(
+        n, HOST_S(20) != 0u ? ALOAD(gColorCounts[COLOR_DEGREE_BASE + c]) : 0u);
     uint threads = n * lanes;
     writeDispatchArgs(c, threads);
 }
@@ -2711,7 +3093,9 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
     uint local = lid.x;
     // Storage loads are non-uniform in WGSL. Publish lanes through workgroup
     // memory; the WGSL post-pass rewrites the read as workgroupUniformLoad.
-    if (local == 0u) gsUniformLanes = primalLanesFor(count);
+    if (local == 0u)
+        gsUniformLanes = primalLanesForDegree(
+            count, HOST_S(20) != 0u ? SOLVE_COUNT(COLOR_DEGREE_BASE + color) : 0u);
     GROUP_SYNC();
     uint lanes = gsUniformLanes;
     uint threads = count * lanes;
@@ -2738,7 +3122,10 @@ void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThr
     }
     else
     {
-        // lanes is 2, 4, or 8. Unrolled halving (three-avbd primalColor).
+        // lanes is 2..64. Unrolled halving (three-avbd primalColor).
+        if (lanes >= 64u) primalReduceStep(32u, live, lane, slot, A, rhs);
+        if (lanes >= 32u) primalReduceStep(16u, live, lane, slot, A, rhs);
+        if (lanes >= 16u) primalReduceStep(8u, live, lane, slot, A, rhs);
         if (lanes >= 8u) primalReduceStep(4u, live, lane, slot, A, rhs);
         if (lanes >= 4u) primalReduceStep(2u, live, lane, slot, A, rhs);
         primalReduceStep(1u, live, lane, slot, A, rhs);

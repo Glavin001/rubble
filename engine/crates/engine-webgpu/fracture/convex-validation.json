@@ -1,0 +1,114 @@
+{
+  "passed": true,
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "results": [
+    {
+      "bodies": 520,
+      "vertices": 8,
+      "expectedPairs": 127,
+      "counters": {
+        "contact": 501,
+        "candidate": 130,
+        "awake": 0,
+        "color": 0,
+        "manifold": 127,
+        "overflow": 0
+      }
+    },
+    {
+      "bodies": 64,
+      "vertices": 64,
+      "expectedPairs": 15,
+      "counters": {
+        "contact": 84,
+        "candidate": 15,
+        "awake": 0,
+        "color": 0,
+        "manifold": 15,
+        "overflow": 0
+      }
+    },
+    {
+      "bodies": 24,
+      "vertices": 64,
+      "expectedPairs": 6,
+      "counters": {
+        "contact": 23,
+        "candidate": 6,
+        "awake": 0,
+        "color": 0,
+        "manifold": 6,
+        "overflow": 0
+      }
+    },
+    {
+      "test": "compound aperture",
+      "passed": true
+    },
+    {
+      "test": "batched contact reuse",
+      "maxPoseError": 0,
+      "passed": true
+    },
+    {
+      "bodies": 10000,
+      "verticesPerHull": 64,
+      "active": 10000,
+      "wallMs": 281.7800000011921,
+      "counters": {
+        "contact": 112107,
+        "candidate": 35923,
+        "awake": 10000,
+        "color": 6,
+        "manifold": 26837,
+        "overflow": 0
+      },
+      "profile": {
+        "supported": true,
+        "wallMs": 236.10000000149012,
+        "boundsMs": 0.131072,
+        "broadphaseMs": 0.262144,
+        "narrowphaseMs": 95.617024,
+        "persistMs": 0.32768,
+        "topologyMs": 2.555904,
+        "solveMs": 106.03724799999998,
+        "sleepMs": 14.614528,
+        "gpuMs": 219.54559999999998,
+        "counters": {
+          "contact": 112040,
+          "candidate": 35849,
+          "awake": 10000,
+          "color": 6,
+          "manifold": 26856,
+          "overflow": 0
+        }
+      }
+    }
+  ],
+  "date": "2026-10-14",
+  "notes": [
+    "Local Chrome WebGPU adapter reports Apple / metal-3. Measurements are not hardware-isolated.",
+    "Dense 10,000-body scene: 64-vertex prisms, eight AVBD iterations, contact reuse disabled; all bodies active. One warm-up, five timed steps; pose readback excluded.",
+    "Correctness checks compare GPU contacts against exhaustive CPU SAT; scale run checks finite state and overflow, not CPU SAT for every scale pair.",
+    "Not a real-time performance qualification."
+  ],
+  "archImpactRegression": {
+    "passed": true,
+    "steps": 840,
+    "peakContacts": 103,
+    "peakAwake": 24,
+    "maxDisplacement": 21.737438154049123,
+    "minHullY": -0.0020092718530642095,
+    "counters": {
+      "contact": 5,
+      "candidate": 2,
+      "awake": 2,
+      "color": 1,
+      "manifold": 2,
+      "overflow": 0
+    }
+  }
+}
