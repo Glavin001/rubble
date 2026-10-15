@@ -61,7 +61,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       s[20] = b(cap.maxBodies, 4);
       s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
       s[22] = 96 * PASS_ALIGN;
-      s[23] = b(Math.max(cap.maxColors, 77) * 3, 4); // colours, work 64..73, convex 74..76
+      s[23] = b(Math.max(cap.maxColors, 79) * 3, 4); // colours, work 64..73, convex 74..76, finer scan 77, moved 78
       s[24] = b(cap.maxColliders, 80);
       s[25] = b(cap.maxCandidates, 32);
       s[26] = b(cap.maxBodies, 32);
@@ -81,7 +81,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       reuse_all_manifolds: 'reuse_all_manifolds_persistent',
     };
     const K = [
-      'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query', 'write_work_args',
+      'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query', 'broadphase_query_awake', 'write_finer_args', 'write_moved_args', 'broadphase_query_finer', 'write_work_args',
       'update_refs', 'contact_hash_clear', 'contact_hash_insert', 'narrowphase',
       'convex_classify', 'convex_bucket', 'convex_write_args', 'convex_sat_small', 'convex_sat_large', 'convex_manifold', 'reuse_all_manifolds',
       'persist_contacts', 'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
@@ -337,7 +337,9 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     }
 
     // Full bounds pass needed (first step, host writes); see scratchWords.
-    let boundsStale = true;
+    let boundsStale = true, movedOnlyStep = false;
+    // Awake-only broadphase queries on moved-only steps (identical pairs).
+    let awakeQueries = budget.awakeQueries !== false;
     const boundsSortable = colliders.every((c, i) => i === 0 || c.body >= colliders[i - 1].body) &&
       bodies.every((b) => !(b.flags & 2));
     // With most bodies awake the full pass is faster (no per-body search, even
@@ -365,6 +367,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
       // Last step's awake count (its awake list is still in gAwakeList) -> HOST_S(6).
       if (s[19]) enc.copyBufferToBuffer(bufs[7], 20, bufs[6], 80 + 6 * 4, 4);
+      movedOnlyStep = s[19] !== 0;
       boundsStale = false;
       enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, COUNTER_BYTES);
       enc.copyBufferToBuffer(hostUpload, 608, bufs[17], 0, colorCountsBytes);
@@ -394,7 +397,11 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     // marks profiling boundaries; it is a no-op for ordinary steps.
     function encodeCollision(pass, phase, reuse) {
       const nCols = Math.max(colliderCount, 1), nBodies = Math.max(bodyCount, 1);
-      disp(pass, 'build_aabbs', nCols);
+      // Moved-only bounds: last step's awake bodies (work slot 78).
+      if (movedOnlyStep) {
+        disp(pass, 'write_moved_args', 64);
+        dispWork(pass, 'build_aabbs', 78);
+      } else disp(pass, 'build_aabbs', nCols);
       if (jointCount) {
         // Exact bonded-pair set for the broadphase (broken bonds are left out).
         disp(pass, 'joint_hash_clear', jointHashSlots);
@@ -404,7 +411,13 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       disp(pass, 'broadphase_clear', gridHashWords);
       disp(pass, 'broadphase_insert', nCols);
       pass = phase('broadphaseInsert');
-      disp(pass, 'broadphase_query', nCols);
+      if (movedOnlyStep && awakeQueries) {
+        // Only last step's awake bodies query; coarse movers then scan finer
+        // cells for resting colliders (same pairs as every collider querying).
+        dispWork(pass, 'broadphase_query_awake', 78);
+        disp(pass, 'write_finer_args', 64);
+        dispWork(pass, 'broadphase_query_finer', 77);
+      } else disp(pass, 'broadphase_query', nCols);
       disp(pass, 'write_work_args', 64);
       pass = phase('broadphase');
       if (reuse) {
@@ -702,22 +715,26 @@ return {
  // Explicit opt-in; no readback/allocation on the interactive hot path.
  // Contacts are persistent cold records: 8 words (colliderA, colliderB,
  // featureId, generation, normal xyz, friction).
- async inspectCollisions({flags=0}={}){
-   const enc=device.createCommandEncoder(),savedFlags=params.flags;params.flags=flags;writeHost(enc);params.flags=savedFlags;let pass=enc.beginComputePass();
-   pass=encodeCollision(pass,()=>pass,false);pass.end();device.queue.submit([enc.finish()]);manifoldsValid=false;
-   await readCounters();
-   if(last.overflow)throw new Error(`Collision overflow ${last.overflow}`);
+ async inspectCollisions({flags=0,awakeQueries:aq=awakeQueries}={}){
+   const enc=device.createCommandEncoder(),savedFlags=params.flags,savedAq=awakeQueries;params.flags=flags;awakeQueries=aq;writeHost(enc);params.flags=savedFlags;let pass=enc.beginComputePass();
+   pass=encodeCollision(pass,()=>pass,false);pass.end();device.queue.submit([enc.finish()]);manifoldsValid=false;awakeQueries=savedAq;
+   // The pass reset the GPU awake count: the next step rebuilds every bound.
+   boundsStale=true;
+   // Report this pass's counters but keep the stepping state: a collision-only
+   // pass counts no awake bodies, and step() skips work when last.awake is 0.
+   const stepState=last;await readCounters();const counters=last;last=stepState;
+   if(counters.overflow)throw new Error(`Collision overflow ${counters.overflow}`);
    const read=async(buffer,offset,size)=>{
      if(!size)return new ArrayBuffer(0);
      const temp=device.createBuffer({size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
      try{const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,offset,temp,0,size);device.queue.submit([e.finish()]);await temp.mapAsync(GPUMapMode.READ);return temp.getMappedRange().slice(0)}finally{temp.destroy()}
    };
    const base=parity===0?0:cap.maxContacts;
-   return {counters:{...last},base,pairs:new Uint32Array(await read(bufs[10],0,last.candidate*16)),
+   return {counters:{...counters},base,pairs:new Uint32Array(await read(bufs[10],0,counters.candidate*16)),
      bounds:new Float32Array(await read(bufs[9],cap.maxBodies*32,colliderCount*32)),
-     contacts:new Uint32Array(await read(bufs[4],base*32,last.contact*32)),
-     points:new Float32Array(await read(bufs[27],base*64,last.contact*64)),
-     manifolds:new Uint32Array(await read(bufs[25],0,last.manifold*32))};
+     contacts:new Uint32Array(await read(bufs[4],base*32,counters.contact*32)),
+     points:new Float32Array(await read(bufs[27],base*64,counters.contact*64)),
+     manifolds:new Uint32Array(await read(bufs[25],0,counters.manifold*32))};
  },
  // Read-only view of the last step's contacts (no collision pass), for debugging.
  async readContacts(){
@@ -833,6 +850,9 @@ return {
    hasFilters=colliders.some((x)=>{const f=filterOf(x);return f.generation!==0||(f.material>>>16)!==0});
    manifoldsValid=false;
  },
+ // Diagnostics: write back a snapshot() of the bodies (e.g. between two
+ // inspectCollisions calls, whose narrowphase may wake bodies).
+ restoreBodies(data){device.queue.writeBuffer(bufs[0],0,data);boundsStale=true;},
  async snapshot(){const enc=device.createCommandEncoder();enc.copyBufferToBuffer(bufs[0],0,snapshot,0,scene.bodies.length*112);device.queue.submit([enc.finish()]);await snapshot.mapAsync(GPUMapMode.READ);const bytes=snapshot.getMappedRange().slice(0);snapshot.unmap();return new Float32Array(bytes);},
  reset(){
    boundsStale=true;
