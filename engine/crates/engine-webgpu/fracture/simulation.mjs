@@ -326,9 +326,22 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       s[18] = grid.levels;   // hierarchical broadphase levels
       s[29] = 1;             // degree-aware primal lanes (bufs[17] holds 128 words)
       s[30] = hasFilters ? 1 : 0; // collision filters present
+      // Moved-only bounds: rebuild AABBs only for last step's awake bodies
+      // (build_aabbs). Needs colliders sorted by body, no kinematic bodies, and
+      // no host-side pose/collider write since the last step.
+      s[19] = movedOnlyBounds() ? 1 : 0;
       s[24] = csrBase;
       return s;
     }
+
+    // Full bounds pass needed (first step, host writes); see scratchWords.
+    let boundsStale = true;
+    const boundsSortable = colliders.every((c, i) => i === 0 || c.body >= colliders[i - 1].body) &&
+      bodies.every((b) => !(b.flags & 2));
+    // With most bodies awake the full pass is faster (no per-body search, even
+    // load); both paths give identical bounds, so pick by last step's count.
+    const movedOnlyBounds = () => boundsSortable && !boundsStale && initialized && budget.movedOnlyBounds !== false &&
+      (budget.movedOnlyBounds === true || last.awake * 4 < bodyCount);
 
     function writeHost(enc) {
       const s = scratchWords();
@@ -348,6 +361,9 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       // Keep the previous GPU count before clearing counters. A benchmark queues
       // ten steps between CPU readbacks; last.contact is stale within that batch.
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
+      // Last step's awake count (its awake list is still in gAwakeList) -> HOST_S(6).
+      if (s[19]) enc.copyBufferToBuffer(bufs[7], 20, bufs[6], 80 + 6 * 4, 4);
+      boundsStale = false;
       enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, COUNTER_BYTES);
       enc.copyBufferToBuffer(hostUpload, 608, bufs[17], 0, colorCountsBytes);
     }
@@ -733,6 +749,7 @@ return {
  // Live solver parameters (dt, iterations, ...), packed again every step.
  get params(){return params},
  launch(origin,direction,{speed,arc=scene.projectileArc??true}={}){
+   boundsStale=true;
    if(shots>=scene.projectileCount)throw new Error('All 16 projectiles fired. Reset to reload.');
    if(![...origin,...direction].every(Number.isFinite))throw new Error('Invalid projectile ray');
    const id=scene.projectileStart+shots,mass=scene.projectileMass,r=scene.projectileRadius;
@@ -787,6 +804,7 @@ return {
  // Upload the arena's changed records; grows the hull buffer (power of two,
  // contents copied) and rebuilds the bind groups that reference it.
  syncHulls(arena){
+   boundsStale=true;
    const needed=arena.records;
    if(needed>hullRecordsCapacity){
      const records=2**Math.ceil(Math.log2(needed)),size=records*16;
@@ -803,6 +821,7 @@ return {
  },
  // Replace a collider (hull swap, filter change). Release old hulls yourself.
  setCollider(index,c){
+   boundsStale=true;
    if(!(index>=0&&index<colliderCount))throw new Error('collider out of range');
    colliders[index]=c;const bytes=new ArrayBuffer(64);writeCollider(bytes,0,c);
    device.queue.writeBuffer(bufs[2],index*64,bytes);writeCollider(colBytes,index,c);
@@ -812,6 +831,7 @@ return {
  },
  async snapshot(){const enc=device.createCommandEncoder();enc.copyBufferToBuffer(bufs[0],0,snapshot,0,scene.bodies.length*112);device.queue.submit([enc.finish()]);await snapshot.mapAsync(GPUMapMode.READ);const bytes=snapshot.getMappedRange().slice(0);snapshot.unmap();return new Float32Array(bytes);},
  reset(){
+   boundsStale=true;
    manifoldsValid=false;
    const enc=device.createCommandEncoder();
    for(let i=0;i<bufs.length;i++)if(![0,2,3,18,22].includes(i))enc.clearBuffer(bufs[i]);

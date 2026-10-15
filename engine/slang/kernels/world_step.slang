@@ -237,11 +237,32 @@ void predict_bodies_listed(uint3 tid : SV_DispatchThreadID)
     predictOne(gAwakeList[li]);
 }
 
+// Moved-only bounds (HOST_S(19) != 0, JS host): one thread per body that was
+// awake in the previous step (gAwakeList still holds that list, its length is
+// copied to HOST_S(6) before the counters reset). Only those bodies moved, so
+// every other collider's stored AABB/OBB is already exact. Colliders are
+// sorted by body (host-checked), so a body's run is found by binary search.
+// Hosts fall back to the full pass after any host-side pose or collider write.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void build_aabbs(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
+    if (HOST_S(19) != 0u)
+    {
+        if (i >= HOST_S(6)) return;
+        uint body = gAwakeList[i];
+        uint n = gCounters[0].colliderCount;
+        uint lo = 0u, hi = n;
+        while (lo < hi)
+        {
+            uint mid = (lo + hi) >> 1;
+            if (gColliders[mid].body < body) lo = mid + 1u; else hi = mid;
+        }
+        for (uint c = lo; c < n && gColliders[c].body == body; c++)
+            buildColliderBounds(c, gColliders[c], gBodies[body]);
+        return;
+    }
     if (i >= gCounters[0].colliderCount) return;
     Collider col = gColliders[i];
     BodyState b = gBodies[col.body];
@@ -251,6 +272,11 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     {
         return;
     }
+    buildColliderBounds(i, col, b);
+}
+
+void buildColliderBounds(uint i, Collider col, BodyState b)
+{
     float3 worldPos = transformPoint(b.position, b.orientation, col.localPos);
     float4 worldRot = quatMul(b.orientation, col.localRot);
     float3 mn, mx;
