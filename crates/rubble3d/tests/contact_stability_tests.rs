@@ -97,7 +97,12 @@ fn build_pyramid() -> Option<(World, Vec<TrackedBody3D>, Vec3)> {
 /// step per frame this compacts so fast it tunnels into deep overlap and the
 /// penalty solver explodes it (energy injection, boxes launched). With adaptive
 /// substepping (as the demo scenes ship) it stays bounded and settles.
-fn build_grid(nx: usize, ny: usize, nz: usize, max_substeps: u32) -> Option<(World, Vec<TrackedBody3D>, Vec3)> {
+fn build_grid(
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    max_substeps: u32,
+) -> Option<(World, Vec<TrackedBody3D>, Vec3)> {
     let gravity = Vec3::new(0.0, -9.81, 0.0);
     let mut world = try_world(SimConfig {
         gravity,
