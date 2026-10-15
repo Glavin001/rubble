@@ -98,7 +98,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
-        manifoldHashInsert:false, gridHashWords:() => 0,
+        manifoldHashInsert:false, gridHashWords:() => 0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
         sleepRounds:8, PASS_ALIGN:256, bufs:[],
         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
@@ -188,7 +188,8 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
 // and encoder: per-manifold insertion reads the previous step's gManifolds, so it
 // must use the copied GPU manifold count and run before narrowphase overwrites it.
 const modeSource = html.slice(html.indexOf('const qs ='), html.indexOf('const regressionKind ='));
-for (const [query, expected] of [['?scene=ring110k','manifold'],['?scene=gables506k','manifold'],
+for (const [query, expected] of [['?scene=ring110k','record'],['?scene=gables506k','record'],
+  ['?scene=ring110k&hashInsert=manifold','manifold'],
   ['?scene=columns','contact'],['?scene=ring110k&hashInsert=contact','contact'],
   ['?scene=gables506k&hashInsert=contact','contact'],['?scene=columns&hashInsert=manifold','manifold']]) {
   test(`hash insert mode parses explicitly (${query})`, () => {
@@ -197,7 +198,7 @@ for (const [query, expected] of [['?scene=ring110k','manifold'],['?scene=gables5
 }
 test('invalid hash insert mode fails before allocating GPU work', () => {
   assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=ring110k&hashInsert=pair'}}),
-    /hashInsert must be contact or manifold/);
+    /hashInsert must be contact, manifold or record/);
 });
 
 function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false}) {
@@ -209,7 +210,7 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false}) {
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0,
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
@@ -243,7 +244,7 @@ test('host upload publishes the previous GPU manifold count before counters rese
   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
     const copies = [];
     const context = {
-      manifoldHashInsert, gridHashWords:() => 0, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
+      manifoldHashInsert, gridHashWords:() => 0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152), steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
       last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
@@ -279,7 +280,7 @@ for (const sparseStart of [10, 32, 0]) {
       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
-      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0,
+      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
       physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix:true,
       sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
       writeHost() {}, disp(p,name) { trace.push({name, phase:p.id}); },
@@ -314,11 +315,26 @@ test('broadphase grid table scales with colliders and clears every head', () => 
     detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
     last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
     nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576,
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:32, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads}); }, dispWork() {}, encoder:{beginComputePass:pass},
   });
   assert.equal(trace.find(c=>c.name==='broadphase_clear').threads, 1048576,
     'The clear must cover every head HOST_S(16) addresses; stale heads link last step\'s colliders into new buckets.');
+});
+
+// Record warm hash sizing: slots hold one previous manifold each. The CPU
+// contact count is a low seed during the first batch, so the body floor keeps
+// the table from exhausting its probe limit; four words per slot stay pre-CSR.
+test('record warm hash slots cover manifolds even with a stale contact seed', () => {
+  const sizing = html.slice(html.indexOf('function warmHashSlots('), html.indexOf('// 0 keeps the shader'));
+  const nextPow2 = n => 2 ** Math.ceil(Math.log2(n));
+  const slots = (prev, bodyCount, warmRecordHash=true, csrBase=8388608) =>
+    runInNewContext(`${sizing}\nwarmHashSlots(${prev})`, {warmRecordHash, bodyCount, nextPow2, csrBase, MAX_WARM_HASH:2097152});
+  assert.equal(slots(441764, 110442), 524288, 'Ring seed (bodies x4) alone would give 262144 slots for ~230k manifolds.');
+  assert.ok(slots(1184245, 110442) >= 2 * 246481, 'Steady ring keeps load at or below one half.');
+  assert.equal(slots(4062927, 505923, true, 16777216), 2097152);
+  assert.ok(slots(4062927, 505923, true, 16777216) * 4 <= 16777216, 'Record words must end before the CSR index region.');
+  assert.equal(slots(1184245, 110442, false), 2097152, 'Head mode keeps one word per slot and the 2^21 cap.');
 });

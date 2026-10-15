@@ -104,10 +104,16 @@
     // rather than per previous contact. Same published heads; ring/gables
     // checkpoints are bit-identical. Ring A/B/A 11.85/11.64/11.87 ms (repeat
     // 11.68), insert 0.39->0.13 ms. hashInsert=contact keeps the control.
-    const hashInsertMode = qs.get('hashInsert') || (['ring110k', 'gables506k'].includes(scene) ? 'manifold' : 'contact');
-    if (!['contact', 'manifold'].includes(hashInsertMode))
-      throw new Error('hashInsert must be contact or manifold');
-    const manifoldHashInsert = hashInsertMode === 'manifold';
+    // Record slots (8ed) resolve the pair key and previous run without loading
+    // previous contacts: ring manifold/record 11.42/11.21/11.83/11.35 ms, gables
+    // 34.41/32.68/35.05/32.74 ms, bit-identical workloads.
+    const hashInsertMode = qs.get('hashInsert') || (['ring110k', 'gables506k'].includes(scene) ? 'record' : 'contact');
+    if (!['contact', 'manifold', 'record'].includes(hashInsertMode))
+      throw new Error('hashInsert must be contact, manifold or record');
+    // record: per-manifold insert of 16-byte slots holding the pair key and its
+    // previous run, so lookups never load previous contacts to compare keys.
+    const warmRecordHash = hashInsertMode === 'record';
+    const manifoldHashInsert = hashInsertMode === 'manifold' || warmRecordHash;
     // Broadphase grid table scaled to >=2x colliders (three-avbd sizes its grid
     // at 2x body capacity); scenes up to 65536 colliders keep 131072 heads.
     // Gables fixed/scaled: 36.92/35.00/36.34/34.50 ms, grid 3.28->1.90 ms, with
@@ -851,6 +857,16 @@ struct VsOut {
     const hostCountersView = new Uint32Array(hostUploadCpu, 512, 16);
     const hostColorsView = new Uint32Array(hostUploadCpu, 576, colorCountWords);
 
+    // Warm hash size: words (one per slot), or 16-byte record slots inside the
+    // pre-CSR region. Records hold one entry per previous manifold; size them
+    // from bodies as well as the CPU contact count, which is a low seed during
+    // the first batch (an undersized table exhausts probes and drops warm starts).
+    function warmHashSlots(prevContacts) {
+      return warmRecordHash
+        ? Math.min(nextPow2(Math.max(prevContacts >> 1, 4 * bodyCount, 1024)), csrBase >> 2)
+        : Math.min(nextPow2(Math.max(prevContacts * 4, 1024)), csrBase, MAX_WARM_HASH);
+    }
+
     // 0 keeps the shader's fixed 131072-head table.
     function gridHashWords() {
       return gridMode === 'scaled' ? Math.min(nextPow2(Math.max(2 * colliderCount, 131072)), csrBase) : 0;
@@ -867,8 +883,8 @@ struct VsOut {
       s[7] = steps === 0 ? 0 : Math.min(last.contact, cap.maxContacts);
       s[8] = parity === 0 ? cap.maxContacts : 0;
       // One hash entry per manifold; host field and clear dispatch must agree.
-      const hash = Math.min(nextPow2(Math.max(prevN * 4, 1024)), idsLen, MAX_WARM_HASH);
-      s[9] = hash;
+      s[9] = warmHashSlots(prevN);
+      s[15] = warmRecordHash ? 1 : 0;
       s[10] = cap.maxCandidates;
       s[11] = parity === 0 ? 0 : cap.maxContacts;
       let log = 0;
@@ -929,14 +945,9 @@ struct VsOut {
     function encodeStep(enc, readback, beginPass) {
       const nBodies = Math.max(bodyCount, 1);
       const nCols = Math.max(colliderCount, 1);
-      const prevContacts = Math.max(last.contact, 256);
-      const idsLen = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
-      // Hash size is a power of two (mask = n-1).
-      const hashN = Math.min(
-        nextPow2(Math.max(Math.max(prevContacts, 256) * 4, 1024)),
-        idsLen,
-        MAX_WARM_HASH,
-      );
+      const prevContacts = Math.min(Math.max(last.contact, 256), cap.maxContacts);
+      // Hash size is a power of two (mask = n-1); records clear four words per slot.
+      const hashN = warmHashSlots(prevContacts) * (warmRecordHash ? 4 : 1);
 
       writeHost(enc);
       let pass = beginPass ? beginPass() : enc.beginComputePass();
