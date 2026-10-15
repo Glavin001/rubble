@@ -121,7 +121,7 @@ int main(int argc, char** argv)
     FILE* o = std::fopen(argv[2], "wb");
     if (!o) return 5;
     GpuCounters_0 c = g.gCounters_0[0];
-    std::fwrite(&c, 64, 1, o);
+    std::fwrite(&c, sizeof(c), 1, o);
     uint32_t cur = g.gScratchAtomics_0[11];
     std::fwrite(&g.gContacts_0[cur], 128, c.contactCount_0, o);
     std::fwrite(&g.gManifolds_0[0], 32, c.manifoldCount_0, o);

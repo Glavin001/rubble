@@ -61,6 +61,14 @@ pub struct WgpuSim {
     pub(crate) reuse_copy: bool,
     /// Two-pass narrowphase (8ek): reuse, then shape tests over compacted pairs.
     pub(crate) np_split: bool,
+    /// Persist work list (8em, HOST_S(22)); requires reuse copy.
+    pub(crate) persist_list: bool,
+    /// Carry resting pairs across sleep (8ep, HOST_S(28)).
+    pub(crate) carry_rest: bool,
+    /// Local incremental color repair (8en, HOST_S(27)).
+    pub(crate) local_repair: bool,
+    /// Test hook: caps the persist list (HOST_S(23)); 0 uses the whole region.
+    pub(crate) persist_list_limit: u32,
     /// Test hook: caps deferred pairs (HOST_S(21)); 0 uses the whole tail.
     pub(crate) np_defer_limit: u32,
     fused_persistence: bool,
@@ -417,6 +425,12 @@ impl WgpuSim {
                 && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
                 && std::env::var("ENGINE_NP").as_deref() == Ok("split"),
             np_defer_limit: 0,
+            persist_list_limit: 0,
+            local_repair: std::env::var("ENGINE_REPAIR").as_deref() == Ok("local"),
+            carry_rest: std::env::var("ENGINE_REST").as_deref() == Ok("carry"),
+            persist_list: persistent_contacts
+                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
+                && std::env::var("ENGINE_PERSIST").as_deref() == Ok("list"),
             device,
             queue,
             capacity,
@@ -767,7 +781,13 @@ impl WgpuSim {
         self.disp(&mut pass, "broadphase_insert", n_cols, None);
         self.disp(&mut pass, "broadphase_query", n_cols, None);
         }
-        self.disp(&mut pass, "write_work_args", 64, None);
+        self.disp(&mut pass, self.work_args_entry(), 64, None);
+        if self.carry_rest && !reuse_manifolds {
+            // Previous manifolds (slot 72) are intact until narrowphase; recount
+            // candidates (slot 64) after the carried resting pairs join them.
+            self.disp_work(&mut pass, "carry_rest_pairs", 72, None);
+            self.disp(&mut pass, self.work_args_entry(), 64, None);
+        }
 
         // Same size the uniforms publish; records clear four words per slot.
         let prev_n = self
@@ -817,12 +837,12 @@ impl WgpuSim {
             // here), size-bucketed cooperative SAT, then clipping.
             self.disp_work(&mut pass, "convex_classify", 64, None);
             self.disp(&mut pass, "convex_write_args", 64, None);
-            self.disp_work(&mut pass, "convex_sat_small", 70, None);
-            self.disp_work(&mut pass, "convex_sat_large", 71, None);
-            self.disp_work(&mut pass, "convex_manifold", 72, None);
+            self.disp_work(&mut pass, "convex_sat_small", 74, None);
+            self.disp_work(&mut pass, "convex_sat_large", 75, None);
+            self.disp_work(&mut pass, "convex_manifold", 76, None);
         }
         }
-        self.disp(&mut pass, "write_work_args", 64, None);
+        self.disp(&mut pass, self.work_args_entry(), 64, None);
         if !reuse && !reuse_manifolds {
             self.disp(&mut pass, "contact_hash_clear", hash_n, None);
             self.disp_work(&mut pass, "contact_hash_insert", 68, None);
@@ -830,24 +850,32 @@ impl WgpuSim {
         if self.fused_persistence && !self.persistent_contacts {
             self.disp_work(&mut pass, "clear_solver_contacts", 65, None);
         }
-        self.disp_work(
-            &mut pass,
-            if self.fused_persistence {
-                "persist_manifolds_compact"
-            } else if self.manifold_persistence {
-                "persist_manifolds"
-            } else if self.reuse_copy {
-                "persist_contacts_copy_persistent"
-            } else {
-                "persist_contacts"
-            },
-            if self.fused_persistence || self.manifold_persistence {
-                66
-            } else {
-                65
-            },
-            None,
-        );
+        if self.persist_list && !reuse_manifolds {
+            // Whole-step reuse lists nothing, so it takes the full scan below.
+            // Slot 70 covers listed contacts; slot 71 runs the full scan only
+            // when the list overflowed (both written after narrowphase).
+            self.disp_work(&mut pass, "persist_list_copy_persistent", 70, None);
+            self.disp_work(&mut pass, "persist_contacts_copy_persistent", 71, None);
+        } else {
+            self.disp_work(
+                &mut pass,
+                if self.fused_persistence {
+                    "persist_manifolds_compact"
+                } else if self.manifold_persistence {
+                    "persist_manifolds"
+                } else if self.reuse_copy {
+                    "persist_contacts_copy_persistent"
+                } else {
+                    "persist_contacts"
+                },
+                if self.fused_persistence || self.manifold_persistence {
+                    66
+                } else {
+                    65
+                },
+                None,
+            );
+        }
         // Persistent CSR reads solver pairs, so pack them before the graph unless
         // manifold persistence already did.
         let early_pair_pack =
@@ -859,7 +887,7 @@ impl WgpuSim {
             self.disp(&mut pass, "warmstart_joints", n_joints, None);
         }
         self.disp(&mut pass, "build_awake_list", n_bodies, None);
-        self.disp(&mut pass, "write_work_args", 64, None);
+        self.disp(&mut pass, self.work_args_entry(), 64, None);
         self.disp(&mut pass, "csr_clear", n_bodies + 1, None);
         self.disp_work(&mut pass, "csr_degree_contacts", 66, None);
         if self.body_count <= 512 {
@@ -872,10 +900,14 @@ impl WgpuSim {
         self.disp_work(&mut pass, "csr_scatter_contacts", 66, None);
         self.disp_work(&mut pass, "csr_sort", 67, None);
         self.disp_work(&mut pass, "init_colors", 67, None);
-        self.disp(&mut pass, "write_work_args", 64, None);
+        self.disp(&mut pass, self.work_args_entry(), 64, None);
         // A colour count is not the JP dependency depth. The active 110k
         // ring still has uncoloured bodies after 16 rounds at step 60.
         let color_rounds = 32;
+        if self.local_repair {
+            // Slot 69 is zero when the local pass handled the repair list.
+            self.disp(&mut pass, "color_bodies_local", 64, None);
+        }
         for round in 0..color_rounds {
             self.disp_work(&mut pass, "color_bodies", 69, Some(round % 16));
         }
@@ -1021,6 +1053,15 @@ impl WgpuSim {
         pass.dispatch_workgroups_indirect(&self.bufs[23], (color as u64) * 12);
     }
 
+    /// Persist-list hosts write slots 70/71 from the reuse-copy variant (8em).
+    fn work_args_entry(&self) -> &'static str {
+        if self.persist_list {
+            "write_work_args_copy_persistent"
+        } else {
+            "write_work_args"
+        }
+    }
+
     /// Broadphase grid heads: at least twice the colliders (three-avbd), so
     /// 506k gables avoids ~4 colliders per bucket; small scenes keep 131072.
     /// `ENGINE_GRID=fixed` keeps the fixed table as a comparison control;
@@ -1085,12 +1126,18 @@ impl WgpuSim {
         s[18] = self.grid_levels;
         s[20] = u32::from(grid_split());
         s[21] = self.np_defer_limit;
+        s[22] = u32::from(self.persist_list);
+        s[23] = self.persist_list_limit;
+        s[27] = u32::from(self.local_repair);
+        s[28] = u32::from(self.carry_rest);
         // Degree-aware primal lanes for convex/compound scenes (high-degree bodies).
         // Box benchmarks keep their validated lane order (see gables_hold).
-        s[22] = u32::from(self.has_convex);
-        s[23] = u32::from(self.has_filters);
-        if self.manifold_hash_insert {
+        s[29] = u32::from(self.has_convex);
+        s[30] = u32::from(self.has_filters);
+        if self.manifold_hash_insert || self.carry_rest {
             s[13] = self.last_counters.manifold_count;
+        }
+        if self.manifold_hash_insert {
             s[14] = 1;
         }
         // CSR index region starts past the hash/id words inside gConstraintIds.
@@ -1239,8 +1286,9 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[20] = b(c.max_bodies, 4);
     s[21] = 64 * 4;
     s[22] = 96 * PASS_ALIGN;
-    // Colour slots 0..63, work slots 64..69, convex 70..72, previous contacts 73.
-    s[23] = b(c.max_colors.max(74) * 3, 4);
+    // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
+    // contacts 73), convex 74..76.
+    s[23] = b(c.max_colors.max(77) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);
     s[26] = b(c.max_bodies, 32);

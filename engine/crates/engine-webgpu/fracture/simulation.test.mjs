@@ -21,7 +21,7 @@ function mockDevice(){
   globalThis.fetch=async url=>{const path=new URL(String(url).replace('../generated/wgsl/',''),wgslDir);
     return existsSync(path)?{ok:true,text:async()=>readFileSync(path,'utf8')}:{ok:false}};
   const buffer=desc=>{const b={...desc,destroyed:false,destroy(){this.destroyed=true},
-    async mapAsync(){},getMappedRange(){const r=new ArrayBuffer(this.size);if(this.size===64)new Uint32Array(r)[5]=1;return r},unmap(){}};log.buffers.push(b);return b};
+    async mapAsync(){},getMappedRange(){const r=new ArrayBuffer(this.size);if(this.size===80)new Uint32Array(r)[5]=1;return r},unmap(){}};log.buffers.push(b);return b};
   const pass=()=>{let pipe=null,bound=null;return{
     setPipeline(p){pipe=p},setBindGroup(i,g,offsets){bound={g,offsets}},
     dispatchWorkgroups(x,y=1,z=1){log.dispatches.push({name:pipe.label,x,y,z,bound})},

@@ -78,6 +78,10 @@ public struct GpuCounters
     AUint manifoldCount;
     AUint recolorCount; // ABI byte 52: compact pending-color work count
     AUint _pad1;        // ABI byte 56: two-pass narrowphase deferred count (8ek)
-    AUint convexLarge;  // ABI byte 60: convex SAT pairs, large bucket (back of list)
+    AUint _pad2;        // ABI byte 60: persist work-list length (8em)
+    AUint convexLarge;  // ABI byte 64: convex SAT pairs, large bucket (back of list)
+    AUint _pad3;        // ABI bytes 68..79: keep the block a multiple of 16 bytes
+    AUint _pad4;
+    AUint _pad5;
 };
 #endif

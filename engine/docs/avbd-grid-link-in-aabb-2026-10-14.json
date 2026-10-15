@@ -1,0 +1,27 @@
+{
+  "decision": "8eo",
+  "change": "Split grids keep each collider's next link in its AABB's spare word (_pad1, previously an unread body id) instead of gColorLists, so a query fetches link and bounds with one 32-byte load per chain element. The legacy (scaled/fixed) grid keeps gColorLists.",
+  "ring_ms": {
+    "new": [
+      10.22,
+      10.37,
+      10.36
+    ],
+    "control": [
+      10.46,
+      10.46
+    ],
+    "gridPhase": {
+      "control": 0.92,
+      "new": 0.85
+    }
+  },
+  "gables": "unaffected (scaled grid)",
+  "gates": {
+    "gpuLib": "50/50; the split lattice cases now read links from the AABBs and keep bijection, table placement and the brute-force pair oracle",
+    "browserRing480": "PASS bit-identical (mean 1.217517997515979)",
+    "nativeRing480Columns_split": "PASS bit-identical (1.1753)",
+    "nativeCanonicalGables240": "PASS 0.118635/0.328483",
+    "metal": "18/18"
+  }
+}

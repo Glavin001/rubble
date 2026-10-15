@@ -19,6 +19,8 @@
       border-radius: 4px; padding: 3px 8px; font: inherit; max-width: 28rem;
     }
     #sceneSelect:focus { outline: 1px solid #6b7a9e; }
+    #sleepLabel { display: flex; align-items: center; gap: 5px; margin-left: 10px; color: #d7dbe6; cursor: pointer; }
+    #sleepLabel.locked { color: #8b93a7; cursor: default; }
     #rates {
       display: grid;
       grid-template-columns: auto auto;
@@ -40,6 +42,9 @@
     <div id="sceneRow">
       <label for="sceneSelect">Scene</label>
       <select id="sceneSelect"></select>
+      <label id="sleepLabel" for="sleepToggle" title="Let resting bodies fall asleep (URL: sleep=on|off)">
+        <input type="checkbox" id="sleepToggle"> Sleep
+      </label>
     </div>
     <div id="rates">
       <div><span class="lbl">TPS</span> <strong class="val" id="tpsVal">—</strong><span class="sub" id="stepMsVal"></span></div>
@@ -131,6 +136,27 @@
     if (!['fused', 'split'].includes(npMode)) throw new Error('np must be fused or split');
     if (npMode === 'split' && !reuseCopy) throw new Error('np=split requires reuse=copy');
     const npSplit = npMode === 'split';
+    // rest=carry (8ep): pairs whose bodies are both at rest (static or asleep)
+    // are re-emitted from last step's manifolds, so their warm start survives
+    // sleep and a woken body does not restart its resting contacts cold.
+    const restMode = qs.get('rest') || 'carry';
+    if (!['carry', 'drop'].includes(restMode)) throw new Error('rest must be carry or drop');
+    const carryRest = restMode === 'carry';
+    // repair=local (8en): one workgroup loops JP rounds over a small incremental
+    // repair list instead of 32 global color_bodies dispatches.
+    // Graph detail colorRepair 0.26 -> 0.13 ms on ring and gables; colors are
+    // identical (JP is schedule-independent).
+    const repairMode = qs.get('repair') || (incrementalColors ? 'local' : 'rounds');
+    if (!['rounds', 'local'].includes(repairMode)) throw new Error('repair must be rounds or local');
+    if (repairMode === 'local' && !incrementalColors) throw new Error('repair=local requires incremental coloring');
+    const localRepair = repairMode === 'local';
+    // persist=list (8em): narrowphase lists the contacts that still need the
+    // persistence pass, so it skips the per-contact scan of finished copies.
+    // Gables scan/list warm 1.97/1.44 ms (wall 26.66/26.13); ring 10.44/10.19.
+    const persistMode = qs.get('persist') || (reuseCopy ? 'list' : 'scan');
+    if (!['scan', 'list'].includes(persistMode)) throw new Error('persist must be scan or list');
+    if (persistMode === 'list' && !reuseCopy) throw new Error('persist=list requires reuse=copy');
+    const persistList = persistMode === 'list';
     // endpoints=pairs (8el): solver pairs are packed before the graph, so CSR
     // degree and scatter read body ids from the 32-byte pair instead of
     // manifold -> two colliders (three-avbd TopoItem shape). Manifold
@@ -346,7 +372,7 @@
       s[20] = b(cap.maxBodies, 4);
       s[21] = 64 * 4;
       s[22] = 96 * PASS_ALIGN;
-      s[23] = b(Math.max(cap.maxColors, 70) * 3, 4);
+      s[23] = b(Math.max(cap.maxColors, 73) * 3, 4);
       s[24] = b(cap.maxColliders, 80);
       s[25] = b(cap.maxCandidates, 32);
       s[26] = b(cap.maxBodies, 32);
@@ -361,6 +387,9 @@
       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
       ...(reuseCopy ? ['narrowphase_copy_persistent', 'persist_contacts_copy_persistent'] : []),
       ...(npSplit ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
+      ...(persistList ? ['persist_list_copy_persistent'] : []),
+      ...(localRepair ? ['color_bodies_local'] : []),
+      ...(carryRest ? ['carry_rest_pairs'] : []),
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
@@ -421,6 +450,32 @@
       sleepLin: cfg.sleepLin ?? 0.15, sleepAng: cfg.sleepAng ?? 0.15, sleepTime: cfg.sleepTime ?? 0.5, residualExit: 1e-4,
       trustLin: 0.35, trustAng: 0.5, pivotFloor: 1e-6, gridCellSize: 2,
     };
+
+    // Sleep toggle. Scenes matching three-avbd (no sleeping) default to a 1e6 s
+    // timer; ?sleep=on|off overrides the scene default and stays in the URL.
+    // Changes apply from the next step (packHost runs every step); turning sleep
+    // off keeps already-sleeping bodies asleep until something wakes them.
+    const SLEEP_OFF_TIME = 1e6;
+    const sceneSleepTime = cfg.sleepTime ?? 0.5;
+    const sleepEnabledTime = sceneSleepTime < SLEEP_OFF_TIME ? sceneSleepTime : 0.5;
+    const sleepQuery = qs.get('sleep');
+    if (sleepQuery !== null && !['on', 'off'].includes(sleepQuery)) throw new Error('sleep must be on or off');
+    const setSleepEnabled = (on) => { params.sleepTime = on ? sleepEnabledTime : SLEEP_OFF_TIME; };
+    setSleepEnabled(sleepQuery !== null ? sleepQuery === 'on' : sceneSleepTime < SLEEP_OFF_TIME);
+    const sleepToggle = document.getElementById('sleepToggle');
+    const sleepLabel = document.getElementById('sleepLabel');
+    function syncSleepToggle(locked) {
+      sleepToggle.checked = params.sleepTime < SLEEP_OFF_TIME;
+      sleepToggle.disabled = !!locked;
+      sleepLabel.classList.toggle('locked', !!locked);
+    }
+    syncSleepToggle(false);
+    sleepToggle.addEventListener('change', () => {
+      setSleepEnabled(sleepToggle.checked);
+      const next = new URL(location.href);
+      next.searchParams.set('sleep', sleepToggle.checked ? 'on' : 'off');
+      history.replaceState(null, '', next.href);
+    });
 
     const packHostBytes = new ArrayBuffer(208);
     const packHostView = new DataView(packHostBytes);
@@ -790,6 +845,7 @@ struct VsOut {
       persist_manifolds_compact: 'persist_manifolds_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
       solve_primal_sparse_compact: 'solve_primal_sparse_persistent',
       solve_primal_color_compact: 'solve_primal_color_persistent', solve_dual_compact: 'solve_dual_persistent',
+      ...(persistList ? {write_work_args: 'write_work_args_copy_persistent'} : {}),
       ...(pairEndpoints ? {csr_degree_contacts: 'csr_degree_contacts_persistent',
         csr_scatter_contacts: 'csr_scatter_contacts_persistent'} : {}),
     };
@@ -940,6 +996,9 @@ struct VsOut {
       s[14] = manifoldHashInsert ? 1 : 0;
       s[16] = gridHashWords();
       s[20] = gridSplit ? 1 : 0;
+      s[22] = persistList ? 1 : 0;
+      s[27] = localRepair ? 1 : 0;
+      s[28] = carryRest ? 1 : 0;
       s[24] = csrBase;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
@@ -962,7 +1021,7 @@ struct VsOut {
       // ten steps between CPU readbacks; last.contact is stale within that batch.
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
       // manifoldCount (byte 48) sizes the per-manifold warm-hash insert.
-      if (steps > 0 && manifoldHashInsert) enc.copyBufferToBuffer(bufs[7], 48, bufs[6], 80 + 13 * 4, 4);
+      if (steps > 0 && (manifoldHashInsert || carryRest)) enc.copyBufferToBuffer(bufs[7], 48, bufs[6], 80 + 13 * 4, 4);
       enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 64);
       enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
     }
@@ -1007,6 +1066,12 @@ struct VsOut {
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
       disp(pass, 'write_work_args', 64);
+      if (carryRest) {
+        // Previous manifolds (slot 72) are intact until narrowphase; recount
+        // candidates (slot 64) once the carried resting pairs join them.
+        dispWork(pass, 'carry_rest_pairs', 72);
+        disp(pass, 'write_work_args', 64);
+      }
       nextPhase();
       const reuse = (params.flags & 1) !== 0;
       if (reuse) {
@@ -1033,7 +1098,12 @@ struct VsOut {
         if (detailedProfile) nextPhase();
       }
       if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
-      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+      // List mode: slot 70 covers listed contacts; slot 71 runs the full scan
+      // only when the list overflowed (both written after narrowphase).
+      if (persistList) {
+        dispWork(pass, 'persist_list_copy_persistent', 70);
+        dispWork(pass, 'persist_contacts_copy_persistent', 71);
+      } else dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
       if (earlyPairPack) dispWork(pass, 'pack_solver_contacts', 66);
       nextPhase();
       disp(pass, 'build_awake_list', nBodies);
@@ -1059,6 +1129,8 @@ struct VsOut {
       if (graphProfile) nextPhase();
       // JP dependency depth exceeds 16 on the active 110k ring.
       const colorRounds = 32;
+      // Local repair runs first; slot 69 is then zero and the rounds launch nothing.
+      if (localRepair) disp(pass, 'color_bodies_local', 64);
       for (let round = 0; round < colorRounds; round++) dispWork(pass, 'color_bodies', incrementalColors ? 69 : 67, round % 16);
       if (graphProfile) nextPhase();
       if (stablePacking) {
@@ -1181,7 +1253,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1494,6 +1566,24 @@ struct VsOut {
     // frame: up to LIVE_IN_FLIGHT frames stay queued and counters arrive one or two
     // frames late. Dispatch sizes are GPU-driven; host sizing tolerates stale
     // counts (benchmarks already run ten-step batches between readbacks).
+    // ?stopAt=N freezes live playback at step N (still rendering) so runs can be
+    // compared at the same step, e.g. sleep=on vs sleep=off screenshots.
+    const stopAt = Math.max(0, Number(qs.get('stopAt')) || 0);
+    // Diagnostic: current body positions (x, y, z per body), for run comparisons.
+    window.__bodyPositions = async () => {
+      const bytes = bodies.length * 112;
+      const snap = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(bufs[0], 0, snap, 0, bytes);
+      device.queue.submit([enc.finish()]);
+      await snap.mapAsync(GPUMapMode.READ);
+      const f = new Float32Array(snap.getMappedRange().slice(0));
+      snap.unmap(); snap.destroy();
+      const out = new Float32Array(bodies.length * 3);
+      for (let i = 0; i < bodies.length; i++) out.set(f.subarray(i * 28, i * 28 + 3), i * 3);
+      return { step: steps, positions: Array.from(out), initial: bodies.map((b) => b.p) };
+    };
+
     const LIVE_IN_FLIGHT = 2;
     const liveFree = Array.from({ length: LIVE_IN_FLIGHT }, () =>
       device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
@@ -1536,6 +1626,20 @@ struct VsOut {
         const aspect = canvas.width / canvas.height;
         writeCamera(aspect);
         const enc = device.createCommandEncoder();
+        const frozen = stopAt > 0 && steps >= stopAt;
+        if (frozen) {
+          const rpFrozen = enc.beginRenderPass({
+            colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
+            depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+          });
+          rpFrozen.setPipeline(groundPipe); rpFrozen.setBindGroup(0, groundBind); rpFrozen.setVertexBuffer(0, groundVbo); rpFrozen.draw(6);
+          rpFrozen.setPipeline(boxPipe); rpFrozen.setBindGroup(0, boxBind); rpFrozen.setVertexBuffer(0, boxVbo); rpFrozen.draw(36, bodies.length - 1);
+          rpFrozen.end();
+          device.queue.submit([enc.finish()]);
+          statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${bodies.length - 1} bodies · stopped at step ${steps} (stopAt) · contacts ${last.contact} · awake ${last.awake} · ov 0x${last.overflow.toString(16)}`;
+          requestAnimationFrame(frame);
+          return;
+        }
         encodeStep(enc, false);
         const rp = enc.beginRenderPass({
           colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
@@ -1603,7 +1707,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1624,7 +1728,8 @@ struct VsOut {
     if (regressionEnabled) {
       const expectedScene = regressionKind === 'gables' ? 'gables506k' : 'ring110k';
       if (scene !== expectedScene) throw new Error(`${regressionKind} regression requires scene=${expectedScene}`);
-      params.sleepTime = 1e6;
+      params.sleepTime = SLEEP_OFF_TIME;
+      syncSleepToggle(true); // regression oracles assume no sleeping
       const readSnapshot = async () => {
         await readCounters();
         const enc = device.createCommandEncoder();
@@ -1652,7 +1757,11 @@ struct VsOut {
       report.hashInsert = hashInsertMode;
       report.reuse = reuseMode;
       report.grid = gridMode;
+      report.sleepTime = params.sleepTime;
       report.np = npMode;
+      report.persist = persistMode;
+      report.repair = repairMode;
+      report.rest = restMode;
       report.endpoints = endpointsMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
@@ -1678,7 +1787,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

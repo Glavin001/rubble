@@ -61,10 +61,10 @@ UPDATE_HULL_GOLDEN=1 cargo test -p engine-schema golden
 | Broadphase | `broadphase_insert/query` | Hierarchical size-level grid when `HOST_S(18)` = levels > 0 |
 | Narrowphase | `narrowphase` | Reuse first; hull pairs deferred via `candidate._pad = CONVEX_DEFER \| hint` |
 | Classify | `convex_classify` (slot 64) | Plane, sphere and capsule pairs emit contacts; hull/hull and hull/box pairs are compacted into the small (front) or large (back) SAT bucket |
-| Args | `convex_write_args` | Slots 70, 71 (balanced 2-D rows) and 72 |
-| SAT | `convex_sat_small` (slot 70) | 16 lanes per pair, 4 pairs per workgroup; V ≤ 16, F ≤ 32, E ≤ 48 |
-| SAT | `convex_sat_large` (slot 71) | 64 lanes per pair |
-| Manifold | `convex_manifold` (slot 72) | One thread per SAT pair; clip, reduce, emit |
+| Args | `convex_write_args` | Slots 74, 75 (balanced 2-D rows) and 76 |
+| SAT | `convex_sat_small` (slot 74) | 16 lanes per pair, 4 pairs per workgroup; V ≤ 16, F ≤ 32, E ≤ 48 |
+| SAT | `convex_sat_large` (slot 75) | 64 lanes per pair |
+| Manifold | `convex_manifold` (slot 76) | One thread per SAT pair; clip, reduce, emit |
 
 **Broadphase.** The hierarchical grid is selected whenever the scene has convex
 colliders; set `ENGINE_GRID_LEVELS=on|off` to force it either way.
@@ -138,7 +138,7 @@ collider means compound children can differ. Set it with
   negative group never does, overriding categories.
 - **Where it runs:** the test is in `emitCandidate`, so every broadphase path
   filters identically.
-- **Cost:** none when unused, because hosts set `HOST_S(23)` only when some
+- **Cost:** none when unused, because hosts set `HOST_S(30)` only when some
   collider carries a filter.
 
 **Runtime hull management.** `HullArena` provides:
@@ -160,13 +160,13 @@ example to replace a fractured chunk. The JS `HullArena` mirrors the Rust one.
 | Resource | Owner |
 |---|---|
 | Binding 29 | `gConvexWork` (`maxCandidates` × 32 B). Declared last, so Metal assigns buffer 27; the Metal host rebinds 27 around the convex dispatches. |
-| Indirect slots 70..72 | Convex args (buffer sized ≥ 73 slots). |
-| `GpuCounters` bytes 44 and 60 | `convexSmall` / `convexLarge` (`StepCounters::convex_sat_small/large`; byte 56 is the two-pass narrowphase deferred count). |
+| Indirect slots 74..76 | Convex args (buffer sized ≥ 77 slots). Slots 70/71 are the persist work list and 72 the resting-pair carry. |
+| `GpuCounters` bytes 44 and 64 | `convexSmall` / `convexLarge` (`StepCounters::convex_sat_small/large`). Byte 56 is the two-pass narrowphase deferred count and byte 60 the persist work-list length; the block is 80 bytes. |
 | `HOST_S(18)` | Grid levels. |
-| `HOST_S(22)` | Degree-aware primal lanes (needs `gColorCounts` ≥ 128 words); hosts enable it for scenes with convex colliders, so box benchmarks keep their validated lane order. |
+| `HOST_S(29)` | Degree-aware primal lanes (needs `gColorCounts` ≥ 128 words); hosts enable it for scenes with convex colliders, so box benchmarks keep their validated lane order. |
 | Scratch 51 | Occupied grid levels. |
 | Scratch 53..63 | Oversized-static list for the hierarchical grid (count + 10 IDs). |
-| `HOST_S(23)` | Collision filters present. |
+| `HOST_S(30)` | Collision filters present (`HOST_S(22)`/`(23)` are the persist list, 27/28 local repair and carry). |
 | Indirect slot 73 | Previous contacts (whole-step manifold reuse). |
 
 This removes the old collisions: binding 27 as fracture hits versus solver

@@ -64,6 +64,7 @@ impl WebGpuWorld {
                     (*n).to_string(),
                     Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
                         .starts_with("solve_primal_sparse")
+                        || n.starts_with("color_bodies_local")
                     {
                         // These entries access buffers only. Slang over-lowers
                         // DeviceMemoryBarrierWithGroupSync to a texture barrier
@@ -306,9 +307,10 @@ fn uniformize_workgroup_lanes(src: &str) -> String {
             out.push_str(
                 &line
                     .replace(NAME, &format!("workgroupUniformLoad(&{NAME})"))
+                    // Restore stores only: `= ` must not also match a `==` read.
                     .replace(
-                        "workgroupUniformLoad(&gsUniformLanes_0) =",
-                        "gsUniformLanes_0 =",
+                        "workgroupUniformLoad(&gsUniformLanes_0) = ",
+                        "gsUniformLanes_0 = ",
                     ),
             );
         }
