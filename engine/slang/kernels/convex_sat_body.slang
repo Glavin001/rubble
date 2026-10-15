@@ -229,7 +229,7 @@ void CS(phaseCacheReduce)(CS(SatLane) s, uint stride)
 void CS(phaseCacheDecide)(CS(SatLane) s)
 {
     if (s.l == 0u && s.valid && CS(gsCached)[s.seg] != 0u &&
-        CS(gsSep)[s.lane] - CS(gsScore)[s.lane] > SAT_CACHE_MARGIN)
+        CS(gsSep)[s.lane] - CS(gsScore)[s.lane] > SAT_CACHE_MARGIN + speculativeMargin())
         CS(gsSkip)[s.seg] = 1u;
 }
 
@@ -320,7 +320,7 @@ void CS(phaseEdges)(CS(SatLane) s)
     uint eOff = s.seg * CSAT_MAXE;
     bool closedBoth = hullClosed(s.ha) && hullClosed(s.hb);
     uint hintEdge = (s.hint >> 16) == CONVEX_FEATURE_EDGE ? (s.hint & 0xFFFFu) : 0xFFFFFFFFu;
-    bool doEdges = s.valid && !CS(skipped)(s) && CS(gsFaceSep)[s.seg] <= 0.0 && !CS(fastFace)(s);
+    bool doEdges = s.valid && !CS(skipped)(s) && CS(gsFaceSep)[s.seg] <= speculativeMargin() && !CS(fastFace)(s);
     float edgeScore = -1e30;
     float edgeSep = -1e30;
     uint edgeKey = 0xFFFFFFFFu;
@@ -419,9 +419,13 @@ void CS(phaseFinish)(CS(SatLane) s)
     uint idx1 = 0u;
     uint idx2 = 0u;
     bool edgeHit = edgeKey != 0xFFFFFFFFu;
-    if (faceSep <= 0.0 && !(edgeHit && edgeSep > 0.0))
+    float spec = speculativeMargin();
+    if (faceSep <= spec && !(edgeHit && edgeSep > spec))
     {
-        if (edgeHit && edgeSep > CONVEX_EDGE_REL * faceSep + CONVEX_EDGE_ABS)
+        // A positive gap (speculative contact) is measured on the axis of largest
+        // separation; overlapping pairs keep the face bias.
+        bool gap = faceSep > 0.0 || (edgeHit && edgeSep > 0.0);
+        if (edgeHit && (gap ? edgeSep > faceSep : edgeSep > CONVEX_EDGE_REL * faceSep + CONVEX_EDGE_ABS))
         {
             uint ea = edgeKey >> 8;
             uint eb = edgeKey & 255u;
@@ -456,10 +460,10 @@ void CS(phaseFinish)(CS(SatLane) s)
     {
         // Separated: remember the feature that proved it for the next step.
         uint feature = 0u;
-        if (faceSep > 0.0)
+        if (faceSep > spec)
             feature = faceKey < 128u ? (SAT_CACHE_FACE_A << 16) | (faceKey << 8)
                                      : (SAT_CACHE_FACE_B << 16) | ((faceKey - 128u) << 8);
-        else if (edgeHit && edgeSep > 0.0)
+        else if (edgeHit && edgeSep > spec)
             feature = (SAT_CACHE_EDGE << 16) | edgeKey;
         if (feature != 0u)
             gSatCache[satCacheSlot(s.colA, s.colB)] = uint2(satCacheCheck(s.colA, s.colB), feature);

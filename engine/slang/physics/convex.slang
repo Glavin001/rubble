@@ -252,12 +252,16 @@ struct ContactAccum
     float depth[CONVEX_SLOTS];   // signed distance below the reference plane
     float score[CONVEX_SLOTS];
     uint feature[CONVEX_SLOTS];
+    float limit;                 // largest kept gap: speculative margin or round-off
 };
 
-ContactAccum contactAccumInit(float3 n)
+// `spec` is the speculative margin (0 unless FLAG_CONTACT_GAP): points up to that
+// gap above the reference surface become contacts before touch.
+ContactAccum contactAccumInit(float3 n, float spec)
 {
     ContactAccum acc;
     orthonormalBasis(n, acc.u, acc.v);
+    acc.limit = max(CONVEX_PLANE_EPS, spec);
     for (int k = 0; k < CONVEX_SLOTS; k++)
     {
         acc.point[k] = float3(0, 0, 0);
@@ -282,7 +286,7 @@ float3 contactAccumDir(ContactAccum acc, int k)
 
 void contactAccumAdd(inout ContactAccum acc, float3 p, float depth, uint feature)
 {
-    if (depth > CONVEX_PLANE_EPS) return;
+    if (depth > acc.limit) return;
     if (-depth > acc.score[0])
     {
         acc.score[0] = -depth; acc.point[0] = p; acc.depth[0] = depth; acc.feature[0] = feature;
@@ -531,7 +535,7 @@ float convexEdgeQueryScalar(HullRef ha, Frame fa, HullRef hb, Frame fb, out uint
 // incident face), streaming points into the reduction accumulator.
 BoxManifold convexFaceManifold(
     HullRef ref, Frame fr, HullRef inc, Frame fi, uint rf, bool referenceIsA,
-    float3 normalAB, bool allowFallback)
+    float3 normalAB, bool allowFallback, float spec)
 {
     BoxManifold mf;
     mf.count = 0;
@@ -547,7 +551,7 @@ BoxManifold convexFaceManifold(
     uint2 rFace = hullFace(ref, rf);
     uint2 iFace = hullFace(inc, incFace);
     uint type = referenceIsA ? CONVEX_FEATURE_FACE_A : CONVEX_FEATURE_FACE_B;
-    ContactAccum acc = contactAccumInit(n);
+    ContactAccum acc = contactAccumInit(n, spec);
 
     // Incident edges clipped against every reference side plane.
     float3 x0 = tRel + quatRotate(qRel, hullVertex(inc, hullFaceVertex(inc, iFace, 0u)));
@@ -650,8 +654,8 @@ BoxManifold convexFaceManifold(
 
 // ---- hull versus plane / sphere / capsule ---------------------------------------
 
-// Plane n·x = w (world). Hull touching or below the plane.
-BoxManifold convexPlaneManifold(HullRef h, Frame f, float3 pn, float pw, bool hullIsA)
+// Plane n·x = w (world). Hull touching, below, or within `spec` above the plane.
+BoxManifold convexPlaneManifold(HullRef h, Frame f, float3 pn, float pw, bool hullIsA, float spec)
 {
     BoxManifold mf;
     mf.count = 0;
@@ -661,8 +665,8 @@ BoxManifold convexPlaneManifold(HullRef h, Frame f, float3 pn, float pw, bool hu
     float dL = pw - dot(pn, f.p);
     // Hill-climbing early-out: lowest vertex above the plane means no contact.
     uint low = hullSupportIndex(h, -nL);
-    if (dot(nL, hullVertex(h, low)) - dL > CONVEX_PLANE_EPS) return mf;
-    ContactAccum acc = contactAccumInit(nL);
+    if (dot(nL, hullVertex(h, low)) - dL > max(CONVEX_PLANE_EPS, spec)) return mf;
+    ContactAccum acc = contactAccumInit(nL, spec);
     for (uint i = 0u; i < h.nv; i++)
     {
         float3 v = hullVertex(h, i);
@@ -700,7 +704,7 @@ float3 hullClosestOnFace(HullRef h, uint fIndex, float4 plane, float3 p)
     return inside ? q : best;
 }
 
-BoxManifold convexSphereManifold(HullRef h, Frame f, float3 center, float radius, bool hullIsA)
+BoxManifold convexSphereManifold(HullRef h, Frame f, float3 center, float radius, bool hullIsA, float spec)
 {
     BoxManifold mf;
     mf.count = 0;
@@ -712,7 +716,7 @@ BoxManifold convexSphereManifold(HullRef h, Frame f, float3 center, float radius
     {
         float4 pl = hullPlane(h, k);
         float s = dot(pl.xyz, c) - pl.w;
-        if (s > radius) return mf; // separating face axis
+        if (s > radius + spec) return mf; // separating face axis
         if (s > maxPlane) { maxPlane = s; maxFace = k; }
     }
     float3 nLocal;
@@ -736,7 +740,7 @@ BoxManifold convexSphereManifold(HullRef h, Frame f, float3 center, float radius
             float d = dot(c - q, c - q);
             if (d < bestD) { bestD = d; onHull = q; feature = CONVEX_FEATURE_SPHERE | k; }
         }
-        if (bestD > radius * radius) return mf;
+        if (bestD > (radius + spec) * (radius + spec)) return mf;
         nLocal = bestD > 1e-16 ? (c - onHull) * rsqrt(bestD) : hullPlane(h, maxFace).xyz;
     }
     float3 n = quatRotate(f.q, nLocal);
@@ -749,7 +753,7 @@ BoxManifold convexSphereManifold(HullRef h, Frame f, float3 center, float radius
 }
 
 // Capsule = segment (local Y, half length) swept by a radius.
-BoxManifold convexCapsuleManifold(HullRef h, Frame f, Frame cap, float radius, float halfLen, bool hullIsA)
+BoxManifold convexCapsuleManifold(HullRef h, Frame f, Frame cap, float radius, float halfLen, bool hullIsA, float spec)
 {
     BoxManifold mf;
     mf.count = 0;
@@ -767,7 +771,7 @@ BoxManifold convexCapsuleManifold(HullRef h, Frame f, Frame cap, float radius, f
     {
         float4 pl = hullPlane(h, k);
         float s = min(dot(pl.xyz, p0), dot(pl.xyz, p1)) - pl.w - radius;
-        if (s > 0.0) return mf;
+        if (s > spec) return mf;
         if (s > faceSep) { faceSep = s; face = k; }
     }
     // Edge x segment axes (Gauss-map arc crosses the great circle normal to u).
@@ -797,7 +801,7 @@ BoxManifold convexCapsuleManifold(HullRef h, Frame f, Frame cap, float radius, f
             if (!closed)
                 for (uint i = 0u; i < h.nv; i++) hullMax = max(hullMax, dot(n, hullVertex(h, i)));
             float s = min(dot(n, p0), dot(n, p1)) - hullMax - radius;
-            if (s > 0.0) return mf;
+            if (s > spec) return mf;
             if (s > edgeSep) { edgeSep = s; edgeN = n; edge = e; }
         }
     }
@@ -845,7 +849,7 @@ BoxManifold convexCapsuleManifold(HullRef h, Frame f, Frame cap, float radius, f
             if (k == 1u && t1 - t0 < 1e-6) break;
             float3 p = lerp(p0, p1, k == 0u ? t0 : t1);
             float dist = dot(nLocal, p) - pl.w;
-            if (dist - radius > CONVEX_PLANE_EPS) continue;
+            if (dist - radius > max(CONVEX_PLANE_EPS, spec)) continue;
             float3 pHull = frameToWorld(f, p - nLocal * dist);
             float3 pCap = frameToWorld(f, p) - n * radius;
             uint feat = CONVEX_FEATURE_CAPSULE | (face << 8) | k;

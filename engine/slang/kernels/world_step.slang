@@ -256,8 +256,9 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     float3 mn, mx;
     // three-avbd testPair pads world AABBs by 1e-4 only (f32 round-off). Inflating by
     // contactOffset (~1 cm) pulled in ring-adjacent bricks that faceSeparated should
-    // still drop — but the fatter boxes also bloated grid occupancy. Margin stays in C0.
-    const float aabbPad = 1.0e-4;
+    // still drop — but the fatter boxes also bloated grid occupancy. Margin stays in C0,
+    // except under FLAG_CONTACT_GAP, where contacts are speculative within it.
+    float aabbPad = max(1.0e-4, speculativeMargin());
     if (col.shape == SHAPE_SPHERE)
     {
         worldAabbSphere(worldPos, col.params.x + aabbPad, mn, mx);
@@ -666,7 +667,7 @@ void hierQuery(uint i)
     bool probeHasObb = shapeHasHull(a.shape);
     BoxObb probe = probeHasObb ? worldObbFromCache(i)
                                : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    const float faceGap = 0.001;
+    float faceGap = max(0.001, speculativeMargin());
     if (active)
     {
         uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
@@ -883,7 +884,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // Probe OBB from build_aabbs cache (three-avbd findPairs loads querier once).
     bool probeIsBox = shapeHasHull(col.shape);
     BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    const float faceGap = 0.001;
+    float faceGap = max(0.001, speculativeMargin());
 
     // Small scenes: exact pairwise (correctness). Large: uniform-grid hash.
     // Awake dynamics test everyone; sleepers only keep static contacts (ground) so a
@@ -1371,6 +1372,13 @@ static const uint FLAG_BOND_PRELOAD = 2u;
 // widens detection, so a contact exists before touch and acts at touch. Without
 // it (three-avbd), C0 = gap + margin and resting bodies sit ~margin deep.
 static const uint FLAG_CONTACT_GAP = 32u;
+
+// Detection margin for contacts that exist before touch (FLAG_CONTACT_GAP):
+// bounds, SAT and clipping keep pairs/points whose gap is at most this.
+float speculativeMargin()
+{
+    return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u ? PARAMS.contactOffset : 0.0;
+}
 // params.flags bit 6: the inertial block uses the world inertia R·diag(I)·Rᵀ
 // (R at the inertial target). Without it (three-avbd) the principal moments are
 // applied on world axes, which is only right for isotropic or axis-aligned bodies.
