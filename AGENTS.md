@@ -1,6 +1,13 @@
 # AGENTS.md
 
 - Assume our target is 10,000+ active rigid bodies when calculating performance at scale
+- Node: the repo pins its version in `.nvmrc`. Run `nvm use` (or rely on an
+  nvm `cd` hook) before any `node`/`npm` command.
+- Never make tests, builds or runtime code depend on `inspiration/`: it is
+  gitignored and absent in CI, fresh clones and worktrees. Record what a pinned
+  reference produces as a checked-in fixture with a generator script that is the
+  only code reading `inspiration/` (see
+  `engine/crates/engine-webgpu/tests/fixtures/generate-three-avbd-reference.ts`).
 
 ## Cursor Cloud specific instructions
 
