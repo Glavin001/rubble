@@ -40,6 +40,55 @@ static const uint CONVEX_SLOT_PAIRS = 76u;
 // candidate contributes at most one item, so the two buckets never collide.
 BIND(29) RWStructuredBuffer<ConvexWork> gConvexWork;
 
+// Exact early-out for hull pairs: each hull lies inside the box of its local
+// AABB, so boxes separated on any of the 15 OBB axes mean the hulls are
+// separated, and the cooperative SAT would report no contact. The broadphase
+// tests only the 6 face axes; ~half of all SAT pairs ended separated. The
+// margin (scaled by the axis length) keeps float rounding from ever
+// disagreeing with SAT. Built from the hull's local bounds and the collider
+// frame, so no extra binding is needed.
+bool hullBoxesSeparated(HullRef ha, Frame fa, HullRef hb, Frame fb, float margin)
+{
+    float3 ea = hullLocalHalf(ha);
+    float3 eb = hullLocalHalf(hb);
+    float3 a[3] = { quatRotate(fa.q, float3(1, 0, 0)), quatRotate(fa.q, float3(0, 1, 0)), quatRotate(fa.q, float3(0, 0, 1)) };
+    float3 b[3] = { quatRotate(fb.q, float3(1, 0, 0)), quatRotate(fb.q, float3(0, 1, 0)), quatRotate(fb.q, float3(0, 0, 1)) };
+    float3 d = frameToWorld(fb, hullLocalCenter(hb)) - frameToWorld(fa, hullLocalCenter(ha));
+    float R[3][3];
+    float AR[3][3];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+        {
+            R[i][j] = dot(a[i], b[j]);
+            AR[i][j] = abs(R[i][j]) + 1e-6; // parallel edges: conservative
+        }
+    float t[3] = { dot(d, a[0]), dot(d, a[1]), dot(d, a[2]) };
+    for (int i = 0; i < 3; i++)
+    {
+        float rb = eb.x * AR[i][0] + eb.y * AR[i][1] + eb.z * AR[i][2];
+        if (abs(t[i]) > ea[i] + rb + margin) return true;
+    }
+    for (int j = 0; j < 3; j++)
+    {
+        float ra = ea.x * AR[0][j] + ea.y * AR[1][j] + ea.z * AR[2][j];
+        if (abs(dot(d, b[j])) > ra + eb[j] + margin) return true;
+    }
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+        {
+            int i1 = (i + 1) % 3, i2 = (i + 2) % 3, j1 = (j + 1) % 3, j2 = (j + 2) % 3;
+            // Axis a_i x b_j (length sqrt(1 - R_ij^2)) in A's basis.
+            float ra = ea[i1] * AR[i2][j] + ea[i2] * AR[i1][j];
+            float rb = eb[j1] * AR[i][j2] + eb[j2] * AR[i][j1];
+            float tl = abs(t[i2] * R[i1][j] - t[i1] * R[i2][j]);
+            float len = sqrt(max(1.0 - R[i][j] * R[i][j], 0.0));
+            if (tl > ra + rb + margin * len && len > 1e-3) return true;
+        }
+    return false;
+}
+
+static const float HULL_BOX_SEPARATION_MARGIN = 1e-4;
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void convex_classify(uint3 tid : SV_DispatchThreadID)
@@ -55,6 +104,10 @@ void convex_classify(uint3 tid : SV_DispatchThreadID)
     {
         HullRef ha = hullOf(ca);
         HullRef hb = hullOf(cb);
+        // FLAG 4 (diagnostic) disables the early-out, to compare outputs.
+        if ((PARAMS.flags & 4u) == 0u && hullBoxesSeparated(ha, colliderFrame(ca, gBodies[ca.body]), hb, colliderFrame(cb, gBodies[cb.body]),
+                               HULL_BOX_SEPARATION_MARGIN))
+            return;
         bool small = ha.nv <= 16u && hb.nv <= 16u && ha.nf <= 32u && hb.nf <= 32u &&
                      ha.ne <= 48u && hb.ne <= 48u;
         uint slot;

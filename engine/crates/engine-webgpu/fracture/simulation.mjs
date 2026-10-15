@@ -570,8 +570,8 @@ return {
  // Explicit opt-in; no readback/allocation on the interactive hot path.
  // Contacts are persistent cold records: 8 words (colliderA, colliderB,
  // featureId, generation, normal xyz, friction).
- async inspectCollisions(){
-   const enc=device.createCommandEncoder(),savedFlags=params.flags;params.flags=0;writeHost(enc);params.flags=savedFlags;let pass=enc.beginComputePass();
+ async inspectCollisions({flags=0}={}){
+   const enc=device.createCommandEncoder(),savedFlags=params.flags;params.flags=flags;writeHost(enc);params.flags=savedFlags;let pass=enc.beginComputePass();
    pass=encodeCollision(pass,()=>pass,false);pass.end();device.queue.submit([enc.finish()]);manifoldsValid=false;
    await readCounters();
    if(last.overflow)throw new Error(`Collision overflow ${last.overflow}`);
