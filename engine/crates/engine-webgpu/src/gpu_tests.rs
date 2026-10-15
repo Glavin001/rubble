@@ -4502,3 +4502,143 @@ fn record_warm_hash_resolves_minimum_live_runs_and_flags_exhaustion() {
         }
     }
 }
+
+/// Settled stacks fall asleep; waking one body must not jolt it or cascade.
+/// Sleepers neither query the broadphase nor keep their resting contacts, so a
+/// woken body used to restart those contacts cold, sag, and wake its
+/// neighbours in a wave (seen as ring110k&sleep=on churning).
+fn wake_disturbance(nx: u32, nz: u32, height: u32, carry: bool) -> (u32, f32, u32) {
+    wake_disturbance_mode(nx, nz, height, carry, true)
+}
+
+/// `sleep = false` is the control: the same settle time and window, never asleep.
+fn wake_disturbance_mode(nx: u32, nz: u32, height: u32, carry: bool, sleep: bool) -> (u32, f32, u32) {
+    let columns = nx * nz;
+    let bodies = columns * height + 1;
+    let mut sim = WgpuSim::new_with_persistent_contacts(WorldCapacity {
+        max_bodies: 4096,
+        max_colliders: 4096,
+        max_contacts: 1 << 16,
+        max_joints: 64,
+        max_candidates: 1 << 16,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .expect("GPU adapter required for sleep/wake stability");
+    // Browser ring/gables defaults; the 3-column case keeps the per-contact
+    // warm hash of the small demo scenes (carry must not need manifold insert).
+    sim.reuse_copy = true;
+    sim.np_split = true;
+    sim.persist_list = true;
+    sim.manifold_hash_insert = columns > 3;
+    sim.warm_record_hash = columns > 3;
+    sim.local_repair = true;
+    sim.carry_rest = carry;
+    let mut params = AvbdParams::default();
+    params.iterations = 4;
+    params.flags |= 1; // reuse contacts
+    if !sleep {
+        params.sleep_time = 1.0e6;
+    }
+    sim.set_params(params);
+    sim.add_body(BodyState {
+        position: [0.0, -24.5, 0.0],
+        orientation: [0.0, 0.0, 0.0, 1.0],
+        ..BodyState::zeroed()
+    });
+    sim.add_collider(Collider {
+        body: 0,
+        shape: ShapeType::Box as u32,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [50.0, 25.0, 50.0, 50.0],
+        ..Collider::zeroed()
+    });
+    for c in 0..columns {
+        for y in 0..height {
+            let pos = [(c % nx) as f32 * 1.5, 0.5 + y as f32, (c / nx) as f32 * 1.5];
+            let id = sim.add_body(BodyState {
+                position: pos,
+                orientation: [0.0, 0.0, 0.0, 1.0],
+                inv_mass: 1.0,
+                inv_inertia: [6.0; 3],
+                flags: 9,
+                initial_pos: pos,
+                initial_rot: [0.0, 0.0, 0.0, 1.0],
+                ..BodyState::zeroed()
+            });
+            sim.add_collider(Collider {
+                body: id,
+                shape: ShapeType::Box as u32,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: [0.5, 0.5, 0.5, 0.8660254],
+                ..Collider::zeroed()
+            });
+        }
+    }
+    let mut settled = false;
+    for _ in 0..600 {
+        if sim.step().expect("step").awake_count == 0 {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled || !sleep, "{bodies} bodies never fell asleep");
+    let before = sim.download_bodies();
+    // Wake the top box of the first column only.
+    let top = height as usize; // body 0 is ground, first column is 1..=height
+    let mut woke = before[top];
+    woke.flags = 9;
+    woke.sleep_timer = 0.0;
+    let offset = (top * std::mem::size_of::<BodyState>()) as u64;
+    sim.queue.write_buffer(&sim.bufs[0], offset, bytes_of(&woke));
+    sim.last_counters.awake_count = 1;
+    let mut max_awake = 0u32;
+    let mut max_disp = 0.0f32;
+    let mut woke_others = 0u32;
+    for _ in 0..90 {
+        let c = sim.step().expect("step");
+        max_awake = max_awake.max(c.awake_count);
+        let now = sim.download_bodies();
+        if std::env::var("WAKE_DEBUG").is_ok() {
+            eprintln!("step contacts={} manifolds={} candidates={} awake={} top y {:.4} -> {:.4} flags {}",
+                c.contact_count, c.manifold_count, c.candidate_count, c.awake_count,
+                before[top].position[1], now[top].position[1], now[top].flags);
+        }
+        for b in 1..now.len() {
+            let d: f32 = (0..3)
+                .map(|k| (now[b].position[k] - before[b].position[k]).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            max_disp = max_disp.max(d);
+        }
+        if c.awake_count == 0 {
+            break;
+        }
+    }
+    let now = sim.download_bodies();
+    for b in 1..now.len() {
+        if b != top && now[b].sleep_timer != before[b].sleep_timer {
+            woke_others += 1;
+        }
+    }
+    (max_awake, max_disp, woke_others)
+}
+
+#[test]
+fn waking_a_sleeping_stack_does_not_jolt_or_cascade() {
+    // 3 columns use the exact small-scene broadphase; 64 columns (577 colliders) the grid.
+    for (nx, nz) in [(3u32, 1u32), (8, 8)] {
+        // Control: the same stack never sleeps and creeps a little over the window.
+        let (_, creep, _) = wake_disturbance_mode(nx, nz, 9, true, false);
+        let (max_awake, max_disp, woke_others) = wake_disturbance(nx, nz, 9, true);
+        let (_, cold_disp, _) = wake_disturbance(nx, nz, 9, false);
+        eprintln!("wake {nx}x{nz}: carry {max_disp} m (awake {max_awake}, others woken {woke_others}), cold restart {cold_disp} m, never-asleep creep {creep} m");
+        let limit = 1.5 * creep + 5e-5;
+        assert_eq!(woke_others, 0, "{nx}x{nz}: waking one top box woke {woke_others} sleeping neighbours");
+        assert!(max_disp <= limit,
+            "{nx}x{nz}: waking one top box moved bodies {max_disp} m, more than 1.5x the never-asleep creep {creep} m; resting contacts lost their warm start while asleep");
+        assert!(cold_disp > limit,
+            "{nx}x{nz}: dropping resting pairs ({cold_disp} m) no longer exceeds the limit {limit} m; this test no longer discriminates");
+    }
+}

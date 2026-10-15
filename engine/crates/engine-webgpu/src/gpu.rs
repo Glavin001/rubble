@@ -30,6 +30,8 @@ pub struct WgpuSim {
     pub(crate) np_split: bool,
     /// Persist work list (8em, HOST_S(22)); requires reuse copy.
     pub(crate) persist_list: bool,
+    /// Carry resting pairs across sleep (8ep, HOST_S(28)).
+    pub(crate) carry_rest: bool,
     /// Local incremental color repair (8en, HOST_S(27)).
     pub(crate) local_repair: bool,
     /// Test hook: caps the persist list (HOST_S(23)); 0 uses the whole region.
@@ -389,6 +391,7 @@ impl WgpuSim {
             np_defer_limit: 0,
             persist_list_limit: 0,
             local_repair: std::env::var("ENGINE_REPAIR").as_deref() == Ok("local"),
+            carry_rest: std::env::var("ENGINE_REST").as_deref() == Ok("carry"),
             persist_list: persistent_contacts
                 && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
                 && std::env::var("ENGINE_PERSIST").as_deref() == Ok("list"),
@@ -603,6 +606,12 @@ impl WgpuSim {
         self.disp(&mut pass, "broadphase_insert", n_cols, None);
         self.disp(&mut pass, "broadphase_query", n_cols, None);
         self.disp(&mut pass, self.work_args_entry(), 64, None);
+        if self.carry_rest {
+            // Previous manifolds (slot 72) are intact until narrowphase; recount
+            // candidates (slot 64) after the carried resting pairs join them.
+            self.disp_work(&mut pass, "carry_rest_pairs", 72, None);
+            self.disp(&mut pass, self.work_args_entry(), 64, None);
+        }
 
         // Same size the uniforms publish; records clear four words per slot.
         let prev_n = self
@@ -925,8 +934,11 @@ impl WgpuSim {
         s[22] = u32::from(self.persist_list);
         s[23] = self.persist_list_limit;
         s[27] = u32::from(self.local_repair);
-        if self.manifold_hash_insert {
+        s[28] = u32::from(self.carry_rest);
+        if self.manifold_hash_insert || self.carry_rest {
             s[13] = self.last_counters.manifold_count;
+        }
+        if self.manifold_hash_insert {
             s[14] = 1;
         }
         // CSR index region starts past the hash/id words inside gConstraintIds.
@@ -1053,7 +1065,7 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[20] = b(c.max_bodies, 4);
     s[21] = 64 * 4;
     s[22] = 96 * PASS_ALIGN;
-    s[23] = b(c.max_colors.max(72) * 3, 4);
+    s[23] = b(c.max_colors.max(73) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);
     s[26] = b(c.max_bodies, 32);
