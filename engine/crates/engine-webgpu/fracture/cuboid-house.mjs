@@ -12,7 +12,7 @@
 // (FLAG_CONTACT_GAP): with the default margin every course rests 2 mm deep, an
 // 11-course wall sinks ~2 cm unevenly against the taller gables, and the roof
 // shifts.
-import {HullArena,gridConfig,scale} from './geometry.mjs';
+import {HullArena,gridConfig,scale,appendHull} from './geometry.mjs';
 
 const BRICK_L=.5,BRICK_H=.25,WALL_T=.25;   // brick length, course height, wall thickness
 const HALF_X=4,HALF_Z=3,COURSES=11;           // outer walls at x = ±4, z = ±3
@@ -25,7 +25,9 @@ function rng(seed){let s=seed>>>0;return ()=>{s=(s*1664525+1013904223)>>>0;retur
 
 // `parts` limits the build (diagnostics): walls, openings, gables, roof,
 // chimney, porch, fence.
-export function buildCuboidHouse({seed=7,pitchDeg=12,parts=['walls','openings','gables','roof','chimney','porch','fence']}={}){
+// colliders: 'box' (SHAPE_BOX) or 'hull' (each box as an 8-vertex convex hull:
+// the same shapes through the convex path, to compare the two).
+export function buildCuboidHouse({seed=7,pitchDeg=12,colliders:colliderKind='box',parts=['walls','openings','gables','roof','chimney','porch','fence']}={}){
   const PITCH=pitchDeg*Math.PI/180,TAN=Math.tan(PITCH),COS=Math.cos(PITCH),SIN=Math.sin(PITCH);
   const has=new Set(parts),rand=rng(seed),pieces=[];
   const jitter=(c,a)=>c.map(x=>Math.min(1,Math.max(0,x*(1+(rand()-.5)*a))));
@@ -146,12 +148,13 @@ export function buildCuboidHouse({seed=7,pitchDeg=12,parts=['walls','openings','
   box([1.3,1+GAP+.11,fenceZ+.45],[.1,.11,.225],'wood',[.18,.2,.24]);
   }
 
-  return sceneFromPieces(pieces);
+  return sceneFromPieces(pieces,{hulls:colliderKind==='hull'});
 }
 
 // Bodies, box colliders and the render mesh, recentred so the footprint's
 // bounding box is centred on x = z = 0 (layouts assume a centred house).
-export function sceneFromPieces(pieces){
+export function sceneFromPieces(pieces,{hulls=false}={}){
+  const arena=new HullArena();
   const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
   for(const p of pieces)for(const c of corners(p))for(let k=0;k<3;k++){lo[k]=Math.min(lo[k],c[k]);hi[k]=Math.max(hi[k],c[k])}
   const shift=[-(lo[0]+hi[0])/2,0,-(lo[2]+hi[2])/2];
@@ -161,7 +164,12 @@ export function sceneFromPieces(pieces){
     const [hx,hy,hz]=p.half,rho=DENSITY[p.material],m=rho*8*hx*hy*hz,id=bodies.length;
     const q=[Math.sin(p.angle/2),0,0,Math.cos(p.angle/2)];
     bodies.push({p:p.center.map((x,k)=>x+shift[k]),q,invMass:1/m,invI:[3/(m*(hy*hy+hz*hz)),3/(m*(hx*hx+hz*hz)),3/(m*(hx*hx+hy*hy))],flags:5});
-    colliders.push({body:id,shape:2,density:rho,params:[hx,hy,hz,0],material:0});
+    if(hulls){
+      const v=[];for(let i=0;i<8;i++)v.push([i&1?hx:-hx,i&2?hy:-hy,i&4?hz:-hz]);
+      const faces=[[0,2,6,4],[1,5,7,3],[0,4,5,1],[2,3,7,6],[0,1,3,2],[4,6,7,5]];
+      const c=appendHull(arena,v,{sizes:faces.map(f=>f.length),indices:faces.flat()});
+      colliders.push({body:id,shape:3,density:rho,params:c.params,localPos:c.localPos,material:0});
+    }else colliders.push({body:id,shape:2,density:rho,params:[hx,hy,hz,0],material:0});
     for(const [n,quad] of FACES)for(const k of [0,1,2,0,2,3]){const s=quad[k];vertices.push(s[0]*hx,s[1]*hy,s[2]*hz,...n,...p.color,id)}
   }
   const width=hi[0]-lo[0],depth=hi[2]-lo[2],height=hi[1]-lo[1],extent=Math.max(width,depth,height);
@@ -178,7 +186,7 @@ export function sceneFromPieces(pieces){
     }
   }
   return {projectileStart,projectileCount,projectileRadius,projectileMass:500,projectileVertices:new Float32Array(projectileVertices),
-    bodies,colliders,joints:[],hullData:new HullArena().data,skippedHulls:[],vertices:new Float32Array(vertices),lines:new Float32Array(0),
+    bodies,colliders,joints:[],hullData:arena.data,skippedHulls:[],vertices:new Float32Array(vertices),lines:new Float32Array(0),
     selected:pieces,bonds:[],byId:new Map(),pieces:pieces.length,boxes:pieces.length,
     extent,extentX:width,extentZ:depth,height,copies:1,instanceStride:0,center:[0,height/2,0],gridCellSize:gridConfig(colliders).base,
     // Flags: 1 reuse contacts, 32 zero-gap contacts, 64 world-frame inertia.
