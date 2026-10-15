@@ -587,6 +587,12 @@ static const uint HIER_MOVING_MASK_SLOT = 31u;
 // Oversized statics: count at 53, up to 10 collider IDs at 54..63.
 static const uint HIER_LARGE_COUNT_SLOT = 53u;
 static const uint HIER_LARGE_MAX = 10u;
+// Moving colliders above the finest level (count at 32, up to 9 IDs at
+// 33..41; host-zeroed each step). Sleeping/static colliders only pair with
+// coarser movers, so while the list is complete a sleeper that overlaps none
+// of them skips its query: the same pairs, without 27 hash probes per level.
+static const uint HIER_COARSE_COUNT_SLOT = 32u;
+static const uint HIER_COARSE_MAX = 9u;
 
 uint hierLevel(float radius)
 {
@@ -646,7 +652,16 @@ void hierInsert(uint i)
     // Occupied-level mask (scratch 51, zeroed by the host each step): queries
     // skip empty levels, so the host can keep slack levels for f32 rounding.
     AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], 1u << level);
-    if (bodyMoving(gBodies[col.body])) AOR2(gScratchAtomics[HIER_MOVING_MASK_SLOT], 1u << level);
+    if (bodyMoving(gBodies[col.body]))
+    {
+        AOR2(gScratchAtomics[HIER_MOVING_MASK_SLOT], 1u << level);
+        if (level > 0u)
+        {
+            uint k;
+            AADD3(gScratchAtomics[HIER_COARSE_COUNT_SLOT], 1u, k);
+            if (k < HIER_COARSE_MAX) ASTORE(gScratchAtomics[HIER_COARSE_COUNT_SLOT + 1u + k], i);
+        }
+    }
     uint prev;
     AXCHG3(gConstraintIds[hierHash(hierCell(box, level), level)], i, prev);
     // The chain link lives in the AABB's spare word, as in the split grid:
@@ -694,6 +709,21 @@ void hierQuery(uint i)
     uint occupied = active ? ALOAD(gScratchAtomics[HIER_LEVEL_MASK_SLOT])
                            : ALOAD(gScratchAtomics[HIER_MOVING_MASK_SLOT]) & ~((2u << own) - 1u);
     if ((occupied >> own) == 0u) return;
+    // Params flag 512 (diagnostic) disables the prefilter, to compare outputs.
+    if (!active && (PARAMS.flags & 512u) == 0u)
+    {
+        uint nCoarse = ALOAD(gScratchAtomics[HIER_COARSE_COUNT_SLOT]);
+        if (nCoarse <= HIER_COARSE_MAX)
+        {
+            bool near = false;
+            for (uint k = 0u; k < nCoarse; k++)
+            {
+                Aabb mb = gAabbs[base + ALOAD(gScratchAtomics[HIER_COARSE_COUNT_SLOT + 1u + k])];
+                if (hierLevel(mb._pad0) > own && aabbOverlap(aa, mb)) near = true;
+            }
+            if (!near) return;
+        }
+    }
     for (uint level = own; level < levels; level++)
     {
         if (((occupied >> level) & 1u) == 0u) continue;
