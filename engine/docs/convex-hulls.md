@@ -196,7 +196,7 @@ enforces it.
 cargo test -p engine-schema                                  # cooker, ABI decode, oracle, golden bytes
 cargo test -p engine-oracles --test convex_slang_cpu         # production Slang kernels on the CPU
 cargo test -p engine-webgpu --lib -- --skip gpu::            # naga validation, storage budget
-node --test crates/engine-webgpu/fracture/*.test.mjs         # JS cooker, golden, mock-device host
+nvm use && node --test crates/engine-webgpu/fracture/*.test.mjs crates/engine-webgpu/tests/*.test.mjs  # Node per .nvmrc
 ```
 
 `convex_slang_cpu` compiles the real kernels with
