@@ -1584,6 +1584,24 @@ struct VsOut {
       if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
     }
 
+    // ?stopAt=N freezes live playback at step N (still rendering) so runs can be
+    // compared at the same step, e.g. sleep=on vs sleep=off screenshots.
+    const stopAt = Math.max(0, Number(qs.get('stopAt')) || 0);
+    // Diagnostic: current body positions (x, y, z per body), for run comparisons.
+    window.__bodyPositions = async () => {
+      const bytes = bodies.length * 112;
+      const snap = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(bufs[0], 0, snap, 0, bytes);
+      device.queue.submit([enc.finish()]);
+      await snap.mapAsync(GPUMapMode.READ);
+      const f = new Float32Array(snap.getMappedRange().slice(0));
+      snap.unmap(); snap.destroy();
+      const out = new Float32Array(bodies.length * 3);
+      for (let i = 0; i < bodies.length; i++) out.set(f.subarray(i * 28, i * 28 + 3), i * 3);
+      return { step: steps, positions: Array.from(out), initial: bodies.map((b) => b.p) };
+    };
+
     async function frame(now) {
       if (!running) return;
       if (liveError) { running = false; fail(liveError); return; }
@@ -1608,6 +1626,20 @@ struct VsOut {
         const aspect = canvas.width / canvas.height;
         writeCamera(aspect);
         const enc = device.createCommandEncoder();
+        const frozen = stopAt > 0 && steps >= stopAt;
+        if (frozen) {
+          const rpFrozen = enc.beginRenderPass({
+            colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
+            depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+          });
+          rpFrozen.setPipeline(groundPipe); rpFrozen.setBindGroup(0, groundBind); rpFrozen.setVertexBuffer(0, groundVbo); rpFrozen.draw(6);
+          rpFrozen.setPipeline(boxPipe); rpFrozen.setBindGroup(0, boxBind); rpFrozen.setVertexBuffer(0, boxVbo); rpFrozen.draw(36, bodies.length - 1);
+          rpFrozen.end();
+          device.queue.submit([enc.finish()]);
+          statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${bodies.length - 1} bodies · stopped at step ${steps} (stopAt) · contacts ${last.contact} · awake ${last.awake} · ov 0x${last.overflow.toString(16)}`;
+          requestAnimationFrame(frame);
+          return;
+        }
         encodeStep(enc, false);
         const rp = enc.beginRenderPass({
           colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
