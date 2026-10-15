@@ -118,3 +118,30 @@ test('hull arena vertex limit rejects larger hulls with a clear error, never red
   assert.equal(arena.records,records,'a rejected hull leaves the arena unchanged');
   assert.doesNotThrow(()=>appendHull(new HullArena(),large.vertices,large.topology));
 });
+
+// Mirrors hullSupportIndex (physics/convex.slang). Some cooked house hulls keep
+// a redundant vertex on no face loop as vertex 0; a climb starting there never
+// moved and missed the ground by up to 15 cm, so plates sank through the floor.
+test('hill-climb supports match brute force on every certified house hull',async()=>{
+ const {parseFractureGlb}=await import('./asset.mjs');const {buildScene}=await import('./geometry.mjs');
+ const bytes=readFileSync(new URL('./assets/veneer-house.glb',import.meta.url));
+ const asset=parseFractureGlb(bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength));
+ const dirs=Array.from({length:64},(_,i)=>{const y=1-2*(i+.5)/64,r=Math.sqrt(1-y*y),t=i*2.399963;return [r*Math.cos(t),y,r*Math.sin(t)]});
+ let isolatedStart=0;
+ for(const level of [1,2,3]){
+  const scene=buildScene(asset,level),seen=new Set();
+  for(const c of scene.colliders){if(c.shape!==3||seen.has(hullBase(c.params)))continue;seen.add(hullBase(c.params));
+   const h=hullView(scene.hullData,hullBase(c.params));if(!h.closed)continue;
+   if(!h.adjacency(0).length)isolatedStart++;
+   for(const d of dirs){
+    let cur=h.edge(0)[0],curD=dot(h.vertex(cur),d);
+    for(let step=0;step<h.nv;step++){let next=cur,nextD=curD;
+     for(const e of h.adjacency(cur)){const [a,b]=h.edge(e),o=a===cur?b:a,od=dot(h.vertex(o),d);if(od>nextD){nextD=od;next=o}}
+     if(next===cur)break;cur=next;curD=nextD}
+    let best=-Infinity;for(let i=0;i<h.nv;i++)best=Math.max(best,dot(h.vertex(i),d));
+    assert.ok(best-curD<=1e-6,`level ${level} hull ${hullBase(c.params)}: climb stopped ${best-curD} short`);
+   }
+  }
+ }
+ assert.ok(isolatedStart>0,'the asset still exercises hulls whose vertex 0 is on no face');
+});

@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 /// `AvbdParams::flags` bit: three-avbd reuseContacts (SAT-skip for still pairs).
 pub const FLAG_REUSE_CONTACTS: u32 = 1;
 
+/// `AvbdParams::flags` bit: contacts target zero gap. `contact_offset` only
+/// widens detection (speculative contacts); without it resting bodies sit about
+/// `contact_offset` deep (three-avbd).
+pub const FLAG_CONTACT_GAP: u32 = 32;
+
+/// `AvbdParams::flags` bit: the primal inertial block uses the world inertia
+/// `R·diag(I)·Rᵀ`. Without it (three-avbd) principal moments act on world axes.
+pub const FLAG_WORLD_INERTIA: u32 = 64;
+
 /// Giles/Diaz/Yuksel AVBD parameters (avbd-demo3d `Solver::defaultParams`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]

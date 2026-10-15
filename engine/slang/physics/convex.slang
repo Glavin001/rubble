@@ -167,8 +167,10 @@ uint hullSupportIndex(HullRef h, float3 dir)
         }
         return best;
     }
-    uint cur = 0u;
-    float curD = dot(hullVertex(h, 0u), dir);
+    // Start on an edge: a vertex on no face loop (a redundant point inside a
+    // face or edge) has no adjacency, and a climb from it would never move.
+    uint cur = hullEdge(h, 0u).x;
+    float curD = dot(hullVertex(h, cur), dir);
     for (uint step = 0u; step < h.nv; step++)
     {
         uint adj = hullVertexAdj(h, cur);
