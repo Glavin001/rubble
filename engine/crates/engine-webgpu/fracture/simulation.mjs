@@ -10,11 +10,16 @@ const BOND_WAKE_ROUNDS = 8;
 const SPARSE_AWAKE = 256;
 // Colour slots dispatched past the previous step's colour count (see encode).
 const COLOR_HEADROOM = 4;
+// Colouring rounds dispatched past the previous step's need (see encode).
+const COLOR_ROUND_HEADROOM = 2;
+// Pass-uniform slot whose value is `round` (slots 48..67 hold scan constants).
+const roundSlot = (round) => round < 48 ? round : round + 20;
 const PASS_ALIGN=256;
 const nextPow2=n=>2**Math.ceil(Math.log2(Math.max(1,n)));
 const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity};
 // Incremental colouring recolours only changed neighbourhoods but lets the
 // palette drift (more solve passes); fresh colouring is the default.
+const colorRoundLimit=Math.min(64,budget.colorRounds??32);
 let incremental=budget.incrementalColoring??false;
 const cap={maxBodies:nextPow2(Math.max(64,scene.bodies.length)),maxColliders:nextPow2(Math.max(64,scene.colliders.length)),
  maxContacts:nextPow2(Math.max(4096,scene.colliders.length*budget.contactsPerCollider)),maxCandidates:nextPow2(Math.max(4096,scene.colliders.length*budget.candidatesPerCollider)),
@@ -79,7 +84,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       'convex_classify', 'convex_bucket', 'convex_write_args', 'convex_sat_small', 'convex_sat_large', 'convex_manifold', 'reuse_all_manifolds',
       'persist_contacts', 'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_sort',
-      'init_colors', 'color_bodies', 'color_bodies_local', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
+      'init_colors', 'color_bodies', 'color_bodies_local', 'color_bodies_tail', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
       'record_color_degrees', 'write_color_args', 'predict_bodies', 'pack_solver_contacts', 'solve_primal_color', 'solve_primal_sparse',
       'solve_dual', 'extract_velocity_sleep',
       'joint_hash_clear', 'joint_hash_insert', 'bond_wake', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
@@ -170,7 +175,8 @@ try {
     for (let i = 0; i < 96; i++) {
       let v = i;
       if (i >= 48 && i < 68) { const k = i - 48; v = (1 << k) | ((k & 1) << 31); }
-      else if (i >= 68) v = 0;
+      else if (i >= 68 && i < 84) v = i - 20; // colouring rounds 48..63 (roundSlot)
+      else if (i >= 84) v = 0;
       passView.setUint32(i * PASS_ALIGN, v >>> 0, true);
     }
     device.queue.writeBuffer(bufs[22], 0, pass);
@@ -333,6 +339,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       hostCountersView[0] = bodyCount;
       hostCountersView[1] = colliderCount;
       hostCountersView[3] = jointCount;
+      hostCountersView[18] = colorRoundLimit; // colorRoundLimit, read by color_bodies_tail
       hostColorsView.fill(0);
       device.queue.writeBuffer(hostUpload, 0, hostUploadCpu);
       // Prefer GPU copies from one upload — four tiny writeBuffers were ~0.3 ms of ring wall.
@@ -462,7 +469,14 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       // Slot 69 is zero when the local pass handled the repair list. Dense debris
       // (100k awake pieces) can need more than 32 Jones-Plassmann rounds.
       if (incremental) disp(pass, 'color_bodies_local', 64);
-      for (let round = 0; round < (budget.colorRounds ?? 32); round++) dispWork(pass, 'color_bodies', incremental ? 69 : 67, round % 16);
+      // Rounds dispatched: the previous step's need plus headroom, not the whole
+      // budget (every empty round still costs a barrier). color_bodies_tail runs
+      // further rounds in one workgroup only if the last dispatched round left a
+      // body blocked, up to the same limit, so colouring always finishes.
+      const roundHeadroom = budget.colorRoundHeadroom === undefined ? COLOR_ROUND_HEADROOM : budget.colorRoundHeadroom;
+      const rounds = roundHeadroom === null ? colorRoundLimit : Math.min(colorRoundLimit, Math.max(1, (last.colorRounds | 0) + 1 + roundHeadroom));
+      for (let round = 0; round < rounds; round++) dispWork(pass, 'color_bodies', incremental ? 69 : 67, roundSlot(round));
+      if (rounds < colorRoundLimit) disp(pass, 'color_bodies_tail', 64, roundSlot(rounds));
       pass = phase('coloring');
       // Stable per-colour body order (locality across every primal iteration).
       disp(pass, 'count_color_tiles', nBodies);
@@ -584,7 +598,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       await staging.mapAsync(GPUMapMode.READ);
       const c = new Uint32Array(staging.getMappedRange().slice(0));
       staging.unmap();
-      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], convexSmall: c[11], convexLarge: c[16] };
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], convexSmall: c[11], convexLarge: c[16], colorRounds: c[17] };
       if (serial !== wakeSerial) last.awake = Math.max(1, last.awake);
       countedSteps = at;
     }

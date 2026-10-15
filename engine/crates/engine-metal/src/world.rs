@@ -676,7 +676,9 @@ impl MetalWorld {
             narrowphase_deferred: 0,
             _pad2: 0,
             convex_sat_large: 0,
-            _pad3: [0; 3],
+            color_rounds: 0,
+            color_round_limit: 0,
+            _pad3: 0,
         };
         if !clear_transient {
             c = self.last_counters;

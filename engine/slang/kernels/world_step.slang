@@ -2990,7 +2990,45 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     if (li >= workN) return;
     uint body = incremental ? gCcdFlags[li] : gAwakeList[li];
     if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) return;
-    jpTryColor(body);
+    // PASS_U is the round index: a body still blocked records the round, so
+    // the host can size the next step's rounds and the tail knows whether the
+    // dispatched rounds finished.
+    if (!jpTryColor(body)) AMAX2(gCounters[0].colorRounds, PASS_U + 1u);
+}
+
+// Rounds past the host's estimate (PASS_U = rounds dispatched): one workgroup
+// keeps running Jones-Plassmann rounds over the same work list while the last
+// round still left a body blocked, up to gCounters.colorRoundLimit rounds in
+// all (the global rounds' limit), with a storage barrier between rounds.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void color_bodies_tail(uint3 lid : SV_GroupThreadID)
+{
+    uint local = lid.x;
+    // Publish the round limit (0: the dispatched rounds finished) through
+    // workgroup memory so the loop and its barriers stay in uniform control flow.
+    if (local == 0u) gsUniformLanes = ALOAD(gCounters[0].colorRounds) >= PASS_U ? ALOAD(gCounters[0].colorRoundLimit) : 0u;
+    GROUP_SYNC();
+    uint limit = gsUniformLanes;
+    if (limit == 0u) return;
+    GROUP_SYNC();
+    bool incremental = HOST_S(26) != 0u;
+    uint workN = incremental ? ALOAD(gCounters[0].recolorCount) : ALOAD(gCounters[0].awakeCount);
+    for (uint round = PASS_U; round < limit; round++)
+    {
+        if (local == 0u) ASTORE(gsColorRemaining, 0u);
+        GROUP_SYNC();
+        for (uint li = local; li < workN; li += 256u)
+        {
+            uint body = incremental ? gCcdFlags[li] : gAwakeList[li];
+            if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) continue;
+            if (!jpTryColor(body)) { AOR2(gsColorRemaining, 1u); AMAX2(gCounters[0].colorRounds, round + 1u); }
+        }
+        DeviceMemoryBarrierWithGroupSync();
+        if (local == 0u) gsUniformLanes = ALOAD(gsColorRemaining);
+        GROUP_SYNC();
+        if (gsUniformLanes == 0u) break;
+    }
 }
 
 // Opt-in local repair (8en, HOST_S(27) != 0): a small incremental repair list

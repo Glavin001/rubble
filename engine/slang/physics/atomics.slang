@@ -80,8 +80,8 @@ public struct GpuCounters
     AUint _pad1;        // ABI byte 56: two-pass narrowphase deferred count (8ek)
     AUint _pad2;        // ABI byte 60: persist work-list length (8em)
     AUint convexLarge;  // ABI byte 64: convex SAT pairs, large bucket (back of list)
-    AUint _pad3;        // ABI bytes 68..79: keep the block a multiple of 16 bytes
-    AUint _pad4;
-    AUint _pad5;
+    AUint colorRounds;     // ABI byte 68: 1 + last JP round that left a body blocked
+    AUint colorRoundLimit; // ABI byte 72: JP rounds the host allows (written each step)
+    AUint _pad5;           // ABI byte 76: keep the block a multiple of 16 bytes
 };
 #endif
