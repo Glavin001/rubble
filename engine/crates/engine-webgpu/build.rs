@@ -13,6 +13,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "narrowphase_defer_copy_persistent",
     "narrowphase_fresh_copy_persistent",
     "csr_degree_contacts_persistent",
+    "persist_list_copy_persistent",
+    "write_work_args_copy_persistent",
     "csr_scatter_contacts_persistent",
     "persist_contacts_copy_persistent",
     "apply_commands",

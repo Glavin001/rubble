@@ -876,6 +876,68 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
 }
 
 // three-avbd Stage 8b: one manifold record + contiguous contact points.
+#if defined(ENGINE_REUSE_COPY)
+// Opt-in persist work list (8em, HOST_S(22) != 0). Contacts that still need the
+// persistence pass (fresh points and reused pairs at rest) are listed, eight
+// local indices per record, in the unused top of gManifolds: manifold slots
+// never exceed the candidate count, so records [n, maxM) are free during
+// narrowphase. gCounters._pad2 counts listed contacts. Once it exceeds the
+// capacity the list is ignored and the full per-contact scan runs instead, so
+// every contact is persisted exactly once in either mode.
+bool persistListEnabled() { return HOST_S(22) != 0u; }
+
+uint persistListCapacity()
+{
+    uint maxM = HOST_S(10);
+    uint capacity = (maxM - min(ALOAD(gCounters[0].candidateCount), maxM)) * 8u;
+    // HOST_S(23) != 0 caps the list (tests exercise the overflow scan).
+    return HOST_S(23) != 0u ? min(capacity, HOST_S(23)) : capacity;
+}
+
+void persistListWrite(uint slot, uint value)
+{
+    uint rec = HOST_S(10) - 1u - (slot >> 3u);
+    switch (slot & 7u)
+    {
+    case 0u: gManifolds[rec].colliderA = value; break;
+    case 1u: gManifolds[rec].colliderB = value; break;
+    case 2u: gManifolds[rec].contactStart = value; break;
+    case 3u: gManifolds[rec].contactCount = value; break;
+    case 4u: gManifolds[rec].normal.x = asfloat(value); break;
+    case 5u: gManifolds[rec].normal.y = asfloat(value); break;
+    case 6u: gManifolds[rec].normal.z = asfloat(value); break;
+    default: gManifolds[rec].friction = asfloat(value); break;
+    }
+}
+
+uint persistListRead(uint slot)
+{
+    Manifold m = gManifolds[HOST_S(10) - 1u - (slot >> 3u)];
+    switch (slot & 7u)
+    {
+    case 0u: return m.colliderA;
+    case 1u: return m.colliderB;
+    case 2u: return m.contactStart;
+    case 3u: return m.contactCount;
+    case 4u: return asuint(m.normal.x);
+    case 5u: return asuint(m.normal.y);
+    case 6u: return asuint(m.normal.z);
+    default: return asuint(m.friction);
+    }
+}
+
+// Lists local contact indices [first, first + count) for the persistence pass.
+void persistListAppend(uint first, uint count)
+{
+    if (!persistListEnabled()) return;
+    uint k;
+    AADD3(gCounters[0]._pad2, count, k);
+    if (k + count > persistListCapacity()) return; // overflow: the scan pass runs
+    for (uint c = 0u; c < count; c++)
+        persistListWrite(k + c, first + c);
+}
+#endif
+
 void emitContactManifold(
     CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
     BoxManifold points, float margin)
@@ -932,6 +994,9 @@ void emitContactManifold(
         BoxManifoldPt pt = points.pts[k];
         STORE_NEW_CONTACT(curOff + cStart + k, mslot, makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu));
     }
+#if defined(ENGINE_REUSE_COPY)
+    persistListAppend(cStart, (uint)count);
+#endif
 
     Manifold mf;
     mf.colliderA = pair.colliderA;
@@ -1157,6 +1222,9 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
         // pass. Encode the exact source index in the transient alive word.
         MARK_REUSED_CONTACT(curOff + cStart + k, mslot, startJ + k + 2u);
     }
+#if defined(ENGINE_REUSE_COPY)
+    if (atRest) persistListAppend(cStart, count);
+#endif
     Manifold mf;
     mf.colliderA = pair.colliderA;
     mf.colliderB = pair.colliderB;
@@ -1791,16 +1859,9 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
     return c;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void persist_contacts(uint3 tid : SV_DispatchThreadID)
+void persistContactAt(uint i)
 {
-    uint i = dispatchIndex(tid);
-    if (i >= ALOAD(gCounters[0].contactCount)) return;
     uint curOff = HOST_S(11);
-#if defined(ENGINE_REUSE_COPY)
-    if ((gSolverPoints[curOff + i].pairAndStick & PERSIST_FINAL) != 0u) return;
-#endif
     uint state = CONTACT_STATE(curOff + i);
     if (state == 0u) return;
     bool reused = state >= 2u;
@@ -1809,6 +1870,31 @@ void persist_contacts(uint3 tid : SV_DispatchThreadID)
     BodyState bb = gBodies[gColliders[c.colliderB].body];
     persistContact(i, c, reused, ba, bb);
 }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void persist_contacts(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= ALOAD(gCounters[0].contactCount)) return;
+#if defined(ENGINE_REUSE_COPY)
+    if ((gSolverPoints[HOST_S(11) + i].pairAndStick & PERSIST_FINAL) != 0u) return;
+#endif
+    persistContactAt(i);
+}
+
+#if defined(ENGINE_REUSE_COPY)
+// Persist only the listed contacts; ignored when the list overflowed.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void persist_list(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = dispatchIndex(tid);
+    // Dispatched over work slot 70, which is zero when the list overflowed.
+    if (k >= ALOAD(gCounters[0]._pad2)) return;
+    persistContactAt(persistListRead(k));
+}
+#endif
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -2455,6 +2541,17 @@ void write_work_args(uint3 tid : SV_DispatchThreadID)
                                             : min(HOST_S(7), HOST_S(3)));
     // Opt-in keeps hosts without a history row / slot 69 compatible.
     if (HOST_S(26) != 0u) writeDispatchArgs(69u, ALOAD(gCounters[0].recolorCount));
+#if defined(ENGINE_REUSE_COPY)
+    // Persist work list (8em): slot 70 = listed contacts, slot 71 = the full
+    // scan, which runs only when the list overflowed.
+    if (persistListEnabled())
+    {
+        uint listed = ALOAD(gCounters[0]._pad2);
+        bool complete = listed <= persistListCapacity();
+        writeDispatchArgs(70u, complete ? listed : 0u);
+        writeDispatchArgs(71u, complete ? 0u : min(ALOAD(gCounters[0].contactCount), HOST_S(3)));
+    }
+#endif
 }
 
 // Write Metal indirect threadgroup counts for each colour (0 groups ⇒ skipped).
