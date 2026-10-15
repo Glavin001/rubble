@@ -65,6 +65,21 @@ M3 Max 24 of 48 houses collapse (debris still topples unbonded lot neighbours;
 43 of 49 on the grid), ~55k pieces stay awake, and the step settles at ~15 ms
 (~66 ticks/s) by 30 s. 10 m yards still lose 22 houses.
 
+**Cuboid suburb · 48 box-built houses** uses the same layout with a procedural
+house made only of box colliders (`cuboid-house.mjs`, ~715 pieces): running-bond
+brick walls with interlocking corners, door and windows with lintels, sills and
+glass, stepped brick gables, a ridge beam, rafters and roof boards, an exterior
+chimney, a porch on posts with a step, and a picket fence with a mailbox. Every
+piece is a loose body held by gravity and friction (μ = 0.5); `cuboid.test.mjs`
+checks that no two pieces start interpenetrating.
+- The roof pitch is 12°: woken whole, a house stands and sleeps again in 2.6 s.
+  At 18° the settling jolt starts the rafters sliding and the roof falls in.
+- The scene uses zero-gap contacts (`FLAG_CONTACT_GAP`). With the default margin
+  each course rests 2 mm deep, so the walls and the taller gables sink unevenly.
+- On an M3 Max the shot collapses 12 of 48 houses, 6-12k pieces stay awake, and
+  the GPU step is 3.5-4.2 ms (box-box contacts, no hull SAT), about 4x faster than
+  the hull suburb. The remaining cost is mostly the primal's per-colour dispatches.
+
 ### Breakable bonds (experimental, opt-in)
 
 “Breakable bonds (experimental)” turns each baked bond of the selected level into
