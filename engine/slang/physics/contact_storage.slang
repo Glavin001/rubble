@@ -22,8 +22,11 @@ struct ContactMeta
     float3 normal; float friction;
 };
 BIND(4) RWStructuredBuffer<ContactMeta> gContactMeta;
-static const uint PERSIST_OWNER_MASK = 0x3FFFFFFFu;
+static const uint PERSIST_OWNER_MASK = 0x1FFFFFFFu;
 static const uint PERSIST_REUSED = 0x40000000u;
+// Reused points finished in narrowphase (ENGINE_REUSE_COPY); persistence skips
+// them. Masked out of the owner like the stick bit, so it may stay set.
+static const uint PERSIST_FINAL = 0x20000000u;
 
 uint persistentContactState(uint absolute)
 {
@@ -68,6 +71,14 @@ void storePersistentContact(uint absolute, uint owner, Contact c)
         (c._pad0 != 0.0 ? SOLVER_STICK : 0u);
     gSolverPoints[absolute] = pt;
 }
+
+#if defined(ENGINE_REUSE_COPY)
+void storeFinalPersistentContact(uint absolute, uint owner, Contact c)
+{
+    storePersistentContact(absolute, owner, c);
+    gSolverPoints[absolute].pairAndStick |= PERSIST_FINAL;
+}
+#endif
 
 void updatePersistentContact(uint absolute, Contact c)
 {

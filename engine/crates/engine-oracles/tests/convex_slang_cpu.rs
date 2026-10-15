@@ -192,7 +192,7 @@ fn run_mode(scene: &Scene, candidates: &[CandidatePair], mode: u32, grid_words: 
     scratch[16] = grid_words;
     scratch[17] = if mode >= 1 { 0 } else { 1 }; // first step builds sleeping bounds
     scratch[18] = if mode >= 1 { levels } else { 0 };
-    scratch[21] = u32::from(scene.colliders.iter().any(CollisionFilter::is_set));
+    scratch[23] = u32::from(scene.colliders.iter().any(CollisionFilter::is_set));
     bytes.extend_from_slice(bytemuck::cast_slice(&scratch));
     bytes.extend_from_slice(bytemuck::cast_slice(&scene.bodies));
     bytes.extend_from_slice(bytemuck::cast_slice(&scene.colliders));

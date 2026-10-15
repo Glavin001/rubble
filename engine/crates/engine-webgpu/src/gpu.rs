@@ -57,6 +57,12 @@ pub struct WgpuSim {
     pub(crate) manifold_hash_insert: bool,
     /// Record warm hash: 16-byte slots carrying the pair key and previous run.
     pub(crate) warm_record_hash: bool,
+    /// Narrowphase finishes reused copies (persistent contacts only).
+    pub(crate) reuse_copy: bool,
+    /// Two-pass narrowphase (8ek): reuse, then shape tests over compacted pairs.
+    pub(crate) np_split: bool,
+    /// Test hook: caps deferred pairs (HOST_S(21)); 0 uses the whole tail.
+    pub(crate) np_defer_limit: u32,
     fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -131,6 +137,12 @@ fn bindings_of(wgsl: &str) -> Vec<Bind> {
 }
 
 /// Word offset where the CSR index lives inside `gConstraintIds` on the WGSL path.
+/// Split broadphase grids: awake dynamics in one table, sleepers and small
+/// statics in a second (HOST_S(20)); awake queriers walk 14 cells.
+fn grid_split() -> bool {
+    std::env::var("ENGINE_GRID").as_deref() == Ok("split")
+}
+
 fn constraint_id_words(c: &WorldCapacity) -> u32 {
     let words = (2 * (c.max_contacts + c.max_joints))
         .max(32768)
@@ -147,6 +159,9 @@ fn persistent_entry(name: &str) -> &str {
         "persist_contacts" => "persist_contacts_persistent",
         "persist_manifolds" | "persist_manifolds_compact" => "persist_manifolds_persistent",
         "pack_solver_contacts" => "pack_solver_pairs_persistent",
+        // 8el: persistent hosts pack pairs before the graph; CSR reads their body ids.
+        "csr_degree_contacts" => "csr_degree_contacts_persistent",
+        "csr_scatter_contacts" => "csr_scatter_contacts_persistent",
         "solve_primal_color_compact" => "solve_primal_color_persistent",
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
@@ -281,7 +296,11 @@ impl WgpuSim {
         let shaders = crate::WebGpuWorld::compile_shaders_report();
         let mut pipes = HashMap::new();
         for (name, canonical) in &shaders {
-            if name.ends_with("_persistent") {
+            // Persistent variants load under their canonical aliases; reuse-copy
+            // entries keep their own names (they have no canonical twin).
+            if name.ends_with("_persistent")
+                && !(persistent_contacts && name.ends_with("_copy_persistent"))
+            {
                 continue;
             }
             let entry = if persistent_contacts {
@@ -392,6 +411,12 @@ impl WgpuSim {
                 Ok("manifold") | Ok("record")
             ),
             warm_record_hash: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("record"),
+            reuse_copy: persistent_contacts
+                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy"),
+            np_split: persistent_contacts
+                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
+                && std::env::var("ENGINE_NP").as_deref() == Ok("split"),
+            np_defer_limit: 0,
             device,
             queue,
             capacity,
@@ -736,7 +761,7 @@ impl WgpuSim {
         self.disp(
             &mut pass,
             "broadphase_clear",
-            u64::from(self.grid_hash_words()),
+            u64::from(self.grid_hash_words()) * if grid_split() { 2 } else { 1 },
             None,
         );
         self.disp(&mut pass, "broadphase_insert", n_cols, None);
@@ -772,7 +797,21 @@ impl WgpuSim {
             reuse || !self.manifold_hash_insert,
             "ENGINE_HASH_INSERT=manifold requires contact reuse"
         );
-        self.disp_work(&mut pass, "narrowphase", 64, None);
+        if self.np_split {
+            self.disp_work(&mut pass, "narrowphase_defer_copy_persistent", 64, None);
+            self.disp_work(&mut pass, "narrowphase_fresh_copy_persistent", 64, None);
+        } else {
+            self.disp_work(
+                &mut pass,
+                if self.reuse_copy {
+                    "narrowphase_copy_persistent"
+                } else {
+                    "narrowphase"
+                },
+                64,
+                None,
+            );
+        }
         if self.has_convex {
             // Hull pairs deferred by narrowphase: classify (cheap pairs emit
             // here), size-bucketed cooperative SAT, then clipping.
@@ -797,6 +836,8 @@ impl WgpuSim {
                 "persist_manifolds_compact"
             } else if self.manifold_persistence {
                 "persist_manifolds"
+            } else if self.reuse_copy {
+                "persist_contacts_copy_persistent"
             } else {
                 "persist_contacts"
             },
@@ -807,6 +848,13 @@ impl WgpuSim {
             },
             None,
         );
+        // Persistent CSR reads solver pairs, so pack them before the graph unless
+        // manifold persistence already did.
+        let early_pair_pack =
+            self.persistent_contacts && !self.fused_persistence && !self.manifold_persistence;
+        if early_pair_pack {
+            self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
+        }
         if self.joint_count > 0 {
             self.disp(&mut pass, "warmstart_joints", n_joints, None);
         }
@@ -846,7 +894,7 @@ impl WgpuSim {
 
         // Dispatch the full palette; empty GPU indirect buckets cost no work.
         let max_c = self.capacity.max_colors.min(32);
-        if self.compact_contacts && !self.fused_persistence {
+        if self.compact_contacts && !self.fused_persistence && !early_pair_pack {
             if !self.persistent_contacts {
                 self.disp_work(&mut pass, "clear_solver_contacts", 65, None);
             }
@@ -975,15 +1023,18 @@ impl WgpuSim {
 
     /// Broadphase grid heads: at least twice the colliders (three-avbd), so
     /// 506k gables avoids ~4 colliders per bucket; small scenes keep 131072.
-    /// `ENGINE_GRID=fixed` keeps the fixed table as a comparison control.
+    /// `ENGINE_GRID=fixed` keeps the fixed table as a comparison control;
+    /// `ENGINE_GRID=split` (8ej) halves the cap so both split tables fit.
     fn grid_hash_words(&self) -> u32 {
         if std::env::var("ENGINE_GRID").as_deref() == Ok("fixed") {
             return 131072;
         }
+        let region = constraint_id_words(&self.capacity) / if grid_split() { 2 } else { 1 };
+        let cap = 1u32 << (31 - region.leading_zeros());
         (2 * self.collider_count)
             .max(131072)
             .next_power_of_two()
-            .min(constraint_id_words(&self.capacity))
+            .min(cap)
     }
 
     /// Warm hash size in slots: one word per slot (heads), or four-word record
@@ -1032,8 +1083,10 @@ impl WgpuSim {
         s[26] = 1; // incremental coloring: history row + compact work slot 69
         s[16] = self.grid_hash_words();
         s[18] = self.grid_levels;
-        s[21] = u32::from(self.has_filters);
-        s[20] = 1; // degree-aware primal lanes; gColorCounts holds 64 + 64 words
+        s[20] = u32::from(grid_split());
+        s[21] = self.np_defer_limit;
+        s[22] = 1; // degree-aware primal lanes; gColorCounts holds 64 + 64 words
+        s[23] = u32::from(self.has_filters);
         if self.manifold_hash_insert {
             s[13] = self.last_counters.manifold_count;
             s[14] = 1;

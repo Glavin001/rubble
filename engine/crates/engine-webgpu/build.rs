@@ -9,6 +9,12 @@ const WORLD_ENTRIES: &[&str] = &[
     "solve_primal_sparse",
     "solve_primal_sparse_compact",
     "solve_primal_sparse_persistent",
+    "narrowphase_copy_persistent",
+    "narrowphase_defer_copy_persistent",
+    "narrowphase_fresh_copy_persistent",
+    "csr_degree_contacts_persistent",
+    "csr_scatter_contacts_persistent",
+    "persist_contacts_copy_persistent",
     "apply_commands",
     "apply_commands_persistent",
     "narrowphase_persistent",
@@ -98,7 +104,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
             "convex_step.slang"
         });
     }
-    if entry.ends_with("_persistent") {
+    if entry.ends_with("_copy_persistent") {
+        kernels.join("reuse_copy.slang")
+    } else if entry.ends_with("_persistent") {
         kernels.join("persistent_solve.slang")
     } else if entry.ends_with("_compact")
         || entry == "pack_solver_contacts"

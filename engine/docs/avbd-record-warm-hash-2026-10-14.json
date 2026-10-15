@@ -1,0 +1,20 @@
+{
+  "decision": "8ed",
+  "diagnosis": "Diagnostic reuse=off (since removed) showed gables narrowphase 6.62 ms without reuse vs ~8.4 ms with it: the reuse path's serial history lookups (per-probe previous-contact loads to compare colliders, generation load, count loop over up to 8 previous contacts) cost more than full SAT+clipping.",
+  "change": "hashInsert=record: the per-manifold insert writes 4-word slots in gConstraintIds (claim = previous manifold + 1, unique so weak-CAS ownership is unambiguous; collider A; collider B; run start | run length << 28). tryReuseContacts and persistence resolve the pair key and run from one slot line per probe, scanning to EMPTY and keeping the minimum start (the per-contact hash's minimum-head merge). Run length comes from the manifold block (every point of a live manifold is alive). Exhaustion raises OVERFLOW_WARM_HASH (256). Slots = nextPow2(max(prevContacts/2, 4*bodies, 1024)) capped at the pre-CSR region / 4.",
+  "sizingBug": "Sizing slots from the CPU contact count alone gave 262144 slots during the first bench batch (contact seed = 4*bodies) for ~230k manifolds; probes exhausted, warm starts dropped and the bench workload diverged (1,183,098 vs 1,184,245). The body floor fixed it; check mode (frequent readbacks) was already identical.",
+  "ring_ms_interleaved": {"manifold": [11.42, 11.83], "record": [11.21, 11.35]},
+  "gables_ms_interleaved": {"manifold": [34.41, 35.05], "record": [32.68, 32.74]},
+  "profiled_gables_ms": {"narrowphase": "~8.4 -> 6.6", "hashInsert": "~0.3 -> 0.59", "hashClear": "0.07 -> 0.20"},
+  "workload": "ring bench snapshots identical (1,184,245 -> 1,174,316 contacts)",
+  "gates": {
+    "gpuLib": "45/45: new record test (20 colliding pairs x 3 blocks, dead corners/blocks, zero-count and past-count manifolds, both layouts/halves; CPU-emulated min-start lookup; 32-slot exhaustion raises the flag); storing whole block lengths fails it",
+    "browserUnit": "237/237 (sizing with stale seed, pre-CSR bound)",
+    "nativeRing480Columns_record": "PASS bit-identical",
+    "nativeCanonicalGables240_record": "PASS bit-identical 0.118626/0.330369",
+    "metal": "18/18",
+    "browserRing480Default": "PASS bit-identical mean 1.1817874610691919",
+    "browserGables240Default": "PASS; contacts identical at every checkpoint; unhit mean 0.11725152522 vs 0.11725153093 m (8th digit), max 0.32761669158935547 identical"
+  },
+  "defaults": "browser ring110k and gables506k hashInsert=record (manifold/contact controls); native opt-in ENGINE_HASH_INSERT=record"
+}

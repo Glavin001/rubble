@@ -633,14 +633,16 @@ impl MetalWorld {
         s[26] = 1; // incremental coloring: history row + compact work slot 69
         s[18] = self.grid_levels; // hierarchical broadphase levels (0 = uniform grid)
         // Per-step broadphase counters (the WebGPU hosts rewrite all 64 words):
-        // legacy large list (25), planes (42), level mask (52), oversized statics (53).
+        // legacy large list (25), planes (42), level mask (51), oversized statics (53).
         s[25] = 0;
         s[42] = 0;
-        s[52] = 0;
+        s[51] = 0;
         s[53] = 0;
         s[19] = 0; // reuse hash miss
-        s[20] = 1; // degree-aware primal lanes (colour counts sized 128 words)
-        s[21] = u32::from(self.has_filters); // collision filters present
+        s[20] = 0; // split broadphase grids (WebGPU opt-in; off on Metal)
+        s[21] = 0; // two-pass narrowphase tail cap (unused on Metal)
+        s[22] = 1; // degree-aware primal lanes (colour counts sized 128 words)
+        s[23] = u32::from(self.has_filters); // collision filters present
         s[21] = 0; // update_refs noRef
         s[22] = 0; // update_refs linMove
         s[23] = 0; // update_refs angMove
@@ -659,10 +661,11 @@ impl MetalWorld {
             pivot_floor_hits: 0,
             sleep_events: 0,
             wake_events: 0,
-            iteration: 0,
+
             manifold_count: 0,
             _pad0: 0,
             convex_sat_small: 0,
+            narrowphase_deferred: 0,
             convex_sat_large: 0,
         };
         if !clear_transient {

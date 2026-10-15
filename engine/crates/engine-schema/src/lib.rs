@@ -261,12 +261,13 @@ pub struct StepCounters {
     pub pivot_floor_hits: u32,
     pub sleep_events: u32,
     pub wake_events: u32,
-    pub iteration: u32,
+    /// Convex SAT pairs in the small bucket (GPU ABI byte 44).
+    pub convex_sat_small: u32,
     pub manifold_count: u32,
     /// Number of bodies scheduled for incremental recoloring (GPU ABI byte 52).
     pub _pad0: u32,
-    /// Convex SAT pairs in the small bucket (GPU ABI byte 56).
-    pub convex_sat_small: u32,
+    /// Two-pass narrowphase deferred pairs (GPU ABI byte 56).
+    pub narrowphase_deferred: u32,
     /// Convex SAT pairs in the large bucket (GPU ABI byte 60).
     pub convex_sat_large: u32,
 }
