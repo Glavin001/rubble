@@ -245,6 +245,18 @@ void predict_bodies_listed(uint3 tid : SV_DispatchThreadID)
     predictOne(gAwakeList[li]);
 }
 
+// First collider of `body` (colliders are sorted by body; host-checked).
+uint firstColliderOfBody(uint body)
+{
+    uint lo = 0u, hi = gCounters[0].colliderCount;
+    while (lo < hi)
+    {
+        uint mid = (lo + hi) >> 1;
+        if (gColliders[mid].body < body) lo = mid + 1u; else hi = mid;
+    }
+    return lo;
+}
+
 // Moved-only bounds (HOST_S(19) != 0, JS host): one thread per body that was
 // awake in the previous step (gAwakeList still holds that list, its length is
 // copied to HOST_S(6) before the counters reset). Only those bodies moved, so
@@ -260,15 +272,13 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
     {
         if (i >= HOST_S(6)) return;
         uint body = gAwakeList[i];
+        BodyState b = gBodies[body];
+        // A body that fell asleep at the end of last step keeps its previous
+        // bounds, exactly as in the full pass below.
+        if (bodyIsSleeping(b) && bodyIsDynamic(b)) return;
         uint n = gCounters[0].colliderCount;
-        uint lo = 0u, hi = n;
-        while (lo < hi)
-        {
-            uint mid = (lo + hi) >> 1;
-            if (gColliders[mid].body < body) lo = mid + 1u; else hi = mid;
-        }
-        for (uint c = lo; c < n && gColliders[c].body == body; c++)
-            buildColliderBounds(c, gColliders[c], gBodies[body]);
+        for (uint c = firstColliderOfBody(body); c < n && gColliders[c].body == body; c++)
+            buildColliderBounds(c, gColliders[c], b);
         return;
     }
     if (i >= gCounters[0].colliderCount) return;
@@ -1146,6 +1156,188 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         }
         emitCandidate(i, j);
     }
+}
+
+// ---- Awake-only queries (JS host, moved-only bounds: HOST_S(19) != 0) ----
+// Every moving collider then belongs to a body on last step's awake list
+// (HOST_S(6) entries; nothing wakes between that list and this broadphase
+// without a host write, which turns moved-only bounds off), so only those
+// query: hierQuery with an active querier emits exactly the pairs it always
+// did. The pairs a resting (sleeping or static) collider found from its own
+// thread, with a coarser mover, are found by that mover instead: it scans the
+// finer cells for resting colliders (hierScanFiner), replaying the resting
+// collider's own acceptance test. emitCandidate orders every pair (min, max),
+// so the candidate set is the same; only its append order differs, and every
+// consumer is order-independent (contacts are keyed and CSR rows sorted).
+// A coarse mover's finer cells are split into chunks of 64 (one lane each):
+// the awake query appends one work item (mover, chunk) per chunk to a list in
+// gConstraintIds between the grid heads (HOST_S(16) words) and the CSR base
+// (HOST_S(24)), unused until the CSR build; the item count is scratch word 5
+// (host-zeroed; HOST_S(5) is unused). broadphase_query_finer runs one
+// workgroup per item, so a large mover's scan spreads over many SMs.
+static const uint FINER_COUNT_SLOT = 5u;
+static const uint FINER_CHUNK = 64u;
+static const uint FINER_SKIP = 0xFFFFFFFFu;
+
+uint finerItemCapacity() { return (HOST_S(24) - HOST_S(16)) / 2u; }
+
+// Cells of `level` that can hold the centre of a collider overlapping `ma`.
+// Level-L colliders reach at most cs/2 (plus the AABB pad, which _pad0 leaves
+// out) from their centre.
+uint3 finerSpan(Aabb ma, uint level, out int3 lo)
+{
+    float cs = hierCellSize(level);
+    float reach = 0.5 * cs + max(1.0e-4, speculativeMargin());
+    lo = int3(floor((ma.mn - reach) / cs));
+    int3 hi = int3(floor((ma.mx + reach) / cs));
+    return uint3(hi - lo + 1);
+}
+
+uint finerLevelMask(uint own)
+{
+    return ALOAD(gScratchAtomics[HIER_LEVEL_MASK_SLOT]) & ((1u << own) - 1u);
+}
+
+uint hierFinerCellCount(Aabb ma, uint own)
+{
+    uint mask = finerLevelMask(own), total = 0u;
+    for (uint level = 0u; level < own; level++)
+    {
+        if (((mask >> level) & 1u) == 0u) continue;
+        int3 lo;
+        uint3 span = finerSpan(ma, level, lo);
+        total += span.x * span.y * span.z;
+    }
+    return total;
+}
+
+// Pairs of coarse mover m with resting colliders at finer levels, over the
+// finer cells [first, end) (every level's cells in turn) with step `stride`.
+// A resting collider j at level L emitted (j, m) from hierQuery iff they
+// overlap and m's cell lies in j's range at m's level; the same test runs
+// here on the same values, so the accepted pairs are identical. Every j that
+// overlaps m has its centre in one of the cells finerSpan lists.
+void hierScanFiner(uint m, uint first, uint stride, uint end)
+{
+    uint base = HOST_S(1);
+    Aabb ma = gAabbs[base + m];
+    uint own = hierLevel(ma._pad0);
+    Collider cm = gColliders[m];
+    bool probeHasObb = shapeHasHull(cm.shape);
+    BoxObb probe = probeHasObb ? worldObbFromCache(m)
+                               : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
+    float faceGap = max(0.001, speculativeMargin());
+    uint mask = finerLevelMask(own);
+    uint count = gCounters[0].colliderCount;
+    float csM = hierCellSize(own);
+    int3 cellM = hierCell(ma, own);
+    for (uint t = first; t < end; t += stride)
+    {
+        uint rem = t, level = 0u;
+        int3 lo = int3(0, 0, 0);
+        uint3 span = uint3(1, 1, 1);
+        for (; level < own; level++)
+        {
+            if (((mask >> level) & 1u) == 0u) continue;
+            span = finerSpan(ma, level, lo);
+            uint n = span.x * span.y * span.z;
+            if (rem < n) break;
+            rem -= n;
+        }
+        if (level >= own) break;
+        int3 cell = lo + int3(uint3(rem % span.x, (rem / span.x) % span.y, rem / (span.x * span.y)));
+        uint j = ALOAD(gConstraintIds[hierHash(cell, level)]);
+        uint guard = 0u;
+        while (j != 0xFFFFFFFFu && guard < count)
+        {
+            guard++;
+            Aabb ab = gAabbs[base + j];
+            uint next = asuint(ab._pad1);
+            if (aabbOverlap(ma, ab) && hierLevel(ab._pad0) == level &&
+                all(hierCell(ab, level) == cell))
+            {
+                // j's query range at m's level, as hierQuery computes it.
+                int3 jc = hierCell(ab, own);
+                int3 jlo = max(int3(floor((ab.mn - 0.5 * csM) / csM)), jc - 1);
+                int3 jhi = min(int3(floor((ab.mx + 0.5 * csM) / csM)), jc + 1);
+                if (all(cellM >= jlo) && all(cellM <= jhi))
+                {
+                    Collider b = gColliders[j];
+                    if (b.body != cm.body && !bodyMoving(gBodies[b.body]) &&
+                        !bodiesJointed(cm.body, b.body) &&
+                        !(probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)))
+                        emitCandidate(j, m);
+                }
+            }
+            j = next;
+        }
+        if (j != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+    }
+}
+
+// One thread per entry of last step's awake list (indirect, work slot 78).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_query_awake(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= HOST_S(6)) return;
+    uint body = gAwakeList[li];
+    if (!bodyMoving(gBodies[body])) return;
+    uint n = gCounters[0].colliderCount;
+    uint levels = HOST_S(18);
+    for (uint c = firstColliderOfBody(body); c < n && gColliders[c].body == body; c++)
+    {
+        hierQuery(c);
+        if (gColliders[c].shape == SHAPE_PLANE) continue;
+        Aabb aa = gAabbs[HOST_S(1) + c];
+        uint own = hierLevel(aa._pad0);
+        if (own == 0u || own >= levels) continue;
+        uint cells = hierFinerCellCount(aa, own);
+        if (cells == 0u) continue;
+        uint chunks = (cells + FINER_CHUNK - 1u) / FINER_CHUNK;
+        uint k;
+        AADD3(gScratchAtomics[FINER_COUNT_SLOT], chunks, k);
+        uint cap = finerItemCapacity();
+        bool fits = k + chunks <= cap;
+        for (uint q = 0u; q < chunks && k + q < cap; q++)
+        {
+            ASTORE(gConstraintIds[HOST_S(16) + 2u * (k + q)], fits ? c : FINER_SKIP);
+            ASTORE(gConstraintIds[HOST_S(16) + 2u * (k + q) + 1u], q);
+        }
+        if (!fits) hierScanFiner(c, 0u, 1u, cells); // list full: scan in this thread
+    }
+}
+
+// Work slot 77: one workgroup per listed chunk.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void write_finer_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    writeDispatchArgs(77u, min(ALOAD(gScratchAtomics[FINER_COUNT_SLOT]), finerItemCapacity()) * 64u);
+}
+
+// Work slot 78: last step's awake list (HOST_S(6) entries), for moved-only
+// bounds and awake-only queries. Slot 67 is reused by the sleep pass.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void write_moved_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    writeDispatchArgs(78u, HOST_S(6));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_query_finer(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint g = gid.x + gid.y * 32768u;
+    if (g >= min(ALOAD(gScratchAtomics[FINER_COUNT_SLOT]), finerItemCapacity())) return;
+    uint m = ALOAD(gConstraintIds[HOST_S(16) + 2u * g]);
+    if (m == FINER_SKIP) return;
+    uint t = ALOAD(gConstraintIds[HOST_S(16) + 2u * g + 1u]) * FINER_CHUNK + lid.x;
+    hierScanFiner(m, t, FINER_CHUNK, t + 1u);
 }
 
 // Back-compat name used by CUDA/WebGPU build lists.
