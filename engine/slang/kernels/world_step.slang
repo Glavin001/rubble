@@ -323,6 +323,19 @@ uint gridHashSize()
 // awake pair is still found once and emitted as (min, max) like before.
 bool gridSplit() { return HOST_S(20) != 0u; }
 
+// Opt-in resting-pair carry (8ep, HOST_S(28) != 0): a pair whose bodies are
+// both at rest (static or sleeping) is re-emitted from last step's manifolds
+// instead of the broadphase, so its warm-start λ/k survive sleep and a woken
+// body does not restart its resting contacts cold. Sleepers then emit no
+// rest pairs themselves (no duplicates); awake bodies still emit theirs.
+// WGSL hosts only: Metal's HOST_S(k) reads gScratchAtomics, whose words 26+
+// hold the large-body list.
+#if defined(ENGINE_WGSL)
+bool carryRestPairs() { return HOST_S(28) != 0u; }
+#else
+bool carryRestPairs() { return false; }
+#endif
+
 uint gridHash(int x, int y, int z)
 {
     uint h = (uint)x * 73856093u ^ (uint)y * 19349663u ^ (uint)z * 83492791u;
@@ -628,9 +641,12 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                     BodyState ob = gBodies[other.body];
                     bool otherStatic = !bodyIsDynamic(ob);
                     bool keep = true;
-                    if (sleeper && !otherStatic) keep = false;
+                    if (sleeper && (!otherStatic || carryRestPairs())) keep = false;
                     if (bodyIsSleeping(ob) && sleeper) keep = false;
-                    if (!otherStatic && j < i) keep = false;
+                    // Lower-index dynamics own the pair, unless asleep: sleepers
+                    // never query, so an awake body must emit its sleeping
+                    // neighbours at any index (as the grid path does).
+                    if (!otherStatic && j < i && !(bodyIsSleeping(ob) && !sleeper)) keep = false;
                     if (otherStatic && !bodyIsDynamic(b)) keep = false;
                     if (bodiesJointed(col.body, other.body)) keep = false;
                     if (keep && other.shape != SHAPE_PLANE)
@@ -670,6 +686,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         // Small→large owns this pair regardless of indices. Only large→large
         // needs index ordering; a large centre-cell query cannot cover its surface.
         if (queryLarge && bodyIsDynamic(ob) && j < i) continue;
+        if (sleeper && carryRestPairs() && bodyIsSleeping(ob)) continue; // carried
         Aabb ab = gAabbs[base + j];
         if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x) continue;
         if (box.mx.y < ab.mn.y || ab.mx.y < box.mn.y) continue;
@@ -2520,8 +2537,13 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
 static const uint LOCAL_COLOR_LIMIT = 4096u;
 bool localColoring()
 {
+#if defined(ENGINE_WGSL)
+    // WGSL hosts only: Metal's HOST_S(27) is a large-body list word.
     return HOST_S(27) != 0u && HOST_S(26) != 0u &&
         ALOAD(gCounters[0].recolorCount) <= LOCAL_COLOR_LIMIT;
+#else
+    return false;
+#endif
 }
 
 groupshared AUint gsColorRemaining;
@@ -2576,6 +2598,26 @@ void writeDispatchArgs(uint slot, uint threads)
     gIndirectArgs[slot * 3u + 2u] = 1u;
 }
 
+// Re-emit last step's resting pairs as candidates (8ep). Runs after the
+// broadphase and before narrowphase overwrites gManifolds; dispatched over
+// work slot 72 (HOST_S(13) = previous GPU manifold count). Narrowphase reuses
+// them through the at-rest path, which copies the contacts unchanged.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void carry_rest_pairs(uint3 tid : SV_DispatchThreadID)
+{
+    if (!carryRestPairs() || HOST_S(17) == 0u) return;
+    uint m = dispatchIndex(tid);
+    if (m >= min(HOST_S(13), HOST_S(10))) return;
+    Manifold mf = gManifolds[m];
+    if (mf.contactCount == 0u) return;
+    BodyState ba = gBodies[gColliders[mf.colliderA].body];
+    BodyState bb = gBodies[gColliders[mf.colliderB].body];
+    if (!bodyIsDynamic(ba) && !bodyIsDynamic(bb)) return;
+    if (!contactPairAtRest(ba, bb)) return;
+    emitCandidate(mf.colliderA, mf.colliderB);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void write_work_args(uint3 tid : SV_DispatchThreadID)
@@ -2592,6 +2634,8 @@ void write_work_args(uint3 tid : SV_DispatchThreadID)
     // Local repair (HOST_S(27)) colors small lists itself; slot 69 then stays empty.
     if (HOST_S(26) != 0u)
         writeDispatchArgs(69u, localColoring() ? 0u : ALOAD(gCounters[0].recolorCount));
+    // Resting-pair carry (8ep): previous manifolds, published by the host.
+    if (carryRestPairs()) writeDispatchArgs(72u, min(HOST_S(13), HOST_S(10)));
 #if defined(ENGINE_REUSE_COPY)
     // Persist work list (8em): slot 70 = listed contacts, slot 71 = the full
     // scan, which runs only when the list overflowed.

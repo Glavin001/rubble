@@ -136,6 +136,12 @@
     if (!['fused', 'split'].includes(npMode)) throw new Error('np must be fused or split');
     if (npMode === 'split' && !reuseCopy) throw new Error('np=split requires reuse=copy');
     const npSplit = npMode === 'split';
+    // rest=carry (8ep): pairs whose bodies are both at rest (static or asleep)
+    // are re-emitted from last step's manifolds, so their warm start survives
+    // sleep and a woken body does not restart its resting contacts cold.
+    const restMode = qs.get('rest') || 'carry';
+    if (!['carry', 'drop'].includes(restMode)) throw new Error('rest must be carry or drop');
+    const carryRest = restMode === 'carry';
     // repair=local (8en): one workgroup loops JP rounds over a small incremental
     // repair list instead of 32 global color_bodies dispatches.
     // Graph detail colorRepair 0.26 -> 0.13 ms on ring and gables; colors are
@@ -366,7 +372,7 @@
       s[20] = b(cap.maxBodies, 4);
       s[21] = 64 * 4;
       s[22] = 96 * PASS_ALIGN;
-      s[23] = b(Math.max(cap.maxColors, 72) * 3, 4);
+      s[23] = b(Math.max(cap.maxColors, 73) * 3, 4);
       s[24] = b(cap.maxColliders, 80);
       s[25] = b(cap.maxCandidates, 32);
       s[26] = b(cap.maxBodies, 32);
@@ -383,6 +389,7 @@
       ...(npSplit ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
       ...(persistList ? ['persist_list_copy_persistent'] : []),
       ...(localRepair ? ['color_bodies_local'] : []),
+      ...(carryRest ? ['carry_rest_pairs'] : []),
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
@@ -991,6 +998,7 @@ struct VsOut {
       s[20] = gridSplit ? 1 : 0;
       s[22] = persistList ? 1 : 0;
       s[27] = localRepair ? 1 : 0;
+      s[28] = carryRest ? 1 : 0;
       s[24] = csrBase;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
@@ -1013,7 +1021,7 @@ struct VsOut {
       // ten steps between CPU readbacks; last.contact is stale within that batch.
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
       // manifoldCount (byte 48) sizes the per-manifold warm-hash insert.
-      if (steps > 0 && manifoldHashInsert) enc.copyBufferToBuffer(bufs[7], 48, bufs[6], 80 + 13 * 4, 4);
+      if (steps > 0 && (manifoldHashInsert || carryRest)) enc.copyBufferToBuffer(bufs[7], 48, bufs[6], 80 + 13 * 4, 4);
       enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 64);
       enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
     }
@@ -1058,6 +1066,12 @@ struct VsOut {
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
       disp(pass, 'write_work_args', 64);
+      if (carryRest) {
+        // Previous manifolds (slot 72) are intact until narrowphase; recount
+        // candidates (slot 64) once the carried resting pairs join them.
+        dispWork(pass, 'carry_rest_pairs', 72);
+        disp(pass, 'write_work_args', 64);
+      }
       nextPhase();
       const reuse = (params.flags & 1) !== 0;
       if (reuse) {
@@ -1239,7 +1253,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, endpoints: endpointsMode, grid: gridMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1661,7 +1675,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1715,6 +1729,7 @@ struct VsOut {
       report.np = npMode;
       report.persist = persistMode;
       report.repair = repairMode;
+      report.rest = restMode;
       report.endpoints = endpointsMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
@@ -1740,7 +1755,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

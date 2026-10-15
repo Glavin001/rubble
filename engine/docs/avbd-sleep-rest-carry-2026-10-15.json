@@ -1,0 +1,66 @@
+{
+  "decision": "8ep",
+  "report": "ring110k with sleep=on looked less stable than sleep=off: settled bodies jolted when woken, in waves.",
+  "causes": [
+    "Sleepers never query the broadphase, so pairs between two sleepers and between a sleeper and static geometry were never emitted. Their warm-start history (lambda, penalties) was lost while asleep; a woken body restarted those contacts cold and sagged, waking its neighbours in turn.",
+    "The exact small-scene broadphase (<= 512 colliders) dropped awake-sleeper pairs when the sleeper had the lower index (lower index owns the pair, but sleepers never query). A woken body fell straight through a sleeping body below it; the grid path already had this exception."
+  ],
+  "change": "carry_rest_pairs (HOST_S(28), work slot 72 = previous GPU manifold count) re-emits last step's manifolds whose bodies are both at rest (static or sleeping) as candidates, after the broadphase and before narrowphase overwrites gManifolds; slot 64 is recounted. Narrowphase reuses them through the existing at-rest path, which copies contacts unchanged, so lambda/k stay frozen while asleep. Sleepers no longer emit rest pairs themselves (small path, large-body list) to avoid duplicates. The small-path ownership rule now exempts sleeping partners. Browser default rest=carry (rest=drop keeps the control); native ENGINE_REST=carry. HOST_S(27)/(28) flags are WGSL-only because Metal reads host slots from gScratchAtomics, whose words 26+ hold the large-body list.",
+  "nativeRing110kSleepOn_awakeEvery30Steps": {
+    "drop": [
+      110440,
+      81689,
+      45550,
+      40796,
+      41458,
+      58040,
+      78339,
+      78593,
+      70020,
+      64297,
+      61367,
+      72635,
+      69608,
+      61980,
+      56855,
+      64961,
+      69121,
+      61723,
+      54863,
+      58005,
+      67861,
+      76129,
+      83092,
+      78005,
+      85599,
+      90232,
+      97000,
+      98738,
+      101816,
+      102103
+    ],
+    "carry": [
+      110440,
+      81780,
+      41575,
+      23662,
+      8260,
+      3363,
+      377,
+      0
+    ],
+    "summedRewakeIncreases": {
+      "drop": 113658,
+      "carry": 0
+    }
+  },
+  "wakeTest": "waking_a_sleeping_stack_does_not_jolt_or_cascade: one woken top box in 3 columns (small path, per-contact hash) and 64 columns (grid, record hash) moves 0.51 mm with carry vs 0.80 mm cold, against 0.40 mm creep for a stack that never sleeps; limit 1.5x creep + 50 um, no neighbour may wake, and the cold restart must exceed the limit. Before the small-path fix the woken box fell 6.9 m.",
+  "gates": {
+    "gpuLib": "51/51",
+    "browserUnit": "294/294 (rest parsing, carry between broadphase and narrowphase on slot 72 with a recount, HOST_S(28) upload)",
+    "nativeRing480Columns_ENGINE_REST_carry": "PASS bit-identical (1.1753; ring has sleep off); sleeping columns cases hold (drift 0.0527, awake 0)",
+    "nativeCanonicalGables240_ENGINE_REST_carry": "PASS 0.118635/0.328483",
+    "metal": "18/18",
+    "browserChecks": "not run: the browser pane was hidden, which pauses the demo's frame loop"
+  }
+}
