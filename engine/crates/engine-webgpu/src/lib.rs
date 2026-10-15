@@ -446,6 +446,17 @@ mod tests {
         }
     }
 
+    /// Chrome exposes 10 storage buffers per compute stage. Every entry must fit,
+    /// which is why convex work is split out of `narrowphase`.
+    #[test]
+    fn every_entry_fits_the_webgpu_storage_buffer_budget() {
+        for (name, res) in WebGpuWorld::compile_shaders_report() {
+            let wgsl = res.unwrap();
+            let storage = wgsl.matches("var<storage").count();
+            assert!(storage <= 10, "{name}: {storage} storage buffers > 10");
+        }
+    }
+
     #[test]
     fn compact_primal_reads_64_byte_points_without_canonical_contact_binding() {
         for name in ["solve_primal_color_compact", "solve_primal_one_compact"] {

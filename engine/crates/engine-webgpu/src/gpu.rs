@@ -3,16 +3,49 @@
 
 use bytemuck::bytes_of;
 use engine_exec::{ExecError, PhaseTimingsMs};
+use engine_schema::convex::HullArena;
 use engine_schema::*;
 use std::collections::HashMap;
 
-const BIND_COUNT: usize = 29;
+const BIND_COUNT: usize = 30;
 const PASS_ALIGN: u64 = 256;
 
 struct Pipe {
     pipeline: wgpu::ComputePipeline,
     bind: wgpu::BindGroup,
     dynamic_pass: bool,
+    /// Kept so bind groups can be rebuilt when a buffer is replaced (hull growth).
+    layout: wgpu::BindGroupLayout,
+    bindings: Vec<u32>,
+}
+
+fn make_bind_group(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    bindings: &[u32],
+    bufs: &[wgpu::Buffer],
+) -> wgpu::BindGroup {
+    let resources: Vec<wgpu::BindGroupEntry> = bindings
+        .iter()
+        .map(|&b| wgpu::BindGroupEntry {
+            binding: b,
+            resource: if b == 22 {
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &bufs[22],
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(16),
+                })
+            } else {
+                bufs[b as usize].as_entire_binding()
+            },
+        })
+        .collect();
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &resources,
+    })
 }
 
 pub struct WgpuSim {
@@ -22,6 +55,8 @@ pub struct WgpuSim {
     manifold_persistence: bool,
     /// Opt-in three-avbd shape: warm-hash insert per previous manifold.
     pub(crate) manifold_hash_insert: bool,
+    /// Record warm hash: 16-byte slots carrying the pair key and previous run.
+    pub(crate) warm_record_hash: bool,
     fused_persistence: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -41,6 +76,18 @@ pub struct WgpuSim {
     host_bodies: Vec<BodyState>,
     host_cols: Vec<Collider>,
     chip: String,
+    /// Any convex hull collider: schedules the convex_* narrowphase entries.
+    has_convex: bool,
+    /// Size levels of the hierarchical broadphase grid (0 = uniform grid).
+    grid_levels: u32,
+    /// (collider count, base cell, levels): recomputed only when colliders change.
+    grid_cache: Option<(u32, f32, u32)>,
+    /// Any collider carries a collision filter (HOST_S(21)).
+    has_filters: bool,
+    /// The last step's manifolds still describe the scene (whole-step reuse).
+    manifolds_valid: bool,
+    /// Records the hull buffer (binding 18) holds; grows on demand.
+    hull_records_capacity: u32,
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -104,6 +151,9 @@ fn persistent_entry(name: &str) -> &str {
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
         "solve_dual_compact" => "solve_dual_persistent",
+        "convex_classify" => "convex_classify_persistent",
+        "convex_manifold" => "convex_manifold_persistent",
+        "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
         _ => name,
     }
 }
@@ -302,37 +352,25 @@ impl WgpuSim {
                 compilation_options: Default::default(),
                 cache: None,
             });
-            let resources: Vec<wgpu::BindGroupEntry> = binds
-                .iter()
-                .map(|b| wgpu::BindGroupEntry {
-                    binding: b.index,
-                    resource: if b.index == 22 {
-                        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &bufs[22],
-                            offset: 0,
-                            size: std::num::NonZeroU64::new(16),
-                        })
-                    } else {
-                        bufs[b.index as usize].as_entire_binding()
-                    },
-                })
-                .collect();
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&name),
-                layout: &layout,
-                entries: &resources,
-            });
+            let bindings: Vec<u32> = binds.iter().map(|b| b.index).collect();
+            let bind = make_bind_group(&device, name, &layout, &bindings, &bufs);
             pipes.insert(
                 name.clone(),
                 Pipe {
                     pipeline,
                     bind,
                     dynamic_pass: binds.iter().any(|b| b.index == 22),
+                    layout,
+                    bindings,
                 },
             );
         }
 
         let _ = mats;
+        let hull_records = capacity.max_hull_vertices;
+        // Every arena starts with the unit cube that box-versus-hull pairs reuse.
+        let arena = HullArena::new();
+        queue.write_buffer(&bufs[18], 0, bytemuck::cast_slice(arena.records()));
         Ok(Self {
             compact_contacts,
             persistent_contacts,
@@ -349,7 +387,11 @@ impl WgpuSim {
                 && std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Ok("fused"),
             manifold_persistence: std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref()
                 == Ok("1"),
-            manifold_hash_insert: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("manifold"),
+            manifold_hash_insert: matches!(
+                std::env::var("ENGINE_HASH_INSERT").as_deref(),
+                Ok("manifold") | Ok("record")
+            ),
+            warm_record_hash: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("record"),
             device,
             queue,
             capacity,
@@ -368,6 +410,12 @@ impl WgpuSim {
             host_bodies: Vec::new(),
             host_cols: Vec::new(),
             chip: format!("{} / {}", info.name, info.backend),
+            has_convex: false,
+            grid_levels: 0,
+            grid_cache: None,
+            has_filters: false,
+            manifolds_valid: false,
+            hull_records_capacity: hull_records,
         })
     }
 
@@ -407,6 +455,7 @@ impl WgpuSim {
             );
             self.host_bodies.extend_from_slice(bodies);
             self.body_count += count;
+            self.manifolds_valid = false;
         }
         start..self.body_count
     }
@@ -425,6 +474,13 @@ impl WgpuSim {
             self.capacity.max_colliders
         );
         if count > 0 {
+            self.has_convex |= colliders
+                .iter()
+                .any(|c| c.shape == ShapeType::ConvexHull as u32);
+            self.has_filters |= colliders
+                .iter()
+                .any(engine_schema::convex::CollisionFilter::is_set);
+            self.manifolds_valid = false;
             self.queue.write_buffer(
                 &self.bufs[2],
                 u64::from(start) * std::mem::size_of::<Collider>() as u64,
@@ -434,6 +490,117 @@ impl WgpuSim {
             self.collider_count += count;
         }
         start..self.collider_count
+    }
+
+    /// Upload the whole hull arena (binding 18), growing the buffer if needed.
+    pub fn set_hulls(&mut self, arena: &mut HullArena) {
+        arena.mark_all_dirty();
+        self.sync_hulls(arena);
+    }
+
+    /// Upload the records the arena changed since the last sync (inserts and
+    /// first-fit reuse of released blocks). Grows the GPU buffer to the next
+    /// power of two and rebuilds the bind groups that reference it.
+    pub fn sync_hulls(&mut self, arena: &mut HullArena) {
+        let needed = arena.len() as u32;
+        if needed > self.hull_records_capacity {
+            let records = needed.next_power_of_two();
+            let bytes = u64::from(records) * 16;
+            assert!(
+                bytes <= self.device.limits().max_storage_buffer_binding_size as u64,
+                "hull arena of {records} records exceeds the device storage binding limit"
+            );
+            let grown = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("b18"),
+                size: bytes,
+                usage: wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            enc.copy_buffer_to_buffer(
+                &self.bufs[18],
+                0,
+                &grown,
+                0,
+                u64::from(self.hull_records_capacity) * 16,
+            );
+            self.queue.submit([enc.finish()]);
+            self.bufs[18] = grown;
+            self.hull_records_capacity = records;
+            for (name, pipe) in self.pipes.iter_mut() {
+                if pipe.bindings.contains(&18) {
+                    pipe.bind = make_bind_group(&self.device, name, &pipe.layout, &pipe.bindings, &self.bufs);
+                }
+            }
+        }
+        let dirty = arena.take_dirty();
+        let records = arena.records();
+        for r in dirty {
+            self.queue.write_buffer(
+                &self.bufs[18],
+                u64::from(r.start) * 16,
+                bytemuck::cast_slice(&records[r.start as usize..r.end as usize]),
+            );
+        }
+        self.manifolds_valid = false;
+    }
+
+    /// Replace a collider (e.g. swap a fractured chunk's hull or its filter).
+    /// Release the old hull's arena reference yourself once nothing uses it.
+    pub fn set_collider(&mut self, id: u32, col: Collider) {
+        assert!(id < self.collider_count, "collider {id} out of range");
+        self.queue.write_buffer(
+            &self.bufs[2],
+            u64::from(id) * std::mem::size_of::<Collider>() as u64,
+            bytes_of(&col),
+        );
+        self.host_cols[id as usize] = col;
+        self.has_convex |= col.shape == ShapeType::ConvexHull as u32;
+        self.has_filters = self
+            .host_cols
+            .iter()
+            .any(engine_schema::convex::CollisionFilter::is_set);
+        self.grid_cache = None;
+        self.manifolds_valid = false;
+    }
+
+    /// Dynamic body made of convex hulls (a single hull or a compound) in one
+    /// input frame placed by `pos`/`rot`. Mass and inertia are the compound's,
+    /// from uniform `density`. Uploads the updated arena.
+    pub fn add_convex_body(
+        &mut self,
+        arena: &mut HullArena,
+        hulls: &[engine_schema::convex::ConvexHull],
+        pos: glam::Vec3,
+        rot: glam::Quat,
+        density: f32,
+    ) -> u32 {
+        let cooked = engine_schema::convex::cook_body(hulls, density);
+        let (p, q) = cooked.body_pose(pos, rot);
+        let body = self.add_body(BodyState::dynamic(p, q, cooked.mass, cooked.inertia));
+        let colliders: Vec<Collider> = cooked
+            .children
+            .iter()
+            .map(|child| Collider {
+                body,
+                shape: ShapeType::ConvexHull as u32,
+                material: 0,
+                generation: 0,
+                local_pos: child.local_pos.to_array(),
+                density,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: engine_schema::convex::convex_collider_params(
+                    arena.insert(&child.hull).expect("hull arena capacity"),
+                    1.0,
+                    child.hull.bounding_radius(),
+                ),
+            })
+            .collect();
+        self.add_colliders(&colliders);
+        self.sync_hulls(arena);
+        body
     }
 
     pub fn body_y(&self, id: u32) -> f32 {
@@ -521,6 +688,18 @@ impl WgpuSim {
     }
 
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
+        self.step_inner(false)
+    }
+
+    /// three-avbd `reuseManifolds`: skip bounds, broadphase and narrowphase and
+    /// carry every previous manifold forward (persistence re-evaluates C0). Falls
+    /// back to a full step when the scene changed since the last step.
+    pub fn step_reuse_manifolds(&mut self) -> Result<StepCounters, ExecError> {
+        let reuse = self.manifolds_valid;
+        self.step_inner(reuse)
+    }
+
+    fn step_inner(&mut self, reuse_manifolds: bool) -> Result<StepCounters, ExecError> {
         let wall = std::time::Instant::now();
         if self.steps_done > 0
             && self.last_counters.awake_count == 0
@@ -535,7 +714,6 @@ impl WgpuSim {
         let n_bodies = self.body_count.max(1) as u64;
         let n_cols = self.collider_count.max(1) as u64;
         let n_joints = self.joint_count.max(1) as u64;
-        let prev_contacts = self.last_counters.contact_count.max(256) as u64;
 
         self.write_host_uniforms();
         let mut enc = self
@@ -548,6 +726,8 @@ impl WgpuSim {
             timestamp_writes: None,
         });
 
+        let collide = !reuse_manifolds;
+        if collide {
         self.disp(&mut pass, "build_aabbs", n_cols, None);
         if self.joint_count > 0 {
             self.disp(&mut pass, "joint_hash_clear", 65536, None);
@@ -561,18 +741,22 @@ impl WgpuSim {
         );
         self.disp(&mut pass, "broadphase_insert", n_cols, None);
         self.disp(&mut pass, "broadphase_query", n_cols, None);
+        }
         self.disp(&mut pass, "write_work_args", 64, None);
 
-        let ids_len = (2 * (self.capacity.max_contacts + self.capacity.max_joints))
-            .max(32768)
-            .next_power_of_two();
-        // One entry per manifold; bound hash memory/work independently of tiled dispatch.
-        const MAX_WARM_HASH: u32 = 1 << 21;
-        let hash_n = (prev_contacts.max(256).saturating_mul(4).max(1024) as u32)
-            .next_power_of_two()
-            .min(ids_len)
-            .min(MAX_WARM_HASH) as u64;
+        // Same size the uniforms publish; records clear four words per slot.
+        let prev_n = self
+            .last_counters
+            .contact_count
+            .min(self.capacity.max_contacts)
+            .max(256);
+        let hash_n =
+            u64::from(self.warm_hash_slots(prev_n)) * if self.warm_record_hash { 4 } else { 1 };
         let reuse = (self.params.flags & FLAG_REUSE_CONTACTS) != 0;
+        if reuse_manifolds {
+            // Every previous run becomes this step's manifold; no hash needed.
+            self.disp_work(&mut pass, "reuse_all_manifolds", 73, None);
+        } else {
         if reuse {
             self.disp(&mut pass, "update_refs", n_bodies, None);
             self.disp(&mut pass, "contact_hash_clear", hash_n, None);
@@ -589,8 +773,18 @@ impl WgpuSim {
             "ENGINE_HASH_INSERT=manifold requires contact reuse"
         );
         self.disp_work(&mut pass, "narrowphase", 64, None);
+        if self.has_convex {
+            // Hull pairs deferred by narrowphase: classify (cheap pairs emit
+            // here), size-bucketed cooperative SAT, then clipping.
+            self.disp_work(&mut pass, "convex_classify", 64, None);
+            self.disp(&mut pass, "convex_write_args", 64, None);
+            self.disp_work(&mut pass, "convex_sat_small", 70, None);
+            self.disp_work(&mut pass, "convex_sat_large", 71, None);
+            self.disp_work(&mut pass, "convex_manifold", 72, None);
+        }
+        }
         self.disp(&mut pass, "write_work_args", 64, None);
-        if !reuse {
+        if !reuse && !reuse_manifolds {
             self.disp(&mut pass, "contact_hash_clear", hash_n, None);
             self.disp_work(&mut pass, "contact_hash_insert", 68, None);
         }
@@ -645,6 +839,8 @@ impl WgpuSim {
             None,
         );
         self.disp(&mut pass, "scatter_color_tiles", n_bodies, None);
+        // Per-colour max CSR degree for degree-aware primal lanes (s[20]).
+        self.disp_work(&mut pass, "record_color_degrees", 67, None);
         self.disp(&mut pass, "write_color_args", 64, None);
         self.disp(&mut pass, "predict_bodies", n_bodies, None);
 
@@ -700,6 +896,7 @@ impl WgpuSim {
         self.command_count = 0;
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
+        self.manifolds_valid = counters.overflow_flags == 0;
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -789,6 +986,27 @@ impl WgpuSim {
             .min(constraint_id_words(&self.capacity))
     }
 
+    /// Warm hash size in slots: one word per slot (heads), or four-word record
+    /// slots at ~2x manifolds, never below 4x bodies, within the pre-CSR region.
+    fn warm_hash_slots(&self, prev_contacts: u32) -> u32 {
+        let ids_len = constraint_id_words(&self.capacity);
+        if self.warm_record_hash {
+            (prev_contacts / 2)
+                .max(4 * self.body_count)
+                .max(1024)
+                .next_power_of_two()
+                .min(ids_len / 4)
+        } else {
+            const MAX_WARM_HASH: u32 = 1 << 21;
+            prev_contacts
+                .saturating_mul(4)
+                .max(1024)
+                .next_power_of_two()
+                .min(ids_len)
+                .min(MAX_WARM_HASH)
+        }
+    }
+
     fn write_host_uniforms(&self) {
         let max_c = self.capacity.max_contacts;
         let cur = if self.contacts_parity == 0 { 0 } else { max_c };
@@ -801,13 +1019,8 @@ impl WgpuSim {
         s[3] = max_c;
         s[7] = self.last_counters.contact_count.min(max_c);
         s[8] = prev;
-        const MAX_WARM_HASH: u32 = 1 << 21;
-        s[9] = prev_n
-            .saturating_mul(4)
-            .max(1024)
-            .next_power_of_two()
-            .min(ids_len)
-            .min(MAX_WARM_HASH);
+        s[9] = self.warm_hash_slots(prev_n);
+        s[15] = u32::from(self.warm_record_hash);
         s[10] = self.capacity.max_candidates;
         s[11] = cur;
         let mut log = 0u32;
@@ -818,6 +1031,9 @@ impl WgpuSim {
         s[17] = self.steps_done;
         s[26] = 1; // incremental coloring: history row + compact work slot 69
         s[16] = self.grid_hash_words();
+        s[18] = self.grid_levels;
+        s[21] = u32::from(self.has_filters);
+        s[20] = 1; // degree-aware primal lanes; gColorCounts holds 64 + 64 words
         if self.manifold_hash_insert {
             s[13] = self.last_counters.manifold_count;
             s[14] = 1;
@@ -844,13 +1060,35 @@ impl WgpuSim {
             s: packed,
         };
         self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
-        let n = self.capacity.max_colors.min(64) as usize;
-        let zeros = vec![0u32; n];
+        // Colour counts (0..63) and per-colour max degrees (64..127).
+        let zeros = vec![0u32; 128];
         self.queue
             .write_buffer(&self.bufs[17], 0, bytemuck::cast_slice(&zeros));
     }
 
     fn refresh_cell(&mut self) {
+        let hier = match std::env::var("ENGINE_GRID_LEVELS").as_deref() {
+            Ok("off") => false,
+            Ok("on") => true,
+            _ => self.has_convex,
+        };
+        if hier {
+            let (base, levels) = match self.grid_cache {
+                Some((n, base, levels)) if n == self.collider_count => (base, levels),
+                _ => {
+                    let (base, levels) = engine_schema::convex::hierarchical_grid(
+                        &self.host_cols,
+                        &self.host_bodies,
+                    );
+                    self.grid_cache = Some((self.collider_count, base, levels));
+                    (base, levels)
+                }
+            };
+            self.params.grid_cell_size = base;
+            self.grid_levels = levels;
+            return;
+        }
+        self.grid_levels = 0;
         let mut max_r = 0.25f32;
         for c in &self.host_cols {
             if c.shape == ShapeType::Plane as u32 {
@@ -940,18 +1178,20 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1) * 4;
     s[15] = b(c.max_bodies * (c.max_colors + 2), 4);
     s[16] = b(c.max_colors * c.max_bodies.div_ceil(64).max(1), 4);
-    s[17] = b(c.max_colors, 4);
+    s[17] = b(c.max_colors.max(128), 4);
     s[18] = b(c.max_hull_vertices, 16);
     s[19] = 65536 * 4;
     s[20] = b(c.max_bodies, 4);
     s[21] = 64 * 4;
     s[22] = 96 * PASS_ALIGN;
-    s[23] = b(c.max_colors.max(70) * 3, 4);
+    // Colour slots 0..63, work slots 64..69, convex 70..72, previous contacts 73.
+    s[23] = b(c.max_colors.max(74) * 3, 4);
     s[24] = b(c.max_colliders, 80);
     s[25] = b(c.max_candidates, 32);
     s[26] = b(c.max_bodies, 32);
     s[27] = b(c.max_contacts, 64);
     s[28] = b(c.max_candidates, 32);
+    s[29] = b(c.max_candidates, 32);
     s
 }
 

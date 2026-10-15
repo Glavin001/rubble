@@ -76,7 +76,39 @@ const WORLD_ENTRIES: &[&str] = &[
     "ccd_classify",
     "ccd_sweep",
     "recompute_inertia",
+    "record_color_degrees",
+    "reuse_all_manifolds",
+    "reuse_all_manifolds_persistent",
+    "convex_classify",
+    "convex_classify_persistent",
+    "convex_write_args",
+    "convex_sat_small",
+    "convex_sat_large",
+    "convex_manifold",
+    "convex_manifold_persistent",
 ];
+
+/// Slang source that defines `entry`.
+fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
+    let kernels = root.join("kernels");
+    if entry.starts_with("convex_") {
+        return kernels.join(if entry.ends_with("_persistent") {
+            "convex_persistent.slang"
+        } else {
+            "convex_step.slang"
+        });
+    }
+    if entry.ends_with("_persistent") {
+        kernels.join("persistent_solve.slang")
+    } else if entry.ends_with("_compact")
+        || entry == "pack_solver_contacts"
+        || entry == "clear_solver_contacts"
+    {
+        kernels.join("compact_solve.slang")
+    } else {
+        kernels.join("world_step.slang")
+    }
+}
 
 fn main() -> Result<()> {
     engine_slang_build::report_slangc_for_cargo();
@@ -87,9 +119,6 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={}", slang_root.display());
     let _ = find_slangc()?;
 
-    let world = slang_root.join("kernels/world_step.slang");
-    let compact = slang_root.join("kernels/compact_solve.slang");
-    let persistent = slang_root.join("kernels/persistent_solve.slang");
     let abi = slang_root.join("kernels/abi_probe.slang");
     compile(
         &abi,
@@ -104,15 +133,7 @@ fn main() -> Result<()> {
     for entry in WORLD_ENTRIES {
         let dest = out.join(format!("{entry}.spv"));
         match compile(
-            if entry.ends_with("_persistent") {
-                &persistent
-            } else if entry.ends_with("_compact")
-                || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
-            {
-                &compact
-            } else {
-                &world
-            },
+            &source_for(&slang_root, entry),
             entry,
             SlangTarget::Spirv,
             &dest,
@@ -155,15 +176,7 @@ fn main() -> Result<()> {
     {
         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
         match compile_with_defines(
-            if entry.ends_with("_persistent") {
-                &persistent
-            } else if entry.ends_with("_compact")
-                || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
-            {
-                &compact
-            } else {
-                &world
-            },
+            &source_for(&slang_root, entry),
             entry,
             SlangTarget::Wgsl,
             &dest,

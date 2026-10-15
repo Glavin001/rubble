@@ -8,6 +8,7 @@ use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 pub mod commands;
+pub mod convex;
 pub mod handles;
 pub mod params;
 
@@ -264,8 +265,10 @@ pub struct StepCounters {
     pub manifold_count: u32,
     /// Number of bodies scheduled for incremental recoloring (GPU ABI byte 52).
     pub _pad0: u32,
-    pub _pad1: u32,
-    pub _pad2: u32,
+    /// Convex SAT pairs in the small bucket (GPU ABI byte 56).
+    pub convex_sat_small: u32,
+    /// Convex SAT pairs in the large bucket (GPU ABI byte 60).
+    pub convex_sat_large: u32,
 }
 
 impl Default for StepCounters {
