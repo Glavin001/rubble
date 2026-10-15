@@ -90,3 +90,31 @@ test('filter words match the Rust CollisionFilter encoding',async()=>{
  assert.deepEqual(filterWords(undefined,3),{generation:0,material:3});
  assert.deepEqual(filterWords({categories:1,mask:2,group:-3},5),{generation:(1|2<<16)>>>0,material:(5|0xfffd<<16)>>>0});
 });
+
+test('convexity is judged at the f32 precision of the input frame (as engine-schema)',()=>{
+  const box=(center,half,lift)=>{
+    const vertices=Array.from({length:8},(_,i)=>[0,1,2].map(k=>center[k]+((i>>k)&1?half:-half)));
+    vertices.push([center[0],center[1]+half+lift,center[2]]);
+    const faces=[[0,2,6,4],[1,5,7,3],[0,4,5,1],[2,3,7,6],[0,1,3,2],[4,6,7,5]];
+    return {vertices,topology:{sizes:faces.map(()=>4),indices:faces.flat()}};
+  };
+  let b=box([6,0,0],.25,3e-6);
+  assert.deepEqual(cookHull(b.vertices,b.topology).vertices.slice(0,8),b.vertices.slice(0,8));
+  b=box([6,0,0],.25,1e-3);assert.throws(()=>cookHull(b.vertices,b.topology),/Non-convex/);
+  b=box([0,0,0],.25,3e-6);assert.throws(()=>cookHull(b.vertices,b.topology),/Non-convex/);
+  // Data stored as f32 in a 6 m frame, cooked after moving to the origin.
+  assert.doesNotThrow(()=>cookHull(b.vertices,b.topology,{sourceScale:6.25}));
+});
+
+test('hull arena vertex limit rejects larger hulls with a clear error, never reduces them',()=>{
+  assert.throws(()=>new HullArena({maxVertices:7}),/outside 8\.\.64/);
+  assert.throws(()=>new HullArena({maxVertices:65}),/outside 8\.\.64/);
+  assert.equal(new HullArena().maxVertices,64);
+  const arena=new HullArena({maxVertices:16});
+  const small=prism(8,.5,1),large=prism(9,.5,1);
+  assert.equal(appendHull(arena,small.vertices,small.topology).hull.vertices.length,16);
+  const records=arena.records;
+  assert.throws(()=>appendHull(arena,large.vertices,large.topology),/18 vertices; the configured limit is 16 \(hard maximum 64\)/);
+  assert.equal(arena.records,records,'a rejected hull leaves the arena unchanged');
+  assert.doesNotThrow(()=>appendHull(new HullArena(),large.vertices,large.topology));
+});

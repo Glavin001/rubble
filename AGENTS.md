@@ -8,6 +8,18 @@
   understand an algorithm, then write our own tests from its definition and
   physical invariants (see `engine/crates/engine-webgpu/tests/spatial_order.test.mjs`
   and `scene_builders.test.mjs`); do not import or record its outputs.
+- Performance work must not trade away physics quality or accuracy. Never make
+  lossy changes on our own initiative: simplifying or decimating collision
+  shapes, dropping contacts or solver iterations, coarsening timesteps,
+  loosening tolerances, or skipping work whose result could differ. Prefer
+  lossless optimizations (same results, less work). When a limit or trade-off
+  is genuinely wanted:
+  - make it an explicit, engine-wide configuration that fails with a clear
+    error when input exceeds it, never something that silently degrades input;
+  - or fix it at the source (for example, re-export assets from Shardwright with
+    the desired settings) rather than altering data at load time.
+  Measuring a lossy option to report its effect is fine; adopting it needs the
+  user's decision.
 
 ## Cursor Cloud specific instructions
 

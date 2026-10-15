@@ -59,6 +59,10 @@ pub enum HullError {
     Topology { faces: usize, edges: usize },
     #[error("hull arena exceeds the 29-bit base range")]
     ArenaFull,
+    #[error("convex hull has {got} vertices; the configured limit is {max} (hard maximum 64). Re-export the asset with fewer hull vertices or raise the limit")]
+    TooManyVertices { got: usize, max: usize },
+    #[error("hull vertex limit {0} is outside 8..=64 (the unit cube at record 0 has 8)")]
+    VertexLimit(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -106,8 +110,8 @@ impl ConvexHull {
     }
 
     /// Quickhull-style incremental hull of a point cloud. Coplanar triangles are
-    /// merged into polygon faces. Clouds whose hull has more than 64 vertices are
-    /// reduced by farthest-point sampling of the hull vertices, then rebuilt.
+    /// merged into polygon faces. A hull with more than 64 vertices is an error,
+    /// never silently reduced: simplify the source asset instead.
     pub fn from_points(points: &[Vec3]) -> Result<Self, HullError> {
         if points.iter().any(|p| !p.is_finite()) {
             return Err(HullError::NonFinite);
@@ -122,13 +126,10 @@ impl ConvexHull {
         if pts.len() < 4 {
             return Err(HullError::VertexCount(pts.len()));
         }
-        let mut tris = triangle_hull(&pts)?;
-        let mut used = hull_vertex_ids(&tris);
+        let tris = triangle_hull(&pts)?;
+        let used = hull_vertex_ids(&tris);
         if used.len() > HULL_MAX_VERTICES {
-            let kept = farthest_point_subset(&used.iter().map(|&i| pts[i]).collect::<Vec<_>>());
-            pts = kept;
-            tris = triangle_hull(&pts)?;
-            used = hull_vertex_ids(&tris);
+            return Err(HullError::TooManyVertices { got: used.len(), max: HULL_MAX_VERTICES });
         }
         // Compact to hull vertices only, preserving first-seen order.
         let remap: HashMap<usize, usize> = used.iter().enumerate().map(|(k, &i)| (i, k)).collect();
@@ -198,6 +199,12 @@ impl ConvexHull {
             return Err(HullError::ZeroVolume);
         }
         let tol = (span * 1e-6).max(1e-9);
+        // Convexity is judged against the input's own f32 precision: assets store
+        // coordinates as f32 in their frame (metres from its origin), so plane
+        // offsets carry ~|x|·2^-24 rounding per coordinate, amplified by small
+        // faces. Only the check widens; face merging and packed bytes are unchanged.
+        let max_abs = v64.iter().map(|p| p.abs().max_element()).fold(0.0f64, f64::max);
+        let convex_tol = tol.max(max_abs * (2.0f64).powi(-20));
 
         struct Raw {
             ids: Vec<usize>,
@@ -277,7 +284,7 @@ impl ConvexHull {
             if loop_ids.len() < 3 {
                 return Err(HullError::DegenerateFace);
             }
-            if normalize && v64.iter().any(|p| n.dot(*p) - d > tol * 2.0) {
+            if normalize && v64.iter().any(|p| n.dot(*p) - d > convex_tol * 2.0) {
                 return Err(HullError::NonConvex);
             }
             faces.push((loop_ids, n));
@@ -537,6 +544,8 @@ pub struct HullArena {
     /// Sorted, non-adjacent free `(start, len)` record ranges.
     free: Vec<(u32, u32)>,
     dirty: Vec<std::ops::Range<u32>>,
+    /// Engine-wide vertex limit (8..=64); `insert` rejects larger hulls.
+    max_vertices: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -554,23 +563,43 @@ impl Default for HullArena {
 
 impl HullArena {
     pub fn new() -> Self {
+        Self::with_max_vertices(HULL_MAX_VERTICES).expect("hard maximum is a valid limit")
+    }
+
+    /// An arena whose hulls may have at most `max_vertices` vertices (8..=64).
+    /// Scenes known to stay small (e.g. assets baked with a 16-vertex cap) set
+    /// it so an oversized hull fails loudly at insert instead of running on a
+    /// slower path; nothing is ever reduced to fit.
+    pub fn with_max_vertices(max_vertices: usize) -> Result<Self, HullError> {
+        if !(8..=HULL_MAX_VERTICES).contains(&max_vertices) {
+            return Err(HullError::VertexLimit(max_vertices));
+        }
         let mut arena = Self {
             records: Vec::new(),
             dedup: HashMap::new(),
             blocks: HashMap::new(),
             free: Vec::new(),
             dirty: Vec::new(),
+            max_vertices,
         };
         let base = arena
             .insert(&ConvexHull::cuboid(Vec3::ONE))
             .expect("unit cube fits");
         debug_assert_eq!(base, UNIT_BOX_HULL_BASE);
-        arena
+        Ok(arena)
+    }
+
+    /// The configured vertex limit.
+    pub fn max_vertices(&self) -> usize {
+        self.max_vertices
     }
 
     /// Insert (or share an identical) hull; returns its record base. Each call
     /// takes one reference, released with `release`.
     pub fn insert(&mut self, hull: &ConvexHull) -> Result<u32, HullError> {
+        if hull.vertices.len() > self.max_vertices {
+            return Err(HullError::TooManyVertices { got: hull.vertices.len(), max: self.max_vertices });
+        }
         let mut scratch = Vec::new();
         hull.pack(&mut scratch)?;
         let key: Vec<u32> = scratch.iter().flatten().copied().collect();
@@ -1014,26 +1043,6 @@ fn triangle_hull(pts: &[DVec3]) -> Result<Vec<[usize; 3]>, HullError> {
         tris = next;
     }
     Ok(tris)
-}
-
-fn farthest_point_subset(pts: &[DVec3]) -> Vec<DVec3> {
-    let centroid = pts.iter().copied().sum::<DVec3>() / pts.len() as f64;
-    let first = (0..pts.len())
-        .max_by(|&i, &j| (pts[i] - centroid).length_squared().total_cmp(&(pts[j] - centroid).length_squared()))
-        .unwrap();
-    let mut chosen = vec![first];
-    let mut dist: Vec<f64> = pts.iter().map(|p| (*p - pts[first]).length_squared()).collect();
-    while chosen.len() < HULL_MAX_VERTICES {
-        let k = (0..pts.len()).max_by(|&i, &j| dist[i].total_cmp(&dist[j])).unwrap();
-        if dist[k] <= 0.0 {
-            break;
-        }
-        chosen.push(k);
-        for (i, p) in pts.iter().enumerate() {
-            dist[i] = dist[i].min((*p - pts[k]).length_squared());
-        }
-    }
-    chosen.iter().map(|&i| pts[i]).collect()
 }
 
 /// Andrew monotone chain over pre-sorted `(id, u, v)` points; counter-clockwise.
