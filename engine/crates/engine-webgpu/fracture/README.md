@@ -87,6 +87,18 @@ and 79-86 ticks/s with a frame rendered every tick; 19 of 49 houses collapse by
 20 s and up to ~20k pieces are awake. The hull grid of the same layout runs at
 ~33 ticks/s.
 
+**Overlap physics ticks** (checkbox, opt-in) stops waiting for each tick's
+counter readback: up to three ticks are queued ahead of the GPU and counters
+are read in the background. The GPU runs the same ticks in the same order;
+only host-side uses of the counters lag a tick or two (HUD, overflow report,
+colour-slot estimate, few-awake solver choice, the all-asleep skip, which now
+applies only when the counters describe the latest tick). On the cuboid grid
+after the shot, 1 tick per call goes from 100 ticks/s waiting to 274
+overlapped; the hull grid, GPU-bound at ~28 ms per tick, goes from 28.9 to
+30.2. In lockstep, overlapped and waiting runs stay bit-identical until the
+engine's own run-to-run nondeterminism appears (two plain runs of the cuboid
+grid diverge at tick ~296).
+
 ### Breakable bonds (experimental, opt-in)
 
 “Breakable bonds (experimental)” turns each baked bond of the selected level into

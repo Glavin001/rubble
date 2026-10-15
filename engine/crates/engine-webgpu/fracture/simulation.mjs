@@ -522,6 +522,16 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     device.queue.writeBuffer(renderBodies, 0, bodyBytes, 0, bodyCount * 112);
     const copyRender = (enc) => enc.copyBufferToBuffer(bufs[0], 0, renderBodies, 0, bodyCount * 112);
 
+    // Overlapped stepping (step({wait:false})): queued-tick completions, the
+    // background counter read, the step those counters describe, and an
+    // overflow seen in the background (thrown by the next call).
+    const MAX_IN_FLIGHT = 3;
+    let inFlight = [], overlapRead = null, countedSteps = 0, submittedSteps = 0, wakeSerial = 0, overlapError = null, lastRead = null;
+    async function flushOverlap() {
+      while (inFlight.length) await inFlight.shift();
+      if (overlapRead) await overlapRead;
+    }
+
     function submitPhysics(reuseManifolds = false) {
       const enc = device.createCommandEncoder();
       encodeStep(enc, false, null, undefined, reuseManifolds && manifoldsValid);
@@ -531,6 +541,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       initialized=true;
       parity ^= 1;
       steps++;
+      submittedSteps = steps;
     }
 
     // One step encoded as several command buffers, split after these phases
@@ -562,7 +573,11 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       readChain = run.catch(() => {});
       return run;
     }
+    // The counters describe the last tick fully submitted when the copy is
+    // queued (countedSteps). A launch after that copy wakes the projectile, so
+    // an older read must not report a sleeping world over it (wakeSerial).
     async function readCountersNow() {
+      const at = submittedSteps, serial = wakeSerial;
       const enc = device.createCommandEncoder();
       enc.copyBufferToBuffer(bufs[7], 0, staging, 0, COUNTER_BYTES);
       device.queue.submit([enc.finish()]);
@@ -570,6 +585,8 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       const c = new Uint32Array(staging.getMappedRange().slice(0));
       staging.unmap();
       last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], convexSmall: c[11], convexLarge: c[16] };
+      if (serial !== wakeSerial) last.awake = Math.max(1, last.awake);
+      countedSteps = at;
     }
 
 
@@ -580,12 +597,14 @@ return {
  get slicing(){return slices!==null},
  beginSlicedStep(){
    if(slices)throw new Error('A sliced step is already in flight');
-   if(initialized&&last.awake===0){steps++;timing={wallMs:0,encodeMs:0,waitMs:0};return false}
+   // Skip only when the counters describe the latest tick (see readCountersNow).
+   if(initialized&&last.awake===0&&countedSteps===steps){steps++;submittedSteps=countedSteps=steps;timing={wallMs:0,encodeMs:0,waitMs:0};return false}
    sliceStart=performance.now();slices=encodeSlices();return true;
  },
  submitSlices(n=1){
    if(!slices)return true;
    if(n>0)device.queue.submit(slices.splice(0,n));
+   if(slices.length===0)submittedSteps=steps;
    return slices.length===0;
  },
  async finishSlicedStep(){
@@ -709,20 +728,48 @@ return {
    const body={p:origin,q:[0,0,0,1],v,invMass:1/mass,invI:Array(3).fill(1/(.4*mass*r*r)),flags:9};
    const bytes=new ArrayBuffer(112);writeBody(bytes,0,body);
    device.queue.writeBuffer(bufs[0],id*112,bytes);device.queue.writeBuffer(bufs[0],(cap.maxBodies+id)*112,bytes);device.queue.writeBuffer(renderBodies,id*112,bytes);manifoldsValid=false;
-   last.awake=Math.max(1,last.awake);shots++;return id;
+   last.awake=Math.max(1,last.awake);wakeSerial++;shots++;return id;
  },
  get steps(){return steps},get counters(){return {...last}},get timing(){return {...timing}},
  // {reuseManifolds:true}: three-avbd whole-step manifold reuse (skips collision
  // detection; falls back to a full step after any scene change).
- async step(count=1,{reuseManifolds=false}={}){
+ // wait: true (default) waits for each batch and its counters. wait: false
+ // overlaps ticks: it returns once the batch is queued, at most MAX_IN_FLIGHT
+ // ticks ahead of the GPU, and reads counters in the background. The GPU runs
+ // the same ticks in the same order either way; only host-side uses of the
+ // counters (HUD, overflow report, colour-slot estimate, the few-awake solver
+ // choice, the all-asleep skip) see values up to a few ticks old.
+ async step(count=1,{reuseManifolds=false,wait=true}={}){
    if(!Number.isInteger(count)||count<1||count>4)throw new Error('Physics batch must have 1–4 ticks');
-   if(initialized&&last.awake===0){steps+=count;timing={wallMs:0,encodeMs:0,waitMs:0};return;}
-   const start=performance.now();for(let i=0;i<count;i++)submitPhysics(reuseManifolds);const submitted=performance.now();
-   await readCounters();const end=performance.now();
+   if(overlapError){const e=overlapError;overlapError=null;manifoldsValid=false;throw e}
+   // Skip all-asleep steps only when the counters describe the latest tick.
+   if(initialized&&last.awake===0&&countedSteps===steps){steps+=count;submittedSteps=countedSteps=steps;timing={wallMs:0,encodeMs:0,waitMs:0};return;}
+   const start=performance.now();
+   for(let i=0;i<count;i++){
+     submitPhysics(reuseManifolds);
+     if(!wait){inFlight.push(device.queue.onSubmittedWorkDone());if(inFlight.length>MAX_IN_FLIGHT)await inFlight.shift()}
+   }
+   const submitted=performance.now();
+   if(!wait){
+     if(!overlapRead){
+       overlapRead=readCounters().then(()=>{const end=performance.now();
+         // Per-tick time from throughput between background reads: a single
+         // read also waits for the ticks queued ahead of it.
+         if(lastRead&&countedSteps>lastRead.steps)timing={wallMs:(end-lastRead.time)/(countedSteps-lastRead.steps),encodeMs:(submitted-start)/count,waitMs:0,overlapped:true};
+         lastRead={time:end,steps:countedSteps};
+         if(last.overflow)overlapError=new Error(`Physics capacity exceeded (0x${last.overflow.toString(16)}); choose a coarser level`);
+       }).finally(()=>{overlapRead=null});
+     }
+     return;
+   }
+   await flushOverlap();
+   lastRead=null;await readCounters();const end=performance.now();
    // Includes queue execution and mapAsync synchronization, not pure GPU time.
    timing={wallMs:(end-start)/count,encodeMs:(submitted-start)/count,waitMs:(end-submitted)/count};
    if(last.overflow){manifoldsValid=false;throw new Error(`Physics capacity exceeded (0x${last.overflow.toString(16)}); choose a coarser level`);}
  },
+ // Wait until every overlapped tick has run and the counters are current.
+ async flush(){await flushOverlap();await readCounters();if(overlapError){const e=overlapError;overlapError=null;throw e}},
  // Upload the arena's changed records; grows the hull buffer (power of two,
  // contents copied) and rebuilds the bind groups that reference it.
  syncHulls(arena){
@@ -758,7 +805,7 @@ return {
    device.queue.writeBuffer(bufs[0],0,bodyBytes);device.queue.writeBuffer(bufs[2],0,colBytes);
    device.queue.writeBuffer(bufs[5],0,jointBytes);
    device.queue.writeBuffer(renderBodies,0,bodyBytes,0,bodyCount*112);slices=null;
-   steps=0;parity=0;shots=0;initialized=false;last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0};
+   steps=0;countedSteps=0;submittedSteps=0;lastRead=null;inFlight=[];overlapError=null;parity=0;shots=0;initialized=false;last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0};
  },
  dispose(){for(const b of [...bufs,staging,snapshot,hostUpload,renderBodies])b.destroy();},
 };
