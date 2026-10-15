@@ -202,7 +202,7 @@ test('invalid hash insert mode fails before allocating GPU work', () => {
 });
 
 // Split broadphase grid (8ej): ring defaults to it, gables keeps the scaled table.
-for (const [query, mode, split] of [['?scene=ring110k','split',true],['?scene=gables506k','scaled',false],
+for (const [query, mode, split] of [['?scene=ring110k','split',true],['?scene=gables506k','split',true],
   ['?scene=columns','scaled',false],['?scene=ring110k&grid=scaled','scaled',false],
   ['?scene=gables506k&grid=split','split',true],['?scene=ring110k&grid=fixed','fixed',false]]) {
   test(`grid mode parses explicitly (${query})`, () => {
