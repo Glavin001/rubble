@@ -174,8 +174,9 @@
     // walk their own cell plus 13 forward cells; sleepers and small statics stay
     // in a second, fully walked table. Ring scaled/split 11.04/10.92/11.05/10.86/
     // 11.02/10.82 ms (grid 1.11->0.92) with identical workload snapshots; gables
-    // was neutral (29.34/29.15/29.37 ms), so it keeps scaled.
-    const gridMode = qs.get('grid') || (scene === 'ring110k' ? 'split' : 'scaled');
+    // was neutral (29.34/29.15/29.37 ms) until 8eo moved split links into the
+    // AABB: gables scaled/split/split/scaled 25.94/25.89/25.93/26.21 ms (8ep).
+    const gridMode = qs.get('grid') || (['ring110k', 'gables506k'].includes(scene) ? 'split' : 'scaled');
     if (!['fixed', 'scaled', 'split'].includes(gridMode)) throw new Error('grid must be fixed, scaled or split');
     const gridSplit = gridMode === 'split';
     const detailedProfile = qs.get('profile') === 'detail';
