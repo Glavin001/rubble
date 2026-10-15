@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {parseFractureGlb,EXTENSION} from './asset.mjs';
-import {buildScene,buildRow,buildGrid,principalAxes,rotate,inverseRotate,add,sub,hullView,hullBase,colliderVertices} from './geometry.mjs';
+import {buildScene,buildRow,buildGrid,buildSuburb,principalAxes,rotate,inverseRotate,add,sub,hullView,hullBase,colliderVertices} from './geometry.mjs';
 const bytes=await readFile(new URL('./assets/masonry-arch.glb',import.meta.url));
 const buffer=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
 const asset=parseFractureGlb(buffer);
@@ -129,4 +129,27 @@ test('a 7x7 grid of level-2 houses offsets copies in x and z and fires down the 
  // The shot runs along +z down the middle column (x = 0 for an odd column count).
  assert.equal(grid.rowShot.origin[0],0);assert.deepEqual(grid.rowShot.direction,[0,0,1]);
  assert.ok(grid.rowShot.origin[2]<-grid.rowLength/2);
+});
+
+test('a suburb puts houses on lots between roads and shoots one column of lots',async()=>{
+ const data=await readFile(new URL('./assets/veneer-house.glb',import.meta.url));
+ const house=parseFractureGlb(data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength));
+ const one=buildScene(house,2),suburb=buildSuburb(house,2,{base:one});
+ const frags=one.projectileStart-1;
+ assert.equal(suburb.copies,48);assert.equal(suburb.projectileStart,1+48*frags);
+ // Footprint of copy 0 from its hulls; copy k is shifted by its lot offset.
+ const lo=[Infinity,Infinity],hi=[-Infinity,-Infinity];
+ for(const c of one.colliders)if(c.shape===3)for(const v of colliderVertices(one,c)){lo[0]=Math.min(lo[0],v[0]);hi[0]=Math.max(hi[0],v[0]);lo[1]=Math.min(lo[1],v[2]);hi[1]=Math.max(hi[1],v[2])}
+ const boxes=Array.from({length:48},(_,k)=>{const dx=suburb.bodies[1+k*frags].p[0]-one.bodies[1].p[0],dz=suburb.bodies[1+k*frags].p[2]-one.bodies[1].p[2];return [lo[0]+dx,lo[1]+dz,hi[0]+dx,hi[1]+dz]});
+ const overlap=(a,b)=>a[0]<b[2]&&b[0]<a[2]&&a[1]<b[3]&&b[1]<a[3];
+ for(let i=0;i<48;i++)for(let j=i+1;j<48;j++)assert.ok(!overlap(boxes[i],boxes[j]),`houses ${i} and ${j} overlap`);
+ // No house sits on a road or sidewalk (the road mesh: 6 vertices per quad, 10 floats each).
+ const r=suburb.roadVertices;assert.ok(r.length>0&&r.length%60===0);
+ for(let q=0;q<r.length;q+=60){const xs=[0,1,2,3,4,5].map(k=>r[q+k*10]),zs=[0,1,2,3,4,5].map(k=>r[q+k*10+2]);
+  const quad=[Math.min(...xs),Math.min(...zs),Math.max(...xs),Math.max(...zs)];
+  for(const b of boxes)assert.ok(!overlap(quad,b),'a house overlaps a road surface')}
+ // The shot rolls along +z and its path (ball radius) crosses one column of lots.
+ const x=suburb.rowShot.origin[0],rad=suburb.projectileRadius;assert.deepEqual(suburb.rowShot.direction,[0,0,1]);
+ const hit=boxes.filter(b=>x+rad>b[0]&&x-rad<b[2]).length;
+ assert.equal(hit,6,'the ball crosses 3 blocks x 2 lots');
 });

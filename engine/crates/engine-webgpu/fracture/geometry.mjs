@@ -332,15 +332,20 @@ export function gridConfig(colliders) {
 // (drawn instanced), so GPU memory grows only with bodies and colliders. The
 // projectile is a heavy ball rolled along the ground down the middle column.
 // base: an already built (e.g. bond-preloaded) single-house scene to replicate.
-export function buildGrid(asset, level, {columns=1, rows=20, gap=2.5, projectileRadius=1.6, projectileMass=200000, projectileSpeed=40, maxHullVertices, base}={}) {
-  const one=base??buildScene(asset,level,{maxHullVertices}),frags=one.projectileStart-1,copies=columns*rows;
+// `positions` ([dx, dz] per copy) replaces the regular grid; `shotX` is then
+// the x of the row shot and `roads` are drawn on the ground (buildSuburb).
+export function buildGrid(asset, level, {columns=1, rows=20, gap=2.5, projectileRadius=1.6, projectileMass=200000, projectileSpeed=40, maxHullVertices, base, positions, shotX:shotAt, roads=[]}={}) {
+  const one=base??buildScene(asset,level,{maxHullVertices}),frags=one.projectileStart-1;
   const pitchX=one.extentX+gap,pitchZ=one.extentZ+gap;
-  const width=pitchX*(columns-1)+one.extentX,length=pitchZ*(rows-1)+one.extentZ;
+  const offsetX=c=>(c-(columns-1)/2)*pitchX;
+  const offsets=positions??Array.from({length:columns*rows},(_,k)=>[offsetX(k%columns),(Math.floor(k/columns)-(rows-1)/2)*pitchZ]);
+  const copies=offsets.length;
+  const spanOf=k=>Math.max(...offsets.map(o=>o[k]))-Math.min(...offsets.map(o=>o[k]));
+  const width=spanOf(0)+one.extentX,length=spanOf(1)+one.extentZ;
   const bodies=[one.bodies[0]],colliders=[one.colliders[0]],joints=[];
   const houseColliders=one.colliders.filter(c=>c.body>=1&&c.body<one.projectileStart);
-  const offsetX=c=>(c-(columns-1)/2)*pitchX;
-  for(let r=0;r<rows;r++)for(let c=0;c<columns;c++){
-    const dx=offsetX(c),dz=(r-(rows-1)/2)*pitchZ,base=(r*columns+c)*frags;
+  for(let k=0;k<copies;k++){
+    const [dx,dz]=offsets[k],base=k*frags;
     for(let i=1;i<one.projectileStart;i++){const b=one.bodies[i];bodies.push({...b,p:[b.p[0]+dx,b.p[1],b.p[2]+dz]})}
     for(const col of houseColliders)colliders.push({...col,body:col.body+base});
     // World-anchored bonds keep body 0 and move their world anchor with the copy.
@@ -355,8 +360,8 @@ export function buildGrid(asset, level, {columns=1, rows=20, gap=2.5, projectile
     const src=one.projectileVertices,stride=src.length/one.projectileCount,r0=one.projectileRadius;
     for(let v=0;v<stride;v+=10){const o=slot*stride+v;projectileVertices.push(src[o]/r0*projectileRadius,src[o+1]/r0*projectileRadius,src[o+2]/r0*projectileRadius,src[o+3],src[o+4],src[o+5],src[o+6],src[o+7],src[o+8],id)}
   }
-  const span=Math.max(width,length),shotX=offsetX(Math.floor(columns/2));
-  return {...one,bodies,colliders,joints,projectileStart,projectileRadius,projectileMass,projectileSpeed,projectileArc:false,
+  const span=Math.max(width,length),shotX=shotAt??offsetX(Math.floor(columns/2));
+  return {...one,bodies,colliders,joints,projectileStart,projectileRadius,projectileMass,projectileSpeed,projectileArc:false,roadVertices:roadMesh(roads),
     projectileVertices:new Float32Array(projectileVertices),copies,columns,rows,instanceStride:frags,
     rowPitch:pitchZ,columnPitch:pitchX,rowLength:length,gridWidth:width,
     extent:Math.max(one.extent,span),center:[0,one.height*.5,0],gridCellSize:gridConfig(colliders).base,
@@ -368,6 +373,51 @@ export function buildGrid(asset, level, {columns=1, rows=20, gap=2.5, projectile
     camera:{yaw:columns>1?.75:1.15,pitch:columns>1?.5:.32,distance:span*.8,minDistance:3},
     // Ready-made shot: from beyond the first house, rolling along +z at ground level.
     rowShot:{origin:[shotX,projectileRadius+.02,-length/2-projectileRadius-8],direction:[0,0,1]}};
+}
+
+// A suburb: blocksX × blocksZ blocks of lotsX × lotsZ houses, with yards between
+// houses and roads (asphalt, sidewalks, dashed centre lines) between blocks.
+// The row shot rolls down one column of lots, through a subset of the houses.
+export function buildSuburb(asset, level, {blocksX=4, blocksZ=3, lotsX=2, lotsZ=2, yardX=5, yardZ=6, road=8, sidewalk=1.5, shotBlock, ...options}={}) {
+  const one=options.base??buildScene(asset,level,{maxHullVertices:options.maxHullVertices});
+  const lotX=one.extentX+yardX,lotZ=one.extentZ+yardZ;
+  const blockW=lotsX*lotX,blockL=lotsZ*lotZ,pitchX=blockW+road,pitchZ=blockL+road;
+  const cx=b=>(b-(blocksX-1)/2)*pitchX,cz=b=>(b-(blocksZ-1)/2)*pitchZ;
+  const positions=[];
+  for(let bz=0;bz<blocksZ;bz++)for(let bx=0;bx<blocksX;bx++)for(let lz=0;lz<lotsZ;lz++)for(let lx=0;lx<lotsX;lx++)
+    positions.push([cx(bx)+(lx-(lotsX-1)/2)*lotX,cz(bz)+(lz-(lotsZ-1)/2)*lotZ]);
+  // Roads run between and around the blocks: x0, z0, x1, z1 and orientation.
+  const halfW=blocksX*pitchX/2,halfL=blocksZ*pitchZ/2,roads=[];
+  for(let i=0;i<=blocksX;i++){const x=-halfW+i*pitchX;roads.push({x0:x-road/2,x1:x+road/2,z0:-halfL-road/2,z1:halfL+road/2,alongZ:true})}
+  for(let i=0;i<=blocksZ;i++){const z=-halfL+i*pitchZ;roads.push({x0:-halfW-road/2,x1:halfW+road/2,z0:z-road/2,z1:z+road/2,alongZ:false,sidewalk})}
+  for(const r of roads)r.sidewalk=sidewalk;
+  const column=shotBlock??Math.floor((blocksX-1)/2);
+  const scene=buildGrid(asset,level,{...options,base:one,positions,shotX:cx(column)+(0-(lotsX-1)/2)*lotX,roads});
+  return {...scene,columns:blocksX*lotsX,rows:blocksZ*lotsZ,extent:Math.max(scene.extent,2*halfW,2*halfL)};
+}
+
+// Flat road surfaces drawn on the static ground (render vertices: position,
+// normal, colour, body 0). Roads are decoration only: the physics ground stays
+// the plane y = 0.
+export function roadMesh(roads) {
+  const v=[];
+  const quad=(x0,z0,x1,z1,y,c)=>{for(const [x,z] of [[x0,z0],[x0,z1],[x1,z1],[x0,z0],[x1,z1],[x1,z0]])v.push(x,y,z,0,1,0,...c,0)};
+  const asphalt=[.17,.18,.2],walk=[.42,.42,.4],paint=[.86,.72,.25];
+  const cross=(r,s)=>r.alongZ!==s.alongZ&&s.x0<=r.x1&&s.x1>=r.x0&&s.z0<=r.z1&&s.z1>=r.z0;
+  for(const r of roads){
+    quad(r.x0,r.z0,r.x1,r.z1,.004,asphalt);
+    const w=r.sidewalk??0;
+    if(r.alongZ){quad(r.x0-w,r.z0,r.x0,r.z1,.003,walk);quad(r.x1,r.z0,r.x1+w,r.z1,.003,walk)}
+    else{quad(r.x0,r.z0-w,r.x1,r.z0,.003,walk);quad(r.x0,r.z1,r.x1,r.z1+w,.003,walk)}
+    // Dashed centre line, broken at intersections.
+    const others=roads.filter(s=>cross(r,s)),mid=r.alongZ?(r.x0+r.x1)/2:(r.z0+r.z1)/2;
+    const [a,b]=r.alongZ?[r.z0,r.z1]:[r.x0,r.x1];
+    for(let t=a+1;t+2<=b;t+=4){
+      if(others.some(s=>r.alongZ?(t+2>=s.z0&&t<=s.z1):(t+2>=s.x0&&t<=s.x1)))continue;
+      if(r.alongZ)quad(mid-.08,t,mid+.08,t+2,.006,paint);else quad(t,mid-.08,t+2,mid+.08,.006,paint);
+    }
+  }
+  return new Float32Array(v);
 }
 
 // A single row of `copies` houses along +z (a one-column grid).
