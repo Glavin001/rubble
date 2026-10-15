@@ -1,0 +1,37 @@
+{
+  "decision": "8en",
+  "change": "Incremental coloring repairs small lists in one workgroup. color_bodies_local (256 threads) loops Jones-Plassmann rounds over the compact repair list behind storage barriers when it holds <= 4096 bodies (HOST_S(27) opt-in); write_work_args then writes slot 69 = 0 so the 32 global color_bodies rounds launch nothing. Larger lists (first step, mass wakes) keep the global rounds. Each JP attempt is shared as jpTryColor. The highest-priority uncolored body always colors and every uncolored neighbour is on the list, so each round progresses. Browser default repair=local under incremental coloring; native ENGINE_REPAIR=local.",
+  "postPassFix": "uniformize_workgroup_lanes rewrote reads of gsUniformLanes to workgroupUniformLoad but its store fix-up pattern ') =' also matched ') ==', silently reverting uniform comparisons. The pattern now requires ') = '. No existing kernel compared the flag, so their WGSL is unchanged; color_bodies_local also joins the texture-barrier lowering fix.",
+  "graph_detail_ms": {
+    "ring": {
+      "rounds": 0.26,
+      "local": 0.13
+    },
+    "gables": {
+      "rounds": 0.26,
+      "local": 0.13
+    }
+  },
+  "wall_ms": {
+    "ring": [
+      "local 10.44",
+      "rounds 10.57",
+      "local 10.45",
+      "rounds 10.39"
+    ],
+    "gables": [
+      "local 26.48",
+      "rounds 27.86 (likely contaminated)"
+    ],
+    "verdict": "~0.13 ms phase saving; wall within noise on this desktop"
+  },
+  "gates": {
+    "gpuLib": "50/50; local_color_repair_matches_global_rounds_on_a_lattice (576 bodies all on the repair list; one-round mutation fails)",
+    "browserUnit": "288/288",
+    "browserRing480": "PASS bit-identical (mean 1.217517997515979)",
+    "browserGables240": "PASS bit-identical 0.1172912589201891/0.3304786682128906",
+    "nativeRing480Columns_ENGINE_REPAIR_local": "PASS bit-identical (1.1753)",
+    "nativeCanonicalGables240_ENGINE_REPAIR_local": "PASS bit-identical 0.118635/0.328483",
+    "metal": "18/18"
+  }
+}

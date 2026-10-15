@@ -131,6 +131,14 @@
     if (!['fused', 'split'].includes(npMode)) throw new Error('np must be fused or split');
     if (npMode === 'split' && !reuseCopy) throw new Error('np=split requires reuse=copy');
     const npSplit = npMode === 'split';
+    // repair=local (8en): one workgroup loops JP rounds over a small incremental
+    // repair list instead of 32 global color_bodies dispatches.
+    // Graph detail colorRepair 0.26 -> 0.13 ms on ring and gables; colors are
+    // identical (JP is schedule-independent).
+    const repairMode = qs.get('repair') || (incrementalColors ? 'local' : 'rounds');
+    if (!['rounds', 'local'].includes(repairMode)) throw new Error('repair must be rounds or local');
+    if (repairMode === 'local' && !incrementalColors) throw new Error('repair=local requires incremental coloring');
+    const localRepair = repairMode === 'local';
     // persist=list (8em): narrowphase lists the contacts that still need the
     // persistence pass, so it skips the per-contact scan of finished copies.
     // Gables scan/list warm 1.97/1.44 ms (wall 26.66/26.13); ring 10.44/10.19.
@@ -369,6 +377,7 @@
       ...(reuseCopy ? ['narrowphase_copy_persistent', 'persist_contacts_copy_persistent'] : []),
       ...(npSplit ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
       ...(persistList ? ['persist_list_copy_persistent'] : []),
+      ...(localRepair ? ['color_bodies_local'] : []),
       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
@@ -950,6 +959,7 @@ struct VsOut {
       s[16] = gridHashWords();
       s[20] = gridSplit ? 1 : 0;
       s[22] = persistList ? 1 : 0;
+      s[27] = localRepair ? 1 : 0;
       s[24] = csrBase;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
@@ -1074,6 +1084,8 @@ struct VsOut {
       if (graphProfile) nextPhase();
       // JP dependency depth exceeds 16 on the active 110k ring.
       const colorRounds = 32;
+      // Local repair runs first; slot 69 is then zero and the rounds launch nothing.
+      if (localRepair) disp(pass, 'color_bodies_local', 64);
       for (let round = 0; round < colorRounds; round++) dispWork(pass, 'color_bodies', incrementalColors ? 69 : 67, round % 16);
       if (graphProfile) nextPhase();
       if (stablePacking) {
@@ -1196,7 +1208,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, endpoints: endpointsMode, grid: gridMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, endpoints: endpointsMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1618,7 +1630,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1669,6 +1681,7 @@ struct VsOut {
       report.grid = gridMode;
       report.np = npMode;
       report.persist = persistMode;
+      report.repair = repairMode;
       report.endpoints = endpointsMode;
       // Exercise reset too: stale warm-start data from the completed run must not
       // contaminate the first frame or the benchmark's lead-in.
@@ -1694,7 +1707,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

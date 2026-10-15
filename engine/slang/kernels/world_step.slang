@@ -2450,21 +2450,11 @@ uint compactPreviousColor(uint body)
     return min(previous, free + 1u);
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void color_bodies(uint3 tid : SV_DispatchThreadID)
+// One Jones-Plassmann attempt for an uncolored body: false while a
+// higher-priority uncolored neighbour blocks it.
+bool jpTryColor(uint body)
 {
-    // Jones-Plassmann: winners take the *smallest free* colour (three-avbd), not the
-    // round index — assigning round forced O(rounds) colours and killed parallelism.
-    uint li = dispatchIndex(tid);
-    bool incremental = HOST_S(26) != 0u;
-    uint workN = incremental ? ALOAD(gCounters[0].recolorCount) : ALOAD(gCounters[0].awakeCount);
-    if (li >= workN) return;
-    uint body = incremental ? gCcdFlags[li] : gAwakeList[li];
     uint prio = jpPriority(body);
-
-    if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) return;
-
     bool blocked = false;
     uint usedLo = 0u;
     uint usedHi = 0u;
@@ -2483,7 +2473,7 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
         else if (oc < 32u) usedLo |= 1u << oc;
         else if (oc < 64u) usedHi |= 1u << (oc - 32u);
     }
-    if (blocked) return;
+    if (blocked) return false;
 
     // Smallest colour not used by already-coloured neighbours (three-avbd smallestFree).
     uint free = 63u;
@@ -2501,6 +2491,62 @@ void color_bodies(uint3 tid : SV_DispatchThreadID)
     }
     ASTORE(gBodyColor[body], free);
     AMAX2(gCounters[0].colorCount, free + 1);
+    return true;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void color_bodies(uint3 tid : SV_DispatchThreadID)
+{
+    // Jones-Plassmann: winners take the *smallest free* colour (three-avbd), not the
+    // round index — assigning round forced O(rounds) colours and killed parallelism.
+    uint li = dispatchIndex(tid);
+    bool incremental = HOST_S(26) != 0u;
+    uint workN = incremental ? ALOAD(gCounters[0].recolorCount) : ALOAD(gCounters[0].awakeCount);
+    if (li >= workN) return;
+    uint body = incremental ? gCcdFlags[li] : gAwakeList[li];
+    if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) return;
+    jpTryColor(body);
+}
+
+// Opt-in local repair (8en, HOST_S(27) != 0): a small incremental repair list
+// is colored by one workgroup looping JP rounds behind storage barriers, and
+// write_work_args zeroes slot 69 so the 32 global rounds launch nothing. The
+// highest-priority uncolored body always colors, and every uncolored neighbour
+// is itself on the list, so each round progresses.
+static const uint LOCAL_COLOR_LIMIT = 4096u;
+bool localColoring()
+{
+    return HOST_S(27) != 0u && HOST_S(26) != 0u &&
+        ALOAD(gCounters[0].recolorCount) <= LOCAL_COLOR_LIMIT;
+}
+
+groupshared AUint gsColorRemaining;
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void color_bodies_local(uint3 lid : SV_GroupThreadID)
+{
+    uint local = lid.x;
+    if (local == 0u) gsUniformLanes = localColoring() ? 1u : 0u;
+    GROUP_SYNC();
+    if (gsUniformLanes == 0u) return;
+    uint workN = ALOAD(gCounters[0].recolorCount);
+    for (uint round = 0u; round < LOCAL_COLOR_LIMIT; round++)
+    {
+        if (local == 0u) ASTORE(gsColorRemaining, 0u);
+        GROUP_SYNC();
+        for (uint li = local; li < workN; li += 256u)
+        {
+            uint body = gCcdFlags[li];
+            if (ALOAD(gBodyColor[body]) != 0xFFFFFFFFu) continue;
+            if (!jpTryColor(body)) AOR2(gsColorRemaining, 1u);
+        }
+        DeviceMemoryBarrierWithGroupSync();
+        if (local == 0u) gsUniformLanes = ALOAD(gsColorRemaining);
+        GROUP_SYNC();
+        if (gsUniformLanes == 0u) break;
+    }
 }
 
 // Adaptive 1/2/4/8 threads per body by colour size. This tuning differs from
@@ -2540,7 +2586,9 @@ void write_work_args(uint3 tid : SV_DispatchThreadID)
     writeDispatchArgs(68u, HOST_S(14) != 0u ? min(HOST_S(13), HOST_S(10))
                                             : min(HOST_S(7), HOST_S(3)));
     // Opt-in keeps hosts without a history row / slot 69 compatible.
-    if (HOST_S(26) != 0u) writeDispatchArgs(69u, ALOAD(gCounters[0].recolorCount));
+    // Local repair (HOST_S(27)) colors small lists itself; slot 69 then stays empty.
+    if (HOST_S(26) != 0u)
+        writeDispatchArgs(69u, localColoring() ? 0u : ALOAD(gCounters[0].recolorCount));
 #if defined(ENGINE_REUSE_COPY)
     // Persist work list (8em): slot 70 = listed contacts, slot 71 = the full
     // scan, which runs only when the list overflowed.

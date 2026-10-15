@@ -61,6 +61,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "csr_sort",
     "csr_sort_append",
     "color_bodies",
+    "color_bodies_local",
     "init_colors",
     "pack_color_lists",
     "count_color_tiles",
