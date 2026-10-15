@@ -12,4 +12,6 @@
 #define solve_primal_one solve_primal_one_persistent
 #define solve_dual solve_dual_persistent
 #define solve_primal_sparse solve_primal_sparse_persistent
+#define csr_degree_contacts csr_degree_contacts_persistent
+#define csr_scatter_contacts csr_scatter_contacts_persistent
 #include "world_step.slang"

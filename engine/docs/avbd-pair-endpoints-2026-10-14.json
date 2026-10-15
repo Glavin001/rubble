@@ -1,0 +1,49 @@
+{
+  "decision": "8el",
+  "change": "Persistent hosts pack solver pairs (pack_solver_pairs_persistent) right after contact persistence instead of before the solve, and csr_degree_contacts_persistent / csr_scatter_contacts_persistent read bodyA/bodyB from the 32-byte SolverPair instead of manifold -> two colliders (three-avbd TopoItem shape). Manifold/fused persistence already pack in the warm pass. Browser default endpoints=pairs under persistent contacts (endpoints=manifold keeps the control); native persistent always.",
+  "browser": "Chrome 152 (Claude app), Metal-3",
+  "gables_graph_detail_ms": {
+    "manifold": {
+      "wall": 27.2,
+      "csrDegree": 0.39,
+      "csrScatter": 0.66,
+      "warm": 1.64,
+      "primal": 8.85
+    },
+    "pairs": {
+      "wall": 27.0,
+      "csrDegree": 0.26,
+      "csrScatter": 0.46,
+      "warm": 1.97,
+      "primal": 8.45
+    },
+    "note": "the pack moved from the primal interval to warm"
+  },
+  "gables_ms": {
+    "sequence": [
+      "manifold 27.79",
+      "pairs 27.30",
+      "pairs 26.92",
+      "manifold 27.24"
+    ]
+  },
+  "ring_ms": {
+    "contaminated": "15.02/51.64/25.61 discarded: the browser pane was hidden mid-run (throttled tab)",
+    "sequence": [
+      "manifold 10.89",
+      "pairs 10.76",
+      "manifold 10.75",
+      "pairs 10.24"
+    ]
+  },
+  "gates": {
+    "gpuLib": "48/48; persistent_csr_from_packed_pairs_matches_manifold_endpoints (permuted collider->body ids, empty manifold, static endpoint; counting bodyA twice fails it)",
+    "browserUnit": "274/274 (endpoint parsing/default, rejection without persistence, exactly one pack and before CSR when endpoints read pairs)",
+    "browserRing480": "PASS bit-identical (mean 1.217517997515979)",
+    "browserGables240": "PASS bit-identical 0.1172912589201891/0.3304786682128906",
+    "nativeRing480Columns": "PASS bit-identical (1.1753)",
+    "nativeCanonicalGables240": "PASS 0.118635/0.328483",
+    "nativePersistentGables240Diagnostic": "PASS 0.118657/0.330531",
+    "metal": "18/18"
+  }
+}

@@ -853,6 +853,115 @@ fn warmstart_duplicate_corner_fixture(entry: &str) {
     }
 }
 
+/// Persistent hosts pack solver pairs before the graph and CSR degree/scatter
+/// read their body ids (8el). The adjacency must match the manifold → collider →
+/// body derivation exactly, skipping empty manifolds and static endpoints.
+#[test]
+fn persistent_csr_from_packed_pairs_matches_manifold_endpoints() {
+    const BODIES: u32 = 12;
+    // Collider c belongs to body PERM[c]: reading collider ids as bodies fails.
+    const PERM: [u32; BODIES as usize] = [0, 7, 3, 11, 5, 9, 1, 10, 2, 6, 4, 8];
+    let edges: Vec<(u32, u32, u32)> = vec![
+        (1, 2, 4), (2, 3, 4), (0, 4, 1), (5, 6, 0), (6, 7, 2), (7, 8, 4), (3, 9, 1),
+        (9, 10, 4), (10, 11, 3), (1, 11, 2), (4, 8, 4),
+    ];
+    let mut results = Vec::new();
+    for persistent in [false, true] {
+        let cap = WorldCapacity::small();
+        let mut sim = if persistent {
+            WgpuSim::new_with_persistent_contacts(cap)
+        } else {
+            WgpuSim::new_with_compact_contacts(cap, true)
+        }
+        .expect("GPU adapter required");
+        for c in 0..BODIES {
+            sim.add_body(BodyState {
+                orientation: [0.0, 0.0, 0.0, 1.0],
+                inv_mass: if c == 0 { 0.0 } else { 1.0 },
+                flags: if c == 0 { 0 } else { 9 }, // body 0 is static
+                ..BodyState::zeroed()
+            });
+        }
+        for c in 0..BODIES {
+            sim.add_collider(Collider {
+                body: PERM[c as usize],
+                shape: ShapeType::Box as u32,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                ..Collider::zeroed()
+            });
+        }
+        let manifolds: Vec<Manifold> = edges
+            .iter()
+            .enumerate()
+            .map(|(i, &(a, b, count))| Manifold {
+                collider_a: a,
+                collider_b: b,
+                contact_start: i as u32 * 4,
+                contact_count: count,
+                normal: [0.0, 1.0, 0.0],
+                ..Manifold::zeroed()
+            })
+            .collect();
+        sim.write_host_uniforms();
+        sim.queue
+            .write_buffer(&sim.bufs[25], 0, bytemuck::cast_slice(&manifolds));
+        let counters = StepCounters {
+            body_count: BODIES,
+            collider_count: BODIES,
+            manifold_count: manifolds.len() as u32,
+            ..StepCounters::default()
+        };
+        sim.queue.write_buffer(&sim.bufs[7], 0, bytes_of(&counters));
+        let n = manifolds.len() as u64;
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            if persistent {
+                sim.disp(&mut pass, "pack_solver_contacts", n, None);
+            }
+            sim.disp(&mut pass, "csr_clear", u64::from(BODIES) + 1, None);
+            sim.disp(&mut pass, "csr_degree_contacts", n, None);
+            sim.disp(&mut pass, "csr_prefix", 1, None);
+            sim.disp(&mut pass, "csr_scatter_contacts", n, None);
+            sim.disp(&mut pass, "csr_sort", u64::from(BODIES), None);
+        }
+        sim.queue.submit([enc.finish()]);
+        let csr_offset = u64::from(constraint_id_words(&sim.capacity)) * 4;
+        let offsets: Vec<u32> = download(&sim, 14, csr_offset, BODIES as usize + 1);
+        let total = offsets[BODIES as usize] as usize;
+        let ids: Vec<u32> = download(&sim, 14, 0, total);
+        let partners: Vec<u32> = download(&sim, 10, 0, total);
+        results.push((offsets, ids, partners));
+    }
+    // Independent oracle: dynamic endpoints only, empty manifolds skipped.
+    let mut expected_degree = vec![0u32; BODIES as usize];
+    for &(a, b, count) in &edges {
+        if count == 0 {
+            continue;
+        }
+        for body in [PERM[a as usize], PERM[b as usize]] {
+            if body != 0 {
+                expected_degree[body as usize] += 1;
+            }
+        }
+    }
+    let (offsets, ids, partners) = &results[1];
+    for body in 0..BODIES as usize {
+        assert_eq!(offsets[body + 1] - offsets[body], expected_degree[body],
+            "body {body}: packed-pair CSR degree differs from the manifold oracle; endpoints must be bodies, not colliders, and empty manifolds must be skipped");
+        for e in offsets[body]..offsets[body + 1] {
+            let (a, b, _) = edges[ids[e as usize] as usize];
+            let (ba, bb) = (PERM[a as usize], PERM[b as usize]);
+            assert!(ba as usize == body || bb as usize == body,
+                "body {body}, edge {e}: adjacency lists manifold {} that does not touch it", ids[e as usize]);
+            assert_eq!(partners[e as usize], if ba as usize == body { bb } else { ba },
+                "body {body}, edge {e}: partner array must name the other body");
+        }
+    }
+    assert_eq!(results[0], results[1],
+        "persistent CSR (packed pairs) must be identical to the compact manifold-derived CSR, including sorted order");
+}
+
 #[test]
 fn csr_prefix_matches_cpu_across_workgroups() {
     let mut sim = WgpuSim::new(WorldCapacity {
