@@ -127,8 +127,14 @@
     // at 2x body capacity); scenes up to 65536 colliders keep 131072 heads.
     // Gables fixed/scaled: 36.92/35.00/36.34/34.50 ms, grid 3.28->1.90 ms, with
     // unchanged workload snapshots. grid=fixed keeps the old table as control.
-    const gridMode = qs.get('grid') || 'scaled';
-    if (!['fixed', 'scaled'].includes(gridMode)) throw new Error('grid must be fixed or scaled');
+    // grid=split (8ej) gives awake dynamics their own table, so awake queriers
+    // walk their own cell plus 13 forward cells; sleepers and small statics stay
+    // in a second, fully walked table. Ring scaled/split 11.04/10.92/11.05/10.86/
+    // 11.02/10.82 ms (grid 1.11->0.92) with identical workload snapshots; gables
+    // was neutral (29.34/29.15/29.37 ms), so it keeps scaled.
+    const gridMode = qs.get('grid') || (scene === 'ring110k' ? 'split' : 'scaled');
+    if (!['fixed', 'scaled', 'split'].includes(gridMode)) throw new Error('grid must be fixed, scaled or split');
+    const gridSplit = gridMode === 'split';
     const detailedProfile = qs.get('profile') === 'detail';
     const graphProfile = qs.get('profile') === 'graph';
     // Diagnostic: one timestamped pass per primal color (and the sparse tail).
@@ -293,6 +299,7 @@
     }, { passive: false });
     const PASS_ALIGN = 256;
     const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+    const prevPow2 = (n) => { let p = 1; while (p * 2 <= n) p <<= 1; return p; };
     const constraintIdWords = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
     const csrBase = Math.max(constraintIdWords, 131072);
 
@@ -878,8 +885,15 @@ struct VsOut {
     }
 
     // 0 keeps the shader's fixed 131072-head table.
+    // Split grids keep awake and other heads in two tables below csrBase.
     function gridHashWords() {
-      return gridMode === 'scaled' ? Math.min(nextPow2(Math.max(2 * colliderCount, 131072)), csrBase) : 0;
+      if (gridMode === 'fixed') return 0;
+      const words = nextPow2(Math.max(2 * colliderCount, 131072));
+      return gridSplit ? Math.min(words, prevPow2(csrBase >> 1)) : Math.min(words, csrBase);
+    }
+
+    function gridClearWords() {
+      return (gridHashWords() || 131072) * (gridSplit ? 2 : 1);
     }
 
     function scratchWords() {
@@ -905,6 +919,7 @@ struct VsOut {
       // s[13] receives the previous GPU manifold count in writeHost.
       s[14] = manifoldHashInsert ? 1 : 0;
       s[16] = gridHashWords();
+      s[20] = gridSplit ? 1 : 0;
       s[24] = csrBase;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
@@ -967,7 +982,7 @@ struct VsOut {
         pass = beginPass();
       };
       disp(pass, 'build_aabbs', nCols);
-      disp(pass, 'broadphase_clear', gridHashWords() || 131072);
+      disp(pass, 'broadphase_clear', gridClearWords());
       nextPhase();
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);

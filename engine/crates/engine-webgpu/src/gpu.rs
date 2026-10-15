@@ -88,6 +88,12 @@ fn bindings_of(wgsl: &str) -> Vec<Bind> {
 }
 
 /// Word offset where the CSR index lives inside `gConstraintIds` on the WGSL path.
+/// Split broadphase grids: awake dynamics in one table, sleepers and small
+/// statics in a second (HOST_S(20)); awake queriers walk 14 cells.
+fn grid_split() -> bool {
+    std::env::var("ENGINE_GRID").as_deref() == Ok("split")
+}
+
 fn constraint_id_words(c: &WorldCapacity) -> u32 {
     let words = (2 * (c.max_contacts + c.max_joints))
         .max(32768)
@@ -569,7 +575,7 @@ impl WgpuSim {
         self.disp(
             &mut pass,
             "broadphase_clear",
-            u64::from(self.grid_hash_words()),
+            u64::from(self.grid_hash_words()) * if grid_split() { 2 } else { 1 },
             None,
         );
         self.disp(&mut pass, "broadphase_insert", n_cols, None);
@@ -801,15 +807,18 @@ impl WgpuSim {
 
     /// Broadphase grid heads: at least twice the colliders (three-avbd), so
     /// 506k gables avoids ~4 colliders per bucket; small scenes keep 131072.
-    /// `ENGINE_GRID=fixed` keeps the fixed table as a comparison control.
+    /// `ENGINE_GRID=fixed` keeps the fixed table as a comparison control;
+    /// `ENGINE_GRID=split` (8ej) halves the cap so both split tables fit.
     fn grid_hash_words(&self) -> u32 {
         if std::env::var("ENGINE_GRID").as_deref() == Ok("fixed") {
             return 131072;
         }
+        let region = constraint_id_words(&self.capacity) / if grid_split() { 2 } else { 1 };
+        let cap = 1u32 << (31 - region.leading_zeros());
         (2 * self.collider_count)
             .max(131072)
             .next_power_of_two()
-            .min(constraint_id_words(&self.capacity))
+            .min(cap)
     }
 
     /// Warm hash size in slots: one word per slot (heads), or four-word record
@@ -857,6 +866,7 @@ impl WgpuSim {
         s[17] = self.steps_done;
         s[26] = 1; // incremental coloring: history row + compact work slot 69
         s[16] = self.grid_hash_words();
+        s[20] = u32::from(grid_split());
         if self.manifold_hash_insert {
             s[13] = self.last_counters.manifold_count;
             s[14] = 1;
