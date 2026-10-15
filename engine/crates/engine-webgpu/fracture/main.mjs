@@ -6,6 +6,14 @@ import {createRenderer} from './render.mjs';
 import {createRates} from './rates.mjs';
 const $=id=>document.getElementById(id),status=$('status');
 let device,asset,scene,sim,renderer,running=false,released=false,loading=true,frame=Promise.resolve(),loadTail=Promise.resolve(),last=0,accumulator=0;
+// Heavier steps than this are split across frames (see simulation encodeSlices);
+// back to whole steps once few bodies are awake.
+const SLICED_STEP_MS=12,SLICE_EXIT_AWAKE=20000;
+// Slices submitted per frame adapt to the frame time: more while frames stay
+// under the 60 FPS budget, fewer above it, so physics gets every spare
+// millisecond without dropping rendering below ~60 FPS.
+const FRAME_BUDGET_MS=16.0;
+let sliceRate=1,sliceCredit=0,frameEma=FRAME_BUDGET_MS;
 let currentRates=null,layout=null,maxHullVertices;
 // Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
 const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
@@ -77,7 +85,7 @@ $('metadata').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringif
 for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();document.body.classList.add('drop')});
 window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
 window.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');const f=e.dataTransfer.files[0];if(f&&device)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))});
-window.__FRACTURE_DEMO__={get ready(){return !loading&&!!sim},get device(){return device},get asset(){return asset},get scene(){return scene},get simulation(){return sim},get renderer(){return renderer},get rates(){return currentRates},
+window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},get ready(){return !loading&&!!sim},get device(){return device},get asset(){return asset},get scene(){return scene},get simulation(){return sim},get renderer(){return renderer},get rates(){return currentRates},
  async shootRay(origin,direction){running=false;await frame;return sim.launch(origin,direction)},
  async fireRow(){running=false;await frame;return sim.launch(scene.rowShot.origin,scene.rowShot.direction)},
  // Repeatable row benchmark: fire, then every `every` steps record wall ms per
@@ -97,21 +105,40 @@ window.__FRACTURE_DEMO__={get ready(){return !loading&&!!sim},get device(){retur
  async stepFrames(count){running=false;await frame;for(let i=0;i<count;i++)await sim.step();renderer.draw($('show-bonds').checked);return sim.counters},
  async snapshot(){await frame;return sim.snapshot()},reset:()=>serializeLoad(async()=>sim.reset()),load:sample,selectLevel:level=>serializeLoad(async()=>{$("level").value=String(level);await loadLevel(level)})};
 function tick(now){
+ const frameMs=last?now-last:FRAME_BUDGET_MS;
  const elapsed=last?Math.min(.04,(now-last)/1000):0;last=now;
+ // Damped control on a smoothed frame time: cut quickly when over budget,
+ // raise slowly when under, so one heavy frame does not swing the rate.
+ frameEma+=0.2*(frameMs-frameEma);
+ sliceRate=Math.min(4,Math.max(0.25,sliceRate*Math.min(1.03,Math.max(0.7,FRAME_BUDGET_MS/frameEma))));
  if(!loading&&renderer){frame=(async()=>{try{
   let work=null,ticks=0;
   if(running){
    accumulator=Math.min(accumulator+elapsed,4/stepHz());
-   // Bound outstanding work. Slow ticks get one tick per frame, rather than
-   // four serial GPU waits starving camera input and rendering.
-   const budget=Math.max(1,Math.min(4,Math.floor(12/Math.max(sim.timing.wallMs,0.1))));
-   ticks=Math.min(budget,Math.floor(accumulator*stepHz()));
-   if(ticks){accumulator-=ticks/stepHz();work=sim.step(ticks)}
+   if(sim.slicing){
+    // A heavy step in flight: this frame's share of slices, then its counters.
+    sliceCredit+=sliceRate;const n=Math.floor(sliceCredit);sliceCredit-=n;
+    // Counters arrive asynchronously, so the queue keeps flowing.
+    if(sim.submitSlices(n))sim.finishSlicedStep().then(()=>{if(!document.hidden)rates.step(sim.timing)}).catch(fail);
+   }else{
+    // Bound outstanding work. Slow ticks get one tick per frame, rather than
+    // four serial GPU waits starving camera input and rendering.
+    const budget=Math.max(1,Math.min(4,Math.floor(12/Math.max(sim.timing.wallMs,0.1))));
+    ticks=Math.min(budget,Math.floor(accumulator*stepHz()));
+    if(ticks){
+     accumulator-=ticks/stepHz();
+     // Steps over ~12 ms run sliced across frames so rendering keeps its rate;
+     // the physics is the same, only spread over several frames.
+     const heavy=sim.timing.wallMs>SLICED_STEP_MS&&!(sim.timing.sliced&&sim.counters.awake<SLICE_EXIT_AWAKE);
+     if(heavy){ticks=0;if(sim.beginSlicedStep()&&sim.submitSlices(1))sim.finishSlicedStep().then(()=>{if(!document.hidden)rates.step(sim.timing)}).catch(fail)}
+     else work=sim.step(ticks);
+    }
+   }
   }
   // Queue the draw immediately behind physics; do not wait for CPU stats first.
   renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
-  if(work){const c=sim.counters;$('awake').textContent=c.awake;$('contacts').textContent=c.contact}
+  if(running){const c=sim.counters;$("awake").textContent=c.awake;$("contacts").textContent=c.contact}
   if(running){const c=sim.counters;setStatus(`${sim.shots}/16 shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
   if(!document.hidden)rates.frame();
  }catch(e){fail(e)}})();frame.finally(()=>requestAnimationFrame(tick))}else requestAnimationFrame(tick);

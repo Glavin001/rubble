@@ -408,6 +408,9 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       let pass = beginPass ? beginPass('start') : enc.beginComputePass(passDescriptor);
       const phase = (name) => {
         if (!beginPass) return pass;
+        // beginPass.split(name) false: keep encoding into the current pass
+        // (slicing splits only at slice boundaries; extra passes add barriers).
+        if (beginPass.split && !beginPass.split(name)) return pass;
         pass.end();
         pass = beginPass(name);
         return pass;
@@ -484,6 +487,8 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
         }
         }
         dispWork(pass, 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
+        // Profiling / slicing boundary halfway through the iterations.
+        if (beginPass && iter + 1 === (params.iterations >> 1)) pass = phase('solveHalf');
       }
       pass = phase('solve');
       disp(pass, 'extract_velocity_sleep', nBodies);
@@ -496,9 +501,17 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     }
 
     let manifoldsValid = false;
+    // The renderer draws a copy of the bodies taken at the end of each step,
+    // so a step split across frames is never seen half-solved.
+    const renderBytes = Math.max(112, bodyCount * 112);
+    const renderBodies = device.createBuffer({label: 'render bodies', size: renderBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(renderBodies, 0, bodyBytes, 0, bodyCount * 112);
+    const copyRender = (enc) => enc.copyBufferToBuffer(bufs[0], 0, renderBodies, 0, bodyCount * 112);
+
     function submitPhysics(reuseManifolds = false) {
       const enc = device.createCommandEncoder();
       encodeStep(enc, false, null, undefined, reuseManifolds && manifoldsValid);
+      copyRender(enc);
       manifoldsValid = true;
       device.queue.submit([enc.finish()]);
       initialized=true;
@@ -506,7 +519,36 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       steps++;
     }
 
-    async function readCounters() {
+    // One step encoded as several command buffers, split after these phases
+    // (each slice <= ~6-8 ms at the 49-house peak). Submitted on successive
+    // frames they run the same dispatches in the same queue order as one
+    // submit, so results are identical; frames just stop waiting on whole steps.
+    const SLICE_AFTER = new Set(['broadphase', 'convexClassify', 'convexSatSmall', 'convexSat', 'convexManifold', 'topology', 'solveHalf', 'solve']);
+    let slices = null, sliceStart = 0, readPending = false;
+    function encodeSlices() {
+      const out = [];
+      let enc = device.createCommandEncoder();
+      const begin = (name) => {
+        if (SLICE_AFTER.has(name)) { out.push(enc.finish()); enc = device.createCommandEncoder(); }
+        return enc.beginComputePass();
+      };
+      begin.split = (name) => name === 'start' || SLICE_AFTER.has(name);
+      encodeStep(enc, false, begin, undefined, false);
+      copyRender(enc);
+      out.push(enc.finish());
+      manifoldsValid = true; initialized = true; parity ^= 1; steps++;
+      return out;
+    }
+
+    // Counter readbacks share one staging buffer, so they run one at a time:
+    // a copy into staging must never be submitted while it is mapped.
+    let readChain = Promise.resolve();
+    function readCounters() {
+      const run = readChain.then(readCountersNow);
+      readChain = run.catch(() => {});
+      return run;
+    }
+    async function readCountersNow() {
       const enc = device.createCommandEncoder();
       enc.copyBufferToBuffer(bufs[7], 0, staging, 0, COUNTER_BYTES);
       device.queue.submit([enc.finish()]);
@@ -518,7 +560,30 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
 
 
 return {
- bodyBuffer:bufs[0],cap,
+ bodyBuffer:bufs[0],renderBodyBuffer:renderBodies,cap,
+ // Sliced stepping (see encodeSlices): begin, submit slices frame by frame,
+ // then finish to read the counters. A sleeping world needs no step.
+ get slicing(){return slices!==null},
+ beginSlicedStep(){
+   if(slices)throw new Error('A sliced step is already in flight');
+   if(initialized&&last.awake===0){steps++;timing={wallMs:0,encodeMs:0,waitMs:0};return false}
+   sliceStart=performance.now();slices=encodeSlices();return true;
+ },
+ submitSlices(n=1){
+   if(!slices)return true;
+   if(n>0)device.queue.submit(slices.splice(0,n));
+   return slices.length===0;
+ },
+ async finishSlicedStep(){
+   if(slices?.length)throw new Error('Slices still pending');
+   slices=null;
+   // The frame loop does not wait for this; a step finishing while the last
+   // readback is still mapping keeps the previous counters one step longer.
+   if(readPending)return;
+   readPending=true;try{await readCounters()}finally{readPending=false}
+   timing={wallMs:performance.now()-sliceStart,encodeMs:0,waitMs:0,sliced:true};
+   if(last.overflow){manifoldsValid=false;throw new Error(`Physics capacity exceeded (0x${last.overflow.toString(16)}); choose a coarser level`);}
+ },
  // Advances one real step with GPU timestamps. Default: one compute pass per
  // phase (bounds, broadphase, narrowphase, convex classify/SAT/manifold,
  // persistence, topology, solve, sleep). Pass boundaries add latency, so
@@ -617,7 +682,7 @@ return {
    const v=direction.map(x=>x*speed);if(arc)v[1]+=.5*9.81*distance/speed;
    const body={p:origin,q:[0,0,0,1],v,invMass:1/mass,invI:Array(3).fill(1/(.4*mass*r*r)),flags:9};
    const bytes=new ArrayBuffer(112);writeBody(bytes,0,body);
-   device.queue.writeBuffer(bufs[0],id*112,bytes);device.queue.writeBuffer(bufs[0],(cap.maxBodies+id)*112,bytes);manifoldsValid=false;
+   device.queue.writeBuffer(bufs[0],id*112,bytes);device.queue.writeBuffer(bufs[0],(cap.maxBodies+id)*112,bytes);device.queue.writeBuffer(renderBodies,id*112,bytes);manifoldsValid=false;
    last.awake=Math.max(1,last.awake);shots++;return id;
  },
  get steps(){return steps},get counters(){return {...last}},get timing(){return {...timing}},
@@ -666,9 +731,10 @@ return {
    device.queue.submit([enc.finish()]);
    device.queue.writeBuffer(bufs[0],0,bodyBytes);device.queue.writeBuffer(bufs[2],0,colBytes);
    device.queue.writeBuffer(bufs[5],0,jointBytes);
+   device.queue.writeBuffer(renderBodies,0,bodyBytes,0,bodyCount*112);slices=null;
    steps=0;parity=0;shots=0;initialized=false;last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0};
  },
- dispose(){for(const b of [...bufs,staging,snapshot,hostUpload])b.destroy();},
+ dispose(){for(const b of [...bufs,staging,snapshot,hostUpload,renderBodies])b.destroy();},
 };
 } catch (error) { for (const buffer of bufs) buffer.destroy(); throw error; }
 }

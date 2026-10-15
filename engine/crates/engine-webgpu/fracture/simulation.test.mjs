@@ -125,3 +125,14 @@ test('bond joints schedule the joint hash, wake, warm start and CSR kernels agai
   assert.ok(events.size>=65536*3*4,'joint hash: three words per slot');assert.ok(joints.size>=4*192,'Joint is 192 bytes');
   sim.dispose();
 });
+
+test('a sliced step issues exactly the dispatches of a whole step, in order',{skip:!haveWgsl&&'run wgsl_export first'},async()=>{
+  const seq=async sliced=>{
+    const {device,log}=mockDevice(),sim=await createSimulation(device,scene(600));
+    await sim.step(1);log.dispatches.length=0;
+    if(sliced){assert.ok(sim.beginSlicedStep());let n=0;while(!sim.submitSlices(1))n++;assert.ok(n>=4,'several slices');await sim.finishSlicedStep()}
+    else await sim.step(1);
+    const names=log.dispatches.map(d=>d.name+':'+(d.indirect?'i'+d.offset:d.x+'x'+d.y)+':'+(d.bound.offsets?.[0]??''));sim.dispose();return names;
+  };
+  assert.deepEqual(await seq(true),await seq(false));
+});

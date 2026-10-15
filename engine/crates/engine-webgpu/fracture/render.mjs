@@ -41,7 +41,7 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const module=device.createShaderModule({code:shader});const info=await module.getCompilationInfo();if(info.messages.some(m=>m.type==='error'))throw new Error(info.messages.map(m=>m.message).join('\n'));
  const layout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},{binding:1,visibility:GPUShaderStage.VERTEX,buffer:{type:'uniform'}}]});
  const uniform=device.createBuffer({size:80,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
- const bind=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:simulation.bodyBuffer}},{binding:1,resource:{buffer:uniform}}]});
+ const bind=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:simulation.renderBodyBuffer??simulation.bodyBuffer}},{binding:1,resource:{buffer:uniform}}]});
  const buffers=[{arrayStride:40,attributes:[{shaderLocation:0,offset:0,format:'float32x3'},{shaderLocation:1,offset:12,format:'float32x3'},{shaderLocation:2,offset:24,format:'float32x3'},{shaderLocation:3,offset:36,format:'float32'}]}];
  const pipeline=entry=>device.createRenderPipeline({layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),vertex:{module,entryPoint:'vs',buffers},fragment:{module,entryPoint:entry,targets:[{format}]},primitive:{topology:entry==='wire'?'line-list':'triangle-list',cullMode:'none'},depthStencil:{format:'depth24plus',depthWriteEnabled:entry!=='wire',depthCompare:entry==='wire'?'always':'less'}});
  const solid=pipeline('fs'),ground=pipeline('ground'),wire=pipeline('wire');
