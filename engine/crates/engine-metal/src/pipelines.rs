@@ -76,6 +76,7 @@ impl Pipelines {
             ("record_color_degrees", msl!("record_color_degrees")),
             ("reuse_all_manifolds", msl!("reuse_all_manifolds")),
             ("convex_classify", msl!("convex_classify")),
+            ("convex_bucket", msl!("convex_bucket")),
             ("convex_write_args", msl!("convex_write_args")),
             ("convex_sat_small", msl!("convex_sat_small")),
             ("convex_sat_large", msl!("convex_sat_large")),

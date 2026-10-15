@@ -4,9 +4,12 @@
 //
 // Schedule, after `narrowphase` has marked hull pairs with CONVEX_DEFER:
 //   convex_classify    one thread per candidate (indirect slot 64). Plane, sphere
-//                      and capsule pairs emit contacts directly; hull/hull and
-//                      hull/box pairs are compacted into the small (front) or
-//                      large (back) SAT bucket of gConvexWork.
+//                      and capsule pairs emit contacts directly.
+//   convex_bucket      one thread per candidate (slot 64). Hull/hull and hull/box
+//                      pairs that neither the box test nor the SAT cache proves
+//                      separated are compacted into the small (front) or large
+//                      (back) SAT bucket of gConvexWork. It touches no contact
+//                      storage, so it has a binding to spare for gSatCache.
 //   convex_write_args  slots 74 (small groups), 75 (large groups), 76 (pairs).
 //   convex_sat_small   16 lanes per pair, 4 pairs per workgroup (V <= 16).
 //   convex_sat_large   64 lanes per pair (V <= 64, F <= 128, E <= 192).
@@ -70,6 +73,51 @@ uint satCacheCheck(uint a, uint b) { return (a * 0xC2B2AE3Du) ^ (b * 0x27D4EB2Fu
 // margin (scaled by the axis length) keeps float rounding from ever
 // disagreeing with SAT. Built from the hull's local bounds and the collider
 // frame, so no extra binding is needed.
+// Scalar form of the cooperative SAT's cache phase (convex_sat_body): the
+// pair's cached feature axis, oriented A->B, still separates the hulls by more
+// than the margin. Supports come from hill-climbing (exact on certified hulls,
+// exhaustive otherwise), so the proof matches the SAT's projection.
+bool satCacheSeparates(uint colA, HullRef ha, Frame fa, uint colB, HullRef hb, Frame fb)
+{
+    // Params flag 8 (diagnostic) disables lookups, to compare outputs.
+    if ((PARAMS.flags & 8u) != 0u) return false;
+    uint2 e = gSatCache[satCacheSlot(colA, colB)];
+    if (e.x != satCacheCheck(colA, colB) || e.y == 0u) return false;
+    uint type = e.y >> 16;
+    uint i1 = (e.y >> 8) & 255u;
+    uint i2 = e.y & 255u;
+    float3 d = float3(0, 0, 0);
+    if (type == SAT_CACHE_FACE_A)
+    {
+        if (i1 >= ha.nf) return false;
+        d = quatRotate(fa.q, hullPlane(ha, i1).xyz);
+    }
+    else if (type == SAT_CACHE_FACE_B)
+    {
+        if (i1 >= hb.nf) return false;
+        d = -quatRotate(fb.q, hullPlane(hb, i1).xyz);
+    }
+    else if (type == SAT_CACHE_EDGE)
+    {
+        if (i1 >= ha.ne || i2 >= hb.ne) return false;
+        uint4 ea = hullEdge(ha, i1);
+        uint4 eb = hullEdge(hb, i2);
+        float3 da = quatRotate(fa.q, hullVertex(ha, ea.y) - hullVertex(ha, ea.x));
+        float3 db = quatRotate(fb.q, hullVertex(hb, eb.y) - hullVertex(hb, eb.x));
+        float3 n = cross(da, db);
+        float len = length(n);
+        if (len < 1e-12) return false;
+        d = n / len;
+        float3 ab = frameToWorld(fb, hullInterior(hb)) - frameToWorld(fa, hullInterior(ha));
+        if (dot(d, ab) < 0.0) d = -d;
+    }
+    else return false;
+    if (dot(d, d) <= 0.5) return false;
+    float maxA = dot(d, frameToWorld(fa, hullVertex(ha, hullSupportIndex(ha, quatRotate(quatConjugate(fa.q), d)))));
+    float minB = dot(d, frameToWorld(fb, hullVertex(hb, hullSupportIndex(hb, -quatRotate(quatConjugate(fb.q), d)))));
+    return minB - maxA > SAT_CACHE_MARGIN + speculativeMargin();
+}
+
 bool hullBoxesSeparated(HullRef ha, Frame fa, HullRef hb, Frame fb, float margin)
 {
     float3 ea = hullLocalHalf(ha);
@@ -114,7 +162,7 @@ static const float HULL_BOX_SEPARATION_MARGIN = 1e-4;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void convex_classify(uint3 tid : SV_DispatchThreadID)
+void convex_bucket(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
     uint n = min(ALOAD(gCounters[0].candidateCount), HOST_S(2));
@@ -127,9 +175,15 @@ void convex_classify(uint3 tid : SV_DispatchThreadID)
     {
         HullRef ha = hullOf(ca);
         HullRef hb = hullOf(cb);
+        Frame fa = colliderFrame(ca, gBodies[ca.body]);
+        Frame fb = colliderFrame(cb, gBodies[cb.body]);
         // FLAG 4 (diagnostic) disables the early-out, to compare outputs.
-        if ((PARAMS.flags & 4u) == 0u && hullBoxesSeparated(ha, colliderFrame(ca, gBodies[ca.body]), hb, colliderFrame(cb, gBodies[cb.body]),
+        if ((PARAMS.flags & 4u) == 0u && hullBoxesSeparated(ha, fa, hb, fb,
                                HULL_BOX_SEPARATION_MARGIN + speculativeMargin()))
+            return;
+        // The SAT's cached separating feature, tested here so proven-separated
+        // pairs (~44% at the 49-house grid peak) never load into a SAT workgroup.
+        if (satCacheSeparates(pair.colliderA, ha, fa, pair.colliderB, hb, fb))
             return;
         bool small = ha.nv <= 16u && hb.nv <= 16u && ha.nf <= 32u && hb.nf <= 32u &&
                      ha.ne <= 48u && hb.ne <= 48u;
@@ -148,8 +202,21 @@ void convex_classify(uint3 tid : SV_DispatchThreadID)
         w._pad0 = 0u;
         w._pad1 = 0u;
         gConvexWork[slot] = w;
-        return;
     }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void convex_classify(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    uint n = min(ALOAD(gCounters[0].candidateCount), HOST_S(2));
+    if (i >= n) return;
+    CandidatePair pair = gCandidates[i];
+    if ((pair._pad & CONVEX_DEFER) == 0u) return;
+    Collider ca = gColliders[pair.colliderA];
+    Collider cb = gColliders[pair.colliderB];
+    if (shapeHasHull(ca.shape) && shapeHasHull(cb.shape)) return; // convex_bucket
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
     Frame fa = colliderFrame(ca, ba);

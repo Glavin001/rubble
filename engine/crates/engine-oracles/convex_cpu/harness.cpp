@@ -1,5 +1,5 @@
 // CPU driver for the Slang convex entries (slangc -target cpp -DENGINE_CPU_TEST=1).
-// Runs convex_classify -> convex_sat_{small,large} -> convex_manifold over a
+// Runs convex_classify -> convex_bucket -> convex_sat_{small,large} -> convex_manifold over a
 // scene written by tests/convex_slang_cpu.rs and writes counters, contacts,
 // manifolds and SAT work records back. Any structured-buffer index out of range
 // aborts, so the harness also checks the kernels' memory bounds.
@@ -102,6 +102,7 @@ int main(int argc, char** argv)
         run(narrowphase, &g, (found + 63) / 64, 1);
     }
     run(convex_classify, &g, (g.gCounters_0[0].candidateCount_0 + 63) / 64, 1);
+    run(convex_bucket, &g, (g.gCounters_0[0].candidateCount_0 + 63) / 64, 1);
     uint32_t small = g.gCounters_0[0].convexSmall_0, large = g.gCounters_0[0].convexLarge_0;
     // Same workgroup geometry as the GPU (4 small / 1 large pairs per group);
     // the CPU entries emulate the 64 lanes phase by phase.

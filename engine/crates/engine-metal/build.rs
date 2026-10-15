@@ -85,6 +85,7 @@ fn main() -> Result<()> {
         "record_color_degrees",
         "reuse_all_manifolds",
         "convex_classify",
+        "convex_bucket",
         "convex_write_args",
         "convex_sat_small",
         "convex_sat_large",

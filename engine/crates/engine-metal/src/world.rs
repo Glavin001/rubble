@@ -877,6 +877,7 @@ impl MetalWorld {
             encoder.set_buffer(27, Some(&self.convex_work), 0);
             encoder.set_buffer(28, Some(&self.sat_cache), 0);
             self.dispatch_work(&encoder, "convex_classify", 64, 0);
+            self.dispatch_work(&encoder, "convex_bucket", 64, 0);
             self.dispatch(&encoder, "convex_write_args", 64);
             self.dispatch_work(&encoder, "convex_sat_small", 74, 0);
             self.dispatch_work(&encoder, "convex_sat_large", 75, 0);

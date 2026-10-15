@@ -834,8 +834,9 @@ impl WgpuSim {
         }
         if self.has_convex {
             // Hull pairs deferred by narrowphase: classify (cheap pairs emit
-            // here), size-bucketed cooperative SAT, then clipping.
+            // here), bucket hull pairs, size-bucketed cooperative SAT, then clipping.
             self.disp_work(&mut pass, "convex_classify", 64, None);
+            self.disp_work(&mut pass, "convex_bucket", 64, None);
             self.disp(&mut pass, "convex_write_args", 64, None);
             self.disp_work(&mut pass, "convex_sat_small", 74, None);
             self.disp_work(&mut pass, "convex_sat_large", 75, None);

@@ -74,7 +74,7 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
     const K = [
       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query', 'write_work_args',
       'update_refs', 'contact_hash_clear', 'contact_hash_insert', 'narrowphase',
-      'convex_classify', 'convex_write_args', 'convex_sat_small', 'convex_sat_large', 'convex_manifold', 'reuse_all_manifolds',
+      'convex_classify', 'convex_bucket', 'convex_write_args', 'convex_sat_small', 'convex_sat_large', 'convex_manifold', 'reuse_all_manifolds',
       'persist_contacts', 'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_sort',
       'init_colors', 'color_bodies', 'color_bodies_local', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
@@ -389,6 +389,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       pass = phase('narrowphase');
       if (hasConvex) {
         dispWork(pass, 'convex_classify', 64);
+        dispWork(pass, 'convex_bucket', 64);
         disp(pass, 'convex_write_args', 64);
         pass = phase('convexClassify');
         dispWork(pass, 'convex_sat_small', 74);

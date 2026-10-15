@@ -59,7 +59,7 @@ test('browser host schedules every core + convex kernel against valid bindings',
   await sim.inspectCollisions();
   sim.reset();await sim.step(1);
   const names=new Set(log.dispatches.map(d=>d.name));
-  for(const k of ['convex_classify','convex_write_args','convex_sat_small','convex_sat_large','convex_manifold','record_color_degrees','csr_prefix','count_color_tiles','pack_solver_contacts','solve_dual','write_sleep_args'])
+  for(const k of ['convex_classify','convex_bucket','convex_write_args','convex_sat_small','convex_sat_large','convex_manifold','record_color_degrees','csr_prefix','count_color_tiles','pack_solver_contacts','solve_dual','write_sleep_args'])
     assert.ok(names.has(k),`missing dispatch ${k}`);
   // Few awake bodies: one workgroup walks every colour per iteration.
   assert.ok(names.has('solve_primal_sparse'),'sparse primal with few awake bodies');
