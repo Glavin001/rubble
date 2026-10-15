@@ -21,7 +21,7 @@ export function mortonSceneOrder(bodies, colliders) {
   };
   const codes = bodies.map(b => {
     const q = k => Math.min(1023, Math.floor((b.p[k] - lo[k]) / Math.max(hi[k] - lo[k], 1e-9) * 1024));
-    // Reference uses Z-up. Our Y/Z reflection must also permute Morton axes.
+    // Interleave X, Z, Y from the least significant bit: vertical varies slowest.
     return (spread(q(0)) | spread(q(2)) << 1 | spread(q(1)) << 2) >>> 0;
   });
   const gpuToScene = Uint32Array.from(bodies.map((_,id)=>id).slice(1).sort((a,b)=>codes[a]-codes[b] || a-b));

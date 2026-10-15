@@ -4,10 +4,10 @@
 - Node: the repo pins its version in `.nvmrc`. Run `nvm use` (or rely on an
   nvm `cd` hook) before any `node`/`npm` command.
 - Never make tests, builds or runtime code depend on `inspiration/`: it is
-  gitignored and absent in CI, fresh clones and worktrees. Record what a pinned
-  reference produces as a checked-in fixture with a generator script that is the
-  only code reading `inspiration/` (see
-  `engine/crates/engine-webgpu/tests/fixtures/generate-three-avbd-reference.ts`).
+  gitignored and absent in CI, fresh clones and worktrees. Read it to
+  understand an algorithm, then write our own tests from its definition and
+  physical invariants (see `engine/crates/engine-webgpu/tests/spatial_order.test.mjs`
+  and `scene_builders.test.mjs`); do not import or record its outputs.
 
 ## Cursor Cloud specific instructions
 
