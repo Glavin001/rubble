@@ -641,7 +641,7 @@ impl MetalWorld {
         s[19] = 0; // reuse hash miss
         s[20] = 0; // split broadphase grids (WebGPU opt-in; off on Metal)
         s[21] = 0; // two-pass narrowphase tail cap (unused on Metal)
-        s[22] = 1; // degree-aware primal lanes (colour counts sized 128 words)
+        s[22] = u32::from(self.has_convex); // degree-aware primal lanes for convex/compound scenes
         s[23] = u32::from(self.has_filters); // collision filters present
         s[21] = 0; // update_refs noRef
         s[22] = 0; // update_refs linMove

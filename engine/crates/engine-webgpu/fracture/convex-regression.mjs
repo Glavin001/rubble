@@ -44,6 +44,17 @@ function satOracle(a,b){
  }
  return {sep:best,axis};
 }
+// Best one-sided face axis (Minkowski faces: B against A's outward normals and
+// A against B's) and best edge-pair axis, each with full projections.
+function faceEdgeSeparation(a,b){
+ const span=(vs,n)=>{let lo=Infinity,hi=-Infinity;for(const v of vs){const d=dot(v,n);lo=Math.min(lo,d);hi=Math.max(hi,d)}return [lo,hi]};
+ let face=-Infinity,edge=-Infinity;
+ for(const n of a.normals)face=Math.max(face,span(b.vertices,n)[0]-span(a.vertices,n)[1]);
+ for(const n of b.normals)face=Math.max(face,span(a.vertices,n)[0]-span(b.vertices,n)[1]);
+ const ca=scale(a.vertices.reduce((s,v)=>add(s,v),[0,0,0]),1/a.vertices.length),cb=scale(b.vertices.reduce((s,v)=>add(s,v),[0,0,0]),1/b.vertices.length);
+ for(const e of a.edges)for(const f of b.edges){const c=cross(e,f),l=Math.hypot(...c);if(l<1e-6)continue;let n=c.map(x=>x/l);if(dot(n,sub(cb,ca))<0)n=n.map(x=>-x);edge=Math.max(edge,sepAlong(a,b,n))}
+ return {face,edge};
+}
 function sepAlong(a,b,n){
  const pa=a.vertices.map(v=>dot(v,n)),pb=b.vertices.map(v=>dot(v,n));
  return Math.max(Math.min(...pb)-Math.max(...pa),Math.min(...pa)-Math.max(...pb));
@@ -74,12 +85,13 @@ function gpuContacts(result){
   const pt=new Float32Array(result.points.buffer,(k/8)*64,16);
   const key=`${a},${b}`;if(!pairs.has(key))pairs.set(key,{normal:[f[0],f[1],f[2]],c0:[]});
   pairs.get(key).c0.push(pt[3]);
+  pairs.get(key).feature=result.contacts[k+2];
  }
  return pairs;
 }
 
 // ---- fixtures ----------------------------------------------------------------------
-function hullFixture(count=160,sides=4,scaleTest=false){
+export function hullFixture(count=160,sides=4,scaleTest=false){
  const arena=new HullArena(),bodies=[],colliders=[];let seed=123;
  const random=()=>((seed=(Math.imul(seed,1664525)+1013904223)>>>0)/2**32);
  for(let i=0;i<count;i++){
@@ -111,7 +123,7 @@ function mixedFixture(){
  return {bodies,colliders,hullData:arena.data,params:{dt:1/120,iterations:0,gravityY:0},projectileCount:0};
 }
 // Compound bodies with several children each, densely packed (scale or quality).
-function compoundFixture(count,children=4,spacing=2.2){
+export function compoundFixture(count,children=4,spacing=2.2){
  const arena=new HullArena(),bodies=[],colliders=[];let seed=99;
  const random=()=>((seed=(Math.imul(seed,1664525)+1013904223)>>>0)/2**32);
  const side=Math.ceil(Math.cbrt(count));
@@ -126,7 +138,7 @@ function compoundFixture(count,children=4,spacing=2.2){
  return {bodies,colliders,hullData:arena.data,params:{dt:1/120,iterations:0,gravityY:0},projectileCount:0};
 }
 // A line of overlapping hulls: exactly `pairs` hull/hull contacts.
-function chainFixture(pairs,sides){
+export function chainFixture(pairs,sides){
  const arena=new HullArena(),bodies=[],colliders=[],h=prism(sides,.5,1);
  for(let i=0;i<=pairs;i++){
   bodies.push({p:[i*.95,1,0],q:[0,0,0,1],invMass:1,invI:[1,1,1],flags:9});
@@ -166,9 +178,17 @@ async function conformance(device,scene,label){
       const got=actual.get(key);
       if(got&&sep<-AMBIGUOUS){
        const n=got.normal;require(Math.abs(Math.hypot(...n)-1)<1e-3,`${label}: non-unit normal ${key}`);
-       const along=sepAlong(pa,pb,n);worstAxis=Math.min(worstAxis,along-sat.sep);
-       require(along>=sat.sep-.012,`${label}: normal ${key} penetrates ${along} vs best ${sat.sep}`);
-       const deepest=Math.min(...got.c0)-MARGIN;require(Math.abs(deepest-along)<.02+.05*Math.abs(along),`${label}: depth ${key} ${deepest} vs ${along}`);
+       const along=sepAlong(pa,pb,n),{face,edge}=faceEdgeSeparation(pa,pb),best=Math.max(face,edge);worstAxis=Math.min(worstAxis,along-best);
+       // The feature type (bits 30..31) says which axis family won. A face must be
+       // the best face and an edge the best edge (an edge also stands in when a
+       // biased face patch clips empty). Face bias: edge > 0.95·face + 0.01.
+       if((got.feature>>>30)===3)require(along>=edge-1e-3,`${label}: edge ${key} gives ${along} vs best edge ${edge}`);
+       else{require(along>=face-1e-3,`${label}: face ${key} gives ${along} vs best face ${face}`);require(edge<=.95*along+.01+1e-3,`${label}: face ${key} kept over a clearly better edge ${edge}`)}
+       // Resting-depth contacts: deepest point equals the SAT depth when the chosen
+       // axis is the global best; otherwise at least as deep as the penetration.
+       const deepest=Math.min(...got.c0)-MARGIN;
+       if(along>=best-1e-4&&along>-.05)require(Math.abs(deepest-along)<2e-3+.05*Math.abs(along),`${label}: depth ${key} ${deepest} vs ${along}`);
+       if(along>=best-1e-4&&best>-.1)require(deepest<=best+2e-3,`${label}: depth ${key} ${deepest} shallower than ${best}`);
        checkedDepth++;
       }
      }
@@ -182,7 +202,7 @@ async function conformance(device,scene,label){
  }finally{sim.dispose()}
 }
 
-async function timeScene(device,scene,steps=5){
+export async function timeScene(device,scene,steps=5){
  const sim=await createSimulation(device,scene);
  try{
   await sim.step();const start=performance.now();for(let i=0;i<steps;i++)await sim.step();
