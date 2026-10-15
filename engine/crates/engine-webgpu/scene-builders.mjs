@@ -1,6 +1,6 @@
-// Scene geometry ported from the pinned three-avbd bench-scenes.ts (Z-up).
-// Swapping Y/Z has determinant -1: axial vectors (rotation and angular velocity)
-// change sign as well as axis. Positions and linear velocities only swap axes.
+// Benchmark scenes in the engine's Y-up frame (tests/scene_builders.test.mjs
+// checks their geometric and physical invariants). Brick yaw is a rotation
+// about +Y; impactors roll without slipping (v + w x (0, -r, 0) = 0).
 export const brickQuaternion = angle => [0, -Math.sin(angle / 2), 0, Math.cos(angle / 2)];
 export const rollingAngularVelocity = (speed, radius) => [speed / radius, 0, 0];
 
