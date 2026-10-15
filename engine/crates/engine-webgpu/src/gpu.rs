@@ -114,6 +114,9 @@ fn persistent_entry(name: &str) -> &str {
         "persist_contacts" => "persist_contacts_persistent",
         "persist_manifolds" | "persist_manifolds_compact" => "persist_manifolds_persistent",
         "pack_solver_contacts" => "pack_solver_pairs_persistent",
+        // 8el: persistent hosts pack pairs before the graph; CSR reads their body ids.
+        "csr_degree_contacts" => "csr_degree_contacts_persistent",
+        "csr_scatter_contacts" => "csr_scatter_contacts_persistent",
         "solve_primal_color_compact" => "solve_primal_color_persistent",
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
@@ -655,6 +658,13 @@ impl WgpuSim {
             },
             None,
         );
+        // Persistent CSR reads solver pairs, so pack them before the graph unless
+        // manifold persistence already did.
+        let early_pair_pack =
+            self.persistent_contacts && !self.fused_persistence && !self.manifold_persistence;
+        if early_pair_pack {
+            self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
+        }
         if self.joint_count > 0 {
             self.disp(&mut pass, "warmstart_joints", n_joints, None);
         }
@@ -692,7 +702,7 @@ impl WgpuSim {
 
         // Dispatch the full palette; empty GPU indirect buckets cost no work.
         let max_c = self.capacity.max_colors.min(32);
-        if self.compact_contacts && !self.fused_persistence {
+        if self.compact_contacts && !self.fused_persistence && !early_pair_pack {
             if !self.persistent_contacts {
                 self.disp_work(&mut pass, "clear_solver_contacts", 65, None);
             }

@@ -1907,9 +1907,17 @@ void csr_degree_contacts(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = ALOAD(gCounters[0].manifoldCount);
     if (i >= n) return;
+#if defined(ENGINE_PERSISTENT_CONTACTS)
+    // Persistent hosts pack solver pairs before the graph (8el): read the two
+    // body ids from the 32-byte pair instead of manifold -> two colliders.
+    SolverPair sp = gSolverPairs[i];
+    if ((sp.countAndSphere & ~SOLVER_SPHERE) == 0u) return;
+    uint2 e = uint2(sp.bodyA, sp.bodyB);
+#else
     Manifold m = gManifolds[i];
     if (m.contactCount == 0u) return;
     uint2 e = constraintEndpoints(gCounters[0].jointCount + i);
+#endif
     csrCountEndpoint(e.x);
     csrCountEndpoint(e.y);
 }
@@ -2117,10 +2125,16 @@ void csr_scatter_contacts(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = ALOAD(gCounters[0].manifoldCount);
     if (i >= n) return;
+    uint id = gCounters[0].jointCount + i;
+#if defined(ENGINE_PERSISTENT_CONTACTS)
+    SolverPair sp = gSolverPairs[i];
+    if ((sp.countAndSphere & ~SOLVER_SPHERE) == 0u) return;
+    uint2 e = uint2(sp.bodyA, sp.bodyB);
+#else
     Manifold m = gManifolds[i];
     if (m.contactCount == 0u) return;
-    uint id = gCounters[0].jointCount + i;
     uint2 e = constraintEndpoints(id);
+#endif
     csrFillEndpoint(e.x, e.y, id);
     csrFillEndpoint(e.y, e.x, id);
 }
