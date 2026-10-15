@@ -8,6 +8,8 @@ const cfg = {friction:0.5, iterations:8, sleepRounds:8, ...scene.params};
 const MAX_WARM_HASH = 1 << 21;
 const BOND_WAKE_ROUNDS = 8;
 const SPARSE_AWAKE = 256;
+// Colour slots dispatched past the previous step's colour count (see encode).
+const COLOR_HEADROOM = 4;
 const PASS_ALIGN=256;
 const nextPow2=n=>2**Math.ceil(Math.log2(Math.max(1,n)));
 const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity};
@@ -478,15 +480,25 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       // instead of one per palette colour. Correct for any count; the previous
       // step's awake count only chooses the faster path.
       const sparse = last.awake <= SPARSE_AWAKE;
+      // Colour slots dispatched one by one: the previous step's colour count
+      // plus headroom, not the whole palette (a scene uses ~8-14 of 64 slots,
+      // and every empty dispatch still costs a barrier). Colours at or past the
+      // estimate run in solve_primal_sparse starting there: same order, same
+      // per-body solve, a barrier between colours. It loops to this step's
+      // real colour count on the GPU, so a step with more colours than the
+      // estimate is still solved completely.
+      const headroom = budget.colorHeadroom === undefined ? COLOR_HEADROOM : budget.colorHeadroom;
+      const dispatched = headroom === null ? colors : Math.min(colors, Math.max(1, (last.color | 0) + headroom));
       for (let iter = 0; iter < params.iterations; iter++) {
         if (sparse) disp(pass, 'solve_primal_sparse', 64, 0);
         else {
         const primal = pipes.solve_primal_color;
-        for (let color = 0; color < colors; color++) {
+        for (let color = 0; color < dispatched; color++) {
           pass.setPipeline(primal.pipeline);
           pass.setBindGroup(0, primal.bind, [color * PASS_ALIGN]);
           pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
         }
+        if (dispatched < colors) disp(pass, 'solve_primal_sparse', 64, dispatched);
         }
         dispWork(pass, 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
         // Profiling / slicing boundary halfway through the iterations.
