@@ -1,5 +1,5 @@
 import {parseFractureGlb} from './asset.mjs';
-import {buildScene,buildGrid} from './geometry.mjs';
+import {buildScene,buildGrid,buildSuburb} from './geometry.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -45,7 +45,7 @@ async function loadLevel(level){
   const built=buildScene(asset,level,{maxHullVertices});
   if($('solve-bonds').checked)setStatus('Settling bonds under self-weight…');
   const one=$('solve-bonds').checked?await preloadBonds(device,built):{...built,joints:[]};
-  next=layout?buildGrid(asset,level,{...layout,maxHullVertices,base:one}):one}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
+  next=layout?(layout.suburb?buildSuburb:buildGrid)(asset,level,{...layout,maxHullVertices,base:one}):one}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
  renderer.colorMode=$('show-sleep').checked?1:0;
@@ -64,7 +64,8 @@ async function importBytes(bytes,name,sampleKey="",entry={}){
  await loadLevel(level);window.__FRACTURE_DEMO__.parseMs=ms;
 }
 const samples={house:{file:'veneer-house.glb',label:'house'},row:{file:'veneer-house-hull16.glb',label:'20 houses',layout:{columns:1,rows:20},level:3,maxHullVertices:16},
- grid:{file:'veneer-house.glb',label:'49 houses',layout:{columns:7,rows:7},level:2},arch:{file:'masonry-arch.glb',label:'arch'}};
+ grid:{file:'veneer-house.glb',label:'49 houses',layout:{columns:7,rows:7},level:2},
+ suburb:{file:'veneer-house.glb',label:'48 houses',layout:{suburb:true},level:2},arch:{file:'masonry-arch.glb',label:'arch'}};
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  setStatus(`Fetching baked ${entry.label}…`);

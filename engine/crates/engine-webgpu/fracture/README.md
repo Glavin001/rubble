@@ -57,6 +57,14 @@ the shot ~38 ms (~114k awake, ~880k contacts). Unbonded pieces knock over
 neighbouring houses, so most of the grid ends up awake. The 16-vertex re-bake
 measured the same peak with 15% more pieces, so the grid keeps the original asset.
 
+**Suburb · 48 houses on lots with roads** (`buildSuburb`) spaces the same houses
+out: 4 × 3 blocks of 2 × 2 lots with 5-6 m yards, separated by 8 m roads with
+sidewalks and dashed centre lines (drawn on the ground; the physics ground is
+still the plane). The ball rolls down one column of lots and hits 6 houses. On an
+M3 Max 24 of 48 houses collapse (debris still topples unbonded lot neighbours;
+43 of 49 on the grid), ~55k pieces stay awake, and the step settles at ~15 ms
+(~66 ticks/s) by 30 s. 10 m yards still lose 22 houses.
+
 ### Breakable bonds (experimental, opt-in)
 
 “Breakable bonds (experimental)” turns each baked bond of the selected level into
