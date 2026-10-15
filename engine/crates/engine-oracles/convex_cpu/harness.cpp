@@ -60,7 +60,7 @@ int main(int argc, char** argv)
         sHulls, sScratch, sManifolds, sWork, sConstraintIds, sEvents, sIndirect, sObbs, sAabbs;
     bind(g.gParams_0, sParams, 1);
     take(&g.gParams_0[0], 80);
-    bind(g.gScratchAtomics_0, sScratch, 64);
+    bind(g.gScratchAtomics_0, sScratch, 96); // 64..79: uniform-grid large list
     take(&g.gScratchAtomics_0[0], 64 * 4);
     bind(g.gBodies_0, sBodies, nBodies);
     take(&g.gBodies_0[0], size_t(nBodies) * 112);

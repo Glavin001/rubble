@@ -7,10 +7,10 @@
 //                      and capsule pairs emit contacts directly; hull/hull and
 //                      hull/box pairs are compacted into the small (front) or
 //                      large (back) SAT bucket of gConvexWork.
-//   convex_write_args  slots 70 (small groups), 71 (large groups), 72 (pairs).
+//   convex_write_args  slots 74 (small groups), 75 (large groups), 76 (pairs).
 //   convex_sat_small   16 lanes per pair, 4 pairs per workgroup (V <= 16).
 //   convex_sat_large   64 lanes per pair (V <= 64, F <= 128, E <= 192).
-//   convex_manifold    one thread per SAT pair (slot 72): clip and emit.
+//   convex_manifold    one thread per SAT pair (slot 76): clip and emit.
 // Each entry stays within WebGPU's per-stage storage-buffer budget, which is why
 // this work is split from `narrowphase` instead of branching inside it.
 #if !defined(CONVEX_SKIP_WORLD_INCLUDE)

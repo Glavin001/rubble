@@ -879,7 +879,10 @@ pub fn principal_axes(inertia: DMat3) -> (glam::DQuat, DVec3) {
 
 /// crate::Collider bound radius as the GPU stores it in `Aabb._pad0`.
 pub fn collider_radius(c: &crate::Collider) -> f32 {
-    if c.params[3] > 0.0 {
+    // Matches build_aabbs: the grid needs every AABB half extent within it.
+    if c.shape == crate::ShapeType::Capsule as u32 {
+        c.params[0] + c.params[1]
+    } else if c.params[3] > 0.0 {
         c.params[3]
     } else {
         (c.params[0] * c.params[0] + c.params[1] * c.params[1] + c.params[2] * c.params[2]).sqrt()

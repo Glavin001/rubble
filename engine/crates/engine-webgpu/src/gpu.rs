@@ -1284,7 +1284,7 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[18] = b(c.max_hull_vertices, 16);
     s[19] = 65536 * 4;
     s[20] = b(c.max_bodies, 4);
-    s[21] = 64 * 4;
+    s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
     s[22] = 96 * PASS_ALIGN;
     // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
     // contacts 73), convex 74..76.
