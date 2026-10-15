@@ -42,7 +42,7 @@ async function loadLevel(level){
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
  renderer.colorMode=$('show-sleep').checked?1:0;
  const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=scene.colliders.filter(c=>c.shape===3).length;$('bonds').textContent=scene.bonds.length*copies;$('release').textContent='Start simulation';
- $('fire').hidden=!scene.rowShot;
+ $('fire').hidden=!scene.rowShot;$('awake').textContent='0';$('contacts').textContent='0';
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
  const what=copies>1?`${copies} houses · ${scene.bodies.length-1-scene.projectileCount} bodies · `:'';
  setStatus(`${what}${(asset.bytes/1048576).toFixed(2)} MB · ${asset.library.material.length} materials${skipped} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
@@ -111,6 +111,7 @@ function tick(now){
   // Queue the draw immediately behind physics; do not wait for CPU stats first.
   renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
+  if(work){const c=sim.counters;$('awake').textContent=c.awake;$('contacts').textContent=c.contact}
   if(running){const c=sim.counters;setStatus(`${sim.shots}/16 shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
   if(!document.hidden)rates.frame();
  }catch(e){fail(e)}})();frame.finally(()=>requestAnimationFrame(tick))}else requestAnimationFrame(tick);
