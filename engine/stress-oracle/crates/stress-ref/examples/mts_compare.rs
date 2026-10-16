@@ -219,7 +219,7 @@ fn main() {
                 "first_crack_time": o.first_crack_time, "impactor_velocity": o.impactor_velocity,
                 "diverged": r.diverged, "end_time": o.time,
                 "fine_steps": st.fine_steps, "coarse_steps": st.coarse_steps,
-                "hot_bond_evals": st.hot_bond_evals, "full_bond_evals": st.full_bond_evals,
+                "hot_bond_evals": st.hot_bond_evals, "full_bond_evals": st.full_bond_evals, "lookahead_bond_evals": st.lookahead_bond_evals,
                 "explicit_work": st.hot_bond_evals as f64 / st.full_bond_evals.max(1) as f64,
                 "hot_body_updates": st.hot_body_updates, "full_body_updates": st.full_body_updates,
                 "hot_contact_evals": st.hot_contact_evals,
