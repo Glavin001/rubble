@@ -152,6 +152,42 @@ impl LoadFilter {
     }
 }
 
+/// Integral of an impact pulse's magnitude (`Function::Pulse`) over `[a, b]`.
+fn pulse_integral(start: f64, plateau: f64, plateau_time: f64, peak: f64, duration: f64, a: f64, b: f64) -> f64 {
+    let overlap = |lo: f64, hi: f64| (hi.min(b) - lo.max(a)).max(0.0);
+    let mut sum = plateau * overlap(start, start + plateau_time);
+    let (s0, s1) = (start + plateau_time, start + plateau_time + duration);
+    let (lo, hi) = (a.max(s0), b.min(s1));
+    if hi > lo && duration > 0.0 {
+        let w = std::f64::consts::PI / duration;
+        sum += peak / w * ((w * (lo - s0)).cos() - (w * (hi - s0)).cos());
+    }
+    sum
+}
+
+impl LoadFilter {
+    /// The filter's loads averaged exactly over the frame `[t0, t0 + dt]`: each pulse as a
+    /// constant force of its mean over the frame (its direction and point are fixed), so
+    /// a quasi-static frame solves under the frame's average load (impulse / dt for a
+    /// pulse inside the frame, the force Blast applies) from one load evaluation instead
+    /// of the average of many substep samples.
+    pub fn frame_average_terms(&self, solver: &ReferenceSolver, t0: f64, dt: f64) -> Vec<LoadTerm> {
+        self.terms(solver)
+            .into_iter()
+            .filter_map(|mut t| {
+                if let Function::Pulse { start, plateau, plateau_time, peak, duration } = t.function {
+                    let mean = pulse_integral(start, plateau, plateau_time, peak, duration, t0, t0 + dt) / dt;
+                    if mean == 0.0 {
+                        return None;
+                    }
+                    t.function = Function::Constant(mean);
+                }
+                Some(t)
+            })
+            .collect()
+    }
+}
+
 /// Host seconds per stage of the coupled frames so far.
 #[derive(Clone, Debug, Default)]
 pub struct CoupledProfile {

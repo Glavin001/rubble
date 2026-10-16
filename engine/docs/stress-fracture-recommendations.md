@@ -69,6 +69,11 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
     - Keeping fragments in the stress solve's own contact until they leave each other's swept bounds would close most of that gap.
     - It lengthens impact windows (cost not measured yet).
 
+6b. **A per-frame static-solve budget, Blast-style (quasi-static use only).**
+    - `STRESS_GPU_STATICS_NEWTON=10` takes villa-savoye from 1.9 to 0.65 s a frame.
+    - It changes house-2story's rammed outcome (7 broken bonds instead of 34).
+    - Our real-time configuration already beats the Blast-equivalent one on cost and accuracy (`docs/stress-fracture-blast-ladder.md`), so this only matters if a quasi-static mode is wanted.
+
 ## Levers that change engine behaviour
 
 6. **Let coupled rigid bodies sleep.**
@@ -78,6 +83,11 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
 7. **Swept collision (CCD) in rubble's Rust host.**
    - rubble's `ccd_classify`/`ccd_sweep` kernels are never dispatched by the Rust host, so a fast body substeps the whole rigid scene. That costs 2.4–3 ms per rubble step, 11 steps per frame on the 40 m/s free-wall ram: 100 ms there against PhysX GPU's 67 ms, the one regime where rubble is slower.
    - Wiring the kernels changes how fast contacts resolve, as PhysX's CCD does.
+
+7a. **Merge rubble's grid broadphase fix (8352765, on the Blast branch).**
+    - The grid broadphase drops static pairs below the querying collider's index once there are more than 512 colliders, so debris can fall through anchored structures.
+    - The fix is correct. It makes b8_sudden over-break (36 bonds against the oracle's 11), because the engine's contact-to-load path then over-breaks where the oracle uses its own penalty contact.
+    - This is a decision for the engine owners: take it together with a fix to that path.
 
 ## Large engineering steps (lossless; scope needs a go-ahead)
 
