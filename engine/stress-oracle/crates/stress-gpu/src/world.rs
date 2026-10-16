@@ -96,6 +96,10 @@ pub struct GpuWorld {
     pub unverified_fractures: u64,
     /// Promoted structures (no redo) and the quiet frames they have left.
     promoted: std::collections::HashMap<usize, u32>,
+    /// Clusters left out of the GPU tables at both refreshes of the last frame (so their
+    /// mirror state did not change during it): the next frame's
+    /// `ReferenceSolver::unchanged`.
+    unchanged_next: std::collections::HashSet<u64>,
     /// Island segments solved again at a smaller contact step (a plan made within the
     /// segment needed it): local retries of the stress solve, not frame rewinds.
     pub segment_retries: u64,
@@ -189,6 +193,7 @@ impl GpuWorld {
             redo_fractured_frames: true,
             unverified_fractures: 0,
             promoted: std::collections::HashMap::new(),
+            unchanged_next: std::collections::HashSet::new(),
             segment_retries: 0,
             static_repeats: std::collections::HashMap::new(),
         };
@@ -292,6 +297,8 @@ impl GpuWorld {
                 }
             }
         }
+        // Quiet clusters at this frame's first refresh (see `unchanged_next`).
+        let mut excluded_mid: std::collections::HashSet<u64>;
         let frozen = loop {
             // The rewind's snapshot only with the redo on; without it, the frame-start
             // cluster of every chunk (for counting fractures of driven bodies) suffices.
@@ -309,6 +316,7 @@ impl GpuWorld {
                 self.with_shell_mut(|w| w.engine_save());
             }
             self.solver.mirror_check("frame start");
+            self.solver.mirror.unchanged = self.unchanged_next.clone();
             let f = self.with_shell_mut(|w| w.coupled_prepare(&forced));
             self.solver.mirror_check("after coupled_prepare (engine step)");
             self.filter.ingest(&self.solver.mirror, f.t0, fdt, &f.impulses);
@@ -319,6 +327,7 @@ impl GpuWorld {
             let qs_one_step = self.scene.sim.solve_mode == SolveMode::QuasiStatic && f.frozen.is_empty() && self.scene.loads.is_empty() && self.scene.events.is_empty();
             self.solver.extra_terms = if qs_one_step { self.filter.frame_average_terms(&self.solver.mirror, f.t0, fdt) } else { self.filter.terms(&self.solver.mirror) };
             self.solver.refresh(gpu)?;
+            excluded_mid = self.solver.excluded_ids().iter().copied().collect();
             let (mut n, mut h) = (f.n, f.h);
             if qs_one_step {
                 (n, h) = (1, fdt);
@@ -519,7 +528,10 @@ impl GpuWorld {
             w.coupled_write_back(&frozen);
         });
         self.solver.mirror_check("after write-back");
-        self.solver.refresh(gpu)
+        self.solver.refresh(gpu)?;
+        self.unchanged_next = self.solver.excluded_ids().iter().copied().filter(|id| excluded_mid.contains(id)).collect();
+        self.solver.mirror.unchanged.clear();
+        Ok(())
     }
 
     /// The reference's `stable_dt` with each structure's certified step from its own

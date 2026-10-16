@@ -384,6 +384,11 @@ pub struct ReferenceSolver {
     turns: Vec<Vec<ChunkTurn>>,
     /// `rayleigh_damping`: the mass-proportional coefficient per structure (1/s).
     pub mass_damping: Vec<f64>,
+    /// Clusters (by id) whose chunks, bonds, chunk states and motion the caller vouches
+    /// are unchanged since its previous frame (stress-gpu: quiet clusters left out of the
+    /// GPU tables for the whole previous frame). Per-cluster caches (`stable_dt`, the
+    /// coupling's routing data) are then reused without checking. Empty by default.
+    pub unchanged: std::collections::HashSet<u64>,
     /// Each cluster's Gershgorin step bound, kept while its bonds, chunks and their
     /// inertia scales are unchanged (`stable_dt`; the bound uses static stiffness and
     /// damping, so nothing else moves it).
@@ -463,6 +468,7 @@ impl ReferenceSolver {
             true_steps: Vec::new(),
             turns: Vec::new(),
             mass_damping: Vec::new(),
+            unchanged: std::collections::HashSet::new(),
             step_bounds: StepBounds::default(),
             multirate: MultirateWindow::default(),
             bond_evaluations: 0,
@@ -949,6 +955,16 @@ impl ReferenceSolver {
                 continue;
             }
             let cl = &self.clusters[ci];
+            if self.unchanged.contains(&cl.id) {
+                if let Some(&(_, _, _, d)) = self.step_bounds.0.lock().unwrap().get(&cl.id) {
+                    let own = match self.true_steps.get(cl.structure) {
+                        Some(&t) if self.config.methods.true_step => d.max(t),
+                        _ => d,
+                    };
+                    dt = dt.min(own);
+                    continue;
+                }
+            }
             let scales: Vec<u64> = cl.chunks.iter().map(|&c| self.chunks[cl.structure][c].inertia_scale.to_bits()).collect();
             let cached = {
                 let cache = self.step_bounds.0.lock().unwrap();
