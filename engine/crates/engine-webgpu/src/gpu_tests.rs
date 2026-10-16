@@ -4906,3 +4906,53 @@ fn waking_a_sleeping_stack_does_not_jolt_or_cascade() {
             "{nx}x{nz}: dropping resting pairs ({cold_disp} m) no longer exceeds the limit {limit} m; this test no longer discriminates");
     }
 }
+
+/// `trim_color_dispatches` records only the colours a step uses; the empty buckets it
+/// leaves out did no work, so a stack settling on a static box ends bit for bit where the
+/// whole palette leaves it.
+#[test]
+fn trimmed_colour_dispatches_match_the_whole_palette() {
+    let run = |trim: bool| {
+        let mut sim = WgpuSim::new(WorldCapacity::small()).expect("GPU adapter required");
+        sim.trim_color_dispatches = trim;
+        let mut ground = BodyState::zeroed();
+        ground.orientation = [0.0, 0.0, 0.0, 1.0];
+        ground.position = [0.0, -0.5, 0.0];
+        sim.add_body(ground);
+        sim.add_collider(Collider {
+            body: 0,
+            shape: ShapeType::Box as u32,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [5.0, 0.5, 5.0, 0.0],
+            density: 1.0,
+            ..Collider::zeroed()
+        });
+        for i in 0..4u32 {
+            let mut b = BodyState::zeroed();
+            b.orientation = [0.0, 0.0, 0.0, 1.0];
+            b.position = [0.05 * i as f32, 0.55 + 1.02 * i as f32, 0.0];
+            b.inv_mass = 1.0;
+            b.inv_inertia = [6.0, 6.0, 6.0];
+            b.flags = BodyFlags::Dynamic as u32 | BodyFlags::Awake as u32;
+            let id = sim.add_body(b);
+            sim.add_collider(Collider {
+                body: id,
+                shape: ShapeType::Box as u32,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: [0.5, 0.5, 0.5, 0.0],
+                density: 1.0,
+                ..Collider::zeroed()
+            });
+        }
+        let mut colors = 0;
+        for _ in 0..120 {
+            let c = sim.step().expect("step");
+            colors = colors.max(c.color_count);
+        }
+        (bytemuck::cast_slice::<BodyState, u8>(&sim.download_bodies()).to_vec(), colors)
+    };
+    let (whole, colors) = run(false);
+    let (trimmed, _) = run(true);
+    assert!(colors > 0 && 2 * colors <= 32, "the stack should use a few colours: {colors}");
+    assert!(whole == trimmed, "trimmed colour dispatches changed the bodies");
+}
