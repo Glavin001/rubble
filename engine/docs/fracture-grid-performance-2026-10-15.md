@@ -242,7 +242,7 @@ physics cost at the peak.
 |---|---|---|
 | Split grid: movers/resting tables, mover pairs visited once (forward cells) | identical | broadphase query 3.85 → 4.04 ms (no gain) |
 | Per-thread pair batching (one atomic per 8 pairs) | identical | 3.85 → 3.82 ms (no gain) |
-| `[ForceUnroll]` of the solver's small loops | differ | primal 8.8 → 8.1 ms |
+| `[ForceUnroll]` of the solver's small loops | differ | primal 8.8 → 8.1 ms at diverged states; in default mode 8.2 → 9.0 ms (no gain) |
 | Unrolling only the zeroing and negation loops | differ | no gain |
 | Skip island-gate rounds after one revokes nothing (a fixed point) | identical | none at the peak: revocations spread through all 8 rounds |
 | Fewer spare colour dispatches and colouring rounds (budget) | (not checked) | ~0.1 ms per tick |
