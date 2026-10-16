@@ -209,7 +209,7 @@ impl GpuWorld {
         w.solver.sync(gpu);
         if scene.sim.methods.true_step {
             let m = &w.solver.mirror;
-            w.damped_steps = (0..m.structures.len()).map(|s| crate::stability::certified_damped_step(m, s)).collect();
+            w.damped_steps = crate::stability::certified_damped_steps(m);
         }
         w.with_shell_mut(|shell| shell.attach_engine(engine));
         Ok(w)
