@@ -53,7 +53,7 @@ test('every preset packs through the wasm host', () => {
     assert.equal(be.colliderCount() - c0, req.colliders, `${desc.name}: colliders`);
     assert.equal(be.jointCount() - j0, req.wheelSlots, `${desc.name}: tyre joints`);
     assert.ok(be.bodies.every((w) => w.length === 28) && be.colliders.every((w) => w.length === 16));
-    assert.ok(be.joints.every((w) => w.length === 36 && w[2] === L.JOINT_TYRE), 'tyre joints are 144 B records');
+    assert.ok(be.joints.every((w) => w.length === 40 && w[2] === L.JOINT_TYRE), 'tyre joints are 160 B records (engine_schema::Joint)');
     const e = host.entries[h];
     assert.equal(e.chassis, b0);
     assert.equal(e.wheelSlots, req.wheelSlots);
