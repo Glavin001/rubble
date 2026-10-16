@@ -452,9 +452,16 @@ impl GpuWorld {
                     for left in self.promoted.values_mut() {
                         *left = left.saturating_sub(1);
                     }
+                    // A promotion starts where a fracture happened under the engine's loads
+                    // (a driven cluster; fractures inside an island were resolved by its
+                    // window) and lasts while the structure keeps breaking anywhere.
                     for e in since {
-                        if let stress_ref::solver::SolverEvent::Broken { structure, .. } = e {
-                            self.promoted.insert(*structure, PROMOTE_FRAMES);
+                        if let stress_ref::solver::SolverEvent::Broken { structure, bond, .. } = e {
+                            let chunk = self.solver.mirror.bonds[*structure][*bond].geometry.a;
+                            let key = BodyKey::Cluster(start_cluster.get(*structure).and_then(|c| c.get(chunk)).copied().unwrap_or(u64::MAX));
+                            if f.driven.contains(&key) || self.promoted.contains_key(structure) {
+                                self.promoted.insert(*structure, PROMOTE_FRAMES);
+                            }
                         }
                     }
                 }
