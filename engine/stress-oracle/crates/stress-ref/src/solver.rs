@@ -382,6 +382,40 @@ pub struct ReferenceSolver {
     turns: Vec<Vec<ChunkTurn>>,
     /// `rayleigh_damping`: the mass-proportional coefficient per structure (1/s).
     pub mass_damping: Vec<f64>,
+    /// `sim.methods.multirate`: the bonds' rates and schedule in the current frame.
+    multirate: MultirateWindow,
+    /// Bond evaluations so far (diagnostics: the work that `multirate` saves).
+    pub bond_evaluations: u64,
+}
+
+/// `sim.methods.multirate`: a window of fine substeps (one frame) in which each bond is
+/// evaluated at its own rate. Closed (`ticks` 0) or used up, every bond is evaluated at
+/// every substep with weight 1, which is the single-rate integrator.
+#[derive(Clone, Debug, Default)]
+struct MultirateWindow {
+    /// Substeps in the window, and how many have been taken.
+    ticks: u32,
+    tick: u32,
+    /// Per structure and runtime bond: substeps per evaluation (a power of two), the
+    /// substep of its next evaluation and of its last one (`u32::MAX`: none yet).
+    rate: Vec<Vec<u32>>,
+    next: Vec<Vec<u32>>,
+    last: Vec<Vec<u32>>,
+}
+
+impl MultirateWindow {
+    fn open(&self) -> bool {
+        self.tick < self.ticks
+    }
+}
+
+/// The largest power of two `r` (at most `cap`) with `r dt <= limit`, at least 1.
+fn rate_within(limit: f64, dt: f64, cap: u32) -> u32 {
+    let mut r = 1u32;
+    while r < cap && 2.0 * r as f64 * dt <= limit {
+        r *= 2;
+    }
+    r
 }
 
 impl ReferenceSolver {
@@ -407,6 +441,8 @@ impl ReferenceSolver {
             true_steps: Vec::new(),
             turns: Vec::new(),
             mass_damping: Vec::new(),
+            multirate: MultirateWindow::default(),
+            bond_evaluations: 0,
             structures,
         };
         for si in 0..solver.structures.len() {
@@ -617,9 +653,22 @@ impl ReferenceSolver {
         e
     }
 
-    /// Recoverable elastic energy stored in bonds at the last evaluation.
+    /// Recoverable elastic energy stored in bonds at the last evaluation (under
+    /// `multirate`, a bond waiting for its next evaluation at the current state).
     pub fn elastic_energy(&self) -> f64 {
-        self.bonds.iter().flatten().filter(|b| b.alive).map(|b| b.stored).sum()
+        if self.multirate.last.is_empty() {
+            return self.bonds.iter().flatten().filter(|b| b.alive).map(|b| b.stored).sum();
+        }
+        let mut e = 0.0;
+        for s in 0..self.bonds.len() {
+            for bi in 0..self.bonds[s].len() {
+                let b = &self.bonds[s][bi];
+                if b.alive {
+                    e += if self.bond_is_stale(s, bi) { self.bond_stored_now(s, bi) } else { b.stored };
+                }
+            }
+        }
+        e
     }
 
     /// Gravitational potential energy `-m g . x` of all active chunks.
@@ -885,6 +934,134 @@ impl ReferenceSolver {
             dt = dt.min(own);
         }
         dt * self.config.courant_safety
+    }
+
+    /// `sim.methods.multirate`: each chunk's own stable substep in cluster `ci`, with
+    /// the safety factor: its Gershgorin step (`chunk_stable_dts`), no smaller than the
+    /// structure's certified step under `true_step` (both are stable steps of the
+    /// chunk's rows), combined with the chunk's own contact bound `contact(s, c)` (with
+    /// its safety) as `World::substep_dt` combines the global two. Returns `(chunk, dt)`.
+    pub fn chunk_native_dts(&self, ci: usize, contact: &impl Fn(usize, usize) -> f64) -> Vec<(usize, f64)> {
+        let s = self.clusters[ci].structure;
+        let floor = match self.true_steps.get(s) {
+            Some(&t) if self.config.methods.true_step => t,
+            _ => 0.0,
+        };
+        let safety = self.config.courant_safety;
+        let scaled = self.config.methods.scaled_step_bound;
+        self.chunk_stable_dts(ci)
+            .into_iter()
+            .map(|(c, d)| {
+                let stress = d.max(floor) * safety;
+                let k = contact(s, c);
+                (c, if scaled { 1.0 / (stress.powi(-2) + k.powi(-2)).sqrt() } else { stress.min(k) })
+            })
+            .collect()
+    }
+
+    /// `sim.methods.multirate`: the rate of every bond of cluster `ci` at substep `dt`
+    /// (substeps per evaluation, a power of two up to `cap`): that of its finer chunk,
+    /// the largest power of two `r` with `r dt` within the chunk's `chunk_native_dts`.
+    /// Returns `(bond, rate)` in the cluster's bond order.
+    pub fn bond_rates(&self, ci: usize, dt: f64, cap: u32, contact: &impl Fn(usize, usize) -> f64) -> Vec<(usize, u32)> {
+        let s = self.clusters[ci].structure;
+        let mut native = vec![f64::INFINITY; self.structures[s].chunks.len()];
+        for (c, d) in self.chunk_native_dts(ci, contact) {
+            native[c] = d;
+        }
+        self.clusters[ci]
+            .bonds
+            .iter()
+            .map(|&bi| {
+                let g = &self.bonds[s][bi].geometry;
+                (bi, rate_within(native[g.a].min(native[g.b]), dt, cap))
+            })
+            .collect()
+    }
+
+    /// `sim.methods.multirate`: open a window of `ticks` substeps of `dt` (a frame): every
+    /// bond's rate (`bond_rates`, at most the window's length rounded up to a power of
+    /// two), every bond due at the first substep. Off, in implicit mode or for a single
+    /// substep the window stays closed (single rate).
+    pub fn open_multirate_window(&mut self, dt: f64, ticks: usize, contact: impl Fn(usize, usize) -> f64) {
+        self.multirate.ticks = 0;
+        self.multirate.tick = 0;
+        if !self.config.methods.multirate || self.config.mode == SolveMode::Implicit || ticks <= 1 {
+            return;
+        }
+        let ticks = ticks.min(u32::MAX as usize / 2) as u32;
+        let cap = ticks.next_power_of_two();
+        let mut rate: Vec<Vec<u32>> = self.bonds.iter().map(|b| vec![1; b.len()]).collect();
+        for ci in 0..self.clusters.len() {
+            if self.clusters[ci].bonds.is_empty() {
+                continue;
+            }
+            let s = self.clusters[ci].structure;
+            for (bi, r) in self.bond_rates(ci, dt, cap, &contact) {
+                rate[s][bi] = r;
+            }
+        }
+        self.multirate.next = self.bonds.iter().map(|b| vec![0; b.len()]).collect();
+        self.multirate.last = self.bonds.iter().map(|b| vec![u32::MAX; b.len()]).collect();
+        self.multirate.rate = rate;
+        self.multirate.ticks = ticks;
+    }
+
+    /// The bonds of each explicit cluster evaluated this substep, with their weight (the
+    /// substeps to their next evaluation): in the cluster's bond order, all of them with
+    /// weight 1 outside a multirate window. Advances the window's schedule.
+    fn firing_bonds(&mut self, explicit: &[usize]) -> Vec<Vec<(usize, f64)>> {
+        let open = self.multirate.open();
+        let (tick, ticks) = (self.multirate.tick, self.multirate.ticks);
+        let mut out = Vec::with_capacity(explicit.len());
+        for &ci in explicit {
+            let cl = &self.clusters[ci];
+            let s = cl.structure;
+            if !open {
+                out.push(cl.bonds.iter().map(|&bi| (bi, 1.0)).collect());
+                continue;
+            }
+            let mr = &mut self.multirate;
+            let mut fired = Vec::new();
+            for &bi in &cl.bonds {
+                // A bond created inside the window (none are today) runs at every substep.
+                let r = mr.rate[s].get(bi).copied().unwrap_or(1);
+                if mr.next[s].get(bi).is_some_and(|&n| n > tick) {
+                    continue;
+                }
+                // To the next multiple of its rate (the rates' common grid), or the end.
+                let w = (r - tick % r).min(ticks - tick);
+                if let Some(n) = mr.next[s].get_mut(bi) {
+                    *n = tick + w;
+                    mr.last[s][bi] = tick;
+                }
+                fired.push((bi, w as f64));
+            }
+            out.push(fired);
+        }
+        out
+    }
+
+    /// Whether bond `bi`'s stored response is older than the last substep's start (a
+    /// bond waiting for its next multirate evaluation).
+    fn bond_is_stale(&self, s: usize, bi: usize) -> bool {
+        match self.multirate.last.get(s).and_then(|l| l.get(bi)) {
+            Some(&last) => last != u32::MAX && last + 1 < self.multirate.tick.min(self.multirate.ticks),
+            None => false,
+        }
+    }
+
+    /// Elastic energy of bond `bi` at the current chunk state, from its committed joint
+    /// state (nothing is committed).
+    fn bond_stored_now(&self, s: usize, bi: usize) -> f64 {
+        let b = &self.bonds[s][bi];
+        let (sa, sb) = (self.chunks[s][b.geometry.a], self.chunks[s][b.geometry.b]);
+        let d = if self.config.methods.corotational_bonds {
+            b.geometry.corotation(sa.u, sa.th, sb.u, sb.th).deformation()
+        } else {
+            b.geometry.kinematics(sa.u, sa.th, sb.u, sb.th)
+        };
+        b.model().evaluate(&b.joint, &d, 0.0, false).stored
     }
 
     /// `rayleigh_damping`: fit each anchored structure's damping to the two-frequency
@@ -1186,30 +1363,34 @@ impl ReferenceSolver {
             let turns = self.chunks.iter().map(|cs| crate::par::map(cs, |c| ChunkTurn::new(c.th))).collect();
             self.turns = turns;
         }
-        let bond_jobs: Vec<(usize, usize)> = explicit
+        // The bonds evaluated this substep and their weights (`multirate`; else all, 1).
+        let fired = self.firing_bonds(&explicit);
+        let bond_jobs: Vec<(usize, usize, f64)> = explicit
             .iter()
-            .flat_map(|&ci| {
-                let cl = &self.clusters[ci];
-                cl.bonds.iter().map(move |&bi| (cl.structure, bi))
+            .zip(&fired)
+            .flat_map(|(&ci, list)| {
+                let s = self.clusters[ci].structure;
+                list.iter().map(move |&(bi, w)| (s, bi, w))
             })
             .collect();
         crate::profile::count(crate::profile::Counter::BondEvaluations, bond_jobs.len() as u64);
+        self.bond_evaluations += bond_jobs.len() as u64;
         if crate::par::serial(bond_jobs.len()) {
             // On one thread each response is applied as it is computed (no list of them):
             // a response reads only its bond and the chunks' motion, which applying the
             // others does not change, so this is the same sweep.
             let _t = crate::profile::time(crate::profile::Stage::BondResponses);
-            for &ci in &explicit {
-                self.apply_bond_responses(ci, &mut None::<std::iter::Empty<_>>, (dt, fracture), t_mid);
+            for (&ci, list) in explicit.iter().zip(&fired) {
+                self.apply_bond_responses(ci, list, &mut None::<std::iter::Empty<_>>, (dt, fracture), t_mid);
             }
         } else {
             let t_bonds = crate::profile::time(crate::profile::Stage::BondResponses);
-            let responses = crate::par::map(&bond_jobs, |&(s, bi)| self.bond_response(s, bi, dt, fracture)).into_iter();
+            let responses = crate::par::map(&bond_jobs, |&(s, bi, w)| self.bond_response(s, bi, dt * w, fracture)).into_iter();
             drop(t_bonds);
             let _t = crate::profile::time(crate::profile::Stage::ApplyBonds);
             let mut responses = Some(responses);
-            for &ci in &explicit {
-                self.apply_bond_responses(ci, &mut responses, (dt, fracture), t_mid);
+            for (&ci, list) in explicit.iter().zip(&fired) {
+                self.apply_bond_responses(ci, list, &mut responses, (dt, fracture), t_mid);
             }
         }
         let t_loads = crate::profile::time(crate::profile::Stage::ChunkLoads);
@@ -1240,6 +1421,9 @@ impl ReferenceSolver {
         drop(t_integrate);
         self.time += dt;
         self.substeps += 1;
+        if self.multirate.open() {
+            self.multirate.tick += 1;
+        }
         if !self.pending_split.is_empty() {
             let _t = crate::profile::time(crate::profile::Stage::Splits);
             self.process_splits();
@@ -1420,22 +1604,25 @@ impl ReferenceSolver {
         }
     }
 
-    /// Commit the bond responses of cluster `ci` (taken in bond order from `responses`,
-    /// or computed here, over `(dt, fracture)`, without one): joint states, internal
-    /// chunk forces, energies and events.
-    fn apply_bond_responses(&mut self, ci: usize, responses: &mut Option<impl Iterator<Item = BondResponse>>, (dt, fracture): (f64, bool), t: f64) {
+    /// Commit the responses of cluster `ci`'s bonds `fired` (bond, weight; taken in that
+    /// order from `responses`, or computed here, over `(weight dt, fracture)`, without
+    /// one): joint states, internal chunk forces, energies and events. A bond of weight
+    /// `w` (`multirate`) acts for `w` substeps: its impulse over them is given in this one.
+    fn apply_bond_responses(&mut self, ci: usize, fired: &[(usize, f64)], responses: &mut Option<impl Iterator<Item = BondResponse>>, (dt, fracture): (f64, bool), t: f64) {
         let s = self.clusters[ci].structure;
         for &c in &self.clusters[ci].chunks {
             self.f_int[s][c] = (Vec3::ZERO, Vec3::ZERO);
         }
         let mut dissipated = 0.0;
         let mut damped = 0.0;
-        for k in 0..self.clusters[ci].bonds.len() {
-            let bi = self.clusters[ci].bonds[k];
-            let (resp, q, bond_damped, (fa, ma, fb, mb)) = match responses {
+        for &(bi, w) in fired {
+            let (resp, q, bond_damped, (mut fa, mut ma, mut fb, mut mb)) = match responses {
                 Some(list) => list.next().expect("one response per bond"),
-                None => self.bond_response(s, bi, dt, fracture),
+                None => self.bond_response(s, bi, dt * w, fracture),
             };
+            if w != 1.0 {
+                (fa, ma, fb, mb) = (fa * w, ma * w, fb * w, mb * w);
+            }
             let (ga, gb) = {
                 let g = &self.bonds[s][bi].geometry;
                 (g.a, g.b)
