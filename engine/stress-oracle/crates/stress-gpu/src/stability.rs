@@ -292,6 +292,36 @@ pub fn certified_radius(m: &ReferenceSolver, s: usize, h: f64) -> Option<f64> {
     (bound > 0.0 && bound.is_finite()).then_some(bound)
 }
 
+/// `certified_damped_step` of every structure, the structures spread over the cores
+/// (each is independent; results in structure order, so identical to a serial loop).
+pub fn certified_damped_steps(m: &ReferenceSolver) -> Vec<f64> {
+    let n = m.structures.len();
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).min(n.max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut out = vec![0.0; n];
+    let parts: Vec<Vec<(usize, f64)>> = std::thread::scope(|sc| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                sc.spawn(|| {
+                    let mut got = Vec::new();
+                    loop {
+                        let s = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if s >= n {
+                            break got;
+                        }
+                        got.push((s, certified_damped_step(m, s)));
+                    }
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().expect("certified step worker")).collect()
+    });
+    for (s, h) in parts.into_iter().flatten() {
+        out[s] = h;
+    }
+    out
+}
+
 /// The certified stable central-difference substep of structure `s` (before the safety
 /// factor) from the dashpots each bond actually has. Leapfrog with dashpots on the lagged
 /// velocity is stable while `(h^2 / 4) K + (h / 2) C < M`, i.e. while

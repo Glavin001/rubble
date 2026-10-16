@@ -155,6 +155,7 @@ impl World {
             handed: Vec::new(),
             kept: HashMap::new(),
             shapes: HashMap::new(),
+            routing: HashMap::new(),
         });
         self.sync_engine_bodies();
     }
@@ -300,22 +301,31 @@ impl World {
         let scale = self.scene.sim.stiffness_scale;
         let plane_strain = |m: &Material| m.youngs_modulus * scale / (1.0 - m.poisson_ratio * m.poisson_ratio);
         let mut parts: Vec<Part> = Vec::new();
+        let mut routing = std::mem::take(&mut self.coupling.as_mut().expect("coupled").routing);
         for ci in 0..self.solver.clusters.len() {
             let cl = &self.solver.clusters[ci];
             let s = cl.structure;
             let com = cl.com_world();
+            // A cluster the caller vouches for (`ReferenceSolver::unchanged`) keeps last
+            // frame's bounds and material data.
+            let reuse = if self.solver.unchanged.contains(&cl.id) { routing.get(&cl.id).copied() } else { None };
+            let (lo, hi, reach, modulus, speed, radius, capacity) = match reuse {
+                Some(r) => r,
+                None => {
             let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
             let (mut reach, mut modulus, mut speed, mut radius): (f64, f64, f64, f64) = (0.0, f64::INFINITY, f64::INFINITY, f64::INFINITY);
             for &c in &cl.chunks {
-                let b = self.chunk_box(s, c);
-                let r = b.bounding_radius();
-                lo = lo.component_min(b.center - Vec3::splat(r));
-                hi = hi.component_max(b.center + Vec3::splat(r));
-                reach = reach.max((b.center - com).norm() + r);
+                // `chunk_box`'s centre and bounding radius (`OBox::bounding_radius` is the
+                // half extents' norm), without building the box.
+                let (center, half) = (self.solver.chunk_position(s, c), self.solver.structures[s].chunks[c].half_extents);
+                let r = half.norm();
+                lo = lo.component_min(center - Vec3::splat(r));
+                hi = hi.component_max(center + Vec3::splat(r));
+                reach = reach.max((center - com).norm() + r);
                 let m = self.chunk_material(s, c);
                 modulus = modulus.min(plane_strain(m));
                 speed = speed.min((m.youngs_modulus * scale / m.density).sqrt());
-                radius = radius.min(b.half.min_elem());
+                radius = radius.min(half.min_elem());
             }
             let capacity = cl
                 .bonds
@@ -325,6 +335,11 @@ impl World {
                     b.strength.tensile * b.geometry.area * b.weibull
                 })
                 .fold(f64::INFINITY, f64::min);
+                    let r = (lo, hi, reach, modulus, speed, radius, capacity);
+                    routing.insert(cl.id, r);
+                    r
+                }
+            };
             let extent = (hi - lo).max_elem();
             let struck = (!cl.bonds.is_empty()).then_some(Struck { round_trip: 2.0 * extent / speed, capacity });
             let sweep = cl.velocity.abs() * dt + Vec3::splat(cl.angular_velocity.norm() * reach * dt);
@@ -344,6 +359,9 @@ impl World {
                 struck,
             });
         }
+        let live: std::collections::HashSet<u64> = self.solver.clusters.iter().map(|cl| cl.id).collect();
+        routing.retain(|id, _| live.contains(id));
+        self.coupling.as_mut().expect("coupled").routing = routing;
         for (i, imp) in self.impactors.iter().enumerate() {
             let b = imp.obox();
             let r = b.bounding_radius();
@@ -388,11 +406,25 @@ impl World {
         let n = parts.len();
         let mut parent: Vec<usize> = (0..n).collect();
         let mut seed = vec![false; n];
-        for i in 0..n {
-            for j in i + 1..n {
-                if !overlaps(&parts[i], &parts[j]) {
-                    continue;
+        // The overlapping pairs, found by sweeping the parts sorted along x (the same set
+        // as testing every pair), then taken in (i, j) order as the double loop over all
+        // pairs would.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| parts[a].lo.x.total_cmp(&parts[b].lo.x));
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for (k, &a) in order.iter().enumerate() {
+            for &b in &order[k + 1..] {
+                if parts[b].lo.x > parts[a].hi.x {
+                    break;
                 }
+                if overlaps(&parts[a], &parts[b]) {
+                    pairs.push((a.min(b), a.max(b)));
+                }
+            }
+        }
+        pairs.sort_unstable();
+        for (i, j) in pairs {
+            {
                 let owned = rigid_assumption_fails(&parts[i], &parts[j]) || rigid_assumption_fails(&parts[j], &parts[i]);
                 let both_immovable = !parts[i].mass.is_finite() && !parts[j].mass.is_finite();
                 if parts[i].key.is_none() || parts[j].key.is_none() {
@@ -429,10 +461,11 @@ impl World {
         for i in 0..n {
             let in_island = parts[i].key.is_some() && island_root[find(&mut parent, i)];
             match parts[i].key {
+                // Parts are the clusters in order, then the impactors, then the ground.
                 Some(BodyKey::Cluster(id)) => {
-                    if let Some(cl) = self.solver.clusters.iter_mut().find(|c| c.id == id) {
-                        cl.driven = !in_island;
-                    }
+                    let cl = &mut self.solver.clusters[i];
+                    debug_assert_eq!(cl.id, id);
+                    cl.driven = !in_island;
                 }
                 Some(BodyKey::Impactor(k)) => self.impactors[k].driven = !in_island,
                 None => {}
