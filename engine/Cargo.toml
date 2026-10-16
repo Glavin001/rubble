@@ -12,6 +12,8 @@ members = [
     "crates/engine-oracles",
     "crates/engine-fracture",
 ]
+# The stress oracle is its own workspace (wgpu 30); engine-fracture depends on its crates by path.
+exclude = ["stress-oracle"]
 
 [workspace.package]
 edition = "2021"

@@ -11,7 +11,7 @@ pub mod gate;
 pub mod contacts;
 pub mod coupled;
 pub mod coverage;
-pub mod joint;
+pub use stress_layout::joint;
 pub mod loads;
 pub mod methods;
 pub mod micro;
