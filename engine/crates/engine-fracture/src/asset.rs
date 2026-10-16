@@ -190,7 +190,13 @@ impl Frac<'_> {
         }
         self.check(t + offset, 1)
     }
-    fn get<T>(&self, t: usize, i: usize, fallback: T, read: impl Fn(&Self, usize) -> Result<T>) -> Result<T> {
+    fn get<T>(
+        &self,
+        t: usize,
+        i: usize,
+        fallback: T,
+        read: impl Fn(&Self, usize) -> Result<T>,
+    ) -> Result<T> {
         let p = self.field(t, i)?;
         if p == 0 {
             Ok(fallback)
@@ -231,15 +237,27 @@ impl Frac<'_> {
         }
         let v = p + self.u32(p)? as usize;
         let n = self.u32(v)? as usize;
-        self.check(v + 4, n.checked_mul(stride).ok_or_else(|| anyhow!("Truncated FRAC payload"))?)?;
+        self.check(
+            v + 4,
+            n.checked_mul(stride)
+                .ok_or_else(|| anyhow!("Truncated FRAC payload"))?,
+        )?;
         Ok((v + 4, n))
     }
-    fn list<T>(&self, t: usize, i: usize, stride: usize, read: impl Fn(&Self, usize) -> Result<T>) -> Result<Vec<T>> {
+    fn list<T>(
+        &self,
+        t: usize,
+        i: usize,
+        stride: usize,
+        read: impl Fn(&Self, usize) -> Result<T>,
+    ) -> Result<Vec<T>> {
         let (start, n) = self.vector(t, i, stride)?;
         (0..n).map(|k| read(self, start + k * stride)).collect()
     }
     fn vec3s(&self, t: usize, i: usize) -> Result<Vec<[f32; 3]>> {
-        self.list(t, i, 12, |r, p| Ok([r.f32(p)?, r.f32(p + 4)?, r.f32(p + 8)?]))
+        self.list(t, i, 12, |r, p| {
+            Ok([r.f32(p)?, r.f32(p + 4)?, r.f32(p + 8)?])
+        })
     }
     fn tables(&self, t: usize, i: usize) -> Result<Vec<usize>> {
         self.list(t, i, 4, |r, p| Ok(p + r.u32(p)? as usize))
@@ -251,7 +269,10 @@ impl Frac<'_> {
 }
 
 pub fn read_physics(bytes: &[u8]) -> Result<Physics> {
-    ensure!(bytes.len() >= 8 && &bytes[4..8] == b"FRAC", "Missing FRAC identifier");
+    ensure!(
+        bytes.len() >= 8 && &bytes[4..8] == b"FRAC",
+        "Missing FRAC identifier"
+    );
     let r = Frac { b: bytes };
     let root = r.u32(0)? as usize;
     ensure!(r.u16_at(root, 0)? == 1, "Unsupported physics schema");
@@ -338,14 +359,28 @@ pub fn read_physics(bytes: &[u8]) -> Result<Physics> {
     let hulls = r
         .tables(root, 8)?
         .into_iter()
-        .map(|t| Ok(Hull { fragment: r.u32_or(t, 1, 0)?, vertices: r.vec3s(t, 0)? }))
+        .map(|t| {
+            Ok(Hull {
+                fragment: r.u32_or(t, 1, 0)?,
+                vertices: r.vec3s(t, 0)?,
+            })
+        })
         .collect::<Result<Vec<_>>>()?;
     let hull_faces = r
         .tables(root, 9)?
         .into_iter()
-        .map(|t| Ok(HullFaces { indices: r.list(t, 0, 4, Frac::u32)?, sizes: r.list(t, 1, 1, Frac::u8)? }))
+        .map(|t| {
+            Ok(HullFaces {
+                indices: r.list(t, 0, 4, Frac::u32)?,
+                sizes: r.list(t, 1, 1, Frac::u8)?,
+            })
+        })
         .collect::<Result<Vec<_>>>()?;
-    let loops = r.tables(root, 10)?.into_iter().map(|t| r.vec3s(t, 0)).collect::<Result<Vec<_>>>()?;
+    let loops = r
+        .tables(root, 10)?
+        .into_iter()
+        .map(|t| r.vec3s(t, 0))
+        .collect::<Result<Vec<_>>>()?;
     let spawn = r.list(root, 12, 24, |r, p| {
         Ok(Spawn {
             p: [r.f32(p)?, r.f32(p + 4)?, r.f32(p + 8)?],
@@ -387,7 +422,10 @@ pub fn read_physics(bytes: &[u8]) -> Result<Physics> {
             (h.fragment as usize) < n
                 && (4..=64).contains(&h.vertices.len())
                 && total == faces.indices.len()
-                && faces.indices.iter().all(|&v| (v as usize) < h.vertices.len()),
+                && faces
+                    .indices
+                    .iter()
+                    .all(|&v| (v as usize) < h.vertices.len()),
             "Invalid convex hull"
         );
     }
@@ -416,7 +454,10 @@ pub fn read_physics(bytes: &[u8]) -> Result<Physics> {
 pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
     let u32_at = |p: usize| u32::from_le_bytes(buffer[p..p + 4].try_into().unwrap());
     ensure!(
-        buffer.len() >= 20 && u32_at(0) == 0x4654_6c67 && u32_at(4) == 2 && u32_at(8) as usize == buffer.len(),
+        buffer.len() >= 20
+            && u32_at(0) == 0x4654_6c67
+            && u32_at(4) == 2
+            && u32_at(8) as usize == buffer.len(),
         "Invalid GLB header or length"
     );
     let (mut json, mut bin): (Option<Value>, Option<&[u8]>) = (None, None);
@@ -425,7 +466,10 @@ pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
         ensure!(p + 8 <= buffer.len(), "Truncated GLB chunk");
         let (n, kind) = (u32_at(p) as usize, u32_at(p + 4));
         p += 8;
-        ensure!(n % 4 == 0 && p + n <= buffer.len(), "Invalid GLB chunk range");
+        ensure!(
+            n % 4 == 0 && p + n <= buffer.len(),
+            "Invalid GLB chunk range"
+        );
         if kind == 0x4e4f_534a {
             ensure!(json.is_none(), "Duplicate JSON");
             json = Some(serde_json::from_slice(&buffer[p..p + n])?);
@@ -439,7 +483,13 @@ pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
     let json = json.unwrap_or(Value::Null);
     let ext = &json["extensions"][EXTENSION];
     let bin = match bin {
-        Some(b) if ext["version"] == 1 && ext["encoding"] == "flatbuffers" && ext["physicsSchemaVersion"] == 1 => b,
+        Some(b)
+            if ext["version"] == 1
+                && ext["encoding"] == "flatbuffers"
+                && ext["physicsSchemaVersion"] == 1 =>
+        {
+            b
+        }
         _ => bail!("This GLB needs the SHARDWRIGHT_fracture v1 export"),
     };
     let coords = &ext["coordinates"];
@@ -448,17 +498,25 @@ pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
         "Unsupported fracture coordinate convention"
     );
     ensure!(
-        !json["extensionsRequired"].as_array().is_some_and(|r| r.iter().any(|e| e == "EXT_meshopt_compression")),
+        !json["extensionsRequired"]
+            .as_array()
+            .is_some_and(|r| r.iter().any(|e| e == "EXT_meshopt_compression")),
         "Export with --uncompressed for this demo"
     );
     ensure!(
         json["buffers"].as_array().is_some_and(|b| b.len() == 1
             && b[0].get("uri").is_none()
-            && b[0]["byteLength"].as_u64().is_some_and(|n| n as usize <= bin.len()))
-            && !json["images"].as_array().is_some_and(|i| i.iter().any(|i| i.get("uri").is_some())),
+            && b[0]["byteLength"]
+                .as_u64()
+                .is_some_and(|n| n as usize <= bin.len()))
+            && !json["images"]
+                .as_array()
+                .is_some_and(|i| i.iter().any(|i| i.get("uri").is_some())),
         "Expected a self-contained GLB"
     );
-    let view = ext["bufferView"].as_u64().ok_or_else(|| anyhow!("Invalid bufferView"))? as usize;
+    let view = ext["bufferView"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("Invalid bufferView"))? as usize;
     let library = ext["materialLibrary"].clone();
     let mut asset = FractureAsset {
         bytes: buffer.len(),
@@ -477,14 +535,21 @@ pub fn parse_fracture_glb(buffer: &[u8]) -> Result<FractureAsset> {
     let materials = asset.material_count();
     for f in &physics.fragments {
         if f.node >= 0 {
-            ensure!(json["nodes"][f.node as usize]["extras"]["fragment_id"] == f.id, "Mismatched fragment node");
+            ensure!(
+                json["nodes"][f.node as usize]["extras"]["fragment_id"] == f.id,
+                "Mismatched fragment node"
+            );
         }
-        ensure!(f.material_ids.iter().all(|&id| (id as usize) < materials), "Missing physical material");
+        ensure!(
+            f.material_ids.iter().all(|&id| (id as usize) < materials),
+            "Missing physical material"
+        );
     }
     for b in &physics.bonds {
         for c in &b.composition {
             ensure!(
-                c.interface_material < 0 || asset.interface_material(c.interface_material).is_some(),
+                c.interface_material < 0
+                    || asset.interface_material(c.interface_material).is_some(),
                 "Missing interface material"
             );
         }
@@ -523,10 +588,15 @@ impl FractureAsset {
         let off = v.get("byteOffset").map_or(Some(0), Value::as_u64);
         let len = v["byteLength"].as_u64();
         let total = self.json["buffers"][0]["byteLength"].as_u64().unwrap_or(0) as usize;
-        let (Some(off), Some(len)) = (off, len) else { bail!("Invalid bufferView") };
+        let (Some(off), Some(len)) = (off, len) else {
+            bail!("Invalid bufferView")
+        };
         let (off, len) = (off as usize, len as usize);
         ensure!(
-            v["buffer"] == 0 && off.checked_add(len).is_some_and(|e| e <= total && e <= self.bin.len()),
+            v["buffer"] == 0
+                && off
+                    .checked_add(len)
+                    .is_some_and(|e| e <= total && e <= self.bin.len()),
             "Invalid bufferView"
         );
         Ok(&self.bin[off..off + len])
@@ -544,16 +614,26 @@ impl FractureAsset {
     /// Interface material record for an id in the shared material id space.
     pub fn interface_material(&self, id: i32) -> Option<&Value> {
         let k = (id as i64).checked_sub(self.material_count() as i64)?;
-        self.library["interface_material"].as_array()?.get(usize::try_from(k).ok()?)
+        self.library["interface_material"]
+            .as_array()?
+            .get(usize::try_from(k).ok()?)
     }
 
     /// Decode an accessor into `count` rows of `width` components.
     pub fn accessor(&self, index: usize) -> Result<Vec<Vec<f64>>> {
         let a = &self.json["accessors"][index];
-        ensure!(a.is_object() && a.get("sparse").is_none(), "Missing or sparse accessor unsupported in this demo");
-        let view_index = a["bufferView"].as_u64().ok_or_else(|| anyhow!("Unsupported accessor"))? as usize;
+        ensure!(
+            a.is_object() && a.get("sparse").is_none(),
+            "Missing or sparse accessor unsupported in this demo"
+        );
+        let view_index = a["bufferView"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("Unsupported accessor"))? as usize;
         let v = &self.json["bufferViews"][view_index];
-        ensure!(v["extensions"].get("EXT_meshopt_compression").is_none(), "Export with --uncompressed for this demo");
+        ensure!(
+            v["extensions"].get("EXT_meshopt_compression").is_none(),
+            "Export with --uncompressed for this demo"
+        );
         let bytes = self.slice(view_index)?;
         let width = match a["type"].as_str() {
             Some("SCALAR") => 1,
@@ -569,11 +649,16 @@ impl FractureAsset {
             5125 | 5126 => 4,
             _ => bail!("Unsupported accessor"),
         };
-        let count = a["count"].as_u64().ok_or_else(|| anyhow!("Unsupported accessor"))? as usize;
-        let stride = v["byteStride"].as_u64().map_or(width * size, |s| s as usize);
+        let count = a["count"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("Unsupported accessor"))? as usize;
+        let stride = v["byteStride"]
+            .as_u64()
+            .map_or(width * size, |s| s as usize);
         let off = a["byteOffset"].as_u64().unwrap_or(0) as usize;
         ensure!(
-            stride >= width * size && (count == 0 || off + (count - 1) * stride + width * size <= bytes.len()),
+            stride >= width * size
+                && (count == 0 || off + (count - 1) * stride + width * size <= bytes.len()),
             "Accessor outside bufferView"
         );
         (0..count)
@@ -605,7 +690,11 @@ impl FractureAsset {
 
     /// Fragments at `level`.
     pub fn level_fragments(&self, level: u8) -> usize {
-        self.physics.fragments.iter().filter(|f| f.level == level).count()
+        self.physics
+            .fragments
+            .iter()
+            .filter(|f| f.level == level)
+            .count()
     }
 
     /// `{physics, materialLibrary}` as JSON (the lab's metadata download).

@@ -48,6 +48,7 @@ export const layoutScene=(one,layout,procedural=false)=>sceneObject(sceneHandle(
 export const withoutJoints=scene=>sceneObject(sceneHandle(scene).withoutJoints());
 export const withCapacity=(scene,partial)=>sceneObject(sceneHandle(scene).withCapacity(partial));
 export const withParams=(scene,partial)=>sceneObject(sceneHandle(scene).withParams(partial));
+export const wakeAll=scene=>sceneObject(sceneHandle(scene).wakeAll());
 
 // World vertices / AABB of a collider at a body pose (default: the scene pose).
 export function colliderVertices(scene,c,body=scene.bodies[c.body]){

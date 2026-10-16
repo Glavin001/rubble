@@ -291,11 +291,12 @@ return {
      points:new Float32Array(await readBuffer(bufs[27],base*64,last.contact*64))};
  },
  get shots(){return plan.shots},
- // Joint lambda0..5 and k0..5 per joint (preloading, diagnostics).
+ // Joint lambda0..5, k0..5 and flags per joint (preloading, diagnostics).
  async jointState(){
    if(!jointCount)return {lambda:[],k:[]};
    const f=new Float32Array(await readBuffer(bufs[5],0,jointCount*JOINT_BYTES)),w=JOINT_BYTES/4;
-   return {lambda:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+24,i*w+30))),k:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+30,i*w+36)))};
+   const u=new Uint32Array(f.buffer);
+   return {lambda:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+24,i*w+30))),k:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+30,i*w+36))),flags:Array.from({length:jointCount},(_,i)=>u[i*w+3])};
  },
  // Joint flags (bit 0 = broken), read back for tests and the HUD.
  async jointFlags(){

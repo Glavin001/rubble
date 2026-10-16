@@ -18,7 +18,8 @@ fn err(e: impl std::fmt::Display) -> JsError {
 }
 
 fn to_js<T: Serialize + ?Sized>(v: &T) -> Result<JsValue, JsError> {
-    v.serialize(&serde_wasm_bindgen::Serializer::json_compatible()).map_err(err)
+    v.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(err)
 }
 
 fn from_js<T: serde::de::DeserializeOwned>(v: JsValue) -> Result<T, JsError> {
@@ -26,7 +27,10 @@ fn from_js<T: serde::de::DeserializeOwned>(v: JsValue) -> Result<T, JsError> {
 }
 
 /// Merge a partial JS object into a serde value (`{...a, ...b}`).
-fn merge<T: Serialize + serde::de::DeserializeOwned>(base: &T, partial: JsValue) -> Result<T, JsError> {
+fn merge<T: Serialize + serde::de::DeserializeOwned>(
+    base: &T,
+    partial: JsValue,
+) -> Result<T, JsError> {
     let mut a = serde_json::to_value(base).map_err(err)?;
     let b: serde_json::Value = from_js(partial)?;
     if let (Some(a), Some(b)) = (a.as_object_mut(), b.as_object()) {
@@ -46,7 +50,9 @@ impl Asset {
     /// Parse (and bounds-check) a fracture GLB.
     #[wasm_bindgen(constructor)]
     pub fn new(bytes: &[u8]) -> Result<Asset, JsError> {
-        engine_fracture::parse_fracture_glb(bytes).map(Asset).map_err(err)
+        engine_fracture::parse_fracture_glb(bytes)
+            .map(Asset)
+            .map_err(err)
     }
     /// Hierarchy levels present, ascending.
     pub fn levels(&self) -> Vec<u8> {
@@ -135,13 +141,22 @@ struct Meta<'a> {
 impl Scene {
     /// One hierarchy level of a baked asset (`maxHullVertices`: engine-wide limit 8..64).
     #[wasm_bindgen(js_name = fromAsset)]
-    pub fn from_asset(asset: &Asset, level: u8, max_hull_vertices: Option<u32>) -> Result<Scene, JsError> {
-        scene::build_scene(&asset.0, level, max_hull_vertices.map(|v| v as usize)).map(Scene).map_err(err)
+    pub fn from_asset(
+        asset: &Asset,
+        level: u8,
+        max_hull_vertices: Option<u32>,
+    ) -> Result<Scene, JsError> {
+        scene::build_scene(&asset.0, level, max_hull_vertices.map(|v| v as usize))
+            .map(Scene)
+            .map_err(err)
     }
     /// The procedural cuboid house; `hulls`: cook each box as an 8-vertex hull.
     #[wasm_bindgen(js_name = cuboidHouse)]
     pub fn cuboid_house(hulls: Option<bool>, pitch_deg: Option<f64>) -> Result<Scene, JsError> {
-        let mut o = CuboidOptions { hulls: hulls.unwrap_or(false), ..CuboidOptions::default() };
+        let mut o = CuboidOptions {
+            hulls: hulls.unwrap_or(false),
+            ..CuboidOptions::default()
+        };
         if let Some(p) = pitch_deg {
             o.pitch_deg = p;
         }
@@ -150,7 +165,9 @@ impl Scene {
     /// Collision-cost benchmark scene (`count` stacks of shape `a` under `b`).
     #[wasm_bindgen(js_name = pairs)]
     pub fn pairs(a: &str, b: &str, count: u32) -> Result<Scene, JsError> {
-        engine_fracture::pairs::build_pair_scene(a, b, count, 2.5).map(Scene).map_err(err)
+        engine_fracture::pairs::build_pair_scene(a, b, count, 2.5)
+            .map(Scene)
+            .map_err(err)
     }
     /// A scene from a plain JS object (`{bodies, colliders, joints?, hullData?,
     /// params?, capacity?, ...}`; tests and GPU conformance suites). `hullData`
@@ -171,8 +188,16 @@ impl Scene {
     }
     /// Copies laid out as a row/grid (`{columns, rows}`) or suburb (`{suburb:true}`).
     pub fn layout(&self, layout: JsValue, procedural: bool) -> Result<Scene, JsError> {
-        let layout: Option<Layout> = if layout.is_null() || layout.is_undefined() { None } else { Some(from_js(layout)?) };
-        Ok(Scene(samples::layout_scene(self.0.clone(), layout, procedural)))
+        let layout: Option<Layout> = if layout.is_null() || layout.is_undefined() {
+            None
+        } else {
+            Some(from_js(layout)?)
+        };
+        Ok(Scene(samples::layout_scene(
+            self.0.clone(),
+            layout,
+            procedural,
+        )))
     }
     #[wasm_bindgen(js_name = withoutJoints)]
     pub fn without_joints(&self) -> Scene {
@@ -185,7 +210,10 @@ impl Scene {
     }
     /// Bond preload, step 2: start asleep at the settled poses (28-word body records).
     pub fn settled(&self, snapshot: &[f32], steps: u32, settled: bool) -> Result<Scene, JsError> {
-        self.0.settled(snapshot, steps, settled).map(Scene).map_err(err)
+        self.0
+            .settled(snapshot, steps, settled)
+            .map(Scene)
+            .map_err(err)
     }
     /// Merge into the GPU budget (`{...capacity, ...partial}`).
     #[wasm_bindgen(js_name = withCapacity)]
@@ -200,6 +228,11 @@ impl Scene {
         let mut s = self.0.clone();
         s.params = merge(&s.params, partial)?;
         Ok(Scene(s))
+    }
+    /// Measurement aid: every dynamic body starts awake.
+    #[wasm_bindgen(js_name = wakeAll)]
+    pub fn wake_all(&self) -> Scene {
+        Scene(self.0.clone().wake_all())
     }
     /// Benchmark aid: houses outside the row shot's column become static.
     #[wasm_bindgen(js_name = freezeUnhitCopies)]
@@ -283,12 +316,20 @@ impl Scene {
     /// World vertices (flat xyz) of convex collider `index` at pose `p`, `q`
     /// (default: its body's scene pose).
     #[wasm_bindgen(js_name = colliderVertices)]
-    pub fn collider_vertices(&self, index: u32, p: Option<Vec<f64>>, q: Option<Vec<f64>>) -> Vec<f64> {
+    pub fn collider_vertices(
+        &self,
+        index: u32,
+        p: Option<Vec<f64>>,
+        q: Option<Vec<f64>>,
+    ) -> Vec<f64> {
         let c = &self.0.colliders[index as usize];
         let b = self.0.bodies[c.body as usize];
         let p = p.map_or(b.p, |p| [p[0], p[1], p[2]]);
         let q = q.map_or(b.q, |q| [q[0], q[1], q[2], q[3]]);
-        scene::collider_vertices(&self.0.hull_data, c, p, q).into_iter().flatten().collect()
+        scene::collider_vertices(&self.0.hull_data, c, p, q)
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -301,11 +342,25 @@ pub fn preload_done(steps: u32, awake: u32) -> bool {
 /// Scale physical bond springs to solver penalties (`scale`/`cap`: defaults
 /// BOND_PENALTY_SCALE and BOND_PENALTY_CAP).
 #[wasm_bindgen(js_name = scaleBondSprings)]
-pub fn scale_bond_springs(joints: JsValue, bodies: JsValue, dt: f64, scale: Option<f64>, cap: Option<f64>) -> Result<JsValue, JsError> {
+pub fn scale_bond_springs(
+    joints: JsValue,
+    bodies: JsValue,
+    dt: f64,
+    scale: Option<f64>,
+    cap: Option<f64>,
+    effective_mass: Option<bool>,
+) -> Result<JsValue, JsError> {
     let joints: Vec<scene::Joint> = from_js(joints)?;
     let bodies: Vec<scene::Body> = from_js(bodies)?;
     use engine_fracture::bonds::*;
-    to_js(&scale_bond_springs_with(&joints, &bodies, dt, scale.unwrap_or(BOND_PENALTY_SCALE), cap.unwrap_or(BOND_PENALTY_CAP)))
+    to_js(&scale_bond_springs_with(
+        &joints,
+        &bodies,
+        dt,
+        scale.unwrap_or(BOND_PENALTY_SCALE),
+        cap.unwrap_or(BOND_PENALTY_CAP),
+        effective_mass.unwrap_or(true),
+    ))
 }
 
 /// Orbit camera and click-to-shoot rays (shared with the Metal viewer).
@@ -330,7 +385,13 @@ impl Orbit {
         self.0.view_proj(aspect).to_vec()
     }
     /// `{origin, direction}` through a viewport point (u, v in 0..1 from the top left).
-    pub fn aim(&self, u: f64, v: f64, aspect: f64, projectile_radius: f64) -> Result<JsValue, JsError> {
+    pub fn aim(
+        &self,
+        u: f64,
+        v: f64,
+        aspect: f64,
+        projectile_radius: f64,
+    ) -> Result<JsValue, JsError> {
         to_js(&self.0.aim(u, v, aspect, projectile_radius))
     }
 }
@@ -377,17 +438,29 @@ pub struct HullArena(engine_schema::convex::HullArena);
 impl HullArena {
     #[wasm_bindgen(constructor)]
     pub fn new(max_vertices: Option<u32>) -> Result<HullArena, JsError> {
-        scene::hull_arena(max_vertices.map(|v| v as usize)).map(HullArena).map_err(err)
+        scene::hull_arena(max_vertices.map(|v| v as usize))
+            .map(HullArena)
+            .map_err(err)
     }
     /// Cook baked faces (flat xyz `vertices`), recentre and insert. Returns
     /// `{base, params, localPos, radius, vertices}` for a convex collider.
     #[wasm_bindgen(js_name = appendHull)]
-    pub fn append_hull(&mut self, vertices: &[f64], sizes: &[u32], indices: &[u32], source_scale: Option<f64>) -> Result<JsValue, JsError> {
+    pub fn append_hull(
+        &mut self,
+        vertices: &[f64],
+        sizes: &[u32],
+        indices: &[u32],
+        source_scale: Option<f64>,
+    ) -> Result<JsValue, JsError> {
         let v: Vec<[f64; 3]> = vertices.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
-        let (base, radius, local_pos) = scene::append_hull(&mut self.0, &v, sizes, indices, source_scale.unwrap_or(0.0)).map_err(err)?;
+        let (base, radius, local_pos) =
+            scene::append_hull(&mut self.0, &v, sizes, indices, source_scale.unwrap_or(0.0))
+                .map_err(err)?;
         let c = Collider::hull(0, 1.0, base, 1.0, radius, local_pos);
         let nv = self.0.records()[base as usize][0] & 255;
-        to_js(&serde_json::json!({"base": base, "params": c.params, "localPos": local_pos, "radius": radius, "vertexCount": nv}))
+        to_js(
+            &serde_json::json!({"base": base, "params": c.params, "localPos": local_pos, "radius": radius, "vertexCount": nv}),
+        )
     }
     pub fn release(&mut self, base: u32) -> bool {
         self.0.release(base)
@@ -398,7 +471,11 @@ impl HullArena {
     /// Dirty record ranges since the last call, as flat `[start, end, ...]`.
     #[wasm_bindgen(js_name = takeDirty)]
     pub fn take_dirty(&mut self) -> Vec<u32> {
-        self.0.take_dirty().into_iter().flat_map(|r| [r.start, r.end]).collect()
+        self.0
+            .take_dirty()
+            .into_iter()
+            .flat_map(|r| [r.start, r.end])
+            .collect()
     }
     #[wasm_bindgen(js_name = markAllDirty)]
     pub fn mark_all_dirty(&mut self) {
@@ -429,9 +506,16 @@ pub fn hull_view(data: &[u32], base: u32) -> Result<JsValue, JsError> {
     let w = |i: usize| data[base as usize * 4 + i];
     let f = |i: usize| f32::from_bits(w(i)) as f64;
     let head = w(0);
-    let (nv, nf, ne, flags) = ((head & 255) as usize, (head >> 8 & 255) as usize, (head >> 16 & 255) as usize, head >> 24);
+    let (nv, nf, ne, flags) = (
+        (head & 255) as usize,
+        (head >> 8 & 255) as usize,
+        (head >> 16 & 255) as usize,
+        head >> 24,
+    );
     let byte = |word: usize, b: usize| w(word + b / 4) >> ((b % 4) * 8) & 255;
-    let vertices: Vec<[f64; 3]> = (0..nv).map(|i| [f((4 + i) * 4), f((4 + i) * 4 + 1), f((4 + i) * 4 + 2)]).collect();
+    let vertices: Vec<[f64; 3]> = (0..nv)
+        .map(|i| [f((4 + i) * 4), f((4 + i) * 4 + 1), f((4 + i) * 4 + 2)])
+        .collect();
     let planes: Vec<serde_json::Value> = (0..nf)
         .map(|k| {
             let o = (4 + nv + k) * 4;
@@ -441,7 +525,9 @@ pub fn hull_view(data: &[u32], base: u32) -> Result<JsValue, JsError> {
     let faces: Vec<Vec<u32>> = (0..nf)
         .map(|k| {
             let entry = w((4 + nv + nf) * 4 + k);
-            (0..entry >> 16).map(|i| byte(w(1) as usize, (entry & 0xffff) as usize + i as usize)).collect()
+            (0..entry >> 16)
+                .map(|i| byte(w(1) as usize, (entry & 0xffff) as usize + i as usize))
+                .collect()
         })
         .collect();
     let edges: Vec<[u32; 4]> = (0..ne)
@@ -453,27 +539,52 @@ pub fn hull_view(data: &[u32], base: u32) -> Result<JsValue, JsError> {
     let adjacency: Vec<Vec<u32>> = (0..nv)
         .map(|i| {
             let x = w((4 + i) * 4 + 3);
-            (0..x >> 16).map(|j| byte(w(3) as usize, (x & 0xffff) as usize + j as usize)).collect()
+            (0..x >> 16)
+                .map(|j| byte(w(3) as usize, (x & 0xffff) as usize + j as usize))
+                .collect()
         })
         .collect();
-    to_js(&serde_json::json!({"nv": nv, "nf": nf, "ne": ne, "closed": flags & 1 != 0,
-        "vertices": vertices, "planes": planes, "faces": faces, "edges": edges, "adjacency": adjacency}))
+    to_js(
+        &serde_json::json!({"nv": nv, "nf": nf, "ne": ne, "closed": flags & 1 != 0,
+        "vertices": vertices, "planes": planes, "faces": faces, "edges": edges, "adjacency": adjacency}),
+    )
 }
 
 /// World vertices (flat xyz) of a convex collider (`{shape, params, localPos?,
 /// localRot?}`) at body pose `p`, `q`.
 #[wasm_bindgen(js_name = colliderWorldVertices)]
-pub fn collider_world_vertices(hull_data: &[u32], collider: JsValue, p: &[f64], q: &[f64]) -> Result<Vec<f64>, JsError> {
+pub fn collider_world_vertices(
+    hull_data: &[u32],
+    collider: JsValue,
+    p: &[f64],
+    q: &[f64],
+) -> Result<Vec<f64>, JsError> {
     let c: Collider = from_js(collider)?;
-    let data: Vec<[u32; 4]> = hull_data.chunks(4).map(|r| [r[0], r[1], r[2], r[3]]).collect();
-    Ok(scene::collider_vertices(&data, &c, [p[0], p[1], p[2]], [q[0], q[1], q[2], q[3]]).into_iter().flatten().collect())
+    let data: Vec<[u32; 4]> = hull_data
+        .chunks(4)
+        .map(|r| [r[0], r[1], r[2], r[3]])
+        .collect();
+    Ok(
+        scene::collider_vertices(&data, &c, [p[0], p[1], p[2]], [q[0], q[1], q[2], q[3]])
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
 }
 
 /// Conservative world AABB `[lo.xyz, hi.xyz]` of a collider at a body pose (as `build_aabbs`).
 #[wasm_bindgen(js_name = colliderWorldBounds)]
-pub fn collider_world_bounds(hull_data: &[u32], collider: JsValue, p: &[f64], q: &[f64]) -> Result<Vec<f64>, JsError> {
+pub fn collider_world_bounds(
+    hull_data: &[u32],
+    collider: JsValue,
+    p: &[f64],
+    q: &[f64],
+) -> Result<Vec<f64>, JsError> {
     let c: Collider = from_js(collider)?;
-    let data: Vec<[u32; 4]> = hull_data.chunks(4).map(|r| [r[0], r[1], r[2], r[3]]).collect();
+    let data: Vec<[u32; 4]> = hull_data
+        .chunks(4)
+        .map(|r| [r[0], r[1], r[2], r[3]])
+        .collect();
     let (lo, hi) = scene::collider_bounds(&data, &c, [p[0], p[1], p[2]], [q[0], q[1], q[2], q[3]]);
     Ok(lo.into_iter().chain(hi).collect())
 }
@@ -483,16 +594,28 @@ pub fn collider_world_bounds(hull_data: &[u32], collider: JsValue, p: &[f64], q:
 #[wasm_bindgen(js_name = packHull)]
 pub fn pack_hull(vertices: &[f32], sizes: &[u32], indices: &[u32]) -> Result<Vec<u32>, JsError> {
     use engine_schema::convex::ConvexHull;
-    let v: Vec<glam::Vec3> = vertices.chunks(3).map(|c| glam::Vec3::new(c[0], c[1], c[2])).collect();
+    let v: Vec<glam::Vec3> = vertices
+        .chunks(3)
+        .map(|c| glam::Vec3::new(c[0], c[1], c[2]))
+        .collect();
     let mut out = Vec::new();
-    ConvexHull::from_faces(&v, sizes, indices).map_err(err)?.pack(&mut out).map_err(err)?;
+    ConvexHull::from_faces(&v, sizes, indices)
+        .map_err(err)?
+        .pack(&mut out)
+        .map_err(err)?;
     Ok(out.into_iter().flatten().collect())
 }
 
 /// Arena base of hull collider params.
 #[wasm_bindgen(js_name = hullBase)]
 pub fn hull_base(params: &[f64]) -> u32 {
-    Collider::new(0, scene::SHAPE_CONVEX, 0.0, [params[0], params[1], params[2], params[3]]).hull_base()
+    Collider::new(
+        0,
+        scene::SHAPE_CONVEX,
+        0.0,
+        [params[0], params[1], params[2], params[3]],
+    )
+    .hull_base()
 }
 
 /// The per-tick host plan (see `engine_fracture::plan`).
@@ -503,7 +626,15 @@ pub struct Plan(Planner);
 impl Plan {
     #[wasm_bindgen(constructor)]
     pub fn new(scene: &Scene, max_binding: f64, max_buffer: f64) -> Result<Plan, JsError> {
-        Planner::new(&scene.0, Limits { max_binding: max_binding as u64, max_buffer: max_buffer as u64 }).map(Plan).map_err(err)
+        Planner::new(
+            &scene.0,
+            Limits {
+                max_binding: max_binding as u64,
+                max_buffer: max_buffer as u64,
+            },
+        )
+        .map(Plan)
+        .map_err(err)
     }
     /// `[[dispatch name, exported entry]]`, indexed by command kernel ids.
     pub fn kernels() -> Result<JsValue, JsError> {
@@ -531,7 +662,11 @@ impl Plan {
     }
     #[wasm_bindgen(js_name = bufferSizes)]
     pub fn buffer_sizes(&self) -> Vec<f64> {
-        self.0.buffer_sizes_bytes().iter().map(|&s| s as f64).collect()
+        self.0
+            .buffer_sizes_bytes()
+            .iter()
+            .map(|&s| s as f64)
+            .collect()
     }
     #[wasm_bindgen(js_name = bodyBytes)]
     pub fn body_bytes(&self) -> Vec<u8> {
@@ -654,10 +789,21 @@ impl Plan {
         self.0.set_collider(index, from_js(collider)?).map_err(err)
     }
     /// Fire the next projectile: `{id, bytes, offsets}` (write `bytes` at both offsets of buffer 0).
-    pub fn launch(&mut self, origin: &[f64], direction: &[f64], speed: Option<f64>, arc: Option<bool>) -> Result<JsValue, JsError> {
+    pub fn launch(
+        &mut self,
+        origin: &[f64],
+        direction: &[f64],
+        speed: Option<f64>,
+        arc: Option<bool>,
+    ) -> Result<JsValue, JsError> {
         let (id, bytes) = self
             .0
-            .launch([origin[0], origin[1], origin[2]], [direction[0], direction[1], direction[2]], speed, arc)
+            .launch(
+                [origin[0], origin[1], origin[2]],
+                [direction[0], direction[1], direction[2]],
+                speed,
+                arc,
+            )
             .map_err(err)?;
         to_js(&serde_json::json!({"id": id, "bytes": bytes, "offsets": self.0.body_offsets(id)}))
     }

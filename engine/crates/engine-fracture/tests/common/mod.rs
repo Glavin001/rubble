@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 pub fn asset_path(file: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine-webgpu/fracture/assets").join(file)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../engine-webgpu/fracture/assets")
+        .join(file)
 }
 
 pub fn load(file: &str) -> FractureAsset {
@@ -23,5 +25,8 @@ pub fn arch() -> &'static FractureAsset {
 }
 
 pub fn close(a: f64, b: f64, rel: f64) {
-    assert!((a - b).abs() <= rel * a.abs().max(b.abs()).max(1e-30), "{a} vs {b}");
+    assert!(
+        (a - b).abs() <= rel * a.abs().max(b.abs()).max(1e-30),
+        "{a} vs {b}"
+    );
 }
