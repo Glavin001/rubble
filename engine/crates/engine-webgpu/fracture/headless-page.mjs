@@ -34,7 +34,10 @@ async function buildNamed(name,device,bonds,layout,levelOverride=null,paramsOver
  const asset=parseFractureGlb(await response.arrayBuffer());
  const level=levelOverride??asset.initialLevel(entry.level);
  const built=withParams(buildScene(asset,level,{maxHullVertices:entry.maxHullVertices}),paramsOverride);
- return layoutScene(bonds?await preloadBonds(device,built):withoutJoints(built),lay,false);
+ const scene=layoutScene(bonds?await preloadBonds(device,built):withoutJoints(built),lay,false);
+ // For sleep-diag's per-fragment breakdown: copy 0's fragment -> body map and the materials.
+ const byId=new Map(scene.selected.map(f=>[f,{id:scene.handle.bodyOfFragment(f),f:asset.handle.fragment(f)}]));
+ return Object.assign(scene,{byId,library:asset.handle.library()});
 }
 
 async function run(){

@@ -193,7 +193,27 @@ export async function runSleepDiag(sim, scene, {ticks = 2400, every = 120, top =
       if (seen.has(key)) continue; seen.add(key); deepPairs++; if (bonded.has(key)) deepBonded++;
     }
   }
-  return {samples, final: {awake: awake.length, contactlessAwake: contactless, deepPairs, deepBonded, fastest: byLin, spinniest: bySpin}};
+  return {samples, final: {awake: awake.length, contactlessAwake: contactless, deepPairs, deepBonded, fastest: byLin, spinniest: bySpin, byFragment: awakeByFragment(scene, awake, isSlow)}};
+}
+
+// Awake and moving bodies by source material and mass band, so asset-side
+// causes (tiny fragments, extreme mass ratios) show up per fragment kind.
+// Copies of one house repeat its local body ids, so local = (i-1) % perHouse + 1.
+function awakeByFragment(scene, awake, isSlow) {
+  if (!scene.byId || !scene.library) return null;
+  const local = new Map(), perHouse = scene.byId.size;
+  for (const {id, f} of scene.byId.values()) local.set(id, f);
+  const band = (m) => m < 0.06 ? '<60g' : m < 0.5 ? '60-500g' : m < 5 ? '0.5-5kg' : m < 50 ? '5-50kg' : '>50kg';
+  const out = {}, houses = {};
+  for (const b of awake) {
+    if (b.i >= scene.projectileStart) continue;
+    const house = Math.floor((b.i - 1) / perHouse); houses[house] = (houses[house] ?? 0) + 1;
+    const f = local.get((b.i - 1) % perHouse + 1); if (!f) continue;
+    const mat = scene.library.material[f.materialIds[0]]?.id ?? String(f.materialIds[0]);
+    const key = `${mat} ${band(f.mass)}`, e = out[key] ??= {awake: 0, moving: 0};
+    e.awake++; if (!isSlow(b)) e.moving++;
+  }
+  return {kinds: out, houses};
 }
 
 // Trace (headless-page sleeptrace=<tick>): run to `at`, pick the fastest and

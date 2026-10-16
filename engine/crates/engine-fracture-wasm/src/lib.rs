@@ -85,6 +85,20 @@ impl Asset {
     pub fn metadata_json(&self) -> Result<String, JsError> {
         self.0.metadata_json().map_err(err)
     }
+    /// The embedded material library (`{material, interface_material, ...}`).
+    pub fn library(&self) -> Result<JsValue, JsError> {
+        to_js(&self.0.library)
+    }
+    /// One fragment record (`{id, level, mass, materialIds, ...}`).
+    pub fn fragment(&self, id: u32) -> Result<JsValue, JsError> {
+        let f = self
+            .0
+            .physics
+            .fragments
+            .get(id as usize)
+            .ok_or_else(|| err("fragment out of range"))?;
+        to_js(f)
+    }
     /// The level a sample opens at (preferred if present, else the first).
     #[wasm_bindgen(js_name = initialLevel)]
     pub fn initial_level(&self, preferred: Option<u8>) -> Option<u8> {
