@@ -9,6 +9,8 @@
 //   budget   JSON merged into scene.capacity, e.g. {"deterministic":true}
 //   bonds    1: the lab's breakable bonds (experimental), preloaded as in the lab
 //   columns, rows   grid layout override (grid scenes only)
+//   staticUnhit  1: houses outside the shot's column become static (immovable).
+//            Behaviour-changing; only to estimate compound houses that stay intact.
 import {parseFractureGlb} from './asset.mjs';
 import {buildScene,buildGrid,buildSuburb} from './geometry.mjs';
 import {buildCuboidHouse} from './cuboid-house.mjs';
@@ -45,6 +47,17 @@ async function run(){
  let gpuError=null;device.addEventListener('uncapturederror',e=>{gpuError??=String(e.error.message)});
  const layout=q.has('columns')||q.has('rows')?{...(q.has('columns')?{columns:num('columns',7)}:{}),...(q.has('rows')?{rows:num('rows',7)}:{})}:null;
  const built=await buildNamed(name,device,num('bonds',0)===1,layout),scene={...built,capacity:{...built.capacity,...budget}};
+ let frozen=0;
+ if(num('staticUnhit',0)===1&&scene.rowShot&&scene.instanceStride){
+  const frags=scene.instanceStride,x=scene.rowShot.origin[0],r=scene.projectileRadius,ground=scene.bodies[0];
+  scene.bodies=scene.bodies.slice();
+  for(let k=0;k<scene.copies;k++){
+   let lo=1/0,hi=-1/0;for(let b=1+k*frags;b<1+(k+1)*frags;b++){lo=Math.min(lo,scene.bodies[b].p[0]);hi=Math.max(hi,scene.bodies[b].p[0])}
+   if(x+r>lo-0.5&&x-r<hi+0.5)continue;
+   for(let b=1+k*frags;b<1+(k+1)*frags;b++)scene.bodies[b]={...scene.bodies[b],invMass:0,invI:[0,0,0],flags:ground.flags};
+   frozen++;
+  }
+ }
  const sim=await createSimulation(device,scene);
  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
  const log=[],t0=performance.now();
@@ -56,7 +69,7 @@ async function run(){
  let kernels=null;
  if(num('profile',1)){const agg={};for(let r=0;r<3;r++){const p=await sim.profileKernels();if(!p.supported)break;for(const [k,v] of Object.entries(p.kernels))agg[k]=(agg[k]??0)+v.ms/3}
   kernels=Object.fromEntries(Object.entries(agg).sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k,+v.toFixed(3)]))}
- const result={scene:name,bodies:scene.bodies.length,colliders:scene.colliders.length,joints:scene.joints?.length??0,budget,warm,measure,
+ const result={scene:name,frozenHouses:frozen,bodies:scene.bodies.length,colliders:scene.colliders.length,joints:scene.joints?.length??0,budget,warm,measure,
   msPerTick:+msPerTick.toFixed(3),ticksPerSecond:+(1000/msPerTick).toFixed(1),warmMs:Math.round(warmMs),counters,kernels,trace:log,gpuError};
  sim.dispose();return result;
 }
