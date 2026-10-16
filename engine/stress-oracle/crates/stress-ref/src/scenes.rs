@@ -109,6 +109,24 @@ pub fn bombarded(mut town: Scene, rams: usize) -> Scene {
     town
 }
 
+/// `bombarded` with each ram aimed at exactly copy `i`'s bodies (`pack_town` names them
+/// `<body>_<i>`). `bombarded`'s suffix match also takes copies 10, 20, ... for copy 0
+/// (and 11, 21, ... for copy 1), aiming between them; it is kept as it is because
+/// recorded benchmarks (and PhysX's copy of this code) use it.
+pub fn bombarded_exact(mut town: Scene, rams: usize) -> Scene {
+    for i in 0..rams {
+        let mut one = town.clone();
+        one.bodies.retain(|b| b.name.rsplit_once('_').is_some_and(|(_, k)| k == i.to_string()));
+        if one.bodies.is_empty() {
+            break;
+        }
+        let (lo, hi) = bounds(&one);
+        town = ram_at(town, &format!("ram{i}"), lo, hi);
+    }
+    town.name = format!("{} ({rams} rammed)", town.name);
+    town
+}
+
 /// The ram of `rammed` into the -x face of the bounds `lo`-`hi`.
 pub fn ram_at(mut scene: Scene, name: &str, lo: Vec3, hi: Vec3) -> Scene {
     let mid = (lo + hi) * 0.5;

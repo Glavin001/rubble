@@ -158,6 +158,19 @@ pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
     out
 }
 
+/// The scale set: 256 copies of house-1story, intact or with four of them rammed (the
+/// target of hundreds of houses).
+pub fn scale(seconds: f64) -> Vec<(&'static str, Scene)> {
+    let mut out = Vec::new();
+    for (label, n, rams) in [("town256_idle", 256, 0), ("town256_four_rams", 256, 4)] {
+        let town = stress_ref::scenes::pack_town(&house(), n, 2.0);
+        let mut s = configure(if rams > 0 { stress_ref::scenes::bombarded_exact(town, rams) } else { town }, seconds);
+        s.name = label.into();
+        out.push((label, s));
+    }
+    out
+}
+
 pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut idle = configure(house(), seconds);
     idle.name = "house_idle".into();
@@ -234,7 +247,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let engine: Box<dyn stress_ref::engine::RigidEngine> = if two_devices {
         stress_rubble::RubbleEngine::boxed(Vec3::from_array(scene.gravity)).expect("rubble engine")
     } else {
-        Box::new(stress_rubble::RubbleEngine::with_device(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone()).expect("rubble engine"))
+        Box::new(stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine"))
     };
     let mut w = stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world");
     // rubble's integrated pipeline: routing before the step, no frame rewind.
@@ -264,7 +277,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let ram = w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let p = &w.solver.profile;
     let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split,
-        "batches": p.batches, "substeps": p.substeps, "host_splits": w.solver.host_splits, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
+        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
     let digest = digest(&w.solver.mirror, &w.solver.impactors);
     let metrics = metrics(scene, &o);
@@ -284,7 +297,7 @@ fn main() {
         match a.as_str() {
             "--solver" => solver = args.next().expect("--solver NAME"),
             "--only" => only = args.next(),
-            "--set" => set = args.next().expect("--set realtime|accuracy|towns|packs"),
+            "--set" => set = args.next().expect("--set realtime|accuracy|towns|scale|packs"),
             "--config" => config = args.next().expect("--config LADDER-RUNG"),
             // A model feature on or off on top of the configuration (e.g. crushing=off).
             "--feature" => {
@@ -303,6 +316,7 @@ fn main() {
     let list = match set.as_str() {
         "accuracy" => named(accuracy(seconds)),
         "towns" => named(towns(seconds)),
+        "scale" => named(scale(seconds)),
         "packs" => packs(seconds),
         _ => named(regimes(seconds)),
     };
