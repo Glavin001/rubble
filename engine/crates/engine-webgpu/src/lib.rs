@@ -6,7 +6,7 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 mod gpu;
-pub use gpu::WgpuSim;
+pub use gpu::{SimSnapshot, WgpuSim};
 
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
