@@ -235,3 +235,21 @@ earlier. In the lab during the row shot it runs at 22-30 ticks/s and 50-58
 FPS. Rendering takes ~2.4 ms per frame (16.7M non-indexed vertices); the
 rest of the GPU goes to physics. The ceiling remains the ~26.5 ms per tick
 physics cost at the peak.
+
+### Headless A/B results (`fracture/headless.mjs`, deterministic, tick 480)
+
+| Change | Counts vs HEAD | Kernel effect |
+|---|---|---|
+| Split grid: movers/resting tables, mover pairs visited once (forward cells) | identical | broadphase query 3.85 → 4.04 ms (no gain) |
+| Per-thread pair batching (one atomic per 8 pairs) | identical | 3.85 → 3.82 ms (no gain) |
+| `[ForceUnroll]` of the solver's small loops | differ | primal 8.8 → 8.1 ms |
+| Unrolling only the zeroing and negation loops | differ | no gain |
+
+The broadphase query is bound neither by chain-entry visits nor by atomic
+contention.
+
+Any edit to the solver kernels changes results in the last bits: Metal
+fuses floating-point operations differently once the code shape changes.
+This happens even for an edit that cannot change any value. The unchanged
+shaders reproduce exactly (614002 candidates on repeat runs). Accepting such
+rounding-only changes is the user's decision.
