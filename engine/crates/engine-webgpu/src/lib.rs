@@ -69,8 +69,14 @@ impl WebGpuWorld {
                     {
                         // These entries access buffers only. Slang over-lowers
                         // DeviceMemoryBarrierWithGroupSync to a texture barrier
-                        // unavailable in the supported WGSL/Naga version.
+                        // unavailable in the supported WGSL/Naga version, and
+                        // ends it with an empty statement (`;;`) that Tint
+                        // accepts but Safari's WGSL parser rejects.
                         w.replace(
+                            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+                            "storageBarrier(); workgroupBarrier();",
+                        )
+                        .replace(
                             "storageBarrier(); textureBarrier(); workgroupBarrier();",
                             "storageBarrier(); workgroupBarrier();",
                         )
@@ -640,6 +646,15 @@ mod tests {
             assert!(!module.global_variables.iter().any(|(_, global)|
                 global.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 21)),
                 "{name}: production contact reuse binds the shared scratch/statistics buffer. The removed hit/miss/generation diagnostics serialized every body/pair on six global atomic counters; keep optional instrumentation out of the default performance path.");
+        }
+    }
+
+    #[test]
+    fn exported_wgsl_has_no_empty_statements() {
+        // Safari's WGSL parser rejects `;;` ("Not a valid statement"); Tint accepts it.
+        for (name, result) in WebGpuWorld::compile_shaders_report() {
+            let source = result.unwrap();
+            assert!(!source.contains(";;"), "{name}: empty statement `;;` breaks Safari");
         }
     }
 
