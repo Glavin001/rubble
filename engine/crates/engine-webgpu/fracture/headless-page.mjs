@@ -9,6 +9,8 @@
 //   budget   JSON merged into scene.capacity, e.g. {"deterministic":true}
 //   bonds    1: the lab's breakable bonds (experimental), preloaded as in the lab
 //   columns, rows   grid layout override (grid scenes only)
+//   scene=pairs a=<shape> b=<shape> count=N reuse=0|1   collision-cost benchmark
+//            (shape-bench.mjs): N static bases of shape a, each with shape b resting on it.
 //   staticUnhit  1: houses outside the shot's column become static (immovable).
 //            Behaviour-changing; only to estimate compound houses that stay intact.
 import {parseFractureGlb} from './asset.mjs';
@@ -16,6 +18,7 @@ import {buildScene,buildGrid,buildSuburb} from './geometry.mjs';
 import {buildCuboidHouse} from './cuboid-house.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
+import {buildPairScene} from './shape-bench.mjs';
 
 // Same bundled scenes as the lab (main.mjs samples), without bond preloading.
 const SCENES={house:{file:'veneer-house.glb'},grid:{file:'veneer-house.glb',layout:{columns:7,rows:7},level:2},
@@ -46,7 +49,9 @@ async function run(){
    maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  let gpuError=null;device.addEventListener('uncapturederror',e=>{gpuError??=String(e.error.message)});
  const layout=q.has('columns')||q.has('rows')?{...(q.has('columns')?{columns:num('columns',7)}:{}),...(q.has('rows')?{rows:num('rows',7)}:{})}:null;
- const built=await buildNamed(name,device,num('bonds',0)===1,layout),scene={...built,capacity:{...built.capacity,...budget}};
+ const built=name==='pairs'?buildPairScene({a:q.get('a')??'box',b:q.get('b')??'box',count:num('count',4096)}):await buildNamed(name,device,num('bonds',0)===1,layout);
+ if(name==='pairs'&&num('reuse',0)===1)built.params={...built.params,flags:built.params.flags|1};
+ const scene={...built,capacity:{...built.capacity,...budget}};
  let frozen=0;
  if(num('staticUnhit',0)===1&&scene.rowShot&&scene.instanceStride){
   const frags=scene.instanceStride,x=scene.rowShot.origin[0],r=scene.projectileRadius,ground=scene.bodies[0];
