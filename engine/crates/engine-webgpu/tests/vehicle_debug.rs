@@ -589,3 +589,82 @@ fn trace_car_on_car() {
         }
     }
 }
+
+/// Traffic-scale timing (`--ignored`): 48 vehicles + 400 crates, ms per step.
+#[test]
+#[ignore]
+fn bench_traffic() {
+    let mut sim = WgpuSim::new(WorldCapacity {
+        max_bodies: 8192,
+        max_colliders: 16384,
+        max_contacts: 131072,
+        max_joints: 64,
+        max_candidates: 262144,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .expect("wgpu");
+    let mut p = AvbdParams::default();
+    p.iterations = 8;
+    sim.set_params(p);
+    sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+    let mut g = BodyState::dynamic(glam::Vec3::new(0.0, -5.0, 0.0), glam::Quat::IDENTITY, 1.0, glam::Vec3::ONE);
+    g.inv_mass = 0.0;
+    g.inv_inertia = [0.0; 3];
+    g.flags = 0;
+    let ground = sim.add_body(g);
+    sim.add_collider(Collider {
+        body: ground,
+        shape: ShapeType::Box as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [400.0, 5.0, 400.0, 400.0],
+    });
+    let kinds = ["sedan", "sports", "kart", "jolt_default", "destructible_sedan", "monster_truck"];
+    let mut rng = 7u32;
+    let mut rand = || {
+        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+        rng as f32 / 4294967296.0
+    };
+    let mut vs = Vec::new();
+    for i in 0..48 {
+        let (x, z) = (((i % 7) as f32 - 3.5) * 14.0, ((i / 7) as f32 - 3.5) * 14.0);
+        let k = kinds[i % kinds.len()];
+        let y = if k == "monster_truck" { 3.5 } else { 2.2 };
+        let v = sim.add_vehicle(&presets::by_name(k).unwrap(), [x, y, z], [0.0, 0.0, 0.0, 1.0]).expect("v");
+        vs.push(v);
+    }
+    for _ in 0..400 {
+        let body = sim.add_body(BodyState::dynamic(
+            glam::Vec3::new((rand() - 0.5) * 120.0, 0.5 + rand() * 6.0, (rand() - 0.5) * 120.0),
+            glam::Quat::IDENTITY,
+            30.0,
+            glam::Vec3::splat(5.0),
+        ));
+        sim.add_collider(Collider {
+            body,
+            shape: ShapeType::Box as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [0.5, 0.5, 0.5, 0.87],
+        });
+    }
+    for (i, v) in vs.iter().enumerate() {
+        sim.set_vehicle_input(*v, VehicleInput { forward: 0.3 + 0.01 * i as f32, steer: if i % 2 == 0 { 0.3 } else { -0.3 }, ..Default::default() });
+    }
+    for _ in 0..60 {
+        sim.step().expect("step");
+    }
+    let t0 = std::time::Instant::now();
+    for _ in 0..300 {
+        sim.step().expect("step");
+    }
+    eprintln!("BENCH traffic: {:.2} ms/step", t0.elapsed().as_secs_f64() * 1000.0 / 300.0);
+}

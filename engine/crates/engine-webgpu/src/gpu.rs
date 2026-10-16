@@ -66,6 +66,9 @@ pub struct WgpuSim {
     body_count: u32,
     collider_count: u32,
     joint_count: u32,
+    /// Tyre joints never enter the joint pair hash; it only needs clearing once
+    /// after they first appear (WgpuSim has no user joints to insert).
+    joint_hash_clear_pending: bool,
     command_count: u32,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
@@ -440,6 +443,7 @@ impl WgpuSim {
             body_count: 0,
             collider_count: 0,
             joint_count: 0,
+            joint_hash_clear_pending: false,
             command_count: 0,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -625,6 +629,7 @@ impl WgpuSim {
         let n_bodies = self.body_count.max(1) as u64;
         let n_cols = self.collider_count.max(1) as u64;
         let n_joints = self.joint_count.max(1) as u64;
+        let clear_joint_hash = std::mem::take(&mut self.joint_hash_clear_pending);
 
         self.write_host_uniforms();
         let mut enc = self
@@ -645,9 +650,9 @@ impl WgpuSim {
             self.disp(&mut pass, "vehicle_input", n_veh, None);
         }
         self.disp(&mut pass, "build_aabbs", n_cols, None);
-        if self.joint_count > 0 {
+        if clear_joint_hash {
+            // Only tyre joints here: they skip the hash, which just has to be empty.
             self.disp(&mut pass, "joint_hash_clear", 65536, None);
-            self.disp(&mut pass, "joint_hash_insert", n_joints, None);
         }
         self.disp(
             &mut pass,
@@ -1273,6 +1278,7 @@ impl VehicleBackend for WgpuSim {
         let stride = std::mem::size_of::<engine_schema::Joint>() as u64;
         self.queue.write_buffer(&self.bufs[5], u64::from(self.joint_count) * stride, bytemuck::cast_slice(joints));
         self.joint_count += joints.len() as u32;
+        self.joint_hash_clear_pending = true;
     }
 
     fn collider_count(&self) -> u32 {
