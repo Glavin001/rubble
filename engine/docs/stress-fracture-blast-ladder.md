@@ -59,7 +59,8 @@ states how many repeats it is over.
   - an exact one-substep frame average;
   - skipping solves whose inputs repeat bit for bit;
   - no rebuild without damage;
-  - two engine bugs: a broadphase that lost static pairs, and hulls rubble rejected.
+  - two engine bugs: a broadphase that lost static pairs (this changes b8_sudden, for
+    the worse; see §4), and hulls rubble rejected (now feat/stress-fracture's fix).
 - **The ladder: two features carry nearly all the accuracy.**
   - Impact islands cut exit-speed error from 64-69 % to 3 %.
   - Crack contact halves broken-bond error, and is cheaper than the rung before it.
@@ -291,7 +292,7 @@ Engine bugs found and fixed (rubble):
 | bug | symptom | fix | check |
 |---|---|---|---|
 | grid broadphase lost static pairs below the querier's index (above 512 colliders) | b5's ram passed through its anchored 840-chunk wall: no contact at all with islands off; fragments fell through anchored structures in the engine | statics kept at any index in both grid paths (`world_step.slang`); new test `broadphase_grid_keeps_static_pairs_below_the_querier_index` fails before, passes after | lib suite, columns_10k, ring_hold, render_abi pass; realtime digests unchanged; gables_506k fails the same way before and after (pre-existing) |
-| "hull not accepted by rubble: non-convex collision hull" panic when house hull chunks form a fragment | half the ladder's rungs (and destruction-view's house_ram) crashed | the chunk's own-frame hull, turned by the collider, when the f32 body-frame hull is rejected | accepted hulls built exactly as before; realtime digests unchanged |
+| "hull not accepted by rubble: non-convex collision hull" panic when house hull chunks form a fragment | half the ladder's rungs (and destruction-view's house_ram) crashed | measured here with this branch's fallback (own-frame hull turned by the collider, ee15edc); after merging feat/stress-fracture, its fix 4b79c32 (hulls cooked once in their own frame, box fallback with a report) replaces it | realtime and accuracy digests equal feat/stress-fracture's (except b8, see below) |
 
 Open items found along the way:
 - **Adaptive without islands overflows rubble on house_car.** `Overflow(128)` is a grid
@@ -304,9 +305,18 @@ Open items found along the way:
   comp-wall-bay, ram placement explodes in the real-time configuration (54 and 63 m/s
   exit speeds). The packs set here places it from the hull surface. The shared scene is
   unchanged, because its digests are the benchmark's.
-- **The broadphase fix changes one real-time outcome.** b5_v30 now breaks 95 bonds
-  where the benchmark doc has 91: fragments now collide with the anchored wall's
-  remainder in the engine.
+- **The broadphase fix changes one real-time outcome: b8_sudden, for the worse.**
+  - With the fix alone on top of feat/stress-fracture (checked bit for bit, twice),
+    b8_sudden breaks 36 bonds into 35 fragments, where it broke 10 into 10. The oracle
+    breaks 11.
+  - Debris that used to fall through the anchored remainder of the frame now hits it in
+    the engine. The engine's contact-to-load path then over-breaks: the oracle resolves
+    that contact with its own penalty contact.
+  - The fix is correct (the engine was dropping contacts), but it exposes that error, so
+    it is a decision for the engine owners. It is its own commit (8352765).
+  - The other 11 accuracy scenes are bit-identical with and without it. b5_v30's 95
+    broken bonds, where the benchmark doc has 91, come from feat/stress-fracture itself,
+    not from this fix.
 
 ## 5. The ladder
 
