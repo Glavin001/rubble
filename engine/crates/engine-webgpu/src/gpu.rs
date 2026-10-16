@@ -5,7 +5,7 @@ use bytemuck::bytes_of;
 use engine_exec::rigid_plan;
 // Kernel fixtures in gpu_tests reach these through `super::*`.
 #[cfg(test)]
-use engine_exec::rigid_plan::{constraint_id_words, COLOR_ROUND_LIMIT};
+use engine_exec::rigid_plan::{constraint_id_words, HostUniforms};
 use engine_exec::{ExecError, PhaseTimingsMs};
 use engine_schema::convex::HullArena;
 use engine_schema::*;
@@ -123,6 +123,9 @@ pub struct WgpuSim {
     /// The host wrote body state since the last step (`write_bodies`): step even
     /// if the last step left no body awake.
     wake_pending: bool,
+    /// Steps the counters in `last_counters` describe (pipelined steps leave
+    /// them stale until `drain`; the asleep skip needs current counters).
+    counted_steps: u32,
     /// Step-start counter values, copied into binding 7 inside the step's
     /// encoder after the previous counts were forwarded to the host uniform.
     counter_upload: wgpu::Buffer,
@@ -464,6 +467,7 @@ impl WgpuSim {
         });
         #[allow(unused_mut)]
         let mut sim = Self {
+            counted_steps: 0,
             counter_upload,
             compact_contacts,
             persistent_contacts,
@@ -863,6 +867,7 @@ impl WgpuSim {
     pub fn drain(&mut self) -> Result<StepCounters, ExecError> {
         let counters = self.read_counters();
         self.last_counters = counters;
+        self.counted_steps = self.steps_done;
         self.manifolds_valid = counters.overflow_flags == 0;
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
@@ -884,13 +889,17 @@ impl WgpuSim {
 
     fn step_core(&mut self, reuse_manifolds: bool, read: bool) -> Result<StepCounters, ExecError> {
         let wall = std::time::Instant::now();
+        // Skip only when the counters describe the latest step: pipelined steps
+        // leave them stale until `drain`.
         if self.steps_done > 0
+            && self.counted_steps == self.steps_done
             && self.last_counters.awake_count == 0
             && self.command_count == 0
             && self.body_count > 0
             && !self.wake_pending
         {
             self.steps_done += 1;
+            self.counted_steps = self.steps_done;
             self.last_timings.total_gpu = 0.0;
             return Ok(self.last_counters);
         }
@@ -932,7 +941,7 @@ impl WgpuSim {
         });
         for c in &cmds {
             match *c {
-                rigid_plan::Cmd::Copy { .. } => {}
+                rigid_plan::Cmd::Copy { .. } | rigid_plan::Cmd::Phase { .. } => {}
                 rigid_plan::Cmd::Dispatch { kernel, threads, pass: p } => {
                     self.disp(&mut pass, kernel, threads, Some(p));
                 }
@@ -961,6 +970,7 @@ impl WgpuSim {
         self.command_count = 0;
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
+        self.counted_steps = self.steps_done;
         self.manifolds_valid = counters.overflow_flags == 0;
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));

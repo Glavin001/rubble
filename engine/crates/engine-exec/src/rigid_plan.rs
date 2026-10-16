@@ -39,6 +39,8 @@ pub enum Cmd {
         threads: u64,
         pass: u32,
     },
+    /// End of a named phase (profiling hosts split timing here; others ignore it).
+    Phase { name: &'static str },
     /// Indirect dispatch from work/colour slot `slot` of binding 23.
     Indirect {
         kernel: &'static str,
@@ -156,6 +158,9 @@ impl Enc {
             pass: 0,
         });
     }
+    fn phase(&mut self, name: &'static str) {
+        self.0.push(Cmd::Phase { name });
+    }
     fn wp(&mut self, kernel: &'static str, slot: u32, pass: u32) {
         self.0.push(Cmd::Indirect { kernel, slot, pass });
     }
@@ -221,6 +226,7 @@ pub fn encode_step(
         e.d("broadphase_query", n_cols);
     }
     e.d(work_args, 64);
+    e.phase("broadphase");
     if m.carry_rest && !reuse_manifolds {
         // Previous manifolds (slot 72) are intact until narrowphase; recount
         // candidates (slot 64) after the carried resting pairs join them.
@@ -273,6 +279,7 @@ pub fn encode_step(
             e.w("convex_manifold", 76);
         }
     }
+    e.phase("narrowphase");
     e.d(work_args, 64);
     if !reuse && !reuse_manifolds {
         e.d("contact_hash_clear", i.warm_hash_words);
@@ -314,6 +321,7 @@ pub fn encode_step(
     if i.joint_count > 0 {
         e.d("warmstart_joints", n_joints);
     }
+    e.phase("warm");
     e.d("build_awake_list", n_bodies);
     e.d(work_args, 64);
     e.d("csr_clear", n_bodies + 1);
@@ -333,6 +341,7 @@ pub fn encode_step(
         e.d("csr_scatter_joints", n_joints);
     }
     e.w("csr_sort", 67);
+    e.phase("graph");
     e.w("init_colors", 67);
     e.d(work_args, 64);
     if m.local_repair {
@@ -349,6 +358,7 @@ pub fn encode_step(
     if rounds < COLOR_ROUND_LIMIT {
         e.dp("color_bodies_tail", 64, rounds);
     }
+    e.phase("coloring");
     let max_c = i.max_colors.min(32);
     e.d("count_color_tiles", n_bodies);
     e.d("prefix_color_tiles_parallel", u64::from(max_c) * 64);
@@ -364,6 +374,7 @@ pub fn encode_step(
         }
         e.w("pack_solver_contacts", 66);
     }
+    e.phase("topology");
     // Colours dispatched one by one: last step's colour count plus headroom (an
     // empty indirect dispatch still costs a barrier). Later colours run in
     // solve_primal_sparse, which loops to this step's real GPU colour count.
@@ -384,7 +395,9 @@ pub fn encode_step(
         if sparse_start < max_c {
             e.dp(sparse, 64, sparse_start);
         }
+        e.phase("primal");
         e.wp(dual, 65, u32::from(iter + 1 == i.iterations));
+        e.phase("dual");
     }
     e.d("extract_velocity_sleep", n_bodies);
     e.d("write_sleep_args", 64);
@@ -396,6 +409,7 @@ pub fn encode_step(
         }
     }
     e.w("sleep_island_commit", 67);
+    e.phase("sleep");
     e.0
 }
 
@@ -517,6 +531,22 @@ pub fn grid_cell(
         max_r = max_r.max(r);
     }
     ((2.0 * max_r * 1.0001).max(0.5), 0)
+}
+
+/// Warm-start pair key, bit-identical to `pairWarmKey` in world_step.slang
+/// (murmur3 fmix32 finalizer over both collider ids; never the empty sentinel).
+pub fn pair_warm_key(a: u32, b: u32) -> u32 {
+    let mut h = a.wrapping_mul(0x9E37_79B1) ^ b.wrapping_add(0x7F4A_7C15).wrapping_mul(0x85EB_CA77);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846C_A68B);
+    h ^= h >> 16;
+    if h == u32::MAX {
+        a ^ b ^ 0xA5A5_A5A5
+    } else {
+        h
+    }
 }
 
 /// GPU bindings every rigid host allocates (`BIND(0..30)` in world_step.slang).
@@ -870,7 +900,7 @@ mod tests {
                     for c in encode_step(&m, &i, whole, true) {
                         let k = match c {
                             Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => kernel,
-                            Cmd::Copy { .. } => continue,
+                            Cmd::Copy { .. } | Cmd::Phase { .. } => continue,
                         };
                         let e = resolve_entry(k, true);
                         assert!(PERSISTENT_ENTRIES.contains(&e), "{k} -> {e} missing");

@@ -1074,13 +1074,15 @@ fn contact_hash_preserves_colliding_pair_heads_across_dead_gaps_and_history_halv
     use std::collections::BTreeMap;
     const HASH_WORDS: u32 = 1024;
     fn key(a: u32, b: u32) -> u32 {
-        let h = a.wrapping_mul(73856093) ^ b.wrapping_mul(19349663);
-        if h == u32::MAX {
-            a ^ b ^ 0xa5a5a5a5
-        } else {
-            h
-        }
+        engine_exec::rigid_plan::pair_warm_key(a, b)
     }
+    // 32 partners whose pair keys share one bucket under the real (mixed) key:
+    // searched, since a finalized key has no arithmetic shortcut to collisions.
+    let bucket0 = key(1, 2) & (HASH_WORDS - 1);
+    let partners: Vec<u32> = (2u32..)
+        .filter(|&b| key(1, b) & (HASH_WORDS - 1) == bucket0)
+        .take(32)
+        .collect();
     let mut points = Vec::new();
     for block in 0..3 {
         for pair in 0..32u32 {
@@ -1090,7 +1092,7 @@ fn contact_hash_preserves_colliding_pair_heads_across_dead_gaps_and_history_halv
             for corner in 0..4 {
                 points.push(Contact {
                     collider_a: 1,
-                    collider_b: 2 + id * HASH_WORDS,
+                    collider_b: partners[id as usize],
                     alive: u32::from(corner != 0 && !(block == 0 && id % 3 == 0)),
                     feature_id: 0x8000_0000 | corner,
                     normal: [f32::NAN; 3],
@@ -4342,12 +4344,7 @@ fn record_warm_hash_resolves_minimum_live_runs_and_flags_exhaustion() {
     use std::collections::BTreeMap;
     const SLOTS: u32 = 256;
     fn key(a: u32, b: u32) -> u32 {
-        let h = a.wrapping_mul(73856093) ^ b.wrapping_mul(19349663);
-        if h == u32::MAX {
-            a ^ b ^ 0xa5a5a5a5
-        } else {
-            h
-        }
+        engine_exec::rigid_plan::pair_warm_key(a, b)
     }
     let mut points = Vec::new();
     for block in 0..3 {

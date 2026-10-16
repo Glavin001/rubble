@@ -54,6 +54,29 @@ fn write(buf: &Buffer, offset: u64, bytes: &[u8]) {
     };
 }
 
+/// What a compute encoder already has bound (pipeline, (slot, offset) per index).
+struct EncodeState {
+    pipeline: Option<usize>,
+    bound: [Option<(u32, u64)>; 32],
+}
+
+impl EncodeState {
+    fn new() -> Self {
+        Self { pipeline: None, bound: [None; 32] }
+    }
+}
+
+/// GPU execution time of a completed command buffer (`GPUEndTime - GPUStartTime`).
+#[allow(unexpected_cfgs)] // objc 0.2 msg_send! checks a cargo-clippy feature
+fn gpu_ms(cb: &CommandBufferRef) -> f64 {
+    use metal::foreign_types::ForeignTypeRef;
+    use objc::{msg_send, sel, sel_impl};
+    let obj = cb.as_ptr() as *mut objc::runtime::Object;
+    // SAFETY: MTLCommandBuffer responds to both selectors once completed.
+    let (start, end): (f64, f64) = unsafe { (msg_send![obj, GPUStartTime], msg_send![obj, GPUEndTime]) };
+    (end - start) * 1000.0
+}
+
 /// Workgroup grid for `threads` invocations at 64 per group, rows of 32768
 /// (must agree with Slang's dispatchIndex).
 fn groups(threads: u64) -> (u64, u64) {
@@ -81,6 +104,12 @@ pub struct MetalSim {
     contacts_parity: u32,
     in_flight: VecDeque<CommandBuffer>,
     ring: usize,
+    /// Per-phase command buffers of a profiled step (`step_profiled`).
+    profiling: bool,
+    profile_cbs: Vec<(&'static str, CommandBuffer)>,
+    kernel_cache: std::cell::RefCell<std::collections::HashMap<&'static str, usize>>,
+    /// Steps the counters in `last_counters` describe.
+    counted_steps: u32,
 }
 
 impl MetalSim {
@@ -100,14 +129,34 @@ impl MetalSim {
             })
             .collect();
         assert_eq!(bufs.len(), BIND_COUNT);
-        let compile = CompileOptions::new();
-        // IEEE math like the WebGPU path, so trajectories stay comparable.
-        compile.set_fast_math_enabled(false);
+        // Metal's default math mode, as wgpu's Metal backend compiles the same
+        // kernels (MTLCompileOptions defaults): fast math on. ENGINE_FAST_MATH=off
+        // compiles strict IEEE; ENGINE_STRICT_KERNELS=a,b keeps those strict.
+        let fast = std::env::var("ENGINE_FAST_MATH").as_deref() != Ok("off");
+        // Collision geometry stays strict IEEE by default: with fast math in the
+        // narrowphase a wall-smash brick tunnelled through the ground slab.
+        let strict: Vec<String> = std::env::var("ENGINE_STRICT_KERNELS")
+            .unwrap_or_else(|_| "narrowphase,convex_".into())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let options = |fast_math: bool| {
+            let o = CompileOptions::new();
+            o.set_fast_math_enabled(fast_math);
+            o
+        };
+        let (fast_opts, strict_opts) = (options(fast), options(false));
         let pipes = RIGID_KERNELS
             .iter()
             .map(|k| {
+                let compile = if strict.iter().any(|s| k.entry.starts_with(s.as_str())) {
+                    &strict_opts
+                } else {
+                    &fast_opts
+                };
                 let lib = device
-                    .new_library_with_source(k.msl, &compile)
+                    .new_library_with_source(k.msl, compile)
                     .map_err(|e| anyhow::anyhow!("compile {}: {e}", k.entry))?;
                 let func = lib
                     .get_function(k.entry, None)
@@ -164,6 +213,10 @@ impl MetalSim {
             contacts_parity: 0,
             in_flight: VecDeque::new(),
             ring: 0,
+            profiling: false,
+            profile_cbs: Vec::new(),
+            kernel_cache: Default::default(),
+            counted_steps: 0,
         })
     }
 
@@ -279,7 +332,14 @@ impl MetalSim {
 
     /// Encode and commit one step without waiting.
     pub fn step_submit(&mut self) -> Result<(), ExecError> {
-        if self.steps_done > 0 && self.last_counters.awake_count == 0 && self.body_count > 0 {
+        // Skip only when the counters describe the latest step: pipelined steps
+        // leave them stale until `drain`.
+        if self.steps_done > 0
+            && self.counted_steps == self.steps_done
+            && self.last_counters.awake_count == 0
+            && self.body_count > 0
+        {
+            self.counted_steps += 1;
             self.steps_done += 1;
             return Ok(());
         }
@@ -319,7 +379,7 @@ impl MetalSim {
         write(&self.upload, base + UP_COLORS, &[0u8; 512]);
         let cmds = rigid_plan::encode_step(&m, &i, false, true);
 
-        let cb = self.queue.new_command_buffer().to_owned();
+        let mut cb = self.queue.new_command_buffer().to_owned();
         let blit = cb.new_blit_command_encoder();
         // Host words and uniform first: the plan's copies then forward last
         // step's GPU counts into the uniform and reset the counters.
@@ -356,23 +416,38 @@ impl MetalSim {
             }
         }
         blit.end_encoding();
-        let desc = ComputePassDescriptor::new();
-        desc.set_dispatch_type(MTLDispatchType::Serial);
-        let e = cb.compute_command_encoder_with_descriptor(desc);
+        let begin = |cb: &CommandBufferRef| {
+            let desc = ComputePassDescriptor::new();
+            desc.set_dispatch_type(MTLDispatchType::Serial);
+            cb.compute_command_encoder_with_descriptor(desc).to_owned()
+        };
+        let mut e = begin(&cb);
+        let mut st = EncodeState::new();
         for c in &cmds {
             match *c {
                 Cmd::Copy { .. } => {}
+                // Profiling: one command buffer per phase, timed by the GPU.
+                Cmd::Phase { name } => {
+                    if self.profiling {
+                        e.end_encoding();
+                        cb.commit();
+                        self.profile_cbs.push((name, cb));
+                        cb = self.queue.new_command_buffer().to_owned();
+                        e = begin(&cb);
+                        st = EncodeState::new();
+                    }
+                }
                 Cmd::Dispatch {
                     kernel,
                     threads,
                     pass,
                 } => {
-                    let k = self.bind(e, kernel, pass, false)?;
+                    let k = self.bind(&e, &mut st, kernel, pass, false)?;
                     let (x, y) = groups(threads);
                     e.dispatch_thread_groups(MTLSize::new(x, y, 1), Self::threads(k));
                 }
                 Cmd::Indirect { kernel, slot, pass } => {
-                    let k = self.bind(e, kernel, pass, true)?;
+                    let k = self.bind(&e, &mut st, kernel, pass, true)?;
                     e.dispatch_thread_groups_indirect(
                         &self.bufs[23],
                         u64::from(slot) * 12,
@@ -397,32 +472,54 @@ impl MetalSim {
         )
     }
 
-    fn bind(
-        &self,
-        e: &ComputeCommandEncoderRef,
-        logical: &str,
-        pass: u32,
-        indirect: bool,
-    ) -> Result<&'static RigidKernel, ExecError> {
+    /// Kernel table index of a logical plan name (resolved once per name).
+    fn kernel_index(&self, logical: &'static str) -> Result<usize, ExecError> {
+        if let Some(&idx) = self.kernel_cache.borrow().get(logical) {
+            return Ok(idx);
+        }
         let entry = rigid_plan::resolve_entry(logical, true);
         let idx = RIGID_KERNELS
             .iter()
             .position(|k| k.entry == entry)
             .ok_or_else(|| ExecError::Backend(format!("MetalSim: no kernel {entry}")))?;
+        self.kernel_cache.borrow_mut().insert(logical, idx);
+        Ok(idx)
+    }
+
+    /// Bind a kernel's pipeline and buffers, skipping whatever the encoder
+    /// already holds (each objc call costs ~1 µs; a step makes hundreds).
+    fn bind(
+        &self,
+        e: &ComputeCommandEncoderRef,
+        st: &mut EncodeState,
+        logical: &'static str,
+        pass: u32,
+        indirect: bool,
+    ) -> Result<&'static RigidKernel, ExecError> {
+        let idx = self.kernel_index(logical)?;
         let k = &RIGID_KERNELS[idx];
-        e.set_compute_pipeline_state(&self.pipes[idx]);
+        if st.pipeline != Some(idx) {
+            e.set_compute_pipeline_state(&self.pipes[idx]);
+            st.pipeline = Some(idx);
+        }
         for &(index, slot) in k.binds {
-            if slot == 22 {
-                e.set_buffer(
-                    u64::from(index),
-                    Some(&self.bufs[22]),
-                    u64::from(pass) * PASS_ALIGN,
-                );
+            let want = if slot == 22 {
+                (slot, u64::from(pass) * PASS_ALIGN)
             } else if slot == 23 && indirect {
+                (u32::MAX, 0)
+            } else {
+                (slot, 0)
+            };
+            let at = index as usize;
+            if st.bound[at] == Some(want) {
+                continue;
+            }
+            st.bound[at] = Some(want);
+            if want.0 == u32::MAX {
                 // Never bind the indirect buffer as a resource of the dispatch it sizes.
                 e.set_buffer(u64::from(index), None, 0);
             } else {
-                e.set_buffer(u64::from(index), Some(&self.bufs[slot as usize]), 0);
+                e.set_buffer(u64::from(index), Some(&self.bufs[slot as usize]), want.1);
             }
         }
         Ok(k)
@@ -439,6 +536,7 @@ impl MetalSim {
         self.wait_all();
         let c: StepCounters = unsafe { *(self.bufs[7].contents() as *const StepCounters) };
         self.last_counters = c;
+        self.counted_steps = self.steps_done;
         if c.overflow_flags != 0 {
             return Err(ExecError::Overflow(c.overflow_flags));
         }
@@ -449,6 +547,28 @@ impl MetalSim {
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
         self.step_submit()?;
         self.drain()
+    }
+
+    /// One step with GPU time per phase (ms, summed over the iterations' primal
+    /// and dual segments). Splitting the step adds a little submission cost.
+    pub fn step_profiled(&mut self) -> Result<Vec<(&'static str, f64)>, ExecError> {
+        self.wait_all();
+        self.profiling = true;
+        self.profile_cbs.clear();
+        let r = self.step_submit();
+        self.profiling = false;
+        r?;
+        self.drain()?;
+        let mut out: Vec<(&'static str, f64)> = Vec::new();
+        for (name, cb) in self.profile_cbs.drain(..) {
+            cb.wait_until_completed();
+            let ms = gpu_ms(&cb);
+            match out.iter_mut().find(|(n, _)| *n == name) {
+                Some(slot) => slot.1 += ms,
+                None => out.push((name, ms)),
+            }
+        }
+        Ok(out)
     }
 
     pub fn download_bodies(&mut self) -> Vec<BodyState> {
