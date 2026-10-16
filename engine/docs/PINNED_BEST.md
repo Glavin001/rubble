@@ -5,7 +5,7 @@
 
 Primary: [three-avbd](../inspiration/pinned/three-avbd) WebGPU. Also: avbd-sandbox GPU, beat-box Slang, Newton VBD GPU ideas, Jolt island/sleep patterns.
 
-Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8-4e81-8fca-082631dbb3ea), [Mine demo3d+sandbox+beat-box](f03d9f0e-64ea-4a66-9bed-dcc3917b4571), [Mine Newton+Jolt opts](2c62a165-94d0-4421-b6c4-a1d68b03215c).
+Full engine audit and roadmap: [ENGINE_AUDIT_2026-10-16.md](ENGINE_AUDIT_2026-10-16.md). Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8-4e81-8fca-082631dbb3ea), [Mine demo3d+sandbox+beat-box](f03d9f0e-64ea-4a66-9bed-dcc3917b4571), [Mine Newton+Jolt opts](2c62a165-94d0-4421-b6c4-a1d68b03215c).
 
 ## MUST-COPY (landed / in progress)
 
