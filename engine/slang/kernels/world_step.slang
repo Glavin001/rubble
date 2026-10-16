@@ -302,7 +302,8 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     // contactOffset (~1 cm) pulled in ring-adjacent bricks that faceSeparated should
     // still drop — but the fatter boxes also bloated grid occupancy. Margin stays in C0,
     // except under FLAG_CONTACT_GAP, where contacts are speculative within it.
-    float aabbPad = max(1.0e-4, speculativeMargin());
+    float reach = colliderReach(b, col);
+    float aabbPad = max(1.0e-4, speculativeMargin()) + reach;
     if (col.shape == SHAPE_SPHERE)
     {
         worldAabbSphere(worldPos, col.params.x + aabbPad, mn, mx);
@@ -348,7 +349,8 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     // The hierarchical grid needs every AABB half extent ≤ _pad0; a capsule's
     // reaches radius + half height, beyond length(radius, half height).
     if (col.shape == SHAPE_CAPSULE) boundR = col.params.x + col.params.y;
-    box._pad0 = boundR;
+    // The swept reach counts as size, so the grid level still bounds the box.
+    box._pad0 = boundR + reach;
     box._pad1 = asfloat(col.body);
     // Store at collider index offset by max_bodies — host allocates gAabbs sized max_bodies+max_colliders
     // Convention: collider AABBs start at index max_bodies. Host sets gScratchAtomics[1] = max_bodies.
@@ -360,7 +362,7 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     {
         HullRef h = hullOf(col);
         WorldObbGpu w;
-        w.center = float4(transformPoint(worldPos, worldRot, hullLocalCenter(h)), 0.0);
+        w.center = float4(transformPoint(worldPos, worldRot, hullLocalCenter(h)), reach);
         w.half = float4(hullLocalHalf(h), 0.0);
         w.axis0 = float4(quatRotate(worldRot, float3(1, 0, 0)), 0.0);
         w.axis1 = float4(quatRotate(worldRot, float3(0, 1, 0)), 0.0);
@@ -372,7 +374,7 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
         float4 q = quatMul(b.orientation, col.localRot);
         BoxObb obb = makeBoxObb(worldPos, q, col.params.xyz);
         WorldObbGpu w;
-        w.center = float4(obb.center, 0.0);
+        w.center = float4(obb.center, reach);
         w.half = float4(obb.half, 0.0);
         w.axis0 = float4(obb.axis0, 0.0);
         w.axis1 = float4(obb.axis1, 0.0);
@@ -583,6 +585,7 @@ bool boxesSeparatedOnFaceAxis(BoxObb probe, uint otherCollider, float gap)
     Collider cb = gColliders[otherCollider];
     if (!shapeHasHull(cb.shape)) return false;
     BoxObb other = worldObbFromCache(otherCollider);
+    gap += cachedReach(otherCollider);
     float3 d = other.center - probe.center;
     float3 hA = probe.half;
     float3 hB = other.half;
@@ -788,7 +791,7 @@ void hierQuery(uint i)
     bool probeHasObb = shapeHasHull(a.shape);
     BoxObb probe = probeHasObb ? worldObbFromCache(i)
                                : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    float faceGap = max(0.001, speculativeMargin());
+    float faceGap = max(0.001, speculativeMargin()) + (probeHasObb ? cachedReach(i) : 0.0);
     if (active)
     {
         uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
@@ -1004,7 +1007,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // Probe OBB from build_aabbs cache (three-avbd findPairs loads querier once).
     bool probeIsBox = shapeHasHull(col.shape);
     BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    float faceGap = max(0.001, speculativeMargin());
+    float faceGap = max(0.001, speculativeMargin()) + (probeIsBox ? cachedReach(i) : 0.0);
 
     // Small scenes: exact pairwise (correctness). Large: uniform-grid hash.
     // Awake dynamics test everyone; sleepers only keep static contacts (ground) so a
@@ -1058,6 +1061,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // the grid and wake sleepers on impact; a woken body re-acquires the plane next step.
     float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
     bool queryLarge = rA > cellSize;
+    rA += colliderReach(b, col);
     uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
     for (uint k = 0u; k < nLarge; k++)
     {
@@ -1194,7 +1198,8 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         if (other.shape == SHAPE_SPHERE)
         {
             float3 d = b.position - ob.position;
-            float rr = other.params.x + (col.params.w > 0.0 ? col.params.w : length(col.params.xyz));
+            float rr = other.params.x + (col.params.w > 0.0 ? col.params.w : length(col.params.xyz))
+                + colliderReach(b, col) + colliderReach(ob, other);
             if (dot(d, d) > rr * rr) continue;
         }
         emitCandidate(i, j);
@@ -1269,7 +1274,7 @@ void hierScanFiner(uint m, uint first, uint stride, uint end)
     bool probeHasObb = shapeHasHull(cm.shape);
     BoxObb probe = probeHasObb ? worldObbFromCache(m)
                                : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    float faceGap = max(0.001, speculativeMargin());
+    float faceGap = max(0.001, speculativeMargin()) + (probeHasObb ? cachedReach(m) : 0.0);
     uint mask = finerLevelMask(own);
     uint count = gCounters[0].colliderCount;
     float csM = hierCellSize(own);
@@ -1672,10 +1677,34 @@ void persistListAppend(uint first, uint count)
 }
 #endif
 
+// Look-ahead keeps a separated point only if the pair can close that gap this
+// step: the relative normal velocity at the point, (vA + ωA×rA − vB − ωB×rB)·n,
+// over h. Points moving apart or sliding past each other get no speculative
+// contact (and no graph edge); touching points (gap ≤ contactOffset) are kept.
+BoxManifold closingPoints(BoxManifold points, BodyState ba, Collider ca, BodyState bb, Collider cb)
+{
+    bool moveA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
+    bool moveB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    float h = PARAMS.dt;
+    float3 n = points.normal;
+    BoxManifold kept = points;
+    kept.count = 0;
+    for (int k = 0; k < points.count; k++)
+    {
+        float3 pA = points.pts[k].pA, pB = points.pts[k].pB;
+        float3 vA = moveA ? ba.linearVel + cross(ba.angularVel, pA - ba.position) : float3(0, 0, 0);
+        float3 vB = moveB ? bb.linearVel + cross(bb.angularVel, pB - bb.position) : float3(0, 0, 0);
+        float reach = PARAMS.contactOffset + max(dot(vA - vB, n), 0.0) * h + abs(PARAMS.gravityY) * h * h;
+        if (dot(n, pB - pA) <= reach) { kept.pts[kept.count] = points.pts[k]; kept.count++; }
+    }
+    return kept;
+}
+
 void emitContactManifold(
     CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
     BoxManifold points, float margin)
 {
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u) points = closingPoints(points, ba, ca, bb, cb);
     int count = points.count;
     float3 nrm = points.normal;
     if (count <= 0) return;
@@ -1860,7 +1889,61 @@ static const uint FLAG_CONTACT_GAP = 32u;
 // bounds, SAT and clipping keep pairs/points whose gap is at most this.
 float speculativeMargin()
 {
-    return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u ? PARAMS.contactOffset : 0.0;
+    return contactGapMode() ? PARAMS.contactOffset : 0.0;
+}
+
+// params.flags bit 14: look-ahead (speculative) contacts sized to motion. Each
+// awake collider's bounds are swept by how far it can move this step, and a
+// pair keeps contacts whose gap is under the sum of both reaches, so pieces
+// meet at contact depth instead of passing up to |v|·h into each other first
+// (PhysX speculative CCD; Box2D/Jolt speculative distance). Rest depth is
+// unchanged; a positive C0 is clearance the solver lets the pair close, so it
+// is never scaled down by α (contactC0NReg).
+static const uint FLAG_SPEC_VELOCITY = 16384u;
+static const float SPEC_REACH_MAX = 0.5;
+bool contactGapMode() { return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u; }
+
+// How far any point of collider `c` on body `b` can move this step:
+// (|v| + |ω|·r)·h + |g|·h², from the velocity at the start of the step. Motion
+// within the contact depth (contactOffset) is already caught by ordinary
+// contacts, so slower colliders get no look-ahead and rest exactly as before.
+float colliderReach(BodyState b, Collider c)
+{
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u || !bodyIsDynamic(b) || bodyIsSleeping(b)) return 0.0;
+    float h = PARAMS.dt;
+    float motion = (length(b.linearVel) + length(b.angularVel) * colliderExtent(c)) * h;
+    if (motion <= PARAMS.contactOffset) return 0.0;
+    return min(motion + abs(PARAMS.gravityY) * h * h, SPEC_REACH_MAX);
+}
+// Reach of a hull or box collider, cached with its world OBB by build_aabbs.
+// Bounds and early-outs use these per-collider reaches (a conservative sweep).
+float cachedReach(uint c) { return gWorldObbs[c].center.w; }
+// How far the pair can close this step: relative speed plus both spins, so
+// pieces carried along together (debris pushed by the ball) get no look-ahead.
+float pairReach(BodyState ba, Collider ca, BodyState bb, Collider cb)
+{
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u) return 0.0;
+    bool moveA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
+    bool moveB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    float3 vA = moveA ? ba.linearVel : float3(0, 0, 0);
+    float3 vB = moveB ? bb.linearVel : float3(0, 0, 0);
+    float spin = (moveA ? length(ba.angularVel) * colliderExtent(ca) : 0.0)
+               + (moveB ? length(bb.angularVel) * colliderExtent(cb) : 0.0);
+    float h = PARAMS.dt;
+    float motion = (length(vB - vA) + spin) * h;
+    if (motion <= PARAMS.contactOffset) return 0.0;
+    return min(motion + abs(PARAMS.gravityY) * h * h, 2.0 * SPEC_REACH_MAX);
+}
+// Gap under which a pair keeps (speculative) contacts.
+float pairMargin(BodyState ba, Collider ca, BodyState bb, Collider cb)
+{
+    return speculativeMargin() + pairReach(ba, ca, bb, cb);
+}
+float pairMarginIds(uint a, uint b)
+{
+    Collider ca = gColliders[a];
+    Collider cb = gColliders[b];
+    return pairMargin(gBodies[ca.body], ca, gBodies[cb.body], cb);
 }
 // params.flags bit 6: the inertial block uses the world inertia R·diag(I)·Rᵀ
 // (R at the inertial target). Without it (three-avbd) the principal moments are
@@ -1902,7 +1985,7 @@ float dualAlpha() { return postStabilize() ? 1.0 : PARAMS.alpha; }
 // Step-start normal offset of a contact whose signed gap is n·(xB−xA).
 float contactC0N(float gap, float margin)
 {
-    return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u ? gap : gap + margin;
+    return contactGapMode() ? gap : gap + margin;
 }
 
 // α-regularized step-start normal offset. α absorbs initial penetration; with
@@ -1910,7 +1993,16 @@ float contactC0N(float gap, float margin)
 // whole (the row then stops the bodies exactly at touch).
 float contactC0NReg(float c0N, float keep)
 {
-    return ((PARAMS.flags & FLAG_CONTACT_GAP) != 0u && c0N > 0.0) ? c0N : c0N * keep;
+    if (contactGapMode()) return c0N > 0.0 ? c0N : c0N * keep;
+    // Look-ahead without FLAG_CONTACT_GAP: C0 = gap + margin. Only a real gap
+    // (C0 beyond the margin) is clearance kept whole; the margin band below it
+    // behaves exactly as without look-ahead.
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u)
+    {
+        float margin = PARAMS.contactOffset;
+        return max(c0N - margin, 0.0) + min(c0N, margin) * keep;
+    }
+    return c0N * keep;
 }
 static const float REUSE_LIN_TOL = 0.002;
 static const float REUSE_ANG_TOL = 0.002;
@@ -2150,7 +2242,10 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
     float3 posB = transformPoint(bb.position, bb.orientation, cb.localPos);
     float4 rotA = quatMul(ba.orientation, ca.localRot);
     float4 rotB = quatMul(bb.orientation, cb.localRot);
+    // Contacts sit `margin` deep (C0 = gap + margin); they are detected up to
+    // `detect`, which adds how far the pair can close this step (look-ahead).
     float margin = PARAMS.contactOffset;
+    float detect = margin + pairReach(ba, ca, bb, cb);
     float3 nrm; float pen; float3 pA; float3 pB;
     bool hit = false;
 
@@ -2159,7 +2254,7 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
     {
         // World OBBs from build_aabbs cache (skip per-pair quat axis rebuild).
         BoxManifold mf = collideBoxesCached(
-            worldObbFromCache(pair.colliderA), worldObbFromCache(pair.colliderB), margin);
+            worldObbFromCache(pair.colliderA), worldObbFromCache(pair.colliderB), detect);
         if (mf.count > 0)
             emitManifold(pair, ba, bb, ca, cb, mf, margin);
         return;
@@ -2167,13 +2262,13 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_PLANE)
     {
         emitManifold(pair, ba, bb, ca, cb,
-            collideBoxPlane(posA, rotA, ca.params.xyz, cb.params.xyz, cb.params.w, margin), margin);
+            collideBoxPlane(posA, rotA, ca.params.xyz, cb.params.xyz, cb.params.w, detect), margin);
         return;
     }
     if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_BOX)
     {
         // Swap to box-vs-plane then flip normal / points for A=plane, B=box.
-        BoxManifold mf = collideBoxPlane(posB, rotB, cb.params.xyz, ca.params.xyz, ca.params.w, margin);
+        BoxManifold mf = collideBoxPlane(posB, rotB, cb.params.xyz, ca.params.xyz, ca.params.w, detect);
         if (mf.count > 0)
         {
             mf.normal = -mf.normal;
@@ -2190,14 +2285,14 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
 
     if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_SPHERE)
     {
-        hit = sphereSphere(posA, ca.params.x, posB, cb.params.x, margin, nrm, pen, pA, pB);
+        hit = sphereSphere(posA, ca.params.x, posB, cb.params.x, detect, nrm, pen, pA, pB);
     }
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_PLANE)
     {
         // Geometric points: sphere surface toward plane, plane projection.
         float3 pn = normalize(cb.params.xyz);
         float gap = dot(posA, pn) - cb.params.w - ca.params.x;
-        if (gap < margin)
+        if (gap < detect)
         {
             hit = true; nrm = -pn; pen = margin - gap;
             pA = posA - pn * ca.params.x;
@@ -2208,7 +2303,7 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
     {
         float3 pn = normalize(ca.params.xyz);
         float gap = dot(posB, pn) - ca.params.w - cb.params.x;
-        if (gap < margin)
+        if (gap < detect)
         {
             hit = true; nrm = pn; pen = margin - gap;
             pB = posB - pn * cb.params.x;
@@ -2315,8 +2410,8 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
         float3 midA = 0.5 * (a0 + a1);
         float3 midB = 0.5 * (b0 + b1);
         float sep = length(midB - midA) - ca.params.y - cb.params.y;
-        if (sep < rA + rB + margin)
-            hit = sphereSphere(midA, rA + ca.params.y * 0.25, midB, rB + cb.params.y * 0.25, margin, nrm, pen, pA, pB);
+        if (sep < rA + rB + detect)
+            hit = sphereSphere(midA, rA + ca.params.y * 0.25, midB, rB + cb.params.y * 0.25, detect, nrm, pen, pA, pB);
     }
     else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_SPHERE)
     {
@@ -2327,7 +2422,7 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
         float3 ab = pb - pa;
         float t = clamp(dot(posB - pa, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
         float3 closest = pa + ab * t;
-        hit = sphereSphere(closest, ca.params.x, posB, cb.params.x, margin, nrm, pen, pA, pB);
+        hit = sphereSphere(closest, ca.params.x, posB, cb.params.x, detect, nrm, pen, pA, pB);
     }
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_CAPSULE)
     {
@@ -2338,13 +2433,13 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
         float3 ab = pb - pa;
         float t = clamp(dot(posA - pa, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
         float3 closest = pa + ab * t;
-        hit = sphereSphere(posA, ca.params.x, closest, cb.params.x, margin, nrm, pen, pA, pB);
+        hit = sphereSphere(posA, ca.params.x, closest, cb.params.x, detect, nrm, pen, pA, pB);
     }
     else
     {
         float rA = ca.params.w > 0.0 ? ca.params.w : length(ca.params.xyz);
         float rB = cb.params.w > 0.0 ? cb.params.w : length(cb.params.xyz);
-        hit = sphereSphere(posA, rA, posB, rB, margin, nrm, pen, pA, pB);
+        hit = sphereSphere(posA, rA, posB, rB, detect, nrm, pen, pA, pB);
     }
 
     if (!hit) return;

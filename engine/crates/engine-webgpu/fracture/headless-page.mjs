@@ -91,6 +91,18 @@ async function run(){
   const report=await runSleepTrace(sim,scene,{at:num('sleeptrace',0),ticks:num('ticks',30),pick:num('pick',3),bodies:q.has('bodies')?q.get('bodies').split(',').map(Number):null,hullView,hullBase});
   sim.dispose();return {scene:name,trace:report,gpuError};
  }
+ // stepdebug=T [to]: run to T, then single steps printing the counters; on a
+ // failure report bodies with non-finite or extreme state.
+ if(num('stepdebug',0)>0){
+  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
+  const from=num('stepdebug',0),to=num('to',from+10),rows=[];let error=null;
+  try{for(let t=0;t<from;t++)await sim.step(1)}catch(e){error='before: '+String(e)}
+  for(let t=from;t<to&&!error;t++){try{await sim.step(1);rows.push({t:t+1,...sim.counters})}catch(e){error=String(e);rows.push({t:t+1,...sim.counters})}}
+  const f=await sim.snapshot(),bad=[];let vmax=0,wmax=0;
+  for(let i=0;i<scene.bodies.length;i++){const o=i*28,v=Math.hypot(f[o+12],f[o+13],f[o+14]),w=Math.hypot(f[o+16],f[o+17],f[o+18]);
+   if(![f[o],f[o+1],f[o+2],v,w].every(Number.isFinite)&&bad.length<10)bad.push(i);if(v>vmax)vmax=v;if(w>wmax)wmax=w}
+  sim.dispose();return {error,rows,bad,vmax,wmax,gpuError};
+ }
  if(num('sleepwatch',0)>0){
   if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
   const report=await runSleepWatch(sim,scene,{from:num('sleepwatch',0),to:num('to',2400)});
