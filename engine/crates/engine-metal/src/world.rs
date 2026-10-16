@@ -66,6 +66,8 @@ pub struct MetalWorld {
     /// Joints that take part in the joint pair filter (everything but tyre joints).
     user_joint_count: u32,
     joint_hash_clear_pending: bool,
+    /// Event ring read cursor (`poll_joint_breaks`).
+    events_seen: u32,
     /// Island-gate BFS rounds (8 for stacks; 2 for random piles so one rocker cannot pin all).
     sleep_island_rounds: u32,
     material_count: u32,
@@ -145,7 +147,11 @@ impl MetalWorld {
             alloc_u32(d, capacity.max_colors),
         ];
         let hull_verts = alloc::<[f32; 4]>(d, capacity.max_hull_vertices);
-        let events = alloc_u32(d, 65536);
+        // Joint pair hash (64k words), then the event ring (cursor + records).
+        let events = alloc_u32(d, engine_schema::EVENTS_WORDS);
+        unsafe {
+            std::ptr::write_bytes(events.contents() as *mut u32, 0, engine_schema::EVENTS_WORDS as usize);
+        }
         let ccd_flags = alloc_u32(d, capacity.max_bodies);
         // WorldObbGpu = 5 × float4
         let world_obbs = alloc::<[f32; 20]>(d, capacity.max_colliders);
@@ -245,6 +251,7 @@ impl MetalWorld {
             joint_count: 0,
             user_joint_count: 0,
             joint_hash_clear_pending: false,
+            events_seen: 0,
             sleep_island_rounds: 8,
             material_count: 1,
             command_count: 0,
@@ -977,6 +984,26 @@ impl MetalWorld {
         }
     }
 
+    /// One joint record after the last completed step (multipliers, broken flag).
+    pub fn joint(&self, id: u32) -> Joint {
+        assert!(id < self.joint_count);
+        unsafe { *(self.joints.contents() as *const Joint).add(id as usize) }
+    }
+
+    /// Joints that broke since the previous call (event ring after the last
+    /// completed step).
+    pub fn poll_joint_breaks(&mut self) -> Vec<engine_schema::JointBreak> {
+        let base = engine_schema::EVENT_RING_BASE as usize;
+        let len = (engine_schema::EVENTS_WORDS - engine_schema::EVENT_RING_BASE) as usize;
+        let words = unsafe { std::slice::from_raw_parts((self.events.contents() as *const u32).add(base), len) };
+        let mut out = Vec::new();
+        let lost = engine_schema::decode_joint_breaks(words, &mut self.events_seen, &mut out);
+        if lost > 0 {
+            eprintln!("event ring overflow: {lost} events lost");
+        }
+        out
+    }
+
     /// Manifold records for the last step (diagnostics).
     pub fn download_manifolds(&self) -> Vec<Manifold> {
         let n = self.last_counters.manifold_count as usize;
@@ -1413,9 +1440,9 @@ impl<'a> SceneBuilder<'a> {
             axis_b: [0.0, 1.0, 0.0],
             limit_max: 0.0,
             c0: [0.0; 3],
-            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
+            ..Default::default()
         })
     }
 
@@ -1434,9 +1461,9 @@ impl<'a> SceneBuilder<'a> {
             axis_b: [0.0, 1.0, 0.0],
             limit_max: 0.0,
             c0: [0.0; 3],
-            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e5; 6],
+            ..Default::default()
         })
     }
 
@@ -1462,9 +1489,9 @@ impl<'a> SceneBuilder<'a> {
             axis_b: axis.to_array(),
             limit_max: 1.0,
             c0: [0.0; 3],
-            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
+            ..Default::default()
         })
     }
 
@@ -1483,9 +1510,9 @@ impl<'a> SceneBuilder<'a> {
             axis_b: axis.to_array(),
             limit_max: std::f32::consts::PI,
             c0: [0.0; 3],
-            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
+            ..Default::default()
         })
     }
 
@@ -1504,9 +1531,9 @@ impl<'a> SceneBuilder<'a> {
             axis_b: axis.to_array(),
             limit_max: std::f32::consts::PI,
             c0: [0.0; 3],
-            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [1.0e4; 6],
+            ..Default::default()
         })
     }
 

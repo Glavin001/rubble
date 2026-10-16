@@ -438,9 +438,9 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
             axis_b: [0.0; 3],
             limit_max: 0.0,
             c0: [0.0; 3],
-            _pad_c0: 0.0,
             lambda: [0.0; 6],
             k: [0.0; 6],
+            ..Default::default()
         });
     }
 

@@ -16,6 +16,8 @@ pub struct WorldSnapshot {
     body_count: u32,
     collider_count: u32,
     joint_count: u32,
+    user_joint_count: u32,
+    events_seen: u32,
     steps_done: u32,
     contacts_parity: u32,
     last_counters: StepCounters,
@@ -66,9 +68,13 @@ pub struct WgpuSim {
     body_count: u32,
     collider_count: u32,
     joint_count: u32,
-    /// Tyre joints never enter the joint pair hash; it only needs clearing once
-    /// after they first appear (WgpuSim has no user joints to insert).
+    /// Joints that take part in the joint pair filter (everything but tyre joints).
+    user_joint_count: u32,
+    /// Tyre joints never enter the joint pair hash; with no user joints it only
+    /// needs clearing once after they first appear.
     joint_hash_clear_pending: bool,
+    /// Event ring read cursor (`poll_joint_breaks`).
+    events_seen: u32,
     command_count: u32,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
@@ -443,7 +449,9 @@ impl WgpuSim {
             body_count: 0,
             collider_count: 0,
             joint_count: 0,
+            user_joint_count: 0,
             joint_hash_clear_pending: false,
+            events_seen: 0,
             command_count: 0,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -650,9 +658,14 @@ impl WgpuSim {
             self.disp(&mut pass, "vehicle_input", n_veh, None);
         }
         self.disp(&mut pass, "build_aabbs", n_cols, None);
-        if clear_joint_hash {
-            // Only tyre joints here: they skip the hash, which just has to be empty.
+        // O(1) joint-pair filter for broadphase, rebuilt each step so a broken
+        // joint's bodies collide again. Tyre joints skip the hash: with no user
+        // joints it only needs one clear.
+        if self.user_joint_count > 0 || clear_joint_hash {
             self.disp(&mut pass, "joint_hash_clear", 65536, None);
+            if self.user_joint_count > 0 {
+                self.disp(&mut pass, "joint_hash_insert", n_joints, None);
+            }
         }
         self.disp(
             &mut pass,
@@ -1190,6 +1203,35 @@ impl WgpuSim {
         self.with_vehicles(|h, sim| h.poll_events(sim))
     }
 
+    /// Append one user joint (ball, fixed, hinge, ...); returns its id.
+    pub fn add_joint(&mut self, joint: engine_schema::Joint) -> u32 {
+        let id = self.joint_count;
+        self.append_joints(std::slice::from_ref(&joint));
+        id
+    }
+
+    /// Read back one joint record (multipliers, penalties, `JOINT_FLAG_BROKEN`).
+    pub fn read_joint(&self, id: u32) -> engine_schema::Joint {
+        assert!(id < self.joint_count);
+        self.read_buffer_range(5, u64::from(id) * std::mem::size_of::<engine_schema::Joint>() as u64, 1)[0]
+    }
+
+    /// Read back every joint record (one transfer).
+    pub fn download_joints(&self) -> Vec<engine_schema::Joint> {
+        self.read_buffer_range(5, 0, self.joint_count as usize)
+    }
+
+    /// Joints that broke since the previous call (read from the event ring).
+    pub fn poll_joint_breaks(&mut self) -> Vec<JointBreak> {
+        let words: Vec<u32> = self.read_buffer_range(19, u64::from(EVENT_RING_BASE) * 4, (EVENTS_WORDS - EVENT_RING_BASE) as usize);
+        let mut out = Vec::new();
+        let lost = decode_joint_breaks(&words, &mut self.events_seen, &mut out);
+        if lost > 0 {
+            eprintln!("event ring overflow: {lost} events lost");
+        }
+        out
+    }
+
     /// Copy every simulation buffer on the GPU plus host bookkeeping.
     pub fn snapshot(&self) -> WorldSnapshot {
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("snapshot") });
@@ -1213,6 +1255,8 @@ impl WgpuSim {
             body_count: self.body_count,
             collider_count: self.collider_count,
             joint_count: self.joint_count,
+            user_joint_count: self.user_joint_count,
+            events_seen: self.events_seen,
             steps_done: self.steps_done,
             contacts_parity: self.contacts_parity,
             last_counters: self.last_counters,
@@ -1232,6 +1276,8 @@ impl WgpuSim {
         self.body_count = snap.body_count;
         self.collider_count = snap.collider_count;
         self.joint_count = snap.joint_count;
+        self.user_joint_count = snap.user_joint_count;
+        self.events_seen = snap.events_seen;
         self.steps_done = snap.steps_done;
         self.contacts_parity = snap.contacts_parity;
         self.last_counters = snap.last_counters;
@@ -1278,6 +1324,7 @@ impl VehicleBackend for WgpuSim {
         let stride = std::mem::size_of::<engine_schema::Joint>() as u64;
         self.queue.write_buffer(&self.bufs[5], u64::from(self.joint_count) * stride, bytemuck::cast_slice(joints));
         self.joint_count += joints.len() as u32;
+        self.user_joint_count += joints.iter().filter(|j| j.joint_type != JOINT_TYRE).count() as u32;
         self.joint_hash_clear_pending = true;
     }
 
@@ -1366,7 +1413,7 @@ fn buffer_sizes(c: &WorldCapacity, v: &VehicleCapacity) -> [u64; BIND_COUNT] {
     s[16] = b(c.max_colors * c.max_bodies.div_ceil(64).max(1), 4);
     s[17] = b(c.max_colors, 4);
     s[18] = b(c.max_hull_vertices, 16);
-    s[19] = 65536 * 4;
+    s[19] = u64::from(EVENTS_WORDS) * 4;
     s[20] = b(c.max_bodies, 4);
     s[21] = 64 * 4;
     s[22] = 96 * PASS_ALIGN;

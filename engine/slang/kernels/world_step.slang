@@ -99,6 +99,36 @@ static const uint EVENT_WAKE = 2u;
 static const uint EVENT_BREAK = 3u;
 static const uint EVENT_OVERFLOW = 4u;
 
+// Event ring behind the 64k joint pair hash in gEvents (engine-schema EVENT_RING_*):
+// a monotonically increasing write cursor, then 4-word records [type, id, a, b].
+// Hosts read the cursor and the records since their last read; never cleared.
+static const uint EVENT_RING_BASE = 65536u;
+static const uint EVENT_RING_CAPACITY = 1024u;
+
+void emitEvent(uint type, uint id, uint a, uint b)
+{
+    uint n;
+    AADD3(gEvents[EVENT_RING_BASE], 1u, n);
+    uint r = EVENT_RING_BASE + 4u + 4u * (n % EVENT_RING_CAPACITY);
+    ASTORE(gEvents[r], type);
+    ASTORE(gEvents[r + 1u], id);
+    ASTORE(gEvents[r + 2u], a);
+    ASTORE(gEvents[r + 3u], b);
+}
+
+// User joints that broke stay in the array (stable ids) but leave the graph.
+bool jointBroken(Joint j) { return j.jointType != JOINT_TYRE && (j.flags & JOINT_FLAG_BROKEN) != 0u; }
+// beat-box / three-avbd dual stasis, as for contacts: both ends asleep or static.
+bool jointAtRest(BodyState a, BodyState b)
+{
+    return (!bodyIsDynamic(a) || bodyIsSleeping(a)) && (!bodyIsDynamic(b) || bodyIsSleeping(b));
+}
+// FIXED / HINGE / D6 add axis-alignment rows (λ₃..₅, penalty k₃) to the ball rows.
+bool jointHasAngularRows(Joint j)
+{
+    return j.jointType == JOINT_FIXED || j.jointType == JOINT_HINGE || j.jointType == JOINT_D6;
+}
+
 bool bodyIsDynamic(BodyState b) { return b.invMass > 0.0 && (b.flags & BODY_DYNAMIC) != 0u; }
 bool bodyIsSleeping(BodyState b) { return (b.flags & BODY_SLEEPING) != 0u; }
 
@@ -378,6 +408,8 @@ void joint_hash_insert(uint3 tid : SV_DispatchThreadID)
     Joint jj = gJoints[i];
     // A wheel standing on a crate must still let the chassis collide with it.
     if (jj.jointType == JOINT_TYRE) return;
+    // A broken joint's bodies collide again.
+    if (jointBroken(jj)) return;
     uint key = jointPairKey(jj.bodyA, jj.bodyB);
     uint h = key & (JOINT_HASH_SIZE - 1u);
     for (uint probe = 0; probe < 64u; probe++)
@@ -1635,11 +1667,26 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     AvbdParams p = PARAMS;
     Joint j = gJoints[i];
     if (j.jointType == JOINT_TYRE) return; // vehicle kernels own the tyre rows
+    if (jointBroken(j)) return;
     BodyState a = gBodies[j.bodyA];
     BodyState b = gBodies[j.bodyB];
+    // Jointed bodies wake together (they already sleep together, see
+    // sleep_island_gate_joints): a sleeper held by an awake body would act as a
+    // fixed support and never pass the load on. One hop per step along a chain.
+    bool dynA = bodyIsDynamic(a), dynB = bodyIsDynamic(b);
+    if (dynA && dynB && bodyIsSleeping(a) != bodyIsSleeping(b))
+    {
+        uint s = bodyIsSleeping(a) ? j.bodyA : j.bodyB;
+        BodyState sb = bodyIsSleeping(a) ? a : b;
+        gBodies[s].flags = (sb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[s].sleepTimer = 0.0;
+    }
+    // Stasis while both ends rest (asleep or static): keep λ/k for the wake.
+    if (jointAtRest(gBodies[j.bodyA], gBodies[j.bodyB])) return;
     float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
     float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
     j.c0 = wa - wb;
+    j.c0Ang = cross(quatRotate(a.orientation, j.axisA), quatRotate(b.orientation, j.axisB));
     j.lambda0 *= p.alpha * p.gamma;
     j.lambda1 *= p.alpha * p.gamma;
     j.lambda2 *= p.alpha * p.gamma;
@@ -2125,6 +2172,7 @@ void csr_degree_joints(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
+    if (jointBroken(gJoints[i])) return; // must match csr_scatter_joints
     uint2 e = constraintEndpoints(i);
     csrCountEndpoint(e.x);
     csrCountEndpoint(e.y);
@@ -2342,6 +2390,7 @@ void csr_scatter_joints(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
+    if (jointBroken(gJoints[i])) return;
     uint2 e = constraintEndpoints(i);
     csrFillEndpoint(e.x, e.y, i);
     csrFillEndpoint(e.y, e.x, i);
@@ -3216,21 +3265,25 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
             float k = max(j.k0, p.kStart);
             contributeBallJoint(A, rhs, b.position, b.orientation, local, C, j.c0, k, lam, isA, p.alpha);
-            if (j.jointType == JOINT_FIXED || j.jointType == JOINT_HINGE || j.jointType == JOINT_D6)
+            if (jointHasAngularRows(j))
             {
-                BodyState other = isA ? bb : ba;
-                float3 axis = isA ? j.axisA : j.axisB;
-                float3 worldAxis = quatRotate(b.orientation, axis);
-                float3 otherAxis = quatRotate(other.orientation, isA ? j.axisB : j.axisA);
-                float3 Cang = cross(worldAxis, otherAxis);
+                // C = wA × wB keeps the joint axes aligned (2 DOF; spin about the
+                // axis stays free). Exact rotational Jacobians of the cross product:
+                // dC/dθA = wA·wBᵀ − (wA·wB)I, dC/dθB = (wA·wB)I − wB·wAᵀ.
+                float3 wA = quatRotate(ba.orientation, j.axisA);
+                float3 wB = quatRotate(bb.orientation, j.axisB);
+                float3 CangReg = cross(wA, wB) - p.alpha * j.c0Ang;
+                float d = dot(wA, wB);
+                float kAng = max(j.k3, p.kStart);
+                float3 lamAng = float3(j.lambda3, j.lambda4, j.lambda5);
                 for (int ax = 0; ax < 3; ax++)
                 {
-                    if (j.jointType == JOINT_HINGE && ax == 0) continue;
+                    float3 e = float3(ax == 0 ? 1.0 : 0.0, ax == 1 ? 1.0 : 0.0, ax == 2 ? 1.0 : 0.0);
+                    float3 row = isA ? (wA[ax] * wB - d * e) : (d * e - wB[ax] * wA);
                     Vec6 jj = vec6Zero();
-                    jj.v[3 + ax] = isA ? 1.0 : -1.0;
-                    float f = k * (1.0 - p.alpha) * Cang[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
-                    mat6AddOuter(A, jj, k);
-                    vec6AddScaled(rhs, jj, f);
+                    jj.v[3] = row.x; jj.v[4] = row.y; jj.v[5] = row.z;
+                    mat6AddOuter(A, jj, kAng);
+                    vec6AddScaled(rhs, jj, kAng * CangReg[ax] + lamAng[ax]);
                 }
             }
             if (j.jointType == JOINT_SLIDER)
@@ -3459,6 +3512,7 @@ void solve_primal_one(uint3 tid : SV_DispatchThreadID)
     solvePrimalForBody(PASS_U);
 }
 
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void solve_dual(uint3 tid : SV_DispatchThreadID)
@@ -3581,7 +3635,8 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         }
     }
     uint nJ = gCounters[0].jointCount;
-    if (i < nJ && gJoints[i].jointType != JOINT_TYRE)
+    if (i < nJ && gJoints[i].jointType != JOINT_TYRE && !jointBroken(gJoints[i])
+        && !jointAtRest(gBodies[gJoints[i].bodyA], gBodies[gJoints[i].bodyB]))
     {
         Joint j = gJoints[i];
         BodyState a = gBodies[j.bodyA];
@@ -3593,10 +3648,49 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
         // demo3d dual: C_hat = C - alpha * C0
         float3 Creg = C - p.alpha * j.c0;
+        float3 lamPrev = lam;
         lam = k * Creg + lam;
         j.lambda0 = lam.x; j.lambda1 = lam.y; j.lambda2 = lam.z;
         j.k0 = min(k + p.betaLin * length(Creg), min(j.stiffness, p.kMaxN));
         j.k1 = j.k0; j.k2 = j.k0;
+        float3 lamAng = float3(0, 0, 0);
+        float3 lamAngPrev = float3(j.lambda3, j.lambda4, j.lambda5);
+        if (jointHasAngularRows(j))
+        {
+            // Angular rows are hard constraints like the linear ones (same C0
+            // stabilization, own penalty ramped by betaAng): λ ← k·Ĉ + λ.
+            float3 CangReg = cross(quatRotate(a.orientation, j.axisA), quatRotate(b.orientation, j.axisB))
+                - p.alpha * j.c0Ang;
+            float kAng = max(j.k3, p.kStart);
+            lamAng = kAng * CangReg + float3(j.lambda3, j.lambda4, j.lambda5);
+            j.lambda3 = lamAng.x; j.lambda4 = lamAng.y; j.lambda5 = lamAng.z;
+            j.k3 = min(kAng + p.betaAng * length(CangReg), min(j.stiffness, p.kMaxN));
+            j.k4 = j.k3; j.k5 = j.k3;
+        }
+        if (PASS_U != 0u)
+        {
+            // Converged when the last iteration moved the multipliers by < 0.01 %
+            // (plus 0.1 N / 0.1 N·m of noise floor).
+            bool moving = length(lam - lamPrev) > 1.0e-4 * length(lam) + 0.1
+                || length(lamAng - lamAngPrev) > 1.0e-4 * length(lamAng) + 0.1;
+            j.flags = moving ? (j.flags | JOINT_FLAG_UNSETTLED) : (j.flags & ~JOINT_FLAG_UNSETTLED);
+        }
+        // Breakable joints: on the final iteration (PASS_U != 0) the multipliers are
+        // this step's converged constraint force and torque. Exceeding a threshold
+        // breaks the joint: it leaves the graph from the next step and its bodies
+        // collide again.
+        if (PASS_U != 0u && (j.breakForce > 0.0 || j.breakTorque > 0.0))
+        {
+            float force = length(lam);
+            float torque = length(lamAng);
+            bool snap = (j.breakForce > 0.0 && force > j.breakForce)
+                || (j.breakTorque > 0.0 && torque > j.breakTorque);
+            if (snap)
+            {
+                j.flags |= JOINT_FLAG_BROKEN;
+                emitEvent(EVENT_BREAK, i, asuint(force), asuint(torque));
+            }
+        }
         gJoints[i] = j;
     }
 }
@@ -3703,11 +3797,19 @@ void sleep_island_gate_joints(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (i >= gCounters[0].jointCount) return;
     Joint j = gJoints[i];
-    if (j.bodyA == j.bodyB) return;
+    if (j.bodyA == j.bodyB || jointBroken(j)) return;
     BodyState a = gBodies[j.bodyA];
     BodyState b = gBodies[j.bodyB];
     bool dynA = bodyIsDynamic(a);
     bool dynB = bodyIsDynamic(b);
+    // Still converging: no endpoint may sleep on forces that are still changing
+    // (a stiff chain can be nearly still long before its multipliers converge).
+    if (j.jointType != JOINT_TYRE && (j.flags & JOINT_FLAG_UNSETTLED) != 0u)
+    {
+        if (dynA && !bodyIsSleeping(a)) gCcdFlags[j.bodyA] = 0;
+        if (dynB && !bodyIsSleeping(b)) gCcdFlags[j.bodyB] = 0;
+        return;
+    }
     if (!dynA || !dynB) return;
     bool okA = bodyIsSleeping(a) || gCcdFlags[j.bodyA] != 0;
     bool okB = bodyIsSleeping(b) || gCcdFlags[j.bodyB] != 0;
