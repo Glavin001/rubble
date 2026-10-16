@@ -578,6 +578,26 @@ pub struct Methods {
     /// self-equilibrated about the deformed configuration so it conserves momentum
     /// (DECISIONS.md 58-60). Off: stiffness-proportional dashpots only.
     pub rayleigh_damping: bool,
+    /// Explicit multirate integration of the bond network (asynchronous variational
+    /// integration, Lew et al. 2003, at power-of-two step ratios). Each frame, every
+    /// bond of an explicitly integrated cluster takes the rate of its finer chunk: the
+    /// largest power of two `r` with `r dt` within that chunk's own stable step (its
+    /// Gershgorin rows, `chunk_stable_dts`, floored at the structure's `true_step` bound
+    /// when that is on, combined with the chunk's own contact bound as `substep_dt`
+    /// combines them, all at their safety factors). A bond is evaluated only at its own
+    /// ticks and kicks both chunks with the impulse `w dt f` of the interval `w dt` to
+    /// its next tick (its rate, cut at the frame's end, where every bond starts again).
+    /// Chunks drift and take their external, inertial and mass-damping loads at every
+    /// substep, so slivers (light chunks with stiff bonds) and their bonds run at the
+    /// substep while the rest of the network runs at its own larger step. Every bond's
+    /// impulse acts on both of its chunks at once with the balanced force and moment of
+    /// the single-rate integrator, so linear and angular momentum are exactly those of
+    /// single rate. The joint law runs on each bond's own interval (rate effects,
+    /// fatigue). A step change, judged by `scripts/fidelity.py` against single rate:
+    /// the truncation error of the coarse bonds grows with their step. Inert in
+    /// implicit mode and in the engine-coupled frame (single rate there). Off: every
+    /// bond at every substep.
+    pub multirate: bool,
 }
 
 impl Default for Methods {
@@ -627,6 +647,7 @@ impl Methods {
             implicit_failure_windows: false,
             corotational_bonds: false,
             rayleigh_damping: false,
+            multirate: false,
         }
     }
 
@@ -650,7 +671,7 @@ impl Methods {
     }
 
     /// Names of every switch, in declaration order.
-    pub const NAMES: [&'static str; 16] = ["layer_contact", "scaled_step_bound", "exact_joint_patch", "patch_after_damage", "exact_rate_filter", "frame_contact_step", "exact_frame_transfer", "contact_crushing", "tangent_statics", "true_step", "lattice_contact_step", "implicit_contact_steps", "implicit_contact_windows", "implicit_failure_windows", "corotational_bonds", "rayleigh_damping"];
+    pub const NAMES: [&'static str; 17] = ["layer_contact", "scaled_step_bound", "exact_joint_patch", "patch_after_damage", "exact_rate_filter", "frame_contact_step", "exact_frame_transfer", "contact_crushing", "tangent_statics", "true_step", "lattice_contact_step", "implicit_contact_steps", "implicit_contact_windows", "implicit_failure_windows", "corotational_bonds", "rayleigh_damping", "multirate"];
 
     /// Set a switch by name.
     pub fn set(&mut self, name: &str, on: bool) -> Result<(), String> {
@@ -671,6 +692,7 @@ impl Methods {
             "implicit_failure_windows" => &mut self.implicit_failure_windows,
             "corotational_bonds" => &mut self.corotational_bonds,
             "rayleigh_damping" => &mut self.rayleigh_damping,
+            "multirate" => &mut self.multirate,
             _ => return Err(format!("unknown method '{name}' (known: {})", Self::NAMES.join(", "))),
         };
         *slot = on;

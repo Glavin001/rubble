@@ -44,7 +44,7 @@ use Honoured::*;
 use Prerequisite::*;
 
 /// Every switch of `Methods::NAMES`.
-pub const TABLE: [Classification; 16] = [
+pub const TABLE: [Classification; 17] = [
     Classification {
         name: "layer_contact",
         honoured: Rejected,
@@ -140,6 +140,12 @@ pub const TABLE: [Classification; 16] = [
         honoured: Rejected,
         oracle: "ref/world.rs fit_mass_damping; ref/solver.rs mass_damping (explicit), ref/implicit.rs (Newmark residual and tangent)",
         gpu: "the bond dashpots only, unscaled",
+    },
+    Classification {
+        name: "multirate",
+        honoured: Rejected,
+        oracle: "ref/solver.rs open_multirate_window, bond_rates, firing_bonds (bond rates and impulses); ref/world.rs open_multirate_window (per frame, chunk contact bounds)",
+        gpu: "every bond at every substep; the design is findings/multirate.md",
     },
 ];
 

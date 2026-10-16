@@ -212,6 +212,8 @@ pub struct World {
     topology_version: u64,
     blast_caches: Vec<Option<BlastCache>>,
     contact_dt: f64,
+    /// `sim.methods.multirate`: each chunk's own contact substep (empty when off).
+    chunk_contact_dts: Vec<Vec<f64>>,
     /// Implicit mode: the last step's solver report and the worst residual so far.
     pub implicit_report: crate::implicit::ImplicitReport,
     pub implicit_worst_residual: f64,
@@ -395,6 +397,7 @@ impl World {
             topology_version: 0,
             blast_caches: vec![None; scene.loads.len()],
             contact_dt: f64::INFINITY,
+            chunk_contact_dts: Vec::new(),
             added_mass_fraction: 0.0,
             static_unconverged_frames: 0,
             implicit_report: Default::default(),
@@ -422,6 +425,9 @@ impl World {
             w.added_mass_fraction = w.solver.apply_mass_scaling(target);
         }
         w.contact_dt = w.contact_stable_dt();
+        if scene.sim.methods.multirate {
+            w.chunk_contact_dts = w.chunk_contact_dts();
+        }
         w.prestress();
         if scene.sim.methods.rayleigh_damping {
             w.solver.fit_mass_damping();
@@ -472,6 +478,42 @@ impl World {
         self.scene.material(&self.solver.structures[s].chunks[c].material)
     }
 
+    /// Squared contact frequency bound of chunk `c` of structure `s` against the
+    /// stiffest material (`contact_stable_dt`'s term for one chunk).
+    fn chunk_contact_w2(&self, s: usize, c: usize, stiffest: &Material) -> f64 {
+        let scale = self.scene.sim.stiffness_scale;
+        let ch = &self.solver.structures[s].chunks[c];
+        let b = OBox { center: Vec3::ZERO, rotation: ch.rotation, half: ch.half_extents, hull: ch.hull.clone(), parts: ch.parts.clone() };
+        let mat = self.chunk_material(s, c);
+        let kn: [f64; 3] = std::array::from_fn(|axis| contact_stiffness(mat, &b, stiffest, &b, ch.rotation.col(axis), scale));
+        let stiffness = if self.scene.sim.methods.lattice_contact_step && self.scene.sim.methods.layer_contact {
+            // The densest network: along axis d, two normal layers and four
+            // tangential ones, each doubled by a neighbour moving the other way.
+            let kt: [f64; 3] = std::array::from_fn(|axis| contact_shear_stiffness(mat, &b, stiffest, &b, ch.rotation.col(axis), scale));
+            let lattice = (0..3).map(|d| 4.0 * kn[d] + 4.0 * (0..3).filter(|&e| e != d).map(|e| kt[e]).sum::<f64>()).fold(0.0, f64::max);
+            LATTICE_ROTATION_MARGIN * lattice
+        } else {
+            // A face pair engages ~10 sample points of k/10 each (total k); a chunk
+            // buried in rubble can touch on all six faces.
+            6.0 * kn.iter().copied().fold(0.0, f64::max)
+        };
+        // Contact loads drive the chunk's deformation inertia (scaled under mass
+        // scaling).
+        stiffness / (ch.mass * self.solver.chunks[s][c].inertia_scale)
+    }
+
+    /// `sim.methods.multirate`: every chunk's own contact substep (`contact_stable_dt`
+    /// for that chunk alone, with the safety factor).
+    pub fn chunk_contact_dts(&self) -> Vec<Vec<f64>> {
+        let stiffest = self.scene.materials.values().max_by(|a, b| a.youngs_modulus.total_cmp(&b.youngs_modulus));
+        self.solver
+            .structures
+            .iter()
+            .enumerate()
+            .map(|(s, st)| (0..st.chunks.len()).map(|c| stiffest.map_or(f64::INFINITY, |m| self.contact_dt_of(self.chunk_contact_w2(s, c, m)))).collect())
+            .collect()
+    }
+
     /// Stable substep for the penalty contacts (stiffest contact on the lightest body).
     fn contact_stable_dt(&self) -> f64 {
         let scale = self.scene.sim.stiffness_scale;
@@ -479,24 +521,8 @@ impl World {
         let Some(stiffest) = stiffest else { return f64::INFINITY };
         let mut w2: f64 = 0.0;
         for (s, st) in self.solver.structures.iter().enumerate() {
-            for (c, ch) in st.chunks.iter().enumerate() {
-                let b = OBox { center: Vec3::ZERO, rotation: ch.rotation, half: ch.half_extents, hull: ch.hull.clone(), parts: ch.parts.clone() };
-                let mat = self.chunk_material(s, c);
-                let kn: [f64; 3] = std::array::from_fn(|axis| contact_stiffness(mat, &b, stiffest, &b, ch.rotation.col(axis), scale));
-                let stiffness = if self.scene.sim.methods.lattice_contact_step && self.scene.sim.methods.layer_contact {
-                    // The densest network: along axis d, two normal layers and four
-                    // tangential ones, each doubled by a neighbour moving the other way.
-                    let kt: [f64; 3] = std::array::from_fn(|axis| contact_shear_stiffness(mat, &b, stiffest, &b, ch.rotation.col(axis), scale));
-                    let lattice = (0..3).map(|d| 4.0 * kn[d] + 4.0 * (0..3).filter(|&e| e != d).map(|e| kt[e]).sum::<f64>()).fold(0.0, f64::max);
-                    LATTICE_ROTATION_MARGIN * lattice
-                } else {
-                    // A face pair engages ~10 sample points of k/10 each (total k); a chunk
-                    // buried in rubble can touch on all six faces.
-                    6.0 * kn.iter().copied().fold(0.0, f64::max)
-                };
-                // Contact loads drive the chunk's deformation inertia (scaled under mass
-                // scaling).
-                w2 = w2.max(stiffness / (ch.mass * self.solver.chunks[s][c].inertia_scale));
+            for c in 0..st.chunks.len() {
+                w2 = w2.max(self.chunk_contact_w2(s, c, stiffest));
             }
         }
         for imp in &self.impactors {
@@ -504,6 +530,12 @@ impl World {
             let k = (0..3).map(|axis| contact_stiffness(&imp.material, &b, stiffest, &b, b.rotation.col(axis), scale)).fold(0.0, f64::max);
             w2 = w2.max(k / imp.mass);
         }
+        self.contact_dt_of(w2)
+    }
+
+    /// The contact substep of a squared frequency bound `w2` (with its dashpot and the
+    /// safety factor).
+    fn contact_dt_of(&self, w2: f64) -> f64 {
         if w2 <= 0.0 {
             f64::INFINITY
         } else if self.scene.sim.methods.layer_contact {
@@ -685,6 +717,11 @@ impl World {
         } else {
             dt
         }
+    }
+
+    /// The contact substep in force (global: the stiffest contact on the lightest body).
+    pub fn contact_dt(&self) -> f64 {
+        self.contact_dt
     }
 
     pub fn substep_dt(&self) -> f64 {
@@ -1697,6 +1734,9 @@ impl World {
             self.count_step_limit();
         }
         let n = (self.scene.sim.frame_dt / dt).round().max(1.0) as usize;
+        if self.scene.sim.methods.multirate {
+            self.open_multirate_window(dt, n);
+        }
         self.frame_loads.resize(&self.solver);
         let splits_before = self.solver.events.len();
         for i in 0..n {
@@ -1750,6 +1790,15 @@ impl World {
             self.solver.energy.static_discard += before + work - (self.mechanical_energy() + self.dissipated_energy());
         }
         self.frame_loads.clear();
+    }
+
+    /// `sim.methods.multirate`: the frame's `n` substeps of `dt` as one window of the
+    /// solver's bond rates, each chunk's contact bound its own (under
+    /// `frame_contact_step` the frame's global one).
+    fn open_multirate_window(&mut self, dt: f64, n: usize) {
+        let per_chunk = !(self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact);
+        let (dts, global) = (&self.chunk_contact_dts, self.contact_dt);
+        self.solver.open_multirate_window(dt, n, |s, c| if per_chunk { dts[s][c] } else { global });
     }
 
     /// Implicit mode: integrate this substep's loads and take an implicit step once
@@ -2333,6 +2382,7 @@ impl World {
         obs.values.insert("broken_bonds".into(), broken as f64);
         obs.values.insert("fragments".into(), fragments as f64);
         obs.values.insert("substeps".into(), self.solver.substeps as f64);
+        obs.values.insert("bond_evaluations".into(), self.solver.bond_evaluations as f64);
         obs.values.insert("bond_dissipation".into(), self.solver.energy.bond_dissipation);
         obs.values.insert("damping_dissipation".into(), self.solver.energy.damping_dissipation);
         obs.values.insert("contact_dissipation".into(), self.contact.dissipated);

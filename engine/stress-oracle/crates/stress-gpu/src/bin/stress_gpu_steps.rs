@@ -13,6 +13,10 @@
 //!   rot x4..x100 every chunk's rotational inertia scaled (the top mode recomputed)
 //!   multirate    each chunk at its own Gershgorin step, floored at the island's true
 //!                step and binned in powers of two (chunk-substeps, global over binned)
+//!   bond rule    the oracle's `sim.methods.multirate` rule at the same substep: each
+//!                bond at its finer chunk's binned step (`ReferenceSolver::bond_rates`
+//!                without contact), as bond evaluations and as chunk updates at each
+//!                chunk's finest bond (both global over multirate)
 //! and the chunks that carry the top mode (its kinetic energy share at the mode shape):
 //! the slivers that set the step.
 
@@ -58,9 +62,13 @@ struct Island {
     carriers: Vec<(usize, f64)>,
     /// Chunk-substeps per frame with each chunk at its binned own step.
     multirate_work: f64,
+    /// The oracle's bond rule: bond evaluations and chunk updates per frame, single rate
+    /// and multirate, and the bonds per rate.
+    bond_rule: [f64; 4],
+    bond_rates: std::collections::BTreeMap<u32, usize>,
 }
 
-fn island(m: &ReferenceSolver, ci: usize, iters: usize) -> Option<Island> {
+fn island(m: &ReferenceSolver, rule: &ReferenceSolver, ci: usize, iters: usize) -> Option<Island> {
     let (mut mode, x) = top_mode_detail(m, ci, iters, 1.0)?;
     mode.omega *= 1.03;
     let dt = stable_step(mode, SAFETY);
@@ -97,7 +105,25 @@ fn island(m: &ReferenceSolver, ci: usize, iters: usize) -> Option<Island> {
             (n_global / 2f64.powf(level)).ceil()
         })
         .sum::<f64>();
-    Some(Island { ci, chunks: cl.chunks.len(), mode, dt, undamped_dt, rot, carriers, multirate_work })
+    // The oracle's rule at this substep: a bond at its finer chunk's rate, a chunk at its
+    // finest bond's.
+    let rates = rule.bond_rates(ci, dt, (n_global as u32).next_power_of_two(), &|_, _| f64::INFINITY);
+    let mut chunk_rate = vec![u32::MAX; st.chunks.len()];
+    let mut bond_rule = [0.0; 4];
+    let mut bond_rates = std::collections::BTreeMap::new();
+    for &(bi, r) in &rates {
+        *bond_rates.entry(r).or_insert(0) += 1;
+        bond_rule[0] += n_global;
+        bond_rule[1] += (n_global / r as f64).ceil();
+        let g = &m.bonds[cl.structure][bi].geometry;
+        chunk_rate[g.a] = chunk_rate[g.a].min(r);
+        chunk_rate[g.b] = chunk_rate[g.b].min(r);
+    }
+    for &c in &cl.chunks {
+        bond_rule[2] += n_global;
+        bond_rule[3] += (n_global / chunk_rate[c].min(n_global as u32).max(1) as f64).ceil();
+    }
+    Some(Island { ci, chunks: cl.chunks.len(), mode, dt, undamped_dt, rot, carriers, multirate_work, bond_rule, bond_rates })
 }
 
 fn levers(scene: &Scene, iters: usize) {
@@ -106,7 +132,15 @@ fn levers(scene: &Scene, iters: usize) {
     let chunks: usize = m.structures.iter().map(|s| s.chunks.len()).sum();
     let bonds: usize = scene.bodies.iter().map(|b| b.bonds.len()).sum();
     let reference = m.stable_dt();
-    let islands: Vec<Island> = (0..m.clusters.len()).filter_map(|ci| island(&m, ci, iters)).collect();
+    // The bond rule's solver: the same scene at this tool's safety, Gershgorin steps only.
+    let rule = {
+        let mut s = scene.clone();
+        s.sim.courant_safety = SAFETY;
+        s.sim.stress_courant_safety = None;
+        s.sim.methods.true_step = false;
+        ReferenceSolver::new(&s)
+    };
+    let islands: Vec<Island> = (0..m.clusters.len()).filter_map(|ci| island(&m, &rule, ci, iters)).collect();
     if islands.is_empty() {
         println!("{}: no bonded islands", scene.name);
         return;
@@ -120,6 +154,14 @@ fn levers(scene: &Scene, iters: usize) {
     let work_global = island_chunks * n;
     let work_per_island: f64 = islands.iter().map(|i| i.chunks as f64 * per_frame(i.dt)).sum();
     let work_multirate: f64 = islands.iter().map(|i| i.multirate_work).sum();
+    let rule: [f64; 4] = std::array::from_fn(|k| islands.iter().map(|i| i.bond_rule[k]).sum());
+    let mut rates = std::collections::BTreeMap::<u32, usize>::new();
+    for i in &islands {
+        for (&r, &k) in &i.bond_rates {
+            *rates.entry(r).or_insert(0) += k;
+        }
+    }
+    let rates: Vec<String> = rates.iter().map(|(r, k)| format!("{r}:{k}")).collect();
     // The island that sets the scene's step decides the scene's levers.
     let top = islands.iter().min_by(|a, b| a.dt.total_cmp(&b.dt)).unwrap();
     let mut dts: Vec<f64> = islands.iter().map(|i| i.dt).collect();
@@ -155,6 +197,7 @@ fn levers(scene: &Scene, iters: usize) {
         ratio(top.rot[2]),
         work_global / work_multirate
     );
+    println!("  bond rule        bond evaluations x{:.2}   chunk updates x{:.2}   (multirate's rule at this substep; bonds per rate {})", rule[0] / rule[1].max(1.0), rule[2] / rule[3].max(1.0), rates.join(" "));
     let st = &m.structures[m.clusters[top.ci].structure];
     let carriers: Vec<String> = top
         .carriers

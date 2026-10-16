@@ -5,6 +5,7 @@ reference, and B) with one build, and B judged on the outcomes a player sees.
     scripts/fidelity.py --bin target/release/stress-ref --b true_step --out DIR [--a ""]
                         [--jobs N] [--only SUBSTRING] [--set dotted.path=JSON]...
                         [--b-set dotted.path=JSON]...  (B only: another solve mode, say)
+                        [--scenes DIR]...  (scene directories; default the catalogue)
 
 Per scene:
   fails     the outcome flags (any bond broken, collapse, ...) are equal
@@ -12,7 +13,7 @@ Per scene:
   when      first cracks within 2 frames (1/30 s) of each other, or neither cracks
   pieces    fragment counts in the same power-of-two bin
   debris    mean speed of detached chunks within 30 % (both above 0.1 m/s)
-  cost      substeps and CPU seconds, B over A
+  cost      substeps, bond evaluations and CPU seconds, B over A
 
 The thresholds are the protocol's (IMPROVEMENTS.md, gameplay fidelity class); a scene
 passes when every applicable metric does. A and B run at one thread each, in parallel
@@ -24,9 +25,9 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def scenes(only):
+def scenes(only, dirs):
     out = []
-    for d in ['scenes', 'scenes/showcases']:
+    for d in dirs or ['scenes', 'scenes/showcases']:
         for f in sorted(os.listdir(os.path.join(ROOT, d))):
             if f.endswith('.json') and (not only or only in f):
                 out.append(os.path.join(d, f))
@@ -78,11 +79,12 @@ def main():
     ap.add_argument('--only')
     ap.add_argument('--set', action='append', default=[], help='--set override for both sides')
     ap.add_argument('--b-set', action='append', default=[], help='--set override for the judged side only (e.g. sim.solve_mode)')
+    ap.add_argument('--scenes', action='append', default=[], help='scene directory (repeatable; default scenes and scenes/showcases)')
     args = ap.parse_args()
     binary = os.path.abspath(args.bin)
     os.makedirs(os.path.join(args.out, 'a'), exist_ok=True)
     os.makedirs(os.path.join(args.out, 'b'), exist_ok=True)
-    todo = scenes(args.only)
+    todo = scenes(args.only, args.scenes)
 
     def both(scene):
         name = os.path.basename(scene)[:-5]
@@ -96,7 +98,7 @@ def main():
         results = list(pool.map(both, todo))
     keys = ['fails', 'where', 'when', 'pieces', 'debris']
     passed = 0
-    print('%-30s %s  %9s %9s  %s' % ('scene', ' '.join('%-6s' % k for k in keys), 'substeps', 'cpu', 'fragments, debris m/s, detached (A -> B)'))
+    print('%-30s %s  %9s %9s %9s  %s' % ('scene', ' '.join('%-6s' % k for k in keys), 'substeps', 'bonds', 'cpu', 'fragments, debris m/s, detached (A -> B)'))
     for name, res in results:
         try:
             a = json.load(open(os.path.join(args.out, 'a', name + '.json')))
@@ -108,8 +110,9 @@ def main():
         ok = all(m.values())
         passed += ok
         sub = b['values'].get('substeps', 0) / max(a['values'].get('substeps', 1), 1)
+        bonds = b['values'].get('bond_evaluations', 0) / max(a['values'].get('bond_evaluations', 1), 1)
         cpu = res['b'][0] / max(res['a'][0], 1e-9)
-        print('%-30s %s  %8.2fx %8.2fx  %g -> %g, %.2f -> %.2f, %d -> %d' % (name, ' '.join('%-6s' % ('ok' if m[k] else 'DIFF') for k in keys), sub, cpu, fa, fb, sa, sb, na, nb))
+        print('%-30s %s  %8.2fx %8.2fx %8.2fx  %g -> %g, %.2f -> %.2f, %d -> %d' % (name, ' '.join('%-6s' % ('ok' if m[k] else 'DIFF') for k in keys), sub, bonds, cpu, fa, fb, sa, sb, na, nb))
     print('fidelity: %d/%d scenes pass every metric; CPU A %.1f s, B %.1f s' % (passed, len(results), sum(r['a'][0] for _, r in results), sum(r['b'][0] for _, r in results)))
 
 
