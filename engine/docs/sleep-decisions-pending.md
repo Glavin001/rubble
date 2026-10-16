@@ -33,7 +33,7 @@ this.
 
 **Tried in the bond solver:** bond geometric stiffness (fixed the divergence,
 on by default), the effective-mass cap, the rotation limit, and inertia
-armature (flag 8388608; worse: 3,275 awake). Post-stabilization off: 2,178.
+armature (flag 8388608, since removed; worse: 3,275 awake). Post-stabilization off: 2,178.
 
 **Options**
 - **A. Fix the legacy bond solver** for damaged, partly broken houses

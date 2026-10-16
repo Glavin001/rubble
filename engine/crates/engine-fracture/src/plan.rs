@@ -111,6 +111,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("solve_primal_color", "solve_primal_color_persistent"),
     ("solve_primal_sparse", "solve_primal_sparse_persistent"),
     ("solve_dual", "solve_dual_persistent"),
+    ("record_stab_velocity", "record_stab_velocity"),
     ("extract_velocity_sleep", "extract_velocity_sleep"),
     ("carry_rest_pairs", "carry_rest_pairs"),
     ("joint_hash_clear", "joint_hash_clear"),
@@ -1142,9 +1143,14 @@ impl Planner {
                 self.phase("solveHalf");
             }
         }
-        // Post-stabilization: one primal pass with alpha = 0 (pass value 256 |
-        // colour), no dual update. It records the velocity before moving each body.
+        // Post-stabilization: record the velocity, then one primal pass with
+        // alpha = 0 (pass value 256 | colour) and no dual update.
         if self.params.flags & crate::scene::FLAG_POST_STAB != 0 {
+            if self.listed_passes {
+                self.work("record_stab_velocity", 67, 1); // awake list
+            } else {
+                self.disp("record_stab_velocity", n_bodies, 0);
+            }
             if sparse {
                 self.disp("solve_primal_sparse", 64, STAB_PASS);
             } else {
