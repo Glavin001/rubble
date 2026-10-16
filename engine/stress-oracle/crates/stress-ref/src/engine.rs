@@ -60,7 +60,8 @@ pub struct BoxShape {
 
 #[derive(Clone, Debug)]
 pub enum BodyGeometry {
-    Boxes(Vec<BoxShape>),
+    /// Shared: the world keeps a cluster's shapes until its chunk set changes.
+    Boxes(std::sync::Arc<Vec<BoxShape>>),
     Sphere { radius: f64, mass: f64 },
 }
 

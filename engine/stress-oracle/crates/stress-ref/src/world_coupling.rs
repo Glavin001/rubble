@@ -154,6 +154,7 @@ impl World {
             end: HashMap::new(),
             handed: Vec::new(),
             kept: HashMap::new(),
+            shapes: HashMap::new(),
         });
         self.sync_engine_bodies();
     }
@@ -171,14 +172,33 @@ impl World {
     }
 
     /// Every body as the engine should have it: one per cluster (boxes per chunk) and
-    /// one per impactor.
-    fn engine_bodies(&self) -> Vec<EngineBody> {
-        let mut out = Vec::new();
+    /// one per impactor. A cluster's shapes are built when its signature is new and
+    /// shared from `cache` after that (they depend only on its chunks).
+    fn engine_bodies(&self, cache: &mut HashMap<u64, (u64, std::sync::Arc<Vec<BoxShape>>)>) -> Vec<EngineBody> {
+        let mut out = Vec::with_capacity(self.solver.clusters.len() + self.impactors.len());
+        let mut live = std::collections::HashSet::with_capacity(self.solver.clusters.len());
         for cl in &self.solver.clusters {
             let st = &self.solver.structures[cl.structure];
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             (cl.structure, &cl.chunks, cl.anchored).hash(&mut hasher);
-            let shapes = cl
+            let signature = hasher.finish();
+            live.insert(cl.id);
+            if let Some((sig, shapes)) = cache.get(&cl.id) {
+                if *sig == signature {
+                    out.push(EngineBody {
+                        key: BodyKey::Cluster(cl.id),
+                        signature,
+                        geometry: BodyGeometry::Boxes(shapes.clone()),
+                        fixed: cl.anchored,
+                        ccd: false,
+                        pose: cl.pose,
+                        velocity: cl.velocity,
+                        angular_velocity: cl.angular_velocity,
+                    });
+                    continue;
+                }
+            }
+            let shapes: Vec<BoxShape> = cl
                 .chunks
                 .iter()
                 .flat_map(|&c| {
@@ -212,9 +232,11 @@ impl World {
                     }
                 })
                 .collect();
+            let shapes = std::sync::Arc::new(shapes);
+            cache.insert(cl.id, (signature, shapes.clone()));
             out.push(EngineBody {
                 key: BodyKey::Cluster(cl.id),
-                signature: hasher.finish(),
+                signature,
                 geometry: BodyGeometry::Boxes(shapes),
                 fixed: cl.anchored,
                 ccd: false,
@@ -226,13 +248,13 @@ impl World {
         for (i, imp) in self.impactors.iter().enumerate() {
             let geometry = match imp.shape {
                 ImpactorShape::Sphere { radius } => BodyGeometry::Sphere { radius, mass: imp.mass },
-                ImpactorShape::Box { half_extents } => BodyGeometry::Boxes(vec![BoxShape {
+                ImpactorShape::Box { half_extents } => BodyGeometry::Boxes(std::sync::Arc::new(vec![BoxShape {
                     local: Pose::default(),
                     half_extents: Vec3::from_array(half_extents),
                     mass: imp.mass,
                     chunk: None,
                     hull: None,
-                }]),
+                }])),
             };
             out.push(EngineBody {
                 key: BodyKey::Impactor(i),
@@ -245,12 +267,16 @@ impl World {
                 angular_velocity: imp.angular_velocity,
             });
         }
+        cache.retain(|id, _| live.contains(id));
         out
     }
 
     fn sync_engine_bodies(&mut self) {
-        let bodies = self.engine_bodies();
-        self.coupling.as_mut().expect("coupled").engine.sync_bodies(&bodies);
+        let mut cache = std::mem::take(&mut self.coupling.as_mut().expect("coupled").shapes);
+        let bodies = self.engine_bodies(&mut cache);
+        let coupling = self.coupling.as_mut().expect("coupled");
+        coupling.shapes = cache;
+        coupling.engine.sync_bodies(&bodies);
     }
 
     /// The world's own view of every body's motion.

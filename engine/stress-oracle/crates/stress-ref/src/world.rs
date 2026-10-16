@@ -265,6 +265,8 @@ struct Coupling {
     /// step (`coupled_write_back` returns them to the world).
     handed: Vec<(ContactKey, Stick)>,
     kept: HashMap<((usize, usize), (usize, usize)), f64>,
+    /// Each cluster's engine shapes by cluster id, with the signature they were built for.
+    shapes: HashMap<u64, (u64, std::sync::Arc<Vec<BoxShape>>)>,
 }
 
 /// Contact stiffness of two bodies pressed together along `dir`: their half-thicknesses

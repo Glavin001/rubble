@@ -6,7 +6,6 @@
 
 pub mod joint;
 
-use std::collections::HashMap;
 
 use stress_ref::math::{Mat3, Quat, Vec3};
 use stress_ref::scene::{SolveMode, Support};
@@ -135,7 +134,8 @@ pub struct StructureTables {
     pub islands: Vec<Island>,
     pub table: MaterialTable,
     pub bonds: Vec<(usize, usize)>,
-    pub bond_index: HashMap<(usize, usize), u32>,
+    /// `bond_index[s][b]`: the GPU bond of structure `s`'s bond `b` (`u32::MAX`: none).
+    pub bond_index: Vec<Vec<u32>>,
     pub bond_static: Vec<BondStatic>,
     pub bond_dyn: Vec<BondDyn>,
     pub csr: Vec<u32>,
@@ -147,10 +147,12 @@ pub const MAX_MATERIALS: usize = 64;
 /// Pack the solver's current structures (static data, history and state).
 pub fn pack(m: &ReferenceSolver) -> Result<StructureTables, String> {
         let mut chunk_index: Vec<Vec<u32>> = m.structures.iter().map(|st| vec![u32::MAX; st.chunks.len()]).collect();
-        let mut chunks = Vec::new();
-        let mut chunk_static = Vec::new();
-        let mut state = Vec::new();
-        let mut islands = Vec::new();
+        let chunk_total: usize = m.clusters.iter().map(|cl| cl.chunks.len()).sum();
+        let bond_total: usize = m.clusters.iter().map(|cl| cl.bonds.len()).sum();
+        let mut chunks = Vec::with_capacity(chunk_total);
+        let mut chunk_static = Vec::with_capacity(chunk_total);
+        let mut state = Vec::with_capacity(4 * chunk_total);
+        let mut islands = Vec::with_capacity(m.clusters.len());
         for (ci, cl) in m.clusters.iter().enumerate() {
             let s = cl.structure;
             let st = &m.structures[s];
@@ -245,11 +247,12 @@ pub fn pack(m: &ReferenceSolver) -> Result<StructureTables, String> {
             });
         }
         let mut table = MaterialTable::default();
-        let mut bonds = Vec::new();
-        let mut bond_index: HashMap<(usize, usize), u32> = HashMap::new();
-        let mut bond_static = Vec::new();
-        let mut bond_dyn = Vec::new();
-        let mut incident = vec![Vec::new(); chunks.len()];
+        let mut bonds = Vec::with_capacity(bond_total);
+        let mut bond_index: Vec<Vec<u32>> = m.structures.iter().map(|st| vec![u32::MAX; st.bonds.len()]).collect();
+        let mut bond_static = Vec::with_capacity(bond_total);
+        let mut bond_dyn = Vec::with_capacity(bond_total);
+        // Chunk-to-bond incidence, `2 bond + side` in bond order (CSR built below).
+        let mut incident: Vec<(u32, u32)> = Vec::with_capacity(2 * bond_total);
         for (ci, cl) in m.clusters.iter().enumerate() {
             let s = cl.structure;
             islands[ci].range[2] = bonds.len() as u32;
@@ -261,9 +264,9 @@ pub fn pack(m: &ReferenceSolver) -> Result<StructureTables, String> {
                 let (a, bb) = (chunk_index[s][g.a], chunk_index[s][g.b]);
                 law.ids = [material, a, bb, ci as u32];
                 let i = bonds.len() as u32;
-                incident[a as usize].push(2 * i);
-                incident[bb as usize].push(2 * i + 1);
-                bond_index.insert((s, bi), i);
+                incident.push((a, 2 * i));
+                incident.push((bb, 2 * i + 1));
+                bond_index[s][bi] = i;
                 bonds.push((s, bi));
                 bond_static.push(BondStatic {
                     t1: v4(g.t1, 0.0),
@@ -290,13 +293,22 @@ pub fn pack(m: &ReferenceSolver) -> Result<StructureTables, String> {
         }
         // CSR incidence: offsets (into this buffer) then entries, in bond order.
         let n = chunks.len();
-        let mut csr = vec![0u32; n + 1];
-        let mut entries = Vec::new();
-        for (c, inc) in incident.iter().enumerate() {
-            csr[c] = (n + 1 + entries.len()) as u32;
-            entries.extend_from_slice(inc);
+        let mut degree = vec![0u32; n + 1];
+        for &(c, _) in &incident {
+            degree[c as usize + 1] += 1;
         }
-        csr[n] = (n + 1 + entries.len()) as u32;
-        csr.extend(entries);
+        let mut csr = vec![0u32; n + 1 + incident.len()];
+        let mut at = n + 1;
+        for c in 0..n {
+            csr[c] = at as u32;
+            at += degree[c + 1] as usize;
+        }
+        csr[n] = at as u32;
+        // Entries per chunk in bond order (a stable fill).
+        let mut fill: Vec<usize> = (0..n).map(|c| csr[c] as usize).collect();
+        for &(c, e) in &incident {
+            csr[fill[c as usize]] = e;
+            fill[c as usize] += 1;
+        }
         Ok(StructureTables { chunk_index, chunks, chunk_static, state, islands, table, bonds, bond_index, bond_static, bond_dyn, csr })
 }

@@ -113,6 +113,28 @@ struct Run {
     redone: u64,
     unverified: u64,
     profile: serde_json::Value,
+    /// FNV-1a of the end state (cluster motion and membership, chunk hidden states,
+    /// impactors), so a lossless change is checked bit for bit.
+    digest: String,
+}
+
+fn digest(m: &stress_ref::solver::ReferenceSolver, impactors: &[stress_ref::world::Impactor]) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut eat = |s: String| {
+        for b in s.bytes() {
+            h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+    };
+    for cl in &m.clusters {
+        eat(format!("{} {:?} {:?} {:?} {:?}", cl.id, cl.chunks, cl.pose, cl.velocity, cl.angular_velocity));
+    }
+    for st in m.chunks.iter().flatten() {
+        eat(format!("{:?} {:?} {:?} {:?} {}", st.u, st.th, st.v, st.w, st.removed));
+    }
+    for i in impactors {
+        eat(format!("{:?} {:?} {:?}", i.pose, i.velocity, i.angular_velocity));
+    }
+    format!("{h:016x}")
 }
 
 fn run_oracle(scene: &Scene) -> Run {
@@ -126,7 +148,8 @@ fn run_oracle(scene: &Scene) -> Run {
     }
     let o = w.observation();
     let ram = w.impactors.first().map_or(0.0, |i| i.velocity.norm());
-    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null }
+    let digest = digest(&w.solver, &w.impactors);
+    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, digest }
 }
 
 #[cfg(feature = "gpu")]
@@ -143,10 +166,22 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     w.redo_fractured_frames = !no_redo;
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut frames = Vec::with_capacity(n);
-    for _ in 0..n {
+    let trace = std::env::var("STRESS_BENCH_TRACE").is_ok();
+    if trace {
+        w.solver.sync(gpu);
+        eprintln!("setup digest {}", digest(&w.solver.mirror, &w.solver.impactors));
+        let mut r = stress_ref::solver::ReferenceSolver::new(scene);
+        eprintln!("fresh digest {}", digest(&r, &[]));
+        r.gravity_prestress();
+        eprintln!("cpu prestress digest {}", digest(&r, &[]));
+    }
+    for f in 0..n {
         let t = Instant::now();
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
+        if trace {
+            eprintln!("frame {f} digest {}", digest(&w.solver.mirror, &w.solver.impactors));
+        }
     }
     w.solver.sync(gpu);
     let o = w.observation();
@@ -155,7 +190,8 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split,
         "batches": p.batches, "substeps": p.substeps, "host_splits": w.solver.host_splits, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
-    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile }
+    let digest = digest(&w.solver.mirror, &w.solver.impactors);
+    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, digest }
 }
 
 fn main() {
@@ -200,7 +236,7 @@ fn main() {
             println!(
                 "{}",
                 serde_json::json!({"solver": solver, "regime": name, "repeat": repeat, "seconds": seconds, "frame_dt": scene.sim.frame_dt,
-                    "frame_ms": run.frames, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile})
+                    "frame_ms": run.frames, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "digest": run.digest})
             );
         }
     }

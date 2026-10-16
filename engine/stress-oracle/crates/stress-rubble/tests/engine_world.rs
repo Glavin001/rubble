@@ -18,7 +18,7 @@ fn cube(key: BodyKey, at: Vec3, chunk: usize, mass: f64) -> EngineBody {
     EngineBody {
         key,
         signature: 1,
-        geometry: BodyGeometry::Boxes(vec![BoxShape { local: Pose::default(), half_extents: Vec3::splat(0.5), mass, chunk: Some((0, chunk)), hull: None }]),
+        geometry: BodyGeometry::Boxes(vec![BoxShape { local: Pose::default(), half_extents: Vec3::splat(0.5), mass, chunk: Some((0, chunk)), hull: None }].into()),
         fixed: false,
         ccd: false,
         pose: Pose::new(at, Quat::IDENTITY),
