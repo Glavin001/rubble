@@ -1,0 +1,23 @@
+[package]
+name = "stress-rubble"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Couples the stress-ref destruction stress solver to rubble's AVBD GPU rigid-body engine (engine-webgpu)"
+
+[dependencies]
+stress-ref = { path = "../stress-ref" }
+# rubble's own engine (wgpu 24; the oracle's GPU solver is on wgpu 30: both majors
+# coexist in the lock, each crate on its own device).
+engine-webgpu = { path = "../../../crates/engine-webgpu" }
+engine-schema = { path = "../../../crates/engine-schema" }
+glam = { version = "0.29", features = ["bytemuck"] }
+anyhow = "1"
+# The GPU stress solver coupled to rubble (`GpuWorld::with_engine`), for its tests.
+stress-gpu = { path = "../stress-gpu", optional = true }
+
+[features]
+gpu = ["dep:stress-gpu"]
+# The shared showcase behaviours with rubble as the engine (slow).
+showcases = []
