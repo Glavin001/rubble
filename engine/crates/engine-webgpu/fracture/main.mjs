@@ -140,7 +140,7 @@ function tick(now){
     // A heavy step in flight: this frame's share of slices, then its counters.
     // Additive increase while the GPU keeps up, multiplicative cut when it
     // does not, with the frame-time cut above as a backstop.
-    sliceRate=workDone[0].done&&frameEma<FRAME_BUDGET_MS*1.5?Math.min(MAX_SLICE_RATE,sliceRate+0.1):Math.max(0.25,sliceRate*0.85);
+    sliceRate=workDone[0].done&&frameEma<FRAME_BUDGET_MS?Math.min(MAX_SLICE_RATE,sliceRate+0.1):Math.max(0.25,sliceRate*0.85);
     sliceCredit+=sliceRate;const n=Math.floor(sliceCredit);sliceCredit-=n;
     const mark={done:false};workDone=[workDone[1],mark];device.queue.onSubmittedWorkDone().then(()=>{mark.done=true});
     // Counters arrive asynchronously, so the queue keeps flowing.
