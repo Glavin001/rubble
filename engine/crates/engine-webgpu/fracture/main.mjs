@@ -1,6 +1,4 @@
-import {parseFractureGlb} from './asset.mjs';
-import {buildScene,buildGrid,buildSuburb} from './geometry.mjs';
-import {buildCuboidHouse} from './cuboid-house.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,layoutScene,withoutJoints,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -64,38 +62,35 @@ async function loadLevel(level){
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   const built=procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   if($('solve-bonds').checked)setStatus('Settling bonds under self-weight…');
-  const one=$('solve-bonds').checked?await preloadBonds(device,built):{...built,joints:[]};
-  next=layout?(layout.suburb?buildSuburb:buildGrid)(asset,level,{...layout,maxHullVertices,base:one}):one;
-  // A brick in a wall touches up to six neighbours (four contacts each).
-  if(procedural)next={...next,capacity:{...next.capacity,candidatesPerCollider:12,contactsPerCollider:24}}}catch(e){if(scene?.selected.length)$('level').value=String(scene.selected[0].level);throw e}
+  const one=$('solve-bonds').checked?await preloadBonds(device,built):withoutJoints(built);
+  // Copies laid out as the sample says (procedural houses get a larger contact budget).
+  next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
  renderer.colorMode=$('show-sleep').checked?1:0;
- const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=scene.colliders.filter(c=>c.shape===(procedural?2:3)).length;$('bonds').textContent=scene.bonds.length*copies;$('release').textContent='Start simulation';
+ const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=procedural?scene.pieces*copies:scene.hullCount;$('bonds').textContent=scene.bondCount*copies;$('release').textContent='Start simulation';
  $('fire').hidden=!scene.rowShot;$('awake').textContent='0';$('contacts').textContent='0';
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
- const what=copies>1?`${copies} houses · ${scene.bodies.length-1-scene.projectileCount} bodies · `:'';
- const source=procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.library.material.length} materials${skipped}`;
+ const what=copies>1?`${copies} houses · ${scene.bodyCount-1-scene.projectileCount} bodies · `:'';
+ const source=procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials${skipped}`;
  setStatus(`${what}${source} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
  layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;
  const start=performance.now(),next=parseFractureGlb(bytes);const ms=performance.now()-start;
- asset=next;$('scene').value=sampleKey;const levels=[...new Set(asset.physics.fragments.map(f=>f.level))].sort((a,b)=>a-b);
- $('level').replaceChildren(...levels.map(l=>new Option(`Level ${l} · ${asset.physics.fragments.filter(f=>f.level===l).length} fragments`,l)));$('filename').textContent=name;
- const level=levels.includes(entry.level)?entry.level:levels[0];$('level').value=String(level);
+ asset?.handle.free();asset=next;$('scene').value=sampleKey;
+ $('level').replaceChildren(...asset.levels.map(l=>new Option(`Level ${l} · ${asset.levelFragments(l)} fragments`,l)));$('filename').textContent=name;
+ const level=asset.initialLevel(entry.level);$('level').value=String(level);
  await loadLevel(level);window.__FRACTURE_DEMO__.parseMs=ms;
 }
-const samples={house:{file:'veneer-house.glb',label:'house'},row:{file:'veneer-house-hull16.glb',label:'20 houses',layout:{columns:1,rows:20},level:3,maxHullVertices:16},
- grid:{file:'veneer-house.glb',label:'49 houses',layout:{columns:7,rows:7},level:2},
- suburb:{file:'veneer-house.glb',label:'48 houses',layout:{suburb:true},level:2},
- cuboids:{procedural:'cuboid',label:'48 cuboid houses',layout:{suburb:true}},
- cuboidGrid:{procedural:'cuboid',label:'49 cuboid houses',layout:{columns:7,rows:7}},arch:{file:'masonry-arch.glb',label:'arch'}};
+// The Scene menu is the shared catalogue (engine-fracture samples.rs), as in the Metal viewer.
+const samples=Object.fromEntries(SAMPLES.map(s=>[s.key,{...s,procedural:s.file?null:'cuboid'}]));
+$('scene').replaceChildren(...SAMPLES.map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house')),Object.assign(new Option('Custom GLB',''),{disabled:true}));
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  if(entry.procedural){
   // Built in code from box colliders: no GLB, one level, no baked bonds.
-  layout=entry.layout??null;procedural=entry.procedural;asset=null;$('scene').value=key;$('filename').textContent='Procedural cuboid house';
+  layout=entry.layout??null;procedural=entry.procedural;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent='Procedural cuboid house';
   $('level').replaceChildren(new Option('Cuboids · box colliders only',0));$('level').value='0';
   await loadLevel(0);return;
  }
@@ -113,7 +108,7 @@ $('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').che
 $('solve-bonds').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
-$('metadata').onclick=()=>{if(!asset)return;const url=URL.createObjectURL(new Blob([JSON.stringify({physics:asset.physics,materialLibrary:asset.library},null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='fracture-metadata.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+$('metadata').onclick=()=>{if(!asset)return;const url=URL.createObjectURL(new Blob([asset.metadataJson()],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='fracture-metadata.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();document.body.classList.add('drop')});
 window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
 window.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');const f=e.dataTransfer.files[0];if(f&&device)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))});

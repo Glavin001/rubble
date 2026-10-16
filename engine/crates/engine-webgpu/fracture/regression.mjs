@@ -1,4 +1,5 @@
-import {add,sub,norm,colliderVertices} from './geometry.mjs';
+import {add,sub,norm} from './vec.mjs';
+import {colliderVertices} from './wasm.mjs';
 // Run in this demo's browser console, or import from a browser automation test.
 export async function runFractureRegression(demo=window.__FRACTURE_DEMO__) {
  const require=(ok,message)=>{if(!ok)throw new Error(`Fracture regression: ${message}`)};

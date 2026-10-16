@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,existsSync} from 'node:fs';
 import {createSimulation} from './simulation.mjs';
-import {HullArena,appendHull} from './geometry.mjs';
+import {HullArena,appendHull} from './wasm.mjs';
 import {prism} from './convex-regression.mjs';
 
 const wgslDir=new URL('../generated/wgsl/',import.meta.url);

@@ -1,4 +1,5 @@
-import {HullArena,appendHull,colliderBounds,colliderVertices,hullView,hullBase,cuboidHull,add,sub,scale,rotate,cross,dot,norm} from './geometry.mjs';
+import {HullArena,appendHull,colliderBounds,colliderVertices,hullView,hullBase} from './wasm.mjs';
+import {add,sub,scale,rotate,cross,dot,norm} from './vec.mjs';
 import {createSimulation} from './simulation.mjs';
 // GPU conformance and scale checks for the core convex path (hull/hull, hull/box,
 // hull/plane, hull/sphere, hull/capsule). CPU oracles below are independent of the
@@ -22,13 +23,15 @@ const MARGIN=.01; // simulation.mjs contactOffset
 const AMBIGUOUS=2e-4; // |separation| band where f32 GPU and f64 oracle may disagree
 
 // ---- CPU oracles -----------------------------------------------------------------
+let cube;const unitCube=()=>cube??=hullView(new HullArena().data,0);
 // World polytope for a hull or box collider: vertices, face planes, edge vectors.
 function polytope(scene,c){
  const body=scene.bodies[c.body],q=body.q||[0,0,0,1],lq=c.localRot||[0,0,0,1];
  if(c.shape===2){
-  const box=cuboidHull(c.params.slice(0,3));const lp=c.localPos||[0,0,0];
-  const vertices=box.vertices.map(v=>add(body.p,rotate(q,add(lp,rotate(lq,v)))));
-  return {vertices,normals:box.faces.map(f=>rotate(q,rotate(lq,f.n))),edges:box.edges.map(([a,b])=>sub(vertices[b],vertices[a]))};
+  // The arena's permanent unit cube (record 0), scaled to the box.
+  const box=unitCube(),lp=c.localPos||[0,0,0];
+  const vertices=box.vertices.map(v=>add(body.p,rotate(q,add(lp,rotate(lq,v.map((x,k)=>x*c.params[k]))))));
+  return {vertices,normals:box.planes.map(f=>rotate(q,rotate(lq,f.n))),edges:box.edges.map(([a,b])=>sub(vertices[b],vertices[a]))};
  }
  const view=hullView(scene.hullData,hullBase(c.params)),vertices=colliderVertices(scene,c),s=c.params[1]||1;
  return {vertices,normals:Array.from({length:view.nf},(_,k)=>rotate(q,rotate(lq,scale(view.plane(k).n,1/s)))).map(norm),
