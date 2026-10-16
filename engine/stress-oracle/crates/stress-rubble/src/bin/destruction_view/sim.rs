@@ -233,6 +233,74 @@ impl Sim {
     }
 }
 
+/// `DESTRUCTION_VIEW_HOST_CHUNKS=1`: every chunk drawn from the mirror instead of the
+/// GPU state (checks the host path against the GPU one).
+pub fn host_chunks_only() -> bool {
+    std::env::var("DESTRUCTION_VIEW_HOST_CHUNKS").is_ok_and(|v| v == "1")
+}
+
+/// A chunk the solver keeps out of its GPU tables, as `destruction_render.slang`'s
+/// `HostChunk` (world box; centre w: utilization, < 0 without an unbroken bond).
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HostChunk {
+    pub center: [f32; 4],
+    pub axes: [[f32; 4]; 3],
+}
+
+impl Sim {
+    /// A signature of what the GPU tables hold and of the topology: the host chunks
+    /// change only with it (excluded clusters do not move while out).
+    pub fn host_chunk_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.world.solver.chunk_order().hash(&mut h);
+        let m = &self.world.solver.mirror;
+        (m.clusters.len(), m.events.len()).hash(&mut h);
+        h.finish()
+    }
+
+    /// Every active chunk not in the GPU tables, from the mirror (`world.rs chunk_box`).
+    pub fn host_chunks(&self) -> Vec<HostChunk> {
+        let m = &self.world.solver.mirror;
+        let on_gpu: std::collections::HashSet<(usize, usize)> =
+            if host_chunks_only() { Default::default() } else { self.world.solver.chunk_order().iter().copied().collect() };
+        let mut out = Vec::new();
+        for (s, st) in m.structures.iter().enumerate() {
+            if (0..st.chunks.len()).all(|c| on_gpu.contains(&(s, c))) {
+                continue;
+            }
+            // Largest utilization of each chunk's unbroken bonds (-1: none).
+            let mut util = vec![-1.0f64; st.chunks.len()];
+            for b in &m.bonds[s] {
+                if b.joint.connected(b.rebar.is_some()) {
+                    for c in [b.geometry.a, b.geometry.b] {
+                        util[c] = util[c].max(b.joint.utilization);
+                    }
+                }
+            }
+            for c in 0..st.chunks.len() {
+                let state = &m.chunks[s][c];
+                if on_gpu.contains(&(s, c)) || !state.active || state.removed {
+                    continue;
+                }
+                let ch = &st.chunks[c];
+                let cl = &m.clusters[state.cluster];
+                let hidden = Quat::from_axis_angle(state.th, state.th.norm()).to_mat3();
+                let r = cl.rotation() * hidden * ch.rotation;
+                let p = m.chunk_position(s, c);
+                let h = ch.half_extents;
+                let half = [h.x, h.y, h.z];
+                out.push(HostChunk {
+                    center: [p.x as f32, p.y as f32, p.z as f32, util[c] as f32],
+                    axes: std::array::from_fn(|k| [r.m[0][k] as f32, r.m[1][k] as f32, r.m[2][k] as f32, half[k] as f32]),
+                });
+            }
+        }
+        out
+    }
+}
+
 /// Entry distance of a ray into an axis-aligned box (negative: the origin is inside).
 pub fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f64> {
     let (mut t0, mut t1) = (f64::NEG_INFINITY, f64::INFINITY);

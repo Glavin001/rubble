@@ -209,6 +209,14 @@ struct Camera_0
     float4 ground_0;
 };
 
+struct HostChunk_natural_0
+{
+    packed_float4 center_1;
+    packed_float4 axis0_0;
+    packed_float4 axis1_0;
+    packed_float4 axis2_0;
+};
+
 struct Impactor_natural_0
 {
     packed_float4 position_1;
@@ -243,6 +251,7 @@ struct KernelContext_0
     uint device* index_0;
     BondDyn_natural_0 device* bond_dyn_0;
     Camera_0 constant* camera_0;
+    HostChunk_natural_0 device* host_chunks_0;
     Impactor_natural_0 device* impactors_0;
 };
 
@@ -286,7 +295,7 @@ struct pixelInput_0
     float3 world_1 [[user(_SLANG_ATTR_2)]];
 };
 
-[[fragment]] pixelOutput_0 lit_fs(pixelInput_0 _S7 [[stage_in]], float4 position_2 [[position]], ChunkStatic_natural_0 device* chunks_1 [[buffer(1)]], Island_natural_0 device* islands_1 [[buffer(2)]], packed_float4 device* state_1 [[buffer(3)]], uint device* index_1 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(5)]], Camera_0 constant* camera_1 [[buffer(0)]], Impactor_natural_0 device* impactors_1 [[buffer(6)]])
+[[fragment]] pixelOutput_0 lit_fs(pixelInput_0 _S7 [[stage_in]], float4 position_2 [[position]], ChunkStatic_natural_0 device* chunks_1 [[buffer(1)]], Island_natural_0 device* islands_1 [[buffer(2)]], packed_float4 device* state_1 [[buffer(3)]], uint device* index_1 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(5)]], Camera_0 constant* camera_1 [[buffer(0)]], HostChunk_natural_0 device* host_chunks_1 [[buffer(7)]], Impactor_natural_0 device* impactors_1 [[buffer(6)]])
 {
     thread KernelContext_0 kernelContext_1;
     (&kernelContext_1)->chunks_0 = chunks_1;
@@ -295,6 +304,7 @@ struct pixelInput_0
     (&kernelContext_1)->index_0 = index_1;
     (&kernelContext_1)->bond_dyn_0 = bond_dyn_1;
     (&kernelContext_1)->camera_0 = camera_1;
+    (&kernelContext_1)->host_chunks_0 = host_chunks_1;
     (&kernelContext_1)->impactors_0 = impactors_1;
     pixelOutput_0 _S8 = { float4(_S7.color_0 * float3((0.34999999403953552f + 0.64999997615814209f * max(dot(normalize(_S7.normal_0), normalize(camera_1->light_0.xyz)), 0.0f))) , 1.0f) };
     return _S8;
@@ -312,7 +322,7 @@ struct pixelInput_1
     float3 world_2 [[user(_SLANG_ATTR_2)]];
 };
 
-[[fragment]] pixelOutput_1 ground_fs(pixelInput_1 _S9 [[stage_in]], float4 position_3 [[position]], ChunkStatic_natural_0 device* chunks_2 [[buffer(1)]], Island_natural_0 device* islands_2 [[buffer(2)]], packed_float4 device* state_2 [[buffer(3)]], uint device* index_2 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(5)]], Camera_0 constant* camera_2 [[buffer(0)]], Impactor_natural_0 device* impactors_2 [[buffer(6)]])
+[[fragment]] pixelOutput_1 ground_fs(pixelInput_1 _S9 [[stage_in]], float4 position_3 [[position]], ChunkStatic_natural_0 device* chunks_2 [[buffer(1)]], Island_natural_0 device* islands_2 [[buffer(2)]], packed_float4 device* state_2 [[buffer(3)]], uint device* index_2 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(5)]], Camera_0 constant* camera_2 [[buffer(0)]], HostChunk_natural_0 device* host_chunks_2 [[buffer(7)]], Impactor_natural_0 device* impactors_2 [[buffer(6)]])
 {
     thread KernelContext_0 kernelContext_2;
     (&kernelContext_2)->chunks_0 = chunks_2;
@@ -321,6 +331,7 @@ struct pixelInput_1
     (&kernelContext_2)->index_0 = index_2;
     (&kernelContext_2)->bond_dyn_0 = bond_dyn_2;
     (&kernelContext_2)->camera_0 = camera_2;
+    (&kernelContext_2)->host_chunks_0 = host_chunks_2;
     (&kernelContext_2)->impactors_0 = impactors_2;
     float2 _S10 = _S9.world_2.xy;
     int2 _S11 = int2(floor(_S10));
@@ -354,7 +365,7 @@ struct VertexOut_0
     float3 world_4;
 };
 
-[[vertex]] chunk_vs_Result_0 chunk_vs(uint vertex_1 [[vertex_id]], uint instance_0 [[instance_id]], uint base_instance_0 [[base_instance]], ChunkStatic_natural_0 device* chunks_3 [[buffer(1)]], Island_natural_0 device* islands_3 [[buffer(2)]], packed_float4 device* state_3 [[buffer(3)]], uint device* index_3 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(5)]], Camera_0 constant* camera_3 [[buffer(0)]], Impactor_natural_0 device* impactors_3 [[buffer(6)]])
+[[vertex]] chunk_vs_Result_0 chunk_vs(uint vertex_1 [[vertex_id]], uint instance_0 [[instance_id]], uint base_instance_0 [[base_instance]], ChunkStatic_natural_0 device* chunks_3 [[buffer(1)]], Island_natural_0 device* islands_3 [[buffer(2)]], packed_float4 device* state_3 [[buffer(3)]], uint device* index_3 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(5)]], Camera_0 constant* camera_3 [[buffer(0)]], HostChunk_natural_0 device* host_chunks_3 [[buffer(7)]], Impactor_natural_0 device* impactors_3 [[buffer(6)]])
 {
     VertexOut_0 _S13;
     thread KernelContext_0 kernelContext_3;
@@ -364,6 +375,7 @@ struct VertexOut_0
     (&kernelContext_3)->index_0 = index_3;
     (&kernelContext_3)->bond_dyn_0 = bond_dyn_3;
     (&kernelContext_3)->camera_0 = camera_3;
+    (&kernelContext_3)->host_chunks_0 = host_chunks_3;
     (&kernelContext_3)->impactors_0 = impactors_3;
     uint _S14 = instance_0 - base_instance_0;
     for(;;)
@@ -445,7 +457,7 @@ struct VertexOut_0
     return _S37;
 }
 
-struct impactor_vs_Result_0
+struct host_chunk_vs_Result_0
 {
     float4 position_6 [[position]];
     float3 normal_4 [[user(_SLANG_ATTR)]];
@@ -453,9 +465,8 @@ struct impactor_vs_Result_0
     float3 world_6 [[user(_SLANG_ATTR_2)]];
 };
 
-[[vertex]] impactor_vs_Result_0 impactor_vs(uint vertex_2 [[vertex_id]], uint instance_1 [[instance_id]], uint base_instance_1 [[base_instance]], ChunkStatic_natural_0 device* chunks_4 [[buffer(1)]], Island_natural_0 device* islands_4 [[buffer(2)]], packed_float4 device* state_4 [[buffer(3)]], uint device* index_4 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_4 [[buffer(5)]], Camera_0 constant* camera_4 [[buffer(0)]], Impactor_natural_0 device* impactors_4 [[buffer(6)]])
+[[vertex]] host_chunk_vs_Result_0 host_chunk_vs(uint vertex_2 [[vertex_id]], uint instance_1 [[instance_id]], uint base_instance_1 [[base_instance]], ChunkStatic_natural_0 device* chunks_4 [[buffer(1)]], Island_natural_0 device* islands_4 [[buffer(2)]], packed_float4 device* state_4 [[buffer(3)]], uint device* index_4 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_4 [[buffer(5)]], Camera_0 constant* camera_4 [[buffer(0)]], HostChunk_natural_0 device* host_chunks_4 [[buffer(7)]], Impactor_natural_0 device* impactors_4 [[buffer(6)]])
 {
-    VertexOut_0 _S38;
     thread KernelContext_0 kernelContext_4;
     (&kernelContext_4)->chunks_0 = chunks_4;
     (&kernelContext_4)->islands_0 = islands_4;
@@ -463,68 +474,47 @@ struct impactor_vs_Result_0
     (&kernelContext_4)->index_0 = index_4;
     (&kernelContext_4)->bond_dyn_0 = bond_dyn_4;
     (&kernelContext_4)->camera_0 = camera_4;
+    (&kernelContext_4)->host_chunks_0 = host_chunks_4;
     (&kernelContext_4)->impactors_0 = impactors_4;
-    uint _S39 = instance_1 - base_instance_1;
-    for(;;)
+    uint _S38 = instance_1 - base_instance_1;
+    thread float3 p_2;
+    thread float3 n_4;
+    box_corner_0(vertex_2, &p_2, &n_4);
+    HostChunk_natural_0 hc_0 = host_chunks_4[_S38];
+    float4 _S39 = float4(hc_0.center_1) ;
+    float4 _S40 = float4(hc_0.axis0_0) ;
+    float3 _S41 = _S40.xyz;
+    float4 _S42 = float4(hc_0.axis1_0) ;
+    float3 _S43 = _S42.xyz;
+    float4 _S44 = float4(hc_0.axis2_0) ;
+    float3 _S45 = _S44.xyz;
+    float3 world_7 = _S39.xyz + _S41 * float3((p_2.x * _S40.w))  + _S43 * float3((p_2.y * _S42.w))  + _S45 * float3((p_2.z * _S44.w)) ;
+    thread VertexOut_0 o_1;
+    float4 _S46 = clip_of_0(world_7, &kernelContext_4);
+    (&o_1)->position_5 = _S46;
+    (&o_1)->normal_3 = _S41 * float3(n_4.x)  + _S43 * float3(n_4.y)  + _S45 * float3(n_4.z) ;
+    float _S47 = _S39.w;
+    float3 _S48;
+    if(_S47 >= 0.0f)
     {
-        Impactor_natural_0 device* _S40 = (&kernelContext_4)->impactors_0+_S39;
-        Quat_0 q_5 = rotation_of_0(float4(_S40->rotation_1) , float4(_S40->rotation_err_1) );
-        float3 center_1 = (float4(_S40->position_1) ).xyz + (float4(_S40->position_err_1) ).xyz;
-        thread float3 p_2;
-        thread float3 n_4;
-        thread VertexOut_0 o_1;
-        float4 _S41 = float4(_S40->shape_0) ;
-        if((_S41.x) > 0.5f)
-        {
-            if(vertex_2 >= 36U)
-            {
-                (&o_1)->position_5 = float4(0.0f, 0.0f, 2.0f, 1.0f);
-                (&o_1)->normal_3 = float3(0.0f, 0.0f, 1.0f);
-                float3 _S42 = float3(0.0f) ;
-                (&o_1)->color_3 = _S42;
-                (&o_1)->world_4 = _S42;
-                _S38 = o_1;
-                break;
-            }
-            box_corner_0(vertex_2, &p_2, &n_4);
-            p_2 = p_2 * (float4(_S40->half_1) ).xyz;
-        }
-        else
-        {
-            uint quad_1 = vertex_2 / 6U;
-            uint corner_1 = vertex_2 % 6U;
-            uint2 _S43 = uint2(0U, 0U);
-            uint2 _S44 = uint2(1U, 1U);
-            array<uint2, int(6)> offs_0 = { { _S43, uint2(1U, 0U), _S44, _S43, _S44, uint2(0U, 1U) } };
-            float theta_0 = 3.14159274101257324f * float(quad_1 / 16U + offs_0[corner_1].y) / 10.0f;
-            float phi_0 = 6.28318548202514648f * float(quad_1 % 16U + offs_0[corner_1].x) / 16.0f;
-            float _S45 = sin(theta_0);
-            float3 _S46 = float3(_S45 * cos(phi_0), _S45 * sin(phi_0), cos(theta_0));
-            n_4 = _S46;
-            p_2 = _S46 * float3(_S41.y) ;
-        }
-        thread Quat_0 _S47 = q_5;
-        float3 _S48 = rotate_0(&_S47, p_2);
-        float3 world_7 = center_1 + _S48;
-        float4 _S49 = clip_of_0(world_7, &kernelContext_4);
-        (&o_1)->position_5 = _S49;
-        thread Quat_0 _S50 = q_5;
-        float3 _S51 = rotate_0(&_S50, n_4);
-        (&o_1)->normal_3 = _S51;
-        (&o_1)->color_3 = float3(0.77999997138977051f, 0.80000001192092896f, 0.8399999737739563f);
-        (&o_1)->world_4 = world_7;
-        _S38 = o_1;
-        break;
+        _S48 = ramp_0(_S47);
     }
-    thread impactor_vs_Result_0 _S52;
-    (&_S52)->position_6 = _S38.position_5;
-    (&_S52)->normal_4 = _S38.normal_3;
-    (&_S52)->color_4 = _S38.color_3;
-    (&_S52)->world_6 = _S38.world_4;
-    return _S52;
+    else
+    {
+        _S48 = float3(0.55000001192092896f, 0.51999998092651367f, 0.47999998927116394f);
+    }
+    (&o_1)->color_3 = _S48;
+    (&o_1)->world_4 = world_7;
+    VertexOut_0 _S49 = o_1;
+    thread host_chunk_vs_Result_0 _S50;
+    (&_S50)->position_6 = _S49.position_5;
+    (&_S50)->normal_4 = _S49.normal_3;
+    (&_S50)->color_4 = _S49.color_3;
+    (&_S50)->world_6 = _S49.world_4;
+    return _S50;
 }
 
-struct ground_vs_Result_0
+struct impactor_vs_Result_0
 {
     float4 position_7 [[position]];
     float3 normal_5 [[user(_SLANG_ATTR)]];
@@ -532,8 +522,9 @@ struct ground_vs_Result_0
     float3 world_8 [[user(_SLANG_ATTR_2)]];
 };
 
-[[vertex]] ground_vs_Result_0 ground_vs(uint vertex_3 [[vertex_id]], ChunkStatic_natural_0 device* chunks_5 [[buffer(1)]], Island_natural_0 device* islands_5 [[buffer(2)]], packed_float4 device* state_5 [[buffer(3)]], uint device* index_5 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_5 [[buffer(5)]], Camera_0 constant* camera_5 [[buffer(0)]], Impactor_natural_0 device* impactors_5 [[buffer(6)]])
+[[vertex]] impactor_vs_Result_0 impactor_vs(uint vertex_3 [[vertex_id]], uint instance_2 [[instance_id]], uint base_instance_2 [[base_instance]], ChunkStatic_natural_0 device* chunks_5 [[buffer(1)]], Island_natural_0 device* islands_5 [[buffer(2)]], packed_float4 device* state_5 [[buffer(3)]], uint device* index_5 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_5 [[buffer(5)]], Camera_0 constant* camera_5 [[buffer(0)]], HostChunk_natural_0 device* host_chunks_5 [[buffer(7)]], Impactor_natural_0 device* impactors_5 [[buffer(6)]])
 {
+    VertexOut_0 _S51;
     thread KernelContext_0 kernelContext_5;
     (&kernelContext_5)->chunks_0 = chunks_5;
     (&kernelContext_5)->islands_0 = islands_5;
@@ -541,22 +532,102 @@ struct ground_vs_Result_0
     (&kernelContext_5)->index_0 = index_5;
     (&kernelContext_5)->bond_dyn_0 = bond_dyn_5;
     (&kernelContext_5)->camera_0 = camera_5;
+    (&kernelContext_5)->host_chunks_0 = host_chunks_5;
     (&kernelContext_5)->impactors_0 = impactors_5;
-    float2 _S53 = float2(-1.0f, -1.0f);
-    float2 _S54 = float2(1.0f, 1.0f);
-    array<float2, int(6)> quad_2 = { { _S53, float2(1.0f, -1.0f), _S54, _S53, _S54, float2(-1.0f, 1.0f) } };
-    float3 world_9 = float3(camera_5->ground_0.zw + quad_2[vertex_3] * float2(camera_5->ground_0.y) , camera_5->ground_0.x);
-    thread VertexOut_0 o_2;
-    float4 _S55 = clip_of_0(world_9, &kernelContext_5);
-    (&o_2)->position_5 = _S55;
-    (&o_2)->normal_3 = float3(0.0f, 0.0f, 1.0f);
-    (&o_2)->color_3 = float3(0.0f) ;
-    (&o_2)->world_4 = world_9;
-    thread ground_vs_Result_0 _S56;
-    (&_S56)->position_7 = o_2.position_5;
-    (&_S56)->normal_5 = o_2.normal_3;
-    (&_S56)->color_5 = o_2.color_3;
-    (&_S56)->world_8 = o_2.world_4;
-    return _S56;
+    uint _S52 = instance_2 - base_instance_2;
+    for(;;)
+    {
+        Impactor_natural_0 device* _S53 = (&kernelContext_5)->impactors_0+_S52;
+        Quat_0 q_5 = rotation_of_0(float4(_S53->rotation_1) , float4(_S53->rotation_err_1) );
+        float3 center_2 = (float4(_S53->position_1) ).xyz + (float4(_S53->position_err_1) ).xyz;
+        thread float3 p_3;
+        thread float3 n_5;
+        thread VertexOut_0 o_2;
+        float4 _S54 = float4(_S53->shape_0) ;
+        if((_S54.x) > 0.5f)
+        {
+            if(vertex_3 >= 36U)
+            {
+                (&o_2)->position_5 = float4(0.0f, 0.0f, 2.0f, 1.0f);
+                (&o_2)->normal_3 = float3(0.0f, 0.0f, 1.0f);
+                float3 _S55 = float3(0.0f) ;
+                (&o_2)->color_3 = _S55;
+                (&o_2)->world_4 = _S55;
+                _S51 = o_2;
+                break;
+            }
+            box_corner_0(vertex_3, &p_3, &n_5);
+            p_3 = p_3 * (float4(_S53->half_1) ).xyz;
+        }
+        else
+        {
+            uint quad_1 = vertex_3 / 6U;
+            uint corner_1 = vertex_3 % 6U;
+            uint2 _S56 = uint2(0U, 0U);
+            uint2 _S57 = uint2(1U, 1U);
+            array<uint2, int(6)> offs_0 = { { _S56, uint2(1U, 0U), _S57, _S56, _S57, uint2(0U, 1U) } };
+            float theta_0 = 3.14159274101257324f * float(quad_1 / 16U + offs_0[corner_1].y) / 10.0f;
+            float phi_0 = 6.28318548202514648f * float(quad_1 % 16U + offs_0[corner_1].x) / 16.0f;
+            float _S58 = sin(theta_0);
+            float3 _S59 = float3(_S58 * cos(phi_0), _S58 * sin(phi_0), cos(theta_0));
+            n_5 = _S59;
+            p_3 = _S59 * float3(_S54.y) ;
+        }
+        thread Quat_0 _S60 = q_5;
+        float3 _S61 = rotate_0(&_S60, p_3);
+        float3 world_9 = center_2 + _S61;
+        float4 _S62 = clip_of_0(world_9, &kernelContext_5);
+        (&o_2)->position_5 = _S62;
+        thread Quat_0 _S63 = q_5;
+        float3 _S64 = rotate_0(&_S63, n_5);
+        (&o_2)->normal_3 = _S64;
+        (&o_2)->color_3 = float3(0.77999997138977051f, 0.80000001192092896f, 0.8399999737739563f);
+        (&o_2)->world_4 = world_9;
+        _S51 = o_2;
+        break;
+    }
+    thread impactor_vs_Result_0 _S65;
+    (&_S65)->position_7 = _S51.position_5;
+    (&_S65)->normal_5 = _S51.normal_3;
+    (&_S65)->color_5 = _S51.color_3;
+    (&_S65)->world_8 = _S51.world_4;
+    return _S65;
+}
+
+struct ground_vs_Result_0
+{
+    float4 position_8 [[position]];
+    float3 normal_6 [[user(_SLANG_ATTR)]];
+    float3 color_6 [[user(_SLANG_ATTR_1)]];
+    float3 world_10 [[user(_SLANG_ATTR_2)]];
+};
+
+[[vertex]] ground_vs_Result_0 ground_vs(uint vertex_4 [[vertex_id]], ChunkStatic_natural_0 device* chunks_6 [[buffer(1)]], Island_natural_0 device* islands_6 [[buffer(2)]], packed_float4 device* state_6 [[buffer(3)]], uint device* index_6 [[buffer(4)]], BondDyn_natural_0 device* bond_dyn_6 [[buffer(5)]], Camera_0 constant* camera_6 [[buffer(0)]], HostChunk_natural_0 device* host_chunks_6 [[buffer(7)]], Impactor_natural_0 device* impactors_6 [[buffer(6)]])
+{
+    thread KernelContext_0 kernelContext_6;
+    (&kernelContext_6)->chunks_0 = chunks_6;
+    (&kernelContext_6)->islands_0 = islands_6;
+    (&kernelContext_6)->state_0 = state_6;
+    (&kernelContext_6)->index_0 = index_6;
+    (&kernelContext_6)->bond_dyn_0 = bond_dyn_6;
+    (&kernelContext_6)->camera_0 = camera_6;
+    (&kernelContext_6)->host_chunks_0 = host_chunks_6;
+    (&kernelContext_6)->impactors_0 = impactors_6;
+    float2 _S66 = float2(-1.0f, -1.0f);
+    float2 _S67 = float2(1.0f, 1.0f);
+    array<float2, int(6)> quad_2 = { { _S66, float2(1.0f, -1.0f), _S67, _S66, _S67, float2(-1.0f, 1.0f) } };
+    float3 world_11 = float3(camera_6->ground_0.zw + quad_2[vertex_4] * float2(camera_6->ground_0.y) , camera_6->ground_0.x);
+    thread VertexOut_0 o_3;
+    float4 _S68 = clip_of_0(world_11, &kernelContext_6);
+    (&o_3)->position_5 = _S68;
+    (&o_3)->normal_3 = float3(0.0f, 0.0f, 1.0f);
+    (&o_3)->color_3 = float3(0.0f) ;
+    (&o_3)->world_4 = world_11;
+    thread ground_vs_Result_0 _S69;
+    (&_S69)->position_8 = o_3.position_5;
+    (&_S69)->normal_6 = o_3.normal_3;
+    (&_S69)->color_6 = o_3.color_3;
+    (&_S69)->world_10 = o_3.world_4;
+    return _S69;
 }
 
