@@ -245,6 +245,8 @@ physics cost at the peak.
 | `[ForceUnroll]` of the solver's small loops | differ | primal 8.8 → 8.1 ms |
 | Unrolling only the zeroing and negation loops | differ | no gain |
 | Skip island-gate rounds after one revokes nothing (a fixed point) | identical | none at the peak: revocations spread through all 8 rounds |
+| Fewer spare colour dispatches and colouring rounds (budget) | (not checked) | ~0.1 ms per tick |
+| Chrome `--enable-dawn-features=disable_robustness` (no bounds checks) | differ | 32.7 → 30.5 ms per tick |
 
 The broadphase query is bound neither by chain-entry visits nor by atomic
 contention.
@@ -254,3 +256,9 @@ fuses floating-point operations differently once the code shape changes.
 This happens even for an edit that cannot change any value. The unchanged
 shaders reproduce exactly (614002 candidates on repeat runs). Accepting such
 rounding-only changes is the user's decision.
+
+Turning off Dawn's bounds checks (no shader source change) also changes the
+results, which confirms the cause: on this stack (Chrome, Dawn, Metal), any
+change to the generated kernel code can change floating-point rounding.
+Under a bit-identical rule, only changes that leave the arithmetic kernels'
+generated code untouched qualify.
