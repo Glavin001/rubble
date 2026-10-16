@@ -60,7 +60,10 @@ house, the free-wall ram, house-1story rammed at 12 m/s), the anchored b5 wall h
 floor drop.
 
 - rubble without rewinds gives the same outcome as PhysX GPU (with its rewinds) in 11 of
-  12 scenes to every digit printed, and as rubble with rewinds in all of those.
+  12 scenes within the run-to-run spread of the GPU stress solve: both pipelines vary by 1-2
+  fragments between repeats on b5 at 10-15 m/s and the free-wall ram, because stress-gpu's
+  contact pipeline is not bit-deterministic. The one stable difference outside b8 is one
+  fragment and one bond on house-1story rammed (33 / 188 against 32 / 187).
 - b8's sudden column removal: rubble 10 fragments / 10 broken bonds, the oracle 11 / 11,
   PhysX GPU 14 / 14, rubble with rewinds 13 / 13.
 - The anchored wall (the bouncing-projectile case): push-over at 10–15 m/s, punch-through
@@ -76,7 +79,21 @@ floor drop.
 
 `engine/stress-oracle/scripts/stress_bench_report.py` turns `stress_bench` runs into the
 three-way table (oracle CPU, PhysX GPU, rubble); the measured tables are in
-`docs/stress-fracture-benchmark.md`. Where the time goes in rubble's pipeline (house
-rammed, 15 frames): the stress solver's GPU substeps about 77 % (≈44 µs per substep, three
-kernels: contact islands, contact forces, sums and bonds), rubble's rigid steps and body
-creation on splits a few percent, host splits and readbacks about 7 %.
+`docs/stress-fracture-benchmark.md` (M3 Max, 2026-10-16, three repeats; other GPU jobs
+were running, so single cells are noisy by about 10 %).
+
+- Destruction frames cost the same on both GPU pipelines, because both spend them in the
+  same stress solve: b5 and house-1story rammed within 0-10 % (median house ram 153 ms
+  against 145 ms), against 1.6-5.5 s per frame for the CPU oracle.
+- rubble is faster at town scale: 16 houses idle 35 ms against 37 ms median (44 against
+  71 mean), 64 houses idle 140 against 160 ms, 16 houses with one rammed 408 against
+  472 ms.
+- rubble is slower where its rigid steps dominate: each AVBD step costs 2.4-4.7 ms even
+  with a handful of bodies (dispatch and readback latency, not work), so the floor drop
+  (one rigid step per frame) runs 11.8 against 5.0 ms median, and the free-wall ram, whose
+  40 m/s ram makes the coupling sub-step the engine 11 times a frame, 97 against 67 ms.
+
+Where the time goes in rubble's pipeline (house rammed, 15 frames): the stress solver's GPU
+substeps about 73 % (≈44 µs per substep, three kernels: contact islands, contact forces,
+sums and bonds), host transfers and splits about 8 %, syncing bodies with rubble 3 %,
+rubble's rigid steps about 1 %, and the rest (about 14 %) host routing and contact planning.
