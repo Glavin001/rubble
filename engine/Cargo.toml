@@ -13,6 +13,8 @@ members = [
     "crates/engine-scenes",
     "crates/engine-oracles",
 ]
+# The stress oracle is its own workspace (wgpu 30); engine-fracture depends on its crates by path.
+exclude = ["stress-oracle"]
 
 [workspace.package]
 edition = "2021"
@@ -30,8 +32,8 @@ metal = "0.31"
 objc = "0.2"
 cocoa = "0.26"
 core-graphics-types = "0.1"
-wgpu = "24"
-pollster = "0.4"
+wgpu = "30"
+pollster = "1"
 winit = "0.30"
 env_logger = "0.11"
 log = "0.4"

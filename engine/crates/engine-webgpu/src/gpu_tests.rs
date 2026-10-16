@@ -18,9 +18,9 @@ fn download<T: bytemuck::Pod>(sim: &WgpuSim, binding: usize, offset: u64, count:
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
-    let _ = sim.device.poll(wgpu::Maintain::Wait);
+    let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().unwrap().unwrap();
-    let result = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
+    let result = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped range")).to_vec();
     staging.unmap();
     result
 }
@@ -1282,9 +1282,9 @@ fn hash_clear_covers_more_than_one_webgpu_dispatch_row() {
         let slice = read.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        let _ = sim.device.poll(wgpu::Maintain::Wait);
+        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().unwrap().unwrap();
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().expect("mapped range");
         let actual: &[u32] = bytemuck::cast_slice(&data);
         for (i, &slot) in actual[..n as usize].iter().enumerate() {
             assert_eq!(slot, u32::MAX,
