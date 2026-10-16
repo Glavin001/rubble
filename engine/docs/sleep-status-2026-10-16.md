@@ -63,7 +63,7 @@ opt-in.
 | 256 | Tangential penalty mass floor | — | No, rejected | Unstable with 4096 |
 | 2048 | Load-based penalty floor | — | No, rejected | Exploded (2.4 MJ) |
 
-| 8388608 | Rotational armature, I ≥ 0.1·m·r_max² | MuJoCo | No | Bonded suburb: 3,275 awake vs 2,191 |
+| 8388608 | Rotational armature, I ≥ 0.1·m·r_max² | MuJoCo | No, removed | Bonded suburb: 3,275 awake vs 2,191. Removed: it read colliders inside the primal solve. |
 
 ### Host-side
 
