@@ -2038,7 +2038,7 @@ static const float SLEEP_POSE_BETA = 0.2;
 //     1.6-4 cm overlap in one pass, the iterations pushed it back, and it
 //     cycled by ~3.5 cm every few ticks with zero reported velocity.
 static const uint FLAG_PUSH_LIMIT = 4194304u;
-static const float PUSH_MAX_SPEED = 0.5;
+static const float PUSH_MAX_SPEED = 0.1;
 bool displacementSleep() { return (PARAMS.flags & FLAG_SLEEP_DISPLACEMENT) != 0u; }
 // A body that may wake its neighbours (contacts or bonds): awake, and under the
 // displacement test not itself a sleep candidate (those only jitter in place).

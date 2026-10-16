@@ -62,3 +62,26 @@ bonds can also release pieces fast. This overlaps the stress-solver work.
 
 **Decision:** keep investing in the legacy bonds, or wait for the stress
 solver?
+
+## 4. Push-out speed limit value (flag 4194304, `PUSH_MAX_SPEED`)
+
+**What was measured**
+- The limit caps how fast overlap is pushed out. Box2D's
+  `contactPushMaxVelocity` defaults to 3 m/s; PhysX's
+  `maxDepenetrationVelocity` is unbounded by default and usually set to
+  1–10 m/s.
+- Jammed compound pieces (which cannot separate) squirm at the cap speed, so a
+  lower cap helps them sleep. The cost is slower recovery from genuine deep
+  overlaps: 5 cm takes 0.5 s at 0.1 m/s.
+
+**7×7 grid at 30 s**
+
+| Cap | Awake | Moving | Jammed | Resetting |
+|---|---|---|---|---|
+| 0.5 m/s | ~3,520 | 0 | 1 | 2 |
+| 0.1 m/s | 2,540–5,160 | 1–4 | 0–4 | 0–20 |
+
+At 0.1 m/s the grid plateaus at about 4,750 awake to 45 s, held by 5–7 slow
+movers.
+
+**Decision:** the cap value. It is 0.1 m/s now.
