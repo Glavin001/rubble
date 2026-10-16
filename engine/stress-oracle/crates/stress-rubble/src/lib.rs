@@ -42,6 +42,8 @@
 //! colliders filtered out of every pair. Capacity is therefore consumed by every
 //! rebuilt body; `RubbleEngine::with_capacity` sizes it.
 
+pub mod scenes;
+
 use std::collections::HashMap;
 use std::ops::Range;
 

@@ -96,6 +96,13 @@ cargo run --release -p stress-viz -- view s_house_car --views damage,fragments,u
 cargo run --release -p stress-viz --features rubble -- view s_house_car --engine rubble
 ```
 
+```sh
+# rubble's production pipeline in a window (stress-gpu + rubble's AVBD engine on one
+# device, no frame rewinds), drawn from the GPU state: click fires, R resets, 1-9 scenes
+cargo run --release -p stress-rubble --bin destruction-view -- --scene wall_ram
+cargo run --release -p stress-rubble --bin destruction-view -- --list
+```
+
 ### Oracles
 
 Each oracle installs into its own pinned environment and runs from the scene file:

@@ -18,8 +18,22 @@ serde_json = "1"
 wgpu = "30"
 # The GPU stress solver coupled to rubble (`GpuWorld::with_engine`), for its tests.
 stress-gpu = { path = "../stress-gpu", optional = true }
+# `destruction-view` (the `view` feature): the interactive window.
+winit = { version = "0.30", optional = true }
+pollster = { version = "1", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+# The veneer house: a fracture GLB through the stress cooker's import (`engine-fracture`).
+engine-fracture = { path = "../../../crates/engine-fracture", optional = true }
 
 [features]
+default = ["view"]
 gpu = ["dep:stress-gpu"]
+# `destruction-view`: rubble's production stress pipeline in a window, in real time.
+view = ["gpu", "dep:winit", "dep:pollster", "dep:bytemuck", "dep:engine-fracture"]
 # The shared showcase behaviours with rubble as the engine (slow).
 showcases = []
+
+[[bin]]
+name = "destruction-view"
+path = "src/bin/destruction_view/main.rs"
+required-features = ["view"]
