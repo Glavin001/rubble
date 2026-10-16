@@ -34,7 +34,7 @@ const SCENES={house:{file:'veneer-house.glb'},grid:{file:'veneer-house.glb',layo
  suburb:{file:'veneer-house.glb',layout:{suburb:true},level:2},
  cuboidGrid:{procedural:true,layout:{columns:7,rows:7}},cuboids:{procedural:true,layout:{suburb:true}}};
 
-async function buildNamed(name,device,bonds,layout,levelOverride){
+async function buildNamed(name,device,bonds,layout,levelOverride,paramsOverride={}){
  const known0=SCENES[name];if(!known0)throw new Error(`Unknown scene ${name}`);
  const known=levelOverride===null?known0:{...known0,level:levelOverride};
  const entry=layout&&known.layout&&!known.layout.suburb?{...known,layout:{...known.layout,...layout}}:known;
@@ -45,7 +45,8 @@ async function buildNamed(name,device,bonds,layout,levelOverride){
  const response=await fetch(`./assets/${entry.file}`);if(!response.ok)throw new Error(`Missing asset ${entry.file}`);
  const asset=parseFractureGlb(await response.arrayBuffer());
  const level=entry.level??Math.min(...asset.physics.fragments.map(f=>f.level));
- const built=buildScene(asset,level),one=bonds?await preloadBonds(device,built):{...built,joints:[]};
+ const built0=buildScene(asset,level),built={...built0,params:{...built0.params,...paramsOverride}};
+ const one=bonds?await preloadBonds(device,built):{...built,joints:[]};
  return entry.layout?(entry.layout.suburb?buildSuburb:buildGrid)(asset,level,{...entry.layout,base:one}):one;
 }
 
@@ -59,7 +60,7 @@ async function run(){
    maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  let gpuError=null;device.addEventListener('uncapturederror',e=>{gpuError??=String(e.error.message)});
  const layout=q.has('columns')||q.has('rows')?{...(q.has('columns')?{columns:num('columns',7)}:{}),...(q.has('rows')?{rows:num('rows',7)}:{})}:null;
- const built=name==='pairs'?buildPairScene({a:q.get('a')??'box',b:q.get('b')??'box',count:num('count',4096)}):await buildNamed(name,device,num('bonds',0)===1,layout,q.has('level')?num('level',0):null);
+ const built=name==='pairs'?buildPairScene({a:q.get('a')??'box',b:q.get('b')??'box',count:num('count',4096)}):await buildNamed(name,device,num('bonds',0)===1,layout,q.has('level')?num('level',0):null,q.has('params')?JSON.parse(q.get('params')):{});
  if(name==='pairs'&&num('reuse',0)===1)built.params={...built.params,flags:built.params.flags|1};
  const scene={...built,capacity:{...built.capacity,...budget},params:{...built.params,...(q.has('params')?JSON.parse(q.get('params')):{})}};
  if(num('awake',0)===1)scene.bodies=scene.bodies.map(b=>b.flags&1?{...b,flags:b.flags&~4}:b);

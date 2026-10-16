@@ -299,14 +299,100 @@ the shot), two runs each:
 - **The ticks were still faster overall**, because fewer bodies are awake by
   then.
 
+## Round 2: the sleep test and waking
+
+After the solver fixes above, the remaining blockers were in how bodies are
+judged slow and how they are woken. Each fix sits behind its own flag.
+
+**7. One-tick blips reset sleep timers.**
+- *Observed:* resting bodies blipped to 0.1–1.5 rad/s for single ticks
+  (friction flicker, post-stabilization's back-and-forth), and a blip reset
+  the 1 s timer.
+- *Fix: displacement test (32768),* Jolt's sleep test spheres. A body is slow
+  while its farthest point stays within sleepLin·sleepTime of its pose at the
+  window start, |Δx| + angle(Δq)·r_max.
+  - It measures the midpoint of the step-start and end poses, so a pose that
+    flips each tick (jammed compound pairs) averages out.
+  - A candidate held awake by its island restarts its window every sleepTime,
+    so creep is measured per window, like a speed.
+  - A sleep candidate cannot wake its neighbours, through contacts or bonds.
+
+**8. Waking kicked bodies, which woke their neighbours.**
+- *Observed:* a wake watch (`wakewatch`) showed a cascade. A woken body moved
+  at 0.1–0.6 m/s on its first step and woke the next: 1,522 wakes in 500 ticks
+  on one resting pile.
+- *First cause:* bodies were woken mid-step, in the narrowphase, after the
+  broadphase had skipped their sleeper pairs. They were solved for one step
+  without their supports.
+  - *Fix: deferred wake (131072).* The body stays still until the next step.
+- *Second cause:* their resting contacts came back cold (λ = 0), so they sagged
+  on their first solved step.
+  - *Fix: resting-pair carry (262144),* now in the JS host. Box2D keeps a
+    sleeping island's contacts the same way. Sleeping pairs are re-emitted
+    from last step's manifolds with their warm-start λ, and the previous
+    manifold count is copied on the GPU.
+
+**9. PhysX stabilization (65536):** velocity is damped below 3× the sleep speed.
+It measured no improvement and stays off.
+
+### Results
+
+**One unhit house, started awake (3,157 pieces):**
+- before this work: 2,467 awake at 20 s, and never asleep;
+- with displacement test, deferred wake and carry: **all asleep by 7–10 s**,
+  with no wake-ups after.
+
+**7×7 grid with the ball (154,759 bodies), awake count:**
+
+| Flags | 15 s | 20 s | 25 s | 30 s |
+|---|---|---|---|---|
+| 65 (before) | ~137k | 136.7k | 136.2k | 135.7k |
+| +4096+128+8192+32768+131072 | 60.6k | 51.2k | 74.0k | 59.6k |
+| + carry (262144) | 84.2k | 73.1k | 65.2k | 58.9k |
+| + midpoint test | 35.0k | 20.8k | 16.5k | 14.6k |
+| **+ look-ahead (16384)** | **21.9k** | **1,053** | **558** | **6** |
+
+At 30 s the 6 awake bodies are:
+- the ball, rolling on empty ground (rigid rolling has no losses);
+- one 5-body cluster around a jammed piece.
+
+**Defaults.** The veneer houses now use 454849
+(65+128+4096+8192+16384+32768+131072+262144), and the cuboid houses use 454881
+(the same plus 32). Bonded scenes drop look-ahead (16384).
+
+**Bonds.**
+- *Observed:* post-stabilization made bonded scenes explode. Bonds are elastic
+  springs, and their force must come from the whole deformation. Under α = 1
+  they saw only this step's change, so the stabilization pass snapped them
+  back.
+- *Fix:* post-stabilization now applies to contacts only. Joints and bonds keep
+  their α handling and λ decay.
+- *Bonded suburb at level 1, 2.5 s:* about 2,250 bodies airborne, against about
+  2,150 with the original flags 65 (it had reached 20,000).
+
+**Look-ahead with bonds.** Bonded scenes turn look-ahead off (`preloadBonds`).
+Their pieces still break apart at 100+ m/s, and the swept bounds then overflow
+the candidate budget.
+
+**Still unsolved: bonds throw pieces.** Even with the original flags, the
+bonded suburb's awake count grows over 30 s (8k → 14k with flags 65), and
+about 3,000 bodies stay airborne:
+- bonded clusters fly at about 300 m/s with spins that flip sign;
+- 18–25 g bonded pieces spin at about 200 rad/s in mid-air.
+
+This is an instability in the experimental bond solver, not in sleeping. The
+stress solver is meant to replace these bonds.
+
 ## Still open
 
-1. **Whether to enable look-ahead by default.** It is more accurate at impact
-   but does not change the grid's sleep outcome yet.
-2. **The last movers in a giant island.** Trace the ~285 tumbling small pieces
-   and the timer resets (wake waves) in the 124k-body island.
+1. **Rolling resistance** (Box2D v3, Bullet). Without it, a rolling ball never
+   stops. It is a material choice, so it is left to you.
+2. **The last jammed piece.** One 5-body cluster still holds a jammed piece at
+   30 s.
+3. **The bond solver instability** in bonded scenes (above). It needs its own
+   investigation, or a decision to move to the stress solver.
 3. **A slider check for flag 1024.** Confirm on a scene with light debris
    sliding on the ground before adopting it.
-4. **Bonds.** Unbonded houses collapse completely once woken. Bonds, or the
+4. **Bonds and collapse.** Unbonded houses collapse completely once woken. Bonds, or the
    stress solver, change what "after the shot" means for the houses next
    door.
