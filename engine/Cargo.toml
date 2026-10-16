@@ -11,6 +11,7 @@ members = [
     "crates/engine-scenes",
     "crates/engine-oracles",
     "crates/engine-vehicle",
+    "crates/engine-vehicle-wasm",
 ]
 
 [workspace.package]
