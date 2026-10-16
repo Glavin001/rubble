@@ -416,4 +416,197 @@ BoxManifold collideBoxPlane(float3 cA, float4 qA, float3 hA, float3 planeN, floa
     return m;
 }
 
+static const uint BOX_CAPSULE_FEATURE = 0x06000000u;
+static const uint CAPSULE_PLANE_FEATURE = 0x05000000u;
+
+float boxSegmentDist2(float3 p, float3 h)
+{
+    float3 g = p - clamp(p, -h, h);
+    return dot(g, g);
+}
+
+// Parameter t ∈ [0, 1] of the point of segment p0 + t·d closest to the box
+// |x| ≤ h. dist²(t) is a convex piecewise quadratic whose pieces break where a
+// coordinate crosses ±h, so the minimum is a piece's stationary point (or a
+// breakpoint). Ties keep the smallest t, so the result is deterministic.
+float boxSegmentClosestT(float3 p0, float3 d, float3 h)
+{
+    float ts[8];
+    ts[0] = 0.0;
+    int n = 1;
+    for (int k = 0; k < 3; k++)
+    {
+        if (abs(d[k]) < 1e-12) continue;
+        for (int sgn = -1; sgn <= 1; sgn += 2)
+        {
+            float t = (float(sgn) * h[k] - p0[k]) / d[k];
+            if (t > 0.0 && t < 1.0) { ts[n] = t; n++; }
+        }
+    }
+    ts[n] = 1.0;
+    n++;
+    for (int i = 1; i < n; i++)
+    {
+        float v = ts[i];
+        int j = i - 1;
+        while (j >= 0 && ts[j] > v) { ts[j + 1] = ts[j]; j--; }
+        ts[j + 1] = v;
+    }
+    float bestT = 0.0;
+    float bestF = boxSegmentDist2(p0, h);
+    for (int i = 0; i + 1 < n; i++)
+    {
+        float a = ts[i];
+        float b = ts[i + 1];
+        float3 pm = p0 + d * (0.5 * (a + b));
+        float num = 0.0;
+        float den = 0.0;
+        for (int k = 0; k < 3; k++)
+        {
+            if (abs(pm[k]) <= h[k]) continue;
+            float c = pm[k] > 0.0 ? h[k] : -h[k];
+            num += d[k] * (p0[k] - c);
+            den += d[k] * d[k];
+        }
+        float t = den > 0.0 ? clamp(-num / den, a, b) : a;
+        float f = boxSegmentDist2(p0 + d * t, h);
+        if (f < bestF) { bestF = f; bestT = t; }
+    }
+    return bestT;
+}
+
+// OBB A vs capsule B (segment along local +Y, half length halfLen, swept by
+// radius). As box/sphere, but for the segment: the exact closest segment point
+// decides the feature. On a face (one axis outside) or through the box (the
+// shallowest face for the whole segment) the segment is clipped to the face's
+// side slabs and both ends of the clipped part become contacts; on an edge or
+// a corner the closest pair is the single contact. Normal A → B. Contacts within
+// `spec` of touching are kept (0 unless contact-gap mode).
+BoxManifold collideBoxCapsule(float3 cA, float4 qA, float3 hA, float3 cB, float4 qB, float radius, float halfLen, float spec)
+{
+    BoxManifold m;
+    m.count = 0;
+    m.normal = float3(0, 1, 0);
+    float4 qInv = quatConjugate(qA);
+    float3 axis = quatRotate(qB, float3(0, 1, 0)) * halfLen;
+    float3 p0 = quatRotate(qInv, cB - axis - cA);
+    float3 p1 = quatRotate(qInv, cB + axis - cA);
+    float3 d = p1 - p0;
+    float3 s = p0 + d * boxSegmentClosestT(p0, d, hA);
+    float3 q = clamp(s, -hA, hA);
+    float3 gap = s - q;
+    float dist = length(gap);
+    if (dist > radius + spec) return m;
+    float3 mids[8];
+    int k = 0;
+    float sgn = 1.0;
+    if (dist > 1e-8)
+    {
+        int outside = 0;
+        uint code = 0u;
+        uint place = 1u;
+        for (int j = 0; j < 3; j++)
+        {
+            if (gap[j] != 0.0) { outside++; k = j; sgn = gap[j] > 0.0 ? 1.0 : -1.0; }
+            code += place * (gap[j] < 0.0 ? 0u : (gap[j] > 0.0 ? 2u : 1u));
+            place *= 3u;
+        }
+        if (outside > 1)
+        {
+            float3 nLocal = gap / dist;
+            float3 n = quatRotate(qA, nLocal);
+            m.normal = n;
+            boxAddPt(m, mids, transformPoint(cA, qA, q), transformPoint(cA, qA, s) - n * radius,
+                BOX_CAPSULE_FEATURE | 0x100u | code);
+            return m;
+        }
+    }
+    else
+    {
+        float best = -1e30;
+        for (int j = 0; j < 3; j++)
+        {
+            for (int side = -1; side <= 1; side += 2)
+            {
+                float sg = float(side);
+                float sep = min(sg * p0[j], sg * p1[j]) - hA[j];
+                if (sep > best) { best = sep; k = j; sgn = sg; }
+            }
+        }
+    }
+    // Face k (sign sgn): clip the segment to the slabs of the other two axes.
+    float t0 = 0.0;
+    float t1 = 1.0;
+    for (int j = 0; j < 3; j++)
+    {
+        if (j == k) continue;
+        if (abs(d[j]) < 1e-12)
+        {
+            if (abs(p0[j]) > hA[j]) { t0 = 1.0; t1 = 0.0; }
+            continue;
+        }
+        float ta = (-hA[j] - p0[j]) / d[j];
+        float tb = (hA[j] - p0[j]) / d[j];
+        t0 = max(t0, min(ta, tb));
+        t1 = min(t1, max(ta, tb));
+    }
+    float3 nLocal = float3(0, 0, 0);
+    nLocal[k] = sgn;
+    float3 n = quatRotate(qA, nLocal);
+    m.normal = n;
+    uint faceId = uint(k) * 2u + (sgn > 0.0 ? 1u : 0u);
+    if (t0 > t1)
+    {
+        // Round-off at a slab boundary: keep the closest point on the face.
+        t0 = boxSegmentClosestT(p0, d, hA);
+        t1 = t0;
+    }
+    for (int e = 0; e < 2; e++)
+    {
+        if (e == 1 && t1 - t0 < 1e-6) break;
+        float3 p = p0 + d * (e == 0 ? t0 : t1);
+        float depth = sgn * p[k] - hA[k];
+        if (depth > radius + spec) continue;
+        float3 onBox = clamp(p, -hA, hA);
+        onBox[k] = sgn * hA[k];
+        boxAddPt(m, mids, transformPoint(cA, qA, onBox), transformPoint(cA, qA, p) - n * radius,
+            BOX_CAPSULE_FEATURE | (faceId << 4) | uint(e));
+    }
+    return m;
+}
+
+// Capsule A vs plane B: one contact per end-cap sphere closer than `margin`
+// (as sphere/plane). Normal A → B (−plane normal).
+BoxManifold collideCapsulePlane(float3 cA, float4 qA, float radius, float halfLen, float3 planeN, float planeW, float margin)
+{
+    BoxManifold m;
+    m.count = 0;
+    float3 pn = normalize(planeN);
+    m.normal = -pn;
+    float3 axis = quatRotate(qA, float3(0, 1, 0)) * halfLen;
+    float3 mids[8];
+    for (int i = 0; i < 2; i++)
+    {
+        float3 e = i == 0 ? cA - axis : cA + axis;
+        float gap = dot(e, pn) - planeW - radius;
+        if (gap >= margin) continue;
+        float3 pA = e - pn * radius;
+        boxAddPt(m, mids, pA, pA - pn * gap, CAPSULE_PLANE_FEATURE | uint(i));
+    }
+    return m;
+}
+
+// Swap a manifold's sides (B → A normal, points exchanged).
+BoxManifold flipManifold(BoxManifold mf)
+{
+    mf.normal = -mf.normal;
+    for (int k = 0; k < mf.count; k++)
+    {
+        float3 tmp = mf.pts[k].pA;
+        mf.pts[k].pA = mf.pts[k].pB;
+        mf.pts[k].pB = tmp;
+    }
+    return mf;
+}
+
 #endif

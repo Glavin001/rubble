@@ -4625,6 +4625,71 @@ fn convex_first_step_manifolds_are_unique_unit_and_reach_sat() {
     assert!(!manifolds.is_empty());
 }
 
+// ---- capsules on boxes and planes ----------------------------------------------
+
+/// A capsule dropped flat onto a static box face (or a ground plane) settles at
+/// its rest height on two segment contacts: no bounding-sphere stand-off, no
+/// sinking, no tipping. The exact geometry is checked against the CPU oracle in
+/// engine-oracles/tests/convex_slang_cpu.rs.
+#[test]
+fn capsule_rests_flat_on_a_box_and_a_plane_with_two_contacts() {
+    let (r, l) = (0.1f32, 0.4f32);
+    for (support_is_box, yaw) in [(true, 0.0f32), (true, 0.6), (false, 0.0), (false, 0.6)] {
+        let label = format!("{} yaw {yaw}", if support_is_box { "box" } else { "plane" });
+        let mut sim = WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
+        let mut params = AvbdParams { dt: 1.0 / 120.0, iterations: 6, flags: FLAG_REUSE_CONTACTS, ..AvbdParams::default() };
+        params.gravity_y = -9.81;
+        sim.set_params(params);
+        let ground = sim.add_body(BodyState::static_plane_support());
+        let (shape, gparams, top) = if support_is_box {
+            (ShapeType::Box, [1.0, 0.25, 1.0, (2.0f32 + 0.0625).sqrt()], 0.25f32)
+        } else {
+            (ShapeType::Plane, [0.0, 1.0, 0.0, 0.0], 0.0)
+        };
+        sim.add_collider(Collider {
+            body: ground,
+            shape: shape as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: gparams,
+        });
+        let rot = glam::Quat::from_rotation_y(yaw) * glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let cap_body = sim.add_body(BodyState::dynamic(glam::Vec3::new(0.0, top + r + 0.02, 0.0), rot, 1.0, glam::Vec3::splat(0.02)));
+        let cap = sim.add_collider(Collider {
+            body: cap_body,
+            shape: ShapeType::Capsule as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 1.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [r, l, 0.0, r + l],
+        });
+        for step in 0..240 {
+            sim.step().unwrap_or_else(|e| panic!("{label}: step {step}: {e:?}"));
+        }
+        let b = sim.download_bodies()[cap_body as usize];
+        let p = glam::Vec3::from_array(b.position);
+        let rest = top + r;
+        // Equilibrium sits ~contactOffset deep (three-avbd C0 = gap + margin).
+        let margin = sim.params.contact_offset;
+        assert!(p.y > rest - margin - 0.005 && p.y < rest + 0.005, "{label}: capsule at y {} (rest {rest})", p.y);
+        let axis = glam::Quat::from_array(b.orientation) * glam::Vec3::Y;
+        assert!(axis.y.abs() < 0.02, "{label}: capsule tipped (axis {axis})");
+        assert!(glam::Vec3::from_array(b.linear_vel).length() < 0.05, "{label}: still moving {:?}", b.linear_vel);
+        let m: Vec<Manifold> = download(&sim, 25, 0, sim.last_counters.manifold_count as usize);
+        let pair: Vec<&Manifold> = m.iter().filter(|m| m.collider_a == cap || m.collider_b == cap).collect();
+        assert_eq!(pair.len(), 1, "{label}: {} manifolds for the capsule", pair.len());
+        assert_eq!(pair[0].contact_count, 2, "{label}: {} contacts", pair[0].contact_count);
+        let n = glam::Vec3::from_array(pair[0].normal);
+        let up = if pair[0].collider_b == cap { 1.0 } else { -1.0 };
+        assert!((n - glam::Vec3::Y * up).length() < 1e-3, "{label}: normal {n}");
+    }
+}
+
 // ---- short GPU input/output checks (a few steps at most) ------------------------
 
 #[test]

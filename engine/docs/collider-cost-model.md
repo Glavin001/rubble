@@ -29,11 +29,8 @@ How each pair is handled:
 |---|---|---|
 | Sphere/sphere, sphere/plane, sphere/box, sphere/capsule, capsule/capsule | Closed form, one thread | 1 (capsule/capsule: 1) |
 | Box/box, box/plane | Box SAT and clipping, one thread | 4 |
+| Box/capsule, capsule/plane | Closest segment feature (box) or end caps (plane), clipped to the box face; one thread | 2 |
 | Any pair with a hull (box/hull, hull/hull, hull vs sphere/capsule/plane) | Cooperative hull path: classify, cached-axis check, SAT, manifold | 4 |
-| **Box/capsule, capsule/plane** | **No dedicated test.** Falls back to bounding spheres, so the contacts are wrong | 1 |
-
-Avoid capsules touching boxes or planes until those pairs get real tests.
-
 ## Measured cost
 
 Each scene has one static base with one awake body resting on it, so every
@@ -45,10 +42,10 @@ pair hasn't moved.
 
 | Pair (base/top) | Contacts | Total (moving) | Narrowphase (moving) | Total (resting) | Relative to box/box (moving) |
 |---|---|---|---|---|---|
-| box/capsule ⚠ | 1 | 19 | 0.2 | | (wrong contacts) |
 | box/sphere | 1 | 37 | 3 | | 0.63 |
 | hull 8v/sphere | 1 | 38 | 5 | | 0.66 |
 | hull 32v/sphere | 1 | 39 | 5 | | 0.67 |
+| box/capsule | 2 | 44 | 7 | 42 | 0.76 |
 | hull 32v/capsule | 2 | 47 | 8 | | 0.81 |
 | **box/box** | 4 | **58** | 11 | 56 | **1.00** |
 | box/hull 8v | 3.25 | 69 | 26 | | 1.19 |
@@ -63,7 +60,7 @@ pair hasn't moved.
 | hull 8v / 4-box compound (4 pairs) | 12 | 161 | 87 | | 2.77 |
 
 Hull "Nv" means N vertices; a box as a hull has 8. The hulls are prisms with
-the box's footprint and height. The resting column was measured for four
+the box's footprint and height. The resting column was measured for five
 pairs only.
 
 ## The model
@@ -81,6 +78,7 @@ cost ≈ Σ awake bodies              22 ns            (6x6 solve per body, 8 it
 | Pair | NP (moving) |
 |---|---|
 | sphere vs box or hull | 3-5 |
+| capsule vs box | 7 |
 | capsule vs hull | 8 |
 | box vs box | 11 |
 | hull vs hull or box, both ≤ 16 vertices (≤ 32 faces, ≤ 48 edges: the small SAT bucket) | 26-38 |
