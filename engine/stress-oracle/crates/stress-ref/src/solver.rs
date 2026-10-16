@@ -352,7 +352,9 @@ impl ChunkLoads {
 #[derive(Clone)]
 pub struct ReferenceSolver {
     pub config: SolverConfig,
-    pub structures: Vec<Structure>,
+    /// Shared between clones (snapshots copy the mirror often); written through
+    /// `Arc::make_mut`, which copies a structure only while it is shared.
+    pub structures: Vec<std::sync::Arc<Structure>>,
     pub chunks: Vec<Vec<ChunkState>>,
     pub bonds: Vec<Vec<RtBond>>,
     /// Runtime bonds touching each chunk.
@@ -382,12 +384,32 @@ pub struct ReferenceSolver {
     turns: Vec<Vec<ChunkTurn>>,
     /// `rayleigh_damping`: the mass-proportional coefficient per structure (1/s).
     pub mass_damping: Vec<f64>,
+    /// Each cluster's Gershgorin step bound, kept while its bonds, chunks and their
+    /// inertia scales are unchanged (`stable_dt`; the bound uses static stiffness and
+    /// damping, so nothing else moves it).
+    step_bounds: StepBounds,
+}
+
+/// `stable_dt`'s per-cluster cache: (bonds, chunks, inertia-scale bits, bound) by cluster id.
+#[derive(Default)]
+struct StepBounds(std::sync::Mutex<std::collections::HashMap<u64, (Vec<usize>, Vec<usize>, Vec<u64>, f64)>>);
+
+impl Clone for StepBounds {
+    fn clone(&self) -> StepBounds {
+        StepBounds(std::sync::Mutex::new(self.0.lock().unwrap().clone()))
+    }
+}
+
+impl StepBounds {
+    fn clear(&mut self) {
+        self.0.get_mut().unwrap().clear();
+    }
 }
 
 impl ReferenceSolver {
     pub fn new(scene: &Scene) -> ReferenceSolver {
         let config = SolverConfig::from_scene(scene);
-        let structures: Vec<Structure> = (0..scene.bodies.len()).map(|i| Structure::from_scene(scene, i)).collect();
+        let structures: Vec<std::sync::Arc<Structure>> = (0..scene.bodies.len()).map(|i| std::sync::Arc::new(Structure::from_scene(scene, i))).collect();
         let mut solver = ReferenceSolver {
             config,
             chunks: Vec::new(),
@@ -407,6 +429,7 @@ impl ReferenceSolver {
             true_steps: Vec::new(),
             turns: Vec::new(),
             mass_damping: Vec::new(),
+            step_bounds: StepBounds::default(),
             structures,
         };
         for si in 0..solver.structures.len() {
@@ -876,7 +899,20 @@ impl ReferenceSolver {
             if self.clusters[ci].bonds.is_empty() || settled {
                 continue;
             }
-            let gershgorin = self.chunk_stable_dts(ci).iter().map(|&(_, d)| d).fold(f64::INFINITY, f64::min);
+            let cl = &self.clusters[ci];
+            let scales: Vec<u64> = cl.chunks.iter().map(|&c| self.chunks[cl.structure][c].inertia_scale.to_bits()).collect();
+            let cached = {
+                let cache = self.step_bounds.0.lock().unwrap();
+                cache.get(&cl.id).and_then(|(b, c, sc, d)| (*b == cl.bonds && *c == cl.chunks && *sc == scales).then_some(*d))
+            };
+            let gershgorin = match cached {
+                Some(d) => d,
+                None => {
+                    let d = self.chunk_stable_dts(ci).iter().map(|&(_, d)| d).fold(f64::INFINITY, f64::min);
+                    self.step_bounds.0.lock().unwrap().insert(cl.id, (cl.bonds.clone(), cl.chunks.clone(), scales, d));
+                    d
+                }
+            };
             // Both are stable steps of this cluster: the larger holds.
             let own = match self.true_steps.get(self.clusters[ci].structure) {
                 Some(&t) if self.config.methods.true_step => gershgorin.max(t),
@@ -926,9 +962,11 @@ impl ReferenceSolver {
             }
             let (zeta, wb) = (zeta / n, wb / n);
             self.mass_damping[s] = 2.0 * zeta * w1 * wb / (w1 + wb);
+            // The bonds' dashpots change: every cached step bound is stale.
+            self.step_bounds.clear();
             for (k, w) in bond_w.iter().enumerate() {
                 if let Some(w) = w {
-                    let b = &mut self.structures[s].bonds[k];
+                    let b = &mut std::sync::Arc::make_mut(&mut self.structures[s]).bonds[k];
                     b.damping = b.damping.scale(w / (w1 + w));
                 }
             }
@@ -1923,7 +1961,7 @@ impl ReferenceSolver {
             }
             let (f, m) = self.chunks[s][c].reaction;
             self.replacements.push(ReplacementLoad { structure: s, chunk: c, force: f, moment: m, start: self.time, duration });
-            self.structures[s].chunks[c].support = Support::None;
+            std::sync::Arc::make_mut(&mut self.structures[s]).chunks[c].support = Support::None;
             self.chunks[s][c].reaction = (Vec3::ZERO, Vec3::ZERO);
         }
         self.rebuild_structure_clusters(s);

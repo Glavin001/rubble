@@ -175,6 +175,19 @@ impl Gpu {
     }
 
     /// A storage buffer initialised with `data` (copyable both ways).
+    /// `storage`, rewriting `old` in place when it has the same size (queue order puts the
+    /// write before any later submission, so the GPU sees the same contents).
+    pub fn storage_into<T: bytemuck::Pod>(&self, label: &str, data: &[T], old: Option<&wgpu::Buffer>) -> wgpu::Buffer {
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        match old {
+            Some(old) if bytes.len() >= 16 && old.size() == bytes.len() as u64 => {
+                self.queue.write_buffer(old, 0, bytes);
+                old.clone()
+            }
+            _ => self.storage(label, data),
+        }
+    }
+
     pub fn storage<T: bytemuck::Pod>(&self, label: &str, data: &[T]) -> wgpu::Buffer {
         // Zero-length bindings are invalid: keep at least 16 bytes.
         let bytes: &[u8] = bytemuck::cast_slice(data);

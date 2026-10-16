@@ -168,7 +168,7 @@ fn cook(b: &EngineBody, arena: &mut HullArena) -> Cooked {
             // about its centre), and its hull (if any) in the body frame.
             let mut parts: Vec<(f64, Vec3, Mat3)> = Vec::new();
             let mut thin = f64::INFINITY;
-            for s in shapes {
+            for s in shapes.iter() {
                 let r = s.local.rotation.to_mat3();
                 match &s.hull {
                     None => {
@@ -211,7 +211,7 @@ fn cook(b: &EngineBody, arena: &mut HullArena) -> Cooked {
             let principal = Quat { w: rot.w, x: rot.x, y: rot.y, z: rot.z }.normalized();
             let to_body = principal.conjugate();
             let mut colliders = Vec::new();
-            for s in shapes {
+            for s in shapes.iter() {
                 let volume = 8.0 * s.half_extents.x * s.half_extents.y * s.half_extents.z;
                 let density = (s.mass / volume.max(1e-300)) as f32;
                 match &s.hull {
@@ -790,7 +790,7 @@ mod tests {
         let b = EngineBody {
             key: BodyKey::Cluster(1),
             signature: 0,
-            geometry: BodyGeometry::Boxes(shapes),
+            geometry: BodyGeometry::Boxes(shapes.into()),
             fixed: false,
             ccd: false,
             pose: Pose::default(),

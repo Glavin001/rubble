@@ -333,6 +333,10 @@ struct Buffers {
     islands: wgpu::Buffer,
     impactors: wgpu::Buffer,
     contact_state: wgpu::Buffer,
+    /// Rebuilt by every `build`; kept to be rewritten in place when the size holds.
+    chunk_static: wgpu::Buffer,
+    index: wgpu::Buffer,
+    loads: wgpu::Buffer,
     bind_segment: wgpu::BindGroup,
     bind_contact: wgpu::BindGroup,
     /// Some impactor has a crush cap (the crush passes run each substep).
@@ -595,7 +599,7 @@ impl GpuSolver {
         gpu: &Gpu,
         kernels: &Kernels,
         m: &ReferenceSolver,
-        loads: Option<&mut WorldLoads>,
+        mut loads: Option<&mut WorldLoads>,
         impactors: &[Impactor],
         pair_memory: &HashMap<PairKey, PairState>,
         probe_stride: u32,
@@ -607,11 +611,11 @@ impl GpuSolver {
         if m.config.mode == SolveMode::Implicit {
             return Err("the implicit solve mode is not on the GPU yet".into());
         }
-        let scene = loads.as_ref().map(|l| l.scene.clone());
         let (mut terms, items) = match loads {
-            Some(l) => (l.terms(m, m.time), l.probe_items(m)),
+            Some(ref mut l) => (l.terms(m, m.time), l.probe_items(m)),
             None => (Vec::new(), Vec::new()),
         };
+        let scene: Option<&Scene> = loads.as_deref().map(|l| &l.scene);
         terms.extend_from_slice(extra_terms);
         let StructureTables { chunk_index, chunks, mut chunk_static, state, mut islands, table, bonds, bond_index, bond_static, bond_dyn, csr } = stress_layout::pack(m)?;
         let n = chunks.len();
@@ -643,7 +647,7 @@ impl GpuSolver {
                     let k = chunk_index[s][c];
                     (k != u32::MAX).then(|| (chunk_static[k as usize].info[1], k))
                 }
-                Target::Bond(s, b) => bond_index.get(&(s, b)).map(|&i| (bond_static[i as usize].law.ids[3], i)),
+                Target::Bond(s, b) => bond_index.get(s).and_then(|v| v.get(b)).copied().filter(|&i| i != u32::MAX).map(|i| (bond_static[i as usize].law.ids[3], i)),
             }
         };
         let mut placed: Vec<(u32, u32, ProbeItem)> = items.into_iter().filter_map(|it| item_island(&it).map(|(isl, idx)| (isl, idx, it))).collect();
@@ -1001,8 +1005,8 @@ impl GpuSolver {
             Some(k) => k.bonds_static.clone(),
             None => gpu.storage("bond static", &bond_static),
         };
-        let chunks_buf = gpu.storage("chunk static", &chunk_static);
-        let index_buf = gpu.storage("index", &index);
+        let chunks_buf = gpu.storage_into("chunk static", &chunk_static, keep.map(|k| &k.chunk_static));
+        let index_buf = gpu.storage_into("index", &index, keep.map(|k| &k.index));
         let state = match keep {
             Some(k) => k.state.clone(),
             None => gpu.storage("state", &state),
@@ -1039,11 +1043,11 @@ impl GpuSolver {
             // Pair ledger flags (world.slang): overlap state present.
             scratch_init[ledger_base + i][3] = f32::from_bits(1);
         }
-        let scratch = gpu.storage("scratch", &scratch_init);
-        let islands_buf = gpu.storage("islands", &islands_gpu);
-        let loads_buf = gpu.storage("loads", &packed);
-        let cstate_buf = gpu.storage("contact state", &cstate);
-        let impactors_buf = gpu.storage("impactors", &if gpu_impactors.is_empty() { vec![GpuImpactor::default()] } else { gpu_impactors.clone() });
+        let scratch = gpu.storage_into("scratch", &scratch_init, keep.map(|k| &k.scratch));
+        let islands_buf = gpu.storage_into("islands", &islands_gpu, keep.map(|k| &k.islands));
+        let loads_buf = gpu.storage_into("loads", &packed, keep.map(|k| &k.loads));
+        let cstate_buf = gpu.storage_into("contact state", &cstate, keep.map(|k| &k.contact_state));
+        let impactors_buf = gpu.storage_into("impactors", &if gpu_impactors.is_empty() { vec![GpuImpactor::default()] } else { gpu_impactors.clone() }, keep.map(|k| &k.impactors));
         let bind = |params: &wgpu::Buffer| {
             gpu.bind(
                 &kernels.island.group,
@@ -1066,6 +1070,9 @@ impl GpuSolver {
                 islands: islands_buf,
                 impactors: impactors_buf,
                 contact_state: cstate_buf,
+                chunk_static: chunks_buf,
+                index: index_buf,
+                loads: loads_buf,
                 bind_segment,
                 bind_contact,
                 crush,
