@@ -378,7 +378,7 @@ the candidate budget.
 
 **10. The bond solve diverged.**
 - *Observed:* a level-1 bonded house started awake, with no shot, spun its
-  16–35 g mortar slivers to 230–240 rad/s, and never slept.
+  16–35 g pine offcuts to 230–240 rad/s, and never slept.
 - *Telling sign:* more iterations made it worse (16 iterations reached
   238 rad/s within 5 ticks; 32 overflowed). That points to divergence, not
   under-convergence.

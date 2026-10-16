@@ -47,7 +47,8 @@ async function buildNamed(name,device,bonds,layout,levelOverride,paramsOverride=
  const level=entry.level??Math.min(...asset.physics.fragments.map(f=>f.level));
  const built0=buildScene(asset,level),built={...built0,params:{...built0.params,...paramsOverride}};
  const one=bonds?await preloadBonds(device,built):{...built,joints:[]};
- return entry.layout?(entry.layout.suburb?buildSuburb:buildGrid)(asset,level,{...entry.layout,base:one}):one;
+ const scene=entry.layout?(entry.layout.suburb?buildSuburb:buildGrid)(asset,level,{...entry.layout,base:one}):one;
+ return {...scene,library:asset.library};
 }
 
 async function run(){
