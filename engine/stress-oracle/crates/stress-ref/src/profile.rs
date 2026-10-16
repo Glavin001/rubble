@@ -15,6 +15,7 @@ pub enum Stage {
     ScriptedLoads,
     Contacts,
     ContactBroadphase,
+    PairSearch,
     ContactPairs,
     ContactImpactors,
     ContactGround,
@@ -42,12 +43,13 @@ pub enum Stage {
     Refine,
 }
 
-const STAGES: [(Stage, &str, usize); 30] = [
+const STAGES: [(Stage, &str, usize); 31] = [
     (Stage::StepDt, "step dt (stable_dt, contact dt)", 0),
     (Stage::Events, "events", 0),
     (Stage::ScriptedLoads, "scripted loads", 0),
     (Stage::Contacts, "contacts", 0),
     (Stage::ContactBroadphase, "broadphase", 1),
+    (Stage::PairSearch, "pair search (chunk_pairs or neighbour list)", 2),
     (Stage::ContactPairs, "chunk pairs", 1),
     (Stage::ContactImpactors, "impactors", 1),
     (Stage::ContactGround, "ground", 1),
@@ -100,9 +102,11 @@ pub enum Counter {
     StepByContact,
     StepByFrame,
     StepByMaxSubstep,
+    NeighbourBuilds,
+    NeighbourPairs,
 }
 
-const COUNTERS: [(Counter, &str); 22] = [
+const COUNTERS: [(Counter, &str); 24] = [
     (Counter::Frames, "frames"),
     (Counter::Substeps, "substeps"),
     (Counter::ExplicitClusters, "explicit cluster-substeps"),
@@ -125,12 +129,14 @@ const COUNTERS: [(Counter, &str); 22] = [
     (Counter::StepByContact, "frames stepped by the contact bound"),
     (Counter::StepByFrame, "frames stepped by the frame"),
     (Counter::StepByMaxSubstep, "frames stepped by max_substep"),
+    (Counter::NeighbourBuilds, "contact neighbour list builds"),
+    (Counter::NeighbourPairs, "contact neighbour list pairs (per substep, summed)"),
 ];
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static FROM_ENV: OnceLock<()> = OnceLock::new();
-static NANOS: [AtomicU64; 30] = [const { AtomicU64::new(0) }; 30];
-static COUNTS: [AtomicU64; 22] = [const { AtomicU64::new(0) }; 22];
+static NANOS: [AtomicU64; 31] = [const { AtomicU64::new(0) }; 31];
+static COUNTS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 
 /// Turns profiling on (also on when `STRESS_PROFILE` is set).
 pub fn enable() {

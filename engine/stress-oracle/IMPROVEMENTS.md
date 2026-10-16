@@ -820,6 +820,120 @@ mode three tests use once each, at round-off cost to exactness. Not pursued. (Co
 globalised *tangent* Newton of `tangent_statics` finds equilibria for most of these
 solves; it was the secant direction that failed, not the existence of an equilibrium.)
 
+### Contact neighbour list (bit-exact, switch on, 2026-10-16)
+
+DEM and molecular-dynamics codes do not search for contact pairs every step. They
+keep a Verlet list of the pairs within a skin and search again only when something
+has moved far enough to enter it (`findings/stress-literature-review.md`). The oracle
+ran `chunk_pairs` every substep, and inside impact windows that is every substep of
+the run.
+
+**Method** (`world.rs`, `NeighbourList`): the list is `chunk_pairs` with every bounding
+radius grown by `s / 2`, at the centres of the build. Skin `s` = 0.5 x the smallest
+active chunk's bounding radius. Each substep keeps the listed pairs that pass
+`chunk_pairs`' own tests (cluster boxes, `admit`, padded intervals, spheres) at the
+current centres. The tests are the same and so is the order (lexicographic in
+`(cluster a, cluster b, chunk a, chunk b)`), so the result is `chunk_pairs`' own, pair
+for pair. The list is rebuilt when:
+- the active chunks, their clusters or their radii change;
+- a cluster's anchored or driven flag changes;
+- the two largest centre displacements since the build sum to more than
+  `s - 256 eps C`.
+
+That last condition is sufficient: a pair `chunk_pairs` returns now was within
+`ra + rb + s` minus far more than round-off at the build, so the grown search found it.
+The test reads only centres and fixed radii, so rotation cannot move a pair in or out.
+Every motion is counted, because the displacement is measured from the world centres
+every substep: hidden deformation, frame folds, rewinds and splits included. Pair
+evaluation (overlap, force law, friction state) still runs every substep on every pair
+whose spheres touch.
+
+**Switch:** `STRESS_REF_CONTACT_SKIN` (the skin as a fraction of the smallest radius,
+default 0.5; `0` or `off` runs `chunk_pairs` every substep). It is a runtime switch, not
+a `sim.methods` field: it changes no result. Non-finite centres, or a skin below
+`1e-9 (max |x| + max r)`, fall back to `chunk_pairs`.
+
+**Gate:** `verify_identical.py` with base 35e1421 gives 182/182 identical (both method
+sets, one thread and all threads, forced solve modes). The test
+`the_neighbour_list_matches_chunk_pairs_every_step` compares the list with
+`chunk_pairs` at every step. It covers moving bodies, approaching pairs, exact ties on a
+grid, hidden jumps, splits, cluster changes, flag flips and NaN centres. It is
+mutation-checked: it fails if only the largest displacement is counted, if the flags
+or cluster identity are left out of the build's identity, if the displacement check is
+skipped, or if the radii grow by `s / 4`.
+
+**Skin** (b5_wall_impact_v10, proven methods, pair search):
+
+| skin / r_min | builds | list pairs per substep | pair search |
+|---|---|---|---|
+| off | | | 0.75 s |
+| 0.25 | 132 | 224 | 0.23 s |
+| 0.5 | 67 | 278 | 0.20 s |
+| 1 | 35 | 636 | 0.27 s |
+| 2 | 19 | 1322 | 0.43 s |
+
+**Profile** (`--profile`, one thread, scenes from `examples/rubble_references`, proven
+methods unless marked established). `base` is 35e1421, `off` is this build with the
+list off, `on` is this build. All 30 runs were concurrent on a shared 16-core machine,
+so wall time is loaded. User CPU is the steadier measure, and the stage times are
+per-substep work. Every observation is identical across base, off and on.
+house_1story_ram (proven methods) is not in the table: after 110 CPU-minutes per
+variant it had not finished.
+
+| Case | substeps | list builds | contacts, us/substep (base / off / on) | pair search, us/substep (off / on) | broadphase stage, s (off / on) | wall s, base / on (user s) |
+|---|---|---|---|---|---|---|
+| b5_wall_impact_v10 | 24162 | 67 | 747 / 720 / 693 | 57.5 / 16.5 | 2.45 / 1.53 | 43.0 / 42.6 (26.3 / 25.9) |
+| b5_wall_impact_v15 | 24159 | 92 | 5556 / 5529 / 5383 | 194.9 / 43.6 | 10.41 / 6.58 | 158.5 / 155.1 (112.4 / 109.6) |
+| b5_wall_impact_v20 | 8058 | 32 | 781 / 733 / 811 | 55.2 / 19.6 | 0.74 / 0.48 | 16.8 / 17.0 (8.2 / 8.3) |
+| b5_wall_impact_v30 | 8058 | 46 | 670 / 658 / 642 | 40.7 / 12.2 | 0.57 / 0.40 | 15.5 / 15.3 (7.5 / 7.4) |
+| b5_wall_impact_v40 | 8058 | 58 | 1902 / 1847 / 1875 | 27.3 / 15.0 | 0.69 / 0.65 | 25.3 / 25.2 (13.2 / 13.0) |
+| s_house_car | 43100 | 185 | 3072 / 3083 / 2988 | 130.8 / 23.3 | 12.25 / 7.26 | 164.0 / 160.2 (117.5 / 113.8) |
+| s_floor_drop | 104598 | 58 | 350 / 356 / 337 | 23.6 / 8.2 | 5.80 / 4.04 | 58.9 / 56.0 (33.9 / 32.6) |
+| b5_wall_impact_v10, established | 39927 | 57 | 307 / 310 / 227 | 111.0 / 30.8 | 6.26 / 2.90 | 41.8 / 39.2 (25.2 / 23.0) |
+| s_house_car, established | 51300 | 137 | 156 / 156 / 93 | 69.1 / 11.3 | 4.20 / 1.28 | 33.0 / 30.4 (18.3 / 16.5) |
+
+Effect:
+- Pair search falls 2-6x per substep. Its time is deterministic work; the counts
+  (builds, list pairs) reproduce exactly.
+- Under the proven methods pair evaluation dominates contacts, and that is unchanged.
+  The run saves 1-4 % of CPU (house hit by a car 117.5 -> 113.8 s; b5 v20 +0.1 s,
+  within noise).
+- Under the established methods (sample-point contact, cheaper per pair) contact per
+  substep falls 26-40 % and CPU 9-10 %.
+- What remains of the broadphase stage is the oriented boxes and polytopes of the
+  candidates, built every substep for evaluation.
+
+**Impactor and ground paths: no list.** Their detection is one test per active chunk
+per substep: a centre distance against the impactor, or a height against the ground.
+A list cannot be cheaper than that, because checking a chunk's displacement costs the
+same test. The time in those stages (`impactors` 2.5 s on b5 v10) is the evaluation of
+the chunks in reach (ball and box overlaps), which must run every substep. The tests
+themselves are about 20 M per path on b5 v10. At a few ns each that is about 0.05 s of
+26 s, an estimate rather than a measurement.
+
+**Porting to stress-gpu's islands.** stress-gpu already reuses its candidates across
+substeps (`contacts::plan`), with per-chunk travel budgets that the GPU checks
+(`travel_check`, re-planning when a chunk outruns its budget). In effect that is a
+neighbour list with a budget in place of a skin. Three things differ:
+1. The plan's chunk pairs are an all-pairs loop over chunks of different clusters
+   (`contacts.rs`). At 10,000 bodies that is 5e7 tests per plan. The sweep build of
+   `chunk_pairs` (cluster boxes, then the two-axis cluster index) would replace it, with
+   the plan's budgets as the growth of each radius.
+2. A plan lasts a fixed `PLAN_STEPS = 4` steps and each re-plan rebuilds the device
+   buffers (`solver.rs`, `step`). Keeping the plan until a travel check fails (or the
+   island's membership or flags change, as this list does) would make re-plans
+   event-driven. That needs the candidate buffers re-uploadable without a full
+   re-layout.
+3. Each candidate's exact sphere test should run in the shader before its contact is
+   evaluated, so a longer-lived (larger) list costs a test per pair, not an
+   evaluation. A filtered list is bit-identical to a fresh plan only if the contact
+   loads are summed in an order that does not depend on the list (here, candidate
+   order with the filter preserving it). Not checked for the GPU's accumulation.
+
+Item 1 is CPU work in Rust, reusing `chunk_pairs` from stress-ref. Items 2-3 change the
+plan lifetime and a shader filter. Pair state is already keyed by chunk identity
+(`PairKey`), so a list that persists across re-plans keeps it as it is.
+
 ## Queue (from the real-time performance analysis, 2026-10-10)
 
 Each oracle-applicable idea, with its class. Exact ones go in directly. Step and model
