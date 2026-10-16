@@ -3,9 +3,17 @@
 //! vertex/fragment shaders draw the chunks straight from the solver's GPU state,
 //! coloured by bond stress over the tensile strength, in a macOS window through wgpu.
 //!
-//!   stress-gpu-view [--scene slab|overhang|PATH.json] [--substeps N] [--exaggerate X]
+//!   stress-gpu-view [--scene slab|overhang|PATH.json] [--substeps N] [--exaggerate X] [--sudden]
 //!   stress-gpu-view --frames 240 --screenshot f.ppm   capture frame 240, then exit
 //!   STRESS_GPU_SHADERS=wgsl stress-gpu-view           the same through WGSL
+//!
+//! Fracture is off (the GPU kernels here are the intact explicit solve). The structure starts
+//! at its static equilibrium under gravity, so it stands still, coloured by its sustained
+//! stress; `--sudden` instead applies gravity at t = 0 from the unloaded shape, and the
+//! structure rings about that equilibrium at its natural frequencies (the slab's first
+//! bending mode is about 42 Hz, the overhang's 13 Hz; light damping). Deflections are
+//! fractions of a millimetre, so they are drawn magnified: by default so that the static
+//! deflection spans 8 % of the structure's size (the factor is in the title).
 //!
 //! Frames are driven from the event loop, not by redraw requests, so the solver keeps
 //! stepping while the window is hidden (macOS stops redrawing occluded windows); a
@@ -42,7 +50,8 @@ struct Camera {
 struct Options {
     scene: String,
     substeps: usize,
-    exaggerate: f32,
+    exaggerate: Option<f32>,
+    sudden: bool,
     frames: Option<u64>,
     screenshot: Option<String>,
 }
@@ -63,6 +72,7 @@ struct View {
     radius: f32,
     stress_max: f32,
     exaggerate: f32,
+    sudden: bool,
     substeps: usize,
     frame: u64,
     sim_time: f64,
@@ -75,14 +85,15 @@ struct App {
 }
 
 fn main() {
-    let mut options = Options { scene: "slab".into(), substeps: 400, exaggerate: 2000.0, frames: None, screenshot: None };
+    let mut options = Options { scene: "slab".into(), substeps: 400, exaggerate: None, sudden: false, frames: None, screenshot: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| panic!("{a} needs a value"));
         match a.as_str() {
             "--scene" => options.scene = value(),
             "--substeps" => options.substeps = value().parse().expect("--substeps N"),
-            "--exaggerate" => options.exaggerate = value().parse().expect("--exaggerate X"),
+            "--exaggerate" => options.exaggerate = Some(value().parse().expect("--exaggerate X")),
+            "--sudden" => options.sudden = true,
             "--frames" => options.frames = Some(value().parse().expect("--frames N")),
             "--screenshot" => options.screenshot = Some(value()),
             other => panic!("unknown argument {other}"),
@@ -164,7 +175,13 @@ impl View {
         surface.configure(&gpu.device, &config);
 
         let scene = load_scene(&options.scene);
-        let reference = ReferenceSolver::new(&scene);
+        // The static equilibrium under gravity: the starting state, unless --sudden, and the
+        // deflection that sets the default magnification.
+        let mut settled = ReferenceSolver::new(&scene);
+        let report = settled.gravity_prestress();
+        assert!(report.converged, "{}: no static equilibrium under gravity ({report:?})", options.scene);
+        let static_deflection = settled.chunks.iter().flatten().map(|st| st.u.norm()).fold(0.0f64, f64::max) as f32;
+        let reference = if options.sudden { ReferenceSolver::new(&scene) } else { settled };
         let solver = GpuStress::new(&gpu, &reference).unwrap_or_else(|e| panic!("{}: {e}", options.scene));
         let stress_max = scene.materials.values().map(|m| m.tensile_strength).fold(f64::INFINITY, f64::min) as f32;
         eprintln!(
@@ -190,6 +207,12 @@ impl View {
         let n = centers.len() as f32;
         let target: [f32; 3] = std::array::from_fn(|i| centers.iter().map(|c| c[i]).sum::<f32>() / n);
         let radius = centers.iter().map(|c| (0..3).map(|i| (c[i] - target[i]).powi(2)).sum::<f32>().sqrt()).fold(0.3f32, f32::max);
+        let exaggerate = options.exaggerate.unwrap_or_else(|| if static_deflection > 0.0 { 0.08 * radius / static_deflection } else { 1.0 });
+        eprintln!(
+            "static deflection {:.3e} m; drawn x{exaggerate:.0}; start: {}",
+            static_deflection,
+            if options.sudden { "unloaded, gravity applied suddenly" } else { "static equilibrium" }
+        );
 
         let camera = gpu.uniform("camera", &Camera::zeroed());
         let bindings = [Binding::Uniform, Binding::Storage, Binding::Storage];
@@ -236,7 +259,8 @@ impl View {
             target,
             radius,
             stress_max,
-            exaggerate: options.exaggerate,
+            exaggerate,
+            sudden: options.sudden,
             substeps: options.substeps,
             frame: 0,
             sim_time: 0.0,
@@ -321,13 +345,15 @@ impl View {
         if self.frame % 60 == 0 {
             let secs = self.started.elapsed().as_secs_f64();
             let title = format!(
-                "stress-gpu: Slang -> {:?} | {} chunks, {} bonds | {} substeps/frame, {:.0} fps | t = {:.3} s",
+                "stress-gpu: Slang -> {:?} | {} chunks, {} bonds | {} substeps/frame, {:.0} fps | t = {:.3} s | deflection x{:.0}, {}, fracture off",
                 self.gpu.shader_path,
                 self.solver.chunks.len(),
                 self.solver.bond_count,
                 self.substeps,
                 self.frame as f64 / secs,
-                self.sim_time
+                self.sim_time,
+                self.exaggerate,
+                if self.sudden { "gravity applied at t = 0" } else { "from rest" }
             );
             self.window.set_title(&title);
             eprintln!("{title}");
