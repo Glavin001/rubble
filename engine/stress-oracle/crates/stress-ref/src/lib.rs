@@ -18,6 +18,7 @@
 #![allow(clippy::needless_range_loop, clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod api;
+pub mod avbd;
 pub mod blast;
 pub mod bond;
 pub mod builders;
