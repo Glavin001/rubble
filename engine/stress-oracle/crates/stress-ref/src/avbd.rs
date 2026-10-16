@@ -58,6 +58,13 @@ use crate::world::{
     FRICTION_REGULARIZATION, MAX_SET_VISCOSITY,
 };
 
+/// Multi-time-step explicit-implicit domain decomposition on this world
+/// (`findings/multi-time-step.md`).
+#[cfg(feature = "mts")]
+pub mod mts;
+#[cfg(feature = "mts")]
+mod skyline;
+
 /// Time integration of the chunk network.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Integrator {
@@ -425,6 +432,7 @@ struct Detected {
     key: (usize, usize, usize),
 }
 
+#[derive(Clone)]
 pub struct AvbdWorld {
     pub scene: Scene,
     pub config: AvbdConfig,
@@ -458,6 +466,8 @@ pub struct AvbdWorld {
     /// Contacts of the current implicit step.
     contacts: Vec<LinContact>,
     body_contacts: Vec<Vec<usize>>,
+    /// Bodies contact detection considers (`None`: all; the multi-time-step hot zone).
+    detect_mask: Option<Vec<bool>>,
 }
 
 impl AvbdWorld {
@@ -625,6 +635,7 @@ impl AvbdWorld {
             next_sample: 0.0,
             contacts: Vec::new(),
             body_contacts: vec![Vec::new(); n],
+            detect_mask: None,
         };
         world.rebuild_components();
         world
@@ -882,6 +893,7 @@ impl AvbdWorld {
         };
         let restitution = self.scene.sim.contact_restitution;
         let _ = restitution;
+        let considered = |j: usize| self.detect_mask.as_ref().map_or(true, |m| m[j]);
         // Impactors against chunks.
         for &ib in &self.impactor_bodies {
             let imp = &self.bodies[ib];
@@ -892,6 +904,9 @@ impl AvbdWorld {
                 let Kind::Chunk(..) = self.bodies[j].kind else {
                     continue;
                 };
+                if !considered(j) {
+                    continue;
+                }
                 let ch = &self.bodies[j];
                 let m = margin(j, Some(ib));
                 if (ch.x - imp.x).norm() > reach + ch.radius() + m {
@@ -966,7 +981,7 @@ impl AvbdWorld {
             let mu = self.scene.sim.contact_friction.unwrap_or(g.friction);
             for j in 0..n {
                 let body = &self.bodies[j];
-                if !body.free() || body.fixed_lin {
+                if !body.free() || body.fixed_lin || !considered(j) {
                     continue;
                 }
                 if let Kind::Chunk(..) = body.kind {
@@ -1011,6 +1026,7 @@ impl AvbdWorld {
         // Chunks of different components (not both anchored).
         let chunk_ids: Vec<usize> = (0..n)
             .filter(|&j| matches!(self.bodies[j].kind, Kind::Chunk(..)) && self.bodies[j].x.x < 1e8)
+            .filter(|&j| considered(j))
             .collect();
         if self.comp_count > 1 {
             let cell = chunk_ids

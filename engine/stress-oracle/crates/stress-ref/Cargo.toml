@@ -24,6 +24,9 @@ faer = { version = "=0.22.6", optional = true }
 [features]
 # The modal pre-window prototype for impacts (`src/modal.rs`, `findings/modal-prewindow.md`).
 modal = ["dep:faer"]
+# The multi-time-step explicit-implicit prototype (`src/avbd/mts.rs`,
+# `findings/multi-time-step.md`).
+mts = ["dep:faer"]
 
 [[example]]
 name = "modal_prewindow"
@@ -32,3 +35,7 @@ required-features = ["modal"]
 [[test]]
 name = "modal_prewindow"
 required-features = ["modal"]
+
+[[example]]
+name = "mts_compare"
+required-features = ["mts"]
