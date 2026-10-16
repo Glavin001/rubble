@@ -406,11 +406,25 @@ impl World {
         let n = parts.len();
         let mut parent: Vec<usize> = (0..n).collect();
         let mut seed = vec![false; n];
-        for i in 0..n {
-            for j in i + 1..n {
-                if !overlaps(&parts[i], &parts[j]) {
-                    continue;
+        // The overlapping pairs, found by sweeping the parts sorted along x (the same set
+        // as testing every pair), then taken in (i, j) order as the double loop over all
+        // pairs would.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| parts[a].lo.x.total_cmp(&parts[b].lo.x));
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for (k, &a) in order.iter().enumerate() {
+            for &b in &order[k + 1..] {
+                if parts[b].lo.x > parts[a].hi.x {
+                    break;
                 }
+                if overlaps(&parts[a], &parts[b]) {
+                    pairs.push((a.min(b), a.max(b)));
+                }
+            }
+        }
+        pairs.sort_unstable();
+        for (i, j) in pairs {
+            {
                 let owned = rigid_assumption_fails(&parts[i], &parts[j]) || rigid_assumption_fails(&parts[j], &parts[i]);
                 let both_immovable = !parts[i].mass.is_finite() && !parts[j].mass.is_finite();
                 if parts[i].key.is_none() || parts[j].key.is_none() {
@@ -447,10 +461,11 @@ impl World {
         for i in 0..n {
             let in_island = parts[i].key.is_some() && island_root[find(&mut parent, i)];
             match parts[i].key {
+                // Parts are the clusters in order, then the impactors, then the ground.
                 Some(BodyKey::Cluster(id)) => {
-                    if let Some(cl) = self.solver.clusters.iter_mut().find(|c| c.id == id) {
-                        cl.driven = !in_island;
-                    }
+                    let cl = &mut self.solver.clusters[i];
+                    debug_assert_eq!(cl.id, id);
+                    cl.driven = !in_island;
                 }
                 Some(BodyKey::Impactor(k)) => self.impactors[k].driven = !in_island,
                 None => {}
