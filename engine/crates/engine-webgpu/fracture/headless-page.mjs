@@ -7,6 +7,11 @@
 //   profile  per-kernel GPU timestamps after measuring, 0/1  (default 1)
 //   trace    log counters every N warm ticks, 0 = off        (default 0)
 //   budget   JSON merged into scene.capacity, e.g. {"deterministic":true}
+//   awake    1: every dynamic body starts awake (scenes start asleep)
+//   params   JSON merged into scene.params, e.g. {"flags":97} (measurement only)
+//   sleepdiag=N [every=120]   why bodies stay awake (sleep-diag.mjs), N ticks after the shot
+//   sleeptrace=T [ticks pick bodies]   per-tick trace of the worst movers from tick T
+//   sleepwatch=T [to]   bodies that start each burst of motion between ticks T and to
 //   bonds    1: the lab's breakable bonds (experimental), preloaded as in the lab
 //   columns, rows   grid layout override (grid scenes only)
 //   scene=pairs a=<shape> b=<shape> count=N reuse=0|1   collision-cost benchmark
@@ -19,6 +24,8 @@ import {buildCuboidHouse} from './cuboid-house.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {buildPairScene} from './shape-bench.mjs';
+import {runSleepDiag,runSleepTrace,runSleepWatch} from './sleep-diag.mjs';
+import {hullView,hullBase} from './geometry.mjs';
 
 // Same bundled scenes as the lab (main.mjs samples), without bond preloading.
 const SCENES={house:{file:'veneer-house.glb'},grid:{file:'veneer-house.glb',layout:{columns:7,rows:7},level:2},
@@ -51,7 +58,8 @@ async function run(){
  const layout=q.has('columns')||q.has('rows')?{...(q.has('columns')?{columns:num('columns',7)}:{}),...(q.has('rows')?{rows:num('rows',7)}:{})}:null;
  const built=name==='pairs'?buildPairScene({a:q.get('a')??'box',b:q.get('b')??'box',count:num('count',4096)}):await buildNamed(name,device,num('bonds',0)===1,layout);
  if(name==='pairs'&&num('reuse',0)===1)built.params={...built.params,flags:built.params.flags|1};
- const scene={...built,capacity:{...built.capacity,...budget}};
+ const scene={...built,capacity:{...built.capacity,...budget},params:{...built.params,...(q.has('params')?JSON.parse(q.get('params')):{})}};
+ if(num('awake',0)===1)scene.bodies=scene.bodies.map(b=>b.flags&1?{...b,flags:b.flags&~4}:b);
  let frozen=0;
  if(num('staticUnhit',0)===1&&scene.rowShot&&scene.instanceStride){
   const frags=scene.instanceStride,x=scene.rowShot.origin[0],r=scene.projectileRadius,ground=scene.bodies[0];
@@ -78,6 +86,21 @@ async function run(){
   A.dispose();B.dispose();return {scene:name,lockstep:{ticks:k-1,firstDifference:first,maxAwake},gpuError};
  }
  const sim=await createSimulation(device,scene);
+ if(num('sleeptrace',0)>0){
+  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
+  const report=await runSleepTrace(sim,scene,{at:num('sleeptrace',0),ticks:num('ticks',30),pick:num('pick',3),bodies:q.has('bodies')?q.get('bodies').split(',').map(Number):null,hullView,hullBase});
+  sim.dispose();return {scene:name,trace:report,gpuError};
+ }
+ if(num('sleepwatch',0)>0){
+  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
+  const report=await runSleepWatch(sim,scene,{from:num('sleepwatch',0),to:num('to',2400)});
+  sim.dispose();return {scene:name,watch:report,gpuError};
+ }
+ if(num('sleepdiag',0)>0){
+  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
+  const report=await runSleepDiag(sim,scene,{ticks:num('sleepdiag',0),every:num('every',120)});
+  sim.dispose();return {scene:name,bodies:scene.bodies.length,params:scene.params,budget,sleepdiag:report,gpuError};
+ }
  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
  const log=[],t0=performance.now();
  // timeline=N: every N ticks, one step timed in a single pass (true GPU ms)

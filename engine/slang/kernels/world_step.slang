@@ -1588,7 +1588,12 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
     float3 vRel = ba.linearVel - bb.linearVel;
     float wRel = length(ba.angularVel) + length(bb.angularVel);
     float thresh = PARAMS.sleepLin;
-    if (dot(vRel, vRel) < thresh * thresh && wRel < PARAMS.sleepAng)
+    if (pointSpeedSleep())
+    {
+        float pointSpeed = length(vRel) + length(ba.angularVel) * colliderExtent(ca) + length(bb.angularVel) * colliderExtent(cb);
+        if (pointSpeed < thresh) return;
+    }
+    else if (dot(vRel, vRel) < thresh * thresh && wRel < PARAMS.sleepAng)
         return;
     // Store only the wake fields: a whole-body store from this thread's
     // narrowphase-start copy could overwrite fields other work updated.
@@ -1832,6 +1837,16 @@ float colliderMinSide(Collider col)
     return max(2.0 * min(h.x, min(h.y, h.z)), 1e-6);
 }
 
+// Farthest point of a collider from its body's origin (centre of mass).
+float colliderExtent(Collider col)
+{
+    float r = col.shape == SHAPE_SPHERE ? col.params.x
+        : col.shape == SHAPE_CAPSULE ? col.params.x + col.params.y
+        : col.shape == SHAPE_CONVEX ? col.params.w
+        : length(col.params.xyz);
+    return length(col.localPos) + r;
+}
+
 static const uint FLAG_REUSE_CONTACTS = 1u;
 // Preload: bonds carry load but never break (hosts settle a structure under its
 // own weight before it is put to sleep, so it wakes in static equilibrium).
@@ -1851,6 +1866,38 @@ float speculativeMargin()
 // (R at the inertial target). Without it (three-avbd) the principal moments are
 // applied on world axes, which is only right for isotropic or axis-aligned bodies.
 static const uint FLAG_WORLD_INERTIA = 64u;
+// Experiments (sleep investigation, 2026-10-16):
+// 128 Coulomb stick: a contact keeps its friction anchors while its unclamped
+//     friction force is inside the cone and the anchor offset is under STICK_TOL
+//     (avbd-demo2d), instead of requiring a 10 µm end-of-step tangential residual.
+// 256 Tangential penalties floored at the pair's mass stiffness, as the normal is.
+// 1024 Sliding rows use the secant stiffness μ|f_N|/|C_T| in the Hessian.
+static const uint FLAG_COULOMB_STICK = 128u;
+static const uint FLAG_TANGENT_MASS_FLOOR = 256u;
+static const uint FLAG_SLIDE_HESSIAN = 1024u;
+static const float STICK_TOL = 0.01;
+// 2048 Load-aware penalty floor: a warm-started contact's resting offset is
+//     ≈ |λ|/k (λ decays by αγ each step and k·C rebuilds it), so k ≥ |λ|/REST_SLOP
+//     bounds the resting overlap (normal) and anchor give (tangent) by REST_SLOP.
+static const uint FLAG_LOAD_PENALTY = 2048u;
+static const float REST_SLOP = 0.001;
+// 4096 Post-stabilization (avbd-demo2d): warm start keeps λ whole, the
+//     iterations run with α = 1 (no correction of step-start error), velocity is
+//     taken after them, then one extra primal pass with α = 0 removes the whole
+//     position error without turning it into velocity. Replaces α's decay of λ,
+//     whose steady state rests every loaded contact ≈ |λ|/k deep.
+static const uint FLAG_POST_STAB = 4096u;
+// 8192 Point-speed sleep test (Box2D v3): a body is slow when its fastest point,
+//     |v| + |ω|·r_max, is under sleepLin; sleepAng is not used. A fixed rad/s
+//     threshold is 20x stricter than the linear one for a 3 cm piece.
+static const uint FLAG_POINT_SPEED_SLEEP = 8192u;
+bool pointSpeedSleep() { return (PARAMS.flags & FLAG_POINT_SPEED_SLEEP) != 0u; }
+// Set by the primal kernels from the pass value (bit 8): the stabilization pass.
+static bool gStabilize = false;
+bool postStabilize() { return (PARAMS.flags & FLAG_POST_STAB) != 0u; }
+float warmDecay() { return postStabilize() ? 1.0 : PARAMS.alpha * PARAMS.gamma; }
+float primalAlpha() { return postStabilize() ? (gStabilize ? 0.0 : 1.0) : PARAMS.alpha; }
+float dualAlpha() { return postStabilize() ? 1.0 : PARAMS.alpha; }
 
 // Step-start normal offset of a contact whose signed gap is n·(xB−xA).
 float contactC0N(float gap, float margin)
@@ -2476,7 +2523,7 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
         j.c0 = transformPoint(a.position, a.orientation, j.localAnchorA)
              - transformPoint(b.position, b.orientation, j.localAnchorB);
         j.c0Ang = bondAngularError(j, a, b);
-        float decay = p.alpha * p.gamma;
+        float decay = warmDecay();
         j.lambda0 *= decay; j.lambda1 *= decay; j.lambda2 *= decay;
         j.lambda3 *= decay; j.lambda4 *= decay; j.lambda5 *= decay;
         gJoints[i] = j;
@@ -2485,12 +2532,12 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
     float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
     j.c0 = wa - wb;
-    j.lambda0 *= p.alpha * p.gamma;
-    j.lambda1 *= p.alpha * p.gamma;
-    j.lambda2 *= p.alpha * p.gamma;
-    j.lambda3 *= p.alpha * p.gamma;
-    j.lambda4 *= p.alpha * p.gamma;
-    j.lambda5 *= p.alpha * p.gamma;
+    j.lambda0 *= warmDecay();
+    j.lambda1 *= warmDecay();
+    j.lambda2 *= warmDecay();
+    j.lambda3 *= warmDecay();
+    j.lambda4 *= warmDecay();
+    j.lambda5 *= warmDecay();
     float kMin = p.kStart;
     float kMax = max(j.stiffness, kMin);
     j.k0 = clamp(j.k0 * p.gamma, kMin, kMax);
@@ -2672,11 +2719,18 @@ Contact finishWarmContact(Contact c, BodyState ba, BodyState bb)
     // Normal stiffness is floored at m/dt²; each tangent ramps independently.
     float kMass = min(mA, mB) / (dt * dt);
     c.kN = max(max(1.0, kMass), p.gamma * c.kN);
-    c.kT = max(1.0, p.gamma * c.kT);
-    c._pad2 = max(1.0, p.gamma * c._pad2);
-    c.lambdaN *= p.alpha * p.gamma;
-    c.lambdaT1 *= p.alpha * p.gamma;
-    c.lambdaT2 *= p.alpha * p.gamma;
+    float kTMin = (p.flags & FLAG_TANGENT_MASS_FLOOR) != 0u ? clamp(kMass, 1.0, p.kMaxN) : 1.0;
+    c.kT = max(kTMin, p.gamma * c.kT);
+    c._pad2 = max(kTMin, p.gamma * c._pad2);
+    c.lambdaN *= warmDecay();
+    c.lambdaT1 *= warmDecay();
+    c.lambdaT2 *= warmDecay();
+    if ((p.flags & FLAG_LOAD_PENALTY) != 0u)
+    {
+        c.kN = min(max(c.kN, abs(c.lambdaN) / REST_SLOP), p.kMaxN);
+        c.kT = min(max(c.kT, abs(c.lambdaT1) / REST_SLOP), p.kMaxN);
+        c._pad2 = min(max(c._pad2, abs(c.lambdaT2) / REST_SLOP), p.kMaxN);
+    }
     return c;
 }
 
@@ -4075,7 +4129,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 if (dot(qB, bB.initialRot) < 0.0) qB = -qB;
                 dAngB = quatSubVec(qB, bB.initialRot);
             }
-            float keep = 1.0 - p.alpha;
+            float keep = 1.0 - primalAlpha();
             for (uint ci = 0u; ci < contactCount; ci++)
             {
                 #if defined(ENGINE_COMPACT_SOLVE)
@@ -4097,6 +4151,27 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                     c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
                 c.penetration = C.x;
                 // C is already Ĉ; alpha=0 + margin=0 ⇒ contributeContact uses F = k·C + λ.
+                if ((p.flags & FLAG_SLIDE_HESSIAN) != 0u)
+                {
+                    // A sliding row's force is fixed at μ|f_N| along the slip, so its
+                    // stiffness is the secant μ|f_N|/|C_T| (IPC's lagged friction
+                    // Hessian), not the stick penalty that would damp the step.
+                    float3 fRaw = float3(c.kN, c.kT, c._pad2) * C + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
+                    float fN = max(-min(fRaw.x, 0.0), 0.0);
+                    float slip = length(C.yz);
+                    if (length(fRaw.yz) > c.friction * fN && slip > 1.0e-9)
+                    {
+                        float kSec = c.friction * fN / slip;
+                        // Keep the force (k·C + λ, then the cone) unchanged: only the
+                        // Hessian uses the secant. contributeContact uses the same k for
+                        // both, so pass the force through λ with k = kSec.
+                        float3 f = projectContactForce(fRaw, c.friction);
+                        c.lambdaT1 = f.y - min(c.kT, kSec) * C.y;
+                        c.lambdaT2 = f.z - min(c._pad2, kSec) * C.z;
+                        c.kT = min(c.kT, kSec);
+                        c._pad2 = min(c._pad2, kSec);
+                    }
+                }
                 contributeContact(A, rhs, c, isA, 0.0, b.position, rotSelf, C, 0.0,
                     isA ? rAW : rBW);
             }
@@ -4113,7 +4188,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 // Six AVBD rows in the bond frame: f = k Creg + lambda.
                 float3x3 F = bondFrame(j, ba);
                 float3 lin, ang;
-                bondViolation(j, ba, bb, p.alpha, lin, ang);
+                bondViolation(j, ba, bb, primalAlpha(), lin, ang);
                 float3 r = quatRotate(b.orientation, isA ? j.localAnchorA : j.localAnchorB);
                 float kLin[3] = { j.k0, j.k1, j.k2 };
                 float lLin[3] = { j.lambda0, j.lambda1, j.lambda2 };
@@ -4141,7 +4216,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             float3 local = isA ? j.localAnchorA : j.localAnchorB;
             float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
             float k = max(j.k0, p.kStart);
-            contributeBallJoint(A, rhs, b.position, b.orientation, local, C, j.c0, k, lam, isA, p.alpha);
+            contributeBallJoint(A, rhs, b.position, b.orientation, local, C, j.c0, k, lam, isA, primalAlpha());
             if (j.jointType == JOINT_FIXED || j.jointType == JOINT_HINGE || j.jointType == JOINT_D6)
             {
                 BodyState other = isA ? bb : ba;
@@ -4154,7 +4229,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                     if (j.jointType == JOINT_HINGE && ax == 0) continue;
                     Vec6 jj = vec6Zero();
                     jj.v[3 + ax] = isA ? 1.0 : -1.0;
-                    float f = k * (1.0 - p.alpha) * Cang[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
+                    float f = k * (1.0 - primalAlpha()) * Cang[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
                     mat6AddOuter(A, jj, k);
                     vec6AddScaled(rhs, jj, f);
                 }
@@ -4169,7 +4244,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                     float3 n = float3(ax == 0 ? 1.0 : 0.0, ax == 1 ? 1.0 : 0.0, ax == 2 ? 1.0 : 0.0);
                     if (abs(dot(n, axis)) > 0.9) continue;
                     Vec6 jj = jacobianLin(n, isA ? (wa - b.position) : (wb - b.position), !isA);
-                    float f = k * (1.0 - p.alpha) * radial[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
+                    float f = k * (1.0 - primalAlpha()) * radial[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
                     mat6AddOuter(A, jj, k);
                     vec6AddScaled(rhs, jj, f);
                 }
@@ -4178,11 +4253,33 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
     }
 }
 
+// BDF1 velocity from the step-start pose x⁻ saved by prediction.
+float3 bodyLinearVelocity(BodyState b, float dt)
+{
+    return (b.position - b.initialPos) / max(dt, 1e-8);
+}
+float3 bodyAngularVelocity(BodyState b, float dt)
+{
+    float4 q0 = b.initialRot;
+    float4 q1 = b.orientation;
+    if (dot(q0, q1) < 0.0) q1 = -q1; // same hemisphere
+    float4 dq = quatMul(q1, quatConjugate(q0));
+    float3 av = 2.0 * dq.xyz / max(dt, 1e-8);
+    return dq.w < 0.0 ? -av : av;
+}
+
 void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
 {
     BodyState b = gBodies[bodyIdx];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     AvbdParams p = PARAMS;
+    // Post-stabilization: the velocity is the pose after the α = 1 iterations,
+    // taken before this pass removes the step-start error.
+    if (gStabilize)
+    {
+        gBodies[bodyIdx].linearVel = bodyLinearVelocity(b, p.dt);
+        gBodies[bodyIdx].angularVel = bodyAngularVelocity(b, p.dt);
+    }
     uint floors = 0;
     Vec6 neg = rhs;
     for (int k = 0; k < 6; k++) neg.v[k] = -rhs.v[k];
@@ -4292,7 +4389,8 @@ void primalReduceStep(uint s, bool live, uint lane, uint slot, inout Mat6 A, ino
 [numthreads(64, 1, 1)]
 void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
 {
-    uint color = PASS_U;
+    uint color = PASS_U & 255u;
+    gStabilize = (PASS_U & 256u) != 0u;
     uint count = SOLVE_COUNT(color);
     uint gid = dispatchIndex(tid);
     uint local = lid.x;
@@ -4352,7 +4450,8 @@ void solve_primal_sparse(uint3 lid : SV_GroupThreadID)
     if (local == 0u) gsUniformLanes = min(ALOAD(gCounters[0].colorCount), min(HOST_S(4), COLOR_DEGREE_BASE));
     GROUP_SYNC();
     uint colorLimit = gsUniformLanes;
-    for (uint color = PASS_U; color < colorLimit; color++)
+    gStabilize = (PASS_U & 256u) != 0u;
+    for (uint color = PASS_U & 255u; color < colorLimit; color++)
     {
         if (local == 0u) gsUniformLanes = SOLVE_COUNT(color);
         GROUP_SYNC();
@@ -4460,7 +4559,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             }
             float3 rAW = quatRotate(rotA, c.anchorA);
             float3 rBW = quatRotate(rotB, c.anchorB);
-            float keep = 1.0 - p.alpha;
+            float keep = 1.0 - dualAlpha();
             float3 n = c.normal;
             float3 t1 = c.tangent1;
             float3 t2 = c.tangent2;
@@ -4481,10 +4580,12 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             if (f.x < 0.0) c.kN = min(c.kN + p.betaLin * abs(cReg.x), p.kMaxN);
             if (rawFriction <= bound)
             {
-                c.kT = min(c.kT + p.betaLin * abs(cReg.y), p.kMaxT);
-                c._pad2 = min(c._pad2 + p.betaLin * abs(cReg.z), p.kMaxT);
+                c.kT = min(c.kT + p.betaLin * abs(cReg.y), max(p.kMaxT, c.kT));
+                c._pad2 = min(c._pad2 + p.betaLin * abs(cReg.z), max(p.kMaxT, c._pad2));
                 c._pad0 = length(cReg.yz) < 1.0e-5 ? 1.0 : 0.0;
             }
+            if ((p.flags & FLAG_COULOMB_STICK) != 0u)
+                c._pad0 = (rawFriction <= bound && length(float2(c.c0T1, c.c0T2)) < STICK_TOL) ? 1.0 : 0.0;
             // The dual changes forces/penalties, not geometry. Avoid writing the
             // full 128-byte record for every contact on every solver iteration.
 #if defined(ENGINE_COMPACT_SOLVE)
@@ -4523,7 +4624,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             // Frozen while both ends sleep or are static, inert once broken.
             if (jointBroken(j) || (!bodyMoving(a) && !bodyMoving(b))) return;
             float3 cl, ca;
-            bondViolation(j, a, b, p.alpha, cl, ca);
+            bondViolation(j, a, b, dualAlpha(), cl, ca);
             float3 lin = float3(j.lambda0, j.lambda1, j.lambda2) + float3(j.k0, j.k1, j.k2) * cl;
             float3 ang = float3(j.lambda3, j.lambda4, j.lambda5) + float3(j.k3, j.k4, j.k5) * ca;
             j.lambda0 = lin.x; j.lambda1 = lin.y; j.lambda2 = lin.z;
@@ -4541,7 +4642,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         float k = max(j.k0, p.kStart);
         float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
         // demo3d dual: C_hat = C - alpha * C0
-        float3 Creg = C - p.alpha * j.c0;
+        float3 Creg = C - dualAlpha() * j.c0;
         lam = k * Creg + lam;
         j.lambda0 = lam.x; j.lambda1 = lam.y; j.lambda2 = lam.z;
         j.k0 = min(k + p.betaLin * length(Creg), min(j.stiffness, p.kMaxN));
@@ -4573,21 +4674,26 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     if (bodyIsSleeping(b)) return;
 
     // Step-start pose x⁻ was saved on the body by prediction (initialPos/Rot).
+    // Post-stabilization stored the velocity before its pass moved the body.
     float dt = max(p.dt, 1e-8);
-    b.linearVel = (b.position - b.initialPos) / dt;
-    // Angular velocity from quat delta
-    float4 q0 = b.initialRot;
-    float4 q1 = b.orientation;
-    // Ensure same hemisphere
-    if (dot(q0, q1) < 0.0) q1 = -q1;
-    float4 dq = quatMul(q1, quatConjugate(q0));
-    float3 av = 2.0 * dq.xyz / dt;
-    if (dq.w < 0.0) av = -av;
-    b.angularVel = av;
+    if (!postStabilize())
+    {
+        b.linearVel = bodyLinearVelocity(b, p.dt);
+        b.angularVel = bodyAngularVelocity(b, p.dt);
+    }
 
     float lin = length(b.linearVel);
     float ang = length(b.angularVel);
-    if (lin < p.sleepLin && ang < p.sleepAng)
+    bool slow = lin < p.sleepLin && ang < p.sleepAng;
+    if (pointSpeedSleep())
+    {
+        float extent = 0.0;
+        uint n = gCounters[0].colliderCount;
+        for (uint c = firstColliderOfBody(i); c < n && gColliders[c].body == i; c++)
+            extent = max(extent, colliderExtent(gColliders[c]));
+        slow = lin + ang * extent < p.sleepLin;
+    }
+    if (slow)
     {
         b.sleepTimer += dt;
         if (b.sleepTimer >= p.sleepTime)
