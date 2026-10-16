@@ -2037,6 +2037,11 @@ static const float SLEEP_POSE_BETA = 0.2;
 //     1.6-4 cm overlap in one pass, the iterations pushed it back, and it
 //     cycled by ~3.5 cm every few ticks with zero reported velocity.
 static const uint FLAG_PUSH_LIMIT = 4194304u;
+// 8388608 Rotational armature (MuJoCo `armature`): each principal moment is at
+//     least ARMATURE_FRACTION·m·r_max² in the solve. Changes how light thin
+//     pieces turn (mortar slivers carrying bond loads); a pending decision.
+static const uint FLAG_ARMATURE = 8388608u;
+static const float ARMATURE_FRACTION = 0.1;
 static const float PUSH_MAX_SPEED = 0.1;
 bool displacementSleep() { return (PARAMS.flags & FLAG_SLEEP_DISPLACEMENT) != 0u; }
 // A body that may wake its neighbours (contacts or bonds): awake, and under the
@@ -4248,6 +4253,14 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             b.invInertia.x > 1e-12 ? (1.0 / b.invInertia.x) : 0.0,
             b.invInertia.y > 1e-12 ? (1.0 / b.invInertia.y) : 0.0,
             b.invInertia.z > 1e-12 ? (1.0 / b.invInertia.z) : 0.0);
+        if ((p.flags & FLAG_ARMATURE) != 0u)
+        {
+            float extent = 0.0;
+            uint n = gCounters[0].colliderCount;
+            for (uint c = firstColliderOfBody(bodyIdx); c < n && gColliders[c].body == bodyIdx; c++)
+                extent = max(extent, colliderExtent(gColliders[c]));
+            inertia = max(inertia, float3(1, 1, 1) * (ARMATURE_FRACTION * mass * extent * extent));
+        }
         float3 dp = b.position - inertial;
         rhs.v[0] = (mass / dt2) * dp.x;
         rhs.v[1] = (mass / dt2) * dp.y;

@@ -34,8 +34,21 @@ from the headless runner with `params={"flags":N}`, and compare runs with
   is lossless at run time and changes the fracture geometry.
 - **D. Leave it to the stress solver**, which replaces these bonds.
 
-**My recommendation:** C, or D if the stress solver lands soon. A and B both
-alter physics everywhere.
+**Tested since** (bonded suburb, awake at 30 s; it plateaus in every case)
+
+| Variant | Awake | Moving |
+|---|---|---|
+| Defaults (6222017) | 2,191 | about 800 |
+| A. Armature (flag 8388608, I ≥ 0.1·m·r_max²) | 3,275 | about 930 |
+| Post-stabilization off (6217921) | 2,178 | about 1,065 |
+
+With the armature the spinners become 1–2 kg pieces at about 50 rad/s, so this
+is not only the slivers' inertia. The bonded scenes also keep about 400 jammed
+pieces. What remains lives in the legacy bond solver, not in the sleep logic.
+
+**My recommendation:** D (the stress solver), or C first if bonds must keep
+working meanwhile. The armature (A) is implemented but did not help, so leave
+it off.
 
 ## 2. Rolling resistance as a default (flag 2097152)
 
@@ -51,8 +64,15 @@ alter physics everywhere.
 - Turn it on for the fracture scenes.
 - Make μr a per-material property, as Box2D's `rollingResistance` does.
 
-**My recommendation:** keep it off by default, and add a per-material
-coefficient when materials need it.
+**Update with the final sleep test** (7×7 grid):
+- With rolling resistance (8319169): every body except the ball is asleep by
+  35 s, and the ball slows to 7.2 m/s by 40 s, so it stops about 1.5 minutes
+  later.
+- Without it (the default): every body except the ball is asleep by 25 s, and
+  the ball keeps rolling forever.
+
+**My recommendation:** if you want truly everything asleep, turn it on and
+accept about 10 s slower settling. Otherwise keep it off.
 
 ## 3. Bond-solver energy at breakage
 
