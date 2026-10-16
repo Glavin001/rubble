@@ -3,8 +3,12 @@ name = "engine-fracture"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SHARDWRIGHT_fracture v1 GLB reader and AVBD scene builder (host-agnostic; no GPU)"
+description = "Fracture lab host logic shared by the WebGPU (wasm) and Metal hosts: SHARDWRIGHT_fracture GLB reader, scene builders and the per-tick dispatch plan (no GPU)"
 
 [dependencies]
 anyhow.workspace = true
+bytemuck.workspace = true
+engine-schema.workspace = true
+glam.workspace = true
+serde.workspace = true
 serde_json.workspace = true
