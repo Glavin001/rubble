@@ -92,7 +92,7 @@ async function run(){
  const sim=await createSimulation(device,scene);
  if(num('sleeptrace',0)>0){
   if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
-  const report=await runSleepTrace(sim,scene,{at:num('sleeptrace',0),ticks:num('ticks',30),pick:num('pick',3),bodies:q.has('bodies')?q.get('bodies').split(',').map(Number):null,hullView,hullBase});
+  const report=await runSleepTrace(sim,scene,{at:num('sleeptrace',0),ticks:num('ticks',30),pick:num('pick',3),bodies:q.has('bodies')?q.get('bodies').split(',').map(Number):null,settling:num('settling',0)===1,hullView,hullBase});
   sim.dispose();return {scene:name,trace:report,gpuError};
  }
  // stepdebug=T [to]: run to T, then single steps printing the counters; on a

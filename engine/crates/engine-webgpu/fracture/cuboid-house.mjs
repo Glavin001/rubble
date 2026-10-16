@@ -190,7 +190,7 @@ export function sceneFromPieces(pieces,{hulls=false}={}){
     selected:pieces,bonds:[],byId:new Map(),pieces:pieces.length,boxes:pieces.length,
     extent,extentX:width,extentZ:depth,height,copies:1,instanceStride:0,center:[0,height/2,0],gridCellSize:gridConfig(colliders).base,
     // Flags: 1 reuse contacts, 32 zero-gap contacts, 64 world-frame inertia.
-    params:{flags:2027745,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
+    params:{flags:6222049,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
 }
 
 // World corners of a piece (rotation about +x).
