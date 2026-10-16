@@ -5,12 +5,12 @@ Chrome WebGPU from one Slang source (`slang/kernels/vehicle_step.slang`).
 
 ```bash
 cd engine
-cargo run -p engine-webgpu --release --bin wgsl_export     # WGSL + vehicle presets/golden
+cargo run -p engine-webgpu --release --bin wgsl_export     # WGSL + vehicle presets + engine-vehicle wasm (wasm-pack)
 python3 -m http.server 8791 --directory crates/engine-webgpu
 # Chrome → http://127.0.0.1:8791/vehicle.html            (?scene=playground|destruction|traffic&preset=sedan)
 cargo test -p engine-webgpu --test vehicle                 # physical envelopes (wgpu)
 cargo test -p engine-metal --test vehicle_parity           # Metal behaviour + Metal↔wgpu parity
-node --test crates/engine-webgpu/tests/vehicle_layout.test.mjs   # JS packer == Rust packer
+node --test crates/engine-webgpu/tests/vehicle_layout.test.mjs   # JS wrapper over the wasm host
 ```
 
 ## Model
@@ -175,7 +175,11 @@ let hits = sim.raycast_batch(&rays);
 
 JS (`crates/engine-webgpu/vehicle.mjs` + `world-host.mjs`): `VehicleHost` with
 `addVehicle / setInput / detachWheel / detachPart / disableWheel / disablePart /
-setFunctionalState / addWheel / readState`, driven by `createWorld(device, …)`.
+setFunctionalState / addWheel / setWheelParams / readState`, driven by
+`createWorld(device, …)`. It wraps the Rust `VehicleHost` and packer compiled to wasm
+(`crates/engine-vehicle-wasm`): each call returns the record writes as an op stream
+that `applyOps` replays into the GPU buffers, so the browser uploads the same bits
+as the native hosts.
 
 Presets (`engine_vehicle::presets`, exported to `generated/vehicle_presets.json`):
 `jolt_default`, `sedan`, `destructible_sedan`, `sports`, `monster_truck`,
