@@ -87,6 +87,11 @@
     // Diagnostic switches retain identical scenes and solver iteration counts.
     const incrementalColors = qs.get('coloring') !== 'rebuild';
     // Ring-only measured default; sparse=32 retains the separate-color control.
+    // ENGINE_AUDIT P1-A: adaptive dispatch counts with completeness tails.
+    // colors=full / rounds=full keep the fixed-palette controls.
+    const COLOR_ROUND_LIMIT = 32, COLOR_ROUND_HEADROOM = 2, COLOR_HEADROOM = 4, SLEEP_NEVER_S = 1e5;
+    const colorsFull = qs.get('colors') === 'full';
+    const roundsFull = qs.get('rounds') === 'full';
     const sparseStart = qs.has('sparse') ? Number(qs.get('sparse')) : scene === 'ring110k' ? 10 : 32;
     if (!Number.isInteger(sparseStart) || sparseStart < 0 || sparseStart > 32)
       throw new Error('sparse must be an integer color index from 0 through 32');
@@ -100,7 +105,9 @@
     // native persistent gables gate fails only through column-9 debris striking
     // column 10 (decision 8ea), so native keeps canonical. Other scenes opt in;
     // compact/canonical retain comparison controls.
-    const persistentByDefault = ['ring110k', 'gables506k'].includes(scene) && !qs.has('contacts');
+    // All scenes default to the persistent path since the ENGINE_AUDIT P0 (one fast
+    // configuration on every host); contacts=canonical/compact keep the controls.
+    const persistentByDefault = !qs.has('contacts');
     const persistentContacts = qs.get('contacts') === 'persistent' || persistentByDefault;
     const compactContacts = persistentContacts || qs.get('contacts') === 'compact';
     const manifoldPersistence = qs.get('persistence') === 'manifold';
@@ -112,7 +119,7 @@
     // Record slots (8ed) resolve the pair key and previous run without loading
     // previous contacts: ring manifold/record 11.42/11.21/11.83/11.35 ms, gables
     // 34.41/32.68/35.05/32.74 ms, bit-identical workloads.
-    const hashInsertMode = qs.get('hashInsert') || (['ring110k', 'gables506k'].includes(scene) ? 'record' : 'contact');
+    const hashInsertMode = qs.get('hashInsert') || 'record';
     if (!['contact', 'manifold', 'record'].includes(hashInsertMode))
       throw new Error('hashInsert must be contact, manifold or record');
     // record: per-manifold insert of 16-byte slots holding the pair key and its
@@ -122,7 +129,7 @@
     // Narrowphase finishes reused copies for moving pairs; persistence skips
     // points tagged final (8eh). Gables pass/copy 30.95/30.19/30.98/30.21 ms,
     // ring 11.37/11.27/11.38/11.27 ms. reuse=pass keeps the separate-pass control.
-    const reuseMode = qs.get('reuse') || (['ring110k', 'gables506k'].includes(scene) && persistentContacts
+    const reuseMode = qs.get('reuse') || (persistentContacts
       && !manifoldPersistence && !fusedPersistence ? 'copy' : 'pass');
     if (!['pass', 'copy'].includes(reuseMode)) throw new Error('reuse must be pass or copy');
     if (reuseMode === 'copy' && (!persistentContacts || manifoldPersistence || fusedPersistence))
@@ -176,7 +183,7 @@
     // 11.02/10.82 ms (grid 1.11->0.92) with identical workload snapshots; gables
     // was neutral (29.34/29.15/29.37 ms) until 8eo moved split links into the
     // AABB: gables scaled/split/split/scaled 25.94/25.89/25.93/26.21 ms (8ep).
-    const gridMode = qs.get('grid') || (['ring110k', 'gables506k'].includes(scene) ? 'split' : 'scaled');
+    const gridMode = qs.get('grid') || 'split';
     if (!['fixed', 'scaled', 'split'].includes(gridMode)) throw new Error('grid must be fixed, scaled or split');
     const gridSplit = gridMode === 'split';
     const detailedProfile = qs.get('profile') === 'detail';
@@ -396,7 +403,9 @@
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
       'csr_scatter_contacts', 'csr_sort', 'csr_sort_append', 'init_colors', 'color_bodies',
       'pack_color_lists', 'write_color_args', 'write_work_args', 'predict_bodies', 'solve_primal_color',
-      ...(sparseStart < 32 ? [compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse'] : []),
+      // Sparse colour tail and JP-round tail: the adaptive dispatch counts
+      // (ENGINE_AUDIT P1-A) rely on them to finish every step completely.
+      compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 'color_bodies_tail',
       'count_color_tiles', 'prefix_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
@@ -910,7 +919,7 @@ struct VsOut {
     statusEl.textContent = 'pipelines ready · building renderer…';
     await new Promise((r) => setTimeout(r, 0));
 
-    const staging = device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const staging = device.createBuffer({ size: 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     // Full body buffer for settle KE / height samples (settled scenes only).
     const bodySnap = (cfg.settled || qs.has("check"))
       ? device.createBuffer({ size: sizes[0], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })
@@ -942,14 +951,16 @@ struct VsOut {
     const colorCountsBytes = colorCountWords * 4;
     // One queue upload + GPU copies into the four step buffers (cheaper than 4 writeBuffers).
     const hostUpload = device.createBuffer({
-      size: 256 + 256 + 64 + colorCountsBytes,
+      size: 256 + 256 + 80 + colorCountsBytes,
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    const hostUploadCpu = new ArrayBuffer(256 + 256 + 64 + colorCountsBytes);
+    const hostUploadCpu = new ArrayBuffer(256 + 256 + 80 + colorCountsBytes);
     const hostScratchView = new Uint32Array(hostUploadCpu, 0, 64);
     const hostParamsView = new Uint8Array(hostUploadCpu, 256, 208);
-    const hostCountersView = new Uint32Array(hostUploadCpu, 512, 16);
-    const hostColorsView = new Uint32Array(hostUploadCpu, 576, colorCountWords);
+    // Counters reset each step: all 80 bytes, so colorRounds (word 17) restarts
+    // and colorRoundLimit (word 18) tells color_bodies_tail the round budget.
+    const hostCountersView = new Uint32Array(hostUploadCpu, 512, 20);
+    const hostColorsView = new Uint32Array(hostUploadCpu, 592, colorCountWords);
 
     // Warm hash size: words (one per slot), or 16-byte record slots inside the
     // pre-CSR region. Records hold one entry per previous manifold; size them
@@ -1013,6 +1024,7 @@ struct VsOut {
       hostCountersView.fill(0);
       hostCountersView[0] = bodyCount;
       hostCountersView[1] = colliderCount;
+      hostCountersView[18] = COLOR_ROUND_LIMIT;
       hostColorsView.fill(0);
       device.queue.writeBuffer(hostUpload, 0, hostUploadCpu);
       // Prefer GPU copies from one upload — four tiny writeBuffers were ~0.3 ms of ring wall.
@@ -1023,8 +1035,8 @@ struct VsOut {
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
       // manifoldCount (byte 48) sizes the per-manifold warm-hash insert.
       if (steps > 0 && (manifoldHashInsert || carryRest)) enc.copyBufferToBuffer(bufs[7], 48, bufs[6], 80 + 13 * 4, 4);
-      enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 64);
-      enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
+      enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 80);
+      enc.copyBufferToBuffer(hostUpload, 592, bufs[17], 0, colorCountsBytes);
     }
 
     function groups(threads) {
@@ -1128,11 +1140,16 @@ struct VsOut {
       dispWork(pass, 'init_colors', 67);
       disp(pass, 'write_work_args', 64);
       if (graphProfile) nextPhase();
-      // JP dependency depth exceeds 16 on the active 110k ring.
-      const colorRounds = 32;
       // Local repair runs first; slot 69 is then zero and the rounds launch nothing.
       if (localRepair) disp(pass, 'color_bodies_local', 64);
-      for (let round = 0; round < colorRounds; round++) dispWork(pass, 'color_bodies', incrementalColors ? 69 : 67, round % 16);
+      // Rounds dispatched: last readback's need plus headroom (JP depth exceeds 16
+      // on the active 110k ring, so the budget stays 32); color_bodies_tail runs
+      // any further rounds in one workgroup, so colouring always finishes (8cl).
+      // Pass value = round index, so blocked bodies record the true depth.
+      const colorRounds = roundsFull ? COLOR_ROUND_LIMIT
+        : Math.min(COLOR_ROUND_LIMIT, Math.max(1, (last.colorRounds || 0) + 1 + COLOR_ROUND_HEADROOM));
+      for (let round = 0; round < colorRounds; round++) dispWork(pass, 'color_bodies', incrementalColors ? 69 : 67, round);
+      if (colorRounds < COLOR_ROUND_LIMIT) disp(pass, 'color_bodies_tail', 64, colorRounds);
       if (graphProfile) nextPhase();
       if (stablePacking) {
         disp(pass, 'count_color_tiles', nBodies);
@@ -1151,28 +1168,35 @@ struct VsOut {
         if (!persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
         dispWork(pass, 'pack_solver_contacts', 66);
       }
+      // Colours dispatched one by one: last readback's colour count plus headroom
+      // (an empty indirect dispatch still costs a barrier); later colours run in
+      // the sparse tail, which loops to this step's real GPU colour count.
+      const tailOk = cap.maxBodies <= 65536 * 8;
+      const colorEstimate = colorsFull || !tailOk || !(last.color > 0) ? colors : Math.max(1, last.color + COLOR_HEADROOM);
+      const primalStart = Math.min(colors, sparseStart, colorEstimate);
       for (let iter = 0; iter < params.iterations; iter++) {
         if (beginPass && iter > 0) nextPhase();
         const primal = pipes[compactContacts ? "solve_primal_color_compact" : "solve_primal_color"];
-        for (let color = 0; color < Math.min(colors, sparseStart); color++) {
+        for (let color = 0; color < primalStart; color++) {
           if (beginPass && colorProfile && color > 0) nextPhase();
           pass.setPipeline(primal.pipeline);
           pass.setBindGroup(0, primal.bind, [color * PASS_ALIGN]);
           pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
         }
-        if (beginPass && colorProfile && sparseStart < colors && sparseStart > 0) nextPhase();
-        if (sparseStart < colors) disp(pass, compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, sparseStart);
+        if (beginPass && colorProfile && primalStart < colors && primalStart > 0) nextPhase();
+        if (primalStart < colors) disp(pass, compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, primalStart);
         if (beginPass) nextPhase();
         dispWork(pass, compactContacts ? 'solve_dual_compact' : 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
       }
       disp(pass, 'extract_velocity_sleep', nBodies);
       nextPhase();
       disp(pass, 'write_sleep_args', 64);
-      for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
+      // A sleep time beyond any run's length produces no candidates to revoke.
+      if (!(params.sleepTime >= SLEEP_NEVER_S)) for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
       dispWork(pass, 'sleep_island_commit', 67);
       pass.end();
       if (readback) {
-        enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
+        enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 80);
       }
     }
 
@@ -1186,12 +1210,12 @@ struct VsOut {
 
     async function readCounters() {
       const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
+      enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 80);
       device.queue.submit([enc.finish()]);
       await staging.mapAsync(GPUMapMode.READ);
       const c = new Uint32Array(staging.getMappedRange().slice(0));
       staging.unmap();
-      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], colorRounds: c[17] };
       if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
     }
 
@@ -1587,7 +1611,7 @@ struct VsOut {
 
     const LIVE_IN_FLIGHT = 2;
     const liveFree = Array.from({ length: LIVE_IN_FLIGHT }, () =>
-      device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+      device.createBuffer({ size: 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
     const livePending = new Set();
     let liveError = null;
     let lastCompletion = 0;
@@ -1599,7 +1623,7 @@ struct VsOut {
     function readLiveCounters(buf) {
       const c = new Uint32Array(buf.getMappedRange().slice(0));
       buf.unmap();
-      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], colorRounds: c[17] };
       if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
     }
 
@@ -1650,7 +1674,7 @@ struct VsOut {
         rp.setPipeline(boxPipe); rp.setBindGroup(0, boxBind); rp.setVertexBuffer(0, boxVbo); rp.draw(36, bodies.length - 1);
         rp.end();
         const readback = liveFree.pop();
-        enc.copyBufferToBuffer(bufs[7], 0, readback, 0, 64);
+        enc.copyBufferToBuffer(bufs[7], 0, readback, 0, 80);
         device.queue.submit([enc.finish()]);
         parity ^= 1;
         steps++;

@@ -1,5 +1,7 @@
 //! Shared phase graph. Backends only encode submission; physics equations live in Slang.
 
+pub mod rigid_plan;
+
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

@@ -435,9 +435,7 @@ impl RubbleEngine {
             ..AvbdParams::default()
         };
         sim.set_params(params);
-        // The coupling's scenes are mostly small: solve only the colours a step uses
-        // (the same work as the whole palette, fewer empty dispatches).
-        sim.trim_color_dispatches = std::env::var("STRESS_RUBBLE_TRIM_COLORS").map_or(true, |v| v != "0");
+        // Small coupling scenes dispatch only the colours in use by default (engine 8ev).
         Ok(RubbleEngine {
             sim,
             arena: HullArena::new(),
