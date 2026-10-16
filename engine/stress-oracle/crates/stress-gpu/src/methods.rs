@@ -189,18 +189,19 @@ mod tests {
         }
     }
 
-    /// The switches the GPU honours on their own: none of the established methods, and of
-    /// the proven ones only the layer contact (and the switches that act with it).
+    /// The switches the GPU does not honour: none of the established methods; of the proven
+    /// ones the layer contact (and the switches that act with it), and the co-rotational
+    /// bonds and Rayleigh damping (small-strain bonds and bond dashpots on the GPU).
     #[test]
     fn unhonoured_switches() {
         let names = |m: &Methods, mode| unhonoured(m, mode).iter().map(|c| c.name).collect::<Vec<_>>();
         assert!(names(&Methods::established(), SolveMode::Explicit).is_empty());
-        assert_eq!(names(&Methods::proven(), SolveMode::Adaptive), ["layer_contact", "contact_crushing", "lattice_contact_step"]);
-        let rigid = Methods { layer_contact: false, ..Methods::proven() };
+        assert_eq!(names(&Methods::proven(), SolveMode::Adaptive), ["layer_contact", "contact_crushing", "lattice_contact_step", "corotational_bonds", "rayleigh_damping"]);
+        let rigid = Methods { layer_contact: false, corotational_bonds: false, rayleigh_damping: false, ..Methods::proven() };
         for mode in [SolveMode::Explicit, SolveMode::Adaptive, SolveMode::QuasiStatic] {
             assert!(names(&rigid, mode).is_empty(), "{mode:?}: {:?}", names(&rigid, mode));
         }
-        assert_eq!(names(&rigid, SolveMode::Implicit), ["implicit_contact_steps"]);
+        assert_eq!(names(&rigid, SolveMode::Implicit), ["implicit_contact_steps", "implicit_contact_windows", "implicit_failure_windows"]);
         // A switch inert without its prerequisite is not honoured with it.
         let frame = Methods { frame_contact_step: true, ..Methods::established() };
         assert!(names(&frame, SolveMode::Explicit).is_empty());

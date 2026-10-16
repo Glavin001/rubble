@@ -8,9 +8,17 @@
 #   scripts/compile_shaders.sh --check   fail if the checked-in output is stale
 set -euo pipefail
 cd "$(dirname "$0")/.."
-IMAGE=stress-gpu-slang:2026.19
-if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
-  docker build -q -t "$IMAGE" tools/slang > /dev/null
+VERSION=2026.19
+IMAGE=stress-gpu-slang:$VERSION
+# A local slangc of the pinned version gives byte-identical output (checked against the
+# Docker build); otherwise the pinned compiler runs in Docker.
+if command -v slangc > /dev/null 2>&1 && [ "$(slangc -v 2>&1)" = "$VERSION" ]; then
+  LOCAL=1
+else
+  LOCAL=0
+  if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
+    docker build -q -t "$IMAGE" tools/slang > /dev/null
+  fi
 fi
 out=shaders/generated
 check=0
@@ -27,8 +35,12 @@ for src in shaders/*.slang; do
     continue
   fi
   for target in metal wgsl; do
-    docker run --rm -v "$PWD:/work" -v "$out:/out" "$IMAGE" \
-      "/work/$src" -I /work/shaders -target "$target" -line-directive-mode none -o "/out/$name.$target"
+    if [ "$LOCAL" = 1 ]; then
+      slangc "$src" -I shaders -target "$target" -line-directive-mode none -o "$out/$name.$target"
+    else
+      docker run --rm -v "$PWD:/work" -v "$out:/out" "$IMAGE" \
+        "/work/$src" -I /work/shaders -target "$target" -line-directive-mode none -o "/out/$name.$target"
+    fi
   done
 done
 if [ "$check" = 1 ]; then

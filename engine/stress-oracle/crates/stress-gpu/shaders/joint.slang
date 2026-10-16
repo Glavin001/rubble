@@ -355,20 +355,11 @@ struct Contact
     float3 plastic; // x, y sliding; z twist
 };
 
-[noinline]
-Contact contact_part(JointMaterial mat, JointBond b, float crush, float3 plastic, float3 d_lin, float3 d_ang)
+// The cracked share's normal contact over the patch at crush `crush`: (normal force,
+// moment about t1, moment about t2, energy), the no-tension patch or the spring grid.
+float4 contact_normal(JointMaterial mat, JointBond b, float crush, float3 d_lin, float3 d_ang)
 {
-    Contact c;
-    c.q_lin = float3(0.0);
-    c.q_ang = float3(0.0);
-    c.energy = 0.0;
-    c.diss = 0.0;
-    c.plastic = plastic;
-    if ((mat.kind_flags.y & FLAG_CRACK_CONTACT) == 0)
-        return c;
     float kn = b.stiff0.x;
-    float ks = b.stiff0.y;
-    float kt = b.stiff1.x;
     float w0 = b.geom0.y;
     float w1 = b.geom0.z;
     float nc_sum = 0.0, m1 = 0.0, m2 = 0.0, energy = 0.0;
@@ -425,6 +416,24 @@ Contact contact_part(JointMaterial mat, JointBond b, float crush, float3 plastic
             }
         }
     }
+    return float4(nc_sum, m1, m2, energy);
+}
+
+[noinline]
+Contact contact_part(JointMaterial mat, JointBond b, float crush, float3 plastic, float3 d_lin, float3 d_ang)
+{
+    Contact c;
+    c.q_lin = float3(0.0);
+    c.q_ang = float3(0.0);
+    c.energy = 0.0;
+    c.diss = 0.0;
+    c.plastic = plastic;
+    if ((mat.kind_flags.y & FLAG_CRACK_CONTACT) == 0)
+        return c;
+    float ks = b.stiff0.y;
+    float kt = b.stiff1.x;
+    float4 normal = contact_normal(mat, b, crush, d_lin, d_ang);
+    float nc_sum = normal.x, m1 = normal.y, m2 = normal.z, energy = normal.w;
     float nc = -nc_sum;
     float3 p = plastic;
     c.q_lin = float3(0.0, 0.0, nc_sum);
@@ -578,6 +587,22 @@ public JointResponse joint_evaluate(JointMaterial mat, JointBond b, JointState s
     float psi_c = d_lin.z < 0.0 ? 0.5 * kn * sq(d_lin.z) : 0.0;
     float3 plastic = float3(st.plastic_x, st.plastic_y, st.plastic_t);
 
+    // The joint's stored energy at this displacement with its internal variables as they
+    // were (damage, crush, slip, rebar plasticity): what the update below can release.
+    // The energy dissipated by the update is exactly this less the energy stored after
+    // it (joint.rs `frozen`, DECISIONS.md 33).
+    float frozen;
+    {
+        float patch = 0.0;
+        if ((flags & FLAG_CRACK_CONTACT) != 0 && state.damage != 0.0)
+            patch = contact_normal(mat, b, state.crush, d_lin, d_ang).w
+                    + 0.5 * (ks * (sq(d_lin.x - state.plastic_x) + sq(d_lin.y - state.plastic_y)) + kt * sq(d_ang.z - state.plastic_t));
+        float rebar = 0.0;
+        if (has_rebar && state.rebar_broken == 0.0)
+            rebar = 0.5 * (b.rebar0.x * sq(d_lin.z - state.rebar_plastic) + b.rebar0.y * (sq(d_lin.x - state.rebar_slip0) + sq(d_lin.y - state.rebar_slip1)));
+        frozen = (1.0 - state.damage) * (psi_ts + (1.0 - state.crush) * psi_c) + state.damage * patch + rebar;
+    }
+
     // Damage evolution.
     if (fracture)
     {
@@ -597,7 +622,6 @@ public JointResponse joint_evaluate(JointMaterial mat, JointBond b, JointState s
                 float excess = max(probe.energy - (1.0 - st.crush) * psi_c, 0.0);
                 float law_released = max(inc.y - excess * (inc.x - st.damage), 0.0);
                 dissipated += law_released;
-                overshoot += max((psi_ts - excess) * (inc.x - st.damage) - law_released, 0.0);
                 st.damage = inc.x;
                 st.mode = mode_ts;
             }
@@ -625,7 +649,6 @@ public JointResponse joint_evaluate(JointMaterial mat, JointBond b, JointState s
             if (inc.x > st.crush)
             {
                 dissipated += inc.y;
-                overshoot += max(psi_c * (inc.x - st.crush) - inc.y, 0.0);
                 st.crush = inc.x;
                 st.mode = mode_c;
                 if (st.crush >= 1.0 && st.damage < 1.0)
@@ -711,6 +734,17 @@ public JointResponse joint_evaluate(JointMaterial mat, JointBond b, JointState s
         st.life = max(st.life - life_rate(mat, ratio) * dt, 0.0);
     }
 
+    // The exact energy balance: whatever the update released is dissipated. The laws'
+    // own accounts (the softening law's fracture energy, friction, plasticity) are its
+    // share up to that total; what they miss is `overshoot` (a step crossing the
+    // softening branch). Nothing changed: nothing is released, exactly.
+    bool changed = st.damage != state.damage || st.crush != state.crush || st.plastic_x != state.plastic_x
+                   || st.plastic_y != state.plastic_y || st.plastic_t != state.plastic_t || st.rebar_plastic != state.rebar_plastic
+                   || st.rebar_slip0 != state.rebar_slip0 || st.rebar_slip1 != state.rebar_slip1 || st.rebar_broken != state.rebar_broken;
+    float released = changed ? frozen - stored : 0.0;
+    float law = max(min(dissipated, released), 0.0);
+    overshoot = released - law;
+    dissipated = law;
     st.dissipated += dissipated;
     JointResponse resp;
     resp.force_lin = force_lin;

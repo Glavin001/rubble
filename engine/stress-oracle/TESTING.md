@@ -93,3 +93,17 @@ This uses the quality profiles in [ORACLE_QUALITY.md](ORACLE_QUALITY.md).
 
 Chaotic scenes (fracture, contact) are compared as distributions over ensembles, as
 `gate.rs` and `fidelity.py` already do, never trajectory by trajectory.
+
+## Running the GPU suite (rubble)
+
+The oracle's default method set (`proven`) includes switches the GPU does not honour
+(layer contact, contact crushing, lattice contact step, co-rotational bonds, Rayleigh
+damping); `world::unsupported` rejects such scenes, so tests comparing whole catalogues
+would run nothing. Run the GPU suite with the set it implements:
+
+```sh
+STRESS_GPU_FIXED_HORIZON=1 STRESS_METHODS=established cargo test --release -p stress-gpu
+```
+
+`crates/stress-gpu/scripts/compile_shaders.sh` uses a local `slangc` when its version is
+the pinned one (byte-identical to the Docker build), else the pinned Docker image.
