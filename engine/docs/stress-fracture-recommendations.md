@@ -90,6 +90,7 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
 7. **Swept collision (CCD) in rubble (engine work, changes behaviour).**
    - A fast body makes the coupling sub-step the whole rigid scene: 11 rubble steps per frame on the 40 m/s free-wall ram, the one regime where rubble is behind PhysX GPU (88 against 67 ms median). It also costs 2–4 % on b5 at 30–40 m/s before impact.
    - rubble has no usable CCD to switch on: `ccd_classify` flags fast bodies, but `ccd_sweep` is a plane-only stub ("stretch goal") with no box or hull time of impact.
+   - The sub-steps are not avoidable without it. A measured shortcut took one engine step when the fast body's swept bounds met nothing and every other body was at rest. It never applied: the ram is in an impact island from its first frame, and all 168 of its sub-steps come after the punch-through, among moving debris, where they stop it tunnelling.
    - Closing the gap means building swept collision for boxes and hulls (conservative advancement or speculative contacts) in `world_step.slang`, then measuring it against the oracle. That is engine-owner work.
 
 7a. **Merge rubble's grid broadphase fix (8352765, on the Blast branch).**
