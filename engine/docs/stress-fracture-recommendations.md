@@ -87,9 +87,10 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
    - The coupling keeps rubble's free bodies awake so their support reactions reach the stress solve.
    - Freezing a sleeping body's loads into the solve would let rubble sleep debris and cars.
    - Quiet anchored houses already cost nothing.
-7. **Swept collision (CCD) in rubble's Rust host.**
-   - rubble's `ccd_classify`/`ccd_sweep` kernels are never dispatched by the Rust host, so a fast body substeps the whole rigid scene. That costs 2.4–3 ms per rubble step, 11 steps per frame on the 40 m/s free-wall ram: 100 ms there against PhysX GPU's 67 ms, the one regime where rubble is slower.
-   - Wiring the kernels changes how fast contacts resolve, as PhysX's CCD does.
+7. **Swept collision (CCD) in rubble (engine work, changes behaviour).**
+   - A fast body makes the coupling sub-step the whole rigid scene: 11 rubble steps per frame on the 40 m/s free-wall ram, the one regime where rubble is behind PhysX GPU (88 against 67 ms median). It also costs 2–4 % on b5 at 30–40 m/s before impact.
+   - rubble has no usable CCD to switch on: `ccd_classify` flags fast bodies, but `ccd_sweep` is a plane-only stub ("stretch goal") with no box or hull time of impact.
+   - Closing the gap means building swept collision for boxes and hulls (conservative advancement or speculative contacts) in `world_step.slang`, then measuring it against the oracle. That is engine-owner work.
 
 7a. **Merge rubble's grid broadphase fix (8352765, on the Blast branch).**
     - The grid broadphase drops static pairs below the querying collider's index once there are more than 512 colliders, so debris can fall through anchored structures.
