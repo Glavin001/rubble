@@ -33,6 +33,14 @@ const constraintIdWords=nextPow2(Math.max(32768,2*(cap.maxContacts+cap.maxJoints
 const csrBase=Math.max(constraintIdWords,131072);
 // Broadphase grid heads: twice the colliders, within the pre-CSR id region.
 const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072)),csrBase);
+// Warm (previous-contact) hash slots; host field and clear dispatch must agree.
+const warmHashWords=Math.min(nextPow2(Math.max(cap.maxContacts*4,1024)),csrBase,MAX_WARM_HASH);
+// Tick-tagged warm hash (world_step warmTagged): slot words carry a per-step
+// tag above log2(maxContacts) index bits, so the table is cleared only when
+// the tags wrap (every warmTagPeriod steps) instead of every step.
+const warmValueBits=Math.log2(cap.maxContacts);
+const warmTagged=budget.taggedWarmHash!==false&&warmValueBits<=29;
+const warmTagPeriod=2**(32-warmValueBits)-2;
 
     function bufferSizes() {
       const b = (n, stride) => n * stride;
@@ -51,9 +59,9 @@ const gridHashWords=Math.min(nextPow2(Math.max(2*scene.colliders.length,131072))
       s[11] = b(cap.maxBodies, 4);
       s[12] = b(cap.maxBodies, 4);
       s[13] = b(cap.maxBodies + 1, 4);
-      // CSR index, then the persistent resting table (world_step restBase):
+      // CSR index, the tagged warm hash, then the persistent resting table (world_step restBase):
       // 32 header words, resting + awake heads, one resting link per collider.
-      s[14] = (csrBase + cap.maxBodies + 1 + 32 + 2 * gridHashWords + cap.maxColliders) * 4;
+      s[14] = (csrBase + cap.maxBodies + 1 + warmHashWords + 32 + 2 * gridHashWords + cap.maxColliders) * 4;
       // Colour lists + history rows; broadphase links reuse it per collider.
       s[15] = b(Math.max(cap.maxColliders, cap.maxBodies * (cap.maxColors + 2)), 4);
       s[16] = b(cap.maxColors * Math.max(1, Math.ceil(cap.maxBodies / 64)), 4);
@@ -303,7 +311,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     const hostCountersView = new Uint32Array(hostUploadCpu, 512, COUNTER_BYTES / 4);
     const hostColorsView = new Uint32Array(hostUploadCpu, 608, colorCountWords);
     // Previous contacts bound the warm hash; host field and clear dispatch must agree.
-    const hashN = Math.min(nextPow2(Math.max(cap.maxContacts * 4, 1024)), csrBase, MAX_WARM_HASH);
+    const hashN = warmHashWords;
 
     function scratchWords() {
       const s = scratchU32;
@@ -337,7 +345,11 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       // Persistent resting table on moved-only steps with awake queries: bit 0
       // on, bit 1 rebuild now (it is rebuilt on the GPU after sleep events).
       const rest = s[19] !== 0 && awakeQueries && persistentRest;
-      s[25] = rest ? (restValid ? 1 : 3) : 0;
+      s[25] = (rest ? (restValid ? 1 : 3) : 0) | (warmTagged ? 4 : 0);
+      // Tagged warm hash: clear once per tag cycle (HOST_S(17) is the step).
+      const cycle = Math.floor(s[17] / warmTagPeriod);
+      warmClear = !warmTagged || cycle !== warmCycle;
+      warmCycle = cycle;
       s[24] = csrBase;
       return s;
     }
@@ -349,6 +361,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     // Resting colliders in a persistent table, so idle steps insert only movers.
     const persistentRest = budget.persistentRest !== false;
     let restStep = false, restValid = false;
+    let warmClear = true, warmCycle = -1;
     const boundsSortable = colliders.every((c, i) => i === 0 || c.body >= colliders[i - 1].body) &&
       bodies.every((b) => !(b.flags & 2));
     // With most bodies awake the full pass is faster (no per-body search, even
@@ -377,7 +390,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       // Last step's awake count (its awake list is still in gAwakeList) -> HOST_S(6).
       if (s[19]) enc.copyBufferToBuffer(bufs[7], 20, bufs[6], 80 + 6 * 4, 4);
       movedOnlyStep = s[19] !== 0;
-      restStep = s[25] !== 0;
+      restStep = (s[25] & 1) !== 0;
       // Last step's sleep events -> HOST_S(5): any sleeper may be missing from R.
       if (restStep) enc.copyBufferToBuffer(bufs[7], 36, bufs[6], 80 + 5 * 4, 4);
       restValid = restStep;
@@ -447,8 +460,9 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       disp(pass, 'write_work_args', 64);
       pass = phase('broadphase');
       if (reuse) {
-        disp(pass, 'update_refs', nBodies);
-        disp(pass, 'contact_hash_clear', hashN);
+        if (movedOnlyStep) dispWork(pass, 'update_refs', 78); // last step's awake list
+        else disp(pass, 'update_refs', nBodies);
+        if (warmClear) disp(pass, 'contact_hash_clear', hashN);
         dispWork(pass, 'contact_hash_insert', 68);
       }
       dispWork(pass, 'narrowphase', 64);
@@ -494,7 +508,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       } else pass = encodeCollision(pass, phase, reuse);
       disp(pass, 'write_work_args', 64);
       if (!reuse && !reuseManifolds) {
-        disp(pass, 'contact_hash_clear', hashN);
+        if (warmClear) disp(pass, 'contact_hash_clear', hashN);
         dispWork(pass, 'contact_hash_insert', 68);
       }
       dispWork(pass, 'persist_contacts', 65);
@@ -747,7 +761,8 @@ return {
    const enc=device.createCommandEncoder(),savedFlags=params.flags,savedAq=awakeQueries;params.flags=flags;awakeQueries=aq;writeHost(enc);params.flags=savedFlags;let pass=enc.beginComputePass();
    pass=encodeCollision(pass,()=>pass,false);pass.end();device.queue.submit([enc.finish()]);manifoldsValid=false;awakeQueries=savedAq;
    // The pass reset the GPU awake count: the next step rebuilds every bound.
-   boundsStale=true;
+   // Its host words may have opened a warm-hash tag cycle without the clear.
+   boundsStale=true;warmCycle=-1;
    // Report this pass's counters but keep the stepping state: a collision-only
    // pass counts no awake bodies, and step() skips work when last.awake is 0.
    const stepState=last;await readCounters();const counters=last;last=stepState;
@@ -891,7 +906,7 @@ return {
    device.queue.writeBuffer(bufs[0],0,bodyBytes);device.queue.writeBuffer(bufs[2],0,colBytes);
    device.queue.writeBuffer(bufs[5],0,jointBytes);
    device.queue.writeBuffer(renderBodies,0,bodyBytes,0,bodyCount*112);slices=null;
-   steps=0;countedSteps=0;submittedSteps=0;lastRead=null;inFlight=[];overlapError=null;parity=0;shots=0;initialized=false;last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0};
+   steps=0;countedSteps=0;submittedSteps=0;warmCycle=-1;lastRead=null;inFlight=[];overlapError=null;parity=0;shots=0;initialized=false;last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0};
  },
  dispose(){for(const b of [...bufs,staging,snapshot,hostUpload,renderBodies])b.destroy();},
 };

@@ -731,7 +731,7 @@ static const uint REST_HEADER = 32u;
 // 11..20 oversized statics.
 
 bool restTables() { return (HOST_S(25) & 1u) != 0u; }
-uint restBase() { return HOST_S(24) + HOST_S(1) + 1u; }
+uint restBase() { return HOST_S(24) + HOST_S(1) + 1u + HOST_S(9); } // past the tagged warm hash
 uint restHeads() { return restBase() + REST_HEADER; }
 uint awakeHeads() { return restHeads() + gridHashSize(); }
 uint restLinks() { return awakeHeads() + gridHashSize(); }
@@ -1737,6 +1737,29 @@ void emitContact(
 
 // Contact warm-start hash helpers (pair → first prev-contact index).
 static const uint CONTACT_HASH_EMPTY = 0xFFFFFFFFu;
+
+// Tick-tagged warm hash (HOST_S(25) bit 2, JS host): the per-contact hash gets
+// its own region past the CSR index (the default one, gConstraintIds[0..),
+// is overwritten by the grid and the CSR every step), and each slot word is
+// (tag << vb) | j with vb = log2(max contacts) and a tag per step. A word
+// without this step's tag reads as EMPTY, so the table behaves exactly as one
+// cleared this step; the host clears it only when the tags wrap around.
+bool warmTagged() { return (HOST_S(25) & 4u) != 0u; }
+uint warmBase() { return warmTagged() ? HOST_S(24) + HOST_S(1) + 1u : 0u; }
+uint warmValueBits() { return firstbithigh(HOST_S(3)); }
+uint warmTag()
+{
+    uint period = (1u << (32u - warmValueBits())) - 2u;
+    return 1u + HOST_S(17) % period;
+}
+// Slot word -> previous-contact index, or EMPTY.
+uint warmSlotValue(uint w)
+{
+    if (!warmTagged()) return w;
+    uint vb = warmValueBits();
+    return (w >> vb) == warmTag() ? (w & ((1u << vb) - 1u)) : CONTACT_HASH_EMPTY;
+}
+uint warmSlotWord(uint j) { return warmTagged() ? (warmTag() << warmValueBits()) | j : j; }
 static const float NEAREST_FRACTION = 0.05;
 
 uint pairWarmKey(uint colA, uint colB)
@@ -1835,7 +1858,14 @@ float3 quatSubVec(float4 a, float4 b)
 void update_refs(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
-    if (i >= gCounters[0].bodyCount) return;
+    // Moved-only steps (HOST_S(19), JS host): only bodies on last step's awake
+    // list changed pose, so every other body would find itself unmoved below.
+    if (HOST_S(19) != 0u)
+    {
+        if (i >= HOST_S(6)) return;
+        i = gAwakeList[i];
+    }
+    else if (i >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[i];
     if (!bodyIsDynamic(b)) return;
     RefPoseGpu last = gRefPoses[i];
@@ -1955,10 +1985,11 @@ bool tryReuseContactsHint(CandidatePair pair, BodyState ba, BodyState bb, float 
     {
     uint key = pairWarmKey(pair.colliderA, pair.colliderB);
     uint h = key & (hashN - 1u);
+    uint table = warmBase();
     for (uint probe = 0; probe < 64u; probe++)
     {
         uint slot = (h + probe) & (hashN - 1u);
-        uint j = ALOAD(gConstraintIds[slot]);
+        uint j = warmSlotValue(ALOAD(gConstraintIds[table + slot]));
         if (j == CONTACT_HASH_EMPTY) break;
         Contact prev = READ_CONTACT(prevOff + j);
         if (prev.alive != 0 &&
@@ -2460,7 +2491,7 @@ void contact_hash_clear(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = HOST_S(9) * (warmRecords() ? 4u : 1u); // hash table word count
     if (i >= n) return;
-    ASTORE(gConstraintIds[i], CONTACT_HASH_EMPTY);
+    ASTORE(gConstraintIds[warmBase() + i], CONTACT_HASH_EMPTY);
 }
 
 // Publish history index j (a live block head) for pair (colA, colB).
@@ -2469,34 +2500,42 @@ void insertWarmHead(uint j, uint colA, uint colB, uint prevOff)
     uint key = pairWarmKey(colA, colB);
     uint n = HOST_S(9);
     uint h = key & (n - 1u); // n is power of two
+    uint table = warmBase();
+    // Slot words (tagged: tag | index); untagged, words are the indices.
+    uint mine = warmSlotWord(j);
     for (uint probe = 0; probe < 64u; probe++)
     {
-        uint slot = (h + probe) & (n - 1u);
-        uint was;
+        uint slot = table + ((h + probe) & (n - 1u));
+        // An empty slot holds EMPTY or (tagged) a word from an earlier step;
+        // other inserts only ever write this step's words.
+        uint expect = warmTagged() ? ALOAD(gConstraintIds[slot]) : CONTACT_HASH_EMPTY;
+        uint was = expect;
         // Spin on the same slot when WGSL weak CAS spuriously fails. Advancing
         // the probe would leave an EMPTY hole and break open-address lookups.
         for (uint spin = 0u; spin < 64u; spin++)
         {
-            ACAS4(gConstraintIds[slot], CONTACT_HASH_EMPTY, j, was);
-            if (was != CONTACT_HASH_EMPTY) break;
-            if (ALOAD(gConstraintIds[slot]) == j) return;
+            if (warmSlotValue(expect) != CONTACT_HASH_EMPTY) { was = expect; break; }
+            ACAS4(gConstraintIds[slot], expect, mine, was);
+            if (was != expect) { expect = was; continue; }
+            if (ALOAD(gConstraintIds[slot]) == mine) return;
         }
-        if (was == CONTACT_HASH_EMPTY) return;
-        Contact occupant = READ_CONTACT(prevOff + was);
+        uint occupied = warmSlotValue(was);
+        if (occupied == CONTACT_HASH_EMPTY) return;
+        Contact occupant = READ_CONTACT(prevOff + occupied);
         if (occupant.alive != 0 &&
             occupant.colliderA == colA &&
             occupant.colliderB == colB)
         {
             // Same pair: keep the minimum index (start of the contiguous block).
             uint cur = was;
-            while (j < cur)
+            while (j < warmSlotValue(cur))
             {
                 uint got;
                 for (uint spin = 0u; spin < 64u; spin++)
                 {
-                    ACAS4(gConstraintIds[slot], cur, j, got);
+                    ACAS4(gConstraintIds[slot], cur, mine, got);
                     if (got != cur) break;
-                    if (ALOAD(gConstraintIds[slot]) == j) return;
+                    if (ALOAD(gConstraintIds[slot]) == mine) return;
                 }
                 if (got == cur) return;
                 cur = got;
@@ -2655,7 +2694,7 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
         for (uint probe = 0; probe < 64u; probe++)
         {
             uint slot = (h + probe) & (hashN - 1u);
-            uint j = ALOAD(gConstraintIds[slot]);
+            uint j = warmSlotValue(ALOAD(gConstraintIds[warmBase() + slot]));
             if (j == CONTACT_HASH_EMPTY) break;
             Contact prev = READ_CONTACT(prevOff + j);
             if (prev.alive != 0 &&
