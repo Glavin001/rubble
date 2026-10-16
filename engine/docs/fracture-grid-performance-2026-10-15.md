@@ -222,3 +222,16 @@ deterministic cache, not dropping it, is the right fix for its race.
 60 ticks/s at this peak needs roughly 10 ms less per tick. No lossless change
 found so far comes close; the remaining levers change behaviour (fewer awake
 pieces, as in "Remaining route" above).
+
+### The lab's frame loop was starving physics (`ebfe128`)
+
+In the interactive lab, the grid ran only 2-4 ticks/s during the shot, and
+even at idle, while the GPU sat mostly idle. The slice controller aimed for
+16.0 ms frames, but 60 Hz vsync paces frames at 16.7 ms, so every frame read
+as over budget and the rate sank to its floor.
+
+The rate now follows whether the GPU finished the work submitted two frames
+earlier. In the lab during the row shot it runs at 22-30 ticks/s and 50-58
+FPS. Rendering takes ~2.4 ms per frame (16.7M non-indexed vertices); the
+rest of the GPU goes to physics. The ceiling remains the ~26.5 ms per tick
+physics cost at the peak.
