@@ -10,7 +10,7 @@
 //   bonds    1: the lab's breakable bonds (experimental), preloaded as in the lab
 //   columns, rows   grid layout override (grid scenes only)
 //   scene=pairs a=<shape> b=<shape> count=N reuse=0|1   collision-cost benchmark
-//            (shape-bench.mjs): N static bases of shape a, each with shape b resting on it.
+//            (engine-fracture pairs.rs): N static bases of shape a, each with shape b resting on it.
 //   staticUnhit  1: houses outside the shot's column become static (immovable).
 //            Behaviour-changing; only to estimate compound houses that stay intact.
 import {parseFractureGlb,buildScene,buildCuboidHouse,buildPairScene,layoutScene,withoutJoints,withCapacity,withParams,sceneHandle,SAMPLES} from './wasm.mjs';

@@ -26,7 +26,9 @@ fn main() -> anyhow::Result<()> {
     scene.capacity.deterministic = true;
     let device = metal::Device::system_default().unwrap();
     let mut sim = FractureSim::new(&device, &device.new_command_queue(), &scene)?;
-    let shot = scene.row_shot.unwrap_or(Ray { origin: [0.0, scene.center[1], scene.extent * 1.5], direction: [0.0, 0.0, -1.0] });
+    // The row shot, else a ball at the highest piece from in front.
+    let top = scene.bodies[1..scene.projectile_start as usize].iter().map(|b| b.p).max_by(|a, b| a[1].total_cmp(&b[1])).unwrap();
+    let shot = scene.row_shot.unwrap_or(Ray { origin: [top[0], top[1], top[2] + scene.extent], direction: [0.0, 0.0, -1.0] });
     sim.launch(shot.origin, shot.direction)?;
     let n = scene.bodies.len();
     for k in 1..=ticks {

@@ -45,9 +45,12 @@ Cookers that produce identical bytes:
   mass properties and principal axes, and recentres each child on its own bounds
   so `local_pos` carries the offset.
 - **Arena:** `HullArena` deduplicates hulls.
-- **JS:** `fracture/geometry.mjs`, with the same algorithm.
+- **Fracture lab:** `engine-fracture` cooks baked faces with this cooker
+  (`from_faces_in_frame` allows the asset frame's f32 rounding) in both hosts; the
+  browser runs it through wasm, so there is no second cooker.
 
-`fracture/hull-golden.json` pins the cross-language bytes. Regenerate it with:
+`fracture/hull-golden.json` pins the packed bytes (`convex.test.mjs` checks the
+wasm build against it). Regenerate it with:
 
 ```sh
 UPDATE_HULL_GOLDEN=1 cargo test -p engine-schema golden
