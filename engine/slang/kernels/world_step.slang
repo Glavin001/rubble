@@ -713,6 +713,66 @@ void hierInsert(uint i)
     gAabbs[HOST_S(1) + i]._pad1 = asfloat(prev);
 }
 
+// ---- Persistent resting table (JS host; HOST_S(25) bit 0) ----
+// Static and sleeping colliders live in a resting table (R) that persists
+// across steps; moving colliders go into an awake table (W) each step, and
+// only they query (broadphase_query_awake). Both tables sit past the CSR
+// index in gConstraintIds (restBase): a 32-word header (occupied-level mask,
+// planes, oversized statics), R heads, W heads, then R chain links (one word
+// per collider; W links stay in the AABB spare word). R is rebuilt from
+// scratch on the step after any body fell asleep (or when the host asks):
+// otherwise no collider stops moving, so every resting collider is already
+// in R at its current cell. A woken collider stays in R as a tombstone: it
+// moves, so R visits skip it, and it is found in W instead. W is emptied after
+// the queries by the same moving colliders, so no step clears whole tables.
+static const uint HIER_LINK_SPARE = 0xFFFFFFFFu;
+static const uint REST_HEADER = 32u;
+// Header words: 0 level mask, 1 plane count, 2..9 planes, 10 large count,
+// 11..20 oversized statics.
+
+bool restTables() { return (HOST_S(25) & 1u) != 0u; }
+uint restBase() { return HOST_S(24) + HOST_S(1) + 1u; }
+uint restHeads() { return restBase() + REST_HEADER; }
+uint awakeHeads() { return restHeads() + gridHashSize(); }
+uint restLinks() { return awakeHeads() + gridHashSize(); }
+
+// One cell's chain (heads at headBase; links in the AABB spare word, or at
+// linkBase + j for R) as seen by querier i: the pair rules of hierQuery.
+void hierVisitCell(uint i, Collider a, bool active, uint own, Aabb aa, bool probeHasObb,
+    BoxObb probe, float faceGap, int3 cell, uint level, uint headBase, uint linkBase, uint count)
+{
+    uint base = HOST_S(1);
+    bool rest = linkBase != HIER_LINK_SPARE;
+    uint j = ALOAD(gConstraintIds[headBase + hierHash(cell, level)]);
+    uint guard = 0u;
+    while (j != 0xFFFFFFFFu && guard < count)
+    {
+        guard++;
+        Aabb ab = gAabbs[base + j];
+        uint next = rest ? ALOAD(gConstraintIds[linkBase + j]) : asuint(ab._pad1);
+        // Hash buckets alias: accept only colliders whose true cell/level
+        // is this one, so no pair is visited twice. The overlap test runs
+        // first: it rejects most entries before the log2/floor checks.
+        if (j != i && aabbOverlap(aa, ab) && hierLevel(ab._pad0) == level &&
+            all(hierCell(ab, level) == cell))
+        {
+            Collider b = gColliders[j];
+            if (b.body != a.body)
+            {
+                bool other = bodyMoving(gBodies[b.body]);
+                bool owner = level > own || (active && (!other || i < j));
+                // A moving collider in R is a tombstone (found in W).
+                if ((active || other) && owner && !(rest && other) &&
+                    !bodiesJointed(a.body, b.body) &&
+                    !(probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)))
+                    emitCandidate(i, j);
+            }
+        }
+        j = next;
+    }
+    if (j != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+}
+
 void hierQuery(uint i)
 {
     Collider a = gColliders[i];
@@ -786,33 +846,16 @@ void hierQuery(uint i)
         for (int x = lo.x; x <= hi.x; x++)
         {
             int3 cell = int3(x, y, z);
-            uint j = ALOAD(gConstraintIds[hierHash(cell, level)]);
-            uint guard = 0u;
-            while (j != 0xFFFFFFFFu && guard < count)
+            if (restTables())
             {
-                guard++;
-                Aabb ab = gAabbs[base + j];
-                uint next = asuint(ab._pad1);
-                // Hash buckets alias: accept only colliders whose true cell/level
-                // is this one, so no pair is visited twice. The overlap test runs
-                // first: it rejects most entries before the log2/floor checks.
-                if (j != i && aabbOverlap(aa, ab) && hierLevel(ab._pad0) == level &&
-                    all(hierCell(ab, level) == cell))
-                {
-                    Collider b = gColliders[j];
-                    if (b.body != a.body)
-                    {
-                        bool other = bodyMoving(gBodies[b.body]);
-                        bool owner = level > own || (active && (!other || i < j));
-                        if ((active || other) && owner &&
-                            !bodiesJointed(a.body, b.body) &&
-                            !(probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)))
-                            emitCandidate(i, j);
-                    }
-                }
-                j = next;
+                hierVisitCell(i, a, active, own, aa, probeHasObb, probe, faceGap, cell, level,
+                    awakeHeads(), HIER_LINK_SPARE, count);
+                hierVisitCell(i, a, active, own, aa, probeHasObb, probe, faceGap, cell, level,
+                    restHeads(), restLinks(), count);
             }
-            if (j != 0xFFFFFFFFu) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+            else
+                hierVisitCell(i, a, active, own, aa, probeHasObb, probe, faceGap, cell, level,
+                    0u, HIER_LINK_SPARE, count);
         }
     }
 }
@@ -1246,13 +1289,15 @@ void hierScanFiner(uint m, uint first, uint stride, uint end)
         }
         if (level >= own) break;
         int3 cell = lo + int3(uint3(rem % span.x, (rem / span.x) % span.y, rem / (span.x * span.y)));
-        uint j = ALOAD(gConstraintIds[hierHash(cell, level)]);
+        // Resting colliders: the grid, or only R (W holds movers alone).
+        bool rest = restTables();
+        uint j = ALOAD(gConstraintIds[(rest ? restHeads() : 0u) + hierHash(cell, level)]);
         uint guard = 0u;
         while (j != 0xFFFFFFFFu && guard < count)
         {
             guard++;
             Aabb ab = gAabbs[base + j];
-            uint next = asuint(ab._pad1);
+            uint next = rest ? ALOAD(gConstraintIds[restLinks() + j]) : asuint(ab._pad1);
             if (aabbOverlap(ma, ab) && hierLevel(ab._pad0) == level &&
                 all(hierCell(ab, level) == cell))
             {
@@ -1320,12 +1365,132 @@ void write_finer_args(uint3 tid : SV_DispatchThreadID)
 
 // Work slot 78: last step's awake list (HOST_S(6) entries), for moved-only
 // bounds and awake-only queries. Slot 67 is reused by the sleep pass.
+// Slots 79/80: the resting-table rebuild (clear, insert), dispatched only
+// when last step put bodies to sleep (HOST_S(5) = its sleep events) or the
+// host asks (HOST_S(25) bit 1).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void write_moved_args(uint3 tid : SV_DispatchThreadID)
 {
     if (dispatchIndex(tid) != 0u) return;
     writeDispatchArgs(78u, HOST_S(6));
+    bool rebuild = restTables() && (HOST_S(5) != 0u || (HOST_S(25) & 2u) != 0u);
+    writeDispatchArgs(79u, rebuild ? REST_HEADER + 2u * gridHashSize() : 0u);
+    writeDispatchArgs(80u, rebuild ? gCounters[0].colliderCount : 0u);
+}
+
+// Rebuild 1: empty both tables and the header.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rest_clear(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= REST_HEADER + 2u * gridHashSize()) return;
+    ASTORE(gConstraintIds[restBase() + i], i < REST_HEADER ? 0u : 0xFFFFFFFFu);
+}
+
+// Rebuild 2: every collider not moving now goes into R (planes and oversized
+// statics into the header lists, as hierInsert lists them each step).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rest_insert(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[i];
+    if (bodyMoving(gBodies[col.body])) return;
+    uint hdr = restBase();
+    if (col.shape == SHAPE_PLANE)
+    {
+        uint slot;
+        AADD3(gConstraintIds[hdr + 1u], 1u, slot);
+        if (slot < 8u) ASTORE(gConstraintIds[hdr + 2u + slot], i);
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        return;
+    }
+    Aabb box = gAabbs[HOST_S(1) + i];
+    uint level = hierLevel(box._pad0);
+    if (level >= HOST_S(18))
+    {
+        uint slot;
+        AADD3(gConstraintIds[hdr + 10u], 1u, slot);
+        if (slot < HIER_LARGE_MAX) ASTORE(gConstraintIds[hdr + 11u + slot], i);
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        return;
+    }
+    AOR2(gConstraintIds[hdr], 1u << level);
+    uint prev;
+    AXCHG3(gConstraintIds[restHeads() + hierHash(hierCell(box, level), level)], i, prev);
+    ASTORE(gConstraintIds[restLinks() + i], prev);
+}
+
+// Each step, before the awake inserts: R's levels, planes and oversized
+// statics into the scratch words hierQuery reads (hierInsert's lists).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rest_publish(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    uint hdr = restBase();
+    AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], ALOAD(gConstraintIds[hdr]));
+    uint planes = ALOAD(gConstraintIds[hdr + 1u]);
+    ASTORE(gScratchAtomics[42], planes);
+    for (uint k = 0u; k < min(planes, 8u); k++)
+        ASTORE(gScratchAtomics[43u + k], ALOAD(gConstraintIds[hdr + 2u + k]));
+    uint large = ALOAD(gConstraintIds[hdr + 10u]);
+    ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT], large);
+    for (uint k = 0u; k < min(large, HIER_LARGE_MAX); k++)
+        ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + k], ALOAD(gConstraintIds[hdr + 11u + k]));
+}
+
+// Moving colliders of last step's awake bodies into W (slot 78).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_insert_awake(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= HOST_S(6)) return;
+    uint body = gAwakeList[li];
+    if (!bodyMoving(gBodies[body])) return;
+    uint n = gCounters[0].colliderCount;
+    for (uint c = firstColliderOfBody(body); c < n && gColliders[c].body == body; c++)
+    {
+        if (gColliders[c].shape == SHAPE_PLANE) continue;
+        Aabb box = gAabbs[HOST_S(1) + c];
+        uint level = hierLevel(box._pad0);
+        if (level >= HOST_S(18))
+        {
+            uint slot;
+            AADD3(gScratchAtomics[HIER_LARGE_COUNT_SLOT], 1, slot);
+            if (slot < HIER_LARGE_MAX) ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + slot], c);
+            else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+            continue;
+        }
+        AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], 1u << level);
+        uint prev;
+        AXCHG3(gConstraintIds[awakeHeads() + hierHash(hierCell(box, level), level)], c, prev);
+        gAabbs[HOST_S(1) + c]._pad1 = asfloat(prev);
+    }
+}
+
+// After the queries: empty the W heads the moving colliders filled.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void broadphase_clear_awake(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= HOST_S(6)) return;
+    uint body = gAwakeList[li];
+    if (!bodyMoving(gBodies[body])) return;
+    uint n = gCounters[0].colliderCount;
+    for (uint c = firstColliderOfBody(body); c < n && gColliders[c].body == body; c++)
+    {
+        if (gColliders[c].shape == SHAPE_PLANE) continue;
+        Aabb box = gAabbs[HOST_S(1) + c];
+        uint level = hierLevel(box._pad0);
+        if (level < HOST_S(18))
+            ASTORE(gConstraintIds[awakeHeads() + hierHash(hierCell(box, level), level)], 0xFFFFFFFFu);
+    }
 }
 
 [shader("compute")]
