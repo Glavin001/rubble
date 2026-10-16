@@ -227,6 +227,23 @@ pub struct Manifold {
 
 /// Joint type of a vehicle wheel standing on a dynamic body (see vehicle_link).
 pub const JOINT_TYRE: u32 = 7;
+/// `Joint::flags` bit set by `solve_dual` when a user joint breaks; every joint
+/// kernel skips the joint from then on (tyre joints keep flags as a block index).
+pub const JOINT_FLAG_BROKEN: u32 = 0x8000_0000;
+/// `Joint::flags` bit set by `solve_dual` while the joint's multipliers are still
+/// changing; its bodies may not fall asleep until it clears.
+pub const JOINT_FLAG_UNSETTLED: u32 = 0x4000_0000;
+
+/// Event ring after the 64k joint pair hash in the events buffer (`gEvents`):
+/// word `EVENT_RING_BASE` is a monotonically increasing write cursor, then
+/// `EVENT_RING_CAPACITY` records of four words `[type, id, a, b]` at
+/// `EVENT_RING_BASE + 4 + 4 * (n % EVENT_RING_CAPACITY)`.
+pub const EVENT_RING_BASE: u32 = 65536;
+pub const EVENT_RING_CAPACITY: u32 = 1024;
+/// Total `u32` words of the events buffer (hash, cursor block, records).
+pub const EVENTS_WORDS: u32 = EVENT_RING_BASE + 4 + 4 * EVENT_RING_CAPACITY;
+/// Event record types (`world_step.slang` EVENT_*).
+pub const EVENT_BREAK: u32 = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -245,9 +262,54 @@ pub struct Joint {
     pub limit_max: f32,
     /// Constraint value at beginning of timestep (demo3d `C0Lin`).
     pub c0: [f32; 3],
-    pub _pad_c0: f32,
+    /// Break threshold on the converged linear constraint force |λ₀..₂| in N
+    /// (0 = unbreakable). Checked on the final solver iteration of each step.
+    pub break_force: f32,
     pub lambda: [f32; 6],
     pub k: [f32; 6],
+    /// Angular rows' constraint `axis_a × axis_b` (world) at step start; written
+    /// by `warmstart_joints` (demo3d `C0Ang`).
+    pub c0_ang: [f32; 3],
+    /// Break threshold on the converged angular constraint torque |λ₃..₅| in N·m
+    /// (FIXED, HINGE, D6; 0 = unbreakable).
+    pub break_torque: f32,
+}
+
+impl Default for Joint {
+    fn default() -> Self {
+        Self::zeroed()
+    }
+}
+
+/// A joint broke this step: its id and the force / torque that exceeded the
+/// threshold (read from the event ring).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointBreak {
+    pub joint: u32,
+    pub force: f32,
+    pub torque: f32,
+}
+
+/// Decode new `EVENT_BREAK` records from an events-buffer ring readback.
+/// `words` starts at `EVENT_RING_BASE`; `seen` is the caller's read cursor and is
+/// advanced. Records overwritten before they were read are counted in the return.
+pub fn decode_joint_breaks(words: &[u32], seen: &mut u32, out: &mut Vec<JointBreak>) -> u32 {
+    let cursor = words[0];
+    let lost = cursor.wrapping_sub(*seen).saturating_sub(EVENT_RING_CAPACITY);
+    let mut n = seen.wrapping_add(lost);
+    while n != cursor {
+        let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
+        if words[r] == EVENT_BREAK {
+            out.push(JointBreak {
+                joint: words[r + 1],
+                force: f32::from_bits(words[r + 2]),
+                torque: f32::from_bits(words[r + 3]),
+            });
+        }
+        n = n.wrapping_add(1);
+    }
+    *seen = cursor;
+    lost
 }
 
 #[repr(C)]
@@ -301,12 +363,46 @@ mod tests {
     use std::mem::{align_of, size_of};
 
     #[test]
+    fn event_ring_decodes_new_breaks_and_counts_overwritten_ones() {
+        let mut words = vec![0u32; (EVENTS_WORDS - EVENT_RING_BASE) as usize];
+        fn put(words: &mut [u32], n: u32, ty: u32, id: u32) {
+            let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
+            words[r..r + 4].copy_from_slice(&[ty, id, 2.5f32.to_bits(), 0.5f32.to_bits()]);
+            words[0] = n + 1;
+        }
+        put(&mut words, 0, EVENT_BREAK, 7);
+        put(&mut words, 1, 1, 9); // not a break (sleep)
+        put(&mut words, 2, EVENT_BREAK, 8);
+        let (mut seen, mut out) = (0u32, Vec::new());
+        assert_eq!(decode_joint_breaks(&words, &mut seen, &mut out), 0);
+        assert_eq!(out, vec![JointBreak { joint: 7, force: 2.5, torque: 0.5 }, JointBreak { joint: 8, force: 2.5, torque: 0.5 }]);
+        assert_eq!(seen, 3);
+        // Nothing new: nothing returned.
+        out.clear();
+        decode_joint_breaks(&words, &mut seen, &mut out);
+        assert!(out.is_empty());
+        // The ring wraps past the reader: the oldest records are reported lost.
+        for n in 3..3 + EVENT_RING_CAPACITY + 5 {
+            put(&mut words, n, EVENT_BREAK, n);
+        }
+        let lost = decode_joint_breaks(&words, &mut seen, &mut out);
+        assert_eq!(lost, 5);
+        assert_eq!(out.len() as u32, EVENT_RING_CAPACITY);
+        assert_eq!(out[0].joint, 8);
+        assert_eq!(out.last().unwrap().joint, 3 + EVENT_RING_CAPACITY + 4);
+    }
+
+    #[test]
     fn abi_sizes() {
         assert_eq!(size_of::<AbiProbe>(), 80);
         assert_eq!(size_of::<BodyState>(), 112);
         assert_eq!(size_of::<Collider>(), 64);
         assert_eq!(size_of::<Contact>(), 128);
         assert_eq!(size_of::<Manifold>(), 32);
+        assert_eq!(size_of::<Joint>(), 160);
+        assert_eq!(std::mem::offset_of!(Joint, break_force), 92);
+        assert_eq!(std::mem::offset_of!(Joint, c0_ang), 144);
+        assert_eq!(std::mem::offset_of!(Joint, break_torque), 156);
         assert_eq!(size_of::<StepCounters>(), 64);
         assert_eq!(align_of::<BodyState>(), 4);
     }

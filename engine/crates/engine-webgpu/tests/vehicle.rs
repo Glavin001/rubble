@@ -904,3 +904,169 @@ fn every_preset_settles_drives_and_turns_without_blowing_up() {
         assert!((q * glam::Vec3::Y).y > 0.8, "{}: stays upright", desc.name);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Breakable plank bridge (vehicle.html ?scene=bridge mirrors this layout).
+// ---------------------------------------------------------------------------
+
+/// Plank bridge: timber planks laid end to end across the gap between two
+/// abutments. The end planks rest on the abutment seats (contact only: a simply
+/// supported span); each seam is bolted with four ball joints at the plank
+/// corners, top and bottom, so bending is carried as a tension/compression couple
+/// through the bolts. Road top at `BRIDGE_DECK_Y`, travel along +Z from z < 0.
+struct Bridge {
+    bolts: Vec<u32>,
+    /// Far end of the deck (z).
+    end_z: f32,
+}
+
+const BRIDGE_DECK_Y: f32 = 3.0;
+const BRIDGE_PLANKS: u32 = 5;
+const PLANK_LEN: f32 = 2.6;
+const PLANK_GAP: f32 = 0.005;
+const PLANK_HALF: [f32; 3] = [2.2, 0.1, 0.5 * PLANK_LEN];
+/// Light timber decking, 200 kg per metre of deck.
+const PLANK_MASS: f32 = 200.0 * PLANK_LEN;
+/// Initial bolt penalty (N/m): a stiff steel bolt, far above a plank's inertial
+/// stiffness m/h² ≈ 2e6 N/m, so the seams hold from the first step instead of the
+/// span sagging while β·|C| ramps the penalty up from the default 1e4.
+const BOLT_PENALTY: f32 = 1.0e8;
+/// Bolt rating. At rest the midspan bolts carry ~102 kN (M = w·x(L−x)/2 over a
+/// 0.32 m couple: 107 kN analytic); a 1.3 t sedan crossing peaks at 180–190 kN and
+/// a 3 t monster truck at ~250 kN (`bridge_probe_unbreakable_bolt_forces`).
+const BOLT_BREAK_FORCE: f32 = 220.0e3;
+
+fn bridge(sim: &mut WgpuSim, break_force: f32) -> Bridge {
+    let (hx, hy, hz) = (PLANK_HALF[0], PLANK_HALF[1], PLANK_HALF[2]);
+    let pitch = PLANK_LEN + PLANK_GAP;
+    let end_z = BRIDGE_PLANKS as f32 * pitch - PLANK_GAP;
+    let (seat, road_half_len) = (0.5f32, 30.0f32);
+    let road_x = hx + 0.3;
+    let y = BRIDGE_DECK_Y;
+    let id = [0.0, 0.0, 0.0, 1.0];
+    // Approach roads (embankments) at deck height, and the lower seats the end
+    // planks rest on.
+    static_box(sim, [0.0, 0.5 * y, -PLANK_GAP - road_half_len], [road_x, 0.5 * y, road_half_len], id);
+    static_box(sim, [0.0, 0.5 * y, end_z + PLANK_GAP + road_half_len], [road_x, 0.5 * y, road_half_len], id);
+    let seat_top = y - 2.0 * hy;
+    static_box(sim, [0.0, 0.5 * seat_top, 0.5 * (seat - PLANK_GAP)], [road_x, 0.5 * seat_top, 0.5 * (seat + PLANK_GAP)], id);
+    static_box(sim, [0.0, 0.5 * seat_top, end_z - 0.5 * (seat - PLANK_GAP)], [road_x, 0.5 * seat_top, 0.5 * (seat + PLANK_GAP)], id);
+    let inertia = [
+        PLANK_MASS * (hy * hy + hz * hz) / 3.0,
+        PLANK_MASS * (hx * hx + hz * hz) / 3.0,
+        PLANK_MASS * (hx * hx + hy * hy) / 3.0,
+    ];
+    let planks: Vec<u32> = (0..BRIDGE_PLANKS)
+        .map(|i| dyn_body(sim, [0.0, y - hy, i as f32 * pitch + hz], PLANK_MASS, inertia, &[([0.0; 3], PLANK_HALF, 0)]))
+        .collect();
+    let mut bolts = Vec::new();
+    for w in planks.windows(2) {
+        for (bx, by) in [(-0.8 * hx, -0.8 * hy), (0.8 * hx, -0.8 * hy), (-0.8 * hx, 0.8 * hy), (0.8 * hx, 0.8 * hy)] {
+            // Anchors meet in the middle of the seam gap.
+            bolts.push(sim.add_joint(engine_schema::Joint {
+                body_a: w[0],
+                body_b: w[1],
+                joint_type: engine_schema::JointType::Ball as u32,
+                local_anchor_a: [bx, by, hz + 0.5 * PLANK_GAP],
+                local_anchor_b: [bx, by, -hz - 0.5 * PLANK_GAP],
+                stiffness: f32::INFINITY,
+                k: [BOLT_PENALTY; 6],
+                break_force,
+                ..Default::default()
+            }));
+        }
+    }
+    Bridge { bolts, end_z }
+}
+
+struct Crossing {
+    /// Largest bolt force seen (N), sampled every 5 steps.
+    max_bolt: f32,
+    breaks: Vec<engine_schema::JointBreak>,
+    /// Lowest chassis height over the run.
+    min_y: f32,
+    /// Chassis height on the approach road (ride height above the deck level).
+    ride_y: f32,
+    chassis: [f32; 3],
+    end_z: f32,
+}
+
+/// Let the deck settle, then drive `desc` across at a steady crawl (2.5 m/s) and
+/// stop on the far road (or stop early once the vehicle has fallen through).
+fn cross_bridge(desc: &VehicleDesc, break_force: f32) -> Crossing {
+    let mut sim = world();
+    let br = bridge(&mut sim, break_force);
+    run(&mut sim, 300);
+    let v = sim.add_vehicle(desc, [0.0, BRIDGE_DECK_Y + 1.5, -12.0], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
+    run(&mut sim, 60);
+    let (mut max_bolt, mut min_y) = (0.0f32, f32::MAX);
+    let ride_y = chassis(&sim, v).position[1];
+    let mut breaks = sim.poll_joint_breaks();
+    for step in 0..1200 {
+        let c = chassis(&sim, v);
+        min_y = min_y.min(c.position[1]);
+        let input = if c.position[2] > br.end_z + 6.0 {
+            VehicleInput { brake: 1.0, ..Default::default() }
+        } else {
+            let e = 2.5 - sim.vehicle_state(v).forward_speed;
+            VehicleInput { forward: (e * 0.4).clamp(0.0, 1.0), brake: (-e * 0.5).clamp(0.0, 1.0), ..Default::default() }
+        };
+        sim.set_vehicle_input(v, input);
+        sim.step().expect("step");
+        breaks.extend(sim.poll_joint_breaks());
+        if step % 5 == 0 {
+            let joints = sim.download_joints();
+            let f = br.bolts.iter().map(|&j| glam::Vec3::from_slice(&joints[j as usize].lambda[..3]).length()).fold(0.0, f32::max);
+            max_bolt = max_bolt.max(f);
+            if step % 30 == 0 && std::env::var("BRIDGE_TRACE").is_ok() {
+                eprintln!("  t {:.2} z {:.2} y {:.2} v {:.2} broken {} max bolt {:.0} kN", step as f32 / 60.0, c.position[2], c.position[1], sim.vehicle_state(v).forward_speed, breaks.len(), f / 1000.0);
+            }
+        }
+        if c.position[1] < ride_y - 2.0 {
+            run(&mut sim, 90); // let it land
+            break;
+        }
+    }
+    let c = chassis(&sim, v);
+    eprintln!(
+        "{}: max bolt {:.0} kN, {} bolts broke, min chassis y {:.2}, final {:?}",
+        desc.name,
+        max_bolt / 1000.0,
+        breaks.len(),
+        min_y,
+        c.position
+    );
+    Crossing { max_bolt, breaks, min_y: min_y.min(c.position[1]), ride_y, chassis: c.position, end_z: br.end_z }
+}
+
+#[test]
+fn a_sedan_crosses_the_plank_bridge_and_the_bolts_hold() {
+    let desc = presets::sedan();
+    let r = cross_bridge(&desc, BOLT_BREAK_FORCE);
+    assert!(r.breaks.is_empty(), "no bolt breaks under a sedan: {:?}", r.breaks);
+    assert!(r.max_bolt > 150.0e3, "the deck feels the car (two-way tyre rows): {} N", r.max_bolt);
+    assert!(r.max_bolt < 0.9 * BOLT_BREAK_FORCE, "margin below the rating: {} N", r.max_bolt);
+    assert!(r.chassis[2] > r.end_z + 3.0, "reached the far road: z {}", r.chassis[2]);
+    assert!(r.min_y > r.ride_y - 0.1, "rode level across the deck: min y {} vs {}", r.min_y, r.ride_y);
+}
+
+#[test]
+fn a_monster_truck_snaps_the_bolts_and_falls_through() {
+    let desc = presets::monster_truck();
+    let r = cross_bridge(&desc, BOLT_BREAK_FORCE);
+    assert!(!r.breaks.is_empty(), "the truck overloads the bolts");
+    for b in &r.breaks {
+        assert!(b.force > BOLT_BREAK_FORCE, "each break exceeded the rating: {b:?}");
+    }
+    assert!(r.chassis[2] < r.end_z, "it never reached the far road: z {}", r.chassis[2]);
+    // The deck is 3 m up; the truck lands on the fallen planks.
+    assert!(r.chassis[1] < r.ride_y - 2.0, "the truck fell through the deck: y {} (ride {})", r.chassis[1], r.ride_y);
+}
+
+#[test]
+#[ignore]
+fn bridge_probe_unbreakable_bolt_forces() {
+    for desc in [presets::sedan(), presets::monster_truck(), presets::tank()] {
+        cross_bridge(&desc, 0.0);
+    }
+}

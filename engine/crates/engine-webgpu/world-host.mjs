@@ -35,12 +35,34 @@ export const KERNELS = [
   'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts',
   'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_degree_joints', 'csr_prefix', 'csr_prefix_blocks',
   'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_scatter_joints', 'csr_sort', 'init_colors',
-  'joint_hash_clear', 'joint_hash_insert',
+  'joint_hash_clear', 'joint_hash_insert', 'warmstart_joints',
   'color_bodies', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
   'write_color_args', 'predict_bodies', 'solve_primal_color', 'solve_dual', 'extract_velocity_sleep',
   'write_sleep_args', 'sleep_island_gate', 'sleep_island_gate_joints', 'sleep_island_commit',
   'vehicle_input', 'wheel_query', 'vehicle_link', 'vehicle_prepare', 'vehicle_iterate', 'vehicle_post', 'raycast_batch',
 ];
+
+// Joint record (engine-schema `Joint`, 160 B): ids, anchors, axes, C0, break force,
+// λ[6], k[6], angular C0, break torque. JOINT_FLAG_BROKEN is set by solve_dual when it snaps.
+export const JOINT_WORDS = 40;
+export const JOINT_BALL = 0, JOINT_FIXED = 1, JOINT_HINGE = 2;
+export const JOINT_FLAG_BROKEN = 0x80000000;
+// gEvents: 64k joint pair hash, then the event ring (engine-schema EVENT_RING_*).
+export const EVENT_RING_BASE = 65536, EVENT_RING_CAPACITY = 1024, EVENT_BREAK = 3;
+const EVENTS_WORDS = EVENT_RING_BASE + 4 + 4 * EVENT_RING_CAPACITY;
+export function jointWords(j) {
+  const u = new Uint32Array(JOINT_WORDS);
+  const f = new Float32Array(u.buffer);
+  u[0] = j.bodyA; u[1] = j.bodyB; u[2] = j.jointType ?? JOINT_BALL; u[3] = j.flags || 0;
+  f.set(j.anchorA || [0, 0, 0], 4); f[7] = j.stiffness ?? 1e10;
+  f.set(j.anchorB || [0, 0, 0], 8); f[11] = j.damping ?? 0;
+  f.set(j.axisA || [0, 1, 0], 12); f[15] = j.limitMin ?? 0;
+  f.set(j.axisB || [0, 1, 0], 16); f[19] = j.limitMax ?? 0;
+  f[23] = j.breakForce ?? 0;
+  f.fill(j.k ?? 1e4, 30, 36);
+  f[39] = j.breakTorque ?? 0;
+  return u;
+}
 
 export function sceneCapacity(bodies, colliders) {
   const b = nextPow2(Math.max(bodies, 4096));
@@ -101,7 +123,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
   sizes[16] = cap.maxColors * Math.max(1, Math.ceil(cap.maxBodies / 64)) * 4;
   sizes[17] = cap.maxColors * 4;
   sizes[18] = cap.maxHull * 16;
-  sizes[19] = 65536 * 4;
+  sizes[19] = EVENTS_WORDS * 4;
   sizes[20] = cap.maxBodies * 4;
   sizes[21] = 64 * 4;
   sizes[22] = 96 * PASS_ALIGN;
@@ -181,14 +203,21 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     device.queue.writeBuffer(bufs[2], index * 64, words);
   };
   world.jointCount = 0;
+  world.userJointCount = 0;
+  world.jointWords = new Uint32Array(cap.maxJoints * JOINT_WORDS);
+  world.eventsSeen = 0;
   world.backend = {
     bodyCount: () => world.bodyCount,
     colliderCount: () => world.colliderCount,
     jointCount: () => world.jointCount,
+    // Shorter records (older tyre joint words) are zero-padded to the 160 B stride.
     appendJoints: (list) => list.forEach((words) => {
       if (world.jointCount >= cap.maxJoints) throw new Error('joint capacity exhausted');
-      // Joint records are 144 B (engine_schema::Joint / slang Joint).
-      device.queue.writeBuffer(bufs[5], world.jointCount * words.byteLength, words);
+      const full = new Uint32Array(JOINT_WORDS);
+      full.set(words.subarray(0, JOINT_WORDS));
+      world.jointWords.set(full, world.jointCount * JOINT_WORDS);
+      device.queue.writeBuffer(bufs[5], world.jointCount * JOINT_WORDS * 4, full);
+      if (full[2] !== 7) world.userJointCount++;
       world.jointCount++;
       world.jointHashClearPending = true;
     }),
@@ -223,6 +252,33 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     flags: b.flags ?? 0, linearVel: b.v || [0, 0, 0], sleepTimer: 0, angularVel: b.w || [0, 0, 0], generation: 0,
     initialPos: b.p, initialPadBits: 0, initialRot: b.q || [0, 0, 0, 1],
   }));
+  // {bodyA, bodyB, jointType, anchorA, anchorB, axisA, axisB, breakForce, breakTorque}.
+  world.addJoint = (j) => { const id = world.jointCount; world.backend.appendJoints([jointWords(j)]); return id; };
+  // Joints that broke since the last call: [{joint, force, torque}] (async readback).
+  const ringBytes = (EVENTS_WORDS - EVENT_RING_BASE) * 4;
+  const ringRead = device.createBuffer({ size: ringBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  let ringBusy = false;
+  world.pollJointBreaks = async () => {
+    if (ringBusy) return [];
+    ringBusy = true;
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(bufs[19], EVENT_RING_BASE * 4, ringRead, 0, ringBytes);
+    device.queue.submit([enc.finish()]);
+    await ringRead.mapAsync(GPUMapMode.READ);
+    const w = new Uint32Array(ringRead.getMappedRange().slice(0));
+    ringRead.unmap();
+    ringBusy = false;
+    const out = [];
+    const cursor = w[0];
+    let n = Math.max(world.eventsSeen, cursor - EVENT_RING_CAPACITY);
+    const fl = new Float32Array(w.buffer);
+    for (; n < cursor; n++) {
+      const r = 4 + 4 * (n % EVENT_RING_CAPACITY);
+      if (w[r] === EVENT_BREAK) out.push({ joint: w[r + 1], force: fl[r + 2], torque: fl[r + 3] });
+    }
+    world.eventsSeen = Math.max(world.eventsSeen, cursor);
+    return out;
+  };
   world.addCollider = (c) => world.addColliderWords(colliderWords({
     body: c.body, shape: c.shape, material: c.material ?? 0, generation: 0, localPos: c.localPos || [0, 0, 0],
     density: 0, localRot: c.localRot || [0, 0, 0, 1], params: c.params,
@@ -317,9 +373,11 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     const p = enc.beginComputePass();
     if (nV > 0) disp(p, 'vehicle_input', nV);
     disp(p, 'build_aabbs', nC);
-    if (world.jointHashClearPending) {
-      // Only tyre joints here: they skip the joint pair hash, which just has to be empty.
+    // Joint pair filter, rebuilt each step so a broken joint's bodies collide again.
+    // Tyre joints skip it: with no user joints it only needs one clear.
+    if (world.userJointCount > 0 || world.jointHashClearPending) {
       disp(p, 'joint_hash_clear', 65536);
+      if (world.userJointCount > 0) disp(p, 'joint_hash_insert', world.jointCount);
       world.jointHashClearPending = false;
     }
     disp(p, 'broadphase_clear', gridHashWords());
@@ -343,6 +401,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
       dispWork(p, 'contact_hash_insert', 68);
     }
     dispWork(p, 'persist_contacts', 65);
+    if (world.jointCount > 0) disp(p, 'warmstart_joints', world.jointCount);
     disp(p, 'build_awake_list', nB);
     disp(p, 'write_work_args', 64);
     disp(p, 'csr_clear', nB + 1);
@@ -395,6 +454,8 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
   world.snapshot = () => ({
     bodyCount: world.bodyCount, colliderCount: world.colliderCount,
     bodies: world.bodyWords.slice(0, world.bodyCount * 28),
+    jointCount: world.jointCount, userJointCount: world.userJointCount,
+    joints: world.jointWords.slice(0, world.jointCount * JOINT_WORDS),
     colliders: world.colliderWords.slice(0, world.colliderCount * 16),
     vehicle: world.vehicleShadow.slice(),
     host: world.vehicles.save(),
@@ -407,6 +468,12 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     device.queue.writeBuffer(bufs[0], 0, snap.bodies);
     device.queue.writeBuffer(bufs[0], cap.maxBodies * 112, snap.bodies);
     device.queue.writeBuffer(bufs[2], 0, snap.colliders);
+    // Joints come back unbroken with fresh multipliers.
+    world.jointCount = snap.jointCount;
+    world.userJointCount = snap.userJointCount;
+    world.jointWords.set(snap.joints);
+    if (snap.joints.length) device.queue.writeBuffer(bufs[5], 0, snap.joints);
+    world.jointHashClearPending = true;
     world.vehicleShadow.set(snap.vehicle);
     device.queue.writeBuffer(bufs[29], 0, snap.vehicle);
     world.vehicles.restore(snap.host);

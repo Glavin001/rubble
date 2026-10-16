@@ -7,7 +7,7 @@ Chrome WebGPU from one Slang source (`slang/kernels/vehicle_step.slang`).
 cd engine
 cargo run -p engine-webgpu --release --bin wgsl_export     # WGSL + vehicle presets + engine-vehicle wasm (wasm-pack)
 python3 -m http.server 8791 --directory crates/engine-webgpu
-# Chrome → http://127.0.0.1:8791/vehicle.html            (?scene=playground|destruction|traffic&preset=sedan)
+# Chrome → http://127.0.0.1:8791/vehicle.html            (?scene=playground|destruction|traffic|bridge&preset=sedan)
 cargo test -p engine-webgpu --test vehicle                 # physical envelopes (wgpu)
 cargo test -p engine-metal --test vehicle_parity           # Metal behaviour + Metal↔wgpu parity
 node --test crates/engine-webgpu/tests/vehicle_layout.test.mjs   # JS wrapper over the wasm host
@@ -130,8 +130,35 @@ expressed in AVBD's per-body block solve:
   filter. With two-body rows and shells, the solver resolves crates and debris.
 
 The bridge case follows directly: the deck body's block carries the truck's load, so a
-deck held by breakable joints (or a future fracture solver reading the same loads) gives
-way, and the truck goes with it.
+deck held by breakable joints gives way under a heavy vehicle, and the truck goes with it.
+
+### Breakable joints and the plank bridge
+
+`Joint.break_force` (N) and `Joint.break_torque` (N·m) make any user joint breakable
+(0 = unbreakable). On the final solver iteration `solve_dual` compares the converged
+multipliers, |λ₀..₂| (force) and |λ₃..₅| (the FIXED / HINGE / D6 angular rows' torque),
+with the thresholds. A joint over either one gets `JOINT_FLAG_BROKEN` and an `EVENT_BREAK`
+record `[3, joint, force, torque]` in the event ring behind the joint pair hash in
+`gEvents`. From the next step it is out of the graph (CSR, warm-start, dual, sleep gate)
+and out of the pair filter, so its bodies collide again. Hosts read new events with
+`WgpuSim::poll_joint_breaks`, `MetalWorld::poll_joint_breaks` and `world.pollJointBreaks()`
+(JS). Tyre joints never break.
+
+`?scene=bridge` (and the `bridge` recorder take) mirrors `tests/vehicle.rs`: five 2.6 m
+planks (200 kg/m) span 12 m between abutment seats, 3 m up. Each seam has four
+ball-joint bolts at the top and bottom corners, so the deck carries bending as a bolt
+couple, rated 220 kN:
+
+| Load | Midspan bolt force |
+|---|---|
+| Deck alone | 102 kN (107 kN analytic: M = w·x(L−x)/2 over a 0.32 m couple) |
+| 1.3 t sedan at 2.5 m/s | 180–190 kN, holds |
+| 3 t monster truck | ~250 kN unbreakable: the bolts break at midspan and it falls through |
+| 4.6 t tank | ~360 kN |
+
+The bolts start at a 1e8 N/m penalty. From the default 1e4 the β·|C| ramp is far too
+slow for 520 kg planks (m/h² ≈ 2e6 N/m), and the span free-falls. Tab switches the
+driven vehicle (sedan first, then `?heavy=monster_truck`).
 
 ## Parts, functional state and severing
 

@@ -99,7 +99,7 @@ public struct Joint
     float3 axisB;
     float limitMax;
     float3 c0;
-    float _padC0;
+    float breakForce;  // N; |λ_lin| above this breaks the joint (0 = unbreakable)
     float lambda0;
     float lambda1;
     float lambda2;
@@ -112,6 +112,8 @@ public struct Joint
     float k3;
     float k4;
     float k5;
+    float3 c0Ang;      // angular rows' C = axisA×axisB at step start (warmstart_joints)
+    float breakTorque; // N·m; |λ_ang| above this breaks it (0 = unbreakable). Joint = 160 B
 };
 
 public static const uint JOINT_BALL = 0u;
@@ -122,6 +124,12 @@ public static const uint JOINT_D6 = 4u;
 public static const uint JOINT_DISTANCE = 5u;
 public static const uint JOINT_MAX_DISTANCE = 6u;
 public static const uint JOINT_TYRE = 7u;
+// Joint.flags bit for user joints (tyre joints use flags as their ground block):
+// set by solve_dual when the joint breaks; every joint kernel then skips it.
+public static const uint JOINT_FLAG_BROKEN = 0x80000000u;
+// Set by solve_dual while the multipliers are still moving: the joint's bodies may
+// not fall asleep with unconverged forces (sleep_island_gate_joints).
+public static const uint JOINT_FLAG_UNSETTLED = 0x40000000u;
 
 public struct AvbdParams
 {
