@@ -192,6 +192,7 @@ static const uint CCD_CANDIDATE_MISS = 32u;
 static const uint OVERFLOW_MANIFOLDS = 64u;
 static const uint OVERFLOW_BP_CHAIN = 128u;
 static const uint OVERFLOW_WARM_HASH = 256u; // record warm hash probe limit exhausted
+static const uint OVERFLOW_LARGE_STATICS = 512u; // more oversized statics than LARGE_STATIC_CAP
 
 struct GpuCommand
 {

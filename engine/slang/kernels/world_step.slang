@@ -333,9 +333,15 @@ void build_aabbs(uint3 tid : SV_DispatchThreadID)
 }
 
 static const uint GRID_HASH_SIZE = 131072u;
-// Oversized-static list in gScratchAtomics (words 53..63; host zeroes them each step).
+// Oversized statics (wider than half a grid cell) cannot be found from the
+// 27-cell stencil, so broadphase_insert lists them: count in gScratchAtomics[53],
+// records [aabb min, collider, aabb max] in gAabbs[HOST_S(29) + k], after the
+// vehicle blocks (engine-schema LARGE_STATIC_CAP). Order follows the atomic
+// append; every listed static is tested, so the result does not depend on it.
 static const uint LARGE_STATIC_COUNT = 53u;
-static const uint LARGE_STATIC_CAP = 10u;
+static const uint LARGE_STATIC_CAP = 1024u;
+uint largeStaticCount() { return min(ALOAD(gScratchAtomics[LARGE_STATIC_COUNT]), LARGE_STATIC_CAP); }
+uint largeStaticCollider(uint k) { return asuint(gAabbs[HOST_S(29) + k]._pad0); }
 // Heads/links carry immutable broadphase eligibility alongside the collider ID.
 // Collider IDs occupy 31 bits; 0xffffffff remains the empty-list sentinel.
 static const uint GRID_AWAKE_DYNAMIC = 0x80000000u;
@@ -563,8 +569,8 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     // Oversized statics are probed separately; large dynamics use the explicit list.
     BodyState bIns = gBodies[col.body];
     // Statics wider than a cell (ramps, walls, ground) cannot be found from the
-    // 27-cell stencil. List up to LARGE_STATIC_CAP (scratch 53 = count, 54..63);
-    // past the cap keep the legacy behaviour (grid, or endpoint probe if huge).
+    // 27-cell stencil: list them (one whole-record store). Past LARGE_STATIC_CAP
+    // flag the overflow and keep the legacy behaviour (grid, or endpoint probe).
     float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
     if (!bodyIsDynamic(bIns) && boundR > 0.5 * cellSize)
     {
@@ -572,9 +578,12 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
         AADD3(gScratchAtomics[LARGE_STATIC_COUNT], 1, slot);
         if (slot < LARGE_STATIC_CAP)
         {
-            ASTORE(gScratchAtomics[LARGE_STATIC_COUNT + 1u + slot], i);
+            Aabb rec = box;
+            rec._pad0 = asfloat(i);
+            gAabbs[HOST_S(29) + slot] = rec;
             return;
         }
+        AOR2(gCounters[0].overflowFlags, OVERFLOW_LARGE_STATICS);
     }
     if (!bodyIsDynamic(bIns) &&
         (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0))
@@ -897,21 +906,21 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // LARGE_STATIC_CAP of them; on overflow the legacy endpoint probe (ground at
     // collider 0 or last) applies. Large dynamics were handled exactly once above.
     uint nLargeStatic = ALOAD(gScratchAtomics[LARGE_STATIC_COUNT]);
-    uint nListed = min(nLargeStatic, LARGE_STATIC_CAP);
+    uint nListed = largeStaticCount();
     bool listOverflow = nLargeStatic > LARGE_STATIC_CAP;
     uint nProbe = nListed + (listOverflow ? 2u : 0u);
     for (uint t = 0u; t < nProbe; t++)
     {
         if (gCounters[0].colliderCount == 0u) break;
         bool endpoint = t >= nListed;
-        uint j = !endpoint ? ALOAD(gScratchAtomics[LARGE_STATIC_COUNT + 1u + t])
+        uint j = !endpoint ? largeStaticCollider(t)
             : ((t == nListed) ? 0u : (gCounters[0].colliderCount - 1u));
         if (j == i || (endpoint && t > nListed && j == 0u)) continue;
         if (endpoint)
         {
             bool listed = false;
             for (uint u = 0u; u < nListed; u++)
-                if (ALOAD(gScratchAtomics[LARGE_STATIC_COUNT + 1u + u]) == j) listed = true;
+                if (largeStaticCollider(u) == j) listed = true;
             if (listed) continue;
         }
         Collider other = gColliders[j];

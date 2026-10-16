@@ -169,8 +169,6 @@ the deck's bending, so a truck faster than ~9 m/s crossed before the bolts felt 
 weight. The bolts start at a 1e8 N/m penalty. From the default 1e4 the β·|C| ramp is
 far too slow for 520 kg planks (m/h² ≈ 2e6 N/m), and the span free-falls. Tab switches
 the driven vehicle (sedan first, then `?heavy=monster_truck`; `heavy=none` for one).
-The scene skips the parked cannonballs, whose static colliders would otherwise fill the
-10-slot large-static list and hide the approach roads from the wheel casts.
 
 ## Parts, functional state and severing
 
