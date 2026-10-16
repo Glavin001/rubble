@@ -22,17 +22,17 @@ switch is bit-identical to single rate, `tests/multirate.rs`).
   impulse. It keeps exactly what single rate keeps: linear momentum to round-off through
   impact and fracture, angular momentum as single rate does (the difference vanishes with
   the substep), energy converging to zero error at first order, and no energy drift over
-  1e5 undamped substeps at safety 0.9.
+  1.6e5 undamped substeps at safety 0.9.
 - **Fidelity.** Catalogue: 34/35 scenes pass every gameplay metric. The one diff
   (s_house_car, `where`) is inside the reference's own spread: single rate against
   itself at safety 0.45 and 0.4 fails the same test. On `true_step`: 35/35.
 - **Packs.**
-  - villa-savoye rammed and the Shardwright projectile pass every metric.
+  - house-1story, house-2story and villa-savoye rammed pass every metric with ×4.8, ×4.3
+    and ×4.0 fewer bond evaluations. The Shardwright projectile passes too.
   - The Shardwright ram cannot be judged: its single-rate reference creates energy
     (3.7e9 J of contact dissipation against a 28.8 kJ ram).
-  - The two rammed houses are pending (see the table below).
-  - It is a step change, so its accuracy is that of the requested safety at every bond.
-    Single rate over-resolves the heavy chunks.
+- **Accuracy.** It is a step change: every bond runs at the requested safety of its own
+  step, where single rate over-resolves the heavy chunks.
   - On b6_spall (a wave problem) the spall speed at the default safety 0.5 moves +8 %
     (3.59 → 3.88 m/s; OpenCourant 3.02). At safety ≤ 0.25 the two agree within 0.6 % and
     converge together.
@@ -228,8 +228,8 @@ and exported per `HANDOFF_SHARDWRIGHT.md`) is rammed and hit by frac-sim's proje
 
 | Scene | Bond evaluations B/A | Gameplay | Outcome A → B |
 |---|---|---|---|
-| house-1story rammed | pending | | (runs in progress) |
-| house-2story rammed | pending | | (runs in progress) |
+| house-1story rammed | ×0.21 | all ok | 209 → 209 broken, 40 → 39 fragments, debris 0.74 → 0.72 m/s, first crack the same |
+| house-2story rammed | ×0.23 | all ok | 216 → 216 broken, 37 → 40 fragments, debris 0.03 → 0.04 m/s, first crack the same |
 | villa-savoye rammed | ×0.25 | all ok | 323 → 306 broken, 21 → 22 fragments, debris 1.13 → 1.31 m/s, first crack the same |
 | Shardwright projectile | ×0.88 | all ok | 18 → 18 broken, 10 → 10 fragments, debris 3.14 → 3.34 m/s |
 | Shardwright ram | ×0.92 | **void**: `where`, `pieces`, `debris` DIFF against a reference that creates energy | 2,321 → 480 broken, 555 → 89 fragments, debris 8.57 → 2.15 m/s |
@@ -253,6 +253,11 @@ dissipation against a 28.8 kJ ram (the building's potential is of order 1e6 J):
   penalty contact's, which multirate leaves unchanged.
 - Why multirate's runs escape it is not known (follow-ups). The projectile case, which
   does not blow up, passes.
+
+Wall time on one thread: house-1story 10,320 → 9,751 s, house-2story 13,090 → 9,097 s,
+under varying machine load. The standalone world's debris contacts dominate these runs.
+The houses' multirate sides were run beside `fidelity.py` (same binary, settings and
+`judge`), to halve the wait.
 
 ## Work per frame
 
