@@ -115,7 +115,7 @@ export async function runSleepDiag(sim, scene, {ticks = 2400, every = 120, top =
   const colliderBody = scene.colliders.map((c) => c.body);
   const isStatic = (i) => !(scene.bodies[i].invMass > 0);
   const samples = [];
-  let tick = 0, prevKeys = null;
+  let tick = 0, prevKeys = null, prevPos = null;
   const snap = async () => { const f = await sim.snapshot(); return {f32: f, u32: new Uint32Array(f.buffer)}; };
   while (tick < ticks) {
     const n = Math.min(4, every - (tick % every));
@@ -143,7 +143,25 @@ export async function runSleepDiag(sim, scene, {ticks = 2400, every = 120, top =
     for (const b of awake) { const s = b.ang; spinHist[s < 0.05 ? '<0.05' : s < 0.5 ? '0.05-0.5' : s < 2 ? '0.5-2' : s < 10 ? '2-10' : '>10']++; }
     const why = classifyAwake(awake, after, colliderBody, isStatic, isSlow, sleepTime);
     const islands = awakeIslands(awake, after, colliderBody, isStatic, isSlow);
-    samples.push({t: +(tick * (scene.params.dt ?? 1 / 120)).toFixed(2), why: why.counts, islands, whyExamples: why.examples, awake: awake.length, moving: moving.length, stillAwake: still.length, gateHeld: held.length,
+    // Drift since the previous sample of bodies that are slow now: creep that
+    // never trips the threshold but moves supports until something lets go.
+    const pos = new Float32Array(scene.bodies.length * 3);
+    for (const b of st.bodies) for (let k = 0; k < 3; k++) pos[b.i * 3 + k] = f32[b.i * 28 + k];
+    let drift = null;
+    if (prevPos) {
+      drift = {'>1mm': 0, '>1cm': 0, '>5cm': 0, slowAwake: 0, examples: []};
+      for (const b of still) {
+        const d = Math.hypot(pos[b.i * 3] - prevPos[b.i * 3], pos[b.i * 3 + 1] - prevPos[b.i * 3 + 1], pos[b.i * 3 + 2] - prevPos[b.i * 3 + 2]);
+        drift.slowAwake++;
+        if (d > 0.001) drift['>1mm']++;
+        if (d > 0.01) { drift['>1cm']++; if (drift.examples.length < 6) drift.examples.push([b.i, +d.toFixed(3)]); }
+        if (d > 0.05) drift['>5cm']++;
+      }
+    }
+    prevPos = pos;
+    const settlingDetail = still.filter((b) => b.timer < sleepTime).slice(0, 8)
+      .map((b) => ({i: b.i, timer: +b.timer.toFixed(3), lin: +b.lin.toFixed(4), ang: +b.ang.toFixed(3), m: +b.m.toFixed(3)}));
+    samples.push({t: +(tick * (scene.params.dt ?? 1 / 120)).toFixed(2), why: why.counts, islands, drift, settlingDetail, whyExamples: why.examples, awake: awake.length, moving: moving.length, stillAwake: still.length, gateHeld: held.length,
       ke: +st.ke.toFixed(1), mechanical: +(st.ke + st.pe).toFixed(1), contacts: nC, keySurvival: +(kept / Math.max(1, kb.size)).toFixed(4),
       deepOver1cm: deep1, deepOver5cm: deep5, minC0: +minC0.toFixed(4), speedHist, spinHist});
     prevKeys = kb;
@@ -212,7 +230,7 @@ export async function runSleepTrace(sim, scene, {at = 1200, ticks = 30, pick = 3
       // Momentum of the body and of the body with its partners (dynamic only).
       let P = v.map((x) => x * m);
       for (const q of partners) { const oq = q * 28; if (f[oq + 3] > 0 && (u[oq + 11] & 1)) { const mq = 1 / f[oq + 3]; P = P.map((x, k) => x + mq * f[oq + 12 + k]); } }
-      tick.bodies[i] = {y: +f[o + 1].toFixed(4), v: v.map((x) => +x.toFixed(3)), w: w.map((x) => +x.toFixed(2)), flags: u[o + 11], groupMomentum: P.map((x) => +x.toFixed(3)), contacts};
+      tick.bodies[i] = {y: +f[o + 1].toFixed(4), timer: +f[o + 15].toFixed(3), v: v.map((x) => +x.toFixed(3)), w: w.map((x) => +x.toFixed(2)), flags: u[o + 11], groupMomentum: P.map((x) => +x.toFixed(3)), contacts};
     }
     rows.push(tick);
   }
@@ -253,4 +271,49 @@ export async function runSleepWatch(sim, scene, {from = 1200, to = 2400, quiet =
     prev = new Set(moving.map((b) => b.i)); prevCount = moving.length;
   }
   return {bursts, series};
+}
+
+// Wake watch (headless-page wakewatch=<from> [to]): every tick, the bodies that
+// went from asleep to awake, with each awake contact partner's speed and timer
+// (the candidates for having woken it).
+export async function runWakeWatch(sim, scene, {from = 1200, to = 1500, top = 10} = {}) {
+  const g = scene.params.gravityY ?? -9.81, colliderBody = scene.colliders.map((c) => c.body), ext = bodyExtents(scene);
+  for (let t = 0; t < from; t += 4) await sim.step(Math.min(4, from - t), {wait: false});
+  await sim.flush();
+  let f = await sim.snapshot(), u = new Uint32Array(f.buffer);
+  const asleep = (u, i) => (u[i * 28 + 11] & 4) !== 0;
+  let prev = new Uint8Array(scene.bodies.length);
+  for (let i = 0; i < scene.bodies.length; i++) prev[i] = asleep(u, i) ? 1 : 0;
+  const events = [], series = [];
+  let totalWakes = 0, lastTimer = null, lastAsleep = null;
+  for (let tick = from; tick < to; tick++) {
+    await sim.step(1);
+    const c = await sim.readContacts();
+    f = await sim.snapshot(); u = new Uint32Array(f.buffer);
+    const woke = [];
+    for (let i = 0; i < scene.bodies.length; i++) { const s = asleep(u, i) ? 1 : 0; if (prev[i] && !s) woke.push(i); prev[i] = s; }
+    totalWakes += woke.length;
+    if (tick % 60 === 0) {
+      let awakeN = 0, settling = 0, resets = 0;
+      for (let i = 0; i < scene.bodies.length; i++) {
+        const o = i * 28; if (!(f[o + 3] > 0) || asleep(u, i)) continue;
+        awakeN++; const tm = f[o + 15]; if (tm < scene.params.sleepTime) settling++;
+        if (lastTimer && tm < lastTimer[i] && !(lastAsleep && lastAsleep[i])) resets++;
+      }
+      series.push([tick, awakeN, settling, resets]);
+      lastTimer = new Float32Array(scene.bodies.length); lastAsleep = new Uint8Array(scene.bodies.length);
+      for (let i = 0; i < scene.bodies.length; i++) { lastTimer[i] = f[i * 28 + 15]; lastAsleep[i] = asleep(u, i) ? 1 : 0; }
+    }
+    if (woke.length && events.length < 30) {
+      const set = new Set(woke.slice(0, top)), partners = new Map();
+      for (let k = 0; k < c.counters.contact; k++) {
+        const a = colliderBody[c.meta[k * 8]], b = colliderBody[c.meta[k * 8 + 1]];
+        for (const [x, y] of [[a, b], [b, a]]) if (set.has(x) && !set.has(y)) { const l = partners.get(x) ?? new Set(); l.add(y); partners.set(x, l); }
+      }
+      const speed = (i) => { const o = i * 28; return Math.hypot(f[o + 12], f[o + 13], f[o + 14]) + Math.hypot(f[o + 16], f[o + 17], f[o + 18]) * ext[i]; };
+      events.push({tick, woke: woke.length, sample: [...set].map((i) => ({i, partners: [...(partners.get(i) ?? [])].filter((p) => p > 0 && !asleep(u, p)).slice(0, 6)
+        .map((p) => ({p, speed: +speed(p).toFixed(4), timer: +f[p * 28 + 15].toFixed(3), m: +(1 / f[p * 28 + 3]).toFixed(2)}))}))});
+    }
+  }
+  return {totalWakes, series, events};
 }

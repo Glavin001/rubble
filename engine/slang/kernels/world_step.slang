@@ -198,7 +198,8 @@ void predictOne(uint i)
     float4 q0 = b.orientation;
     BODY_PREV(i).linearVel = b.linearVel;
 
-    if (!startAtRest)
+    // A deferred wake keeps its pose this step (it is solved from the next).
+    if (!startAtRest && !wakePending(b))
     {
         b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
         b.orientation = quatNormalize(
@@ -1589,6 +1590,10 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
     // (~1.5k sleeping / 31k awake despite KE~50). Never clear SLEEPING on calm pairs.
     bool awakeA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
     bool awakeB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    // Displacement sleep: a body that has itself stayed put for sleepTime (a
+    // sleep candidate) only jitters in place; it cannot wake its neighbours.
+    awakeA = awakeA && canWake(ba);
+    awakeB = awakeB && canWake(bb);
     if (!awakeA && !awakeB) return;
     float3 vRel = ba.linearVel - bb.linearVel;
     float wRel = length(ba.angularVel) + length(bb.angularVel);
@@ -1604,12 +1609,12 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
     // narrowphase-start copy could overwrite fields other work updated.
     if (bodyIsDynamic(ba) && bodyIsSleeping(ba) && awakeB)
     {
-        gBodies[ca.body].flags = (ba.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[ca.body].flags = wokenFlags(ba.flags);
         gBodies[ca.body].sleepTimer = 0.0;
     }
     if (bodyIsDynamic(bb) && bodyIsSleeping(bb) && awakeA)
     {
-        gBodies[cb.body].flags = (bb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[cb.body].flags = wokenFlags(bb.flags);
         gBodies[cb.body].sleepTimer = 0.0;
     }
 }
@@ -1975,6 +1980,40 @@ static const uint FLAG_POST_STAB = 4096u;
 //     threshold is 20x stricter than the linear one for a 3 cm piece.
 static const uint FLAG_POINT_SPEED_SLEEP = 8192u;
 bool pointSpeedSleep() { return (PARAMS.flags & FLAG_POINT_SPEED_SLEEP) != 0u; }
+// 32768 Displacement sleep test (Jolt's sleep test spheres): a body is slow while
+//     its farthest point stays within sleepLin·sleepTime of the pose it had when
+//     its sleep timer started, |Δx| + angle(Δq)·r_max. Jitter and one-tick blips
+//     that go nowhere no longer reset the timer; steady motion still does. The
+//     reference pose lives in the previous-step body record (BODY_PREV), whose
+//     pose fields are otherwise unused.
+static const uint FLAG_SLEEP_DISPLACEMENT = 32768u;
+bool displacementSleep() { return (PARAMS.flags & FLAG_SLEEP_DISPLACEMENT) != 0u; }
+// A body that may wake its neighbours (contacts or bonds): awake, and under the
+// displacement test not itself a sleep candidate (those only jitter in place).
+bool canWake(BodyState b)
+{
+    return bodyIsDynamic(b) && !bodyIsSleeping(b) && (!displacementSleep() || b.sleepTimer < PARAMS.sleepTime);
+}
+// 65536 Stabilization (PhysX PxSceneFlag::eENABLE_STABILIZATION): a body whose
+//     fastest point is under STAB_SPEEDS·sleepLin keeps only the fraction
+//     speed/(STAB_SPEEDS·sleepLin) of its velocity for the next step, so
+//     near-rest jitter cannot build momentum; faster motion is untouched.
+static const uint FLAG_STABILIZATION = 65536u;
+// 131072 Deferred wake: a body woken during a step (contact or bond wake, in the
+//     narrowphase, after the broadphase skipped its sleeper pairs) stays
+//     immovable for the rest of that step and is solved from the next one, when
+//     it has its whole contact set. Woken immediately, it was solved for a step
+//     without its supports and started with a 0.1-0.6 m/s kick that woke its
+//     neighbours in turn (Box2D instead restores a woken island's contacts).
+static const uint FLAG_DEFER_WAKE = 131072u;
+static const uint BODY_WAKE_PENDING = 16u;
+uint wokenFlags(uint flags)
+{
+    uint pending = (PARAMS.flags & FLAG_DEFER_WAKE) != 0u ? BODY_WAKE_PENDING : 0u;
+    return (flags & ~BODY_SLEEPING) | BODY_AWAKE | pending;
+}
+bool wakePending(BodyState b) { return (b.flags & BODY_WAKE_PENDING) != 0u; }
+static const float STAB_SPEEDS = 3.0;
 // Set by the primal kernels from the pass value (bit 8): the stabilization pass.
 static bool gStabilize = false;
 bool postStabilize() { return (PARAMS.flags & FLAG_POST_STAB) != 0u; }
@@ -2585,14 +2624,14 @@ void bond_wake(uint3 tid : SV_DispatchThreadID)
     BodyState b = gBodies[j.bodyB];
     bool sleepA = bodyIsDynamic(a) && bodyIsSleeping(a);
     bool sleepB = bodyIsDynamic(b) && bodyIsSleeping(b);
-    if (sleepA && bodyMoving(b))
+    if (sleepA && canWake(b))
     {
-        gBodies[j.bodyA].flags = (a.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[j.bodyA].flags = wokenFlags(a.flags);
         gBodies[j.bodyA].sleepTimer = 0.0;
     }
-    if (sleepB && bodyMoving(a))
+    if (sleepB && canWake(a))
     {
-        gBodies[j.bodyB].flags = (b.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[j.bodyB].flags = wokenFlags(b.flags);
         gBodies[j.bodyB].sleepTimer = 0.0;
     }
 }
@@ -4366,7 +4405,7 @@ float3 bodyAngularVelocity(BodyState b, float dt)
 void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
 {
     BodyState b = gBodies[bodyIdx];
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b)) return;
     AvbdParams p = PARAMS;
     // Post-stabilization: the velocity is the pose after the α = 1 iterations,
     // taken before this pass removes the step-start error.
@@ -4767,6 +4806,15 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     gCcdFlags[i] = 0;
     if (!bodyIsDynamic(b)) return;
     if (bodyIsSleeping(b)) return;
+    if (wakePending(b))
+    {
+        // Held still this step; solved from the next with a fresh sleep timer.
+        gBodies[i].flags = b.flags & ~BODY_WAKE_PENDING;
+        gBodies[i].linearVel = float3(0, 0, 0);
+        gBodies[i].angularVel = float3(0, 0, 0);
+        gBodies[i].sleepTimer = 0.0;
+        return;
+    }
 
     // Step-start pose x⁻ was saved on the body by prediction (initialPos/Rot).
     // Post-stabilization stored the velocity before its pass moved the body.
@@ -4780,13 +4828,43 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     float lin = length(b.linearVel);
     float ang = length(b.angularVel);
     bool slow = lin < p.sleepLin && ang < p.sleepAng;
-    if (pointSpeedSleep())
+    float extent = 0.0;
+    if (pointSpeedSleep() || displacementSleep() || (p.flags & FLAG_STABILIZATION) != 0u)
     {
-        float extent = 0.0;
         uint n = gCounters[0].colliderCount;
         for (uint c = firstColliderOfBody(i); c < n && gColliders[c].body == i; c++)
             extent = max(extent, colliderExtent(gColliders[c]));
-        slow = lin + ang * extent < p.sleepLin;
+        if (pointSpeedSleep()) slow = lin + ang * extent < p.sleepLin;
+        if ((p.flags & FLAG_STABILIZATION) != 0u)
+        {
+            float band = STAB_SPEEDS * p.sleepLin;
+            float speed = lin + ang * extent;
+            if (speed < band)
+            {
+                float keepV = speed / band;
+                b.linearVel *= keepV;
+                b.angularVel *= keepV;
+            }
+        }
+        if (displacementSleep())
+        {
+            // A fresh timer (just woken or just moved) takes the current pose as
+            // its reference; afterwards the window's displacement decides.
+            float4 refRot = BODY_PREV(i).orientation;
+            float3 refPos = BODY_PREV(i).position;
+            float turn = 2.0 * acos(min(abs(dot(refRot, b.orientation)), 1.0));
+            float moved = length(b.position - refPos) + turn * extent;
+            slow = b.sleepTimer <= 0.0 || moved < p.sleepLin * p.sleepTime;
+            // A candidate held awake (by its island) restarts the window every
+            // sleepTime, so the limit is drift per window, like a speed.
+            bool rewindow = slow && b.sleepTimer >= 2.0 * p.sleepTime;
+            if (rewindow) b.sleepTimer = p.sleepTime;
+            if (!slow || b.sleepTimer <= 0.0 || rewindow)
+            {
+                BODY_PREV(i).position = b.position;
+                BODY_PREV(i).orientation = b.orientation;
+            }
+        }
     }
     if (slow)
     {
