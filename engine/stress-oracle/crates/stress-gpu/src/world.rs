@@ -86,7 +86,22 @@ pub struct GpuWorld {
     /// segment plans (`step_frame_coupled`).
     cost_substep: (f64, u64),
     cost_segment: (f64, u64),
+    /// Coupled to an engine: solve a frame again, with the bodies in islands, when a body
+    /// the engine moved fractured during it (the reference's verification). Off: the
+    /// fracture stands at the end of the frame (no rewind), and the frame is counted in
+    /// `unverified_fractures`.
+    pub redo_fractured_frames: bool,
+    /// Frames in which a body the engine moved fractured and no redo was taken.
+    pub unverified_fractures: u64,
+    /// Promoted structures (no redo) and the quiet frames they have left.
+    promoted: std::collections::HashMap<usize, u32>,
+    /// Island segments solved again at a smaller contact step (a plan made within the
+    /// segment needed it): local retries of the stress solve, not frame rewinds.
+    pub segment_retries: u64,
 }
+
+/// Frames a structure stays promoted (its clusters island seeds) after its last fracture.
+const PROMOTE_FRAMES: u32 = 6;
 
 /// Segments of an island frame, each checked against the contact plans made within it
 /// (`step_frame_coupled`): a plan that needs a smaller step costs one segment again.
@@ -161,6 +176,10 @@ impl GpuWorld {
             damped_steps: Vec::new(),
             cost_substep: (0.0, 0),
             cost_segment: (0.0, 0),
+            redo_fractured_frames: true,
+            unverified_fractures: 0,
+            promoted: std::collections::HashMap::new(),
+            segment_retries: 0,
         };
         let values: Vec<f64> = (0..scene.probes.len()).map(|p| w.probe_value(p)).collect();
         w.record(w.solver.mirror.time, &values, true);
@@ -219,11 +238,50 @@ impl GpuWorld {
     fn step_frame_coupled(&mut self, gpu: &Gpu) -> Result<(), String> {
         let fdt = self.scene.sim.frame_dt;
         let mut forced: std::collections::HashSet<BodyKey> = std::collections::HashSet::new();
+        // Promotion (no redo): every cluster of a structure that fractured under the
+        // engine's loads is an island seed until the structure has been quiet for
+        // `PROMOTE_FRAMES` frames, so the release that follows a fracture is resolved by
+        // the stress solve's own dynamics from the next frame on.
+        if !self.redo_fractured_frames {
+            // A scripted structural event (a support or member removal) this frame, or one
+            // still ramping, is a sudden change of the structure's support: its structure
+            // is promoted from the frame it starts, before any rigid response to it.
+            let t = self.solver.mirror.time;
+            for (ei, ev) in self.scene.events.iter().enumerate() {
+                let (time, duration, body) = match ev {
+                    EventDesc::RemoveChunks { time, duration, body, .. } | EventDesc::RemoveSupports { time, duration, body, .. } => (*time, *duration, body),
+                };
+                let starts = !self.events_done[ei] && time <= t + fdt + 1e-12;
+                let ramping = time <= t && t < time + duration;
+                if starts || ramping {
+                    if let Some(si) = self.scene.bodies.iter().position(|b| &b.name == body) {
+                        self.promoted.insert(si, PROMOTE_FRAMES);
+                    }
+                }
+            }
+            self.promoted.retain(|_, left| *left > 0);
+            for cl in &self.solver.mirror.clusters {
+                if self.promoted.contains_key(&cl.structure) {
+                    forced.insert(BodyKey::Cluster(cl.id));
+                }
+            }
+        }
         let frozen = loop {
-            let saved = self.solver.snapshot(gpu);
+            // The rewind's snapshot only with the redo on; without it, the frame-start
+            // cluster of every chunk (for counting fractures of driven bodies) suffices.
+            let saved = if self.redo_fractured_frames {
+                Some(self.solver.snapshot(gpu))
+            } else {
+                self.solver.download(gpu);
+                None
+            };
+            let events_at_start = self.solver.mirror.events.len();
+            let start_cluster = if saved.is_none() { stress_ref::world::chunk_clusters(&self.solver.mirror) } else { Vec::new() };
             let saved_host = (self.frame, self.events_done.clone(), self.blasts_active.clone(), self.probes.clone(), self.next_sample, self.filter.clone());
             let saved_counts = (self.shell.island_frames, self.shell.max_island_bodies, self.shell.engine_body_frames, self.shell.island_body_frames);
-            self.with_shell_mut(|w| w.engine_save());
+            if self.redo_fractured_frames {
+                self.with_shell_mut(|w| w.engine_save());
+            }
             self.solver.mirror_check("frame start");
             let f = self.with_shell_mut(|w| w.coupled_prepare(&forced));
             self.solver.mirror_check("after coupled_prepare (engine step)");
@@ -347,7 +405,9 @@ impl GpuWorld {
                         }
                         self.solver.restore(gpu, snap)?;
                         (self.events_done, self.blasts_active, self.probes, self.next_sample, self.filter) = host;
-                        self.shell.redone_frames += 1;
+                        // A rejected segment (a plan within it needs a smaller contact step):
+                        // a local numerical retry, not a frame rewind.
+                        self.segment_retries += 1;
                         taken = seg_taken;
                         cap = cap.min(need);
                         continue;
@@ -361,8 +421,11 @@ impl GpuWorld {
             self.finish_frame(gpu, taken)?;
             self.solver.mirror_check("after finish_frame");
             self.solver.sync(gpu);
-            let since = &self.solver.mirror.events[saved.mirror().events.len()..];
-            let broke = fractured_since(saved.mirror(), since, &f.driven);
+            let since = &self.solver.mirror.events[events_at_start..];
+            let broke = match &saved {
+                Some(saved) => fractured_since(saved.mirror(), since, &f.driven),
+                None => stress_ref::world::fractured_since_clusters(&start_cluster, &self.solver.mirror, since, &f.driven),
+            };
             if std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
                 let broken = since.iter().filter(|e| matches!(e, stress_ref::solver::SolverEvent::Broken { .. })).count();
                 eprintln!(
@@ -379,13 +442,30 @@ impl GpuWorld {
                     self.solver.profile.batches
                 );
             }
-            if broke.is_empty() || broke.is_subset(&forced) {
-                self.with_shell_mut(|w| w.engine_discard());
+            if broke.is_empty() || broke.is_subset(&forced) || !self.redo_fractured_frames {
+                if !broke.is_empty() && !broke.is_subset(&forced) {
+                    // No redo (`redo_fractured_frames` off): the fracture of a body the
+                    // engine moved stands as computed from the engine's loads; counted.
+                    self.unverified_fractures += 1;
+                }
+                if !self.redo_fractured_frames {
+                    for left in self.promoted.values_mut() {
+                        *left = left.saturating_sub(1);
+                    }
+                    for e in since {
+                        if let stress_ref::solver::SolverEvent::Broken { structure, .. } = e {
+                            self.promoted.insert(*structure, PROMOTE_FRAMES);
+                        }
+                    }
+                }
+                if self.redo_fractured_frames {
+                    self.with_shell_mut(|w| w.engine_discard());
+                }
                 break f.frozen;
             }
             // The engine's assumption failed for these bodies: solve the frame again with
             // them in islands.
-            self.solver.restore(gpu, saved)?;
+            self.solver.restore(gpu, saved.expect("snapshot taken with the redo on"))?;
             (self.frame, self.events_done, self.blasts_active, self.probes, self.next_sample, self.filter) = saved_host;
             (self.shell.island_frames, self.shell.max_island_bodies, self.shell.engine_body_frames, self.shell.island_body_frames) = saved_counts;
             self.with_shell_mut(|w| w.engine_restore());
@@ -516,6 +596,12 @@ impl GpuWorld {
     }
 
     /// Advance one frame (`sim.frame_dt`).
+    /// Frames solved again by the coupled frame's verification (a body the engine moved
+    /// fractured).
+    pub fn redone_frames(&self) -> u64 {
+        self.shell.redone_frames
+    }
+
     pub fn step_frame(&mut self, gpu: &Gpu) -> Result<(), String> {
         if self.coupled() {
             return self.step_frame_coupled(gpu);

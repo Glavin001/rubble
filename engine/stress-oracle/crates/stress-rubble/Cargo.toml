@@ -14,6 +14,8 @@ engine-webgpu = { path = "../../../crates/engine-webgpu" }
 engine-schema = { path = "../../../crates/engine-schema" }
 glam = { version = "0.29", features = ["bytemuck"] }
 anyhow = "1"
+serde_json = "1"
+wgpu = "30"
 # The GPU stress solver coupled to rubble (`GpuWorld::with_engine`), for its tests.
 stress-gpu = { path = "../stress-gpu", optional = true }
 

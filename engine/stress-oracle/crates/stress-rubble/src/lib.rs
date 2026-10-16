@@ -313,8 +313,17 @@ impl RubbleEngine {
     }
 
     pub fn with_capacity(gravity: Vec3, capacity: WorldCapacity) -> anyhow::Result<RubbleEngine> {
+        Self::with_sim(gravity, WgpuSim::new_with_compact_contacts(capacity, false)?)
+    }
+
+    /// The engine on an existing device: the GPU stress solver's, so rubble and the
+    /// stress solve share one device and queue.
+    pub fn with_device(gravity: Vec3, info: wgpu::AdapterInfo, device: wgpu::Device, queue: wgpu::Queue) -> anyhow::Result<RubbleEngine> {
+        Self::with_sim(gravity, WgpuSim::with_device(default_capacity(), info, device, queue)?)
+    }
+
+    fn with_sim(gravity: Vec3, mut sim: WgpuSim) -> anyhow::Result<RubbleEngine> {
         anyhow::ensure!(gravity.x == 0.0 && gravity.y == 0.0, "rubble's gravity is along its up axis only; got {gravity:?} (Z-up)");
-        let mut sim = WgpuSim::new_with_compact_contacts(capacity, false)?;
         let params = AvbdParams {
             gravity_y: gravity.z as f32,
             // Zero-gap rest (bodies do not sit `contact_offset` deep) and the world
@@ -466,11 +475,15 @@ impl RubbleEngine {
 
     /// Collect the solved contacts of the last rubble step (`h` its length) on chunks.
     fn contacts_of_step(&self, h: f64, start: &[BodyState], out: &mut Vec<EngineContact>) {
+        let t = std::time::Instant::now();
         let rows = self.sim.last_contacts().expect("contact readback");
+        profile::add("step.contacts.rows", t);
         if rows.is_empty() {
             return;
         }
+        let t = std::time::Instant::now();
         let end = self.sim.download_bodies();
+        profile::add("step.contacts.bodies", t);
         // Velocity of a body's material point `p` (rubble frame) at the start of the
         // engine step.
         let point_velocity = |owner: Owner, body: u32, p: glam::Vec3| match owner {
@@ -538,6 +551,7 @@ impl RigidEngine for RubbleEngine {
     }
 
     fn sync_bodies(&mut self, bodies: &[EngineBody]) {
+        let _timer = Timer(std::time::Instant::now(), "sync_bodies");
         let wanted: HashMap<BodyKey, &EngineBody> = bodies.iter().map(|b| (b.key, b)).collect();
         let mut stale: Vec<BodyKey> = self
             .bodies
@@ -557,6 +571,7 @@ impl RigidEngine for RubbleEngine {
     }
 
     fn step(&mut self, dt: f64, frozen: &[BodyKey], impulses: &[(BodyKey, Vec3, Vec3)]) -> Vec<EngineContact> {
+        let _timer = Timer(std::time::Instant::now(), "step");
         let mut all = self.sim.download_bodies();
         // Hold island bodies still.
         for k in frozen {
@@ -610,15 +625,20 @@ impl RigidEngine for RubbleEngine {
         self.sim.set_params(params);
         let mut out = Vec::new();
         for _ in 0..n {
+            let t = std::time::Instant::now();
             if let Err(e) = self.sim.step() {
                 panic!("rubble step failed: {e:?} (capacity overflow)");
             }
+            profile::add("step.sim", t);
+            let t = std::time::Instant::now();
             self.contacts_of_step(h, &all, &mut out);
+            profile::add("step.contacts", t);
         }
         out
     }
 
     fn motion(&self) -> Vec<BodyMotion> {
+        let _timer = Timer(std::time::Instant::now(), "motion");
         let all = self.sim.download_bodies();
         self.sorted_keys()
             .into_iter()
@@ -630,6 +650,7 @@ impl RigidEngine for RubbleEngine {
     }
 
     fn set_motion(&mut self, states: &[BodyMotion]) {
+        let _timer = Timer(std::time::Instant::now(), "set_motion");
         let all = self.sim.download_bodies();
         for st in states {
             let Some(e) = self.bodies.get(&st.key) else { continue };
@@ -658,6 +679,7 @@ impl RigidEngine for RubbleEngine {
     }
 
     fn save(&mut self) {
+        let _timer = Timer(std::time::Instant::now(), "save");
         self.discard();
         let snapshot = match self.spare.take() {
             Some(old) => self.sim.save_state_reusing(old),
@@ -673,6 +695,7 @@ impl RigidEngine for RubbleEngine {
     }
 
     fn restore(&mut self) {
+        let _timer = Timer(std::time::Instant::now(), "restore");
         if let Some(saved) = self.saved.take() {
             self.sim.restore_state(&saved.snapshot);
             self.bodies = saved.bodies;
@@ -696,9 +719,39 @@ impl RigidEngine for RubbleEngine {
     }
 
     fn discard(&mut self) {
+        let _timer = Timer(std::time::Instant::now(), "discard");
         if let Some(saved) = self.saved.take() {
             self.spare = Some(saved.snapshot);
         }
+    }
+}
+
+
+/// Wall time spent in each `RigidEngine` call (benchmarks): (calls, nanoseconds) per name.
+pub mod profile {
+    use std::sync::Mutex;
+    static TIMES: Mutex<Vec<(&'static str, u64, u64)>> = Mutex::new(Vec::new());
+    pub fn add(name: &'static str, t: std::time::Instant) {
+        let ns = t.elapsed().as_nanos() as u64;
+        let mut v = TIMES.lock().unwrap();
+        match v.iter_mut().find(|e| e.0 == name) {
+            Some(e) => {
+                e.1 += 1;
+                e.2 += ns;
+            }
+            None => v.push((name, 1, ns)),
+        }
+    }
+    /// Take the accumulated (name, calls, milliseconds) and reset.
+    pub fn take() -> Vec<(&'static str, u64, f64)> {
+        std::mem::take(&mut *TIMES.lock().unwrap()).into_iter().map(|(n, c, ns)| (n, c, ns as f64 * 1e-6)).collect()
+    }
+}
+
+struct Timer(std::time::Instant, &'static str);
+impl Drop for Timer {
+    fn drop(&mut self) {
+        profile::add(self.1, self.0);
     }
 }
 

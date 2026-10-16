@@ -186,6 +186,27 @@ fn persistent_entry(name: &str) -> &str {
     }
 }
 
+/// A high-performance adapter's device with its full limits.
+pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL;
+    let instance = wgpu::Instance::new(desc);
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        ..Default::default()
+    }))
+    .map_err(|e| anyhow::anyhow!("no wgpu adapter: {e}"))?;
+    let info = adapter.get_info();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("engine-webgpu-sim"),
+        required_features: wgpu::Features::empty(),
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))?;
+    Ok((info, device, queue))
+}
+
 impl WgpuSim {
     pub fn new(capacity: WorldCapacity) -> anyhow::Result<Self> {
         if std::env::var("ENGINE_PERSISTENT_CONTACTS").as_deref() == Ok("1") {
@@ -227,30 +248,33 @@ impl WgpuSim {
             capacity.max_candidates < 0x7fff_ffff,
             "compact pair index exceeds 31 bits"
         );
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| anyhow::anyhow!("no wgpu adapter"))?;
-        let info = adapter.get_info();
-        let align = adapter.limits().min_storage_buffer_offset_alignment;
+        let (info, device, queue) = default_device()?;
+        Self::with_device_storage(capacity, compact_contacts, persistent_contacts, info, device, queue)
+    }
+
+    /// The simulation on an existing device (e.g. one shared with the GPU stress solver,
+    /// so both read each other's buffers without a host round trip).
+    pub fn with_device(
+        capacity: WorldCapacity,
+        info: wgpu::AdapterInfo,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> anyhow::Result<Self> {
+        Self::with_device_storage(capacity, false, false, info, device, queue)
+    }
+
+    fn with_device_storage(
+        capacity: WorldCapacity,
+        compact_contacts: bool,
+        persistent_contacts: bool,
+        info: wgpu::AdapterInfo,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> anyhow::Result<Self> {
+        let align = device.limits().min_storage_buffer_offset_alignment;
         if u64::from(align) > PASS_ALIGN {
             anyhow::bail!("storage offset alignment {align} > {PASS_ALIGN}");
         }
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("engine-webgpu-sim"),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter.limits(),
-                memory_hints: Default::default(),
-            },
-            None,
-        ))?;
 
         let mut sizes = buffer_sizes(&capacity);
         if persistent_contacts {
@@ -375,8 +399,8 @@ impl WgpuSim {
                 layout: Some(
                     &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some(&name),
-                        bind_group_layouts: &[&layout],
-                        push_constant_ranges: &[],
+                        bind_group_layouts: &[Some(&layout)],
+                        immediate_size: 0,
                     }),
                 ),
                 module: &module,
@@ -724,9 +748,9 @@ impl WgpuSim {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().unwrap().unwrap();
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().expect("mapped range");
         let bodies = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         staging.unmap();
@@ -1247,9 +1271,9 @@ impl WgpuSim {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().unwrap().unwrap();
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().expect("mapped range");
         let c: StepCounters = *bytemuck::from_bytes(&data[..n as usize]);
         drop(data);
         staging.unmap();

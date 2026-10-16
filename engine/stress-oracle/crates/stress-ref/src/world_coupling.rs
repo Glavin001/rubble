@@ -839,6 +839,28 @@ pub struct CoupledFrame {
 
 /// Driven bodies (by their key in `saved`, at the start of the frame) with a bond broken
 /// among `events` (those since `saved`).
+/// The cluster id of every chunk, by structure (what `fractured_since` reads of a saved
+/// solver, without copying it).
+pub fn chunk_clusters(m: &ReferenceSolver) -> Vec<Vec<u64>> {
+    m.chunks.iter().map(|cs| cs.iter().map(|c| m.clusters.get(c.cluster).map_or(u64::MAX, |cl| cl.id)).collect()).collect()
+}
+
+/// `fractured_since` from the frame-start `chunk_clusters` and bond endpoints (bonds are
+/// never added, so the current solver's geometry is the saved one's).
+pub fn fractured_since_clusters(start: &[Vec<u64>], m: &ReferenceSolver, events: &[SolverEvent], driven: &HashSet<BodyKey>) -> HashSet<BodyKey> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SolverEvent::Broken { structure, bond, .. } => {
+                let chunk = m.bonds[*structure][*bond].geometry.a;
+                let key = BodyKey::Cluster(start[*structure][chunk]);
+                driven.contains(&key).then_some(key)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn fractured_since(saved: &ReferenceSolver, events: &[SolverEvent], driven: &HashSet<BodyKey>) -> HashSet<BodyKey> {
     events
         .iter()
