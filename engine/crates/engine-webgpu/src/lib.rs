@@ -792,7 +792,10 @@ mod tests {
     #[test]
     fn count_only_kernels_do_not_load_unrelated_atomic_counters() {
         // These kernels need immutable body/collider counts; reparent commands
-        // additionally read the contact count in their invalidation branch. Loading a
+        // additionally read the contact count in their invalidation branch, and the
+        // awake-list per-body passes (PASS_U == 1) bound threads by the awake count
+        // in place of bodyCount: one read of a counter no thread of that dispatch
+        // writes, the same as every other awake-list kernel. Loading a
         // whole StepCounters snapshot emits ten atomic reads for every body on
         // WGSL, including counters being incremented by neighbouring threads.
         // Check parsed IR rather than generated identifiers or text formatting.
@@ -802,6 +805,7 @@ mod tests {
             "broadphase_insert",
             "broadphase_query",
             "build_awake_list",
+            "predict_bodies",
             "extract_velocity_sleep",
             "sleep_island_commit",
             "ccd_classify",
@@ -876,10 +880,10 @@ mod tests {
                 }
             }
             atomic_offsets.sort_unstable();
-            let expected = if name == "apply_commands" {
-                vec![8]
-            } else {
-                vec![]
+            let expected = match name {
+                "apply_commands" => vec![8],
+                "predict_bodies" | "extract_velocity_sleep" | "sleep_island_commit" => vec![20],
+                _ => vec![],
             };
             assert_eq!(atomic_offsets, expected,
                 "{name}: unrelated atomic counter reads per invocation: {unexpected:?}. Read bodyCount/colliderCount directly; a full counter snapshot can cause GPU contention at 100k–506k scale. Atomic increments remain allowed.");
