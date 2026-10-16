@@ -575,6 +575,100 @@ BoxManifold collideBoxCapsule(float3 cA, float4 qA, float3 hA, float3 cB, float4
     return m;
 }
 
+// Closest points c1 on segment p1q1 and c2 on segment p2q2 (Ericson 5.1.9).
+void closestSegments(float3 p1, float3 q1, float3 p2, float3 q2, out float3 c1, out float3 c2)
+{
+    float3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+    float a = dot(d1, d1), e = dot(d2, d2), b = dot(d1, d2), c = dot(d1, r), f = dot(d2, r);
+    float s = 0.0, t = 0.0;
+    if (a > 1e-12 && e > 1e-12)
+    {
+        float denom = a * e - b * b;
+        s = denom > 1e-12 ? clamp((b * f - c * e) / denom, 0.0, 1.0) : 0.0;
+        t = (b * s + f) / e;
+        if (t < 0.0) { t = 0.0; s = clamp(-c / a, 0.0, 1.0); }
+        else if (t > 1.0) { t = 1.0; s = clamp((b - c) / a, 0.0, 1.0); }
+    }
+    else if (e > 1e-12) t = clamp(f / e, 0.0, 1.0);
+    else if (a > 1e-12) s = clamp(-c / a, 0.0, 1.0);
+    c1 = p1 + s * d1;
+    c2 = p2 + t * d2;
+}
+
+static const uint CAPSULE_CAPSULE_FEATURE = 0x07000000u;
+// Segments closer than this to parallel (sine of the angle) share a face-like
+// overlap and get two contacts; otherwise they cross at one point.
+static const float CAPSULE_PARALLEL_SIN = 0.05;
+
+// Capsule A vs capsule B (segments along local +Y, half lengths hA / hB).
+// The closest pair of segment points gives the normal (A → B). Near-parallel
+// segments whose projections overlap get one contact at each end of the
+// overlap (each paired with its closest point on B), plus the closest pair
+// when the segments cross inside the overlap; crossed segments, or capsules
+// that are spheres, get the single closest pair. Contacts within
+// `spec` of touching are kept (0 unless contact-gap mode).
+BoxManifold collideCapsules(float3 cA, float4 qA, float rA, float hA, float3 cB, float4 qB, float rB, float hB, float spec)
+{
+    BoxManifold m;
+    m.count = 0;
+    m.normal = float3(0, 1, 0);
+    float3 axA = quatRotate(qA, float3(0, 1, 0));
+    float3 axB = quatRotate(qB, float3(0, 1, 0));
+    float3 a0 = cA - axA * hA;
+    float3 a1 = cA + axA * hA;
+    float3 b0 = cB - axB * hB;
+    float3 b1 = cB + axB * hB;
+    float3 pa, pb;
+    closestSegments(a0, a1, b0, b1, pa, pb);
+    float3 d = pb - pa;
+    float dist = length(d);
+    float reach = rA + rB;
+    if (dist > reach + spec) return m;
+    float3 n;
+    if (dist > 1e-6) n = d / dist;
+    else
+    {
+        // Axes meet: any normal perpendicular to both, toward B.
+        float3 c = cross(axA, axB);
+        if (dot(c, c) < 1e-12)
+        {
+            float3 t2;
+            orthonormalBasis(axA, c, t2);
+        }
+        n = normalize(c);
+        if (dot(n, cB - cA) < 0.0) n = -n;
+    }
+    m.normal = n;
+    float3 mids[8];
+    if (hA > 1e-6 && hB > 1e-6 && length(cross(axA, axB)) < CAPSULE_PARALLEL_SIN)
+    {
+        // Overlap of B's projection on A's segment.
+        float lenA = 2.0 * hA;
+        float tb0 = dot(b0 - a0, axA);
+        float tb1 = dot(b1 - a0, axA);
+        float t0 = max(0.0, min(tb0, tb1));
+        float t1 = min(lenA, max(tb0, tb1));
+        if (t1 - t0 > 1e-6)
+        {
+            float endGap = 1e30;
+            for (int e = 0; e < 2; e++)
+            {
+                float3 p = a0 + axA * (e == 0 ? t0 : t1);
+                float3 q, dummy;
+                closestSegments(p, p, b0, b1, dummy, q);
+                float g = dot(n, q - p) - reach;
+                endGap = min(endGap, g);
+                if (g > spec) continue;
+                boxAddPt(m, mids, p + n * rA, q - n * rB, CAPSULE_CAPSULE_FEATURE | uint(e));
+            }
+            // Segments crossing inside the overlap are deepest there: keep that pair too.
+            if (m.count > 0 && dist - reach >= endGap - 1e-5) return m;
+        }
+    }
+    boxAddPt(m, mids, pa + n * rA, pb - n * rB, CAPSULE_CAPSULE_FEATURE | 0x100u);
+    return m;
+}
+
 // Capsule A vs plane B: one contact per end-cap sphere closer than `margin`
 // (as sphere/plane). Normal A → B (−plane normal).
 BoxManifold collideCapsulePlane(float3 cA, float4 qA, float radius, float halfLen, float3 planeN, float planeW, float margin)

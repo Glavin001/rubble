@@ -4690,6 +4690,68 @@ fn capsule_rests_flat_on_a_box_and_a_plane_with_two_contacts() {
     }
 }
 
+/// A capsule laid across two static parallel capsules (one crossing contact each),
+/// and one laid in the groove between them (two parallel contacts each), settles
+/// at its rest height without sinking, rolling or sliding.
+#[test]
+fn capsule_rests_across_and_along_two_capsules() {
+    let (big_r, big_l, r, l, gap) = (0.1f32, 0.5f32, 0.1f32, 0.4f32, 0.15f32);
+    let lying_x = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let lying_z = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    // (label, top orientation, support half spacing along Z, rest height, contacts per support)
+    let cases = [
+        ("across", lying_z, 0.3f32, big_r + r, 1u32),
+        ("groove", lying_x, gap, ((big_r + r) * (big_r + r) - gap * gap).sqrt(), 2),
+    ];
+    for (label, top_rot, s, rest, per_support) in cases {
+        let mut sim = WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
+        let mut params = AvbdParams { dt: 1.0 / 120.0, iterations: 6, flags: FLAG_REUSE_CONTACTS, ..AvbdParams::default() };
+        params.gravity_y = -9.81;
+        sim.set_params(params);
+        let capsule = |body: u32, radius: f32, half: f32| Collider {
+            body,
+            shape: ShapeType::Capsule as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 1.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [radius, half, 0.0, radius + half],
+        };
+        let mut supports = Vec::new();
+        for z in [-s, s] {
+            let mut st = BodyState::static_plane_support();
+            st.position = [0.0, 0.0, z];
+            st.orientation = lying_x.to_array();
+            let b = sim.add_body(st);
+            supports.push(sim.add_collider(capsule(b, big_r, big_l)));
+        }
+        let top = sim.add_body(BodyState::dynamic(glam::Vec3::new(0.0, rest + 0.02, 0.0), top_rot, 1.0, glam::Vec3::splat(0.02)));
+        let cap = sim.add_collider(capsule(top, r, l));
+        for step in 0..240 {
+            sim.step().unwrap_or_else(|e| panic!("{label}: step {step}: {e:?}"));
+        }
+        let b = sim.download_bodies()[top as usize];
+        let p = glam::Vec3::from_array(b.position);
+        let margin = sim.params.contact_offset;
+        assert!(p.y > rest - 1.5 * margin - 0.005 && p.y < rest + 0.005, "{label}: capsule at y {} (rest {rest})", p.y);
+        assert!(p.x.abs() < 0.01 && p.z.abs() < 0.01, "{label}: capsule drifted to {p}");
+        assert!(glam::Vec3::from_array(b.linear_vel).length() < 0.05, "{label}: still moving {:?}", b.linear_vel);
+        let axis = glam::Quat::from_array(b.orientation) * glam::Vec3::Y;
+        let want = top_rot * glam::Vec3::Y;
+        assert!(axis.dot(want).abs() > 0.999, "{label}: capsule turned (axis {axis})");
+        let m: Vec<Manifold> = download(&sim, 25, 0, sim.last_counters.manifold_count as usize);
+        for &support in &supports {
+            let pair: Vec<&Manifold> = m
+                .iter()
+                .filter(|m| (m.collider_a, m.collider_b) == (cap, support) || (m.collider_a, m.collider_b) == (support, cap))
+                .collect();
+            assert_eq!(pair.len(), 1, "{label}: {} manifolds with support {support}", pair.len());
+            assert_eq!(pair[0].contact_count, per_support, "{label}: {} contacts with support {support}", pair[0].contact_count);
+        }
+    }
+}
+
 // ---- short GPU input/output checks (a few steps at most) ------------------------
 
 #[test]
