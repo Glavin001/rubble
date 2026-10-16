@@ -177,6 +177,13 @@ const warmTagPeriod=2**(32-warmValueBits)-2;
 
 
 Object.assign(params,scene.params,{gridCellSize:scene.gridCellSize});
+// budget.deterministic (opt-in): run-to-run identical results. Adds the exact
+// sleep gate (below) and drops the SAT-cache early-out (params flag 8): the
+// cache is direct-mapped, pairs that share a slot overwrite each other in
+// scheduling order, and on rare near pairs its proof of separation disagrees
+// with the full SAT, which can miss that axis (near-parallel edges are
+// skipped) and emit a fallback contact. Both change results vs the default.
+if(budget.deterministic===true)params.flags|=8;
 const sizes=bufferSizes();
 for(const [i,size] of sizes.entries())if(size>device.limits.maxStorageBufferBindingSize||size>device.limits.maxBufferSize)throw new Error(`GPU buffer ${i} exceeds this adapter's limits`);
 const bufs=sizes.map((size,i)=>device.createBuffer({label:`AVBD ${i}`,size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC|((i===6||i===22)?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|(i===23?GPUBufferUsage.INDIRECT:0)}));
@@ -345,7 +352,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       // Persistent resting table on moved-only steps with awake queries: bit 0
       // on, bit 1 rebuild now (it is rebuilt on the GPU after sleep events).
       const rest = s[19] !== 0 && awakeQueries && persistentRest;
-      s[25] = (rest ? (restValid ? 1 : 3) : 0) | (warmTagged ? 4 : 0);
+      s[25] = (rest ? (restValid ? 1 : 3) : 0) | (warmTagged ? 4 : 0) | (exactSleepGate ? 8 : 0);
       // Tagged warm hash: clear once per tag cycle (HOST_S(17) is the step).
       const cycle = Math.floor(s[17] / warmTagPeriod);
       warmClear = !warmTagged || cycle !== warmCycle;
@@ -362,6 +369,10 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
     const persistentRest = budget.persistentRest !== false;
     let restStep = false, restValid = false;
     let warmClear = true, warmCycle = -1;
+    // Opt-in: the island sleep gate moves a revocation exactly one hop per
+    // round (deterministic); the default in-place gate can move it further
+    // within a round depending on GPU scheduling. Changes which bodies sleep.
+    const exactSleepGate = budget.deterministicSleepGate === true || budget.deterministic === true;
     const boundsSortable = colliders.every((c, i) => i === 0 || c.body >= colliders[i - 1].body) &&
       bodies.every((b) => !(b.flags & 2));
     // With most bodies awake the full pass is faster (no per-body search, even
@@ -596,7 +607,8 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
       if (listedPasses) dispWork(pass, 'extract_velocity_sleep', 67, 1); // awake list
       else disp(pass, 'extract_velocity_sleep', nBodies);
       disp(pass, 'write_sleep_args', 64);
-      for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
+      // Pass value = round (1..n), used by the opt-in exact gate.
+      for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66, i + 1);
       dispWork(pass, 'sleep_island_commit', 67, listedPasses ? 1 : 0); // awake list
       if (beginPass) phase('sleep');
       pass.end();

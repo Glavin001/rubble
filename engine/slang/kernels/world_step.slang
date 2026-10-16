@@ -4601,10 +4601,23 @@ void write_sleep_args(uint3 tid : SV_DispatchThreadID)
     writeDispatchArgs(67u, anyCandidate ? gCounters[0].bodyCount : 0u);
 }
 
+static const uint SLEEP_REVOKED = 0x80000000u;
+bool sleepGateExact() { return (HOST_S(25) & 8u) != 0u; }
+// Candidate at the start of `round`: never revoked, or revoked in this round.
+bool gateCandidate(uint flag, uint round) { return flag == 1u || flag == (SLEEP_REVOKED | round); }
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
 {
+    // Opt-in deterministic gate (HOST_S(25) bit 3, JS host, PASS_U = round
+    // 1..n): a candidate revoked in round r is marked SLEEP_REVOKED | r and
+    // still counts as a candidate for the rest of round r, so a revocation
+    // travels exactly one hop per round. In place (default), a revocation
+    // written earlier in the same dispatch may already be read, so how far it
+    // travels in n rounds depends on thread scheduling.
+    bool roundExact = sleepGateExact() && PASS_U != 0u;
+    uint round = PASS_U;
     // One thread per manifold (same connectivity as contacts, ~2–4× fewer).
     // Ring smash: no sleep candidates → scratch[13]==0 → entire gate is a no-op.
     if (ALOAD(gScratchAtomics[13]) == 0u) return;
@@ -4633,12 +4646,22 @@ void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
     bool dynB = bodyIsDynamic(b);
     if (!dynA || !dynB) return;
     // Sleeping neighbor is fine (already out of the island). Awake non-candidate blocks.
-    bool okA = bodyIsSleeping(a) || gCcdFlags[ba] != 0;
-    bool okB = bodyIsSleeping(b) || gCcdFlags[bb] != 0;
+    uint fa = gCcdFlags[ba];
+    uint fb = gCcdFlags[bb];
+    bool okA = bodyIsSleeping(a) || (roundExact ? gateCandidate(fa, round) : fa != 0);
+    bool okB = bodyIsSleeping(b) || (roundExact ? gateCandidate(fb, round) : fb != 0);
     if (!okA || !okB)
     {
-        if (dynA && !bodyIsSleeping(a)) gCcdFlags[ba] = 0;
-        if (dynB && !bodyIsSleeping(b)) gCcdFlags[bb] = 0;
+        if (roundExact)
+        {
+            if (dynA && !bodyIsSleeping(a) && fa == 1u) gCcdFlags[ba] = SLEEP_REVOKED | round;
+            if (dynB && !bodyIsSleeping(b) && fb == 1u) gCcdFlags[bb] = SLEEP_REVOKED | round;
+        }
+        else
+        {
+            if (dynA && !bodyIsSleeping(a)) gCcdFlags[ba] = 0;
+            if (dynB && !bodyIsSleeping(b)) gCcdFlags[bb] = 0;
+        }
     }
 }
 
@@ -4656,7 +4679,8 @@ void sleep_island_commit(uint3 tid : SV_DispatchThreadID)
     else if (i >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[i];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
-    if (gCcdFlags[i] == 0) return;
+    // Exact gate: only unrevoked candidates (1) sleep; revoked ones hold a mark.
+    if (sleepGateExact() ? gCcdFlags[i] != 1u : gCcdFlags[i] == 0) return;
     b.flags = (b.flags & ~BODY_AWAKE) | BODY_SLEEPING;
     b.linearVel = float3(0, 0, 0);
     b.angularVel = float3(0, 0, 0);
