@@ -67,7 +67,10 @@ const TAKES = {
       { n: 40, input: { forward: 0, steer: 0 }, caption: 'Monster truck: sphere-cast wheels, 4WD with limited-slip diffs', cam: 'chase' },
       { n: 150, cruise: 11, input: { steer: 0 }, caption: 'Smash through the box stack' },
       { n: 120, cruise: 11, input: { steer: 0 }, caption: 'Boxes are ordinary AVBD bodies; the truck is one chassis body', cam: { orbit: [2.6, 0.3, 16], spin: 0.008 } },
-      { n: 150, cruise: 10, input: { steer: 1 }, caption: 'Hard right turn', cam: 'chase' },
+      // Full lock at 7 m/s needs ~0.75 g. The truck's static stability factor is
+      // ~0.92 g (half-track 1.45 m / CG 1.58 m), so at 10 m/s it slides at the limit
+      // and debris under a tyre trips it over, which is physical but not this take.
+      { n: 150, cruise: 7, input: { steer: 1 }, caption: 'Hard right turn', cam: 'chase' },
       { n: 210, cruise: 12, input: { steer: 0.15 }, caption: 'Back toward the ramps' },
       { n: 100, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Brake' },
     ],

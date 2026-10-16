@@ -537,8 +537,10 @@ fn crashing_into_light_crates_does_not_launch_the_vehicle() {
     // A stack of 40 kg crates. Wheels used to treat the crates as immovable ground and
     // the vehicle was thrown 300+ m up. Now tyre rows on crates are two-body and wheel
     // shells take side hits: the crates get shoved and the vehicle stays bounded.
-    // Peak wheel loads while ramming rigid crates are legitimately large (a 3 t truck
-    // losing ~3 m/s in ~15 ms is ~600 kN), so the test bounds motion, not force.
+    // Wheel loads stay physical: a wheel mount inside a crate used to read as a hit at
+    // t = 0 along the suspension axis (full bump, 60× the truck's weight). The worst
+    // real hit left is a tyre climbing a crate edge at ~4.5 m/s into the surface: the
+    // 6 Hz bump damper alone gives ~176 kN, about 6× the monster truck's weight.
     for preset in [presets::monster_truck(), presets::sedan()] {
         let mut sim = world();
         sim.set_material(1, Material { friction: 0.6, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
@@ -589,9 +591,42 @@ fn crashing_into_light_crates_does_not_launch_the_vehicle() {
         );
         assert!(max_v < 16.0, "{}: thrown at {max_v} m/s", preset.name);
         assert!(max_w < 6.0, "{}: spun at {max_w} rad/s", preset.name);
-        assert!(max_y < 6.0, "{}: launched to y {max_y}", preset.name);
+        assert!(max_y < 3.0, "{}: launched to y {max_y}", preset.name);
+        assert!(max_fn < 12.0 * weight, "{}: peak wheel load {:.1}× weight", preset.name, max_fn / weight);
         assert!(shoved > 0.5, "{}: the crates react ({shoved} m)", preset.name);
     }
+}
+
+#[test]
+fn a_ledge_beside_the_wheel_mount_is_not_a_suspension_hit() {
+    // A static ledge beside the front-left wheel at mount height: 0.5 m outboard of
+    // the suspension axis, so the sphere cast (tyre radius 0.8) starts inside it, but
+    // ~0.9 m from the wheel centre, so neither the tyre nor its shell touches it. Its
+    // face is a side hit and the tyre stands on the ground below. Casts used to
+    // report an origin-inside hit as t = 0 along the suspension axis, so the bump stop
+    // fired straight up against a ledge the tyre never touched.
+    let mut sim = world();
+    let desc = presets::monster_truck();
+    // Front-left mount (1.45, -0.1, 1.75) from the chassis, at y ≈ 1.6 once settled.
+    static_box(&mut sim, [1.45 + 0.5 + 0.4, 1.95, 1.75], [0.4, 0.4, 0.4], [0.0, 0.0, 0.0, 1.0]);
+    let v = spawn(&mut sim, &desc, 2.0);
+    let weight = mass_of(&desc) * 10.0;
+    let (mut max_fn, mut max_y, mut drift) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..180 {
+        sim.step().expect("step");
+        let c = chassis(&sim, v);
+        max_y = max_y.max(c.position[1]);
+        drift = drift.max(c.position[0].abs().max(c.position[2].abs()));
+        let st = sim.vehicle_state(v);
+        max_fn = st.wheels.iter().fold(max_fn, |m, w| m.max(w.suspension_force));
+        let w = &st.wheels[0];
+        assert!(w.ground_body != Some(1), "step {i}: the front-left tyre took the ledge as ground: {w:?}");
+    }
+    let w = &sim.vehicle_state(v).wheels[0];
+    assert!(w.in_contact && w.ground_body == Some(0) && w.contact_normal[1] > 0.99, "tyre on the ground: {w:?}");
+    eprintln!("ledge beside the mount: peak wheel load {:.2}× weight, max y {max_y:.2}, drift {drift:.3} m", max_fn / weight);
+    assert!(max_fn < 1.5 * weight, "no bump-stop spike ({:.1}× weight)", max_fn / weight);
+    assert!(max_y < 2.05 && drift < 0.05, "no kick off the ledge (max y {max_y}, drift {drift} m)");
 }
 
 #[test]

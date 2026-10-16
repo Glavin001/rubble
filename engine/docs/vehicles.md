@@ -45,7 +45,12 @@ open / limited-slip differentials, inter-differential LSD, plus a direct-drive m
 
 Wheel queries: one 64-lane workgroup per wheel casts a ray, or sweeps a sphere of the
 wheel radius (`wheel_query: Sphere`, catches kerbs and box edges), along the suspension at
-`x⁻`. It runs right after `broadphase_query` and walks the broadphase grid cells the
+`x⁻`. Each collider's hit counts only inside the tyre cone (35° from the suspension axis for
+sphere casts, and for a hit above full bump the cone is measured from the full-bump wheel centre).
+Anything else is the wheel shell's, so a crate face beside the tyre never hides the ground below
+it. A cast that starts inside a collider (a mount overlapping a crate) reports where the line
+entered it (t ≤ 0) and the real normal there, never an invented full-bump hit along the axis.
+It runs right after `broadphase_query` and walks the broadphase grid cells the
 segment crosses (padded by one cell), plus planes, large dynamics and listed large statics,
 so cost no longer grows with the collider count. `VehicleHost::full_scan_queries` /
 `WgpuSim::set_vehicle_full_scan` switches to scanning every collider; that is the test

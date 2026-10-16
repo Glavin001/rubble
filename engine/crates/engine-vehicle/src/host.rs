@@ -275,6 +275,11 @@ impl VehicleHost {
         self.entries[h.0 as usize].first_part_body + part
     }
 
+    /// Global wheel slot of a vehicle's wheel (index into the wheel records).
+    pub fn wheel_slot(&self, h: VehicleHandle, wheel: u32) -> u32 {
+        self.entries[h.0 as usize].slots.wheel_base + wheel
+    }
+
     /// Body index of a wheel's free rigid body (valid after `detach_wheel`).
     pub fn wheel_body(&self, h: VehicleHandle, wheel: u32) -> u32 {
         self.entries[h.0 as usize].chassis + 2 + wheel
