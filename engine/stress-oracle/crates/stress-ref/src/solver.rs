@@ -448,7 +448,8 @@ fn rate_within(limit: f64, dt: f64, cap: u32) -> u32 {
 impl ReferenceSolver {
     pub fn new(scene: &Scene) -> ReferenceSolver {
         let config = SolverConfig::from_scene(scene);
-        let structures: Vec<std::sync::Arc<Structure>> = (0..scene.bodies.len()).map(|i| std::sync::Arc::new(Structure::from_scene(scene, i))).collect();
+        // Independent per body: built on all cores, in body order.
+        let structures: Vec<std::sync::Arc<Structure>> = crate::par::map_range(0..scene.bodies.len(), 1, |i| std::sync::Arc::new(Structure::from_scene(scene, i)));
         let mut solver = ReferenceSolver {
             config,
             chunks: Vec::new(),
@@ -1232,7 +1233,10 @@ impl ReferenceSolver {
         if !self.config.methods.true_step {
             return;
         }
-        self.true_steps = (0..self.structures.len()).map(|s| self.structure_true_step(s)).collect();
+        // Independent per structure: spread over the cores, collected in structure order.
+        let this = &*self;
+        let steps = crate::par::map_range(0..this.structures.len(), 1, |s| this.structure_true_step(s));
+        self.true_steps = steps;
     }
 
     /// The stable central-difference substep of structure `s`'s bond network at full

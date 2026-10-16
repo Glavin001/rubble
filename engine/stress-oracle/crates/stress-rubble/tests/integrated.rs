@@ -120,3 +120,55 @@ fn sudden_support_loss_is_promoted_at_its_event() {
     assert_eq!(a.redone, 0);
     assert!((a.fragments - 11.0).abs() <= 2.0 && (a.broken - 11.0).abs() <= 2.0, "{} fragments, {} broken", a.fragments, a.broken);
 }
+
+/// Bit-level summary of the mirror's state: cluster motion and membership, every chunk's
+/// hidden state, every bond's history and force.
+fn mirror_state(m: &stress_ref::solver::ReferenceSolver) -> String {
+    let mut out = String::new();
+    for cl in &m.clusters {
+        out += &format!("{} {:?} {:?} {:?} {:?} {:?}\n", cl.id, cl.chunks, cl.pose, cl.velocity, cl.angular_velocity, cl.activity);
+    }
+    for (s, chunks) in m.chunks.iter().enumerate() {
+        for st in chunks {
+            out += &format!("{s} {:?} {:?} {:?} {:?}\n", st.u, st.th, st.v, st.w);
+        }
+    }
+    for bonds in &m.bonds {
+        for b in bonds {
+            out += &format!("{:?} {:?} {}\n", b.joint, b.force, b.alive);
+        }
+    }
+    out
+}
+
+/// A segment snapshot leaves the structures whose clusters are all quiet (off the GPU)
+/// out of its copy; restoring it gives the same mirror as restoring a full snapshot of
+/// the same instant, after GPU substeps changed the live state in between.
+#[test]
+fn segment_snapshot_restores_like_a_full_one() {
+    let gpu = Gpu::new().expect("GPU");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/house-1story.json");
+    let house = stress_ref::scene_pack::import(&path, "house-1story", "structure").expect("house-1story pack");
+    let town = stress_ref::scenes::bombarded_exact(stress_ref::scenes::pack_town(&house, 4, 2.0), 1);
+    let scene = configure(town, 0.25);
+    std::env::set_var("STRESS_GPU_FIXED_HORIZON", "1");
+    let engine = RubbleEngine::with_device(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone()).expect("rubble");
+    let mut w = GpuWorld::with_engine(&gpu, &scene, Box::new(engine)).expect("coupled world");
+    w.redo_fractured_frames = false;
+    for _ in 0..3 {
+        w.step_frame(&gpu).expect("frame");
+    }
+    assert!(w.solver.quiet_count() > 0, "the untouched houses should be quiet");
+    let full = w.solver.snapshot(&gpu);
+    let segment = w.solver.snapshot_segment(&gpu);
+    let dt = 1e-6;
+    w.solver.step(&gpu, dt, 200).expect("substeps");
+    w.solver.restore(&gpu, segment).expect("restore segment");
+    w.solver.sync(&gpu);
+    let after_segment = mirror_state(&w.solver.mirror);
+    w.solver.step(&gpu, dt, 200).expect("substeps");
+    w.solver.restore(&gpu, full).expect("restore full");
+    w.solver.sync(&gpu);
+    let after_full = mirror_state(&w.solver.mirror);
+    assert!(after_segment == after_full, "segment restore differs from full restore");
+}

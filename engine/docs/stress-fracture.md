@@ -117,6 +117,18 @@ rewinds) against PhysX GPU:
 
 The CPU oracle runs 1.9-4.9 s per destruction frame.
 
+At scale (`stress_bench --set scale`, 256 copies of house-1story, rubble only):
+
+| regime | frame time | setup |
+|---|---|---|
+| 256 houses idle, after the first second | 6.8 ms median, 19.7 ms p95 | about 15 s |
+| 256 houses, four rammed (first 0.5 s) | 514 ms mean | about 15 s |
+
+In the four-rammed town the GPU waits are under a fifth of the main thread. The rest is
+host work per segment that scales with the active houses and their debris: the plan
+and pack of every build, snapshots, readbacks and the contact step bound. That is what
+stage 3 of `docs/stress-fracture-gpu-resident.md` moves onto the GPU.
+
 Where the time goes now:
 - Idle and resting scenes: settled anchored clusters are left out of the GPU tables
   (`GpuSolver::quiet_clusters`, bit-identical), and the rest of the host work was cut
