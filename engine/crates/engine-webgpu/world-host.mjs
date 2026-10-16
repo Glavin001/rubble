@@ -166,6 +166,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
       if (world.jointCount >= cap.maxJoints) throw new Error('joint capacity exhausted');
       device.queue.writeBuffer(bufs[5], world.jointCount * 128, words);
       world.jointCount++;
+      world.jointHashClearPending = true;
     }),
     appendBodies: (list) => list.forEach((w) => world.addBodyWords(w)),
     appendColliders: (list) => list.forEach((w) => world.addColliderWords(w)),
@@ -292,10 +293,10 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     const p = enc.beginComputePass();
     if (nV > 0) disp(p, 'vehicle_input', nV);
     disp(p, 'build_aabbs', nC);
-    if (world.jointCount > 0) {
-      // Joint pair filter (tyre joints skip it; the hash must still be valid).
+    if (world.jointHashClearPending) {
+      // Only tyre joints here: they skip the joint pair hash, which just has to be empty.
       disp(p, 'joint_hash_clear', 65536);
-      disp(p, 'joint_hash_insert', world.jointCount);
+      world.jointHashClearPending = false;
     }
     disp(p, 'broadphase_clear', gridHashWords());
     disp(p, 'broadphase_insert', nC);

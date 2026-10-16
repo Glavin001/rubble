@@ -63,6 +63,9 @@ pub struct MetalWorld {
     body_count: u32,
     collider_count: u32,
     joint_count: u32,
+    /// Joints that take part in the joint pair filter (everything but tyre joints).
+    user_joint_count: u32,
+    joint_hash_clear_pending: bool,
     /// Island-gate BFS rounds (8 for stacks; 2 for random piles so one rocker cannot pin all).
     sleep_island_rounds: u32,
     material_count: u32,
@@ -240,6 +243,8 @@ impl MetalWorld {
             body_count: 0,
             collider_count: 0,
             joint_count: 0,
+            user_joint_count: 0,
+            joint_hash_clear_pending: false,
             sleep_island_rounds: 8,
             material_count: 1,
             command_count: 0,
@@ -314,6 +319,10 @@ impl MetalWorld {
     }
 
     pub fn add_joint(&mut self, joint: Joint) -> u32 {
+        if joint.joint_type != engine_schema::JOINT_TYRE {
+            self.user_joint_count += 1;
+        }
+        self.joint_hash_clear_pending = true;
         let id = self.joint_count;
         assert!(id < self.capacity.max_joints);
         let joints = unsafe {
@@ -712,9 +721,13 @@ impl MetalWorld {
         self.dispatch(&encoder, "build_aabbs", n_cols);
         // O(1) joint-pair filter for broadphase (was O(joints) per candidate).
         // Ring/Wall smash have zero joints — skip the 64k clear entirely.
-        if self.joint_count > 0 {
+        // Tyre joints skip the pair hash: with no user joints it only needs one clear.
+        if self.user_joint_count > 0 || self.joint_hash_clear_pending {
             self.dispatch(&encoder, "joint_hash_clear", 65536);
-            self.dispatch(&encoder, "joint_hash_insert", n_joints);
+            if self.user_joint_count > 0 {
+                self.dispatch(&encoder, "joint_hash_insert", n_joints);
+            }
+            self.joint_hash_clear_pending = false;
         }
         self.dispatch(&encoder, "broadphase_clear", 131072);
         self.dispatch(&encoder, "broadphase_insert", n_cols);

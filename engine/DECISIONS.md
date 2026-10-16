@@ -291,3 +291,5 @@ Host notes:
 * WgpuSim and the JS host previously never dispatched the joint graph passes; they do now.
 * Capacity reserves one joint per wheel slot, and the AABB tail gains a ground block per wheel slot.
 * A partial `float3` store and a constant-folded quaternion both tripped naga's SPIR-V front end; the shell code uses whole-record stores and separate park and place paths.
+* Tyre joints never enter the joint pair hash, so with no user joints the hash is cleared once instead of every step (64k entries).
+* Cost at traffic scale (48 vehicles, 400 crates, WgpuSim on an M3 Max): 8.77 ms/step against 8.44 ms before coupling (+4%). This is mostly the shell spheres in the broadphase and the real crate coupling.
