@@ -10,6 +10,7 @@ members = [
     "crates/engine-slang-build",
     "crates/engine-scenes",
     "crates/engine-oracles",
+    "crates/engine-fracture",
 ]
 
 [workspace.package]
@@ -39,6 +40,7 @@ engine-slang-build = { path = "crates/engine-slang-build" }
 engine-metal = { path = "crates/engine-metal" }
 engine-scenes = { path = "crates/engine-scenes" }
 engine-oracles = { path = "crates/engine-oracles" }
+engine-fracture = { path = "crates/engine-fracture" }
 
 [profile.release]
 lto = "thin"

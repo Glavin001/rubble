@@ -1,0 +1,22 @@
+# Generated benchmark scenes: `stress-ref gen-scenes scenes` (README).
+scenes/
+# Rendered videos (`scripts/render_videos.sh`, VIDEOS=videos).
+videos/
+# stress-viz writes `<scene>.mp4` / stills into the working directory when run without
+# --out; nothing rendered is source.
+*.mp4
+*.webm
+*.gif
+/*.png
+# Local A/B and study output (`stress-ref ab --json`, `run --out` scratch).
+/ab/
+/out/
+*.log
+# golden/ and golden_mesh/ are committed oracle results (golden_mesh/ is the b5 v40
+# mesh study kept as evidence; see its README). Build output (target/), Python
+# bytecode and .DS_Store are ignored by the repository's root .gitignore.
+/target/
+__pycache__/
+# Finer veneer-house levels are regenerated from the GLB:
+#   cargo run -p engine-fracture --bin fracture_stress_export -- ../crates/engine-webgpu/fracture/assets/veneer-house.glb packs/veneer-house-lN.json N
+/packs/veneer-house-l[1-9].json

@@ -1,0 +1,159 @@
+diff --git a/destruction/stress-oracle/crates/stress-ref/src/solver.rs b/destruction/stress-oracle/crates/stress-ref/src/solver.rs
+index 70711bee6..e2f1d362c 100644
+--- a/destruction/stress-oracle/crates/stress-ref/src/solver.rs
++++ b/destruction/stress-oracle/crates/stress-ref/src/solver.rs
+@@ -1273,6 +1273,16 @@ impl ReferenceSolver {
+             };
+             damped += bond_damped;
+             dissipated += resp.dissipated;
++            // DEBUG-BOND-DISSIPATION
++            if resp.dissipated > 1e4 && std::env::var("STRESS_DEBUG_SPLIT").is_ok() {
++                let b = &self.bonds[s][bi];
++                let (sa, sb) = (self.chunks[s][b.geometry.a], self.chunks[s][b.geometry.b]);
++                let d = b.geometry.kinematics(sa.u, sa.th, sb.u, sb.th);
++                eprintln!(
++                    "BOND t={:.5} cluster {ci} bond {bi} dissipated {:.3e} overshoot {:.3e} damage {:.3}->{:.3} |d.lin| {:.3e} |d.ang| {:.3e} area {:.3e} rebar {:?} disconnected {}",
++                    t, resp.dissipated, resp.overshoot, b.joint.damage, resp.state.damage, d.lin.norm(), d.ang.norm(), b.geometry.area, b.rebar.is_some(), resp.disconnected
++                );
++            }
+             self.energy.softening_overshoot += resp.overshoot;
+             self.max_utilization = self.max_utilization.max(resp.state.utilization);
+             let (fa, ma, fb, mb) = self.bonds[s][bi].geometry.chunk_loads(&q);
+@@ -1461,19 +1471,28 @@ impl ReferenceSolver {
+             lv += (r.cross(cs.v - dv) * ch.mass + ch.inertia * cs.w) * k;
+         }
+         let (phi, dw) = (inv_i * lu, inv_i * lv);
++        if exact && std::env::var("STRESS_DEBUG_SPLIT").is_ok() {
++            eprintln!("FOLD cluster {ci} chunks {} |phi| {:.3e} |t| {:.3e}", self.clusters[ci].chunks.len(), phi.norm(), (tu / self.clusters[ci].mass).norm());
++        }
+         let chunks = cl.chunks.clone();
+         let true_com = cl.com;
+         if exact && self.config.integrate_rigid && !self.clusters[ci].driven {
+-            // Every chunk keeps its world position, orientation, velocity and spin exactly:
+-            // record them, move the frame, and re-express them in it. The linearised
+-            // transfer below moves positions by O(phi^2) and velocities by O(phi v): a
+-            // finite fold (the first after a split) changed momentum and energy.
+-            let world: Vec<(Vec3, Quat, Vec3, Vec3)> = chunks
++            // Every chunk keeps its world velocity and spin exactly: record them, move the
++            // frame, and re-express them in it (the linearised transfer below changes
++            // velocities by O(phi v): a finite fold, the first after a split, changed
++            // momentum and energy). Displacements and rotations take the linear transfer
++            // `u - t - phi x r`, `th - phi`: the hidden field is linear, so its rigid part
++            // is exactly that field, and removing it leaves every bond's kinematics
++            // unchanged. Re-expressing the world positions instead (the finite rotation
++            // R(phi) taken out of `r + phi x r`) left O(phi^2 L) in the bonds as strain:
++            // at a 0.05 rad fold, millimetres at concrete stiffness, megajoules booked as
++            // fracture energy no motion paid for. Positions move by O(phi^2) instead.
++            let world: Vec<(Vec3, Vec3, Vec3, Vec3)> = chunks
+                 .iter()
+                 .map(|&c| {
+                     let (v, w) = self.chunk_velocity(s, c);
+-                    let th = self.chunks[s][c].th;
+-                    (self.chunk_position(s, c), self.clusters[ci].pose.rotation * Quat::from_rotation_vector(th), v, w)
++                    let cs = &self.chunks[s][c];
++                    (cs.u, cs.th, v, w)
+                 })
+                 .collect();
+             let cl = &mut self.clusters[ci];
+@@ -1484,13 +1503,13 @@ impl ReferenceSolver {
+             cl.angular_velocity += rot.rotate(dw);
+             let cl = self.clusters[ci].clone();
+             let back = cl.pose.rotation.conjugate();
+-            for (&c, (x, q, v, w)) in chunks.iter().zip(world) {
++            for (&c, (u0, th0, v, w)) in chunks.iter().zip(world) {
+                 let center = self.structures[s].chunks[c].center;
+-                let u = cl.pose.inverse_transform_point(x) - center;
++                let u = u0 - t - phi.cross(center - com);
+                 let r = cl.pose.transform_vector(center + u - cl.com);
+                 let cs = &mut self.chunks[s][c];
+                 cs.u = u;
+-                cs.th = (back * q).to_rotation_vector();
++                cs.th = th0 - phi;
+                 cs.v = back.rotate(v - cl.velocity - cl.angular_velocity.cross(r));
+                 cs.w = back.rotate(w - cl.angular_velocity);
+             }
+@@ -1613,6 +1632,22 @@ impl ReferenceSolver {
+             }
+         }
+         self.rebuild_adjacency(s);
++        // DEBUG-SPLIT-JUMP: each surviving bond's kinematics before the children form.
++        let debug_split = std::env::var("STRESS_DEBUG_SPLIT").is_ok();
++        let before: Vec<(usize, Local6)> = if debug_split {
++            parent
++                .bonds
++                .iter()
++                .filter(|&&bi| self.bonds[s][bi].alive)
++                .map(|&bi| {
++                    let g = &self.bonds[s][bi].geometry;
++                    let (ca, cb) = (&self.chunks[s][g.a], &self.chunks[s][g.b]);
++                    (bi, g.kinematics(ca.u, ca.th, cb.u, cb.th))
++                })
++                .collect()
++        } else {
++            Vec::new()
++        };
+         let mut children = Vec::new();
+         for comp in comps {
+             // Linear and angular momentum of the child from its chunks' exact velocities.
+@@ -1643,6 +1678,20 @@ impl ReferenceSolver {
+                 cs.v = rot.transpose() * (v - child.velocity - child.angular_velocity.cross(r));
+                 cs.w = rot.transpose() * (w - child.angular_velocity);
+             }
++            // DEBUG-SPLIT-STAGES: the child's surviving bonds' kinematics at each stage.
++            let child_bonds: Vec<usize> = if debug_split { self.clusters[idx].bonds.clone() } else { Vec::new() };
++            let kin = |sv: &Self| -> Vec<Local6> {
++                child_bonds
++                    .iter()
++                    .map(|&bi| {
++                        let g = &sv.bonds[s][bi].geometry;
++                        let (ca, cb) = (&sv.chunks[s][g.a], &sv.chunks[s][g.b]);
++                        g.kinematics(ca.u, ca.th, cb.u, cb.th)
++                    })
++                    .collect()
++            };
++            let jump = |a: &[Local6], b: &[Local6]| a.iter().zip(b).map(|(x, y)| (x.lin - y.lin).norm()).fold(0.0, f64::max);
++            let k0 = kin(self);
+             // Fold the mean hidden translation of a free child into its pose.
+             if !child.anchored {
+                 let mean = comp.iter().map(|&c| self.chunks[s][c].u * lite[c].1).fold(Vec3::ZERO, |a, b| a + b)
+@@ -1652,6 +1701,7 @@ impl ReferenceSolver {
+                 }
+                 self.clusters[idx].pose.position += parent.pose.transform_vector(mean);
+             }
++            let k1 = kin(self);
+             if self.config.methods.exact_frame_transfer {
+                 // Every chunk keeps its world velocity and spin exactly: the lever arms
+                 // above leave out the hidden displacement (and the fold moves it), which
+@@ -1672,8 +1722,32 @@ impl ReferenceSolver {
+                     self.fold_rigid_drift(idx, true);
+                 }
+             }
++            if debug_split {
++                let k2 = kin(self);
++                let max_th = comp.iter().map(|&c| self.chunks[s][c].th.norm()).fold(0.0, f64::max);
++                eprintln!(
++                    "CHILD t={:.5} chunks {} anchored {} bonds {}: jump mean-fold {:.3e}, drift-fold {:.3e}; max |th| after {:.3e}",
++                    self.time, comp.len(), child.anchored, child_bonds.len(), jump(&k0, &k1), jump(&k1, &k2), max_th
++                );
++            }
+             children.push(self.clusters[idx].id);
+         }
++        if debug_split {
++            let mut worst = (0.0f64, 0usize, 0.0f64);
++            for (bi, d0) in &before {
++                let g = &self.bonds[s][*bi].geometry;
++                let (ca, cb) = (&self.chunks[s][g.a], &self.chunks[s][g.b]);
++                let d1 = g.kinematics(ca.u, ca.th, cb.u, cb.th);
++                let jump = (d1.lin - d0.lin).norm() + (d1.ang - d0.ang).norm() * 0.1;
++                if jump > worst.0 {
++                    worst = (jump, *bi, d0.lin.norm());
++                }
++            }
++            eprintln!(
++                "SPLIT t={:.4} parent {} chunks {} -> {} children; surviving bonds {}; worst kinematic jump {:.3e} (bond {}, |d| before {:.3e})",
++                self.time, parent.id, parent.chunks.len(), children.len(), before.len(), worst.0, worst.1, worst.2
++            );
++        }
+         self.events.push(SolverEvent::Split { time: self.time, parent: parent.id, children });
+     }
+ 
