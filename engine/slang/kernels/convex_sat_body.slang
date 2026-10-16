@@ -74,6 +74,8 @@ CS(SatLane) CS(satLane)(uint3 group, uint lane)
     s.fb = (Frame)0;
     s.fb.q = quatIdentity();
     s.hint = 0u;
+    s.colA = 0u;
+    s.colB = 0u;
     if (s.valid)
     {
         ConvexWork w = gConvexWork[s.slot];
@@ -239,7 +241,7 @@ void CS(phaseEdges)(CS(SatLane) s)
     uint eOff = s.seg * CSAT_MAXE;
     bool closedBoth = hullClosed(s.ha) && hullClosed(s.hb);
     uint hintEdge = (s.hint >> 16) == CONVEX_FEATURE_EDGE ? (s.hint & 0xFFFFu) : 0xFFFFFFFFu;
-    bool doEdges = s.valid && CS(gsFaceSep)[s.seg] <= speculativeMargin() && !CS(fastFace)(s);
+    bool doEdges = s.valid && CS(gsFaceSep)[s.seg] <= speculativeMargin() + cachedReach(s.colA) + cachedReach(s.colB) && !CS(fastFace)(s);
     float edgeScore = -1e30;
     float edgeSep = -1e30;
     uint edgeKey = 0xFFFFFFFFu;
@@ -327,7 +329,7 @@ void CS(phaseFinish)(CS(SatLane) s)
     uint idx1 = 0u;
     uint idx2 = 0u;
     bool edgeHit = edgeKey != 0xFFFFFFFFu;
-    float spec = speculativeMargin();
+    float spec = pairMarginIds(s.colA, s.colB);
     if (faceSep <= spec && !(edgeHit && edgeSep > spec))
     {
         // A positive gap (speculative contact) is measured on the axis of largest

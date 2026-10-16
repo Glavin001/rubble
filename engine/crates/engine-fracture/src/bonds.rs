@@ -2,6 +2,7 @@
 //! from Shardwright's reference models, mapped to solver penalties.
 
 use crate::asset::{Bond, FractureAsset};
+use crate::math::*;
 use crate::scene::{Body, Joint};
 use serde_json::Value;
 
@@ -26,12 +27,19 @@ fn num(v: &Value, key: &str) -> Option<f64> {
 
 /// The fragment's first physical material (an empty record when missing).
 fn fragment_material(asset: &FractureAsset, f: u32) -> &Value {
-    let id = asset.physics.fragments[f as usize].material_ids.first().copied().unwrap_or(0);
+    let id = asset.physics.fragments[f as usize]
+        .material_ids
+        .first()
+        .copied()
+        .unwrap_or(0);
     asset.material(id)
 }
 
 fn interface<'a>(asset: &'a FractureAsset, bond: &Bond) -> Option<&'a Value> {
-    let id = bond.composition.first().map_or(-1, |c| c.interface_material);
+    let id = bond
+        .composition
+        .first()
+        .map_or(-1, |c| c.interface_material);
     if id >= 0 {
         asset.interface_material(id)
     } else {
@@ -51,11 +59,19 @@ pub fn bond_capacities(asset: &FractureAsset, bond: &Bond, strength_scale: f64) 
         (ft, num(m, "compressive_strength").unwrap_or(10.0 * ft))
     };
     let (fta, fca) = strengths(bond.a);
-    let (ftb, fcb) = if bond.b >= 0 { strengths(bond.b as u32) } else { (fta, fca) };
-    let ft = interface(asset, bond).and_then(|m| num(m, "tensile_strength")).unwrap_or(fta.min(ftb));
+    let (ftb, fcb) = if bond.b >= 0 {
+        strengths(bond.b as u32)
+    } else {
+        (fta, fca)
+    };
+    let ft = interface(asset, bond)
+        .and_then(|m| num(m, "tensile_strength"))
+        .unwrap_or(fta.min(ftb));
     let fc = fca.min(fcb);
     let k = bond.strength_scale as f64 * strength_scale;
-    let c = (bond.extent_half[0] as f64).max(bond.extent_half[1] as f64).max(1e-6);
+    let c = (bond.extent_half[0] as f64)
+        .max(bond.extent_half[1] as f64)
+        .max(1e-6);
     let fte = if ft > 0.0 { ft } else { 0.05 * fc };
     let area = bond.area as f64;
     [
@@ -78,7 +94,9 @@ pub fn bond_springs(asset: &FractureAsset, bond: &Bond) -> [f64; 6] {
         let m = fragment_material(asset, f);
         // Anisotropic (wood): longitudinal E and shear G, as frac-material elastic().
         if let Some(a) = m.get("anisotropy").filter(|a| !a.is_null()) {
-            let e = num(a, "E_long").or_else(|| num(a, "e_long")).unwrap_or(f64::NAN);
+            let e = num(a, "E_long")
+                .or_else(|| num(a, "e_long"))
+                .unwrap_or(f64::NAN);
             let g = num(a, "G").or_else(|| num(a, "g")).unwrap_or(f64::NAN);
             return (e, g);
         }
@@ -88,31 +106,84 @@ pub fn bond_springs(asset: &FractureAsset, bond: &Bond) -> [f64; 6] {
         (1e9, 1e9 / 2.4)
     };
     let (ea, ga) = elastic(bond.a);
-    let (eb, gb) = if bond.b >= 0 { elastic(bond.b as u32) } else { (f64::INFINITY, f64::INFINITY) };
+    let (eb, gb) = if bond.b >= 0 {
+        elastic(bond.b as u32)
+    } else {
+        (f64::INFINITY, f64::INFINITY)
+    };
     let (em, gm, tm) = match interface(asset, bond) {
         Some(im) => {
             let em = num(im, "youngs_modulus").unwrap_or(ea);
-            (em, num(im, "shear_modulus").unwrap_or(em / 2.4), num(im, "thickness").unwrap_or(0.0))
+            (
+                em,
+                num(im, "shear_modulus").unwrap_or(em / 2.4),
+                num(im, "thickness").unwrap_or(0.0),
+            )
         }
         None => (1.0, 1.0, 0.0),
     };
     let da = (bond.dist_a as f64).max(1e-9);
-    let db = if bond.b >= 0 { (bond.dist_b as f64).max(1e-9) } else { 0.0 };
+    let db = if bond.b >= 0 {
+        (bond.dist_b as f64).max(1e-9)
+    } else {
+        0.0
+    };
     let side = |d: f64, x: f64| if x.is_finite() { d / x } else { 0.0 };
     let layer = |x: f64| if tm > 0.0 { tm / x } else { 0.0 };
     let ce = da / ea + side(db, eb) + layer(em);
     let cg = da / ga + side(db, gb) + layer(gm);
     let area = bond.area as f64;
     let ks = area / cg;
-    [area / ce, ks, ks, bond.i_uu as f64 / ce, bond.i_vv as f64 / ce, bond.polar_moment as f64 / cg]
+    [
+        area / ce,
+        ks,
+        ks,
+        bond.i_uu as f64 / ce,
+        bond.i_vv as f64 / ce,
+        bond.polar_moment as f64 / cg,
+    ]
 }
 
 /// Scale physical springs to solver penalties (see `BOND_PENALTY_SCALE`).
 pub fn scale_bond_springs(joints: &[Joint], bodies: &[Body], dt: f64) -> Vec<Joint> {
-    scale_bond_springs_with(joints, bodies, dt, BOND_PENALTY_SCALE, BOND_PENALTY_CAP)
+    scale_bond_springs_with(
+        joints,
+        bodies,
+        dt,
+        BOND_PENALTY_SCALE,
+        BOND_PENALTY_CAP,
+        true,
+    )
 }
 
-pub fn scale_bond_springs_with(joints: &[Joint], bodies: &[Body], dt: f64, scale: f64, cap: f64) -> Vec<Joint> {
+/// Effective mass of a body along body-frame direction `d` at body-frame anchor `r`.
+fn row_mass(b: Option<&Body>, r: [f64; 3], d: [f64; 3]) -> f64 {
+    match b {
+        Some(b) if b.inv_mass > 0.0 => {
+            let w = cross(r, d);
+            1.0 / (b.inv_mass
+                + w[0] * w[0] * b.inv_i[0]
+                + w[1] * w[1] * b.inv_i[1]
+                + w[2] * w[2] * b.inv_i[2])
+        }
+        _ => f64::INFINITY,
+    }
+}
+
+/// `scale_bond_springs` with explicit scale and cap. A linear row also turns
+/// its bodies through the anchor's lever arm, so with `effective_mass` it is
+/// capped by the row's effective mass at the anchor, 1/(1/m + (r×d)ᵀI⁻¹(r×d)),
+/// not by m alone: a 6 cm sliver bonded at its end otherwise saw ~100x its
+/// smallest inertial term about that axis, and light bonded pieces spun up in
+/// Gauss-Seidel (sleep investigation 2026-10-16). `false` keeps the m-only cap.
+pub fn scale_bond_springs_with(
+    joints: &[Joint],
+    bodies: &[Body],
+    dt: f64,
+    scale: f64,
+    cap: f64,
+    effective_mass: bool,
+) -> Vec<Joint> {
     if joints.is_empty() {
         return vec![];
     }
@@ -121,22 +192,44 @@ pub fn scale_bond_springs_with(joints: &[Joint], bodies: &[Body], dt: f64, scale
         v[v.len() >> 1]
     };
     let inertial = |i: u32| match bodies.get(i as usize) {
-        Some(b) if b.inv_mass > 0.0 => (1.0 / b.inv_mass, 1.0 / b.inv_i.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        Some(b) if b.inv_mass > 0.0 => (
+            1.0 / b.inv_mass,
+            1.0 / b.inv_i.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        ),
         _ => (f64::INFINITY, f64::INFINITY),
     };
     let lighter = |j: &Joint| {
         let (a, b) = (inertial(j.body_a), inertial(j.body_b));
         (a.0.min(b.0), a.1.min(b.1))
     };
-    let s = scale * median(joints.iter().map(|j| lighter(j).0).collect()) / (dt * dt) / median(joints.iter().map(|j| j.k[0]).collect());
+    let s = scale * median(joints.iter().map(|j| lighter(j).0).collect())
+        / (dt * dt)
+        / median(joints.iter().map(|j| j.k[0]).collect());
     joints
         .iter()
         .map(|j| {
             let (m, i) = lighter(j);
-            let (cap_lin, cap_ang) = (cap * m / (dt * dt), cap * i / (dt * dt));
+            let cap_ang = cap * i / (dt * dt);
+            let mut cap_rows = [cap * m / (dt * dt); 3];
+            if effective_mass {
+                let (n, u) = (j.normal, j.frame_u);
+                let q = |b: u32| bodies.get(b as usize).map_or(IDENTITY, |b| b.q);
+                let (qa, qb) = (q(j.body_a), q(j.body_b));
+                for (row, da) in [n, u, cross(n, u)].into_iter().enumerate() {
+                    let db = inverse_rotate(qb, rotate(qa, da));
+                    let mb = if j.world {
+                        f64::INFINITY
+                    } else {
+                        row_mass(bodies.get(j.body_b as usize), j.anchor_b, db)
+                    };
+                    cap_rows[row] = cap
+                        * row_mass(bodies.get(j.body_a as usize), j.anchor_a, da).min(mb)
+                        / (dt * dt);
+                }
+            }
             let mut out = *j;
             for (r, k) in out.k.iter_mut().enumerate() {
-                *k = (*k * s).min(if r < 3 { cap_lin } else { cap_ang });
+                *k = (*k * s).min(if r < 3 { cap_rows[r] } else { cap_ang });
             }
             out
         })

@@ -198,7 +198,8 @@ void predictOne(uint i)
     float4 q0 = b.orientation;
     BODY_PREV(i).linearVel = b.linearVel;
 
-    if (!startAtRest)
+    // A deferred wake keeps its pose this step (it is solved from the next).
+    if (!startAtRest && !wakePending(b))
     {
         b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
         b.orientation = quatNormalize(
@@ -302,7 +303,12 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     // contactOffset (~1 cm) pulled in ring-adjacent bricks that faceSeparated should
     // still drop — but the fatter boxes also bloated grid occupancy. Margin stays in C0,
     // except under FLAG_CONTACT_GAP, where contacts are speculative within it.
-    float aabbPad = max(1.0e-4, speculativeMargin());
+    // Look-ahead sweep: the linear motion v·h extends the box along v only
+    // (as Box2D sweeps bullets); spin and gravity pad it all round. `reach`
+    // stays the scalar bound for the face tests and the grid level.
+    float reach = colliderReach(b, col);
+    float3 sweep = reach > 0.0 ? b.linearVel * PARAMS.dt : float3(0, 0, 0);
+    float aabbPad = max(1.0e-4, speculativeMargin()) + (reach > 0.0 ? max(reach - length(sweep), 0.0) : 0.0);
     if (col.shape == SHAPE_SPHERE)
     {
         worldAabbSphere(worldPos, col.params.x + aabbPad, mn, mx);
@@ -342,13 +348,16 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
         mn += worldPos - aabbPad;
         mx += worldPos + aabbPad;
     }
+    mn = min(mn, mn + sweep);
+    mx = max(mx, mx + sweep);
     Aabb box;
     box.mn = mn; box.mx = mx;
     float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
     // The hierarchical grid needs every AABB half extent ≤ _pad0; a capsule's
     // reaches radius + half height, beyond length(radius, half height).
     if (col.shape == SHAPE_CAPSULE) boundR = col.params.x + col.params.y;
-    box._pad0 = boundR;
+    // The swept reach counts as size, so the grid level still bounds the box.
+    box._pad0 = boundR + reach;
     box._pad1 = asfloat(col.body);
     // Store at collider index offset by max_bodies — host allocates gAabbs sized max_bodies+max_colliders
     // Convention: collider AABBs start at index max_bodies. Host sets gScratchAtomics[1] = max_bodies.
@@ -360,7 +369,7 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     {
         HullRef h = hullOf(col);
         WorldObbGpu w;
-        w.center = float4(transformPoint(worldPos, worldRot, hullLocalCenter(h)), 0.0);
+        w.center = float4(transformPoint(worldPos, worldRot, hullLocalCenter(h)), reach);
         w.half = float4(hullLocalHalf(h), 0.0);
         w.axis0 = float4(quatRotate(worldRot, float3(1, 0, 0)), 0.0);
         w.axis1 = float4(quatRotate(worldRot, float3(0, 1, 0)), 0.0);
@@ -372,7 +381,7 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
         float4 q = quatMul(b.orientation, col.localRot);
         BoxObb obb = makeBoxObb(worldPos, q, col.params.xyz);
         WorldObbGpu w;
-        w.center = float4(obb.center, 0.0);
+        w.center = float4(obb.center, reach);
         w.half = float4(obb.half, 0.0);
         w.axis0 = float4(obb.axis0, 0.0);
         w.axis1 = float4(obb.axis1, 0.0);
@@ -531,10 +540,36 @@ bool collidersFilteredOut(uint i, uint j)
 
 uint materialIndex(Collider c) { return c.material & 0xFFFFu; }
 
+// Look-ahead pairs are tested with their relative sweep: each box is swept by
+// its own v·h for the broadphase, so pieces carried along together (debris in
+// front of the ball) overlap their neighbours' boxes although they cannot
+// close on them. Undo both sweeps and sweep one box by (vi − vj)·h instead.
+bool lookAheadSeparated(uint i, uint j)
+{
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u) return false;
+    Collider ci = gColliders[i];
+    Collider cj = gColliders[j];
+    BodyState bi = gBodies[ci.body];
+    BodyState bj = gBodies[cj.body];
+    float3 si = colliderReach(bi, ci) > 0.0 ? bi.linearVel * PARAMS.dt : float3(0, 0, 0);
+    float3 sj = colliderReach(bj, cj) > 0.0 ? bj.linearVel * PARAMS.dt : float3(0, 0, 0);
+    if (all(si == float3(0, 0, 0)) && all(sj == float3(0, 0, 0))) return false;
+    uint base = HOST_S(1);
+    Aabb ai = gAabbs[base + i];
+    Aabb aj = gAabbs[base + j];
+    float3 imn = ai.mn - min(si, float3(0, 0, 0)), imx = ai.mx - max(si, float3(0, 0, 0));
+    float3 jmn = aj.mn - min(sj, float3(0, 0, 0)), jmx = aj.mx - max(sj, float3(0, 0, 0));
+    float3 rel = si - sj;
+    imn = min(imn, imn + rel);
+    imx = max(imx, imx + rel);
+    return any(imx < jmn) || any(jmx < imn);
+}
+
 void emitCandidate(uint i, uint j)
 {
     if (i == j) return;
     if (HOST_S(30) != 0u && collidersFilteredOut(i, j)) return;
+    if (lookAheadSeparated(i, j)) return;
     uint a = min(i, j);
     uint b = max(i, j);
     uint slot;
@@ -583,6 +618,7 @@ bool boxesSeparatedOnFaceAxis(BoxObb probe, uint otherCollider, float gap)
     Collider cb = gColliders[otherCollider];
     if (!shapeHasHull(cb.shape)) return false;
     BoxObb other = worldObbFromCache(otherCollider);
+    gap += cachedReach(otherCollider);
     float3 d = other.center - probe.center;
     float3 hA = probe.half;
     float3 hB = other.half;
@@ -788,7 +824,7 @@ void hierQuery(uint i)
     bool probeHasObb = shapeHasHull(a.shape);
     BoxObb probe = probeHasObb ? worldObbFromCache(i)
                                : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    float faceGap = max(0.001, speculativeMargin());
+    float faceGap = max(0.001, speculativeMargin()) + (probeHasObb ? cachedReach(i) : 0.0);
     if (active)
     {
         uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
@@ -1006,7 +1042,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // Probe OBB from build_aabbs cache (three-avbd findPairs loads querier once).
     bool probeIsBox = shapeHasHull(col.shape);
     BoxObb probeObb = probeIsBox ? worldObbFromCache(i) : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    float faceGap = max(0.001, speculativeMargin());
+    float faceGap = max(0.001, speculativeMargin()) + (probeIsBox ? cachedReach(i) : 0.0);
 
     // Small scenes: exact pairwise (correctness). Large: uniform-grid hash.
     // Awake dynamics test everyone; sleepers only keep static contacts (ground) so a
@@ -1060,6 +1096,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // the grid and wake sleepers on impact; a woken body re-acquires the plane next step.
     float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
     bool queryLarge = rA > cellSize;
+    rA += colliderReach(b, col);
     uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
     for (uint k = 0u; k < nLarge; k++)
     {
@@ -1197,7 +1234,8 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         if (other.shape == SHAPE_SPHERE)
         {
             float3 d = b.position - ob.position;
-            float rr = other.params.x + (col.params.w > 0.0 ? col.params.w : length(col.params.xyz));
+            float rr = other.params.x + (col.params.w > 0.0 ? col.params.w : length(col.params.xyz))
+                + colliderReach(b, col) + colliderReach(ob, other);
             if (dot(d, d) > rr * rr) continue;
         }
         emitCandidate(i, j);
@@ -1272,7 +1310,7 @@ void hierScanFiner(uint m, uint first, uint stride, uint end)
     bool probeHasObb = shapeHasHull(cm.shape);
     BoxObb probe = probeHasObb ? worldObbFromCache(m)
                                : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    float faceGap = max(0.001, speculativeMargin());
+    float faceGap = max(0.001, speculativeMargin()) + (probeHasObb ? cachedReach(m) : 0.0);
     uint mask = finerLevelMask(own);
     uint count = gCounters[0].colliderCount;
     float csM = hierCellSize(own);
@@ -1587,22 +1625,31 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
     // (~1.5k sleeping / 31k awake despite KE~50). Never clear SLEEPING on calm pairs.
     bool awakeA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
     bool awakeB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    // Displacement sleep: a body that has itself stayed put for sleepTime (a
+    // sleep candidate) only jitters in place; it cannot wake its neighbours.
+    awakeA = awakeA && canWake(ba);
+    awakeB = awakeB && canWake(bb);
     if (!awakeA && !awakeB) return;
     float3 vRel = ba.linearVel - bb.linearVel;
     float wRel = length(ba.angularVel) + length(bb.angularVel);
     float thresh = PARAMS.sleepLin;
-    if (dot(vRel, vRel) < thresh * thresh && wRel < PARAMS.sleepAng)
+    if (pointSpeedSleep())
+    {
+        float pointSpeed = length(vRel) + length(ba.angularVel) * colliderExtent(ca) + length(bb.angularVel) * colliderExtent(cb);
+        if (pointSpeed < thresh) return;
+    }
+    else if (dot(vRel, vRel) < thresh * thresh && wRel < PARAMS.sleepAng)
         return;
     // Store only the wake fields: a whole-body store from this thread's
     // narrowphase-start copy could overwrite fields other work updated.
     if (bodyIsDynamic(ba) && bodyIsSleeping(ba) && awakeB)
     {
-        gBodies[ca.body].flags = (ba.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[ca.body].flags = wokenFlags(ba.flags);
         gBodies[ca.body].sleepTimer = 0.0;
     }
     if (bodyIsDynamic(bb) && bodyIsSleeping(bb) && awakeA)
     {
-        gBodies[cb.body].flags = (bb.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[cb.body].flags = wokenFlags(bb.flags);
         gBodies[cb.body].sleepTimer = 0.0;
     }
 }
@@ -1670,10 +1717,34 @@ void persistListAppend(uint first, uint count)
 }
 #endif
 
+// Look-ahead keeps a separated point only if the pair can close that gap this
+// step: the relative normal velocity at the point, (vA + ωA×rA − vB − ωB×rB)·n,
+// over h. Points moving apart or sliding past each other get no speculative
+// contact (and no graph edge); touching points (gap ≤ contactOffset) are kept.
+BoxManifold closingPoints(BoxManifold points, BodyState ba, Collider ca, BodyState bb, Collider cb)
+{
+    bool moveA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
+    bool moveB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    float h = PARAMS.dt;
+    float3 n = points.normal;
+    BoxManifold kept = points;
+    kept.count = 0;
+    for (int k = 0; k < points.count; k++)
+    {
+        float3 pA = points.pts[k].pA, pB = points.pts[k].pB;
+        float3 vA = moveA ? ba.linearVel + cross(ba.angularVel, pA - ba.position) : float3(0, 0, 0);
+        float3 vB = moveB ? bb.linearVel + cross(bb.angularVel, pB - bb.position) : float3(0, 0, 0);
+        float reach = PARAMS.contactOffset + max(dot(vA - vB, n), 0.0) * h + abs(PARAMS.gravityY) * h * h;
+        if (dot(n, pB - pA) <= reach) { kept.pts[kept.count] = points.pts[k]; kept.count++; }
+    }
+    return kept;
+}
+
 void emitContactManifold(
     CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
     BoxManifold points, float margin)
 {
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u) points = closingPoints(points, ba, ca, bb, cb);
     int count = points.count;
     float3 nrm = points.normal;
     if (count <= 0) return;
@@ -1835,6 +1906,16 @@ float colliderMinSide(Collider col)
     return max(2.0 * min(h.x, min(h.y, h.z)), 1e-6);
 }
 
+// Farthest point of a collider from its body's origin (centre of mass).
+float colliderExtent(Collider col)
+{
+    float r = col.shape == SHAPE_SPHERE ? col.params.x
+        : col.shape == SHAPE_CAPSULE ? col.params.x + col.params.y
+        : col.shape == SHAPE_CONVEX ? col.params.w
+        : length(col.params.xyz);
+    return length(col.localPos) + r;
+}
+
 static const uint FLAG_REUSE_CONTACTS = 1u;
 // Preload: bonds carry load but never break (hosts settle a structure under its
 // own weight before it is put to sleep, so it wakes in static equilibrium).
@@ -1848,17 +1929,181 @@ static const uint FLAG_CONTACT_GAP = 32u;
 // bounds, SAT and clipping keep pairs/points whose gap is at most this.
 float speculativeMargin()
 {
-    return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u ? PARAMS.contactOffset : 0.0;
+    return contactGapMode() ? PARAMS.contactOffset : 0.0;
+}
+
+// params.flags bit 14: look-ahead (speculative) contacts sized to motion. Each
+// awake collider's bounds are swept by how far it can move this step, and a
+// pair keeps contacts whose gap is under the sum of both reaches, so pieces
+// meet at contact depth instead of passing up to |v|·h into each other first
+// (PhysX speculative CCD; Box2D/Jolt speculative distance). Rest depth is
+// unchanged; a positive C0 is clearance the solver lets the pair close, so it
+// is never scaled down by α (contactC0NReg).
+static const uint FLAG_SPEC_VELOCITY = 16384u;
+static const float SPEC_REACH_MAX = 0.5;
+bool contactGapMode() { return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u; }
+
+// How far any point of collider `c` on body `b` moves this step:
+// (|v| + |ω|·r)·h + |g|·h², from the velocity at the start of the step. Motion
+// within the contact depth (contactOffset) is already caught by ordinary
+// contacts, so slower colliders get no look-ahead and rest exactly as before.
+float colliderReach(BodyState b, Collider c)
+{
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u || !bodyIsDynamic(b) || bodyIsSleeping(b)) return 0.0;
+    // Spin pads the box all round (|ω|·r·h); with the rotation limit
+    // (FLAG_MAX_ROTATION) that is at most 0.785 r. Without spin, tumbling
+    // debris jammed into neighbours (7x7 grid: 3,869 awake at 30 s vs 6).
+    float h = PARAMS.dt;
+    float linear = length(b.linearVel) * h;
+    float motion = linear + length(b.angularVel) * colliderExtent(c) * h;
+    if (motion <= PARAMS.contactOffset) return 0.0;
+    return min(motion + abs(PARAMS.gravityY) * h * h, SPEC_REACH_MAX);
+}
+// Reach of a hull or box collider, cached with its world OBB by build_aabbs.
+// Bounds and early-outs use these per-collider reaches (a conservative sweep).
+float cachedReach(uint c) { return gWorldObbs[c].center.w; }
+// How far the pair can close this step: relative speed plus both spins, so
+// pieces carried along together (debris pushed by the ball) get no look-ahead.
+float pairReach(BodyState ba, Collider ca, BodyState bb, Collider cb)
+{
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u) return 0.0;
+    bool moveA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
+    bool moveB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    float3 vA = moveA ? ba.linearVel : float3(0, 0, 0);
+    float3 vB = moveB ? bb.linearVel : float3(0, 0, 0);
+    // Spin counts here (the narrowphase margin): closingPoints keeps only the
+    // points whose ω×r velocity actually closes the gap. The broadphase sweep
+    // stays linear (colliderReach), so spin does not flood the candidates.
+    float spin = (moveA ? length(ba.angularVel) * colliderExtent(ca) : 0.0)
+               + (moveB ? length(bb.angularVel) * colliderExtent(cb) : 0.0);
+    float h = PARAMS.dt;
+    float motion = (length(vB - vA) + spin) * h;
+    if (motion <= PARAMS.contactOffset) return 0.0;
+    return min(motion + abs(PARAMS.gravityY) * h * h, 2.0 * SPEC_REACH_MAX);
+}
+// Gap under which a pair keeps (speculative) contacts.
+float pairMargin(BodyState ba, Collider ca, BodyState bb, Collider cb)
+{
+    return speculativeMargin() + pairReach(ba, ca, bb, cb);
+}
+float pairMarginIds(uint a, uint b)
+{
+    Collider ca = gColliders[a];
+    Collider cb = gColliders[b];
+    return pairMargin(gBodies[ca.body], ca, gBodies[cb.body], cb);
 }
 // params.flags bit 6: the inertial block uses the world inertia R·diag(I)·Rᵀ
 // (R at the inertial target). Without it (three-avbd) the principal moments are
 // applied on world axes, which is only right for isotropic or axis-aligned bodies.
 static const uint FLAG_WORLD_INERTIA = 64u;
+// Experiments (sleep investigation, 2026-10-16):
+// 128 Coulomb stick: a contact keeps its friction anchors while its unclamped
+//     friction force is inside the cone and the anchor offset is under STICK_TOL
+//     (avbd-demo2d), instead of requiring a 10 µm end-of-step tangential residual.
+// 256 Tangential penalties floored at the pair's mass stiffness, as the normal is.
+// 1024 Sliding rows use the secant stiffness μ|f_N|/|C_T| in the Hessian.
+static const uint FLAG_COULOMB_STICK = 128u;
+static const uint FLAG_TANGENT_MASS_FLOOR = 256u;
+static const uint FLAG_SLIDE_HESSIAN = 1024u;
+static const float STICK_TOL = 0.01;
+// 2048 Load-aware penalty floor: a warm-started contact's resting offset is
+//     ≈ |λ|/k (λ decays by αγ each step and k·C rebuilds it), so k ≥ |λ|/REST_SLOP
+//     bounds the resting overlap (normal) and anchor give (tangent) by REST_SLOP.
+static const uint FLAG_LOAD_PENALTY = 2048u;
+static const float REST_SLOP = 0.001;
+// 4096 Post-stabilization (avbd-demo2d): warm start keeps λ whole, the
+//     iterations run with α = 1 (no correction of step-start error), velocity is
+//     taken after them, then one extra primal pass with α = 0 removes the whole
+//     position error without turning it into velocity. Replaces α's decay of λ,
+//     whose steady state rests every loaded contact ≈ |λ|/k deep. Contacts
+//     only: joints and elastic bonds keep α (a spring's force comes from its
+//     whole deformation, not this step's change; post-stabilizing bonds blew
+//     bonded houses apart).
+static const uint FLAG_POST_STAB = 4096u;
+// 8192 Point-speed sleep test (Box2D v3): a body is slow when its fastest point,
+//     |v| + |ω|·r_max, is under sleepLin; sleepAng is not used. A fixed rad/s
+//     threshold is 20x stricter than the linear one for a 3 cm piece.
+static const uint FLAG_POINT_SPEED_SLEEP = 8192u;
+bool pointSpeedSleep() { return (PARAMS.flags & FLAG_POINT_SPEED_SLEEP) != 0u; }
+// 32768 Displacement sleep test (Jolt's sleep test spheres): a body is slow while
+//     its farthest point stays within sleepLin·sleepTime of the pose it had when
+//     its sleep timer started (r_max for rotation), by both a low-pass pose
+//     and the velocity integral Σv·h; motion must show in both. Jitter and one-tick blips
+//     that go nowhere no longer reset the timer; steady motion still does. The
+//     reference pose lives in the previous-step body record (BODY_PREV), whose
+//     pose fields are otherwise unused.
+static const uint FLAG_SLEEP_DISPLACEMENT = 32768u;
+static const float SLEEP_POSE_BETA = 0.2;
+// 4194304 Push-out limit (Box2D contactPushMaxVelocity, PhysX
+//     maxDepenetrationVelocity): overlap is corrected at most PUSH_MAX_SPEED·h
+//     per step. Post-stabilization otherwise removed a jammed piece's whole
+//     1.6-4 cm overlap in one pass, the iterations pushed it back, and it
+//     cycled by ~3.5 cm every few ticks with zero reported velocity.
+static const uint FLAG_PUSH_LIMIT = 4194304u;
+// 8388608 Rotational armature (MuJoCo `armature`): each principal moment is at
+//     least ARMATURE_FRACTION·m·r_max² in the solve. Changes how light thin
+//     pieces turn (mortar slivers carrying bond loads); a pending decision.
+static const uint FLAG_ARMATURE = 8388608u;
+static const float ARMATURE_FRACTION = 0.1;
+static const float PUSH_MAX_SPEED = 0.1;
+bool displacementSleep() { return (PARAMS.flags & FLAG_SLEEP_DISPLACEMENT) != 0u; }
+// A body that may wake its neighbours (contacts or bonds): awake, and under the
+// displacement test not itself a sleep candidate (those only jitter in place).
+bool canWake(BodyState b)
+{
+    return bodyIsDynamic(b) && !bodyIsSleeping(b) && (!displacementSleep() || b.sleepTimer < PARAMS.sleepTime);
+}
+// 65536 Stabilization (PhysX PxSceneFlag::eENABLE_STABILIZATION): a body whose
+//     fastest point is under STAB_SPEEDS·sleepLin keeps only the fraction
+//     speed/(STAB_SPEEDS·sleepLin) of its velocity for the next step, so
+//     near-rest jitter cannot build momentum; faster motion is untouched.
+static const uint FLAG_STABILIZATION = 65536u;
+// 131072 Deferred wake: a body woken during a step (contact or bond wake, in the
+//     narrowphase, after the broadphase skipped its sleeper pairs) stays
+//     immovable for the rest of that step and is solved from the next one, when
+//     it has its whole contact set. Woken immediately, it was solved for a step
+//     without its supports and started with a 0.1-0.6 m/s kick that woke its
+//     neighbours in turn (Box2D instead restores a woken island's contacts).
+static const uint FLAG_DEFER_WAKE = 131072u;
+// 524288 Bond geometric stiffness (AVBD Sec. 3.5, avbd-demo3d Joint): the
+//     anchor rows' lumped |F|·|r| term in the angular Hessian. Without it the
+//     per-body Newton step overshoots under large bond forces and the iteration
+//     diverges (light bonded slivers spun to 240 rad/s; worse with more
+//     iterations).
+static const uint FLAG_BOND_GEOMETRIC = 524288u;
+// 1048576 Max rotation per step (Box2D b2_maxRotation = 0.25π; Jolt clamps
+//     angular velocity to 0.25π/dt; PhysX maxAngularVelocity): |ω|·h ≤ 0.25π.
+//     Past it the small-angle Jacobians and the quaternion update break down
+//     (light bonded slivers saturated at 2/h = 240 rad/s and kept flipping).
+static const uint FLAG_MAX_ROTATION = 1048576u;
+// 2097152 Rolling resistance (Box2D v3 shape rollingResistance; Bullet rolling
+//     friction): per manifold, a torque against the pair's relative rolling
+//     (rotation about axes in the contact plane) capped at μr·N·r, N the
+//     manifold's normal force and r the contact's lever arm, so a rolling body
+//     comes to rest instead of rolling forever on rigid ground.
+static const uint FLAG_ROLLING_RESISTANCE = 2097152u;
+static const float ROLLING_RESISTANCE = 0.02;
+
+static const float MAX_ROTATION = 0.785398;
+static const uint BODY_WAKE_PENDING = 16u;
+uint wokenFlags(uint flags)
+{
+    uint pending = (PARAMS.flags & FLAG_DEFER_WAKE) != 0u ? BODY_WAKE_PENDING : 0u;
+    return (flags & ~BODY_SLEEPING) | BODY_AWAKE | pending;
+}
+bool wakePending(BodyState b) { return (b.flags & BODY_WAKE_PENDING) != 0u; }
+static const float STAB_SPEEDS = 3.0;
+// Set by the primal kernels from the pass value (bit 8): the stabilization pass.
+static bool gStabilize = false;
+bool postStabilize() { return (PARAMS.flags & FLAG_POST_STAB) != 0u; }
+float warmDecay() { return postStabilize() ? 1.0 : PARAMS.alpha * PARAMS.gamma; }
+float primalAlpha() { return postStabilize() ? (gStabilize ? 0.0 : 1.0) : PARAMS.alpha; }
+float dualAlpha() { return postStabilize() ? 1.0 : PARAMS.alpha; }
 
 // Step-start normal offset of a contact whose signed gap is n·(xB−xA).
 float contactC0N(float gap, float margin)
 {
-    return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u ? gap : gap + margin;
+    return contactGapMode() ? gap : gap + margin;
 }
 
 // α-regularized step-start normal offset. α absorbs initial penetration; with
@@ -1866,7 +2111,23 @@ float contactC0N(float gap, float margin)
 // whole (the row then stops the bodies exactly at touch).
 float contactC0NReg(float c0N, float keep)
 {
-    return ((PARAMS.flags & FLAG_CONTACT_GAP) != 0u && c0N > 0.0) ? c0N : c0N * keep;
+    // Push-out limit: overlap is removed at most PUSH_MAX_SPEED·h per step.
+    if ((PARAMS.flags & FLAG_PUSH_LIMIT) != 0u)
+        return max(contactC0NRegFull(c0N, keep), -PUSH_MAX_SPEED * PARAMS.dt);
+    return contactC0NRegFull(c0N, keep);
+}
+float contactC0NRegFull(float c0N, float keep)
+{
+    if (contactGapMode()) return c0N > 0.0 ? c0N : c0N * keep;
+    // Look-ahead without FLAG_CONTACT_GAP: C0 = gap + margin. Only a real gap
+    // (C0 beyond the margin) is clearance kept whole; the margin band below it
+    // behaves exactly as without look-ahead.
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u)
+    {
+        float margin = PARAMS.contactOffset;
+        return max(c0N - margin, 0.0) + min(c0N, margin) * keep;
+    }
+    return c0N * keep;
 }
 static const float REUSE_LIN_TOL = 0.002;
 static const float REUSE_ANG_TOL = 0.002;
@@ -2106,7 +2367,10 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
     float3 posB = transformPoint(bb.position, bb.orientation, cb.localPos);
     float4 rotA = quatMul(ba.orientation, ca.localRot);
     float4 rotB = quatMul(bb.orientation, cb.localRot);
+    // Contacts sit `margin` deep (C0 = gap + margin); they are detected up to
+    // `detect`, which adds how far the pair can close this step (look-ahead).
     float margin = PARAMS.contactOffset;
+    float detect = margin + pairReach(ba, ca, bb, cb);
     float3 nrm; float pen; float3 pA; float3 pB;
     bool hit = false;
 
@@ -2115,7 +2379,7 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
     {
         // World OBBs from build_aabbs cache (skip per-pair quat axis rebuild).
         BoxManifold mf = collideBoxesCached(
-            worldObbFromCache(pair.colliderA), worldObbFromCache(pair.colliderB), margin);
+            worldObbFromCache(pair.colliderA), worldObbFromCache(pair.colliderB), detect);
         if (mf.count > 0)
             emitManifold(pair, ba, bb, ca, cb, mf, margin);
         return;
@@ -2123,13 +2387,13 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
     if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_PLANE)
     {
         emitManifold(pair, ba, bb, ca, cb,
-            collideBoxPlane(posA, rotA, ca.params.xyz, cb.params.xyz, cb.params.w, margin), margin);
+            collideBoxPlane(posA, rotA, ca.params.xyz, cb.params.xyz, cb.params.w, detect), margin);
         return;
     }
     if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_BOX)
     {
         // Swap to box-vs-plane then flip normal / points for A=plane, B=box.
-        BoxManifold mf = collideBoxPlane(posB, rotB, cb.params.xyz, ca.params.xyz, ca.params.w, margin);
+        BoxManifold mf = collideBoxPlane(posB, rotB, cb.params.xyz, ca.params.xyz, ca.params.w, detect);
         if (mf.count > 0)
             emitManifold(pair, ba, bb, ca, cb, flipManifold(mf), margin);
         return;
@@ -2169,14 +2433,14 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
 
     if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_SPHERE)
     {
-        hit = sphereSphere(posA, ca.params.x, posB, cb.params.x, margin, nrm, pen, pA, pB);
+        hit = sphereSphere(posA, ca.params.x, posB, cb.params.x, detect, nrm, pen, pA, pB);
     }
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_PLANE)
     {
         // Geometric points: sphere surface toward plane, plane projection.
         float3 pn = normalize(cb.params.xyz);
         float gap = dot(posA, pn) - cb.params.w - ca.params.x;
-        if (gap < margin)
+        if (gap < detect)
         {
             hit = true; nrm = -pn; pen = margin - gap;
             pA = posA - pn * ca.params.x;
@@ -2187,7 +2451,7 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
     {
         float3 pn = normalize(ca.params.xyz);
         float gap = dot(posB, pn) - ca.params.w - cb.params.x;
-        if (gap < margin)
+        if (gap < detect)
         {
             hit = true; nrm = pn; pen = margin - gap;
             pB = posB - pn * cb.params.x;
@@ -2290,7 +2554,7 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
         float3 ab = pb - pa;
         float t = clamp(dot(posB - pa, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
         float3 closest = pa + ab * t;
-        hit = sphereSphere(closest, ca.params.x, posB, cb.params.x, margin, nrm, pen, pA, pB);
+        hit = sphereSphere(closest, ca.params.x, posB, cb.params.x, detect, nrm, pen, pA, pB);
     }
     else if (ca.shape == SHAPE_SPHERE && cb.shape == SHAPE_CAPSULE)
     {
@@ -2301,13 +2565,13 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
         float3 ab = pb - pa;
         float t = clamp(dot(posA - pa, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
         float3 closest = pa + ab * t;
-        hit = sphereSphere(posA, ca.params.x, closest, cb.params.x, margin, nrm, pen, pA, pB);
+        hit = sphereSphere(posA, ca.params.x, closest, cb.params.x, detect, nrm, pen, pA, pB);
     }
     else
     {
         float rA = ca.params.w > 0.0 ? ca.params.w : length(ca.params.xyz);
         float rB = cb.params.w > 0.0 ? cb.params.w : length(cb.params.xyz);
-        hit = sphereSphere(posA, rA, posB, rB, margin, nrm, pen, pA, pB);
+        hit = sphereSphere(posA, rA, posB, rB, detect, nrm, pen, pA, pB);
     }
 
     if (!hit) return;
@@ -2453,14 +2717,14 @@ void bond_wake(uint3 tid : SV_DispatchThreadID)
     BodyState b = gBodies[j.bodyB];
     bool sleepA = bodyIsDynamic(a) && bodyIsSleeping(a);
     bool sleepB = bodyIsDynamic(b) && bodyIsSleeping(b);
-    if (sleepA && bodyMoving(b))
+    if (sleepA && canWake(b))
     {
-        gBodies[j.bodyA].flags = (a.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[j.bodyA].flags = wokenFlags(a.flags);
         gBodies[j.bodyA].sleepTimer = 0.0;
     }
-    if (sleepB && bodyMoving(a))
+    if (sleepB && canWake(a))
     {
-        gBodies[j.bodyB].flags = (b.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        gBodies[j.bodyB].flags = wokenFlags(b.flags);
         gBodies[j.bodyB].sleepTimer = 0.0;
     }
 }
@@ -2682,11 +2946,18 @@ Contact finishWarmContact(Contact c, BodyState ba, BodyState bb)
     // Normal stiffness is floored at m/dt²; each tangent ramps independently.
     float kMass = min(mA, mB) / (dt * dt);
     c.kN = max(max(1.0, kMass), p.gamma * c.kN);
-    c.kT = max(1.0, p.gamma * c.kT);
-    c._pad2 = max(1.0, p.gamma * c._pad2);
-    c.lambdaN *= p.alpha * p.gamma;
-    c.lambdaT1 *= p.alpha * p.gamma;
-    c.lambdaT2 *= p.alpha * p.gamma;
+    float kTMin = (p.flags & FLAG_TANGENT_MASS_FLOOR) != 0u ? clamp(kMass, 1.0, p.kMaxN) : 1.0;
+    c.kT = max(kTMin, p.gamma * c.kT);
+    c._pad2 = max(kTMin, p.gamma * c._pad2);
+    c.lambdaN *= warmDecay();
+    c.lambdaT1 *= warmDecay();
+    c.lambdaT2 *= warmDecay();
+    if ((p.flags & FLAG_LOAD_PENALTY) != 0u)
+    {
+        c.kN = min(max(c.kN, abs(c.lambdaN) / REST_SLOP), p.kMaxN);
+        c.kT = min(max(c.kT, abs(c.lambdaT1) / REST_SLOP), p.kMaxN);
+        c._pad2 = min(max(c._pad2, abs(c.lambdaT2) / REST_SLOP), p.kMaxN);
+    }
     return c;
 }
 
@@ -3992,6 +4263,14 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             b.invInertia.x > 1e-12 ? (1.0 / b.invInertia.x) : 0.0,
             b.invInertia.y > 1e-12 ? (1.0 / b.invInertia.y) : 0.0,
             b.invInertia.z > 1e-12 ? (1.0 / b.invInertia.z) : 0.0);
+        if ((p.flags & FLAG_ARMATURE) != 0u)
+        {
+            float extent = 0.0;
+            uint n = gCounters[0].colliderCount;
+            for (uint c = firstColliderOfBody(bodyIdx); c < n && gColliders[c].body == bodyIdx; c++)
+                extent = max(extent, colliderExtent(gColliders[c]));
+            inertia = max(inertia, float3(1, 1, 1) * (ARMATURE_FRACTION * mass * extent * extent));
+        }
         float3 dp = b.position - inertial;
         rhs.v[0] = (mass / dt2) * dp.x;
         rhs.v[1] = (mass / dt2) * dp.y;
@@ -4085,7 +4364,9 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 if (dot(qB, bB.initialRot) < 0.0) qB = -qB;
                 dAngB = quatSubVec(qB, bB.initialRot);
             }
-            float keep = 1.0 - p.alpha;
+            float keep = 1.0 - primalAlpha();
+            float rollN = 0.0, rollArm = 0.0;
+            float3 rollNormal = float3(0, 0, 0);
             for (uint ci = 0u; ci < contactCount; ci++)
             {
                 #if defined(ENGINE_COMPACT_SOLVE)
@@ -4107,8 +4388,61 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                     c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
                 c.penetration = C.x;
                 // C is already Ĉ; alpha=0 + margin=0 ⇒ contributeContact uses F = k·C + λ.
+                if ((p.flags & FLAG_SLIDE_HESSIAN) != 0u)
+                {
+                    // A sliding row's force is fixed at μ|f_N| along the slip, so its
+                    // stiffness is the secant μ|f_N|/|C_T| (IPC's lagged friction
+                    // Hessian), not the stick penalty that would damp the step.
+                    float3 fRaw = float3(c.kN, c.kT, c._pad2) * C + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
+                    float fN = max(-min(fRaw.x, 0.0), 0.0);
+                    float slip = length(C.yz);
+                    if (length(fRaw.yz) > c.friction * fN && slip > 1.0e-9)
+                    {
+                        float kSec = c.friction * fN / slip;
+                        // Keep the force (k·C + λ, then the cone) unchanged: only the
+                        // Hessian uses the secant. contributeContact uses the same k for
+                        // both, so pass the force through λ with k = kSec.
+                        float3 f = projectContactForce(fRaw, c.friction);
+                        c.lambdaT1 = f.y - min(c.kT, kSec) * C.y;
+                        c.lambdaT2 = f.z - min(c._pad2, kSec) * C.z;
+                        c.kT = min(c.kT, kSec);
+                        c._pad2 = min(c._pad2, kSec);
+                    }
+                }
+                if ((p.flags & FLAG_ROLLING_RESISTANCE) != 0u)
+                {
+                    float fN = max(-(c.kN * C.x + c.lambdaN), 0.0);
+                    rollN += fN;
+                    rollArm = max(rollArm, length(isA ? rAW : rBW));
+                    rollNormal = n;
+                }
                 contributeContact(A, rhs, c, isA, 0.0, b.position, rotSelf, C, 0.0,
                     isA ? rAW : rBW);
+            }
+            if ((p.flags & FLAG_ROLLING_RESISTANCE) != 0u && rollN > 0.0)
+            {
+                // Relative rolling this step (twist about the normal excluded).
+                float3 roll = dAngB - dAngA;
+                roll -= rollNormal * dot(roll, rollNormal);
+                float angle = length(roll);
+                float cap = ROLLING_RESISTANCE * rollN * rollArm;
+                if (angle > 1.0e-9 && cap > 0.0)
+                {
+                    float3 axis = roll / angle;
+                    // At most stop this step's relative rolling, never reverse it
+                    // (as Box2D clamps the impulse): stiffness I_axis/h² of this
+                    // body about the axis, the torque capped at μr·N·r.
+                    float3 local = quatRotate(quatConjugate(b.orientation), axis);
+                    float invIAxis = max(dot(local * local, b.invInertia), 1.0e-12);
+                    float kHold = 1.0 / (invIAxis * p.dt * p.dt);
+                    float torque = min(kHold * angle, cap);
+                    float kRow = torque / angle;
+                    Vec6 ja = vec6Zero();
+                    float sgn = isA ? -1.0 : 1.0;
+                    ja.v[3] = sgn * axis.x; ja.v[4] = sgn * axis.y; ja.v[5] = sgn * axis.z;
+                    mat6AddOuter(A, ja, kRow);
+                    vec6AddScaled(rhs, ja, torque);
+                }
             }
         }
         else
@@ -4132,16 +4466,31 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 float lAng[3] = { j.lambda5, j.lambda3, j.lambda4 };
                 float cAng[3] = { ang.z, ang.x, ang.y };
                 float s = isA ? -1.0 : 1.0;
+                float3 fWorld = float3(0, 0, 0);
                 for (int row = 0; row < 3; row++)
                 {
                     float3 d = F[row];
                     Vec6 jl = jacobianLin(d, r, !isA);
                     mat6AddOuter(A, jl, kLin[row]);
                     vec6AddScaled(rhs, jl, kLin[row] * lin[row] + lLin[row]);
+                    fWorld += d * (kLin[row] * lin[row] + lLin[row]);
                     Vec6 ja = vec6Zero();
                     ja.v[3] = s * d.x; ja.v[4] = s * d.y; ja.v[5] = s * d.z;
                     mat6AddOuter(A, ja, kAng[row]);
                     vec6AddScaled(rhs, ja, kAng[row] * cAng[row] + lAng[row]);
+                }
+                if ((p.flags & FLAG_BOND_GEOMETRIC) != 0u)
+                {
+                    // Diagonally lumped geometric stiffness of the anchor point
+                    // (AVBD Sec. 3.5; avbd-demo3d Joint): the Hessian of F·(R r),
+                    // H = ½(F rᵀ + r Fᵀ) − (F·r) I, stamped as diag(|columns|).
+                    float3 rr = isA ? r : -r;
+                    float3 fv = fWorld;
+                    float fr = dot(fv, rr);
+                    float3 c0 = 0.5 * (fv * rr.x + rr * fv.x) - float3(fr, 0, 0);
+                    float3 c1 = 0.5 * (fv * rr.y + rr * fv.y) - float3(0, fr, 0);
+                    float3 c2 = 0.5 * (fv * rr.z + rr * fv.z) - float3(0, 0, fr);
+                    mat6AddDiag(A, float3(0, 0, 0), float3(length(c0), length(c1), length(c2)));
                 }
                 continue;
             }
@@ -4188,11 +4537,33 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
     }
 }
 
+// BDF1 velocity from the step-start pose x⁻ saved by prediction.
+float3 bodyLinearVelocity(BodyState b, float dt)
+{
+    return (b.position - b.initialPos) / max(dt, 1e-8);
+}
+float3 bodyAngularVelocity(BodyState b, float dt)
+{
+    float4 q0 = b.initialRot;
+    float4 q1 = b.orientation;
+    if (dot(q0, q1) < 0.0) q1 = -q1; // same hemisphere
+    float4 dq = quatMul(q1, quatConjugate(q0));
+    float3 av = 2.0 * dq.xyz / max(dt, 1e-8);
+    return dq.w < 0.0 ? -av : av;
+}
+
 void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
 {
     BodyState b = gBodies[bodyIdx];
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b)) return;
     AvbdParams p = PARAMS;
+    // Post-stabilization: the velocity is the pose after the α = 1 iterations,
+    // taken before this pass removes the step-start error.
+    if (gStabilize)
+    {
+        gBodies[bodyIdx].linearVel = bodyLinearVelocity(b, p.dt);
+        gBodies[bodyIdx].angularVel = bodyAngularVelocity(b, p.dt);
+    }
     uint floors = 0;
     Vec6 neg = rhs;
     for (int k = 0; k < 6; k++) neg.v[k] = -rhs.v[k];
@@ -4302,7 +4673,8 @@ void primalReduceStep(uint s, bool live, uint lane, uint slot, inout Mat6 A, ino
 [numthreads(64, 1, 1)]
 void solve_primal_color(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
 {
-    uint color = PASS_U;
+    uint color = PASS_U & 255u;
+    gStabilize = (PASS_U & 256u) != 0u;
     uint count = SOLVE_COUNT(color);
     uint gid = dispatchIndex(tid);
     uint local = lid.x;
@@ -4362,7 +4734,8 @@ void solve_primal_sparse(uint3 lid : SV_GroupThreadID)
     if (local == 0u) gsUniformLanes = min(ALOAD(gCounters[0].colorCount), min(HOST_S(4), COLOR_DEGREE_BASE));
     GROUP_SYNC();
     uint colorLimit = gsUniformLanes;
-    for (uint color = PASS_U; color < colorLimit; color++)
+    gStabilize = (PASS_U & 256u) != 0u;
+    for (uint color = PASS_U & 255u; color < colorLimit; color++)
     {
         if (local == 0u) gsUniformLanes = SOLVE_COUNT(color);
         GROUP_SYNC();
@@ -4470,7 +4843,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             }
             float3 rAW = quatRotate(rotA, c.anchorA);
             float3 rBW = quatRotate(rotB, c.anchorB);
-            float keep = 1.0 - p.alpha;
+            float keep = 1.0 - dualAlpha();
             float3 n = c.normal;
             float3 t1 = c.tangent1;
             float3 t2 = c.tangent2;
@@ -4491,10 +4864,12 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             if (f.x < 0.0) c.kN = min(c.kN + p.betaLin * abs(cReg.x), p.kMaxN);
             if (rawFriction <= bound)
             {
-                c.kT = min(c.kT + p.betaLin * abs(cReg.y), p.kMaxT);
-                c._pad2 = min(c._pad2 + p.betaLin * abs(cReg.z), p.kMaxT);
+                c.kT = min(c.kT + p.betaLin * abs(cReg.y), max(p.kMaxT, c.kT));
+                c._pad2 = min(c._pad2 + p.betaLin * abs(cReg.z), max(p.kMaxT, c._pad2));
                 c._pad0 = length(cReg.yz) < 1.0e-5 ? 1.0 : 0.0;
             }
+            if ((p.flags & FLAG_COULOMB_STICK) != 0u)
+                c._pad0 = (rawFriction <= bound && length(float2(c.c0T1, c.c0T2)) < STICK_TOL) ? 1.0 : 0.0;
             // The dual changes forces/penalties, not geometry. Avoid writing the
             // full 128-byte record for every contact on every solver iteration.
 #if defined(ENGINE_COMPACT_SOLVE)
@@ -4581,23 +4956,101 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     gCcdFlags[i] = 0;
     if (!bodyIsDynamic(b)) return;
     if (bodyIsSleeping(b)) return;
+    if (wakePending(b))
+    {
+        // Held still this step; solved from the next with a fresh sleep timer.
+        gBodies[i].flags = b.flags & ~BODY_WAKE_PENDING;
+        gBodies[i].linearVel = float3(0, 0, 0);
+        gBodies[i].angularVel = float3(0, 0, 0);
+        gBodies[i].sleepTimer = 0.0;
+        return;
+    }
 
     // Step-start pose x⁻ was saved on the body by prediction (initialPos/Rot).
+    // Post-stabilization stored the velocity before its pass moved the body.
     float dt = max(p.dt, 1e-8);
-    b.linearVel = (b.position - b.initialPos) / dt;
-    // Angular velocity from quat delta
-    float4 q0 = b.initialRot;
-    float4 q1 = b.orientation;
-    // Ensure same hemisphere
-    if (dot(q0, q1) < 0.0) q1 = -q1;
-    float4 dq = quatMul(q1, quatConjugate(q0));
-    float3 av = 2.0 * dq.xyz / dt;
-    if (dq.w < 0.0) av = -av;
-    b.angularVel = av;
+    if (!postStabilize())
+    {
+        b.linearVel = bodyLinearVelocity(b, p.dt);
+        b.angularVel = bodyAngularVelocity(b, p.dt);
+    }
 
+    if ((p.flags & FLAG_MAX_ROTATION) != 0u)
+    {
+        float wMax = MAX_ROTATION / dt;
+        float w = length(b.angularVel);
+        if (w > wMax) b.angularVel *= wMax / w;
+    }
     float lin = length(b.linearVel);
     float ang = length(b.angularVel);
-    if (lin < p.sleepLin && ang < p.sleepAng)
+    bool slow = lin < p.sleepLin && ang < p.sleepAng;
+    float extent = 0.0;
+    if (pointSpeedSleep() || displacementSleep() || (p.flags & FLAG_STABILIZATION) != 0u)
+    {
+        uint n = gCounters[0].colliderCount;
+        for (uint c = firstColliderOfBody(i); c < n && gColliders[c].body == i; c++)
+            extent = max(extent, colliderExtent(gColliders[c]));
+        if (pointSpeedSleep()) slow = lin + ang * extent < p.sleepLin;
+        if ((p.flags & FLAG_STABILIZATION) != 0u)
+        {
+            float band = STAB_SPEEDS * p.sleepLin;
+            float speed = lin + ang * extent;
+            if (speed < band)
+            {
+                float keepV = speed / band;
+                b.linearVel *= keepV;
+                b.angularVel *= keepV;
+            }
+        }
+        if (displacementSleep())
+        {
+            // A body moves only if both measures of this window say so:
+            //  - pose: a low-pass (β = SLEEP_POSE_BETA) pose against the pose
+            //    at the window start. It ignores velocity that never moves the
+            //    body (one-tick blips that post-stabilization undoes);
+            //  - velocity: D = Σ v·h, Θ = Σ ω·h, as mature engines judge sleep
+            //    (Box2D, Jolt, PhysX). It ignores push-out, which is not
+            //    velocity (a jammed pair slowly pushed apart).
+            // Storage: the previous-step record's spare fields (only its
+            // linearVel is used elsewhere).
+            bool fresh = b.sleepTimer <= 0.0;
+            float3 emaPos = fresh ? b.position : BODY_PREV(i).initialPos;
+            float4 emaRot = fresh ? b.orientation : BODY_PREV(i).initialRot;
+            float4 qNow = b.orientation;
+            if (dot(qNow, emaRot) < 0.0) qNow = -qNow;
+            emaPos += SLEEP_POSE_BETA * (b.position - emaPos);
+            emaRot = quatNormalize(emaRot + SLEEP_POSE_BETA * (qNow - emaRot));
+            float3 refPos = fresh ? emaPos : BODY_PREV(i).position;
+            float4 refRot = fresh ? emaRot : BODY_PREV(i).orientation;
+            float turn = 2.0 * acos(min(abs(dot(refRot, emaRot)), 1.0));
+            float movedPose = length(emaPos - refPos) + turn * extent;
+            float3 dLin = (fresh ? float3(0, 0, 0) : BODY_PREV(i).angularVel) + b.linearVel * dt;
+            float3 dAng = (fresh ? float3(0, 0, 0) : BODY_PREV(i).invInertia) + b.angularVel * dt;
+            float movedVel = length(dLin) + length(dAng) * extent;
+            float moved = min(movedPose, movedVel);
+            slow = fresh || moved < p.sleepLin * p.sleepTime;
+            // Diagnostics (sleep-diag.mjs): this window's displacement.
+            gBodies[i].initialPad = moved;
+            // A candidate held awake (by its island) restarts the window every
+            // sleepTime, so the limit is drift per window, like a speed.
+            bool rewindow = slow && b.sleepTimer >= 2.0 * p.sleepTime;
+            if (rewindow) b.sleepTimer = p.sleepTime;
+            if (!slow || rewindow)
+            {
+                refPos = emaPos;
+                refRot = emaRot;
+                dLin = float3(0, 0, 0);
+                dAng = float3(0, 0, 0);
+            }
+            BODY_PREV(i).initialPos = emaPos;
+            BODY_PREV(i).initialRot = emaRot;
+            BODY_PREV(i).position = refPos;
+            BODY_PREV(i).orientation = refRot;
+            BODY_PREV(i).angularVel = dLin;
+            BODY_PREV(i).invInertia = dAng;
+        }
+    }
+    if (slow)
     {
         b.sleepTimer += dt;
         if (b.sleepTimer >= p.sleepTime)

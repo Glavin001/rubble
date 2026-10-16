@@ -20,10 +20,18 @@ fn bind_slots(sources: &[PathBuf]) -> Result<HashMap<String, u32>> {
     let mut map = HashMap::new();
     for path in sources {
         for line in std::fs::read_to_string(path)?.lines() {
-            let Some(rest) = line.trim_start().strip_prefix("BIND(") else { continue };
-            let Some((n, decl)) = rest.split_once(')') else { continue };
-            let Some(decl) = decl.split(';').next() else { continue };
-            let Some(name) = decl.split_whitespace().last() else { continue };
+            let Some(rest) = line.trim_start().strip_prefix("BIND(") else {
+                continue;
+            };
+            let Some((n, decl)) = rest.split_once(')') else {
+                continue;
+            };
+            let Some(decl) = decl.split(';').next() else {
+                continue;
+            };
+            let Some(name) = decl.split_whitespace().last() else {
+                continue;
+            };
             let slot: u32 = n.trim().parse()?;
             if let Some(old) = map.insert(name.to_string(), slot) {
                 if old != slot {
@@ -43,7 +51,9 @@ fn msl_buffers(msl: &str, entry: &str, stage: &str) -> Result<Vec<(String, u32)>
         .ok_or_else(|| anyhow!("no {stage} signature for {entry}"))?;
     let mut out = Vec::new();
     for part in sig.split(", ") {
-        let Some((decl, rest)) = part.split_once(" [[buffer(") else { continue };
+        let Some((decl, rest)) = part.split_once(" [[buffer(") else {
+            continue;
+        };
         let index: u32 = rest.split(')').next().unwrap().parse()?;
         let var = decl.split_whitespace().last().unwrap();
         // Slang suffixes globals with `_<n>`.
@@ -54,11 +64,25 @@ fn msl_buffers(msl: &str, entry: &str, stage: &str) -> Result<Vec<(String, u32)>
 }
 
 /// Compile one compute entry to MSL with reflection; returns (msl, threads).
-fn compile_kernel(slangc: &Path, root: &Path, entry: &str, dest: &Path) -> Result<(String, [u32; 3])> {
+fn compile_kernel(
+    slangc: &Path,
+    root: &Path,
+    entry: &str,
+    dest: &Path,
+) -> Result<(String, [u32; 3])> {
     let source = root.join("kernels").join(kernel_source(entry));
     let reflection = dest.with_extension("json");
     let output = Command::new(slangc)
-        .args(["-target", "metal", "-stage", "compute", "-entry", entry, "-DENGINE_WGSL=1", "-I"])
+        .args([
+            "-target",
+            "metal",
+            "-stage",
+            "compute",
+            "-entry",
+            entry,
+            "-DENGINE_WGSL=1",
+            "-I",
+        ])
         .arg(root.join("physics"))
         .arg("-I")
         .arg(root.join("kernels"))
@@ -70,7 +94,10 @@ fn compile_kernel(slangc: &Path, root: &Path, entry: &str, dest: &Path) -> Resul
         .output()
         .with_context(|| format!("spawn {}", slangc.display()))?;
     if !output.status.success() {
-        bail!("slangc {entry}: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "slangc {entry}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&reflection)?)?;
     let size = json["entryPoints"]
@@ -78,7 +105,12 @@ fn compile_kernel(slangc: &Path, root: &Path, entry: &str, dest: &Path) -> Resul
         .and_then(|e| e.iter().find(|e| e["name"] == entry))
         .map(|e| &e["threadGroupSize"])
         .ok_or_else(|| anyhow!("{entry}: no reflected entry point"))?;
-    let t = |k: usize| size[k].as_u64().map(|x| x as u32).ok_or_else(|| anyhow!("{entry}: thread group size"));
+    let t = |k: usize| {
+        size[k]
+            .as_u64()
+            .map(|x| x as u32)
+            .ok_or_else(|| anyhow!("{entry}: thread group size"))
+    };
     Ok((std::fs::read_to_string(dest)?, [t(0)?, t(1)?, t(2)?]))
 }
 
@@ -108,15 +140,24 @@ fn main() -> Result<()> {
                     let mut done = Vec::new();
                     loop {
                         let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(&(_, entry)) = KERNELS.get(k) else { break };
+                        let Some(&(_, entry)) = KERNELS.get(k) else {
+                            break;
+                        };
                         let dest = out_dir.join(format!("{entry}.metal"));
-                        done.push((k, dest.clone(), compile_kernel(&slangc, &root, entry, &dest)));
+                        done.push((
+                            k,
+                            dest.clone(),
+                            compile_kernel(&slangc, &root, entry, &dest),
+                        ));
                     }
                     done
                 })
             })
             .collect();
-        workers.into_iter().flat_map(|w| w.join().unwrap()).collect()
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap())
+            .collect()
     });
     let mut compiled: Vec<Option<(PathBuf, String, [u32; 3])>> = vec![None; KERNELS.len()];
     for (k, dest, r) in results {
@@ -132,7 +173,9 @@ fn main() -> Result<()> {
         let (dest, msl, threads) = compiled[k].take().unwrap();
         let mut binds = String::new();
         for (global, index) in msl_buffers(&msl, entry, "[[kernel]]")? {
-            let slot = slots.get(&global).ok_or_else(|| anyhow!("{entry}: global {global} has no BIND slot"))?;
+            let slot = slots
+                .get(&global)
+                .ok_or_else(|| anyhow!("{entry}: global {global} has no BIND slot"))?;
             write!(binds, "({index}, {slot}), ")?;
         }
         writeln!(
@@ -146,7 +189,15 @@ fn main() -> Result<()> {
     // Draw shader: one library with vs + three fragment entries.
     let draw = root.join("render/fracture_draw.slang");
     let draw_out = out_dir.join("fracture_draw.metal");
-    compile_stage(&draw, "vs", "vertex", SlangTarget::Metal, &draw_out, &[], &[])?;
+    compile_stage(
+        &draw,
+        "vs",
+        "vertex",
+        SlangTarget::Metal,
+        &draw_out,
+        &[],
+        &[],
+    )?;
     let vs = std::fs::read_to_string(&draw_out)?;
     let draw_binds = msl_buffers(&vs, "vs", "[[vertex]]")?;
     let expect = |g: &str, i: u32| draw_binds.iter().any(|(n, k)| n == g && *k == i);
@@ -154,13 +205,28 @@ fn main() -> Result<()> {
         bail!("unexpected draw bindings {draw_binds:?}");
     }
     let mut libs = String::new();
-    for (entry, stage) in [("fs", "fragment"), ("ground", "fragment"), ("wire", "fragment")] {
+    for (entry, stage) in [
+        ("fs", "fragment"),
+        ("ground", "fragment"),
+        ("wire", "fragment"),
+    ] {
         let dest = out_dir.join(format!("fracture_draw_{entry}.metal"));
         compile_stage(&draw, entry, stage, SlangTarget::Metal, &dest, &[], &[])?;
-        writeln!(libs, "    ({entry:?}, include_str!({:?})),", dest.display().to_string())?;
+        writeln!(
+            libs,
+            "    ({entry:?}, include_str!({:?})),",
+            dest.display().to_string()
+        )?;
     }
-    writeln!(table, "pub static DRAW_VS: &str = include_str!({:?});", draw_out.display().to_string())?;
+    writeln!(
+        table,
+        "pub static DRAW_VS: &str = include_str!({:?});",
+        draw_out.display().to_string()
+    )?;
     writeln!(table, "pub static DRAW_FS: &[(&str, &str)] = &[\n{libs}];")?;
-    std::fs::write(PathBuf::from(std::env::var("OUT_DIR")?).join("fracture_kernels.rs"), table)?;
+    std::fs::write(
+        PathBuf::from(std::env::var("OUT_DIR")?).join("fracture_kernels.rs"),
+        table,
+    )?;
     Ok(())
 }

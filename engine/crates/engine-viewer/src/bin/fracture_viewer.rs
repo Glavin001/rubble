@@ -79,7 +79,9 @@ impl Source {
     fn name(&self) -> String {
         match self {
             Source::Sample(s) => s.menu.to_string(),
-            Source::File(p) => p.file_name().map_or("model".into(), |n| n.to_string_lossy().into_owned()),
+            Source::File(p) => p
+                .file_name()
+                .map_or("model".into(), |n| n.to_string_lossy().into_owned()),
         }
     }
 }
@@ -98,7 +100,10 @@ struct Rates {
 
 impl Rates {
     fn reset(&mut self) {
-        *self = Self { start: Some(Instant::now()), ..Default::default() };
+        *self = Self {
+            start: Some(Instant::now()),
+            ..Default::default()
+        };
     }
     fn step(&mut self, t: &engine_viewer::fracture::sim::Timing) {
         self.steps += 1;
@@ -127,7 +132,11 @@ impl Rates {
         } else {
             format!("{tps:.0} TPS · {fps:.0} FPS")
         };
-        *self = Self { start: Some(Instant::now()), summary, ..Default::default() };
+        *self = Self {
+            start: Some(Instant::now()),
+            summary,
+            ..Default::default()
+        };
         true
     }
 }
@@ -172,7 +181,9 @@ struct App {
 
 impl App {
     fn hz(&self) -> f64 {
-        self.loaded.as_ref().map_or(120.0, |l| 1.0 / l.scene.params.dt as f64)
+        self.loaded
+            .as_ref()
+            .map_or(120.0, |l| 1.0 / l.scene.params.dt as f64)
     }
 
     /// Load `source` at `level` (default: the sample's level, else the first).
@@ -189,11 +200,20 @@ impl App {
             if self.asset.as_ref().is_none_or(|(p, _)| *p != path) {
                 let t = Instant::now();
                 let asset = parse_fracture_glb(&std::fs::read(&path)?)?;
-                println!("parsed {} in {:.0} ms · levels {:?}", path.display(), t.elapsed().as_secs_f64() * 1000.0, asset.levels());
+                println!(
+                    "parsed {} in {:.0} ms · levels {:?}",
+                    path.display(),
+                    t.elapsed().as_secs_f64() * 1000.0,
+                    asset.levels()
+                );
                 self.asset = Some((path, asset));
             }
             let levels = self.asset.as_ref().unwrap().1.levels();
-            let wanted = engine_fracture::samples::initial_level(&self.asset.as_ref().unwrap().1, level.or(source.level())).unwrap_or(0);
+            let wanted = engine_fracture::samples::initial_level(
+                &self.asset.as_ref().unwrap().1,
+                level.or(source.level()),
+            )
+            .unwrap_or(0);
             let mut order = levels.clone();
             order.sort_by_key(|&l| ((l as i32 - wanted as i32).abs(), l > wanted));
             let mut first_error = None;
@@ -231,7 +251,11 @@ impl App {
         let t = Instant::now();
         let asset = level.and(self.asset.as_ref().map(|(_, a)| a));
         let built = base_scene(asset, level.unwrap_or(0), source.max_hull_vertices())?;
-        let one = if self.bonds { self.preload(&built)? } else { built.without_joints() };
+        let one = if self.bonds {
+            self.preload(&built)?
+        } else {
+            built.without_joints()
+        };
         let scene = layout_scene(one, source.layout(), asset.is_none());
         let sim = FractureSim::new(&self.device, &self.queue, &scene)?;
         let renderer = Renderer::new(&self.device, MTLPixelFormat::BGRA8Unorm, &scene)?;
@@ -246,7 +270,14 @@ impl App {
             scene.skipped_hulls.len(),
             t.elapsed().as_secs_f64() * 1000.0
         );
-        Ok(Loaded { name, level, orbit: Orbit::new(&scene), scene, sim, renderer })
+        Ok(Loaded {
+            name,
+            level,
+            orbit: Orbit::new(&scene),
+            scene,
+            sim,
+            renderer,
+        })
     }
 
     /// Settle one copy under its own weight with breaking off, then start it
@@ -266,15 +297,23 @@ impl App {
             }
         }
         println!("bonds settled in {steps} steps ({} awake)", sim.last.awake);
-        scene.settled(&sim.snapshot(scene.bodies.len())?, steps, sim.last.awake == 0)
+        scene.settled(
+            &sim.snapshot(scene.bodies.len())?,
+            steps,
+            sim.last.awake == 0,
+        )
     }
 
     fn select_level(&mut self, step: i32) {
-        let (Some(l), Some((_, asset))) = (&self.loaded, &self.asset) else { return };
+        let (Some(l), Some((_, asset))) = (&self.loaded, &self.asset) else {
+            return;
+        };
         let Some(current) = l.level else { return };
         let levels = asset.levels();
         let i = levels.iter().position(|&x| x == current).unwrap_or(0) as i32 + step;
-        let Some(&level) = levels.get(i.max(0) as usize).filter(|_| i >= 0) else { return };
+        let Some(&level) = levels.get(i.max(0) as usize).filter(|_| i >= 0) else {
+            return;
+        };
         if level == current {
             return;
         }
@@ -287,7 +326,8 @@ impl App {
             }
             Err(e) => {
                 eprintln!("level {level} unavailable: {e:#}");
-                self.status = format!("level {level} unavailable ({e}) · staying on level {current}");
+                self.status =
+                    format!("level {level} unavailable ({e}) · staying on level {current}");
             }
         }
         self.rates.reset();
@@ -345,20 +385,31 @@ impl App {
     }
 
     fn shoot(&mut self, at: PhysicalPosition<f64>) {
-        let (Some(window), Some(l)) = (&self.window, &self.loaded) else { return };
+        let (Some(window), Some(l)) = (&self.window, &self.loaded) else {
+            return;
+        };
         let size = window.inner_size();
         let aspect = size.width as f64 / size.height.max(1) as f64;
-        let ray = l.orbit.aim(at.x / size.width as f64, at.y / size.height as f64, aspect, l.scene.projectile_radius);
+        let ray = l.orbit.aim(
+            at.x / size.width as f64,
+            at.y / size.height as f64,
+            aspect,
+            l.scene.projectile_radius,
+        );
         self.fire(ray);
     }
 
     /// One frame: advance physics on a 1/dt accumulator, draw, then read counters.
     fn frame(&mut self) {
         let now = Instant::now();
-        let elapsed = self.last_frame.map_or(0.0, |t| (now - t).as_secs_f64().min(0.04));
+        let elapsed = self
+            .last_frame
+            .map_or(0.0, |t| (now - t).as_secs_f64().min(0.04));
         self.last_frame = Some(now);
         let hz = self.hz();
-        let (Some(layer), Some(l)) = (&self.layer, &mut self.loaded) else { return };
+        let (Some(layer), Some(l)) = (&self.layer, &mut self.loaded) else {
+            return;
+        };
         let mut ticks = 0;
         let mut error = None;
         if self.running {
@@ -377,8 +428,17 @@ impl App {
         // Queue the draw immediately behind physics; the same queue orders them.
         autoreleasepool(|| {
             if let Some(drawable) = layer.next_drawable() {
-                let aspect = drawable.texture().width() as f64 / drawable.texture().height().max(1) as f64;
-                l.renderer.draw(&self.device, &self.queue, drawable, l.sim.body_buffer(), l.orbit.view_proj(aspect), l.sim.shots(), self.show_bonds);
+                let aspect =
+                    drawable.texture().width() as f64 / drawable.texture().height().max(1) as f64;
+                l.renderer.draw(
+                    &self.device,
+                    &self.queue,
+                    drawable,
+                    l.sim.body_buffer(),
+                    l.orbit.view_proj(aspect),
+                    l.sim.shots(),
+                    self.show_bonds,
+                );
             }
         });
         if ticks > 0 {
@@ -403,9 +463,18 @@ impl App {
     }
 
     fn counters_line(&self) -> String {
-        let Some(l) = &self.loaded else { return String::new() };
+        let Some(l) = &self.loaded else {
+            return String::new();
+        };
         let c = l.sim.last;
-        format!("{}/16 shots · {} steps · {} contacts · {} candidates · {} awake", l.sim.shots(), l.sim.steps(), c.contact, c.candidate, c.awake)
+        format!(
+            "{}/16 shots · {} steps · {} contacts · {} candidates · {} awake",
+            l.sim.shots(),
+            l.sim.steps(),
+            c.contact,
+            c.candidate,
+            c.awake
+        )
     }
 
     fn resize(&self) {
@@ -443,7 +512,11 @@ impl App {
             "[" => self.select_level(-1),
             "]" => self.select_level(1),
             digit => {
-                if let Some(s) = digit.parse::<usize>().ok().and_then(|d| SAMPLES.get(d.wrapping_sub(1))) {
+                if let Some(s) = digit
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|d| SAMPLES.get(d.wrapping_sub(1)))
+                {
                     self.load(Source::Sample(s), None);
                 }
             }
@@ -460,7 +533,9 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("Fracture lab · Metal").with_inner_size(LogicalSize::new(1400.0, 900.0));
+        let attrs = Window::default_attributes()
+            .with_title("Fracture lab · Metal")
+            .with_inner_size(LogicalSize::new(1400.0, 900.0));
         let window = event_loop.create_window(attrs).expect("window");
         window.focus_window();
         let layer = MetalLayer::new();
@@ -487,7 +562,10 @@ impl ApplicationHandler for App {
                 Some(ray) => self.fire(ray),
                 None => {
                     let size = self.window.as_ref().unwrap().inner_size();
-                    self.shoot(PhysicalPosition::new(size.width as f64 / 2.0, size.height as f64 / 2.0));
+                    self.shoot(PhysicalPosition::new(
+                        size.width as f64 / 2.0,
+                        size.height as f64 / 2.0,
+                    ));
                 }
             }
         }
@@ -512,19 +590,34 @@ impl ApplicationHandler for App {
                 self.cursor = position;
                 let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor());
                 if let Some(d) = &mut self.drag {
-                    if ((position.x - d.start.x).powi(2) + (position.y - d.start.y).powi(2)).sqrt() > 5.0 * scale {
+                    if ((position.x - d.start.x).powi(2) + (position.y - d.start.y).powi(2)).sqrt()
+                        > 5.0 * scale
+                    {
                         d.moved = true;
                     }
                     if d.moved {
                         if let Some(l) = &mut self.loaded {
-                            l.orbit.drag((position.x - d.last.x) / scale, (position.y - d.last.y) / scale);
+                            l.orbit.drag(
+                                (position.x - d.last.x) / scale,
+                                (position.y - d.last.y) / scale,
+                            );
                         }
                     }
                     d.last = position;
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
-                ElementState::Pressed => self.drag = Some(Drag { start: self.cursor, last: self.cursor, moved: false }),
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => match state {
+                ElementState::Pressed => {
+                    self.drag = Some(Drag {
+                        start: self.cursor,
+                        last: self.cursor,
+                        moved: false,
+                    })
+                }
                 ElementState::Released => {
                     if self.drag.take().is_some_and(|d| !d.moved) {
                         self.shoot(self.cursor);
@@ -540,7 +633,9 @@ impl ApplicationHandler for App {
                     l.orbit.zoom(dy);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !event.repeat =>
+            {
                 match event.logical_key.as_ref() {
                     Key::Named(NamedKey::Space) => {
                         self.running = !self.running && self.loaded.is_some();
@@ -561,7 +656,8 @@ impl ApplicationHandler for App {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let mut args = std::env::args().skip(1);
-    let (mut source, mut level, mut auto_shoot, mut bonds) = ("house".to_string(), None, false, false);
+    let (mut source, mut level, mut auto_shoot, mut bonds) =
+        ("house".to_string(), None, false, false);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--level" => level = args.next().and_then(|s| s.parse().ok()),
@@ -569,7 +665,10 @@ fn main() -> anyhow::Result<()> {
             "--bonds" => bonds = true,
             "-h" | "--help" => {
                 let keys: Vec<&str> = SAMPLES.iter().map(|s| s.key).collect();
-                println!("fracture_viewer [{}|path.glb] [--level N] [--shoot] [--bonds]", keys.join("|"));
+                println!(
+                    "fracture_viewer [{}|path.glb] [--level N] [--shoot] [--bonds]",
+                    keys.join("|")
+                );
                 return Ok(());
             }
             other => source = other.to_string(),

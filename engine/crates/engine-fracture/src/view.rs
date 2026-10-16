@@ -37,7 +37,12 @@ impl Orbit {
     /// Eye position; narrow viewports back off so the scene still fits.
     pub fn eye(&self, aspect: f64) -> [f64; 3] {
         let fitted = self.distance / aspect.min(1.0);
-        let (sy, cy, sp, cp) = (self.yaw.sin(), self.yaw.cos(), self.pitch.sin(), self.pitch.cos());
+        let (sy, cy, sp, cp) = (
+            self.yaw.sin(),
+            self.yaw.cos(),
+            self.pitch.sin(),
+            self.pitch.cos(),
+        );
         add(self.target, scale([sy * cp, sp, cy * cp], fitted))
     }
 
@@ -47,10 +52,48 @@ impl Orbit {
         let z = norm(sub(eye, self.target));
         let x = norm(cross([0.0, 1.0, 0.0], z));
         let y = cross(z, x);
-        let view = [x[0], y[0], z[0], 0.0, x[1], y[1], z[1], 0.0, x[2], y[2], z[2], 0.0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1.0];
+        let view = [
+            x[0],
+            y[0],
+            z[0],
+            0.0,
+            x[1],
+            y[1],
+            z[1],
+            0.0,
+            x[2],
+            y[2],
+            z[2],
+            0.0,
+            -dot(x, eye),
+            -dot(y, eye),
+            -dot(z, eye),
+            1.0,
+        ];
         let f = 1.0 / (FOV_Y / 2.0).tan();
-        let proj = [f / aspect, 0.0, 0.0, 0.0, 0.0, f, 0.0, 0.0, 0.0, 0.0, far / (NEAR - far), -1.0, 0.0, 0.0, NEAR * far / (NEAR - far), 0.0];
-        std::array::from_fn(|i| (0..4).map(|k| proj[k * 4 + i % 4] * view[(i / 4) * 4 + k]).sum::<f64>() as f32)
+        let proj = [
+            f / aspect,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            f,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            far / (NEAR - far),
+            -1.0,
+            0.0,
+            0.0,
+            NEAR * far / (NEAR - far),
+            0.0,
+        ];
+        std::array::from_fn(|i| {
+            (0..4)
+                .map(|k| proj[k * 4 + i % 4] * view[(i / 4) * 4 + k])
+                .sum::<f64>() as f32
+        })
     }
 
     pub fn drag(&mut self, dx: f64, dy: f64) {
@@ -59,7 +102,9 @@ impl Orbit {
     }
 
     pub fn zoom(&mut self, delta_y: f64) {
-        self.distance = (self.distance * (delta_y * 0.001).exp()).min(self.extent * 8.0).max(self.min_distance);
+        self.distance = (self.distance * (delta_y * 0.001).exp())
+            .min(self.extent * 8.0)
+            .max(self.min_distance);
     }
 
     /// Shot through a viewport point (u, v in 0..1 from the top left), starting
@@ -72,7 +117,10 @@ impl Orbit {
         let t = (FOV_Y / 2.0).tan();
         let (x, y) = ((2.0 * u - 1.0) * aspect * t, (1.0 - 2.0 * v) * t);
         let direction = norm(add(forward, add(scale(right, x), scale(up, y))));
-        Ray { origin: add(eye, scale(direction, projectile_radius * 2.0)), direction }
+        Ray {
+            origin: add(eye, scale(direction, projectile_radius * 2.0)),
+            direction,
+        }
     }
 }
 
@@ -80,7 +128,14 @@ impl Orbit {
 pub fn floor_vertices(extent: f64) -> Vec<f32> {
     let size = (extent * 8.0).max(20.0);
     let mut v = Vec::new();
-    for [x, z] in [[-size, -size], [-size, size], [size, size], [-size, -size], [size, size], [size, -size]] {
+    for [x, z] in [
+        [-size, -size],
+        [-size, size],
+        [size, size],
+        [-size, -size],
+        [size, size],
+        [size, -size],
+    ] {
         vertex(&mut v, [x, 0.0, z], [0.0, 1.0, 0.0], [0.1, 0.15, 0.18], 0);
     }
     v
