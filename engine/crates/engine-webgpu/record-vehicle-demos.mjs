@@ -105,6 +105,42 @@ const TAKES = {
       { n: 240, input: { forward: 0.6, steer: -0.3 }, caption: 'Chase cam in the crowd', cam: 'chase' },
     ],
   },
+  // Two-way ground coupling labs (each mirrors a test in tests/vehicle.rs).
+  slab_ice: {
+    query: 'scene=slab',
+    script: [
+      { n: 60, input: { forward: 0, steer: 0 }, caption: 'Two-way coupling: sedan on a 2.5 t slab resting on frictionless skids', cam: { orbit: [1.57, 0.35, 22] } },
+      { n: 200, input: { forward: 0.5, steer: 0 }, caption: 'Throttle: the tyres push the slab backward (momentum is conserved)' },
+      { n: 120, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Brake: the tyre force reverses and both come to rest together' },
+      { n: 60, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Slab displaced; the static cones show how far', cam: { orbit: [1.2, 0.5, 30] } },
+    ],
+  },
+  seesaw: {
+    query: 'scene=seesaw',
+    script: [
+      { n: 40, input: { forward: 0, steer: 0 }, caption: 'Two-way coupling: a 250 kg seesaw plank on a pivot', cam: { orbit: [1.57, 0.25, 20] } },
+      { n: 330, cruise: 3.5, input: { steer: 0 }, caption: 'The wheel loads act on the plank: it tips once the car passes the pivot' },
+      { n: 120, cruise: 3.5, input: { steer: 0 }, caption: 'Down the other side', cam: { orbit: [1.9, 0.3, 18] } },
+      { n: 80, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Brake' },
+    ],
+  },
+  carry: {
+    query: 'scene=carry',
+    script: [
+      { n: 90, input: { forward: 0, steer: 0 }, caption: 'Two-way coupling: a parked kart riding on a monster truck', cam: { orbit: [2.4, 0.35, 14] } },
+      { n: 180, input: { forward: 0.15, steer: 0 }, caption: 'The kart’s tyres load the truck’s roof; friction carries it along', cam: 'chase' },
+      { n: 240, input: { forward: 0.15, steer: 0.35 }, caption: 'Turning: the kart’s lateral tyre forces hold it on', cam: { orbit: [2.4, 0.35, 16], spin: 0.006 } },
+      { n: 120, input: { forward: 0, steer: 0, brake: 0.4 }, caption: 'Gentle brake' },
+    ],
+  },
+  sidewall: {
+    query: 'scene=sidewall',
+    script: [
+      { n: 40, input: { forward: 0, steer: 0 }, caption: 'Wheel shells: crates beside the tyres, off the suspension ray lines', cam: { orbit: [3.5, 0.45, 12] } },
+      { n: 300, cruise: 6, input: { steer: 0 }, caption: 'The tyre outlines shove the crates aside (wheels are physical, not just rays)' },
+      { n: 90, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Brake', cam: { orbit: [3.0, 0.5, 18] } },
+    ],
+  },
 };
 
 const args = process.argv.slice(2);

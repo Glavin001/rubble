@@ -76,12 +76,16 @@
       playground: 'Playground: ramps, stacks, wall',
       destruction: 'Destruction yard: sever parts',
       traffic: 'Traffic: many AI vehicles',
+      slab: 'Lab: car on a slab sliding on ice',
+      seesaw: 'Lab: seesaw plank',
+      carry: 'Lab: kart riding on a truck',
+      sidewall: 'Lab: crates beside the tyres',
     };
     const scene = qs.get('scene') || 'playground';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
     const presets = await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json();
     const byName = Object.fromEntries(presets.map((p) => [p.name, p]));
-    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : 'sedan');
+    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' ? 'monster_truck' : 'sedan');
     if (!byName[presetName]) throw new Error(`unknown preset ${presetName}; have ${Object.keys(byName).join(', ')}`);
 
     const sceneSel = document.getElementById('sceneSel');
@@ -191,6 +195,47 @@
         addVehicle('monster_truck', [-14, 3.5, -12], 0.4);
         addVehicle('kart', [6, 1.5, -6], 2.0);
         addVehicle('six_wheel_truck', [18, 3, 22], -1.2);
+      }
+    } else if (scene !== 'traffic') {
+      // Two-way coupling labs: each mirrors a test in tests/vehicle.rs.
+      const MAT_SKID = 3;
+      world.setMaterial(MAT_SKID, 0.0);
+      const boxBody = (p, half, mass, extra = {}) => {
+        const body = world.addBody({ p, q: extra.q, invMass: 1 / mass, invI: boxInv(mass, ...half), flags: 1 | 8 });
+        return body;
+      };
+      const boxCol = (body, half, material, localPos = [0, 0, 0]) =>
+        world.addCollider({ body, shape: 2, material, localPos, params: [...half, Math.hypot(...half)] });
+      if (scene === 'slab') {
+        // Heavy slab: grippy deck on frictionless skids. The car's tyres push it back.
+        const m = 2500, half = [6, 0.15, 30];
+        const body = boxBody([0, 0.25, 0], [6, 0.25, 30], m);
+        boxCol(body, half, MAT_GROUND, [0, 0.1, 0]);
+        boxCol(body, half, MAT_SKID, [0, -0.1, 0]);
+        // Cones along the world so the slab's motion reads on camera.
+        for (let z = -40; z <= 40; z += 8) staticBox([8.5, 0.5, z], [0.25, 0.5, 0.25]);
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? -20], spawnAt[2] ?? 0);
+      } else if (scene === 'seesaw') {
+        // Low pivot, long plank resting on its near (-Z) end; the car's weight tips it.
+        staticBox([0, 0.25, 0], [2.6, 0.25, 0.2]);
+        // Centre 1 m on the near side so the plank rests on its near end until the car's
+        // weight crosses the pivot.
+        const tilt = -Math.atan(0.5 / 8);
+        const body = boxBody([0, 0.58 - Math.tan(-tilt), -1], [2.2, 0.08, 7], 250, { q: qAxis([1, 0, 0], tilt) });
+        boxCol(body, [2.2, 0.08, 7], MAT_GROUND);
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? -16], spawnAt[2] ?? 0);
+      } else if (scene === 'carry') {
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
+        // Parked kart (handbrake on) riding on the truck's roof.
+        addVehicle('kart', [spawnAt[0] ?? 0, 4.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0, { forward: 0, steer: 0, handbrake: 1 });
+      } else if (scene === 'sidewall') {
+        // Light crates in two rows that only the tyre outlines reach (outside the body,
+        // off the ray lines): the wheel shells shove them.
+        for (let i = 0; i < 8; i++) for (const x of [-1.15, 1.15]) {
+          const body = boxBody([x, 0.2, 6 + i * 2.5], [0.3, 0.2, 0.3], 15);
+          boxCol(body, [0.3, 0.2, 0.3], MAT_PROP);
+        }
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
       }
     } else {
       addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? -60], spawnAt[2] ?? 0);
