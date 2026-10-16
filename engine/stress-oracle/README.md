@@ -5,10 +5,16 @@
 > that repository. It keeps `stress-ref` (the CPU f64 reference), `stress-gpu` (the Slang
 > GPU solver and its wgpu host) and `stress-reduce` (static condensation), with the
 > goldens, oracle pipelines and docs. The scene packs the tests load are in `packs/`.
-> Left behind: `stress-physx`, the CUDA shader output and the PhysX build glue (they
-> link PhysX), and for now the `stress-viz` debug renderer. Rubble's AVBD engine takes over the
+> Left behind: `stress-physx` (with its offscreen `render.rs` and the `destruction_video`
+> example of the GPU world on PhysX GPU), the CUDA shader output, the PhysX build glue and
+> `scripts/realtime_verify.sh` (they link PhysX). Rubble's AVBD engine takes over the
 > rigid-body role `stress-physx` played. PhysX runs described below and in the other
 > documents are historical measurements.
+>
+> `stress-viz` (the debug renderer and the interactive viewer) followed later from the
+> fork's `feat/oracle-physx-quality` (`905d53209`: the GPU rasterizer, `stress-viz view`
+> and its `--solver-mode`), with `scripts/render_videos.sh`; its `physx` feature became
+> `rubble` (`--engine rubble`: `stress_rubble::RubbleEngine` through `World::with_engine`).
 
 This workspace is the ground truth for the destruction stress solver described in
 the spec (rigid clusters of chunks, a small-strain elastodynamic bond network per
@@ -47,8 +53,8 @@ Taking over this work? Start with [`HANDOFF.md`](HANDOFF.md).
 | `crates/stress-ref/src/snapshot.rs` | `World::snapshot()`: world-frame chunk boxes, Love-Weber chunk stress, bond damage, for renderers and debugging |
 | `crates/stress-ref/src/showcases.rs` | the spec's showcase scenes (overhang, supports, car, floor drop, arch, house) |
 | `crates/stress-ref/tests/` | the test suite (analytic, conservation, failure laws, dynamics, solve modes, features, determinism, refinement, engine API, snapshots, showcases, oracle goldens); `tests/shared/showcases.rs` is also run through PhysX |
-| `crates/stress-viz` | debug renderer: runs a scene and writes an MP4 of view panels (utilization, stress, damage, fragments, speed, deformation) and variant comparisons |
-| `scripts/render_videos.sh` | renders every benchmark, showcase and feature comparison into `videos/` (not committed) |
+| `crates/stress-viz` | debug renderer: runs a scene and writes an MP4 of view panels (utilization, stress, damage, fragments, speed, deformation) and variant comparisons; rasterizes on the GPU through wgpu (Metal, Vulkan, DX12) or in software (`--renderer auto\|gpu\|cpu`); `stress-viz view` is the interactive window (see "Viewer"); `--features rubble` adds rubble's engine (`--engine rubble`) |
+| `scripts/render_videos.sh` | renders every benchmark, showcase and feature comparison, and the oracle-vs-rubble comparisons, into `videos/` (not committed) |
 | `crates/stress-physx` | `PhysxEngine` (PhysX CPU behind `RigidEngine`), the `stress-physx` command, the older `PhysxDestruction` adapter over `StressSolverApi`, and their tests |
 | `oracles/CONTRACT.md` | what an oracle reads and writes |
 | `oracles/<tool>/` | `install.sh`, `PINNED.md`, `export.py`, `run.py`, `observe.py`, `pipeline.py`, `README.md` |
@@ -82,6 +88,12 @@ cargo run --release -p stress-viz -- render b5_wall_impact_v40 --views utilizati
 cargo run --release -p stress-viz -- compare s_blast_two_walls \
     --variant "shadowing on:" --variant "shadowing off:feature blast_shadowing=off" -o cmp.mp4
 scripts/render_videos.sh            # or a subset: scripts/render_videos.sh b5 s_house feature_
+PARALLEL=4 RAYON_NUM_THREADS=4 scripts/render_videos.sh   # several videos at once (many-core machines)
+
+# Interactive window: live run, replay/scrub, free camera, click to fire steel spheres
+cargo run --release -p stress-viz -- view s_house_car --views damage,fragments,utilization --arrows
+# rubble's AVBD engine moving the bodies (in render, still, compare and view)
+cargo run --release -p stress-viz --features rubble -- view s_house_car --engine rubble
 ```
 
 ### Oracles
@@ -588,3 +600,29 @@ them progressively (1, 1, 2, 10, 13, 15 broken bonds over the first 0.1 s, one p
 | `feature_weibull` | Weibull vs uniform bond strengths on the breached panel |
 | `s_overhang_thin_fatigue` | overhang with and without static fatigue (snaps at ~9 s vs holds) |
 | `b5_wall_impact_v10_rate`, `b7_masonry_v15_modes` | rate effects on/off; explicit vs adaptive |
+| `rubble_<scene>` | the standalone world (left) vs the same scene with rubble's AVBD engine moving the bodies (right), the stress solve owning impact islands; `RUBBLE=0` skips them. A scene the coupled world keeps entirely in stress-owned islands renders identically in both (`s_arch_keystone_removed` up to 1 s does) |
+
+### Viewer
+
+`stress-viz view <scene> [options]` opens a window on a live run (cargo feature
+`viewer`, on by default). The simulation runs on its own thread (`--sim-threads`,
+default 4) as fast as it can or capped at real time, and records every frame; the
+window shows the live head or any recorded frame. Projectiles are steel spheres fired
+where you click; firing on a past frame branches the run there (restored from the
+nearest checkpoint and re-simulated deterministically with the shots logged so far;
+with an external engine there are no checkpoints and the branch re-simulates from the
+start). `--solver-mode explicit|soft|implicit|mass-scaling|adaptive` (M in the window)
+trades fidelity for speed; the rubble coupling runs only explicit and adaptive.
+`--renderer auto|gpu|cpu` picks the rasterizer, as for videos.
+
+| input | does |
+|---|---|
+| drag / right- or shift-drag / wheel | orbit / pan / zoom |
+| click | fire a sphere (`[` `]` speed, `-` `=` size) |
+| drag the timeline | scrub |
+| Space, arrows, L | play/pause the replay, step a frame, back to the live head |
+| `,` `.` | replay speed |
+| P, T, R | pause the simulation, real-time cap, restart |
+| M, E | solver mode, engine (standalone / rubble; restarts) |
+| V, A, K, C | view mode, velocity arrows, cracks, fit camera |
+| H, Q | help, quit |
