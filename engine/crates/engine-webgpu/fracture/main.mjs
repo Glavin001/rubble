@@ -12,9 +12,17 @@ let device,asset,scene,sim,renderer,running=false,released=false,loading=true,fr
 const SLICED_STEP_MS=12,SLICE_EXIT_AWAKE=20000;
 // Slices submitted per frame adapt to the frame time: more while frames stay
 // under the 60 FPS budget, fewer above it, so physics gets every spare
-// millisecond without dropping rendering below ~60 FPS.
-const FRAME_BUDGET_MS=16.0;
+// millisecond without dropping rendering below ~60 FPS. The budget sits just
+// above one 60 Hz vsync interval (16.7 ms): at 16.0 every vsync-paced frame
+// read as over budget and the rate sank to its floor (2-4 ticks/s).
+const FRAME_BUDGET_MS=17.5,MAX_SLICE_RATE=24;
 let sliceRate=1,sliceCredit=0,frameEma=FRAME_BUDGET_MS;
+// Whether the GPU finished the work submitted two frames ago before this
+// frame began (queue.onSubmittedWorkDone): then it is about to run dry, so
+// submit more slices; otherwise fewer. One frame of work stays queued, so the
+// GPU never idles between frames. Vsync-paced frame times jump between 16.7
+// and 33 ms, too coarse to steer by.
+let workDone=[{done:true},{done:true}];
 let currentRates=null,layout=null,maxHullVertices,procedural=null;
 // Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
 const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
@@ -123,14 +131,18 @@ function tick(now){
  // Damped control on a smoothed frame time: cut quickly when over budget,
  // raise slowly when under, so one heavy frame does not swing the rate.
  frameEma+=0.2*(frameMs-frameEma);
- sliceRate=Math.min(4,Math.max(0.25,sliceRate*Math.min(1.03,Math.max(0.7,FRAME_BUDGET_MS/frameEma))));
+ if(!sim?.slicing)sliceRate=Math.min(MAX_SLICE_RATE,Math.max(0.25,sliceRate*Math.min(1.03,Math.max(0.7,FRAME_BUDGET_MS/frameEma))));
  if(!loading&&renderer){frame=(async()=>{try{
   let work=null,ticks=0;
   if(running){
    accumulator=Math.min(accumulator+elapsed,4/stepHz());
    if(sim.slicing){
     // A heavy step in flight: this frame's share of slices, then its counters.
+    // Additive increase while the GPU keeps up, multiplicative cut when it
+    // does not, with the frame-time cut above as a backstop.
+    sliceRate=workDone[0].done&&frameEma<FRAME_BUDGET_MS*1.5?Math.min(MAX_SLICE_RATE,sliceRate+0.1):Math.max(0.25,sliceRate*0.85);
     sliceCredit+=sliceRate;const n=Math.floor(sliceCredit);sliceCredit-=n;
+    const mark={done:false};workDone=[workDone[1],mark];device.queue.onSubmittedWorkDone().then(()=>{mark.done=true});
     // Counters arrive asynchronously, so the queue keeps flowing.
     if(sim.submitSlices(n))sim.finishSlicedStep().then(()=>{if(!document.hidden)rates.step(sim.timing)}).catch(fail);
    }else{
