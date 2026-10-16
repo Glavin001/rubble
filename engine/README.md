@@ -34,6 +34,26 @@ cargo run -p engine-scenes --release --bin demo_viewer -- "Brick Ring (28k)" --s
 cargo run -p engine-scenes --release --bin demo_viewer -- "Chain Mail (1.6k)"
 ```
 
+## Native fracture viewer (macOS / Metal)
+
+Windowed counterpart of the [fracture GLB / WebGPU demo](crates/engine-webgpu/fracture/README.md):
+the same Slang kernels and dispatch order, compiled Slang → MSL (with the `ENGINE_WGSL`
+buffer layout), drawn with a Slang render shader that reads live poses from the body buffer.
+The GLB/scene import (`crates/engine-fracture`) is a Rust port of `asset.mjs` + `geometry.mjs`
+and produces byte-identical hull arenas.
+
+```bash
+cargo run -p engine-viewer --release --bin fracture_viewer                 # house, level 0
+cargo run -p engine-viewer --release --bin fracture_viewer -- arch --level 1
+cargo run -p engine-viewer --release --bin fracture_viewer -- my.fracture.glb
+cargo test -p engine-viewer --release --test fracture_regression          # headless arch check
+```
+
+Click to shoot · drag to orbit · scroll to zoom · Space start/pause · R reset · B bonds ·
+`[` `]` level · 1 house · 2 arch · drop a `.glb` on the window. Live TPS/FPS and counters are
+in the window title. `fracture_compare` (example) runs a deterministic shot headlessly for
+parity checks against the browser console.
+
 ## Demo scenes
 
 Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):

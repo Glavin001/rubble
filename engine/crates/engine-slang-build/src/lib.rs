@@ -88,6 +88,19 @@ pub fn compile_with_defines(
     include_dirs: &[&Path],
     defines: &[(&str, &str)],
 ) -> Result<()> {
+    compile_stage(source, entry, "compute", target, out, include_dirs, defines)
+}
+
+/// Like [`compile_with_defines`] for any pipeline stage (`compute`, `vertex`, `fragment`).
+pub fn compile_stage(
+    source: &Path,
+    entry: &str,
+    stage: &str,
+    target: SlangTarget,
+    out: &Path,
+    include_dirs: &[&Path],
+    defines: &[(&str, &str)],
+) -> Result<()> {
     let slangc = find_slangc()?;
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
@@ -96,7 +109,7 @@ pub fn compile_with_defines(
     cmd.arg("-target")
         .arg(target.flag())
         .arg("-stage")
-        .arg("compute")
+        .arg(stage)
         .arg("-entry")
         .arg(entry)
         .arg("-o")
