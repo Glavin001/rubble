@@ -33,7 +33,7 @@ Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8
 
 ## Speed bars (local M3 Max only)
 
-Do **not** gate on published M4 Max FINDINGS. Local Chrome numbers: `LOCAL_three_avbd_gpu_bench.json`.
+Do **not** gate on published M4 Max FINDINGS. Local Chrome numbers: `baselines/three-avbd-chrome-small-steady-2026-10-13.json`.
 
 | Scene | our Metal p50 (local) | three-avbd wall (local) | gate |
 |-------|----------------------|-------------------------|------|
