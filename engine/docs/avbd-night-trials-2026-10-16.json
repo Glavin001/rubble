@@ -1,0 +1,23 @@
+{
+  "measuredAt": "2026-10-16T04:00Z-04:40Z",
+  "head": "039494c",
+  "browser": "Claude app in-app browser, Chrome 152, apple metal-3, M3 Max",
+  "protocol": "three-avbd-2x5x10 bench=only, top-level navigation, interleaved A/B",
+  "conditions": {
+    "contention": "Other Claude sessions were compiling (rustc/slangc) during part of the window; one 54 ms gables outlier was discarded.",
+    "paneVisibility": "document.visibilityState reported 'visible' on every read, but the desktop app reported this session open in no window late in the run. The 8es runs fall in that window, so treat 8es timings as indicative only.",
+    "iframeHarness": "Rejected: demo in a full-viewport iframe measured gables at 40.5 ms against 27 ms top-level, an unfair regime."
+  },
+  "headBaseline": {
+    "ring110k": {"wallMs": [10.47, 10.11, 10.21], "phasesDetail": "aabbs 0.07 grid 0.92 refs 0.00 hashClear 0.07 hashInsert 0.13 narrowphase 1.77 warm 0.66 graph 0.59 primal 4.00 dual 1.77", "graphPassesAllAtTimerFloor": true},
+    "gables506k": {"wallMs": [27.10, 27.13, 26.95, 26.88, 26.55], "phasesDetail": "aabbs 0.52 grid 2.03 refs 0.20 hashClear 0.20 hashInsert 0.59 narrowphase 5.24 warm 1.51 graph 2.88 primal 8.85 dual 5.70",
+      "phasesGraph": "awake 0.20 csrDegree 0.26 csrPrefix 0.07 csrScatter 0.46 csrSort 0.59 colorInit 0.26 colorRepair 0.13 colorPack 0.33 predict 0.52"},
+    "collisionSplit": {"ring110k": "gridInsert 0.07 gridQuery 0.85 npDefer 0.85 npFresh 1.18", "gables506k": "gridInsert 0.33 gridQuery 1.57 npDefer 3.54 npFresh 2.16"}
+  },
+  "trials": {
+    "8eq_awakeOrdered": {"verdict": "rejected (neutral)", "gablesOrderedWallMs": [26.91, 26.94, 26.98, 27.20], "gablesAtomicWallMs": [27.13, 26.95, 26.88, 27.10], "graphPhase": "awake 0.20 -> 0.20, predict 0.52 -> 0.46, csrSort 0.59 -> 0.52", "workloadIdentical": true},
+    "8er_csrSortRegs": {"verdict": "rejected (neutral)", "gablesWallMs": {"regs": 27.21, "global": 27.21}, "csrSortMs": {"regs": 0.59, "global": 0.59}, "finding": "csr_sort cost is dominated by compactPreviousColor's neighbour body/colour loads, not by the insertion sort."},
+    "8es_npGroupedAlloc": {"verdict": "rejected (no gain, defect on gables)", "ringProfileNp": {"group": "npDefer 0.85 npFresh 1.18", "thread": "npDefer 0.85 npFresh 1.25"}, "ringWallMs": {"group": [10.18, 10.21], "thread": [11.00]}, "gables": "benchmark rejected its own run: overflow=256 (OVERFLOW_WARM_HASH); root cause not investigated because the per-pass time did not move"}
+  },
+  "patch": "docs/avbd-night-2026-10-16-trials.patch"
+}
