@@ -1,0 +1,28 @@
+[package]
+name = "bench-physx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Benchmark adapter: NVIDIA PhysX 5 (C++ shim over FFI; CPU, optional CUDA GPU dynamics)"
+
+[[bin]]
+name = "bench-physx"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+bench-core.workspace = true
+physx-sys = { version = "=0.11.5", optional = true }
+
+[build-dependencies]
+cc = "1.0"
+serde_json.workspace = true
+
+[features]
+default = ["vendored"]
+# Build and link PhysX 5.1 from source via the physx-sys crate (CPU only; works on macOS).
+vendored = ["dep:physx-sys"]
+# CUDA GPU dynamics + GPU broadphase. Needs the official SDK (PHYSX_SDK_DIR) on Linux/Windows.
+gpu = []

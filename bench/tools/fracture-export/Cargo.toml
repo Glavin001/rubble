@@ -1,0 +1,17 @@
+[package]
+name = "bench-fracture-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Exports Shardwright fracture GLBs (one scene per hierarchy level) in bench scene format v2"
+publish = false
+
+[[bin]]
+name = "fracture-export"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+engine-fracture = { path = "../../../engine/crates/engine-fracture" }

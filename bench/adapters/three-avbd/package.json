@@ -1,0 +1,9 @@
+{
+  "name": "bench-three-avbd",
+  "private": true,
+  "description": "Headless Dawn runtime for the three-avbd benchmark adapter (run.ts). Pinned to the newest webgpu build that loads on macOS 14; set BENCH_DAWN=pinned to use three-avbd's own (webgpu@0.6.x, macOS 26+).",
+  "type": "module",
+  "dependencies": {
+    "webgpu": "0.2.12"
+  }
+}

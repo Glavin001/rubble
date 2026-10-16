@@ -1,0 +1,18 @@
+[package]
+name = "bench-joint-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Exports rubble's D6 joint scenes (ragdolls, hinge chains, motors) in bench scene format v3"
+publish = false
+
+[[bin]]
+name = "joint-export"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+engine-scenes = { path = "../../../engine/crates/engine-scenes" }
+engine-schema = { path = "../../../engine/crates/engine-schema" }
