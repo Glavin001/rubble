@@ -75,6 +75,24 @@ floor drop.
 
 `crates/stress-rubble/tests/integrated.rs` keeps these properties as tests.
 
+## Accuracy against the oracle (2026-10-16 rerun)
+
+`docs/stress-fracture-benchmark.md`, "Agreement with the oracle", has each solver's
+outcomes over three repeats.
+
+**rubble against PhysX GPU (same coupled frame, different engine).** They agree within
+the GPU stress solve's own run-to-run spread on every regime except b8's sudden column
+removal: rubble 10/10, PhysX 14/14, oracle 11/11, so rubble is closer.
+
+**Both coupled pipelines against the oracle:**
+- **Exit speeds.**
+  - Within 0.07 m/s on the free-wall ram, the rammed house, the house car and b5 at 10–15 m/s.
+  - 0.5–0.85 m/s high (2–3 %) on b5's punch-through at 20–40 m/s.
+- **Debris counts differ.** After a punch-through the coupled frames keep the plug in a few large pieces: 3 fragments against the oracle's 107 at 30 m/s, and 32 against 106 at 20 m/s. At 10–15 m/s they produce more: 51–95 against 45–77.
+  - The cause: once an impact island ends, the engine owns debris contact, while the oracle keeps every chunk in its own explicit contact until the end.
+  - The fix would be to keep debris in its island until it separates. That changes behaviour and costs time, so it is in the recommendations.
+- **Exact matches.** Idle, settling, support-loss (b4) and floor-drop outcomes match exactly.
+
 ## Cost
 
 `engine/stress-oracle/scripts/stress_bench_report.py` turns `stress_bench` runs into the

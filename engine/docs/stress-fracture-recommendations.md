@@ -64,6 +64,11 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
    - Exact only with a rigorous bound; the simple weakest-bond test is not conservative (A12 #19).
 5. **Stiffness or mass scaling.** Big cuts in substeps, but it shifts the boundary between impulsive and quasi-static response. Not recommended.
 
+6a. **Keep debris in its impact island until it separates (accuracy up, cost up).**
+    - Both coupled pipelines hand debris to the engine when an island ends. b5's punch-through then breaks into 3–32 fragments where the oracle has 106–107, and the ram exits 2–3 % fast.
+    - Keeping fragments in the stress solve's own contact until they leave each other's swept bounds would close most of that gap.
+    - It lengthens impact windows (cost not measured yet).
+
 ## Levers that change engine behaviour
 
 6. **Let coupled rigid bodies sleep.**
