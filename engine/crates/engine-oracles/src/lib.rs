@@ -163,7 +163,10 @@ pub fn write_mapping(dir: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// Developer-machine check only: inspiration/ is gitignored and absent in
+    /// CI and worktrees. Run with `cargo test -p engine-oracles -- --ignored`.
     #[test]
+    #[ignore = "needs the gitignored inspiration/pinned checkout"]
     fn pinned_repos_present() {
         let root = inspiration_root();
         for name in [

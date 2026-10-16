@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-14",
+  "machine": "Apple M3 Max",
+  "browser": "Chrome 152 (Claude in-app browser), WebGPU adapter apple / metal-3, timestamp-query",
+  "toolchain": { "slangc": "2026.19", "rustc": "1.94.0", "node": "22.22.2" },
+  "source": "feat/convex-hulls after 8d0e9fd (degree-aware lanes gated on convex scenes)",
+  "notes": "Wall ms/tick awaits a counter readback after every step. GPU ms from timestamp queries; singlePass times the whole step in one compute pass (per-phase passes add latency). Chrome quantizes timestamps to ~0.066 ms.",
+  "correctness": {
+    "webgpu_rust_gpu_tests": "55/55 (incl. 480-step convex pile, persistent and canonical storage)",
+    "webgpu_integration": "columns_hold 4/4, gables_hold 1/1, ring_hold 1/1, render_abi 2/2",
+    "metal": "22/22 (unit, avbd_slice incl. convex hull body, parity, oracle accuracy, ports/ccd)",
+    "browser_convex_conformance": "pass: 520x8v (127 pairs), 64x64v (15), 24x64v bipyramids (6), mixed box/sphere/capsule/plane, dense compounds (274), compound aperture, work lists 0/1/1, batched reuse (pose error 0), cached feature vs full SAT (2.2 cm)",
+    "browser_work_list_boundaries": "32768 and 32769 large-bucket pairs, 40000 and 131073 small-bucket pairs: one manifold per pair, no overflow",
+    "arch_regression": { "steps": 840, "peakContacts": 86, "peakAwake": 24, "minHullY": -0.00201, "overflow": 0, "reset": "exact" }
+  },
+  "benchmarks": {
+    "dense_10k_64v_prisms_reuse_off": {
+      "baseline_retired_fracture_path_ms_per_tick": 281.78,
+      "wallMs": 15.86, "singlePassGpuMs": 10.81,
+      "phasesMs": { "bounds": 0.07, "broadphase": 0.20, "convexClassify": 0.07, "convexSat": 6.16, "convexManifold": 2.03, "persistence": 0.26, "topology": 0.66, "solve": 1.77, "sleep": 0.07 },
+      "counters": { "awake": 10000, "candidates": 35932, "contacts": 76438, "manifolds": 26820, "colors": 6, "overflow": 0 }
+    },
+    "compounds_10k_bodies_x4_hulls_reuse_on": {
+      "wallMs": 9.34, "singlePassGpuMs": 6.09,
+      "phasesMs": { "broadphase": 0.52, "narrowphase": 0.20, "convexSat": 0.39, "convexManifold": 0.79, "persistence": 0.07, "topology": 0.39, "solve": 3.87, "sleep": 0.07 },
+      "counters": { "awake": 10000, "colliders": 40000, "candidates": 50709, "contacts": 76492, "manifolds": 27985, "colors": 5, "overflow": 0 }
+    },
+    "rubble_30k_8v_hulls_reuse_on": {
+      "wallMs": 10.66, "singlePassGpuMs": 6.09,
+      "counters": { "awake": 30000, "candidates": 105801, "contacts": 80603, "manifolds": 32021, "colors": 5, "overflow": 0 }
+    },
+    "house_level1_after_impact": {
+      "baseline_retired_path": { "solveMs": "86-136", "profiledCallMs": "141-219" },
+      "singlePassGpuMs": [4.19, 4.92, 5.18, 5.18, 6.95],
+      "solveMs": "1.90-3.87", "fragments": 567, "hulls": 2253, "awake": 568, "contacts": "6302-6475", "colors": 7, "overflow": 0
+    },
+    "metal_scene_fps": {
+      "Convex Pile (10k)": { "p50Ms": 1.626, "p95Ms": 4.149, "awake": 10000 },
+      "Convex Compounds (10k)": { "p50Ms": 2.904, "p95Ms": 5.508, "awake": 10000 },
+      "Convex Rubble (30k)": { "p50Ms": 2.988, "p95Ms": 6.250, "awake": 30400 }
+    }
+  },
+  "findings": [
+    "Degree-aware primal lanes changed reduction order in the box-only 506k gables scene enough to push one debris-adjacent brick past gables_hold's 0.60 m limit; hosts now enable them only for scenes with convex colliders.",
+    "Running every work-list boundary case back to back in one tab (up to 16.7 M candidate capacity) reloaded the page from GPU memory pressure; each case passes in isolation."
+  ]
+}

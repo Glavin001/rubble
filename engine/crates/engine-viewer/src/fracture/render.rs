@@ -1,73 +1,20 @@
-//! Metal draw of the fracture scene (port of `fracture/render.mjs`).
-//!
-//! Vertices are body-local; the Slang vertex shader reads live poses straight from the
-//! physics body buffer, so there is no per-frame CPU transform readback.
+//! Metal draw of the fracture lab (the browser's `fracture/render.mjs` on
+//! Metal): the shared Slang draw shader reads live poses from the physics body
+//! buffer (no CPU transform readback); house copies draw instanced; camera,
+//! floor and the indexed mesh come from `engine_fracture::view`.
 
 use super::kernels::{DRAW_FS, DRAW_VS};
-use engine_fracture::FractureScene;
-use glam::{Mat4, Vec3};
+use engine_fracture::view::{floor_vertices, index_mesh};
+use engine_fracture::Scene;
 use metal::*;
 
-pub const FOV_Y: f32 = 0.7;
+pub use engine_fracture::view::Orbit;
 
-/// Orbit camera with the browser demo's defaults and limits.
-#[derive(Clone, Copy, Debug)]
-pub struct Orbit {
-    pub yaw: f32,
-    pub pitch: f32,
-    pub distance: f32,
-    pub target: Vec3,
-    pub extent: f32,
-}
-
-impl Orbit {
-    pub fn new(scene: &FractureScene) -> Self {
-        Self {
-            yaw: 0.25,
-            pitch: 0.22,
-            distance: scene.extent * 1.9,
-            target: Vec3::from(scene.center),
-            extent: scene.extent,
-        }
-    }
-
-    pub fn eye(&self, aspect: f32) -> Vec3 {
-        let fitted = self.distance / aspect.min(1.0);
-        self.target
-            + Vec3::new(
-                self.yaw.sin() * self.pitch.cos(),
-                self.pitch.sin(),
-                self.yaw.cos() * self.pitch.cos(),
-            ) * fitted
-    }
-
-    pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        let far = (self.extent * 50.0).max(500.0);
-        Mat4::perspective_rh(FOV_Y, aspect, 0.02, far)
-            * Mat4::look_at_rh(self.eye(aspect), self.target, Vec3::Y)
-    }
-
-    pub fn drag(&mut self, dx: f32, dy: f32) {
-        self.yaw -= dx * 0.006;
-        self.pitch = (self.pitch + dy * 0.006).clamp(-0.1, 1.3);
-    }
-
-    pub fn zoom(&mut self, delta_y: f32) {
-        self.distance =
-            (self.distance * (delta_y * 0.001).exp()).clamp(self.extent * 0.35, self.extent * 8.0);
-    }
-
-    /// Ray through a window point (normalized 0..1 from top-left).
-    pub fn aim(&self, u: f32, v: f32, aspect: f32, radius: f32) -> (Vec3, Vec3) {
-        let eye = self.eye(aspect);
-        let forward = (self.target - eye).normalize();
-        let right = forward.cross(Vec3::Y).normalize();
-        let up = right.cross(forward);
-        let t = (FOV_Y / 2.0).tan();
-        let (x, y) = ((2.0 * u - 1.0) * aspect * t, (1.0 - 2.0 * v) * t);
-        let dir = (forward + right * x + up * y).normalize();
-        (eye + dir * radius * 2.0, dir)
-    }
+/// Draw uniform: column-major view-projection, then (instance stride, colour mode).
+#[repr(C)]
+struct View {
+    vp: [f32; 16],
+    mode: [u32; 4],
 }
 
 pub struct Renderer {
@@ -75,61 +22,48 @@ pub struct Renderer {
     ground: RenderPipelineState,
     wire: RenderPipelineState,
     depth_less: DepthStencilState,
+    depth_decal: DepthStencilState,
     depth_always: DepthStencilState,
     mesh: Buffer,
+    index: Buffer,
+    index_count: u64,
     lines: Buffer,
     floor: Buffer,
+    roads: Buffer,
     projectiles: Buffer,
-    counts: [u64; 4],
+    counts: [u64; 3],
     projectile_per_slot: u64,
+    copies: u64,
+    stride: u32,
     depth: Option<Texture>,
     size: (u64, u64),
+    /// 0: materials; 1: sleep state (awake orange, asleep blue, static grey).
+    pub color_mode: u32,
 }
 
-fn buffer(device: &Device, data: &[f32]) -> Buffer {
-    let bytes = (data.len() * 4).max(4) as u64;
+fn buffer<T>(device: &Device, data: &[T]) -> Buffer {
+    let bytes = std::mem::size_of_val(data).max(4) as u64;
     if data.is_empty() {
         return device.new_buffer(bytes, MTLResourceOptions::StorageModeShared);
     }
-    device.new_buffer_with_data(
-        data.as_ptr() as *const _,
-        bytes,
-        MTLResourceOptions::StorageModeShared,
-    )
+    device.new_buffer_with_data(data.as_ptr() as *const _, bytes, MTLResourceOptions::StorageModeShared)
 }
 
 impl Renderer {
-    pub fn new(
-        device: &Device,
-        format: MTLPixelFormat,
-        scene: &FractureScene,
-    ) -> anyhow::Result<Self> {
+    pub fn new(device: &Device, format: MTLPixelFormat, scene: &Scene) -> anyhow::Result<Self> {
         let opts = CompileOptions::new();
-        let vs_lib = device
-            .new_library_with_source(DRAW_VS, &opts)
-            .map_err(|e| anyhow::anyhow!("draw vs: {e}"))?;
-        let vs = vs_lib
-            .get_function("vs", None)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let vs_lib = device.new_library_with_source(DRAW_VS, &opts).map_err(|e| anyhow::anyhow!("draw vs: {e}"))?;
+        let vs = vs_lib.get_function("vs", None).map_err(|e| anyhow::anyhow!("{e}"))?;
         let pipeline = |entry: &str| -> anyhow::Result<RenderPipelineState> {
             let src = DRAW_FS.iter().find(|(n, _)| *n == entry).unwrap().1;
-            let lib = device
-                .new_library_with_source(src, &opts)
-                .map_err(|e| anyhow::anyhow!("draw {entry}: {e}"))?;
-            let fs = lib
-                .get_function(entry, None)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let lib = device.new_library_with_source(src, &opts).map_err(|e| anyhow::anyhow!("draw {entry}: {e}"))?;
+            let fs = lib.get_function(entry, None).map_err(|e| anyhow::anyhow!("{e}"))?;
             let desc = RenderPipelineDescriptor::new();
             desc.set_vertex_function(Some(&vs));
             desc.set_fragment_function(Some(&fs));
-            desc.color_attachments()
-                .object_at(0)
-                .unwrap()
-                .set_pixel_format(format);
+            desc.color_attachments().object_at(0).unwrap().set_pixel_format(format);
             desc.set_depth_attachment_pixel_format(MTLPixelFormat::Depth32Float);
-            device
-                .new_render_pipeline_state(&desc)
-                .map_err(|e| anyhow::anyhow!("pipeline {entry}: {e}"))
+            device.new_render_pipeline_state(&desc).map_err(|e| anyhow::anyhow!("pipeline {entry}: {e}"))
         };
         let depth_state = |compare, write| {
             let d = DepthStencilDescriptor::new();
@@ -137,55 +71,44 @@ impl Renderer {
             d.set_depth_write_enabled(write);
             device.new_depth_stencil_state(&d)
         };
-        let size = (scene.extent * 8.0).max(20.0);
-        let mut g = Vec::new();
-        for p in [
-            [-size, 0.0, -size],
-            [-size, 0.0, size],
-            [size, 0.0, size],
-            [-size, 0.0, -size],
-            [size, 0.0, size],
-            [size, 0.0, -size],
-        ] {
-            g.extend(p);
-            g.extend([0.0, 1.0, 0.0, 0.1, 0.15, 0.18, 0.0]);
-        }
+        let (unique, index) = index_mesh(&scene.vertices);
         Ok(Self {
             solid: pipeline("fs")?,
             ground: pipeline("ground")?,
             wire: pipeline("wire")?,
             depth_less: depth_state(MTLCompareFunction::Less, true),
+            depth_decal: depth_state(MTLCompareFunction::LessEqual, true),
             depth_always: depth_state(MTLCompareFunction::Always, false),
-            mesh: buffer(device, &scene.vertices),
+            mesh: buffer(device, &unique),
+            index: buffer(device, &index),
+            index_count: index.len() as u64,
             lines: buffer(device, &scene.lines),
-            floor: buffer(device, &g),
+            floor: buffer(device, &floor_vertices(scene.extent)),
+            roads: buffer(device, &scene.road_vertices),
             projectiles: buffer(device, &scene.projectile_vertices),
-            counts: [
-                6,
-                scene.vertices.len() as u64 / 10,
-                scene.lines.len() as u64 / 10,
-                0,
-            ],
-            projectile_per_slot: scene.projectile_vertices.len() as u64
-                / 10
-                / scene.projectile_count as u64,
+            counts: [6, scene.lines.len() as u64 / 10, scene.road_vertices.len() as u64 / 10],
+            projectile_per_slot: scene.projectile_vertices.len() as u64 / 10 / scene.projectile_count.max(1) as u64,
+            copies: scene.copies.max(1) as u64,
+            stride: scene.instance_stride,
             depth: None,
             size: (0, 0),
+            color_mode: 0,
         })
     }
 
+    /// Draw into the window's next drawable and present it.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(
-        &mut self,
-        device: &Device,
-        queue: &CommandQueue,
-        drawable: &MetalDrawableRef,
-        bodies: &Buffer,
-        view_proj: Mat4,
-        shots: u32,
-        show_bonds: bool,
-    ) {
-        let tex = drawable.texture();
+    pub fn draw(&mut self, device: &Device, queue: &CommandQueue, drawable: &MetalDrawableRef, bodies: &Buffer, view_proj: [f32; 16], shots: u32, show_bonds: bool) {
+        let cb = queue.new_command_buffer();
+        cb.set_label("fracture draw");
+        self.encode(device, cb, drawable.texture(), bodies, view_proj, shots, show_bonds);
+        cb.present_drawable(drawable);
+        cb.commit();
+    }
+
+    /// Encode one frame into `target` (a drawable or an offscreen texture).
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode(&mut self, device: &Device, cb: &CommandBufferRef, tex: &TextureRef, bodies: &Buffer, view_proj: [f32; 16], shots: u32, show_bonds: bool) {
         let (w, h) = (tex.width(), tex.height());
         if self.size != (w, h) || self.depth.is_none() {
             let d = TextureDescriptor::new();
@@ -209,58 +132,36 @@ impl Renderer {
         depth.set_clear_depth(1.0);
         depth.set_store_action(MTLStoreAction::DontCare);
 
-        let cb = queue.new_command_buffer();
-        cb.set_label("fracture draw");
         let e = cb.new_render_command_encoder(pass);
-        let camera = view_proj.to_cols_array();
+        let view = View { vp: view_proj, mode: [self.stride, self.color_mode, 0, 0] };
         e.set_vertex_buffer(0, Some(bodies), 0);
-        e.set_vertex_bytes(2, 64, camera.as_ptr() as *const _);
+        e.set_vertex_bytes(2, std::mem::size_of::<View>() as u64, &view as *const View as *const _);
         e.set_cull_mode(MTLCullMode::None);
-        let draw = |pipe: &RenderPipelineState,
-                    depth: &DepthStencilState,
-                    verts: &Buffer,
-                    prim,
-                    count: u64| {
-            if count == 0 {
-                return;
-            }
+        let bind = |pipe: &RenderPipelineState, depth: &DepthStencilState, verts: &Buffer| {
             e.set_render_pipeline_state(pipe);
             e.set_depth_stencil_state(depth);
             e.set_vertex_buffer(1, Some(verts), 0);
-            e.draw_primitives(prim, 0, count);
         };
-        draw(
-            &self.ground,
-            &self.depth_less,
-            &self.floor,
-            MTLPrimitiveType::Triangle,
-            self.counts[0],
-        );
-        draw(
-            &self.solid,
-            &self.depth_less,
-            &self.mesh,
-            MTLPrimitiveType::Triangle,
-            self.counts[1],
-        );
-        draw(
-            &self.solid,
-            &self.depth_less,
-            &self.projectiles,
-            MTLPrimitiveType::Triangle,
-            shots as u64 * self.projectile_per_slot,
-        );
-        if show_bonds {
-            draw(
-                &self.wire,
-                &self.depth_always,
-                &self.lines,
-                MTLPrimitiveType::Line,
-                self.counts[2],
-            );
+        bind(&self.ground, &self.depth_less, &self.floor);
+        e.draw_primitives(MTLPrimitiveType::Triangle, 0, self.counts[0]);
+        if self.counts[2] > 0 {
+            // Road decals lie millimetres above the ground: a depth bias keeps
+            // them in front of it at any distance.
+            bind(&self.solid, &self.depth_decal, &self.roads);
+            e.set_depth_bias(-16.0, -2.0, 0.0);
+            e.draw_primitives(MTLPrimitiveType::Triangle, 0, self.counts[2]);
+            e.set_depth_bias(0.0, 0.0, 0.0);
+        }
+        bind(&self.solid, &self.depth_less, &self.mesh);
+        e.draw_indexed_primitives_instanced(MTLPrimitiveType::Triangle, self.index_count, MTLIndexType::UInt32, &self.index, 0, self.copies);
+        if shots > 0 {
+            bind(&self.solid, &self.depth_less, &self.projectiles);
+            e.draw_primitives(MTLPrimitiveType::Triangle, 0, shots as u64 * self.projectile_per_slot);
+        }
+        if show_bonds && self.counts[1] > 0 {
+            bind(&self.wire, &self.depth_always, &self.lines);
+            e.draw_primitives_instanced(MTLPrimitiveType::Line, 0, self.counts[1], self.copies);
         }
         e.end_encoding();
-        cb.present_drawable(drawable);
-        cb.commit();
     }
 }

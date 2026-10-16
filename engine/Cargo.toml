@@ -8,6 +8,7 @@ members = [
     "crates/engine-cuda",
     "crates/engine-viewer",
     "crates/engine-fracture",
+    "crates/engine-fracture-wasm",
     "crates/engine-slang-build",
     "crates/engine-scenes",
     "crates/engine-oracles",

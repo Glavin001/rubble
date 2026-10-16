@@ -10,6 +10,7 @@ engine-schema.workspace = true
 engine-exec.workspace = true
 engine-slang-build.workspace = true
 bytemuck.workspace = true
+glam.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 anyhow.workspace = true

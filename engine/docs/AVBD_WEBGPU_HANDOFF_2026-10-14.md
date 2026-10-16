@@ -473,7 +473,7 @@ Export directory is `engine/crates/engine-webgpu/generated/wgsl/`, gitignored. C
   engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
 
 /Users/glavin/.nvm/versions/node/v24.13.1/bin/node --experimental-transform-types --test \
-  engine/crates/engine-webgpu/tests/scene_builders.test.ts
+  engine/crates/engine-webgpu/tests/scene_builders.test.mjs
 
 /Users/glavin/.nvm/versions/node/v24.13.1/bin/node --test \
   engine/crates/engine-webgpu/tests/spatial_order.test.mjs
