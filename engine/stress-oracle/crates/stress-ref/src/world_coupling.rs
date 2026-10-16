@@ -158,6 +158,17 @@ impl World {
         self.sync_engine_bodies();
     }
 
+    /// Add an impactor to the running world (a projectile fired into it), coupled to the
+    /// engine at once when there is one. Returns its index. Impactors are keyed by index
+    /// (`BodyKey::Impactor`), so they are only ever appended.
+    pub fn add_impactor(&mut self, imp: Impactor) -> usize {
+        self.impactors.push(imp);
+        if self.coupling.is_some() {
+            self.sync_engine_bodies();
+        }
+        self.impactors.len() - 1
+    }
+
     /// Name of the coupled engine, if any.
     pub fn engine_name(&self) -> Option<&str> {
         self.coupling.as_ref().map(|c| c.engine.name())

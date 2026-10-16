@@ -215,6 +215,15 @@ impl GpuWorld {
         Ok(w)
     }
 
+    /// Add an impactor between frames (a projectile fired into the world), coupled to
+    /// the engine at once when there is one (world_coupling.rs `add_impactor`). Returns
+    /// its index.
+    pub fn add_impactor(&mut self, gpu: &Gpu, imp: stress_ref::world::Impactor) -> Result<usize, String> {
+        let i = self.with_shell_mut(|w| w.add_impactor(imp));
+        self.solver.refresh(gpu)?;
+        Ok(i)
+    }
+
     /// Whether the world is coupled to an engine.
     pub fn coupled(&self) -> bool {
         self.shell.engine_name().is_some()

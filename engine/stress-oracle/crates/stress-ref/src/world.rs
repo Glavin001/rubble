@@ -22,7 +22,7 @@ use crate::material::Material;
 use crate::math::{Mat3, Pose, Quat, Vec3};
 use crate::observation::{ChunkObservation, Observation, ProbeSeries};
 use crate::scene::{
-    ChunkSelector, EventDesc, ImpactorShape, LoadDesc, ProbeKind, Scene, SectionComponent, SolveMode, Support,
+    ChunkSelector, EventDesc, ImpactorDesc, ImpactorShape, LoadDesc, ProbeKind, Scene, SectionComponent, SolveMode, Support,
 };
 use crate::solver::{Activity, ChunkLoads, ReferenceSolver};
 use crate::statics::StaticOptions;
@@ -65,6 +65,31 @@ pub struct Impactor {
 }
 
 impl Impactor {
+    /// The impactor a scene describes (at rest in no engine: `driven` false).
+    pub fn from_desc(d: &ImpactorDesc, scene: &Scene) -> Impactor {
+        let inertia = match d.shape {
+            ImpactorShape::Sphere { radius } => Mat3::IDENTITY * (0.4 * d.mass * radius * radius),
+            ImpactorShape::Box { half_extents } => {
+                let (a, b, c) = (2.0 * half_extents[0], 2.0 * half_extents[1], 2.0 * half_extents[2]);
+                Mat3::diag(Vec3::new(b * b + c * c, a * a + c * c, a * a + b * b) * (d.mass / 12.0))
+            }
+        };
+        Impactor {
+            name: d.name.clone(),
+            shape: d.shape.clone(),
+            mass: d.mass,
+            inertia,
+            pose: Pose::new(Vec3::from_array(d.position), Quat::from_wxyz(d.orientation)),
+            velocity: Vec3::from_array(d.velocity),
+            angular_velocity: Vec3::from_array(d.angular_velocity),
+            material: scene.material(&d.material).clone(),
+            crush: d.crush.map(|c| (c.max_force, c.energy)),
+            crush_used: 0.0,
+            crush_depth: 0.0,
+            driven: false,
+        }
+    }
+
     fn obox(&self) -> OBox {
         let h = match self.shape {
             ImpactorShape::Box { half_extents } => Vec3::from_array(half_extents),
@@ -332,33 +357,7 @@ pub(crate) fn damping_ratio(restitution: f64) -> f64 {
 impl World {
     pub fn new(scene: &Scene) -> World {
         let solver = ReferenceSolver::new(scene);
-        let impactors = scene
-            .impactors
-            .iter()
-            .map(|d| {
-                let inertia = match d.shape {
-                    ImpactorShape::Sphere { radius } => Mat3::IDENTITY * (0.4 * d.mass * radius * radius),
-                    ImpactorShape::Box { half_extents } => {
-                        let (a, b, c) = (2.0 * half_extents[0], 2.0 * half_extents[1], 2.0 * half_extents[2]);
-                        Mat3::diag(Vec3::new(b * b + c * c, a * a + c * c, a * a + b * b) * (d.mass / 12.0))
-                    }
-                };
-                Impactor {
-                    name: d.name.clone(),
-                    shape: d.shape.clone(),
-                    mass: d.mass,
-                    inertia,
-                    pose: Pose::new(Vec3::from_array(d.position), Quat::from_wxyz(d.orientation)),
-                    velocity: Vec3::from_array(d.velocity),
-                    angular_velocity: Vec3::from_array(d.angular_velocity),
-                    material: scene.material(&d.material).clone(),
-                    crush: d.crush.map(|c| (c.max_force, c.energy)),
-                    crush_used: 0.0,
-                    crush_depth: 0.0,
-                    driven: false,
-                }
-            })
-            .collect();
+        let impactors = scene.impactors.iter().map(|d| Impactor::from_desc(d, scene)).collect();
         let loads = ChunkLoads::new(&solver);
         let initial_positions = solver
             .structures
