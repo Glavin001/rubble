@@ -143,11 +143,52 @@ fn parallel_axis(d: Vec3) -> Mat3 {
     Mat3::diag(Vec3::splat(d.norm2())) - Mat3::outer(d, d)
 }
 
-/// A chunk shape's convex hull cooked once in its own (shape) frame: its arena entry,
-/// the recentring offset (shape frame) and its bounding radius. Keyed by (chunk, the
-/// shape's ordinal among that chunk's shapes); every body the chunk later belongs to
-/// reuses it, its own orientation going on the collider.
-type HullCache = HashMap<((usize, usize), usize), (u32, glam::Vec3, f32)>;
+/// A shape's convex hull cooked once in its own (shape) frame: its arena entry, the
+/// recentring offset (shape frame) and its bounding radius. Keyed by the exact bits of
+/// its points, so every body the chunk later belongs to, and every identical chunk (the
+/// copies of a building), reuses one cooked hull; its orientation goes on the collider.
+type HullCache = HashMap<Vec<u64>, Option<HullEntry>>;
+
+/// A cooked hull (`None` in the cache: rubble rejected it, and the shape is its box).
+#[derive(Clone, Copy)]
+struct HullEntry {
+    /// Arena entry, recentring offset (shape frame), bounding radius.
+    base: u32,
+    offset: glam::Vec3,
+    radius: f32,
+    /// Unit-density mass properties (shape frame) and local bounds.
+    volume: f32,
+    com: glam::Vec3,
+    inertia: glam::Mat3,
+    lo: glam::Vec3,
+    hi: glam::Vec3,
+}
+
+/// The cooked hull of `points` (shape frame), from the cache or built once.
+fn hull_entry(points: &[Vec3], chunk: Option<(usize, usize)>, arena: &mut HullArena, hulls: &mut HullCache) -> Option<HullEntry> {
+    let key: Vec<u64> = points.iter().flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).collect();
+    if let Some(e) = hulls.get(&key) {
+        return *e;
+    }
+    let pts: Vec<glam::Vec3> = points.iter().map(|p| gv(*p)).collect();
+    let entry = match ConvexHull::from_points(&pts) {
+        Ok(hull) => {
+            let unit = hull.mass_properties(1.0);
+            let (lo, hi) = hull.local_bounds();
+            let (cooked, offset) = hull.recentered();
+            let base = arena.insert(&cooked).unwrap_or_else(|e| panic!("chunk {chunk:?}: hull arena: {e}"));
+            Some(HullEntry { base, offset, radius: cooked.bounding_radius(), volume: unit.volume, com: unit.center_of_mass, inertia: unit.inertia, lo, hi })
+        }
+        Err(e) => {
+            // Never silent: reported, and the shape is its box (mass and collision).
+            eprintln!("stress-rubble: chunk {chunk:?} hull rejected by rubble ({e}); its box stands in");
+            HULL_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        }
+    };
+    hulls.insert(key, entry);
+    entry
+}
 
 /// Chunk shapes whose hull rubble rejected, colliding as boxes instead (reported).
 pub static HULL_FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -190,13 +231,16 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
                         let i = Mat3::diag(box_inertia(s.mass, s.half_extents));
                         parts.push((s.mass, s.local.position, r * i * r.transpose()));
                     }
+                    Some(points) if hull_entry(points, s.chunk, arena, hulls).is_none() => {
+                        thin = thin.min(s.half_extents.min_elem());
+                        let i = Mat3::diag(box_inertia(s.mass, s.half_extents));
+                        parts.push((s.mass, s.local.position, r * i * r.transpose()));
+                    }
                     Some(points) => {
-                        let hull = ConvexHull::from_points(&points.iter().map(|p| gv(*p)).collect::<Vec<_>>())
-                            .unwrap_or_else(|e| panic!("chunk {:?}: hull not accepted by rubble: {e}", s.chunk));
-                        let unit = hull.mass_properties(1.0);
-                        let scale = s.mass / unit.volume as f64;
-                        let c = s.local.transform_point(rv(unit.center_of_mass));
-                        let m = unit.inertia;
+                        let h = hull_entry(points, s.chunk, arena, hulls).expect("cooked above");
+                        let scale = s.mass / h.volume as f64;
+                        let c = s.local.transform_point(rv(h.com));
+                        let m = h.inertia;
                         let i = Mat3 {
                             m: [
                                 [m.x_axis.x as f64, m.y_axis.x as f64, m.z_axis.x as f64],
@@ -204,8 +248,7 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
                                 [m.x_axis.z as f64, m.y_axis.z as f64, m.z_axis.z as f64],
                             ],
                         } * scale;
-                        let (lo, hi) = hull.local_bounds();
-                        thin = thin.min(rv((hi - lo) * 0.5).min_elem());
+                        thin = thin.min(rv((h.hi - h.lo) * 0.5).min_elem());
                         parts.push((s.mass, c, r * i * r.transpose()));
                     }
                 }
@@ -225,7 +268,6 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
             let principal = Quat { w: rot.w, x: rot.x, y: rot.y, z: rot.z }.normalized();
             let to_body = principal.conjugate();
             let mut colliders = Vec::new();
-            let mut seen: HashMap<Option<(usize, usize)>, usize> = HashMap::new();
             for s in shapes.iter() {
                 let volume = 8.0 * s.half_extents.x * s.half_extents.y * s.half_extents.z;
                 let density = (s.mass / volume.max(1e-300)) as f32;
@@ -248,32 +290,7 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
                         // into a fragment's principal frame and rounded to f32, a convex
                         // hull can fail rubble's convexity tolerance), oriented by the
                         // collider's rotation.
-                        let ordinal = {
-                            let n = seen.entry(s.chunk).or_insert(0usize);
-                            *n += 1;
-                            *n - 1
-                        };
-                        let cooked = s.chunk.and_then(|c| hulls.get(&(c, ordinal)).copied());
-                        let cooked = cooked.or_else(|| {
-                            let pts: Vec<glam::Vec3> = points.iter().map(|p| gv(*p)).collect();
-                            match ConvexHull::from_points(&pts) {
-                                Ok(hull) => {
-                                    let (hull, offset) = hull.recentered();
-                                    let base = arena.insert(&hull).unwrap_or_else(|e| panic!("chunk {:?}: hull arena: {e}", s.chunk));
-                                    let entry = (base, offset, hull.bounding_radius());
-                                    if let Some(c) = s.chunk {
-                                        hulls.insert((c, ordinal), entry);
-                                    }
-                                    Some(entry)
-                                }
-                                Err(e) => {
-                                    // Never silent: reported, and the shape collides as its box.
-                                    eprintln!("stress-rubble: chunk {:?} hull rejected by rubble ({e}); colliding as its box", s.chunk);
-                                    HULL_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    None
-                                }
-                            }
-                        });
+                        let cooked = hull_entry(points, s.chunk, arena, hulls).map(|h| (h.base, h.offset, h.radius));
                         let q = (to_body * s.local.rotation).normalized();
                         match cooked {
                             Some((base, offset, radius)) => colliders.push(Collider {
