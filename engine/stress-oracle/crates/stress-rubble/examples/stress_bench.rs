@@ -65,34 +65,6 @@ fn house() -> Scene {
     stress_ref::scene_pack::import(&path, "house-1story", "structure").expect("house-1story pack")
 }
 
-/// A 400 kg box rammed at 12 m/s into the middle of the structure's -x face
-/// (stress-gpu `scenes::rammed`, restated so this example needs no GPU crate).
-fn rammed(mut scene: Scene) -> Scene {
-    use stress_ref::math::Vec3;
-    use stress_ref::scene::*;
-    let mut lo = Vec3::splat(f64::INFINITY);
-    let mut hi = Vec3::splat(f64::NEG_INFINITY);
-    for c in scene.bodies.iter().flat_map(|b| b.chunks.iter()) {
-        let p = Vec3::from_array(c.center);
-        lo = lo.component_min(p);
-        hi = hi.component_max(p);
-    }
-    let mid = (lo + hi) * 0.5;
-    let material = scene.bodies[0].chunks[0].material.clone();
-    scene.impactors.push(ImpactorDesc {
-        name: "ram".into(),
-        shape: ImpactorShape::Box { half_extents: [0.15, 0.3, 0.3] },
-        mass: 400.0,
-        position: [lo.x - 0.35, mid.y, mid.z],
-        orientation: [0.0, 0.0, 0.0, 1.0],
-        velocity: [12.0, 0.0, 0.0],
-        angular_velocity: [0.0; 3],
-        material,
-        crush: None,
-    });
-    scene
-}
-
 /// The accuracy set: the realtime regimes plus the oracle's gate cases, each in the same
 /// real-time configuration (so solvers differ only by pipeline).
 pub fn accuracy(seconds: f64) -> Vec<(&'static str, Scene)> {
@@ -111,10 +83,23 @@ pub fn accuracy(seconds: f64) -> Vec<(&'static str, Scene)> {
     out
 }
 
+/// The town set: copies of house-1story on a grid, intact (idle) or with one rammed —
+/// how cost grows with buildings that are quiet.
+pub fn towns(seconds: f64) -> Vec<(&'static str, Scene)> {
+    let mut out = Vec::new();
+    for (label, n, rams) in [("town16_idle", 16, 0), ("town64_idle", 64, 0), ("town16_one_ram", 16, 1)] {
+        let town = stress_ref::scenes::pack_town(&house(), n, 2.0);
+        let mut s = configure(if rams > 0 { stress_ref::scenes::bombarded(town, rams) } else { town }, seconds);
+        s.name = label.into();
+        out.push((label, s));
+    }
+    out
+}
+
 pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut idle = configure(house(), seconds);
     idle.name = "house_idle".into();
-    let mut house_ram = configure(rammed(house()), seconds);
+    let mut house_ram = configure(stress_ref::scenes::rammed(house()), seconds);
     house_ram.name = "house_ram".into();
     let b5 = configure(stress_ref::builders::wall_impact(20.0, "b5_v20"), seconds);
     vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
@@ -184,7 +169,7 @@ fn main() {
         match a.as_str() {
             "--solver" => solver = args.next().expect("--solver NAME"),
             "--only" => only = args.next(),
-            "--set" => set = args.next().expect("--set realtime|accuracy"),
+            "--set" => set = args.next().expect("--set realtime|accuracy|towns"),
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).expect("--seconds S"),
             "--repeats" => repeats = args.next().and_then(|v| v.parse().ok()).expect("--repeats N"),
             other => panic!("unknown argument {other}"),
@@ -192,7 +177,11 @@ fn main() {
     }
     #[cfg(feature = "gpu")]
     let gpu = (solver != "oracle").then(|| stress_gpu::gpu::Gpu::new().expect("GPU"));
-    let list = if set == "accuracy" { accuracy(seconds) } else { regimes(seconds) };
+    let list = match set.as_str() {
+        "accuracy" => accuracy(seconds),
+        "towns" => towns(seconds),
+        _ => regimes(seconds),
+    };
     for (name, scene) in list {
         if only.as_ref().is_some_and(|o| o != name) {
             continue;
