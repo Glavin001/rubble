@@ -2058,8 +2058,8 @@ impl GpuSolver {
         out
     }
 
-    /// Clusters the GPU would not touch, by id (sorted): settled, anchored and driven
-    /// (never in a contact plan), in a scene without scripted loads, events or probes,
+    /// Clusters the GPU would not touch, by id (sorted): settled, anchored and moved by
+    /// the engine (`driven`: never in a contact plan), in a scene without scripted loads, events or probes,
     /// with no engine load on any chunk (`extra_terms`), whose every bond's static fatigue
     /// over a frame stays a thousandth of half an f32 ulp of its life (so the GPU's
     /// `settled_fatigue` leaves it bit for bit). The kernels skip such an island's phases
@@ -2101,7 +2101,10 @@ impl GpuSolver {
             .filter(|(ci, cl)| {
                 cl.activity == Activity::Settled
                     && cl.anchored
-                    && (cl.driven || !m.config.integrate_rigid)
+                    // Moved by the engine, not owned by an impact island: never in a
+                    // contact plan (`integrate_rigid` off makes every cluster count as
+                    // driven to the kernels, island members included, so it is not enough).
+                    && cl.driven
                     && !loaded[*ci]
                     // An excluded cluster's bonds are not read back, so its verdict holds.
                     && (self.excluded.binary_search(&cl.id).is_ok() || cl.bonds.iter().all(|&bi| fatigue_still(cl.structure, bi)))

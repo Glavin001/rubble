@@ -172,7 +172,17 @@ pub fn plan(scene: &Scene, m: &ReferenceSolver, impactors: &[Impactor], chunk_or
         b
     };
     // Chunk pairs of different clusters (world.rs `apply_contacts`, any substep).
-    let by_cluster: Vec<Vec<u32>> = m.clusters.iter().map(|cl| cl.chunks.iter().map(|&c| gpu_index[&(cl.structure, c)]).collect()).collect();
+    // A quiet cluster left out of the GPU tables (`GpuSolver::quiet_clusters`) has no
+    // GPU chunks; it is engine-driven, so every pair with it is skipped below anyway.
+    let by_cluster: Vec<Vec<u32>> = m
+        .clusters
+        .iter()
+        .map(|cl| {
+            let ks: Vec<u32> = cl.chunks.iter().filter_map(|&c| gpu_index.get(&(cl.structure, c)).copied()).collect();
+            assert!(ks.len() == cl.chunks.len() || cl.driven, "cluster {} has chunks missing from the GPU tables but is not engine-driven", cl.id);
+            ks
+        })
+        .collect();
     let mut sorted_by_cluster: Vec<Vec<u32>> = by_cluster.clone();
     for (ci, list) in sorted_by_cluster.iter_mut().enumerate() {
         // The reference iterates a cluster's chunks in active order (structure, chunk).
