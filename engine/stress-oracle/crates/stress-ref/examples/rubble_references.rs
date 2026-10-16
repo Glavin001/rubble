@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! cargo run --release -p stress-ref --example rubble_references -- [--methods established|proven]
-//!     [--out reference] [--only PREFIX] [--safety-divisor N]
+//!     [--out reference] [--only PREFIX] [--safety-divisor N] [--veneer]
 //! ```
 //! `--safety-divisor N` divides the stress and contact Courant safeties by N (the refined
 //! runs of the timing and refinement gates); the case names gain `_refN`.
@@ -120,7 +120,11 @@ fn cases() -> Vec<Scene> {
     out.push(named("s_house_car"));
     out.push(rammed(house, "house_1story_ram"));
     // The lab's own asset (`fracture/assets/veneer-house.glb`, exported by
-    // `engine-fracture`'s `fracture_stress_export` at level 0).
+    // `engine-fracture`'s `fracture_stress_export` at level 0): explicit at the true step
+    // these take hours of CPU, so only with `--veneer`.
+    if !std::env::args().any(|a| a == "--veneer") {
+        return out;
+    }
     let veneer = stress_ref::scene_pack::import(&packs.join("veneer-house-l0.json"), "veneer_house_l0", "structure").expect("veneer-house-l0 pack");
     let mut rest = veneer.clone();
     rest.name = "veneer_house_l0_rest".into();
