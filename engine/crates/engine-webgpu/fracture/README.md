@@ -276,6 +276,26 @@ not CCD. Bonds remain inspection metadata rather than stress constraints.
 The Gauss-map/contact-selection port is based on three-avbd at `2bb1a318`;
 its MIT copyright/license is preserved in `engine/slang/THIRD_PARTY_LICENSES.txt`.
 
+## Headless physics benchmark
+
+Physics only: no canvas and no renderer, with WebGPU on the real GPU in
+headless Chrome. It prints JSON with ms/tick (ticks queued back to back),
+the counters, and per-kernel GPU times.
+
+```sh
+nvm use
+node engine/crates/engine-webgpu/fracture/headless.mjs grid warm=420 measure=120
+node engine/crates/engine-webgpu/fracture/headless.mjs cuboidGrid budget='{"deterministic":true}' trace=60
+```
+
+- Scenes: `grid`, `suburb`, `house`, `cuboidGrid`, `cuboids`.
+- `shot=none` skips the row shot. `profile=0` skips the kernel timings.
+- `budget` is merged into the scene capacity. Use
+  `{"deterministic":true}` for run-to-run identical results, so two shader
+  builds can be compared tick for tick.
+- `CHROME=` picks the browser (default: Google Chrome).
+- No npm dependencies; see `headless-page.mjs` for the protocol.
+
 ## Verification
 
 ```sh
