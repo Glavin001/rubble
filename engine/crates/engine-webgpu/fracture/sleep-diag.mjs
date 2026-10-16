@@ -244,7 +244,7 @@ export async function runSleepTrace(sim, scene, {at = 1200, ticks = 30, pick = 3
       // Momentum of the body and of the body with its partners (dynamic only).
       let P = v.map((x) => x * m);
       for (const q of partners) { const oq = q * 28; if (f[oq + 3] > 0 && (u[oq + 11] & 1)) { const mq = 1 / f[oq + 3]; P = P.map((x, k) => x + mq * f[oq + 12 + k]); } }
-      tick.bodies[i] = {y: +f[o + 1].toFixed(4), timer: +f[o + 15].toFixed(3), moved: +f[o + 23].toFixed(4), v: v.map((x) => +x.toFixed(3)), w: w.map((x) => +x.toFixed(2)), flags: u[o + 11], groupMomentum: P.map((x) => +x.toFixed(3)), contacts};
+      tick.bodies[i] = {p: [0, 1, 2].map((k) => +f[o + k].toFixed(4)), y: +f[o + 1].toFixed(4), timer: +f[o + 15].toFixed(3), moved: +f[o + 23].toFixed(4), v: v.map((x) => +x.toFixed(3)), w: w.map((x) => +x.toFixed(2)), flags: u[o + 11], groupMomentum: P.map((x) => +x.toFixed(3)), contacts};
     }
     rows.push(tick);
   }

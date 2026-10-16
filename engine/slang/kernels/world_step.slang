@@ -2024,9 +2024,8 @@ static const uint FLAG_POINT_SPEED_SLEEP = 8192u;
 bool pointSpeedSleep() { return (PARAMS.flags & FLAG_POINT_SPEED_SLEEP) != 0u; }
 // 32768 Displacement sleep test (Jolt's sleep test spheres): a body is slow while
 //     its farthest point stays within sleepLin·sleepTime of the pose it had when
-//     its sleep timer started, |Δx| + angle(Δq)·r_max, using a low-pass
-//     (exponentially averaged) pose so numerical jitter in place does not
-//     count as motion. Jitter and one-tick blips
+//     its sleep timer started (r_max for rotation), by both a low-pass pose
+//     and the velocity integral Σv·h; motion must show in both. Jitter and one-tick blips
 //     that go nowhere no longer reset the timer; steady motion still does. The
 //     reference pose lives in the previous-step body record (BODY_PREV), whose
 //     pose fields are otherwise unused.
@@ -4982,39 +4981,50 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
         }
         if (displacementSleep())
         {
-            // A fresh timer (just woken or just moved) takes the current pose as
-            // its reference; afterwards the window's displacement decides.
-            // Low-pass pose (exponential average, β = SLEEP_POSE_BETA, kept in
-            // the previous-step record's spare x⁻ fields): jitter in place
-            // (jammed compounds flipping with a period of 2-3 ticks) averages
-            // out, steady motion moves it at the same rate with a short lag.
-            // A fresh window restarts it at the current pose.
-            float3 emaPos = b.sleepTimer <= 0.0 ? b.position : BODY_PREV(i).initialPos;
-            float4 emaRot = b.sleepTimer <= 0.0 ? b.orientation : BODY_PREV(i).initialRot;
+            // A body moves only if both measures of this window say so:
+            //  - pose: a low-pass (β = SLEEP_POSE_BETA) pose against the pose
+            //    at the window start. It ignores velocity that never moves the
+            //    body (one-tick blips that post-stabilization undoes);
+            //  - velocity: D = Σ v·h, Θ = Σ ω·h, as mature engines judge sleep
+            //    (Box2D, Jolt, PhysX). It ignores push-out, which is not
+            //    velocity (a jammed pair slowly pushed apart).
+            // Storage: the previous-step record's spare fields (only its
+            // linearVel is used elsewhere).
+            bool fresh = b.sleepTimer <= 0.0;
+            float3 emaPos = fresh ? b.position : BODY_PREV(i).initialPos;
+            float4 emaRot = fresh ? b.orientation : BODY_PREV(i).initialRot;
             float4 qNow = b.orientation;
             if (dot(qNow, emaRot) < 0.0) qNow = -qNow;
             emaPos += SLEEP_POSE_BETA * (b.position - emaPos);
             emaRot = quatNormalize(emaRot + SLEEP_POSE_BETA * (qNow - emaRot));
-            BODY_PREV(i).initialPos = emaPos;
-            BODY_PREV(i).initialRot = emaRot;
-            float3 midPos = emaPos;
-            float4 midRot = emaRot;
-            float4 refRot = BODY_PREV(i).orientation;
-            float3 refPos = BODY_PREV(i).position;
-            float turn = 2.0 * acos(min(abs(dot(refRot, midRot)), 1.0));
-            float moved = length(midPos - refPos) + turn * extent;
-            slow = b.sleepTimer <= 0.0 || moved < p.sleepLin * p.sleepTime;
+            float3 refPos = fresh ? emaPos : BODY_PREV(i).position;
+            float4 refRot = fresh ? emaRot : BODY_PREV(i).orientation;
+            float turn = 2.0 * acos(min(abs(dot(refRot, emaRot)), 1.0));
+            float movedPose = length(emaPos - refPos) + turn * extent;
+            float3 dLin = (fresh ? float3(0, 0, 0) : BODY_PREV(i).angularVel) + b.linearVel * dt;
+            float3 dAng = (fresh ? float3(0, 0, 0) : BODY_PREV(i).invInertia) + b.angularVel * dt;
+            float movedVel = length(dLin) + length(dAng) * extent;
+            float moved = min(movedPose, movedVel);
+            slow = fresh || moved < p.sleepLin * p.sleepTime;
             // Diagnostics (sleep-diag.mjs): this window's displacement.
             gBodies[i].initialPad = moved;
             // A candidate held awake (by its island) restarts the window every
             // sleepTime, so the limit is drift per window, like a speed.
             bool rewindow = slow && b.sleepTimer >= 2.0 * p.sleepTime;
             if (rewindow) b.sleepTimer = p.sleepTime;
-            if (!slow || b.sleepTimer <= 0.0 || rewindow)
+            if (!slow || rewindow)
             {
-                BODY_PREV(i).position = midPos;
-                BODY_PREV(i).orientation = midRot;
+                refPos = emaPos;
+                refRot = emaRot;
+                dLin = float3(0, 0, 0);
+                dAng = float3(0, 0, 0);
             }
+            BODY_PREV(i).initialPos = emaPos;
+            BODY_PREV(i).initialRot = emaRot;
+            BODY_PREV(i).position = refPos;
+            BODY_PREV(i).orientation = refRot;
+            BODY_PREV(i).angularVel = dLin;
+            BODY_PREV(i).invInertia = dAng;
         }
     }
     if (slow)
