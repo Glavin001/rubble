@@ -23,9 +23,40 @@
 
 use std::time::Instant;
 
-use stress_ref::scene::Scene;
+use stress_ref::scene::{Scene, SolveMode};
 
 use stress_rubble::scenes::{house, realtime as configure, wall_ram};
+
+/// The fidelity ladder (`--config`): from the Blast-equivalent configuration to the full
+/// real-time one, one switch per rung (each rung keeps every switch of the rungs before).
+/// What each configuration changes on top of `configure`, and whether impact islands run.
+///   blast         quasi-static equilibrium every frame with same-step cascade, threshold
+///                 bonds (no softening, Weibull, crack contact, rate, fatigue, buckling,
+///                 rebar, dashpots), the engine drives every body (contacts only as loads):
+///                 what the Blast ExtStressSolver computes, solved to convergence
+///   adaptive      + explicit dynamics while loaded (adaptive mode), still no islands
+///   islands       + impact islands routed before the step
+///   softening, weibull, crack_contact, rate_effects, static_fatigue, buckling, rebar,
+///   damping       + that model feature, in this order
+///   realtime      the full real-time configuration (= damping, every feature on)
+pub const LADDER: [&str; 12] = ["blast", "adaptive", "islands", "softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping", "realtime"];
+const LADDER_FEATURES: [&str; 8] = ["softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping"];
+
+/// `scene` (already `configure`d) under ladder configuration `config`; whether islands run.
+fn ladder(mut s: Scene, config: &str) -> (Scene, bool) {
+    if config == "realtime" {
+        return (s, true);
+    }
+    let rung = LADDER.iter().position(|&c| c == config).unwrap_or_else(|| panic!("unknown --config {config} (known: {})", LADDER.join(", ")));
+    for (i, f) in LADDER_FEATURES.iter().enumerate() {
+        // Feature i is on from rung 3 + i.
+        s.sim.features.set(f, rung >= 3 + i).unwrap();
+    }
+    if rung == 0 {
+        s.sim.solve_mode = SolveMode::QuasiStatic;
+    }
+    (s, rung >= 2)
+}
 
 /// The accuracy set: the realtime regimes plus the oracle's gate cases, each in the same
 /// real-time configuration (so solvers differ only by pipeline).
@@ -58,6 +89,22 @@ pub fn towns(seconds: f64) -> Vec<(&'static str, Scene)> {
     out
 }
 
+/// The Blast packs both solvers load, each intact (idle) and rammed as `house_ram` is.
+pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
+    let mut out = Vec::new();
+    for name in ["house-1story", "house-2story", "villa-savoye", "brick-building", "rig-portal", "rig-toppled", "comp-wall-bay"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../packs/{name}.json"));
+        let scene = stress_ref::scene_pack::import(&path, name, "structure").unwrap_or_else(|e| panic!("{name} pack: {e}"));
+        let mut idle = configure(scene.clone(), seconds);
+        idle.name = format!("{name}_idle");
+        let mut ram = configure(stress_ref::scenes::rammed(scene), seconds);
+        ram.name = format!("{name}_ram");
+        out.push((idle.name.clone(), idle));
+        out.push((ram.name.clone(), ram));
+    }
+    out
+}
+
 pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut idle = configure(house(), seconds);
     idle.name = "house_idle".into();
@@ -75,6 +122,8 @@ struct Run {
     redone: u64,
     unverified: u64,
     profile: serde_json::Value,
+    /// The scene's own metrics (b5: failure mode hole / push_over, hole area, speed lost).
+    metrics: serde_json::Value,
     /// FNV-1a of the end state (cluster motion and membership, chunk hidden states,
     /// impactors), so a lossless change is checked bit for bit.
     digest: String,
@@ -99,6 +148,16 @@ fn digest(m: &stress_ref::solver::ReferenceSolver, impactors: &[stress_ref::worl
     format!("{h:016x}")
 }
 
+fn metrics(scene: &Scene, o: &stress_ref::observation::Observation) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for m in &scene.metrics {
+        if let Ok(v) = stress_ref::metrics::evaluate(scene, m, o) {
+            out.insert(m.name.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
 fn run_oracle(scene: &Scene) -> Run {
     let mut w = stress_ref::world::World::new(scene);
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
@@ -111,11 +170,12 @@ fn run_oracle(scene: &Scene) -> Run {
     let o = w.observation();
     let ram = w.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let digest = digest(&w.solver, &w.impactors);
-    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, digest }
+    let metrics = metrics(scene, &o);
+    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, metrics, digest }
 }
 
 #[cfg(feature = "gpu")]
-fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, no_redo: bool) -> Run {
+fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, no_redo: bool, islands: bool) -> Run {
     use stress_ref::math::Vec3;
     // One device for both (`rubble-gpu`), or rubble on its own device (`rubble-gpu-2dev`).
     let engine: Box<dyn stress_ref::engine::RigidEngine> = if two_devices {
@@ -126,6 +186,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let mut w = stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world");
     // rubble's integrated pipeline: routing before the step, no frame rewind.
     w.redo_fractured_frames = !no_redo;
+    w.set_impact_islands(islands);
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut frames = Vec::with_capacity(n);
     let trace = std::env::var("STRESS_BENCH_TRACE").is_ok();
@@ -153,7 +214,8 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
     let digest = digest(&w.solver.mirror, &w.solver.impactors);
-    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, digest }
+    let metrics = metrics(scene, &o);
+    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, metrics, digest }
 }
 
 fn main() {
@@ -162,12 +224,14 @@ fn main() {
     let mut seconds = 0.25;
     let mut repeats = 1usize;
     let mut set = "realtime".to_string();
+    let mut config = "realtime".to_string();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--solver" => solver = args.next().expect("--solver NAME"),
             "--only" => only = args.next(),
-            "--set" => set = args.next().expect("--set realtime|accuracy|towns"),
+            "--set" => set = args.next().expect("--set realtime|accuracy|towns|packs"),
+            "--config" => config = args.next().expect("--config LADDER-RUNG"),
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).expect("--seconds S"),
             "--repeats" => repeats = args.next().and_then(|v| v.parse().ok()).expect("--repeats N"),
             other => panic!("unknown argument {other}"),
@@ -175,30 +239,34 @@ fn main() {
     }
     #[cfg(feature = "gpu")]
     let gpu = (solver != "oracle").then(|| stress_gpu::gpu::Gpu::new().expect("GPU"));
+    let named = |l: Vec<(&'static str, Scene)>| l.into_iter().map(|(n, s)| (n.to_string(), s)).collect::<Vec<_>>();
     let list = match set.as_str() {
-        "accuracy" => accuracy(seconds),
-        "towns" => towns(seconds),
-        _ => regimes(seconds),
+        "accuracy" => named(accuracy(seconds)),
+        "towns" => named(towns(seconds)),
+        "packs" => packs(seconds),
+        _ => named(regimes(seconds)),
     };
     for (name, scene) in list {
-        if only.as_ref().is_some_and(|o| o != name) {
+        if only.as_ref().is_some_and(|o| *o != name) {
             continue;
         }
+        let (scene, islands) = ladder(scene, &config);
+        let _ = islands;
         for repeat in 0..repeats.max(1) {
             let run = match solver.as_str() {
                 "oracle" => run_oracle(&scene),
                 #[cfg(feature = "gpu")]
-                "rubble-gpu" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, false, true),
+                "rubble-gpu" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, false, true, islands),
                 #[cfg(feature = "gpu")]
-                "rubble-gpu-redo" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, false, false),
+                "rubble-gpu-redo" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, false, false, islands),
                 #[cfg(feature = "gpu")]
-                "rubble-gpu-2dev" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, true, false),
+                "rubble-gpu-2dev" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, true, false, islands),
                 other => panic!("unknown solver {other} (rubble-gpu needs --features gpu)"),
             };
             println!(
                 "{}",
-                serde_json::json!({"solver": solver, "regime": name, "repeat": repeat, "seconds": seconds, "frame_dt": scene.sim.frame_dt,
-                    "frame_ms": run.frames, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "digest": run.digest})
+                serde_json::json!({"solver": solver, "config": config, "regime": name, "repeat": repeat, "seconds": seconds, "frame_dt": scene.sim.frame_dt,
+                    "frame_ms": run.frames, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "metrics": run.metrics, "digest": run.digest})
             );
         }
     }
