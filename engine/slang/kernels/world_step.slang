@@ -2024,12 +2024,21 @@ static const uint FLAG_POINT_SPEED_SLEEP = 8192u;
 bool pointSpeedSleep() { return (PARAMS.flags & FLAG_POINT_SPEED_SLEEP) != 0u; }
 // 32768 Displacement sleep test (Jolt's sleep test spheres): a body is slow while
 //     its farthest point stays within sleepLin·sleepTime of the pose it had when
-//     its sleep timer started, |Δx| + angle(Δq)·r_max, using the two-tick
-//     midpoint pose so a period-2 numerical flip does not count as motion. Jitter and one-tick blips
+//     its sleep timer started, |Δx| + angle(Δq)·r_max, using a low-pass
+//     (exponentially averaged) pose so numerical jitter in place does not
+//     count as motion. Jitter and one-tick blips
 //     that go nowhere no longer reset the timer; steady motion still does. The
 //     reference pose lives in the previous-step body record (BODY_PREV), whose
 //     pose fields are otherwise unused.
 static const uint FLAG_SLEEP_DISPLACEMENT = 32768u;
+static const float SLEEP_POSE_BETA = 0.2;
+// 4194304 Push-out limit (Box2D contactPushMaxVelocity, PhysX
+//     maxDepenetrationVelocity): overlap is corrected at most PUSH_MAX_SPEED·h
+//     per step. Post-stabilization otherwise removed a jammed piece's whole
+//     1.6-4 cm overlap in one pass, the iterations pushed it back, and it
+//     cycled by ~3.5 cm every few ticks with zero reported velocity.
+static const uint FLAG_PUSH_LIMIT = 4194304u;
+static const float PUSH_MAX_SPEED = 0.5;
 bool displacementSleep() { return (PARAMS.flags & FLAG_SLEEP_DISPLACEMENT) != 0u; }
 // A body that may wake its neighbours (contacts or bonds): awake, and under the
 // displacement test not itself a sleep candidate (those only jitter in place).
@@ -2094,6 +2103,13 @@ float contactC0N(float gap, float margin)
 // FLAG_CONTACT_GAP a positive gap is real clearance, not error, so it is kept
 // whole (the row then stops the bodies exactly at touch).
 float contactC0NReg(float c0N, float keep)
+{
+    // Push-out limit: overlap is removed at most PUSH_MAX_SPEED·h per step.
+    if ((PARAMS.flags & FLAG_PUSH_LIMIT) != 0u)
+        return max(contactC0NRegFull(c0N, keep), -PUSH_MAX_SPEED * PARAMS.dt);
+    return contactC0NRegFull(c0N, keep);
+}
+float contactC0NRegFull(float c0N, float keep)
 {
     if (contactGapMode()) return c0N > 0.0 ? c0N : c0N * keep;
     // Look-ahead without FLAG_CONTACT_GAP: C0 = gap + margin. Only a real gap
@@ -4968,18 +4984,28 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
         {
             // A fresh timer (just woken or just moved) takes the current pose as
             // its reference; afterwards the window's displacement decides.
-            // Two-tick midpoint pose (x and x⁻): a pose that flips back and
-            // forth each tick (jammed compounds) averages out; steady motion
-            // moves the midpoint at the same rate.
-            float3 midPos = 0.5 * (b.position + b.initialPos);
-            float4 q0 = b.initialRot;
-            if (dot(q0, b.orientation) < 0.0) q0 = -q0;
-            float4 midRot = quatNormalize(b.orientation + q0);
+            // Low-pass pose (exponential average, β = SLEEP_POSE_BETA, kept in
+            // the previous-step record's spare x⁻ fields): jitter in place
+            // (jammed compounds flipping with a period of 2-3 ticks) averages
+            // out, steady motion moves it at the same rate with a short lag.
+            // A fresh window restarts it at the current pose.
+            float3 emaPos = b.sleepTimer <= 0.0 ? b.position : BODY_PREV(i).initialPos;
+            float4 emaRot = b.sleepTimer <= 0.0 ? b.orientation : BODY_PREV(i).initialRot;
+            float4 qNow = b.orientation;
+            if (dot(qNow, emaRot) < 0.0) qNow = -qNow;
+            emaPos += SLEEP_POSE_BETA * (b.position - emaPos);
+            emaRot = quatNormalize(emaRot + SLEEP_POSE_BETA * (qNow - emaRot));
+            BODY_PREV(i).initialPos = emaPos;
+            BODY_PREV(i).initialRot = emaRot;
+            float3 midPos = emaPos;
+            float4 midRot = emaRot;
             float4 refRot = BODY_PREV(i).orientation;
             float3 refPos = BODY_PREV(i).position;
             float turn = 2.0 * acos(min(abs(dot(refRot, midRot)), 1.0));
             float moved = length(midPos - refPos) + turn * extent;
             slow = b.sleepTimer <= 0.0 || moved < p.sleepLin * p.sleepTime;
+            // Diagnostics (sleep-diag.mjs): this window's displacement.
+            gBodies[i].initialPad = moved;
             // A candidate held awake (by its island) restarts the window every
             // sleepTime, so the limit is drift per window, like a speed.
             bool rewindow = slow && b.sleepTimer >= 2.0 * p.sleepTime;

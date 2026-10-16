@@ -202,13 +202,16 @@ export async function runSleepDiag(sim, scene, {ticks = 2400, every = 120, top =
 // Contact point (SolverPoint, 16 floats): anchorA 0-2, c0N 3, anchorB 4-6,
 // c0T1 7, lambda 8-10, c0T2 11, penalty 12-14, pairAndStick 15. Meta (8
 // words): colliderA, colliderB, featureId, generation, normal 4-6, friction.
-export async function runSleepTrace(sim, scene, {at = 1200, ticks = 30, pick = 3, bodies: chosen = null, hullView, hullBase} = {}) {
+export async function runSleepTrace(sim, scene, {at = 1200, ticks = 30, pick = 3, bodies: chosen = null, settling = false, hullView, hullBase} = {}) {
   const g = scene.params.gravityY ?? -9.81, colliderBody = scene.colliders.map((c) => c.body);
   for (let t = 0; t < at; t += 4) await sim.step(Math.min(4, at - t), {wait: false});
   await sim.flush();
   let f = await sim.snapshot(), u = new Uint32Array(f.buffer);
   const st = bodyStats(f, u, scene, g).bodies.filter((b) => !b.asleep && b.i < scene.projectileStart);
-  const ids = chosen ?? [...new Set([...[...st].sort((a, b) => b.lin - a.lin).slice(0, pick), ...[...st].sort((a, b) => b.ang - a.ang).slice(0, pick)].map((b) => b.i))];
+  // settling: the bodies that block their island (awake, timer < sleepTime).
+  const ids = chosen ?? (settling
+    ? st.filter((b) => b.timer < scene.params.sleepTime).sort((a, b) => a.timer - b.timer).slice(0, 2 * pick).map((b) => b.i)
+    : [...new Set([...[...st].sort((a, b) => b.lin - a.lin).slice(0, pick), ...[...st].sort((a, b) => b.ang - a.ang).slice(0, pick)].map((b) => b.i))]);
   const hullOf = (c) => {
     if (c.shape !== 3) return {shape: c.shape, params: c.params};
     const v = hullView(scene.hullData, hullBase(c.params)), verts = Array.from({length: v.nv}, (_, i) => v.vertex(i));
@@ -241,7 +244,7 @@ export async function runSleepTrace(sim, scene, {at = 1200, ticks = 30, pick = 3
       // Momentum of the body and of the body with its partners (dynamic only).
       let P = v.map((x) => x * m);
       for (const q of partners) { const oq = q * 28; if (f[oq + 3] > 0 && (u[oq + 11] & 1)) { const mq = 1 / f[oq + 3]; P = P.map((x, k) => x + mq * f[oq + 12 + k]); } }
-      tick.bodies[i] = {y: +f[o + 1].toFixed(4), timer: +f[o + 15].toFixed(3), v: v.map((x) => +x.toFixed(3)), w: w.map((x) => +x.toFixed(2)), flags: u[o + 11], groupMomentum: P.map((x) => +x.toFixed(3)), contacts};
+      tick.bodies[i] = {y: +f[o + 1].toFixed(4), timer: +f[o + 15].toFixed(3), moved: +f[o + 23].toFixed(4), v: v.map((x) => +x.toFixed(3)), w: w.map((x) => +x.toFixed(2)), flags: u[o + 11], groupMomentum: P.map((x) => +x.toFixed(3)), contacts};
     }
     rows.push(tick);
   }
