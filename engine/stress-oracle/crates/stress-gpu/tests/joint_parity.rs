@@ -272,7 +272,10 @@ fn joint_law_matches_the_reference() {
         let o = &outputs[5 * i..5 * i + 5];
         let k = c.stiffness.as_local();
         let force_scale = c.d.mul_elem(&k).to_array().iter().chain(r.force.to_array().iter()).fold(1e-30f64, |m, x| m.max(x.abs()));
-        let energy_scale = 0.5 * c.d.dot(&c.d.mul_elem(&k)) + r.stored.abs() + r.dissipated.abs() + 1e-30;
+        // The energy ledger's own magnitudes are part of the scale: with the exact balance
+        // (joint.rs `frozen`), a cracked joint whose friction offsets hold energy releases
+        // it as `overshoot`, which can exceed the elastic energy at `d` many times over.
+        let energy_scale = 0.5 * c.d.dot(&c.d.mul_elem(&k)) + r.stored.abs() + r.dissipated.abs() + r.overshoot.abs() + 1e-30;
         let gf = [o[0][0], o[0][1], o[0][2], o[1][0], o[1][1], o[1][2]];
         for (j, x) in r.force.to_array().iter().enumerate() {
             note("force", (gf[j] as f64 - x).abs() / force_scale, i);
