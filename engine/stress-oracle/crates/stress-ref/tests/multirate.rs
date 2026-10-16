@@ -316,7 +316,7 @@ fn multirate_energy_converges_in_free_vibration() {
 
 /// At safety 0.9 (A1's; the default is 0.5) the coarse bonds' interval is a multiple of a
 /// step already near the slivers' stability limit, where impulse multiple-time-stepping can
-/// resonate with the fast modes (Biesiadecki and Skeel 1993). Over 1e5 substeps of free
+/// resonate with the fast modes (Biesiadecki and Skeel 1993). Over 1.6e5 substeps of free
 /// vibration without damping the energy error stays bounded: the last tenth of the run
 /// is no worse than the first.
 #[test]

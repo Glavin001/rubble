@@ -22,7 +22,7 @@ switch is bit-identical to single rate, `tests/multirate.rs`).
   impulse. It keeps exactly what single rate keeps: linear momentum to round-off through
   impact and fracture, angular momentum as single rate does (the difference vanishes with
   the substep), energy converging to zero error at first order, and no energy drift over
-  1e5 undamped substeps at safety 0.9.
+  1.6e5 undamped substeps at safety 0.9.
 - **Fidelity.** Catalogue: 34/35 scenes pass every gameplay metric. The one diff
   (s_house_car, `where`) is inside the reference's own spread: single rate against
   itself at safety 0.45 and 0.4 fails the same test. On `true_step`: 35/35.
@@ -31,8 +31,8 @@ switch is bit-identical to single rate, `tests/multirate.rs`).
     and ×4.0 fewer bond evaluations. The Shardwright projectile passes too.
   - The Shardwright ram cannot be judged: its single-rate reference creates energy
     (3.7e9 J of contact dissipation against a 28.8 kJ ram).
-  - It is a step change, so its accuracy is that of the requested safety at every bond.
-    Single rate over-resolves the heavy chunks.
+- **Accuracy.** It is a step change: every bond runs at the requested safety of its own
+  step, where single rate over-resolves the heavy chunks.
   - On b6_spall (a wave problem) the spall speed at the default safety 0.5 moves +8 %
     (3.59 → 3.88 m/s; OpenCourant 3.02). At safety ≤ 0.25 the two agree within 0.6 % and
     converge together.
