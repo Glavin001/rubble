@@ -250,7 +250,7 @@ fn a_suburb_puts_houses_on_lots_between_roads_and_shoots_one_column() {
     }
     // No house sits on a road or sidewalk (6 vertices per quad, 10 floats each).
     let r = &suburb.road_vertices;
-    assert!(!r.is_empty() && r.len() % 60 == 0);
+    assert!(!r.is_empty() && r.len().is_multiple_of(60));
     for q in r.chunks(60) {
         let xs: Vec<f64> = (0..6).map(|k| q[k * 10] as f64).collect();
         let zs: Vec<f64> = (0..6).map(|k| q[k * 10 + 2] as f64).collect();
@@ -273,6 +273,6 @@ fn fine_levels_of_the_arch_build_and_bonds_become_joints() {
     for level in 0..4u8 {
         let s = build_scene(arch(), level, None).unwrap();
         assert!(!s.joints.is_empty());
-        assert!(s.lines.len() % 10 == 0 && !s.vertices.is_empty());
+        assert!(s.lines.len().is_multiple_of(10) && !s.vertices.is_empty());
     }
 }

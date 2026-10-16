@@ -530,7 +530,7 @@ impl Scene {
     /// Bond preloading: settled once the bonded island sleeps (sleep keeps its
     /// bond state), checked every 60 steps, giving up after 600.
     pub fn preload_done(steps: u32, awake: u32) -> bool {
-        steps >= 600 || (steps % 60 == 0 && awake == 0)
+        steps >= 600 || (steps.is_multiple_of(60) && awake == 0)
     }
 
     /// Bond preloading, step 2: start every piece asleep at the settled poses
@@ -618,7 +618,7 @@ pub fn principal_axes(inertia: &[f32; 9]) -> Result<([f64; 4], [f64; 3])> {
     );
     let (q, moments) = engine_schema::convex::principal_axes(m);
     let moments = moments.to_array();
-    if moments.iter().any(|x| !(*x > 0.0) || !x.is_finite()) {
+    if moments.iter().any(|x| x.is_nan() || *x <= 0.0 || !x.is_finite()) {
         bail!("Fragment inertia is not positive definite");
     }
     Ok((q.to_array(), moments))
@@ -759,7 +759,7 @@ pub fn build_scene(asset: &FractureAsset, level: u8, max_hull_vertices: Option<u
     let placement = [-center[0], -lo[1], -center[2]];
     let mut body_of: Vec<(u32, u32, [f64; 4])> = Vec::new();
     for f in &selected {
-        if !(f.mass > 0.0) || f.hull_count == 0 {
+        if f.mass.is_nan() || f.mass <= 0.0 || f.hull_count == 0 {
             bail!("Fragment {} has no dynamic mass or hull", f.id);
         }
         let (q, moments) = principal_axes(&f.inertia)?;
@@ -989,9 +989,7 @@ pub fn build_grid(one: &Scene, o: &GridOptions) -> Scene {
         s.colliders.push(Collider::new(id, SHAPE_SPHERE, 0.0, [r, 0.0, 0.0, 0.0]));
         for v in (0..stride).step_by(10) {
             let src = &one.projectile_vertices[slot * stride + v..slot * stride + v + 10];
-            for k in 0..3 {
-                s.projectile_vertices.push((src[k] as f64 / r0 * r) as f32);
-            }
+            s.projectile_vertices.extend(src[..3].iter().map(|x| (*x as f64 / r0 * r) as f32));
             s.projectile_vertices.extend_from_slice(&src[3..9]);
             s.projectile_vertices.push(id as f32);
         }

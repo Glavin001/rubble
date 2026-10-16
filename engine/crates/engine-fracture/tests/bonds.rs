@@ -80,9 +80,9 @@ fn joints_weld_at_the_centroid_with_the_rest_pose_and_capped_springs() {
     let joints: Vec<Joint> = s.joints.iter().zip(&raw).map(|(j, k)| Joint { k: *k, ..*j }).collect();
     let scaled = scale_bond_springs_with(&joints, &s.bodies, dt, 0.5, f64::INFINITY);
     let f = scaled[0].k[0] / raw[0][0];
-    for i in 0..50 {
-        for r in 0..6 {
-            close(scaled[i].k[r], raw[i][r] * f, 1e-9);
+    for (j, k) in scaled.iter().zip(&raw).take(50) {
+        for (a, b) in j.k.iter().zip(k) {
+            close(*a, b * f, 1e-9);
         }
     }
 }
