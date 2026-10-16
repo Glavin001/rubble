@@ -50,7 +50,14 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const solid=pipeline('fs'),ground=pipeline('ground'),wire=pipeline('wire'),decal=pipeline('fs',true);
  const make=data=>{const b=device.createBuffer({size:Math.max(4,data.byteLength),usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});if(data.length)device.queue.writeBuffer(b,0,data);return b;};
  const projectiles=make(scene.projectileVertices);
- const mesh=make(scene.vertices),lines=make(scene.lines),roads=make(scene.roadVertices??new Float32Array(0)),g=[];
+ // Indexed house mesh: corners repeated by the triangle list are stored once
+ // (only exact matches of all ten attributes merge, body id included), so
+ // each copy runs far fewer vertex shaders for the same image.
+ const indexed=(()=>{const words=new Uint32Array(scene.vertices.buffer,scene.vertices.byteOffset,scene.vertices.length),n=words.length/10,seen=new Map(),index=new Uint32Array(n),unique=[];
+  for(let v=0;v<n;v++){const key=words.subarray(v*10,v*10+10).join(',');let k=seen.get(key);if(k===undefined){k=unique.length/10;seen.set(key,k);for(let j=0;j<10;j++)unique.push(words[v*10+j])}index[v]=k}
+  return {vertices:new Float32Array(new Uint32Array(unique).buffer),index}})();
+ const index=device.createBuffer({size:Math.max(4,indexed.index.byteLength),usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(index,0,indexed.index);
+ const mesh=make(indexed.vertices),lines=make(scene.lines),roads=make(scene.roadVertices??new Float32Array(0)),g=[];
  const size=Math.max(20,scene.extent*8);for(const p of [[-size,0,-size],[-size,0,size],[size,0,size],[-size,0,-size],[size,0,size],[size,0,-size]])g.push(...p,0,1,0,.1,.15,.18,0);
  const floor=make(new Float32Array(g));let depth,width=0,height=0,yaw=scene.camera?.yaw??.25,pitch=scene.camera?.pitch??.22,distance=scene.camera?.distance??scene.extent*1.9,drag;
  function camera(){
@@ -93,8 +100,8 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const enc=device.createCommandEncoder(),pass=enc.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[.035,.055,.075,1],loadOp:'clear',storeOp:'store'}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'},...(stamps?{timestampWrites:stamps}:{})});
   pass.setBindGroup(0,bind);pass.setPipeline(ground);pass.setVertexBuffer(0,floor);pass.draw(6);
   if(scene.roadVertices?.length){pass.setPipeline(decal);pass.setVertexBuffer(0,roads);pass.draw(scene.roadVertices.length/10)}
-  pass.setPipeline(solid);pass.setVertexBuffer(0,mesh);pass.draw(scene.vertices.length/10,scene.copies||1);
+  pass.setPipeline(solid);pass.setVertexBuffer(0,mesh);pass.setIndexBuffer(index,'uint32');pass.drawIndexed(indexed.index.length,scene.copies||1);
   if(simulation.shots){pass.setVertexBuffer(0,projectiles);pass.draw(simulation.shots*scene.projectileVertices.length/scene.projectileCount/10)}
   if(showBonds&&scene.lines.length){pass.setPipeline(wire);pass.setVertexBuffer(0,lines);pass.draw(scene.lines.length/10,scene.copies||1)}pass.end();device.queue.submit([enc.finish()]);
- },dispose(){for(const b of [uniform,mesh,lines,roads,floor,projectiles])b.destroy();depth?.destroy();canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
+ },dispose(){for(const b of [uniform,mesh,index,lines,roads,floor,projectiles])b.destroy();depth?.destroy();canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
 }
