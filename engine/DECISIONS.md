@@ -249,3 +249,22 @@ The same native ring now settles to zero awake bodies by step ~210, with no re-w
 8er. **Reject register sorting of short CSR lists.** `csr_sort_regs` sorted lists of ≤8 edges in registers with a fixed insertion network, using one load and at most one store per edge. The edge key is a strict total order, so the result is the same order. Gables csrSort stayed at 0.59 ms and the wall at 27.21 ms in both modes. The pass cost is `compactPreviousColor` (incremental coloring), which makes random neighbour body and colour loads, not the sort. That function is the lead if csrSort is revisited. Same evidence and patch.
 
 8es. **Reject per-workgroup slot reservation in `narrowphase_defer`.** `tryReuseContacts` was split into find/commit helpers, and `narrowphase_defer_grouped` reserved manifolds, contacts, persist-list entries and deferred slots with one atomic per counter per workgroup instead of per candidate. Ring `profile=np` (a temporary split of grid insert/query and np defer/fresh) gave npDefer 0.85 ms either way. Atomic contention is not what this pass costs. The collision split at HEAD is ring gridQuery 0.85, npDefer 0.85, npFresh 1.18 ms and gables gridQuery 1.57, npDefer 3.54, npFresh 2.16 ms. On gables the grouped variant raised OVERFLOW_WARM_HASH (256) and the benchmark rejected the run. The cause was not investigated because the variant showed no gain. Do not revive it without first finding that defect. These timings came late in a session whose browser pane the desktop app reported as not shown (the page itself reported `visible`), so treat them as indicative only. Same evidence and patch.
+
+8et. **D6 joints replace the per-type joint switch (`docs/JOINTS.md`).** The old shader solved only Ball correctly:
+- Fixed/D6 left twist free.
+- Hinge skipped world X instead of its axis.
+- Slider kept the ball rows.
+- Distance/MaxDistance ran as balls.
+- The angular dual never updated.
+- wgpu never put joints in the CSR.
+
+Joints are now a 288 B D6 record with seven rows (three-avbd ball/fixed/soft/spring/break/yield + PhysX D6 motions, twist/cone/pyramid/linear limits, motors, servos) shared by Metal, wgpu and the browser. Joints stay in one buffer because Chrome's primal kernels already use 9–10 of 10 storage bindings.
+
+Fixes found with the ragdoll probe:
+- exact swing-twist gradient (bX alone blew up free-swing twist limits);
+- wrap-aware angle limits (knees flipped at ±π);
+- slack limits restart at kStart (pops).
+
+The ball fast path loads only `JointBall` fields: chain mail 1.13 ms vs 1.40 ms for the generic path (interleaved A/B).
+
+Bench `bench/results/joints-all` (format v3 D6 scenes; PhysX as `PxD6Joint`) was taken under load average 30–60 from other sessions, so treat the absolute ms as noisy. In it rubble-metal passes every scene and beats three-avbd on chain mail and jointed drop. PhysX GPU fails joint-gap gates at its default 4 iterations on chain mail, jointed drop and hinge chains, and is slower on motor field (19.3 vs 1.18 ms) and ragdolls (7.37 vs 3.28 ms). Re-run in a quiet window before quoting.

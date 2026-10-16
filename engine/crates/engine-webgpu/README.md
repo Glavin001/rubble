@@ -11,6 +11,7 @@ export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
 cargo test -p engine-webgpu --release --lib --test columns_hold --test ring_hold --test gables_hold --test render_abi -- --nocapture --test-threads=1
 cargo test -p engine-metal --release --lib -- --nocapture --test-threads=1
 cargo test -p engine-metal --release --test oracle_accuracy --test avbd_slice --test columns_wgpu_parity --test webgpu_parity -- --nocapture --test-threads=1
+cargo test -p engine-metal --release --test joints --test joints_wgpu_parity -- --nocapture --test-threads=1
 cargo test -p engine-scenes --release --lib scene_conversion
 ```
 
@@ -291,3 +292,12 @@ WGSL and timing protocol through native wgpu, with the same full-buffer checks.
 Use `GPU_PROBE_WORKGROUP=256` (native) or `?group=256` (browser) to compare a
 256-thread group against the default 64. Run native and browser probes serially.
 The probe uses its own device/buffers and does not modify the physics backend.
+
+## Joint scenes in the browser
+
+`demo.html?scene=joints` (also `ragdolls`, `ragdolls10k`, `hingechains10k`, `motorfield10k`)
+loads scenes built by `engine-scenes` and exported as raw GPU records
+(`cargo run -p engine-scenes --release --bin scene_export`), so the browser steps exactly
+the records the native tests use. Alt-drag grabs a body, `F` fires a ball, `M` toggles
+motors. `node tools/record-joints.mjs` records each scene in headless Chrome WebGPU to
+`test-results/joints/`. See `engine/docs/JOINTS.md`.
