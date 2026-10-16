@@ -51,6 +51,27 @@ for sc in scenes:
             extra += f" (rewound {r['redone_frames']})"
         cells.append(f"{r['ram']:.2f} / {r['fragments']:.0f} / {r['broken_bonds']:.0f}{extra}")
     lines.append(f"| {sc} | " + " | ".join(cells) + " |")
+lines += ["", "## Agreement with the oracle", "",
+          "Each solver's outcome over its repeats (exit speed m/s, fragments, broken bonds: min-max), and the exit speed's difference from the oracle's.", ""]
+lines += ["| scene | " + " | ".join(solvers) + " |", "|---" * (len(solvers) + 1) + "|"]
+for sc in scenes:
+    ref = runs.get((sc, "oracle"))
+    ref_ram = ref[0]["ram"] if ref else None
+    cells = []
+    for so in solvers:
+        rs = runs.get((sc, so))
+        if not rs:
+            cells.append("—")
+            continue
+        def rng(k, f):
+            lo, hi = f % min(r[k] for r in rs), f % max(r[k] for r in rs)
+            return lo if lo == hi else f"{lo}–{hi}"
+        cell = f"{rng('ram', '%.2f')} / {rng('fragments', '%.0f')} / {rng('broken_bonds', '%.0f')}"
+        if ref_ram is not None and so != "oracle" and ref_ram > 0:
+            d = st.median([r["ram"] for r in rs]) - ref_ram
+            cell += f" (Δv {d:+.2f})"
+        cells.append(cell)
+    lines.append(f"| {sc} | " + " | ".join(cells) + " |")
 lines += ["", "## Frame time (ms, every frame of every repeat)", ""]
 for metric, fn in [
     ("mean", st.mean),
