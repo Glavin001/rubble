@@ -8,6 +8,7 @@
 //   trace    log counters every N warm ticks, 0 = off        (default 0)
 //   budget   JSON merged into scene.capacity, e.g. {"deterministic":true}
 //   bonds    1: the lab's breakable bonds (experimental), preloaded as in the lab
+//   columns, rows   grid layout override (grid scenes only)
 import {parseFractureGlb} from './asset.mjs';
 import {buildScene,buildGrid,buildSuburb} from './geometry.mjs';
 import {buildCuboidHouse} from './cuboid-house.mjs';
@@ -19,8 +20,9 @@ const SCENES={house:{file:'veneer-house.glb'},grid:{file:'veneer-house.glb',layo
  suburb:{file:'veneer-house.glb',layout:{suburb:true},level:2},
  cuboidGrid:{procedural:true,layout:{columns:7,rows:7}},cuboids:{procedural:true,layout:{suburb:true}}};
 
-async function buildNamed(name,device,bonds){
- const entry=SCENES[name];if(!entry)throw new Error(`Unknown scene ${name}`);
+async function buildNamed(name,device,bonds,layout){
+ const known=SCENES[name];if(!known)throw new Error(`Unknown scene ${name}`);
+ const entry=layout&&known.layout&&!known.layout.suburb?{...known,layout:{...known.layout,...layout}}:known;
  if(entry.procedural){
   const one=buildCuboidHouse(),scene=(entry.layout.suburb?buildSuburb:buildGrid)(null,0,{...entry.layout,base:one});
   return {...scene,capacity:{...scene.capacity,candidatesPerCollider:12,contactsPerCollider:24}};
@@ -41,7 +43,8 @@ async function run(){
   requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(16,adapter.limits.maxStorageBuffersPerShaderStage),
    maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  let gpuError=null;device.addEventListener('uncapturederror',e=>{gpuError??=String(e.error.message)});
- const built=await buildNamed(name,device,num('bonds',0)===1),scene={...built,capacity:{...built.capacity,...budget}};
+ const layout=q.has('columns')||q.has('rows')?{...(q.has('columns')?{columns:num('columns',7)}:{}),...(q.has('rows')?{rows:num('rows',7)}:{})}:null;
+ const built=await buildNamed(name,device,num('bonds',0)===1,layout),scene={...built,capacity:{...built.capacity,...budget}};
  const sim=await createSimulation(device,scene);
  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
  const log=[],t0=performance.now();
