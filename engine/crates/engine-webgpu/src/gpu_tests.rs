@@ -4122,7 +4122,7 @@ fn mixed_contact_reuse_fixture_mode(
                 let fresh = (1..=count)
                     .filter(|id| !reuse || id % 5 == 0 || id % 4 == 0 || *id == count)
                     .count() as u32;
-                assert_eq!(c._pad1, fresh,
+                assert_eq!(c.narrowphase_deferred, fresh,
                     "{context}: two-pass narrowphase must hand every non-reused pair to shape tests exactly once");
             }
             assert_eq!(
@@ -4501,6 +4501,270 @@ fn record_warm_hash_resolves_minimum_live_runs_and_flags_exhaustion() {
             );
         }
     }
+}
+
+// ---- convex hulls ---------------------------------------------------------------
+
+fn convex_capacity() -> WorldCapacity {
+    WorldCapacity {
+        max_bodies: 4096,
+        max_colliders: 8192,
+        max_contacts: 65_536,
+        max_joints: 64,
+        max_candidates: 65_536,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 65_536,
+    }
+}
+
+fn convex_library() -> Vec<engine_schema::convex::ConvexHull> {
+    use engine_schema::convex::ConvexHull;
+    let mut seed = 9u32;
+    let mut rnd = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+    };
+    let mut out = vec![ConvexHull::cuboid(glam::Vec3::new(0.3, 0.2, 0.25))];
+    for n in [8usize, 14, 20, 30] {
+        let pts: Vec<glam::Vec3> = (0..n).map(|_| glam::Vec3::new(rnd(), rnd() * 0.7, rnd()) * 0.8).collect();
+        out.push(ConvexHull::from_points(&pts).unwrap());
+    }
+    out
+}
+
+/// Ground plane plus `n` convex bodies (every fourth a two-hull compound).
+fn convex_pile_sim(n: u32, persistent: bool) -> (WgpuSim, Vec<u32>) {
+    let mut sim = if persistent {
+        WgpuSim::new_with_persistent_contacts(convex_capacity()).expect("wgpu adapter")
+    } else {
+        WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter")
+    };
+    let mut params = AvbdParams { dt: 1.0 / 120.0, iterations: 6, flags: FLAG_REUSE_CONTACTS, ..AvbdParams::default() };
+    params.gravity_y = -9.81;
+    sim.set_params(params);
+    let ground = sim.add_body(BodyState::static_plane_support());
+    sim.add_collider(Collider {
+        body: ground,
+        shape: ShapeType::Plane as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [0.0, 1.0, 0.0, 0.0],
+    });
+    let lib = convex_library();
+    let mut arena = engine_schema::convex::HullArena::new();
+    let mut bodies = Vec::new();
+    for i in 0..n {
+        let p = glam::Vec3::new((i % 8) as f32 * 1.1, 0.6 + (i / 64) as f32 * 1.1, ((i / 8) % 8) as f32 * 1.1);
+        let rot = glam::Quat::from_rotation_y(i as f32 * 0.7) * glam::Quat::from_rotation_x(i as f32 * 0.3);
+        let mut hulls = vec![lib[i as usize % lib.len()].clone()];
+        if i % 4 == 0 {
+            let mut child = lib[(i as usize + 1) % lib.len()].clone();
+            for v in &mut child.vertices {
+                *v += glam::Vec3::X * 0.35;
+            }
+            for f in &mut child.faces {
+                f.d += f.normal.x * 0.35;
+            }
+            hulls.push(child);
+        }
+        bodies.push(sim.add_convex_body(&mut arena, &hulls, p, rot, 500.0));
+    }
+    (sim, bodies)
+}
+
+#[test]
+fn convex_pile_settles_without_overflow_or_ground_penetration() {
+    for persistent in [false, true] {
+        let (mut sim, bodies) = convex_pile_sim(256, persistent);
+        for step in 0..480 {
+            sim.step().unwrap_or_else(|e| panic!("step {step} (persistent {persistent}): {e:?}"));
+        }
+        let all = sim.download_bodies();
+        for &b in &bodies {
+            let s = all[b as usize];
+            assert!(s.position.iter().all(|x| x.is_finite()), "body {b} not finite");
+            assert!(s.position[1] > -0.05, "body {b} fell through the ground: {:?}", s.position);
+            let v = glam::Vec3::from_array(s.linear_vel).length();
+            assert!(v < 1.0, "body {b} still moving at {v} m/s after 4 s");
+        }
+    }
+}
+
+/// Structural checks of the first GPU step (the exhaustive SAT/manifold oracle
+/// comparison runs on the CPU harness in engine-oracles/tests/convex_slang_cpu.rs).
+#[test]
+fn convex_first_step_manifolds_are_unique_unit_and_reach_sat() {
+    let (mut sim, _) = convex_pile_sim(128, false);
+    let mut params = sim.params;
+    params.iterations = 0;
+    params.flags = 0;
+    sim.set_params(params);
+    let cols = sim.host_cols.clone();
+    let bodies = sim.download_bodies();
+    sim.step().unwrap();
+    let counters = sim.last_counters;
+    let manifolds: Vec<Manifold> = download(&sim, 25, 0, counters.manifold_count as usize);
+    let mut seen = std::collections::HashSet::new();
+    for m in &manifolds {
+        if m.contact_count == 0 {
+            continue;
+        }
+        assert!(m.contact_count <= 4, "convex manifolds keep at most 4 points");
+        assert!(seen.insert((m.collider_a, m.collider_b)), "duplicate manifold");
+        let n = glam::Vec3::from_array(m.normal);
+        assert!((n.length() - 1.0).abs() < 1e-3, "non-unit manifold normal");
+        let (ba, bb) = (cols[m.collider_a as usize].body, cols[m.collider_b as usize].body);
+        assert_ne!(ba, bb, "self contact");
+        assert!(bodies[ba as usize].is_dynamic() || bodies[bb as usize].is_dynamic());
+    }
+    assert!(counters.convex_sat_small + counters.convex_sat_large > 0, "no hull pair reached SAT");
+    assert!(!manifolds.is_empty());
+}
+
+// ---- short GPU input/output checks (a few steps at most) ------------------------
+
+#[test]
+fn hull_buffer_grows_and_keeps_released_block_reuse_exact() {
+    use engine_schema::convex::{ConvexHull, HullArena};
+    let mut cap = convex_capacity();
+    cap.max_hull_vertices = 64; // the unit cube alone is 26 records
+    let mut sim = WgpuSim::new_with_compact_contacts(cap, false).expect("wgpu adapter");
+    let mut arena = HullArena::new();
+    let lib = convex_library();
+    let mut bases = Vec::new();
+    for (k, h) in lib.iter().enumerate() {
+        let mut h = h.clone();
+        for v in &mut h.vertices {
+            *v *= 1.0 + k as f32 * 0.1; // distinct hulls (no dedup)
+        }
+        let h = ConvexHull::from_points(&h.vertices).unwrap();
+        bases.push(arena.insert(&h).unwrap());
+    }
+    sim.sync_hulls(&mut arena);
+    assert!(sim.hull_records_capacity >= arena.len() as u32);
+    // Free one block and reuse it with a different hull.
+    assert!(arena.release(bases[1]));
+    let reused = arena.insert(&ConvexHull::cuboid(glam::Vec3::new(0.1, 0.2, 0.3))).unwrap();
+    assert_eq!(reused, bases[1]);
+    sim.sync_hulls(&mut arena);
+    let gpu: Vec<[u32; 4]> = download(&sim, 18, 0, arena.len());
+    assert_eq!(gpu.as_slice(), arena.records(), "GPU hull records equal the arena after growth and reuse");
+}
+
+/// Two overlapping hull pairs; one pair is excluded by categories, another by a
+/// shared negative group. Only the allowed pair may produce a manifold.
+#[test]
+fn collision_filters_drop_exactly_the_filtered_pairs_on_gpu() {
+    use engine_schema::convex::{convex_collider_params, CollisionFilter, ConvexHull, HullArena};
+    let mut sim = WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
+    sim.set_params(AvbdParams { dt: 1.0 / 120.0, iterations: 0, gravity_y: 0.0, ..AvbdParams::default() });
+    let mut arena = HullArena::new();
+    let hull = ConvexHull::cuboid(glam::Vec3::splat(0.5));
+    let base = arena.insert(&hull).unwrap();
+    let filters = [
+        (CollisionFilter::default(), CollisionFilter::default()), // allowed
+        (CollisionFilter { categories: 1, mask: 1, group: 0 }, CollisionFilter { categories: 2, mask: 2, group: 0 }),
+        (CollisionFilter { group: -1, ..Default::default() }, CollisionFilter { group: -1, ..Default::default() }),
+    ];
+    let mut cols = Vec::new();
+    for (k, (fa, fb)) in filters.iter().enumerate() {
+        for (dx, f) in [(0.0f32, fa), (0.9, fb)] {
+            let b = sim.add_body(BodyState::dynamic(glam::Vec3::new(k as f32 * 5.0 + dx, 2.0, 0.0), glam::Quat::IDENTITY, 1.0, glam::Vec3::ONE));
+            let mut c = Collider {
+                body: b,
+                shape: ShapeType::ConvexHull as u32,
+                material: 0,
+                generation: 0,
+                local_pos: [0.0; 3],
+                density: 1.0,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: convex_collider_params(base, 1.0, hull.bounding_radius()),
+            };
+            f.apply(&mut c);
+            cols.push(c);
+        }
+    }
+    sim.add_colliders(&cols);
+    sim.sync_hulls(&mut arena);
+    sim.step().unwrap();
+    let m: Vec<Manifold> = download(&sim, 25, 0, sim.last_counters.manifold_count as usize);
+    let pairs: Vec<(u32, u32)> = m.iter().filter(|m| m.contact_count > 0).map(|m| (m.collider_a, m.collider_b)).collect();
+    assert_eq!(pairs, vec![(0, 1)], "only the unfiltered pair collides");
+}
+
+/// Resting overlapping hulls: a whole-step reuse reproduces the previous step's
+/// manifold set (same pairs, same counts) without running collision detection.
+#[test]
+fn whole_step_manifold_reuse_reproduces_previous_manifolds_on_gpu() {
+    for persistent in [false, true] {
+        let (mut sim, _) = convex_pile_sim(0, persistent);
+        let mut params = sim.params;
+        params.iterations = 2;
+        sim.set_params(params);
+        // A row of slightly overlapping hulls resting on the ground plane.
+        let mut arena = HullArena::new();
+        let lib = convex_library();
+        for i in 0..12 {
+            let h = &lib[i % lib.len()];
+            let lo = h.vertices.iter().map(|v| v.y).fold(f32::INFINITY, f32::min);
+            sim.add_convex_body(&mut arena, std::slice::from_ref(h), glam::Vec3::new(i as f32 * 0.45, -lo - 0.003, 0.0), glam::Quat::IDENTITY, 500.0);
+        }
+        sim.step().unwrap();
+        sim.step().unwrap();
+        let before = sim.last_counters;
+        assert!(before.manifold_count > 10, "fixture has contacts");
+        let set = |sim: &WgpuSim| -> Vec<(u32, u32, u32)> {
+            let m: Vec<Manifold> = download(sim, 25, 0, sim.last_counters.manifold_count as usize);
+            let mut v: Vec<_> = m.iter().map(|m| (m.collider_a, m.collider_b, m.contact_count)).collect();
+            v.sort_unstable();
+            v
+        };
+        let full = set(&sim);
+        sim.step_reuse_manifolds().unwrap();
+        let after = sim.last_counters;
+        assert_eq!(after.candidate_count, 0, "reuse skipped the broadphase (persistent {persistent})");
+        assert_eq!(after.manifold_count, before.manifold_count);
+        assert_eq!(after.contact_count, before.contact_count);
+        assert_eq!(set(&sim), full, "reused manifolds equal the previous set (persistent {persistent})");
+    }
+}
+
+/// Upstream's opt-in reuse-copy and two-pass narrowphase modes: hull pairs must
+/// skip the shape tail and still reach the convex stages, with the same
+/// manifolds as the single-pass narrowphase.
+#[test]
+fn convex_pairs_bypass_the_two_pass_narrowphase_tail() {
+    let run = |split: bool| -> (StepCounters, Vec<(u32, u32, u32)>) {
+        let (mut sim, _) = convex_pile_sim(0, true);
+        sim.reuse_copy = split;
+        sim.np_split = split;
+        let mut params = sim.params;
+        params.iterations = 2;
+        sim.set_params(params);
+        let mut arena = HullArena::new();
+        let lib = convex_library();
+        for i in 0..12 {
+            let h = &lib[i % lib.len()];
+            let lo = h.vertices.iter().map(|v| v.y).fold(f32::INFINITY, f32::min);
+            sim.add_convex_body(&mut arena, std::slice::from_ref(h), glam::Vec3::new(i as f32 * 0.45, -lo - 0.003, 0.0), glam::Quat::IDENTITY, 500.0);
+        }
+        sim.step().unwrap();
+        sim.step().unwrap();
+        let c = sim.last_counters;
+        let m: Vec<Manifold> = download(&sim, 25, 0, c.manifold_count as usize);
+        let mut v: Vec<_> = m.iter().map(|m| (m.collider_a, m.collider_b, m.contact_count)).collect();
+        v.sort_unstable();
+        (c, v)
+    };
+    let (single, a) = run(false);
+    let (split, b) = run(true);
+    assert!(single.manifold_count > 10);
+    assert!(split.convex_sat_small + split.convex_sat_large > 0 || !b.is_empty(), "hull pairs reached the convex stages");
+    assert_eq!(a.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(), b.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(), "same manifold pairs");
 }
 
 /// Settled stacks fall asleep; waking one body must not jolt it or cascade.

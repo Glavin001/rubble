@@ -65,6 +65,7 @@ impl WebGpuWorld {
                     Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
                         .starts_with("solve_primal_sparse")
                         || n.starts_with("color_bodies_local")
+                        || n.starts_with("color_bodies_tail")
                     {
                         // These entries access buffers only. Slang over-lowers
                         // DeviceMemoryBarrierWithGroupSync to a texture barrier
@@ -445,6 +446,17 @@ mod tests {
             )
             .validate(&module)
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
+    }
+
+    /// Chrome exposes 10 storage buffers per compute stage. Every entry must fit,
+    /// which is why convex work is split out of `narrowphase`.
+    #[test]
+    fn every_entry_fits_the_webgpu_storage_buffer_budget() {
+        for (name, res) in WebGpuWorld::compile_shaders_report() {
+            let wgsl = res.unwrap();
+            let storage = wgsl.matches("var<storage").count();
+            assert!(storage <= 10, "{name}: {storage} storage buffers > 10");
         }
     }
 

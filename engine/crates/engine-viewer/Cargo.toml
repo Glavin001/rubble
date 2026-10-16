@@ -21,7 +21,9 @@ winit.workspace = true
 
 [build-dependencies]
 engine-slang-build.workspace = true
+engine-fracture.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
 
 [[bin]]
 name = "fracture_viewer"

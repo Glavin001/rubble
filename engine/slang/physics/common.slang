@@ -116,6 +116,17 @@ struct Joint
     float k3;
     float k4;
     float k5;
+    // Bond joints (JOINT_BOND): the bond frame's u axis in A's frame (the
+    // normal is axisB), and break capacities from the baked bond: x tension
+    // (N), y compression (N), z shear (N), w bending moment (N m). A capacity
+    // <= 0 means that mode never breaks.
+    float3 frameU;
+    float _padFrameU;
+    float4 strength;
+    // Bond angular violation at step start (C0 of the angular rows; c0 holds
+    // the linear one), for AVBD stabilization.
+    float3 c0Ang;
+    float _padC0Ang;
 };
 
 static const uint JOINT_BALL = 0u;
@@ -125,6 +136,15 @@ static const uint JOINT_SLIDER = 3u;
 static const uint JOINT_D6 = 4u;
 static const uint JOINT_DISTANCE = 5u;
 static const uint JOINT_MAX_DISTANCE = 6u;
+// Breakable bond: six AVBD rows in the bond frame (normal axisB and frameU in
+// A's frame) about the rest pose (relative rotation in axisA.xyz + limitMin as
+// a quaternion). Fixed penalty k0..k5 (normal, u, v, about u, about v, about
+// normal) proportional to Shardwright's elastic springs, so redundant bonds
+// share load as the bake's stress model does; lambda0..5 accumulate the row
+// forces. Breaks when they exceed the baked capacities (strength).
+static const uint JOINT_BOND = 7u;
+// Joint.flags: set once a bond breaks; broken joints are skipped everywhere.
+static const uint JOINT_FLAG_BROKEN = 1u;
 
 struct AvbdParams
 {

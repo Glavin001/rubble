@@ -203,7 +203,8 @@ fn compound_and_joints_survive() {
             Vec3::new(0.0, 0.0, -0.3),
             Vec3::X,
         );
-        let _ = b.add_convex_hull(Vec3::new(-1.5, 4.0, 0.0), Vec3::splat(0.35), 1.0, 0, 0);
+        let hull = engine_schema::convex::ConvexHull::cuboid(Vec3::splat(0.35));
+        let _ = b.add_convex_hull(&[hull], Vec3::new(-1.5, 4.0, 0.0), glam::Quat::IDENTITY, 1.0 / 0.343);
     }
     for _ in 0..60 {
         world.step().unwrap();

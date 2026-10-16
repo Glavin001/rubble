@@ -1,4 +1,5 @@
-import {rotate,add,sub,norm} from './geometry.mjs';
+import {add,sub,norm} from './vec.mjs';
+import {colliderVertices} from './wasm.mjs';
 // Run in this demo's browser console, or import from a browser automation test.
 export async function runFractureRegression(demo=window.__FRACTURE_DEMO__) {
  const require=(ok,message)=>{if(!ok)throw new Error(`Fracture regression: ${message}`)};
@@ -19,8 +20,8 @@ export async function runFractureRegression(demo=window.__FRACTURE_DEMO__) {
   maxDisplacement=Math.max(maxDisplacement,Math.hypot(...sub(Array.from(after.slice(o,o+3)),Array.from(before.slice(o,o+3)))));
  }
  for(const c of demo.scene.colliders.filter(c=>c.shape===3)){
-  const o=c.body*28,q=Array.from(after.slice(o+4,o+8)),p=Array.from(after.slice(o,o+3));
-  for(let i=0;i<c.params[1];i++){const v=(c.params[0]+1+i)*4;minHullY=Math.min(minHullY,add(rotate(q,Array.from(demo.scene.hullData.slice(v,v+3))),p)[1])}
+  const o=c.body*28,body={q:Array.from(after.slice(o+4,o+8)),p:Array.from(after.slice(o,o+3))};
+  for(const v of colliderVertices(demo.scene,c,body))minHullY=Math.min(minHullY,v[1]);
  }
  require(peakContacts>0&&peakAwake>1,'projectile did not wake fragments');require(maxDisplacement>.1,'projectile did not move the arch');
  require(minHullY>-.025,`hulls penetrated the floor: ${minHullY} m`);

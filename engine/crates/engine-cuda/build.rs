@@ -22,9 +22,20 @@ fn main() -> Result<()> {
         "extract_velocity_sleep",
         "ccd_classify",
         "ccd_sweep",
+        "convex_classify",
+        "convex_bucket",
+        "convex_write_args",
+        "convex_sat_small",
+        "convex_sat_large",
+        "convex_manifold",
     ] {
+        let source = if entry.starts_with("convex_") {
+            slang_root.join("kernels/convex_step.slang")
+        } else {
+            world.clone()
+        };
         compile(
-            &world,
+            &source,
             entry,
             SlangTarget::Cuda,
             &out.join(format!("{entry}.cu")),

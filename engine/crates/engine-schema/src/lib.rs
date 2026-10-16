@@ -8,6 +8,7 @@ use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 pub mod commands;
+pub mod convex;
 pub mod handles;
 pub mod params;
 
@@ -87,6 +88,15 @@ pub enum JointType {
     D6 = 4,
     Distance = 5,
     MaxDistance = 6,
+    /// Breakable weld (all six DOF) carrying `Joint::strength` capacities.
+    Bond = 7,
+}
+
+/// Slots in the joint-pair hash (`jointHashSize()` in world_step.slang): a power
+/// of two, at least 65536 and twice the joint count. `gEvents` needs three
+/// words per slot (joint index, then the body pair).
+pub fn joint_hash_size(joints: u32) -> u32 {
+    (joints.saturating_mul(2)).max(65536).next_power_of_two()
 }
 
 /// Hot body state (112 bytes). `initial_pos` / `initial_rot` are the step-start pose.
@@ -244,6 +254,15 @@ pub struct Joint {
     pub _pad_c0: f32,
     pub lambda: [f32; 6],
     pub k: [f32; 6],
+    /// Bond joints: the bond frame's u axis in body A's frame (normal: `axis_b`).
+    pub frame_u: [f32; 3],
+    pub _pad_frame_u: f32,
+    /// Bond break capacities: tension (N), compression (N), shear (N), bending
+    /// moment (N m); <= 0 means that mode never breaks.
+    pub strength: [f32; 4],
+    /// Bond angular violation at step start (GPU-owned).
+    pub c0_ang: [f32; 3],
+    pub _pad_c0_ang: f32,
 }
 
 #[repr(C)]
@@ -260,12 +279,25 @@ pub struct StepCounters {
     pub pivot_floor_hits: u32,
     pub sleep_events: u32,
     pub wake_events: u32,
-    pub iteration: u32,
+    /// Convex SAT pairs in the small bucket (GPU ABI byte 44).
+    pub convex_sat_small: u32,
     pub manifold_count: u32,
     /// Number of bodies scheduled for incremental recoloring (GPU ABI byte 52).
     pub _pad0: u32,
-    pub _pad1: u32,
+    /// Two-pass narrowphase deferred pairs (GPU ABI byte 56).
+    pub narrowphase_deferred: u32,
+    /// Persist work-list length (GPU ABI byte 60).
     pub _pad2: u32,
+    /// Convex SAT pairs in the large bucket (GPU ABI byte 64).
+    pub convex_sat_large: u32,
+    /// One past the last Jones-Plassmann round that left a body blocked
+    /// (GPU ABI byte 68); hosts size the next step's colouring rounds from it.
+    pub color_rounds: u32,
+    /// Colouring rounds the host allows this step (GPU ABI byte 72), read by
+    /// the single-workgroup tail.
+    pub color_round_limit: u32,
+    /// Pads the block to 80 bytes (GPU ABI byte 76).
+    pub _pad3: u32,
 }
 
 impl Default for StepCounters {
@@ -303,7 +335,7 @@ mod tests {
         assert_eq!(size_of::<Collider>(), 64);
         assert_eq!(size_of::<Contact>(), 128);
         assert_eq!(size_of::<Manifold>(), 32);
-        assert_eq!(size_of::<StepCounters>(), 64);
+        assert_eq!(size_of::<StepCounters>(), 80);
         assert_eq!(align_of::<BodyState>(), 4);
     }
 }

@@ -24,7 +24,7 @@
 /// id) resolve to a scheduling-dependent occupant — the same approximation the
 /// linear scan already made (it took whichever matched first), and covered by
 /// the oracle's tolerance rather than the bitwise determinism probe.
-
+///
 /// Shared prelude: the `Contact` layout, warmstart params, feature-skip
 /// constants, and the composite-key hash. Concatenated into both kernels.
 const WARMSTART_COMMON: &str = r#"

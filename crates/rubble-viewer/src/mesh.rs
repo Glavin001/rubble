@@ -353,7 +353,7 @@ mod tests {
     }
 
     fn triangle_winding_matches_normals(mesh: &Mesh) {
-        for triangle in mesh.indices.chunks_exact(3) {
+        for triangle in mesh.indices.as_chunks::<3>().0 {
             let a = mesh.vertices[triangle[0] as usize].position;
             let b = mesh.vertices[triangle[1] as usize].position;
             let c = mesh.vertices[triangle[2] as usize].position;
@@ -398,7 +398,7 @@ mod tests {
             "capsule should produce indices"
         );
 
-        for triangle in capsule.indices.chunks_exact(3) {
+        for triangle in capsule.indices.as_chunks::<3>().0 {
             let a = capsule.vertices[triangle[0] as usize].position;
             let b = capsule.vertices[triangle[1] as usize].position;
             let c = capsule.vertices[triangle[2] as usize].position;

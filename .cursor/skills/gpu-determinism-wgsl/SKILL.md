@@ -1,6 +1,6 @@
 ---
 name: gpu-determinism-wgsl
-description: Write WGSL compute kernels with atomics, hash maps, and parallel emission that stay bit-identical across runs on the same hardware. Use when adding or modifying GPU kernels in crates/rubble3d/src/gpu or crates/rubble-gpu, when the determinism probe fails, or when replacing CPU logic with GPU parallel equivalents.
+description: Write GPU compute kernels (WGSL, or Slang in engine/slang) with atomics, hash maps, and parallel emission that stay bit-identical across runs on the same hardware, and prove that an optimization is lossless. Use when adding or modifying GPU kernels in crates/rubble3d/src/gpu, crates/rubble-gpu or engine/slang, when runs diverge, or when claiming a performance change does not alter results.
 ---
 
 # Deterministic WGSL Kernels
@@ -36,3 +36,44 @@ cargo nextest run -p rubble3d
 ```
 
 If the probe fails, bisect by disabling the new kernel's effect (feed it zero counts) to confirm attribution before hunting inside it.
+
+## Engine (Slang, `engine/slang/kernels`): lessons from the fracture lab
+
+Two races made identical fracture-lab runs diverge after ~120-200 ticks:
+
+6. **Iterated in-place propagation.**
+   - `sleep_island_gate` revokes sleep candidates in place over N rounds.
+     A revocation written earlier in the same dispatch may already be read, so
+     how far it travels depends on scheduling.
+   - Antidote: mark a write with the round that made it and treat it as unseen
+     until the next round (`budget.deterministicSleepGate`).
+   - The same applies to any multi-round label or flood propagation.
+7. **Direct-mapped caches used as early-outs.**
+   - In the SAT separating-feature cache, pairs that share a slot overwrite
+     each other in scheduling order.
+   - A cached proof can skip a pair that the full test (which skips
+     near-parallel edges) would have given a fallback contact.
+   - A cache is lossless only if every hit agrees with the full computation
+     it skips.
+   - `budget.deterministic` turns on both fixes.
+
+**Floating-point codegen.** On Chrome → Dawn → Metal, *any* change to a
+kernel's generated code can change its rounding, even with no maths changed:
+- unrolling a loop that only zeroes values;
+- turning off Dawn's bounds checks.
+
+So "same source maths" does not prove "same results". Unchanged shaders do
+reproduce exactly.
+
+**Proving an optimization lossless.** Don't compare old and new shader builds.
+Put the optimization behind a host flag and compare off vs on in one build:
+1. Use `budget.deterministic`.
+2. Run lockstep in one page or headless run.
+3. Compare body snapshots bit for bit, and candidate and contact counts every
+   tick.
+
+Example: every broadphase change of 2026-10-15 was proven over 700 hull-grid
+ticks this way. Pair-set checks are also useful:
+- run `inspectCollisions` on one state with the optimization on, then off;
+- call `restoreBodies(snapshot)` between the two runs, because the
+  narrowphase wakes bodies.

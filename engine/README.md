@@ -13,6 +13,8 @@ For the browser demo and automated scale/correctness checks, see
 [Slang/WebGPU regression checks](crates/engine-webgpu/README.md).
 For single-file Shardwright asset import, see the
 [fracture GLB / WebGPU demo](crates/engine-webgpu/fracture/README.md).
+Convex hulls and compound bodies (packed hull ABI, broadphase, cooperative SAT,
+CPU/GPU verification) are described in [docs/convex-hulls.md](docs/convex-hulls.md).
 
 ## Quick start (Metal)
 
@@ -34,23 +36,28 @@ cargo run -p engine-scenes --release --bin demo_viewer -- "Chain Mail (1.6k)"
 
 ## Native fracture viewer (macOS / Metal)
 
-Windowed counterpart of the [fracture GLB / WebGPU demo](crates/engine-webgpu/fracture/README.md):
-the same Slang kernels and dispatch order, compiled Slang → MSL (with the `ENGINE_WGSL`
-buffer layout), drawn with a Slang render shader that reads live poses from the body buffer.
-The GLB/scene import (`crates/engine-fracture`) is a Rust port of `asset.mjs` + `geometry.mjs`
-and produces byte-identical hull arenas.
+The native counterpart of the [fracture lab](crates/engine-webgpu/fracture/README.md):
+every scene of the lab's Scene menu, built and stepped by the same Rust host logic
+(`crates/engine-fracture`) and the same Slang kernels, compiled Slang → MSL with the
+lab's `ENGINE_WGSL` buffer layout. See *Shared architecture* in the lab's README.
 
 ```bash
-cargo run -p engine-viewer --release --bin fracture_viewer                 # house, level 0
-cargo run -p engine-viewer --release --bin fracture_viewer -- arch --level 1
+cargo run -p engine-viewer --release --bin fracture_viewer                  # house, level 0
+cargo run -p engine-viewer --release --bin fracture_viewer -- grid --shoot   # 49 houses, ball fired
+cargo run -p engine-viewer --release --bin fracture_viewer -- arch --level 1 --bonds
 cargo run -p engine-viewer --release --bin fracture_viewer -- my.fracture.glb
-cargo test -p engine-viewer --release --test fracture_regression          # headless arch check
+cargo test -p engine-viewer --release --test fracture_regression           # arch impact + every scene
+cargo run -p engine-viewer --release --example fracture_compare -- arch 0 240
+cargo run -p engine-viewer --release --example fracture_snapshot -- suburb 150 suburb.bmp
 ```
 
-Click to shoot · drag to orbit · scroll to zoom · Space start/pause · R reset · B bonds ·
-`[` `]` level · 1 house · 2 arch · drop a `.glb` on the window. Live TPS/FPS and counters are
-in the window title. `fracture_compare` (example) runs a deterministic shot headlessly for
-parity checks against the browser console.
+Keys: 1–7 scenes (house, 20-house row, 7×7 grid, suburb, cuboid suburb, cuboid grid,
+arch) · `[` `]` level · drop a `.glb` on the window · click to shoot · F fire the
+wrecking ball (rows, grids, suburbs) · drag to orbit · scroll to zoom · Space
+start/pause · R reset · B bond graph · K breakable bonds (experimental, preloaded as in
+the lab) · C colour by sleep state. Live TPS/FPS and counters are in the window title.
+`fracture_compare` runs the deterministic parity shot (compare with `parity.mjs` in the
+browser); `fracture_snapshot` renders a scene offscreen to a BMP.
 
 ## Demo scenes
 
