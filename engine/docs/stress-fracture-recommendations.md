@@ -1,66 +1,88 @@
-# Stress-fracture performance: what needs your decision
+# Stress-fracture performance: what is done, and what needs your decision
 
-Every change adopted so far keeps the physics as the oracle defines it: rubble's pipeline
-matches PhysX GPU's outcomes (with its rewinds) in 11 of 12 accuracy scenes and is
-closer to the oracle in the twelfth, with no frame rewound. The levers below cost
-accuracy, change an asset, change the engine's behaviour, or are large enough to need a
-go-ahead. Measured effects are cited; unmeasured ones are marked.
+Every change adopted keeps the physics the oracle defines. The lossless changes below
+were gated bit for bit: the same end-state digest on all 15 `stress_bench` regimes
+(accuracy and town sets, `STRESS_GPU_FIXED_HORIZON=1`), plus the integrated and
+coupled-vs-reference tests. The levers after them cost accuracy, change an asset or the
+engine's behaviour, or are research. Each says what is measured and what is not.
 
-## Where the time goes (rubble's pipeline, house-1story rammed)
+## Done without changing results (2026-10-16)
 
-About 77 % of a destruction frame is the stress solver's explicit substeps inside impact
-islands: ~2,900 substeps per 1/60 s frame at ~44 µs each (three latency-bound kernels).
-The rest: host splits and readbacks ~7 %, rubble's rigid steps and fragment-body creation
-a few percent (more when a fast body needs collision substeps: 14 % on the free-wall ram).
-Two alternatives to explicit windows were built and measured and both lose on cost at
-equal fidelity: AVBD as the stress solver (8–32× more work on walls,
-`stress-oracle/findings/avbd-stress.md`) and an exact modal pre-window (2–30× slower,
-`findings/modal-prewindow.md`). So the substep count and the cost per substep are what
-remain to cut.
+| Change | Where | Effect |
+|---|---|---|
+| Convex hulls built in a deterministic order | stress-ref `hull.rs` | Every coupled run now reproduces bit for bit across processes. Before, the prestress differed per process. |
+| Host waste out of every frame: no `Scene` clone, structures shared (`Arc`), faster `pack`, cached engine shapes and step bounds, buffers rewritten in place | stress-gpu, stress-ref, stress-layout | Idle 64-house town 210 → 80 ms (median, interleaved A/B) |
+| Quiet clusters left out of the GPU tables (Tier 0 of the plan) | `GpuSolver::quiet_clusters`, `stress_layout::pack_with` | 80 → 25 ms; 16 houses 46–69 → 18–22 ms |
+| rubble body read-backs reused, routing bounds without building boxes | stress-rubble, `select_islands` | 25 → 6–8 ms |
+| Certified damped steps computed on all cores | `stability::certified_damped_steps` | 64-house setup 55 → 15 s |
 
-## Levers that change accuracy (measure-then-decide)
+A quiet cluster is excluded only while the GPU provably does nothing to it:
+- settled, anchored and engine-driven;
+- no load on any of its chunks;
+- no scripted loads, events or probes in the scene;
+- every bond's per-frame static-fatigue decrement under a thousandth of half an f32 ulp of its life.
 
-1. **Stress step safety 0.9 instead of 0.5.** About 1.6–2× fewer substeps where the bond
-   bound sets the step. Not converged: the house ram drifts to 2.62 m/s against 3.04
-   (REALTIME_ROADMAP A12 #20). Recommendation: keep 0.5.
-2. **Sliver elimination in the assets.** Statically condense the few tiny, stiff chunks
-   that set the explicit step: house-1story ×4.5 fewer substeps by removing 16 of 319
-   chunks (A3). It changes the model (those chunks follow their neighbours
-   quasi-statically) and is a Shardwright/asset decision; it must be gated against the
-   oracle with `fidelity.py` first.
-3. **A calibrated critical-speed router.** Below a per-material critical impact speed,
-   resolve impacts quasi-statically instead of in an explicit window (push-over is right
-   there; punch-through starts at 15–20 m/s on b5, IMPROVEMENTS.md). Large savings for
-   debris rain and slow pushes; wrong if the calibration misses a case. Not built.
-4. **Debris release certificates.** Let fragments that can no longer break anything leave
-   the stress solve early (A12 remaining levers). Exact only with a rigorous bound; the
-   simple weakest-bond test is not conservative under lever arms (A12 #19).
-5. **Stiffness or mass scaling (E × 0.01, selective mass scaling).** Big substep cuts; shifts
-   the impulsive/quasi-static boundary (README). Not recommended for fidelity.
+`STRESS_GPU_QUIET_EXCLUDE=0` turns it off.
+
+## Where the time goes now
+
+- **Idle and resting scenes.**
+  - The host is mostly out of the frame. What remains of an idle town frame is the coupling's bookkeeping over the clusters (routing, refresh) and one GPU round trip: 5 ms for 16 houses and 13 ms for 64 (median, three-way rerun).
+  - PhysX GPU needs 68 and 176 ms for the same towns.
+- **Destruction frames are GPU-bound.**
+  - On house-1story rammed, 89 % of the main thread waits on the stress substeps; host work is about 5 %.
+  - A substep costs about 44 µs uncontended. It is three dependent dispatches (GPU timestamps: contact islands 26 µs, contact forces 23 µs, sums and bonds 18 µs), about 2,900 per 1/60 s frame.
+  - Three trivial dispatches cost 6 µs on this GPU (`stress-gpu/examples/dispatch_floor.rs`), so dispatch count is not the limit; kernel execution is.
+- **Kernel trials (2026-10-16).** None was lossless and worth taking:
+  - 512-thread island groups: −5 % on two scenes, +2 % on the third, and the results change at the ulp level;
+  - a blocked bond-load gather: 0 %;
+  - device fences narrowed to group barriers: 0 %.
+
+  The default Metal System Trace records no limiter counters, so the next step there is an Xcode GPU capture with performance limiters on the three kernels. The number of substeps remains the multiplier.
+
+## Levers that change accuracy (measure, then you decide)
+
+0. **Fix the contact-crushing pass-through (a model fault, found 2026-10-16).**
+   - With the default methods (`layer_contact` and `contact_crushing` on), a contact face that has crushed through its first layer (`d_u = 2 G_c / f_c`, about 1.3 mm for brick) pushes with zero force while the chunks overlap (stress-ref `pair_layer_contact_with`). Fragments then slide through walls.
+   - On `s_house_car`, 30–60 pairs overlap by more than 5 mm from t = 0.3 s, up to 172 mm. With crushing off: one pair, 5.3 mm.
+   - Proposed fix: after a crushed layer, the material behind it is a fresh layer with full strength and crushing energy. The energy absorbed per millimetre stays the same, but pushing through meets about half the crushing strength instead of nothing. Mortar has the same fault.
+   - It changes oracle results, so it needs your OK. Every gate and golden would then be regenerated. Viewing workaround: `--feature contact_crushing=off`.
+
+1. **Stress step safety 0.9 instead of 0.5.**
+   - About 1.6–2× fewer substeps where the bond bound sets the step.
+   - Not converged: the house ram drifts to 2.62 m/s against 3.04 (REALTIME_ROADMAP A12 #20).
+   - Recommendation: keep 0.5.
+2. **Sliver elimination in the assets.**
+   - House-1story needs 4.5× fewer substeps once 16 of its 319 chunks are condensed (A3).
+   - It changes the model and is an asset (Shardwright) decision. Gate it against the oracle with `fidelity.py` first.
+3. **A calibrated critical-speed router.**
+   - Below a per-material critical impact speed, resolve impacts quasi-statically instead of in an explicit window. Push-over is right there; punch-through starts at 15–20 m/s on b5.
+   - Large savings for debris rain and slow pushes; wrong if the calibration misses a case.
+   - The Blast-equivalent session's feature ladder (`docs/stress-fracture-blast-ladder.md`, in progress) measures this trade directly.
+4. **Debris release certificates.**
+   - Fragments that can no longer break anything leave the stress solve early.
+   - Exact only with a rigorous bound; the simple weakest-bond test is not conservative (A12 #19).
+5. **Stiffness or mass scaling.** Big cuts in substeps, but it shifts the boundary between impulsive and quasi-static response. Not recommended.
 
 ## Levers that change engine behaviour
 
-6. **Let coupled rigid bodies sleep.** The coupling keeps rubble's bodies awake so their
-   support reactions stay visible to the stress solve; rubble's own sleep would cut idle
-   rigid cost in large towns. Needs a rule that a sleeping body's loads are frozen into
-   the stress solve (they are unchanged while it sleeps). Not measured yet at scale.
-7. **Swept collision (CCD) in rubble's Rust host instead of substeps.** rubble's
-   `ccd_classify`/`ccd_sweep` kernels exist but the Rust host never dispatches them, so the
-   coupling substeps the whole rigid scene for a fast body (~2.6 ms per rubble step;
-   14 % of the free-wall ram). Wiring them changes how fast contacts are resolved (as
-   PhysX's CCD does); a conditional-substep shortcut was tried and rejected (it saved
-   7 % and was not lossless, because the substep count applies to every body).
+6. **Let coupled rigid bodies sleep.**
+   - The coupling keeps rubble's free bodies awake so their support reactions reach the stress solve.
+   - Freezing a sleeping body's loads into the solve would let rubble sleep debris and cars.
+   - Quiet anchored houses already cost nothing.
+7. **Swept collision (CCD) in rubble's Rust host.**
+   - rubble's `ccd_classify`/`ccd_sweep` kernels are never dispatched by the Rust host, so a fast body substeps the whole rigid scene. That costs 2.4–3 ms per rubble step, 11 steps per frame on the 40 m/s free-wall ram: 100 ms there against PhysX GPU's 67 ms, the one regime where rubble is slower.
+   - Wiring the kernels changes how fast contacts resolve, as PhysX's CCD does.
 
-## Large engineering steps (lossless, need a go-ahead for scope)
+## Large engineering steps (lossless; scope needs a go-ahead)
 
-8. **GPU-resident coupling.** Today the host still selects islands, plans contacts per
-   segment and splits clusters on a CPU mirror (≈7 % of a destruction frame, more with
-   many fractures). Moving routing, contact planning and splits into kernels removes the
-   host round trips and makes the pipeline scale with activity only.
-9. **Kernel fusion / per-island multirate steps.** The three per-substep kernels are
-   latency bound (~15 µs each). A persistent one-threadgroup pipeline was slower before
-   (A12 #15); per-island step sizes pay in mixed towns (A5). Both are research items.
-10. **Cross-platform determinism of asset bakes.** Bakes are byte-identical across runs and
-    thread counts on this Mac; Shardwright's CI does not check `building_lite` across
-    OS/arch. Adding it there (and pinning its toolchain) makes rebuilt assets reproducible
-    everywhere.
+8. **Finish the GPU-resident coupling (stages 2–3 of `docs/stress-fracture-gpu-resident.md`).**
+   - Stage 1 and Tier 0 already removed most host work, so stages 2–3 are now worth about 5 % on destruction frames and a few ms on idle ones.
+   - Their value is architectural: no CPU mirror, a frame cost that scales with activity, and the base for running inside rubble's AVBD step.
+9. **Fewer substeps without losing accuracy (research, running in sessions).**
+   - Multirate explicit integration: bonds at power-of-two rates, conservation-tested (WIP).
+   - An explicit hot zone with Newmark elsewhere.
+   - These attack the real multiplier, the substep count. Each is gated against the oracle before it can be adopted.
+10. **Cross-platform determinism of asset bakes.**
+    - Bakes are byte-identical across runs and thread counts on this Mac.
+    - Shardwright's CI does not check `building_lite` across OS and architecture.
