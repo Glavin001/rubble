@@ -148,8 +148,21 @@ impl ConvexHull {
     /// is impossible (`DegenerateFace`), the raw faces are kept and the hull is
     /// marked uncertified so the GPU never prunes with unproven adjacency.
     pub fn from_faces(vertices: &[Vec3], sizes: &[u32], indices: &[u32]) -> Result<Self, HullError> {
-        match Self::pack_faces(vertices, sizes, indices, true) {
-            Err(HullError::DegenerateFace) => Self::pack_faces(vertices, sizes, indices, false),
+        Self::from_faces_in_frame(vertices, sizes, indices, 0.0)
+    }
+
+    /// `from_faces` for vertices that were stored as f32 in another frame and
+    /// moved here (e.g. an asset frame, then a fragment's body frame).
+    /// `source_scale` is the largest |coordinate| of that frame: the convexity
+    /// check allows its f32 rounding as well as these vertices' own.
+    pub fn from_faces_in_frame(
+        vertices: &[Vec3],
+        sizes: &[u32],
+        indices: &[u32],
+        source_scale: f32,
+    ) -> Result<Self, HullError> {
+        match Self::pack_faces(vertices, sizes, indices, true, source_scale) {
+            Err(HullError::DegenerateFace) => Self::pack_faces(vertices, sizes, indices, false, source_scale),
             other => other,
         }
     }
@@ -159,6 +172,7 @@ impl ConvexHull {
         sizes: &[u32],
         indices: &[u32],
         normalize: bool,
+        source_scale: f32,
     ) -> Result<Self, HullError> {
         if vertices.len() < 4 || vertices.len() > HULL_MAX_VERTICES {
             return Err(HullError::VertexCount(vertices.len()));
@@ -203,7 +217,7 @@ impl ConvexHull {
         // coordinates as f32 in their frame (metres from its origin), so plane
         // offsets carry ~|x|·2^-24 rounding per coordinate, amplified by small
         // faces. Only the check widens; face merging and packed bytes are unchanged.
-        let max_abs = v64.iter().map(|p| p.abs().max_element()).fold(0.0f64, f64::max);
+        let max_abs = v64.iter().map(|p| p.abs().max_element()).fold(source_scale as f64, f64::max);
         let convex_tol = tol.max(max_abs * (2.0f64).powi(-20));
 
         struct Raw {
