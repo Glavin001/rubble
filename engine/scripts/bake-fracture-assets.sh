@@ -4,7 +4,8 @@
 # Shardwright (the `prefracture` CLI, crate frac-cli) is taken from either
 #   SHARDWRIGHT_PATH=/path/to/Shardwright   a local checkout, built as it is, or
 #   SHARDWRIGHT_REV=<commit>                 github.com/Glavin001/Shardwright at that commit
-#                                            (cloned and built once under engine/.tools/).
+#                                            (cloned and built once under engine/.tools/);
+#                                            default: the pinned commit below.
 # Each asset is baked from its Shardwright source mesh and bake config, packaged as one
 # self-contained GLB (`export-glb --uncompressed`), and exported for the stress oracle
 # (`fracture_stress_export`, level 0). Bakes are deterministic for a given Shardwright
@@ -17,6 +18,8 @@
 # them over engine/crates/engine-webgpu/fracture/assets/ and the oracle packs. Different
 # Shardwright commits fracture differently, so installing changes the lab's assets.
 set -euo pipefail
+# The Shardwright commit the lab's rebuilt assets come from (export-glb first appears there).
+PINNED_SHARDWRIGHT_REV=e2ea334cbd06181b11a2d793e30582b949af2ece
 ENGINE=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ENGINE/.tools/baked"
 INSTALL=0
@@ -38,7 +41,8 @@ ASSETS=(
 if [ -n "${SHARDWRIGHT_PATH:-}" ]; then
   SW=$(cd "$SHARDWRIGHT_PATH" && pwd)
   REV="$(git -C "$SW" rev-parse --short HEAD)$(git -C "$SW" diff --quiet && git -C "$SW" diff --cached --quiet || echo -dirty)"
-elif [ -n "${SHARDWRIGHT_REV:-}" ]; then
+else
+  SHARDWRIGHT_REV=${SHARDWRIGHT_REV:-$PINNED_SHARDWRIGHT_REV}
   SW="$ENGINE/.tools/shardwright-$SHARDWRIGHT_REV"
   if [ ! -d "$SW/.git" ]; then
     git clone --filter=blob:none https://github.com/Glavin001/Shardwright.git "$SW"
@@ -46,9 +50,6 @@ elif [ -n "${SHARDWRIGHT_REV:-}" ]; then
   git -C "$SW" fetch -q origin "$SHARDWRIGHT_REV" || true
   git -C "$SW" checkout -q "$SHARDWRIGHT_REV"
   REV=$SHARDWRIGHT_REV
-else
-  echo "set SHARDWRIGHT_PATH (local checkout) or SHARDWRIGHT_REV (git commit)" >&2
-  exit 2
 fi
 (cd "$SW" && cargo build --release -q -p frac-cli)
 PF="$SW/target/release/prefracture"
