@@ -11,7 +11,7 @@ use stress_gpu::shaders;
 use winit::window::Window;
 
 use crate::font;
-use crate::sim::Sim;
+use crate::sim::{HostChunk, Sim};
 
 /// Uniforms of `destruction_render.slang` (`Camera`).
 #[repr(C)]
@@ -105,6 +105,9 @@ pub struct Renderer {
     camera: wgpu::Buffer,
     group: wgpu::BindGroupLayout,
     chunk_pipeline: wgpu::RenderPipeline,
+    host_chunk_pipeline: wgpu::RenderPipeline,
+    /// The host chunks (`Sim::host_chunks`), their count and the signature they are of.
+    host_chunks: (wgpu::Buffer, u32, Option<u64>),
     impactor_pipeline: wgpu::RenderPipeline,
     ground_pipeline: wgpu::RenderPipeline,
     hud_group: wgpu::BindGroupLayout,
@@ -135,7 +138,7 @@ impl Renderer {
         surface.configure(&gpu.device, &config);
 
         let camera = gpu.uniform("camera", &<CameraUniform as bytemuck::Zeroable>::zeroed());
-        let bindings = [Binding::Uniform, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage];
+        let bindings = [Binding::Uniform, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage];
         let (group, layout) = gpu.layout("destruction render", &bindings, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT);
         let module = gpu.module(&shaders::DESTRUCTION_RENDER);
         let depth_state = |write: bool, compare: wgpu::CompareFunction| wgpu::DepthStencilState {
@@ -159,6 +162,7 @@ impl Renderer {
             })
         };
         let chunk_pipeline = pipeline("chunks", "chunk_vs", "lit_fs");
+        let host_chunk_pipeline = pipeline("host chunks", "host_chunk_vs", "lit_fs");
         let impactor_pipeline = pipeline("impactors", "impactor_vs", "lit_fs");
         let ground_pipeline = pipeline("ground", "ground_vs", "ground_fs");
 
@@ -196,6 +200,8 @@ impl Renderer {
             camera,
             group,
             chunk_pipeline,
+            host_chunk_pipeline,
+            host_chunks: (gpu.storage("host chunks", &[HostChunk::default()]), 0, None),
             impactor_pipeline,
             ground_pipeline,
             hud_group,
@@ -285,8 +291,15 @@ impl Renderer {
         let cam = CameraUniform { view_proj: orbit.view_proj(aspect).to_cols_array_2d(), light: [0.35, -0.55, 0.75, 0.0], ground };
         self.gpu.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&cam));
         // The solver's buffers are replaced by its rebuilds: bound afresh every frame.
+        let signature = sim.host_chunk_signature();
+        if self.host_chunks.2 != Some(signature) {
+            let list = sim.host_chunks();
+            let n = list.len() as u32;
+            let data = if list.is_empty() { vec![HostChunk::default()] } else { list };
+            self.host_chunks = (self.gpu.storage("host chunks", &data), n, Some(signature));
+        }
         let rb = sim.world.solver.render_buffers();
-        let bind = self.gpu.bind(&self.group, &[&self.camera, rb.chunks, rb.islands, rb.state, rb.index, rb.bond_dyn, rb.impactors]);
+        let bind = self.gpu.bind(&self.group, &[&self.camera, rb.chunks, rb.islands, rb.state, rb.index, rb.bond_dyn, rb.impactors, &self.host_chunks.0]);
         let hud_bind = self.upload_hud(hud);
 
         let texture = frame.as_ref().map_or(&self.offscreen, |f| &f.texture);
@@ -315,8 +328,14 @@ impl Renderer {
                 pass.set_pipeline(&self.ground_pipeline);
                 pass.draw(0..6, 0..1);
             }
-            pass.set_pipeline(&self.chunk_pipeline);
-            pass.draw(0..36, 0..rb.chunk_count);
+            if !crate::sim::host_chunks_only() {
+                pass.set_pipeline(&self.chunk_pipeline);
+                pass.draw(0..36, 0..rb.chunk_count);
+            }
+            if self.host_chunks.1 > 0 {
+                pass.set_pipeline(&self.host_chunk_pipeline);
+                pass.draw(0..36, 0..self.host_chunks.1);
+            }
             if rb.impactor_count > 0 {
                 pass.set_pipeline(&self.impactor_pipeline);
                 pass.draw(0..SPHERE_VERTICES, 0..rb.impactor_count);

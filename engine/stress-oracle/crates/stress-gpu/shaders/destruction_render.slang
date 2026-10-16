@@ -3,8 +3,10 @@
 // `chunk_box`: island rotation x hidden rotation x chunk rotation, centre at rest centre
 // + u), coloured by the largest utilization (failure index) of its unbroken bonds, read
 // from the bonds' joint state through the chunk's CSR incidence. Chunks without an
-// unbroken bond (loose pieces) are drawn grey. Impactors are drawn from the impactor
-// records (spheres and boxes), and the ground as a checkered plane.
+// unbroken bond (loose pieces) are drawn grey. Chunks the solver keeps out of its GPU
+// tables (quiet clusters) come from the host's mirror (`host_chunks`). Impactors are
+// drawn from the impactor records (spheres and boxes), and the ground as a checkered
+// plane.
 // Vertices come from the vertex index: no vertex buffers.
 
 import joint;
@@ -62,6 +64,16 @@ struct Impactor
 [[vk::binding(4, 0)]] StructuredBuffer<uint> index;   // CSR: [chunk_count + 1] offsets, then 2 * bond + side
 [[vk::binding(5, 0)]] StructuredBuffer<BondDyn> bond_dyn;
 [[vk::binding(6, 0)]] StructuredBuffer<Impactor> impactors;
+// Chunks the solver leaves out of its GPU tables (quiet clusters: they do not move while
+// out), as the host's mirror has them: world boxes, coloured the same way.
+struct HostChunk
+{
+    float4 center; // world; w: utilization (< 0: no unbroken bond)
+    float4 axis0;  // world box axes; w: half extent along it
+    float4 axis1;
+    float4 axis2;
+};
+[[vk::binding(7, 0)]] StructuredBuffer<HostChunk> host_chunks;
 
 struct VertexOut
 {
@@ -149,6 +161,22 @@ VertexOut chunk_vs(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
     o.position = clip_of(world);
     o.normal = rotate(q, rotate(hidden, local_n));
     o.color = intact > 0 ? ramp(util) : float3(0.55, 0.52, 0.48);
+    o.world = world;
+    return o;
+}
+
+[shader("vertex")]
+VertexOut host_chunk_vs(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
+{
+    float3 p;
+    float3 n;
+    box_corner(vertex, p, n);
+    HostChunk hc = host_chunks[instance];
+    float3 world = hc.center.xyz + hc.axis0.xyz * (p.x * hc.axis0.w) + hc.axis1.xyz * (p.y * hc.axis1.w) + hc.axis2.xyz * (p.z * hc.axis2.w);
+    VertexOut o;
+    o.position = clip_of(world);
+    o.normal = hc.axis0.xyz * n.x + hc.axis1.xyz * n.y + hc.axis2.xyz * n.z;
+    o.color = hc.center.w >= 0.0 ? ramp(hc.center.w) : float3(0.55, 0.52, 0.48);
     o.world = world;
     return o;
 }
