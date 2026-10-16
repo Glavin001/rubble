@@ -87,11 +87,16 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
    - The coupling keeps rubble's free bodies awake so their support reactions reach the stress solve.
    - Freezing a sleeping body's loads into the solve would let rubble sleep debris and cars.
    - Quiet anchored houses already cost nothing.
-7. **Swept collision (CCD) in rubble (engine work, changes behaviour).**
-   - A fast body makes the coupling sub-step the whole rigid scene: 11 rubble steps per frame on the 40 m/s free-wall ram, the one regime where rubble is behind PhysX GPU (88 against 67 ms median). It also costs 2–4 % on b5 at 30–40 m/s before impact.
-   - rubble has no usable CCD to switch on: `ccd_classify` flags fast bodies, but `ccd_sweep` is a plane-only stub ("stretch goal") with no box or hull time of impact.
-   - The sub-steps are not avoidable without it. A measured shortcut took one engine step when the fast body's swept bounds met nothing and every other body was at rest. It never applied: the ram is in an impact island from its first frame, and all 168 of its sub-steps come after the punch-through, among moving debris, where they stop it tunnelling.
-   - Closing the gap means building swept collision for boxes and hulls (conservative advancement or speculative contacts) in `world_step.slang`, then measuring it against the oracle. That is engine-owner work.
+7. **Speculative contacts instead of CCD sub-steps (measured, ready to adopt: your call).**
+   - A fast body made the coupling sub-step the whole rigid scene (11 rubble steps a frame on the 40 m/s free-wall ram, among the debris after the punch-through). rubble has no swept collision (`ccd_sweep` is a plane-only stub).
+   - rubble does have speculative contacts: `contact_offset` widens detection, and with `FLAG_CONTACT_GAP` contacts still aim at zero gap. `STRESS_RUBBLE_SPECULATIVE=1` takes one engine step with the offset widened to the farthest a CCD body travels in it.
+   - Measured on the whole accuracy and town sets, three repeats (`reference/bench-2026-10-16c/rubble-gpu-speculative.jsonl`):
+     - every outcome is within the run-to-run spread of the sub-stepped pipeline;
+     - free-wall ram 88 → 68 ms median (PhysX GPU 67);
+     - b5 at 30–40 m/s 125–127 → 116 ms (PhysX 121);
+     - house car 37 → 34 ms;
+     - the rest unchanged or slightly faster.
+   - It changes how the engine resolves fast contacts, so it is off by default. Adopting it makes rubble's pipeline at least as fast as PhysX GPU on every regime but the floor drop (about 9 against 7 ms; 7.3 when measured back to back).
 
 7a. **Merge rubble's grid broadphase fix (8352765, on the Blast branch).**
     - The grid broadphase drops static pairs below the querying collider's index once there are more than 512 colliders, so debris can fall through anchored structures.
