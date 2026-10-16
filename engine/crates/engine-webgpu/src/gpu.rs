@@ -102,6 +102,11 @@ pub struct WgpuSim {
     manifolds_valid: bool,
     /// Records the hull buffer (binding 18) holds; grows on demand.
     hull_records_capacity: u32,
+    /// The host wrote body state since the last step (`write_bodies`): step even
+    /// if the last step left no body awake.
+    wake_pending: bool,
+    /// Offset of the last step's contact rows in binding 4 (`last_contacts`).
+    last_contact_offset: u32,
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -455,6 +460,8 @@ impl WgpuSim {
             has_filters: false,
             manifolds_valid: false,
             hull_records_capacity: hull_records,
+            wake_pending: false,
+            last_contact_offset: 0,
         })
     }
 
@@ -744,6 +751,7 @@ impl WgpuSim {
             && self.last_counters.awake_count == 0
             && self.command_count == 0
             && self.body_count > 0
+            && !self.wake_pending
         {
             self.steps_done += 1;
             self.last_timings.total_gpu = 0.0;
@@ -755,6 +763,12 @@ impl WgpuSim {
         let n_joints = self.joint_count.max(1) as u64;
 
         self.write_host_uniforms();
+        self.wake_pending = false;
+        self.last_contact_offset = if self.contacts_parity == 0 {
+            0
+        } else {
+            self.capacity.max_contacts
+        };
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1300,6 +1314,10 @@ fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
     s[30] = u64::from(c.max_candidates.max(1024).next_power_of_two()) * 8;
     s
 }
+
+#[path = "gpu_host_state.rs"]
+mod host_state;
+pub use host_state::SimSnapshot;
 
 #[cfg(test)]
 #[path = "gpu_tests.rs"]
