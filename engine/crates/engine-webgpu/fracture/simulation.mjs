@@ -743,7 +743,8 @@ return {
      await read.mapAsync(GPUMapMode.READ);const t=new BigUint64Array(read.getMappedRange().slice(0));
      const kernels={};for(let i=0;i<n;i++){const k=kernels[names[i]]??={ms:0,count:0};k.ms+=Number(t[2*i+1]-t[2*i])/1e6;k.count++}
      await readCounters();
-     return {supported:true,dispatches:n,kernels,counters:{...last}};
+     const list=names.map((name,i)=>[name,Number(t[2*i+1]-t[2*i])/1e6]);
+     return {supported:true,dispatches:n,kernels,list,counters:{...last}};
    }finally{query.destroy();resolve.destroy();read.destroy()}
  },
  async profileStep({singlePass=false}={}){
