@@ -206,6 +206,8 @@ pub struct World {
     /// Elastic-layer contact: the friction state (shear-layer slip and twist) of every
     /// contact in touch, carried from substep to substep; dropped when it separates.
     sticks: HashMap<ContactKey, Stick>,
+    /// The contact broadphase's chunk pairs within a skin (`NeighbourList`).
+    neighbours: NeighbourList,
     /// Elastic-layer contacts applied this substep (for the contact work by kind).
     applied: Vec<Applied>,
     /// External rigid-body engine, if the world is coupled to one (`World::with_engine`).
@@ -394,6 +396,7 @@ impl World {
             contact_hits,
             pair_offsets: Default::default(),
             sticks: Default::default(),
+            neighbours: Default::default(),
             applied: Vec::new(),
             coupling: None,
             island_frames: 0,
@@ -1141,7 +1144,10 @@ impl World {
             let cluster_of: Vec<usize> = active.iter().map(|&(s, c)| self.solver.chunks[s][c].cluster).collect();
             let clusters = &self.solver.clusters;
             let admit = |ca: usize, cb: usize| !(clusters[ca].anchored && clusters[cb].anchored) && !clusters[ca].driven && !clusters[cb].driven;
-            let touching = chunk_pairs(&bounds, &cluster_of, &cluster_boxes, admit);
+            let flags: Vec<(bool, bool)> = clusters.iter().map(|c| (c.anchored, c.driven)).collect();
+            let t_search = crate::profile::time(crate::profile::Stage::PairSearch);
+            let touching = self.neighbours.chunk_pairs(&active, &bounds, &cluster_of, &cluster_boxes, &flags, admit);
+            drop(t_search);
             crate::profile::count(crate::profile::Counter::BroadphaseChunks, active.len() as u64);
             for (ka, kb) in touching {
                 let (sa, chunk_a) = active[ka];
@@ -1429,7 +1435,10 @@ impl World {
                 let (cla, clb) = (&clusters[ca], &clusters[cb]);
                 !((cla.anchored && clb.anchored) || cla.driven || clb.driven)
             };
-            let touching = chunk_pairs(&bounds, &cluster_of, &cluster_boxes, admit);
+            let flags: Vec<(bool, bool)> = clusters.iter().map(|c| (c.anchored, c.driven)).collect();
+            let t_search = crate::profile::time(crate::profile::Stage::PairSearch);
+            let touching = self.neighbours.chunk_pairs(&active, &bounds, &cluster_of, &cluster_boxes, &flags, admit);
+            drop(t_search);
             crate::profile::count(crate::profile::Counter::BroadphaseChunks, active.len() as u64);
             for (ka, kb) in touching {
                 // Pairs by chunk identity (lower first), not by cluster order,
@@ -3156,6 +3165,129 @@ impl ClusterSweep {
 /// Below this many queries in a substep a cluster is scanned rather than indexed.
 const INDEX_MIN_QUERIES: usize = 10;
 
+/// The contact neighbour list's skin as a fraction of the smallest active chunk's
+/// bounding radius (`STRESS_REF_CONTACT_SKIN`, default 0.5; `0` or `off` turns the list
+/// off and `chunk_pairs` runs every substep). Read once. The list changes no result,
+/// only how often the broadphase searches.
+fn contact_skin() -> f64 {
+    static SKIN: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SKIN.get_or_init(|| match std::env::var("STRESS_REF_CONTACT_SKIN") {
+        Ok(v) if v == "off" => 0.0,
+        Ok(v) => v.parse().ok().filter(|s: &f64| s.is_finite() && *s >= 0.0).unwrap_or_else(|| panic!("STRESS_REF_CONTACT_SKIN: a fraction >= 0 or off, not {v}")),
+        Err(_) => 0.5,
+    })
+}
+
+/// A Verlet neighbour list for `chunk_pairs`: the pairs it finds with every bounding
+/// radius grown by half a skin `s`, at the centres of the build. Each substep keeps
+/// those of them that `chunk_pairs` would return at the current centres, by the same
+/// tests (cluster boxes, `admit`, padded intervals, spheres) in the same order, so the
+/// result is `chunk_pairs`' own; it is rebuilt when the chunks, their clusters, radii or
+/// the clusters' anchored and driven flags change, or when the two largest centre
+/// displacements since the build sum to more than `s` (less round-off).
+///
+/// Why that suffices: a pair `chunk_pairs` returns now has centres within
+/// `ra + rb + 16 eps C` (`C = max |x| + max r + s`; its sphere test, rounded), so at the
+/// build they were within `ra + rb + 16 eps C + da + db <= ra + rb + s - 200 eps C`: deep
+/// inside every test of the grown search (each rounds by under `16 eps C`). The test is
+/// on centres and fixed radii only, so a chunk's rotation cannot move a pair in or out.
+/// Every motion counts, hidden deformation, frame folds, rewinds and splits included:
+/// the displacement is measured from the world centres themselves every substep.
+#[derive(Clone, Debug, Default)]
+struct NeighbourList {
+    active: Vec<(usize, usize)>,
+    cluster_of: Vec<usize>,
+    radii: Vec<f64>,
+    /// (anchored, driven) of every cluster at the build.
+    flags: Vec<(bool, bool)>,
+    /// Chunk centres at the build.
+    centers: Vec<Vec3>,
+    skin: f64,
+    /// `chunk_pairs` of the grown spheres, in its order.
+    pairs: Vec<(usize, usize)>,
+    built: bool,
+}
+
+impl NeighbourList {
+    /// `chunk_pairs(bounds, cluster, boxes, admit)` for the chunks `active` of clusters
+    /// with `flags` (which decide `admit`).
+    fn chunk_pairs(&mut self, active: &[(usize, usize)], bounds: &[(Vec3, f64)], cluster: &[usize], boxes: &[(Vec3, Vec3)], flags: &[(bool, bool)], admit: impl Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
+        let fraction = contact_skin();
+        let finite = bounds.iter().all(|(p, r)| p.to_array().iter().all(|x| x.is_finite()) && r.is_finite() && *r >= 0.0);
+        if fraction == 0.0 || !finite || bounds.is_empty() {
+            self.built = false;
+            return chunk_pairs(bounds, cluster, boxes, admit);
+        }
+        let r_max = bounds.iter().map(|b| b.1).fold(0.0, f64::max);
+        let c_max = bounds.iter().flat_map(|b| b.0.to_array()).map(f64::abs).fold(0.0, f64::max);
+        let same = self.built
+            && self.active == active
+            && self.cluster_of == cluster
+            && self.flags == flags
+            && self.radii.len() == bounds.len()
+            && self.radii.iter().zip(bounds).all(|(r, b)| *r == b.1);
+        let fits = same && {
+            let (mut d1, mut d2) = (0.0f64, 0.0f64);
+            for (p0, b) in self.centers.iter().zip(bounds) {
+                let d = (b.0 - *p0).norm();
+                if !(d <= d1) {
+                    // NaN lands here and fails the test below.
+                    d2 = d1;
+                    d1 = d;
+                } else if d > d2 {
+                    d2 = d;
+                }
+            }
+            let c = c_max.max(self.centers.iter().flat_map(|p| p.to_array()).map(f64::abs).fold(0.0, f64::max)) + r_max + self.skin;
+            d1 + d2 <= self.skin - 256.0 * f64::EPSILON * c
+        };
+        if !fits {
+            let r_min = bounds.iter().map(|b| b.1).fold(f64::INFINITY, f64::min);
+            let skin = fraction * r_min;
+            if !(skin > 1e-9 * (c_max + r_max)) {
+                // Too thin to outlast round-off (points, or coordinates far from the origin).
+                self.built = false;
+                return chunk_pairs(bounds, cluster, boxes, admit);
+            }
+            crate::profile::count(crate::profile::Counter::NeighbourBuilds, 1);
+            let half = 0.5 * skin;
+            let grown: Vec<(Vec3, f64)> = bounds.iter().map(|&(p, r)| (p, r + half)).collect();
+            let mut grown_boxes = vec![(Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY)); boxes.len()];
+            for (&ci, &(p, r)) in cluster.iter().zip(&grown) {
+                grown_boxes[ci].0 = grown_boxes[ci].0.component_min(p - Vec3::splat(r));
+                grown_boxes[ci].1 = grown_boxes[ci].1.component_max(p + Vec3::splat(r));
+            }
+            *self = NeighbourList {
+                pairs: chunk_pairs(&grown, cluster, &grown_boxes, &admit),
+                active: active.to_vec(),
+                cluster_of: cluster.to_vec(),
+                radii: bounds.iter().map(|b| b.1).collect(),
+                flags: flags.to_vec(),
+                centers: bounds.iter().map(|b| b.0).collect(),
+                skin,
+                built: true,
+            };
+        }
+        crate::profile::count(crate::profile::Counter::NeighbourPairs, self.pairs.len() as u64);
+        // `chunk_pairs`' tests, at the current centres.
+        let m = 16.0 * f64::EPSILON * (r_max + c_max);
+        let apart = |ka: usize, kb: usize| {
+            let ((pa, ra), (pb, rb)) = (bounds[ka], bounds[kb]);
+            (0..3).any(|i| pa[i] + ra + m < pb[i] - rb - m || pb[i] + rb + m < pa[i] - ra - m)
+        };
+        let touch = |ka: usize, kb: usize| {
+            let ((pa, ra), (pb, rb)) = (bounds[ka], bounds[kb]);
+            !((pa - pb).norm() > ra + rb)
+        };
+        let overlap = |ca: usize, cb: usize| {
+            let ((a0, a1), (b0, b1)) = (boxes[ca], boxes[cb]);
+            !(0..3).any(|i| a1[i] < b0[i] || b1[i] < a0[i])
+        };
+        // (`admit` is fixed by the flags, part of the build's identity: kept as a guard.)
+        self.pairs.iter().copied().filter(|&(ka, kb)| overlap(cluster[ka], cluster[kb]) && admit(cluster[ka], cluster[kb]) && !apart(ka, kb) && touch(ka, kb)).collect()
+    }
+}
+
 /// The chunk pairs of the contact broadphase, as the all-pairs loops decide them: over
 /// cluster pairs `ca < cb` whose boxes overlap (`boxes[c]`: min, max corner; skipped
 /// when `a1[i] < b0[i] || b1[i] < a0[i]` on some axis) and that `admit`, then over their
@@ -3727,5 +3859,93 @@ mod tests {
             }
             assert_eq!(chunk_pairs(&bounds, &cluster, &boxes, admit), expected, "trial {trial}");
         }
+    }
+
+    /// The neighbour list returns exactly `chunk_pairs`' pairs, in its order, every
+    /// substep while bodies move (approaching pairs, exact ties on a grid, jumps of hidden
+    /// motion, splits that renumber clusters, flags that change `admit`, non-finite
+    /// centres), and reuses its build between rebuilds.
+    #[test]
+    fn the_neighbour_list_matches_chunk_pairs_every_step() {
+        let mut rng = Lcg(11);
+        let (mut steps, mut builds) = (0usize, 0usize);
+        for trial in 0..60 {
+            let grid = trial % 2 == 0;
+            let offset = [0.0, 1e3, -7.5e5][trial % 3];
+            let n = 2 + (rng.next() * 120.0) as usize;
+            let mut n_clusters = 1 + (rng.next() * 30.0) as usize;
+            let mut bounds: Vec<(Vec3, f64)> = (0..n)
+                .map(|_| (Vec3::new(rng.coord(grid) + offset, rng.coord(grid), rng.coord(grid) - offset), if grid { 0.125 } else { 0.1 + rng.next() * 0.2 }))
+                .collect();
+            let mut cluster: Vec<usize> = (0..n).map(|_| if rng.next() < 0.5 { 0 } else { (rng.next() * n_clusters as f64) as usize % n_clusters }).collect();
+            let mut refused: Vec<bool> = (0..n_clusters).map(|_| rng.next() < 0.2).collect();
+            // Per-chunk velocity: towards the middle (pairs close in), or random.
+            let velocity: Vec<Vec3> = (0..n)
+                .map(|k| {
+                    let towards = Vec3::new(offset, 0.0, -offset) - bounds[k].0;
+                    let v = if rng.next() < 0.5 { towards * 0.002 } else { Vec3::new(rng.next() - 0.5, rng.next() - 0.5, rng.next() - 0.5) * 0.004 };
+                    // On the grid, steps of 1/1024: exact, so ties at `ra + rb` recur.
+                    if grid { Vec3::new((v.x * 1024.0).round(), (v.y * 1024.0).round(), (v.z * 1024.0).round()) / 1024.0 } else { v }
+                })
+                .collect();
+            let active: Vec<(usize, usize)> = (0..n).map(|k| (0, k)).collect();
+            let mut list = NeighbourList::default();
+            for step in 0..120 {
+                for (b, v) in bounds.iter_mut().zip(&velocity) {
+                    b.0 += *v;
+                }
+                match (trial + step) % 41 {
+                    // Hidden motion: one chunk jumps and comes back two steps later.
+                    5 => bounds[step % n].0 += Vec3::splat(0.3),
+                    7 => bounds[(step - 2) % n].0 -= Vec3::splat(0.3),
+                    // A split: a chunk moves to a new cluster.
+                    11 => {
+                        cluster[step % n] = n_clusters;
+                        n_clusters += 1;
+                        refused.push(false);
+                    }
+                    // A chunk changes cluster, their number and flags unchanged.
+                    13 => cluster[step % n] = (cluster[step % n] + 1) % n_clusters,
+                    17 => refused[step % n_clusters] ^= true,
+                    19 if trial % 5 == 0 => bounds[step % n].0.y = f64::NAN,
+                    _ => {}
+                }
+                let admit = |ca: usize, cb: usize| !(refused[ca] && refused[cb]);
+                let flags: Vec<(bool, bool)> = refused.iter().map(|&r| (r, false)).collect();
+                let mut boxes = vec![(Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY)); n_clusters];
+                for (k, &c) in cluster.iter().enumerate() {
+                    let (center, radius) = bounds[k];
+                    boxes[c].0 = boxes[c].0.component_min(center - Vec3::splat(radius));
+                    boxes[c].1 = boxes[c].1.component_max(center + Vec3::splat(radius));
+                }
+                let expected = chunk_pairs(&bounds, &cluster, &boxes, admit);
+                let before = list.centers.clone();
+                let got = list.chunk_pairs(&active, &bounds, &cluster, &boxes, &flags, admit);
+                assert_eq!(got, expected, "trial {trial} step {step}");
+                steps += 1;
+                if !list.built || list.centers != before {
+                    builds += 1;
+                }
+                for b in bounds.iter_mut().filter(|b| !b.0.y.is_finite()) {
+                    b.0.y = 0.0;
+                }
+            }
+        }
+        assert!(builds * 4 < steps, "the list was rebuilt {builds} times in {steps} steps");
+
+        // Two chunks just beyond the list's reach close in on each other, each by under
+        // the skin but together by more: the list must count both displacements.
+        let (r, skin) = (0.1, 0.1 * contact_skin());
+        let mut bounds = vec![(Vec3::ZERO, r), (Vec3::new(2.0 * r + skin * 1.02, 0.0, 0.0), r)];
+        let (cluster, flags, active) = (vec![0, 1], vec![(false, false); 2], vec![(0, 0), (0, 1)]);
+        let mut list = NeighbourList::default();
+        for step in 0..4 {
+            let boxes: Vec<(Vec3, Vec3)> = bounds.iter().map(|&(p, r)| (p - Vec3::splat(r), p + Vec3::splat(r))).collect();
+            let expected = chunk_pairs(&bounds, &cluster, &boxes, |_, _| true);
+            assert_eq!(list.chunk_pairs(&active, &bounds, &cluster, &boxes, &flags, |_, _| true), expected, "approach step {step}");
+            bounds[0].0.x += 0.32 * skin;
+            bounds[1].0.x -= 0.32 * skin;
+        }
+        assert!((bounds[1].0 - bounds[0].0).norm() < 2.0 * r - skin, "the two have come into contact");
     }
 }
