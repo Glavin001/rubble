@@ -1,6 +1,6 @@
 // Vehicle record layout in gVehicleData (RWStructuredBuffer<float4>), in float4 slots.
-// Single source of truth for the GPU side; engine-schema/src/vehicle.rs and
-// engine-webgpu/vehicle.mjs mirror these numbers and tests compare all three.
+// Single source of truth for the GPU side; engine-schema/src/vehicle.rs mirrors these
+// numbers (layout_matches_slang) and engine-webgpu/vehicle.mjs reads them from it via wasm.
 #ifndef ENGINE_PHYSICS_VEHICLE_LAYOUT_SLANG
 #define ENGINE_PHYSICS_VEHICLE_LAYOUT_SLANG
 

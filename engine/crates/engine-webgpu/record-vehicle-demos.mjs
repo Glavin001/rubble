@@ -157,7 +157,7 @@ const FRAMES = mkdtempSync(join(tmpdir(), 'vehicle-frames-'));
 mkdirSync(OUT, { recursive: true });
 
 // Static files + PUT /rec/<take>/<frame>.jpg.
-const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain' };
+const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   const m = req.method === 'PUT' && url.pathname.match(/^\/rec\/([\w-]+)\/([\w.-]+)$/);
