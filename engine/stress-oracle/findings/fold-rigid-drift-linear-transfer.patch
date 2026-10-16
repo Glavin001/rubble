@@ -1,0 +1,51 @@
+diff --git a/destruction/stress-oracle/crates/stress-ref/src/solver.rs b/destruction/stress-oracle/crates/stress-ref/src/solver.rs
+index 70711bee6..9541e0424 100644
+--- a/destruction/stress-oracle/crates/stress-ref/src/solver.rs
++++ b/destruction/stress-oracle/crates/stress-ref/src/solver.rs
+@@ -1464,16 +1464,22 @@ impl ReferenceSolver {
+         let chunks = cl.chunks.clone();
+         let true_com = cl.com;
+         if exact && self.config.integrate_rigid && !self.clusters[ci].driven {
+-            // Every chunk keeps its world position, orientation, velocity and spin exactly:
+-            // record them, move the frame, and re-express them in it. The linearised
+-            // transfer below moves positions by O(phi^2) and velocities by O(phi v): a
+-            // finite fold (the first after a split) changed momentum and energy.
+-            let world: Vec<(Vec3, Quat, Vec3, Vec3)> = chunks
++            // Every chunk keeps its world velocity and spin exactly: record them, move the
++            // frame, and re-express them in it (the linearised transfer below changes
++            // velocities by O(phi v): a finite fold, the first after a split, changed
++            // momentum and energy). Displacements and rotations take the linear transfer
++            // `u - t - phi x r`, `th - phi`: the hidden field is linear, so its rigid part
++            // is exactly that field, and removing it leaves every bond's kinematics
++            // unchanged. Re-expressing the world positions instead (the finite rotation
++            // R(phi) taken out of `r + phi x r`) left O(phi^2 L) in the bonds as strain:
++            // at a 0.05 rad fold, millimetres at concrete stiffness, megajoules booked as
++            // fracture energy no motion paid for. Positions move by O(phi^2) instead.
++            let world: Vec<(Vec3, Vec3, Vec3, Vec3)> = chunks
+                 .iter()
+                 .map(|&c| {
+                     let (v, w) = self.chunk_velocity(s, c);
+-                    let th = self.chunks[s][c].th;
+-                    (self.chunk_position(s, c), self.clusters[ci].pose.rotation * Quat::from_rotation_vector(th), v, w)
++                    let cs = &self.chunks[s][c];
++                    (cs.u, cs.th, v, w)
+                 })
+                 .collect();
+             let cl = &mut self.clusters[ci];
+@@ -1484,13 +1490,13 @@ impl ReferenceSolver {
+             cl.angular_velocity += rot.rotate(dw);
+             let cl = self.clusters[ci].clone();
+             let back = cl.pose.rotation.conjugate();
+-            for (&c, (x, q, v, w)) in chunks.iter().zip(world) {
++            for (&c, (u0, th0, v, w)) in chunks.iter().zip(world) {
+                 let center = self.structures[s].chunks[c].center;
+-                let u = cl.pose.inverse_transform_point(x) - center;
++                let u = u0 - t - phi.cross(center - com);
+                 let r = cl.pose.transform_vector(center + u - cl.com);
+                 let cs = &mut self.chunks[s][c];
+                 cs.u = u;
+-                cs.th = (back * q).to_rotation_vector();
++                cs.th = th0 - phi;
+                 cs.v = back.rotate(v - cl.velocity - cl.angular_velocity.cross(r));
+                 cs.w = back.rotate(w - cl.angular_velocity);
+             }

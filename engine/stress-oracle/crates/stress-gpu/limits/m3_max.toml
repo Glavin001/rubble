@@ -1,0 +1,301 @@
+# GPU limits measured by scripts/limits.sh (tools/limits/limits.m). See limits/README.md.
+# Every timed value is the minimum (and median) of 'repeats' runs on a warmed GPU unless stated.
+# Driver statistics use a PRIVATE Metal API (pipeline option 0x40000).
+
+[control]
+measured = true
+chip = "Apple M3 Max"
+target = "m3_max"
+gpu_cores = 40
+os = "14.4 (23E214)"
+power_mode = "2"
+low_power_mode = "unknown"
+metal_compiler = "Apple metal version 32023.155 (metalfe-32023.155)"
+date_utc = "2026-10-11T05:15:51Z"
+duration_s = 25
+commit = "cb63e436b"
+repeats = 7
+probes = "default"
+opt_in = ""
+gpu_utilization_before_pct = [0, 25, 26, 23, 25]
+gpu_utilization_after_pct = [47, 23, 25, 24, 28]
+gpu_utilization_note = "ioreg IOAccelerator 'Device Utilization %', whole GPU, sampled while this tool was not running (other processes); max before 26, after 47"
+contention_threshold_pct = 15
+contended = true
+
+[device]
+name = "Apple M3 Max"
+architecture = "applegpu_g15s"
+max_threads_per_threadgroup = 1024
+max_threadgroup_memory_bytes = 32768
+recommended_max_working_set_bytes = 103079215104
+unified_memory = true
+driver_statistics_available = true
+simd_width = 32
+
+[instruction_cache]
+method = "straight-line loop body of N statements (4 independent FMA/MUL chains; mixed: + a cached device load every 8th and a uniform branch every 16th), 1 threadgroup x 256 threads, ns per driver instruction = loop-count slope / driver instruction count; knee = [last point below, first point above] 1.1x the median of the first 4 (sustained for the next point too)"
+repeats = 7
+alu_knee_instructions = [2110, 2192]
+alu_knee_code_bytes = [16974, 17630]
+alu_ns_per_instr_below = 1.623
+alu_ns_per_instr_above = 3.022
+alu_points_columns = ["statements", "driver_instructions", "code_bytes", "ns_per_instr_min", "ns_per_instr_median", "branches"]
+alu_points = [
+  [512, 697, 5678, 1.595, 1.595, 2],
+  [576, 769, 6254, 1.606, 1.606, 2],
+  [640, 849, 6894, 1.655, 1.655, 2],
+  [704, 941, 7630, 1.629, 1.628, 2],
+  [768, 1028, 8324, 1.621, 1.62, 2],
+  [832, 1105, 8940, 1.597, 1.599, 2],
+  [896, 1186, 9588, 1.633, 1.635, 2],
+  [960, 1278, 10324, 1.637, 1.64, 2],
+  [1024, 1365, 11018, 1.624, 1.626, 2],
+  [1088, 1438, 11602, 1.613, 1.615, 2],
+  [1152, 1522, 12274, 1.617, 1.621, 2],
+  [1216, 1614, 13010, 1.633, 1.634, 2],
+  [1280, 1697, 13672, 1.627, 1.629, 2],
+  [1344, 1774, 14288, 1.608, 1.608, 2],
+  [1408, 1857, 14952, 1.614, 1.617, 2],
+  [1472, 1948, 15680, 1.623, 1.628, 2],
+  [1536, 2035, 16374, 1.604, 1.623, 2],
+  [1600, 2110, 16974, 1.753, 1.752, 2],
+  [1664, 2192, 17630, 2.256, 2.267, 2],
+  [1728, 2284, 18366, 2.367, 2.37, 2],
+  [1792, 2368, 19036, 2.554, 2.566, 2],
+  [1856, 2439, 19604, 2.666, 2.669, 2],
+  [1920, 2528, 20316, 2.739, 2.747, 2],
+  [1984, 2621, 21060, 2.806, 2.811, 2],
+  [2048, 2707, 21746, 2.829, 2.839, 2],
+  [2112, 2778, 22314, 2.86, 2.876, 2],
+  [2176, 2862, 22986, 2.893, 2.904, 2],
+  [2240, 2958, 23754, 2.929, 2.927, 2],
+  [2304, 3041, 24418, 2.959, 2.96, 2],
+  [2368, 3108, 24952, 2.942, 2.949, 2],
+  [2432, 3197, 25664, 2.961, 2.968, 2],
+  [2496, 3292, 26424, 2.979, 2.983, 2],
+  [2560, 3376, 27096, 2.978, 2.987, 2],
+  [2624, 3445, 27646, 2.971, 2.98, 2],
+  [2688, 3534, 28358, 3.007, 3.016, 2],
+  [2752, 3631, 29134, 3.004, 3.006, 2],
+  [2816, 3706, 29734, 3.017, 3.022, 2],
+  [2880, 3775, 30284, 3.023, 3.028, 2],
+  [2944, 3868, 31028, 3.022, 3.025, 2],
+  [3008, 3963, 31788, 3.048, 3.047, 2],
+  [3072, 4040, 32404, 3.056, 3.066, 2],
+  [3136, 4112, 32978, 3.044, 3.061, 2],
+  [3200, 4208, 33746, 3.052, 3.062, 2],
+  [3264, 4298, 34466, 3.063, 3.066, 2],
+  [3328, 4374, 35074, 3.035, 3.038, 2],
+  [3392, 4449, 35672, 3.054, 3.057, 2],
+  [3456, 4543, 36424, 3.061, 3.067, 2],
+  [3520, 4631, 37128, 3.054, 3.056, 2],
+  [3584, 4710, 37760, 3.053, 3.062, 2],
+  [3648, 4786, 38368, 3.058, 3.078, 2],
+  [3712, 4880, 39118, 3.05, 3.049, 2],
+  [3776, 4965, 39798, 3.048, 3.051, 2],
+  [3840, 5045, 40438, 3.05, 3.055, 2],
+  [3904, 5123, 41062, 3.058, 3.06, 2],
+  [3968, 5215, 41796, 3.079, 3.077, 2],
+  [4032, 5302, 42492, 3.067, 3.075, 2],
+  [4096, 5373, 43060, 3.078, 3.081, 2],
+]
+mixed_knee_instructions = [1106, 1284]
+mixed_knee_code_bytes = [9808, 11260]
+mixed_ns_per_instr_below = 1.444
+mixed_ns_per_instr_above = 4.551
+mixed_points_columns = ["statements", "driver_instructions", "code_bytes", "ns_per_instr_min", "ns_per_instr_median", "branches"]
+mixed_points = [
+  [192, 473, 4198, 1.36, 1.361, 2],
+  [256, 631, 5594, 1.4, 1.404, 2],
+  [320, 784, 6946, 1.444, 1.46, 2],
+  [384, 937, 8276, 1.446, 1.447, 2],
+  [448, 1106, 9808, 1.523, 1.536, 2],
+  [512, 1284, 11260, 2.921, 2.925, 2],
+  [576, 1447, 12582, 3.352, 3.353, 2],
+  [640, 1604, 13932, 3.369, 3.371, 2],
+  [704, 1764, 15314, 3.391, 3.392, 2],
+  [768, 1933, 16764, 3.627, 3.635, 2],
+  [832, 2099, 18194, 4.238, 4.258, 2],
+  [896, 2260, 19586, 4.478, 4.504, 2],
+  [960, 2420, 20964, 4.574, 4.573, 2],
+  [1024, 2580, 22350, 4.642, 4.651, 2],
+  [1088, 2683, 23176, 4.63, 4.639, 2],
+  [1152, 2794, 24032, 4.639, 4.643, 2],
+  [1216, 2887, 24756, 4.626, 4.637, 2],
+  [1280, 2980, 25468, 4.552, 4.559, 2],
+  [1344, 3079, 26534, 4.55, 4.542, 2],
+  [1408, 3188, 27396, 4.551, 4.548, 2],
+  [1472, 3296, 28244, 4.485, 4.496, 2],
+  [1536, 3476, 29266, 4.643, 4.654, 2],
+  [1600, 3598, 30016, 4.591, 4.595, 2],
+]
+
+[live_registers]
+method = "K floats live across a dynamic loop, each updated by a dependent FMA per iteration; 1 threadgroup of min(256, maxTotalThreadsPerThreadgroup); ns per update = slope / K; spill and register counts from driver statistics (private option 0x40000)"
+repeats = 7
+first_spill_live_floats = 96
+first_spill_temp_registers = 96
+max_temp_registers_seen = 96
+time_knee_live_floats = [88, 96]
+time_knee_ns_per_update = [1.627, 3.035]
+points_columns = ["live_floats", "temp_registers", "spilled_bytes", "max_threads_per_threadgroup", "threads_dispatched", "ns_per_update_min", "ns_per_update_median"]
+points = [
+  [16, 27, 0, 1024, 256, 1.971, 1.976],
+  [24, 36, 0, 1024, 256, 1.872, 1.891],
+  [32, 43, 0, 1024, 256, 1.8, 1.831],
+  [40, 51, 0, 1024, 256, 1.744, 1.747],
+  [48, 60, 0, 1024, 256, 1.699, 1.715],
+  [56, 67, 0, 1024, 256, 1.726, 1.728],
+  [64, 75, 0, 1024, 256, 1.642, 1.657],
+  [72, 84, 0, 1024, 256, 1.638, 1.641],
+  [80, 91, 0, 1024, 256, 1.615, 1.619],
+  [88, 96, 0, 1024, 256, 1.627, 1.628],
+  [96, 96, 96, 1024, 256, 3.035, 3.035],
+  [104, 96, 128, 1024, 256, 4.245, 4.249],
+  [112, 96, 192, 1024, 256, 5.817, 5.857],
+  [120, 96, 240, 1024, 256, 5.86, 5.929],
+  [128, 96, 304, 1024, 256, 8.838, 8.844],
+  [136, 96, 368, 1024, 256, 9.854, 9.894],
+  [144, 96, 448, 1024, 256, 9.497, 9.517],
+  [152, 96, 512, 1024, 256, 11.08, 11.12],
+  [160, 96, 560, 1024, 256, 9.617, 9.617],
+  [168, 96, 576, 1024, 256, 10.29, 10.3],
+  [176, 96, 528, 1024, 256, 12.16, 12.16],
+  [184, 96, 608, 1024, 256, 11.54, 11.56],
+  [192, 96, 608, 1024, 256, 10.97, 10.97],
+  [200, 96, 656, 1024, 256, 12.04, 12.04],
+  [208, 96, 784, 1024, 256, 12.02, 12.02],
+  [216, 96, 864, 1024, 256, 11.81, 11.8],
+  [224, 96, 736, 1024, 256, 13.27, 13.27],
+  [232, 96, 848, 1024, 256, 13.83, 13.82],
+  [240, 96, 976, 1024, 256, 13.11, 13.1],
+  [248, 96, 1008, 1024, 256, 15.74, 18.27],
+  [256, 96, 1008, 1024, 256, 17.37, 17.12],
+]
+
+[stack]
+method = "per-thread uint array of S words, filled at run time, then a dependent chase through all S entries in a full-period LCG order; ns per dependent stack load = loop-count slope; footprint per threadgroup = driver spilled bytes per thread (the array plus a few bytes; 4*S when not spilled) x threads, the same measure kernel_budget.sh reports; sweep 1: S at 256 threads; sweep 2: S=256 (1 KiB/thread) with threads varied; knee = first point (and the next) above 1.5x the median of the first 4"
+repeats = 7
+array_sweep_knee_array_bytes_per_thread = [704, 768]
+array_sweep_knee_bytes_per_threadgroup = [184320, 200704]
+array_sweep_ns_per_load = [56.31, 122.49]
+array_sweep_columns = ["array_bytes_per_thread", "threads", "stack_bytes_per_threadgroup", "spilled_bytes", "temp_registers", "ns_per_load_min", "ns_per_load_median"]
+array_sweep = [
+  [64, 256, 16384, 0, 7, 33.88, 33.98],
+  [128, 256, 32768, 0, 7, 61.39, 61.58],
+  [192, 256, 53248, 208, 53, 55.5, 55.53],
+  [256, 256, 69632, 272, 69, 55.45, 55.45],
+  [320, 256, 86016, 336, 85, 55.51, 55.49],
+  [384, 256, 102400, 400, 13, 55.85, 55.9],
+  [448, 256, 118784, 464, 45, 56.4, 56.42],
+  [512, 256, 135168, 528, 22, 56.03, 56.1],
+  [576, 256, 151552, 592, 63, 55.14, 55.18],
+  [640, 256, 167936, 656, 56, 55.26, 55.32],
+  [704, 256, 184320, 720, 60, 56.31, 56.35],
+  [768, 256, 200704, 784, 63, 122.5, 124.1],
+  [896, 256, 233472, 912, 45, 146.8, 147],
+  [1024, 256, 266240, 1040, 22, 157.3, 158],
+  [1280, 256, 331776, 1296, 55, 238.4, 239.9],
+  [1536, 256, 397312, 1552, 64, 255.1, 259.4],
+  [2048, 256, 528384, 2064, 22, 322.6, 325.9],
+  [3072, 256, 790528, 3088, 64, 383, 384.3],
+  [4096, 256, 1052672, 4112, 22, 411.8, 414],
+  [8192, 256, 2101248, 8208, 27, 580.1, 581.9],
+]
+thread_sweep_knee_bytes_per_threadgroup = [199680, 232960]
+thread_sweep_ns_per_load = [55.28, 150.58]
+thread_sweep_columns = ["array_bytes_per_thread", "threads", "stack_bytes_per_threadgroup", "spilled_bytes", "temp_registers", "ns_per_load_min", "ns_per_load_median"]
+thread_sweep = [
+  [1024, 32, 33280, 1040, 22, 55.27, 55.27],
+  [1024, 64, 66560, 1040, 22, 55.27, 55.27],
+  [1024, 96, 99840, 1040, 22, 55.27, 55.26],
+  [1024, 128, 133120, 1040, 22, 55.22, 55.27],
+  [1024, 160, 166400, 1040, 22, 55.31, 55.33],
+  [1024, 192, 199680, 1040, 22, 55.28, 55.33],
+  [1024, 224, 232960, 1040, 22, 150.6, 150.6],
+  [1024, 256, 266240, 1040, 22, 157.8, 157.9],
+  [1024, 320, 332800, 1040, 22, 263.4, 265.8],
+  [1024, 384, 399360, 1040, 22, 386.6, 390],
+  [1024, 512, 532480, 1040, 22, 627, 631.8],
+  [1024, 768, 798720, 1040, 22, 1130, 1135],
+  [1024, 1024, 1064960, 1040, 22, 1448, 1448],
+]
+
+[ops]
+method = "1 threadgroup x 256 threads, dynamic loop of U dependent operations; ns_min/ns_median = loop-count slope / U (loop overhead included, amortised over U); ns_excl_loop = (slope - loop_iter slope) / U, approximate; precise library compiled -fno-fast-math like build.rs"
+repeats = 7
+loop_iter = { ns_min = 14.494, ns_median = 14.495, ns_excl_loop = 14.494, per_iteration = 1, driver_instructions = 20, what = "dynamic loop iteration carrying one dependent integer multiply-add" }
+fma = { ns_min = 1.902, ns_median = 1.902, ns_excl_loop = 0.996, per_iteration = 16, driver_instructions = 36, what = "dependent FMA" }
+div_precise = { ns_min = 37.843, ns_median = 38.429, ns_excl_loop = 36.938, per_iteration = 16, driver_instructions = 453, what = "dependent add + precise divide" }
+div_fast = { ns_min = 6.883, ns_median = 6.922, ns_excl_loop = 5.978, per_iteration = 16, driver_instructions = 69, what = "dependent add + fast::divide" }
+sqrt_precise = { ns_min = 26.620, ns_median = 26.649, ns_excl_loop = 25.715, per_iteration = 16, driver_instructions = 261, what = "dependent add + precise sqrt" }
+sqrt_fast = { ns_min = 26.622, ns_median = 26.657, ns_excl_loop = 25.716, per_iteration = 16, driver_instructions = 261, what = "dependent add + fast::sqrt" }
+pow_precise = { ns_min = 403.646, ns_median = 404.020, ns_excl_loop = 402.740, per_iteration = 16, driver_instructions = 2550, what = "dependent add + precise::pow" }
+pow_fast = { ns_min = 11.770, ns_median = 11.821, ns_excl_loop = 10.864, per_iteration = 16, driver_instructions = 85, what = "dependent add + fast::pow" }
+exp_precise = { ns_min = 12.299, ns_median = 12.298, ns_excl_loop = 11.393, per_iteration = 16, driver_instructions = 149, what = "dependent precise::exp" }
+exp_fast = { ns_min = 6.021, ns_median = 6.024, ns_excl_loop = 5.115, per_iteration = 16, driver_instructions = 53, what = "dependent fast::exp" }
+simd_sum = { ns_min = 16.216, ns_median = 16.217, ns_excl_loop = 14.405, per_iteration = 8, driver_instructions = 36, what = "dependent simd_sum + FMA" }
+load_threadgroup = { ns_min = 48.565, ns_median = 48.574, ns_excl_loop = 46.754, per_iteration = 8, driver_instructions = 44, what = "dependent threadgroup load" }
+load_device = { ns_min = 54.573, ns_median = 54.590, ns_excl_loop = 52.762, per_iteration = 8, driver_instructions = 30, what = "dependent device load (16 KiB, cached)" }
+load_constant = { ns_min = 54.523, ns_median = 54.561, ns_excl_loop = 52.711, per_iteration = 8, driver_instructions = 30, what = "dependent constant-address-space load" }
+load_stack = { ns_min = 44.799, ns_median = 44.947, ns_excl_loop = 42.988, per_iteration = 8, driver_instructions = 408, what = "dependent stack (private array) load" }
+barrier_threadgroup = { ns_min = 126.815, ns_median = 126.819, ns_excl_loop = 112.321, per_iteration = 1, driver_instructions = 27, what = "threadgroup exchange: store, threadgroup barrier, neighbour load, barrier (per exchange)" }
+barrier_device = { ns_min = 146.474, ns_median = 146.647, ns_excl_loop = 131.980, per_iteration = 1, driver_instructions = 29, what = "device exchange: store, device-memory barrier, neighbour load, barrier (per exchange)" }
+fma_one_simd = { ns_min = 1.902, ns_median = 1.902, ns_excl_loop = 0.996, per_iteration = 16, what = "dependent FMA, 1 threadgroup x 32 threads (one SIMD: no issue contention between SIMDs)" }
+
+[dispatch]
+method = "tiny dependent kernel (1 group x 32 threads, read-modify-write of one word) dispatched N times; GPU time from command-buffer timestamps; per-dispatch = least-squares slope over N >= 8 of min times"
+repeats = 7
+serial_encoder_us_per_dispatch = 1.029
+serial_encoder_intercept_us = 0.25
+serial_encoder_columns = ["dispatches", "gpu_us_min", "gpu_us_median", "gpu_us_per_dispatch_min"]
+serial_encoder = [
+  [1, 2.167, 2.25, 2.167],
+  [2, 3.208, 3.375, 1.604],
+  [4, 5.167, 5.333, 1.292],
+  [8, 9.042, 9.25, 1.13],
+  [16, 16.92, 17.62, 1.057],
+  [32, 33.12, 35.33, 1.035],
+  [64, 66.37, 67.88, 1.037],
+  [128, 131.1, 134.5, 1.024],
+  [256, 263, 273, 1.027],
+  [512, 527.5, 547.5, 1.03],
+]
+batch_n = 64
+one_cb_serial_encoder_gpu_us_per_dispatch = { min = 1.033, median = 1.043 }
+one_cb_serial_encoder_wall_us_per_dispatch = { min = 3.066, median = 3.294 }
+one_cb_encoder_per_dispatch_gpu_us_per_dispatch = { min = 1.035, median = 1.078 }
+cb_per_dispatch_gpu_span_us_per_dispatch = { min = 14.965, median = 18.060 }
+cb_per_dispatch_wall_us_per_dispatch = { min = 17.429, median = 19.944 }
+
+[round_trip]
+method = "commit -> host resumes, back to back (GPU warm), 200 samples each; spin waits are bounded at 1 s"
+samples = 200
+empty_cb_wait_until_completed_us = { min = 9.7, median = 14.6, p90 = 26.5, max = 54.5, commit_to_gpu_start_median = 7.3, gpu_end_to_resume_median = 7.1 }
+tiny_dispatch_wait_until_completed_us = { min = 103.2, median = 116.4, p90 = 142.1, max = 342.0, commit_to_gpu_start_median = 52.4, gpu_end_to_resume_median = 59.7 }
+tiny_dispatch_shared_event_spin_us = { min = 80.7, median = 90.5, p90 = 103.8, max = 312.4, commit_to_gpu_start_median = 50.8, gpu_end_to_resume_median = 36.9 }
+
+[clock_ramp]
+method = "fixed single-threadgroup FMA kernel (~200 us warm) after an idle sleep of gap ms; GPU exec from timestamps; ratio = median exec / warm min exec. Min-of-N hides the ramp, so median and max are the result here"
+warm_exec_us = { min = 202.6, median = 202.9 }
+worst_slowdown = 4.34
+points_columns = ["gap_ms", "samples", "exec_us_min", "exec_us_median", "exec_us_max", "median_over_warm", "commit_to_gpu_start_us_median"]
+points = [
+  [0.1, 30, 202.7, 202.9, 215.9, 1.001, 55.71],
+  [0.25, 30, 202.6, 202.9, 215.5, 1.001, 63.92],
+  [0.5, 30, 202.7, 202.9, 215.5, 1.001, 61.04],
+  [1, 30, 202.7, 203, 215.6, 1.002, 60.42],
+  [2, 30, 202.7, 204.5, 218.3, 1.009, 513.1],
+  [4, 30, 203.5, 204.4, 217.3, 1.009, 488.8],
+  [8, 30, 237.5, 827, 879, 4.081, 364.3],
+  [16, 25, 826.5, 827.3, 879.2, 4.083, 376.3],
+  [33, 12, 826.6, 827.3, 878.7, 4.083, 374.4],
+  [50, 8, 826.6, 827.4, 878.7, 4.083, 379],
+]
+
+[bandwidth]
+method = "float4 streaming copy kernel, 128 MiB -> 128 MiB private buffers, whole GPU; GB/s = (read + write bytes) / GPU time"
+repeats = 7
+copy_gb_per_s = { max = 355.6, median = 352.3 }
+copy_ms = { min = 0.755, median = 0.762 }

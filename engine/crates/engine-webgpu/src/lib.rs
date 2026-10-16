@@ -6,7 +6,7 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 mod gpu;
-pub use gpu::WgpuSim;
+pub use gpu::{default_device, SimSnapshot, WgpuSim};
 
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
@@ -150,26 +150,7 @@ impl WebGpuWorld {
     /// Create a wgpu device and load every successfully translated WGSL module.
     /// Returns adapter label + counts (ok / fail).
     pub fn smoke_device() -> anyhow::Result<String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| anyhow::anyhow!("no wgpu adapter"))?;
-        let info = adapter.get_info();
-        let (device, _queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("engine-webgpu"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: Default::default(),
-            },
-            None,
-        ))?;
+        let (info, device, _queue) = crate::gpu::default_device()?;
 
         let report = Self::compile_shaders_report();
         let mut loaded = 0u32;
@@ -792,7 +773,10 @@ mod tests {
     #[test]
     fn count_only_kernels_do_not_load_unrelated_atomic_counters() {
         // These kernels need immutable body/collider counts; reparent commands
-        // additionally read the contact count in their invalidation branch. Loading a
+        // additionally read the contact count in their invalidation branch, and the
+        // awake-list per-body passes (PASS_U == 1) bound threads by the awake count
+        // in place of bodyCount: one read of a counter no thread of that dispatch
+        // writes, the same as every other awake-list kernel. Loading a
         // whole StepCounters snapshot emits ten atomic reads for every body on
         // WGSL, including counters being incremented by neighbouring threads.
         // Check parsed IR rather than generated identifiers or text formatting.
@@ -802,6 +786,7 @@ mod tests {
             "broadphase_insert",
             "broadphase_query",
             "build_awake_list",
+            "predict_bodies",
             "extract_velocity_sleep",
             "sleep_island_commit",
             "ccd_classify",
@@ -876,10 +861,10 @@ mod tests {
                 }
             }
             atomic_offsets.sort_unstable();
-            let expected = if name == "apply_commands" {
-                vec![8]
-            } else {
-                vec![]
+            let expected = match name {
+                "apply_commands" => vec![8],
+                "predict_bodies" | "extract_velocity_sleep" | "sleep_island_commit" => vec![20],
+                _ => vec![],
             };
             assert_eq!(atomic_offsets, expected,
                 "{name}: unrelated atomic counter reads per invocation: {unexpected:?}. Read bodyCount/colliderCount directly; a full counter snapshot can cause GPU contention at 100k–506k scale. Atomic increments remain allowed.");

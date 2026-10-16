@@ -12,12 +12,14 @@
 
 pub mod asset;
 pub mod bonds;
+pub mod cook;
 pub mod cuboid;
 pub mod math;
 pub mod pairs;
 pub mod plan;
 pub mod samples;
 pub mod scene;
+pub mod stress_export;
 pub mod view;
 
 pub use asset::{parse_fracture_glb, FractureAsset};

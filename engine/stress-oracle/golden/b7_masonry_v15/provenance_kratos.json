@@ -1,0 +1,47 @@
+{
+ "tool": "kratos",
+ "scene": "b7_masonry_v15",
+ "seed": 0,
+ "scene_file": "/home/user/PhysX/destruction/stress-oracle/scenes/b7_masonry_v15.json",
+ "scene_sha256": "7a0c27033cfa6ef69c998aafaa5d731ab7faea75e37d9e3be5a2d86d9e463229",
+ "run_scene_sha256": "7a0c27033cfa6ef69c998aafaa5d731ab7faea75e37d9e3be5a2d86d9e463229",
+ "deck_sha256": "d557bcba969d01c3b547500f6d6daf0ac68ec5a8a5d2713291d40120ebca436c",
+ "observation_sha256": "67da1e397a22b1ade354b81d3188fcf3b82dfb1b210978a1a7528e97a3a72c3c",
+ "command": "/home/user/oracle-env/venv/bin/python -I oracles/kratos/pipeline.py scenes/b7_masonry_v15.json",
+ "versions": {
+  "KratosMultiphysics": "10.4.4",
+  "KratosDEMApplication": "10.4.4",
+  "numpy": "2.5.3",
+  "scipy": "1.18.1",
+  "python": "3.12.3"
+ },
+ "solver_version": "KratosMultiphysics 10.4.4 + KratosDEMApplication 10.4.4 (PyPI wheels)",
+ "params": {
+  "particle_size": null,
+  "brick_stiffness_ratio": 5.0,
+  "dt": null,
+  "dt_safety": 0.12,
+  "settle_time": 0.01,
+  "search_tolerance": 0.002,
+  "impact_restitution": 0.2,
+  "contact_young_modulus": null
+ },
+ "dt": 3.0199337741082953e-06,
+ "n_settle": 3311,
+ "n_steps": 33114,
+ "particles": 2561,
+ "bonds_initial": 6256,
+ "wall_seconds": {
+  "export": 0.39133667945861816,
+  "run": 665.3631930351257,
+  "observe": 0.11841630935668945,
+  "total": 666.0690803527832,
+  "solver_init": 0.09766244888305664,
+  "solver_settle": 61.933417081832886,
+  "solver_impact": 602.8593730926514
+ },
+ "threads": 1,
+ "host": "Linux-6.18.44-fc-v80-x86_64-with-glibc2.39",
+ "date": "2026-10-09T08:51:28+00:00",
+ "work_dir": "/home/user/oracle-runs/kratos/b7_masonry_v15"
+}
