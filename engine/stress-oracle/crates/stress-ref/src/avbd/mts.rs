@@ -11,28 +11,27 @@
 //!   coarse step `h = m dt`, nonlinear: each bond's law is evaluated at the trial
 //!   deformation from its step-start history (damage inside the iteration, as
 //!   `avbd-stress.md` found necessary), solved by modified Newton with a profile Cholesky
-//!   of `K_t + 2/h C + 4/h^2 M`, so the exterior can crack;
+//!   of `K_t + 2/h C + 4/h^2 M`, so the exterior can crack (`Exterior::Newmark`); or a
+//!   linear Craig-Bampton reduction about its state at each repartition
+//!   (`Exterior::CraigBampton`), which cannot;
 //! - a ring chunk carries bonds of both zones: it is duplicated, its mass and inertia
 //!   split in proportion to the axial stiffness of its bonds in each zone (each copy keeps
 //!   the chunk's own `k/m`, so neither zone's stability changes), and the two copies are
 //!   held to one velocity by interface forces `lambda` (6 per ring chunk).
 //!
-//! **Coupling (GC).** Per coarse step: the exterior's *free* problem (no new interface
-//! force), then for each fine step `j` the hot zone's free step and the condensed
-//! interface problem `(dt D + c_j S) lambda_j = b_j` for velocity continuity with the
-//! exterior's velocity interpolated linearly in time (at the fine step's midpoint, where
-//! the symplectic velocity lives); finally the exterior's *link* problem with the
-//! multiplier. `D` is the hot copies' inverse mass, `S = 2/h C K_eff^-1 C^T` the
-//! exterior's condensed end-of-step velocity response. Two variants (`Coupling`):
-//! - `Gc`: Gravouil-Combescure as published: the exterior feels the last multiplier at
-//!   the step's end (Newmark's trapezoidal impulse `h (lambda_0 + lambda_m) / 2`), proven
-//!   stable and dissipative at the interface, not momentum-exact for `m > 1`;
-//! - `Mean`: the exterior feels the fine steps' *mean* multiplier as a load constant over
-//!   the coarse step (Newmark with the acceleration jump at the step's start), so both
-//!   sides receive the same impulse `sum dt lambda_j`: momentum-exact, stability not
-//!   proven (measured).
-//! A velocity bias `(x_hot - x_ext) / h` from the step's start closes the copies' drift
-//! (both sides' positions are integrated from velocities that match only on average).
+//! **Coupling (GC with a multiplier predictor).** Per coarse step from `t_n`: the hot
+//! zone's force pass at `t_n`; the exterior's *free* problem with the multiplier at `t_n`
+//! held as its interface load; for each substep `k` the condensed interface problem
+//! `(dt/2 D + S) lambda_k = (1 - k/m) V_B(t_n) + (k/m) V_B^free + S lambda_0 - v_A^free`
+//! for continuity of the hot copies' integer-time velocity (the central-difference form
+//! of the symplectic substep) with the exterior's interpolated velocity; a look-ahead
+//! force pass at `t_{n+1}` (not committed, identical to the next substep's) for the end
+//! multiplier; the exterior's *link* problem with its change. `D` is the hot copies'
+//! inverse mass, `S = 2/h C K_eff^-1 C^T` the exterior's condensed end-of-step velocity
+//! response, the same at every substep. Weighting `S` by `k/m`, or leaving the predictor
+//! out (the free problem without the interface force), is unstable or drains the
+//! vibration through the interface (`findings/multi-time-step.md`). A velocity bias
+//! `(x_hot - x_ext) / h` closing the copies' drift is optional and off by default.
 //!
 //! **Escalation** into the core (never back) at each coarse step's start, by
 //! - contact closure: anything within `contact_margin` coarse steps of travel of touching
@@ -166,8 +165,10 @@ pub struct CoarseRecord {
     /// next step's bias, and the largest velocity mismatch (m/s).
     pub drift: f64,
     pub velocity_gap: f64,
-    /// Largest exterior bond utilisation at the step's end.
+    /// Largest exterior bond utilisation at the step's end, and the exterior bonds
+    /// damaged (Craig-Bampton: over capacity) in this step.
     pub ext_u_max: f64,
+    pub ext_cracks: usize,
     /// Energy at the step's end (with `energy`): kinetic, stored in the bonds, gravity's
     /// potential, and dissipated so far (bond laws and dashpots).
     pub kinetic: f64,
@@ -176,6 +177,8 @@ pub struct CoarseRecord {
     pub dissipated: f64,
     /// Total linear momentum (all bodies, both copies).
     pub momentum: [f64; 3],
+    /// Seconds since the run's start at the step's end.
+    pub wall: f64,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -435,8 +438,8 @@ pub struct MtsWorld {
     share: Vec<f64>,
     /// The ring's exterior copies.
     ext_copy: Vec<Body>,
-    /// Interface force on each ring chunk's hot copy (`Gc`: the last step's end
-    /// multiplier, `Mean`: its mean), and the one before.
+    /// Interface force on each ring chunk's hot copy at the last coarse step's end, and
+    /// the one before (the influence bound's change).
     lam_prev: Vec<[f64; 6]>,
     lam_prev2: Vec<[f64; 6]>,
     solver: Option<ExtSolver>,
@@ -452,6 +455,7 @@ pub struct MtsWorld {
     forced: Vec<bool>,
     pub stats: MtsStats,
     diverged: bool,
+    started: Option<Instant>,
 }
 
 /// Outcome of a run: the AVBD world's report plus the detached set and the cost.
@@ -502,12 +506,11 @@ impl MtsWorld {
             forced: vec![false; n],
             stats: MtsStats::default(),
             diverged: false,
+            started: None,
         };
         // Newmark's start acceleration (the prestressed equilibrium's, about zero).
         m.w.init_accelerations();
         m.repartition();
-        // The truth takes the initial velocities as its first half-step velocities.
-        m.rebase.iter_mut().for_each(|r| *r = false);
         m
     }
 
@@ -665,9 +668,11 @@ impl MtsWorld {
         }
         self.ring = ring;
         self.share = share;
-        // Bodies new to the hot zone carry the exterior's integer-time velocity.
+        // Bodies new to the hot zone carry the exterior's integer-time velocity (at the
+        // start, the initial velocities are the truth's first half-step velocities).
+        let started = self.stats.coarse_steps > 0;
         for i in 0..n {
-            if self.hot[i] && !old_hot[i] {
+            if started && self.hot[i] && !old_hot[i] {
                 self.rebase[i] = true;
             }
         }
@@ -1033,9 +1038,11 @@ impl MtsWorld {
         if !ok {
             self.diverged = true;
             eprintln!("MTS world: exterior operator indefinite at t = {:.6e}", self.w.time);
+            // Leave a usable (identity-scaled) operator; the run stops at this step.
             mat = assembled;
+            mat.clear();
             for (r, d) in diag.iter().enumerate() {
-                mat.add(r, r, 1e3 * d.abs());
+                mat.add(r, r, d.abs().max(1.0));
             }
             assert!(mat.factor());
         }
@@ -1917,6 +1924,7 @@ impl MtsWorld {
                     if u >= 1.0 {
                         // Over capacity: the linear exterior would have cracked here.
                         self.stats.exterior_cracks += 1;
+                        record.ext_cracks += 1;
                         if self.config.verify == Verify::Rollback {
                             self.stats.misses_damage += 1;
                             misses.extend([self.w.bonds[k].a, self.w.bonds[k].b]);
@@ -1934,6 +1942,7 @@ impl MtsWorld {
                 u_max = u_max.max(j.utilization);
                 if j.damage + j.crush > ext_damage0[q] {
                     self.stats.exterior_cracks += 1;
+                    record.ext_cracks += 1;
                     if self.config.verify == Verify::Rollback {
                         self.stats.misses_damage += 1;
                         misses.extend([self.w.bonds[k].a, self.w.bonds[k].b]);
@@ -2025,6 +2034,7 @@ impl MtsWorld {
             record.momentum = mom.to_array();
             record.dissipated = self.w.bond_dissipation + self.w.damping_dissipation;
         }
+        record.wall = self.started.map_or(0.0, |s| s.elapsed().as_secs_f64());
         self.stats.records.push(record);
         misses
     }
@@ -2142,6 +2152,7 @@ impl MtsWorld {
     /// Run to the end.
     pub fn run(&mut self) -> MtsReport {
         let start = Instant::now();
+        self.started = Some(start);
         let end = self.config.end_time.unwrap_or(self.w.scene.sim.duration);
         self.w.next_sample = self.w.time;
         self.w.record_probes();
@@ -2255,4 +2266,48 @@ pub fn utilisation_map(world: &World, end: f64, levels: &[f64]) -> Vec<(f64, Vec
         }
     }
     (0..nb).map(|k| (peak[k], first[k].clone(), dist[k])).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builders::cantilever;
+
+    fn b2(end: f64) -> World {
+        let mut scene = cantilever(20, "b2_cantilever");
+        scene.sim.methods = crate::scene::Methods::established();
+        scene.sim.duration = end;
+        World::new(&scene.with_derived())
+    }
+
+    fn tip(probes: &HashMap<String, Vec<[f64; 2]>>) -> Vec<[f64; 2]> {
+        probes["tip"].clone()
+    }
+
+    /// With everything in the hot zone the coarse-step loop is the explicit replica, bit
+    /// for bit.
+    #[test]
+    fn all_hot_is_the_explicit_replica() {
+        let world = b2(0.08);
+        let explicit = AvbdWorld::from_world(&world, AvbdConfig { integrator: Integrator::Explicit, ..AvbdConfig::default() }).run();
+        let mts = MtsWorld::new(&world, MtsConfig { all_hot: true, ratio: 7, ..MtsConfig::default() }).run();
+        assert_eq!(tip(&explicit.probes), tip(&mts.outcome.probes));
+    }
+
+    /// Gravouil-Combescure with the multiplier predictor on the cantilever, root explicit,
+    /// tip in Newmark at 30 explicit steps: the tip follows the explicit truth through the
+    /// release and the free vibration.
+    #[test]
+    fn gc_coupling_follows_the_cantilever() {
+        let world = b2(0.6);
+        let explicit = AvbdWorld::from_world(&world, AvbdConfig { integrator: Integrator::Explicit, ..AvbdConfig::default() }).run();
+        let config = MtsConfig { ratio: 30, seed: (1..=6).collect(), escalation: false, verify: Verify::Count, ..MtsConfig::default() };
+        let mts = MtsWorld::new(&world, config).run();
+        let (a, b) = (tip(&explicit.probes), tip(&mts.outcome.probes));
+        let amp = a.iter().map(|p| p[1].abs()).fold(0.0, f64::max);
+        let n = a.len().min(b.len());
+        let worst = (0..n).map(|i| (a[i][1] - b[i][1]).abs()).fold(0.0, f64::max);
+        assert!(worst < 0.02 * amp, "tip error {worst:.3e} of amplitude {amp:.3e}");
+        assert!(!mts.diverged);
+    }
 }
