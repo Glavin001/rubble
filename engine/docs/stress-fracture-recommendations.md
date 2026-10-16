@@ -96,6 +96,12 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
     - The fix is correct. It makes b8_sudden over-break (36 bonds against the oracle's 11), because the engine's contact-to-load path then over-breaks where the oracle uses its own penalty contact.
     - This is a decision for the engine owners: take it together with a fix to that path.
 
+7b. **rubble: read the previous step's counts on the GPU (lossless, engine owners).**
+    - Each AVBD step's uniforms carry the previous step's contact and manifold counts (`write_host_uniforms`: warm-start hash size, previous contact range), so the host must read the counters back before it can record the next step.
+    - If the kernels read those counts from the counters buffer instead, the coupling could record a frame's substeps back to back, with the CPU encoding (about a third of a rubble step) overlapping the GPU.
+    - That would recover about 1 ms per substep where rubble substeps for a fast body: the free-wall ram's 11 per frame, and b5 at 30–40 m/s before impact.
+    - It is a change to `world_step.slang`, so it belongs to the engine owners, gated bit for bit on the engine's own suites.
+
 ## Large engineering steps (lossless; scope needs a go-ahead)
 
 8. **Finish the GPU-resident coupling (stages 2–3 of `docs/stress-fracture-gpu-resident.md`).**
