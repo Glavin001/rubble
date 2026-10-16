@@ -89,7 +89,20 @@ pub fn towns(seconds: f64) -> Vec<(&'static str, Scene)> {
     out
 }
 
-/// The Blast packs both solvers load, each intact (idle) and rammed as `house_ram` is.
+/// The x of a pack's -x surface (hull extents, not chunk centres: `scenes::rammed` places
+/// the ram 0.2 m from the leftmost centre, inside packs whose chunks are wider than that).
+fn surface_lo_x(scene: &Scene) -> f64 {
+    scene
+        .bodies
+        .iter()
+        .flat_map(|b| b.chunks.iter())
+        .map(|c| c.center[0] + c.hull.as_ref().map_or(-c.half_extents[0], |h| h.iter().map(|v| v[0]).fold(f64::INFINITY, f64::min)))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// The Blast packs both solvers load, each intact (idle) and rammed: `scenes::rammed`'s
+/// 400 kg box at 12 m/s into the middle of the -x face, its front 0.2 m from the surface
+/// (`blast_ladder_bench bench PACK ram` fires its ball from the same surface).
 pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
     let mut out = Vec::new();
     for name in ["house-1story", "house-2story", "villa-savoye", "brick-building", "rig-portal", "rig-toppled", "comp-wall-bay"] {
@@ -97,10 +110,25 @@ pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
         let scene = stress_ref::scene_pack::import(&path, name, "structure").unwrap_or_else(|e| panic!("{name} pack: {e}"));
         let mut idle = configure(scene.clone(), seconds);
         idle.name = format!("{name}_idle");
-        let mut ram = configure(stress_ref::scenes::rammed(scene), seconds);
+        let (mut lo, hi) = stress_ref::scenes::bounds(&scene);
+        lo.x = surface_lo_x(&scene);
+        let mut ram = configure(stress_ref::scenes::ram_at(scene, "ram", lo, hi), seconds);
         ram.name = format!("{name}_ram");
         out.push((idle.name.clone(), idle));
         out.push((ram.name.clone(), ram));
+    }
+    out
+}
+
+/// The scale set: 256 copies of house-1story, intact or with four of them rammed (the
+/// target of hundreds of houses).
+pub fn scale(seconds: f64) -> Vec<(&'static str, Scene)> {
+    let mut out = Vec::new();
+    for (label, n, rams) in [("town256_idle", 256, 0), ("town256_four_rams", 256, 4)] {
+        let town = stress_ref::scenes::pack_town(&house(), n, 2.0);
+        let mut s = configure(if rams > 0 { stress_ref::scenes::bombarded_exact(town, rams) } else { town }, seconds);
+        s.name = label.into();
+        out.push((label, s));
     }
     out
 }
@@ -181,7 +209,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let engine: Box<dyn stress_ref::engine::RigidEngine> = if two_devices {
         stress_rubble::RubbleEngine::boxed(Vec3::from_array(scene.gravity)).expect("rubble engine")
     } else {
-        Box::new(stress_rubble::RubbleEngine::with_device(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone()).expect("rubble engine"))
+        Box::new(stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine"))
     };
     let mut w = stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world");
     // rubble's integrated pipeline: routing before the step, no frame rewind.
@@ -225,13 +253,20 @@ fn main() {
     let mut repeats = 1usize;
     let mut set = "realtime".to_string();
     let mut config = "realtime".to_string();
+    let mut overrides: Vec<(String, bool)> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--solver" => solver = args.next().expect("--solver NAME"),
             "--only" => only = args.next(),
-            "--set" => set = args.next().expect("--set realtime|accuracy|towns|packs"),
+            "--set" => set = args.next().expect("--set realtime|accuracy|towns|scale|packs"),
             "--config" => config = args.next().expect("--config LADDER-RUNG"),
+            // A model feature on or off on top of the configuration (e.g. crushing=off).
+            "--feature" => {
+                let v = args.next().expect("--feature NAME=on|off");
+                let (n, on) = v.split_once('=').expect("--feature NAME=on|off");
+                overrides.push((n.to_string(), on == "on"));
+            }
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).expect("--seconds S"),
             "--repeats" => repeats = args.next().and_then(|v| v.parse().ok()).expect("--repeats N"),
             other => panic!("unknown argument {other}"),
@@ -243,6 +278,7 @@ fn main() {
     let list = match set.as_str() {
         "accuracy" => named(accuracy(seconds)),
         "towns" => named(towns(seconds)),
+        "scale" => named(scale(seconds)),
         "packs" => packs(seconds),
         _ => named(regimes(seconds)),
     };
@@ -250,7 +286,10 @@ fn main() {
         if only.as_ref().is_some_and(|o| *o != name) {
             continue;
         }
-        let (scene, islands) = ladder(scene, &config);
+        let (mut scene, islands) = ladder(scene, &config);
+        for (n, on) in &overrides {
+            scene.sim.features.set(n, *on).unwrap_or_else(|e| panic!("--feature: {e}"));
+        }
         let _ = islands;
         for repeat in 0..repeats.max(1) {
             // A run that panics (an engine failure) is reported as failed and the next
@@ -275,7 +314,7 @@ fn main() {
             };
             println!(
                 "{}",
-                serde_json::json!({"solver": solver, "config": config, "regime": name, "repeat": repeat, "seconds": seconds, "frame_dt": scene.sim.frame_dt,
+                serde_json::json!({"solver": solver, "config": config, "features": overrides.iter().map(|(n, on)| format!("{n}={}", if *on { "on" } else { "off" })).collect::<Vec<_>>(), "regime": name, "repeat": repeat, "seconds": seconds, "frame_dt": scene.sim.frame_dt,
                     "frame_ms": run.frames, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "metrics": run.metrics, "digest": run.digest})
             );
         }

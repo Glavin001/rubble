@@ -355,6 +355,20 @@ pub struct RubbleEngine {
 
 /// The default capacity: room for a few thousand bodies (every rebuilt cluster takes
 /// a new body; rubble cannot reuse a retired one's slot).
+/// Room for a scene: the default, or more when the scene is larger. Every chunk is a
+/// collider, and every rebuilt cluster takes new colliders (rubble does not reuse a
+/// retired body's), so bodies and colliders get four times the scene's count.
+pub fn capacity_for(scene: &stress_ref::scene::Scene) -> WorldCapacity {
+    let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
+    let mut c = default_capacity();
+    c.max_colliders = c.max_colliders.max((4 * chunks).next_power_of_two() as u32);
+    c.max_bodies = c.max_bodies.max((4 * (scene.bodies.len() + scene.impactors.len()) + 1).next_power_of_two() as u32);
+    c.max_contacts = c.max_contacts.max(c.max_colliders);
+    c.max_candidates = c.max_candidates.max(4 * c.max_colliders);
+    c.max_hull_vertices = c.max_hull_vertices.max((32 * chunks).next_power_of_two() as u32);
+    c
+}
+
 pub fn default_capacity() -> WorldCapacity {
     WorldCapacity {
         max_bodies: 16_384,
@@ -382,7 +396,12 @@ impl RubbleEngine {
     /// The engine on an existing device: the GPU stress solver's, so rubble and the
     /// stress solve share one device and queue.
     pub fn with_device(gravity: Vec3, info: wgpu::AdapterInfo, device: wgpu::Device, queue: wgpu::Queue) -> anyhow::Result<RubbleEngine> {
-        Self::with_sim(gravity, WgpuSim::with_device(default_capacity(), info, device, queue)?)
+        Self::with_device_capacity(gravity, info, device, queue, default_capacity())
+    }
+
+    /// `with_device` with the given capacity (`capacity_for` sizes it from a scene).
+    pub fn with_device_capacity(gravity: Vec3, info: wgpu::AdapterInfo, device: wgpu::Device, queue: wgpu::Queue, capacity: WorldCapacity) -> anyhow::Result<RubbleEngine> {
+        Self::with_sim(gravity, WgpuSim::with_device(capacity, info, device, queue)?)
     }
 
     fn with_sim(gravity: Vec3, mut sim: WgpuSim) -> anyhow::Result<RubbleEngine> {
