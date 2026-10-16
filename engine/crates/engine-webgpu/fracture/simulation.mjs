@@ -15,6 +15,8 @@ const COLOR_ROUND_HEADROOM = 2;
 // Pass-uniform slot whose value is `round` (slots 48..67 hold scan constants).
 const roundSlot = (round) => round < 48 ? round : round + 20;
 const PASS_ALIGN=256;
+// Pass values: 0..95 as below, 96..159 = 256 | colour (post-stabilization primal pass).
+const PASS_SLOTS=160,STAB_PASS=96,FLAG_POST_STAB=4096;
 const nextPow2=n=>2**Math.ceil(Math.log2(Math.max(1,n)));
 const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity};
 // Incremental colouring recolours only changed neighbourhoods but lets the
@@ -71,7 +73,7 @@ const warmTagPeriod=2**(32-warmValueBits)-2;
       s[19] = jointHashSlots * 3 * 4;      // joint hash: index + body pair per slot
       s[20] = b(cap.maxBodies, 4);
       s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
-      s[22] = 96 * PASS_ALIGN;
+      s[22] = PASS_SLOTS * PASS_ALIGN;
       s[23] = b(Math.max(cap.maxColors, 82) * 3, 4); // colours, work 64..73, convex 74..76, finer scan 77, moved 78, rest rebuild 79..80, awake colliders 81
       s[24] = b(cap.maxColliders, 80);
       s[25] = b(cap.maxCandidates, 32);
@@ -190,12 +192,13 @@ for(const [i,size] of sizes.entries())if(size>device.limits.maxStorageBufferBind
 const bufs=sizes.map((size,i)=>device.createBuffer({label:`AVBD ${i}`,size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC|((i===6||i===22)?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|(i===23?GPUBufferUsage.INDIRECT:0)}));
 
 try {
-    const pass = new Uint8Array(96 * PASS_ALIGN);
+    const pass = new Uint8Array(PASS_SLOTS * PASS_ALIGN);
     const passView = new DataView(pass.buffer);
-    for (let i = 0; i < 96; i++) {
+    for (let i = 0; i < PASS_SLOTS; i++) {
       let v = i;
       if (i >= 48 && i < 68) { const k = i - 48; v = (1 << k) | ((k & 1) << 31); }
       else if (i >= 68 && i < 84) v = i - 20; // colouring rounds 48..63 (roundSlot)
+      else if (i >= STAB_PASS) v = 256 | (i - STAB_PASS);
       else if (i >= 84) v = 0;
       passView.setUint32(i * PASS_ALIGN, v >>> 0, true);
     }
@@ -608,6 +611,20 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
         dispWork(pass, 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
         // Profiling / slicing boundary halfway through the iterations.
         if (beginPass && iter + 1 === (params.iterations >> 1)) pass = phase('solveHalf');
+      }
+      // Post-stabilization: one primal pass with α = 0 (pass value 256 | colour),
+      // no dual update. It records the velocity before moving each body.
+      if (params.flags & FLAG_POST_STAB) {
+        if (sparse) disp(pass, 'solve_primal_sparse', 64, STAB_PASS);
+        else {
+          const primal = pipes.solve_primal_color;
+          for (let color = 0; color < dispatched; color++) {
+            pass.setPipeline(primal.pipeline);
+            pass.setBindGroup(0, primal.bind, [(STAB_PASS + color) * PASS_ALIGN]);
+            pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
+          }
+          if (dispatched < colors) disp(pass, 'solve_primal_sparse', 64, STAB_PASS + dispatched);
+        }
       }
       pass = phase('solve');
       if (listedPasses) dispWork(pass, 'extract_velocity_sleep', 67, 1); // awake list
