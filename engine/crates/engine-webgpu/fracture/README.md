@@ -294,6 +294,11 @@ node engine/crates/engine-webgpu/fracture/headless.mjs cuboidGrid budget='{"dete
   `{"deterministic":true}` for run-to-run identical results, so two shader
   builds can be compared tick for tick.
 - `CHROME=` picks the browser (default: Google Chrome).
+- `bonds=1` uses the lab's breakable bonds. `columns=`/`rows=` change the
+  grid layout.
+- `staticUnhit=1` makes the houses outside the shot's column static. This
+  changes behaviour and is only for estimates.
+- `CHROME_ARGS` passes extra browser flags, for example Dawn toggles.
 - No npm dependencies; see `headless-page.mjs` for the protocol.
 
 ## Verification
