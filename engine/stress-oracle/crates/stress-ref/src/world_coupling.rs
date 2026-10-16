@@ -131,8 +131,8 @@ impl World {
     /// and contact except in impact islands (see `engine.rs`). Runs the explicit solve.
     pub fn with_engine(scene: &Scene, engine: Box<dyn RigidEngine>) -> World {
         assert!(
-            matches!(scene.sim.solve_mode, SolveMode::Explicit | SolveMode::Adaptive),
-            "the engine-coupled world runs the explicit or adaptive solve"
+            matches!(scene.sim.solve_mode, SolveMode::Explicit | SolveMode::Adaptive | SolveMode::QuasiStatic),
+            "the engine-coupled world runs the explicit, adaptive or quasi-static solve"
         );
         let mut w = World::new(scene);
         w.attach_engine(engine);
@@ -809,7 +809,19 @@ impl World {
     pub fn coupled_prepare(&mut self, forced: &HashSet<BodyKey>) -> CoupledFrame {
         let fdt = self.scene.sim.frame_dt;
         let t0 = self.solver.time;
-        let island_bodies = self.select_islands(fdt, forced);
+        // Without impact islands (and always in quasi-static mode, which has no explicit
+        // dynamics to resolve one) the engine drives every body.
+        let island_bodies = if self.impact_islands && self.scene.sim.solve_mode != SolveMode::QuasiStatic {
+            self.select_islands(fdt, forced)
+        } else {
+            for cl in &mut self.solver.clusters {
+                cl.driven = true;
+            }
+            for imp in &mut self.impactors {
+                imp.driven = true;
+            }
+            0
+        };
         if island_bodies > 0 {
             self.island_frames += 1;
             self.max_island_bodies = self.max_island_bodies.max(island_bodies);

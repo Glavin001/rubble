@@ -1004,7 +1004,9 @@ impl GpuSolver {
             // statics.rs `equilibrate`: its secant steps (all 60 Newton iterations, or
             // SECANT_STEPS under `tangent_statics`, whose re-solve `equilibrate` delegates
             // to the mirror); the residual tolerance at f32's reach.
-            statics_newton: StaticOptions::default().secant_steps(m.config.methods.tangent_statics) as u32,
+            // (`STRESS_GPU_STATICS_NEWTON=N`, a measurement only: at most N steps, a lossy
+            // budget like Blast's per-frame iteration cap.)
+            statics_newton: std::env::var("STRESS_GPU_STATICS_NEWTON").ok().and_then(|v| v.parse().ok()).unwrap_or(StaticOptions::default().secant_steps(m.config.methods.tangent_statics) as u32),
             statics_cg: 20_000,
             statics_tol: std::env::var("STRESS_GPU_STATICS_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-5),
             pair_lanes: if gpu.shader_path == crate::gpu::ShaderPath::Wgsl { 1 } else { 32 },
