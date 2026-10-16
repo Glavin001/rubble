@@ -84,6 +84,13 @@ cargo run --release -p stress-viz -- compare s_blast_two_walls \
 scripts/render_videos.sh            # or a subset: scripts/render_videos.sh b5 s_house feature_
 ```
 
+```sh
+# rubble's production pipeline in a window (stress-gpu + rubble's AVBD engine on one
+# device, no frame rewinds), drawn from the GPU state: click fires, R resets, 1-9 scenes
+cargo run --release -p stress-rubble --bin destruction-view -- --scene wall_ram
+cargo run --release -p stress-rubble --bin destruction-view -- --list
+```
+
 ### Oracles
 
 Each oracle installs into its own pinned environment and runs from the scene file:
