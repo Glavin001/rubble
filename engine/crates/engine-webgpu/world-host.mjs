@@ -15,7 +15,7 @@ export const KERNELS = [
   'joint_hash_clear', 'joint_hash_insert',
   'color_bodies', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
   'write_color_args', 'predict_bodies', 'solve_primal_color', 'solve_dual', 'extract_velocity_sleep',
-  'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
+  'write_sleep_args', 'sleep_island_gate', 'sleep_island_gate_joints', 'sleep_island_commit',
   'vehicle_input', 'wheel_query', 'vehicle_link', 'vehicle_prepare', 'vehicle_iterate', 'vehicle_post', 'raycast_batch',
 ];
 
@@ -355,7 +355,10 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     disp(p, 'extract_velocity_sleep', nB);
     if (nV > 0) disp(p, 'vehicle_post', nV);
     disp(p, 'write_sleep_args', 64);
-    for (let i = 0; i < 8; i++) dispWork(p, 'sleep_island_gate', 66);
+    for (let i = 0; i < 8; i++) {
+      dispWork(p, 'sleep_island_gate', 66);
+      if (world.jointCount > 0) disp(p, 'sleep_island_gate_joints', world.jointCount);
+    }
     dispWork(p, 'sleep_island_commit', 67);
     p.end();
     world.parity ^= 1;

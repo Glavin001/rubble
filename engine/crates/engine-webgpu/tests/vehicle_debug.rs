@@ -521,3 +521,71 @@ fn trace_straight_line() {
         }
     }
 }
+
+/// Kart dropped on a monster truck (`--ignored`): two-body link state and loads.
+#[test]
+#[ignore]
+fn trace_car_on_car() {
+    use engine_schema::vehicle::*;
+    use engine_vehicle::VehicleBackend;
+    let mut sim = WgpuSim::new(WorldCapacity {
+        max_bodies: 4096,
+        max_colliders: 8192,
+        max_contacts: 32768,
+        max_joints: 64,
+        max_candidates: 65536,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .expect("wgpu");
+    let mut p = AvbdParams::default();
+    p.iterations = 10;
+    sim.set_params(p);
+    sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+    let mut g = BodyState::dynamic(glam::Vec3::new(0.0, -5.0, 0.0), glam::Quat::IDENTITY, 1.0, glam::Vec3::ONE);
+    g.inv_mass = 0.0;
+    g.inv_inertia = [0.0; 3];
+    g.flags = 0;
+    let ground = sim.add_body(g);
+    sim.add_collider(Collider {
+        body: ground,
+        shape: ShapeType::Box as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [400.0, 5.0, 400.0, 400.0],
+    });
+    let t = sim.add_vehicle(&presets::monster_truck(), [0.0, 2.0, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("truck");
+    for _ in 0..120 {
+        sim.step().expect("step");
+    }
+    let roof = sim.read_body(sim.vehicle_host().chassis_body(t)).position[1];
+    let k = sim.add_vehicle(&presets::kart(), [0.0, roof + 1.6, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("kart");
+    let l = sim.vehicle_host().capacity.layout();
+    for i in 0..240 {
+        sim.step().expect("step");
+        if i % 20 == 0 {
+            let tc = sim.read_body(sim.vehicle_host().chassis_body(t));
+            let kc = sim.read_body(sim.vehicle_host().chassis_body(k));
+            let ts = sim.vehicle_state(t);
+            let ks = sim.vehicle_state(k);
+            // kart wheel slots follow the truck's (4) in the pool
+            let tj: Vec<u32> = (0..4).map(|w| sim.read_slots(l.wheel_base + (4 + w) * WHEEL_STRIDE + W_TJ, 1)[0][2]).collect();
+            eprintln!(
+                "{i}: truck y {:.3} flags {} load {:.0} | kart y {:.3} flags {} contacts {} grounds {:?} twoBody {:?} kart Fs {:?}",
+                tc.position[1],
+                tc.flags,
+                ts.wheels.iter().map(|w| w.suspension_force).sum::<f32>(),
+                kc.position[1],
+                kc.flags,
+                ks.contacts,
+                ks.wheels.iter().map(|w| w.ground_body).collect::<Vec<_>>(),
+                tj,
+                ks.wheels.iter().map(|w| w.suspension_force as i32).collect::<Vec<_>>(),
+            );
+        }
+    }
+}

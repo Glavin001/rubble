@@ -87,6 +87,7 @@ fn main() -> Result<()> {
         "solve_primal_one",
         "solve_dual",
         "sleep_island_gate",
+        "sleep_island_gate_joints",
         "sleep_island_commit",
         "extract_velocity_sleep",
         "ccd_classify",
