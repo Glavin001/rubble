@@ -141,6 +141,8 @@ pub struct FractureScene {
     pub projectile_mass: f32,
     pub fragment_count: usize,
     pub hull_count: usize,
+    /// (fragment id, hull index) of flat zero-volume compound children that were dropped.
+    pub skipped_hulls: Vec<(u32, u32)>,
     pub bond_count: usize,
     pub extent: f32,
     pub height: f32,
@@ -607,6 +609,7 @@ pub fn build_scene(asset: &FractureAsset, level: u8) -> Result<FractureScene> {
     let extent = sub(hi, lo).into_iter().fold(f64::NEG_INFINITY, f64::max);
     let placement = [-center[0], -lo[1], -center[2]];
     let mut hull_count = 0;
+    let mut skipped_hulls = Vec::new();
     let mut radii = Vec::new();
     for f in &selected {
         if !(f.mass > 0.0) || f.hull_count == 0 {
@@ -624,6 +627,7 @@ pub fn build_scene(asset: &FractureAsset, level: u8) -> Result<FractureScene> {
             flags: 5,
         });
         by_id.insert(f.id, id);
+        let mut kept = 0;
         for h in f.hull_begin..f.hull_begin + f.hull_count {
             let hull = &physics.hulls[h as usize];
             let verts: Vec<V3> = hull
@@ -631,8 +635,17 @@ pub fn build_scene(asset: &FractureAsset, level: u8) -> Result<FractureScene> {
                 .iter()
                 .map(|v| inverse_rotate(q, sub(v3(*v), v3(f.com))))
                 .collect();
-            let params = append_hull(&mut hull_data, &verts, hull)
-                .map_err(|e| anyhow!("Fragment {}, hull {h}: {e}", f.id))?;
+            let params = match append_hull(&mut hull_data, &verts, hull) {
+                Ok(params) => params,
+                // A zero-volume child (a flat sheet baked into a compound) adds no
+                // collision volume and no mass: mass/inertia come from the fragment.
+                // Drop it while the fragment keeps real hulls; never thicken it.
+                Err(e) if e.to_string().contains("zero-volume") => {
+                    skipped_hulls.push((f.id, h));
+                    continue;
+                }
+                Err(e) => bail!("Fragment {}, hull {h}: {e}", f.id),
+            };
             radii.push(params[3]);
             colliders.push(Collider {
                 body: id,
@@ -641,6 +654,13 @@ pub fn build_scene(asset: &FractureAsset, level: u8) -> Result<FractureScene> {
                 params: params.map(|x| x as f32),
             });
             hull_count += 1;
+            kept += 1;
+        }
+        if kept == 0 {
+            bail!(
+                "Fragment {}: every collision hull has zero volume; recook the source collision asset",
+                f.id
+            );
         }
         let json = &asset.json;
         let mesh_index = if f.node >= 0 {
@@ -786,6 +806,7 @@ pub fn build_scene(asset: &FractureAsset, level: u8) -> Result<FractureScene> {
         projectile_mass: projectile_mass as f32,
         fragment_count: selected.len(),
         hull_count,
+        skipped_hulls,
         bond_count: bonds.len(),
         extent: extent as f32,
         height: height as f32,
