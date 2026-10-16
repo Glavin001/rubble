@@ -424,6 +424,13 @@ impl WgpuSim {
         self.params = params;
     }
 
+    /// Replace the material table that `Collider::material` indexes (64 entries, all
+    /// friction 0.5 until set).
+    pub fn set_materials(&mut self, mats: &[Material]) {
+        assert!(mats.len() <= 64, "the material table holds 64 entries");
+        self.queue.write_buffer(&self.bufs[3], 0, bytemuck::cast_slice(mats));
+    }
+
     pub fn add_body(&mut self, body: BodyState) -> u32 {
         self.add_bodies(std::slice::from_ref(&body)).start
     }
