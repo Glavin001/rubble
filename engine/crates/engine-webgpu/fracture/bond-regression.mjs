@@ -3,7 +3,8 @@
 // Each case is a small scene of unit-density boxes welded by bonds, judged by
 // physical invariants (a strong weld holds, a weak one breaks the right way).
 import {createSimulation} from './simulation.mjs';
-import {quatMul,quatConjugate,inverseRotate,sub,scaleBondSprings} from './geometry.mjs';
+import {quatMul,quatConjugate,inverseRotate,sub} from './vec.mjs';
+import {scaleBondSprings} from './wasm.mjs';
 
 const H=0.25,MASS=1000*(2*H)**3,G=9.81;
 const box=(p,q=[0,0,0,1])=>({p,q,invMass:1/MASS,invI:Array(3).fill(1/(MASS*(2*H)**2/6)),flags:9});

@@ -1,4 +1,4 @@
-import {add,scale,sub,dot,cross,norm} from './geometry.mjs';
+import {add,scale,sub,dot,cross,norm} from './vec.mjs';
 const shader=`
 struct Body {p:vec4f,q:vec4f,invI:vec4f,v:vec4f,w:vec4f,initialP:vec4f,initialQ:vec4f};
 @group(0) @binding(0) var<storage,read> bodies:array<Body>;

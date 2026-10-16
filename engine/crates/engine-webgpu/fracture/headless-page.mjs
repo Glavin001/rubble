@@ -13,30 +13,19 @@
 //            (shape-bench.mjs): N static bases of shape a, each with shape b resting on it.
 //   staticUnhit  1: houses outside the shot's column become static (immovable).
 //            Behaviour-changing; only to estimate compound houses that stay intact.
-import {parseFractureGlb} from './asset.mjs';
-import {buildScene,buildGrid,buildSuburb} from './geometry.mjs';
-import {buildCuboidHouse} from './cuboid-house.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPairScene,layoutScene,withoutJoints,withCapacity,withParams,sceneHandle,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
-import {buildPairScene} from './shape-bench.mjs';
 
-// Same bundled scenes as the lab (main.mjs samples), without bond preloading.
-const SCENES={house:{file:'veneer-house.glb'},grid:{file:'veneer-house.glb',layout:{columns:7,rows:7},level:2},
- suburb:{file:'veneer-house.glb',layout:{suburb:true},level:2},
- cuboidGrid:{procedural:true,layout:{columns:7,rows:7}},cuboids:{procedural:true,layout:{suburb:true}}};
-
+// The lab's bundled scenes (engine-fracture samples.rs); bonds only with bonds=1.
 async function buildNamed(name,device,bonds,layout){
- const known=SCENES[name];if(!known)throw new Error(`Unknown scene ${name}`);
- const entry=layout&&known.layout&&!known.layout.suburb?{...known,layout:{...known.layout,...layout}}:known;
- if(entry.procedural){
-  const one=buildCuboidHouse(),scene=(entry.layout.suburb?buildSuburb:buildGrid)(null,0,{...entry.layout,base:one});
-  return {...scene,capacity:{...scene.capacity,candidatesPerCollider:12,contactsPerCollider:24}};
- }
+ const entry=SAMPLES.find(s=>s.key===name);if(!entry)throw new Error(`Unknown scene ${name}`);
+ const lay=layout&&entry.layout&&!entry.layout.suburb?{...entry.layout,...layout}:entry.layout;
+ if(!entry.file)return layoutScene(buildCuboidHouse(),lay,true);
  const response=await fetch(`./assets/${entry.file}`);if(!response.ok)throw new Error(`Missing asset ${entry.file}`);
  const asset=parseFractureGlb(await response.arrayBuffer());
- const level=entry.level??Math.min(...asset.physics.fragments.map(f=>f.level));
- const built=buildScene(asset,level),one=bonds?await preloadBonds(device,built):{...built,joints:[]};
- return entry.layout?(entry.layout.suburb?buildSuburb:buildGrid)(asset,level,{...entry.layout,base:one}):one;
+ const built=buildScene(asset,asset.initialLevel(entry.level),{maxHullVertices:entry.maxHullVertices});
+ return layoutScene(bonds?await preloadBonds(device,built):withoutJoints(built),lay,false);
 }
 
 async function run(){
@@ -49,26 +38,16 @@ async function run(){
    maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  let gpuError=null;device.addEventListener('uncapturederror',e=>{gpuError??=String(e.error.message)});
  const layout=q.has('columns')||q.has('rows')?{...(q.has('columns')?{columns:num('columns',7)}:{}),...(q.has('rows')?{rows:num('rows',7)}:{})}:null;
- const built=name==='pairs'?buildPairScene({a:q.get('a')??'box',b:q.get('b')??'box',count:num('count',4096)}):await buildNamed(name,device,num('bonds',0)===1,layout);
- if(name==='pairs'&&num('reuse',0)===1)built.params={...built.params,flags:built.params.flags|1};
- const scene={...built,capacity:{...built.capacity,...budget}};
- let frozen=0;
- if(num('staticUnhit',0)===1&&scene.rowShot&&scene.instanceStride){
-  const frags=scene.instanceStride,x=scene.rowShot.origin[0],r=scene.projectileRadius,ground=scene.bodies[0];
-  scene.bodies=scene.bodies.slice();
-  for(let k=0;k<scene.copies;k++){
-   let lo=1/0,hi=-1/0;for(let b=1+k*frags;b<1+(k+1)*frags;b++){lo=Math.min(lo,scene.bodies[b].p[0]);hi=Math.max(hi,scene.bodies[b].p[0])}
-   if(x+r>lo-0.5&&x-r<hi+0.5)continue;
-   for(let b=1+k*frags;b<1+(k+1)*frags;b++)scene.bodies[b]={...scene.bodies[b],invMass:0,invI:[0,0,0],flags:ground.flags};
-   frozen++;
-  }
- }
+ let built=name==='pairs'?buildPairScene({a:q.get('a')??'box',b:q.get('b')??'box',count:num('count',4096)}):await buildNamed(name,device,num('bonds',0)===1,layout);
+ if(name==='pairs'&&num('reuse',0)===1)built=withParams(built,{flags:built.params.flags|1});
+ const scene=withCapacity(built,budget);
+ const frozen=num('staticUnhit',0)===1?sceneHandle(scene).freezeUnhitCopies():0;
  // lockstep=N: N ticks of every optimization off vs on (both deterministic),
  // counts compared every tick and body words every 35; reports the first difference.
  if(num('lockstep',0)>0){
   const off={deterministic:true,movedOnlyBounds:false,awakeQueries:false,persistentRest:false,taggedWarmHash:false,awakeListPasses:false};
   const on={deterministic:true,movedOnlyBounds:true};
-  const A=await createSimulation(device,{...scene,capacity:{...scene.capacity,...off}}),B=await createSimulation(device,{...scene,capacity:{...scene.capacity,...on}});
+  const A=await createSimulation(device,withCapacity(scene,off)),B=await createSimulation(device,withCapacity(scene,on));
   if((q.get('shot')??'row')==='row'&&scene.rowShot)for(const S of [A,B])S.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
   let first=null,maxAwake=0,k=0;
   for(k=1;k<=num('lockstep',0)&&!first;k++){await A.step(1);await B.step(1);maxAwake=Math.max(maxAwake,A.counters.awake);
@@ -103,7 +82,7 @@ async function run(){
  let kernels=null;
  if(num('profile',1)){const agg={};for(let r=0;r<3;r++){const p=await sim.profileKernels();if(!p.supported)break;for(const [k,v] of Object.entries(p.kernels))agg[k]=(agg[k]??0)+v.ms/3}
   kernels=Object.fromEntries(Object.entries(agg).sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k,+v.toFixed(3)]))}
- const result={scene:name,timeline:stages,frozenHouses:frozen,bodies:scene.bodies.length,colliders:scene.colliders.length,joints:scene.joints?.length??0,budget,warm,measure,
+ const result={scene:name,timeline:stages,frozenHouses:frozen,bodies:scene.bodyCount,colliders:scene.colliderCount,joints:scene.jointCount,budget,warm,measure,
   msPerTick:+msPerTick.toFixed(3),ticksPerSecond:+(1000/msPerTick).toFixed(1),warmMs:Math.round(warmMs),counters,kernels,trace:log,gpuError};
  sim.dispose();return result;
 }
