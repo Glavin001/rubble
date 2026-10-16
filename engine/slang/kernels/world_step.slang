@@ -1982,7 +1982,8 @@ static const uint FLAG_POINT_SPEED_SLEEP = 8192u;
 bool pointSpeedSleep() { return (PARAMS.flags & FLAG_POINT_SPEED_SLEEP) != 0u; }
 // 32768 Displacement sleep test (Jolt's sleep test spheres): a body is slow while
 //     its farthest point stays within sleepLin·sleepTime of the pose it had when
-//     its sleep timer started, |Δx| + angle(Δq)·r_max. Jitter and one-tick blips
+//     its sleep timer started, |Δx| + angle(Δq)·r_max, using the two-tick
+//     midpoint pose so a period-2 numerical flip does not count as motion. Jitter and one-tick blips
 //     that go nowhere no longer reset the timer; steady motion still does. The
 //     reference pose lives in the previous-step body record (BODY_PREV), whose
 //     pose fields are otherwise unused.
@@ -4850,10 +4851,17 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
         {
             // A fresh timer (just woken or just moved) takes the current pose as
             // its reference; afterwards the window's displacement decides.
+            // Two-tick midpoint pose (x and x⁻): a pose that flips back and
+            // forth each tick (jammed compounds) averages out; steady motion
+            // moves the midpoint at the same rate.
+            float3 midPos = 0.5 * (b.position + b.initialPos);
+            float4 q0 = b.initialRot;
+            if (dot(q0, b.orientation) < 0.0) q0 = -q0;
+            float4 midRot = quatNormalize(b.orientation + q0);
             float4 refRot = BODY_PREV(i).orientation;
             float3 refPos = BODY_PREV(i).position;
-            float turn = 2.0 * acos(min(abs(dot(refRot, b.orientation)), 1.0));
-            float moved = length(b.position - refPos) + turn * extent;
+            float turn = 2.0 * acos(min(abs(dot(refRot, midRot)), 1.0));
+            float moved = length(midPos - refPos) + turn * extent;
             slow = b.sleepTimer <= 0.0 || moved < p.sleepLin * p.sleepTime;
             // A candidate held awake (by its island) restarts the window every
             // sleepTime, so the limit is drift per window, like a speed.
@@ -4861,8 +4869,8 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
             if (rewindow) b.sleepTimer = p.sleepTime;
             if (!slow || b.sleepTimer <= 0.0 || rewindow)
             {
-                BODY_PREV(i).position = b.position;
-                BODY_PREV(i).orientation = b.orientation;
+                BODY_PREV(i).position = midPos;
+                BODY_PREV(i).orientation = midRot;
             }
         }
     }
