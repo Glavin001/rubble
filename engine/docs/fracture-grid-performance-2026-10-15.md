@@ -181,3 +181,44 @@ Making either the default changes results. The options for the cache are:
 `build_awake_list`, `csr_clear` and the CSR prefix passes (one thread per
 body), plus fixed per-colour and per-iteration dispatch counts. Next
 candidates: an event-driven awake list and a CSR over awake bodies only.
+
+### Peak: what was measured after the idle work
+
+The hull-grid shot at ~3.5 s (113k awake, 872k contacts, 586k candidates)
+takes 26.5 ms per tick (~38 ticks/s). Per kernel:
+
+| Kernel | ms |
+|---|---|
+| primal (8 iterations × 12 colour dispatches) | 8.6 |
+| broadphase query | 3.6 |
+| convex manifold | 2.7 |
+| SAT large | 2.5 |
+| dual (8 iterations) | 2.5 |
+| colouring | 0.87 |
+| SAT small | 0.87 |
+| persist | 0.87 |
+
+Tried at the peak with `budget.deterministic` (so every run has the same
+state; counts identical); none helped:
+
+- Grid hash 2-16× colliders instead of 2× (alias walks): 3.93 → 3.69-3.82 ms
+  for the query, within noise.
+- Broadphase threads in Morton order of the start positions: no gain (the
+  scene's collider order is already spatially coherent).
+- A moving flag in each chain word, so ownership is decided before the
+  collider/body loads: no gain.
+
+The query is bound by the AABB loads of the chain entries themselves (about
+39M entry visits per tick).
+
+The primal runs at about 0.65 ns per body-contact visit, loading ~110 bytes
+each, which is close to memory bandwidth. Its colours take 0.33, 0.26, 0.20,
+0.13, 0.13, 0.07, 0.07 ms per iteration; the empty headroom dispatches are
+free.
+
+With SAT-cache lookups off, SAT large rises from 2.5 to 7.3 ms. A
+deterministic cache, not dropping it, is the right fix for its race.
+
+60 ticks/s at this peak needs roughly 10 ms less per tick. No lossless change
+found so far comes close; the remaining levers change behaviour (fewer awake
+pieces, as in "Remaining route" above).
