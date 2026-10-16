@@ -53,6 +53,7 @@ int main(int argc, char** argv)
     // mode 0: run the convex stages on the given candidates. mode 1: run the
     // whole collision front end (bounds, broadphase, narrowphase, convex) with
     // `nCandidates` as the candidate capacity and `head[7]` grid hash words.
+    // mode 3: run the narrowphase (then the convex stages) on the given candidates.
     uint32_t mode = head[6], gridWords = head[7];
 
     GlobalParams_0 g = {};
@@ -67,7 +68,7 @@ int main(int argc, char** argv)
     bind(g.gColliders_0, sColliders, nColliders);
     take(&g.gColliders_0[0], size_t(nColliders) * 64);
     bind(g.gCandidates_0, sCandidates, nCandidates);
-    if (mode == 0) take(&g.gCandidates_0[0], size_t(nCandidates) * 16);
+    if (mode == 0 || mode == 3) take(&g.gCandidates_0[0], size_t(nCandidates) * 16);
     bind(g.gHulls_0, sHulls, nHull);
     take(&g.gHulls_0[0], size_t(nHull) * 16);
     bind(g.gMaterials_0, sMaterials, 64);
@@ -76,7 +77,7 @@ int main(int argc, char** argv)
     bind(g.gCounters_0, sCounters, 1);
     g.gCounters_0[0].bodyCount_0 = nBodies;
     g.gCounters_0[0].colliderCount_0 = nColliders;
-    g.gCounters_0[0].candidateCount_0 = mode == 0 ? nCandidates : 0u;
+    g.gCounters_0[0].candidateCount_0 = (mode == 0 || mode == 3) ? nCandidates : 0u;
     // Previous contacts live in the other half: [maxContacts, 2·maxContacts).
     bind(g.gManifolds_0, sManifolds, nCandidates);
     bind(g.gConvexWork_0, sWork, nCandidates);
@@ -92,7 +93,8 @@ int main(int argc, char** argv)
     bind(g.gWorldObbs_0, sObbs, nColliders);
     bind(g.gAabbs_0, sAabbs, nBodies + nColliders);
 
-    if (mode >= 1)
+    if (mode == 3) run(narrowphase, &g, (nCandidates + 63) / 64, 1);
+    if (mode == 1 || mode == 2)
     {
         run(build_aabbs, &g, (nColliders + 63) / 64, 1);
         run(broadphase_clear, &g, (gridWords + 63) / 64, 1);
