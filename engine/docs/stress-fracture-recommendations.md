@@ -74,6 +74,13 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
     - It changes house-2story's rammed outcome (7 broken bonds instead of 34).
     - Our real-time configuration already beats the Blast-equivalent one on cost and accuracy (`docs/stress-fracture-blast-ladder.md`), so this only matters if a quasi-static mode is wanted.
 
+6c. **The ladder's "damping" rung (b5_v20 513 → 350 broken bonds) is not a GPU dashpot fault (checked 2026-10-16).**
+    - The GPU world's own dashpot step certificate makes no difference on b5: `STRESS_BENCH_ORACLE_STEP=1` gives identical outcomes at 10, 15 and 20 m/s, since the contact step sets the substep there.
+    - The established method set is fully honoured on the GPU.
+    - The GPU-vs-reference parity tests (damped materials, 4,000 substeps) hold to 1e-3.
+    - The rung's effect is not systematic across speeds: 246 → 370 at 10 m/s, 421 → 424 at 15 m/s, against the oracle's 318 and 367. b5 near its threshold is sensitive to any change.
+    - A seed-spread study (the plan's step 7 families) would put a number on that sensitivity.
+
 ## Levers that change engine behaviour
 
 6. **Let coupled rigid bodies sleep.**

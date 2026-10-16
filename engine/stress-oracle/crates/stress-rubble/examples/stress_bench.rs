@@ -252,6 +252,11 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let mut w = stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world");
     // rubble's integrated pipeline: routing before the step, no frame rewind.
     w.redo_fractured_frames = !no_redo;
+    // STRESS_BENCH_ORACLE_STEP=1: the oracle's own certified step instead of the GPU
+    // world's sharper dashpot certificate (`own_dashpot_step`), for comparison.
+    if std::env::var("STRESS_BENCH_ORACLE_STEP").is_ok_and(|v| v == "1") {
+        w.own_dashpot_step = false;
+    }
     w.set_impact_islands(islands);
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut frames = Vec::with_capacity(n);
