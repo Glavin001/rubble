@@ -507,13 +507,12 @@ impl RubbleEngine {
         self.bodies_changed();
         // A category no collider's mask includes, and a mask that admits none.
         let never = CollisionFilter { categories: 0x8000, mask: 0, group: 0 };
+        // The body's colliders are contiguous: retired in one upload.
         for id in e.colliders.clone() {
-            let mut col = self.cols[id as usize];
-            never.apply(&mut col);
-            self.cols[id as usize] = col;
-            self.sim.set_collider(id, col);
+            never.apply(&mut self.cols[id as usize]);
             self.owners[id as usize] = Owner::Retired;
         }
+        self.sim.set_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
         self.frozen.retain(|k| *k != key);
     }
 

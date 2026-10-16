@@ -1051,7 +1051,10 @@ impl ReferenceSolver {
         if !self.config.methods.true_step {
             return;
         }
-        self.true_steps = (0..self.structures.len()).map(|s| self.structure_true_step(s)).collect();
+        // Independent per structure: spread over the cores, collected in structure order.
+        let this = &*self;
+        let steps = crate::par::map_range(0..this.structures.len(), 1, |s| this.structure_true_step(s));
+        self.true_steps = steps;
     }
 
     /// The stable central-difference substep of structure `s`'s bond network at full

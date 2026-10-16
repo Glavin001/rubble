@@ -620,18 +620,32 @@ impl WgpuSim {
     /// Replace a collider (e.g. swap a fractured chunk's hull or its filter).
     /// Release the old hull's arena reference yourself once nothing uses it.
     pub fn set_collider(&mut self, id: u32, col: Collider) {
-        assert!(id < self.collider_count, "collider {id} out of range");
+        self.set_colliders(id, std::slice::from_ref(&col));
+    }
+
+    /// Replace the contiguous colliders `first..first + cols.len()` in one upload.
+    pub fn set_colliders(&mut self, first: u32, cols: &[Collider]) {
+        let end = first as usize + cols.len();
+        assert!(end <= self.collider_count as usize, "colliders {first}..{end} out of range");
+        if cols.is_empty() {
+            return;
+        }
         self.queue.write_buffer(
             &self.bufs[2],
-            u64::from(id) * std::mem::size_of::<Collider>() as u64,
-            bytes_of(&col),
+            u64::from(first) * std::mem::size_of::<Collider>() as u64,
+            bytemuck::cast_slice(cols),
         );
-        self.host_cols[id as usize] = col;
-        self.has_convex |= col.shape == ShapeType::ConvexHull as u32;
-        self.has_filters = self
-            .host_cols
-            .iter()
-            .any(engine_schema::convex::CollisionFilter::is_set);
+        use engine_schema::convex::CollisionFilter;
+        // Any filter left: only a replaced filtered collider can clear the flag, and
+        // only then is every collider scanned again.
+        let cleared = self.host_cols[first as usize..end].iter().any(CollisionFilter::is_set);
+        self.host_cols[first as usize..end].copy_from_slice(cols);
+        self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        if cols.iter().any(CollisionFilter::is_set) {
+            self.has_filters = true;
+        } else if cleared {
+            self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
+        }
         self.grid_cache = None;
         self.manifolds_valid = false;
     }

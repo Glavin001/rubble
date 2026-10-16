@@ -404,6 +404,10 @@ pub struct Profile {
 #[derive(Clone)]
 pub struct HostSnapshot {
     mirror: ReferenceSolver,
+    /// Structures left out of `mirror` (their chunk, bond and adjacency tables are empty
+    /// there): every cluster of theirs was a quiet cluster off the GPU, so nothing a
+    /// segment does can change them, and `restore` takes them from the live mirror.
+    omitted: Vec<usize>,
     impactors: Vec<Impactor>,
     contact_dissipated: f64,
     crush_energy: f64,
@@ -1707,9 +1711,35 @@ impl GpuSolver {
     /// Everything a frame changes, downloaded into a host copy (`restore` undoes the
     /// frame).
     pub fn snapshot(&mut self, gpu: &Gpu) -> HostSnapshot {
+        self.snapshot_omitting(gpu, false)
+    }
+
+    /// `snapshot` for a segment: the excluded set is fixed until the next `refresh`, so
+    /// structures all of whose clusters are off the GPU tables cannot change before a
+    /// `restore` in the same frame and stay out of the copy (`HostSnapshot::omitted`;
+    /// its `mirror()` then lacks their chunks and bonds).
+    pub fn snapshot_segment(&mut self, gpu: &Gpu) -> HostSnapshot {
+        self.snapshot_omitting(gpu, true)
+    }
+
+    fn snapshot_omitting(&mut self, gpu: &Gpu, omit_quiet: bool) -> HostSnapshot {
         self.download(gpu);
+        let m = &mut self.mirror;
+        let mut on_gpu = vec![!omit_quiet; m.structures.len()];
+        for cl in &m.clusters {
+            if self.excluded.binary_search(&cl.id).is_err() {
+                on_gpu[cl.structure] = true;
+            }
+        }
+        let omitted: Vec<usize> = (0..on_gpu.len()).filter(|&s| !on_gpu[s]).collect();
+        let parked: Vec<_> = omitted.iter().map(|&s| (std::mem::take(&mut m.chunks[s]), std::mem::take(&mut m.bonds[s]), std::mem::take(&mut m.chunk_bonds[s]))).collect();
+        let mirror = m.clone();
+        for (&s, (c, b, cb)) in omitted.iter().zip(parked) {
+            (m.chunks[s], m.bonds[s], m.chunk_bonds[s]) = (c, b, cb);
+        }
         HostSnapshot {
-            mirror: self.mirror.clone(),
+            mirror,
+            omitted,
             impactors: self.impactors.clone(),
             contact_dissipated: self.contact_dissipated,
             crush_energy: self.crush_energy,
@@ -1721,7 +1751,13 @@ impl GpuSolver {
 
     /// Return to a snapshot: the host state, then every buffer rebuilt from it.
     pub fn restore(&mut self, gpu: &Gpu, s: HostSnapshot) -> Result<(), String> {
-        self.mirror = s.mirror;
+        let mut mirror = s.mirror;
+        for &st in &s.omitted {
+            mirror.chunks[st] = std::mem::take(&mut self.mirror.chunks[st]);
+            mirror.bonds[st] = std::mem::take(&mut self.mirror.bonds[st]);
+            mirror.chunk_bonds[st] = std::mem::take(&mut self.mirror.chunk_bonds[st]);
+        }
+        self.mirror = mirror;
         self.impactors = s.impactors;
         self.contact_dissipated = s.contact_dissipated;
         self.crush_energy = s.crush_energy;
