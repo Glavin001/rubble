@@ -13,3 +13,8 @@ web/dist*/
 web/src/wasm/
 web/test-results/
 web/playwright-report/
+test-results/
+
+engine/docs/*.png
+engine/docs/*.jpg
+engine/docs/LOCAL_*
