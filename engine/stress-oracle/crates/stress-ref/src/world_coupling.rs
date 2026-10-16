@@ -155,6 +155,7 @@ impl World {
             handed: Vec::new(),
             kept: HashMap::new(),
             shapes: HashMap::new(),
+            routing: HashMap::new(),
         });
         self.sync_engine_bodies();
     }
@@ -300,10 +301,17 @@ impl World {
         let scale = self.scene.sim.stiffness_scale;
         let plane_strain = |m: &Material| m.youngs_modulus * scale / (1.0 - m.poisson_ratio * m.poisson_ratio);
         let mut parts: Vec<Part> = Vec::new();
+        let mut routing = std::mem::take(&mut self.coupling.as_mut().expect("coupled").routing);
         for ci in 0..self.solver.clusters.len() {
             let cl = &self.solver.clusters[ci];
             let s = cl.structure;
             let com = cl.com_world();
+            // A cluster the caller vouches for (`ReferenceSolver::unchanged`) keeps last
+            // frame's bounds and material data.
+            let reuse = if self.solver.unchanged.contains(&cl.id) { routing.get(&cl.id).copied() } else { None };
+            let (lo, hi, reach, modulus, speed, radius, capacity) = match reuse {
+                Some(r) => r,
+                None => {
             let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
             let (mut reach, mut modulus, mut speed, mut radius): (f64, f64, f64, f64) = (0.0, f64::INFINITY, f64::INFINITY, f64::INFINITY);
             for &c in &cl.chunks {
@@ -327,6 +335,11 @@ impl World {
                     b.strength.tensile * b.geometry.area * b.weibull
                 })
                 .fold(f64::INFINITY, f64::min);
+                    let r = (lo, hi, reach, modulus, speed, radius, capacity);
+                    routing.insert(cl.id, r);
+                    r
+                }
+            };
             let extent = (hi - lo).max_elem();
             let struck = (!cl.bonds.is_empty()).then_some(Struck { round_trip: 2.0 * extent / speed, capacity });
             let sweep = cl.velocity.abs() * dt + Vec3::splat(cl.angular_velocity.norm() * reach * dt);
@@ -346,6 +359,9 @@ impl World {
                 struck,
             });
         }
+        let live: std::collections::HashSet<u64> = self.solver.clusters.iter().map(|cl| cl.id).collect();
+        routing.retain(|id, _| live.contains(id));
+        self.coupling.as_mut().expect("coupled").routing = routing;
         for (i, imp) in self.impactors.iter().enumerate() {
             let b = imp.obox();
             let r = b.bounding_radius();
