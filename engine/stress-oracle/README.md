@@ -5,11 +5,13 @@
 > that repository. It keeps `stress-ref` (the CPU f64 reference), `stress-gpu` (the Slang
 > GPU solver and its wgpu host) and `stress-reduce` (static condensation), with the
 > goldens, oracle pipelines and docs. The scene packs the tests load are in `packs/`.
-> Left behind: `stress-physx` (with its offscreen `render.rs` and the `destruction_video`
-> example of the GPU world on PhysX GPU), the CUDA shader output, the PhysX build glue and
+> Left behind: `stress-physx`, the CUDA shader output, the PhysX build glue and
 > `scripts/realtime_verify.sh` (they link PhysX). Rubble's AVBD engine takes over the
 > rigid-body role `stress-physx` played. PhysX runs described below and in the other
-> documents are historical measurements.
+> documents are historical measurements. `stress-physx`'s product-path video tool (its
+> offscreen `render.rs` and the `destruction_video` example) was ported to
+> `crates/stress-rubble` (`render` module, `destruction_video` example, `gpu` feature;
+> see "Destruction videos" below).
 >
 > `stress-viz` (the debug renderer and the interactive viewer) followed later from the
 > fork's `feat/oracle-physx-quality` (`905d53209`: the GPU rasterizer, `stress-viz view`
@@ -55,6 +57,7 @@ Taking over this work? Start with [`HANDOFF.md`](HANDOFF.md).
 | `crates/stress-ref/tests/` | the test suite (analytic, conservation, failure laws, dynamics, solve modes, features, determinism, refinement, engine API, snapshots, showcases, oracle goldens); `tests/shared/showcases.rs` is also run through PhysX |
 | `crates/stress-viz` | debug renderer: runs a scene and writes an MP4 of view panels (utilization, stress, damage, fragments, speed, deformation) and variant comparisons; rasterizes on the GPU through wgpu (Metal, Vulkan, DX12) or in software (`--renderer auto\|gpu\|cpu`); `stress-viz view` is the interactive window (see "Viewer"); `--features rubble` adds rubble's engine (`--engine rubble`) |
 | `scripts/render_videos.sh` | renders every benchmark, showcase and feature comparison, and the oracle-vs-rubble comparisons, into `videos/` (not committed) |
+| `crates/stress-rubble` | `RubbleEngine` (rubble's AVBD GPU engine behind `RigidEngine`), its tests and benchmarks; with `gpu`, the offscreen video renderer (`render`) and the `destruction_video` example |
 | `crates/stress-physx` | `PhysxEngine` (PhysX CPU behind `RigidEngine`), the `stress-physx` command, the older `PhysxDestruction` adapter over `StressSolverApi`, and their tests |
 | `oracles/CONTRACT.md` | what an oracle reads and writes |
 | `oracles/<tool>/` | `install.sh`, `PINNED.md`, `export.py`, `run.py`, `observe.py`, `pipeline.py`, `README.md` |
@@ -76,6 +79,31 @@ cargo run --release -- seeds scenes/b9_panel_high_weibull.json --out /tmp/seeds 
 PHYSX_ROOT=/path/to/physx-install cargo test --release -p stress-physx
 PHYSX_ROOT=/path/to/physx-install cargo run --release -p stress-physx -- check scenes golden
 ```
+
+### Destruction videos
+
+`crates/stress-rubble/examples/destruction_video.rs` renders the product path, the GPU
+stress solver coupled to rubble on the solver's device (`GpuWorld::with_engine` +
+`RubbleEngine::with_device`), one 1/60 s frame at a time at the realtime_peak settings.
+Every chunk hull or box is drawn at its solver pose (WGSL, 4x MSAA, headless), with an
+overlay, and piped into ffmpeg (`FFMPEG` overrides the binary); a per-frame CSV (step
+time, substeps, broken bonds, clusters) is written next to the video.
+
+```sh
+cargo build --release -p stress-rubble --features gpu --example destruction_video
+# four packs (house-1story, brick-building, house-2story, villa-savoye) struck by lobbed balls
+target/release/examples/destruction_video --scene town --seconds 6 --out videos/demo/town.mp4
+# free walls rammed in turn in zero gravity, with the measured step time per frame
+target/release/examples/destruction_video --scene live --seconds 8 --encode-after --live-readout --out videos/demo/live.mp4
+```
+
+Other options: `--width`/`--height` (default 1920x1080), `--no-render` (timing only),
+`--info` (scene summary), `--scene live-gravity`, a comma-separated subset of the town's
+packs, and `--walls`, `--wall NXxNYxNZ`, `--chunk`, `--ram-mass`, `--ram-half`, `--houses`.
+The packs load unchanged: their hull colliders (at most 42 points) are within the
+64-corner limit stress-ref and rubble share, and a pack beyond it fails at import. The
+fork's version-1 Voronoi packs (fractured-tower, -bridge, -wall), which it reduced to 64
+corners at load time, are not in `packs/`, so the town here has four structures, not seven.
 
 `stress-ref run` options: `--seed N`, `--mode explicit|implicit|adaptive|quasi_static`,
 `--stiffness-scale S`, `--max-substep DT`, `--frame-dt DT`, `--no-fracture`,
