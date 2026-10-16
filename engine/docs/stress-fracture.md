@@ -97,8 +97,9 @@ removal: rubble 10/10, PhysX 14/14, oracle 11/11, so rubble is closer.
 
 `engine/stress-oracle/scripts/stress_bench_report.py` turns `stress_bench` runs into the
 three-way table (oracle CPU, PhysX GPU, rubble); the measured tables are in
-`docs/stress-fracture-benchmark.md`. That is the 2026-10-16 rerun after the lossless host
-work (`reference/bench-2026-10-16b`, M3 Max, three repeats; other sessions shared the GPU
+`docs/stress-fracture-benchmark.md`. Its rubble rows are the final code
+(`reference/bench-2026-10-16c`; the oracle and PhysX rows carried over from
+`bench-2026-10-16b`, M3 Max, three repeats; other sessions shared the GPU
 at times, so single cells are noisy). Medians in rubble's production configuration (no
 rewinds) against PhysX GPU:
 
