@@ -2123,6 +2123,12 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
             emitManifold(pair, ba, bb, ca, cb, flipManifold(mf), margin);
         return;
     }
+    if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CAPSULE)
+    {
+        emitManifold(pair, ba, bb, ca, cb,
+            collideCapsules(posA, rotA, ca.params.x, ca.params.y, posB, rotB, cb.params.x, cb.params.y, speculativeMargin()), margin);
+        return;
+    }
     if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_PLANE)
     {
         emitManifold(pair, ba, bb, ca, cb,
@@ -2250,22 +2256,6 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
             pB = transformPoint(posB, rotB, onBox);
             pA = posA + nrm * rGeo;
         }
-    }
-    else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CAPSULE)
-    {
-        float rA = ca.params.x;
-        float rB = cb.params.x;
-        float3 axA = quatRotate(rotA, float3(0, 1, 0));
-        float3 axB = quatRotate(rotB, float3(0, 1, 0));
-        float3 a0 = posA - axA * ca.params.y;
-        float3 a1 = posA + axA * ca.params.y;
-        float3 b0 = posB - axB * cb.params.y;
-        float3 b1 = posB + axB * cb.params.y;
-        float3 midA = 0.5 * (a0 + a1);
-        float3 midB = 0.5 * (b0 + b1);
-        float sep = length(midB - midA) - ca.params.y - cb.params.y;
-        if (sep < rA + rB + margin)
-            hit = sphereSphere(midA, rA + ca.params.y * 0.25, midB, rB + cb.params.y * 0.25, margin, nrm, pen, pA, pB);
     }
     else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_SPHERE)
     {

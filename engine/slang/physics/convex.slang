@@ -416,25 +416,6 @@ Frame colliderFrame(Collider c, BodyState b)
     return f;
 }
 
-void closestSegments(float3 p1, float3 q1, float3 p2, float3 q2, out float3 c1, out float3 c2)
-{
-    float3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
-    float a = dot(d1, d1), e = dot(d2, d2), b = dot(d1, d2), c = dot(d1, r), f = dot(d2, r);
-    float s = 0.0, t = 0.0;
-    if (a > 1e-12 && e > 1e-12)
-    {
-        float denom = a * e - b * b;
-        s = denom > 1e-12 ? clamp((b * f - c * e) / denom, 0.0, 1.0) : 0.0;
-        t = (b * s + f) / e;
-        if (t < 0.0) { t = 0.0; s = clamp(-c / a, 0.0, 1.0); }
-        else if (t > 1.0) { t = 1.0; s = clamp((b - c) / a, 0.0, 1.0); }
-    }
-    else if (e > 1e-12) t = clamp(f / e, 0.0, 1.0);
-    else if (a > 1e-12) s = clamp(-c / a, 0.0, 1.0);
-    c1 = p1 + s * d1;
-    c2 = p2 + t * d2;
-}
-
 // Uncertified hulls: the SAT edge pair fixes the axis, not the supporting edges
 // (any parallel edge yields the same cross product). Pick the parallel edge that
 // is extreme along n: `sign` +1 maximises (A), -1 minimises (B).

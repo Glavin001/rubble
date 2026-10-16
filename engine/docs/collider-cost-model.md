@@ -27,9 +27,10 @@ How each pair is handled:
 
 | Pair | Path | Max contacts |
 |---|---|---|
-| Sphere/sphere, sphere/plane, sphere/box, sphere/capsule, capsule/capsule | Closed form, one thread | 1 (capsule/capsule: 1) |
+| Sphere/sphere, sphere/plane, sphere/box, sphere/capsule | Closed form, one thread | 1 |
 | Box/box, box/plane | Box SAT and clipping, one thread | 4 |
 | Box/capsule, capsule/plane | Closest segment feature (box) or end caps (plane), clipped to the box face; one thread | 2 |
+| Capsule/capsule | Closest segment points; near-parallel segments (< 3°) get both ends of their overlap, plus the closest pair if they cross inside it; one thread | 2 (3 when crossing) |
 | Any pair with a hull (box/hull, hull/hull, hull vs sphere/capsule/plane) | Cooperative hull path: classify, cached-axis check, SAT, manifold | 4 |
 ## Measured cost
 
@@ -45,7 +46,8 @@ pair hasn't moved.
 | box/sphere | 1 | 37 | 3 | | 0.63 |
 | hull 8v/sphere | 1 | 38 | 5 | | 0.66 |
 | hull 32v/sphere | 1 | 39 | 5 | | 0.67 |
-| box/capsule | 2 | 44 | 7 | 42 | 0.76 |
+| box/capsule | 2 | 44 | 7 | 42 | 0.75 |
+| capsule/capsule (parallel) | 2 | 47 | 8 | 42 | 0.76 |
 | hull 32v/capsule | 2 | 47 | 8 | | 0.81 |
 | **box/box** | 4 | **58** | 11 | 56 | **1.00** |
 | box/hull 8v | 3.25 | 69 | 26 | | 1.19 |
@@ -60,8 +62,9 @@ pair hasn't moved.
 | hull 8v / 4-box compound (4 pairs) | 12 | 161 | 87 | | 2.77 |
 
 Hull "Nv" means N vertices; a box as a hull has 8. The hulls are prisms with
-the box's footprint and height. The resting column was measured for five
-pairs only.
+the box's footprint and height. The resting column was measured for six
+pairs only. The capsule rows were measured in later runs; their ratio is
+against box/box from the same run (59 and 62 ns).
 
 ## The model
 
@@ -79,6 +82,7 @@ cost ≈ Σ awake bodies              22 ns            (6x6 solve per body, 8 it
 |---|---|
 | sphere vs box or hull | 3-5 |
 | capsule vs box | 7 |
+| capsule vs capsule | 8 |
 | capsule vs hull | 8 |
 | box vs box | 11 |
 | hull vs hull or box, both ≤ 16 vertices (≤ 32 faces, ≤ 48 edges: the small SAT bucket) | 26-38 |
