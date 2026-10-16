@@ -77,6 +77,7 @@ pub mod shaders {
 pub use stress_ref::scenes;
 pub mod solver;
 pub mod statics;
+pub mod static_inputs;
 pub mod stability;
 pub mod world;
 pub mod stress;

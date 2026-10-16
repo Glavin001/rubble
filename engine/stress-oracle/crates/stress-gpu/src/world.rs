@@ -34,6 +34,7 @@ use stress_ref::engine::{BodyKey, RigidEngine};
 use stress_ref::world::{fractured_since, World};
 
 use crate::gpu::Gpu;
+use crate::static_inputs::StaticInputs;
 use crate::loads::WorldLoads;
 use crate::solver::GpuSolver;
 
@@ -98,6 +99,15 @@ pub struct GpuWorld {
     /// Island segments solved again at a smaller contact step (a plan made within the
     /// segment needed it): local retries of the stress solve, not frame rewinds.
     pub segment_retries: u64,
+    /// Coupled quasi-static frames: each cluster's (by id) last solve inputs that left its
+    /// state unchanged (`static_inputs`), and whether that solve converged.
+    static_repeats: std::collections::HashMap<u64, (StaticInputs, bool)>,
+}
+
+/// `STRESS_GPU_QS_EVERY_SOLVE=1`: the coupled quasi-static frame without its lossless
+/// shortcuts (repeated solves skipped, no rebuild without a damage change).
+fn qs_every_solve() -> bool {
+    std::env::var("STRESS_GPU_QS_EVERY_SOLVE").is_ok_and(|v| v == "1")
 }
 
 /// Frames a structure stays promoted (its clusters island seeds) after its last fracture.
@@ -180,6 +190,7 @@ impl GpuWorld {
             unverified_fractures: 0,
             promoted: std::collections::HashMap::new(),
             segment_retries: 0,
+            static_repeats: std::collections::HashMap::new(),
         };
         let values: Vec<f64> = (0..scene.probes.len()).map(|p| w.probe_value(p)).collect();
         w.record(w.solver.mirror.time, &values, true);
@@ -202,8 +213,8 @@ impl GpuWorld {
     /// the engine owns rigid motion and contact except in impact islands, which the GPU
     /// simulates with its own chunk-level contact.
     pub fn with_engine(gpu: &Gpu, scene: &Scene, engine: Box<dyn RigidEngine>) -> Result<GpuWorld, String> {
-        if !matches!(scene.sim.solve_mode, SolveMode::Explicit | SolveMode::Adaptive) {
-            return Err("the engine-coupled world runs the explicit or adaptive solve".into());
+        if !matches!(scene.sim.solve_mode, SolveMode::Explicit | SolveMode::Adaptive | SolveMode::QuasiStatic) {
+            return Err("the engine-coupled world runs the explicit, adaptive or quasi-static solve".into());
         }
         let mut w = GpuWorld::new(gpu, scene)?;
         w.solver.sync(gpu);
@@ -213,6 +224,12 @@ impl GpuWorld {
         }
         w.with_shell_mut(|shell| shell.attach_engine(engine));
         Ok(w)
+    }
+
+    /// Coupled mode: impact islands on (the default) or off (the engine drives every
+    /// body and its contacts reach the stress solve only as loads; `World::impact_islands`).
+    pub fn set_impact_islands(&mut self, on: bool) {
+        self.shell.impact_islands = on;
     }
 
     /// Whether the world is coupled to an engine.
@@ -286,10 +303,17 @@ impl GpuWorld {
             let f = self.with_shell_mut(|w| w.coupled_prepare(&forced));
             self.solver.mirror_check("after coupled_prepare (engine step)");
             self.filter.ingest(&self.solver.mirror, f.t0, fdt, &f.impulses);
-            self.solver.extra_terms = self.filter.terms(&self.solver.mirror);
+            // Quasi-static (no islands, nothing integrated explicitly): the substeps only
+            // sample the loads for the frame's average. With the engine's loads as their
+            // exact frame averages and no scripted loads or events (which take substep
+            // times), one substep gives that average exactly.
+            let qs_one_step = self.scene.sim.solve_mode == SolveMode::QuasiStatic && f.frozen.is_empty() && self.scene.loads.is_empty() && self.scene.events.is_empty();
+            self.solver.extra_terms = if qs_one_step { self.filter.frame_average_terms(&self.solver.mirror, f.t0, fdt) } else { self.filter.terms(&self.solver.mirror) };
             self.solver.refresh(gpu)?;
             let (mut n, mut h) = (f.n, f.h);
-            if self.stress_step_outside_islands && f.frozen.is_empty() {
+            if qs_one_step {
+                (n, h) = (1, fdt);
+            } else if self.stress_step_outside_islands && f.frozen.is_empty() {
                 let dt = self.stress_dt().min(fdt);
                 n = (fdt / dt).ceil().max(1.0) as usize;
                 h = fdt / n as f64;
@@ -704,10 +728,18 @@ impl GpuWorld {
                 // world.rs: the frame's average loads, equilibrium with same-step cascade.
                 let mut fl = self.solver.frame_load_sum.clone();
                 fl.scale(1.0 / n as f64);
-                if !self.solve_static_all(gpu, &fl)? {
+                let (converged, structural, solved) = self.solve_static_all(gpu, &fl)?;
+                if !converged {
                     self.shell.static_unconverged_frames += 1;
                 }
-                true
+                // Coupled: without a damage change or split only the solved bonds'
+                // history moved (the GPU holds the equilibrium): upload it, no rebuild.
+                if self.coupled() && !structural && !qs_every_solve() {
+                    self.solver.upload_bonds(gpu, &solved);
+                    false
+                } else {
+                    true
+                }
             }
             SolveMode::Adaptive if host_statics => {
                 let settled = self.settle_quiet_clusters(gpu);
@@ -744,16 +776,49 @@ impl GpuWorld {
 
     /// statics.rs `solve_static_all` with the same-step cascade: every cluster to
     /// equilibrium (one GPU dispatch), damage committed at it, splits, and again until no
-    /// bond changes. Whether every solve converged.
-    fn solve_static_all(&mut self, gpu: &Gpu, loads: &ChunkLoads) -> Result<bool, String> {
+    /// bond changes. Whether every solve converged, whether any damage changed or a
+    /// cluster split, and the clusters of the first pass.
+    fn solve_static_all(&mut self, gpu: &Gpu, loads: &ChunkLoads) -> Result<(bool, bool, Vec<usize>), String> {
         let dt = self.scene.sim.frame_dt;
         let mut converged = true;
+        let mut structural = false;
+        let mut first = Vec::new();
+        // Coupled: a cluster whose solve inputs repeat those of a solve that left its
+        // state unchanged is not solved again (`static_inputs`; lossless).
+        // (`STRESS_GPU_QS_EVERY_SOLVE=1`, diagnostic: every solve and rebuild, to check
+        // that the shortcuts change nothing.)
+        let skip_repeats = self.coupled() && !qs_every_solve();
         for pass in 0..StaticOptions::default().max_cascade.max(1) {
             if pass > 0 {
                 self.solver.coverage |= crate::coverage::QS_CASCADE;
             }
             let clusters: Vec<usize> = (0..self.solver.mirror.clusters.len()).filter(|&ci| !self.solver.mirror.clusters[ci].bonds.is_empty()).collect();
-            let results = self.equilibrate(gpu, &clusters, loads);
+            if pass == 0 {
+                first = clusters.clone();
+            }
+            let results = if skip_repeats {
+                let m = &self.solver.mirror;
+                let inputs: Vec<StaticInputs> = clusters.iter().map(|&ci| StaticInputs::of(m, ci, loads)).collect();
+                let mut results: Vec<Option<bool>> = clusters.iter().zip(&inputs).map(|(&ci, k)| self.static_repeats.get(&m.clusters[ci].id).filter(|(was, _)| was == k).map(|(_, ok)| *ok)).collect();
+                let todo: Vec<usize> = clusters.iter().zip(&results).filter(|(_, r)| r.is_none()).map(|(&ci, _)| ci).collect();
+                let solved = if todo.is_empty() { Vec::new() } else { self.equilibrate(gpu, &todo, loads) };
+                let m = &self.solver.mirror;
+                for (k, &ci) in clusters.iter().enumerate() {
+                    if let Some(j) = todo.iter().position(|&t| t == ci) {
+                        results[k] = Some(solved[j]);
+                        // Converged or not (an unconverged solve keeps its start state),
+                        // a solve that ended where it started repeats bit for bit.
+                        if inputs[k].same_state(m, ci) {
+                            self.static_repeats.insert(m.clusters[ci].id, (inputs[k].clone(), solved[j]));
+                        } else {
+                            self.static_repeats.remove(&m.clusters[ci].id);
+                        }
+                    }
+                }
+                results.into_iter().map(|r| r.expect("solved or repeated")).collect()
+            } else {
+                self.equilibrate(gpu, &clusters, loads)
+            };
             let m = &mut self.solver.mirror;
             let mut any = false;
             let mut to_split = Vec::new();
@@ -775,13 +840,14 @@ impl GpuWorld {
             if !any {
                 break;
             }
+            structural = true;
             // Damage (and topology) changed on the mirror: the next pass solves from it.
             if let Some(l) = self.solver.loads.as_mut() {
                 l.topology_version += 1;
             }
             self.solver.rebuild(gpu, 0.0)?;
         }
-        Ok(converged)
+        Ok((converged, structural, first))
     }
 
     /// world.rs `settle_quiet_clusters` (`GpuSolver::settle_quiet_clusters`).
