@@ -11,6 +11,8 @@ New 3D GPU rigid-body physics engine. **Not** an extension of the legacy `crates
 See [TOOLCHAIN.md](TOOLCHAIN.md) for slangc and pinned inspiration revisions.
 For the browser demo and automated scale/correctness checks, see
 [Slang/WebGPU regression checks](crates/engine-webgpu/README.md).
+For single-file Shardwright asset import, see the
+[fracture GLB / WebGPU demo](crates/engine-webgpu/fracture/README.md).
 
 ## Quick start (Metal)
 
