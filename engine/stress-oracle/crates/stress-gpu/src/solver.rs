@@ -755,6 +755,8 @@ impl GpuSolver {
         let mut segments: Vec<u32> = Vec::new();
         // Each chunk's contact plan, for the scratch (`cplan_base`).
         let mut chunk_plan = vec![[[0f32; 4]; 4]; chunks.len()];
+        // Contact modulus and friction by material name (looked up once per name).
+        let mut contact_material: Vec<(&str, (f64, f64))> = Vec::new();
         for (k, &(s, c)) in chunks.iter().enumerate() {
             let ci = m.chunks[s][c].cluster;
             let data = &m.structures[s].chunks[c];
@@ -766,7 +768,14 @@ impl GpuSolver {
                 segments.extend([k as u32, entries + at as u32, entries + end as u32]);
             }
             let (e, mu) = match &scene {
-                Some(scene) => (modulus(scene, &data.material), scene.material(&data.material).friction),
+                Some(scene) => match contact_material.iter().find(|(name, _)| *name == data.material.as_str()) {
+                    Some(&(_, em)) => em,
+                    None => {
+                        let em = (modulus(scene, &data.material), scene.material(&data.material).friction);
+                        contact_material.push((data.material.as_str(), em));
+                        em
+                    }
+                },
                 None => (1.0, 0.0),
             };
             let (start_hi, start_lo) = split(m.chunk_position(s, c));
