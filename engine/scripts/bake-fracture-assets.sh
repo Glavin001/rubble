@@ -2,7 +2,8 @@
 # Rebuild the fracture lab's assets from Shardwright, reproducibly.
 #
 # Shardwright (the `prefracture` CLI, crate frac-cli) is taken from either
-#   SHARDWRIGHT_PATH=/path/to/Shardwright   a local checkout, built as it is, or
+#   --shardwright PATH (or SHARDWRIGHT_PATH)  an existing local clone, built as it is
+#                                            (a warning when it is not at the pinned commit), or
 #   SHARDWRIGHT_REV=<commit>                 github.com/Glavin001/Shardwright at that commit
 #                                            (cloned and built once under engine/.tools/);
 #                                            default: the pinned commit below.
@@ -12,7 +13,8 @@
 # commit, source, config and seed; the script prints each output's SHA-256 so a rebuild
 # can be compared with the recorded one.
 #
-#   engine/scripts/bake-fracture-assets.sh [--out DIR] [--install]
+#   engine/scripts/bake-fracture-assets.sh [--shardwright PATH] [--out DIR] [--install]
+#   engine/scripts/bake-fracture-assets.sh --shardwright ~/Development/Shardwright
 #
 # Without --install the GLBs go to DIR (default engine/.tools/baked/); --install copies
 # them over engine/crates/engine-webgpu/fracture/assets/ and the oracle packs. Different
@@ -26,6 +28,7 @@ INSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT=$2; shift 2 ;;
+    --shardwright) SHARDWRIGHT_PATH=$2; shift 2 ;;
     --install) INSTALL=1; shift ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
@@ -40,7 +43,10 @@ ASSETS=(
 
 if [ -n "${SHARDWRIGHT_PATH:-}" ]; then
   SW=$(cd "$SHARDWRIGHT_PATH" && pwd)
-  REV="$(git -C "$SW" rev-parse --short HEAD)$(git -C "$SW" diff --quiet && git -C "$SW" diff --cached --quiet || echo -dirty)"
+  REV="$(git -C "$SW" rev-parse HEAD)$(git -C "$SW" diff --quiet && git -C "$SW" diff --cached --quiet || echo -dirty)"
+  if [ "$REV" != "$PINNED_SHARDWRIGHT_REV" ]; then
+    echo "warning: $SW is at $REV, not the pinned $PINNED_SHARDWRIGHT_REV: its bakes may differ from the recorded assets" >&2
+  fi
 else
   SHARDWRIGHT_REV=${SHARDWRIGHT_REV:-$PINNED_SHARDWRIGHT_REV}
   SW="$ENGINE/.tools/shardwright-$SHARDWRIGHT_REV"
