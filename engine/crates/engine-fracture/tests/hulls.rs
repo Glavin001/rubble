@@ -20,7 +20,11 @@ fn prism(sides: usize, radius: f64, height: f64) -> (Vec<[f64; 3]>, Vec<u32>, Ve
     for i in 0..n {
         faces.push(vec![i, (i + 1) % n, (i + 1) % n + n, i + n]);
     }
-    (v, faces.iter().map(|f| f.len() as u32).collect(), faces.concat())
+    (
+        v,
+        faces.iter().map(|f| f.len() as u32).collect(),
+        faces.concat(),
+    )
 }
 
 #[test]
@@ -49,7 +53,9 @@ fn offset_compound_children_are_recentred_with_tight_bounds() {
 #[test]
 fn convexity_is_judged_at_the_f32_precision_of_the_input_frame() {
     let cube = |center: [f64; 3], half: f64, lift: f64| {
-        let mut v: Vec<[f64; 3]> = (0..8).map(|i| [0, 1, 2].map(|k| center[k] + if (i >> k) & 1 != 0 { half } else { -half })).collect();
+        let mut v: Vec<[f64; 3]> = (0..8)
+            .map(|i| [0, 1, 2].map(|k| center[k] + if (i >> k) & 1 != 0 { half } else { -half }))
+            .collect();
         v.push([center[0], center[1] + half + lift, center[2]]);
         v
     };
@@ -61,9 +67,15 @@ fn convexity_is_judged_at_the_f32_precision_of_the_input_frame() {
         append_hull(&mut arena, v, &sizes, &indices, scale).map(|_| ())
     };
     assert!(cook(&cube([6.0, 0.0, 0.0], 0.25, 3e-6), 0.0).is_ok());
-    assert!(cook(&cube([6.0, 0.0, 0.0], 0.25, 1e-3), 0.0).unwrap_err().to_string().contains("non-convex"));
+    assert!(cook(&cube([6.0, 0.0, 0.0], 0.25, 1e-3), 0.0)
+        .unwrap_err()
+        .to_string()
+        .contains("non-convex"));
     let small = cube([0.0; 3], 0.25, 3e-6);
-    assert!(cook(&small, 0.0).unwrap_err().to_string().contains("non-convex"));
+    assert!(cook(&small, 0.0)
+        .unwrap_err()
+        .to_string()
+        .contains("non-convex"));
     // Data stored as f32 in a 6 m frame, cooked after moving to the origin.
     assert!(cook(&small, 6.25).is_ok());
 }
@@ -74,7 +86,11 @@ fn filter_words_match_the_collision_filter_encoding() {
     c.material = 3;
     assert_eq!(c.filter_words(), (0, 3));
     c.material = 5;
-    c.filter = Some(Filter { categories: 1, mask: 2, group: -3 });
+    c.filter = Some(Filter {
+        categories: 1,
+        mask: 2,
+        group: -3,
+    });
     assert_eq!(c.filter_words(), (1 | 2 << 16, 5 | 0xfffd << 16));
     assert!(c.has_filter());
 }
@@ -111,7 +127,11 @@ fn hill_climb_supports_match_brute_force_on_every_certified_house_hull() {
             let byte = |w: usize, b: usize| (word(w + b / 4) >> ((b % 4) * 8)) & 255;
             let vertex = |i: usize| {
                 let r = h[base + 4 + i];
-                [f32::from_bits(r[0]) as f64, f32::from_bits(r[1]) as f64, f32::from_bits(r[2]) as f64]
+                [
+                    f32::from_bits(r[0]) as f64,
+                    f32::from_bits(r[1]) as f64,
+                    f32::from_bits(r[2]) as f64,
+                ]
             };
             let edge = |e: usize| {
                 let x = word(head[2] as usize + e);
@@ -120,7 +140,9 @@ fn hill_climb_supports_match_brute_force_on_every_certified_house_hull() {
             let adjacency = |i: usize| {
                 let x = h[base + 4 + i][3];
                 let (start, deg) = ((x & 0xffff) as usize, (x >> 16) as usize);
-                (0..deg).map(|j| byte(head[3] as usize, start + j) as usize).collect::<Vec<_>>()
+                (0..deg)
+                    .map(|j| byte(head[3] as usize, start + j) as usize)
+                    .collect::<Vec<_>>()
             };
             if adjacency(0).is_empty() {
                 isolated_start += 1;
@@ -145,10 +167,19 @@ fn hill_climb_supports_match_brute_force_on_every_certified_house_hull() {
                     cur = next;
                     cur_d = next_d;
                 }
-                let best = (0..nv).map(|i| dot(vertex(i), *d)).fold(f64::NEG_INFINITY, f64::max);
-                assert!(best - cur_d <= 1e-6, "level {level} hull {base}: climb stopped {} short", best - cur_d);
+                let best = (0..nv)
+                    .map(|i| dot(vertex(i), *d))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                assert!(
+                    best - cur_d <= 1e-6,
+                    "level {level} hull {base}: climb stopped {} short",
+                    best - cur_d
+                );
             }
         }
     }
-    assert!(isolated_start > 0, "the asset still exercises hulls whose vertex 0 is on no face");
+    assert!(
+        isolated_start > 0,
+        "the asset still exercises hulls whose vertex 0 is on no face"
+    );
 }

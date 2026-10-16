@@ -10,7 +10,7 @@ test('cuboid house: box colliders only, all pieces asleep and dynamic',()=>{
  assert.equal(house.projectileStart,house.pieces+1);
  assert.ok(house.colliders.slice(1,house.projectileStart).every(c=>c.shape===2&&c.params.slice(0,3).every(h=>h>0)));
  assert.ok(house.bodies.slice(1,house.projectileStart).every(b=>b.flags===5&&b.invMass>0));
- assert.equal(house.params.flags,97,'reuse, zero-gap contacts, world-frame inertia');
+ assert.equal(house.params.flags,6222049,'the fracture-scene defaults plus zero-gap contacts');
  assert.equal(buildCuboidHouse({colliders:'hull'}).hullCount,house.pieces);
 });
 

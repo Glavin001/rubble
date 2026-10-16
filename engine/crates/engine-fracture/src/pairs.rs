@@ -28,12 +28,19 @@ fn prism(n: usize) -> (Vec<[f64; 3]>, Vec<u32>, Vec<u32>) {
     for i in 0..n {
         v.push([v[i][0], HALF[1], v[i][2]]);
     }
-    let mut faces: Vec<Vec<u32>> = vec![(0..n as u32).collect(), (0..n as u32).map(|i| n as u32 + i).rev().collect()];
+    let mut faces: Vec<Vec<u32>> = vec![
+        (0..n as u32).collect(),
+        (0..n as u32).map(|i| n as u32 + i).rev().collect(),
+    ];
     for i in 0..n as u32 {
         let j = (i + 1) % n as u32;
         faces.push(vec![i, n as u32 + i, n as u32 + j, j]);
     }
-    (v, faces.iter().map(|f| f.len() as u32).collect(), faces.concat())
+    (
+        v,
+        faces.iter().map(|f| f.len() as u32).collect(),
+        faces.concat(),
+    )
 }
 
 fn colliders_for(shape: &str, body: u32, arena: &mut HullArena) -> Result<Vec<Collider>> {
@@ -43,20 +50,29 @@ fn colliders_for(shape: &str, body: u32, arena: &mut HullArena) -> Result<Vec<Co
         "sphere" => vec![c(SHAPE_SPHERE, [RADIUS, 0.0, 0.0, 0.0])],
         "capsule" => {
             let h = std::f64::consts::FRAC_1_SQRT_2;
-            vec![Collider { local_rot: [0.0, 0.0, h, h], ..c(SHAPE_CAPSULE, [RADIUS, RADIUS, 0.0, 0.0]) }]
+            vec![Collider {
+                local_rot: [0.0, 0.0, h, h],
+                ..c(SHAPE_CAPSULE, [RADIUS, RADIUS, 0.0, 0.0])
+            }]
         }
         "box4" => {
             let h = [HALF[0] / 2.0, HALF[1], HALF[2] / 2.0];
             let mut out = Vec::new();
             for sx in [-1.0, 1.0] {
                 for sz in [-1.0, 1.0] {
-                    out.push(Collider { local_pos: [sx * h[0], 0.0, sz * h[2]], ..c(SHAPE_BOX, [h[0], h[1], h[2], 0.0]) });
+                    out.push(Collider {
+                        local_pos: [sx * h[0], 0.0, sz * h[2]],
+                        ..c(SHAPE_BOX, [h[0], h[1], h[2], 0.0])
+                    });
                 }
             }
             out
         }
         _ => {
-            let Some(n) = shape.strip_prefix("hull").and_then(|n| n.parse::<usize>().ok()) else {
+            let Some(n) = shape
+                .strip_prefix("hull")
+                .and_then(|n| n.parse::<usize>().ok())
+            else {
                 bail!("Unknown bench shape {shape}");
             };
             let (v, sizes, indices) = prism(n);
@@ -92,7 +108,11 @@ pub fn build_pair_scene(a: &str, b: &str, count: u32, spacing: f64) -> Result<Sc
         bodies.push(Body {
             p: [x, 2.0 * HALF[1] + rest_half(b), z],
             inv_mass: 1.0 / m,
-            inv_i: [3.0 / (m * (sq(HALF[1]) + sq(HALF[2]))), 3.0 / (m * (sq(HALF[0]) + sq(HALF[2]))), 3.0 / (m * (sq(HALF[0]) + sq(HALF[1])))],
+            inv_i: [
+                3.0 / (m * (sq(HALF[1]) + sq(HALF[2]))),
+                3.0 / (m * (sq(HALF[0]) + sq(HALF[2]))),
+                3.0 / (m * (sq(HALF[0]) + sq(HALF[1]))),
+            ],
             flags: FLAG_DYNAMIC,
             ..Body::fixed([0.0; 3])
         });
@@ -100,13 +120,22 @@ pub fn build_pair_scene(a: &str, b: &str, count: u32, spacing: f64) -> Result<Sc
     }
     let extent = side as f64 * spacing;
     // Flags: world-frame inertia (+1 contact reuse when the host asks). Sleep off.
-    let params = SceneParams { sleep_lin: -1.0, sleep_ang: -1.0, sleep_time: 1e9, ..SceneParams::lab(FLAG_WORLD_INERTIA) };
+    let params = SceneParams {
+        sleep_lin: -1.0,
+        sleep_ang: -1.0,
+        sleep_time: 1e9,
+        ..SceneParams::lab(FLAG_WORLD_INERTIA)
+    };
     let mut s = Scene::from_parts(bodies, colliders, &arena, params);
     s.projectile_radius = 0.25;
     s.extent = extent;
     s.extent_x = extent;
     s.extent_z = extent;
     s.center = [0.0, 0.5, 0.0];
-    s.capacity = Budget { candidates_per_collider: 8, contacts_per_collider: 16, ..Budget::default() };
+    s.capacity = Budget {
+        candidates_per_collider: 8,
+        contacts_per_collider: 16,
+        ..Budget::default()
+    };
     Ok(s)
 }
