@@ -7,17 +7,19 @@
 //   profile  per-kernel GPU timestamps after measuring, 0/1  (default 1)
 //   trace    log counters every N warm ticks, 0 = off        (default 0)
 //   budget   JSON merged into scene.capacity, e.g. {"deterministic":true}
+//   bonds    1: the lab's breakable bonds (experimental), preloaded as in the lab
 import {parseFractureGlb} from './asset.mjs';
 import {buildScene,buildGrid,buildSuburb} from './geometry.mjs';
 import {buildCuboidHouse} from './cuboid-house.mjs';
 import {createSimulation} from './simulation.mjs';
+import {preloadBonds} from './bonds.mjs';
 
 // Same bundled scenes as the lab (main.mjs samples), without bond preloading.
 const SCENES={house:{file:'veneer-house.glb'},grid:{file:'veneer-house.glb',layout:{columns:7,rows:7},level:2},
  suburb:{file:'veneer-house.glb',layout:{suburb:true},level:2},
  cuboidGrid:{procedural:true,layout:{columns:7,rows:7}},cuboids:{procedural:true,layout:{suburb:true}}};
 
-async function buildNamed(name){
+async function buildNamed(name,device,bonds){
  const entry=SCENES[name];if(!entry)throw new Error(`Unknown scene ${name}`);
  if(entry.procedural){
   const one=buildCuboidHouse(),scene=(entry.layout.suburb?buildSuburb:buildGrid)(null,0,{...entry.layout,base:one});
@@ -26,7 +28,7 @@ async function buildNamed(name){
  const response=await fetch(`./assets/${entry.file}`);if(!response.ok)throw new Error(`Missing asset ${entry.file}`);
  const asset=parseFractureGlb(await response.arrayBuffer());
  const level=entry.level??Math.min(...asset.physics.fragments.map(f=>f.level));
- const one={...buildScene(asset,level),joints:[]};
+ const built=buildScene(asset,level),one=bonds?await preloadBonds(device,built):{...built,joints:[]};
  return entry.layout?(entry.layout.suburb?buildSuburb:buildGrid)(asset,level,{...entry.layout,base:one}):one;
 }
 
@@ -39,7 +41,7 @@ async function run(){
   requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(16,adapter.limits.maxStorageBuffersPerShaderStage),
    maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  let gpuError=null;device.addEventListener('uncapturederror',e=>{gpuError??=String(e.error.message)});
- const built=await buildNamed(name),scene={...built,capacity:{...built.capacity,...budget}};
+ const built=await buildNamed(name,device,num('bonds',0)===1),scene={...built,capacity:{...built.capacity,...budget}};
  const sim=await createSimulation(device,scene);
  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
  const log=[],t0=performance.now();
@@ -51,7 +53,7 @@ async function run(){
  let kernels=null;
  if(num('profile',1)){const agg={};for(let r=0;r<3;r++){const p=await sim.profileKernels();if(!p.supported)break;for(const [k,v] of Object.entries(p.kernels))agg[k]=(agg[k]??0)+v.ms/3}
   kernels=Object.fromEntries(Object.entries(agg).sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k,+v.toFixed(3)]))}
- const result={scene:name,bodies:scene.bodies.length,colliders:scene.colliders.length,budget,warm,measure,
+ const result={scene:name,bodies:scene.bodies.length,colliders:scene.colliders.length,joints:scene.joints?.length??0,budget,warm,measure,
   msPerTick:+msPerTick.toFixed(3),ticksPerSecond:+(1000/msPerTick).toFixed(1),warmMs:Math.round(warmMs),counters,kernels,trace:log,gpuError};
  sim.dispose();return result;
 }
