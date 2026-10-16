@@ -4,7 +4,7 @@ fn stat_card(ui: &mut egui::Ui, label: &str, value: String) {
     egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14))
         .stroke(egui::Stroke::new(
-            1.0,
+            1.0_f32,
             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 24),
         ))
         .corner_radius(8.0)
@@ -44,7 +44,7 @@ pub fn draw_panel(
     let panel_frame = egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(18, 20, 26, 232))
         .stroke(egui::Stroke::new(
-            1.0,
+            1.0_f32,
             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 24),
         ))
         .corner_radius(14.0)

@@ -139,7 +139,14 @@ fn run(label: &str, spec: GridSpec, cfg: SimConfig, steps: usize) -> f32 {
                 sum_y += b.position.y;
                 max_y = max_y.max(b.position.y);
             }
-            println!("{},{:.2},{:.2},{:.2},{:.2}", s, max_r, max_speed, sum_y / n as f32, max_y);
+            println!(
+                "{},{:.2},{:.2},{:.2},{:.2}",
+                s,
+                max_r,
+                max_speed,
+                sum_y / n as f32,
+                max_y
+            );
         }
     }
     println!("PEAK SPEED: {peak_speed:.2} m/s");
@@ -193,10 +200,30 @@ fn grid_explosion_baseline() {
         vgap: 0.08,
         clearance: 0.03,
     };
-    run("plane shallow", dropped(6, 6, 6, Floor::Plane), default_cfg(), 300);
-    run("box shallow", dropped(6, 6, 6, Floor::Box), default_cfg(), 300);
-    run("plane deep", dropped(6, 24, 6, Floor::Plane), default_cfg(), 300);
-    run("box deep", dropped(6, 24, 6, Floor::Box), default_cfg(), 300);
+    run(
+        "plane shallow",
+        dropped(6, 6, 6, Floor::Plane),
+        default_cfg(),
+        300,
+    );
+    run(
+        "box shallow",
+        dropped(6, 6, 6, Floor::Box),
+        default_cfg(),
+        300,
+    );
+    run(
+        "plane deep",
+        dropped(6, 24, 6, Floor::Plane),
+        default_cfg(),
+        300,
+    );
+    run(
+        "box deep",
+        dropped(6, 24, 6, Floor::Box),
+        default_cfg(),
+        300,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +317,12 @@ fn t4_substep_ladder() {
     };
     let mut results = Vec::new();
     for substeps in [1u32, 2, 4] {
-        let peak = run(&format!("T4 substeps={substeps}"), deep, cfg_with(12, substeps), 300);
+        let peak = run(
+            &format!("T4 substeps={substeps}"),
+            deep,
+            cfg_with(12, substeps),
+            300,
+        );
         results.push((substeps, peak));
     }
     println!("\nT4 VERDICT (substeps -> peak speed):");
@@ -362,7 +394,12 @@ fn fix_check_substeps4() {
         clearance: 0.03,
         ..presettled
     };
-    let ps = run("FIX pre-settled deep (ss=4)", presettled, cfg_with(12, 4), 300);
+    let ps = run(
+        "FIX pre-settled deep (ss=4)",
+        presettled,
+        cfg_with(12, 4),
+        300,
+    );
     let cl = run("FIX single column (ss=4)", column, cfg_with(12, 4), 300);
     let dr = run("FIX dropped deep (ss=4)", dropped, cfg_with(12, 4), 300);
     println!("\nFIX-CHECK VERDICT (ss=4): pre-settled={ps:.1} column={cl:.1} dropped={dr:.1} m/s");
@@ -398,7 +435,10 @@ fn substep_choice_probe() {
         world.step();
         let ss = world.last_substeps();
         let snaps = snapshot_all(&world, &tracked);
-        let v = snaps.iter().map(|b| b.linear_velocity.length()).fold(0.0f32, f32::max);
+        let v = snaps
+            .iter()
+            .map(|b| b.linear_velocity.length())
+            .fold(0.0f32, f32::max);
         peak = peak.max(v);
         if s % 5 == 0 {
             println!("{s},{ss},{v:.2}");
@@ -439,9 +479,24 @@ fn adaptive_travel_sweep() {
     };
     let mut rows = Vec::new();
     for travel in [0.02f32, 0.015, 0.01] {
-        let ps = run(&format!("ADAPT t={travel} pre-settled"), presettled, cfg_adaptive(8, travel), 300);
-        let dr = run(&format!("ADAPT t={travel} dropped"), dropped, cfg_adaptive(8, travel), 300);
-        let cl = run(&format!("ADAPT t={travel} column"), column, cfg_adaptive(8, travel), 300);
+        let ps = run(
+            &format!("ADAPT t={travel} pre-settled"),
+            presettled,
+            cfg_adaptive(8, travel),
+            300,
+        );
+        let dr = run(
+            &format!("ADAPT t={travel} dropped"),
+            dropped,
+            cfg_adaptive(8, travel),
+            300,
+        );
+        let cl = run(
+            &format!("ADAPT t={travel} column"),
+            column,
+            cfg_adaptive(8, travel),
+            300,
+        );
         rows.push((travel, ps, dr, cl));
     }
     println!("\nADAPTIVE SWEEP VERDICT (travel -> pre-settled / dropped / column peak m/s):");
@@ -474,8 +529,18 @@ fn floor_ladder() {
     };
     let mut rows = Vec::new();
     for floor in [1u32, 2, 3, 4] {
-        let ps = run(&format!("FLOOR {floor} pre-settled"), presettled, cfg_floor(floor, 8, 0.02), 300);
-        let dr = run(&format!("FLOOR {floor} dropped"), dropped, cfg_floor(floor, 8, 0.02), 300);
+        let ps = run(
+            &format!("FLOOR {floor} pre-settled"),
+            presettled,
+            cfg_floor(floor, 8, 0.02),
+            300,
+        );
+        let dr = run(
+            &format!("FLOOR {floor} dropped"),
+            dropped,
+            cfg_floor(floor, 8, 0.02),
+            300,
+        );
         rows.push((floor, ps, dr));
     }
     println!("\nFLOOR LADDER VERDICT (floor -> pre-settled / dropped peak m/s over 300 frames):");
@@ -536,7 +601,9 @@ fn energy_gain_by_config() {
         let (gain, peak, fke) = energy_gain(dropped, cfg, 300);
         rows.push((label, gain, peak, fke));
     }
-    println!("\nENERGY-GAIN VERDICT (config -> max_total_energy_gain / peak_speed / final_ke over 300):");
+    println!(
+        "\nENERGY-GAIN VERDICT (config -> max_total_energy_gain / peak_speed / final_ke over 300):"
+    );
     for (label, gain, peak, fke) in rows {
         println!("  {label:32} -> gain={gain:8.1} J  peak={peak:5.1}  final_ke={fke:8.1} J");
     }
@@ -660,9 +727,16 @@ fn t6_energy_audit() {
         let snaps = snapshot_all(&world, &tracked);
         let m = compute_metrics(&snaps, gravity);
         let contacts = world.fetch_last_contacts().to_vec();
-        let max_depth = contacts.iter().map(|c| c.depth().abs()).fold(0.0f32, f32::max);
+        let max_depth = contacts
+            .iter()
+            .map(|c| c.depth().abs())
+            .fold(0.0f32, f32::max);
         let total = m.total_energy;
-        let d_total = if prev_total.is_nan() { 0.0 } else { total - prev_total };
+        let d_total = if prev_total.is_nan() {
+            0.0
+        } else {
+            total - prev_total
+        };
         // Print every frame in the first second (impact window), then decimate.
         if s < 90 || s % 10 == 0 {
             println!(
