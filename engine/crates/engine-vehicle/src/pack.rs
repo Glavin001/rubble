@@ -4,7 +4,7 @@
 
 use crate::desc::*;
 use engine_schema::vehicle::*;
-use engine_schema::{BodyFlags, BodyState, Collider, ShapeType};
+use engine_schema::{BodyFlags, BodyState, Collider, Joint, ShapeType, JOINT_TYRE};
 use glam::{Quat, Vec3};
 
 pub type Slot = [u32; 4];
@@ -22,6 +22,8 @@ pub struct VehicleSlots {
     pub collider_base: u32,
     /// Absolute gAabbs index of this vehicle's 4-entry block.
     pub aabb_block: u32,
+    /// First of this vehicle's tyre joints (one per wheel slot).
+    pub joint_base: u32,
 }
 
 /// Pool sizes a vehicle needs.
@@ -48,6 +50,9 @@ pub struct PackedVehicle {
     pub diffs: Vec<Vec<Slot>>,
     pub anti_rolls: Vec<Slot>,
     pub parts: Vec<Vec<Slot>>,
+    /// One JOINT_TYRE per wheel slot, parked on the static anchor until a wheel
+    /// stands on a dynamic body (vehicle_link).
+    pub joints: Vec<Joint>,
     /// Chassis total mass and inertia (body axes).
     pub mass: f32,
     pub inertia: [f32; 3],
@@ -107,7 +112,8 @@ pub fn requirements(desc: &VehicleDesc) -> Requirements {
         bodies: 2 + wheel_slots + desc.parts.len() as u32,
         colliders: desc.parts.iter().map(|p| p.colliders.len() as u32).sum::<u32>()
             + desc.wheels.iter().map(rim_count).sum::<u32>()
-            + spare_rims,
+            + spare_rims
+            + wheel_slots * SHELL_SPHERES,
     }
 }
 
@@ -153,6 +159,34 @@ fn parked_body(index: u32, mass: f32, inertia: Vec3) -> BodyState {
 pub fn rim_colliders_n(w: &WheelDesc, up: Vec3, fwd: Vec3, body: u32, n: u32) -> Vec<Collider> {
     let frame = WheelFrame { up, fwd };
     rim_colliders_frame(w, &frame, body, n)
+}
+
+/// Shell sphere radius and ring radius: as wide as the tyre (≤ 0.4 R), inside it.
+pub fn shell_geometry(radius: f32, width: f32) -> (f32, f32) {
+    let rs = (0.5 * width).min(0.4 * radius).max(1e-3);
+    (rs, (radius - rs).max(0.0))
+}
+
+/// Shell spheres around a wheel centre at `center` (chassis space), in the plane of
+/// `down` (suspension direction) and `fwd`, at 60°…300° from straight down.
+pub fn shell_colliders(w: &WheelDesc, center: Vec3, down: Vec3, fwd: Vec3, body: u32) -> Vec<Collider> {
+    let (rs, ring) = shell_geometry(w.radius, w.width);
+    (1..=SHELL_SPHERES)
+        .map(|k| {
+            let th = std::f32::consts::TAU * k as f32 / (SHELL_SPHERES + 1) as f32;
+            let p = center + (down * th.cos() + fwd * th.sin()) * ring;
+            Collider {
+                body,
+                shape: ShapeType::Sphere as u32,
+                material: w.rim_material,
+                generation: 0,
+                local_pos: p.to_array(),
+                density: 0.0,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: [rs, 0.0, 0.0, rs],
+            }
+        })
+        .collect()
 }
 
 fn rim_colliders(w: &WheelDesc, frame: &WheelFrame, body: u32) -> Vec<Collider> {
@@ -363,6 +397,17 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
         rim_starts.push(slots.collider_base + out.colliders.len() as u32);
         out.colliders.extend(rim_colliders(w, &frame, wheel_body0 + i));
     }
+    // Wheel shells on the chassis (spare slots park theirs on the static anchor);
+    // vehicle_post moves them with the suspension and steering every step.
+    let mut shell_starts = Vec::new();
+    for i in 0..wheel_slots {
+        let real = (i as usize) < desc.wheels.len();
+        let w = desc.wheels.get(i as usize).unwrap_or(&spare);
+        let down = w.suspension_dir.map(v3).unwrap_or(-up).normalize();
+        let center = v3(w.position) + down * w.suspension_max;
+        shell_starts.push(slots.collider_base + out.colliders.len() as u32);
+        out.colliders.extend(shell_colliders(w, center, down, fwd, if real { chassis } else { anchor }));
+    }
 
     // ---- wheels ----
     let mut wheel_curves = Vec::new();
@@ -374,6 +419,29 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
         let w = desc.wheels.get(i as usize).unwrap_or(&spare);
         let c = if real { wheel_curves[i as usize] } else { wheel_curves[0] };
         out.wheels.push(pack_wheel(desc, w, slots.vehicle, i, real, wheel_body0 + i, rim_starts[i as usize], c));
+    }
+
+    // ---- tyre joints: graph edges to dynamic ground, parked on the anchor ----
+    for (i, rec) in out.wheels.iter_mut().enumerate() {
+        rec[W_TJ as usize] = [slots.joint_base + i as u32, shell_starts[i], NO_INDEX, 0];
+        out.joints.push(Joint {
+            body_a: anchor,
+            body_b: anchor,
+            joint_type: JOINT_TYRE,
+            flags: 0,
+            local_anchor_a: [0.0; 3],
+            stiffness: 0.0,
+            local_anchor_b: [0.0; 3],
+            damping: 0.0,
+            axis_a: [0.0; 3],
+            limit_min: 0.0,
+            axis_b: [0.0; 3],
+            limit_max: 0.0,
+            c0: [0.0; 3],
+            _pad_c0: 0.0,
+            lambda: [0.0; 6],
+            k: [0.0; 6],
+        });
     }
 
     // ---- tracks: members share the driven wheel's spin, inertia and brake ----

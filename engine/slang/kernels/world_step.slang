@@ -376,6 +376,8 @@ void joint_hash_insert(uint3 tid : SV_DispatchThreadID)
     uint nJ = gCounters[0].jointCount;
     if (i >= nJ) return;
     Joint jj = gJoints[i];
+    // A wheel standing on a crate must still let the chassis collide with it.
+    if (jj.jointType == JOINT_TYRE) return;
     uint key = jointPairKey(jj.bodyA, jj.bodyB);
     uint h = key & (JOINT_HASH_SIZE - 1u);
     for (uint probe = 0; probe < 64u; probe++)
@@ -1632,6 +1634,7 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     if (i >= n) return;
     AvbdParams p = PARAMS;
     Joint j = gJoints[i];
+    if (j.jointType == JOINT_TYRE) return; // vehicle kernels own the tyre rows
     BodyState a = gBodies[j.bodyA];
     BodyState b = gBodies[j.bodyB];
     float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
@@ -3195,6 +3198,14 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
         else
         {
             Joint j = gJoints[id];
+            if (j.jointType == JOINT_TYRE)
+            {
+                // Wheel on this body: its share of the tyre rows, assembled by the
+                // vehicle kernels at both bodies' current iterates. The chassis side
+                // is already in the chassis's own vehicle block.
+                if (j.bodyB == bodyIdx && j.bodyA != bodyIdx) addVehicleBlock(A, rhs, j.flags);
+                continue;
+            }
             bool isA = j.bodyA == bodyIdx;
             BodyState ba = gBodies[j.bodyA];
             BodyState bb = gBodies[j.bodyB];
@@ -3570,7 +3581,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         }
     }
     uint nJ = gCounters[0].jointCount;
-    if (i < nJ)
+    if (i < nJ && gJoints[i].jointType != JOINT_TYRE)
     {
         Joint j = gJoints[i];
         BodyState a = gBodies[j.bodyA];

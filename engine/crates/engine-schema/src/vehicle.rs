@@ -97,7 +97,8 @@ pub const W_O_ST: u32 = 33; // omega, kappa, alphaDeg, asfloat(outFlags)
 pub const W_O_N: u32 = 34; // contact normal.xyz, asfloat(groundBody)
 pub const W_LHIT: u32 = 35; // last hit in ground-body space.xyz, valid (1/0) — query-rate extrapolation
 pub const W_LN: u32 = 36; // last hit normal in ground-body space.xyz, pad
-pub const W_FP: u32 = 37; // suspension force point (chassis space).xyz, enabled (1/0)
+pub const W_FP: u32 = 37;
+pub const W_TJ: u32 = 38; // suspension force point (chassis space).xyz, enabled (1/0)
 pub const WF_STEER: u32 = 1;
 pub const WF_DRIVEN: u32 = 2;
 pub const WF_HANDBRAKE: u32 = 4;
@@ -132,6 +133,7 @@ pub const ANTIROLL_STRIDE: u32 = 1; // asfloat(left), asfloat(right), stiffness,
 pub const RAY_STRIDE: u32 = 4; // in: origin.xyz,maxDist | dir.xyz,asfloat(excludeBody); out: point.xyz,dist | normal.xyz,asfloat(collider)
 pub const NO_INDEX: u32 = 0x7F7FFFFF;
 pub const MAX_VEHICLE_WHEELS: u32 = 16;
+pub const SHELL_SPHERES: u32 = 5;
 pub const MAX_DRIVEN_WHEELS: u32 = 8;
 
 /// `BodyState::flags` bit for a vehicle chassis (`initial_pad` = asfloat(block index)).
@@ -266,6 +268,7 @@ mod tests {
             "W_LHIT" => W_LHIT,
             "W_LN" => W_LN,
             "W_FP" => W_FP,
+            "W_TJ" => W_TJ,
             "WF_STEER" => WF_STEER,
             "WF_DRIVEN" => WF_DRIVEN,
             "WF_HANDBRAKE" => WF_HANDBRAKE,
@@ -300,6 +303,7 @@ mod tests {
             "RAY_STRIDE" => RAY_STRIDE,
             "NO_INDEX" => NO_INDEX,
             "MAX_VEHICLE_WHEELS" => MAX_VEHICLE_WHEELS,
+            "SHELL_SPHERES" => SHELL_SPHERES,
             "MAX_DRIVEN_WHEELS" => MAX_DRIVEN_WHEELS,
             _ => return None,
         })

@@ -60,6 +60,7 @@ fn main() -> anyhow::Result<()> {
         anti_roll_base: 1,
         part_base: 4,
         body_base: 10,
+        joint_base: 6,
         collider_base: 20,
         aabb_block: 1000,
     };
@@ -77,7 +78,7 @@ fn main() -> anyhow::Result<()> {
             "slots": {
                 "vehicle": slots.vehicle, "wheelBase": slots.wheel_base, "curvePointBase": slots.curve_point_base,
                 "diffBase": slots.diff_base, "antiRollBase": slots.anti_roll_base, "partBase": slots.part_base,
-                "bodyBase": slots.body_base, "colliderBase": slots.collider_base, "aabbBlock": slots.aabb_block,
+                "bodyBase": slots.body_base, "colliderBase": slots.collider_base, "aabbBlock": slots.aabb_block, "jointBase": slots.joint_base,
             },
             "requirements": req,
             "bodies": words(&p.bodies),

@@ -75,6 +75,7 @@ impl Pipelines {
             ("recompute_inertia", msl!("recompute_inertia")),
             ("vehicle_input", msl!("vehicle_input")),
             ("wheel_query", msl!("wheel_query")),
+            ("vehicle_link", msl!("vehicle_link")),
             ("vehicle_prepare", msl!("vehicle_prepare")),
             ("vehicle_iterate", msl!("vehicle_iterate")),
             ("vehicle_post", msl!("vehicle_post")),

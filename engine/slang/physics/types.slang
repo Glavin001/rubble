@@ -121,6 +121,7 @@ public static const uint JOINT_SLIDER = 3u;
 public static const uint JOINT_D6 = 4u;
 public static const uint JOINT_DISTANCE = 5u;
 public static const uint JOINT_MAX_DISTANCE = 6u;
+public static const uint JOINT_TYRE = 7u;
 
 public struct AvbdParams
 {

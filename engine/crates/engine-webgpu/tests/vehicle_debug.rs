@@ -269,13 +269,16 @@ fn trace_stack_impact() {
         let st = sim.vehicle_state(v);
         let speed = glam::Vec3::from_array(c.linear_vel).length();
         let w = glam::Vec3::from_array(c.angular_vel).length();
-        if i % 10 == 0 || speed > 25.0 || w > 4.0 {
+        let peak = st.wheels.iter().fold(0.0f32, |m, w| m.max(w.suspension_force));
+        if i % 10 == 0 || speed > 25.0 || w > 4.0 || peak > 60_000.0 {
             eprintln!(
-                "{i}: p {:?} |v| {speed:.1} |w| {w:.1} contacts {} Fs {:?} hit {:?}",
+                "{i}: p {:?} |v| {speed:.1} |w| {w:.1} contacts {} Fs {:?} hit {:?} L {:?} ny {:?}",
                 c.position.map(|x| (x * 100.0).round() / 100.0),
                 st.contacts,
                 st.wheels.iter().map(|w| w.suspension_force as i32).collect::<Vec<_>>(),
-                st.wheels.iter().map(|w| w.ground_body).collect::<Vec<_>>()
+                st.wheels.iter().map(|w| w.ground_body).collect::<Vec<_>>(),
+                st.wheels.iter().map(|w| (w.suspension_length * 100.0).round() / 100.0).collect::<Vec<_>>(),
+                st.wheels.iter().map(|w| (w.contact_normal[1] * 100.0).round() / 100.0).collect::<Vec<_>>()
             );
         }
         if speed > 40.0 {

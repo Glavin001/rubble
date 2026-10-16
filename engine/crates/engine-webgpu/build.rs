@@ -89,6 +89,7 @@ const WORLD_ENTRIES: &[&str] = &[
     // Vehicle controller (slang/kernels/vehicle_step.slang).
     "vehicle_input",
     "wheel_query",
+    "vehicle_link",
     "vehicle_prepare",
     "vehicle_iterate",
     "vehicle_post",
@@ -98,6 +99,7 @@ const WORLD_ENTRIES: &[&str] = &[
 const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_input",
     "wheel_query",
+    "vehicle_link",
     "vehicle_prepare",
     "vehicle_iterate",
     "vehicle_post",

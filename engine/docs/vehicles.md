@@ -85,6 +85,49 @@ Motorcycles (`motorcycle: Some(MotorcycleDesc)`, a port of Jolt `MotorcycleContr
 * `suspension_force_point` (Jolt `mSuspensionForcePoint`) applies a wheel's suspension
   force at a chassis point, for example along a raked fork.
 
+## Two-way ground coupling
+
+A wheel acts on whatever it stands on, inside the same solve. A crate under a tyre is
+pushed down and sideways, a bridge deck feels the truck's real (dynamic) load in the step
+it happens, and a car can drive on another car. This is the Jolt model
+(`VehicleConstraint::BuildIslands` links the vehicle and each wheel's dynamic contact body
+into one island; suspension, max-up stop and friction are two-body constraint parts),
+expressed in AVBD's per-body block solve:
+
+* **Static or kinematic ground** keeps the fast path. The tyre rows act on the chassis
+  only, and the ground's motion enters as a given displacement.
+* **Dynamic ground** turns each touching wheel into a two-body constraint.
+  * `vehicle_link` runs after `wheel_query`, before the constraint graph is built, and
+    points the wheel's reserved `JOINT_TYRE` joint at (chassis, ground). A sleeping ground
+    body is woken, as in Jolt. The joint only creates the graph edge, so the two bodies get
+    different colours and the ground body's primal gathers the wheel. It is skipped by
+    the joint pair filter (the chassis still collides with the crate), by joint
+    warm-starting and by the joint dual update. With no dynamic ground, the joint points
+    at the vehicle's static anchor body and adds no edge.
+  * Each iteration, the vehicle kernels evaluate every tyre row (suspension and bump stop,
+    anti-roll, longitudinal, lateral) at the current iterates of both bodies. The ground's
+    displacement at the contact point replaces the explicit `v_g·dt`. Each row adds its
+    chassis Jacobian to the chassis block (as before, with wheel spin condensed). It also
+    adds its ground Jacobian `J_g = −[e; r_g × e]` to that wheel's **ground block**: a
+    6×6 + 6 in the `gAabbs` tail after the chassis blocks. The ground body's primal adds
+    the block through the tyre joint. Both blocks come from the same rows with the same
+    multipliers, so the forces are equal and opposite.
+  * The lagged explicit ground reaction is gone, along with its velocity cap.
+* **Wheel shells.** Each wheel has a collider on the chassis body (a sphere, or a capsule
+  along the axle, sized slightly inside the tyre). `vehicle_post` moves it to the wheel's
+  suspended position every step. It handles everything except the tyre's own ground
+  contact: sidewalls against debris, kerb faces, other cars. Because it sits inside the
+  tyre, it never carries the car on the ground; the tyre rows do that. This is a simpler
+  variant of the PhysX vehicle pattern of wheel shapes plus contact modification that
+  drops the ground contact. Detaching or removing a wheel disables its shell.
+* **Removed workarounds.** The default wheel-load cap is gone (`bump_max_force` stays as
+  an explicit, physical option), and so is the "ignore unclimbable dynamic hits" ray
+  filter. With two-body rows and shells, the solver resolves crates and debris.
+
+The bridge case follows directly: the deck body's block carries the truck's load, so a
+deck held by breakable joints (or a future fracture solver reading the same loads) gives
+way, and the truck goes with it.
+
 ## Parts, functional state and severing
 
 A vehicle is built from **parts** (collider groups on the chassis) with roles:
@@ -160,9 +203,10 @@ controller).
 * At most 16 wheel slots per vehicle (tank tracks use 7 wheels a side, Jolt's sample uses 9).
 * The ground reaction on dynamic bodies lags one step and is applied without atomics
   (two vehicles on the same box in one step can lose one update).
-* Wheels are not colliders while attached. Each wheel's load is capped (`bump_max_force`,
-  else 8× an even share of the weight). The reaction on a light dynamic body is capped at
-  the relative speed plus 2 m/s. Hits on dynamic bodies higher than the wheel could climb
-  are ignored, so the chassis meets that crate instead (DECISIONS v9).
+* Wheel shells are spheres (the world narrowphase has no cylinder or capsule–box pair), so
+  sidewalls are a five-sphere approximation of the tyre outline.
+* A ground block holds one wheel's rows. When both ends of an anti-roll bar stand on the
+  same dynamic body, the cross term between the two blocks is dropped (the gradient stays
+  exact; the Hessian is block-diagonal).
 * Not yet: cylinder casts, an inactive (sleeping) query rate, and automatic load-based
   fracture (its inputs already exist via `step_loads`).

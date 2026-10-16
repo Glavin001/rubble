@@ -534,11 +534,15 @@ fn motorcycle_balances_and_leans_into_turns() {
 
 #[test]
 fn crashing_into_light_crates_does_not_launch_the_vehicle() {
-    // A stack of 40 kg crates: sphere-cast wheels that climb into it used to read full
-    // compression and answer with MN bump-stop loads (vehicle thrown 300+ m up).
+    // A stack of 40 kg crates. Wheels used to treat the crates as immovable ground and
+    // the vehicle was thrown 300+ m up. Now tyre rows on crates are two-body and wheel
+    // shells take side hits: the crates get shoved and the vehicle stays bounded.
+    // Peak wheel loads while ramming rigid crates are legitimately large (a 3 t truck
+    // losing ~3 m/s in ~15 ms is ~600 kN), so the test bounds motion, not force.
     for preset in [presets::monster_truck(), presets::sedan()] {
         let mut sim = world();
         sim.set_material(1, Material { friction: 0.6, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+        let mut crates = Vec::new();
         for y in 0..5 {
             for i in 0..(4 - (y >> 1)) {
                 let body = sim.add_body(BodyState::dynamic(
@@ -547,6 +551,7 @@ fn crashing_into_light_crates_does_not_launch_the_vehicle() {
                     40.0,
                     glam::Vec3::splat(40.0 / 6.0),
                 ));
+                crates.push((body, glam::Vec3::new((i as f32 - 1.5) * 1.05, 0.5 + y as f32, 13.0)));
                 sim.add_collider(Collider {
                     body,
                     shape: ShapeType::Box as u32,
@@ -573,11 +578,19 @@ fn crashing_into_light_crates_does_not_launch_the_vehicle() {
             max_fn = sim.vehicle_state(v).wheels.iter().fold(max_fn, |m, w| m.max(w.suspension_force));
         }
         let weight = mass_of(&preset) * 10.0;
-        eprintln!("{}: max |v| {max_v:.1} |ω| {max_w:.1} y {max_y:.2} Fn {:.1}× weight", preset.name, max_fn / weight);
+        let shoved = crates
+            .iter()
+            .map(|&(b, p0)| (glam::Vec3::from_array(sim.read_body(b).position) - p0).length())
+            .fold(0.0f32, f32::max);
+        eprintln!(
+            "{}: max |v| {max_v:.1} |ω| {max_w:.1} y {max_y:.2} peak wheel load {:.1}× weight, crates shoved up to {shoved:.1} m",
+            preset.name,
+            max_fn / weight
+        );
         assert!(max_v < 16.0, "{}: thrown at {max_v} m/s", preset.name);
         assert!(max_w < 6.0, "{}: spun at {max_w} rad/s", preset.name);
         assert!(max_y < 6.0, "{}: launched to y {max_y}", preset.name);
-        assert!(max_fn < 4.0 * weight, "{}: wheel load {max_fn} N", preset.name);
+        assert!(shoved > 0.5, "{}: the crates react ({shoved} m)", preset.name);
     }
 }
 
@@ -638,6 +651,90 @@ fn motorcycle_holds_a_straight_line_under_full_throttle_after_a_turn() {
     assert!(st.forward_speed > 25.0, "accelerates: {}", st.forward_speed);
     assert!(max_yaw < 0.3, "holds its heading: |yaw| up to {max_yaw}");
     assert!(max_lean < 15.0, "stays upright: {max_lean}°");
+}
+
+/// A dynamic box body with one or more box colliders (material per collider).
+fn dyn_body(sim: &mut WgpuSim, pos: [f32; 3], mass: f32, inertia: [f32; 3], boxes: &[([f32; 3], [f32; 3], u32)]) -> u32 {
+    let body = sim.add_body(BodyState::dynamic(
+        glam::Vec3::from_array(pos),
+        glam::Quat::IDENTITY,
+        mass,
+        glam::Vec3::from_array(inertia),
+    ));
+    for &(local, half, material) in boxes {
+        sim.add_collider(Collider {
+            body,
+            shape: ShapeType::Box as u32,
+            material,
+            generation: 0,
+            local_pos: local,
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [half[0], half[1], half[2], (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt()],
+        });
+    }
+    body
+}
+
+#[test]
+fn tyre_forces_push_back_on_a_dynamic_ground_body() {
+    // A sedan accelerates on a heavy slab that slides on frictionless ice. The tyre
+    // rows are two-body constraints, so the slab is pushed back inside the same
+    // solve and the pair's total horizontal momentum stays ~zero.
+    let mut sim = world();
+    sim.set_material(1, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+    sim.set_material(2, Material { friction: 0.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+    let slab_mass = 2500.0f32;
+    let (hx, hz) = (6.0f32, 30.0f32);
+    let slab = dyn_body(
+        &mut sim,
+        [0.0, 0.25, 0.0],
+        slab_mass,
+        [slab_mass * (0.25 + hz * hz) / 3.0, slab_mass * (hx * hx + hz * hz) / 3.0, slab_mass * (hx * hx + 0.25) / 3.0],
+        // Grippy deck on top, frictionless skid underneath.
+        &[([0.0, 0.1, 0.0], [hx, 0.15, hz], 1), ([0.0, -0.1, 0.0], [hx, 0.15, hz], 2)],
+    );
+    let desc = presets::sedan();
+    let car_mass = mass_of(&desc);
+    let v = sim.add_vehicle(&desc, [0.0, 2.0, -20.0], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
+    run(&mut sim, 90);
+    let car0 = chassis(&sim, v);
+    let slab0 = sim.read_body(slab);
+    eprintln!("settled: car y {:.3} slab y {:.3} slab v {:?}", car0.position[1], slab0.position[1], slab0.linear_vel);
+    drive(&mut sim, v, throttle(1.0, 0.0), 120);
+    let car = chassis(&sim, v);
+    let sl = sim.read_body(slab);
+    let p_car = car_mass * car.linear_vel[2];
+    let p_slab = slab_mass * sl.linear_vel[2];
+    eprintln!(
+        "after 2 s: car vz {:.2} slab vz {:.3} p_car {:.0} p_slab {:.0} sum {:.0} slab moved {:.2} m",
+        car.linear_vel[2], sl.linear_vel[2], p_car, p_slab, p_car + p_slab, sl.position[2] - slab0.position[2]
+    );
+    assert!(car.linear_vel[2] > 3.0, "car accelerates on the slab");
+    assert!(sl.linear_vel[2] < -0.5, "slab is pushed backwards: {}", sl.linear_vel[2]);
+    assert!((p_car + p_slab).abs() < 0.1 * p_car.abs(), "momentum conserved: {} vs {}", p_car + p_slab, p_car);
+}
+
+#[test]
+fn a_parked_car_tips_a_seesaw_plank() {
+    // The deck feels the car's weight in-step: a plank on a central pivot tips under
+    // a car parked on one end (it used to see only a lagged, capped reaction).
+    let mut sim = world();
+    static_box(&mut sim, [0.0, 0.5, 0.0], [3.0, 0.5, 0.25], [0.0, 0.0, 0.0, 1.0]);
+    let (hz, m) = (6.0f32, 300.0f32);
+    let plank = dyn_body(&mut sim, [0.0, 1.15, 0.0], m, [m * hz * hz / 3.0, m * hz * hz / 3.0, m * 4.0 / 3.0], &[([0.0; 3], [2.0, 0.15, hz], 0)]);
+    run(&mut sim, 30);
+    let v = sim.add_vehicle(&presets::sedan(), [0.0, 2.6, 3.8], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
+    let mut max_tilt = 0.0f32;
+    for _ in 0..180 {
+        sim.step().expect("step");
+        let q = glam::Quat::from_array(sim.read_body(plank).orientation);
+        let f = q * glam::Vec3::Z;
+        max_tilt = max_tilt.max(-f.y.asin().to_degrees());
+    }
+    let c = chassis(&sim, v);
+    eprintln!("plank tilt {max_tilt:.1}° car at {:?}", c.position);
+    assert!(max_tilt > 10.0, "the car's end goes down: tilt {max_tilt}°");
 }
 
 #[test]
