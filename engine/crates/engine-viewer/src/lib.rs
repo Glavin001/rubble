@@ -1,6 +1,8 @@
 //! Instanced draw over the physics pose buffer.
 //! The viewer holds a reference to the Metal body buffer; it never downloads poses each frame.
 
+pub mod fracture;
+
 use engine_exec::PhysicsBackend;
 use engine_metal::{MetalWorld, SceneBuilder};
 use engine_schema::WorldCapacity;
@@ -71,7 +73,11 @@ pub fn run_destruction_demo() -> anyhow::Result<()> {
         world.step()?;
         if i % 60 == 0 {
             let t = world.last_timings();
-            println!("frame={i} gpu={:.3}ms contacts={}", t.total_gpu, world.last_counters().contact_count);
+            println!(
+                "frame={i} gpu={:.3}ms contacts={}",
+                t.total_gpu,
+                world.last_counters().contact_count
+            );
         }
     }
     Ok(())
