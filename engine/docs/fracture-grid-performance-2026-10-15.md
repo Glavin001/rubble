@@ -262,3 +262,20 @@ results, which confirms the cause: on this stack (Chrome, Dawn, Metal), any
 change to the generated kernel code can change floating-point rounding.
 Under a bit-identical rule, only changes that leave the arithmetic kernels'
 generated code untouched qualify.
+
+### Final state (end of 2026-10-15)
+
+- **Lab frame rate (`b88a1cc`).** The slice controller backs off once the
+  frame-time average passes the 60 Hz budget (17.5 ms). During the grid shot
+  the lab renders 69-82 FPS through the peak (100-129k awake), with physics at
+  25-31 ticks/s.
+- **Physics at the peak.** Unchanged at ~26 ms per tick (~39 ticks/s
+  headless). The user chose to keep the current behaviour and stop here.
+- **Behaviour-changing options, measured only** (headless runner, nothing
+  adopted):
+
+| Option | Ticks/s during the shot |
+|---|---|
+| Breakable bonds (`bonds=1`) | ~35: bonds wake whole houses and add solver rows |
+| Unhit houses static (`staticUnhit=1`), a stand-in for intact compound houses | ~95 (10.6 ms per tick, 22k awake) |
+| Only the shot column, 7 houses (`columns=1 rows=7`) | ~161 (6.2 ms per tick) |
