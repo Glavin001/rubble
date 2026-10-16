@@ -20,3 +20,5 @@ __pycache__/
 # Finer veneer-house levels are regenerated from the GLB:
 #   cargo run -p engine-fracture --bin fracture_stress_export -- ../crates/engine-webgpu/fracture/assets/veneer-house.glb packs/veneer-house-lN.json N
 /packs/veneer-house-l[1-9].json
+# Reference runs keep their exact input locally; it is rebuilt by examples/rubble_references.
+/reference/**/scene.json
