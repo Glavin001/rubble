@@ -327,7 +327,7 @@ impl GpuWorld {
                     let rest = t_end - self.solver.mirror.time;
                     let mut horizon = if rest < 1.5 * span { rest } else { span };
                     let t_setup = std::time::Instant::now();
-                    let snap = self.solver.snapshot(gpu);
+                    let snap = self.solver.snapshot_segment(gpu);
                     let host = (self.events_done.clone(), self.blasts_active.clone(), self.probes.clone(), self.next_sample, self.filter.clone());
                     let seg_taken = taken;
                     let stress = self.stress_dt();
