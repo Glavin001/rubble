@@ -134,7 +134,8 @@ pub struct StructureTables {
     pub islands: Vec<Island>,
     pub table: MaterialTable,
     pub bonds: Vec<(usize, usize)>,
-    /// `bond_index[s][b]`: the GPU bond of structure `s`'s bond `b` (`u32::MAX`: none).
+    /// `bond_index[s][b]`: the GPU bond of structure `s`'s bond `b` (`u32::MAX`: none; the
+    /// table is empty for a structure with no packed cluster, as is `chunk_index[s]`).
     pub bond_index: Vec<Vec<u32>>,
     pub bond_static: Vec<BondStatic>,
     pub bond_dyn: Vec<BondDyn>,
@@ -155,7 +156,15 @@ pub fn pack(m: &ReferenceSolver) -> Result<StructureTables, String> {
 /// `GpuSolver::quiet_clusters`).
 pub fn pack_with(m: &ReferenceSolver, exclude: &[bool]) -> Result<StructureTables, String> {
     let excluded = |ci: usize| exclude.get(ci).copied().unwrap_or(false);
-        let mut chunk_index: Vec<Vec<u32>> = m.structures.iter().map(|st| vec![u32::MAX; st.chunks.len()]).collect();
+    // Index tables only for structures with a packed cluster (empty for the rest).
+    let mut packed_structure = vec![false; m.structures.len()];
+    for (ci, cl) in m.clusters.iter().enumerate() {
+        if !excluded(ci) {
+            packed_structure[cl.structure] = true;
+        }
+    }
+        let mut chunk_index: Vec<Vec<u32>> =
+            m.structures.iter().enumerate().map(|(s, st)| if packed_structure[s] { vec![u32::MAX; st.chunks.len()] } else { Vec::new() }).collect();
         let chunk_total: usize = m.clusters.iter().enumerate().filter(|(ci, _)| !excluded(*ci)).map(|(_, cl)| cl.chunks.len()).sum();
         let bond_total: usize = m.clusters.iter().enumerate().filter(|(ci, _)| !excluded(*ci)).map(|(_, cl)| cl.bonds.len()).sum();
         let mut chunks = Vec::with_capacity(chunk_total);
@@ -258,7 +267,8 @@ pub fn pack_with(m: &ReferenceSolver, exclude: &[bool]) -> Result<StructureTable
         }
         let mut table = MaterialTable::default();
         let mut bonds = Vec::with_capacity(bond_total);
-        let mut bond_index: Vec<Vec<u32>> = m.structures.iter().map(|st| vec![u32::MAX; st.bonds.len()]).collect();
+        let mut bond_index: Vec<Vec<u32>> =
+            m.structures.iter().enumerate().map(|(s, st)| if packed_structure[s] { vec![u32::MAX; st.bonds.len()] } else { Vec::new() }).collect();
         let mut bond_static = Vec::with_capacity(bond_total);
         let mut bond_dyn = Vec::with_capacity(bond_total);
         // Chunk-to-bond incidence, `2 bond + side` in bond order (CSR built below).

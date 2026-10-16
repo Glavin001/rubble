@@ -414,7 +414,8 @@ impl StepBounds {
 impl ReferenceSolver {
     pub fn new(scene: &Scene) -> ReferenceSolver {
         let config = SolverConfig::from_scene(scene);
-        let structures: Vec<std::sync::Arc<Structure>> = (0..scene.bodies.len()).map(|i| std::sync::Arc::new(Structure::from_scene(scene, i))).collect();
+        // Independent per body: built on all cores, in body order.
+        let structures: Vec<std::sync::Arc<Structure>> = crate::par::map_range(0..scene.bodies.len(), 1, |i| std::sync::Arc::new(Structure::from_scene(scene, i)));
         let mut solver = ReferenceSolver {
             config,
             chunks: Vec::new(),
