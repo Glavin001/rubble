@@ -12,8 +12,8 @@
 <div class="actions"><button class="primary" id="release" disabled>Start simulation</button><button id="reset" disabled>Reset</button></div>
 <button id="fire" hidden disabled style="width:100%;margin-top:8px">Fire the wrecking ball through the row</button>
 <section class="performance" aria-label="Live performance"><div class="stats">
-<div title="Completed physics ticks per wall-clock second; target 120"><strong id="tps">—</strong><span>Physics TPS</span><small id="step-ms">target TPS</small></div>
-<div title="Rendered frames per wall-clock second, including time waiting for physics"><strong id="fps">—</strong><span>Render FPS</span><small id="frame-ms">frames / second</small></div>
+<div title="Completed physics ticks per wall-clock second (target 120). Below: GPU time of a sampled tick (timestamps) and the ticks per second that time alone would allow."><strong id="tps">—</strong><span>Physics TPS</span><small id="step-ms">target TPS</small></div>
+<div title="Rendered frames per wall-clock second, including time waiting for physics. Below: GPU time of a sampled frame's render pass (timestamps) and the frames per second it alone would allow, uncapped by the display."><strong id="fps">—</strong><span>Render FPS</span><small id="frame-ms">frames / second</small></div>
 <div title="Simulated time divided by real time; 1.00× means real time"><strong id="sim-speed">—</strong><span>Sim speed</span><small>1.00× = real time</small></div>
 </div><p id="timing" title="Wall-clock timings, not GPU timestamp measurements. Wait includes queued GPU work and readback synchronization.">TPS counts physics ticks; FPS counts rendered frames.</p></section>
 <div class="stats"><div><strong id="fragments">—</strong><span>fragments</span></div><div><strong id="hulls">—</strong><span>baked hulls</span></div><div><strong id="bonds">—</strong><span>bonds</span></div><div title="Dynamic bodies currently simulated (not asleep)"><strong id="awake">—</strong><span>awake bodies</span></div><div title="Contact points this step"><strong id="contacts">—</strong><span>contacts</span></div></div>

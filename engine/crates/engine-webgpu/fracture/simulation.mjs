@@ -639,12 +639,40 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
       if (overlapRead) await overlapRead;
     }
 
+    // GPU time of one sampled tick at a time (stats panel), about four times a
+    // second: each pass of the tick writes begin/end timestamps, the sum is the
+    // tick's GPU time. One sample in flight; nothing waits on its readback.
+    const tickTimer = device.features.has('timestamp-query') ? {
+      query: device.createQuerySet({type: 'timestamp', count: 32}),
+      resolve: device.createBuffer({size: 256, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC}),
+      read: device.createBuffer({size: 256, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST}),
+      busy: false, last: 0, ms: null,
+    } : null;
+    const timeThisTick = () => tickTimer && !tickTimer.busy && performance.now() - tickTimer.last > 250;
+    const tickStamps = (k) => ({timestampWrites: {querySet: tickTimer.query, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1}});
+    function resolveTickStamps(enc, passes) {
+      tickTimer.busy = true; tickTimer.last = performance.now();
+      enc.resolveQuerySet(tickTimer.query, 0, 2 * passes, tickTimer.resolve, 0);
+      enc.copyBufferToBuffer(tickTimer.resolve, 0, tickTimer.read, 0, 16 * passes);
+    }
+    // After the submit that holds the copy.
+    function readTickStamps(passes) {
+      tickTimer.read.mapAsync(GPUMapMode.READ, 0, 16 * passes).then(() => {
+        const t = new BigUint64Array(tickTimer.read.getMappedRange(0, 16 * passes));
+        let ns = 0; for (let i = 0; i < passes; i++) ns += Number(t[2 * i + 1] - t[2 * i]);
+        tickTimer.read.unmap(); tickTimer.ms = ns / 1e6;
+      }).catch(() => {}).finally(() => { tickTimer.busy = false; });
+    }
+
     function submitPhysics(reuseManifolds = false) {
       const enc = device.createCommandEncoder();
-      encodeStep(enc, false, null, undefined, reuseManifolds && manifoldsValid);
+      const timed = timeThisTick();
+      encodeStep(enc, false, null, timed ? tickStamps(0) : undefined, reuseManifolds && manifoldsValid);
       copyRender(enc);
+      if (timed) resolveTickStamps(enc, 1);
       manifoldsValid = true;
       device.queue.submit([enc.finish()]);
+      if (timed) readTickStamps(1);
       initialized=true;
       parity ^= 1;
       steps++;
@@ -656,17 +684,21 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
     // frames they run the same dispatches in the same queue order as one
     // submit, so results are identical; frames just stop waiting on whole steps.
     const SLICE_AFTER = new Set(['broadphase', 'convexClassify', 'convexSatSmall', 'convexSat', 'convexManifold', 'topology', 'solveHalf', 'solve']);
-    let slices = null, sliceStart = 0, readPending = false;
+    let slices = null, sliceStart = 0, readPending = false, slicePasses = 0;
     function encodeSlices() {
       const out = [];
       let enc = device.createCommandEncoder();
+      const timed = timeThisTick();
+      let passes = 0;
       const begin = (name) => {
         if (SLICE_AFTER.has(name)) { out.push(enc.finish()); enc = device.createCommandEncoder(); }
-        return enc.beginComputePass();
+        return enc.beginComputePass(timed ? tickStamps(passes++) : undefined);
       };
       begin.split = (name) => name === 'start' || SLICE_AFTER.has(name);
       encodeStep(enc, false, begin, undefined, false);
       copyRender(enc);
+      if (timed) resolveTickStamps(enc, passes);
+      slicePasses = timed ? passes : 0;
       out.push(enc.finish());
       manifoldsValid = true; initialized = true; parity ^= 1; steps++;
       return out;
@@ -702,6 +734,8 @@ return {
  // Sliced stepping (see encodeSlices): begin, submit slices frame by frame,
  // then finish to read the counters. A sleeping world needs no step.
  get slicing(){return slices!==null},
+ // GPU ms of the latest sampled tick (timestamps), or null if unsupported.
+ get gpuTickMs(){return tickTimer?.ms??null},
  beginSlicedStep(){
    if(slices)throw new Error('A sliced step is already in flight');
    // Skip only when the counters describe the latest tick (see readCountersNow).
@@ -711,7 +745,7 @@ return {
  submitSlices(n=1){
    if(!slices)return true;
    if(n>0)device.queue.submit(slices.splice(0,n));
-   if(slices.length===0)submittedSteps=steps;
+   if(slices.length===0){submittedSteps=steps;if(slicePasses){readTickStamps(slicePasses);slicePasses=0}}
    return slices.length===0;
  },
  async finishSlicedStep(){
@@ -931,7 +965,7 @@ return {
    device.queue.writeBuffer(renderBodies,0,bodyBytes,0,bodyCount*112);slices=null;
    steps=0;countedSteps=0;submittedSteps=0;warmCycle=-1;lastRead=null;inFlight=[];overlapError=null;parity=0;shots=0;initialized=false;last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0};
  },
- dispose(){for(const b of [...bufs,staging,snapshot,hostUpload,renderBodies])b.destroy();},
+ dispose(){for(const b of [...bufs,staging,snapshot,hostUpload,renderBodies])b.destroy();if(tickTimer){tickTimer.query.destroy();tickTimer.resolve.destroy();tickTimer.read.destroy()}},
 };
 } catch (error) { for (const buffer of bufs) buffer.destroy(); throw error; }
 }
