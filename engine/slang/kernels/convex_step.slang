@@ -115,7 +115,7 @@ bool satCacheSeparates(uint colA, HullRef ha, Frame fa, uint colB, HullRef hb, F
     if (dot(d, d) <= 0.5) return false;
     float maxA = dot(d, frameToWorld(fa, hullVertex(ha, hullSupportIndex(ha, quatRotate(quatConjugate(fa.q), d)))));
     float minB = dot(d, frameToWorld(fb, hullVertex(hb, hullSupportIndex(hb, -quatRotate(quatConjugate(fb.q), d)))));
-    return minB - maxA > SAT_CACHE_MARGIN + speculativeMargin();
+    return minB - maxA > SAT_CACHE_MARGIN + speculativeMargin() + cachedReach(colA) + cachedReach(colB);
 }
 
 bool hullBoxesSeparated(HullRef ha, Frame fa, HullRef hb, Frame fb, float margin)
@@ -179,7 +179,7 @@ void convex_bucket(uint3 tid : SV_DispatchThreadID)
         Frame fb = colliderFrame(cb, gBodies[cb.body]);
         // FLAG 4 (diagnostic) disables the early-out, to compare outputs.
         if ((PARAMS.flags & 4u) == 0u && hullBoxesSeparated(ha, fa, hb, fb,
-                               HULL_BOX_SEPARATION_MARGIN + speculativeMargin()))
+                               HULL_BOX_SEPARATION_MARGIN + speculativeMargin() + cachedReach(pair.colliderA) + cachedReach(pair.colliderB)))
             return;
         // The SAT's cached separating feature, tested here so proven-separated
         // pairs (~44% at the 49-house grid peak) never load into a SAT workgroup.
@@ -221,7 +221,7 @@ void convex_classify(uint3 tid : SV_DispatchThreadID)
     BodyState bb = gBodies[cb.body];
     Frame fa = colliderFrame(ca, ba);
     Frame fb = colliderFrame(cb, bb);
-    float spec = speculativeMargin();
+    float spec = pairMargin(ba, ca, bb, cb);
     BoxManifold mf;
     mf.count = 0;
     mf.normal = float3(0, 1, 0);
@@ -319,7 +319,7 @@ void convex_manifold(uint3 tid : SV_DispatchThreadID)
     HullRef ha = hullOf(ca);
     HullRef hb = hullOf(cb);
     float3 n = w.normalSep.xyz;
-    float spec = speculativeMargin();
+    float spec = pairMargin(ba, ca, bb, cb);
     BoxManifold mf;
     if (type == CONVEX_FEATURE_EDGE)
         mf = convexEdgeManifold(ha, fa, hb, fb, idx1, idx2, n);

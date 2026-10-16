@@ -172,9 +172,23 @@ the centre of mass.
   at 20 m/s.
 - The 2 mm speculative margin (flag 32) is far smaller than that, and
   measured no better.
-- A fix would size speculative contacts by relative speed, as PhysX
-  speculative CCD and Box2D/Jolt speculative distance do. That has not been
-  tried yet.
+- **The fix: look-ahead contacts (flag 16384).** They are sized to how fast
+  each pair is closing, as PhysX speculative CCD and Box2D/Jolt speculative
+  distance do:
+  - each awake collider's bounds are swept by
+    (|v| + |ω|·r)·h + |g|·h², but only when that motion exceeds the 2 mm
+    contact depth;
+  - the narrowphase and hull SAT keep a pair up to its relative reach;
+  - a separated point is kept only if the relative normal velocity at that
+    point, (v_A + ω_A×r_A − v_B − ω_B×r_B)·n, closes the gap within the step;
+  - only a real gap (C₀ beyond the 2 mm margin) is kept whole as clearance.
+
+  Each of those choices replaced a version that failed on the grid:
+  - **gap-mode contacts** (rest at touch) made bricks rock on their hovering
+    corners;
+  - **reach for every awake body** gave resting bodies speculative contacts;
+  - **an isotropic spin bound** made struck bricks spinning at 240 rad/s
+    contact everything within 20 cm, overflowing the 64-colour palette.
 
 ### 6. The island gate
 
@@ -195,6 +209,13 @@ The flags are added to the scene's 65. Flags 256 and 2048 are rejected.
 | 2048 | Penalty floored by load (**rejected**) |
 | 4096 | Post-stabilization |
 | 8192 | Point-speed sleep test |
+| 16384 | Look-ahead contacts sized to closing speed |
+
+**Defaults.** The fracture scenes now default to 4096+128+8192:
+- the veneer houses use 12481;
+- the cuboid houses use 12513.
+
+Look-ahead (16384) is off by default.
 
 ### One house, unhit, started awake
 
@@ -224,6 +245,26 @@ The grid has 154,759 bodies.
 | +4096+8192 | 1,147 | 136 | 688 | 116,378 |
 | +4096+1024+8192 | 641 | 90 | 2,417 | 114,522 |
 | **+4096+128+8192** | **294** | 119 | 350 | 97,949 |
+| +4096+128+8192+16384 | 256 | 92 | 285 | 124,114 |
+
+Look-ahead cuts impact interpenetration about threefold:
+
+| Contacts, 20–30 s | Without look-ahead | With look-ahead |
+|---|---|---|
+| More than 1 cm deep | about 3,000 | about 900 |
+| More than 5 cm deep | 6–9 | 1–2 |
+
+It does not get the grid to sleep. From about 15 s, **the grid is one
+connected island of about 124,000 bodies**: debris piles bridge the houses, as
+the awake-island statistics in `sleepdiag` show. Within it, the gate
+(8 rounds, so each blocker holds its 8-hop neighbourhood) keeps everything
+near a non-candidate awake. At 30 s there are about 5,500 non-candidates:
+- about 285 moving bodies, mostly small pieces tumbling at 4–16 rad/s;
+- about 55 jammed bodies;
+- about 4,000–5,000 bodies whose timers were reset in the last second.
+
+On the one-house pile, look-ahead with the defaults has 0–3 movers from
+12 s, and its deepest overlap is 4–5 mm instead of 30 mm.
 
 With 4096+128+8192:
 - the movers fall steadily, to 171 at 25 s;
@@ -260,12 +301,12 @@ the shot), two runs each:
 
 ## Still open
 
-1. **Velocity-sized speculative contacts.** Size each pair's speculative
-   margin by its relative motion over the step. This would stop fast pieces
-   from passing into each other and jamming (cause 5), which is the main
-   remaining holder of the grid's islands.
-2. **A slider check for flag 1024.** Confirm on a scene with light debris
+1. **Whether to enable look-ahead by default.** It is more accurate at impact
+   but does not change the grid's sleep outcome yet.
+2. **The last movers in a giant island.** Trace the ~285 tumbling small pieces
+   and the timer resets (wake waves) in the 124k-body island.
+3. **A slider check for flag 1024.** Confirm on a scene with light debris
    sliding on the ground before adopting it.
-3. **Bonds.** Unbonded houses collapse completely once woken. Bonds, or the
+4. **Bonds.** Unbonded houses collapse completely once woken. Bonds, or the
    stress solver, change what "after the shot" means for the houses next
    door.

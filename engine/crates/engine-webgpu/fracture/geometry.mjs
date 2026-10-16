@@ -509,5 +509,5 @@ export function buildScene(asset, level, {maxHullVertices}={}) {
   return {projectileStart,projectileCount,projectileRadius,projectileMass,projectileVertices:new Float32Array(projectileVertices),bodies,colliders,joints:scaledJoints,hullData:arena.data,skippedHulls,vertices:new Float32Array(vertices),lines:new Float32Array(lines),selected,bonds,byId,
     extent,extentX:hi[0]-lo[0],extentZ:hi[2]-lo[2],height,copies:1,instanceStride:0,center:[0,height*.5+placement[1]+lo[1],0],gridCellSize:gridConfig(colliders).base,
     // Flags: 1 reuse contacts, 64 world-frame inertia (FLAG_WORLD_INERTIA).
-    params:{flags:65,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
+    params:{flags:12481,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
 }
