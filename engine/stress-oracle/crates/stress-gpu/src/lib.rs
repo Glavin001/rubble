@@ -72,6 +72,11 @@ pub mod shaders {
             ("contact_islands_and_wide_chunks", (256, 1, 1)),
         ]);
     pub const STRESS_RENDER: ShaderSet = shader_set!("stress_render", [("stress_vs", (1, 1, 1)), ("stress_fs", (1, 1, 1))]);
+    pub const DESTRUCTION_RENDER: ShaderSet = shader_set!(
+        "destruction_render",
+        [("chunk_vs", (1, 1, 1)), ("host_chunk_vs", (1, 1, 1)), ("impactor_vs", (1, 1, 1)), ("ground_vs", (1, 1, 1)), ("lit_fs", (1, 1, 1)), ("ground_fs", (1, 1, 1))]
+    );
+    pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
 }
 
 pub use stress_ref::scenes;

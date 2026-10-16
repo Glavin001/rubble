@@ -327,6 +327,9 @@ struct Buffers {
     params_contact: wgpu::Buffer,
     /// The static part of the params (offsets, counts, contact constants).
     params: Params,
+    /// Chunk records and the CSR index (rebuilt with the layout).
+    chunks: wgpu::Buffer,
+    index: wgpu::Buffer,
     state: wgpu::Buffer,
     bond_dyn: wgpu::Buffer,
     scratch: wgpu::Buffer,
@@ -396,6 +399,19 @@ pub struct Profile {
     /// whose outcome differed.
     pub statics_checked: u64,
     pub statics_mismatched: u64,
+}
+
+/// The solver's buffers a renderer reads (`GpuSolver::render_buffers`), in the binding
+/// order of `destruction_render.slang` after its camera.
+pub struct RenderBuffers<'a> {
+    pub chunks: &'a wgpu::Buffer,
+    pub islands: &'a wgpu::Buffer,
+    pub state: &'a wgpu::Buffer,
+    pub index: &'a wgpu::Buffer,
+    pub bond_dyn: &'a wgpu::Buffer,
+    pub impactors: &'a wgpu::Buffer,
+    pub chunk_count: u32,
+    pub impactor_count: u32,
 }
 
 /// The host copy of everything a frame changes (`GpuSolver::snapshot`): to solve the
@@ -1082,6 +1098,8 @@ impl GpuSolver {
                 params_segment,
                 params_contact,
                 params,
+                chunks: chunks_buf,
+                index: index_buf,
                 state,
                 bond_dyn: bond_dyn_buf,
                 scratch,
@@ -2540,6 +2558,22 @@ impl GpuSolver {
             if !data.is_empty() {
                 gpu.queue.write_buffer(&self.buffers.bond_dyn, (std::mem::size_of::<BondDyn>() * b0) as u64, bytemuck::cast_slice(&data));
             }
+        }
+    }
+
+    /// The buffers a renderer draws the world from (`destruction_render.slang`): valid
+    /// until the next rebuild or refresh, which replaces some of them.
+    pub fn render_buffers(&self) -> RenderBuffers<'_> {
+        let b = &self.buffers;
+        RenderBuffers {
+            chunks: &b.chunks,
+            islands: &b.islands,
+            state: &b.state,
+            index: &b.index,
+            bond_dyn: &b.bond_dyn,
+            impactors: &b.impactors,
+            chunk_count: self.layout.chunks.len() as u32,
+            impactor_count: self.layout.gpu_impactors.len() as u32,
         }
     }
 
