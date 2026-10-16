@@ -932,9 +932,14 @@ const PLANK_MASS: f32 = 200.0 * PLANK_LEN;
 /// span sagging while β·|C| ramps the penalty up from the default 1e4.
 const BOLT_PENALTY: f32 = 1.0e8;
 /// Bolt rating. At rest the midspan bolts carry ~102 kN (M = w·x(L−x)/2 over a
-/// 0.32 m couple: 107 kN analytic); a 1.3 t sedan crossing peaks at 180–190 kN and
-/// a 3 t monster truck at ~250 kN (`bridge_probe_unbreakable_bolt_forces`).
-const BOLT_BREAK_FORCE: f32 = 220.0e3;
+/// 0.32 m couple: 107 kN analytic). Crossing at 2.5 m/s a 1.3 t sedan peaks near
+/// 205 kN, a 3 t monster truck near 320 kN and a 4.6 t tank near 450 kN
+/// (`bridge_probe_unbreakable_bolt_forces`).
+const BOLT_BREAK_FORCE: f32 = 255.0e3;
+/// Colored Gauss–Seidel needs ~3 s of 10-iteration steps to converge the deck's
+/// bending, longer than a fast crossing: at 10 a truck above ~9 m/s crossed before
+/// the bolts felt its weight. 20 iterations track it (cheap for six bodies).
+const BRIDGE_ITERATIONS: u32 = 20;
 
 fn bridge(sim: &mut WgpuSim, break_force: f32) -> Bridge {
     let (hx, hy, hz) = (PLANK_HALF[0], PLANK_HALF[1], PLANK_HALF[2]);
@@ -991,13 +996,18 @@ struct Crossing {
     end_z: f32,
 }
 
-/// Let the deck settle, then drive `desc` across at a steady crawl (2.5 m/s) and
-/// stop on the far road (or stop early once the vehicle has fallen through).
-fn cross_bridge(desc: &VehicleDesc, break_force: f32) -> Crossing {
+/// Let the deck settle, then drive `desc` across holding `speed` (m/s) and stop on
+/// the far road (or stop early once the vehicle has fallen through). Fast runs
+/// start at the far end of the 30 m approach road to get up to speed.
+fn cross_bridge(desc: &VehicleDesc, break_force: f32, speed: f32) -> Crossing {
     let mut sim = world();
+    let mut p = AvbdParams::default();
+    p.iterations = BRIDGE_ITERATIONS;
+    sim.set_params(p);
     let br = bridge(&mut sim, break_force);
     run(&mut sim, 300);
-    let v = sim.add_vehicle(desc, [0.0, BRIDGE_DECK_Y + 1.5, -12.0], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
+    let start_z = if speed > 4.0 { -27.0 } else { -12.0 };
+    let v = sim.add_vehicle(desc, [0.0, BRIDGE_DECK_Y + 1.5, start_z], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
     run(&mut sim, 60);
     let (mut max_bolt, mut min_y) = (0.0f32, f32::MAX);
     let ride_y = chassis(&sim, v).position[1];
@@ -1008,7 +1018,7 @@ fn cross_bridge(desc: &VehicleDesc, break_force: f32) -> Crossing {
         let input = if c.position[2] > br.end_z + 6.0 {
             VehicleInput { brake: 1.0, ..Default::default() }
         } else {
-            let e = 2.5 - sim.vehicle_state(v).forward_speed;
+            let e = speed - sim.vehicle_state(v).forward_speed;
             VehicleInput { forward: (e * 0.4).clamp(0.0, 1.0), brake: (-e * 0.5).clamp(0.0, 1.0), ..Default::default() }
         };
         sim.set_vehicle_input(v, input);
@@ -1042,7 +1052,7 @@ fn cross_bridge(desc: &VehicleDesc, break_force: f32) -> Crossing {
 #[test]
 fn a_sedan_crosses_the_plank_bridge_and_the_bolts_hold() {
     let desc = presets::sedan();
-    let r = cross_bridge(&desc, BOLT_BREAK_FORCE);
+    let r = cross_bridge(&desc, BOLT_BREAK_FORCE, 2.5);
     assert!(r.breaks.is_empty(), "no bolt breaks under a sedan: {:?}", r.breaks);
     assert!(r.max_bolt > 150.0e3, "the deck feels the car (two-way tyre rows): {} N", r.max_bolt);
     assert!(r.max_bolt < 0.9 * BOLT_BREAK_FORCE, "margin below the rating: {} N", r.max_bolt);
@@ -1053,7 +1063,7 @@ fn a_sedan_crosses_the_plank_bridge_and_the_bolts_hold() {
 #[test]
 fn a_monster_truck_snaps_the_bolts_and_falls_through() {
     let desc = presets::monster_truck();
-    let r = cross_bridge(&desc, BOLT_BREAK_FORCE);
+    let r = cross_bridge(&desc, BOLT_BREAK_FORCE, 2.5);
     assert!(!r.breaks.is_empty(), "the truck overloads the bolts");
     for b in &r.breaks {
         assert!(b.force > BOLT_BREAK_FORCE, "each break exceeded the rating: {b:?}");
@@ -1067,6 +1077,26 @@ fn a_monster_truck_snaps_the_bolts_and_falls_through() {
 #[ignore]
 fn bridge_probe_unbreakable_bolt_forces() {
     for desc in [presets::sedan(), presets::monster_truck(), presets::tank()] {
-        cross_bridge(&desc, 0.0);
+        cross_bridge(&desc, 0.0, 2.5);
+    }
+}
+
+#[test]
+fn a_fast_monster_truck_breaks_the_bridge_but_makes_it_over() {
+    // At 12 m/s the truck is past midspan when the bolts let go: the deck folds
+    // behind it and its momentum carries it onto the far road.
+    let r = cross_bridge(&presets::monster_truck(), BOLT_BREAK_FORCE, 12.0);
+    assert!(r.breaks.len() >= 8, "the bridge still breaks: {} bolts", r.breaks.len());
+    assert!(r.chassis[2] > r.end_z + 3.0, "made it to the far road: z {}", r.chassis[2]);
+    assert!((r.chassis[1] - r.ride_y).abs() < 0.2, "on its wheels at road level: y {} vs {}", r.chassis[1], r.ride_y);
+}
+
+#[test]
+#[ignore]
+fn bridge_probe_truck_speed() {
+    let speeds: Vec<f32> = std::env::var("SPEEDS").map(|v| v.split(',').map(|x| x.parse().unwrap()).collect()).unwrap_or(vec![5.0, 8.0, 10.0, 12.0, 14.0]);
+    for v in speeds {
+        let r = cross_bridge(&presets::monster_truck(), BOLT_BREAK_FORCE, v);
+        eprintln!("speed {v}: breaks {}, final {:?} (end_z {:.2}), ride {:.2}", r.breaks.len(), r.chassis, r.end_z, r.ride_y);
     }
 }

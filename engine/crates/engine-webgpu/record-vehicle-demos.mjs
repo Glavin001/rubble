@@ -140,12 +140,22 @@ const TAKES = {
   bridge: {
     query: 'scene=bridge',
     script: [
-      { n: 45, input: { forward: 0, steer: 0 }, caption: 'Plank bridge: five 2.6 m planks, 16 ball-joint bolts rated 220 kN', cam: { orbit: [1.25, 0.3, 24] } },
+      { n: 45, input: { forward: 0, steer: 0 }, caption: 'Plank bridge: five 2.6 m planks, 16 ball-joint bolts rated 255 kN', cam: { orbit: [1.25, 0.3, 24] } },
       { n: 330, cruise: 4, input: { steer: 0 }, caption: 'A 1.3 t sedan crosses: its tyre rows load the deck, the bolts hold', cam: { orbit: [1.5, 0.22, 20] } },
       { n: 45, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Parked on the far side' },
       { n: 20, act: 'player:1', input: { forward: 0, steer: 0 }, caption: 'Now a 3 t monster truck', cam: { orbit: [1.5, 0.22, 22] } },
-      { n: 420, cruise: 3, input: { steer: 0 }, caption: 'Over 220 kN at midspan: the bolts break (EVENT_BREAK) and the deck folds' },
+      { n: 420, cruise: 3, input: { steer: 0 }, caption: 'Over 255 kN at midspan: the bolts break (EVENT_BREAK) and the deck folds' },
       { n: 150, input: { forward: 0, steer: 0, brake: 1 }, caption: 'The truck falls through with the planks', cam: { orbit: [1.9, 0.35, 18], spin: 0.004 } },
+    ],
+  },
+  // Same bridge, truck at 43 km/h: it is past midspan when the bolts let go.
+  bridge_fast: {
+    query: 'scene=bridge&preset=monster_truck&heavy=none&spawn=0,-27,0',
+    script: [
+      { n: 30, input: { forward: 0, steer: 0 }, caption: 'Same bridge, monster truck with a run-up', cam: { orbit: [1.3, 0.25, 20] } },
+      { n: 150, cruise: 12, input: { steer: 0 }, caption: 'Up to 43 km/h on the approach' },
+      { n: 210, cruise: 12, input: { steer: 0 }, caption: 'The bolts still break, but behind the truck: momentum carries it over', cam: { orbit: [1.6, 0.2, 18] } },
+      { n: 150, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Made it. The deck is gone', cam: { orbit: [2.2, 0.35, 22], spin: 0.004 } },
     ],
   },
   sidewall: {

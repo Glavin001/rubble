@@ -144,21 +144,33 @@ and out of the pair filter, so its bodies collide again. Hosts read new events w
 `WgpuSim::poll_joint_breaks`, `MetalWorld::poll_joint_breaks` and `world.pollJointBreaks()`
 (JS). Tyre joints never break.
 
-`?scene=bridge` (and the `bridge` recorder take) mirrors `tests/vehicle.rs`: five 2.6 m
-planks (200 kg/m) span 12 m between abutment seats, 3 m up. Each seam has four
-ball-joint bolts at the top and bottom corners, so the deck carries bending as a bolt
-couple, rated 220 kN:
+`?scene=bridge` (and the `bridge` / `bridge_fast` recorder takes) mirrors
+`tests/vehicle.rs`: five 2.6 m planks (200 kg/m) span 12 m between abutment seats, 3 m
+up. Each seam has four ball-joint bolts at the top and bottom corners, so the deck
+carries bending as a bolt couple, rated 255 kN. Bolt forces at 20 solver iterations:
 
-| Load | Midspan bolt force |
+| Load (2.5 m/s) | Midspan bolt force |
 |---|---|
 | Deck alone | 102 kN (107 kN analytic: M = w·x(L−x)/2 over a 0.32 m couple) |
-| 1.3 t sedan at 2.5 m/s | 180–190 kN, holds |
-| 3 t monster truck | ~250 kN unbreakable: the bolts break at midspan and it falls through |
-| 4.6 t tank | ~360 kN |
+| 1.3 t sedan | ~205 kN, holds |
+| 3 t monster truck | ~320 kN if unbreakable: the bolts break and it falls through |
+| 4.6 t tank | ~450 kN |
 
-The bolts start at a 1e8 N/m penalty. From the default 1e4 the β·|C| ramp is far too
-slow for 520 kg planks (m/h² ≈ 2e6 N/m), and the span free-falls. Tab switches the
-driven vehicle (sedan first, then `?heavy=monster_truck`).
+The monster truck always breaks the bolts, but speed decides where it ends up:
+
+| Truck speed | Outcome |
+|---|---|
+| ≤ 8 m/s | Falls through with the planks |
+| 9 m/s | Front wheels reach the far road, rear caught on the edge |
+| ≥ 10 m/s | The deck folds behind it and it lands on the far road |
+
+The scene runs 20 iterations: at 10, colored Gauss–Seidel needs about 3 s to converge
+the deck's bending, so a truck faster than ~9 m/s crossed before the bolts felt its
+weight. The bolts start at a 1e8 N/m penalty. From the default 1e4 the β·|C| ramp is
+far too slow for 520 kg planks (m/h² ≈ 2e6 N/m), and the span free-falls. Tab switches
+the driven vehicle (sedan first, then `?heavy=monster_truck`; `heavy=none` for one).
+The scene skips the parked cannonballs, whose static colliders would otherwise fill the
+10-slot large-static list and hide the approach roads from the wheel casts.
 
 ## Parts, functional state and severing
 
