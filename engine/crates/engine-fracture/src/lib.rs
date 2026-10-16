@@ -18,6 +18,7 @@ pub mod pairs;
 pub mod plan;
 pub mod samples;
 pub mod scene;
+pub mod view;
 
 pub use asset::{parse_fracture_glb, FractureAsset};
 pub use plan::{Command, Counters, Limits, Planner};
