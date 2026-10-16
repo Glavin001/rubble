@@ -27,7 +27,7 @@ engine-fracture = { path = "../../../crates/engine-fracture", optional = true }
 
 [features]
 default = ["view"]
-gpu = ["dep:stress-gpu"]
+gpu = ["dep:stress-gpu", "dep:bytemuck"]
 # `destruction-view`: rubble's production stress pipeline in a window, in real time.
 view = ["gpu", "dep:winit", "dep:pollster", "dep:bytemuck", "dep:engine-fracture"]
 # The shared showcase behaviours with rubble as the engine (slow).
@@ -37,3 +37,7 @@ showcases = []
 name = "destruction-view"
 path = "src/bin/destruction_view/main.rs"
 required-features = ["view"]
+
+[[example]]
+name = "destruction_video"
+required-features = ["gpu"]

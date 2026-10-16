@@ -43,6 +43,8 @@
 //! rebuilt body; `RubbleEngine::with_capacity` sizes it.
 
 pub mod scenes;
+#[cfg(feature = "gpu")]
+pub mod render;
 
 use std::collections::HashMap;
 use std::ops::Range;

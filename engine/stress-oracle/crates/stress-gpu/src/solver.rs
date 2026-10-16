@@ -327,9 +327,6 @@ struct Buffers {
     params_contact: wgpu::Buffer,
     /// The static part of the params (offsets, counts, contact constants).
     params: Params,
-    /// Chunk records and the CSR index (rebuilt with the layout).
-    chunks: wgpu::Buffer,
-    index: wgpu::Buffer,
     state: wgpu::Buffer,
     bond_dyn: wgpu::Buffer,
     scratch: wgpu::Buffer,
@@ -1098,8 +1095,6 @@ impl GpuSolver {
                 params_segment,
                 params_contact,
                 params,
-                chunks: chunks_buf,
-                index: index_buf,
                 state,
                 bond_dyn: bond_dyn_buf,
                 scratch,
@@ -2566,7 +2561,7 @@ impl GpuSolver {
     pub fn render_buffers(&self) -> RenderBuffers<'_> {
         let b = &self.buffers;
         RenderBuffers {
-            chunks: &b.chunks,
+            chunks: &b.chunk_static,
             islands: &b.islands,
             state: &b.state,
             index: &b.index,
