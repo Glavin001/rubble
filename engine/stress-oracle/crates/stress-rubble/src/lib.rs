@@ -230,8 +230,22 @@ fn cook(b: &EngineBody, arena: &mut HullArena) -> Cooked {
                     }
                     Some(points) => {
                         let local: Vec<glam::Vec3> = points.iter().map(|p| gv(to_body.rotate(s.local.transform_point(*p) - com))).collect();
-                        let hull = ConvexHull::from_points(&local).unwrap_or_else(|e| panic!("chunk {:?}: hull not accepted by rubble: {e}", s.chunk));
-                        let (hull, offset) = hull.recentered();
+                        let (hull, offset, rotation) = match ConvexHull::from_points(&local) {
+                            Ok(hull) => {
+                                let (hull, offset) = hull.recentered();
+                                (hull, offset, [0.0, 0.0, 0.0, 1.0])
+                            }
+                            // Rounded to f32 in the body frame, nearly coplanar faces can
+                            // fail rubble's strict convexity test (seen when house chunks
+                            // form fragments). The same points in the shape's own frame
+                            // passed it above: that hull, turned by the collider instead.
+                            Err(_) => {
+                                let own = ConvexHull::from_points(&points.iter().map(|p| gv(*p)).collect::<Vec<_>>()).unwrap_or_else(|e| panic!("chunk {:?}: hull not accepted by rubble: {e}", s.chunk));
+                                let (hull, centre) = own.recentered();
+                                let offset = gv(to_body.rotate(s.local.transform_point(rv(centre)) - com));
+                                (hull, offset, glam_quat((to_body * s.local.rotation).normalized()).to_array())
+                            }
+                        };
                         let base = arena.insert(&hull).unwrap_or_else(|e| panic!("chunk {:?}: hull arena: {e}", s.chunk));
                         colliders.push(Collider {
                             body: 0,
@@ -240,7 +254,7 @@ fn cook(b: &EngineBody, arena: &mut HullArena) -> Cooked {
                             generation: 0,
                             local_pos: offset.to_array(),
                             density,
-                            local_rot: [0.0, 0.0, 0.0, 1.0],
+                            local_rot: rotation,
                             params: convex_collider_params(base, 1.0, hull.bounding_radius()),
                         });
                     }
