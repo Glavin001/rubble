@@ -434,6 +434,12 @@ pub struct GpuSolver {
     pub crush_energy: f64,
     /// Pre-existing overlap of the pairs in contact (world.rs `pair_offsets`).
     pair_memory: HashMap<PairKey, PairState>,
+    /// Ids of the quiet clusters left out of the chunk and bond tables (`quiet_clusters`):
+    /// chosen by `refresh`, kept by every other build.
+    excluded: Vec<u64>,
+    /// The mirror's chunk state and cluster motion equal the GPU's (after a download,
+    /// before the next compute submission).
+    state_current: bool,
     kernels: Kernels,
     timing: Option<Timing>,
     layout: Layout,
@@ -505,7 +511,7 @@ impl GpuSolver {
         let step_times = vec![mirror.time];
         let mut loads = loads;
         let pair_memory = HashMap::new();
-        let (layout, buffers) = Self::build(gpu, &kernels, &mirror, loads.as_mut(), &impactors, &pair_memory, 4, 0.0, mirror.time, None, &[])?;
+        let (layout, buffers) = Self::build(gpu, &kernels, &mirror, loads.as_mut(), &impactors, &pair_memory, 4, 0.0, mirror.time, None, &[], &[])?;
         Ok(GpuSolver {
             mirror,
             loads,
@@ -515,6 +521,8 @@ impl GpuSolver {
             frame_load_sum: ChunkLoads::default(),
             crush_energy: 0.0,
             pair_memory,
+            excluded: Vec::new(),
+            state_current: true,
             kernels,
             timing,
             layout,
@@ -547,7 +555,7 @@ impl GpuSolver {
         }
         let stride = self.buffers.params.probe_stride;
         self.plan_until = self.mirror.time + horizon;
-        let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, None, &self.extra_terms)?;
+        let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, None, &self.extra_terms, &self.excluded)?;
         self.layout = layout;
         self.buffers = buffers;
         Ok(())
@@ -560,7 +568,7 @@ impl GpuSolver {
         let horizon = if self.contacts_possible() { horizon } else { 0.0 };
         self.plan_until = self.mirror.time + horizon;
         let (layout, buffers) =
-            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms)?;
+            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
         self.layout = layout;
         self.buffers = buffers;
         Ok(())
@@ -607,6 +615,7 @@ impl GpuSolver {
         plan_time: f64,
         keep: Option<&Buffers>,
         extra_terms: &[LoadTerm],
+        excluded: &[u64],
     ) -> Result<(Layout, Buffers), String> {
         if m.config.mode == SolveMode::Implicit {
             return Err("the implicit solve mode is not on the GPU yet".into());
@@ -617,7 +626,7 @@ impl GpuSolver {
         };
         let scene: Option<&Scene> = loads.as_deref().map(|l| &l.scene);
         terms.extend_from_slice(extra_terms);
-        let StructureTables { chunk_index, chunks, mut chunk_static, state, mut islands, table, bonds, bond_index, bond_static, bond_dyn, csr } = stress_layout::pack(m)?;
+        let StructureTables { chunk_index, chunks, mut chunk_static, state, mut islands, table, bonds, bond_index, bond_static, bond_dyn, csr } = stress_layout::pack_with(m, &m.clusters.iter().map(|cl| excluded.binary_search(&cl.id).is_ok()).collect::<Vec<_>>())?;
         let n = chunks.len();
 
         // Load terms by GPU chunk (stable: the reference's order within a chunk), then
@@ -1133,7 +1142,7 @@ impl GpuSolver {
             }
             let stride = stride.max(self.buffers.params.probe_stride);
             let keep = if full { None } else { Some(&self.buffers) };
-            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, start_time, keep, &self.extra_terms)?;
+            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, start_time, keep, &self.extra_terms, &self.excluded)?;
             self.layout = layout;
             self.buffers = buffers;
             self.log_plan();
@@ -1335,6 +1344,7 @@ impl GpuSolver {
             }
             let t = std::time::Instant::now();
             gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
             self.profile.gpu += t.elapsed().as_secs_f64();
             if let Some(timing) = &self.timing {
@@ -1477,7 +1487,7 @@ impl GpuSolver {
             let left_now = self.mirror.clusters.iter().filter_map(|c| remaining.get(&c.id).copied()).max().unwrap_or(0).max(pipeline_left);
             let reached = self.step_times[start + substeps - left_now];
             self.plan_until = reached + dt * left_now as f64;
-            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, self.buffers.params.probe_stride, dt * left_now as f64, reached, None, &self.extra_terms)?;
+            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, self.buffers.params.probe_stride, dt * left_now as f64, reached, None, &self.extra_terms, &self.excluded)?;
             self.layout = layout;
             self.buffers = buffers;
             self.log_plan();
@@ -1912,6 +1922,7 @@ impl GpuSolver {
                 }
             }
         }
+        self.state_current = true;
         bonds.then(|| bytemuck::pod_collect_to_vec(&bond_bytes))
     }
 
@@ -2040,20 +2051,113 @@ impl GpuSolver {
                 }
             }
             gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
             out.push((name, t.elapsed().as_secs_f64() / reps as f64));
         }
         out
     }
 
+    /// Clusters the GPU would not touch, by id (sorted): settled, anchored and driven
+    /// (never in a contact plan), in a scene without scripted loads, events or probes,
+    /// with no engine load on any chunk (`extra_terms`), whose every bond's static fatigue
+    /// over a frame stays a thousandth of half an f32 ulp of its life (so the GPU's
+    /// `settled_fatigue` leaves it bit for bit). The kernels skip such an island's phases
+    /// (`ISLAND_QUIET`), so leaving its chunks and bonds out changes nothing else.
+    /// `STRESS_GPU_QUIET_EXCLUDE=0`: none.
+    fn quiet_clusters(&self) -> Vec<u64> {
+        let m = &self.mirror;
+        let Some(l) = self.loads.as_ref() else { return Vec::new() };
+        let sc = &l.scene;
+        if m.config.mode != SolveMode::Adaptive
+            || !sc.loads.is_empty()
+            || !sc.events.is_empty()
+            || !sc.probes.is_empty()
+            || std::env::var("STRESS_GPU_QUIET_EXCLUDE").is_ok_and(|v| v == "0")
+        {
+            return Vec::new();
+        }
+        let frame_dt = sc.sim.frame_dt;
+        let mut loaded = vec![false; m.clusters.len()];
+        for t in &self.extra_terms {
+            if let Some(cs) = m.chunks.get(t.structure).and_then(|v| v.get(t.chunk)) {
+                if let Some(x) = loaded.get_mut(cs.cluster) {
+                    *x = true;
+                }
+            }
+        }
+        let fatigue_still = |s: usize, bi: usize| {
+            let b = &m.bonds[s][bi];
+            let Some(f) = b.strength.static_fatigue else { return true };
+            let idx = stress_ref::joint::failure_indices(&b.strength, &stress_ref::joint::stress_measures(&b.geometry, &b.force), b.weibull);
+            let ratio = idx.tension.max(idx.shear).max(idx.compression);
+            let life = 1.0 - b.joint.fatigue;
+            f.life_rate(ratio) * frame_dt < 1e-3 * life * (-27f64).exp2()
+        };
+        let mut ids: Vec<u64> = m
+            .clusters
+            .iter()
+            .enumerate()
+            .filter(|(ci, cl)| {
+                cl.activity == Activity::Settled
+                    && cl.anchored
+                    && (cl.driven || !m.config.integrate_rigid)
+                    && !loaded[*ci]
+                    && cl.bonds.iter().all(|&bi| fatigue_still(cl.structure, bi))
+            })
+            .map(|(_, cl)| cl.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// How many clusters are left out of the GPU tables as quiet (`quiet_clusters`).
+    pub fn quiet_count(&self) -> usize {
+        self.excluded.len()
+    }
+
+    /// `download` for a relayout, keeping what the host set since the GPU last ran:
+    /// cluster motion and activity, and the impactors.
+    fn download_keeping_host_motion(&mut self, gpu: &Gpu) {
+        let host: Vec<_> = self
+            .mirror
+            .clusters
+            .iter()
+            .map(|cl| (cl.pose, cl.velocity, cl.angular_velocity, cl.driven, cl.activity, cl.active_timer, cl.settled_load_norm))
+            .collect();
+        let impactors = self.impactors.clone();
+        self.download(gpu);
+        for (cl, h) in self.mirror.clusters.iter_mut().zip(host) {
+            (cl.pose, cl.velocity, cl.angular_velocity, cl.driven, cl.activity, cl.active_timer, cl.settled_load_norm) = h;
+        }
+        self.impactors = impactors;
+    }
+
     /// Re-lay the per-step data (load terms, island poses) from the mirror, keeping the
     /// GPU's chunk state and bond history: for an engine's new frame (poses, contact
     /// loads). The mirror's bonds may lag (nothing is taken from them).
+    ///
+    /// Also where the quiet clusters left out of the tables are chosen (`quiet_clusters`):
+    /// when that set changes, everything is laid out again from the mirror, brought up
+    /// to the GPU's state first.
     pub fn refresh(&mut self, gpu: &Gpu) -> Result<(), String> {
         let stride = self.buffers.params.probe_stride;
         self.plan_until = self.mirror.time;
+        let quiet = self.quiet_clusters();
+        if quiet != self.excluded {
+            if !self.state_current {
+                self.download_keeping_host_motion(gpu);
+            }
+            self.sync(gpu);
+            self.excluded = quiet;
+            let (layout, buffers) =
+                Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, None, &self.extra_terms, &self.excluded)?;
+            self.layout = layout;
+            self.buffers = buffers;
+            return Ok(());
+        }
         let (layout, buffers) =
-            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, Some(&self.buffers), &self.extra_terms)?;
+            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
         self.layout = layout;
         self.buffers = buffers;
         Ok(())
@@ -2110,6 +2214,7 @@ impl GpuSolver {
             pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
         }
         gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
         let result_at = p.statics_base as usize + 23 * self.layout.chunks.len() + 2 * self.layout.bonds.len();
         let results: Vec<[f32; 4]> = gpu.read_range(&self.buffers.scratch, result_at, islands.len());
@@ -2402,6 +2507,7 @@ impl GpuSolver {
             pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
         }
         gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
         self.bonds_stale = true;
         let mut read: Vec<Island> = gpu.read(&self.buffers.islands);
         read.pop();
