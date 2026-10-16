@@ -803,6 +803,7 @@ mod tests {
             "build_awake_list",
             "predict_bodies",
             "extract_velocity_sleep",
+            "record_stab_velocity",
             "sleep_island_commit",
             "ccd_classify",
             "ccd_sweep",
@@ -878,7 +879,8 @@ mod tests {
             atomic_offsets.sort_unstable();
             let expected = match name {
                 "apply_commands" => vec![8],
-                "predict_bodies" | "extract_velocity_sleep" | "sleep_island_commit" => vec![20],
+                "predict_bodies" | "extract_velocity_sleep" | "record_stab_velocity"
+                | "sleep_island_commit" => vec![20],
                 _ => vec![],
             };
             assert_eq!(atomic_offsets, expected,
