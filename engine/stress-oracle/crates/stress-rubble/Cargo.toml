@@ -18,8 +18,14 @@ serde_json = "1"
 wgpu = "30"
 # The GPU stress solver coupled to rubble (`GpuWorld::with_engine`), for its tests.
 stress-gpu = { path = "../stress-gpu", optional = true }
+# The offscreen video renderer (`render`, gpu feature).
+bytemuck = { version = "1", features = ["derive"], optional = true }
 
 [features]
-gpu = ["dep:stress-gpu"]
+gpu = ["dep:stress-gpu", "dep:bytemuck"]
 # The shared showcase behaviours with rubble as the engine (slow).
 showcases = []
+
+[[example]]
+name = "destruction_video"
+required-features = ["gpu"]
