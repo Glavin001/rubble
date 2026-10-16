@@ -15,8 +15,8 @@ The awake bodies at 30 s, for the default flags of each stage:
 |---|---|---|
 | One unhit house, started awake (3,157 bodies) | 2,467, never sleeps | **0 from about 8 s** |
 | Bonded house started awake (level 1, 567 bodies) | 561, spins to 240 rad/s | **0 from about 8 s** |
-| 7×7 grid with the ball (154,759 bodies) | 135,734 | **2,540–5,160** (plateaus near 4,750 to 45 s) |
-| Bonded suburb, level 1 (27,233 bodies) | 14,391, growing | **about 2,750**, flat |
+| 7×7 grid with the ball (154,759 bodies) | 135,734 | **1: only the rolling ball, from 25 s** (deterministic and normal runs) |
+| Bonded suburb, level 1 (27,233 bodies) | 14,391, growing | **about 2,190**, flat (legacy bond solver) |
 
 The remaining awake bodies:
 - **7×7 grid:** 2 islands of about 2,400 bodies, each held by 5–7 slow movers
@@ -40,7 +40,7 @@ opt-in.
 | 128 | Coulomb stick | avbd-demo2d | Yes, on the grid | Movers at 20 s: 1,147 → 294 |
 | 8192 | Point-speed sleep test | Box2D v3 | Yes | With 4096, the one house sleeps |
 | 16384 | Look-ahead contacts sized to closing speed, linear and spin, with a relative-sweep candidate test | PhysX speculative CCD, Box2D, Jolt | Yes | Grid deep (>1 cm) contacts 3,000 → 900. Needed four fixes: rest semantics, a per-point closing-velocity filter, a relative sweep, and a spin bound. |
-| 32768 | Displacement sleep test with a low-pass pose (β 0.2) and per-window restarts | Jolt sleep spheres | Yes | Ignores jitter in place, such as period-2 and period-3 jammed pieces |
+| 32768 | Displacement sleep test: a body counts as moving only if both its low-pass pose and its velocity integral Σv·h moved more than sleepLin·sleepTime this window | Jolt sleep spheres; Box2D, Jolt and PhysX velocity tests | Yes, the final key | Ignores velocity blips that post-stabilization undoes, and push-out that is not velocity. The grid went from about 4,750 to 1 awake (the ball). |
 | 131072 | Deferred wake | Box2D (woken islands keep their contacts) | Yes | Stops the wake cascade (1,522 → 0 wakes on one pile) |
 | 262144 | Resting-pair carry: sleeping pairs keep their λ | Box2D; Rust host `ENGINE_REST=carry` | Yes | One house asleep by 10 s; no cold-start sag on waking |
 | 524288 | Bond geometric stiffness | AVBD paper Sec. 3.5, avbd-demo3d | Yes | Bond iteration stopped diverging; the bonded house sleeps by 8 s |
@@ -56,6 +56,8 @@ opt-in.
 | 2097152 | Rolling resistance, μr 0.02, stiffness bounded by inertia | Box2D v3, Bullet | Stops the ball in about 2 minutes, but worse elsewhere | Grid at 30 s: 2,059–9,145 awake vs 158–3,000 without |
 | 256 | Tangential penalty mass floor | — | No, rejected | Unstable with 4096 |
 | 2048 | Load-based penalty floor | — | No, rejected | Exploded (2.4 MJ) |
+
+| 8388608 | Rotational armature, I ≥ 0.1·m·r_max² | MuJoCo | No | Bonded suburb: 3,275 awake vs 2,191 |
 
 ### Host-side
 
