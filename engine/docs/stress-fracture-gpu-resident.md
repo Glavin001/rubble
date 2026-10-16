@@ -23,6 +23,23 @@ rubble's AVBD step itself costs 2.4-4.7 ms per step with a handful of bodies (GP
 execution of ~100 latency-bound dispatches), which is what makes the floor drop and the
 sub-stepped free-wall ram slower than PhysX GPU.
 
+## Status (2026-10-16)
+
+- **Stage 1 and Tier 0 done, bit-identical.**
+  - Host waste is out of every frame.
+  - Quiet clusters are left out of the GPU tables, and their routing and step data are reused.
+  - rubble's body read-backs are reused.
+  - Hulls are cooked once per distinct shape.
+  - Routing and the contact plan no longer loop over every pair.
+  - Setup work is parallel and proportional to the scene.
+- **Measured.**
+  - Idle 64-house town: 210 → 2.4 ms per steady-state frame.
+  - 256 houses with four rammed: 815 → 514 ms per frame.
+  - 256-house setup: 55+ → 15 s.
+- **Stages 2–3 not started.**
+  - The measured value of stage 2 (one submission, shared buffers) is now small: host waits are under 5 % of a single-house destruction frame.
+  - Stage 3 (planning, packing and splits on the GPU) is what the many-house destruction frames need.
+
 ## Stages
 
 Each stage is gated before the next starts.

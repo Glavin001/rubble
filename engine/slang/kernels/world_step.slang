@@ -1007,9 +1007,7 @@ void gridScanCell(uint i, Collider col, BodyState b, Aabb box, float3 cA, float 
         {
             BodyState ob = gBodies[other.body];
             bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
-            // Statics never query, so the dynamic querier owns every static pair at
-            // any index (as the full scan does).
-            keep = cur > i || !bodyIsDynamic(ob) || (!sleeper && otherSleep);
+            keep = cur > i || (!sleeper && otherSleep);
         }
         if (!keep || other.body == col.body || bodiesJointed(col.body, other.body) ||
             other.shape == SHAPE_PLANE)
@@ -1194,8 +1192,7 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             Collider other = gColliders[cur];
             BodyState ob = gBodies[other.body];
             bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
-            // Statics never query: the dynamic querier owns static pairs at any index.
-            bool pairOnce = cur > i || !bodyIsDynamic(ob) || (!sleeper && otherSleep);
+            bool pairOnce = cur > i || (!sleeper && otherSleep);
             if (pairOnce && cur != i)
             {
                 if (other.body != col.body &&

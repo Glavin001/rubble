@@ -1,5 +1,11 @@
 # Blast vs our stress solver: head to head, then a fidelity ladder (2026-10-16)
 
+> **Merge note (feat/stress-fracture).** This branch was merged without its rubble
+> broadphase fix (8352765): the fix is correct, but it makes b8_sudden over-break
+> (36 bonds against the oracle's 11) by exposing the engine's contact-to-load path, so
+> adopting it is a decision for the engine owners (see the recommendations). Every
+> other change merged; stress_bench digests are unchanged by the merge.
+
 ## The question
 
 The earlier Blast-based GPU stress solver in the PhysX repository was fast but
