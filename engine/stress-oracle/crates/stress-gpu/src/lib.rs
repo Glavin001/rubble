@@ -74,7 +74,7 @@ pub mod shaders {
     pub const STRESS_RENDER: ShaderSet = shader_set!("stress_render", [("stress_vs", (1, 1, 1)), ("stress_fs", (1, 1, 1))]);
 }
 
-pub mod scenes;
+pub use stress_ref::scenes;
 pub mod solver;
 pub mod statics;
 pub mod stability;
