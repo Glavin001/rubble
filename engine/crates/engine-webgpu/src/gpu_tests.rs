@@ -611,6 +611,105 @@ fn broadphase_linked_buckets_case(buckets: usize, split: bool) {
 }
 
 #[test]
+fn broadphase_grid_keeps_static_pairs_below_the_querier_index() {
+    // Statics never query, so a dynamic querier owns every static pair whatever the
+    // indices. A grid of static boxes created first (an anchored structure) and one
+    // dynamic box created last (an impactor) must pair on both grid paths, as the
+    // full scan of small scenes does: the grid used to keep only `cur > i`, and a
+    // ram passed through an anchored 840-chunk wall without a contact.
+    for split in [false, true] {
+        broadphase_static_pairs_case(split);
+    }
+}
+
+fn broadphase_static_pairs_case(split: bool) {
+    use std::collections::BTreeSet;
+    const STATICS: usize = 640; // Above the 512-collider full scan: the grid path.
+    let buckets = 65536usize;
+    let mut sim = WgpuSim::new_with_compact_contacts(WorldCapacity::small(), false)
+        .expect("GPU adapter required for grid pair coverage");
+    sim.params.grid_cell_size = 1.25;
+    let mut centers = Vec::new();
+    for id in 0..STATICS {
+        let p = [
+            (id % 16) as f32 * 0.75 - 6.,
+            ((id / 16) % 8) as f32 * 0.75 - 3.,
+            (id / 128) as f32 * 0.75 - 1.5,
+        ];
+        centers.push(p);
+        sim.add_body(BodyState {
+            position: p,
+            orientation: [0., 0., 0., 1.],
+            ..BodyState::zeroed()
+        });
+        sim.add_collider(Collider {
+            body: id as u32,
+            shape: ShapeType::Box as u32,
+            params: [0.375, 0.375, 0.375, 0.65],
+            local_rot: [0., 0., 0., 1.],
+            ..Collider::zeroed()
+        });
+    }
+    // The dynamic box, last, touching the statics around it.
+    let p = [0.375, 0.375, 0.375];
+    centers.push(p);
+    sim.add_body(BodyState {
+        position: p,
+        orientation: [0., 0., 0., 1.],
+        inv_mass: 1.,
+        inv_inertia: [1.; 3],
+        flags: 9,
+        ..BodyState::zeroed()
+    });
+    sim.add_collider(Collider {
+        body: STATICS as u32,
+        shape: ShapeType::Box as u32,
+        params: [0.375, 0.375, 0.375, 0.65],
+        local_rot: [0., 0., 0., 1.],
+        ..Collider::zeroed()
+    });
+    let n = STATICS + 1;
+    sim.write_host_uniforms();
+    let s16 = std::mem::size_of::<AvbdParams>() as u64 + 16 * 4;
+    sim.queue
+        .write_buffer(&sim.bufs[6], s16, bytemuck::bytes_of(&(buckets as u32)));
+    sim.queue.write_buffer(
+        &sim.bufs[6],
+        s16 + 4 * 4,
+        bytemuck::bytes_of(&u32::from(split)),
+    );
+    let tables = if split { 2 } else { 1 };
+    let mut enc = sim.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = enc.begin_compute_pass(&Default::default());
+        sim.disp(&mut pass, "build_aabbs", n as u64, None);
+        sim.disp(
+            &mut pass,
+            "broadphase_clear",
+            (buckets * tables) as u64,
+            None,
+        );
+        sim.disp(&mut pass, "broadphase_insert", n as u64, None);
+        sim.disp(&mut pass, "broadphase_query", n as u64, None);
+    }
+    sim.queue.submit([enc.finish()]);
+    let counters = download::<StepCounters>(&sim, 7, 0, 1)[0];
+    assert_eq!(counters.overflow_flags, 0, "Overflow invalidates broadphase coverage evidence");
+    let pairs: Vec<CandidatePair> = if counters.candidate_count == 0 { Vec::new() } else { download(&sim, 10, 0, counters.candidate_count as usize) };
+    let actual: BTreeSet<(u32, u32)> = pairs
+        .iter()
+        .map(|p| (p.collider_a.min(p.collider_b), p.collider_a.max(p.collider_b)))
+        .collect();
+    // Only the dynamic box queries: its touching statics, and nothing static-static.
+    let expected: BTreeSet<(u32, u32)> = (0..STATICS)
+        .filter(|&a| (0..3).all(|axis| (centers[a][axis] - p[axis]).abs() <= 0.7501))
+        .map(|a| (a as u32, STATICS as u32))
+        .collect();
+    assert!(!expected.is_empty());
+    assert_eq!(actual, expected, "split={split}: the grid lost static pairs below the dynamic querier's index");
+}
+
+#[test]
 fn sleep_dispatch_skips_empty_work_and_restores_current_island_propagation() {
     let mut sim = WgpuSim::new(WorldCapacity::small()).expect("GPU adapter required");
     let mut body = BodyState::zeroed();

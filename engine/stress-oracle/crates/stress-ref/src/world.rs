@@ -246,6 +246,11 @@ pub struct World {
     /// `implicit_failure_windows`: frames solved again because a bond started to fail
     /// in an implicit step.
     pub redone_frames: u64,
+    /// Coupled mode: impact islands (bodies whose contact the rigid assumption cannot
+    /// resolve are simulated by the stress solve's own dynamics within the frame). Off,
+    /// the engine drives every body and the stress solve takes its contacts only as
+    /// loads (the Blast-style coupling); quasi-static mode always runs it off.
+    pub impact_islands: bool,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -402,6 +407,7 @@ impl World {
             engine_body_frames: 0,
             island_body_frames: 0,
             redone_frames: 0,
+            impact_islands: true,
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,
