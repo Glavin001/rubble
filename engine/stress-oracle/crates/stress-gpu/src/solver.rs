@@ -2115,6 +2115,11 @@ impl GpuSolver {
         ids
     }
 
+    /// The ids of the clusters left out of the GPU tables as quiet (sorted).
+    pub fn excluded_ids(&self) -> &[u64] {
+        &self.excluded
+    }
+
     /// How many clusters are left out of the GPU tables as quiet (`quiet_clusters`).
     pub fn quiet_count(&self) -> usize {
         self.excluded.len()

@@ -267,6 +267,10 @@ struct Coupling {
     kept: HashMap<((usize, usize), (usize, usize)), f64>,
     /// Each cluster's engine shapes by cluster id, with the signature they were built for.
     shapes: HashMap<u64, (u64, std::sync::Arc<Vec<BoxShape>>)>,
+    /// `select_islands`' per-cluster bounds and material data (lo, hi, reach, modulus,
+    /// wave speed, contact radius, weakest bond capacity), reused for clusters in
+    /// `ReferenceSolver::unchanged`.
+    routing: HashMap<u64, (Vec3, Vec3, f64, f64, f64, f64, f64)>,
 }
 
 /// Contact stiffness of two bodies pressed together along `dir`: their half-thicknesses
