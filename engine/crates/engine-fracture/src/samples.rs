@@ -26,9 +26,17 @@ fn one() -> u32 {
 
 impl Layout {
     pub const fn grid(columns: u32, rows: u32) -> Self {
-        Self { suburb: false, columns, rows }
+        Self {
+            suburb: false,
+            columns,
+            rows,
+        }
     }
-    pub const SUBURB: Self = Self { suburb: true, columns: 1, rows: 1 };
+    pub const SUBURB: Self = Self {
+        suburb: true,
+        columns: 1,
+        rows: 1,
+    };
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -55,7 +63,15 @@ impl Sample {
 }
 
 pub const SAMPLES: &[Sample] = &[
-    Sample { key: "house", menu: "House · 131 building parts", label: "house", file: Some("veneer-house.glb"), layout: None, level: None, max_hull_vertices: None },
+    Sample {
+        key: "house",
+        menu: "House · 131 building parts",
+        label: "house",
+        file: Some("veneer-house.glb"),
+        layout: None,
+        level: None,
+        max_hull_vertices: None,
+    },
     Sample {
         key: "row",
         menu: "20 houses · Level 3 in a row",
@@ -83,9 +99,33 @@ pub const SAMPLES: &[Sample] = &[
         level: Some(2),
         max_hull_vertices: None,
     },
-    Sample { key: "cuboids", menu: "Cuboid suburb · 48 box-built houses", label: "48 cuboid houses", file: None, layout: Some(Layout::SUBURB), level: None, max_hull_vertices: None },
-    Sample { key: "cuboidGrid", menu: "49 box-built houses in a 7×7 grid", label: "49 cuboid houses", file: None, layout: Some(Layout::grid(7, 7)), level: None, max_hull_vertices: None },
-    Sample { key: "arch", menu: "Masonry arch · 23 pieces", label: "arch", file: Some("masonry-arch.glb"), layout: None, level: None, max_hull_vertices: None },
+    Sample {
+        key: "cuboids",
+        menu: "Cuboid suburb · 48 box-built houses",
+        label: "48 cuboid houses",
+        file: None,
+        layout: Some(Layout::SUBURB),
+        level: None,
+        max_hull_vertices: None,
+    },
+    Sample {
+        key: "cuboidGrid",
+        menu: "49 box-built houses in a 7×7 grid",
+        label: "49 cuboid houses",
+        file: None,
+        layout: Some(Layout::grid(7, 7)),
+        level: None,
+        max_hull_vertices: None,
+    },
+    Sample {
+        key: "arch",
+        menu: "Masonry arch · 23 pieces",
+        label: "arch",
+        file: Some("masonry-arch.glb"),
+        layout: None,
+        level: None,
+        max_hull_vertices: None,
+    },
 ];
 
 pub fn sample(key: &str) -> Result<&'static Sample> {
@@ -98,11 +138,17 @@ pub fn sample(key: &str) -> Result<&'static Sample> {
 /// The level a sample opens at: its preferred level if present, else the first.
 pub fn initial_level(asset: &FractureAsset, preferred: Option<u8>) -> Option<u8> {
     let levels = asset.levels();
-    preferred.filter(|l| levels.contains(l)).or(levels.first().copied())
+    preferred
+        .filter(|l| levels.contains(l))
+        .or(levels.first().copied())
 }
 
 /// One house: a baked level, or the procedural cuboid house when `asset` is None.
-pub fn base_scene(asset: Option<&FractureAsset>, level: u8, max_hull_vertices: Option<usize>) -> Result<Scene> {
+pub fn base_scene(
+    asset: Option<&FractureAsset>,
+    level: u8,
+    max_hull_vertices: Option<usize>,
+) -> Result<Scene> {
     match asset {
         Some(asset) => build_scene(asset, level, max_hull_vertices),
         None => build_cuboid_house(&CuboidOptions::default()),
@@ -114,7 +160,14 @@ pub fn layout_scene(one: Scene, layout: Option<Layout>, procedural: bool) -> Sce
     let mut s = match layout {
         None => one,
         Some(l) if l.suburb => build_suburb(&one, &SuburbOptions::default()),
-        Some(l) => build_grid(&one, &GridOptions { columns: l.columns, rows: l.rows, ..GridOptions::default() }),
+        Some(l) => build_grid(
+            &one,
+            &GridOptions {
+                columns: l.columns,
+                rows: l.rows,
+                ..GridOptions::default()
+            },
+        ),
     };
     if procedural {
         // A brick in a wall touches up to six neighbours (four contacts each).

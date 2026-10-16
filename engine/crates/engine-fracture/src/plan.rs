@@ -31,7 +31,9 @@ pub const MATERIAL_BUFFER: u32 = 3;
 pub const HOST_UPLOAD: u32 = 255;
 /// Pass-uniform stride (dynamic offset alignment).
 pub const PASS_ALIGN: u32 = 256;
-pub const PASS_SLOTS: u32 = 96;
+pub const PASS_SLOTS: u32 = 160;
+/// First pass slot of the post-stabilization primal pass (value 256 | colour).
+pub const STAB_PASS: u32 = 96;
 pub const COUNTER_BYTES: u32 = 80;
 pub const BODY_BYTES: usize = 112;
 pub const COLLIDER_BYTES: usize = 64;
@@ -110,6 +112,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("solve_primal_sparse", "solve_primal_sparse_persistent"),
     ("solve_dual", "solve_dual_persistent"),
     ("extract_velocity_sleep", "extract_velocity_sleep"),
+    ("carry_rest_pairs", "carry_rest_pairs"),
     ("joint_hash_clear", "joint_hash_clear"),
     ("joint_hash_insert", "joint_hash_insert"),
     ("bond_wake", "bond_wake"),
@@ -125,13 +128,20 @@ pub const KERNELS: &[(&str, &str)] = &[
 /// (as engine-webgpu's build script compiles them).
 pub fn kernel_source(entry: &str) -> &'static str {
     if entry.starts_with("convex_") {
-        return if entry.ends_with("_persistent") { "convex_persistent.slang" } else { "convex_step.slang" };
+        return if entry.ends_with("_persistent") {
+            "convex_persistent.slang"
+        } else {
+            "convex_step.slang"
+        };
     }
     if entry.ends_with("_copy_persistent") {
         "reuse_copy.slang"
     } else if entry.ends_with("_persistent") {
         "persistent_solve.slang"
-    } else if entry.ends_with("_compact") || entry == "pack_solver_contacts" || entry == "clear_solver_contacts" {
+    } else if entry.ends_with("_compact")
+        || entry == "pack_solver_contacts"
+        || entry == "clear_solver_contacts"
+    {
         "compact_solve.slang"
     } else {
         "world_step.slang"
@@ -139,7 +149,10 @@ pub fn kernel_source(entry: &str) -> &'static str {
 }
 
 fn kernel(name: &str) -> u32 {
-    KERNELS.iter().position(|(n, _)| *n == name).unwrap_or_else(|| panic!("unscheduled kernel {name}")) as u32
+    KERNELS
+        .iter()
+        .position(|(n, _)| *n == name)
+        .unwrap_or_else(|| panic!("unscheduled kernel {name}")) as u32
 }
 
 /// Profiling and slicing boundaries: a phase ends where its marker appears.
@@ -178,11 +191,22 @@ pub const OP_PHASE: u32 = 3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     /// `dispatchWorkgroups(x, y, 1)` of `kernel` with pass-uniform slot `pass`.
-    Dispatch { kernel: u32, x: u32, y: u32, pass: u32 },
+    Dispatch {
+        kernel: u32,
+        x: u32,
+        y: u32,
+        pass: u32,
+    },
     /// Indirect dispatch: workgroup counts at `slot * 12` bytes of buffer 23.
     Indirect { kernel: u32, slot: u32, pass: u32 },
     /// Buffer copy; `src == HOST_UPLOAD` reads this tick's host upload.
-    Copy { src: u32, src_offset: u32, dst: u32, dst_offset: u32, size: u32 },
+    Copy {
+        src: u32,
+        src_offset: u32,
+        dst: u32,
+        dst_offset: u32,
+        size: u32,
+    },
     /// End of phase `PHASES[id]`.
     Phase { id: u32 },
 }
@@ -194,9 +218,33 @@ impl Command {
         while i < words.len() {
             let w = &words[i..];
             let (c, n) = match w[0] {
-                OP_DISPATCH => (Command::Dispatch { kernel: w[1], x: w[2], y: w[3], pass: w[4] }, 5),
-                OP_INDIRECT => (Command::Indirect { kernel: w[1], slot: w[2], pass: w[3] }, 4),
-                OP_COPY => (Command::Copy { src: w[1], src_offset: w[2], dst: w[3], dst_offset: w[4], size: w[5] }, 6),
+                OP_DISPATCH => (
+                    Command::Dispatch {
+                        kernel: w[1],
+                        x: w[2],
+                        y: w[3],
+                        pass: w[4],
+                    },
+                    5,
+                ),
+                OP_INDIRECT => (
+                    Command::Indirect {
+                        kernel: w[1],
+                        slot: w[2],
+                        pass: w[3],
+                    },
+                    4,
+                ),
+                OP_COPY => (
+                    Command::Copy {
+                        src: w[1],
+                        src_offset: w[2],
+                        dst: w[3],
+                        dst_offset: w[4],
+                        size: w[5],
+                    },
+                    6,
+                ),
                 _ => (Command::Phase { id: w[1] }, 2),
             };
             out.push(c);
@@ -394,18 +442,25 @@ impl Planner {
         let joint_count = scene.joints.len() as u32;
         // Joint-pair hash (world_step jointHashSize): >= 65536 slots and 2x the joints.
         let joint_hash_slots = next_pow2((2 * joint_count as u64).max(65536));
-        let constraint_id_words = next_pow2((2 * (cap.max_contacts as u64 + cap.max_joints as u64)).max(32768));
+        let constraint_id_words =
+            next_pow2((2 * (cap.max_contacts as u64 + cap.max_joints as u64)).max(32768));
         let csr_base = constraint_id_words.max(131072);
         // Broadphase grid heads: twice the colliders, within the pre-CSR id region.
         let grid_hash_words = next_pow2((2 * nc).max(131072)).min(csr_base);
         // Warm (previous-contact) hash slots; host field and clear dispatch must agree.
-        let warm_hash_words = next_pow2((cap.max_contacts as u64 * 4).max(1024)).min(csr_base).min(MAX_WARM_HASH);
+        let warm_hash_words = next_pow2((cap.max_contacts as u64 * 4).max(1024))
+            .min(csr_base)
+            .min(MAX_WARM_HASH);
         // Tick-tagged warm hash (world_step warmTagged): slot words carry a per-step
         // tag above log2(maxContacts) index bits, so the table is cleared only when
         // the tags wrap (every warm_tag_period steps) instead of every step.
         let warm_value_bits = cap.max_contacts.trailing_zeros();
         let warm_tagged = budget.tagged_warm_hash && warm_value_bits <= 29;
-        let warm_tag_period = if warm_value_bits == 0 { u32::MAX } else { ((1u64 << (32 - warm_value_bits)) - 2) as u32 };
+        let warm_tag_period = if warm_value_bits == 0 {
+            u32::MAX
+        } else {
+            ((1u64 << (32 - warm_value_bits)) - 2) as u32
+        };
         let mut params = scene.params;
         let (grid_base, grid_levels) = crate::scene::grid_config(&scene.colliders);
         params.grid_cell_size = grid_base as f32;
@@ -444,7 +499,9 @@ impl Planner {
             has_filters: scene.colliders.iter().any(Collider::has_filter),
             sleep_rounds: params.sleep_rounds.min(16),
             color_headroom: budget.color_headroom.unwrap_or(Some(COLOR_HEADROOM)),
-            color_round_headroom: budget.color_round_headroom.unwrap_or(Some(COLOR_ROUND_HEADROOM)),
+            color_round_headroom: budget
+                .color_round_headroom
+                .unwrap_or(Some(COLOR_ROUND_HEADROOM)),
             moved_only_override: budget.moved_only_bounds,
             // Awake-only broadphase queries on moved-only steps (identical pairs).
             awake_queries: budget.awake_queries,
@@ -487,7 +544,10 @@ impl Planner {
         };
         p.sizes = p.buffer_sizes();
         for (i, &size) in p.sizes.iter().enumerate() {
-            ensure!(size <= limits.max_binding && size <= limits.max_buffer, "GPU buffer {i} exceeds this adapter's limits");
+            ensure!(
+                size <= limits.max_binding && size <= limits.max_buffer,
+                "GPU buffer {i} exceeds this adapter's limits"
+            );
         }
         p.body_bytes = vec![0; p.sizes[0] as usize];
         for (i, b) in scene.bodies.iter().enumerate() {
@@ -498,9 +558,14 @@ impl Planner {
         }
         p.collider_bytes = vec![0; p.sizes[2] as usize];
         for (i, c) in scene.colliders.iter().enumerate() {
-            p.collider_bytes[i * COLLIDER_BYTES..(i + 1) * COLLIDER_BYTES].copy_from_slice(bytes_of(&collider_record(c)));
+            p.collider_bytes[i * COLLIDER_BYTES..(i + 1) * COLLIDER_BYTES]
+                .copy_from_slice(bytes_of(&collider_record(c)));
         }
-        p.joint_bytes = scene.joints.iter().flat_map(|j| bytes_of(&joint_record(j)).to_vec()).collect();
+        p.joint_bytes = scene
+            .joints
+            .iter()
+            .flat_map(|j| bytes_of(&joint_record(j)).to_vec())
+            .collect();
         if p.joint_bytes.is_empty() {
             p.joint_bytes = vec![0; JOINT_BYTES];
         }
@@ -527,12 +592,19 @@ impl Planner {
         // CSR index, the tagged warm hash, then the persistent resting table (world_step
         // restBase): 32 header words, resting + awake heads, one resting link per
         // collider, then the awake-collider list (one word per collider).
-        s[14] = (self.csr_base as u64 + cap.max_bodies as u64 + 1 + self.warm_hash_words as u64 + 32
+        s[14] = (self.csr_base as u64
+            + cap.max_bodies as u64
+            + 1
+            + self.warm_hash_words as u64
+            + 32
             + 2 * self.grid_hash_words as u64
             + 2 * cap.max_colliders as u64)
             * 4;
         // Colour lists + history rows; broadphase links reuse it per collider.
-        s[15] = b(cap.max_colliders.max(cap.max_bodies * (cap.max_colors + 2)), 4);
+        s[15] = b(
+            cap.max_colliders.max(cap.max_bodies * (cap.max_colors + 2)),
+            4,
+        );
         s[16] = b(cap.max_colors * cap.max_bodies.div_ceil(64).max(1), 4);
         s[17] = b(128, 4); // colour counts 0..63 + max degrees 64..127
         s[18] = b(cap.max_hull, 16);
@@ -583,7 +655,8 @@ impl Planner {
     }
 
     /// Pass uniform table (buffer 22): slot i holds i; slots 48..67 the block-scan
-    /// constants; 68..83 the colouring rounds 48..63 (`round_slot`).
+    /// constants; 68..83 the colouring rounds 48..63 (`round_slot`); 96..159
+    /// `256 | colour` for the post-stabilization primal pass.
     pub fn pass_table() -> Vec<u8> {
         let mut out = vec![0u8; (PASS_SLOTS * PASS_ALIGN) as usize];
         for i in 0..PASS_SLOTS {
@@ -592,6 +665,8 @@ impl Planner {
                 (1u32 << k) | ((k & 1) << 31)
             } else if (68..84).contains(&i) {
                 i - 20
+            } else if i >= STAB_PASS {
+                256 | (i - STAB_PASS)
             } else if i >= 84 {
                 0
             } else {
@@ -630,7 +705,11 @@ impl Planner {
         self.parity = 0;
         self.shots = 0;
         self.initialized = false;
-        self.last = Counters { awake: self.body_count.saturating_sub(1), color: 16, ..Counters::default() };
+        self.last = Counters {
+            awake: self.body_count.saturating_sub(1),
+            color: 16,
+            ..Counters::default()
+        };
     }
 
     /// This tick's host upload (`UPLOAD_BYTES`), valid until the next encode.
@@ -650,18 +729,34 @@ impl Planner {
         s[2] = cap.max_candidates;
         s[3] = cap.max_contacts;
         s[4] = cap.max_colors.min(64);
-        s[7] = if self.steps == 0 { 0 } else { self.last.contact.min(cap.max_contacts) };
-        s[8] = if self.parity == 0 { cap.max_contacts } else { 0 };
+        s[7] = if self.steps == 0 {
+            0
+        } else {
+            self.last.contact.min(cap.max_contacts)
+        };
+        s[8] = if self.parity == 0 {
+            cap.max_contacts
+        } else {
+            0
+        };
         s[9] = self.warm_hash_words;
         s[10] = cap.max_candidates;
-        s[11] = if self.parity == 0 { 0 } else { cap.max_contacts };
+        s[11] = if self.parity == 0 {
+            0
+        } else {
+            cap.max_contacts
+        };
         let mut log = 0;
         while (1u32 << log) < self.body_count.max(1) && log < 20 {
             log += 1;
         }
         s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
         s[16] = self.grid_hash_words;
-        s[17] = if self.initialized { self.steps.max(1) } else { 0 };
+        s[17] = if self.initialized {
+            self.steps.max(1)
+        } else {
+            0
+        };
         // Incremental colouring (as the Rust host): colours persist in a history row
         // and only bodies whose neighbourhood changed recolour (work slot 69); small
         // repair lists are coloured by one workgroup (local repair).
@@ -670,22 +765,36 @@ impl Planner {
         s[18] = self.grid_levels; // hierarchical broadphase levels
         s[29] = 1; // degree-aware primal lanes (buffer 17 holds 128 words)
         s[30] = self.has_filters as u32; // collision filters present
-        // Moved-only bounds: rebuild AABBs only for last step's awake bodies
-        // (build_aabbs). Needs colliders sorted by body, no kinematic bodies, and no
-        // host-side pose/collider write since the last step.
+                                         // Moved-only bounds: rebuild AABBs only for last step's awake bodies
+                                         // (build_aabbs). Needs colliders sorted by body, no kinematic bodies, and no
+                                         // host-side pose/collider write since the last step.
         s[19] = self.moved_only_bounds() as u32;
         // Persistent resting table on moved-only steps with awake queries: bit 0 on,
         // bit 1 rebuild now (it is rebuilt on the GPU after sleep events).
         let rest = s[19] != 0 && self.awake_queries && self.persistent_rest;
-        s[25] = (if rest { if self.rest_valid { 1 } else { 3 } } else { 0 })
-            | if self.warm_tagged { 4 } else { 0 }
+        s[25] = (if rest {
+            if self.rest_valid {
+                1
+            } else {
+                3
+            }
+        } else {
+            0
+        }) | if self.warm_tagged { 4 } else { 0 }
             | if self.exact_sleep_gate { 8 } else { 0 };
         // Tagged warm hash: clear once per tag cycle (HOST_S(17) is the step).
         let cycle = (s[17] / self.warm_tag_period) as i64;
         self.warm_clear = !self.warm_tagged || cycle != self.warm_cycle;
         self.warm_cycle = cycle;
         s[24] = self.csr_base;
+        s[28] = self.carry_rest() as u32;
         s
+    }
+
+    /// Resting-pair carry (FLAG_CARRY_REST): resting pairs keep their contacts
+    /// and warm-start lambda through sleep from last step's manifolds.
+    fn carry_rest(&self) -> bool {
+        self.params.flags & crate::scene::FLAG_CARRY_REST != 0
     }
 
     /// With most bodies awake the full pass is faster (no per-body search, even
@@ -729,7 +838,8 @@ impl Planner {
     }
 
     fn copy(&mut self, src: u32, src_offset: u32, dst: u32, dst_offset: u32, size: u32) {
-        self.commands.extend([OP_COPY, src, src_offset, dst, dst_offset, size]);
+        self.commands
+            .extend([OP_COPY, src, src_offset, dst, dst_offset, size]);
     }
     fn phase(&mut self, name: &str) {
         self.commands.extend([OP_PHASE, phase_id(name)]);
@@ -737,10 +847,17 @@ impl Planner {
     /// `dispatchWorkgroups(groups(threads))`: ceil(threads/64) groups in rows of 32768.
     fn disp(&mut self, name: &str, threads: u32, pass: u32) {
         let n = threads.max(1).div_ceil(WORKGROUP);
-        self.commands.extend([OP_DISPATCH, kernel(name), n.min(32768), n.div_ceil(32768), pass]);
+        self.commands.extend([
+            OP_DISPATCH,
+            kernel(name),
+            n.min(32768),
+            n.div_ceil(32768),
+            pass,
+        ]);
     }
     fn work(&mut self, name: &str, slot: u32, pass: u32) {
-        self.commands.extend([OP_INDIRECT, kernel(name), slot, pass]);
+        self.commands
+            .extend([OP_INDIRECT, kernel(name), slot, pass]);
     }
 
     fn write_host(&mut self) {
@@ -773,6 +890,10 @@ impl Planner {
         if s[19] != 0 {
             self.copy(COUNTERS_BUFFER, 20, PARAMS_BUFFER, 80 + 6 * 4, 4);
         }
+        // Last step's manifold count -> HOST_S(13), for the resting-pair carry.
+        if s[28] != 0 && self.steps > 0 {
+            self.copy(COUNTERS_BUFFER, 48, PARAMS_BUFFER, 80 + 13 * 4, 4);
+        }
         self.moved_only_step = s[19] != 0;
         self.rest_step = s[25] & 1 != 0;
         // Last step's sleep events -> HOST_S(5): any sleeper may be missing from R.
@@ -781,8 +902,20 @@ impl Planner {
         }
         self.rest_valid = self.rest_step;
         self.bounds_stale = false;
-        self.copy(HOST_UPLOAD, UPLOAD_COUNTERS, COUNTERS_BUFFER, 0, COUNTER_BYTES);
-        self.copy(HOST_UPLOAD, UPLOAD_COLORS, 17, 0, (COLOR_COUNT_WORDS * 4) as u32);
+        self.copy(
+            HOST_UPLOAD,
+            UPLOAD_COUNTERS,
+            COUNTERS_BUFFER,
+            0,
+            COUNTER_BYTES,
+        );
+        self.copy(
+            HOST_UPLOAD,
+            UPLOAD_COLORS,
+            17,
+            0,
+            (COLOR_COUNT_WORDS * 4) as u32,
+        );
     }
 
     /// Collision only (bounds, broadphase, narrowphase incl. convex).
@@ -833,6 +966,12 @@ impl Planner {
             self.disp("broadphase_query", n_cols, 0);
         }
         self.disp("write_work_args", 64, 0);
+        if self.carry_rest() {
+            // Last step's manifolds (slot 72) are intact until narrowphase;
+            // recount candidates after the carried pairs join them.
+            self.work("carry_rest_pairs", 72, 0);
+            self.disp("write_work_args", 64, 0);
+        }
         self.phase("broadphase");
         if reuse {
             if self.moved_only_step {
@@ -1003,6 +1142,20 @@ impl Planner {
                 self.phase("solveHalf");
             }
         }
+        // Post-stabilization: one primal pass with alpha = 0 (pass value 256 |
+        // colour), no dual update. It records the velocity before moving each body.
+        if self.params.flags & crate::scene::FLAG_POST_STAB != 0 {
+            if sparse {
+                self.disp("solve_primal_sparse", 64, STAB_PASS);
+            } else {
+                for color in 0..dispatched {
+                    self.work("solve_primal_color", color, STAB_PASS + color);
+                }
+                if dispatched < colors {
+                    self.disp("solve_primal_sparse", 64, STAB_PASS + dispatched);
+                }
+            }
+        }
         self.phase("solve");
         if self.listed_passes {
             self.work("extract_velocity_sleep", 67, 1); // awake list
@@ -1098,7 +1251,10 @@ impl Planner {
     pub fn overflow_error(&mut self) -> Result<()> {
         if self.last.overflow != 0 {
             self.manifolds_valid = false;
-            bail!("Physics capacity exceeded (0x{:x}); choose a coarser level", self.last.overflow);
+            bail!(
+                "Physics capacity exceeded (0x{:x}); choose a coarser level",
+                self.last.overflow
+            );
         }
         Ok(())
     }
@@ -1119,19 +1275,45 @@ impl Planner {
     /// Fire the next projectile along a ray: returns its body id and record
     /// (write it at the id in both body halves). Shots compensate for gravity to
     /// aim near the scene centre's depth unless `arc` is false.
-    pub fn launch(&mut self, origin: [f64; 3], direction: [f64; 3], speed: Option<f64>, arc: Option<bool>) -> Result<(u32, Vec<u8>)> {
+    pub fn launch(
+        &mut self,
+        origin: [f64; 3],
+        direction: [f64; 3],
+        speed: Option<f64>,
+        arc: Option<bool>,
+    ) -> Result<(u32, Vec<u8>)> {
         self.mark_stale(false);
-        ensure!(self.shots < self.projectile_count, "All 16 projectiles fired. Reset to reload.");
-        ensure!(origin.iter().chain(&direction).all(|x| x.is_finite()), "Invalid projectile ray");
+        ensure!(
+            self.shots < self.projectile_count,
+            "All 16 projectiles fired. Reset to reload."
+        );
+        ensure!(
+            origin.iter().chain(&direction).all(|x| x.is_finite()),
+            "Invalid projectile ray"
+        );
         let id = self.projectile_start + self.shots;
         let (m, r) = (self.projectile_mass, self.projectile_radius);
-        let speed = speed.or(self.projectile_speed).unwrap_or_else(|| (self.extent * 3.0).clamp(5.0, 18.0));
-        let distance = r.max((0..3).map(|i| (self.center[i] - origin[i]) * direction[i]).sum());
+        let speed = speed
+            .or(self.projectile_speed)
+            .unwrap_or_else(|| (self.extent * 3.0).clamp(5.0, 18.0));
+        let distance = r.max(
+            (0..3)
+                .map(|i| (self.center[i] - origin[i]) * direction[i])
+                .sum(),
+        );
         let mut v = direction.map(|x| x * speed);
         if arc.unwrap_or(self.projectile_arc) {
             v[1] += 0.5 * 9.81 * distance / speed;
         }
-        let body = Body { p: origin, q: [0.0, 0.0, 0.0, 1.0], v, w: [0.0; 3], inv_mass: 1.0 / m, inv_i: [1.0 / (0.4 * m * r * r); 3], flags: 9 };
+        let body = Body {
+            p: origin,
+            q: [0.0, 0.0, 0.0, 1.0],
+            v,
+            w: [0.0; 3],
+            inv_mass: 1.0 / m,
+            inv_i: [1.0 / (0.4 * m * r * r); 3],
+            flags: 9,
+        };
         self.manifolds_valid = false;
         self.last.awake = self.last.awake.max(1);
         self.wake_serial += 1;
@@ -1141,7 +1323,10 @@ impl Planner {
 
     /// Byte offset of body `id` in the current and previous halves of buffer 0.
     pub fn body_offsets(&self, id: u32) -> [u64; 2] {
-        [id as u64 * BODY_BYTES as u64, (self.cap.max_bodies + id) as u64 * BODY_BYTES as u64]
+        [
+            id as u64 * BODY_BYTES as u64,
+            (self.cap.max_bodies + id) as u64 * BODY_BYTES as u64,
+        ]
     }
 }
 
@@ -1162,5 +1347,13 @@ pub fn phase_names() -> Vec<&'static str> {
 /// Bodies-snapshot helper: the `p` and `q` of body `i` from 28-word records.
 pub fn snapshot_pose(snapshot: &[f32], i: usize) -> ([f32; 3], [f32; 4]) {
     let o = i * 28;
-    ([snapshot[o], snapshot[o + 1], snapshot[o + 2]], [snapshot[o + 4], snapshot[o + 5], snapshot[o + 6], snapshot[o + 7]])
+    (
+        [snapshot[o], snapshot[o + 1], snapshot[o + 2]],
+        [
+            snapshot[o + 4],
+            snapshot[o + 5],
+            snapshot[o + 6],
+            snapshot[o + 7],
+        ],
+    )
 }

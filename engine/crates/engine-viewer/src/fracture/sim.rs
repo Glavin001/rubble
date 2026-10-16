@@ -8,7 +8,9 @@
 //! counters and bodies are read in place.
 
 use super::kernels::{Kernel, KERNELS};
-use engine_fracture::plan::{self, Command, Counters, Limits, Planner, BODY_BYTES, HOST_UPLOAD, PASS_ALIGN, UPLOAD_BYTES};
+use engine_fracture::plan::{
+    self, Command, Counters, Limits, Planner, BODY_BYTES, HOST_UPLOAD, PASS_ALIGN, UPLOAD_BYTES,
+};
 use engine_fracture::Scene;
 use metal::*;
 use std::time::Instant;
@@ -43,17 +45,35 @@ fn shared(device: &Device, size: u64) -> Buffer {
 
 fn write(buf: &Buffer, offset: u64, bytes: &[u8]) {
     assert!(offset as usize + bytes.len() <= buf.length() as usize);
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), (buf.contents() as *mut u8).add(offset as usize), bytes.len()) };
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            (buf.contents() as *mut u8).add(offset as usize),
+            bytes.len(),
+        )
+    };
 }
 
 fn read_words(buf: &Buffer, offset: usize, count: usize) -> Vec<u32> {
-    unsafe { std::slice::from_raw_parts((buf.contents() as *const u8).add(offset) as *const u32, count).to_vec() }
+    unsafe {
+        std::slice::from_raw_parts(
+            (buf.contents() as *const u8).add(offset) as *const u32,
+            count,
+        )
+        .to_vec()
+    }
 }
 
 impl FractureSim {
     pub fn new(device: &Device, queue: &CommandQueue, scene: &Scene) -> anyhow::Result<Self> {
         let max = device.max_buffer_length();
-        let plan = Planner::new(scene, Limits { max_binding: max, max_buffer: max })?;
+        let plan = Planner::new(
+            scene,
+            Limits {
+                max_binding: max,
+                max_buffer: max,
+            },
+        )?;
         let bufs: Vec<Buffer> = plan
             .buffer_sizes_bytes()
             .iter()
@@ -70,9 +90,15 @@ impl FractureSim {
         let pipes = KERNELS
             .iter()
             .map(|k| {
-                let lib = device.new_library_with_source(k.msl, &compile).map_err(|e| anyhow::anyhow!("compile {}: {e}", k.entry))?;
-                let func = lib.get_function(k.entry, None).map_err(|e| anyhow::anyhow!("function {}: {e}", k.entry))?;
-                device.new_compute_pipeline_state_with_function(&func).map_err(|e| anyhow::anyhow!("pipeline {}: {e}", k.entry))
+                let lib = device
+                    .new_library_with_source(k.msl, &compile)
+                    .map_err(|e| anyhow::anyhow!("compile {}: {e}", k.entry))?;
+                let func = lib
+                    .get_function(k.entry, None)
+                    .map_err(|e| anyhow::anyhow!("function {}: {e}", k.entry))?;
+                device
+                    .new_compute_pipeline_state_with_function(&func)
+                    .map_err(|e| anyhow::anyhow!("pipeline {}: {e}", k.entry))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let sim = Self {
@@ -86,18 +112,43 @@ impl FractureSim {
             in_flight: None,
             batch: (Instant::now(), 1),
         };
-        write(&sim.bufs[plan::PASS_BUFFER as usize], 0, &Planner::pass_table());
-        write(&sim.bufs[plan::MATERIAL_BUFFER as usize], 0, &sim.plan.material_table());
-        let hull: Vec<u8> = scene.hull_data.iter().flatten().flat_map(|w| w.to_le_bytes()).collect();
+        write(
+            &sim.bufs[plan::PASS_BUFFER as usize],
+            0,
+            &Planner::pass_table(),
+        );
+        write(
+            &sim.bufs[plan::MATERIAL_BUFFER as usize],
+            0,
+            &sim.plan.material_table(),
+        );
+        let hull: Vec<u8> = scene
+            .hull_data
+            .iter()
+            .flatten()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
         write(&sim.bufs[plan::HULL_BUFFER as usize], 0, &hull);
         sim.upload_initial();
         Ok(sim)
     }
 
     fn upload_initial(&self) {
-        write(&self.bufs[plan::BODY_BUFFER as usize], 0, self.plan.body_bytes());
-        write(&self.bufs[plan::COLLIDER_BUFFER as usize], 0, self.plan.collider_bytes());
-        write(&self.bufs[plan::JOINT_BUFFER as usize], 0, self.plan.joint_bytes());
+        write(
+            &self.bufs[plan::BODY_BUFFER as usize],
+            0,
+            self.plan.body_bytes(),
+        );
+        write(
+            &self.bufs[plan::COLLIDER_BUFFER as usize],
+            0,
+            self.plan.collider_bytes(),
+        );
+        write(
+            &self.bufs[plan::JOINT_BUFFER as usize],
+            0,
+            self.plan.joint_bytes(),
+        );
     }
 
     pub fn body_buffer(&self) -> &Buffer {
@@ -121,9 +172,26 @@ impl FractureSim {
         let commands = Command::decode(words);
         let blit = cb.new_blit_command_encoder();
         for c in &commands {
-            if let Command::Copy { src, src_offset, dst, dst_offset, size } = *c {
-                let (from, offset) = if src == HOST_UPLOAD { (&self.upload, base + src_offset as u64) } else { (&self.bufs[src as usize], src_offset as u64) };
-                blit.copy_from_buffer(from, offset, &self.bufs[dst as usize], dst_offset as u64, size as u64);
+            if let Command::Copy {
+                src,
+                src_offset,
+                dst,
+                dst_offset,
+                size,
+            } = *c
+            {
+                let (from, offset) = if src == HOST_UPLOAD {
+                    (&self.upload, base + src_offset as u64)
+                } else {
+                    (&self.bufs[src as usize], src_offset as u64)
+                };
+                blit.copy_from_buffer(
+                    from,
+                    offset,
+                    &self.bufs[dst as usize],
+                    dst_offset as u64,
+                    size as u64,
+                );
             }
         }
         blit.end_encoding();
@@ -138,7 +206,11 @@ impl FractureSim {
                 }
                 Command::Indirect { kernel, slot, pass } => {
                     let k = self.bind(e, kernel, pass, true);
-                    e.dispatch_thread_groups_indirect(&self.bufs[plan::ARGS_BUFFER as usize], slot as u64 * 12, threads(k));
+                    e.dispatch_thread_groups_indirect(
+                        &self.bufs[plan::ARGS_BUFFER as usize],
+                        slot as u64 * 12,
+                        threads(k),
+                    );
                 }
                 _ => {}
             }
@@ -146,12 +218,22 @@ impl FractureSim {
         e.end_encoding();
     }
 
-    fn bind(&self, e: &ComputeCommandEncoderRef, kernel: u32, pass: u32, indirect: bool) -> &'static Kernel {
+    fn bind(
+        &self,
+        e: &ComputeCommandEncoderRef,
+        kernel: u32,
+        pass: u32,
+        indirect: bool,
+    ) -> &'static Kernel {
         let k = &KERNELS[kernel as usize];
         e.set_compute_pipeline_state(&self.pipes[kernel as usize]);
         for &(index, slot) in k.binds {
             if slot == plan::PASS_BUFFER {
-                e.set_buffer(index as u64, Some(&self.bufs[slot as usize]), (pass * PASS_ALIGN) as u64);
+                e.set_buffer(
+                    index as u64,
+                    Some(&self.bufs[slot as usize]),
+                    (pass * PASS_ALIGN) as u64,
+                );
             } else if slot == plan::ARGS_BUFFER && indirect {
                 // Never bind the indirect buffer as a resource of the dispatch it sizes.
                 e.set_buffer(index as u64, None, 0);
@@ -164,7 +246,10 @@ impl FractureSim {
 
     /// Submit `count` (1-4) ticks without waiting. Fully sleeping scenes skip GPU work.
     pub fn submit(&mut self, count: u32) -> anyhow::Result<bool> {
-        anyhow::ensure!((1..=RING as u32).contains(&count), "Physics batch must have 1–4 ticks");
+        anyhow::ensure!(
+            (1..=RING as u32).contains(&count),
+            "Physics batch must have 1–4 ticks"
+        );
         self.wait()?;
         if self.plan.skip_asleep(count) {
             self.timing = Timing::default();
@@ -180,7 +265,11 @@ impl FractureSim {
         cb.commit();
         self.plan.mark_submitted();
         let encode = start.elapsed().as_secs_f64() * 1000.0 / count as f64;
-        self.timing = Timing { wall_ms: encode, encode_ms: encode, wait_ms: 0.0 };
+        self.timing = Timing {
+            wall_ms: encode,
+            encode_ms: encode,
+            wait_ms: 0.0,
+        };
         self.in_flight = Some(cb);
         self.batch = (start, count);
         Ok(true)
@@ -188,14 +277,22 @@ impl FractureSim {
 
     /// Wait for the in-flight batch, then read the counters in place.
     pub fn wait(&mut self) -> anyhow::Result<()> {
-        let Some(cb) = self.in_flight.take() else { return Ok(()) };
+        let Some(cb) = self.in_flight.take() else {
+            return Ok(());
+        };
         let waited = Instant::now();
         let token = self.plan.begin_read();
         cb.wait_until_completed();
         let (start, count) = self.batch;
         let end = Instant::now();
-        anyhow::ensure!(cb.status() != MTLCommandBufferStatus::Error, "Metal command buffer failed");
-        self.last = self.plan.finish_read(token, &read_words(&self.bufs[plan::COUNTERS_BUFFER as usize], 0, 20));
+        anyhow::ensure!(
+            cb.status() != MTLCommandBufferStatus::Error,
+            "Metal command buffer failed"
+        );
+        self.last = self.plan.finish_read(
+            token,
+            &read_words(&self.bufs[plan::COUNTERS_BUFFER as usize], 0, 20),
+        );
         // Wall includes queue execution; not isolated GPU time.
         let n = count as f64;
         self.timing.wall_ms = (end - start).as_secs_f64() * 1000.0 / n;
@@ -228,7 +325,9 @@ impl FractureSim {
         let _ = self.wait();
         for (i, buf) in self.bufs.iter().enumerate() {
             if Planner::cleared_on_reset(i as u32) {
-                unsafe { std::ptr::write_bytes(buf.contents() as *mut u8, 0, buf.length() as usize) };
+                unsafe {
+                    std::ptr::write_bytes(buf.contents() as *mut u8, 0, buf.length() as usize)
+                };
             }
         }
         self.upload_initial();
@@ -240,18 +339,31 @@ impl FractureSim {
     /// `inspectCollisions()`); returns (counters, contact metas: 8 words each).
     pub fn inspect_collisions(&mut self) -> anyhow::Result<(Counters, Vec<[u32; 8]>)> {
         self.wait()?;
-        let words = self.plan.encode_inspect(0, self.plan.awake_queries).to_vec();
+        let words = self
+            .plan
+            .encode_inspect(0, self.plan.awake_queries)
+            .to_vec();
         let cb = self.queue.new_command_buffer();
         let token = self.plan.begin_read();
         self.replay(cb, &words, 0);
         cb.commit();
         cb.wait_until_completed();
         self.plan.after_inspect();
-        let counters = self.plan.count_read(token, &read_words(&self.bufs[plan::COUNTERS_BUFFER as usize], 0, 20));
-        anyhow::ensure!(counters.overflow == 0, "Collision overflow {}", counters.overflow);
+        let counters = self.plan.count_read(
+            token,
+            &read_words(&self.bufs[plan::COUNTERS_BUFFER as usize], 0, 20),
+        );
+        anyhow::ensure!(
+            counters.overflow == 0,
+            "Collision overflow {}",
+            counters.overflow
+        );
         let base = self.plan.contact_base(false) as usize;
         let metas = read_words(&self.bufs[4], base * 32, counters.contact as usize * 8);
-        Ok((counters, metas.chunks(8).map(|c| c.try_into().unwrap()).collect()))
+        Ok((
+            counters,
+            metas.chunks(8).map(|c| c.try_into().unwrap()).collect(),
+        ))
     }
 
     /// Copy of the first `count` 112-byte bodies as f32 words (28 per body).
@@ -263,5 +375,9 @@ impl FractureSim {
 }
 
 fn threads(k: &Kernel) -> MTLSize {
-    MTLSize::new(k.threads[0] as u64, k.threads[1] as u64, k.threads[2] as u64)
+    MTLSize::new(
+        k.threads[0] as u64,
+        k.threads[1] as u64,
+        k.threads[2] as u64,
+    )
 }

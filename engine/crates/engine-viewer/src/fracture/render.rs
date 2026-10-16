@@ -46,24 +46,41 @@ fn buffer<T>(device: &Device, data: &[T]) -> Buffer {
     if data.is_empty() {
         return device.new_buffer(bytes, MTLResourceOptions::StorageModeShared);
     }
-    device.new_buffer_with_data(data.as_ptr() as *const _, bytes, MTLResourceOptions::StorageModeShared)
+    device.new_buffer_with_data(
+        data.as_ptr() as *const _,
+        bytes,
+        MTLResourceOptions::StorageModeShared,
+    )
 }
 
 impl Renderer {
     pub fn new(device: &Device, format: MTLPixelFormat, scene: &Scene) -> anyhow::Result<Self> {
         let opts = CompileOptions::new();
-        let vs_lib = device.new_library_with_source(DRAW_VS, &opts).map_err(|e| anyhow::anyhow!("draw vs: {e}"))?;
-        let vs = vs_lib.get_function("vs", None).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let vs_lib = device
+            .new_library_with_source(DRAW_VS, &opts)
+            .map_err(|e| anyhow::anyhow!("draw vs: {e}"))?;
+        let vs = vs_lib
+            .get_function("vs", None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let pipeline = |entry: &str| -> anyhow::Result<RenderPipelineState> {
             let src = DRAW_FS.iter().find(|(n, _)| *n == entry).unwrap().1;
-            let lib = device.new_library_with_source(src, &opts).map_err(|e| anyhow::anyhow!("draw {entry}: {e}"))?;
-            let fs = lib.get_function(entry, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let lib = device
+                .new_library_with_source(src, &opts)
+                .map_err(|e| anyhow::anyhow!("draw {entry}: {e}"))?;
+            let fs = lib
+                .get_function(entry, None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             let desc = RenderPipelineDescriptor::new();
             desc.set_vertex_function(Some(&vs));
             desc.set_fragment_function(Some(&fs));
-            desc.color_attachments().object_at(0).unwrap().set_pixel_format(format);
+            desc.color_attachments()
+                .object_at(0)
+                .unwrap()
+                .set_pixel_format(format);
             desc.set_depth_attachment_pixel_format(MTLPixelFormat::Depth32Float);
-            device.new_render_pipeline_state(&desc).map_err(|e| anyhow::anyhow!("pipeline {entry}: {e}"))
+            device
+                .new_render_pipeline_state(&desc)
+                .map_err(|e| anyhow::anyhow!("pipeline {entry}: {e}"))
         };
         let depth_state = |compare, write| {
             let d = DepthStencilDescriptor::new();
@@ -86,8 +103,14 @@ impl Renderer {
             floor: buffer(device, &floor_vertices(scene.extent)),
             roads: buffer(device, &scene.road_vertices),
             projectiles: buffer(device, &scene.projectile_vertices),
-            counts: [6, scene.lines.len() as u64 / 10, scene.road_vertices.len() as u64 / 10],
-            projectile_per_slot: scene.projectile_vertices.len() as u64 / 10 / scene.projectile_count.max(1) as u64,
+            counts: [
+                6,
+                scene.lines.len() as u64 / 10,
+                scene.road_vertices.len() as u64 / 10,
+            ],
+            projectile_per_slot: scene.projectile_vertices.len() as u64
+                / 10
+                / scene.projectile_count.max(1) as u64,
             copies: scene.copies.max(1) as u64,
             stride: scene.instance_stride,
             depth: None,
@@ -98,17 +121,43 @@ impl Renderer {
 
     /// Draw into the window's next drawable and present it.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, device: &Device, queue: &CommandQueue, drawable: &MetalDrawableRef, bodies: &Buffer, view_proj: [f32; 16], shots: u32, show_bonds: bool) {
+    pub fn draw(
+        &mut self,
+        device: &Device,
+        queue: &CommandQueue,
+        drawable: &MetalDrawableRef,
+        bodies: &Buffer,
+        view_proj: [f32; 16],
+        shots: u32,
+        show_bonds: bool,
+    ) {
         let cb = queue.new_command_buffer();
         cb.set_label("fracture draw");
-        self.encode(device, cb, drawable.texture(), bodies, view_proj, shots, show_bonds);
+        self.encode(
+            device,
+            cb,
+            drawable.texture(),
+            bodies,
+            view_proj,
+            shots,
+            show_bonds,
+        );
         cb.present_drawable(drawable);
         cb.commit();
     }
 
     /// Encode one frame into `target` (a drawable or an offscreen texture).
     #[allow(clippy::too_many_arguments)]
-    pub fn encode(&mut self, device: &Device, cb: &CommandBufferRef, tex: &TextureRef, bodies: &Buffer, view_proj: [f32; 16], shots: u32, show_bonds: bool) {
+    pub fn encode(
+        &mut self,
+        device: &Device,
+        cb: &CommandBufferRef,
+        tex: &TextureRef,
+        bodies: &Buffer,
+        view_proj: [f32; 16],
+        shots: u32,
+        show_bonds: bool,
+    ) {
         let (w, h) = (tex.width(), tex.height());
         if self.size != (w, h) || self.depth.is_none() {
             let d = TextureDescriptor::new();
@@ -133,9 +182,16 @@ impl Renderer {
         depth.set_store_action(MTLStoreAction::DontCare);
 
         let e = cb.new_render_command_encoder(pass);
-        let view = View { vp: view_proj, mode: [self.stride, self.color_mode, 0, 0] };
+        let view = View {
+            vp: view_proj,
+            mode: [self.stride, self.color_mode, 0, 0],
+        };
         e.set_vertex_buffer(0, Some(bodies), 0);
-        e.set_vertex_bytes(2, std::mem::size_of::<View>() as u64, &view as *const View as *const _);
+        e.set_vertex_bytes(
+            2,
+            std::mem::size_of::<View>() as u64,
+            &view as *const View as *const _,
+        );
         e.set_cull_mode(MTLCullMode::None);
         let bind = |pipe: &RenderPipelineState, depth: &DepthStencilState, verts: &Buffer| {
             e.set_render_pipeline_state(pipe);
@@ -153,10 +209,21 @@ impl Renderer {
             e.set_depth_bias(0.0, 0.0, 0.0);
         }
         bind(&self.solid, &self.depth_less, &self.mesh);
-        e.draw_indexed_primitives_instanced(MTLPrimitiveType::Triangle, self.index_count, MTLIndexType::UInt32, &self.index, 0, self.copies);
+        e.draw_indexed_primitives_instanced(
+            MTLPrimitiveType::Triangle,
+            self.index_count,
+            MTLIndexType::UInt32,
+            &self.index,
+            0,
+            self.copies,
+        );
         if shots > 0 {
             bind(&self.solid, &self.depth_less, &self.projectiles);
-            e.draw_primitives(MTLPrimitiveType::Triangle, 0, shots as u64 * self.projectile_per_slot);
+            e.draw_primitives(
+                MTLPrimitiveType::Triangle,
+                0,
+                shots as u64 * self.projectile_per_slot,
+            );
         }
         if show_bonds && self.counts[1] > 0 {
             bind(&self.wire, &self.depth_always, &self.lines);

@@ -68,7 +68,11 @@ impl Piece {
             for sy in [-1.0, 1.0] {
                 for sz in [-1.0, 1.0] {
                     let (y, z) = (sy * hy, sz * hz);
-                    out[i] = [self.center[0] + sx * hx, self.center[1] + c * y - s * z, self.center[2] + s * y + c * z];
+                    out[i] = [
+                        self.center[0] + sx * hx,
+                        self.center[1] + c * y - s * z,
+                        self.center[2] + s * y + c * z,
+                    ];
                     i += 1;
                 }
             }
@@ -89,7 +93,9 @@ impl Rng {
     }
 }
 
-pub const PARTS: [&str; 7] = ["walls", "openings", "gables", "roof", "chimney", "porch", "fence"];
+pub const PARTS: [&str; 7] = [
+    "walls", "openings", "gables", "roof", "chimney", "porch", "fence",
+];
 
 #[derive(Clone, Debug)]
 pub struct CuboidOptions {
@@ -104,7 +110,12 @@ pub struct CuboidOptions {
 
 impl Default for CuboidOptions {
     fn default() -> Self {
-        Self { seed: 7, pitch_deg: 12.0, hulls: false, parts: PARTS.to_vec() }
+        Self {
+            seed: 7,
+            pitch_deg: 12.0,
+            hulls: false,
+            parts: PARTS.to_vec(),
+        }
     }
 }
 
@@ -131,12 +142,25 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
     let has = |p: &str| o.parts.contains(&p);
     let mut rand = Rng(o.seed);
     let mut pieces = Vec::new();
-    let mut boxed = |center: [f64; 3], half: [f64; 3], material: Material, color: [f64; 3], angle: f64| {
-        pieces.push(Piece { center, half, material, color, angle })
-    };
+    let mut boxed =
+        |center: [f64; 3], half: [f64; 3], material: Material, color: [f64; 3], angle: f64| {
+            pieces.push(Piece {
+                center,
+                half,
+                material,
+                color,
+                angle,
+            })
+        };
     let concrete = [0.62, 0.62, 0.6];
     let trim = [0.9, 0.88, 0.82];
-    let opening = |u0, u1, c0, c1, door| Opening { u0, u1, c0, c1, door };
+    let opening = |u0, u1, c0, c1, door| Opening {
+        u0,
+        u1,
+        c0,
+        c1,
+        door,
+    };
 
     // ---- walls ----------------------------------------------------------------
     // A wall runs along u (x for front/back, z for the sides) at a fixed
@@ -146,11 +170,30 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
         Wall {
             along_x: true,
             at: HALF_Z - WALL_T / 2.0,
-            openings: vec![opening(-0.5, 0.5, 0, 8, true), opening(-3.0, -1.8, 3, 8, false), opening(1.8, 3.0, 3, 8, false)],
+            openings: vec![
+                opening(-0.5, 0.5, 0, 8, true),
+                opening(-3.0, -1.8, 3, 8, false),
+                opening(1.8, 3.0, 3, 8, false),
+            ],
         },
-        Wall { along_x: true, at: -HALF_Z + WALL_T / 2.0, openings: vec![opening(-2.6, -1.4, 3, 8, false), opening(1.4, 2.6, 3, 8, false)] },
-        Wall { along_x: false, at: HALF_X - WALL_T / 2.0, openings: vec![opening(-0.6, 0.6, 3, 8, false)] },
-        Wall { along_x: false, at: -HALF_X + WALL_T / 2.0, openings: vec![] },
+        Wall {
+            along_x: true,
+            at: -HALF_Z + WALL_T / 2.0,
+            openings: vec![
+                opening(-2.6, -1.4, 3, 8, false),
+                opening(1.4, 2.6, 3, 8, false),
+            ],
+        },
+        Wall {
+            along_x: false,
+            at: HALF_X - WALL_T / 2.0,
+            openings: vec![opening(-0.6, 0.6, 3, 8, false)],
+        },
+        Wall {
+            along_x: false,
+            at: -HALF_X + WALL_T / 2.0,
+            openings: vec![],
+        },
     ];
     let place = |boxed: &mut dyn FnMut([f64; 3], [f64; 3], Material, [f64; 3], f64),
                  wall: &Wall,
@@ -162,13 +205,30 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
                  material: Material,
                  color: [f64; 3]| {
         if wall.along_x {
-            boxed([u, y, wall.at], [du / 2.0, dy / 2.0, depth / 2.0], material, color, 0.0)
+            boxed(
+                [u, y, wall.at],
+                [du / 2.0, dy / 2.0, depth / 2.0],
+                material,
+                color,
+                0.0,
+            )
         } else {
-            boxed([wall.at, y, u], [depth / 2.0, dy / 2.0, du / 2.0], material, color, 0.0)
+            boxed(
+                [wall.at, y, u],
+                [depth / 2.0, dy / 2.0, du / 2.0],
+                material,
+                color,
+                0.0,
+            )
         }
     };
     // Fill [a, b] of one course with bricks; odd courses start with a half brick.
-    let fill = |boxed: &mut dyn FnMut([f64; 3], [f64; 3], Material, [f64; 3], f64), rand: &mut Rng, wall: &Wall, a: f64, b: f64, course: u32| {
+    let fill = |boxed: &mut dyn FnMut([f64; 3], [f64; 3], Material, [f64; 3], f64),
+                rand: &mut Rng,
+                wall: &Wall,
+                a: f64,
+                b: f64,
+                course: u32| {
         let len = b - a;
         if len < 0.1 {
             return;
@@ -210,7 +270,10 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
                     if h1 <= r0 || h0 >= r1 {
                         vec![(r0, r1)]
                     } else {
-                        [(r0, r0.max(h0)), (r1.min(h1), r1)].into_iter().filter(|(x, y)| y - x > 1e-9).collect()
+                        [(r0, r0.max(h0)), (r1.min(h1), r1)]
+                            .into_iter()
+                            .filter(|(x, y)| y - x > 1e-9)
+                            .collect()
                     }
                 })
                 .collect();
@@ -242,14 +305,54 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
             for o in &wall.openings {
                 // Lintel over the opening, bearing a brick depth on each side.
                 let mid = (o.u0 + o.u1) / 2.0;
-                place(&mut boxed, wall, mid, (o.c1 as f64 + 0.5) * BRICK_H, o.u1 - o.u0 + 2.0 * WALL_T - GAP, BRICK_H, WALL_T, Material::Concrete, concrete);
+                place(
+                    &mut boxed,
+                    wall,
+                    mid,
+                    (o.c1 as f64 + 0.5) * BRICK_H,
+                    o.u1 - o.u0 + 2.0 * WALL_T - GAP,
+                    BRICK_H,
+                    WALL_T,
+                    Material::Concrete,
+                    concrete,
+                );
                 let (top, bottom, w) = (o.c1 as f64 * BRICK_H, o.c0 as f64 * BRICK_H, o.u1 - o.u0);
                 if o.door {
-                    place(&mut boxed, wall, mid, (top - 0.01) / 2.0, w - 0.02, top - 0.01, 0.05, Material::Wood, [0.2, 0.38, 0.42]);
+                    place(
+                        &mut boxed,
+                        wall,
+                        mid,
+                        (top - 0.01) / 2.0,
+                        w - 0.02,
+                        top - 0.01,
+                        0.05,
+                        Material::Wood,
+                        [0.2, 0.38, 0.42],
+                    );
                 } else {
                     let sill = 0.06;
-                    place(&mut boxed, wall, mid, bottom + sill / 2.0, w - 0.01, sill, WALL_T, Material::Wood, trim);
-                    place(&mut boxed, wall, mid, (bottom + sill + top - 0.01) / 2.0, w - 0.02, top - 0.01 - bottom - sill, 0.03, Material::Glass, [0.62, 0.8, 0.9]);
+                    place(
+                        &mut boxed,
+                        wall,
+                        mid,
+                        bottom + sill / 2.0,
+                        w - 0.01,
+                        sill,
+                        WALL_T,
+                        Material::Wood,
+                        trim,
+                    );
+                    place(
+                        &mut boxed,
+                        wall,
+                        mid,
+                        (bottom + sill + top - 0.01) / 2.0,
+                        w - 0.02,
+                        top - 0.01 - bottom - sill,
+                        0.03,
+                        Material::Glass,
+                        [0.62, 0.8, 0.9],
+                    );
                 }
             }
         }
@@ -281,12 +384,29 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
     if has("gables") {
         for x in [HALF_X - WALL_T / 2.0, -HALF_X + WALL_T / 2.0] {
             for &(c, span) in &gable_courses {
-                fill(&mut boxed, &mut rand, &Wall { along_x: false, at: x, openings: vec![] }, -span, span, c);
+                fill(
+                    &mut boxed,
+                    &mut rand,
+                    &Wall {
+                        along_x: false,
+                        at: x,
+                        openings: vec![],
+                    },
+                    -span,
+                    span,
+                    c,
+                );
             }
         }
     }
     if has("roof") {
-        boxed([0.0, gable_top + ridge_h / 2.0, 0.0], [HALF_X - 0.05, ridge_h / 2.0, 0.1], Material::Wood, [0.5, 0.36, 0.22], 0.0);
+        boxed(
+            [0.0, gable_top + ridge_h / 2.0, 0.0],
+            [HALF_X - 0.05, ridge_h / 2.0, 0.1],
+            Material::Wood,
+            [0.5, 0.36, 0.22],
+            0.0,
+        );
     }
     // Rafters and roof boards along each slope, from just off the ridge to the eave overhang.
     let (z_lo, z_hi, rafter_t, board_t, strip) = (0.02, HALF_Z + 0.35, 0.12, 0.03, 0.62);
@@ -301,7 +421,13 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
             };
             for x in [-3.6, -1.8, 0.0, 1.8, 3.6] {
                 let (z, y) = on_slope(z_lo, z_hi, 0.0, rafter_t);
-                boxed([x, y, z], [0.04, rafter_t / 2.0, (z_hi - z_lo) / cos / 2.0], Material::Wood, [0.55, 0.4, 0.25], angle);
+                boxed(
+                    [x, y, z],
+                    [0.04, rafter_t / 2.0, (z_hi - z_lo) / cos / 2.0],
+                    Material::Wood,
+                    [0.55, 0.4, 0.25],
+                    angle,
+                );
             }
             let lift = rafter_t / cos + GAP;
             let mut z0 = z_lo;
@@ -310,13 +436,25 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
                 let (z, y) = on_slope(z0, z1, lift, board_t);
                 let shade = rand.jitter([0.33, 0.29, 0.28], 0.15);
                 for (x0, x1) in [(-HALF_X, -GAP), (GAP, HALF_X)] {
-                    boxed([(x0 + x1) / 2.0, y, z], [(x1 - x0) / 2.0, board_t / 2.0, (z1 - z0) / cos / 2.0 - GAP], Material::Wood, shade, angle);
+                    boxed(
+                        [(x0 + x1) / 2.0, y, z],
+                        [(x1 - x0) / 2.0, board_t / 2.0, (z1 - z0) / cos / 2.0 - GAP],
+                        Material::Wood,
+                        shade,
+                        angle,
+                    );
                 }
                 z0 += strip * cos;
             }
         }
         let cap_y = plane(z_lo) + rafter_t / cos + GAP + board_t / cos + 0.002;
-        boxed([0.0, cap_y + 0.02, 0.0], [HALF_X, 0.02, 0.18], Material::Wood, [0.25, 0.22, 0.22], 0.0);
+        boxed(
+            [0.0, cap_y + 0.02, 0.0],
+            [HALF_X, 0.02, 0.18],
+            Material::Wood,
+            [0.25, 0.22, 0.22],
+            0.0,
+        );
     }
 
     // ---- chimney (outside the left gable) ----------------------------------------
@@ -329,11 +467,23 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
             let col = rand.jitter([0.5, 0.2, 0.15], 0.2);
             if c % 2 == 0 {
                 for z in [-0.125, 0.125] {
-                    boxed([chimney_x, y, z], [0.25 - GAP, BRICK_H / 2.0, 0.125 - GAP / 2.0], Material::Brick, col, 0.0);
+                    boxed(
+                        [chimney_x, y, z],
+                        [0.25 - GAP, BRICK_H / 2.0, 0.125 - GAP / 2.0],
+                        Material::Brick,
+                        col,
+                        0.0,
+                    );
                 }
             } else {
                 for dx in [-0.125, 0.125] {
-                    boxed([chimney_x + dx, y, 0.0], [0.125 - GAP / 2.0, BRICK_H / 2.0, 0.25 - GAP], Material::Brick, col, 0.0);
+                    boxed(
+                        [chimney_x + dx, y, 0.0],
+                        [0.125 - GAP / 2.0, BRICK_H / 2.0, 0.25 - GAP],
+                        Material::Brick,
+                        col,
+                        0.0,
+                    );
                 }
             }
             c += 1;
@@ -345,11 +495,29 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
     if has("porch") {
         for x in [-1.1, 1.1] {
             for z in [HALF_Z + 0.2, HALF_Z + 1.4] {
-                boxed([x, post_h / 2.0, z], [0.075, post_h / 2.0, 0.075], Material::Wood, trim, 0.0);
+                boxed(
+                    [x, post_h / 2.0, z],
+                    [0.075, post_h / 2.0, 0.075],
+                    Material::Wood,
+                    trim,
+                    0.0,
+                );
             }
         }
-        boxed([0.0, post_h + GAP + 0.04, HALF_Z + 0.825], [1.3, 0.04, 0.775], Material::Wood, [0.4, 0.4, 0.42], 0.0);
-        boxed([0.0, 0.075, HALF_Z + 0.3 + GAP], [0.7, 0.075, 0.3], Material::Concrete, concrete, 0.0);
+        boxed(
+            [0.0, post_h + GAP + 0.04, HALF_Z + 0.825],
+            [1.3, 0.04, 0.775],
+            Material::Wood,
+            [0.4, 0.4, 0.42],
+            0.0,
+        );
+        boxed(
+            [0.0, 0.075, HALF_Z + 0.3 + GAP],
+            [0.7, 0.075, 0.3],
+            Material::Concrete,
+            concrete,
+            0.0,
+        );
     }
 
     // ---- picket fence, gate gap and mailbox --------------------------------------
@@ -357,22 +525,52 @@ pub fn cuboid_pieces(o: &CuboidOptions) -> Vec<Piece> {
     let posts = [-5.0, -2.5, -0.75, 0.75, 2.5, 5.0];
     if has("fence") {
         for x in posts {
-            boxed([x, 0.475, fence_z], [0.05, 0.475, 0.05], Material::Wood, trim, 0.0);
+            boxed(
+                [x, 0.475, fence_z],
+                [0.05, 0.475, 0.05],
+                Material::Wood,
+                trim,
+                0.0,
+            );
         }
         for k in 0..posts.len() - 1 {
             let (a, b) = (posts[k], posts[k + 1]);
             if a == -0.75 {
                 continue; // the gate
             }
-            boxed([(a + b) / 2.0, 0.95 + GAP + 0.02, fence_z], [(b - a) / 2.0 - GAP, 0.02, 0.03], Material::Wood, trim, 0.0);
+            boxed(
+                [(a + b) / 2.0, 0.95 + GAP + 0.02, fence_z],
+                [(b - a) / 2.0 - GAP, 0.02, 0.03],
+                Material::Wood,
+                trim,
+                0.0,
+            );
             let mut x = a + 0.15;
             while x < b - 0.12 {
-                boxed([x, 0.4, fence_z], [0.04, 0.4, 0.0125], Material::Wood, trim, 0.0);
+                boxed(
+                    [x, 0.4, fence_z],
+                    [0.04, 0.4, 0.0125],
+                    Material::Wood,
+                    trim,
+                    0.0,
+                );
                 x += 0.18;
             }
         }
-        boxed([1.3, 0.5, fence_z + 0.45], [0.04, 0.5, 0.04], Material::Wood, [0.45, 0.32, 0.2], 0.0);
-        boxed([1.3, 1.0 + GAP + 0.11, fence_z + 0.45], [0.1, 0.11, 0.225], Material::Wood, [0.18, 0.2, 0.24], 0.0);
+        boxed(
+            [1.3, 0.5, fence_z + 0.45],
+            [0.04, 0.5, 0.04],
+            Material::Wood,
+            [0.45, 0.32, 0.2],
+            0.0,
+        );
+        boxed(
+            [1.3, 1.0 + GAP + 0.11, fence_z + 0.45],
+            [0.1, 0.11, 0.225],
+            Material::Wood,
+            [0.18, 0.2, 0.24],
+            0.0,
+        );
     }
     pieces
 }
@@ -383,15 +581,70 @@ pub fn build_cuboid_house(o: &CuboidOptions) -> Result<Scene> {
 }
 
 const FACES: [([f64; 3], [[f64; 3]; 4]); 6] = [
-    ([1.0, 0.0, 0.0], [[1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [1.0, 1.0, 1.0], [1.0, -1.0, 1.0]]),
-    ([-1.0, 0.0, 0.0], [[-1.0, -1.0, 1.0], [-1.0, 1.0, 1.0], [-1.0, 1.0, -1.0], [-1.0, -1.0, -1.0]]),
-    ([0.0, 1.0, 0.0], [[-1.0, 1.0, -1.0], [-1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, -1.0]]),
-    ([0.0, -1.0, 0.0], [[-1.0, -1.0, 1.0], [-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, -1.0, 1.0]]),
-    ([0.0, 0.0, 1.0], [[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]]),
-    ([0.0, 0.0, -1.0], [[1.0, -1.0, -1.0], [-1.0, -1.0, -1.0], [-1.0, 1.0, -1.0], [1.0, 1.0, -1.0]]),
+    (
+        [1.0, 0.0, 0.0],
+        [
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0],
+        ],
+    ),
+    (
+        [-1.0, 0.0, 0.0],
+        [
+            [-1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, -1.0],
+        ],
+    ),
+    (
+        [0.0, 1.0, 0.0],
+        [
+            [-1.0, 1.0, -1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, -1.0],
+        ],
+    ),
+    (
+        [0.0, -1.0, 0.0],
+        [
+            [-1.0, -1.0, 1.0],
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, -1.0, 1.0],
+        ],
+    ),
+    (
+        [0.0, 0.0, 1.0],
+        [
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ],
+    ),
+    (
+        [0.0, 0.0, -1.0],
+        [
+            [1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0],
+        ],
+    ),
 ];
 /// Faces of an 8-corner box (corner i: bit 0 x, bit 1 y, bit 2 z).
-pub const BOX_FACES: [[u32; 4]; 6] = [[0, 2, 6, 4], [1, 5, 7, 3], [0, 4, 5, 1], [2, 3, 7, 6], [0, 1, 3, 2], [4, 6, 7, 5]];
+pub const BOX_FACES: [[u32; 4]; 6] = [
+    [0, 2, 6, 4],
+    [1, 5, 7, 3],
+    [0, 4, 5, 1],
+    [2, 3, 7, 6],
+    [0, 1, 3, 2],
+    [4, 6, 7, 5],
+];
 
 /// Box corners for half extents (corner i: bit 0 x, bit 1 y, bit 2 z).
 pub fn box_corners(half: [f64; 3]) -> Vec<[f64; 3]> {
@@ -437,11 +690,16 @@ pub fn scene_from_pieces(pieces: &[Piece], hulls: bool) -> Result<Scene> {
             v: [0.0; 3],
             w: [0.0; 3],
             inv_mass: 1.0 / m,
-            inv_i: [3.0 / (m * (hy * hy + hz * hz)), 3.0 / (m * (hx * hx + hz * hz)), 3.0 / (m * (hx * hx + hy * hy))],
+            inv_i: [
+                3.0 / (m * (hy * hy + hz * hz)),
+                3.0 / (m * (hx * hx + hz * hz)),
+                3.0 / (m * (hx * hx + hy * hy)),
+            ],
             flags: FLAG_DYNAMIC | FLAG_SLEEPING,
         });
         if hulls {
-            let (base, radius, local_pos) = append_hull(&mut arena, &box_corners(p.half), &sizes, &indices, 0.0)?;
+            let (base, radius, local_pos) =
+                append_hull(&mut arena, &box_corners(p.half), &sizes, &indices, 0.0)?;
             colliders.push(Collider::hull(id, rho, base, 1.0, radius, local_pos));
         } else {
             colliders.push(Collider::new(id, SHAPE_BOX, rho, [hx, hy, hz, 0.0]));
@@ -449,12 +707,23 @@ pub fn scene_from_pieces(pieces: &[Piece], hulls: bool) -> Result<Scene> {
         for (n, quad) in FACES {
             for k in [0, 1, 2, 0, 2, 3] {
                 let s = quad[k];
-                vertex(&mut vertices, [s[0] * hx, s[1] * hy, s[2] * hz], n, p.color, id);
+                vertex(
+                    &mut vertices,
+                    [s[0] * hx, s[1] * hy, s[2] * hz],
+                    n,
+                    p.color,
+                    id,
+                );
             }
         }
     }
     let span = sub(hi, lo);
-    let mut s = Scene::from_parts(bodies, colliders, &arena, SceneParams::lab(FLAG_REUSE | FLAG_CONTACT_GAP | FLAG_WORLD_INERTIA));
+    let mut s = Scene::from_parts(
+        bodies,
+        colliders,
+        &arena,
+        SceneParams::lab(LAB_FLAGS | FLAG_CONTACT_GAP),
+    );
     add_projectiles(&mut s, 0.4, 2.0);
     s.projectile_mass = 500.0;
     s.vertices = vertices;
