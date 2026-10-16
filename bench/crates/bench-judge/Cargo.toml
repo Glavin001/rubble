@@ -1,0 +1,13 @@
+[package]
+name = "bench-judge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Engine-neutral quality metrics and gates from pose dumps, plus the comparison report"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+bench-core.workspace = true
+parry3d = { version = "0.31", features = ["parallel"] }
