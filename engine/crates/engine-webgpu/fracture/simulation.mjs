@@ -61,7 +61,8 @@ const warmTagPeriod=2**(32-warmValueBits)-2;
       s[13] = b(cap.maxBodies + 1, 4);
       // CSR index, the tagged warm hash, then the persistent resting table (world_step restBase):
       // 32 header words, resting + awake heads, one resting link per collider.
-      s[14] = (csrBase + cap.maxBodies + 1 + warmHashWords + 32 + 2 * gridHashWords + cap.maxColliders) * 4;
+      // ... then the awake-collider list (one word per collider).
+      s[14] = (csrBase + cap.maxBodies + 1 + warmHashWords + 32 + 2 * gridHashWords + 2 * cap.maxColliders) * 4;
       // Colour lists + history rows; broadphase links reuse it per collider.
       s[15] = b(Math.max(cap.maxColliders, cap.maxBodies * (cap.maxColors + 2)), 4);
       s[16] = b(cap.maxColors * Math.max(1, Math.ceil(cap.maxBodies / 64)), 4);
@@ -71,7 +72,7 @@ const warmTagPeriod=2**(32-warmValueBits)-2;
       s[20] = b(cap.maxBodies, 4);
       s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
       s[22] = 96 * PASS_ALIGN;
-      s[23] = b(Math.max(cap.maxColors, 81) * 3, 4); // colours, work 64..73, convex 74..76, finer scan 77, moved 78, rest rebuild 79..80
+      s[23] = b(Math.max(cap.maxColors, 82) * 3, 4); // colours, work 64..73, convex 74..76, finer scan 77, moved 78, rest rebuild 79..80, awake colliders 81
       s[24] = b(cap.maxColliders, 80);
       s[25] = b(cap.maxCandidates, 32);
       s[26] = b(cap.maxBodies, 32);
@@ -91,7 +92,7 @@ const warmTagPeriod=2**(32-warmValueBits)-2;
       reuse_all_manifolds: 'reuse_all_manifolds_persistent',
     };
     const K = [
-      'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query', 'broadphase_query_awake', 'write_finer_args', 'write_moved_args', 'rest_clear', 'rest_insert', 'rest_publish', 'broadphase_insert_awake', 'broadphase_clear_awake', 'broadphase_query_finer', 'write_work_args',
+      'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query', 'broadphase_query_awake', 'write_finer_args', 'write_moved_args', 'rest_clear', 'rest_insert', 'rest_publish', 'broadphase_insert_awake', 'broadphase_clear_awake', 'list_awake_colliders', 'write_awake_collider_args', 'broadphase_query_finer', 'write_work_args',
       'update_refs', 'contact_hash_clear', 'contact_hash_insert', 'narrowphase',
       'convex_classify', 'convex_bucket', 'convex_write_args', 'convex_sat_small', 'convex_sat_large', 'convex_manifold', 'reuse_all_manifolds',
       'persist_contacts', 'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
@@ -450,21 +451,26 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
         dispWork(pass, 'rest_clear', 79);
         dispWork(pass, 'rest_insert', 80);
         disp(pass, 'rest_publish', 64);
-        dispWork(pass, 'broadphase_insert_awake', 78);
+        // Colliders of moving bodies, then one thread per collider (slot 81).
+        dispWork(pass, 'list_awake_colliders', 78);
+        disp(pass, 'write_awake_collider_args', 64);
+        dispWork(pass, 'broadphase_insert_awake', 81);
       } else {
         disp(pass, 'broadphase_clear', gridHashWords);
         disp(pass, 'broadphase_insert', nCols);
       }
       pass = phase('broadphaseInsert');
       if (restStep) {
-        dispWork(pass, 'broadphase_query_awake', 78);
+        dispWork(pass, 'broadphase_query_awake', 81);
         disp(pass, 'write_finer_args', 64);
         dispWork(pass, 'broadphase_query_finer', 77);
-        dispWork(pass, 'broadphase_clear_awake', 78);
+        dispWork(pass, 'broadphase_clear_awake', 81);
       } else if (movedOnlyStep && awakeQueries) {
         // Only last step's awake bodies query; coarse movers then scan finer
         // cells for resting colliders (same pairs as every collider querying).
-        dispWork(pass, 'broadphase_query_awake', 78);
+        dispWork(pass, 'list_awake_colliders', 78);
+        disp(pass, 'write_awake_collider_args', 64);
+        dispWork(pass, 'broadphase_query_awake', 81);
         disp(pass, 'write_finer_args', 64);
         dispWork(pass, 'broadphase_query_finer', 77);
       } else disp(pass, 'broadphase_query', nCols);

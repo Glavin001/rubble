@@ -279,3 +279,25 @@ generated code untouched qualify.
 | Breakable bonds (`bonds=1`) | ~35: bonds wake whole houses and add solver rows |
 | Unhit houses static (`staticUnhit=1`), a stand-in for intact compound houses | ~95 (10.6 ms per tick, 22k awake) |
 | Only the shot column, 7 houses (`columns=1 rows=7`) | ~161 (6.2 ms per tick) |
+
+### Impact spike: the awake broadphase was serializing compound bodies (2026-10-16)
+
+A tick-by-tick profile of the grid shot (`headless.mjs grid timeline=10`)
+shows:
+
+- **Before impact** (ball rolling): < 1 ms per tick.
+- **First contact** (tick ~30): jumps to 9-12 ms with only 1-6k awake pieces.
+  `broadphase_query_awake` alone took 3.9-5.5 ms; the full broadphase over all
+  colliders took 1.4-1.9 ms on the same states.
+- **Cause.** The awake query ran one thread per awake body and looped over that
+  body's colliders, so fragments carrying dozens of hulls serialized their
+  queries.
+- **Fix.** `list_awake_colliders` now lists the colliders of moving bodies, and
+  the awake insert, query and clear run one thread per collider (work slot 81).
+- **Result.** Awake query during impact 3.9-5.5 → 0.9-1.7 ms; tick 42
+  10.7 → 7.85 ms.
+- **Verification.** Candidate counts are identical at every sampled tick.
+  `headless.mjs grid lockstep=420` (every optimization off vs on,
+  deterministic) is bit-identical over 420 ticks, up to 112k awake.
+- **Peak.** At 124k of 155k awake the full path is still faster (31.7 vs
+  33.5 ms), so the awake path keeps its quarter-awake threshold.

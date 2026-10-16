@@ -1320,38 +1320,69 @@ void hierScanFiner(uint m, uint first, uint stride, uint end)
     }
 }
 
-// One thread per entry of last step's awake list (indirect, work slot 78).
+// One thread per listed awake collider (indirect, work slot 81).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_query_awake(uint3 tid : SV_DispatchThreadID)
+{
+    uint li = dispatchIndex(tid);
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
+    uint levels = HOST_S(18);
+    hierQuery(c);
+    if (gColliders[c].shape == SHAPE_PLANE) return;
+    Aabb aa = gAabbs[HOST_S(1) + c];
+    uint own = hierLevel(aa._pad0);
+    if (own == 0u || own >= levels) return;
+    uint cells = hierFinerCellCount(aa, own);
+    if (cells == 0u) return;
+    uint chunks = (cells + FINER_CHUNK - 1u) / FINER_CHUNK;
+    uint k;
+    AADD3(gScratchAtomics[FINER_COUNT_SLOT], chunks, k);
+    uint cap = finerItemCapacity();
+    bool fits = k + chunks <= cap;
+    for (uint q = 0u; q < chunks && k + q < cap; q++)
+    {
+        ASTORE(gConstraintIds[HOST_S(16) + 2u * (k + q)], fits ? c : FINER_SKIP);
+        ASTORE(gConstraintIds[HOST_S(16) + 2u * (k + q) + 1u], q);
+    }
+    if (!fits) hierScanFiner(c, 0u, 1u, cells); // list full: scan in this thread
+}
+
+// Colliders of moving bodies on last step's awake list (one thread per entry,
+// work slot 78), so the awake insert, query and clear run one thread per
+// collider: a body with many colliders no longer serializes them in one thread.
+// Listed in gConstraintIds after the resting links (awakeColliderBase); the
+// count is scratch word 6 (host-zeroed; HOST_S(6) lives in the uniform).
+static const uint AWAKE_COLLIDER_COUNT_SLOT = 6u;
+uint awakeColliderBase() { return restLinks() + gCounters[0].colliderCount; }
+uint awakeColliderCount() { return ALOAD(gScratchAtomics[AWAKE_COLLIDER_COUNT_SLOT]); }
+uint awakeCollider(uint li) { return ALOAD(gConstraintIds[awakeColliderBase() + li]); }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void list_awake_colliders(uint3 tid : SV_DispatchThreadID)
 {
     uint li = dispatchIndex(tid);
     if (li >= HOST_S(6)) return;
     uint body = gAwakeList[li];
     if (!bodyMoving(gBodies[body])) return;
     uint n = gCounters[0].colliderCount;
-    uint levels = HOST_S(18);
-    for (uint c = firstColliderOfBody(body); c < n && gColliders[c].body == body; c++)
-    {
-        hierQuery(c);
-        if (gColliders[c].shape == SHAPE_PLANE) continue;
-        Aabb aa = gAabbs[HOST_S(1) + c];
-        uint own = hierLevel(aa._pad0);
-        if (own == 0u || own >= levels) continue;
-        uint cells = hierFinerCellCount(aa, own);
-        if (cells == 0u) continue;
-        uint chunks = (cells + FINER_CHUNK - 1u) / FINER_CHUNK;
-        uint k;
-        AADD3(gScratchAtomics[FINER_COUNT_SLOT], chunks, k);
-        uint cap = finerItemCapacity();
-        bool fits = k + chunks <= cap;
-        for (uint q = 0u; q < chunks && k + q < cap; q++)
-        {
-            ASTORE(gConstraintIds[HOST_S(16) + 2u * (k + q)], fits ? c : FINER_SKIP);
-            ASTORE(gConstraintIds[HOST_S(16) + 2u * (k + q) + 1u], q);
-        }
-        if (!fits) hierScanFiner(c, 0u, 1u, cells); // list full: scan in this thread
-    }
+    uint first = firstColliderOfBody(body), end = first;
+    while (end < n && gColliders[end].body == body) end++;
+    if (end == first) return;
+    uint base;
+    AADD3(gScratchAtomics[AWAKE_COLLIDER_COUNT_SLOT], end - first, base);
+    for (uint c = first; c < end; c++) ASTORE(gConstraintIds[awakeColliderBase() + base + (c - first)], c);
+}
+
+// Work slot 81: one thread per listed awake collider.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void write_awake_collider_args(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u) return;
+    writeDispatchArgs(81u, awakeColliderCount());
 }
 
 // Work slot 77: one workgroup per listed chunk.
@@ -1443,54 +1474,44 @@ void rest_publish(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + k], ALOAD(gConstraintIds[hdr + 11u + k]));
 }
 
-// Moving colliders of last step's awake bodies into W (slot 78).
+// Listed awake colliders into W (one thread each, slot 81).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_insert_awake(uint3 tid : SV_DispatchThreadID)
 {
     uint li = dispatchIndex(tid);
-    if (li >= HOST_S(6)) return;
-    uint body = gAwakeList[li];
-    if (!bodyMoving(gBodies[body])) return;
-    uint n = gCounters[0].colliderCount;
-    for (uint c = firstColliderOfBody(body); c < n && gColliders[c].body == body; c++)
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
+    if (gColliders[c].shape == SHAPE_PLANE) return;
+    Aabb box = gAabbs[HOST_S(1) + c];
+    uint level = hierLevel(box._pad0);
+    if (level >= HOST_S(18))
     {
-        if (gColliders[c].shape == SHAPE_PLANE) continue;
-        Aabb box = gAabbs[HOST_S(1) + c];
-        uint level = hierLevel(box._pad0);
-        if (level >= HOST_S(18))
-        {
-            uint slot;
-            AADD3(gScratchAtomics[HIER_LARGE_COUNT_SLOT], 1, slot);
-            if (slot < HIER_LARGE_MAX) ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + slot], c);
-            else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
-            continue;
-        }
-        AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], 1u << level);
-        uint prev;
-        AXCHG3(gConstraintIds[awakeHeads() + hierHash(hierCell(box, level), level)], c, prev);
-        gAabbs[HOST_S(1) + c]._pad1 = asfloat(prev);
+        uint slot;
+        AADD3(gScratchAtomics[HIER_LARGE_COUNT_SLOT], 1, slot);
+        if (slot < HIER_LARGE_MAX) ASTORE(gScratchAtomics[HIER_LARGE_COUNT_SLOT + 1u + slot], c);
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+        return;
     }
+    AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], 1u << level);
+    uint prev;
+    AXCHG3(gConstraintIds[awakeHeads() + hierHash(hierCell(box, level), level)], c, prev);
+    gAabbs[HOST_S(1) + c]._pad1 = asfloat(prev);
 }
 
-// After the queries: empty the W heads the moving colliders filled.
+// After the queries: empty the W heads the listed colliders filled (slot 81).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_clear_awake(uint3 tid : SV_DispatchThreadID)
 {
     uint li = dispatchIndex(tid);
-    if (li >= HOST_S(6)) return;
-    uint body = gAwakeList[li];
-    if (!bodyMoving(gBodies[body])) return;
-    uint n = gCounters[0].colliderCount;
-    for (uint c = firstColliderOfBody(body); c < n && gColliders[c].body == body; c++)
-    {
-        if (gColliders[c].shape == SHAPE_PLANE) continue;
-        Aabb box = gAabbs[HOST_S(1) + c];
-        uint level = hierLevel(box._pad0);
-        if (level < HOST_S(18))
-            ASTORE(gConstraintIds[awakeHeads() + hierHash(hierCell(box, level), level)], 0xFFFFFFFFu);
-    }
+    if (li >= awakeColliderCount()) return;
+    uint c = awakeCollider(li);
+    if (gColliders[c].shape == SHAPE_PLANE) return;
+    Aabb box = gAabbs[HOST_S(1) + c];
+    uint level = hierLevel(box._pad0);
+    if (level < HOST_S(18))
+        ASTORE(gConstraintIds[awakeHeads() + hierHash(hierCell(box, level), level)], 0xFFFFFFFFu);
 }
 
 [shader("compute")]

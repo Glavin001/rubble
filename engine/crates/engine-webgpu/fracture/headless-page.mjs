@@ -63,10 +63,39 @@ async function run(){
    frozen++;
   }
  }
+ // lockstep=N: N ticks of every optimization off vs on (both deterministic),
+ // counts compared every tick and body words every 35; reports the first difference.
+ if(num('lockstep',0)>0){
+  const off={deterministic:true,movedOnlyBounds:false,awakeQueries:false,persistentRest:false,taggedWarmHash:false,awakeListPasses:false};
+  const on={deterministic:true,movedOnlyBounds:true};
+  const A=await createSimulation(device,{...scene,capacity:{...scene.capacity,...off}}),B=await createSimulation(device,{...scene,capacity:{...scene.capacity,...on}});
+  if((q.get('shot')??'row')==='row'&&scene.rowShot)for(const S of [A,B])S.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
+  let first=null,maxAwake=0,k=0;
+  for(k=1;k<=num('lockstep',0)&&!first;k++){await A.step(1);await B.step(1);maxAwake=Math.max(maxAwake,A.counters.awake);
+   const a=A.counters,b=B.counters;if(a.candidate!==b.candidate||a.contact!==b.contact||a.awake!==b.awake){first={tick:k,a,b};break}
+   if(k%35===0){const [x,y]=await Promise.all([A,B].map(async S=>new Uint32Array((await S.snapshot()).buffer).slice()));
+    for(let i=0;i<x.length;i++)if(x[i]!==y[i]){first={tick:k,word:i%28,body:Math.floor(i/28)};break}}}
+  A.dispose();B.dispose();return {scene:name,lockstep:{ticks:k-1,firstDifference:first,maxAwake},gpuError};
+ }
  const sim=await createSimulation(device,scene);
  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
  const log=[],t0=performance.now();
- for(let k=0;k<warm;k+=4){await sim.step(Math.min(4,warm-k),{wait:false});
+ // timeline=N: every N ticks, one step timed in a single pass (true GPU ms)
+ // and the next profiled per kernel, grouped by stage, with the counters.
+ const timeline=num('timeline',0),stages=[];
+ const stageOf=k=>/^(build_aabbs|broadphase|write_moved|rest_|write_finer)/.test(k)?'broadphase':
+  /^(narrowphase|contact_hash|persist_contacts|update_refs|reuse_all)/.test(k)?'contacts':
+  /^convex_/.test(k)?'hullCollision':/^(solve_primal)/.test(k)?'solverPrimal':/^(solve_dual)/.test(k)?'solverDual':
+  /^(pack_solver|predict_bodies|extract_velocity)/.test(k)?'solverOther':
+  /^(csr_|build_awake)/.test(k)?'contactGraph':/^(color_|init_colors|count_color|prefix_color|scatter_color|record_color|write_color)/.test(k)?'coloring':
+  /^(sleep_|write_sleep)/.test(k)?'sleep':'other';
+ if(timeline)for(let k=0;k<warm;){
+  if(k%timeline===0){const w=await sim.profileStep({singlePass:true});const p=await sim.profileKernels();const st={};
+   for(const [n,v] of Object.entries(p.kernels??{}))st[stageOf(n)]=+((st[stageOf(n)]??0)+v.ms).toFixed(3);
+   const c=sim.counters;stages.push({tick:sim.steps,stepMs:+w.gpuMs.toFixed(2),awake:c.awake,contacts:c.contact,candidates:c.candidate,hullPairs:c.convexSmall+c.convexLarge,stages:st,kernels:Object.entries(p.kernels??{}).sort((a,b)=>b[1].ms-a[1].ms).slice(0,10).map(([n,v])=>n+" "+v.ms.toFixed(3)+" x"+v.count)});k+=2}
+  else{await sim.step(1);k++}
+ }
+ else for(let k=0;k<warm;k+=4){await sim.step(Math.min(4,warm-k),{wait:false});
   if(trace&&Math.floor((k+4)/trace)>Math.floor(k/trace)){await sim.flush();const c=sim.counters;log.push({tick:sim.steps,awake:c.awake,contacts:c.contact,candidates:c.candidate})}}
  await sim.flush();const warmMs=performance.now()-t0;
  const t1=performance.now();for(let k=0;k<measure;k++)await sim.step(1,{wait:false});await sim.flush();
@@ -74,7 +103,7 @@ async function run(){
  let kernels=null;
  if(num('profile',1)){const agg={};for(let r=0;r<3;r++){const p=await sim.profileKernels();if(!p.supported)break;for(const [k,v] of Object.entries(p.kernels))agg[k]=(agg[k]??0)+v.ms/3}
   kernels=Object.fromEntries(Object.entries(agg).sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k,+v.toFixed(3)]))}
- const result={scene:name,frozenHouses:frozen,bodies:scene.bodies.length,colliders:scene.colliders.length,joints:scene.joints?.length??0,budget,warm,measure,
+ const result={scene:name,timeline:stages,frozenHouses:frozen,bodies:scene.bodies.length,colliders:scene.colliders.length,joints:scene.joints?.length??0,budget,warm,measure,
   msPerTick:+msPerTick.toFixed(3),ticksPerSecond:+(1000/msPerTick).toFixed(1),warmMs:Math.round(warmMs),counters,kernels,trace:log,gpuError};
  sim.dispose();return result;
 }
