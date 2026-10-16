@@ -356,6 +356,15 @@ pub const OVERFLOW_COLORS: u32 = 8;
 pub const CCD_BUDGET_EXHAUSTED: u32 = 16;
 pub const CCD_CANDIDATE_MISS: u32 = 32;
 pub const OVERFLOW_MANIFOLDS: u32 = 64;
+pub const OVERFLOW_BP_CHAIN: u32 = 128;
+pub const OVERFLOW_WARM_HASH: u32 = 256;
+/// More oversized statics than `LARGE_STATIC_CAP`: some are found only by the
+/// endpoint probes.
+pub const OVERFLOW_LARGE_STATICS: u32 = 512;
+/// Oversized-static list (statics wider than half a grid cell): this many 32-byte
+/// records `[aabb min, collider, aabb max, _]` after the vehicle blocks in the AABB
+/// buffer, at the index hosts pass in host scalar 29.
+pub const LARGE_STATIC_CAP: u32 = 1024;
 
 #[cfg(test)]
 mod tests {

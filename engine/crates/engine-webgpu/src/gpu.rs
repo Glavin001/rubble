@@ -75,6 +75,8 @@ pub struct WgpuSim {
     joint_hash_clear_pending: bool,
     /// Event ring read cursor (`poll_joint_breaks`).
     events_seen: u32,
+    /// First oversized-static list record in the AABB buffer (host scalar 29).
+    large_static_base: u32,
     command_count: u32,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
@@ -452,6 +454,7 @@ impl WgpuSim {
             user_joint_count: 0,
             joint_hash_clear_pending: false,
             events_seen: 0,
+            large_static_base: aabb_tail + 4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels),
             command_count: 0,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -1033,6 +1036,7 @@ impl WgpuSim {
         s[23] = self.persist_list_limit;
         s[27] = u32::from(self.local_repair);
         s[28] = u32::from(self.carry_rest);
+        s[29] = self.large_static_base;
         if self.manifold_hash_insert || self.carry_rest {
             s[13] = self.last_counters.manifold_count;
         }
@@ -1403,7 +1407,8 @@ fn buffer_sizes(c: &WorldCapacity, v: &VehicleCapacity) -> [u64; BIND_COUNT] {
     s[8] = b(c.max_commands, 64);
     // Collider AABBs, then a 4-entry wheel-row block per vehicle and a 4-entry
     // ground block per wheel slot (two-body tyre rows).
-    s[9] = b(c.max_bodies + c.max_colliders + 4 * (v.max_vehicles + v.max_wheels), 32);
+    // Then the oversized-static list (LARGE_STATIC_CAP records, host scalar 29).
+    s[9] = b(c.max_bodies + c.max_colliders + 4 * (v.max_vehicles + v.max_wheels) + LARGE_STATIC_CAP, 32);
     s[10] = b(c.max_candidates, 16);
     s[11] = b(c.max_bodies, 4);
     s[12] = b(c.max_bodies, 4);

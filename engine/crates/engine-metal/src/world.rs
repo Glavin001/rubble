@@ -70,6 +70,8 @@ pub struct MetalWorld {
     events_seen: u32,
     /// Island-gate BFS rounds (8 for stacks; 2 for random piles so one rocker cannot pin all).
     sleep_island_rounds: u32,
+    /// First oversized-static list record in the AABB buffer (host scalar 29).
+    large_static_base: u32,
     material_count: u32,
     command_count: u32,
 
@@ -116,7 +118,9 @@ impl MetalWorld {
         // Collider AABBs, then a 4-entry wheel-row block per vehicle and a 4-entry
         // ground block per wheel slot (two-body tyre rows).
         let aabb_tail = capacity.max_bodies + capacity.max_colliders;
-        let aabbs = alloc::<AabbGpu>(d, aabb_tail + 4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels));
+        // Then the oversized-static list (host scalar 29 = its first record).
+        let large_static_base = aabb_tail + 4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels);
+        let aabbs = alloc::<AabbGpu>(d, large_static_base + engine_schema::LARGE_STATIC_CAP);
         let vehicle_data = alloc::<[u32; 4]>(d, vehicle_capacity.layout().total_slots);
         unsafe {
             std::ptr::write_bytes(vehicle_data.contents() as *mut u8, 0, vehicle_capacity.bytes() as usize);
@@ -252,6 +256,7 @@ impl MetalWorld {
             user_joint_count: 0,
             joint_hash_clear_pending: false,
             events_seen: 0,
+            large_static_base,
             sleep_island_rounds: 8,
             material_count: 1,
             command_count: 0,
@@ -572,6 +577,7 @@ impl MetalWorld {
         s[21] = 0; // update_refs noRef
         s[22] = 0; // update_refs linMove
         s[23] = 0; // update_refs angMove
+        s[29] = self.large_static_base;
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {

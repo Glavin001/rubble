@@ -462,7 +462,7 @@ void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint 
         {
             uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
             uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
-            uint nStatic = min(ALOAD(gScratchAtomics[LARGE_STATIC_COUNT]), LARGE_STATIC_CAP);
+            uint nStatic = largeStaticCount();
             uint nList = nPlanes + nLarge + nStatic + 2u;
             uint nColliders = gCounters[0].colliderCount;
             for (uint k = lane; k < nList; k += 64u)
@@ -470,7 +470,7 @@ void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint 
                 uint ci;
                 if (k < nPlanes) ci = ALOAD(gScratchAtomics[43u + k]);
                 else if (k < nPlanes + nLarge) ci = ALOAD(gScratchAtomics[26u + k - nPlanes]);
-                else if (k < nPlanes + nLarge + nStatic) ci = ALOAD(gScratchAtomics[LARGE_STATIC_COUNT + 1u + k - nPlanes - nLarge]);
+                else if (k < nPlanes + nLarge + nStatic) ci = largeStaticCollider(k - nPlanes - nLarge);
                 else ci = k + 2u == nList ? 0u : nColliders - 1u;
                 if (ci < nColliders)
                     rayTestCollider(ci, o, d, maxT, excludeBody, rad, coneCos, lmin, mn, mx, base, bestT, bestC);

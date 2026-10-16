@@ -50,6 +50,7 @@ export const JOINT_FLAG_BROKEN = 0x80000000;
 // gEvents: 64k joint pair hash, then the event ring (engine-schema EVENT_RING_*).
 export const EVENT_RING_BASE = 65536, EVENT_RING_CAPACITY = 1024, EVENT_BREAK = 3;
 const EVENTS_WORDS = EVENT_RING_BASE + 4 + 4 * EVENT_RING_CAPACITY;
+const LARGE_STATIC_CAP = 1024;
 export function jointWords(j) {
   const u = new Uint32Array(JOINT_WORDS);
   const f = new Float32Array(u.buffer);
@@ -113,7 +114,9 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
   sizes[5] = cap.maxJoints * 256;
   sizes[8] = cap.maxCommands * 64;
   // Collider AABBs, then a 4-entry block per vehicle and per wheel slot (ground blocks).
-  sizes[9] = (cap.maxBodies + cap.maxColliders + 4 * (vehicleCap.maxVehicles + vehicleCap.maxWheels)) * 32;
+  // Then the oversized-static list (engine-schema LARGE_STATIC_CAP, host scalar 29).
+  const largeStaticBase = cap.maxBodies + cap.maxColliders + 4 * (vehicleCap.maxVehicles + vehicleCap.maxWheels);
+  sizes[9] = (largeStaticBase + LARGE_STATIC_CAP) * 32;
   sizes[10] = cap.maxCandidates * 16;
   sizes[11] = cap.maxBodies * 4;
   sizes[12] = cap.maxBodies * 4;
@@ -330,6 +333,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     s[17] = world.steps;
     s[24] = csrBase;
     s[26] = 1;
+    s[29] = largeStaticBase;
     s[4] = Math.min(cap.maxColors, 32);
     PFIELDS.forEach((k, i) => (i === 2 || i === 3) ? hostParams.setUint32(i * 4, params[k], true) : hostParams.setFloat32(i * 4, params[k], true));
     for (let i = 0; i < 32; i++) hostParams.setUint32(80 + i * 4, s[i], true);

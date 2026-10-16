@@ -184,6 +184,7 @@ public static const uint CCD_BUDGET_EXHAUSTED = 16u;
 public static const uint CCD_CANDIDATE_MISS = 32u;
 public static const uint OVERFLOW_BP_CHAIN = 128u; // linked-list BP hit per-slot walk cap
 public static const uint OVERFLOW_WARM_HASH = 256u; // record warm hash probe limit exhausted
+public static const uint OVERFLOW_LARGE_STATICS = 512u; // more oversized statics than LARGE_STATIC_CAP
 
 public struct GpuCommand
 {

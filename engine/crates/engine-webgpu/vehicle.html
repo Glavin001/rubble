@@ -294,10 +294,7 @@
     }
     // Cannonballs: parked static spheres, launched by writing their body records.
     const cannon = [];
-    // Parked cannonballs are static colliders: the bridge scene skips them so its two
-    // long approach roads stay within the 10-slot large-static list (LARGE_STATIC_CAP),
-    // which wheel casts and the broadphase need to find them.
-    for (let i = 0; i < (scene === 'bridge' ? 0 : 12); i++) {
+    for (let i = 0; i < 12; i++) {
       const body = world.addBody({ p: [-4000 - i * 5, -4000, -4000], flags: 0, invMass: 1 / 400, invI: [2.5 / (400 * 0.36), 2.5 / (400 * 0.36), 2.5 / (400 * 0.36)] });
       world.addCollider({ body, shape: 0, material: MAT_PROP, params: [0.6, 0, 0, 0.6] });
       cannon.push(body);
