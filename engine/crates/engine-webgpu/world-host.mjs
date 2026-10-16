@@ -10,12 +10,13 @@ const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
 export const KERNELS = [
   'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query', 'write_work_args',
   'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts',
-  'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix', 'csr_prefix_blocks',
-  'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_sort', 'init_colors',
+  'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_degree_joints', 'csr_prefix', 'csr_prefix_blocks',
+  'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_scatter_joints', 'csr_sort', 'init_colors',
+  'joint_hash_clear', 'joint_hash_insert',
   'color_bodies', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
   'write_color_args', 'predict_bodies', 'solve_primal_color', 'solve_dual', 'extract_velocity_sleep',
   'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
-  'vehicle_input', 'wheel_query', 'vehicle_prepare', 'vehicle_iterate', 'vehicle_post', 'raycast_batch',
+  'vehicle_input', 'wheel_query', 'vehicle_link', 'vehicle_prepare', 'vehicle_iterate', 'vehicle_post', 'raycast_batch',
 ];
 
 export function sceneCapacity(bodies, colliders) {
@@ -50,7 +51,9 @@ export const DEFAULT_PARAMS = {
   residualExit: 1e-4, trustLin: 0.35, trustAng: 0.5, pivotFloor: 1e-6, gridCellSize: 2,
 };
 
-export async function createWorld(device, { cap, vehicleCap = DEFAULT_VEHICLE_CAPACITY, wgslBase = './generated/wgsl/', status = () => {} }) {
+export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_VEHICLE_CAPACITY, wgslBase = './generated/wgsl/', status = () => {} }) {
+  // One tyre joint per vehicle wheel slot rides on top of the user joints.
+  const cap = { ...userCap, maxJoints: userCap.maxJoints + vehicleCap.maxWheels };
   const constraintIdWords = nextPow2(Math.max(32768, 2 * (cap.maxContacts + cap.maxJoints)));
   const csrBase = Math.max(constraintIdWords, 131072);
   const vlayout = vehicleLayout(vehicleCap);
@@ -64,7 +67,8 @@ export async function createWorld(device, { cap, vehicleCap = DEFAULT_VEHICLE_CA
   sizes[4] = cap.maxContacts * 2 * 128;
   sizes[5] = cap.maxJoints * 256;
   sizes[8] = cap.maxCommands * 64;
-  sizes[9] = (cap.maxBodies + cap.maxColliders + 4 * vehicleCap.maxVehicles) * 32;
+  // Collider AABBs, then a 4-entry block per vehicle and per wheel slot (ground blocks).
+  sizes[9] = (cap.maxBodies + cap.maxColliders + 4 * (vehicleCap.maxVehicles + vehicleCap.maxWheels)) * 32;
   sizes[10] = cap.maxCandidates * 16;
   sizes[11] = cap.maxBodies * 4;
   sizes[12] = cap.maxBodies * 4;
@@ -153,9 +157,16 @@ export async function createWorld(device, { cap, vehicleCap = DEFAULT_VEHICLE_CA
     world.colliderWords.set(words, index * 16);
     device.queue.writeBuffer(bufs[2], index * 64, words);
   };
+  world.jointCount = 0;
   world.backend = {
     bodyCount: () => world.bodyCount,
     colliderCount: () => world.colliderCount,
+    jointCount: () => world.jointCount,
+    appendJoints: (list) => list.forEach((words) => {
+      if (world.jointCount >= cap.maxJoints) throw new Error('joint capacity exhausted');
+      device.queue.writeBuffer(bufs[5], world.jointCount * 128, words);
+      world.jointCount++;
+    }),
     appendBodies: (list) => list.forEach((w) => world.addBodyWords(w)),
     appendColliders: (list) => list.forEach((w) => world.addColliderWords(w)),
     writeBody: (i, w) => writeBodyRaw(i, w),
@@ -244,6 +255,7 @@ export async function createWorld(device, { cap, vehicleCap = DEFAULT_VEHICLE_CA
     counters.fill(0);
     counters[0] = world.bodyCount;
     counters[1] = world.colliderCount;
+    counters[3] = world.jointCount;
     colorZero.fill(0);
     device.queue.writeBuffer(hostUpload, 0, hostCpu);
     enc.copyBufferToBuffer(hostUpload, 0, bufs[21], 0, 256);
@@ -280,10 +292,18 @@ export async function createWorld(device, { cap, vehicleCap = DEFAULT_VEHICLE_CA
     const p = enc.beginComputePass();
     if (nV > 0) disp(p, 'vehicle_input', nV);
     disp(p, 'build_aabbs', nC);
+    if (world.jointCount > 0) {
+      // Joint pair filter (tyre joints skip it; the hash must still be valid).
+      disp(p, 'joint_hash_clear', 65536);
+      disp(p, 'joint_hash_insert', world.jointCount);
+    }
     disp(p, 'broadphase_clear', gridHashWords());
     disp(p, 'broadphase_insert', nC);
     disp(p, 'broadphase_query', nC);
-    if (nV > 0) disp(p, 'wheel_query', nW * 64); // grid walk: before the contact hash reuses the heads
+    if (nV > 0) {
+      disp(p, 'wheel_query', nW * 64); // grid walk: before the contact hash reuses the heads
+      disp(p, 'vehicle_link', nW); // wheels on dynamic bodies join the constraint graph
+    }
     disp(p, 'write_work_args', 64);
     const reuse = (params.flags & 1) !== 0;
     if (reuse) {
@@ -302,6 +322,7 @@ export async function createWorld(device, { cap, vehicleCap = DEFAULT_VEHICLE_CA
     disp(p, 'write_work_args', 64);
     disp(p, 'csr_clear', nB + 1);
     dispWork(p, 'csr_degree_contacts', 66);
+    if (world.jointCount > 0) disp(p, 'csr_degree_joints', world.jointCount);
     if (world.bodyCount <= 512) disp(p, 'csr_prefix', 1);
     else {
       disp(p, 'csr_prefix_blocks', Math.ceil(nB / 4));
@@ -309,6 +330,7 @@ export async function createWorld(device, { cap, vehicleCap = DEFAULT_VEHICLE_CA
       disp(p, 'csr_prefix_add', nB);
     }
     dispWork(p, 'csr_scatter_contacts', 66);
+    if (world.jointCount > 0) disp(p, 'csr_scatter_joints', world.jointCount);
     dispWork(p, 'csr_sort', 67);
     dispWork(p, 'init_colors', 67);
     disp(p, 'write_work_args', 64);

@@ -110,6 +110,7 @@ static const uint W_O_N = 34u;     // contact normal.xyz, asfloat(groundBody)
 static const uint W_LHIT = 35u;    // last hit in ground-body space.xyz, valid (1/0) — query-rate extrapolation
 static const uint W_LN = 36u;      // last hit normal in ground-body space.xyz, spin servo target y* (rad/step)
 static const uint W_FP = 37u;      // suspension force point (chassis space).xyz, enabled (1/0)
+static const uint W_TJ = 38u;      // uint4(tyreJoint, shellCollider, twoBodyGround (NO_INDEX = static ground), pad)
 
 // Wheel config flags (W_CFG.y)
 static const uint WF_STEER = 1u;
@@ -156,6 +157,11 @@ static const uint RAY_STRIDE = 4u;      // in: origin.xyz,maxDist | dir.xyz,asfl
 // WGSL constant folding rejects. 0x7F7FFFFF is FLT_MAX bits.
 static const uint NO_INDEX = 0x7F7FFFFFu;
 static const uint MAX_VEHICLE_WHEELS = 16u;
+// Wheel shell: spheres on the chassis around each tyre (not the bottom, which the
+// tyre rows own), for sidewall contact with debris, kerb faces and other cars.
+static const uint SHELL_SPHERES = 5u;
+// cos 35°: sphere-cast hits steeper than this belong to the wheel shell.
+static const float SWEEP_CONE_COS = 0.819;
 static const uint MAX_DRIVEN_WHEELS = 8u;
 
 #endif

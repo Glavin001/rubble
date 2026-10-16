@@ -83,7 +83,9 @@ impl MetalWorld {
         Self::new_with_vehicles(capacity, VehicleCapacity::default())
     }
 
-    pub fn new_with_vehicles(capacity: WorldCapacity, vehicle_capacity: VehicleCapacity) -> anyhow::Result<Self> {
+    pub fn new_with_vehicles(mut capacity: WorldCapacity, vehicle_capacity: VehicleCapacity) -> anyhow::Result<Self> {
+        // One tyre joint per vehicle wheel slot rides on top of the user joints.
+        capacity.max_joints += vehicle_capacity.max_wheels;
         let device = MetalDevice::new()?;
         let chip = device.chip.clone();
         let pipelines = Pipelines::new(&device.device)?;
@@ -106,9 +108,10 @@ impl MetalWorld {
         let params_buf = alloc::<AvbdParams>(d, 1);
         let counters = [alloc::<StepCounters>(d, 1), alloc::<StepCounters>(d, 1)];
         let commands = alloc::<GpuCommand>(d, capacity.max_commands);
-        // Collider AABBs, then a 4-entry wheel-row block per vehicle.
+        // Collider AABBs, then a 4-entry wheel-row block per vehicle and a 4-entry
+        // ground block per wheel slot (two-body tyre rows).
         let aabb_tail = capacity.max_bodies + capacity.max_colliders;
-        let aabbs = alloc::<AabbGpu>(d, aabb_tail + 4 * vehicle_capacity.max_vehicles);
+        let aabbs = alloc::<AabbGpu>(d, aabb_tail + 4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels));
         let vehicle_data = alloc::<[u32; 4]>(d, vehicle_capacity.layout().total_slots);
         unsafe {
             std::ptr::write_bytes(vehicle_data.contents() as *mut u8, 0, vehicle_capacity.bytes() as usize);
@@ -718,6 +721,8 @@ impl MetalWorld {
         self.dispatch(&encoder, "broadphase_query", n_cols);
         if n_veh > 0 {
             self.dispatch_vehicle(&encoder, "wheel_query", n_wheels, true);
+            // Before the constraint graph: link wheels on dynamic bodies.
+            self.dispatch_vehicle(&encoder, "vehicle_link", n_wheels, false);
         }
         self.dispatch(&encoder, "write_work_args", 64);
         // Pair hash before NP when reuseContacts is on (three-avbd order); otherwise
@@ -1059,6 +1064,16 @@ impl MetalWorld {
 impl VehicleBackend for MetalWorld {
     fn body_count(&self) -> u32 {
         self.body_count
+    }
+
+    fn joint_count(&self) -> u32 {
+        self.joint_count
+    }
+
+    fn append_joints(&mut self, joints: &[Joint]) {
+        for j in joints {
+            self.add_joint(*j);
+        }
     }
 
     fn collider_count(&self) -> u32 {

@@ -21,6 +21,9 @@ pub trait VehicleBackend {
     /// Write curve points (8 bytes each) at point index `point` of the curve region.
     fn write_curve_points(&mut self, byte_offset: u64, points: &[[f32; 2]]);
     fn read_slots(&self, slot: u32, count: u32) -> Vec<Slot>;
+    fn joint_count(&self) -> u32;
+    /// Append joints (vehicle tyre joints) after the existing ones.
+    fn append_joints(&mut self, joints: &[engine_schema::Joint]);
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -306,6 +309,7 @@ impl VehicleHost {
             body_base: backend.body_count(),
             collider_base: backend.collider_count(),
             aabb_block: self.aabb_tail + 4 * v,
+            joint_base: backend.joint_count(),
         };
         let packed = pack::pack(desc, Vec3::from_array(position), Quat::from_array(rotation), slots);
         self.upload(backend, &packed, &slots);
@@ -335,6 +339,7 @@ impl VehicleHost {
         let l = self.capacity.layout();
         backend.append_bodies(&p.bodies);
         backend.append_colliders(&p.colliders);
+        backend.append_joints(&p.joints);
         backend.write_slots(l.vehicle_base + s.vehicle * VEH_STRIDE, &p.vehicle);
         for (i, w) in p.wheels.iter().enumerate() {
             backend.write_slots(l.wheel_base + (s.wheel_base + i as u32) * WHEEL_STRIDE, w);
@@ -465,6 +470,10 @@ impl VehicleHost {
         for (k, c) in pack::rim_colliders_n(wheel, up, fwd, parked, rims).iter().enumerate() {
             backend.write_collider(old[W_PARK as usize][1] + k as u32, c);
         }
+        // Keep the slot's tyre joint and shell; resize the shell for this wheel
+        // (vehicle_post moves it onto the chassis once the wheel is attached).
+        w[W_TJ as usize] = [old[W_TJ as usize][0], old[W_TJ as usize][1], NO_INDEX, 0];
+        write_shell(backend, wheel, up, fwd, old[W_TJ as usize][1], e.slots.body_base + 1);
         backend.write_slots(rec, &w);
         let entry = &mut self.entries[h.0 as usize];
         entry.wheels_used += 1;
@@ -492,6 +501,11 @@ impl VehicleHost {
         );
         // Static slots only (dynamic state stays GPU-owned).
         backend.write_slots(rec + W_HP, &w[W_HP as usize..W_PARK as usize]);
+        // Resize the shell to the new tyre (keeps whichever body owns it now).
+        let shell = backend.read_slots(rec + W_TJ, 1)[0][1];
+        let up = Vec3::from_array(e.desc.up).normalize();
+        let fwd = Vec3::from_array(e.desc.forward).normalize();
+        write_shell(backend, &shifted, up, fwd, shell, e.chassis);
         backend.write_slots(rec + W_UP, &w[W_UP as usize..W_UP as usize + 1]);
         let mut cfg = old[W_CFG as usize];
         cfg[1] = w[W_CFG as usize][1];
@@ -624,5 +638,18 @@ pub mod anyhow_lite {
         } else {
             Err(msg.to_string())
         }
+    }
+}
+
+/// Rewrite a wheel slot's shell spheres for `wheel` (centre at full droop; the
+/// kernel re-places them every step).
+fn write_shell(backend: &mut impl VehicleBackend, wheel: &WheelDesc, up: Vec3, fwd: Vec3, first: u32, body: u32) {
+    if first == NO_INDEX {
+        return;
+    }
+    let down = wheel.suspension_dir.map(Vec3::from_array).unwrap_or(-up).normalize();
+    let center = Vec3::from_array(wheel.position) + down * wheel.suspension_max;
+    for (k, c) in pack::shell_colliders(wheel, center, down, fwd, body).iter().enumerate() {
+        backend.write_collider(first + k as u32, c);
     }
 }

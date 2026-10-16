@@ -29,6 +29,7 @@ fn main() -> Result<()> {
     let vehicle_entries = [
         "vehicle_input",
         "wheel_query",
+        "vehicle_link",
         "vehicle_prepare",
         "vehicle_iterate",
         "vehicle_post",
@@ -93,6 +94,7 @@ fn main() -> Result<()> {
         "recompute_inertia",
         "vehicle_input",
         "wheel_query",
+        "vehicle_link",
         "vehicle_prepare",
         "vehicle_iterate",
         "vehicle_post",

@@ -127,6 +127,9 @@ static const uint JOINT_SLIDER = 3u;
 static const uint JOINT_D6 = 4u;
 static const uint JOINT_DISTANCE = 5u;
 static const uint JOINT_MAX_DISTANCE = 6u;
+// Vehicle wheel on a dynamic body: links chassis and ground in the constraint graph;
+// the ground body's primal adds the wheel's ground block (flags = block index).
+static const uint JOINT_TYRE = 7u;
 
 struct AvbdParams
 {

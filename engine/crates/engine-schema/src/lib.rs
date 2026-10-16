@@ -225,6 +225,9 @@ pub struct Manifold {
     pub friction: f32,
 }
 
+/// Joint type of a vehicle wheel standing on a dynamic body (see vehicle_link).
+pub const JOINT_TYRE: u32 = 7;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Joint {

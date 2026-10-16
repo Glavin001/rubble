@@ -325,15 +325,7 @@ bool segmentHitsAabb(float3 mn, float3 mx, Aabb ab)
 groupshared float gsRayT[64];
 groupshared uint gsRayC[64];
 
-// Hits on dynamic bodies closer than minT are ignored: a crate that slides under a
-// wheel above the height it could climb (wheel centre at full bump) is left to the
-// chassis contacts instead of reading as a step that shoves that corner up.
-bool rayHitAccepted(uint ci, float t, float minT)
-{
-    return t >= minT || !bodyIsDynamic(gBodies[gColliders[ci].body]);
-}
-
-void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad, float minT)
+void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad)
 {
     float bestT = 1e30;
     uint bestC = NO_INDEX;
@@ -349,7 +341,7 @@ void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excl
         if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) continue;
         float t;
         float3 n;
-        if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT && rayHitAccepted(ci, t, minT))
+        if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT)
         {
             bestT = t;
             bestC = ci;
@@ -359,7 +351,7 @@ void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excl
     gsRayC[lane] = bestC;
 }
 
-void rayTestCollider(uint ci, float3 o, float3 d, float maxT, float minT, uint excludeBody, float rad,
+void rayTestCollider(uint ci, float3 o, float3 d, float maxT, uint excludeBody, float rad,
     float3 mn, float3 mx, uint base, inout float bestT, inout uint bestC)
 {
     Collider col = gColliders[ci];
@@ -367,7 +359,7 @@ void rayTestCollider(uint ci, float3 o, float3 d, float maxT, float minT, uint e
     if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) return;
     float t;
     float3 n;
-    if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT && rayHitAccepted(ci, t, minT))
+    if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT)
     {
         bestT = t;
         bestC = ci;
@@ -382,7 +374,7 @@ void rayTestCollider(uint ci, float3 o, float3 d, float maxT, float minT, uint e
 // the segment spans too many cells.
 static const uint RAY_GRID_MAX_CELLS = 512u;
 
-void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad, float minT)
+void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad)
 {
     float bestT = 1e30;
     uint bestC = NO_INDEX;
@@ -399,7 +391,7 @@ void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint 
     {
         uint nCols = gCounters[0].colliderCount;
         for (uint ci = lane; ci < nCols; ci += 64u)
-            rayTestCollider(ci, o, d, maxT, minT, excludeBody, rad, mn, mx, base, bestT, bestC);
+            rayTestCollider(ci, o, d, maxT, excludeBody, rad, mn, mx, base, bestT, bestC);
     }
     else
     {
@@ -418,7 +410,7 @@ void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint 
                 uint cur = link & GRID_COLLIDER_MASK;
                 link = gridSplit() ? asuint(gAabbs[base + cur]._pad1) : gColorLists[cur];
                 guard++;
-                rayTestCollider(cur, o, d, maxT, minT, excludeBody, rad, mn, mx, base, bestT, bestC);
+                rayTestCollider(cur, o, d, maxT, excludeBody, rad, mn, mx, base, bestT, bestC);
             }
         }
         if (live)
@@ -436,7 +428,7 @@ void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint 
                 else if (k < nPlanes + nLarge + nStatic) ci = ALOAD(gScratchAtomics[LARGE_STATIC_COUNT + 1u + k - nPlanes - nLarge]);
                 else ci = k + 2u == nList ? 0u : nColliders - 1u;
                 if (ci < nColliders)
-                    rayTestCollider(ci, o, d, maxT, minT, excludeBody, rad, mn, mx, base, bestT, bestC);
+                    rayTestCollider(ci, o, d, maxT, excludeBody, rad, mn, mx, base, bestT, bestC);
             }
         }
     }
@@ -932,11 +924,8 @@ void wheel_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         if (interval > 1u && hadHit && ((HOST_S(17) + w) % interval) != 0u) probe = false;
     }
     // Query mode in the vehicle header: 0 = broadphase grid walk, 1 = full scan.
-    // Climbable limit: ray hits nearer than the min suspension length, sphere centres
-    // nearer than min length − radius (the wheel centre at full bump).
-    float minT = live ? (sweep > 0.0 ? max(0.0, VD(wr + W_SUSP).x - sweep) : VD(wr + W_SUSP).x) : 0.0;
-    if (VU(VH_MISC).w == 1u) rayLaneScan(lane, probe, o, d, maxT, chassis, sweep, minT);
-    else rayLaneScanGrid(lane, probe, o, d, maxT, chassis, sweep, minT);
+    if (VU(VH_MISC).w == 1u) rayLaneScan(lane, probe, o, d, maxT, chassis, sweep);
+    else rayLaneScanGrid(lane, probe, o, d, maxT, chassis, sweep);
     rayReduce(lane);
     if (!live || lane != 0u) return;
 
@@ -958,7 +947,22 @@ void wheel_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             float3 n2;
             rayCollider(best, o, d, sweep, t2, n2);
             n = dot(n2, d) > 0.0 ? -n2 : n2;
-            contact = dot(n, -d) >= VD(vr + V_UP).w;
+            // A sphere cast also finds things beside the tyre (crate faces, kerb
+            // edges). The tyre rows only own the bottom cone (≤ 35° off the
+            // suspension axis); the wheel shell (spheres from 60°) owns the rest,
+            // so the suspension never pushes along its axis against a side hit.
+            float coneCos = sweep > 0.0 ? max(VD(vr + V_UP).w, SWEEP_CONE_COS) : VD(vr + V_UP).w;
+            contact = dot(n, -d) >= coneCos;
+            // A hit above the full-bump position (t < L_min, e.g. a crate edge already
+            // in the wheel arch) can only be the tyre bottoming if it lies under the
+            // tyre at full bump: test the cone from that wheel centre, not the mount.
+            float Lmin = VD(wr + W_SUSP).x;
+            if (contact && sweep > 0.0 && tHit < Lmin)
+            {
+                float3 v = (o + d * tHit - n * sweep) - (o + d * Lmin);
+                float lv = length(v);
+                if (lv > 1e-4 && dot(v / lv, d) < coneCos) contact = false;
+            }
         }
         ground = contact ? gColliders[best].body : NO_INDEX;
     }
@@ -1398,6 +1402,78 @@ float3 lateralLever(uint wr, float3 r, float3 upW)
     return r - upW * (dot(r, upW) * (1.0 - rollInf));
 }
 
+// ---------------------------------------------------------------------------
+// Two-body tyre rows. A wheel on a dynamic body (vehicle_link sets W_TJ.z) sees
+// that body's current solver iterate at the contact instead of a given ground
+// motion, and writes the body's share of every row (J_g = −[e; r_g × e], same
+// stiffness and force as the chassis side) into its ground block, which the
+// body's primal adds through the wheel's JOINT_TYRE joint.
+// ---------------------------------------------------------------------------
+uint wheelGround(uint wr) { return VU(wr + W_TJ).z; }
+
+uint groundBlockIndex(uint wheelSlot)
+{
+    return VU(VH_BASES).w + 4u * VU(VH_COUNTS).x + 4u * wheelSlot;
+}
+
+// Ground displacement at the contact since x⁻: the body's current iterate for a
+// two-body wheel, else the given motion v_g·dt (static / kinematic ground).
+float3 wheelGroundDisp(uint wr)
+{
+    uint gi = wheelGround(wr);
+    if (gi == NO_INDEX) return VD(wr + W_C5).xyz;
+    BodyState gb = gBodies[gi];
+    if (bodyIsSleeping(gb)) return float3(0, 0, 0);
+    float4 q = gb.orientation;
+    if (dot(q, gb.initialRot) < 0.0) q = -q;
+    return (gb.position - gb.initialPos) + cross(quatSubVec(q, gb.initialRot), VD(wr + W_HIT).xyz - gb.initialPos);
+}
+
+Vec6 groundJac(uint wr, float3 e)
+{
+    BodyState gb = gBodies[wheelGround(wr)];
+    Vec6 j = jac(e, VD(wr + W_HIT).xyz - gb.initialPos);
+    for (int a = 0; a < 6; a++) j.v[a] = -j.v[a];
+    return j;
+}
+
+// Add k·JJᵀ and f·J to a ground block (lower triangle + rhs, writeVehicleBlock layout).
+void groundAdd(uint wheelSlot, Vec6 j, float k, float f)
+{
+    uint at = groundBlockIndex(wheelSlot);
+    float b[32];
+    for (uint e = 0u; e < 4u; e++)
+    {
+        Aabb a = gAabbs[at + e];
+        b[e * 8u] = a.mn.x; b[e * 8u + 1u] = a.mn.y; b[e * 8u + 2u] = a.mn.z; b[e * 8u + 3u] = a._pad0;
+        b[e * 8u + 4u] = a.mx.x; b[e * 8u + 5u] = a.mx.y; b[e * 8u + 6u] = a.mx.z; b[e * 8u + 7u] = a._pad1;
+    }
+    uint idx = 0u;
+    for (uint r = 0u; r < 6u; r++)
+        for (uint c2 = 0u; c2 <= r; c2++) { b[idx] += k * j.v[r] * j.v[c2]; idx++; }
+    for (uint r = 0u; r < 6u; r++) b[21u + r] += f * j.v[r];
+    b[27] = 1.0;
+    for (uint e = 0u; e < 4u; e++)
+    {
+        Aabb a;
+        a.mn = float3(b[e * 8u], b[e * 8u + 1u], b[e * 8u + 2u]);
+        a._pad0 = b[e * 8u + 3u];
+        a.mx = float3(b[e * 8u + 4u], b[e * 8u + 5u], b[e * 8u + 6u]);
+        a._pad1 = b[e * 8u + 7u];
+        gAabbs[at + e] = a;
+    }
+}
+
+void groundClear(uint wheelSlot)
+{
+    uint at = groundBlockIndex(wheelSlot);
+    Aabb z;
+    z.mn = float3(0, 0, 0); z._pad0 = 0.0; z.mx = float3(0, 0, 0); z._pad1 = 0.0;
+    for (uint e = 0u; e < 3u; e++) gAabbs[at + e] = z;
+    z._pad0 = 1.0; // active (empty until rows add to it)
+    gAabbs[at + 3u] = z;
+}
+
 // Assemble every wheel row at chassis displacement (dl, da) from x⁻.
 // When dual is set, first update multipliers/penalties at this iterate.
 void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
@@ -1410,12 +1486,9 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
     float3 upW = quatRotate(c.initialRot, vehicleUpLocal(vr));
     uint nW = min(cfg.z, MAX_VEHICLE_WHEELS);
 
-    // Default per-wheel load cap: 8× an even share of the weight over the attached
-    // wheels (not the touching ones, which would let one wheel carry 8× the vehicle).
-    uint nAttached = 0u;
+    // Ground blocks are rebuilt with the chassis block, at the same iterate.
     for (uint wi = 0u; wi < nW; wi++)
-        if ((VU(wheelRec(cfg.y + wi) + W_C0).z & (WD_DETACHED | WD_DISABLED)) == 0u) nAttached++;
-    float defaultCap = 8.0 * VD(vr + V_MASS).x * abs(p.gravityY) / float(max(nAttached, 1u));
+        if (wheelGround(wheelRec(cfg.y + wi)) != NO_INDEX) groundClear(cfg.y + wi);
 
     // Pass 1: suspension / bump stop.
     float Lw[MAX_VEHICLE_WHEELS];
@@ -1430,7 +1503,7 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
         contacts++;
         float4 c1 = VD(wr + W_C1);
         float4 c2 = VD(wr + W_C2);
-        float3 eg = VD(wr + W_C5).xyz;
+        float3 eg = wheelGroundDisp(wr);
         float4 k = VD(wr + W_K);
         float4 susp = VD(wr + W_SUSP);
         Vec6 jn = jac(c2.xyz, suspensionLever(wr, c1.xyz, c.initialRot));
@@ -1448,24 +1521,25 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
             float fB = k.z * (L - susp.x) + k.w * (L - c1.w);
             if (fB < 0.0) { fsTotal += fB; kTotal += k.z + k.w; flags |= WD_BUMP; }
         }
-        // Cap the wheel's normal load (bump max force, else defaultCap). An obstacle
-        // that appears inside a sphere cast reads as full compression; uncapped, the
-        // stiff bump stop answers with meganewtons and launches the vehicle. Past the
-        // cap the row is a constant force.
+        // Optional physical limit (bump_max_force): past it the row is a constant force.
         float bumpMax = VD(wr + W_MISC).z;
-        float fCap = bumpMax > 0.0 ? bumpMax : defaultCap;
-        if (fCap > 0.0 && -fsTotal * c2.w > fCap)
+        if (bumpMax > 0.0 && -fsTotal * c2.w > bumpMax)
         {
-            fsTotal = -fCap / max(c2.w, 1e-6);
+            fsTotal = -bumpMax / max(c2.w, 1e-6);
             kTotal = 0.0;
-            vec6AddScaled(g, jn, fsTotal * c2.w);
         }
-        if (kTotal > 0.0)
+        if (fsTotal != 0.0)
         {
             Vec6 js = jn;
             for (int a = 0; a < 6; a++) js.v[a] *= c2.w;
             mat6AddOuter(H, js, kTotal);
             vec6AddScaled(g, js, fsTotal);
+            if (wheelGround(wr) != NO_INDEX)
+            {
+                Vec6 jg = groundJac(wr, c2.xyz);
+                for (int a = 0; a < 6; a++) jg.v[a] *= c2.w;
+                groundAdd(cfg.y + wi, jg, kTotal, fsTotal);
+            }
         }
         FnW[wi] = max(0.0, -fsTotal * c2.w);
         dyn.z = flags;
@@ -1491,6 +1565,19 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
         float diff = Lw[l] - Lw[r];
         mat6AddOuter(H, gj, ar.z);
         vec6AddScaled(g, gj, ar.z * diff);
+        // Each wheel's ground carries its end of the bar (same row, its own Jacobian).
+        if (wheelGround(wl) != NO_INDEX)
+        {
+            Vec6 jg = groundJac(wl, nl.xyz);
+            for (int a = 0; a < 6; a++) jg.v[a] *= nl.w;
+            groundAdd(cfg.y + l, jg, ar.z, ar.z * diff);
+        }
+        if (wheelGround(wrr) != NO_INDEX)
+        {
+            Vec6 jg = groundJac(wrr, nr.xyz);
+            for (int a = 0; a < 6; a++) jg.v[a] *= -nr.w;
+            groundAdd(cfg.y + r, jg, ar.z, ar.z * diff);
+        }
         FnW[l] = max(0.0, FnW[l] - ar.z * diff * nl.w);
         FnW[r] = max(0.0, FnW[r] + ar.z * diff * nr.w);
     }
@@ -1544,7 +1631,7 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
             if (contact)
             {
                 float4 c1 = VD(wr + W_C1);
-                float3 eg = VD(wr + W_C5).xyz;
+                float3 eg = wheelGroundDisp(wr);
                 float3 t = VD(wr + W_C3).xyz;
                 float3 s = VD(wr + W_C4).xyz;
                 CL0 = alphaStab * k2.z + jdot(jac(t, c1.xyz), dl, da) - dot(t, eg);
@@ -1706,6 +1793,12 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
             }
             mat6AddOuter(H, js, VD(wr + W_K2).x);
             vec6AddScaled(g, js, mFT[m]);
+            // The ground's share, with wheel spin held at its solved y.
+            if (wheelGround(wr) != NO_INDEX)
+            {
+                groundAdd(cfg.y + mWheel[m], groundJac(wr, VD(wr + W_C3).xyz), mKL[m], mFL[m]);
+                groundAdd(cfg.y + mWheel[m], groundJac(wr, VD(wr + W_C4).xyz), VD(wr + W_K2).x, mFT[m]);
+            }
         }
         if (coupled) mat6AddOuter(H, u, -1.0 / A);
         VSet(lr + W_BS, float4(0.0, A, 0.0, 0.0));
@@ -1871,6 +1964,94 @@ void chassisDisplacement(BodyState c, out float3 dl, out float3 da)
     float4 q = c.orientation;
     if (dot(q, c.initialRot) < 0.0) q = -q;
     da = quatSubVec(q, c.initialRot);
+}
+
+// Wheel shell: SHELL_SPHERES spheres on the chassis around the tyre, at 60°…300°
+// from straight down (the tyre rows own the bottom), following suspension travel
+// L and steering. A detached or removed wheel parks its shell on the static anchor.
+void parkWheelShell(uint wr, uint anchor)
+{
+    uint first = VU(wr + W_TJ).y;
+    if (first == NO_INDEX || gColliders[first].body == anchor) return;
+    for (uint k = 0u; k < SHELL_SPHERES; k++)
+    {
+        Collider col = gColliders[first + k];
+        col.body = anchor;
+        gColliders[first + k] = col;
+    }
+}
+
+// Separate from parkWheelShell: inlining both paths into one call with constant
+// arguments folded the steer quaternion into a constant that naga's SPIR-V
+// front end cannot swizzle.
+void placeWheelShell(uint wr, uint chassis, uint anchor, bool attached, float L, float steer)
+{
+    uint first = VU(wr + W_TJ).y;
+    if (first == NO_INDEX) return;
+    if (!attached)
+    {
+        parkWheelShell(wr, anchor);
+        return;
+    }
+    float4 hp = VD(wr + W_HP);
+    float4 dir = VD(wr + W_DIR);
+    float3 down = normalize(dir.xyz);
+    float3 fwd = quatRotate(wheelSteerRot(wr, steer), VD(wr + W_FWD).xyz);
+    fwd = normalize(fwd - down * dot(fwd, down));
+    float3 center = hp.xyz + down * L;
+    float rs = max(min(0.5 * dir.w, 0.4 * hp.w), 1e-3);
+    float ring = max(hp.w - rs, 0.0);
+    for (uint k = 0u; k < SHELL_SPHERES; k++)
+    {
+        float th = TWO_PI * float(k + 1u) / float(SHELL_SPHERES + 1u);
+        // Whole-record store: a partial float3 store mis-translates through naga.
+        Collider col = gColliders[first + k];
+        col.body = chassis;
+        col.localPos = center + (down * cos(th) + fwd * sin(th)) * ring;
+        gColliders[first + k] = col;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// vehicle_link: after wheel_query, before the constraint graph. A wheel standing
+// on a dynamic body points its JOINT_TYRE joint at (chassis, ground) so the two
+// get different colours and the ground's primal gathers the wheel's ground block;
+// a sleeping ground is woken (Jolt VehicleConstraint::BuildIslands). Otherwise the
+// joint parks on the vehicle's static anchor and adds no graph edge.
+// ---------------------------------------------------------------------------
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void vehicle_link(uint3 tid : SV_DispatchThreadID)
+{
+    uint w = dispatchIndex(tid);
+    if (w >= wheelCountTotal()) return;
+    uint wr = wheelRec(w);
+    uint4 tj = VU(wr + W_TJ);
+    if (tj.x == NO_INDEX) return;
+    uint vr = vehRec(VU(wr + W_CFG).x);
+    uint chassis = VU(vr + V_CFG).x;
+    uint anchor = VU(vr + V_POOL2).z;
+    uint4 dyn = VU(wr + W_C0);
+    BodyState c = gBodies[chassis];
+    uint ground = NO_INDEX;
+    if ((dyn.z & WD_CONTACT) != 0u && (dyn.z & (WD_DETACHED | WD_DISABLED)) == 0u
+        && dyn.x != NO_INDEX && dyn.x != chassis && bodyIsDynamic(c) && !bodyIsSleeping(c))
+    {
+        BodyState g = gBodies[dyn.x];
+        if (bodyIsDynamic(g))
+        {
+            ground = dyn.x;
+            if (bodyIsSleeping(g)) wakeBody(ground);
+        }
+    }
+    tj.z = ground;
+    VSetU(wr + W_TJ, tj);
+    Joint j = gJoints[tj.x];
+    j.bodyA = ground != NO_INDEX ? chassis : anchor;
+    j.bodyB = ground != NO_INDEX ? ground : anchor;
+    j.jointType = JOINT_TYRE;
+    j.flags = groundBlockIndex(w);
+    gJoints[tj.x] = j;
 }
 
 // ---------------------------------------------------------------------------
@@ -2219,11 +2400,16 @@ void vehicle_post(uint3 tid : SV_DispatchThreadID)
     float alphaStab = 1.0 - p.alpha;
     updateSeverGrace(vr, cfg, dt);
 
+    uint anchor = VU(vr + V_POOL2).z;
     for (uint wi = 0u; wi < nW; wi++)
     {
         uint wr = wheelRec(cfg.y + wi);
         uint4 dyn = VU(wr + W_C0);
-        if ((dyn.z & (WD_DETACHED | WD_DISABLED)) != 0u) continue;
+        if ((dyn.z & (WD_DETACHED | WD_DISABLED)) != 0u)
+        {
+            parkWheelShell(wr, anchor);
+            continue;
+        }
         float4 w = VD(wr + W_W);
         float4 hp = VD(wr + W_HP);
         float4 susp = VD(wr + W_SUSP);
@@ -2247,7 +2433,7 @@ void vehicle_post(uint3 tid : SV_DispatchThreadID)
             nContact++;
             float4 c1 = VD(wr + W_C1);
             float4 c2 = VD(wr + W_C2);
-            float3 eg = VD(wr + W_C5).xyz;
+            float3 eg = wheelGroundDisp(wr);
             float3 t = VD(wr + W_C3).xyz;
             float3 s = VD(wr + W_C4).xyz;
             Vec6 jn = jac(c2.xyz, suspensionLever(wr, c1.xyz, c.initialRot));
@@ -2267,33 +2453,10 @@ void vehicle_post(uint3 tid : SV_DispatchThreadID)
                 VSet(wr + W_K2, k2);
             }
             if ((driveMask & (1u << wi)) != 0u && VD(wr + W_C3).w > 0.1) slipping = true;
-            // Reaction on a dynamic ground body (applied as a velocity change).
-            uint gb = dyn.x;
-            BodyState gbody = gBodies[gb];
-            float3 hit = VD(wr + W_HIT).xyz;
-            if (active && gb != chassis && bodyIsDynamic(gbody))
-            {
-                float3 J = -F * dt;
-                // The ground is held fixed during the step, so a light body (a crate)
-                // can receive far more impulse than it could take: cap its velocity
-                // change at the wheel's speed relative to it plus 2 m/s.
-                float3 vrelG = c.linearVel + cross(c.angularVel, hit - c.position)
-                    - (gbody.linearVel + cross(gbody.angularVel, hit - gbody.position));
-                float dvG = length(J) * gbody.invMass;
-                float dvMax = length(vrelG) + 2.0;
-                if (dvG > dvMax) J *= dvMax / dvG;
-                if (bodyIsSleeping(gbody))
-                {
-                    float3 vrel = c.linearVel + cross(c.angularVel, hit - c.position);
-                    if (length(vrel) > p.sleepLin || length(J) * gbody.invMass > p.sleepLin) wakeBody(gb);
-                }
-                else
-                {
-                    gBodies[gb].linearVel = gbody.linearVel + J * gbody.invMass;
-                    gBodies[gb].angularVel = gbody.angularVel + applyInvInertiaWorld(gbody, cross(hit - gbody.position, J));
-                    if (length(gbody.linearVel) > p.sleepLin) keepAwake = true;
-                }
-            }
+            // A moving ground body keeps the vehicle awake (its reaction is already
+            // in the solve: two-body tyre rows).
+            uint gi = wheelGround(wr);
+            if (gi != NO_INDEX && length(gBodies[gi].linearVel) > p.sleepLin) keepAwake = true;
         }
         else
         {
@@ -2309,6 +2472,7 @@ void vehicle_post(uint3 tid : SV_DispatchThreadID)
             float4 rot = quatNormalize(quatMul(quatMul(c.orientation, wheelSteerRot(wr, steer)), quatAxisAngle(axl, w.y)));
             VSet(wr + W_O_POS, float4(center, L));
             VSet(wr + W_O_ROT, rot);
+            placeWheelShell(wr, chassis, anchor, (VU(wr + W_CFG).y & WF_ENABLED) != 0u, L, steer);
             float3 hpW = transformPoint(c.position, c.orientation, hp.xyz);
             float3 hit = VD(wr + W_HIT).xyz;
             float4 qi = quatConjugate(c.orientation);
@@ -2372,7 +2536,7 @@ void raycast_batch(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float4 a = live ? VD(rr) : float4(0, 0, 0, 0);
     float4 b = live ? VD(rr + 1u) : float4(0, -1, 0, 0);
     float3 dir = live ? normalize(b.xyz) : float3(0, -1, 0);
-    rayLaneScan(lane, live, a.xyz, dir, a.w, asuint(b.w), 0.0, 0.0);
+    rayLaneScan(lane, live, a.xyz, dir, a.w, asuint(b.w), 0.0);
     rayReduce(lane);
     if (!live || lane != 0u) return;
     uint best = gsRayC[0];

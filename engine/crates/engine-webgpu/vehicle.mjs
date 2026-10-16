@@ -21,7 +21,7 @@ export const L = {
   W_MISC: 9, W_PARK: 10, W_UP: 11, W_C0: 12, W_C1: 13, W_C2: 14, W_C3: 15, W_C4: 16, W_C5: 17,
   W_K: 18, W_LAM: 19, W_K2: 20, W_Y: 21, W_W: 22, W_F: 23, W_BS: 24, W_HIT: 25, W_GV: 26, W_MU: 27,
   W_O_POS: 28, W_O_ROT: 29, W_O_FM: 30, W_O_TM: 31, W_O_CP: 32, W_O_ST: 33, W_O_N: 34,
-  W_LHIT: 35, W_LN: 36, W_FP: 37,
+  W_LHIT: 35, W_LN: 36, W_FP: 37, W_TJ: 38,
   WF_STEER: 1, WF_DRIVEN: 2, WF_HANDBRAKE: 4, WF_ENABLED: 8, WF_RIGID_BUMP: 16, WF_BOX_FRICTION: 32,
   WD_CONTACT: 1, WD_STICK_L: 2, WD_STICK_T: 4, WD_DETACHED: 8, WD_DISABLED: 16, WD_SUSP: 32,
   WD_SLIDE: 64, WD_BUMP: 128, WD_PENDING_ADD: 256,
@@ -29,9 +29,10 @@ export const L = {
   PR_BODY: 0, PR_ENGINE: 1, PR_DRIVESHAFT: 2, PR_STEERING: 3, PR_BRAKE: 4,
   PS_ATTACHED: 0, PS_DETACHED: 1, PS_DISABLED: 2, PS_LOST: 3,
   DIFF_STRIDE: 2, ANTIROLL_STRIDE: 1, RAY_STRIDE: 4,
-  NO_INDEX: 0x7F7FFFFF, MAX_VEHICLE_WHEELS: 16, MAX_DRIVEN_WHEELS: 8,
+  NO_INDEX: 0x7F7FFFFF, MAX_VEHICLE_WHEELS: 16, MAX_DRIVEN_WHEELS: 8, SHELL_SPHERES: 5,
 };
 export const BODY_VEHICLE = 16;
+export const JOINT_TYRE = 7;
 export const WHEEL_RIM_MATERIAL = 7;
 const RIM_SPHERES_MAX = 32;
 
@@ -127,7 +128,7 @@ export function requirements(desc) {
     parts: desc.parts.length,
     bodies: 2 + wheelSlots + desc.parts.length,
     colliders: desc.parts.reduce((s, p) => s + p.colliders.length, 0)
-      + desc.wheels.reduce((s, w) => s + rimCount(w), 0) + spareRims,
+      + desc.wheels.reduce((s, w) => s + rimCount(w), 0) + spareRims + wheelSlots * L.SHELL_SPHERES,
   };
 }
 
@@ -157,6 +158,23 @@ function parkedBody(index, mass, inertia) {
   b.flags = 0;
   b.initialPos = b.position.slice();
   return b;
+}
+
+export function shellGeometry(radius, width) {
+  const rs = fr(Math.max(Math.min(fr(0.5 * width), fr(0.4 * radius)), 1e-3));
+  return [rs, fr(Math.max(fr(radius - rs), 0))];
+}
+
+/** Wheel shell spheres around `center` in the plane of `down` and `fwd` (60°…300° from down). */
+export function shellColliders(w, center, down, fwd, body) {
+  const [rs, ring] = shellGeometry(w.radius, w.width);
+  const out = [];
+  for (let k = 1; k <= L.SHELL_SPHERES; k++) {
+    const th = fr((Math.PI * 2 * k) / (L.SHELL_SPHERES + 1));
+    const p = add(center, scale(add(scale(down, fr(Math.cos(th))), scale(fwd, fr(Math.sin(th)))), ring));
+    out.push({ body, shape: 0, material: w.rim_material, generation: 0, localPos: p, density: 0, localRot: [0, 0, 0, 1], params: [rs, 0, 0, rs] });
+  }
+  return out;
 }
 
 export function rimColliders(w, up, fwd, body, n) {
@@ -235,7 +253,7 @@ export function pack(desc0, position, rotation, slots) {
   const up = normalize(desc.up);
   const fwd = normalize(desc.forward);
   const axle = normalize(cross(up, fwd));
-  const out = { bodies: [], colliders: [], vehicle: null, wheels: [], curvePoints: [], diffs: [], antiRolls: [], parts: [], mass: 0, inertia: null };
+  const out = { bodies: [], colliders: [], vehicle: null, wheels: [], curvePoints: [], diffs: [], antiRolls: [], parts: [], joints: [], mass: 0, inertia: null };
   const curves = { base: slots.curvePointBase, points: out.curvePoints };
 
   let mass = 0;
@@ -304,6 +322,16 @@ export function pack(desc0, position, rotation, slots) {
     rimStarts.push(slots.colliderBase + out.colliders.length);
     out.colliders.push(...rimColliders(w, up, fwd, wheel0 + i, rimCount(w)));
   }
+  // Wheel shells on the chassis (spare slots park theirs on the static anchor).
+  const shellStarts = [];
+  for (let i = 0; i < wheelSlots; i++) {
+    const real = i < desc.wheels.length;
+    const w = desc.wheels[i] || spare;
+    const down = normalize(w.suspension_dir || scale(up, -1));
+    const center = add(v3(w.position), scale(down, w.suspension_max));
+    shellStarts.push(slots.colliderBase + out.colliders.length);
+    out.colliders.push(...shellColliders(w, center, down, fwd, real ? chassis : anchor));
+  }
 
   const wheelCurves = desc.wheels.map((w) => [pushCurve(curves, w.long_friction), pushCurve(curves, w.lat_friction)]);
   for (let i = 0; i < wheelSlots; i++) {
@@ -311,6 +339,11 @@ export function pack(desc0, position, rotation, slots) {
     const w = desc.wheels[i] || spare;
     out.wheels.push(packWheel(desc, w, slots.vehicle, i, real, wheel0 + i, rimStarts[i], real ? wheelCurves[i] : wheelCurves[0]));
   }
+  // Tyre joints: graph edges to dynamic ground, parked on the anchor.
+  out.wheels.forEach((rec, i) => {
+    rec[L.W_TJ] = [slots.jointBase + i, shellStarts[i], L.NO_INDEX, 0];
+    out.joints.push({ bodyA: anchor, bodyB: anchor, jointType: JOINT_TYRE });
+  });
 
   // Tracks: members share the driven wheel's spin, inertia and brake.
   if (desc.tracks) {
@@ -442,6 +475,13 @@ export function bodyWords(b) {
   return u;
 }
 
+// Joint record (128 B): bodyA, bodyB, type, flags, then zeros (tyre joints only).
+export function jointWords(j) {
+  const u = new Uint32Array(32);
+  u[0] = j.bodyA; u[1] = j.bodyB; u[2] = j.jointType; u[3] = j.flags || 0;
+  return u;
+}
+
 export function colliderWords(c) {
   const u = new Uint32Array(16);
   u[0] = c.body; u[1] = c.shape; u[2] = c.material; u[3] = c.generation;
@@ -521,11 +561,13 @@ export class VehicleHost {
       vehicle: v, wheelBase: this.wheelsUsed, curvePointBase: this.curvePointsUsed, diffBase: this.diffsUsed,
       antiRollBase: this.antiRollsUsed, partBase: this.partsUsed, bodyBase: backend.bodyCount(),
       colliderBase: backend.colliderCount(), aabbBlock: this.aabbTail + 4 * v,
+      jointBase: backend.jointCount(),
     };
     const p = pack(desc, position, rotation, slots);
     const l = this.layout;
     backend.appendBodies(p.bodies.map(bodyWords));
     backend.appendColliders(p.colliders.map(colliderWords));
+    backend.appendJoints(p.joints.map(jointWords));
     backend.writeSlots(l.vehicleBase + v * L.VEH_STRIDE, VehicleHost.flat(p.vehicle));
     p.wheels.forEach((w, i) => backend.writeSlots(l.wheelBase + (slots.wheelBase + i) * L.WHEEL_STRIDE, VehicleHost.flat(w)));
     if (p.curvePoints.length) {
@@ -597,6 +639,13 @@ export class VehicleHost {
     const axle = normalize(cross(up, fwd));
     backend.writeBody(old[L.W_PARK][0], bodyWords(parkedBody(old[L.W_PARK][0], wheel.mass, wheelBodyInertia(wheel, axle))));
     rimColliders(wheel, up, fwd, old[L.W_PARK][0], rims).forEach((c, k) => backend.writeCollider(old[L.W_PARK][1] + k, colliderWords(c)));
+    // Keep the slot's tyre joint and shell; resize the shell (vehicle_post attaches it).
+    s[L.W_TJ] = [old[L.W_TJ][0], old[L.W_TJ][1], L.NO_INDEX, 0];
+    if (old[L.W_TJ][1] !== L.NO_INDEX) {
+      const down = normalize(w.suspension_dir || scale(up, -1));
+      const center = add(v3(w.position), scale(down, w.suspension_max));
+      shellColliders(w, center, down, fwd, e.chassis + 1).forEach((c, k) => backend.writeCollider(old[L.W_TJ][1] + k, colliderWords(c)));
+    }
     backend.writeSlots(rec, VehicleHost.flat(s));
     e.wheelsUsed++;
     e.desc.wheels.push(structuredClone(wheel));

@@ -188,11 +188,13 @@ impl WgpuSim {
     }
 
     fn new_full(
-        capacity: WorldCapacity,
+        mut capacity: WorldCapacity,
         compact_contacts: bool,
         persistent_contacts: bool,
         vehicle_capacity: VehicleCapacity,
     ) -> anyhow::Result<Self> {
+        // One tyre joint per vehicle wheel slot rides on top of the user joints.
+        capacity.max_joints += vehicle_capacity.max_wheels;
         anyhow::ensure!(
             capacity.max_colliders < 0x7fff_ffff,
             "grid collider ID overlaps awake-dynamic flag or empty sentinel"
@@ -659,6 +661,8 @@ impl WgpuSim {
             // One workgroup per wheel, cast at x⁻ through this step's grid (the
             // contact hash reuses its heads later in the step).
             self.disp(&mut pass, "wheel_query", n_wheels * 64, None);
+            // Before the constraint graph: link wheels on dynamic bodies.
+            self.disp(&mut pass, "vehicle_link", n_wheels, None);
         }
         self.disp(&mut pass, self.work_args_entry(), 64, None);
         if self.carry_rest {
@@ -754,6 +758,9 @@ impl WgpuSim {
         self.disp(&mut pass, self.work_args_entry(), 64, None);
         self.disp(&mut pass, "csr_clear", n_bodies + 1, None);
         self.disp_work(&mut pass, "csr_degree_contacts", 66, None);
+        if self.joint_count > 0 {
+            self.disp(&mut pass, "csr_degree_joints", n_joints, None);
+        }
         if self.body_count <= 512 {
             self.disp(&mut pass, "csr_prefix", 1, None);
         } else {
@@ -762,6 +769,9 @@ impl WgpuSim {
             self.disp(&mut pass, "csr_prefix_add", n_bodies, None);
         }
         self.disp_work(&mut pass, "csr_scatter_contacts", 66, None);
+        if self.joint_count > 0 {
+            self.disp(&mut pass, "csr_scatter_joints", n_joints, None);
+        }
         self.disp_work(&mut pass, "csr_sort", 67, None);
         self.disp_work(&mut pass, "init_colors", 67, None);
         self.disp(&mut pass, self.work_args_entry(), 64, None);
@@ -1248,6 +1258,20 @@ impl VehicleBackend for WgpuSim {
         self.body_count
     }
 
+    fn joint_count(&self) -> u32 {
+        self.joint_count
+    }
+
+    fn append_joints(&mut self, joints: &[engine_schema::Joint]) {
+        if joints.is_empty() {
+            return;
+        }
+        assert!(self.joint_count + joints.len() as u32 <= self.capacity.max_joints, "joint capacity exhausted");
+        let stride = std::mem::size_of::<engine_schema::Joint>() as u64;
+        self.queue.write_buffer(&self.bufs[5], u64::from(self.joint_count) * stride, bytemuck::cast_slice(joints));
+        self.joint_count += joints.len() as u32;
+    }
+
     fn collider_count(&self) -> u32 {
         self.collider_count
     }
@@ -1321,8 +1345,9 @@ fn buffer_sizes(c: &WorldCapacity, v: &VehicleCapacity) -> [u64; BIND_COUNT] {
     s[6] = 256;
     s[7] = 256;
     s[8] = b(c.max_commands, 64);
-    // Collider AABBs, then a 4-entry wheel-row block per vehicle.
-    s[9] = b(c.max_bodies + c.max_colliders + 4 * v.max_vehicles, 32);
+    // Collider AABBs, then a 4-entry wheel-row block per vehicle and a 4-entry
+    // ground block per wheel slot (two-body tyre rows).
+    s[9] = b(c.max_bodies + c.max_colliders + 4 * (v.max_vehicles + v.max_wheels), 32);
     s[10] = b(c.max_candidates, 16);
     s[11] = b(c.max_bodies, 4);
     s[12] = b(c.max_bodies, 4);
