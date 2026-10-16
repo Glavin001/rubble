@@ -792,7 +792,10 @@ void vehicle_input(uint3 tid : SV_DispatchThreadID)
     float speed = dot(c.linearVel, fwdW);
     float forwardIn = clamp(in0.x, -1.0, 1.0);
     float brakeIn = clamp(in0.z, 0.0, 1.0);
-    if ((cfg.w & VF_REVERSE_BRAKE) != 0u && forwardIn * speed < 0.0 && abs(speed) > 1.0)
+    // Throttle against the motion brakes first. Not for a steering tank: a pivot
+    // swings the hull's forward speed negative and would brake the turn away.
+    bool steeringTank = (cfg.w & VF_TRACKED) != 0u && abs(in0.y) > 0.1;
+    if ((cfg.w & VF_REVERSE_BRAKE) != 0u && !steeringTank && forwardIn * speed < 0.0 && abs(speed) > 1.0)
     {
         brakeIn = max(brakeIn, abs(forwardIn));
         forwardIn = 0.0;
@@ -800,21 +803,32 @@ void vehicle_input(uint3 tid : SV_DispatchThreadID)
     float steerTarget = clamp(in0.y, -1.0, 1.0);
     if ((cfg.w & VF_TRACKED) != 0u)
     {
-        // Tracks steer by drive ratio (Jolt TankTest): the inner track slows to
-        // turnRatio at full steer, or counter-rotates for a pivot when stopped
-        // without throttle.
+        // Arcade skid steer: each track gets throttle ± steer (left = f + s, right =
+        // f − s), so steer always yaws the hull the same way: a pivot from rest, a
+        // track-ratio turn while driving, the same rotation sense in reverse. The
+        // faster track sets the throttle and drive direction; the ratios are each
+        // track's share of it (negative = counter-rotating), feeding Jolt's
+        // tracked drivetrain unchanged.
         float4 tr = VD(vr + V_TRACK);
         float turnAW = VD(vr + V_TRACK_D).w;
-        float s = steerTarget;
+        float s = steerTarget * tr.z;
+        float trackL = forwardIn + s, trackR = forwardIn - s;
+        float mag = max(abs(trackL), abs(trackR));
         float ratioL = 1.0, ratioR = 1.0;
-        if (abs(s) > 0.02)
+        if (mag > 0.02)
         {
-            bool pivot = abs(forwardIn) < 0.05 && brakeIn == 0.0 && abs(speed) < tr.w;
-            float inner = pivot ? -1.0 : lerp(1.0, tr.z, abs(s));
-            // Yaw rate ≈ (1 − ratio)·v / W, lateral accel ≈ (1 − ratio)·v² / W.
-            if (!pivot && turnAW > 0.0 && speed * speed > 1e-3) inner = max(inner, 1.0 - turnAW / (speed * speed));
-            if (pivot) forwardIn = abs(s);
-            if (s > 0.0) ratioR = inner; else ratioL = inner;
+            float dir = trackL + trackR < -1e-4 ? -1.0 : 1.0;
+            ratioL = trackL / (dir * mag);
+            ratioR = trackR / (dir * mag);
+            forwardIn = dir * min(mag, 1.0);
+            // Both tracks the same way at speed: cap the turn's lateral acceleration
+            // (yaw ≈ (1 − ratio)·v / W, lateral accel ≈ (1 − ratio)·v² / W).
+            if (ratioL * ratioR >= 0.0 && turnAW > 0.0 && speed * speed > 1e-3)
+            {
+                float floorRatio = 1.0 - turnAW / (speed * speed);
+                ratioL = max(ratioL, floorRatio);
+                ratioR = max(ratioR, floorRatio);
+            }
         }
         VSet(vr + V_TRACK_D, float4(ratioL, ratioR, forwardIn, turnAW));
         steerTarget = 0.0;
@@ -1162,15 +1176,33 @@ void computeDrivetrain(uint vr, uint4 cfg, float dt, float speedFwd, inout float
             float4 sr = VD(wrr + W_W);
             float il = max(VD(wl + W_INER).x, 1e-6);
             float ir = max(VD(wrr + W_INER).x, 1e-6);
-            float denom = tr[0] * tr[1] > 0.0 ? tr[0] * ir + tr[1] * il : tr[1] * il - tr[0] * ir;
-            if (abs(denom) > 1e-9)
+            if (tr[0] * tr[1] > 0.0)
             {
-                float impulse = (tr[0] * sr.x - tr[1] * sl.x) / denom;
-                sl.x += impulse * il;
-                sr.x += (tr[0] * tr[1] > 0.0 ? -impulse : impulse) * ir;
-                VSet(wl + W_W, sl);
-                VSet(wrr + W_W, sr);
+                // Same direction: Jolt's momentum-conserving exchange.
+                float denom = tr[0] * ir + tr[1] * il;
+                if (abs(denom) > 1e-9)
+                {
+                    float impulse = (tr[0] * sr.x - tr[1] * sl.x) / denom;
+                    sl.x += impulse * il;
+                    sr.x -= impulse * ir;
+                }
             }
+            else
+            {
+                // Counter-rotating: Jolt's opposite-sign formula sends two equal track
+                // speeds to 0/0 (any ratio "holds"), so a partial counter-rotation from
+                // rolling never turns. Project onto right·ωl = left·ωr instead, with
+                // the least inertia-weighted change.
+                float g = tr[1] * tr[1] / il + tr[0] * tr[0] / ir;
+                if (g > 1e-12)
+                {
+                    float lambda = (tr[0] * sr.x - tr[1] * sl.x) / g;
+                    sl.x += lambda * tr[1] / il;
+                    sr.x -= lambda * tr[0] / ir;
+                }
+            }
+            VSet(wl + W_W, sl);
+            VSet(wrr + W_W, sr);
         }
         VSet(vr + V_D0, float4(omegaE, d0.yzw));
         return;
@@ -1179,6 +1211,29 @@ void computeDrivetrain(uint vr, uint4 cfg, float dt, float speedFwd, inout float
     float throttle = abs(forward);
     if ((cfg.w & VF_MANUAL_TRANS) == 0u) throttle *= clutchFriction;
     if (!engineConnected) throttle = 0.0;
+    if ((cfg.w & VF_TRACTION_CONTROL) != 0u)
+    {
+        // Traction control on last step's slip, normalised by each tyre's curve peak:
+        // full torque to 0.8× peak slip, down to a fifth by 1.6× (past the peak a
+        // tyre trades its side grip for wheelspin). The slip ratio is regularised as
+        // slip speed / max(|v|, 3 m/s): at a standstill κ = slip / |v| blows up and
+        // would choke every launch.
+        float kMax = 0.0;
+        float vReg = abs(speedFwd) / max(abs(speedFwd), 3.0);
+        for (uint wi = 0u; wi < cfg.z && wi < MAX_VEHICLE_WHEELS; wi++)
+        {
+            uint wr = wheelRec(cfg.y + wi);
+            if ((driveMask & (1u << wi)) != 0u && (VU(wr + W_C0).z & WD_CONTACT) != 0u)
+                kMax = max(kMax, VD(wr + W_C3).w * vReg / max(curvePeakX(asuint(VD(wr + W_TIRE).x)), 0.03));
+        }
+        // Low-pass the cut (τ 0.1 s): applied raw it chattered around the threshold
+        // every step, which also amplified tiny backend (Metal vs WebGPU) differences.
+        float4 q = VD(vr + V_QUERY);
+        float cutTarget = 1.0 - clamp(1.0 - (kMax - 0.8) / 1.0, 0.2, 1.0);
+        float cut = lerp(q.y, cutTarget, 1.0 - exp(-dt / 0.1));
+        VSet(vr + V_QUERY, float4(q.x, cut, q.zw));
+        throttle *= 1.0 - cut;
+    }
     omegaE = clamp(omegaE * max(0.0, 1.0 - eng1.x * dt), minW, maxW);
     float rpm = omegaE * RAD_PER_S_TO_RPM;
     float engineTorque = throttle * eng0.x * curveEval(asuint(eng1.y), rpm / max(eng0.z, 1.0));
@@ -1502,6 +1557,7 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
             float fLprev = lam.w * (CL0 - R * yv.x) + lam.x;
             float fT = fTraw;
             float aLeff = aL;
+            float tLim = aT; // lateral bound the dual update re-clamps to
             bool clampT = false;
             if (contact)
             {
@@ -1515,15 +1571,34 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
                 }
                 else if (e > 1.0)
                 {
+                    // Saturated. Near the grip peak split the ellipse by the raw row
+                    // forces; well past it (a locked or spinning wheel) a sliding
+                    // tyre's force opposes its slip velocity, so share it along the
+                    // peak-normalised slip (κ/κ̂, tan α/tan α̂), Pacejka's similarity
+                    // method. Raw forces alone let the stiff lateral row keep its grip
+                    // on a locked wheel (no handbrake turns); the slip direction alone
+                    // stripped a driven tyre's side grip at κ ≈ 0.05 on a straight
+                    // (bikes swapped ends under throttle).
                     float sc = rsqrt(max(e, 1e-12));
-                    fT = fTraw * sc;
-                    aLeff = abs(fLprev) * sc;
-                    clampT = true;
+                    float tProp = abs(fTraw) * sc;
+                    float lProp = abs(fLprev) * sc;
+                    float4 tire = VD(wr + W_TIRE);
+                    float kPk = max(curvePeakX(asuint(tire.x)), 0.03);
+                    float aPk = tan(radians(max(curvePeakX(asuint(tire.y)), 1.5)));
+                    float nx = VD(wr + W_C3).w / kPk;
+                    float ny = tan(min(VD(wr + W_C4).w, 1.45)) / aPk;
+                    float nn = sqrt(nx * nx + ny * ny);
+                    float wSlip = nn > 1e-6 ? clamp(max(nx, ny) - 1.0, 0.0, 1.0) : 0.0;
+                    float tCap = lerp(tProp, nn > 1e-6 ? aT * ny / nn : tProp, wSlip);
+                    aLeff = lerp(lProp, nn > 1e-6 ? aL * nx / nn : lProp, wSlip);
+                    clampT = abs(fTraw) > tCap;
+                    fT = clampT ? sign(fTraw) * tCap : fTraw;
+                    tLim = max(tCap, abs(fT));
                 }
                 else aLeff = aL * sqrt(max(0.0, 1.0 - (fTraw / aT) * (fTraw / aT)));
             }
             mWheel[nm] = wi; mR[nm] = R; mCL0[nm] = CL0; mCT[nm] = CT; mKL[nm] = lam.w;
-            mLamL[nm] = lam.x; mAL[nm] = contact ? aLeff : 0.0; mAT[nm] = aT; mFT[nm] = fT;
+            mLamL[nm] = lam.x; mAL[nm] = contact ? aLeff : 0.0; mAT[nm] = tLim; mFT[nm] = fT;
             mClampT[nm] = clampT; mContact[nm] = contact; mClampL[nm] = false; mFL[nm] = 0.0;
             rAsum += R * mAL[nm];
             nm++;

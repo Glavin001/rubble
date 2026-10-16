@@ -54,6 +54,7 @@ pub const VF_CAN_SLEEP: u32 = 8;
 pub const VF_REVERSE_BRAKE: u32 = 16; // throttle against travel brakes first
 pub const VF_SPHERE_CAST: u32 = 32; // wheels sweep a sphere of their radius (kerbs, edges)
 pub const VF_TRACKED: u32 = 64; // two tracks: shared spin per track, left/right drive ratios
+pub const VF_TRACTION_CONTROL: u32 = 128; // cut engine torque while a driven wheel spins past peak slip
 pub const VS_ENGINE_LOST: u32 = 1;
 pub const VS_ACTIVE: u32 = 2; // block built this step
 pub const VS_SLIPPING: u32 = 4; // a driven wheel slipped (blocks upshift)
@@ -221,6 +222,7 @@ mod tests {
             "VF_REVERSE_BRAKE" => VF_REVERSE_BRAKE,
             "VF_SPHERE_CAST" => VF_SPHERE_CAST,
             "VF_TRACKED" => VF_TRACKED,
+            "VF_TRACTION_CONTROL" => VF_TRACTION_CONTROL,
             "VS_ENGINE_LOST" => VS_ENGINE_LOST,
             "VS_ACTIVE" => VS_ACTIVE,
             "VS_SLIPPING" => VS_SLIPPING,

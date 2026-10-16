@@ -97,6 +97,8 @@ pub fn sedan() -> VehicleDesc {
             AntiRollDesc { left: 2, right: 3, stiffness: 6000.0 },
         ],
         aero: AeroDesc { drag: 0.4, downforce: 0.3, center: [0.0, 0.1, 0.0] },
+        steering: SteeringDesc { speed_curve: Curve::road_steering(), ..Default::default() },
+        assists: AssistDesc { traction_control: true, ..Default::default() },
         ..Default::default()
     }
 }
@@ -106,6 +108,10 @@ pub fn sedan() -> VehicleDesc {
 pub fn destructible_sedan() -> VehicleDesc {
     let mut d = sedan();
     d.name = "destructible_sedan".into();
+    // The separable engine (250 kg at the nose) and bumpers put the part-derived centre
+    // of mass ~0.25 m ahead of the sedan's, unloading the driven rear: shift it back so
+    // both cars balance alike.
+    d.center_of_mass_offset = [0.0, -0.18, -0.25];
     d.parts = vec![
         box_part("frame", PartRole::Body, 560.0, [0.76, 0.15, 2.0], [0.0, 0.0, 0.0]),
         box_part("cabin", PartRole::Body, 300.0, [0.7, 0.24, 1.05], [0.0, 0.42, -0.25]),
@@ -150,6 +156,8 @@ pub fn sports() -> VehicleDesc {
     }
     d.aero = AeroDesc { drag: 0.35, downforce: 1.6, center: [0.0, 0.0, -0.2] };
     d.steering.rate = 6.0;
+    // Sports car: no traction control, so throttle can still steer the tail.
+    d.assists.traction_control = false;
     d
 }
 
@@ -201,7 +209,7 @@ pub fn monster_truck() -> VehicleDesc {
         ],
         max_pitch_roll_deg: 60.0,
         wheel_query: WheelQuery::Sphere,
-        assists: AssistDesc { air_control_pitch: 2.5, air_control_yaw: 1.5, upright_stiffness: 0.0, upright_damping: 0.0 },
+        assists: AssistDesc { air_control_pitch: 2.5, air_control_yaw: 1.5, upright_stiffness: 0.0, upright_damping: 0.0, ..Default::default() },
         ..Default::default()
     }
 }
@@ -288,7 +296,7 @@ pub fn kart() -> VehicleDesc {
         ],
         wheels: four_wheels(0.6, -0.02, 0.75, -0.75, &front, &rear),
         drive: DriveDesc::Direct { max_torque: 220.0, top_speed: 26.0 },
-        assists: AssistDesc { air_control_pitch: 4.0, air_control_yaw: 3.0, upright_stiffness: 0.0, upright_damping: 0.0 },
+        assists: AssistDesc { air_control_pitch: 4.0, air_control_yaw: 3.0, upright_stiffness: 0.0, upright_damping: 0.0, ..Default::default() },
         steering: SteeringDesc { rate: 8.0, ..Default::default() },
         aero: AeroDesc { drag: 0.15, downforce: 0.2, center: [0.0; 3] },
         ..Default::default()
@@ -439,7 +447,12 @@ pub fn motorcycle() -> VehicleDesc {
         motorcycle: Some(MotorcycleDesc { max_lean_deg: 35.0, ..Default::default() }),
         // Rider + bike CdA ~0.6 m² → ½ρ·CdA ≈ 0.35 (Jolt's sample has no drag and tops out
         // only at the rev limiter).
-        aero: AeroDesc { drag: 0.35, downforce: 0.0, center: [0.0, 0.3, 0.0] },
+        // Drag at the centre of mass: applied above it, it unloaded the front tyre at
+        // speed until any disturbance could swing the heading.
+        aero: AeroDesc { drag: 0.35, downforce: 0.0, center: [0.0, 0.0, 0.0] },
+        // The engine delivers ~2× the rear tyre's grip in the low gears; without TC full
+        // throttle spins it and a spinning tyre has no side grip.
+        assists: AssistDesc { traction_control: true, ..Default::default() },
         // Jolt offsets the box's center of mass to its bottom face.
         center_of_mass_offset: [0.0, -0.3, 0.0],
         max_pitch_roll_deg: 60.0,

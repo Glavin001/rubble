@@ -424,6 +424,9 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
     if desc.wheel_query == WheelQuery::Sphere {
         flags |= VF_SPHERE_CAST;
     }
+    if desc.assists.traction_control {
+        flags |= VF_TRACTION_CONTROL;
+    }
     if desc.tracks.is_some() {
         flags |= VF_TRACKED;
     }
@@ -491,7 +494,7 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
     }
     v[V_BIKE_D as usize] = slot3(Vec3::Y, 0.0);
     v[V_TRACK as usize] = match &desc.tracks {
-        Some(t) => [t.left.driven_wheel, t.right.driven_wheel, f(t.turn_ratio), f(t.pivot_speed)],
+        Some(t) => [t.left.driven_wheel, t.right.driven_wheel, f(t.steer_strength), f(0.0)],
         None => [NO_INDEX, NO_INDEX, f(0.0), f(0.0)],
     };
     // V_TRACK_D.w: lateral-accel budget × track spacing (a·W, m²/s²) for the

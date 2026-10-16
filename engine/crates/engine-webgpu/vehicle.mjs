@@ -13,7 +13,7 @@ export const L = {
   V_IN0: 16, V_IN1: 17, V_IN2: 18, V_IN3: 19, V_D0: 20, V_D1: 21, V_D2: 22, V_D3: 23,
   V_REFP: 24, V_REFQ: 25, V_D4: 26, V_O0: 27, V_O1: 28, V_O2: 29, V_O3: 30, V_ASSIST: 31,
   V_BIKE0: 32, V_BIKE1: 33, V_BIKE_D: 34, V_TRACK: 35, V_TRACK_D: 36, V_QUERY: 37,
-  VF_ENABLED: 1, VF_DIRECT_DRIVE: 2, VF_MANUAL_TRANS: 4, VF_CAN_SLEEP: 8, VF_REVERSE_BRAKE: 16, VF_SPHERE_CAST: 32, VF_TRACKED: 64,
+  VF_ENABLED: 1, VF_DIRECT_DRIVE: 2, VF_MANUAL_TRANS: 4, VF_CAN_SLEEP: 8, VF_REVERSE_BRAKE: 16, VF_SPHERE_CAST: 32, VF_TRACKED: 64, VF_TRACTION_CONTROL: 128,
   VS_ENGINE_LOST: 1, VS_ACTIVE: 2, VS_SLIPPING: 4,
   GEAR_AUTO: 0x7FFFFFFF,
   WHEEL_STRIDE: 48,
@@ -337,6 +337,7 @@ export function pack(desc0, position, rotation, slots) {
   if (desc.can_sleep) flags |= L.VF_CAN_SLEEP;
   if (desc.reverse_brake) flags |= L.VF_REVERSE_BRAKE;
   if (desc.wheel_query === 'sphere') flags |= L.VF_SPHERE_CAST;
+  if (desc.assists && desc.assists.traction_control) flags |= L.VF_TRACTION_CONTROL;
   if (desc.tracks) flags |= L.VF_TRACKED;
   const v = Array.from({ length: L.VEH_STRIDE }, () => [0, 0, 0, 0]);
   let directTorque = 0, topSpeed = 0;
@@ -389,7 +390,7 @@ export function pack(desc0, position, rotation, slots) {
   v[L.V_BIKE_D] = slot3([0, 1, 0], 0);
   const t = desc.tracks;
   v[L.V_TRACK] = t
-    ? [t.left.driven_wheel, t.right.driven_wheel, fbits(t.turn_ratio), fbits(t.pivot_speed)]
+    ? [t.left.driven_wheel, t.right.driven_wheel, fbits(t.steer_strength), fbits(0)]
     : [L.NO_INDEX, L.NO_INDEX, fbits(0), fbits(0)];
   // V_TRACK_D.w: lateral-accel budget × track spacing (a·W) for the ratio cap.
   let turnAW = 0;

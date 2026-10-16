@@ -46,9 +46,9 @@ static const uint V_O2 = 29u;      // uint4(wheelMask, driveMask, steerMask, eve
 static const uint V_BIKE0 = 32u;   // maxLean (rad, 0 = off), leanSpring (N·m/rad), leanDamping (N·m·s/rad), leanIntegration
 static const uint V_BIKE1 = 33u;   // integrationDecay (1/s), smoothing [0,1), leanSteerLimit (0/1), pad
 static const uint V_BIKE_D = 34u;  // target lean.xyz (world), integrated lean angle
-static const uint V_TRACK = 35u;   // uint4(leftTrackLeader, rightTrackLeader, asfloat(turnRatio), asfloat(pivotSpeed))
+static const uint V_TRACK = 35u;   // uint4(leftTrackLeader, rightTrackLeader, asfloat(steerStrength), pad)
 static const uint V_TRACK_D = 36u; // leftRatio, rightRatio, effective forward, turn grip a·W (m²/s², static)
-static const uint V_QUERY = 37u;   // uint4(stepsBetweenQueries (0/1 = every step), pad, pad, pad)
+static const uint V_QUERY = 37u;   // uint4(stepsBetweenQueries (0/1 = every step), asfloat(tractionCut, filtered), pad, pad)
 static const uint V_ASSIST = 31u;  // airPitch, airYaw (rad/s² per input), uprightStiffness (1/s²), uprightDamping (1/s)
 static const uint V_O3 = 30u;      // uint4(engineConnected, partsLost) , pitch/roll λ, pitch/roll k
 
@@ -60,6 +60,7 @@ static const uint VF_CAN_SLEEP = 8u;
 static const uint VF_REVERSE_BRAKE = 16u; // throttle against travel brakes first
 static const uint VF_SPHERE_CAST = 32u;   // wheels sweep a sphere of their radius (kerbs, edges)
 static const uint VF_TRACKED = 64u;       // two tracks: shared spin per track, left/right drive ratios
+static const uint VF_TRACTION_CONTROL = 128u; // cut engine torque while a driven wheel spins past peak slip
 
 // Vehicle status (V_D3.y)
 static const uint VS_ENGINE_LOST = 1u;
