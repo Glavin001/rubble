@@ -1,0 +1,51 @@
+{
+  "oracle": "opencourant",
+  "scene": "b9_panel_low",
+  "seed": 0,
+  "scene_file": "scenes/b9_panel_low.json",
+  "scene_sha256": "26d3a4e82eecd4e0aa20383728efa8b6659ce181d8cad14e4582cc30910e9670",
+  "tool": {
+    "tool": "OpenCourant (OpenRadioss fork)",
+    "release_tag": "latest-20261006",
+    "commit": "33e685176cccf0c539a3ce07aa2096985a284e2a",
+    "asset": "OpenCourant_linux64.zip",
+    "asset_sha256": "9d67531de156dd9beba05fbfe710dcdc2bcecbdf3dc3a12642cf85dcece80081",
+    "url": "https://github.com/OpenCourant/OpenCourant/releases/download/latest-20261006/OpenCourant_linux64.zip"
+  },
+  "starter_deck_sha256": "6b632044f0217f94a0856f48990228f7608012f0f0786845f36a2bcf1115a29f",
+  "engine_deck_sha256": "5faf8a0ee6194a5bf9cc4931ff66d3aa037553951f06cbe88d59b98d60b004ca",
+  "options": {
+    "elements_per_chunk": 2,
+    "cohesive_thickness": 0.2,
+    "self_contact": true,
+    "contact_gap_fraction": 0.5,
+    "impact_gap": 0.0002,
+    "dt_safety": 0.6,
+    "threads": 2,
+    "anim_frames": 10,
+    "th_dt": null,
+    "isolid": 24,
+    "contact_damping": 0.05
+  },
+  "command": "python -I oracles/opencourant/pipeline.py scenes/b9_panel_low.json --threads 2",
+  "solver_commands": [
+    "/home/user/oracle-env/opencourant/OpenCourant/exec/starter_linux64_gf -i b9_panel_low_0000.rad -np 1 -nt 2",
+    "/home/user/oracle-env/opencourant/OpenCourant/exec/engine_linux64_gf -i b9_panel_low_0001.rad -nt 2",
+    "/home/user/oracle-env/opencourant/OpenCourant/exec/th_to_csv_linux64_gf /home/user/oracle-runs/opencourant/b9_panel_low/b9_panel_lowT01",
+    "/home/user/oracle-env/opencourant/OpenCourant/exec/anim_to_vtk_linux64_gf <A-files>"
+  ],
+  "threads": 2,
+  "starter_wall_s": 0.67,
+  "engine_wall_s": 79.06,
+  "pipeline_wall_s": 80.79,
+  "engine_cycles": 26592,
+  "model_size": {
+    "nodes": 11880,
+    "elements": 6872,
+    "cohesive": 3352
+  },
+  "python": "3.12.3",
+  "numpy": "2.5.3",
+  "host": "Linux-6.18.44-fc-v80-x86_64-with-glibc2.39",
+  "rundir": "/home/user/oracle-runs/opencourant/b9_panel_low"
+}

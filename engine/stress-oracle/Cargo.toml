@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/stress-ref", "crates/stress-gpu", "crates/stress-reduce"]
+default-members = ["crates/stress-ref"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[profile.release]
+debug = 1
+
+# Tests are numerical: run them optimized so the explicit reference stays fast.
+[profile.test]
+opt-level = 3
+debug-assertions = true

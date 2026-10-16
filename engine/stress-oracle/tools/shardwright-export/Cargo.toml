@@ -1,0 +1,12 @@
+[package]
+name = "shard-export"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+frac-io = { path = "../../../../../Shardwright/crates/frac-io" }
+frac-material = { path = "../../../../../Shardwright/crates/frac-material" }
+flatbuffers = "=24.3.25"
+serde_json = "1"
+
+[workspace]
