@@ -133,9 +133,12 @@ impl ConvexHull {
             let Some((_, p)) = best else { break };
             used[p] = true;
             let visible: Vec<bool> = tris.iter().map(|t| sees(t, p)).collect();
-            let seen: std::collections::HashSet<(usize, usize)> =
+            // The visible triangles' edges in triangle order (not the set's hash order, which
+            // differs between processes and would reorder the faces and their sums).
+            let edges: Vec<(usize, usize)> =
                 tris.iter().zip(&visible).filter(|(_, v)| **v).flat_map(|(t, _)| [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]).collect();
-            let horizon: Vec<(usize, usize)> = seen.iter().copied().filter(|&(a, b)| !seen.contains(&(b, a))).collect();
+            let seen: std::collections::HashSet<(usize, usize)> = edges.iter().copied().collect();
+            let horizon: Vec<(usize, usize)> = edges.into_iter().filter(|&(a, b)| !seen.contains(&(b, a))).collect();
             let mut kept: Vec<[usize; 3]> = tris.iter().zip(&visible).filter(|(_, v)| !**v).map(|(t, _)| *t).collect();
             kept.extend(horizon.into_iter().map(|(a, b)| [a, b, p]));
             tris = kept;
