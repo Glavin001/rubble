@@ -9,11 +9,15 @@ use serde::{Deserialize, Serialize};
 
 pub mod commands;
 pub mod handles;
+pub mod joint;
 pub mod params;
+pub mod snapshot;
 
 pub use commands::*;
 pub use handles::*;
+pub use joint::*;
 pub use params::*;
+pub use snapshot::*;
 
 /// ABI probe used by Gate 0 layout round-trips (must match `slang/kernels/abi_probe.slang`).
 #[repr(C)]
@@ -77,17 +81,6 @@ pub enum ShapeType {
     Plane = 4,
 }
 
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JointType {
-    Ball = 0,
-    Fixed = 1,
-    Hinge = 2,
-    Slider = 3,
-    D6 = 4,
-    Distance = 5,
-    MaxDistance = 6,
-}
 
 /// Hot body state (112 bytes). `initial_pos` / `initial_rot` are the step-start pose.
 #[repr(C)]
@@ -224,27 +217,6 @@ pub struct Manifold {
     pub friction: f32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct Joint {
-    pub body_a: u32,
-    pub body_b: u32,
-    pub joint_type: u32,
-    pub flags: u32,
-    pub local_anchor_a: [f32; 3],
-    pub stiffness: f32,
-    pub local_anchor_b: [f32; 3],
-    pub damping: f32,
-    pub axis_a: [f32; 3],
-    pub limit_min: f32,
-    pub axis_b: [f32; 3],
-    pub limit_max: f32,
-    /// Constraint value at beginning of timestep (demo3d `C0Lin`).
-    pub c0: [f32; 3],
-    pub _pad_c0: f32,
-    pub lambda: [f32; 6],
-    pub k: [f32; 6],
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -304,6 +276,7 @@ mod tests {
         assert_eq!(size_of::<Contact>(), 128);
         assert_eq!(size_of::<Manifold>(), 32);
         assert_eq!(size_of::<StepCounters>(), 64);
+        assert_eq!(size_of::<Joint>(), 288);
         assert_eq!(align_of::<BodyState>(), 4);
     }
 }

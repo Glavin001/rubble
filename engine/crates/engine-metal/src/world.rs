@@ -50,6 +50,10 @@ pub struct MetalWorld {
     body_count: u32,
     collider_count: u32,
     joint_count: u32,
+    /// Released joint slots, reused by `add_joint` (three-avbd releaseJoints).
+    free_joints: Vec<u32>,
+    /// Per-body bounding radius of its largest dynamic collider (torque arm default).
+    body_radius: Vec<f32>,
     /// Island-gate BFS rounds (8 for stacks; 2 for random piles so one rocker cannot pin all).
     sleep_island_rounds: u32,
     material_count: u32,
@@ -211,6 +215,8 @@ impl MetalWorld {
             body_count: 0,
             collider_count: 0,
             joint_count: 0,
+            free_joints: Vec::new(),
+            body_radius: Vec::new(),
             sleep_island_rounds: 8,
             material_count: 1,
             command_count: 0,
@@ -281,21 +287,110 @@ impl MetalWorld {
         };
         cols[id as usize] = col;
         self.collider_count += 1;
+        if let Some(r) = collider_reach(&col) {
+            let b = col.body as usize;
+            if self.body_radius.len() <= b {
+                self.body_radius.resize(b + 1, 0.0);
+            }
+            self.body_radius[b] = self.body_radius[b].max(r);
+        }
         id
     }
 
-    pub fn add_joint(&mut self, joint: Joint) -> u32 {
-        let id = self.joint_count;
-        assert!(id < self.capacity.max_joints);
-        let joints = unsafe {
+    fn joints_mut(&mut self) -> &mut [Joint] {
+        unsafe {
             std::slice::from_raw_parts_mut(
                 self.joints.contents() as *mut Joint,
                 self.capacity.max_joints as usize,
             )
+        }
+    }
+
+    /// Live and broken joints written so far (`[0, joint_count)`).
+    pub fn joints(&self) -> &[Joint] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.joints.contents() as *const Joint,
+                self.joint_count as usize,
+            )
+        }
+    }
+
+    pub fn joint(&self, id: u32) -> Joint {
+        self.joints()[id as usize]
+    }
+
+    /// Write a raw GPU joint, reusing a released slot when one is free.
+    pub fn add_joint(&mut self, joint: Joint) -> u32 {
+        let id = match self.free_joints.pop() {
+            Some(id) => id,
+            None => {
+                let id = self.joint_count;
+                assert!(id < self.capacity.max_joints, "joint capacity exceeded");
+                self.joint_count += 1;
+                id
+            }
         };
-        joints[id as usize] = joint;
-        self.joint_count += 1;
+        self.joints_mut()[id as usize] = joint;
         id
+    }
+
+    /// Default torque arm (three-avbd `|size_a + size_b|²`) from collider bounds.
+    pub fn default_torque_arm(&self, a: u32, b: u32) -> f32 {
+        let r = |id: u32| {
+            let body = self.body(id);
+            if body.inv_mass == 0.0 {
+                return 0.0;
+            }
+            self.body_radius.get(id as usize).copied().unwrap_or(0.0)
+        };
+        default_torque_arm(r(a), r(b))
+    }
+
+    pub fn add_joint_desc(&mut self, desc: &JointDesc) -> u32 {
+        let mut j = desc.to_gpu();
+        if desc.torque_arm <= 0.0 {
+            j.torque_arm = self.default_torque_arm(desc.body_a, desc.body_b);
+        }
+        self.add_joint(j)
+    }
+
+    /// Release a joint: the pair collides again and the slot is reused.
+    pub fn remove_joint(&mut self, id: u32) {
+        // Released = broken with both ends on body 0 (never a real joint, and a
+        // safe index if any kernel reads it).
+        let j = &mut self.joints_mut()[id as usize];
+        if j.flags & JOINT_FLAG_BROKEN == 0 || j.body_a != j.body_b {
+            j.flags |= JOINT_FLAG_BROKEN;
+            j.body_a = 0;
+            j.body_b = 0;
+            self.free_joints.push(id);
+        }
+    }
+
+    /// Joints the GPU broke since the last call. Their slots are released.
+    pub fn drain_broken_joints(&mut self) -> Vec<u32> {
+        let broken: Vec<u32> = (0..self.joint_count)
+            .filter(|&i| {
+                let j = self.joint(i);
+                j.is_broken() && j.body_a != j.body_b
+            })
+            .collect();
+        for &id in &broken {
+            self.remove_joint(id);
+        }
+        broken
+    }
+
+    /// Update a drive's targets in place (motors, servos).
+    pub fn set_joint_drive(&mut self, id: u32, velocity: f32, target: f32) {
+        let j = &mut self.joints_mut()[id as usize];
+        j.drive_velocity = velocity;
+        j.drive_target = target;
+    }
+
+    pub fn set_joint(&mut self, id: u32, joint: Joint) {
+        self.joints_mut()[id as usize] = joint;
     }
 
     pub fn push_command(&mut self, cmd: GpuCommand) {
@@ -861,6 +956,25 @@ impl MetalWorld {
         }
     }
 
+    /// Everything a scene wrote, for replay on another backend.
+    pub fn snapshot(&self) -> WorldSnapshot {
+        let colliders = unsafe {
+            std::slice::from_raw_parts(
+                self.colliders.contents() as *const Collider,
+                self.collider_count as usize,
+            )
+        };
+        let materials =
+            unsafe { std::slice::from_raw_parts(self.materials.contents() as *const Material, 64) };
+        WorldSnapshot {
+            bodies: self.download_bodies(),
+            colliders: colliders.to_vec(),
+            materials: materials.to_vec(),
+            joints: self.joints().to_vec(),
+            params: Some(self.params),
+        }
+    }
+
     pub fn download_bodies(&self) -> Vec<BodyState> {
         let bodies = unsafe {
             std::slice::from_raw_parts(
@@ -1159,48 +1273,47 @@ impl<'a> SceneBuilder<'a> {
         body
     }
 
+    /// Add a joint at rest in the bodies' current orientations (frame B is
+    /// derived from frame A, three-avbd `rest: 'current'`).
+    pub fn add_joint(&mut self, desc: JointDesc) -> u32 {
+        let qa = Quat::from_array(self.world.body(desc.body_a).orientation);
+        let qb = Quat::from_array(self.world.body(desc.body_b).orientation);
+        self.world.add_joint_desc(&desc.rest_from_bodies(qa, qb))
+    }
+
+    /// Body-local frames for a joint placed at a world anchor with a world
+    /// axis (hinge / slider / twist axis = frame X).
+    pub fn world_frames(
+        &self,
+        a: u32,
+        b: u32,
+        anchor: Vec3,
+        axis: Vec3,
+    ) -> (JointFrame, JointFrame) {
+        let ba = self.world.body(a);
+        let bb = self.world.body(b);
+        let qa = Quat::from_array(ba.orientation);
+        let qb = Quat::from_array(bb.orientation);
+        let la = qa.conjugate() * (anchor - Vec3::from_array(ba.position));
+        let lb = qb.conjugate() * (anchor - Vec3::from_array(bb.position));
+        let axis_a = qa.conjugate() * axis;
+        (JointFrame::with_axis(la, axis_a), JointFrame::at(lb))
+    }
+
     pub fn add_ball_joint(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3) -> u32 {
-        self.world.add_joint(Joint {
-            body_a: a,
-            body_b: b,
-            joint_type: JointType::Ball as u32,
-            flags: 0,
-            local_anchor_a: anchor_a.to_array(),
-            stiffness: 1.0e5,
-            local_anchor_b: anchor_b.to_array(),
-            damping: 0.0,
-            axis_a: [0.0, 1.0, 0.0],
-            limit_min: 0.0,
-            axis_b: [0.0, 1.0, 0.0],
-            limit_max: 0.0,
-            c0: [0.0; 3],
-            _pad_c0: 0.0,
-            lambda: [0.0; 6],
-            k: [1.0e4; 6],
-        })
+        self.add_joint(JointDesc::ball(a, b, anchor_a, anchor_b))
     }
 
     pub fn add_fixed_joint(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3) -> u32 {
-        self.world.add_joint(Joint {
-            body_a: a,
-            body_b: b,
-            joint_type: JointType::Fixed as u32,
-            flags: 0,
-            local_anchor_a: anchor_a.to_array(),
-            stiffness: 1.0e5,
-            local_anchor_b: anchor_b.to_array(),
-            damping: 0.0,
-            axis_a: [0.0, 1.0, 0.0],
-            limit_min: 0.0,
-            axis_b: [0.0, 1.0, 0.0],
-            limit_max: 0.0,
-            c0: [0.0; 3],
-            _pad_c0: 0.0,
-            lambda: [0.0; 6],
-            k: [1.0e5; 6],
-        })
+        self.add_joint(JointDesc::fixed(
+            a,
+            b,
+            JointFrame::at(anchor_a),
+            JointFrame::at(anchor_b),
+        ))
     }
 
+    /// Prismatic joint; `axis` is in body A's local frame.
     pub fn add_slider(
         &mut self,
         a: u32,
@@ -1209,66 +1322,59 @@ impl<'a> SceneBuilder<'a> {
         anchor_b: Vec3,
         axis: Vec3,
     ) -> u32 {
-        self.world.add_joint(Joint {
-            body_a: a,
-            body_b: b,
-            joint_type: JointType::Slider as u32,
-            flags: 0,
-            local_anchor_a: anchor_a.to_array(),
-            stiffness: 1.0e5,
-            local_anchor_b: anchor_b.to_array(),
-            damping: 0.0,
-            axis_a: axis.to_array(),
-            limit_min: -1.0,
-            axis_b: axis.to_array(),
-            limit_max: 1.0,
-            c0: [0.0; 3],
-            _pad_c0: 0.0,
-            lambda: [0.0; 6],
-            k: [1.0e4; 6],
-        })
+        self.add_joint(JointDesc::slider(
+            a,
+            b,
+            JointFrame::with_axis(anchor_a, axis),
+            JointFrame::at(anchor_b),
+        ))
     }
 
+    /// D6 with every DOF locked except twist about `axis` (body A local);
+    /// adjust motions with `add_joint(JointDesc::d6(..).with_motion(..))`.
     pub fn add_d6(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3, axis: Vec3) -> u32 {
-        self.world.add_joint(Joint {
-            body_a: a,
-            body_b: b,
-            joint_type: JointType::D6 as u32,
-            flags: 0,
-            local_anchor_a: anchor_a.to_array(),
-            stiffness: 1.0e5,
-            local_anchor_b: anchor_b.to_array(),
-            damping: 0.0,
-            axis_a: axis.to_array(),
-            limit_min: -std::f32::consts::PI,
-            axis_b: axis.to_array(),
-            limit_max: std::f32::consts::PI,
-            c0: [0.0; 3],
-            _pad_c0: 0.0,
-            lambda: [0.0; 6],
-            k: [1.0e4; 6],
-        })
+        self.add_joint(
+            JointDesc::d6(
+                a,
+                b,
+                JointFrame::with_axis(anchor_a, axis),
+                JointFrame::at(anchor_b),
+            )
+            .with_motion(Dof::Twist, Motion::Free),
+        )
     }
 
+    /// Revolute joint about `axis` (body A local).
     pub fn add_hinge(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3, axis: Vec3) -> u32 {
-        self.world.add_joint(Joint {
-            body_a: a,
-            body_b: b,
-            joint_type: JointType::Hinge as u32,
-            flags: 0,
-            local_anchor_a: anchor_a.to_array(),
-            stiffness: 5.0e3,
-            local_anchor_b: anchor_b.to_array(),
-            damping: 0.0,
-            axis_a: axis.to_array(),
-            limit_min: -std::f32::consts::PI,
-            axis_b: axis.to_array(),
-            limit_max: std::f32::consts::PI,
-            c0: [0.0; 3],
-            _pad_c0: 0.0,
-            lambda: [0.0; 6],
-            k: [1.0e4; 6],
-        })
+        self.add_joint(JointDesc::hinge(
+            a,
+            b,
+            JointFrame::with_axis(anchor_a, axis),
+            JointFrame::at(anchor_b),
+        ))
+    }
+
+    pub fn add_distance(
+        &mut self,
+        a: u32,
+        b: u32,
+        anchor_a: Vec3,
+        anchor_b: Vec3,
+        length: f32,
+    ) -> u32 {
+        self.add_joint(JointDesc::distance(a, b, anchor_a, anchor_b, length))
+    }
+
+    pub fn add_spring(
+        &mut self,
+        a: u32,
+        b: u32,
+        anchor_a: Vec3,
+        anchor_b: Vec3,
+        rest: f32,
+        stiffness: f32,
+    ) -> u32 {
+        self.add_joint(JointDesc::spring(a, b, anchor_a, anchor_b, rest, stiffness))
     }
 
     pub fn pile_spheres(&mut self, n: u32, spacing: f32) {

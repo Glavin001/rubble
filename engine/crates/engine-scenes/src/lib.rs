@@ -8,6 +8,9 @@ use engine_metal::{MetalWorld, SceneBuilder};
 use engine_schema::{AvbdParams, BodyState, WorldCapacity, FLAG_REUSE_CONTACTS};
 use glam::{Quat, Vec3};
 
+pub mod joints;
+pub use joints::*;
+
 #[derive(Clone, Debug)]
 pub struct SceneInfo {
     pub name: &'static str,
@@ -821,6 +824,51 @@ pub fn all_scenes() -> Vec<SceneDef> {
                 capacity: WorldCapacity::small(),
             },
             build: heavy_rope,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Joints Showcase",
+                group: "Joints & springs",
+                iterations: 10,
+                capacity: cap(4096),
+            },
+            build: joints_showcase,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Ragdolls (40)",
+                group: "Joints & springs",
+                iterations: 10,
+                capacity: cap(4096),
+            },
+            build: |b| ragdoll_pile(b, 40),
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Ragdoll Pile (10k)",
+                group: "Joints & springs",
+                iterations: 8,
+                capacity: cap(16_384),
+            },
+            build: |b| ragdoll_pile(b, 1000),
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Hinge Chains (10k)",
+                group: "Joints & springs",
+                iterations: 8,
+                capacity: cap(16_384),
+            },
+            build: |b| hinge_chains(b, 400, 25),
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Motor Field (10k)",
+                group: "Joints & springs",
+                iterations: 8,
+                capacity: cap(16_384),
+            },
+            build: |b| motor_field(b, 2500),
         },
         SceneDef {
             info: SceneInfo {

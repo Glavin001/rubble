@@ -64,6 +64,7 @@
     import { runRingRegression } from "./ring-regression.mjs";
     import { runGablesRegression } from "./gables-regression.mjs";
     import { measurePhysicsBatches, assertBenchmarkWorkload } from "./physics-benchmark.mjs?v=2";
+    import { installJointControls } from "./joint-interaction.mjs";
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
@@ -183,7 +184,7 @@
     const graphProfile = qs.get('profile') === 'graph';
     // Diagnostic: one timestamped pass per primal color (and the sparse tail).
     const colorProfile = qs.get('profile') === 'colors';
-    const spatialOrder = qs.get('order') === 'morton';
+    const spatialOrder = qs.get('order') === 'morton' && !(qs.get('scene') || '').match(/^(joints|ragdolls|hingechains|motorfield)/);
     const physicalAdjacency = qs.get('adjacency') !== 'append';
     const regressionKind = qs.get('check');
     const regressionEnabled = ['ring', 'gables'].includes(regressionKind);
@@ -278,6 +279,33 @@
         eye: [0, 80, -120], look: [0, 10, 0], far: 4000, ground: 256, flags: 1, sleepTime: 1e6,
         cap: { ...sceneCap(524288), maxContacts: 6 * 1048576, maxCandidates: 4 * 1048576 },
       },
+      // Joint scenes: built by engine-scenes in Rust, exported as raw GPU
+      // records (cargo run -p engine-scenes --release --bin scene_export).
+      joints: {
+        title: 'joints showcase', snapshot: 'joints',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [0, 12, -22], look: [0, 2.5, 1], far: 400, ground: 60,
+      },
+      ragdolls: {
+        title: 'ragdolls 40', snapshot: 'ragdolls',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.6,
+        eye: [6, 6, -11], look: [0, 1.5, 0], far: 400, ground: 40,
+      },
+      ragdolls10k: {
+        title: 'ragdoll pile 11k bodies, 10k joints', snapshot: 'ragdolls10k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.6,
+        eye: [16, 14, -22], look: [0, 1, 0], far: 600, ground: 60,
+      },
+      hingechains10k: {
+        title: 'hinge chains 10k bodies, 10k joints', snapshot: 'hingechains10k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [40, 30, -90], look: [0, 8, 0], far: 800, ground: 120,
+      },
+      motorfield10k: {
+        title: 'motor field 10k bodies, 2.5k motors', snapshot: 'motorfield10k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [30, 30, -70], look: [0, 2, 0], far: 800, ground: 80,
+      },
     };
     const cfg = SCENES[scene];
     if (!cfg) throw new Error(`unknown scene ${scene}; try ${Object.keys(SCENES).join(', ')}`);
@@ -296,6 +324,31 @@
       if (sceneSelect.value !== 'pyramid') next.searchParams.delete('levels');
       location.href = next.href;
     });
+    // Snapshot scenes size the world from the exported counts.
+    async function loadSnapshot(id) {
+      const base = `./generated/scenes/${id}`;
+      const metaRes = await fetch(`${base}.json`, { cache: 'no-store' });
+      if (!metaRes.ok) throw new Error(`missing ${base}.json; run: cargo run -p engine-scenes --release --bin scene_export`);
+      const meta = await metaRes.json();
+      const bin = await (await fetch(`${base}.bin`, { cache: 'no-store' })).arrayBuffer();
+      const magic = new TextDecoder().decode(new Uint8Array(bin, 0, 8));
+      if (magic !== 'RUBSNAP1') throw new Error(`${base}.bin is not a WorldSnapshot`);
+      const [nb, nc, nm, nj] = new Uint32Array(bin, 8, 4);
+      let off = 24;
+      const take = (n, stride) => { const v = new Uint8Array(bin, off, n * stride); off += n * stride; return v; };
+      return {
+        meta,
+        bodies: take(nb, 112), colliders: take(nc, 64), materials: take(nm, 16), joints: take(nj, meta.jointLayout.stride),
+        counts: { bodies: nb, colliders: nc, joints: nj },
+      };
+    }
+    const snap = cfg.snapshot ? await loadSnapshot(cfg.snapshot) : null;
+    if (snap) {
+      cfg.iterations = cfg.iterations ?? snap.meta.iterations;
+      cfg.cap = sceneCap(snap.counts.bodies, { maxJoints: Math.max(64, snap.counts.joints) });
+      cfg.title = `${cfg.title}, ${cfg.iterations} iterations`;
+    }
+    const jointCount = snap ? snap.counts.joints : 0;
     const cap = cfg.cap;
     const lead = cfg.lead;
     const eye0 = cfg.eye;
@@ -312,13 +365,23 @@
       return [target[0] + orbitDist * cp * sy, target[1] + orbitDist * sp, target[2] + orbitDist * cp * cy];
     }
     let drag = null;
+    let jointControls = null;
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('pointerdown', (e) => {
+      if (jointControls && (e.ctrlKey || e.altKey || e.metaKey) && e.button === 0) {
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capture */ }
+        jointControls.startGrab(e);
+        return;
+      }
       drag = { id: e.pointerId, x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey || e.button === 1 };
       try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capture */ }
     });
-    canvas.addEventListener('pointerup', (e) => { if (drag && drag.id === e.pointerId) drag = null; });
+    canvas.addEventListener('pointerup', (e) => {
+      if (jointControls && jointControls.endGrab(e)) return;
+      if (drag && drag.id === e.pointerId) drag = null;
+    });
     canvas.addEventListener('pointermove', (e) => {
+      if (jointControls && jointControls.moveGrab(e)) return;
       if (!drag || drag.id !== e.pointerId) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.x = e.clientX; drag.y = e.clientY;
@@ -355,7 +418,7 @@
       s[2] = b(cap.maxColliders, 64);
       s[3] = b(64, 16);
       s[4] = b(cap.maxContacts * 2, persistentContacts ? 32 : 128);
-      s[5] = b(cap.maxJoints, 256);
+      s[5] = b(cap.maxJoints, 288); // engine-schema Joint
       s[6] = 256;
       s[7] = 256;
       s[8] = b(cap.maxCommands, 64);
@@ -400,6 +463,7 @@
       'count_color_tiles', 'prefix_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
+      ...(jointCount > 0 ? ['joint_hash_clear', 'joint_hash_insert', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints'] : []),
     ];
 
     function bindingsOf(wgsl) {
@@ -742,7 +806,17 @@ struct VsOut {
       colliders.push({ body: id, shape: 0, density, params: [radius, 0, 0, radius] });
     };
     statusEl.textContent = `building ${scene}…`;
-    if (scene === 'ring') {
+    if (snap) {
+      // Bodies 0..renderBodies-1 own collider i; trailing bodies (mouse) have none.
+      const bv = new DataView(snap.bodies.buffer, snap.bodies.byteOffset, snap.bodies.byteLength);
+      const cv = new DataView(snap.colliders.buffer, snap.colliders.byteOffset, snap.colliders.byteLength);
+      for (let i = 0; i < snap.meta.renderBodies; i++) {
+        const o = i * 112;
+        bodies.push({ p: [bv.getFloat32(o, true), bv.getFloat32(o + 4, true), bv.getFloat32(o + 8, true)], invMass: bv.getFloat32(o + 12, true) });
+        colliders.push({ body: i, shape: cv.getUint32(i * 64 + 4, true), params: [0, 0, 0, cv.getFloat32(i * 64 + 60, true)] });
+        if (i > 0) maxSmallR = Math.max(maxSmallR, cv.getFloat32(i * 64 + 60, true));
+      }
+    } else if (scene === 'ring') {
       buildRing(addBrick, addBall, 12, 20, 2, 10);
     } else if (scene === 'ring110k') {
       buildRing(addBrick, addBall, 80, 40, 4, 10);
@@ -830,7 +904,13 @@ struct VsOut {
     if (bodies.length > cap.maxBodies) throw new Error(`${bodies.length} bodies exceed capacity ${cap.maxBodies}`);
     params.gridCellSize = Math.max(0.5, 2 * maxSmallR * 1.0001);
     const storageOrder = spatialOrder ? mortonSceneOrder(bodies, colliders) : null;
-    bodies.forEach((b, sceneId) => {
+    if (snap) {
+      new Uint8Array(bodyBytes).set(snap.bodies, 0);
+      new Uint8Array(bodyBytes).set(snap.bodies, cap.maxBodies * 112); // x⁻ = x
+      new Uint8Array(colBytes).set(snap.colliders, 0);
+      device.queue.writeBuffer(bufs[3], 0, snap.materials);
+      device.queue.writeBuffer(bufs[5], 0, snap.joints);
+    } else bodies.forEach((b, sceneId) => {
       const gpu = storageOrder ? storageOrder.sceneToGpu[sceneId] : sceneId;
       writeBody(bodyBytes, gpu, b);
       writeBody(bodyBytes, cap.maxBodies + gpu, b);
@@ -838,6 +918,12 @@ struct VsOut {
     });
     device.queue.writeBuffer(bufs[0], 0, bodyBytes);
     device.queue.writeBuffer(bufs[2], 0, colBytes);
+    if (snap) {
+      jointControls = installJointControls({
+        device, bodyBuffer: bufs[0], jointBuffer: bufs[5], snap, maxBodies: cap.maxBodies, canvas,
+        camera: { eye: cameraEye, target: () => target, fovY: Math.PI / 5 },
+      });
+    }
 
     const persistentEntries = {
       narrowphase: 'narrowphase_persistent', contact_hash_insert: 'contact_hash_insert_persistent',
@@ -915,8 +1001,8 @@ struct VsOut {
     const bodySnap = (cfg.settled || qs.has("check"))
       ? device.createBuffer({ size: sizes[0], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })
       : null;
-    let bodyCount = bodies.length;
-    let colliderCount = bodies.length;
+    let bodyCount = snap ? snap.counts.bodies : bodies.length;
+    let colliderCount = snap ? snap.counts.colliders : bodies.length;
     // Seed dispatch sizes so frame 0 / bench lead-ins without per-step readback
     // do not use a 1024-slot contact hash for 100k-body scenes.
     const seedContacts = Math.min(cap.maxContacts, Math.max(256, (bodies.length - 1) * 4));
@@ -1013,6 +1099,7 @@ struct VsOut {
       hostCountersView.fill(0);
       hostCountersView[0] = bodyCount;
       hostCountersView[1] = colliderCount;
+      hostCountersView[3] = jointCount;
       hostColorsView.fill(0);
       device.queue.writeBuffer(hostUpload, 0, hostUploadCpu);
       // Prefer GPU copies from one upload — four tiny writeBuffers were ~0.3 ms of ring wall.
@@ -1062,6 +1149,10 @@ struct VsOut {
         pass = beginPass();
       };
       disp(pass, 'build_aabbs', nCols);
+      if (jointCount > 0) {
+        disp(pass, 'joint_hash_clear', 65536);
+        disp(pass, 'joint_hash_insert', jointCount);
+      }
       disp(pass, 'broadphase_clear', gridClearWords());
       nextPhase();
       disp(pass, 'broadphase_insert', nCols);
@@ -1107,11 +1198,13 @@ struct VsOut {
       } else dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
       if (earlyPairPack) dispWork(pass, 'pack_solver_contacts', 66);
       nextPhase();
+      if (jointCount > 0) disp(pass, 'warmstart_joints', jointCount);
       disp(pass, 'build_awake_list', nBodies);
       disp(pass, 'write_work_args', 64);
       if (graphProfile) nextPhase();
       disp(pass, 'csr_clear', nBodies + 1);
       dispWork(pass, 'csr_degree_contacts', 66);
+      if (jointCount > 0) disp(pass, 'csr_degree_joints', jointCount);
       if (graphProfile) nextPhase();
       if (bodyCount <= 512) {
         disp(pass, 'csr_prefix', 1);
@@ -1122,6 +1215,7 @@ struct VsOut {
       }
       if (graphProfile) nextPhase();
       dispWork(pass, 'csr_scatter_contacts', 66);
+      if (jointCount > 0) disp(pass, 'csr_scatter_joints', jointCount);
       if (graphProfile) nextPhase();
       dispWork(pass, physicalAdjacency ? 'csr_sort' : 'csr_sort_append', 67);
       if (graphProfile) nextPhase();
@@ -1218,6 +1312,7 @@ struct VsOut {
     function restoreScene() {
       device.queue.writeBuffer(bufs[0], 0, bodyBytes);
       device.queue.writeBuffer(bufs[2], 0, colBytes);
+      if (snap) device.queue.writeBuffer(bufs[5], 0, snap.joints);
       parity = 0;
       steps = 0;
       last = {
@@ -1432,7 +1527,7 @@ struct VsOut {
     }
     const colorNames = ['position tint (red −X/down, yellow +X/up)', 'awake amber, sleeping blue', 'speed: blue still, red above 3 m/s'];
     function showLegend() {
-      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed. Friction μ ${cfg.friction}. Drag to orbit, scroll to zoom, right-drag to pan.`;
+      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed. Friction μ ${cfg.friction}. Drag to orbit, scroll to zoom, right-drag to pan.` + (jointControls ? ` ${jointControls.legend}.` : '');
     }
     showLegend();
     addEventListener('keydown', (e) => {
@@ -1641,6 +1736,7 @@ struct VsOut {
           requestAnimationFrame(frame);
           return;
         }
+        if (jointControls) jointControls.beforeStep(steps * params.dt);
         encodeStep(enc, false);
         const rp = enc.beginRenderPass({
           colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],

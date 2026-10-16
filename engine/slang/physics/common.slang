@@ -90,41 +90,54 @@ struct Manifold
 
 struct Joint
 {
+    // Layout mirrors engine-schema `Joint` (288 B). Row math: joints.slang.
     uint bodyA;
     uint bodyB;
-    uint jointType;
     uint flags;
-    float3 localAnchorA;
-    float stiffness;
-    float3 localAnchorB;
-    float damping;
-    float3 axisA;
-    float limitMin;
-    float3 axisB;
-    float limitMax;
-    float3 c0;
-    float _padC0;
-    float lambda0;
-    float lambda1;
-    float lambda2;
-    float lambda3;
-    float lambda4;
-    float lambda5;
-    float k0;
-    float k1;
-    float k2;
-    float k3;
-    float k4;
-    float k5;
+    uint motion; // 2 bits per DOF (X, Y, Z, twist, swing1, swing2)
+    float3 anchorA;
+    float torqueArm;
+    float4 frameA;
+    float3 anchorB;
+    float linStiffness;
+    float4 frameB;
+    float4 restStart;
+    float3 linLo;
+    float twistLo;
+    float3 linHi;
+    float twistHi;
+    float swingY;
+    float swingZ;
+    float radialMin;
+    float radialMax;
+    float angStiffness;
+    float limitStiffness;
+    float limitDamping;
+    float driveForceLimit;
+    float breakForce;
+    float breakTorque;
+    float yieldTorque;
+    float breakBend;
+    float driveTarget;
+    float driveVelocity;
+    float driveStiffness;
+    float driveDamping;
+    float lambda[8];
+    float penalty[8];
+    float c0[8];
 };
 
-static const uint JOINT_BALL = 0u;
-static const uint JOINT_FIXED = 1u;
-static const uint JOINT_HINGE = 2u;
-static const uint JOINT_SLIDER = 3u;
-static const uint JOINT_D6 = 4u;
-static const uint JOINT_DISTANCE = 5u;
-static const uint JOINT_MAX_DISTANCE = 6u;
+static const uint JOINT_FLAG_BROKEN = 1u;
+static const uint JOINT_FLAG_COLLIDE = 2u;
+static const uint JOINT_FLAG_RADIAL = 4u;
+static const uint JOINT_FLAG_CONE = 8u;
+static const uint JOINT_FLAG_DRIVE = 16u;
+static const uint JOINT_DRIVE_DOF_SHIFT = 8u;
+static const uint MOTION_LOCKED = 0u;
+static const uint MOTION_LIMITED = 1u;
+static const uint MOTION_FREE = 2u;
+static const float JOINT_HARD = 1.0e30;
+static const float JOINT_BIG = 3.0e38;
 
 struct AvbdParams
 {
