@@ -158,11 +158,36 @@ fn compound_chunk(f: &Value, mat: &str) -> Result<crate::scene::ChunkDesc, Strin
         h.get("faces")?.as_array()?.iter().map(|f| f.as_array().map(|i| i.iter().filter_map(|k| k.as_u64().map(|k| k as usize)).collect())).collect()
     };
     let parts: Vec<(Vec<Vec3>, Option<Vec<Vec<usize>>>)> = hulls.iter().map(|h| (points(h), faces(h))).collect();
+    // A hull whose stored faces do not close (an edge used once, e.g. a face split
+    // along a T-junction) is the convex hull of its own points: the same solid, with
+    // faces recomputed. Only points that do not span a solid are an error.
+    // Points that span no solid at all (a flat sheet) are left out like the zero-volume
+    // hulls below.
+    let parts: Vec<(Vec<Vec3>, Option<Vec<Vec<usize>>>)> = parts
+        .into_iter()
+        .filter_map(|(p, fc)| match &fc {
+            Some(f) if ConvexHull::of_part(&p, Some(f)).is_err() => ConvexHull::new(&p).is_ok().then_some((p, None)),
+            _ => Some((p, fc)),
+        })
+        .collect();
+    if parts.is_empty() {
+        return Err("no hull spans a solid".into());
+    }
     let mass: Vec<_> = parts
         .iter()
         .enumerate()
         .map(|(k, (p, fc))| ConvexHull::of_part(p, fc.as_deref()).map(|h| h.unit_mass()).map_err(|e| format!("hull {k}: {e}")))
         .collect::<Result<_, _>>()?;
+    // Flat (zero-volume) hulls baked into a compound add no volume and no mass, and their
+    // centroid is undefined: leave them out while the fragment keeps real hulls (rubble's
+    // importer does the same). A fragment of flat hulls only is rejected (equivalent box).
+    let largest = mass.iter().map(|m| m.volume).fold(0.0f64, f64::max);
+    let keep: Vec<bool> = mass.iter().map(|m| m.volume > 1e-9 * largest).collect();
+    if largest <= 0.0 {
+        return Err("every hull has zero volume".into());
+    }
+    let parts: Vec<_> = parts.into_iter().zip(&keep).filter(|(_, k)| **k).map(|(p, _)| p).collect();
+    let mass: Vec<_> = mass.into_iter().zip(&keep).filter(|(_, k)| **k).map(|(m, _)| m).collect();
     let volume: f64 = mass.iter().map(|m| m.volume).sum();
     let center = mass.iter().fold(Vec3::ZERO, |c, m| c + m.centroid * m.volume) / volume;
     let mut inertia = Mat3::ZERO;
@@ -194,8 +219,14 @@ fn compound_chunk(f: &Value, mat: &str) -> Result<crate::scene::ChunkDesc, Strin
 pub fn import(path: &std::path::Path, name: &str) -> Result<Scene, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let json: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    import_value(&json, name).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// [`import`] from an already parsed `shardwright-stress/1` document (e.g. one written
+/// in memory from a fracture GLB by rubble's `engine-fracture`).
+pub fn import_value(json: &Value, name: &str) -> Result<Scene, String> {
     if json["format"] != "shardwright-stress/1" {
-        return Err(format!("{}: not a shardwright-stress/1 export", path.display()));
+        return Err("not a shardwright-stress/1 export".into());
     }
     let level = json["bond_level"].as_u64().ok_or("no bond_level")?;
     let frags = json["fragments"].as_array().ok_or("no fragments")?;

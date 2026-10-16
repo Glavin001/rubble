@@ -6,6 +6,7 @@
 //! No GPU or windowing dependencies, so it can also back a wasm host later.
 
 pub mod asset;
+pub mod cook;
 pub mod scene;
 pub mod stress_export;
 
