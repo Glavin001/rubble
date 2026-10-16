@@ -42,6 +42,9 @@
 //! colliders filtered out of every pair. Capacity is therefore consumed by every
 //! rebuilt body; `RubbleEngine::with_capacity` sizes it.
 
+#[cfg(feature = "gpu")]
+pub mod render;
+
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -229,9 +232,14 @@ fn cook(b: &EngineBody, arena: &mut HullArena) -> Cooked {
                         });
                     }
                     Some(points) => {
-                        let local: Vec<glam::Vec3> = points.iter().map(|p| gv(to_body.rotate(s.local.transform_point(*p) - com))).collect();
-                        let hull = ConvexHull::from_points(&local).unwrap_or_else(|e| panic!("chunk {:?}: hull not accepted by rubble: {e}", s.chunk));
+                        // The hull in its chunk frame (as the asset gives it), placed by the
+                        // collider's pose: corners rotated into the body frame and rounded to
+                        // f32 there can tip a nearly coplanar face out of convexity.
+                        let q = (to_body * s.local.rotation).normalized();
+                        let hull = ConvexHull::from_points(&points.iter().map(|p| gv(*p)).collect::<Vec<_>>())
+                            .unwrap_or_else(|e| panic!("chunk {:?}: hull not accepted by rubble: {e}", s.chunk));
                         let (hull, offset) = hull.recentered();
+                        let offset = gv(to_body.rotate(s.local.position - com) + q.rotate(rv(offset)));
                         let base = arena.insert(&hull).unwrap_or_else(|e| panic!("chunk {:?}: hull arena: {e}", s.chunk));
                         colliders.push(Collider {
                             body: 0,
@@ -240,7 +248,7 @@ fn cook(b: &EngineBody, arena: &mut HullArena) -> Cooked {
                             generation: 0,
                             local_pos: offset.to_array(),
                             density,
-                            local_rot: [0.0, 0.0, 0.0, 1.0],
+                            local_rot: glam_quat(q).to_array(),
                             params: convex_collider_params(base, 1.0, hull.bounding_radius()),
                         });
                     }
