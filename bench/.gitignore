@@ -1,0 +1,7 @@
+/target
+/results/
+/scenes/out/
+/adapters/three-avbd/node_modules/
+/adapters/physx/build/
+!Cargo.lock
+/third_party/*/
