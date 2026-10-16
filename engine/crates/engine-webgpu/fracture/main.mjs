@@ -33,7 +33,12 @@ const rates=createRates(value=>{
  $('sim-speed').textContent=value?`${value.speed.toFixed(2)}×`:'—';
  $('step-ms').textContent=value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:`target ${stepHz()} TPS`;
  $('frame-ms').textContent=value?`${value.frameMs.toFixed(1)} ms/frame`:'frames / second';
- $('timing').textContent=value?.stepMs?`Physics: ${value.encodeMs.toFixed(1)} ms CPU submit + ${value.waitMs.toFixed(1)} ms GPU / readback wait`:'TPS counts physics ticks; FPS counts rendered frames.';
+ // Per tick: CPU time encoding and submitting the GPU work, then time spent
+ // waiting on the GPU (the readback, or a full queue of overlapped ticks).
+ // Sliced ticks run between frames, so no wait is measured for them.
+ $('timing').textContent=!value?.stepMs?'TPS counts physics ticks; FPS counts rendered frames.':
+  value.sliced?`Physics per tick: ${value.encodeMs.toFixed(1)} ms CPU encode; GPU work spread across frames`:
+  `Physics per tick: ${value.encodeMs.toFixed(1)} ms CPU encode + ${value.waitMs.toFixed(1)} ms waiting on the GPU`;
 },undefined,()=>stepHz());
 document.addEventListener('visibilitychange',()=>{last=0;accumulator=0;rates.reset()});
 const setStatus=text=>{status.textContent=text;status.classList.remove('error')};

@@ -302,7 +302,7 @@ const staging=device.createBuffer({size:COUNTER_BYTES,usage:GPUBufferUsage.MAP_R
 const snapshot=device.createBuffer({size:scene.bodies.length*112,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
 const bodyCount=bodies.length,colliderCount=colliders.length,sleepRounds=Math.max(0,Math.min(16,cfg.sleepRounds??8));
 let last={contact:0,candidate:0,awake:bodyCount-1,color:16,manifold:0,overflow:0,convexSmall:0,convexLarge:0},steps=0,parity=0,shots=0;
-let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false;
+let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
 
     // Reused every step — allocating these in writeHost showed up as wall−GPU gap on ring.
     const scratchU32 = new Uint32Array(64);
@@ -706,7 +706,7 @@ return {
    if(slices)throw new Error('A sliced step is already in flight');
    // Skip only when the counters describe the latest tick (see readCountersNow).
    if(initialized&&last.awake===0&&countedSteps===steps){steps++;submittedSteps=countedSteps=steps;timing={wallMs:0,encodeMs:0,waitMs:0};return false}
-   sliceStart=performance.now();slices=encodeSlices();return true;
+   sliceStart=performance.now();slices=encodeSlices();sliceEncodeMs=performance.now()-sliceStart;return true;
  },
  submitSlices(n=1){
    if(!slices)return true;
@@ -721,7 +721,8 @@ return {
    // readback is still mapping keeps the previous counters one step longer.
    if(readPending)return;
    readPending=true;try{await readCounters()}finally{readPending=false}
-   timing={wallMs:performance.now()-sliceStart,encodeMs:0,waitMs:0,sliced:true};
+   // Slices are submitted over several frames: no GPU wait to report.
+   timing={wallMs:performance.now()-sliceStart,encodeMs:sliceEncodeMs,waitMs:0,sliced:true};
    if(last.overflow){manifoldsValid=false;throw new Error(`Physics capacity exceeded (0x${last.overflow.toString(16)}); choose a coarser level`);}
  },
  // Advances one real step with GPU timestamps. Default: one compute pass per
@@ -859,9 +860,12 @@ return {
    // Skip all-asleep steps only when the counters describe the latest tick.
    if(initialized&&last.awake===0&&countedSteps===steps){steps+=count;submittedSteps=countedSteps=steps;timing={wallMs:0,encodeMs:0,waitMs:0};return;}
    const start=performance.now();
+   // CPU encode/submit time only; a full overlap queue's wait for the GPU is
+   // timed separately (it is GPU time, not CPU work).
+   let encode=0,queueWait=0;
    for(let i=0;i<count;i++){
-     submitPhysics(reuseManifolds);
-     if(!wait){inFlight.push(device.queue.onSubmittedWorkDone());if(inFlight.length>MAX_IN_FLIGHT)await inFlight.shift()}
+     const t0=performance.now();submitPhysics(reuseManifolds);encode+=performance.now()-t0;
+     if(!wait){inFlight.push(device.queue.onSubmittedWorkDone());if(inFlight.length>MAX_IN_FLIGHT){const t1=performance.now();await inFlight.shift();queueWait+=performance.now()-t1}}
    }
    const submitted=performance.now();
    if(!wait){
@@ -869,7 +873,7 @@ return {
        overlapRead=readCounters().then(()=>{const end=performance.now();
          // Per-tick time from throughput between background reads: a single
          // read also waits for the ticks queued ahead of it.
-         if(lastRead&&countedSteps>lastRead.steps)timing={wallMs:(end-lastRead.time)/(countedSteps-lastRead.steps),encodeMs:(submitted-start)/count,waitMs:0,overlapped:true};
+         if(lastRead&&countedSteps>lastRead.steps)timing={wallMs:(end-lastRead.time)/(countedSteps-lastRead.steps),encodeMs:encode/count,waitMs:queueWait/count,overlapped:true};
          lastRead={time:end,steps:countedSteps};
          if(last.overflow)overlapError=new Error(`Physics capacity exceeded (0x${last.overflow.toString(16)}); choose a coarser level`);
        }).finally(()=>{overlapRead=null});
@@ -879,7 +883,7 @@ return {
    await flushOverlap();
    lastRead=null;await readCounters();const end=performance.now();
    // Includes queue execution and mapAsync synchronization, not pure GPU time.
-   timing={wallMs:(end-start)/count,encodeMs:(submitted-start)/count,waitMs:(end-submitted)/count};
+   timing={wallMs:(end-start)/count,encodeMs:encode/count,waitMs:(end-start-encode)/count};
    if(last.overflow){manifoldsValid=false;throw new Error(`Physics capacity exceeded (0x${last.overflow.toString(16)}); choose a coarser level`);}
  },
  // Wait until every overlapped tick has run and the counters are current.
