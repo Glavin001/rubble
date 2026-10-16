@@ -87,14 +87,22 @@ A quiet cluster is excluded only while the GPU provably does nothing to it:
    - The coupling keeps rubble's free bodies awake so their support reactions reach the stress solve.
    - Freezing a sleeping body's loads into the solve would let rubble sleep debris and cars.
    - Quiet anchored houses already cost nothing.
-7. **Swept collision (CCD) in rubble's Rust host.**
-   - rubble's `ccd_classify`/`ccd_sweep` kernels are never dispatched by the Rust host, so a fast body substeps the whole rigid scene. That costs 2.4–3 ms per rubble step, 11 steps per frame on the 40 m/s free-wall ram: 100 ms there against PhysX GPU's 67 ms, the one regime where rubble is slower.
-   - Wiring the kernels changes how fast contacts resolve, as PhysX's CCD does.
+7. **Swept collision (CCD) in rubble (engine work, changes behaviour).**
+   - A fast body makes the coupling sub-step the whole rigid scene: 11 rubble steps per frame on the 40 m/s free-wall ram, the one regime where rubble is behind PhysX GPU (88 against 67 ms median). It also costs 2–4 % on b5 at 30–40 m/s before impact.
+   - rubble has no usable CCD to switch on: `ccd_classify` flags fast bodies, but `ccd_sweep` is a plane-only stub ("stretch goal") with no box or hull time of impact.
+   - The sub-steps are not avoidable without it. A measured shortcut took one engine step when the fast body's swept bounds met nothing and every other body was at rest. It never applied: the ram is in an impact island from its first frame, and all 168 of its sub-steps come after the punch-through, among moving debris, where they stop it tunnelling.
+   - Closing the gap means building swept collision for boxes and hulls (conservative advancement or speculative contacts) in `world_step.slang`, then measuring it against the oracle. That is engine-owner work.
 
 7a. **Merge rubble's grid broadphase fix (8352765, on the Blast branch).**
     - The grid broadphase drops static pairs below the querying collider's index once there are more than 512 colliders, so debris can fall through anchored structures.
     - The fix is correct. It makes b8_sudden over-break (36 bonds against the oracle's 11), because the engine's contact-to-load path then over-breaks where the oracle uses its own penalty contact.
     - This is a decision for the engine owners: take it together with a fix to that path.
+
+7b. **rubble: read the previous step's counts on the GPU (lossless, engine owners).**
+    - Each AVBD step's uniforms carry the previous step's contact and manifold counts (`write_host_uniforms`: warm-start hash size, previous contact range), so the host must read the counters back before it can record the next step.
+    - If the kernels read those counts from the counters buffer instead, the coupling could record a frame's substeps back to back, with the CPU encoding (about a third of a rubble step) overlapping the GPU.
+    - That would recover about 1 ms per substep where rubble substeps for a fast body: the free-wall ram's 11 per frame, and b5 at 30–40 m/s before impact.
+    - It is a change to `world_step.slang`, so it belongs to the engine owners, gated bit for bit on the engine's own suites.
 
 ## Large engineering steps (lossless; scope needs a go-ahead)
 
