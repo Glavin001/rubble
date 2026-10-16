@@ -6,14 +6,8 @@
 import {createSimulation} from './simulation.mjs';
 
 export const FLAG_BOND_PRELOAD=2;
-// Look-ahead contacts (params.flags 16384) stay off with bonds: bonded pieces
-// still break apart at 100+ m/s (a bond-solver instability, sleep
-// investigation 2026-10-16), and their swept bounds overflow the candidates.
-const FLAG_SPEC_VELOCITY=16384;
-
-export async function preloadBonds(device, scene0, {maxSteps=600}={}) {
-  if(!scene0.joints?.length)return scene0;
-  const scene={...scene0,params:{...scene0.params,flags:(scene0.params.flags??0)&~FLAG_SPEC_VELOCITY}};
+export async function preloadBonds(device, scene, {maxSteps=600}={}) {
+  if(!scene.joints?.length)return scene;
   const dynamic=i=>i>0&&i<scene.projectileStart&&scene.bodies[i].invMass>0;
   const awake={...scene,bodies:scene.bodies.map((b,i)=>dynamic(i)?{...b,flags:9}:b),
     params:{...scene.params,flags:(scene.params.flags??0)|FLAG_BOND_PRELOAD}};

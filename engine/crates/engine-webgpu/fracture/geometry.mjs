@@ -40,14 +40,30 @@ export const JOINT_BOND=7, JOINT_BYTES=192;
 // Gauss-Seidel (a released pair hangs in the air) and f32 6x6 solves lose
 // precision; the few capped rows are still the stiffest in the structure.
 export const BOND_PENALTY_SCALE=0.5, BOND_PENALTY_CAP=5;
-export function scaleBondSprings(joints, bodies, dt, scale=BOND_PENALTY_SCALE, cap=BOND_PENALTY_CAP) {
+// A linear row also turns its bodies through the anchor's lever arm, so it is
+// capped by the row's effective mass at the anchor, 1/(1/m + (r×d)ᵀI⁻¹(r×d)),
+// not by m alone: a 6 cm sliver bonded at its end otherwise saw ~100x its
+// smallest inertial term about that axis, and light bonded pieces spun up in
+// Gauss-Seidel (sleep investigation 2026-10-16). effectiveMass=false keeps the
+// older m-only cap.
+export function scaleBondSprings(joints, bodies, dt, scale=BOND_PENALTY_SCALE, cap=BOND_PENALTY_CAP, {effectiveMass=true}={}) {
   if(!joints.length)return joints;
   const median=v=>{const s=[...v].sort((a,b)=>a-b);return s[s.length>>1]};
   const inertial=i=>bodies[i]?.invMass>0?{m:1/bodies[i].invMass,I:1/Math.max(...bodies[i].invI)}:{m:Infinity,I:Infinity};
   const lighter=j=>{const a=inertial(j.bodyA),b=inertial(j.bodyB);return {m:Math.min(a.m,b.m),I:Math.min(a.I,b.I)}};
   const s=scale*median(joints.map(j=>lighter(j).m))/(dt*dt)/median(joints.map(j=>j.k[0]));
-  return joints.map(j=>{const {m,I}=lighter(j),capLin=cap*m/(dt*dt),capAng=cap*I/(dt*dt);
-    return {...j,k:j.k.map((x,r)=>Math.min(x*s,r<3?capLin:capAng))}});
+  // Effective mass of body i along body-frame direction d at body-frame anchor r.
+  const rowMass=(i,r,d)=>{const b=bodies[i];if(!(b?.invMass>0))return Infinity;
+    const w=cross(r,d);return 1/(b.invMass+w[0]*w[0]*b.invI[0]+w[1]*w[1]*b.invI[1]+w[2]*w[2]*b.invI[2])};
+  return joints.map(j=>{const {m,I}=lighter(j),capAng=cap*I/(dt*dt);
+    let capRows=[0,1,2].map(()=>cap*m/(dt*dt));
+    if(effectiveMass&&j.normal&&j.frameU){
+      const n=j.normal,u=j.frameU,dirsA=[n,u,cross(n,u)];
+      const qA=bodies[j.bodyA]?.q??[0,0,0,1],qB=bodies[j.bodyB]?.q??[0,0,0,1];
+      capRows=dirsA.map(dA=>{const dB=inverseRotate(qB,rotate(qA,dA));
+        return cap*Math.min(rowMass(j.bodyA,j.anchorA,dA),j.world?Infinity:rowMass(j.bodyB,j.anchorB,dB))/(dt*dt)});
+    }
+    return {...j,k:j.k.map((x,r)=>Math.min(x*s,r<3?capRows[r]:capAng))}});
 }
 
 // Elastic bond springs, Shardwright's reference model (frac-validate
@@ -509,5 +525,5 @@ export function buildScene(asset, level, {maxHullVertices}={}) {
   return {projectileStart,projectileCount,projectileRadius,projectileMass,projectileVertices:new Float32Array(projectileVertices),bodies,colliders,joints:scaledJoints,hullData:arena.data,skippedHulls,vertices:new Float32Array(vertices),lines:new Float32Array(lines),selected,bonds,byId,
     extent,extentX:hi[0]-lo[0],extentZ:hi[2]-lo[2],height,copies:1,instanceStride:0,center:[0,height*.5+placement[1]+lo[1],0],gridCellSize:gridConfig(colliders).base,
     // Flags: 1 reuse contacts, 64 world-frame inertia (FLAG_WORLD_INERTIA).
-    params:{flags:454849,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
+    params:{flags:4124865,iterations:8,dt:1/120,gravityY:-9.81,contactOffset:.002,alpha:.95,sleepLin:.03,sleepAng:.05,sleepTime:1}};
 }

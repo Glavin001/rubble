@@ -882,7 +882,8 @@ return {
    const size=jointCount*JOINT_BYTES,read=device.createBuffer({size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
    try{const enc=device.createCommandEncoder();enc.copyBufferToBuffer(bufs[5],0,read,0,size);device.queue.submit([enc.finish()]);
      await read.mapAsync(GPUMapMode.READ);const f=new Float32Array(read.getMappedRange().slice(0));read.unmap();const w=JOINT_BYTES/4;
-     return {lambda:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+24,i*w+30))),k:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+30,i*w+36)))};}
+     const u=new Uint32Array(f.buffer);
+     return {lambda:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+24,i*w+30))),k:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+30,i*w+36))),flags:Array.from({length:jointCount},(_,i)=>u[i*w+3])};}
    finally{read.destroy()}
  },
  // Joint flags (bit 0 = broken), read back for tests and the HUD.
