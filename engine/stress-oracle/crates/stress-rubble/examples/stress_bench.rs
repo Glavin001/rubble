@@ -96,6 +96,19 @@ pub fn towns(seconds: f64) -> Vec<(&'static str, Scene)> {
     out
 }
 
+/// The scale set: 256 copies of house-1story, intact or with four of them rammed (the
+/// target of hundreds of houses).
+pub fn scale(seconds: f64) -> Vec<(&'static str, Scene)> {
+    let mut out = Vec::new();
+    for (label, n, rams) in [("town256_idle", 256, 0), ("town256_four_rams", 256, 4)] {
+        let town = stress_ref::scenes::pack_town(&house(), n, 2.0);
+        let mut s = configure(if rams > 0 { stress_ref::scenes::bombarded_exact(town, rams) } else { town }, seconds);
+        s.name = label.into();
+        out.push((label, s));
+    }
+    out
+}
+
 pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut idle = configure(house(), seconds);
     idle.name = "house_idle".into();
@@ -159,7 +172,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let engine: Box<dyn stress_ref::engine::RigidEngine> = if two_devices {
         stress_rubble::RubbleEngine::boxed(Vec3::from_array(scene.gravity)).expect("rubble engine")
     } else {
-        Box::new(stress_rubble::RubbleEngine::with_device(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone()).expect("rubble engine"))
+        Box::new(stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine"))
     };
     let mut w = stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world");
     // rubble's integrated pipeline: routing before the step, no frame rewind.
@@ -205,7 +218,7 @@ fn main() {
         match a.as_str() {
             "--solver" => solver = args.next().expect("--solver NAME"),
             "--only" => only = args.next(),
-            "--set" => set = args.next().expect("--set realtime|accuracy|towns"),
+            "--set" => set = args.next().expect("--set realtime|accuracy|towns|scale"),
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).expect("--seconds S"),
             "--repeats" => repeats = args.next().and_then(|v| v.parse().ok()).expect("--repeats N"),
             other => panic!("unknown argument {other}"),
@@ -216,6 +229,7 @@ fn main() {
     let list = match set.as_str() {
         "accuracy" => accuracy(seconds),
         "towns" => towns(seconds),
+        "scale" => scale(seconds),
         _ => regimes(seconds),
     };
     for (name, scene) in list {
