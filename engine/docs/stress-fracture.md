@@ -75,25 +75,59 @@ floor drop.
 
 `crates/stress-rubble/tests/integrated.rs` keeps these properties as tests.
 
+## Accuracy against the oracle (2026-10-16 rerun)
+
+`docs/stress-fracture-benchmark.md`, "Agreement with the oracle", has each solver's
+outcomes over three repeats.
+
+**rubble against PhysX GPU (same coupled frame, different engine).** They agree within
+the GPU stress solve's own run-to-run spread on every regime except b8's sudden column
+removal: rubble 10/10, PhysX 14/14, oracle 11/11, so rubble is closer.
+
+**Both coupled pipelines against the oracle:**
+- **Exit speeds.**
+  - Within 0.07 m/s on the free-wall ram, the rammed house, the house car and b5 at 10–15 m/s.
+  - 0.5–0.85 m/s high (2–3 %) on b5's punch-through at 20–40 m/s.
+- **Debris counts differ.** After a punch-through the coupled frames keep the plug in a few large pieces: 3 fragments against the oracle's 107 at 30 m/s, and 32 against 106 at 20 m/s. At 10–15 m/s they produce more: 51–95 against 45–77.
+  - The cause: once an impact island ends, the engine owns debris contact, while the oracle keeps every chunk in its own explicit contact until the end.
+  - The fix would be to keep debris in its island until it separates. That changes behaviour and costs time, so it is in the recommendations.
+- **Exact matches.** Idle, settling, support-loss (b4) and floor-drop outcomes match exactly.
+
 ## Cost
 
 `engine/stress-oracle/scripts/stress_bench_report.py` turns `stress_bench` runs into the
 three-way table (oracle CPU, PhysX GPU, rubble); the measured tables are in
-`docs/stress-fracture-benchmark.md` (M3 Max, 2026-10-16, three repeats; other GPU jobs
-were running, so single cells are noisy by about 10 %).
+`docs/stress-fracture-benchmark.md`. That is the 2026-10-16 rerun after the lossless host
+work (`reference/bench-2026-10-16b`, M3 Max, three repeats; other sessions shared the GPU
+at times, so single cells are noisy). Medians in rubble's production configuration (no
+rewinds) against PhysX GPU:
 
-- Destruction frames cost the same on both GPU pipelines, because both spend them in the
-  same stress solve: b5 and house-1story rammed within 0-10 % (median house ram 153 ms
-  against 145 ms), against 1.6-5.5 s per frame for the CPU oracle.
-- rubble is faster at town scale: 16 houses idle 35 ms against 37 ms median (44 against
-  71 mean), 64 houses idle 140 against 160 ms, 16 houses with one rammed 408 against
-  472 ms.
-- rubble is slower where its rigid steps dominate: each AVBD step costs 2.4-4.7 ms even
-  with a handful of bodies (dispatch and readback latency, not work), so the floor drop
-  (one rigid step per frame) runs 11.8 against 5.0 ms median, and the free-wall ram, whose
-  40 m/s ram makes the coupling sub-step the engine 11 times a frame, 97 against 67 ms.
+| regime | PhysX GPU | rubble | |
+|---|---|---|---|
+| house idle | 5.2 ms | 1.5 ms | rubble 3.5x faster |
+| 16-house town idle | 68 ms | 5.2 ms | 13x |
+| 64-house town idle | 176 ms | 12.9 ms | 14x |
+| 16 houses, one rammed | 415 ms | 302 ms | 1.4x |
+| house-1story rammed | 150 ms | 150 ms | equal (GPU stress solve) |
+| b5 wall, 10-40 m/s | 121-382 ms | 131-381 ms | equal within 9 % |
+| house hit by a car | 40 ms | 30 ms | 1.4x |
+| b8 sudden support loss | 20 ms | 10 ms | 2x |
+| floor drop | 7.0 ms | 5.6 ms | 1.25x |
+| free-wall ram, 40 m/s | 67 ms | 100 ms | PhysX 1.5x faster (rubble sub-steps its rigid scene for the fast ram; no CCD in rubble's Rust host) |
 
-Where the time goes in rubble's pipeline (house rammed, 15 frames): the stress solver's GPU
-substeps about 73 % (≈44 µs per substep, three kernels: contact islands, contact forces,
-sums and bonds), host transfers and splits about 8 %, syncing bodies with rubble 3 %,
-rubble's rigid steps about 1 %, and the rest (about 14 %) host routing and contact planning.
+The CPU oracle runs 1.9-4.9 s per destruction frame.
+
+Where the time goes now:
+- Idle and resting scenes: settled anchored clusters are left out of the GPU tables
+  (`GpuSolver::quiet_clusters`, bit-identical), and the rest of the host work was cut
+  bit for bit (see `docs/stress-fracture-recommendations.md`).
+- Destruction frames are GPU-bound. On house-1story rammed, 89 % of the main thread
+  waits for the stress substeps, about 44 µs each uncontended. Three dependent
+  dispatches make up a substep: contact islands, contact forces, and sums with bonds.
+  Three trivial dispatches cost 6 µs (`examples/dispatch_floor.rs`), so the rest is
+  kernel execution. These trials found no lossless gain beyond about 5 %:
+  - 512-thread islands: -5 % on two scenes, +2 % on the third, and not bit-identical;
+  - a blocked bond-load gather: 0 %;
+  - narrower barriers: 0 %.
+
+  The number of substeps is the multiplier.
