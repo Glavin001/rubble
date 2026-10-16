@@ -11,8 +11,10 @@
 //   params   JSON merged into scene.params, e.g. {"flags":97} (measurement only)
 //   sleepdiag=N [every=120]   why bodies stay awake (sleep-diag.mjs), N ticks after the shot
 //   sleeptrace=T [ticks pick bodies]   per-tick trace of the worst movers from tick T
+//   wakewatch=T [to]    bodies woken each tick and their awake partners
 //   sleepwatch=T [to]   bodies that start each burst of motion between ticks T and to
 //   bonds    1: the lab's breakable bonds (experimental), preloaded as in the lab
+//   level    fracture level override for the GLB scenes
 //   columns, rows   grid layout override (grid scenes only)
 //   scene=pairs a=<shape> b=<shape> count=N reuse=0|1   collision-cost benchmark
 //            (shape-bench.mjs): N static bases of shape a, each with shape b resting on it.
@@ -24,7 +26,7 @@ import {buildCuboidHouse} from './cuboid-house.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {buildPairScene} from './shape-bench.mjs';
-import {runSleepDiag,runSleepTrace,runSleepWatch} from './sleep-diag.mjs';
+import {runSleepDiag,runSleepTrace,runSleepWatch,runWakeWatch} from './sleep-diag.mjs';
 import {hullView,hullBase} from './geometry.mjs';
 
 // Same bundled scenes as the lab (main.mjs samples), without bond preloading.
@@ -32,8 +34,9 @@ const SCENES={house:{file:'veneer-house.glb'},grid:{file:'veneer-house.glb',layo
  suburb:{file:'veneer-house.glb',layout:{suburb:true},level:2},
  cuboidGrid:{procedural:true,layout:{columns:7,rows:7}},cuboids:{procedural:true,layout:{suburb:true}}};
 
-async function buildNamed(name,device,bonds,layout){
- const known=SCENES[name];if(!known)throw new Error(`Unknown scene ${name}`);
+async function buildNamed(name,device,bonds,layout,levelOverride){
+ const known0=SCENES[name];if(!known0)throw new Error(`Unknown scene ${name}`);
+ const known=levelOverride===null?known0:{...known0,level:levelOverride};
  const entry=layout&&known.layout&&!known.layout.suburb?{...known,layout:{...known.layout,...layout}}:known;
  if(entry.procedural){
   const one=buildCuboidHouse(),scene=(entry.layout.suburb?buildSuburb:buildGrid)(null,0,{...entry.layout,base:one});
@@ -56,7 +59,7 @@ async function run(){
    maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  let gpuError=null;device.addEventListener('uncapturederror',e=>{gpuError??=String(e.error.message)});
  const layout=q.has('columns')||q.has('rows')?{...(q.has('columns')?{columns:num('columns',7)}:{}),...(q.has('rows')?{rows:num('rows',7)}:{})}:null;
- const built=name==='pairs'?buildPairScene({a:q.get('a')??'box',b:q.get('b')??'box',count:num('count',4096)}):await buildNamed(name,device,num('bonds',0)===1,layout);
+ const built=name==='pairs'?buildPairScene({a:q.get('a')??'box',b:q.get('b')??'box',count:num('count',4096)}):await buildNamed(name,device,num('bonds',0)===1,layout,q.has('level')?num('level',0):null);
  if(name==='pairs'&&num('reuse',0)===1)built.params={...built.params,flags:built.params.flags|1};
  const scene={...built,capacity:{...built.capacity,...budget},params:{...built.params,...(q.has('params')?JSON.parse(q.get('params')):{})}};
  if(num('awake',0)===1)scene.bodies=scene.bodies.map(b=>b.flags&1?{...b,flags:b.flags&~4}:b);
@@ -102,6 +105,11 @@ async function run(){
   for(let i=0;i<scene.bodies.length;i++){const o=i*28,v=Math.hypot(f[o+12],f[o+13],f[o+14]),w=Math.hypot(f[o+16],f[o+17],f[o+18]);
    if(![f[o],f[o+1],f[o+2],v,w].every(Number.isFinite)&&bad.length<10)bad.push(i);if(v>vmax)vmax=v;if(w>wmax)wmax=w}
   sim.dispose();return {error,rows,bad,vmax,wmax,gpuError};
+ }
+ if(num('wakewatch',0)>0){
+  if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
+  const report=await runWakeWatch(sim,scene,{from:num('wakewatch',0),to:num('to',1500)});
+  sim.dispose();return {scene:name,wake:report,gpuError};
  }
  if(num('sleepwatch',0)>0){
   if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});

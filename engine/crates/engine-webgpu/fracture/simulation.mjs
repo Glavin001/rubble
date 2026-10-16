@@ -17,6 +17,9 @@ const roundSlot = (round) => round < 48 ? round : round + 20;
 const PASS_ALIGN=256;
 // Pass values: 0..95 as below, 96..159 = 256 | colour (post-stabilization primal pass).
 const PASS_SLOTS=160,STAB_PASS=96,FLAG_POST_STAB=4096;
+// params.flags 262144: carry resting pairs (and their warm-start λ) through sleep
+// from last step's manifolds (world_step carry_rest_pairs; Rust ENGINE_REST=carry).
+const FLAG_CARRY_REST=262144;
 const nextPow2=n=>2**Math.ceil(Math.log2(Math.max(1,n)));
 const budget={contactsPerCollider:32,candidatesPerCollider:64,...scene.capacity};
 // Incremental colouring recolours only changed neighbourhoods but lets the
@@ -101,7 +104,7 @@ const warmTagPeriod=2**(32-warmValueBits)-2;
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_sort',
       'init_colors', 'color_bodies', 'color_bodies_local', 'color_bodies_tail', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
       'record_color_degrees', 'write_color_args', 'predict_bodies', 'pack_solver_contacts', 'solve_primal_color', 'solve_primal_sparse',
-      'solve_dual', 'extract_velocity_sleep',
+      'solve_dual', 'extract_velocity_sleep', 'carry_rest_pairs',
       'joint_hash_clear', 'joint_hash_insert', 'bond_wake', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
     ];
     let hasConvex = scene.colliders.some((c) => c.shape === 3);
@@ -362,6 +365,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
       warmClear = !warmTagged || cycle !== warmCycle;
       warmCycle = cycle;
       s[24] = csrBase;
+      s[28] = carryRest() ? 1 : 0;
       return s;
     }
 
@@ -381,6 +385,7 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
       bodies.every((b) => !(b.flags & 2));
     // With most bodies awake the full pass is faster (no per-body search, even
     // load); both paths give identical bounds, so pick by last step's count.
+    const carryRest = () => (params.flags & FLAG_CARRY_REST) !== 0;
     const movedOnlyBounds = () => boundsSortable && !boundsStale && initialized && budget.movedOnlyBounds !== false &&
       (budget.movedOnlyBounds === true || last.awake * 4 < bodyCount);
 
@@ -404,6 +409,8 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
       // Last step's awake count (its awake list is still in gAwakeList) -> HOST_S(6).
       if (s[19]) enc.copyBufferToBuffer(bufs[7], 20, bufs[6], 80 + 6 * 4, 4);
+      // Last step's manifold count -> HOST_S(13), for the resting-pair carry.
+      if (s[28] && steps > 0) enc.copyBufferToBuffer(bufs[7], 48, bufs[6], 80 + 13 * 4, 4);
       movedOnlyStep = s[19] !== 0;
       restStep = (s[25] & 1) !== 0;
       // Last step's sleep events -> HOST_S(5): any sleeper may be missing from R.
@@ -478,6 +485,12 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
         dispWork(pass, 'broadphase_query_finer', 77);
       } else disp(pass, 'broadphase_query', nCols);
       disp(pass, 'write_work_args', 64);
+      if (carryRest()) {
+        // Resting-pair carry: last step's manifolds (slot 72) are intact until
+        // narrowphase; recount candidates after the carried pairs join them.
+        dispWork(pass, 'carry_rest_pairs', 72);
+        disp(pass, 'write_work_args', 64);
+      }
       pass = phase('broadphase');
       if (reuse) {
         if (movedOnlyStep) dispWork(pass, 'update_refs', 78); // last step's awake list
