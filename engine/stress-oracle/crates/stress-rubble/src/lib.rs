@@ -735,9 +735,25 @@ impl RigidEngine for RubbleEngine {
         if !any_moving {
             return Vec::new();
         }
+        // `STRESS_RUBBLE_SPECULATIVE=1` (measurement only, off by default): instead of
+        // sub-stepping the whole scene for a fast body, one step whose speculative
+        // contact range (`contact_offset`, contacts still aim at zero gap) covers the
+        // farthest a CCD body travels in it. A behaviour change, measured, not adopted.
+        let mut offset = 0.01f32;
+        if n > 1 && std::env::var("STRESS_RUBBLE_SPECULATIVE").is_ok_and(|v| v == "1") {
+            let mut travel = 0.0f64;
+            for (_, e) in self.bodies.iter().filter(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)) {
+                let s = &all[e.id as usize];
+                travel = travel.max(glam::Vec3::from_array(s.linear_vel).length() as f64 * dt + glam::Vec3::from_array(s.angular_vel).length() as f64 * e.thin * dt);
+            }
+            offset = offset.max(travel as f32);
+            n = 1;
+            self.last_substeps = 1;
+        }
         let h = dt / n as f64;
         let mut params = self.sim.params();
         params.dt = h as f32;
+        params.contact_offset = offset;
         self.sim.set_params(params);
         let mut out = Vec::new();
         for _ in 0..n {
