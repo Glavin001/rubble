@@ -288,6 +288,9 @@ pub struct RubbleEngine {
     pub max_substeps: u32,
     /// Substeps of the last engine step.
     pub last_substeps: u32,
+    /// The GPU's body states as last read, while nothing has changed them since (a step,
+    /// a body written or added, a restore): `bodies_now` answers from it.
+    bodies_read: std::cell::RefCell<Option<Vec<BodyState>>>,
 }
 
 /// The default capacity: room for a few thousand bodies (every rebuilt cluster takes
@@ -348,6 +351,7 @@ impl RubbleEngine {
             substeps: 1,
             max_substeps: 256,
             last_substeps: 0,
+            bodies_read: std::cell::RefCell::new(None),
         })
     }
 
@@ -390,6 +394,7 @@ impl RubbleEngine {
             state.angular_vel = to_rubble(b.angular_velocity);
         }
         let id = self.sim.add_body(state);
+        self.bodies_changed();
         let cols: Vec<Collider> = c.colliders.iter().map(|col| Collider { body: id, ..*col }).collect();
         let key = b.key;
         let colliders = self.add_colliders(&cols, c.chunks.iter().map(|&chunk| Owner::Body { key, chunk }));
@@ -416,13 +421,14 @@ impl RubbleEngine {
     /// Retire a body: static where it stands, its colliders in no pair.
     fn remove_body(&mut self, key: BodyKey) {
         let Some(e) = self.bodies.remove(&key) else { return };
-        let mut s = self.sim.read_body(e.id);
+        let mut s = self.bodies_now()[e.id as usize];
         s.inv_mass = 0.0;
         s.inv_inertia = [0.0; 3];
         s.linear_vel = [0.0; 3];
         s.angular_vel = [0.0; 3];
         s.flags = 0;
         self.sim.write_bodies(e.id, &[s]);
+        self.bodies_changed();
         // A category no collider's mask includes, and a mask that admits none.
         let never = CollisionFilter { categories: 0x8000, mask: 0, group: 0 };
         for id in e.colliders.clone() {
@@ -447,6 +453,17 @@ impl RubbleEngine {
         }
     }
 
+    /// Every body's state as the GPU has it: read back once, then reused until a step,
+    /// a write or a new body changes the buffer (`bodies_changed`).
+    fn bodies_now(&self) -> Vec<BodyState> {
+        let mut read = self.bodies_read.borrow_mut();
+        read.get_or_insert_with(|| self.sim.download_bodies()).clone()
+    }
+
+    fn bodies_changed(&self) {
+        *self.bodies_read.borrow_mut() = None;
+    }
+
     fn sorted_keys(&self) -> Vec<BodyKey> {
         let mut keys: Vec<BodyKey> = self.bodies.keys().copied().collect();
         keys.sort();
@@ -461,11 +478,12 @@ impl RubbleEngine {
         s.flags = BodyFlags::Dynamic as u32 | BodyFlags::Awake as u32;
         s.sleep_timer = 0.0;
         self.sim.write_bodies(e.id, &[s]);
+        self.bodies_changed();
     }
 
     /// Total linear momentum of the dynamic bodies (oracle frame).
     pub fn momentum(&self) -> Vec3 {
-        let all = self.sim.download_bodies();
+        let all = self.bodies_now();
         self.bodies
             .values()
             .filter(|e| e.inv_mass > 0.0)
@@ -482,7 +500,7 @@ impl RubbleEngine {
             return;
         }
         let t = std::time::Instant::now();
-        let end = self.sim.download_bodies();
+        let end = self.bodies_now();
         profile::add("step.contacts.bodies", t);
         // Velocity of a body's material point `p` (rubble frame) at the start of the
         // engine step.
@@ -537,6 +555,7 @@ impl RigidEngine for RubbleEngine {
 
     fn add_ground(&mut self, height: f64) {
         let id = self.sim.add_body(BodyState::static_plane_support());
+        self.bodies_changed();
         let plane = Collider {
             body: id,
             shape: ShapeType::Plane as u32,
@@ -572,7 +591,7 @@ impl RigidEngine for RubbleEngine {
 
     fn step(&mut self, dt: f64, frozen: &[BodyKey], impulses: &[(BodyKey, Vec3, Vec3)]) -> Vec<EngineContact> {
         let _timer = Timer(std::time::Instant::now(), "step");
-        let mut all = self.sim.download_bodies();
+        let mut all = self.bodies_now();
         // Hold island bodies still.
         for k in frozen {
             let Some(e) = self.bodies.get(k) else { continue };
@@ -586,6 +605,7 @@ impl RigidEngine for RubbleEngine {
             s.angular_vel = [0.0; 3];
             let s = *s;
             self.sim.write_bodies(e.id, &[s]);
+        self.bodies_changed();
             self.frozen.push(*k);
         }
         // The scripted loads' impulses into driven bodies.
@@ -604,6 +624,7 @@ impl RigidEngine for RubbleEngine {
             s.angular_vel = (glam::Vec3::from_array(s.angular_vel) + dw).to_array();
             let s = *s;
             self.sim.write_bodies(e.id, &[s]);
+        self.bodies_changed();
         }
 
         // Substeps: CCD bodies move at most half their thinnest extent per substep.
@@ -626,6 +647,7 @@ impl RigidEngine for RubbleEngine {
         let mut out = Vec::new();
         for _ in 0..n {
             let t = std::time::Instant::now();
+            self.bodies_changed();
             if let Err(e) = self.sim.step() {
                 panic!("rubble step failed: {e:?} (capacity overflow)");
             }
@@ -639,7 +661,7 @@ impl RigidEngine for RubbleEngine {
 
     fn motion(&self) -> Vec<BodyMotion> {
         let _timer = Timer(std::time::Instant::now(), "motion");
-        let all = self.sim.download_bodies();
+        let all = self.bodies_now();
         self.sorted_keys()
             .into_iter()
             .map(|k| {
@@ -651,7 +673,7 @@ impl RigidEngine for RubbleEngine {
 
     fn set_motion(&mut self, states: &[BodyMotion]) {
         let _timer = Timer(std::time::Instant::now(), "set_motion");
-        let all = self.sim.download_bodies();
+        let all = self.bodies_now();
         for st in states {
             let Some(e) = self.bodies.get(&st.key) else { continue };
             if e.fixed {
@@ -698,6 +720,7 @@ impl RigidEngine for RubbleEngine {
         let _timer = Timer(std::time::Instant::now(), "restore");
         if let Some(saved) = self.saved.take() {
             self.sim.restore_state(&saved.snapshot);
+        self.bodies_changed();
             self.bodies = saved.bodies;
             self.owners = saved.owners;
             self.cols = saved.cols;
@@ -706,7 +729,7 @@ impl RigidEngine for RubbleEngine {
         }
         // Release any body still frozen at the saved instant.
         if !self.frozen.is_empty() {
-            let all = self.sim.download_bodies();
+            let all = self.bodies_now();
             for k in std::mem::take(&mut self.frozen) {
                 if let Some(e) = self.bodies.get(&k) {
                     let mut s = all[e.id as usize];

@@ -2103,7 +2103,8 @@ impl GpuSolver {
                     && cl.anchored
                     && (cl.driven || !m.config.integrate_rigid)
                     && !loaded[*ci]
-                    && cl.bonds.iter().all(|&bi| fatigue_still(cl.structure, bi))
+                    // An excluded cluster's bonds are not read back, so its verdict holds.
+                    && (self.excluded.binary_search(&cl.id).is_ok() || cl.bonds.iter().all(|&bi| fatigue_still(cl.structure, bi)))
             })
             .map(|(_, cl)| cl.id)
             .collect();
