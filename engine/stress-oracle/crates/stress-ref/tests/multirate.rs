@@ -314,13 +314,13 @@ fn multirate_energy_converges_in_free_vibration() {
     assert_converges_to_zero("free vibration, multirate", &errors, energy_floor(runs[runs.len() - 1].1));
 }
 
-/// At the default safety (0.9) the coarse bonds' interval is twice a step that is
-/// already near the slivers' stability limit, where impulse multiple-time-stepping can
+/// At safety 0.9 (A1's; the default is 0.5) the coarse bonds' interval is a multiple of a
+/// step already near the slivers' stability limit, where impulse multiple-time-stepping can
 /// resonate with the fast modes (Biesiadecki and Skeel 1993). Over 1e5 substeps of free
 /// vibration without damping the energy error stays bounded: the last tenth of the run
 /// is no worse than the first.
 #[test]
-fn multirate_energy_does_not_drift_at_the_default_safety() {
+fn multirate_energy_does_not_drift_at_a_high_safety() {
     let mut w = vibrating_wall(0.9, 1000, 0.25);
     let errors = energy_errors(&mut w);
     let tenth = errors.len() / 10;

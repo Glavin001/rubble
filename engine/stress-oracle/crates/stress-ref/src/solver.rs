@@ -1013,6 +1013,10 @@ impl ReferenceSolver {
     fn firing_bonds(&mut self, explicit: &[usize]) -> Vec<Vec<(usize, f64)>> {
         let open = self.multirate.open();
         let (tick, ticks) = (self.multirate.tick, self.multirate.ticks);
+        if !open {
+            // Every bond is evaluated: none waits any more.
+            self.multirate.last.clear();
+        }
         let mut out = Vec::with_capacity(explicit.len());
         for &ci in explicit {
             let cl = &self.clusters[ci];
