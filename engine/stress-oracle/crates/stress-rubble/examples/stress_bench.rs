@@ -291,7 +291,9 @@ fn main() {
         let (scene, islands) = ladder(scene, &config);
         let _ = islands;
         for repeat in 0..repeats.max(1) {
-            let run = match solver.as_str() {
+            // A run that panics (an engine failure) is reported as failed and the next
+            // scene runs, so one failing rung still reports the others.
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match solver.as_str() {
                 "oracle" => run_oracle(&scene),
                 #[cfg(feature = "gpu")]
                 "rubble-gpu" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, false, true, islands),
@@ -300,6 +302,14 @@ fn main() {
                 #[cfg(feature = "gpu")]
                 "rubble-gpu-2dev" => run_rubble_gpu(gpu.as_ref().unwrap(), &scene, true, false, islands),
                 other => panic!("unknown solver {other} (rubble-gpu needs --features gpu)"),
+            }));
+            let run = match run {
+                Ok(run) => run,
+                Err(e) => {
+                    let why = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                    println!("{}", serde_json::json!({"solver": solver, "config": config, "regime": name, "repeat": repeat, "failed": why}));
+                    continue;
+                }
             };
             println!(
                 "{}",
