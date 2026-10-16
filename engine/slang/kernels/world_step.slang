@@ -2128,16 +2128,39 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
         // Swap to box-vs-plane then flip normal / points for A=plane, B=box.
         BoxManifold mf = collideBoxPlane(posB, rotB, cb.params.xyz, ca.params.xyz, ca.params.w, margin);
         if (mf.count > 0)
-        {
-            mf.normal = -mf.normal;
-            for (int k = 0; k < mf.count; k++)
-            {
-                float3 tmp = mf.pts[k].pA;
-                mf.pts[k].pA = mf.pts[k].pB;
-                mf.pts[k].pB = tmp;
-            }
-            emitManifold(pair, ba, bb, ca, cb, mf, margin);
-        }
+            emitManifold(pair, ba, bb, ca, cb, flipManifold(mf), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_CAPSULE)
+    {
+        emitManifold(pair, ba, bb, ca, cb,
+            collideBoxCapsule(posA, rotA, ca.params.xyz, posB, rotB, cb.params.x, cb.params.y, speculativeMargin()), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_BOX)
+    {
+        BoxManifold mf = collideBoxCapsule(posB, rotB, cb.params.xyz, posA, rotA, ca.params.x, ca.params.y, speculativeMargin());
+        if (mf.count > 0)
+            emitManifold(pair, ba, bb, ca, cb, flipManifold(mf), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CAPSULE)
+    {
+        emitManifold(pair, ba, bb, ca, cb,
+            collideCapsules(posA, rotA, ca.params.x, ca.params.y, posB, rotB, cb.params.x, cb.params.y, speculativeMargin()), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_PLANE)
+    {
+        emitManifold(pair, ba, bb, ca, cb,
+            collideCapsulePlane(posA, rotA, ca.params.x, ca.params.y, cb.params.xyz, cb.params.w, margin), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_CAPSULE)
+    {
+        BoxManifold mf = collideCapsulePlane(posB, rotB, cb.params.x, cb.params.y, ca.params.xyz, ca.params.w, margin);
+        if (mf.count > 0)
+            emitManifold(pair, ba, bb, ca, cb, flipManifold(mf), margin);
         return;
     }
 
@@ -2254,22 +2277,6 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
             pB = transformPoint(posB, rotB, onBox);
             pA = posA + nrm * rGeo;
         }
-    }
-    else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CAPSULE)
-    {
-        float rA = ca.params.x;
-        float rB = cb.params.x;
-        float3 axA = quatRotate(rotA, float3(0, 1, 0));
-        float3 axB = quatRotate(rotB, float3(0, 1, 0));
-        float3 a0 = posA - axA * ca.params.y;
-        float3 a1 = posA + axA * ca.params.y;
-        float3 b0 = posB - axB * cb.params.y;
-        float3 b1 = posB + axB * cb.params.y;
-        float3 midA = 0.5 * (a0 + a1);
-        float3 midB = 0.5 * (b0 + b1);
-        float sep = length(midB - midA) - ca.params.y - cb.params.y;
-        if (sep < rA + rB + margin)
-            hit = sphereSphere(midA, rA + ca.params.y * 0.25, midB, rB + cb.params.y * 0.25, margin, nrm, pen, pA, pB);
     }
     else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_SPHERE)
     {
