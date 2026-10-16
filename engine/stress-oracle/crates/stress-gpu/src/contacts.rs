@@ -190,8 +190,11 @@ pub fn plan(scene: &Scene, m: &ReferenceSolver, impactors: &[Impactor], chunk_or
         list.sort_by_key(|&k| (s, chunk_order[k as usize].1));
     }
     let mu_of = |s: usize, c: usize| scene.material(&m.structures[s].chunks[c].material).friction;
-    for ca in 0..m.clusters.len() {
-        for cb in ca + 1..m.clusters.len() {
+    // A pair needs both clusters owned (not engine-driven): only those are visited, in
+    // the order of the loop over every pair.
+    let owned: Vec<usize> = (0..m.clusters.len()).filter(|&c| !m.clusters[c].driven).collect();
+    for (i, &ca) in owned.iter().enumerate() {
+        for &cb in &owned[i + 1..] {
             let (cla, clb) = (&m.clusters[ca], &m.clusters[cb]);
             if (cla.anchored && clb.anchored) || cla.driven || clb.driven {
                 continue;
