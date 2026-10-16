@@ -244,6 +244,7 @@ physics cost at the peak.
 | Per-thread pair batching (one atomic per 8 pairs) | identical | 3.85 → 3.82 ms (no gain) |
 | `[ForceUnroll]` of the solver's small loops | differ | primal 8.8 → 8.1 ms |
 | Unrolling only the zeroing and negation loops | differ | no gain |
+| Skip island-gate rounds after one revokes nothing (a fixed point) | identical | none at the peak: revocations spread through all 8 rounds |
 
 The broadphase query is bound neither by chain-entry visits nor by atomic
 contention.
