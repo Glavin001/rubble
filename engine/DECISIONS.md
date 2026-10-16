@@ -293,3 +293,18 @@ Host notes:
 * A partial `float3` store and a constant-folded quaternion both tripped naga's SPIR-V front end; the shell code uses whole-record stores and separate park and place paths.
 * Tyre joints never enter the joint pair hash, so with no user joints the hash is cleared once instead of every step (64k entries).
 * Cost at traffic scale (48 vehicles, 400 crates, WgpuSim on an M3 Max): 8.77 ms/step against 8.44 ms before coupling (+4%). This is mostly the shell spheres in the broadphase and the real crate coupling.
+
+v13. **A cast that starts inside a collider reports where it entered, and the tyre cone filters each collider (no invented full-bump hits).** Three monster-truck reports had one cause: a wheel's sphere cast starts at the mount, and a sphere of tyre radius there often overlaps a crate, a kerb or a ramp side that the tyre itself never touches. The cast primitives returned t = 0 with n = −d for any start inside a shape, so the hit read as full compression straight along the suspension axis and passed the 35° cone. The 6 Hz bump stop answered as if the crate were under the tyre:
+* **Wedge load.** Ramming the crate stack gave 1.77 MN on one wheel, 59.7× the truck's weight. It was not the rigid-crate deceleration v12 assumed: every spike had t = 0 and invCos = 1.
+* **Traffic hops.** In Chrome the traffic take threw monster trucks up to 3.8 m above their ride height (y 5.6).
+* **monster_stack take.** The truck was kicked sideways in the stack and ended on its side against the ramp.
+
+Changes:
+* Sphere, box, rounded box (sphere sweep), capsule and plane casts from an inside origin report the entry behind the origin (t ≤ 0) and the real surface normal there. `raycast_batch` still reports a ray starting inside a collider as a hit at its origin.
+* The tyre cone (and the full-bump test for hits above L_min) moves from the single nearest hit into the per-collider scan (`tyreAccepts`). A side hit is the shell's, and it no longer hides the ground or crate top further down the travel. Grid walk and full scan share the test, so they stay bit-identical.
+
+Results:
+* Crate-stack ram: peak wheel load 59.7× → 7.8× weight, chassis max y 4.06 → 1.92 m. The 7.8× that remains is real: a rear tyre climbs a 1 m crate edge at 9.6 m/s, with a 30° normal and 4.5 m/s into the surface. The bump damper (D ≈ 39 kN·s/m) plus 4 cm of bump spring give ≈ 220 kN against 231 kN measured. The test now bounds the load at 12× weight and the height at 3 m.
+* A new test parks the truck beside a ledge inside its mount sphere but 0.9 m from the wheel centre. It fails on the old casts at step 0 (138 kN, the truck kicked 0.5 m sideways); with the fix the tyre stays on the ground.
+* Traffic take in Chrome: the worst hop is now 1.18 m against 3.84 m. The rest is quasi-static: trucks high-centred on crate piles, vertical speed ≤ 1.2 m/s.
+* monster_stack take: the truck ploughs through the stack upright. With clean contacts it now carries 10 m/s into the scripted full-lock turn, where it slides at ~0.95 g. Its static stability factor is half-track/CG = 1.45/1.58 ≈ 0.92 g, so rubble under a tyre can trip it over, which is physical. On flat asphalt it does not roll at any speed up to 10 m/s (`trace_rollover_threshold`). The take turns at 7 m/s (~0.75 g).

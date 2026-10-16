@@ -120,6 +120,11 @@ float curvePeak(uint h)
 
 // ---------------------------------------------------------------------------
 // Ray casts against world colliders (shared by wheels and raycast_batch)
+//
+// A cast whose origin is already inside a shape reports where the line entered
+// it (t ≤ 0) and the surface normal there, not a made-up t = 0 along -d: a wheel
+// mount inside a crate must see the crate's real face, which the tyre cone then
+// accepts (geometry under the tyre) or leaves to the wheel shell (beside it).
 // ---------------------------------------------------------------------------
 bool raySphere(float3 o, float3 d, float3 c, float r, out float t, out float3 n)
 {
@@ -127,11 +132,11 @@ bool raySphere(float3 o, float3 d, float3 c, float r, out float t, out float3 n)
     float3 oc = o - c;
     float b = dot(oc, d);
     float cc = dot(oc, oc) - r * r;
-    if (cc <= 0.0) return true; // origin inside
     float h = b * b - cc;
-    if (h < 0.0 || b > 0.0) return false;
-    t = -b - sqrt(h);
-    n = normalize(o + d * t - c);
+    if (cc > 0.0 && (h < 0.0 || b > 0.0)) return false;
+    t = -b - sqrt(max(h, 0.0)); // origin inside (cc ≤ 0): the entry behind it, t ≤ 0
+    float3 p = o + d * t - c;
+    n = dot(p, p) > 1e-12 ? normalize(p) : -d;
     return true;
 }
 
@@ -162,9 +167,8 @@ bool rayObb(float3 o, float3 d, BoxObb box, out float t, out float3 n)
         tFar = min(tFar, t1);
         if (tNear > tFar) return false;
     }
-    if (tFar < 0.0) return false;
-    if (tNear < 0.0) return true; // origin inside: t = 0, n = -d
-    t = tNear;
+    if (tFar < 0.0 || nearAxis < 0) return false;
+    t = tNear; // origin inside: the entry behind it, t < 0
     float3 ax = nearAxis == 0 ? box.axis0 : (nearAxis == 1 ? box.axis1 : box.axis2);
     n = ax * nearSign;
     return true;
@@ -228,13 +232,16 @@ bool sweepObb(float3 o, float3 d, BoxObb box, float rad, out float t, out float3
     float3 rel = o - box.center;
     float3 lo = float3(dot(rel, box.axis0), dot(rel, box.axis1), dot(rel, box.axis2));
     float3 ld = float3(dot(d, box.axis0), dot(d, box.axis1), dot(d, box.axis2));
-    // Origin already inside the rounded box: report an immediate hit.
+    // Origin already inside the rounded box: cast from a point behind it (beyond
+    // the box's bounding radius) to find where the line entered, t < 0.
     float3 q = abs(lo) - box.half;
-    if (length(max(q, float3(0, 0, 0))) + min(max(q.x, max(q.y, q.z)), 0.0) < rad) return true;
-    float tt = roundedBoxT(lo, ld, box.half, rad);
+    float back = 0.0;
+    if (length(max(q, float3(0, 0, 0))) + min(max(q.x, max(q.y, q.z)), 0.0) < rad)
+        back = 2.0 * (length(box.half) + rad);
+    float tt = roundedBoxT(lo - ld * back, ld, box.half, rad);
     if (tt < 0.0) return false;
-    t = tt;
-    float3 p = lo + ld * tt;
+    t = tt - back;
+    float3 p = lo + ld * t;
     float3 ln = float3(p.x < 0.0 ? -1.0 : 1.0, p.y < 0.0 ? -1.0 : 1.0, p.z < 0.0 ? -1.0 : 1.0)
         * max(abs(p) - box.half, float3(0, 0, 0));
     if (dot(ln, ln) < 1e-12)
@@ -248,7 +255,7 @@ bool sweepObb(float3 o, float3 d, BoxObb box, float rad, out float t, out float3
     return true;
 }
 
-bool rayCapsule(float3 o, float3 d, float3 c, float3 axis, float halfLen, float r, out float t, out float3 n)
+bool rayCapsuleOutside(float3 o, float3 d, float3 c, float3 axis, float halfLen, float r, out float t, out float3 n)
 {
     // Closest approach between the ray and the segment, then a sphere test there.
     float3 pa = c - axis * halfLen;
@@ -285,6 +292,18 @@ bool rayCapsule(float3 o, float3 d, float3 c, float3 axis, float halfLen, float 
     return false;
 }
 
+bool rayCapsule(float3 o0, float3 d, float3 c, float3 axis, float halfLen, float r, out float t, out float3 n)
+{
+    // Origin inside: cast from behind the capsule and report the entry (t < 0).
+    float s0 = clamp(dot(o0 - c, axis), -halfLen, halfLen);
+    float3 off = o0 - (c + axis * s0);
+    float back = dot(off, off) < r * r ? 2.0 * (halfLen + r) : 0.0;
+    float3 o = o0 - d * back;
+    bool hit = rayCapsuleOutside(o, d, c, axis, halfLen, r, t, n);
+    t -= back;
+    return hit;
+}
+
 // Sweep a sphere of radius `rad` (0 = ray) from o along d against a collider.
 bool rayCollider(uint ci, float3 o, float3 d, float rad, out float t, out float3 n)
 {
@@ -305,9 +324,14 @@ bool rayCollider(uint ci, float3 o, float3 d, float rad, out float t, out float3
         float3 pn = normalize(col.params.xyz);
         float denom = dot(pn, d);
         float dist = dot(pn, o) - col.params.w - rad;
-        if (dist <= 0.0) { n = pn; return true; }
-        if (denom >= -1e-9) return false;
-        t = -dist / denom;
+        n = pn;
+        if (denom >= -1e-9)
+        {
+            // Parallel or leaving: behind the plane the whole line is inside.
+            t = -1e9;
+            return dist <= 0.0;
+        }
+        t = -dist / denom; // origin behind the plane: t ≤ 0
         n = pn;
         return true;
     }
@@ -321,11 +345,31 @@ bool segmentHitsAabb(float3 mn, float3 mx, Aabb ab)
              mx.z < ab.mn.z || ab.mx.z < mn.z);
 }
 
+// Whether a hit can carry the tyre: its normal lies within the tyre cone around
+// the suspension axis (coneCos; ≤ -1 accepts every hit) and, for a sphere cast
+// hit above the full-bump position (t < lmin), the contact also lies inside that
+// cone seen from the wheel centre at full bump. Hits beside the tyre (crate
+// faces, kerb walls, a mount inside a crate) belong to the wheel shell, and must
+// not hide the support further down the suspension travel.
+bool tyreAccepts(float3 o, float3 d, float t, float3 n, float rad, float coneCos, float lmin)
+{
+    if (dot(n, d) > 0.0) n = -n;
+    if (dot(n, -d) < coneCos) return false;
+    if (rad > 0.0 && t < lmin)
+    {
+        float3 v = (o + d * t - n * rad) - (o + d * lmin);
+        float lv = length(v);
+        if (lv > 1e-4 && dot(v / lv, d) < coneCos) return false;
+    }
+    return true;
+}
+
 // One workgroup per query: lanes stride the colliders, then a min-reduction.
 groupshared float gsRayT[64];
 groupshared uint gsRayC[64];
 
-void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad)
+void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad,
+    float coneCos, float lmin)
 {
     float bestT = 1e30;
     uint bestC = NO_INDEX;
@@ -341,7 +385,7 @@ void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excl
         if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) continue;
         float t;
         float3 n;
-        if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT)
+        if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT && tyreAccepts(o, d, t, n, rad, coneCos, lmin))
         {
             bestT = t;
             bestC = ci;
@@ -352,14 +396,14 @@ void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excl
 }
 
 void rayTestCollider(uint ci, float3 o, float3 d, float maxT, uint excludeBody, float rad,
-    float3 mn, float3 mx, uint base, inout float bestT, inout uint bestC)
+    float coneCos, float lmin, float3 mn, float3 mx, uint base, inout float bestT, inout uint bestC)
 {
     Collider col = gColliders[ci];
     if (col.body == excludeBody) return;
     if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) return;
     float t;
     float3 n;
-    if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT)
+    if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT && tyreAccepts(o, d, t, n, rad, coneCos, lmin))
     {
         bestT = t;
         bestC = ci;
@@ -374,7 +418,8 @@ void rayTestCollider(uint ci, float3 o, float3 d, float maxT, uint excludeBody, 
 // the segment spans too many cells.
 static const uint RAY_GRID_MAX_CELLS = 512u;
 
-void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad)
+void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad,
+    float coneCos, float lmin)
 {
     float bestT = 1e30;
     uint bestC = NO_INDEX;
@@ -391,7 +436,7 @@ void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint 
     {
         uint nCols = gCounters[0].colliderCount;
         for (uint ci = lane; ci < nCols; ci += 64u)
-            rayTestCollider(ci, o, d, maxT, excludeBody, rad, mn, mx, base, bestT, bestC);
+            rayTestCollider(ci, o, d, maxT, excludeBody, rad, coneCos, lmin, mn, mx, base, bestT, bestC);
     }
     else
     {
@@ -410,7 +455,7 @@ void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint 
                 uint cur = link & GRID_COLLIDER_MASK;
                 link = gridSplit() ? asuint(gAabbs[base + cur]._pad1) : gColorLists[cur];
                 guard++;
-                rayTestCollider(cur, o, d, maxT, excludeBody, rad, mn, mx, base, bestT, bestC);
+                rayTestCollider(cur, o, d, maxT, excludeBody, rad, coneCos, lmin, mn, mx, base, bestT, bestC);
             }
         }
         if (live)
@@ -428,7 +473,7 @@ void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint 
                 else if (k < nPlanes + nLarge + nStatic) ci = ALOAD(gScratchAtomics[LARGE_STATIC_COUNT + 1u + k - nPlanes - nLarge]);
                 else ci = k + 2u == nList ? 0u : nColliders - 1u;
                 if (ci < nColliders)
-                    rayTestCollider(ci, o, d, maxT, excludeBody, rad, mn, mx, base, bestT, bestC);
+                    rayTestCollider(ci, o, d, maxT, excludeBody, rad, coneCos, lmin, mn, mx, base, bestT, bestC);
             }
         }
     }
@@ -907,6 +952,8 @@ void wheel_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float3 d = float3(0, -1, 0);
     float maxT = 0.0;
     float sweep = 0.0; // sphere-cast radius (0 = ray)
+    float coneCos = 1.0;
+    float lmin = 0.0;
     // Query rate (Jolt mNumStepsBetweenCollisionTest): between full probes a wheel
     // that had a contact slides it along the last hit plane, which moves with its
     // ground body. Staggered so a vehicle's wheels do not probe on the same step.
@@ -918,14 +965,20 @@ void wheel_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         d = normalize(quatRotate(c.orientation, VD(wr + W_DIR).xyz));
         bool sphere = (VU(vr + V_CFG).w & VF_SPHERE_CAST) != 0u;
         sweep = sphere ? VD(wr + W_HP).w : 0.0;
+        // The tyre rows own the bottom cone (≤ 35° off the suspension axis for a
+        // sphere cast, which also finds things beside the tyre); the wheel shell
+        // (spheres from 60°) owns the rest, so the suspension never pushes along
+        // its axis against a side hit.
+        coneCos = sphere ? max(VD(vr + V_UP).w, SWEEP_CONE_COS) : VD(vr + V_UP).w;
+        lmin = VD(wr + W_SUSP).x;
         maxT = VD(wr + W_SUSP).y + (sphere ? 0.0 : VD(wr + W_HP).w);
         uint interval = VU(vr + V_QUERY).x;
         bool hadHit = (VU(wr + W_C0).z & WD_CONTACT) != 0u && VD(wr + W_LHIT).w > 0.5;
         if (interval > 1u && hadHit && ((HOST_S(17) + w) % interval) != 0u) probe = false;
     }
     // Query mode in the vehicle header: 0 = broadphase grid walk, 1 = full scan.
-    if (VU(VH_MISC).w == 1u) rayLaneScan(lane, probe, o, d, maxT, chassis, sweep);
-    else rayLaneScanGrid(lane, probe, o, d, maxT, chassis, sweep);
+    if (VU(VH_MISC).w == 1u) rayLaneScan(lane, probe, o, d, maxT, chassis, sweep, coneCos, lmin);
+    else rayLaneScanGrid(lane, probe, o, d, maxT, chassis, sweep, coneCos, lmin);
     rayReduce(lane);
     if (!live || lane != 0u) return;
 
@@ -943,26 +996,12 @@ void wheel_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         tHit = gsRayT[0];
         if (best != NO_INDEX)
         {
+            // The scan only keeps hits the tyre cone accepts (tyreAccepts).
             float t2;
             float3 n2;
             rayCollider(best, o, d, sweep, t2, n2);
             n = dot(n2, d) > 0.0 ? -n2 : n2;
-            // A sphere cast also finds things beside the tyre (crate faces, kerb
-            // edges). The tyre rows only own the bottom cone (≤ 35° off the
-            // suspension axis); the wheel shell (spheres from 60°) owns the rest,
-            // so the suspension never pushes along its axis against a side hit.
-            float coneCos = sweep > 0.0 ? max(VD(vr + V_UP).w, SWEEP_CONE_COS) : VD(vr + V_UP).w;
-            contact = dot(n, -d) >= coneCos;
-            // A hit above the full-bump position (t < L_min, e.g. a crate edge already
-            // in the wheel arch) can only be the tyre bottoming if it lies under the
-            // tyre at full bump: test the cone from that wheel centre, not the mount.
-            float Lmin = VD(wr + W_SUSP).x;
-            if (contact && sweep > 0.0 && tHit < Lmin)
-            {
-                float3 v = (o + d * tHit - n * sweep) - (o + d * Lmin);
-                float lv = length(v);
-                if (lv > 1e-4 && dot(v / lv, d) < coneCos) contact = false;
-            }
+            contact = true;
         }
         ground = contact ? gColliders[best].body : NO_INDEX;
     }
@@ -2541,7 +2580,7 @@ void raycast_batch(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float4 a = live ? VD(rr) : float4(0, 0, 0, 0);
     float4 b = live ? VD(rr + 1u) : float4(0, -1, 0, 0);
     float3 dir = live ? normalize(b.xyz) : float3(0, -1, 0);
-    rayLaneScan(lane, live, a.xyz, dir, a.w, asuint(b.w), 0.0);
+    rayLaneScan(lane, live, a.xyz, dir, a.w, asuint(b.w), 0.0, -2.0, 0.0);
     rayReduce(lane);
     if (!live || lane != 0u) return;
     uint best = gsRayC[0];
@@ -2554,6 +2593,9 @@ void raycast_batch(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float t;
     float3 n;
     rayCollider(best, a.xyz, dir, 0.0, t, n);
-    VSet(rr + 2u, float4(a.xyz + dir * gsRayT[0], gsRayT[0]));
+    // A ray starting inside a collider hits it at its origin.
+    float tHit = max(gsRayT[0], 0.0);
+    if (gsRayT[0] < 0.0) n = -dir;
+    VSet(rr + 2u, float4(a.xyz + dir * tHit, tHit));
     VSet(rr + 3u, float4(n, asfloat(best)));
 }

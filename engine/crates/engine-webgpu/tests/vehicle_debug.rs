@@ -668,3 +668,386 @@ fn bench_traffic() {
     }
     eprintln!("BENCH traffic: {:.2} ms/step", t0.elapsed().as_secs_f64() * 1000.0 / 300.0);
 }
+
+/// Raw per-wheel query words (hit distance t, L at x⁻, normal, flags, bump K) for the
+/// wheels of `v`, one line each, when any wheel load passes `min_load` N.
+fn dump_wheel_rows(sim: &WgpuSim, v: engine_vehicle::VehicleHandle, step: u32, min_load: f32) -> bool {
+    use engine_schema::vehicle::*;
+    use engine_vehicle::VehicleBackend;
+    let st = sim.vehicle_state(v);
+    let peak = st.wheels.iter().fold(0.0f32, |m, w| m.max(w.suspension_force));
+    if peak < min_load {
+        return false;
+    }
+    let l = sim.vehicle_host().capacity.layout();
+    let c = sim.read_body(sim.vehicle_host().chassis_body(v));
+    eprintln!(
+        "step {step}: chassis p {:?} v {:?} w {:?}",
+        c.position.map(|x| (x * 100.0).round() / 100.0),
+        c.linear_vel.map(|x| (x * 10.0).round() / 10.0),
+        c.angular_vel.map(|x| (x * 10.0).round() / 10.0)
+    );
+    for (i, w) in st.wheels.iter().enumerate() {
+        let slot = sim.vehicle_host().wheel_slot(v, i as u32);
+        let s = sim.read_slots(l.wheel_base + slot * WHEEL_STRIDE, WHEEL_STRIDE);
+        let f = |k: u32| s[k as usize].map(f32::from_bits);
+        let r3 = |a: [f32; 4]| a.map(|x| (x * 1000.0).round() / 1000.0);
+        eprintln!(
+            "   w{i}: Fs {:>9.0} flags {:#x} ground {:?} col {} t {:.3} L0 {:.3} n·invCos {:?} K {:?}",
+            w.suspension_force,
+            s[W_C0 as usize][2],
+            w.ground_body,
+            s[W_C0 as usize][1] as i32,
+            f(W_HIT)[3],
+            f(W_C1)[3],
+            r3(f(W_C2)),
+            f(W_K).map(|x| x.round())
+        );
+    }
+    true
+}
+
+/// Crate-stack wedge (`PRESET`, `SPEED`, `MIN_LOAD`, `--ignored`): the wheel rows at every
+/// step whose peak wheel load passes MIN_LOAD (default 20× vehicle weight).
+#[test]
+#[ignore]
+fn trace_crate_wedge() {
+    let name = std::env::var("PRESET").unwrap_or_else(|_| "monster_truck".into());
+    let mut sim = WgpuSim::new(WorldCapacity {
+        max_bodies: 4096,
+        max_colliders: 8192,
+        max_contacts: 32768,
+        max_joints: 64,
+        max_candidates: 65536,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .expect("wgpu");
+    let mut p = AvbdParams::default();
+    p.iterations = 10;
+    sim.set_params(p);
+    sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+    sim.set_material(1, Material { friction: 0.6, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+    let mut g = BodyState::dynamic(glam::Vec3::new(0.0, -5.0, 0.0), glam::Quat::IDENTITY, 1.0, glam::Vec3::ONE);
+    g.inv_mass = 0.0;
+    g.inv_inertia = [0.0; 3];
+    g.flags = 0;
+    let ground = sim.add_body(g);
+    sim.add_collider(Collider {
+        body: ground,
+        shape: ShapeType::Box as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [400.0, 5.0, 400.0, 400.0],
+    });
+    for y in 0..5 {
+        for i in 0..(4 - (y >> 1)) {
+            let body = sim.add_body(BodyState::dynamic(
+                glam::Vec3::new((i as f32 - 1.5) * 1.05, 0.5 + y as f32, 13.0),
+                glam::Quat::IDENTITY,
+                40.0,
+                glam::Vec3::splat(40.0 / 6.0),
+            ));
+            sim.add_collider(Collider {
+                body,
+                shape: ShapeType::Box as u32,
+                material: 1,
+                generation: 0,
+                local_pos: [0.0; 3],
+                density: 0.0,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: [0.5, 0.5, 0.5, 0.87],
+            });
+        }
+    }
+    let desc = presets::by_name(&name).expect("preset");
+    let weight = (desc.parts.iter().map(|p| p.mass).sum::<f32>() + desc.wheels.iter().map(|w| w.mass).sum::<f32>()) * 10.0;
+    let min_load = std::env::var("MIN_LOAD").map(|s| s.parse().unwrap()).unwrap_or(20.0 * weight);
+    let v = sim.add_vehicle(&desc, [0.0, 2.5, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
+    for _ in 0..60 {
+        sim.step().expect("step");
+    }
+    let target = std::env::var("SPEED").map(|s| s.parse().unwrap()).unwrap_or(11.0f32);
+    let (mut peak, mut max_y) = (0.0f32, 0.0f32);
+    for i in 0..240 {
+        let e = target - sim.vehicle_state(v).forward_speed;
+        sim.set_vehicle_input(v, VehicleInput { forward: (e * 0.4).clamp(0.0, 1.0), ..Default::default() });
+        sim.step().expect("step");
+        dump_wheel_rows(&sim, v, i, min_load);
+        peak = sim.vehicle_state(v).wheels.iter().fold(peak, |m, w| m.max(w.suspension_force));
+        max_y = max_y.max(sim.read_body(sim.vehicle_host().chassis_body(v)).position[1]);
+    }
+    eprintln!("{name}: peak wheel load {:.1}× weight, max chassis y {max_y:.2}", peak / weight);
+}
+
+// ---------------------------------------------------------------------------
+// vehicle.html scenes, rebuilt body for body (same order, LCG, materials).
+// ---------------------------------------------------------------------------
+fn demo_world(bodies: u32) -> WgpuSim {
+    let mut sim = WgpuSim::new(WorldCapacity {
+        max_bodies: bodies,
+        max_colliders: bodies * 2,
+        max_contacts: bodies * 16,
+        max_joints: 1024,
+        max_candidates: bodies * 32,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .expect("wgpu");
+    let mut p = AvbdParams::default();
+    p.iterations = 8;
+    sim.set_params(p);
+    let mat = |f: f32| Material { friction: f, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 };
+    sim.set_material(0, mat(1.0)); // ground
+    sim.set_material(1, mat(0.6)); // props
+    sim.set_material(2, mat(0.08)); // ice
+    sim.set_material(engine_vehicle::pack::WHEEL_RIM_MATERIAL, mat(0.9));
+    demo_box(&mut sim, [0.0, -5.0, 0.0], [400.0, 5.0, 400.0], [0.0, 0.0, 0.0, 1.0], 0, 0.0);
+    sim
+}
+
+fn q_axis(ax: [f32; 3], ang: f32) -> [f32; 4] {
+    let s = (ang * 0.5).sin();
+    [ax[0] * s, ax[1] * s, ax[2] * s, (ang * 0.5).cos()]
+}
+
+/// Box body + collider; mass 0 = static.
+fn demo_box(sim: &mut WgpuSim, p: [f32; 3], h: [f32; 3], q: [f32; 4], material: u32, mass: f32) -> u32 {
+    let mut b = BodyState::dynamic(glam::Vec3::from_array(p), glam::Quat::from_array(q), 1.0, glam::Vec3::ONE);
+    if mass > 0.0 {
+        b.inv_mass = 1.0 / mass;
+        b.inv_inertia = [
+            3.0 / (mass * (h[1] * h[1] + h[2] * h[2])),
+            3.0 / (mass * (h[0] * h[0] + h[2] * h[2])),
+            3.0 / (mass * (h[0] * h[0] + h[1] * h[1])),
+        ];
+    } else {
+        b.inv_mass = 0.0;
+        b.inv_inertia = [0.0; 3];
+        b.flags = 0;
+    }
+    b.initial_pos = p;
+    b.initial_rot = q;
+    let body = sim.add_body(b);
+    sim.add_collider(Collider {
+        body,
+        shape: ShapeType::Box as u32,
+        material,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [h[0], h[1], h[2], (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt()],
+    });
+    body
+}
+
+fn demo_vehicle(sim: &mut WgpuSim, name: &str, p: [f32; 3], yaw: f32) -> engine_vehicle::VehicleHandle {
+    sim.add_vehicle(&presets::by_name(name).expect("preset"), p, q_axis([0.0, 1.0, 0.0], yaw)).expect("vehicle")
+}
+
+/// vehicle.html `scene=playground` with the player preset at (x, z, yaw).
+fn playground(preset: &str, x: f32, z: f32, yaw: f32) -> (WgpuSim, engine_vehicle::VehicleHandle) {
+    let mut sim = demo_world(6000);
+    let v = demo_vehicle(&mut sim, preset, [x, 2.5, z], yaw);
+    let id = [0.0, 0.0, 0.0, 1.0];
+    demo_box(&mut sim, [0.0, 0.6, 30.0], [4.0, 0.4, 6.0], q_axis([1.0, 0.0, 0.0], -0.22), 1, 0.0);
+    demo_box(&mut sim, [0.0, 1.95, 41.0], [4.0, 0.4, 5.5], id, 1, 0.0);
+    demo_box(&mut sim, [0.0, 0.6, 52.0], [4.0, 0.4, 6.0], q_axis([1.0, 0.0, 0.0], 0.22), 1, 0.0);
+    demo_box(&mut sim, [-22.0, 0.9, 10.0], [3.0, 0.3, 4.0], q_axis([1.0, 0.0, 0.0], -0.32), 1, 0.0);
+    demo_box(&mut sim, [24.0, 0.0, -20.0], [10.0, 1.5, 14.0], q_axis([0.0, 0.0, 1.0], 0.18), 1, 0.0);
+    demo_box(&mut sim, [-30.0, -0.02, -25.0], [12.0, 0.05, 12.0], id, 2, 0.0);
+    for i in 0..8 {
+        demo_box(&mut sim, [-12.0 + i as f32 * 3.4, 0.6, 18.0], [0.25, 0.6, 0.25], id, 1, 0.0);
+    }
+    for (x, z) in [(8.0f32, 26.0f32), (-10.0, 32.0), (14.0, 40.0)] {
+        for y in 0..5 {
+            for i in 0..(4 - (y >> 1)) {
+                demo_box(&mut sim, [x + (i as f32 - 1.5) * 1.05, 0.5 + y as f32, z], [0.5; 3], id, 1, 40.0);
+            }
+        }
+    }
+    for c in 0..8 {
+        for i in 0..14 {
+            let p = [-20.0 + i as f32 * 1.02 + (c & 1) as f32 * 0.5, 0.25 + c as f32 * 0.5, 60.0];
+            demo_box(&mut sim, p, [0.5, 0.25, 0.25], id, 1, 12.0);
+        }
+    }
+    for i in 0..6 {
+        let (r, m) = (0.8f32, 60.0f32);
+        let body = sim.add_body(BodyState::dynamic(glam::Vec3::new(20.0 + i as f32 * 2.2, 0.8, 6.0), glam::Quat::IDENTITY, m, glam::Vec3::splat(0.4 * m * r * r)));
+        sim.add_collider(Collider {
+            body,
+            shape: ShapeType::Sphere as u32,
+            material: 1,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [r, 0.0, 0.0, r],
+        });
+    }
+    demo_vehicle(&mut sim, "monster_truck", [-14.0, 3.5, -12.0], 0.4);
+    demo_vehicle(&mut sim, "kart", [6.0, 1.5, -6.0], 2.0);
+    demo_vehicle(&mut sim, "six_wheel_truck", [18.0, 3.0, 22.0], -1.2);
+    (sim, v)
+}
+
+/// record-vehicle-demos.mjs `monster_stack` take (`MIN_LOAD`, `--ignored`): chassis
+/// pose every 0.25 s and the wheel rows on load spikes.
+#[test]
+#[ignore]
+fn trace_monster_stack_take() {
+    let (mut sim, v) = playground("monster_truck", -10.0, 22.0, 0.0);
+    let min_load: f32 = std::env::var("MIN_LOAD").map(|s| s.parse().unwrap()).unwrap_or(600_000.0);
+    // (steps, cruise m/s (<0 = none), steer, brake)
+    let script = [(40u32, -1.0f32, 0.0f32, 0.0f32), (150, 11.0, 0.0, 0.0), (120, 11.0, 0.0, 0.0), (150, 10.0, 1.0, 0.0), (210, 12.0, 0.15, 0.0), (100, -1.0, 0.0, 1.0)];
+    let (mut step, mut min_up, mut peak) = (0u32, 1.0f32, 0.0f32);
+    for (n, cruise, steer, brake) in script {
+        sim.set_vehicle_input(v, VehicleInput { forward: 0.0, steer, brake, ..Default::default() });
+        for _ in 0..n {
+            if cruise >= 0.0 {
+                let e = cruise - sim.vehicle_state(v).forward_speed;
+                let brake = if e < -1.0 { (-e * 0.2).min(1.0) } else { 0.0 };
+                sim.set_vehicle_input(v, VehicleInput { forward: (e * 0.4).clamp(0.0, 1.0), steer, brake, ..Default::default() });
+            }
+            sim.step().expect("step");
+            step += 1;
+            let c = sim.read_body(sim.vehicle_host().chassis_body(v));
+            let up = glam::Quat::from_array(c.orientation) * glam::Vec3::Y;
+            min_up = min_up.min(up.y);
+            let st = sim.vehicle_state(v);
+            peak = st.wheels.iter().fold(peak, |m, w| m.max(w.suspension_force));
+            if !dump_wheel_rows(&sim, v, step, min_load) && step % 15 == 0 {
+                eprintln!(
+                    "{step}: p {:?} up.y {:.2} |v| {:.1} |w| {:.1} spd {:.1} contacts {} Fs {:?}",
+                    c.position.map(|x| (x * 100.0).round() / 100.0),
+                    up.y,
+                    glam::Vec3::from_array(c.linear_vel).length(),
+                    glam::Vec3::from_array(c.angular_vel).length(),
+                    st.forward_speed,
+                    st.contacts,
+                    st.wheels.iter().map(|w| w.suspension_force as i32).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+    let c = sim.read_body(sim.vehicle_host().chassis_body(v));
+    let up = glam::Quat::from_array(c.orientation) * glam::Vec3::Y;
+    eprintln!("monster_stack: final up.y {:.2} (min {min_up:.2}) p {:?} peak wheel load {peak:.0} N", up.y, c.position);
+}
+
+/// vehicle.html `scene=traffic` (record take `traffic`): the highest chassis of all 49
+/// vehicles, and the wheel rows of the vehicle that hops highest (`--ignored`).
+#[test]
+#[ignore]
+fn trace_traffic_hop() {
+    let mut sim = demo_world(8192);
+    let player = demo_vehicle(&mut sim, "sedan", [0.0, 2.5, 0.0], 0.0);
+    let kinds = ["sedan", "sports", "kart", "jolt_default", "destructible_sedan", "monster_truck"];
+    let mut rng = 7u32;
+    let mut rand = || {
+        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+        rng as f32 / 4294967296.0
+    };
+    let n = 48;
+    let cols = (n as f32).sqrt().ceil() as i32;
+    let mut vs = vec![(player, "sedan", 2.5f32)];
+    let mut ai = Vec::new();
+    for i in 0..n {
+        let (x, z) = (((i % cols) as f32 - cols as f32 / 2.0) * 14.0, ((i / cols) as f32 - cols as f32 / 2.0) * 14.0);
+        let kind = kinds[i as usize % kinds.len()];
+        let y = if kind == "monster_truck" { 3.5 } else { 2.2 };
+        let h = demo_vehicle(&mut sim, kind, [x, y, z], rand() * 6.28);
+        let input = VehicleInput { forward: 0.2 + 0.25 * rand(), steer: (if rand() < 0.5 { -1.0 } else { 1.0 }) * (0.15 + 0.35 * rand()), ..Default::default() };
+        ai.push((h, input));
+        vs.push((h, kind, y));
+    }
+    let id = [0.0, 0.0, 0.0, 1.0];
+    for _ in 0..400 {
+        let p = [(rand() - 0.5) * 120.0, 0.5 + rand() * 6.0, (rand() - 0.5) * 120.0];
+        demo_box(&mut sim, p, [0.5; 3], id, 1, 30.0);
+    }
+    for (h, input) in &ai {
+        sim.set_vehicle_input(*h, *input);
+    }
+    let watch: Option<usize> = std::env::var("WATCH").ok().map(|s| s.parse().unwrap());
+    let mut best = (0.0f32, 0usize, 0u32);
+    let mut settled_y = vec![0.0f32; vs.len()];
+    for step in 0..720u32 {
+        let input = if step < 480 { VehicleInput { forward: 0.4, steer: 0.2, ..Default::default() } } else { VehicleInput { forward: 0.6, steer: -0.3, ..Default::default() } };
+        sim.set_vehicle_input(player, input);
+        sim.step().expect("step");
+        for (k, (h, _, _)) in vs.iter().enumerate() {
+            let y = sim.read_body(sim.vehicle_host().chassis_body(*h)).position[1];
+            if step == 90 {
+                settled_y[k] = y;
+            }
+            if step > 90 && y - settled_y[k] > best.0 {
+                best = (y - settled_y[k], k, step);
+            }
+            if watch == Some(k) && step > 90 {
+                dump_wheel_rows(&sim, *h, step, 0.0);
+            }
+        }
+    }
+    let (rise, k, step) = best;
+    eprintln!("highest hop: vehicle {k} ({}) rose {rise:.2} m above its settled height {:.2} at step {step}", vs[k].1, settled_y[k]);
+}
+
+/// Static ledge beside a monster truck's front-left mount (`--ignored`): wheel rows.
+#[test]
+#[ignore]
+fn trace_ledge_beside_mount() {
+    let mut sim = demo_world(4096);
+    let env = |k: &str, d: f32| std::env::var(k).map(|s| s.parse().unwrap()).unwrap_or(d);
+    demo_box(&mut sim, [1.45 + env("DX", 0.5) + 0.4, env("Y", 1.95), 1.75], [0.4, 0.4, 0.4], [0.0, 0.0, 0.0, 1.0], 1, 0.0);
+    let v = demo_vehicle(&mut sim, "monster_truck", [0.0, 2.0, 0.0], 0.0);
+    for i in 0..120 {
+        sim.step().expect("step");
+        if i % 20 == 0 || i < 3 {
+            dump_wheel_rows(&sim, v, i, 0.0);
+        }
+    }
+}
+
+/// Full-lock turn from a held speed on flat asphalt (`PRESET`, `STEER`, `--ignored`):
+/// min chassis up.y per entry speed, to compare with the static stability factor.
+#[test]
+#[ignore]
+fn trace_rollover_threshold() {
+    let name = std::env::var("PRESET").unwrap_or_else(|_| "monster_truck".into());
+    let steer: f32 = std::env::var("STEER").map(|s| s.parse().unwrap()).unwrap_or(1.0);
+    for speed in [5.0f32, 6.0, 6.5, 7.0, 7.5, 8.0, 9.0, 10.0] {
+        let mut sim = demo_world(4096);
+        let v = demo_vehicle(&mut sim, &name, [0.0, 2.5, -150.0], 0.0);
+        for _ in 0..60 {
+            sim.step().expect("step");
+        }
+        for _ in 0..900 {
+            let e = speed - sim.vehicle_state(v).forward_speed;
+            sim.set_vehicle_input(v, VehicleInput { forward: (e * 0.4).clamp(0.0, 1.0), brake: if e < -1.0 { (-e * 0.2).min(1.0) } else { 0.0 }, ..Default::default() });
+            sim.step().expect("step");
+            if e.abs() < 0.1 {
+                break;
+            }
+        }
+        let mut min_up = 1.0f32;
+        let mut max_lat = 0.0f32;
+        for _ in 0..240 {
+            let e = speed - sim.vehicle_state(v).forward_speed;
+            sim.set_vehicle_input(v, VehicleInput { forward: (e * 0.4).clamp(0.0, 1.0), steer, brake: if e < -1.0 { (-e * 0.2).min(1.0) } else { 0.0 }, ..Default::default() });
+            sim.step().expect("step");
+            let c = sim.read_body(sim.vehicle_host().chassis_body(v));
+            min_up = min_up.min((glam::Quat::from_array(c.orientation) * glam::Vec3::Y).y);
+            let st = sim.vehicle_state(v);
+            max_lat = max_lat.max((st.forward_speed * st.yaw_rate).abs() / 10.0);
+        }
+        eprintln!("{name} full lock ({steer}) at {speed:4.1} m/s: min up.y {min_up:.2} (rolled: {}), peak lateral {max_lat:.2} g", min_up < 0.5);
+    }
+}
