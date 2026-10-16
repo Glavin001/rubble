@@ -307,15 +307,17 @@ impl World {
             let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
             let (mut reach, mut modulus, mut speed, mut radius): (f64, f64, f64, f64) = (0.0, f64::INFINITY, f64::INFINITY, f64::INFINITY);
             for &c in &cl.chunks {
-                let b = self.chunk_box(s, c);
-                let r = b.bounding_radius();
-                lo = lo.component_min(b.center - Vec3::splat(r));
-                hi = hi.component_max(b.center + Vec3::splat(r));
-                reach = reach.max((b.center - com).norm() + r);
+                // `chunk_box`'s centre and bounding radius (`OBox::bounding_radius` is the
+                // half extents' norm), without building the box.
+                let (center, half) = (self.solver.chunk_position(s, c), self.solver.structures[s].chunks[c].half_extents);
+                let r = half.norm();
+                lo = lo.component_min(center - Vec3::splat(r));
+                hi = hi.component_max(center + Vec3::splat(r));
+                reach = reach.max((center - com).norm() + r);
                 let m = self.chunk_material(s, c);
                 modulus = modulus.min(plane_strain(m));
                 speed = speed.min((m.youngs_modulus * scale / m.density).sqrt());
-                radius = radius.min(b.half.min_elem());
+                radius = radius.min(half.min_elem());
             }
             let capacity = cl
                 .bonds
