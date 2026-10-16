@@ -193,11 +193,38 @@ pub fn plan(scene: &Scene, m: &ReferenceSolver, impactors: &[Impactor], chunk_or
     // A pair needs both clusters owned (not engine-driven): only those are visited, in
     // the order of the loop over every pair.
     let owned: Vec<usize> = (0..m.clusters.len()).filter(|&c| !m.clusters[c].driven).collect();
+    // Per owned cluster, for a conservative whole-cluster test: a centre, its chunks'
+    // largest distance from it, largest radius + budget, and largest speed.
+    let reach: Vec<(Vec3, f64, f64, f64)> = owned
+        .iter()
+        .map(|&c| {
+            let ks = &sorted_by_cluster[c];
+            let center = ks.first().map_or(Vec3::ZERO, |&k| pos[k as usize]);
+            ks.iter().fold((center, 0.0f64, 0.0f64, 0.0f64), |(o, s, rb, v), &k| {
+                let k = k as usize;
+                (o, s.max((pos[k] - o).norm()), rb.max(radius[k] + plan.budget[k]), v.max(velocity[k].norm()))
+            })
+        })
+        .collect();
     for (i, &ca) in owned.iter().enumerate() {
-        for &cb in &owned[i + 1..] {
+        for (j, &cb) in owned.iter().enumerate().skip(i + 1) {
             let (cla, clb) = (&m.clusters[ca], &m.clusters[cb]);
             if (cla.anchored && clb.anchored) || cla.driven || clb.driven {
                 continue;
+            }
+            // Every chunk pair's `middle` is at least the centres' distance less both
+            // spreads and half the largest relative travel, and every pair's limit at
+            // most both largest radii + budgets and the largest sweep (`falls` is the
+            // cluster's): beyond that, with a margin for rounding, no chunk pair passes.
+            {
+                let ((oa, sa, rba, va), (ob, sb, rbb, vb)) = (reach[i], reach[j]);
+                let dg = if cla.anchored == clb.anchored { 0.0 } else { g };
+                let travel = (va + vb) * duration;
+                let near = (ob - oa).norm() - sa - sb - 0.5 * travel;
+                let limit = rba + rbb + 0.5 * travel + 0.5 * dg * duration * duration;
+                if near > limit + 1e-9 * (near.abs() + limit + sa + sb + 1.0) {
+                    continue;
+                }
             }
             for &ka in &sorted_by_cluster[ca] {
                 for &kb in &sorted_by_cluster[cb] {
