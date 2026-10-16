@@ -738,6 +738,63 @@ fn a_parked_car_tips_a_seesaw_plank() {
 }
 
 #[test]
+fn wheel_shell_shoves_a_crate_beside_the_tyre() {
+    // The crate overlaps only the front-left tyre's outline: outside the body box and
+    // clear of the wheel's ray line, so only the wheel shell can meet it. Without a
+    // shell it would pass straight through the tyre.
+    let mut sim = world();
+    let crate_pos = [1.15f32, 0.2, 6.0];
+    let crate_body = dyn_body(&mut sim, crate_pos, 15.0, [15.0 * 0.32 / 3.0; 3], &[([0.0; 3], [0.3, 0.2, 0.3], 0)]);
+    let v = spawn(&mut sim, &presets::sedan(), 1.0);
+    run(&mut sim, 60);
+    for _ in 0..150 {
+        let e = 5.0 - sim.vehicle_state(v).forward_speed;
+        sim.set_vehicle_input(v, throttle((e * 0.4).clamp(0.0, 1.0), 0.0));
+        sim.step().expect("step");
+    }
+    let c = sim.read_body(crate_body);
+    let car = chassis(&sim, v);
+    eprintln!("crate {:?} (from {crate_pos:?}), car z {:.2}", c.position, car.position[2]);
+    assert!(car.position[2] > 8.0, "the car drove past the crate's start");
+    let moved = ((c.position[0] - crate_pos[0]).powi(2) + (c.position[2] - crate_pos[2]).powi(2)).sqrt();
+    assert!(moved > 0.5, "the tyre shoved the crate ({moved} m)");
+}
+
+#[test]
+fn a_car_parked_on_a_truck_loads_its_suspension() {
+    // Vehicle on vehicle: the sedan's tyre rows act on the truck's chassis, so the
+    // truck's own suspension carries both weights.
+    let mut sim = world();
+    // Converged loads, not the values frozen when the island falls asleep mid-bounce.
+    let mut p = AvbdParams::default();
+    p.iterations = 10;
+    p.sleep_time = 1e6;
+    sim.set_params(p);
+    let truck = presets::monster_truck();
+    let t = spawn(&mut sim, &truck, 2.0);
+    run(&mut sim, 240);
+    let alone: f32 = sim.vehicle_state(t).wheels.iter().map(|w| w.suspension_force).sum();
+    let roof = chassis(&sim, t).position[1];
+    let sedan = presets::kart();
+    let k = sim.add_vehicle(&sedan, [0.0, roof + 1.6, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
+    run(&mut sim, 360);
+    let loaded: f32 = sim.vehicle_state(t).wheels.iter().map(|w| w.suspension_force).sum();
+    let ks = sim.vehicle_state(k);
+    let kc = chassis(&sim, k);
+    eprintln!(
+        "truck wheel load alone {alone:.0} N, with the kart {loaded:.0} N (kart weight {:.0} N); kart contacts {} at y {:.2}, ground {:?}",
+        mass_of(&sedan) * 10.0,
+        ks.contacts,
+        kc.position[1],
+        ks.wheels.iter().map(|w| w.ground_body).collect::<Vec<_>>()
+    );
+    assert_eq!(ks.contacts, 4, "the kart stands on the truck");
+    let gain = loaded - alone;
+    let weight = mass_of(&sedan) * 10.0;
+    assert!((gain - weight).abs() < 0.1 * weight, "truck carries the kart: +{gain} N vs {weight} N");
+}
+
+#[test]
 fn air_control_pitches_an_airborne_kart() {
     let mut sim = world();
     let v = spawn(&mut sim, &presets::kart(), 20.0);

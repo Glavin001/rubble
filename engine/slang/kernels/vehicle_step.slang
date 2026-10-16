@@ -2016,8 +2016,8 @@ void placeWheelShell(uint wr, uint chassis, uint anchor, bool attached, float L,
 // vehicle_link: after wheel_query, before the constraint graph. A wheel standing
 // on a dynamic body points its JOINT_TYRE joint at (chassis, ground) so the two
 // get different colours and the ground's primal gathers the wheel's ground block;
-// a sleeping ground is woken (Jolt VehicleConstraint::BuildIslands). Otherwise the
-// joint parks on the vehicle's static anchor and adds no graph edge.
+// the pair sleeps and wakes as one island (Jolt VehicleConstraint::BuildIslands).
+// Otherwise the joint parks on the vehicle's static anchor and adds no graph edge.
 // ---------------------------------------------------------------------------
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -2035,13 +2035,18 @@ void vehicle_link(uint3 tid : SV_DispatchThreadID)
     BodyState c = gBodies[chassis];
     uint ground = NO_INDEX;
     if ((dyn.z & WD_CONTACT) != 0u && (dyn.z & (WD_DETACHED | WD_DISABLED)) == 0u
-        && dyn.x != NO_INDEX && dyn.x != chassis && bodyIsDynamic(c) && !bodyIsSleeping(c))
+        && dyn.x != NO_INDEX && dyn.x != chassis && bodyIsDynamic(c))
     {
         BodyState g = gBodies[dyn.x];
-        if (bodyIsDynamic(g))
+        // Vehicle and ground form one island: both sleep, or both are awake and
+        // linked. A sleeping car on a moving truck (or the reverse) would otherwise
+        // stop transmitting its weight.
+        bool cs = bodyIsSleeping(c), gs = bodyIsSleeping(g);
+        if (bodyIsDynamic(g) && !(cs && gs))
         {
             ground = dyn.x;
-            if (bodyIsSleeping(g)) wakeBody(ground);
+            if (cs) wakeBody(chassis);
+            if (gs) wakeBody(ground);
         }
     }
     tj.z = ground;

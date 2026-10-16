@@ -845,6 +845,9 @@ impl WgpuSim {
         if self.sleep_island_rounds > 0 {
             for _ in 0..self.sleep_island_rounds.min(16) {
                 self.disp_work(&mut pass, "sleep_island_gate", 66, None);
+                if self.joint_count > 0 {
+                    self.disp(&mut pass, "sleep_island_gate_joints", n_joints, None);
+                }
             }
         }
         self.disp_work(&mut pass, "sleep_island_commit", 67, None);

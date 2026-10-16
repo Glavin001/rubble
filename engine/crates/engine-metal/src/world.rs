@@ -848,6 +848,9 @@ impl MetalWorld {
             let rounds = self.sleep_island_rounds.min(16);
             for _ in 0..rounds {
                 self.dispatch_work(&encoder, "sleep_island_gate", 66, 0);
+                if self.joint_count > 0 {
+                    self.dispatch(&encoder, "sleep_island_gate_joints", n_joints);
+                }
             }
         }
         self.dispatch_work(&encoder, "sleep_island_commit", 67, 0);

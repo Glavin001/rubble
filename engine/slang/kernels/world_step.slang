@@ -3693,6 +3693,31 @@ void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// Same rule across joints: bodies held together by a joint (including a vehicle's
+// tyre joint to the body it stands on) sleep together or not at all.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void sleep_island_gate_joints(uint3 tid : SV_DispatchThreadID)
+{
+    if (ALOAD(gScratchAtomics[13]) == 0u) return;
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].jointCount) return;
+    Joint j = gJoints[i];
+    if (j.bodyA == j.bodyB) return;
+    BodyState a = gBodies[j.bodyA];
+    BodyState b = gBodies[j.bodyB];
+    bool dynA = bodyIsDynamic(a);
+    bool dynB = bodyIsDynamic(b);
+    if (!dynA || !dynB) return;
+    bool okA = bodyIsSleeping(a) || gCcdFlags[j.bodyA] != 0;
+    bool okB = bodyIsSleeping(b) || gCcdFlags[j.bodyB] != 0;
+    if (!okA || !okB)
+    {
+        if (!bodyIsSleeping(a)) gCcdFlags[j.bodyA] = 0;
+        if (!bodyIsSleeping(b)) gCcdFlags[j.bodyB] = 0;
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void sleep_island_commit(uint3 tid : SV_DispatchThreadID)

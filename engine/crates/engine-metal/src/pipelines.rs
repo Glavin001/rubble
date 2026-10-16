@@ -69,6 +69,7 @@ impl Pipelines {
             ("solve_dual", msl!("solve_dual")),
             ("extract_velocity_sleep", msl!("extract_velocity_sleep")),
             ("sleep_island_gate", msl!("sleep_island_gate")),
+            ("sleep_island_gate_joints", msl!("sleep_island_gate_joints")),
             ("sleep_island_commit", msl!("sleep_island_commit")),
             ("ccd_classify", msl!("ccd_classify")),
             ("ccd_sweep", msl!("ccd_sweep")),
