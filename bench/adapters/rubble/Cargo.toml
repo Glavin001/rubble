@@ -1,0 +1,33 @@
+[package]
+name = "bench-rubble"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Benchmark adapter: rubble's AVBD engine (Slang → WGSL on wgpu, or native Metal)"
+publish = false
+
+[[bin]]
+name = "bench-rubble"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+bench-core.workspace = true
+engine-schema = { path = "../../../engine/crates/engine-schema" }
+glam = "0.29"
+engine-exec = { path = "../../../engine/crates/engine-exec" }
+engine-webgpu = { path = "../../../engine/crates/engine-webgpu" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+engine-metal = { path = "../../../engine/crates/engine-metal" }
+# Shardwright convex-hull scenes run on rubble's native Metal fracture host
+engine-viewer = { path = "../../../engine/crates/engine-viewer", optional = true }
+engine-fracture = { path = "../../../engine/crates/engine-fracture", optional = true }
+metal = { version = "0.31", optional = true }
+
+[features]
+default = ["fracture"]
+# Off: build without the (in-progress) engine-viewer fracture host; hull scenes then report n/a
+fracture = ["dep:engine-viewer", "dep:engine-fracture", "dep:metal"]
