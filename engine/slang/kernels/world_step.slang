@@ -4388,12 +4388,15 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 roll -= rollNormal * dot(roll, rollNormal);
                 float angle = length(roll);
                 float cap = ROLLING_RESISTANCE * rollN * rollArm;
-                // Static part: a stiff hold below the cap (the normal penalty at
-                // the lever arm); rolling: the capped torque, secant Hessian.
-                float kHold = rollN / max(rollArm * 1.0e-3, 1.0e-6) * rollArm * rollArm;
                 if (angle > 1.0e-9 && cap > 0.0)
                 {
                     float3 axis = roll / angle;
+                    // At most stop this step's relative rolling, never reverse it
+                    // (as Box2D clamps the impulse): stiffness I_axis/h² of this
+                    // body about the axis, the torque capped at μr·N·r.
+                    float3 local = quatRotate(quatConjugate(b.orientation), axis);
+                    float invIAxis = max(dot(local * local, b.invInertia), 1.0e-12);
+                    float kHold = 1.0 / (invIAxis * p.dt * p.dt);
                     float torque = min(kHold * angle, cap);
                     float kRow = torque / angle;
                     Vec6 ja = vec6Zero();
