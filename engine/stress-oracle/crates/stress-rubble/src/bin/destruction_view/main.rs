@@ -31,6 +31,8 @@
 //! `--view YAW,PITCH` the initial camera; `--spin DEG` turns the camera DEG degrees per
 //! simulated second; `--paused` start paused.
 
+// stress-viz's 5x7 font (stress-viz is a binary crate: its module, included by path).
+#[path = "../../../../stress-viz/src/font.rs"]
 mod font;
 mod render;
 mod sim;
@@ -100,6 +102,8 @@ struct App {
     message: Option<(String, Instant)>,
     rates: Rates,
     error: Option<String>,
+    /// The run's last frame failed: nothing steps until R.
+    failed: bool,
     report: Vec<serde_json::Value>,
 }
 
@@ -160,6 +164,7 @@ fn main() {
         message: None,
         rates: Rates::default(),
         error: None,
+        failed: false,
         report: Vec::new(),
     };
     event_loop.run_app(&mut app).expect("run");
@@ -200,6 +205,7 @@ impl App {
                     if sim.armed.is_empty() { String::new() } else { format!("; {} ram(s) held: click launches", sim.armed.len()) }
                 );
                 self.sim = Some(sim);
+                self.failed = false;
                 self.acc = 0.0;
                 self.rates = Rates::default();
                 self.say(info);
@@ -212,10 +218,19 @@ impl App {
     }
 
     fn step(&mut self) {
+        if self.failed {
+            return;
+        }
         let (Some(sim), Some(gpu)) = (self.sim.as_mut(), self.gpu.as_ref()) else { return };
-        if let Err(e) = sim.step(gpu) {
+        // A panic inside the pipeline (the engine's or the solver's asserts) must not
+        // take the window down: the run stops there and R starts it again.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.step(gpu))).unwrap_or_else(|p| {
+            Err(p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "panic".into()))
+        });
+        if let Err(e) = result {
+            self.failed = true;
             self.paused = true;
-            let m = format!("frame {} failed: {e} (paused; R resets)", sim.frames);
+            let m = format!("frame {} failed: {e} (R resets)", sim.frames + 1);
             self.say(m);
             return;
         }
@@ -533,6 +548,10 @@ impl ApplicationHandler for App {
         let (Some(g), Some(sim), Some(orbit)) = (self.gfx.as_mut(), self.sim.as_ref(), self.orbit.as_ref()) else { return };
         if let Err(e) = g.draw(sim, orbit, &hud) {
             self.error = Some(e);
+            el.exit();
+        }
+        if self.failed && (self.opts.frames.is_some() || self.opts.record.is_some()) {
+            self.error = self.message.as_ref().map(|(m, _)| m.clone());
             el.exit();
         }
         if self.opts.frames.is_some_and(|n| sim.frames >= n) {
