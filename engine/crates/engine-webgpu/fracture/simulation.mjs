@@ -104,7 +104,7 @@ const warmTagPeriod=2**(32-warmValueBits)-2;
       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add', 'csr_scatter_contacts', 'csr_sort',
       'init_colors', 'color_bodies', 'color_bodies_local', 'color_bodies_tail', 'count_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
       'record_color_degrees', 'write_color_args', 'predict_bodies', 'pack_solver_contacts', 'solve_primal_color', 'solve_primal_sparse',
-      'solve_dual', 'extract_velocity_sleep', 'carry_rest_pairs',
+      'solve_dual', 'record_stab_velocity', 'extract_velocity_sleep', 'carry_rest_pairs',
       'joint_hash_clear', 'joint_hash_insert', 'bond_wake', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
     ];
     let hasConvex = scene.colliders.some((c) => c.shape === 3);
@@ -625,9 +625,11 @@ let timing={wallMs:0,encodeMs:0,waitMs:0},initialized=false,sliceEncodeMs=0;
         // Profiling / slicing boundary halfway through the iterations.
         if (beginPass && iter + 1 === (params.iterations >> 1)) pass = phase('solveHalf');
       }
-      // Post-stabilization: one primal pass with α = 0 (pass value 256 | colour),
-      // no dual update. It records the velocity before moving each body.
+      // Post-stabilization: record the velocity, then one primal pass with
+      // α = 0 (pass value 256 | colour) and no dual update.
       if (params.flags & FLAG_POST_STAB) {
+        if (listedPasses) dispWork(pass, 'record_stab_velocity', 67, 1); // awake list
+        else disp(pass, 'record_stab_velocity', nBodies);
         if (sparse) disp(pass, 'solve_primal_sparse', 64, STAB_PASS);
         else {
           const primal = pipes.solve_primal_color;

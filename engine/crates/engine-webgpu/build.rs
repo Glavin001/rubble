@@ -95,6 +95,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "solve_dual",
     "sleep_island_gate",
     "sleep_island_commit",
+    "record_stab_velocity",
     "extract_velocity_sleep",
     "ccd_classify",
     "ccd_sweep",
