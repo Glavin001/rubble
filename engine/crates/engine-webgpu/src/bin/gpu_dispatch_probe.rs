@@ -3,25 +3,8 @@
 use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN,
-        ..Default::default()
-    });
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .ok_or_else(|| anyhow::anyhow!("Hardware GPU adapter required for dispatch diagnostic"))?;
-    eprintln!("adapter: {:?}", adapter.get_info());
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("dispatch diagnostic"),
-            required_features: wgpu::Features::empty(),
-            required_limits: adapter.limits(),
-            memory_hints: Default::default(),
-        },
-        None,
-    ))?;
+    let (info, device, queue) = engine_webgpu::default_device()?;
+    eprintln!("adapter: {info:?}");
     let group_size: u32 = std::env::var("GPU_PROBE_WORKGROUP")
         .unwrap_or_else(|_| "64".into())
         .parse()?;
@@ -30,9 +13,7 @@ fn main() -> anyhow::Result<()> {
         "GPU_PROBE_WORKGROUP must be 64 or 256"
     );
     eprintln!("workgroup size: {group_size}");
-    let constants = [("groupSize".to_string(), group_size as f64)]
-        .into_iter()
-        .collect();
+    let constants = [("groupSize", group_size as f64)];
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("shared dispatch diagnostic"),
         source: wgpu::ShaderSource::Wgsl(include_str!("../../dispatch-diagnostic.wgsl").into()),
@@ -106,21 +87,21 @@ fn main() -> anyhow::Result<()> {
         for _ in 0..10 {
             step();
         }
-        let _ = device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
         let mut rounds = Vec::new();
         let mut medians = Vec::new();
         for _ in 0..2 {
             for _ in 0..3 {
                 step();
             }
-            let _ = device.poll(wgpu::Maintain::Wait);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
             let mut samples = Vec::new();
             for _ in 0..5 {
                 let start = Instant::now();
                 for _ in 0..10 {
                     step();
                 }
-                let _ = device.poll(wgpu::Maintain::Wait);
+                let _ = device.poll(wgpu::PollType::wait_indefinitely());
                 samples.push(start.elapsed().as_secs_f64() * 100.0);
             }
             let mut sorted = samples.clone();
@@ -136,10 +117,10 @@ fn main() -> anyhow::Result<()> {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
             });
-        let _ = device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv()??;
         let expected = submitted * dispatches;
-        let mapped = read.slice(..).get_mapped_range();
+        let mapped = read.slice(..).get_mapped_range().expect("mapped range");
         for (lane, &value) in bytemuck::cast_slice::<u8, u32>(&mapped).iter().enumerate() {
             anyhow::ensure!(value == expected, "Dispatch coverage failure: dispatches={dispatches}, split={split}, lane={lane}: got {value}, expected {expected}. Timing invalid if work is omitted.");
         }

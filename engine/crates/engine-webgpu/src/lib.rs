@@ -6,7 +6,7 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 mod gpu;
-pub use gpu::{SimSnapshot, WgpuSim};
+pub use gpu::{default_device, SimSnapshot, WgpuSim};
 
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
@@ -150,26 +150,7 @@ impl WebGpuWorld {
     /// Create a wgpu device and load every successfully translated WGSL module.
     /// Returns adapter label + counts (ok / fail).
     pub fn smoke_device() -> anyhow::Result<String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| anyhow::anyhow!("no wgpu adapter"))?;
-        let info = adapter.get_info();
-        let (device, _queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("engine-webgpu"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: Default::default(),
-            },
-            None,
-        ))?;
+        let (info, device, _queue) = crate::gpu::default_device()?;
 
         let report = Self::compile_shaders_report();
         let mut loaded = 0u32;
