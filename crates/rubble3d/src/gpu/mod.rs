@@ -3958,11 +3958,12 @@ impl GpuPipeline {
         }
 
         // Grow the map if either count would push the load factor past ~0.5.
-        let want_cap =
-            (2 * self.prev_contact_count.max(new_count).max(1)).next_power_of_two();
+        let want_cap = (2 * self.prev_contact_count.max(new_count).max(1)).next_power_of_two();
         if want_cap > self.ws_map_cap {
-            self.ws_map_hash.grow_if_needed(&self.ctx, want_cap as usize);
-            self.ws_map_entry.grow_if_needed(&self.ctx, want_cap as usize);
+            self.ws_map_hash
+                .grow_if_needed(&self.ctx, want_cap as usize);
+            self.ws_map_entry
+                .grow_if_needed(&self.ctx, want_cap as usize);
             self.ws_map_cap = want_cap;
             self.warmstart_bg_cache.key = None;
             self.warmstart_insert_bg_cache.key = None;
@@ -3992,32 +3993,35 @@ impl GpuPipeline {
         ];
         if self.warmstart_insert_bg_cache.key != Some(insert_key) {
             let layout = self.warmstart_insert_kernel.bind_group_layout();
-            let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("warmstart_insert_bg"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.prev_contacts.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.warmstart_params_uniform.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.ws_map_hash.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.ws_map_entry.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: self.prev_contact_count_buf.buffer().as_entire_binding(),
-                    },
-                ],
-            });
+            let bg = self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("warmstart_insert_bg"),
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.prev_contacts.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.warmstart_params_uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.ws_map_hash.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.ws_map_entry.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.prev_contact_count_buf.buffer().as_entire_binding(),
+                        },
+                    ],
+                });
             self.warmstart_insert_bg_cache.key = Some(insert_key);
             self.warmstart_insert_bg_cache.bind_group = Some(bg);
         }
@@ -4032,36 +4036,39 @@ impl GpuPipeline {
         ];
         if self.warmstart_bg_cache.key != Some(match_key) {
             let layout = self.warmstart_kernel.bind_group_layout();
-            let bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("warmstart_match_bg"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.prev_contacts.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.contacts.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.warmstart_params_uniform.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.contact_count.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: self.ws_map_hash.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: self.ws_map_entry.buffer().as_entire_binding(),
-                    },
-                ],
-            });
+            let bg = self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("warmstart_match_bg"),
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.prev_contacts.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.contacts.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.warmstart_params_uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.contact_count.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.ws_map_hash.buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.ws_map_entry.buffer().as_entire_binding(),
+                        },
+                    ],
+                });
             self.warmstart_bg_cache.key = Some(match_key);
             self.warmstart_bg_cache.bind_group = Some(bg);
         }
