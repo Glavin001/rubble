@@ -6,6 +6,7 @@ use crate::pack::{self, PackedVehicle, Slot, VehicleCapacity, VehicleSlots};
 use engine_schema::vehicle::*;
 use engine_schema::{BodyState, Collider};
 use glam::{Quat, Vec3};
+use serde::Serialize;
 
 /// What a GPU host provides to the vehicle system.
 pub trait VehicleBackend {
@@ -42,7 +43,8 @@ struct Entry {
     origin: [f32; 3],
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WheelState {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
@@ -63,9 +65,12 @@ pub struct WheelState {
     pub sliding: bool,
     pub detached: bool,
     pub disabled: bool,
+    pub radius: f32,
+    pub width: f32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VehicleState {
     pub forward_speed: f32,
     pub lateral_speed: f32,
@@ -81,6 +86,8 @@ pub struct VehicleState {
     pub parts_lost: u32,
     /// Increments whenever the functional state changes (severing, masks).
     pub event_seq: u32,
+    /// Current chassis mass (drops as parts are lost).
+    pub mass: f32,
     pub wheels: Vec<WheelState>,
 }
 
@@ -270,6 +277,16 @@ impl VehicleHost {
         &self.entries[h.0 as usize].desc
     }
 
+    /// Where the vehicle's records and objects live.
+    pub fn slots(&self, h: VehicleHandle) -> VehicleSlots {
+        self.entries[h.0 as usize].slots
+    }
+
+    /// Wheel slots reserved for the vehicle (wheels plus spares).
+    pub fn wheel_slots(&self, h: VehicleHandle) -> u32 {
+        self.entries[h.0 as usize].wheel_slots
+    }
+
     /// Body index of a part's spawned rigid body (valid after `detach_part`).
     pub fn part_body(&self, h: VehicleHandle, part: u32) -> u32 {
         self.entries[h.0 as usize].first_part_body + part
@@ -438,6 +455,7 @@ impl VehicleHost {
             e.wheels_used
         };
         let e = &self.entries[h.0 as usize];
+        let design = wheel;
         let wheel = &WheelDesc { position: (Vec3::from_array(wheel.position) - Vec3::from_array(e.origin)).to_array(), ..wheel.clone() };
         let slot_index = e.slots.wheel_base + idx;
         let rec = l.wheel_base + slot_index * WHEEL_STRIDE;
@@ -477,7 +495,7 @@ impl VehicleHost {
         backend.write_slots(rec, &w);
         let entry = &mut self.entries[h.0 as usize];
         entry.wheels_used += 1;
-        entry.desc.wheels.push(wheel.clone());
+        entry.desc.wheels.push(design.clone());
         self.dirty = true;
         Ok(idx)
     }
@@ -537,6 +555,7 @@ impl VehicleHost {
             event_seq: o2[3],
             engine_connected: o3[0] != 0,
             parts_lost: o3[1],
+            mass: f32::from_bits(v[V_MASS as usize][0]),
             wheels: Vec::new(),
         };
         for wi in 0..e.wheels_used as usize {
@@ -569,6 +588,8 @@ impl VehicleHost {
                 sliding: flags & WD_SLIDE != 0,
                 detached: dynf & WD_DETACHED != 0,
                 disabled: dynf & WD_DISABLED != 0,
+                radius: fw(w[W_HP as usize]),
+                width: fw(w[W_DIR as usize]),
             });
         }
         out

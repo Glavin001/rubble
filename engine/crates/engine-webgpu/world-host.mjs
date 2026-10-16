@@ -1,7 +1,30 @@
 // Minimal WebGPU host for the shared Slang→WGSL step, mirroring WgpuSim::step
 // (crates/engine-webgpu/src/gpu.rs) on the canonical contact path, including the
 // vehicle passes. Used by vehicle.html; demo.html keeps its own benchmark host.
-import { VehicleHost, DEFAULT_VEHICLE_CAPACITY, vehicleLayout, bodyWords, colliderWords } from './vehicle.mjs';
+import { VehicleHost, DEFAULT_VEHICLE_CAPACITY, vehicleLayout, fbits } from './vehicle.mjs';
+
+// ---- record encoding (BodyState 112 B, Collider 64 B) for scene objects ----
+export function bodyWords(b) {
+  const u = new Uint32Array(28);
+  const put = (i, v) => { u[i] = fbits(v); };
+  b.position.forEach((x, i) => put(i, x)); put(3, b.invMass);
+  b.orientation.forEach((x, i) => put(4 + i, x));
+  b.invInertia.forEach((x, i) => put(8 + i, x)); u[11] = b.flags >>> 0;
+  b.linearVel.forEach((x, i) => put(12 + i, x)); put(15, b.sleepTimer);
+  b.angularVel.forEach((x, i) => put(16 + i, x)); u[19] = b.generation >>> 0;
+  b.initialPos.forEach((x, i) => put(20 + i, x)); u[23] = b.initialPadBits >>> 0;
+  b.initialRot.forEach((x, i) => put(24 + i, x));
+  return u;
+}
+
+export function colliderWords(c) {
+  const u = new Uint32Array(16);
+  u[0] = c.body; u[1] = c.shape; u[2] = c.material; u[3] = c.generation;
+  c.localPos.forEach((x, i) => { u[4 + i] = fbits(x); }); u[7] = fbits(c.density);
+  c.localRot.forEach((x, i) => { u[8 + i] = fbits(x); });
+  c.params.forEach((x, i) => { u[12 + i] = fbits(x); });
+  return u;
+}
 
 export const PASS_ALIGN = 256;
 const BIND_COUNT = 30;
@@ -164,7 +187,8 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     jointCount: () => world.jointCount,
     appendJoints: (list) => list.forEach((words) => {
       if (world.jointCount >= cap.maxJoints) throw new Error('joint capacity exhausted');
-      device.queue.writeBuffer(bufs[5], world.jointCount * 128, words);
+      // Joint records are 144 B (engine_schema::Joint / slang Joint).
+      device.queue.writeBuffer(bufs[5], world.jointCount * words.byteLength, words);
       world.jointCount++;
       world.jointHashClearPending = true;
     }),
@@ -373,7 +397,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     bodies: world.bodyWords.slice(0, world.bodyCount * 28),
     colliders: world.colliderWords.slice(0, world.colliderCount * 16),
     vehicle: world.vehicleShadow.slice(),
-    host: structuredClone({ entries: world.vehicles.entries, wheelsUsed: world.vehicles.wheelsUsed, curvePointsUsed: world.vehicles.curvePointsUsed, diffsUsed: world.vehicles.diffsUsed, antiRollsUsed: world.vehicles.antiRollsUsed, partsUsed: world.vehicles.partsUsed }),
+    host: world.vehicles.save(),
   });
   world.restore = (snap) => {
     world.bodyCount = snap.bodyCount;
@@ -385,8 +409,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     device.queue.writeBuffer(bufs[2], 0, snap.colliders);
     world.vehicleShadow.set(snap.vehicle);
     device.queue.writeBuffer(bufs[29], 0, snap.vehicle);
-    Object.assign(world.vehicles, structuredClone(snap.host));
-    world.vehicles.dirty = true;
+    world.vehicles.restore(snap.host);
     world.steps = 0;
     world.parity = 0;
     world.last = { contact: 0, candidate: 0, awake: 0, color: 0, manifold: 0, overflow: 0 };

@@ -1,6 +1,6 @@
 //! Pack a [`VehicleDesc`] into the `gVehicleData` records plus the bodies and
 //! colliders a host appends (chassis, parked anchor, parked wheel/part bodies).
-//! `engine-webgpu/vehicle.mjs` is a line-for-line port; golden tests compare them.
+//! The browser demo runs this code too (`engine-vehicle-wasm`).
 
 use crate::desc::*;
 use engine_schema::vehicle::*;

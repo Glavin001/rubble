@@ -56,10 +56,12 @@ a million tiny uploads before the first GPU submission.
 ## Vehicle demo
 
 `vehicle.html` drives the same WGSL kernels through `world-host.mjs` (a port of
-`WgpuSim::step`) and `vehicle.mjs` (a port of the `engine-vehicle` packer). Run
+`WgpuSim::step`) and `vehicle.mjs` (a thin wrapper over `engine-vehicle`'s packer and
+`VehicleHost`, compiled to wasm from `../engine-vehicle-wasm`). Run
 `cargo run -p engine-webgpu --release --bin wgsl_export` first: it also writes
-`generated/vehicle_presets.json` and the packer golden data checked by
-`node --test tests/vehicle_layout.test.mjs`.
+`generated/vehicle_presets.json` and builds `generated/vehicle_wasm/` with `wasm-pack`
+(needs the `wasm32-unknown-unknown` target). `node --test tests/vehicle_layout.test.mjs`
+checks the wrapper.
 
 - `?scene=playground|destruction|traffic`, `?preset=<name>`, `?spawn=x,z,yaw` (player
   pose), `?vehicles=N` (traffic), `?sleep=off`, `?stopAt=N`
