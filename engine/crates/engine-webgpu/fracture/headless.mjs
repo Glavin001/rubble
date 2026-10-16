@@ -6,6 +6,7 @@
 //   node headless.mjs [scene=grid] [warm=420] [measure=120] [profile=1]
 //                     [trace=0] [shot=row|none] [budget='{"deterministic":true}']
 //   CHROME=/path/to/chrome node headless.mjs ...   (default: Google Chrome)
+//   CHROME_ARGS='--enable-dawn-features=disable_robustness' adds browser flags
 import http from 'node:http';
 import {readFile, mkdtemp, rm} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
@@ -32,7 +33,8 @@ const page = `http://127.0.0.1:${server.address().port}/fracture/headless.html?$
 
 const profile = await mkdtemp(path.join(tmpdir(), 'fracture-headless-'));
 const browser = spawn(chrome, ['--headless=new', '--enable-unsafe-webgpu', '--remote-debugging-port=0',
-  `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank'], {stdio: ['ignore', 'ignore', 'pipe']});
+  `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+  ...(process.env.CHROME_ARGS ?? '').split(' ').filter(Boolean), 'about:blank'], {stdio: ['ignore', 'ignore', 'pipe']});
 const finish = async (code) => {
   const exited = browser.exitCode !== null ? Promise.resolve() : new Promise((ok) => browser.once('exit', ok));
   browser.kill(); server.close(); await exited;
