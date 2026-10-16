@@ -31,8 +31,14 @@ const rates=createRates(value=>{
  $('tps').textContent=value?value.tps.toFixed(value.tps>0&&value.tps<10?1:0):'—';
  $('fps').textContent=value?value.fps.toFixed(value.fps>0&&value.fps<10?1:0):'—';
  $('sim-speed').textContent=value?`${value.speed.toFixed(2)}×`:'—';
- $('step-ms').textContent=value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:`target ${stepHz()} TPS`;
- $('frame-ms').textContent=value?`${value.frameMs.toFixed(1)} ms/frame`:'frames / second';
+ // GPU time from timestamps (sampled ticks and frames) and the rate it alone
+ // would allow if nothing else used the GPU (physics and rendering share it).
+ const tickMs=sim?.gpuTickMs,frameMs=renderer?.gpuFrameMs;
+ $('step-ms').textContent=value&&!value.stepMs&&sim?.counters.awake===0?'all asleep · no GPU work':
+  value&&tickMs?`${tickMs.toFixed(1)} ms GPU/tick · max ${Math.floor(1000/tickMs)} TPS`:
+  value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:`target ${stepHz()} TPS`;
+ $('frame-ms').textContent=value&&frameMs?`${frameMs.toFixed(1)} ms GPU/frame · max ${Math.floor(1000/frameMs)} FPS`:
+  value?`${value.frameMs.toFixed(1)} ms/frame`:'frames / second';
  // Per tick: CPU time encoding and submitting the GPU work, then time spent
  // waiting on the GPU (the readback, or a full queue of overlapped ticks).
  // Sliced ticks run between frames, so no wait is measured for them.

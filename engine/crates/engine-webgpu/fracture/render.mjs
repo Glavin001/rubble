@@ -80,7 +80,14 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const wheel=e=>{e.preventDefault();distance=Math.max(scene.camera?.minDistance??scene.extent*.35,Math.min(scene.extent*8,distance*Math.exp(e.deltaY*.001)))};
  canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerup',up);canvas.addEventListener('pointercancel',cancel);canvas.addEventListener('wheel',wheel,{passive:false});
  let stamps=null,colorMode=0;
+ // GPU time of a sampled frame's render pass, about four times a second (stats
+ // panel). One sample in flight; nothing waits on its readback.
+ const frameTimer=device.features.has('timestamp-query')?{query:device.createQuerySet({type:'timestamp',count:2}),
+  resolve:device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),
+  read:device.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),busy:false,last:0,ms:null}:null;
  return {aim,
+ // GPU ms of the latest sampled frame's render pass, or null if unsupported.
+ get gpuFrameMs(){return frameTimer?.ms??null},
  // 0: materials; 1: sleep state (awake orange, asleep blue, static grey).
  set colorMode(mode){colorMode=mode|0},
  // GPU time of one frame's render pass (ms), via timestamps.
@@ -97,11 +104,16 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
   if(w!==width||h!==height){width=canvas.width=w;height=canvas.height=h;depth?.destroy();depth=device.createTexture({size:[w,h],format:'depth24plus',usage:GPUTextureUsage.RENDER_ATTACHMENT});}
   const {eye,target}=camera();
   device.queue.writeBuffer(uniform,0,matrix(eye,target,w/h,.02,Math.max(500,scene.extent*50)));device.queue.writeBuffer(uniform,64,new Uint32Array([scene.instanceStride||0,colorMode,0,0]));
- const enc=device.createCommandEncoder(),pass=enc.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[.035,.055,.075,1],loadOp:'clear',storeOp:'store'}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'},...(stamps?{timestampWrites:stamps}:{})});
+ const timed=!stamps&&frameTimer&&!frameTimer.busy&&performance.now()-frameTimer.last>250;
+ const writes=stamps??(timed?{querySet:frameTimer.query,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}:null);
+ const enc=device.createCommandEncoder(),pass=enc.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[.035,.055,.075,1],loadOp:'clear',storeOp:'store'}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'},...(writes?{timestampWrites:writes}:{})});
   pass.setBindGroup(0,bind);pass.setPipeline(ground);pass.setVertexBuffer(0,floor);pass.draw(6);
   if(scene.roadVertices?.length){pass.setPipeline(decal);pass.setVertexBuffer(0,roads);pass.draw(scene.roadVertices.length/10)}
   pass.setPipeline(solid);pass.setVertexBuffer(0,mesh);pass.setIndexBuffer(index,'uint32');pass.drawIndexed(indexed.index.length,scene.copies||1);
   if(simulation.shots){pass.setVertexBuffer(0,projectiles);pass.draw(simulation.shots*scene.projectileVertices.length/scene.projectileCount/10)}
-  if(showBonds&&scene.lines.length){pass.setPipeline(wire);pass.setVertexBuffer(0,lines);pass.draw(scene.lines.length/10,scene.copies||1)}pass.end();device.queue.submit([enc.finish()]);
- },dispose(){for(const b of [uniform,mesh,index,lines,roads,floor,projectiles])b.destroy();depth?.destroy();canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
+  if(showBonds&&scene.lines.length){pass.setPipeline(wire);pass.setVertexBuffer(0,lines);pass.draw(scene.lines.length/10,scene.copies||1)}pass.end();
+  if(timed){frameTimer.busy=true;frameTimer.last=performance.now();enc.resolveQuerySet(frameTimer.query,0,2,frameTimer.resolve,0);enc.copyBufferToBuffer(frameTimer.resolve,0,frameTimer.read,0,16)}
+  device.queue.submit([enc.finish()]);
+  if(timed)frameTimer.read.mapAsync(GPUMapMode.READ).then(()=>{const t=new BigUint64Array(frameTimer.read.getMappedRange());frameTimer.ms=Number(t[1]-t[0])/1e6;frameTimer.read.unmap()}).catch(()=>{}).finally(()=>{frameTimer.busy=false});
+ },dispose(){for(const b of [uniform,mesh,index,lines,roads,floor,projectiles])b.destroy();if(frameTimer){frameTimer.query.destroy();frameTimer.resolve.destroy();frameTimer.read.destroy()}depth?.destroy();canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
 }
