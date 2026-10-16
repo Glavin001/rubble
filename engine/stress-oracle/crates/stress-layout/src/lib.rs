@@ -146,9 +146,18 @@ pub const MAX_MATERIALS: usize = 64;
 
 /// Pack the solver's current structures (static data, history and state).
 pub fn pack(m: &ReferenceSolver) -> Result<StructureTables, String> {
+    pack_with(m, &[])
+}
+
+/// `pack`, with the clusters flagged in `exclude` (by cluster index; missing: included)
+/// left out of the chunk and bond tables: each keeps its island record, with empty
+/// chunk and bond ranges. For quiet clusters the GPU would not touch (stress-gpu
+/// `GpuSolver::quiet_clusters`).
+pub fn pack_with(m: &ReferenceSolver, exclude: &[bool]) -> Result<StructureTables, String> {
+    let excluded = |ci: usize| exclude.get(ci).copied().unwrap_or(false);
         let mut chunk_index: Vec<Vec<u32>> = m.structures.iter().map(|st| vec![u32::MAX; st.chunks.len()]).collect();
-        let chunk_total: usize = m.clusters.iter().map(|cl| cl.chunks.len()).sum();
-        let bond_total: usize = m.clusters.iter().map(|cl| cl.bonds.len()).sum();
+        let chunk_total: usize = m.clusters.iter().enumerate().filter(|(ci, _)| !excluded(*ci)).map(|(_, cl)| cl.chunks.len()).sum();
+        let bond_total: usize = m.clusters.iter().enumerate().filter(|(ci, _)| !excluded(*ci)).map(|(_, cl)| cl.bonds.len()).sum();
         let mut chunks = Vec::with_capacity(chunk_total);
         let mut chunk_static = Vec::with_capacity(chunk_total);
         let mut state = Vec::with_capacity(4 * chunk_total);
@@ -157,7 +166,8 @@ pub fn pack(m: &ReferenceSolver) -> Result<StructureTables, String> {
             let s = cl.structure;
             let st = &m.structures[s];
             let begin = chunks.len() as u32;
-            for &c in &cl.chunks {
+            let packed_chunks: &[usize] = if excluded(ci) { &[] } else { &cl.chunks };
+            for &c in packed_chunks {
                 let data = &st.chunks[c];
                 let cs = &m.chunks[s][c];
                 chunk_index[s][c] = chunks.len() as u32;
@@ -256,7 +266,8 @@ pub fn pack(m: &ReferenceSolver) -> Result<StructureTables, String> {
         for (ci, cl) in m.clusters.iter().enumerate() {
             let s = cl.structure;
             islands[ci].range[2] = bonds.len() as u32;
-            for &bi in &cl.bonds {
+            let packed_bonds: &[usize] = if excluded(ci) { &[] } else { &cl.bonds };
+            for &bi in packed_bonds {
                 let b = &m.bonds[s][bi];
                 let g = &b.geometry;
                 let material = table.index(&b.strength);
