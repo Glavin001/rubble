@@ -303,8 +303,12 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     // contactOffset (~1 cm) pulled in ring-adjacent bricks that faceSeparated should
     // still drop — but the fatter boxes also bloated grid occupancy. Margin stays in C0,
     // except under FLAG_CONTACT_GAP, where contacts are speculative within it.
+    // Look-ahead sweep: the linear motion v·h extends the box along v only
+    // (as Box2D sweeps bullets); spin and gravity pad it all round. `reach`
+    // stays the scalar bound for the face tests and the grid level.
     float reach = colliderReach(b, col);
-    float aabbPad = max(1.0e-4, speculativeMargin()) + reach;
+    float3 sweep = reach > 0.0 ? b.linearVel * PARAMS.dt : float3(0, 0, 0);
+    float aabbPad = max(1.0e-4, speculativeMargin()) + (reach > 0.0 ? max(reach - length(sweep), 0.0) : 0.0);
     if (col.shape == SHAPE_SPHERE)
     {
         worldAabbSphere(worldPos, col.params.x + aabbPad, mn, mx);
@@ -344,6 +348,8 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
         mn += worldPos - aabbPad;
         mx += worldPos + aabbPad;
     }
+    mn = min(mn, mn + sweep);
+    mx = max(mx, mx + sweep);
     Aabb box;
     box.mn = mn; box.mx = mx;
     float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
@@ -534,10 +540,36 @@ bool collidersFilteredOut(uint i, uint j)
 
 uint materialIndex(Collider c) { return c.material & 0xFFFFu; }
 
+// Look-ahead pairs are tested with their relative sweep: each box is swept by
+// its own v·h for the broadphase, so pieces carried along together (debris in
+// front of the ball) overlap their neighbours' boxes although they cannot
+// close on them. Undo both sweeps and sweep one box by (vi − vj)·h instead.
+bool lookAheadSeparated(uint i, uint j)
+{
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u) return false;
+    Collider ci = gColliders[i];
+    Collider cj = gColliders[j];
+    BodyState bi = gBodies[ci.body];
+    BodyState bj = gBodies[cj.body];
+    float3 si = colliderReach(bi, ci) > 0.0 ? bi.linearVel * PARAMS.dt : float3(0, 0, 0);
+    float3 sj = colliderReach(bj, cj) > 0.0 ? bj.linearVel * PARAMS.dt : float3(0, 0, 0);
+    if (all(si == float3(0, 0, 0)) && all(sj == float3(0, 0, 0))) return false;
+    uint base = HOST_S(1);
+    Aabb ai = gAabbs[base + i];
+    Aabb aj = gAabbs[base + j];
+    float3 imn = ai.mn - min(si, float3(0, 0, 0)), imx = ai.mx - max(si, float3(0, 0, 0));
+    float3 jmn = aj.mn - min(sj, float3(0, 0, 0)), jmx = aj.mx - max(sj, float3(0, 0, 0));
+    float3 rel = si - sj;
+    imn = min(imn, imn + rel);
+    imx = max(imx, imx + rel);
+    return any(imx < jmn) || any(jmx < imn);
+}
+
 void emitCandidate(uint i, uint j)
 {
     if (i == j) return;
     if (HOST_S(30) != 0u && collidersFilteredOut(i, j)) return;
+    if (lookAheadSeparated(i, j)) return;
     uint a = min(i, j);
     uint b = max(i, j);
     uint slot;
@@ -1908,15 +1940,19 @@ static const uint FLAG_SPEC_VELOCITY = 16384u;
 static const float SPEC_REACH_MAX = 0.5;
 bool contactGapMode() { return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u; }
 
-// How far any point of collider `c` on body `b` can move this step:
+// How far any point of collider `c` on body `b` moves this step:
 // (|v| + |ω|·r)·h + |g|·h², from the velocity at the start of the step. Motion
 // within the contact depth (contactOffset) is already caught by ordinary
 // contacts, so slower colliders get no look-ahead and rest exactly as before.
 float colliderReach(BodyState b, Collider c)
 {
     if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u || !bodyIsDynamic(b) || bodyIsSleeping(b)) return 0.0;
+    // Spin pads the box all round (|ω|·r·h); with the rotation limit
+    // (FLAG_MAX_ROTATION) that is at most 0.785 r. Without spin, tumbling
+    // debris jammed into neighbours (7x7 grid: 3,869 awake at 30 s vs 6).
     float h = PARAMS.dt;
-    float motion = (length(b.linearVel) + length(b.angularVel) * colliderExtent(c)) * h;
+    float linear = length(b.linearVel) * h;
+    float motion = linear + length(b.angularVel) * colliderExtent(c) * h;
     if (motion <= PARAMS.contactOffset) return 0.0;
     return min(motion + abs(PARAMS.gravityY) * h * h, SPEC_REACH_MAX);
 }
@@ -1932,6 +1968,9 @@ float pairReach(BodyState ba, Collider ca, BodyState bb, Collider cb)
     bool moveB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
     float3 vA = moveA ? ba.linearVel : float3(0, 0, 0);
     float3 vB = moveB ? bb.linearVel : float3(0, 0, 0);
+    // Spin counts here (the narrowphase margin): closingPoints keeps only the
+    // points whose ω×r velocity actually closes the gap. The broadphase sweep
+    // stays linear (colliderReach), so spin does not flood the candidates.
     float spin = (moveA ? length(ba.angularVel) * colliderExtent(ca) : 0.0)
                + (moveB ? length(bb.angularVel) * colliderExtent(cb) : 0.0);
     float h = PARAMS.dt;
@@ -2010,6 +2049,26 @@ static const uint FLAG_STABILIZATION = 65536u;
 //     without its supports and started with a 0.1-0.6 m/s kick that woke its
 //     neighbours in turn (Box2D instead restores a woken island's contacts).
 static const uint FLAG_DEFER_WAKE = 131072u;
+// 524288 Bond geometric stiffness (AVBD Sec. 3.5, avbd-demo3d Joint): the
+//     anchor rows' lumped |F|·|r| term in the angular Hessian. Without it the
+//     per-body Newton step overshoots under large bond forces and the iteration
+//     diverges (light bonded slivers spun to 240 rad/s; worse with more
+//     iterations).
+static const uint FLAG_BOND_GEOMETRIC = 524288u;
+// 1048576 Max rotation per step (Box2D b2_maxRotation = 0.25π; Jolt clamps
+//     angular velocity to 0.25π/dt; PhysX maxAngularVelocity): |ω|·h ≤ 0.25π.
+//     Past it the small-angle Jacobians and the quaternion update break down
+//     (light bonded slivers saturated at 2/h = 240 rad/s and kept flipping).
+static const uint FLAG_MAX_ROTATION = 1048576u;
+// 2097152 Rolling resistance (Box2D v3 shape rollingResistance; Bullet rolling
+//     friction): per manifold, a torque against the pair's relative rolling
+//     (rotation about axes in the contact plane) capped at μr·N·r, N the
+//     manifold's normal force and r the contact's lever arm, so a rolling body
+//     comes to rest instead of rolling forever on rigid ground.
+static const uint FLAG_ROLLING_RESISTANCE = 2097152u;
+static const float ROLLING_RESISTANCE = 0.02;
+
+static const float MAX_ROTATION = 0.785398;
 static const uint BODY_WAKE_PENDING = 16u;
 uint wokenFlags(uint flags)
 {
@@ -4268,6 +4327,8 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 dAngB = quatSubVec(qB, bB.initialRot);
             }
             float keep = 1.0 - primalAlpha();
+            float rollN = 0.0, rollArm = 0.0;
+            float3 rollNormal = float3(0, 0, 0);
             for (uint ci = 0u; ci < contactCount; ci++)
             {
                 #if defined(ENGINE_COMPACT_SOLVE)
@@ -4310,8 +4371,37 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                         c._pad2 = min(c._pad2, kSec);
                     }
                 }
+                if ((p.flags & FLAG_ROLLING_RESISTANCE) != 0u)
+                {
+                    float fN = max(-(c.kN * C.x + c.lambdaN), 0.0);
+                    rollN += fN;
+                    rollArm = max(rollArm, length(isA ? rAW : rBW));
+                    rollNormal = n;
+                }
                 contributeContact(A, rhs, c, isA, 0.0, b.position, rotSelf, C, 0.0,
                     isA ? rAW : rBW);
+            }
+            if ((p.flags & FLAG_ROLLING_RESISTANCE) != 0u && rollN > 0.0)
+            {
+                // Relative rolling this step (twist about the normal excluded).
+                float3 roll = dAngB - dAngA;
+                roll -= rollNormal * dot(roll, rollNormal);
+                float angle = length(roll);
+                float cap = ROLLING_RESISTANCE * rollN * rollArm;
+                // Static part: a stiff hold below the cap (the normal penalty at
+                // the lever arm); rolling: the capped torque, secant Hessian.
+                float kHold = rollN / max(rollArm * 1.0e-3, 1.0e-6) * rollArm * rollArm;
+                if (angle > 1.0e-9 && cap > 0.0)
+                {
+                    float3 axis = roll / angle;
+                    float torque = min(kHold * angle, cap);
+                    float kRow = torque / angle;
+                    Vec6 ja = vec6Zero();
+                    float sgn = isA ? -1.0 : 1.0;
+                    ja.v[3] = sgn * axis.x; ja.v[4] = sgn * axis.y; ja.v[5] = sgn * axis.z;
+                    mat6AddOuter(A, ja, kRow);
+                    vec6AddScaled(rhs, ja, torque);
+                }
             }
         }
         else
@@ -4335,16 +4425,31 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 float lAng[3] = { j.lambda5, j.lambda3, j.lambda4 };
                 float cAng[3] = { ang.z, ang.x, ang.y };
                 float s = isA ? -1.0 : 1.0;
+                float3 fWorld = float3(0, 0, 0);
                 for (int row = 0; row < 3; row++)
                 {
                     float3 d = F[row];
                     Vec6 jl = jacobianLin(d, r, !isA);
                     mat6AddOuter(A, jl, kLin[row]);
                     vec6AddScaled(rhs, jl, kLin[row] * lin[row] + lLin[row]);
+                    fWorld += d * (kLin[row] * lin[row] + lLin[row]);
                     Vec6 ja = vec6Zero();
                     ja.v[3] = s * d.x; ja.v[4] = s * d.y; ja.v[5] = s * d.z;
                     mat6AddOuter(A, ja, kAng[row]);
                     vec6AddScaled(rhs, ja, kAng[row] * cAng[row] + lAng[row]);
+                }
+                if ((p.flags & FLAG_BOND_GEOMETRIC) != 0u)
+                {
+                    // Diagonally lumped geometric stiffness of the anchor point
+                    // (AVBD Sec. 3.5; avbd-demo3d Joint): the Hessian of F·(R r),
+                    // H = ½(F rᵀ + r Fᵀ) − (F·r) I, stamped as diag(|columns|).
+                    float3 rr = isA ? r : -r;
+                    float3 fv = fWorld;
+                    float fr = dot(fv, rr);
+                    float3 c0 = 0.5 * (fv * rr.x + rr * fv.x) - float3(fr, 0, 0);
+                    float3 c1 = 0.5 * (fv * rr.y + rr * fv.y) - float3(0, fr, 0);
+                    float3 c2 = 0.5 * (fv * rr.z + rr * fv.z) - float3(0, 0, fr);
+                    mat6AddDiag(A, float3(0, 0, 0), float3(length(c0), length(c1), length(c2)));
                 }
                 continue;
             }
@@ -4829,6 +4934,12 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
         b.angularVel = bodyAngularVelocity(b, p.dt);
     }
 
+    if ((p.flags & FLAG_MAX_ROTATION) != 0u)
+    {
+        float wMax = MAX_ROTATION / dt;
+        float w = length(b.angularVel);
+        if (w > wMax) b.angularVel *= wMax / w;
+    }
     float lin = length(b.linearVel);
     float ang = length(b.angularVel);
     bool slow = lin < p.sleepLin && ang < p.sleepAng;

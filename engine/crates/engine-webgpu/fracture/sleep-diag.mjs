@@ -182,7 +182,18 @@ export async function runSleepDiag(sim, scene, {ticks = 2400, every = 120, top =
   const byLin = [...awake].sort((x, y) => y.lin - x.lin).slice(0, top).map(describe);
   const bySpin = [...awake].sort((x, y) => y.ang - x.ang).slice(0, top).map(describe);
   const contactless = awake.filter((b) => !perBody.has(b.i)).length;
-  return {samples, final: {awake: awake.length, contactlessAwake: contactless, fastest: byLin, spinniest: bySpin}};
+  // Deep contacts between pairs that were bonded in the bake (broken bonds).
+  let deepPairs = 0, deepBonded = 0;
+  if (scene.joints?.length) {
+    const bonded = new Set(scene.joints.map((j) => `${Math.min(j.bodyA, j.bodyB)},${Math.max(j.bodyA, j.bodyB)}`));
+    const seen = new Set();
+    for (let i = 0; i < last.counters.contact; i++) {
+      if (last.points[i * 16 + 3] > -0.005) continue;
+      const a = colliderBody[last.meta[i * 8]], b = colliderBody[last.meta[i * 8 + 1]], key = `${Math.min(a, b)},${Math.max(a, b)}`;
+      if (seen.has(key)) continue; seen.add(key); deepPairs++; if (bonded.has(key)) deepBonded++;
+    }
+  }
+  return {samples, final: {awake: awake.length, contactlessAwake: contactless, deepPairs, deepBonded, fastest: byLin, spinniest: bySpin}};
 }
 
 // Trace (headless-page sleeptrace=<tick>): run to `at`, pick the fastest and
@@ -233,6 +244,13 @@ export async function runSleepTrace(sim, scene, {at = 1200, ticks = 30, pick = 3
       tick.bodies[i] = {y: +f[o + 1].toFixed(4), timer: +f[o + 15].toFixed(3), v: v.map((x) => +x.toFixed(3)), w: w.map((x) => +x.toFixed(2)), flags: u[o + 11], groupMomentum: P.map((x) => +x.toFixed(3)), contacts};
     }
     rows.push(tick);
+  }
+  // Bonds of the traced bodies at the end: partner, broken, |λ| linear/angular.
+  if (scene.joints?.length) {
+    const st = await sim.jointState();
+    for (const e of info) e.bonds = scene.joints.map((j, k) => ({j, k})).filter(({j}) => j.bodyA === e.body || j.bodyB === e.body).slice(0, 12)
+      .map(({j, k}) => ({other: j.bodyA === e.body ? j.bodyB : j.bodyA, broken: (st.flags[k] & 1) !== 0, flags: st.flags[k],
+        lamLin: +Math.hypot(...st.lambda[k].slice(0, 3)).toFixed(2), lamAng: +Math.hypot(...st.lambda[k].slice(3, 6)).toFixed(3)}));
   }
   return {info, rows};
 }

@@ -374,6 +374,47 @@ At 30 s the 6 awake bodies are:
 Their pieces still break apart at 100+ m/s, and the swept bounds then overflow
 the candidate budget.
 
+## Round 3: bonds, rotation and rolling
+
+**10. The bond solve diverged.**
+- *Observed:* a level-1 bonded house started awake, with no shot, spun its
+  16–35 g mortar slivers to 230–240 rad/s, and never slept.
+- *Telling sign:* more iterations made it worse (16 iterations reached
+  238 rad/s within 5 ticks; 32 overflowed). That points to divergence, not
+  under-convergence.
+- *Fix: bond geometric stiffness (524288).* The bond rows lacked AVBD's lumped
+  geometric stiffness (paper Sec. 3.5; the `avbd-demo3d` Joint stamps it). The
+  anchor's ½(F rᵀ + r Fᵀ) − (F·r)I is now added to the angular block, lumped by
+  column norm.
+- *Result:* the same house is all asleep by 8 s, and more iterations now help
+  (5.4 rad/s at 8 iterations, 1.8 at 16).
+
+**11. Effective-mass cap for bond rows.** A linear row's penalty is capped by
+cap·m_eff/h² at the anchor, with m_eff = 1/(1/m + (r×d)ᵀI⁻¹(r×d)). This is
+host-side, in `scaleBondSprings`; no measurable change on its own.
+
+**12. Rotation limit (1048576).** |ω|·h ≤ 0.25π, from Box2D's maxRotation and
+Jolt's angular-velocity clamp. Past that, the small-angle Jacobians and the
+quaternion update break down. It also bounds the look-ahead spin pad.
+
+**13. Rolling resistance (2097152).** From Box2D v3 and Bullet: per manifold, a
+torque against the relative rolling (twist about the normal excluded), capped
+at μr·N·r with μr = 0.02.
+- With it, the 200 t ball slows from 11.4 to 8.4 m/s by 30 s and comes to rest
+  in about two minutes. Without it, it never stops.
+
+**14. Look-ahead refinements.**
+- *Directional sweep:* the linear sweep extends the box along v only.
+- *Relative sweep test:* pairs are tested with (vA − vB)·h, so co-moving debris
+  in front of the ball no longer produces candidates.
+- *Spin:* it pads the broadphase sweep and the pair margin (removing it cost
+  the grid 3,869 awake at 30 s instead of 6), and is bounded by the rotation
+  limit.
+- *Bonded scenes* use look-ahead again.
+
+**Defaults are now 4124865.** That is 65 + 128 + 4096 + 8192 + 16384 + 32768 +
+131072 + 262144 + 524288 + 1048576 + 2097152; the cuboid houses add 32.
+
 **Still unsolved: bonds throw pieces.** Even with the original flags, the
 bonded suburb's awake count grows over 30 s (8k → 14k with flags 65), and
 about 3,000 bodies stay airborne:
