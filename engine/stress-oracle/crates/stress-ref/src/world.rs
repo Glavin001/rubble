@@ -32,15 +32,15 @@ mod coupling;
 pub use coupling::{chunk_clusters, fractured_since, fractured_since_clusters, ContactPartner, CoupledFrame, PlannedPose};
 
 /// Friction regularisation speed (m/s): below it friction scales linearly with slip speed.
-const FRICTION_REGULARIZATION: f64 = 1e-3;
+pub(crate) const FRICTION_REGULARIZATION: f64 = 1e-3;
 /// Largest total viscous coefficient (normal dashpot or regularised friction) of one
 /// contact set (a chunk against one other body), as a fraction of `m_red / dt`. Its
 /// points share it, so a set stays stable however many points engage; a chunk may be
 /// in contact with a few sets at once (explicit stability needs `c dt / m < 2`).
-const MAX_SET_VISCOSITY: f64 = 1.0;
+pub(crate) const MAX_SET_VISCOSITY: f64 = 1.0;
 /// Points over which a face pair spreads its stiffness and viscosity: a set engaging
 /// more never exceeds its face-pair values (the stable-substep assumption).
-const FACE_PAIR_POINTS: usize = 10;
+pub(crate) const FACE_PAIR_POINTS: usize = 10;
 
 #[derive(Clone, Debug)]
 pub struct Impactor {
@@ -266,7 +266,7 @@ struct Coupling {
 /// along `dir` in series over the smaller projected face, like a bond between them.
 /// Chunks are rigid (all compliance lives in springs), so a softer contact would act
 /// as a cushion and cut the stress wave it transmits.
-fn contact_stiffness(a: &Material, box_a: &OBox, b: &Material, box_b: &OBox, dir: Vec3, scale: f64) -> f64 {
+pub(crate) fn contact_stiffness(a: &Material, box_a: &OBox, b: &Material, box_b: &OBox, dir: Vec3, scale: f64) -> f64 {
     let e = |m: &Material| m.youngs_modulus * scale / (1.0 - m.poisson_ratio * m.poisson_ratio);
     let d = dir.normalized();
     let (ha, aa) = half_thickness_and_area(box_a, d);
@@ -319,7 +319,7 @@ fn layer_thickness(b: &OBox, n: Vec3) -> (f64, Vec3) {
     (h, if h > 0.0 { g / h } else { Vec3::ZERO })
 }
 
-fn damping_ratio(restitution: f64) -> f64 {
+pub(crate) fn damping_ratio(restitution: f64) -> f64 {
     let l = restitution.max(1e-6).ln();
     -l / (std::f64::consts::PI.powi(2) + l * l).sqrt()
 }
@@ -2408,7 +2408,7 @@ pub fn min_stiffness_scale(scene: &Scene, frames: f64) -> f64 {
 /// Penalty contact force at one point, with the energy it stores and dissipates
 /// over `dt`.
 #[allow(clippy::too_many_arguments)]
-fn penalty_force(
+pub(crate) fn penalty_force(
     k: f64,
     m_red: f64,
     restitution: f64,
