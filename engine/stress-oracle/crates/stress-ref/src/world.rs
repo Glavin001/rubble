@@ -29,6 +29,11 @@ use crate::statics::StaticOptions;
 
 #[path = "world_coupling.rs"]
 mod coupling;
+/// The modal pre-window for impacts (prototype, `modal` feature): a child module so it
+/// drives the world's own contact and substep without widening their visibility.
+#[cfg(feature = "modal")]
+#[path = "modal.rs"]
+pub mod modal;
 pub use coupling::{chunk_clusters, fractured_since, fractured_since_clusters, ContactPartner, CoupledFrame, PlannedPose};
 
 /// Friction regularisation speed (m/s): below it friction scales linearly with slip speed.
