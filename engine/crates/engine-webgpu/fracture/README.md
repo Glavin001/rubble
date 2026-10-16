@@ -2,9 +2,12 @@
 
 A local, dependency-free browser demo importing **one self-contained GLB** with
 `SHARDWRIGHT_fracture` v1. Shardwright does the slow fracture/hull cooking offline.
-The browser reads baked meshes, convex hulls, full mass/inertia tensors, bonds,
-hierarchy, and the resolved physical material library. No Rust/Wasm bake runs in
-the browser. GPU shader compilation is a separate startup cost.
+The lab reads baked meshes, convex hulls, full mass/inertia tensors, bonds,
+hierarchy, and the resolved physical material library. Reading, scene building
+and the per-tick host plan run in Rust compiled to wasm (no fracture bake runs
+in the browser); the same Rust runs every scene natively on Metal
+([`fracture_viewer`](../../../README.md#native-fracture-viewer-macos--metal)).
+GPU shader compilation is a separate startup cost.
 
 ## Run
 
@@ -16,11 +19,60 @@ export RUSTUP_TOOLCHAIN=stable
 export WGPU_BACKEND=vulkan
 export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
 cargo run --manifest-path engine/Cargo.toml -p engine-webgpu --bin wgsl_export
+wasm-pack build engine/crates/engine-fracture-wasm --release --target web \
+  --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
 python3 -m http.server 8777 --bind 127.0.0.1 --directory engine/crates/engine-webgpu
 ```
 
 Open <http://127.0.0.1:8777/fracture/> in a WebGPU-enabled browser. Generated WGSL
-is ignored by git, so rerun the export after checkout or shader changes.
+and wasm are ignored by git, so rerun the export after checkout or shader changes,
+and the `wasm-pack` build after changes to `engine-fracture`. `wasm-pack` comes
+from `web/`'s devDependencies (`npm --prefix web ci`) or `cargo install wasm-pack`.
+
+## Shared architecture
+
+Each piece of logic has one source, used by both hosts:
+
+| Piece | Source | Browser (WebGPU) | Native (Metal) |
+|---|---|---|---|
+| GLB / FRAC reader, metadata | `engine-fracture` `asset.rs` | wasm `Asset` | direct |
+| Scene building: levels, compound hulls, bonds, rows/grids/suburbs, roads, cuboid house, Scene menu | `engine-fracture` `scene.rs`, `cuboid.rs`, `bonds.rs`, `samples.rs` | wasm `Scene` | direct |
+| Hull cooking and the hull arena (ABI v2) | `engine-schema` `convex.rs` | wasm `HullArena` | direct |
+| Per-tick host plan: buffer sizes, host words, step state, ordered dispatches | `engine-fracture` `plan.rs` | `simulation.mjs` replays it | `engine-viewer` `sim.rs` replays it |
+| Physics kernels | `slang/kernels/*.slang` (`ENGINE_WGSL` layout) | WGSL (`wgsl_export`) | MSL (`engine-viewer` `build.rs`, from the plan's entry list) |
+| Camera, shot rays, floor, indexed mesh | `engine-fracture` `view.rs` | wasm `Orbit` | direct |
+| Draw shader | `slang/render/fracture_draw.slang` | WGSL (`wgsl_export`) | MSL |
+
+`engine-fracture-wasm` is the wasm-bindgen surface; `wasm.mjs` loads it and adapts
+types. `Planner` emits each tick as flat command words: a copy (from the tick's host
+upload or between buffers), a direct dispatch (kernel, workgroups, pass-uniform
+slot), an indirect dispatch (kernel, argument slot, pass slot) or a phase marker
+(profiling and frame-slicing boundaries). The hosts only create buffers and
+pipelines, replay commands, read counters back into the plan, and draw. The JS
+left is GPU I/O, the page and input. On a recording mock device the
+replayed commands are byte-identical to the former JS host's, uploads included.
+
+**Deterministic parity shot.** Both hosts can run the same scene, deterministic
+budget, shot and tick count:
+
+```sh
+cargo run -p engine-viewer --release --example fracture_compare -- arch 0 240
+```
+```js
+(await import('./parity.mjs')).parityShot(__FRACTURE_DEMO__.device,{scene:'arch',level:0,ticks:240})
+```
+
+Measured on an M3 Max after 240 ticks:
+
+| Scene | Metal standing | Browser standing | Metal contacts @240 | Browser contacts @240 |
+|---|---|---|---|---|
+| arch, level 0 | 5 of 23 | 5 of 23 | 85 | 95 |
+| house, level 0 | 70 of 131 | 70 of 131 | 969 | 780 |
+| cuboid 7×7 grid | 31,907 of 35,035 | 31,927 of 35,035 | 46,760 | 47,286 |
+
+The arch's counters are identical through tick 120. Each host repeats its own
+run exactly; between hosts, f32 differences in the generated shader code (Slang →
+MSL directly vs Slang → WGSL → Dawn) grow through contact-rich, chaotic motion.
 The default **House** scene contains 131 building parts, 163 baked collision
 hulls and 454 bonds. The Scene selector also retains the 23-piece masonry arch.
 Both start at rest on the floor. Click to shoot an orange sphere; drag to orbit
@@ -57,7 +109,7 @@ the shot ~38 ms (~114k awake, ~880k contacts). Unbonded pieces knock over
 neighbouring houses, so most of the grid ends up awake. The 16-vertex re-bake
 measured the same peak with 15% more pieces, so the grid keeps the original asset.
 
-**Suburb · 48 houses on lots with roads** (`buildSuburb`) spaces the same houses
+**Suburb · 48 houses on lots with roads** (`build_suburb` in `engine-fracture`) spaces the same houses
 out: 4 × 3 blocks of 2 × 2 lots with 5-6 m yards, separated by 8 m roads with
 sidewalks and dashed centre lines (drawn on the ground; the physics ground is
 still the plane). The ball rolls down one column of lots and hits 6 houses. On an
@@ -66,11 +118,11 @@ M3 Max 24 of 48 houses collapse (debris still topples unbonded lot neighbours;
 (~66 ticks/s) by 30 s. 10 m yards still lose 22 houses.
 
 **Cuboid suburb · 48 box-built houses** uses the same layout with a procedural
-house made only of box colliders (`cuboid-house.mjs`, ~715 pieces): running-bond
+house made only of box colliders (`engine-fracture` `cuboid.rs`, ~715 pieces): running-bond
 brick walls with interlocking corners, door and windows with lintels, sills and
 glass, stepped brick gables, a ridge beam, rafters and roof boards, an exterior
 chimney, a porch on posts with a step, and a picket fence with a mailbox. Every
-piece is a loose body held by gravity and friction (μ = 0.5); `cuboid.test.mjs`
+piece is a loose body held by gravity and friction (μ = 0.5); `engine-fracture` `tests/cuboid.rs`
 checks that no two pieces start interpenetrating.
 - The roof pitch is 12°: woken whole, a house stands and sleeps again in 2.6 s.
   At 18° the settling jolt starts the rafters sliding and the roof falls in.
@@ -108,18 +160,18 @@ a `JOINT_BOND` weld (`world_step.slang`):
   torsion) about the baked rest pose. Each row has a fixed penalty and an
   accumulated multiplier.
 - **Penalties.** They are Shardwright's elastic springs (`kn = A/ce`, `ks = A/cg`,
-  `ktu,v = Iuu,vv/ce`, `kt = J/cg`; `geometry.mjs bondSprings`) times one
+  `ktu,v = Iuu,vv/ce`, `kt = J/cg`; `bonds.rs bond_springs`) times one
   scene-wide factor, so redundant bonds share load in the bake's proportions.
   Rows stiffer than 5× their lighter body's inertial term are capped:
   stiffer rows lock bonded clusters in Gauss-Seidel.
 - **Breaking.** A bond breaks when `max(Fn⁺/T + M/Mcap, Fn⁻/C, V/S) > 1` on the
   step's final iteration. The capacities come from Shardwright's reference
   stress solver: material and interface strengths × area × strength scale
-  (`bondCapacities`). Broken bonds leave the exact joint-pair hash, so their
+  (`bond_capacities`). Broken bonds leave the exact joint-pair hash, so their
   pieces collide again.
 - **Sleep and wake.** Bonds join sleep islands and wake their partners.
 - **Preloading.** The scene first settles one house with breaking off
-  (`bonds.mjs preloadBonds`) and starts every copy from those poses.
+  (`Scene::preload_variant` / `settled`, driven by each host) and starts every copy from those poses.
 
 `bond-regression.mjs` checks the welds on the GPU:
 
@@ -197,18 +249,19 @@ no source sidecars or runtime bake are required.
 
 ## Contract and implementation
 
-- `asset.mjs`: bounds-checked GLB / schema-1 FlatBuffers reader; can be reused
-  independently of WebGPU. Exposes full tensors, bond frames/areas/moments,
+- `engine-fracture/src/asset.rs`: bounds-checked GLB / schema-1 FlatBuffers reader;
+  reusable independently of any GPU. Exposes full tensors, bond frames/areas/moments,
   composition, strength scales, reinforcement, boundary loops and child mappings.
   Interface material IDs share the material ID space:
   `library.interface_material[id - library.material.length]`; -1 means unspecified.
-- `geometry.mjs`: selects a hierarchy level, converts full inertia to a principal
-  basis, transforms both render and collision geometry to that basis, and cooks
-  baked convex topology into the **packed hull ABI v2** (the same bytes as
-  `engine-schema`'s Rust cooker; `hull-golden.json` pins them). Each compound
-  child is recentred on its own bounds and placed by the collider's local
-  position. CPU work is decoding/conversion, not hull generation.
-- `simulation.mjs`: submits Rubble's **core** Slang AVBD kernels using WebGPU with
+- `engine-fracture/src/scene.rs`: selects a hierarchy level, converts full inertia
+  to a principal basis, transforms both render and collision geometry to that
+  basis, and cooks baked convex topology into the **packed hull ABI v2** with
+  `engine-schema`'s cooker (`hull-golden.json` pins its bytes). Each compound child
+  is recentred on its own bounds and placed by the collider's local position. CPU
+  work is decoding/conversion, not hull generation.
+- `simulation.mjs`: replays the plan (`engine-fracture/src/plan.rs`), which
+  schedules Rubble's **core** Slang AVBD kernels with
   persistent hot/cold contacts, the hierarchical size-level broadphase, the convex
   narrowphase (`convex_classify` / `convex_sat_small|large` / `convex_manifold`),
   the block CSR scan, stable colour tiles, degree-aware primal lanes and sized
@@ -305,12 +358,18 @@ node engine/crates/engine-webgpu/fracture/headless.mjs cuboidGrid budget='{"dete
 
 ```sh
 nvm use   # .nvmrc: Node 22.22 (node:module stripTypeScriptTypes needs >= 22.13)
-node --test engine/crates/engine-webgpu/fracture/asset.test.mjs engine/crates/engine-webgpu/fracture/convex.test.mjs engine/crates/engine-webgpu/fracture/simulation.test.mjs
+node --test engine/crates/engine-webgpu/fracture/*.test.mjs
 cargo test --manifest-path engine/Cargo.toml -p engine-oracles --test convex_slang_cpu
 ```
 
 `simulation.test.mjs` drives the browser host with a mock WebGPU device against
-the exported WGSL (no GPU). `convex_slang_cpu` runs the production Slang convex
+the exported WGSL (no GPU). The node tests run the lab's wasm path (build it
+first, see *Run*); the scene, bond, hull and cuboid-house logic is tested in Rust:
+
+```sh
+cargo test --manifest-path engine/Cargo.toml -p engine-fracture --release
+cargo test --manifest-path engine/Cargo.toml -p engine-viewer --release --test fracture_regression
+``` `convex_slang_cpu` runs the production Slang convex
 and broadphase kernels on the CPU (`slangc -target cpp`) against exhaustive
 oracles; see `engine/docs/convex-hulls.md`.
 

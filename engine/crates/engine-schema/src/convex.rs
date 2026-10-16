@@ -935,7 +935,7 @@ pub fn collider_radius(c: &crate::Collider) -> f32 {
 /// Hierarchical grid: base cell = median collider diameter, enough levels to
 /// cover every dynamic collider. Oversized statics beyond the top level use the
 /// explicit 10-entry large list; when there are more, the levels cover them too.
-/// Mirrors `hierLevel` in world_step.slang and `gridConfig` in fracture/geometry.mjs.
+/// Mirrors `hierLevel` in world_step.slang (the fracture lab sizes its grid with engine-fracture `grid_config`).
 pub fn hierarchical_grid(cols: &[crate::Collider], bodies: &[crate::BodyState]) -> (f32, u32) {
     let mut diameters: Vec<f32> = cols
         .iter()

@@ -144,4 +144,4 @@ node headless.mjs pairs a=hull8 b=box4 count=8192                 # one scene
 
 - Shapes: `box`, `sphere`, `capsule`, `hullN` (an N-gon prism with 2N
   vertices, N = 3-32), `box4` (four-box compound).
-- Scenes are built by `shape-bench.mjs`.
+- Scenes are built by `engine-fracture` `pairs.rs` (wasm `Scene.pairs`).
