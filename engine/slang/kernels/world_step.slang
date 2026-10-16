@@ -1856,7 +1856,16 @@ static const float NEAREST_FRACTION = 0.05;
 
 uint pairWarmKey(uint colA, uint colB)
 {
-    uint h = colA * 73856093u ^ colB * 19349663u;
+    // Finalize with a full-avalanche mixer (murmur3 fmix32): the slot is the low
+    // bits, and the plain prime-xor key left Morton-ordered neighbour pairs
+    // (three-avbd's spatialSort builders) in clusters longer than the 64-slot
+    // linear probe even at 25% load, overflowing the record hash on gables506k.
+    uint h = colA * 0x9E3779B1u ^ (colB + 0x7F4A7C15u) * 0x85EBCA77u;
+    h ^= h >> 16;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15;
+    h *= 0x846CA68Bu;
+    h ^= h >> 16;
     return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ 0xA5A5A5A5u) : h;
 }
 

@@ -2,9 +2,11 @@
 
 mod device;
 mod pipelines;
+mod sim;
 mod world;
 
 pub use device::MetalDevice;
+pub use sim::MetalSim;
 pub use world::{MetalWorld, SceneBuilder};
 
 use engine_schema::AbiProbe;

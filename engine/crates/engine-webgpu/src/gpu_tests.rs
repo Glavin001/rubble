@@ -1,6 +1,7 @@
 //! GPU regressions for adjacency construction and contact persistence.
 //! These require a real wgpu adapter; absence fails explicitly instead of skipping.
 use super::*;
+use engine_exec::rigid_plan::HostUniforms;
 use bytemuck::Zeroable;
 use wgpu::util::DeviceExt;
 
@@ -5034,14 +5035,17 @@ fn waking_a_sleeping_stack_does_not_jolt_or_cascade() {
     }
 }
 
-/// `trim_color_dispatches` records only the colours a step uses; the empty buckets it
-/// leaves out did no work, so a stack settling on a static box ends bit for bit where the
-/// whole palette leaves it.
+/// Adaptive dispatch (8ev) records last step's colour count plus headroom and lets
+/// `solve_primal_sparse` finish any further colours; the empty buckets it leaves out
+/// did no work, so a stack settling on a static box ends bit for bit where the whole
+/// palette leaves it.
 #[test]
-fn trimmed_colour_dispatches_match_the_whole_palette() {
-    let run = |trim: bool| {
+fn adaptive_colour_dispatches_match_the_whole_palette() {
+    let run = |full: bool| {
         let mut sim = WgpuSim::new(WorldCapacity::small()).expect("GPU adapter required");
-        sim.trim_color_dispatches = trim;
+        if full {
+            sim.use_full_color_palette();
+        }
         let mut ground = BodyState::zeroed();
         ground.orientation = [0.0, 0.0, 0.0, 1.0];
         ground.position = [0.0, -0.5, 0.0];
@@ -5078,8 +5082,8 @@ fn trimmed_colour_dispatches_match_the_whole_palette() {
         }
         (bytemuck::cast_slice::<BodyState, u8>(&sim.download_bodies()).to_vec(), colors)
     };
-    let (whole, colors) = run(false);
-    let (trimmed, _) = run(true);
+    let (whole, colors) = run(true);
+    let (adaptive, _) = run(false);
     assert!(colors > 0 && 2 * colors <= 32, "the stack should use a few colours: {colors}");
-    assert!(whole == trimmed, "trimmed colour dispatches changed the bodies");
+    assert!(whole == adaptive, "adaptive colour dispatches changed the bodies");
 }

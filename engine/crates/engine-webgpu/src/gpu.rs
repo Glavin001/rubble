@@ -2,13 +2,16 @@
 //! This is the fair path vs three-avbd Chrome WebGPU.
 
 use bytemuck::bytes_of;
+use engine_exec::rigid_plan;
+// Kernel fixtures in gpu_tests reach these through `super::*`.
+#[cfg(test)]
+use engine_exec::rigid_plan::{constraint_id_words, COLOR_ROUND_LIMIT};
 use engine_exec::{ExecError, PhaseTimingsMs};
 use engine_schema::convex::HullArena;
 use engine_schema::*;
 use std::collections::HashMap;
 
-const BIND_COUNT: usize = 31;
-const PASS_ALIGN: u64 = 256;
+use engine_exec::rigid_plan::{BIND_COUNT, PASS_ALIGN};
 
 struct Pipe {
     pipeline: wgpu::ComputePipeline,
@@ -72,6 +75,21 @@ pub struct WgpuSim {
     /// Test hook: caps deferred pairs (HOST_S(21)); 0 uses the whole tail.
     pub(crate) np_defer_limit: u32,
     fused_persistence: bool,
+    /// Split broadphase grid (8ej, HOST_S(20)); resolved once, not per step.
+    grid_split: bool,
+    /// `ENGINE_GRID=fixed`: the old 131072-head table (comparison control).
+    grid_fixed: bool,
+    /// `ENGINE_GRID_LEVELS` override of the hierarchical grid (None: convex scenes).
+    grid_levels_mode: Option<bool>,
+    /// Diagnostic dispatch filters (`WG_ONLY` / `WG_SKIP`), parsed once.
+    wg_only: Option<Vec<String>>,
+    wg_skip: Option<Vec<String>>,
+    /// Primal colours dispatched one by one: last step's colour count plus this
+    /// headroom; later colours run in the sparse tail (`None`: whole palette).
+    color_headroom: Option<u32>,
+    /// JP rounds dispatched: last step's rounds plus this headroom, then
+    /// `color_bodies_tail` (`None`: all 32 rounds).
+    color_round_headroom: Option<u32>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     capacity: WorldCapacity,
@@ -83,8 +101,6 @@ pub struct WgpuSim {
     joint_count: u32,
     command_count: u32,
     sleep_island_rounds: u32,
-    /// Record only the colours a step uses in its solve loop (`step`; off by default).
-    pub trim_color_dispatches: bool,
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
     steps_done: u32,
@@ -107,6 +123,9 @@ pub struct WgpuSim {
     /// The host wrote body state since the last step (`write_bodies`): step even
     /// if the last step left no body awake.
     wake_pending: bool,
+    /// Step-start counter values, copied into binding 7 inside the step's
+    /// encoder after the previous counts were forwarded to the host uniform.
+    counter_upload: wgpu::Buffer,
     /// Offset of the last step's contact rows in binding 4 (`last_contacts`).
     last_contact_offset: u32,
 }
@@ -154,16 +173,37 @@ fn bindings_of(wgsl: &str) -> Vec<Bind> {
 /// Word offset where the CSR index lives inside `gConstraintIds` on the WGSL path.
 /// Split broadphase grids: awake dynamics in one table, sleepers and small
 /// statics in a second (HOST_S(20)); awake queriers walk 14 cells.
-fn grid_split() -> bool {
-    std::env::var("ENGINE_GRID").as_deref() == Ok("split")
+fn grid_split_env() -> bool {
+    !matches!(env_str("ENGINE_GRID").as_deref(), Some("scaled") | Some("fixed"))
 }
 
-fn constraint_id_words(c: &WorldCapacity) -> u32 {
-    let words = (2 * (c.max_contacts + c.max_joints))
-        .max(32768)
-        .next_power_of_two() as u64;
-    words.max(131072) as u32
+/// ENGINE_AUDIT P0: every measured win is the default on every host; an
+/// `ENGINE_*` variable set to its control value restores the old path.
+fn env_str(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }
+
+/// `true` unless `name` is set to one of the listed control values.
+fn env_default_on(name: &str, controls: &[&str]) -> bool {
+    match env_str(name) {
+        Some(v) => !controls.contains(&v.as_str()),
+        None => true,
+    }
+}
+
+fn env_list(name: &str) -> Option<Vec<String>> {
+    env_str(name).map(|v| v.split(',').map(|n| n.trim().to_string()).collect())
+}
+
+/// Headroom over last step's count; `ENGINE_<X>=full` dispatches everything.
+fn env_headroom(name: &str, default: u32) -> Option<u32> {
+    match env_str(name).as_deref() {
+        Some("full") => None,
+        Some(v) => v.parse().ok().or(Some(default)),
+        None => Some(default),
+    }
+}
+
 
 fn persistent_entry(name: &str) -> &str {
     match name {
@@ -211,13 +251,21 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
 
 impl WgpuSim {
     pub fn new(capacity: WorldCapacity) -> anyhow::Result<Self> {
-        if std::env::var("ENGINE_PERSISTENT_CONTACTS").as_deref() == Ok("1") {
-            return Self::new_with_persistent_contacts(capacity);
+        // Persistent 32 B pair + 64 B point records are the default (8cz/8dg);
+        // ENGINE_CONTACTS=canonical|compact keep the controls.
+        // Unit-test fixtures read the canonical 128-byte contact layout.
+        if cfg!(test) {
+            return Self::new_with_compact_contacts(capacity, false);
         }
-        Self::new_with_compact_contacts(
-            capacity,
-            std::env::var("ENGINE_COMPACT_CONTACTS").as_deref() == Ok("1"),
-        )
+        let legacy_compact = env_str("ENGINE_COMPACT_CONTACTS").as_deref() == Some("1");
+        let legacy_off = env_str("ENGINE_PERSISTENT_CONTACTS").as_deref() == Some("0");
+        match env_str("ENGINE_CONTACTS").as_deref() {
+            Some("canonical") => Self::new_with_compact_contacts(capacity, false),
+            Some("compact") => Self::new_with_compact_contacts(capacity, true),
+            _ if legacy_compact => Self::new_with_compact_contacts(capacity, true),
+            _ if legacy_off => Self::new_with_compact_contacts(capacity, false),
+            _ => Self::new_with_persistent_contacts(capacity),
+        }
     }
 
     pub fn new_with_compact_contacts(
@@ -278,15 +326,7 @@ impl WgpuSim {
             anyhow::bail!("storage offset alignment {align} > {PASS_ALIGN}");
         }
 
-        let mut sizes = buffer_sizes(&capacity);
-        if persistent_contacts {
-            sizes[4] = u64::from(capacity.max_contacts) * 2 * 32;
-            sizes[27] = u64::from(capacity.max_contacts) * 2 * 64;
-        }
-        if !compact_contacts {
-            sizes[27] = 64;
-            sizes[28] = 32;
-        }
+        let sizes = rigid_plan::buffer_sizes(&capacity, compact_contacts, persistent_contacts);
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         for (i, &bytes) in sizes.iter().enumerate() {
             let usage = wgpu::BufferUsages::COPY_DST
@@ -308,21 +348,8 @@ impl WgpuSim {
                 mapped_at_creation: false,
             }));
         }
-        // Zero pass table slots (256-byte aligned so dynamic offsets are legal).
-        let mut pass = vec![0u8; (96 * PASS_ALIGN) as usize];
-        for i in 0..96u32 {
-            let v = if i < 48 {
-                i
-            } else if i < 68 {
-                let k = i - 48;
-                (1u32 << k) | ((k & 1) << 31)
-            } else {
-                0
-            };
-            let o = (i as usize) * PASS_ALIGN as usize;
-            pass[o..o + 4].copy_from_slice(&v.to_le_bytes());
-        }
-        queue.write_buffer(&bufs[22], 0, &pass);
+        // Pass table slots (256-byte aligned so dynamic offsets are legal).
+        queue.write_buffer(&bufs[22], 0, &rigid_plan::pass_table());
 
         let mats = [Material {
             friction: 0.5,
@@ -429,12 +456,19 @@ impl WgpuSim {
         // Every arena starts with the unit cube that box-versus-hull pairs reuse.
         let arena = HullArena::new();
         queue.write_buffer(&bufs[18], 0, bytemuck::cast_slice(arena.records()));
-        Ok(Self {
+        let counter_upload = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("counter-upload"),
+            size: std::mem::size_of::<StepCounters>() as u64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        #[allow(unused_mut)]
+        let mut sim = Self {
+            counter_upload,
             compact_contacts,
             persistent_contacts,
             sparse_start: if capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8 {
-                std::env::var("ENGINE_SPARSE_COLORS")
-                    .ok()
+                env_str("ENGINE_SPARSE_COLORS")
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(32)
                     .min(32)
@@ -442,26 +476,33 @@ impl WgpuSim {
                 32
             },
             fused_persistence: compact_contacts
-                && std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Ok("fused"),
-            manifold_persistence: std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref()
-                == Ok("1"),
-            manifold_hash_insert: matches!(
-                std::env::var("ENGINE_HASH_INSERT").as_deref(),
-                Ok("manifold") | Ok("record")
-            ),
-            warm_record_hash: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("record"),
-            reuse_copy: persistent_contacts
-                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy"),
+                && env_str("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Some("fused"),
+            manifold_persistence: env_str("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Some("1"),
+            // Record warm hash (8ed) is the default; ENGINE_HASH_INSERT=contact|manifold.
+            manifold_hash_insert: env_default_on("ENGINE_HASH_INSERT", &["contact"]),
+            warm_record_hash: env_default_on("ENGINE_HASH_INSERT", &["contact", "manifold"]),
+            reuse_copy: persistent_contacts && env_default_on("ENGINE_REUSE", &["pass"]),
             np_split: persistent_contacts
-                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
-                && std::env::var("ENGINE_NP").as_deref() == Ok("split"),
+                && env_default_on("ENGINE_REUSE", &["pass"])
+                && env_default_on("ENGINE_NP", &["fused"]),
             np_defer_limit: 0,
             persist_list_limit: 0,
-            local_repair: std::env::var("ENGINE_REPAIR").as_deref() == Ok("local"),
-            carry_rest: std::env::var("ENGINE_REST").as_deref() == Ok("carry"),
+            local_repair: env_default_on("ENGINE_REPAIR", &["rounds"]),
+            carry_rest: env_default_on("ENGINE_REST", &["drop"]),
             persist_list: persistent_contacts
-                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
-                && std::env::var("ENGINE_PERSIST").as_deref() == Ok("list"),
+                && env_default_on("ENGINE_REUSE", &["pass"])
+                && env_default_on("ENGINE_PERSIST", &["scan"]),
+            grid_split: grid_split_env(),
+            grid_fixed: env_str("ENGINE_GRID").as_deref() == Some("fixed"),
+            grid_levels_mode: match env_str("ENGINE_GRID_LEVELS").as_deref() {
+                Some("off") => Some(false),
+                Some("on") => Some(true),
+                _ => None,
+            },
+            wg_only: env_list("WG_ONLY"),
+            wg_skip: env_list("WG_SKIP"),
+            color_headroom: env_headroom("ENGINE_COLOR_HEADROOM", 4),
+            color_round_headroom: env_headroom("ENGINE_COLOR_ROUND_HEADROOM", 2),
             device,
             queue,
             capacity,
@@ -473,7 +514,6 @@ impl WgpuSim {
             joint_count: 0,
             command_count: 0,
             sleep_island_rounds: 8,
-            trim_color_dispatches: false,
             last_counters: StepCounters::default(),
             last_timings: PhaseTimingsMs::default(),
             steps_done: 0,
@@ -489,7 +529,34 @@ impl WgpuSim {
             hull_records_capacity: hull_records,
             wake_pending: false,
             last_contact_offset: 0,
-        })
+        };
+        // Kernel fixtures in the unit tests set the modes they exercise on top
+        // of the pre-P0 controls; integration tests run the shipped defaults.
+        #[cfg(test)]
+        sim.use_control_modes();
+        Ok(sim)
+    }
+
+    /// The pre-ENGINE_AUDIT configuration: per-contact warm hash, separate
+    /// persistence, global colouring rounds, scaled grid, full palette.
+    #[cfg(test)]
+    /// Dispatch the whole colour palette every iteration instead of last step's
+    /// colour count plus headroom (ENGINE_COLOR_HEADROOM=full), for tests.
+    pub(crate) fn use_full_color_palette(&mut self) {
+        self.color_headroom = None;
+    }
+
+    pub(crate) fn use_control_modes(&mut self) {
+        self.manifold_hash_insert = false;
+        self.warm_record_hash = false;
+        self.reuse_copy = false;
+        self.np_split = false;
+        self.persist_list = false;
+        self.local_repair = false;
+        self.carry_rest = false;
+        self.grid_split = false;
+        self.color_headroom = None;
+        self.color_round_headroom = None;
     }
 
     pub fn chip(&self) -> &str {
@@ -785,6 +852,24 @@ impl WgpuSim {
         self.step_inner(false)
     }
 
+    /// Encode and submit one step without waiting for it (pipelined hosts and
+    /// benchmarks). Previous-step counts reach the next step through GPU copies,
+    /// as in the browser host; `drain` waits and refreshes the counters.
+    pub fn step_submit(&mut self) -> Result<(), ExecError> {
+        self.step_core(false, false).map(|_| ())
+    }
+
+    /// Wait for every submitted step and refresh the counters (overflow check).
+    pub fn drain(&mut self) -> Result<StepCounters, ExecError> {
+        let counters = self.read_counters();
+        self.last_counters = counters;
+        self.manifolds_valid = counters.overflow_flags == 0;
+        if counters.overflow_flags != 0 {
+            return Err(ExecError::Overflow(counters.overflow_flags));
+        }
+        Ok(counters)
+    }
+
     /// three-avbd `reuseManifolds`: skip bounds, broadphase and narrowphase and
     /// carry every previous manifold forward (persistence re-evaluates C0). Falls
     /// back to a full step when the scene changed since the last step.
@@ -794,6 +879,10 @@ impl WgpuSim {
     }
 
     fn step_inner(&mut self, reuse_manifolds: bool) -> Result<StepCounters, ExecError> {
+        self.step_core(reuse_manifolds, true)
+    }
+
+    fn step_core(&mut self, reuse_manifolds: bool, read: bool) -> Result<StepCounters, ExecError> {
         let wall = std::time::Instant::now();
         if self.steps_done > 0
             && self.last_counters.awake_count == 0
@@ -806,211 +895,66 @@ impl WgpuSim {
             return Ok(self.last_counters);
         }
         self.refresh_cell();
-        let n_bodies = self.body_count.max(1) as u64;
-        let n_cols = self.collider_count.max(1) as u64;
-        let n_joints = self.joint_count.max(1) as u64;
-
-        self.write_host_uniforms();
+        self.write_host_uniforms_ex(!read);
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
             0
         } else {
             self.capacity.max_contacts
         };
+        let modes = self.step_modes();
+        let inputs = self.step_inputs();
+        let cmds = rigid_plan::encode_step(&modes, &inputs, reuse_manifolds, !read);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("step"),
             });
+        for c in &cmds {
+            if let rigid_plan::Cmd::Copy { src, src_offset, dst, dst_offset, size } = *c {
+                let from = if src == rigid_plan::COUNTER_UPLOAD {
+                    &self.counter_upload
+                } else {
+                    &self.bufs[src as usize]
+                };
+                enc.copy_buffer_to_buffer(
+                    from,
+                    u64::from(src_offset),
+                    &self.bufs[dst as usize],
+                    u64::from(dst_offset),
+                    u64::from(size),
+                );
+            }
+        }
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
         });
-
-        let collide = !reuse_manifolds;
-        if collide {
-        self.disp(&mut pass, "build_aabbs", n_cols, None);
-        if self.joint_count > 0 {
-            self.disp(&mut pass, "joint_hash_clear", u64::from(engine_schema::joint_hash_size(self.joint_count)), None);
-            self.disp(&mut pass, "joint_hash_insert", n_joints, None);
-        }
-        self.disp(
-            &mut pass,
-            "broadphase_clear",
-            u64::from(self.grid_hash_words()) * if grid_split() { 2 } else { 1 },
-            None,
-        );
-        self.disp(&mut pass, "broadphase_insert", n_cols, None);
-        self.disp(&mut pass, "broadphase_query", n_cols, None);
-        }
-        self.disp(&mut pass, self.work_args_entry(), 64, None);
-        if self.carry_rest && !reuse_manifolds {
-            // Previous manifolds (slot 72) are intact until narrowphase; recount
-            // candidates (slot 64) after the carried resting pairs join them.
-            self.disp_work(&mut pass, "carry_rest_pairs", 72, None);
-            self.disp(&mut pass, self.work_args_entry(), 64, None);
-        }
-
-        // Same size the uniforms publish; records clear four words per slot.
-        let prev_n = self
-            .last_counters
-            .contact_count
-            .min(self.capacity.max_contacts)
-            .max(256);
-        let hash_n =
-            u64::from(self.warm_hash_slots(prev_n)) * if self.warm_record_hash { 4 } else { 1 };
-        let reuse = (self.params.flags & FLAG_REUSE_CONTACTS) != 0;
-        if reuse_manifolds {
-            // Every previous run becomes this step's manifold; no hash needed.
-            self.disp_work(&mut pass, "reuse_all_manifolds", 73, None);
-        } else {
-        if reuse {
-            self.disp(&mut pass, "update_refs", n_bodies, None);
-            self.disp(&mut pass, "contact_hash_clear", hash_n, None);
-            let insert = if self.manifold_hash_insert {
-                "contact_hash_insert_manifolds"
-            } else {
-                "contact_hash_insert"
-            };
-            self.disp_work(&mut pass, insert, 68, None);
-        }
-        // Narrowphase overwrites gManifolds; the manifold insert must precede it.
-        assert!(
-            reuse || !self.manifold_hash_insert,
-            "ENGINE_HASH_INSERT=manifold requires contact reuse"
-        );
-        if self.np_split {
-            self.disp_work(&mut pass, "narrowphase_defer_copy_persistent", 64, None);
-            self.disp_work(&mut pass, "narrowphase_fresh_copy_persistent", 64, None);
-        } else {
-            self.disp_work(
-                &mut pass,
-                if self.reuse_copy {
-                    "narrowphase_copy_persistent"
-                } else {
-                    "narrowphase"
-                },
-                64,
-                None,
-            );
-        }
-        if self.has_convex {
-            // Hull pairs deferred by narrowphase: classify (cheap pairs emit
-            // here), bucket hull pairs, size-bucketed cooperative SAT, then clipping.
-            self.disp_work(&mut pass, "convex_classify", 64, None);
-            self.disp_work(&mut pass, "convex_bucket", 64, None);
-            self.disp(&mut pass, "convex_write_args", 64, None);
-            self.disp_work(&mut pass, "convex_sat_small", 74, None);
-            self.disp_work(&mut pass, "convex_sat_large", 75, None);
-            self.disp_work(&mut pass, "convex_manifold", 76, None);
-        }
-        }
-        self.disp(&mut pass, self.work_args_entry(), 64, None);
-        if !reuse && !reuse_manifolds {
-            self.disp(&mut pass, "contact_hash_clear", hash_n, None);
-            self.disp_work(&mut pass, "contact_hash_insert", 68, None);
-        }
-        if self.fused_persistence && !self.persistent_contacts {
-            self.disp_work(&mut pass, "clear_solver_contacts", 65, None);
-        }
-        if self.persist_list && !reuse_manifolds {
-            // Whole-step reuse lists nothing, so it takes the full scan below.
-            // Slot 70 covers listed contacts; slot 71 runs the full scan only
-            // when the list overflowed (both written after narrowphase).
-            self.disp_work(&mut pass, "persist_list_copy_persistent", 70, None);
-            self.disp_work(&mut pass, "persist_contacts_copy_persistent", 71, None);
-        } else {
-            self.disp_work(
-                &mut pass,
-                if self.fused_persistence {
-                    "persist_manifolds_compact"
-                } else if self.manifold_persistence {
-                    "persist_manifolds"
-                } else if self.reuse_copy {
-                    "persist_contacts_copy_persistent"
-                } else {
-                    "persist_contacts"
-                },
-                if self.fused_persistence || self.manifold_persistence {
-                    66
-                } else {
-                    65
-                },
-                None,
-            );
-        }
-        // Persistent CSR reads solver pairs, so pack them before the graph unless
-        // manifold persistence already did.
-        let early_pair_pack =
-            self.persistent_contacts && !self.fused_persistence && !self.manifold_persistence;
-        if early_pair_pack {
-            self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
-        }
-        if self.joint_count > 0 {
-            self.disp(&mut pass, "warmstart_joints", n_joints, None);
-        }
-        self.disp(&mut pass, "build_awake_list", n_bodies, None);
-        self.disp(&mut pass, self.work_args_entry(), 64, None);
-        self.disp(&mut pass, "csr_clear", n_bodies + 1, None);
-        self.disp_work(&mut pass, "csr_degree_contacts", 66, None);
-        if self.body_count <= 512 {
-            self.disp(&mut pass, "csr_prefix", 1, None);
-        } else {
-            self.disp(&mut pass, "csr_prefix_blocks", (n_bodies + 3) / 4, None);
-            self.disp(&mut pass, "csr_prefix_block_sums", 64, None);
-            self.disp(&mut pass, "csr_prefix_add", n_bodies, None);
-        }
-        self.disp_work(&mut pass, "csr_scatter_contacts", 66, None);
-        self.disp_work(&mut pass, "csr_sort", 67, None);
-        self.disp_work(&mut pass, "init_colors", 67, None);
-        self.disp(&mut pass, self.work_args_entry(), 64, None);
-        // A colour count is not the JP dependency depth. The active 110k
-        // ring still has uncoloured bodies after 16 rounds at step 60.
-        let color_rounds = 32;
-        if self.local_repair {
-            // Slot 69 is zero when the local pass handled the repair list.
-            self.disp(&mut pass, "color_bodies_local", 64, None);
-        }
-        for round in 0..color_rounds {
-            self.disp_work(&mut pass, "color_bodies", 69, Some(round % 16));
-        }
-        self.disp(&mut pass, "count_color_tiles", n_bodies, None);
-        self.disp(
-            &mut pass,
-            "prefix_color_tiles_parallel",
-            u64::from(self.capacity.max_colors.min(32)) * 64,
-            None,
-        );
-        self.disp(&mut pass, "scatter_color_tiles", n_bodies, None);
-        // Per-colour max CSR degree for degree-aware primal lanes (s[20]).
-        self.disp_work(&mut pass, "record_color_degrees", 67, None);
-        self.disp(&mut pass, "write_color_args", 64, None);
-        self.disp(&mut pass, "predict_bodies", n_bodies, None);
-
-        // The solve loop dispatches one indirect bucket per colour and iteration; an empty
-        // bucket does no work but still costs a dispatch (about 9 us on Apple GPUs), so a
-        // small scene pays for the whole 32-colour palette ten times a step. When the last
-        // step used at most half the palette, the colouring is submitted first and the
-        // solve records only the colours this step uses (`color_count`, the highest
-        // colour plus one): the same work, one counters read-back more.
-        let max_c = self.capacity.max_colors.min(32);
-        let split = self.trim_color_dispatches && self.steps_done > 0 && self.last_counters.color_count.saturating_mul(2) <= max_c;
-        if split {
-            drop(pass);
-            self.queue.submit([enc.finish()]);
-            let colors = self.read_counters().color_count.min(max_c);
-            let mut enc2 = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("step solve") });
-            {
-                let mut pass2 = enc2.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step solve"), timestamp_writes: None });
-                self.record_solve(&mut pass2, colors, early_pair_pack, n_bodies);
+        for c in &cmds {
+            match *c {
+                rigid_plan::Cmd::Copy { .. } => {}
+                rigid_plan::Cmd::Dispatch { kernel, threads, pass: p } => {
+                    self.disp(&mut pass, kernel, threads, Some(p));
+                }
+                rigid_plan::Cmd::Indirect { kernel, slot, pass: p } => {
+                    if kernel.starts_with("solve_primal_color") {
+                        self.disp_indirect(&mut pass, slot);
+                    } else {
+                        self.disp_work(&mut pass, kernel, slot, Some(p));
+                    }
+                }
             }
-            self.queue.submit([enc2.finish()]);
-        } else {
-            self.record_solve(&mut pass, max_c, early_pair_pack, n_bodies);
-            drop(pass);
-            self.queue.submit([enc.finish()]);
         }
+        drop(pass);
+        self.queue.submit([enc.finish()]);
 
+        if !read {
+            self.contacts_parity ^= 1;
+            self.steps_done = self.steps_done.saturating_add(1);
+            self.command_count = 0;
+            self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
+            return Ok(self.last_counters);
+        }
         let counters = self.read_counters();
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
@@ -1024,52 +968,6 @@ impl WgpuSim {
         Ok(counters)
     }
 
-    /// The solve part of a step after colouring: solver contacts, `colors` colour buckets
-    /// per iteration (the palette, or the colours in use), velocities and sleep.
-    fn record_solve<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, colors: u32, early_pair_pack: bool, n_bodies: u64) {
-        if self.compact_contacts && !self.fused_persistence && !early_pair_pack {
-            if !self.persistent_contacts {
-                self.disp_work(pass, "clear_solver_contacts", 65, None);
-            }
-            self.disp_work(pass, "pack_solver_contacts", 66, None);
-        }
-        for iter in 0..self.params.iterations {
-            for color in 0..colors.min(self.sparse_start) {
-                self.disp_indirect(pass, color);
-            }
-            if self.sparse_start < colors {
-                self.disp(
-                    pass,
-                    if self.compact_contacts {
-                        "solve_primal_sparse_compact"
-                    } else {
-                        "solve_primal_sparse"
-                    },
-                    64,
-                    Some(self.sparse_start),
-                );
-            }
-            self.disp_work(
-                pass,
-                if self.compact_contacts {
-                    "solve_dual_compact"
-                } else {
-                    "solve_dual"
-                },
-                65,
-                Some(u32::from(iter + 1 == self.params.iterations)),
-            );
-        }
-        self.disp(pass, "extract_velocity_sleep", n_bodies, None);
-        self.disp(pass, "write_sleep_args", 64, None);
-        if self.sleep_island_rounds > 0 {
-            for _ in 0..self.sleep_island_rounds.min(16) {
-                self.disp_work(pass, "sleep_island_gate", 66, None);
-            }
-        }
-        self.disp_work(pass, "sleep_island_commit", 67, None);
-    }
-
     fn disp<'a>(
         &'a self,
         pass: &mut wgpu::ComputePass<'a>,
@@ -1077,15 +975,8 @@ impl WgpuSim {
         threads: u64,
         pass_idx: Option<u32>,
     ) {
-        if let Ok(only) = std::env::var("WG_ONLY") {
-            if !only.split(',').any(|n| n.trim() == name) {
-                return;
-            }
-        }
-        if let Ok(skip) = std::env::var("WG_SKIP") {
-            if skip.split(',').any(|n| n.trim() == name) {
-                return;
-            }
+        if !self.wg_allows(name) {
+            return;
         }
         let p = self
             .pipes
@@ -1120,15 +1011,8 @@ impl WgpuSim {
     }
 
     fn disp_indirect<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, color: u32) {
-        if let Ok(only) = std::env::var("WG_ONLY") {
-            if !only.split(',').any(|n| n.trim() == "solve_primal_color") {
-                return;
-            }
-        }
-        if let Ok(skip) = std::env::var("WG_SKIP") {
-            if skip.split(',').any(|n| n.trim() == "solve_primal_color") {
-                return;
-            }
+        if !self.wg_allows("solve_primal_color") {
+            return;
         }
         let p = &self.pipes[if self.compact_contacts {
             "solve_primal_color_compact"
@@ -1140,9 +1024,86 @@ impl WgpuSim {
         pass.dispatch_workgroups_indirect(&self.bufs[23], (color as u64) * 12);
     }
 
+    /// This step's resolved modes for the shared step graph.
+    fn step_modes(&self) -> rigid_plan::StepModes {
+        rigid_plan::StepModes {
+            compact_contacts: self.compact_contacts,
+            persistent_contacts: self.persistent_contacts,
+            manifold_persistence: self.manifold_persistence,
+            fused_persistence: self.fused_persistence,
+            manifold_insert: self.manifold_insert(),
+            copy_reuse: self.copy_reuse(),
+            split_np: self.split_np(),
+            listed_persist: self.listed_persist(),
+            carry_rest: self.carry_rest,
+            local_repair: self.local_repair,
+            grid_split: self.grid_split,
+            sparse_start: self.sparse_start,
+            color_headroom: self.color_headroom,
+            color_round_headroom: self.color_round_headroom,
+            tail_ok: self.capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8,
+        }
+    }
+
+    fn step_inputs(&self) -> rigid_plan::StepInputs {
+        // Same size the uniforms publish; records clear four words per slot.
+        let prev_n = self
+            .last_counters
+            .contact_count
+            .min(self.capacity.max_contacts)
+            .max(256);
+        rigid_plan::StepInputs {
+            body_count: self.body_count,
+            collider_count: self.collider_count,
+            joint_count: self.joint_count,
+            joint_hash_slots: engine_schema::joint_hash_size(self.joint_count),
+            has_convex: self.has_convex,
+            reuse_contacts: self.reuse_on(),
+            max_colors: self.capacity.max_colors,
+            iterations: self.params.iterations,
+            sleep_time: self.params.sleep_time,
+            sleep_island_rounds: self.sleep_island_rounds,
+            grid_hash_words: self.grid_hash_words(),
+            warm_hash_words: u64::from(self.warm_hash_slots(prev_n))
+                * if self.record_hash() { 4 } else { 1 },
+            steps_done: self.steps_done,
+            last: self.last_counters,
+        }
+    }
+
+    /// Contact reuse (FLAG_REUSE_CONTACTS) gates every mode built on it.
+    fn reuse_on(&self) -> bool {
+        (self.params.flags & FLAG_REUSE_CONTACTS) != 0
+    }
+    fn record_hash(&self) -> bool {
+        self.warm_record_hash && self.reuse_on()
+    }
+    fn manifold_insert(&self) -> bool {
+        self.manifold_hash_insert && self.reuse_on()
+    }
+    fn copy_reuse(&self) -> bool {
+        self.reuse_copy
+    }
+    fn split_np(&self) -> bool {
+        self.np_split && self.copy_reuse()
+    }
+    /// The persist list is written by narrowphase only; convex kernels emit
+    /// contacts after it, so hull scenes take the full persistence scan.
+    fn listed_persist(&self) -> bool {
+        self.persist_list && !self.has_convex
+    }
+
+
+
+    fn wg_allows(&self, name: &str) -> bool {
+        self.wg_only.as_ref().is_none_or(|l| l.iter().any(|n| n == name))
+            && !self.wg_skip.as_ref().is_some_and(|l| l.iter().any(|n| n == name))
+    }
+
     /// Persist-list hosts write slots 70/71 from the reuse-copy variant (8em).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn work_args_entry(&self) -> &'static str {
-        if self.persist_list {
+        if self.listed_persist() {
             "write_work_args_copy_persistent"
         } else {
             "write_work_args"
@@ -1154,100 +1115,46 @@ impl WgpuSim {
     /// `ENGINE_GRID=fixed` keeps the fixed table as a comparison control;
     /// `ENGINE_GRID=split` (8ej) halves the cap so both split tables fit.
     fn grid_hash_words(&self) -> u32 {
-        if std::env::var("ENGINE_GRID").as_deref() == Ok("fixed") {
-            return 131072;
-        }
-        let region = constraint_id_words(&self.capacity) / if grid_split() { 2 } else { 1 };
-        let cap = 1u32 << (31 - region.leading_zeros());
-        (2 * self.collider_count)
-            .max(131072)
-            .next_power_of_two()
-            .min(cap)
+        rigid_plan::grid_hash_words(&self.capacity, self.collider_count, self.grid_split, self.grid_fixed)
     }
 
     /// Warm hash size in slots: one word per slot (heads), or four-word record
     /// slots at ~2x manifolds, never below 4x bodies, within the pre-CSR region.
     fn warm_hash_slots(&self, prev_contacts: u32) -> u32 {
-        let ids_len = constraint_id_words(&self.capacity);
-        if self.warm_record_hash {
-            (prev_contacts / 2)
-                .max(4 * self.body_count)
-                .max(1024)
-                .next_power_of_two()
-                .min(ids_len / 4)
-        } else {
-            const MAX_WARM_HASH: u32 = 1 << 21;
-            prev_contacts
-                .saturating_mul(4)
-                .max(1024)
-                .next_power_of_two()
-                .min(ids_len)
-                .min(MAX_WARM_HASH)
-        }
+        rigid_plan::warm_hash_slots(&self.capacity, self.body_count, prev_contacts, self.record_hash())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn write_host_uniforms(&self) {
-        let max_c = self.capacity.max_contacts;
-        let cur = if self.contacts_parity == 0 { 0 } else { max_c };
-        let prev = if self.contacts_parity == 0 { max_c } else { 0 };
-        let ids_len = constraint_id_words(&self.capacity);
-        let prev_n = self.last_counters.contact_count.min(max_c).max(256);
-        let mut s = [0u32; 64];
-        s[1] = self.capacity.max_bodies;
-        s[2] = self.capacity.max_candidates;
-        s[3] = max_c;
-        s[7] = self.last_counters.contact_count.min(max_c);
-        s[8] = prev;
-        s[9] = self.warm_hash_slots(prev_n);
-        s[15] = u32::from(self.warm_record_hash);
-        s[10] = self.capacity.max_candidates;
-        s[11] = cur;
-        let mut log = 0u32;
-        while (1u32 << log) < self.body_count.max(1) && log < 20 {
-            log += 1;
-        }
-        s[12] = if log == 0 { 0 } else { (log - 1) & 1 };
-        s[17] = self.steps_done;
-        s[26] = 1; // incremental coloring: history row + compact work slot 69
-        s[16] = self.grid_hash_words();
-        s[18] = self.grid_levels;
-        s[20] = u32::from(grid_split());
-        s[21] = self.np_defer_limit;
-        s[22] = u32::from(self.persist_list);
-        s[23] = self.persist_list_limit;
-        s[27] = u32::from(self.local_repair);
-        s[28] = u32::from(self.carry_rest);
-        // Degree-aware primal lanes for convex/compound scenes (high-degree bodies).
-        // Box benchmarks keep their validated lane order (see gables_hold).
-        s[29] = u32::from(self.has_convex);
-        s[30] = u32::from(self.has_filters);
-        if self.manifold_hash_insert || self.carry_rest {
-            s[13] = self.last_counters.manifold_count;
-        }
-        if self.manifold_hash_insert {
-            s[14] = 1;
-        }
-        // CSR index region starts past the hash/id words inside gConstraintIds.
-        s[24] = ids_len;
-        s[4] = self.capacity.max_colors.min(32);
+        self.write_host_uniforms_ex(false);
+    }
+
+    /// `pipelined`: counters go to the upload buffer and the step's encoder
+    /// forwards last step's counts before resetting them (no host readback).
+    fn write_host_uniforms_ex(&self, pipelined: bool) {
+        let inputs = self.step_inputs();
+        let s = rigid_plan::host_words(
+            &self.capacity,
+            &self.step_modes(),
+            &inputs,
+            &rigid_plan::HostState {
+                contacts_parity: self.contacts_parity,
+                grid_levels: self.grid_levels,
+                has_filters: self.has_filters,
+                record_hash: self.record_hash(),
+                np_defer_limit: self.np_defer_limit,
+                persist_list_limit: self.persist_list_limit,
+            },
+        );
         self.queue
             .write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
-
-        let c = StepCounters {
-            body_count: self.body_count,
-            collider_count: self.collider_count,
-            joint_count: self.joint_count,
-            ..StepCounters::default()
-        };
-        self.queue.write_buffer(&self.bufs[7], 0, bytes_of(&c));
-        let mut packed = [[0u32; 4]; 8];
-        for i in 0..32 {
-            packed[i / 4][i % 4] = s[i];
+        let c = rigid_plan::step_counters(&inputs);
+        if pipelined {
+            self.queue.write_buffer(&self.counter_upload, 0, bytes_of(&c));
+        } else {
+            self.queue.write_buffer(&self.bufs[7], 0, bytes_of(&c));
         }
-        let host = HostUniforms {
-            params: self.params,
-            s: packed,
-        };
+        let host = rigid_plan::host_uniforms(&self.params, &s);
         self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
         // Colour counts (0..63) and per-colour max degrees (64..127).
         let zeros = vec![0u32; 128];
@@ -1256,49 +1163,19 @@ impl WgpuSim {
     }
 
     fn refresh_cell(&mut self) {
-        let hier = match std::env::var("ENGINE_GRID_LEVELS").as_deref() {
-            Ok("off") => false,
-            Ok("on") => true,
-            _ => self.has_convex,
-        };
-        if hier {
-            let (base, levels) = match self.grid_cache {
-                Some((n, base, levels)) if n == self.collider_count => (base, levels),
-                _ => {
-                    let (base, levels) = engine_schema::convex::hierarchical_grid(
-                        &self.host_cols,
-                        &self.host_bodies,
-                    );
-                    self.grid_cache = Some((self.collider_count, base, levels));
-                    (base, levels)
+        let hier = self.grid_levels_mode.unwrap_or(self.has_convex);
+        let (cell, levels) = match self.grid_cache {
+            Some((n, cell, levels)) if hier && n == self.collider_count => (cell, levels),
+            _ => {
+                let r = rigid_plan::grid_cell(&self.host_cols, &self.host_bodies, hier);
+                if hier {
+                    self.grid_cache = Some((self.collider_count, r.0, r.1));
                 }
-            };
-            self.params.grid_cell_size = base;
-            self.grid_levels = levels;
-            return;
-        }
-        self.grid_levels = 0;
-        let mut max_r = 0.25f32;
-        for c in &self.host_cols {
-            if c.shape == ShapeType::Plane as u32 {
-                continue;
+                r
             }
-            let body = c.body as usize;
-            if body >= self.host_bodies.len() || self.host_bodies[body].inv_mass <= 0.0 {
-                continue;
-            }
-            let r = if c.params[3] > 0.0 {
-                c.params[3]
-            } else {
-                (c.params[0] * c.params[0] + c.params[1] * c.params[1] + c.params[2] * c.params[2])
-                    .sqrt()
-            };
-            if r > 2.0 {
-                continue;
-            }
-            max_r = max_r.max(r);
-        }
-        self.params.grid_cell_size = (2.0 * max_r * 1.0001).max(0.5);
+        };
+        self.params.grid_cell_size = cell;
+        self.grid_levels = levels;
     }
 
     fn read_counters(&self) -> StepCounters {
@@ -1333,59 +1210,8 @@ impl WgpuSim {
     }
 }
 
-/// Matches `HostUniforms` in `world_step.slang` (`AvbdParams` then `uint4 s[8]`).
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct HostUniforms {
-    params: AvbdParams,
-    s: [[u32; 4]; 8],
-}
 
-fn buffer_sizes(c: &WorldCapacity) -> [u64; BIND_COUNT] {
-    let b = |n: u32, stride: u64| n as u64 * stride;
-    let mut s = [256u64; BIND_COUNT];
-    s[0] = b(
-        c.max_bodies.saturating_mul(2),
-        std::mem::size_of::<engine_schema::BodyState>() as u64,
-    );
-    s[1] = b(
-        c.max_bodies,
-        std::mem::size_of::<engine_schema::BodyState>() as u64,
-    );
-    s[2] = b(c.max_colliders, 64);
-    s[3] = b(64, 16);
-    s[4] = b(c.max_contacts.saturating_mul(2), 128);
-    s[5] = b(c.max_joints, 256);
-    s[6] = 256;
-    s[7] = 256;
-    s[8] = b(c.max_commands, 64);
-    s[9] = b(c.max_bodies + c.max_colliders, 32);
-    s[10] = b(c.max_candidates, 16);
-    s[11] = b(c.max_bodies, 4);
-    s[12] = b(c.max_bodies, 4);
-    s[13] = b(c.max_bodies + 1, 4);
-    s[14] = (u64::from(constraint_id_words(c)) + u64::from(c.max_bodies) + 1) * 4;
-    s[15] = b(c.max_bodies * (c.max_colors + 2), 4);
-    s[16] = b(c.max_colors * c.max_bodies.div_ceil(64).max(1), 4);
-    s[17] = b(c.max_colors.max(128), 4);
-    s[18] = b(c.max_hull_vertices, 16);
-    s[19] = u64::from(engine_schema::joint_hash_size(c.max_joints)) * 3 * 4;
-    s[20] = b(c.max_bodies, 4);
-    s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
-    s[22] = 96 * PASS_ALIGN;
-    // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
-    // contacts 73), convex 74..76.
-    s[23] = b(c.max_colors.max(77) * 3, 4);
-    s[24] = b(c.max_colliders, 80);
-    s[25] = b(c.max_candidates, 32);
-    s[26] = b(c.max_bodies, 32);
-    s[27] = b(c.max_contacts, 64);
-    s[28] = b(c.max_candidates, 32);
-    s[29] = b(c.max_candidates, 32);
-    // SAT separating-feature cache (convex_step gSatCache): uint2 slots, power of two.
-    s[30] = u64::from(c.max_candidates.max(1024).next_power_of_two()) * 8;
-    s
-}
+
 
 #[path = "gpu_host_state.rs"]
 mod host_state;
