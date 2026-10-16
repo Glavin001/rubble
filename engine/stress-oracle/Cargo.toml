@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/stress-ref", "crates/stress-layout", "crates/stress-gpu", "crates/stress-reduce", "crates/stress-rubble"]
+members = ["crates/stress-ref", "crates/stress-layout", "crates/stress-gpu", "crates/stress-reduce", "crates/stress-rubble", "crates/stress-viz"]
 default-members = ["crates/stress-ref"]
 
 [workspace.package]
