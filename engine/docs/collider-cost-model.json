@@ -37,16 +37,16 @@
   },
   {
    "pair": "box/capsule",
-   "contactsPerPair": 1,
+   "contactsPerPair": 2,
    "manifoldsPerPair": 1,
    "awake": true,
-   "totalNs": 19.3,
-   "broadphaseNs": 4,
-   "narrowphaseNs": 0.2,
-   "graphNs": 1.4,
-   "solverNs": 12.9,
-   "sleepNs": -0.5,
-   "otherNs": -0.1
+   "totalNs": 44.4,
+   "broadphaseNs": 4.6,
+   "narrowphaseNs": 7,
+   "graphNs": 3.7,
+   "solverNs": 27.8,
+   "sleepNs": -0.1,
+   "otherNs": 0.1
   },
   {
    "pair": "hull4/sphere",
@@ -231,6 +231,19 @@
    "solverNs": 38.8,
    "sleepNs": 0.2,
    "otherNs": 0.2
+  },
+  {
+   "pair": "box/capsule",
+   "contactsPerPair": 2,
+   "manifoldsPerPair": 1,
+   "awake": true,
+   "totalNs": 41.5,
+   "broadphaseNs": 4.4,
+   "narrowphaseNs": 4.1,
+   "graphNs": 4.4,
+   "solverNs": 28.1,
+   "sleepNs": 0.2,
+   "otherNs": 0.4
   },
   {
    "pair": "hull8/hull8",
