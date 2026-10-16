@@ -83,6 +83,8 @@ pub struct WgpuSim {
     joint_count: u32,
     command_count: u32,
     sleep_island_rounds: u32,
+    /// Record only the colours a step uses in its solve loop (`step`; off by default).
+    pub trim_color_dispatches: bool,
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
     steps_done: u32,
@@ -471,6 +473,7 @@ impl WgpuSim {
             joint_count: 0,
             command_count: 0,
             sleep_island_rounds: 8,
+            trim_color_dispatches: false,
             last_counters: StepCounters::default(),
             last_timings: PhaseTimingsMs::default(),
             steps_done: 0,
@@ -977,51 +980,29 @@ impl WgpuSim {
         self.disp(&mut pass, "write_color_args", 64, None);
         self.disp(&mut pass, "predict_bodies", n_bodies, None);
 
-        // Dispatch the full palette; empty GPU indirect buckets cost no work.
+        // The solve loop dispatches one indirect bucket per colour and iteration; an empty
+        // bucket does no work but still costs a dispatch (about 9 us on Apple GPUs), so a
+        // small scene pays for the whole 32-colour palette ten times a step. When the last
+        // step used at most half the palette, the colouring is submitted first and the
+        // solve records only the colours this step uses (`color_count`, the highest
+        // colour plus one): the same work, one counters read-back more.
         let max_c = self.capacity.max_colors.min(32);
-        if self.compact_contacts && !self.fused_persistence && !early_pair_pack {
-            if !self.persistent_contacts {
-                self.disp_work(&mut pass, "clear_solver_contacts", 65, None);
+        let split = self.trim_color_dispatches && self.steps_done > 0 && self.last_counters.color_count.saturating_mul(2) <= max_c;
+        if split {
+            drop(pass);
+            self.queue.submit([enc.finish()]);
+            let colors = self.read_counters().color_count.min(max_c);
+            let mut enc2 = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("step solve") });
+            {
+                let mut pass2 = enc2.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step solve"), timestamp_writes: None });
+                self.record_solve(&mut pass2, colors, early_pair_pack, n_bodies);
             }
-            self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
+            self.queue.submit([enc2.finish()]);
+        } else {
+            self.record_solve(&mut pass, max_c, early_pair_pack, n_bodies);
+            drop(pass);
+            self.queue.submit([enc.finish()]);
         }
-        for iter in 0..self.params.iterations {
-            for color in 0..max_c.min(self.sparse_start) {
-                self.disp_indirect(&mut pass, color);
-            }
-            if self.sparse_start < max_c {
-                self.disp(
-                    &mut pass,
-                    if self.compact_contacts {
-                        "solve_primal_sparse_compact"
-                    } else {
-                        "solve_primal_sparse"
-                    },
-                    64,
-                    Some(self.sparse_start),
-                );
-            }
-            self.disp_work(
-                &mut pass,
-                if self.compact_contacts {
-                    "solve_dual_compact"
-                } else {
-                    "solve_dual"
-                },
-                65,
-                Some(u32::from(iter + 1 == self.params.iterations)),
-            );
-        }
-        self.disp(&mut pass, "extract_velocity_sleep", n_bodies, None);
-        self.disp(&mut pass, "write_sleep_args", 64, None);
-        if self.sleep_island_rounds > 0 {
-            for _ in 0..self.sleep_island_rounds.min(16) {
-                self.disp_work(&mut pass, "sleep_island_gate", 66, None);
-            }
-        }
-        self.disp_work(&mut pass, "sleep_island_commit", 67, None);
-        drop(pass);
-        self.queue.submit([enc.finish()]);
 
         let counters = self.read_counters();
         self.contacts_parity ^= 1;
@@ -1034,6 +1015,52 @@ impl WgpuSim {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
         Ok(counters)
+    }
+
+    /// The solve part of a step after colouring: solver contacts, `colors` colour buckets
+    /// per iteration (the palette, or the colours in use), velocities and sleep.
+    fn record_solve<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, colors: u32, early_pair_pack: bool, n_bodies: u64) {
+        if self.compact_contacts && !self.fused_persistence && !early_pair_pack {
+            if !self.persistent_contacts {
+                self.disp_work(pass, "clear_solver_contacts", 65, None);
+            }
+            self.disp_work(pass, "pack_solver_contacts", 66, None);
+        }
+        for iter in 0..self.params.iterations {
+            for color in 0..colors.min(self.sparse_start) {
+                self.disp_indirect(pass, color);
+            }
+            if self.sparse_start < colors {
+                self.disp(
+                    pass,
+                    if self.compact_contacts {
+                        "solve_primal_sparse_compact"
+                    } else {
+                        "solve_primal_sparse"
+                    },
+                    64,
+                    Some(self.sparse_start),
+                );
+            }
+            self.disp_work(
+                pass,
+                if self.compact_contacts {
+                    "solve_dual_compact"
+                } else {
+                    "solve_dual"
+                },
+                65,
+                Some(u32::from(iter + 1 == self.params.iterations)),
+            );
+        }
+        self.disp(pass, "extract_velocity_sleep", n_bodies, None);
+        self.disp(pass, "write_sleep_args", 64, None);
+        if self.sleep_island_rounds > 0 {
+            for _ in 0..self.sleep_island_rounds.min(16) {
+                self.disp_work(pass, "sleep_island_gate", 66, None);
+            }
+        }
+        self.disp_work(pass, "sleep_island_commit", 67, None);
     }
 
     fn disp<'a>(
