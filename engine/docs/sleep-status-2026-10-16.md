@@ -22,9 +22,15 @@ The remaining awake bodies:
 - **7×7 grid:** 2 islands of about 2,400 bodies, each held by 5–7 slow movers
   (bricks still moving at about 5 cm/s on a few contacts). The 200 t ball keeps
   rolling at about 11 m/s; it touches only the ground.
-- **Bonded suburb:** about 1,500 bonded mortar slivers (13–50 g) between
-  1–3 kg bricks keep jittering. That is a mass ratio of about 1:200, which
-  needs your decision.
+- **Bonded suburb:** the awake bodies are almost the whole of the 5 struck
+  houses (529–563 of 567 bodies each); no other house has an awake body. Most
+  are ordinary 0.5–5 kg pine members (1,412 of 2,182); pieces under 60 g are
+  only 136, in proportion to their share of the asset. 335 have no contact at
+  all: they hang or spin on bonds. The same suburb **without bonds** is all
+  asleep by 30 s except the ball, so the cause is the legacy bond solver, not
+  the asset or the sleep logic. (An earlier version of this note blamed
+  "mortar slivers"; the light pieces are pine offcuts, and they are not the
+  cause.)
 
 ## Changes
 
@@ -44,7 +50,7 @@ opt-in.
 | 131072 | Deferred wake | Box2D (woken islands keep their contacts) | Yes | Stops the wake cascade (1,522 → 0 wakes on one pile) |
 | 262144 | Resting-pair carry: sleeping pairs keep their λ | Box2D; Rust host `ENGINE_REST=carry` | Yes | One house asleep by 10 s; no cold-start sag on waking |
 | 524288 | Bond geometric stiffness | AVBD paper Sec. 3.5, avbd-demo3d | Yes | Bond iteration stopped diverging; the bonded house sleeps by 8 s |
-| 1048576 | Rotation limit, 0.25π per step | Box2D, Jolt | Partly | Bounds spin and the look-ahead pad; slivers no longer reach 240 rad/s |
+| 1048576 | Rotation limit, 0.25π per step | Box2D, Jolt | Partly | Bounds spin and the look-ahead pad; light pieces no longer reach 240 rad/s |
 | 4194304 | Push-out limit, 0.1 m/s | Box2D, PhysX | Yes | Jammed pieces at 30 s: about 40 → 0–4 |
 
 ### Off by default
@@ -103,8 +109,8 @@ Other options:
 
 1. **The grid's last slow movers.** Trace them (`sleeptrace=3600 pick=3`);
    my last attempt produced no output.
-2. **The bonded slivers' mass ratio.** Needs your decision (pending-decisions
-   item 1).
+2. **Bonded houses stay awake.** The legacy bond solver keeps struck bonded
+   houses moving (pending-decisions items 1 and 3).
 3. **Rolling resistance as a default, and the push-out cap value.** Pending
    decisions items 2 and 4.
 4. **Run variance.** The grid varies a lot between runs, by up to 3× in awake

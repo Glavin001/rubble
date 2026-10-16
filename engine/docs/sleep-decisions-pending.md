@@ -9,46 +9,38 @@ All flags below are `params.flags` bits on the fracture scenes. Turn one on
 from the headless runner with `params={"flags":N}`, and compare runs with
 `sleepdiag`.
 
-## 1. Light mortar slivers in bonded scenes (mass ratio)
+## 1. Struck bonded houses never sleep (legacy bond solver)
 
-**What was measured**
-- In the bonded suburb at level 1, about 1,500 bonded pieces keep moving after
-  the shot, so about 2,750 bodies stay awake from 12 s on.
-- The movers are 13–50 g mortar slivers bonded between 1–3 kg bricks. One
-  13 g sliver carries about 800 N through five bonds, with anchors about 3 cm
-  from its centre. That is about 24 N·m on I ≈ 10⁻⁶ kg·m², so any imbalance
-  within one solver iteration flips it.
-- A mass ratio of about 1:200 is past what iterative solvers handle. Jolt and
-  PhysX documentation advise ratios under about 10–100.
-- Already done: bond geometric stiffness, the effective-mass cap on bond rows,
-  and the rotation limit. The divergence is gone, but the slivers still
-  jitter.
+**What was measured** (bonded suburb, level 1, defaults 6222017, at 30 s)
+- About 2,180 awake, flat from 15 s on. Every one is in one of the 5 struck
+  houses, and each of those houses is almost entirely awake (529–563 of 567
+  bodies). The other 43 houses are asleep.
+- By fragment kind (awake / moving): pine 0.5–5 kg 1,412 / 1,278; pine
+  60–500 g 176 / 151; brick >50 kg 161 / 64; pine <60 g 136 / 108. The light
+  pieces are no more likely to be awake than the heavy ones.
+- 335 awake bodies have no contact: they hang or spin on bonds (up to
+  90 rad/s).
+- **The same suburb without bonds is all asleep by 30 s** except the ball.
+- The asset checks out: at level 1 every fragment's mass, volume, centre of
+  mass and inertia agree with its collision hulls (volume within 18%, centre
+  within 8.5 cm, inertia within 0.93–1.32×).
 
-**Options** (all used by mature engines, and all of them change sliver physics)
-- **A. Inertia armature (MuJoCo `armature`).** Add a minimum rotational
-  inertia to light bodies. Slivers would turn more sluggishly than real mortar.
-- **B. Mass scaling in bond/contact rows (PhysX `invMassScale`).** The solver
-  treats the light body as heavier in those rows. Bonds then load slightly
-  incorrectly.
-- **C. Merge slivers into a neighbour in the asset** (Shardwright export). This
-  is lossless at run time and changes the fracture geometry.
-- **D. Leave it to the stress solver**, which replaces these bonds.
+**Correction.** An earlier version of this entry blamed 13–50 g "mortar
+slivers" and a 1:200 mass ratio. The light pieces are pine offcuts from cell
+agglomeration (34 under 60 g per house, the lightest 8 g), and the breakdown
+above shows they are not the cause. Merging them in Shardwright would not fix
+this.
 
-**Tested since** (bonded suburb, awake at 30 s; it plateaus in every case)
+**Tried in the bond solver:** bond geometric stiffness (fixed the divergence,
+on by default), the effective-mass cap, the rotation limit, and inertia
+armature (flag 8388608; worse: 3,275 awake). Post-stabilization off: 2,178.
 
-| Variant | Awake | Moving |
-|---|---|---|
-| Defaults (6222017) | 2,191 | about 800 |
-| A. Armature (flag 8388608, I ≥ 0.1·m·r_max²) | 3,275 | about 930 |
-| Post-stabilization off (6217921) | 2,178 | about 1,065 |
+**Options**
+- **A. Fix the legacy bond solver** for damaged, partly broken houses
+  (bond rows on hanging pieces, breakage energy).
+- **B. Leave it to the stress solver**, which replaces these bonds.
 
-With the armature the spinners become 1–2 kg pieces at about 50 rad/s, so this
-is not only the slivers' inertia. The bonded scenes also keep about 400 jammed
-pieces. What remains lives in the legacy bond solver, not in the sleep logic.
-
-**My recommendation:** D (the stress solver), or C first if bonds must keep
-working meanwhile. The armature (A) is implemented but did not help, so leave
-it off.
+**My recommendation:** B. This is the same question as item 3.
 
 ## 2. Rolling resistance as a default (flag 2097152)
 
