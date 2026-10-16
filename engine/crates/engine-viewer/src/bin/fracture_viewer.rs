@@ -13,7 +13,7 @@
 #![allow(unexpected_cfgs)]
 
 use core_graphics_types::geometry::CGSize;
-use engine_fracture::{build_scene, parse_fracture_glb, FractureAsset};
+use engine_fracture::{build_scene, parse_fracture_glb, FractureAsset, FractureScene};
 use engine_viewer::fracture::{FractureSim, Orbit, Renderer};
 use metal::*;
 use objc::runtime::{Object, YES};
@@ -105,6 +105,7 @@ struct Loaded {
     level: u8,
     fragments: usize,
     hulls: usize,
+    skipped: usize,
     bonds: usize,
     projectile_radius: f32,
     sim: FractureSim,
@@ -150,18 +151,37 @@ impl App {
             .and_then(|bytes| parse_fracture_glb(&bytes))
             .and_then(|asset| {
                 let levels = asset.levels();
-                let level = level.filter(|l| levels.contains(l)).unwrap_or(levels[0]);
+                let wanted = level.filter(|l| levels.contains(l)).unwrap_or(levels[0]);
                 let parse_ms = started.elapsed().as_secs_f64() * 1000.0;
                 let name = path
                     .file_name()
                     .map_or("model".into(), |n| n.to_string_lossy().into_owned());
                 println!("parsed {name} in {parse_ms:.0} ms · levels {levels:?}");
-                self.build(asset, levels, level, name)
+                // Unloadable levels (e.g. degenerate baked hulls) fall back to the
+                // nearest loadable one, preferring coarser levels.
+                let mut order = levels.clone();
+                order.sort_by_key(|&l| ((l as i32 - wanted as i32).abs(), l > wanted));
+                let mut first_error = None;
+                for level in order {
+                    match build_scene(&asset, level) {
+                        Ok(scene) => {
+                            let notice = first_error.map(|e: anyhow::Error| {
+                                eprintln!("level {wanted} unavailable: {e:#}");
+                                format!("level {wanted} unavailable ({e}) · showing level {level}")
+                            });
+                            return Ok((self.build(asset, levels, scene, name)?, notice));
+                        }
+                        Err(e) => {
+                            first_error.get_or_insert(e);
+                        }
+                    }
+                }
+                Err(first_error.unwrap())
             });
         match result {
-            Ok(l) => {
+            Ok((l, notice)) => {
                 self.loaded = Some(l);
-                self.status = "click the model to shoot".into();
+                self.status = notice.unwrap_or_else(|| "click the model to shoot".into());
             }
             Err(e) => self.fail(e),
         }
@@ -173,17 +193,18 @@ impl App {
         &self,
         asset: FractureAsset,
         levels: Vec<u8>,
-        level: u8,
+        scene: FractureScene,
         name: String,
     ) -> anyhow::Result<Loaded> {
         let t = Instant::now();
-        let scene = build_scene(&asset, level)?;
+        let level = scene.level;
         let sim = FractureSim::new(&self.device, &self.queue, &scene)?;
         let renderer = Renderer::new(&self.device, MTLPixelFormat::BGRA8Unorm, &scene)?;
         println!(
-            "{name} level {level}: {} fragments · {} hulls · {} bonds · {} bodies · built in {:.0} ms",
+            "{name} level {level}: {} fragments · {} hulls ({} flat skipped) · {} bonds · {} bodies · built in {:.0} ms",
             scene.fragment_count,
             scene.hull_count,
+            scene.skipped_hulls.len(),
             scene.bond_count,
             scene.bodies.len(),
             t.elapsed().as_secs_f64() * 1000.0
@@ -195,6 +216,7 @@ impl App {
             level,
             fragments: scene.fragment_count,
             hulls: scene.hull_count,
+            skipped: scene.skipped_hulls.len(),
             bonds: scene.bond_count,
             projectile_radius: scene.projectile_radius,
             sim,
@@ -215,22 +237,34 @@ impl App {
             return;
         }
         self.running = false;
+        // Build the scene first so an unloadable level keeps the current one.
+        let scene = match build_scene(&l.asset, level) {
+            Ok(scene) => scene,
+            Err(e) => {
+                eprintln!("level {level} unavailable: {e:#}");
+                self.status = format!(
+                    "level {level} unavailable ({e}) · staying on level {}",
+                    l.level
+                );
+                self.loaded = Some(l);
+                self.update_title();
+                return;
+            }
+        };
         let Loaded {
             asset,
             levels,
             name,
             ..
         } = l;
-        // A failed level keeps nothing to fall back on cheaply; rebuild the previous level.
-        let previous = levels[(i - step) as usize];
-        match self.build(asset, levels, level, name) {
+        match self.build(asset, levels, scene, name) {
             Ok(next) => {
                 self.loaded = Some(next);
                 self.status = "click the model to shoot".into();
             }
             Err(e) => {
                 self.fail(e);
-                self.load(&self.source.clone(), Some(previous));
+                self.load(&self.source.clone(), None);
                 return;
             }
         }
@@ -256,11 +290,12 @@ impl App {
                     format!(" · {}", self.rates.summary)
                 };
                 format!(
-                    "Fracture lab · Metal · {} L{} · {} frags / {} hulls / {} bonds · {}{} · {}/16 shots · {} contacts · {} awake · {:.1} s{}",
+                    "Fracture lab · Metal · {} L{} · {} frags / {} hulls{} / {} bonds · {}{} · {}/16 shots · {} contacts · {} awake · {:.1} s{}",
                     l.name,
                     l.level,
                     l.fragments,
                     l.hulls,
+                    if l.skipped > 0 { format!(" ({} flat skipped)", l.skipped) } else { String::new() },
                     l.bonds,
                     if self.running { "running" } else { "paused" },
                     rates,
@@ -268,7 +303,7 @@ impl App {
                     c.contact,
                     c.awake,
                     l.sim.steps as f64 / TPS,
-                    if self.status.starts_with("error") { format!(" · {}", self.status) } else { String::new() },
+                    if self.status.starts_with("error") || self.status.starts_with("level") { format!(" · {}", self.status) } else { String::new() },
                 )
             }
             None => format!("Fracture lab · Metal · {}", self.status),
