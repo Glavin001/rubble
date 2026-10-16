@@ -1973,7 +1973,10 @@ static const float REST_SLOP = 0.001;
 //     iterations run with α = 1 (no correction of step-start error), velocity is
 //     taken after them, then one extra primal pass with α = 0 removes the whole
 //     position error without turning it into velocity. Replaces α's decay of λ,
-//     whose steady state rests every loaded contact ≈ |λ|/k deep.
+//     whose steady state rests every loaded contact ≈ |λ|/k deep. Contacts
+//     only: joints and elastic bonds keep α (a spring's force comes from its
+//     whole deformation, not this step's change; post-stabilizing bonds blew
+//     bonded houses apart).
 static const uint FLAG_POST_STAB = 4096u;
 // 8192 Point-speed sleep test (Box2D v3): a body is slow when its fastest point,
 //     |v| + |ω|·r_max, is under sleepLin; sleepAng is not used. A fixed rad/s
@@ -2658,7 +2661,7 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
         j.c0 = transformPoint(a.position, a.orientation, j.localAnchorA)
              - transformPoint(b.position, b.orientation, j.localAnchorB);
         j.c0Ang = bondAngularError(j, a, b);
-        float decay = warmDecay();
+        float decay = p.alpha * p.gamma;
         j.lambda0 *= decay; j.lambda1 *= decay; j.lambda2 *= decay;
         j.lambda3 *= decay; j.lambda4 *= decay; j.lambda5 *= decay;
         gJoints[i] = j;
@@ -2667,12 +2670,12 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
     float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
     j.c0 = wa - wb;
-    j.lambda0 *= warmDecay();
-    j.lambda1 *= warmDecay();
-    j.lambda2 *= warmDecay();
-    j.lambda3 *= warmDecay();
-    j.lambda4 *= warmDecay();
-    j.lambda5 *= warmDecay();
+    j.lambda0 *= p.alpha * p.gamma;
+    j.lambda1 *= p.alpha * p.gamma;
+    j.lambda2 *= p.alpha * p.gamma;
+    j.lambda3 *= p.alpha * p.gamma;
+    j.lambda4 *= p.alpha * p.gamma;
+    j.lambda5 *= p.alpha * p.gamma;
     float kMin = p.kStart;
     float kMax = max(j.stiffness, kMin);
     j.k0 = clamp(j.k0 * p.gamma, kMin, kMax);
@@ -4323,7 +4326,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 // Six AVBD rows in the bond frame: f = k Creg + lambda.
                 float3x3 F = bondFrame(j, ba);
                 float3 lin, ang;
-                bondViolation(j, ba, bb, primalAlpha(), lin, ang);
+                bondViolation(j, ba, bb, p.alpha, lin, ang);
                 float3 r = quatRotate(b.orientation, isA ? j.localAnchorA : j.localAnchorB);
                 float kLin[3] = { j.k0, j.k1, j.k2 };
                 float lLin[3] = { j.lambda0, j.lambda1, j.lambda2 };
@@ -4351,7 +4354,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             float3 local = isA ? j.localAnchorA : j.localAnchorB;
             float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
             float k = max(j.k0, p.kStart);
-            contributeBallJoint(A, rhs, b.position, b.orientation, local, C, j.c0, k, lam, isA, primalAlpha());
+            contributeBallJoint(A, rhs, b.position, b.orientation, local, C, j.c0, k, lam, isA, p.alpha);
             if (j.jointType == JOINT_FIXED || j.jointType == JOINT_HINGE || j.jointType == JOINT_D6)
             {
                 BodyState other = isA ? bb : ba;
@@ -4364,7 +4367,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                     if (j.jointType == JOINT_HINGE && ax == 0) continue;
                     Vec6 jj = vec6Zero();
                     jj.v[3 + ax] = isA ? 1.0 : -1.0;
-                    float f = k * (1.0 - primalAlpha()) * Cang[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
+                    float f = k * (1.0 - p.alpha) * Cang[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
                     mat6AddOuter(A, jj, k);
                     vec6AddScaled(rhs, jj, f);
                 }
@@ -4379,7 +4382,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                     float3 n = float3(ax == 0 ? 1.0 : 0.0, ax == 1 ? 1.0 : 0.0, ax == 2 ? 1.0 : 0.0);
                     if (abs(dot(n, axis)) > 0.9) continue;
                     Vec6 jj = jacobianLin(n, isA ? (wa - b.position) : (wb - b.position), !isA);
-                    float f = k * (1.0 - primalAlpha()) * radial[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
+                    float f = k * (1.0 - p.alpha) * radial[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
                     mat6AddOuter(A, jj, k);
                     vec6AddScaled(rhs, jj, f);
                 }
@@ -4759,7 +4762,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             // Frozen while both ends sleep or are static, inert once broken.
             if (jointBroken(j) || (!bodyMoving(a) && !bodyMoving(b))) return;
             float3 cl, ca;
-            bondViolation(j, a, b, dualAlpha(), cl, ca);
+            bondViolation(j, a, b, p.alpha, cl, ca);
             float3 lin = float3(j.lambda0, j.lambda1, j.lambda2) + float3(j.k0, j.k1, j.k2) * cl;
             float3 ang = float3(j.lambda3, j.lambda4, j.lambda5) + float3(j.k3, j.k4, j.k5) * ca;
             j.lambda0 = lin.x; j.lambda1 = lin.y; j.lambda2 = lin.z;
@@ -4777,7 +4780,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         float k = max(j.k0, p.kStart);
         float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
         // demo3d dual: C_hat = C - alpha * C0
-        float3 Creg = C - dualAlpha() * j.c0;
+        float3 Creg = C - p.alpha * j.c0;
         lam = k * Creg + lam;
         j.lambda0 = lam.x; j.lambda1 = lam.y; j.lambda2 = lam.z;
         j.k0 = min(k + p.betaLin * length(Creg), min(j.stiffness, p.kMaxN));
