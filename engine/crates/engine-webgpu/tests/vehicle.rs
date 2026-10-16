@@ -485,6 +485,21 @@ fn tank_pivots_in_place_drives_and_turns_by_track_ratio() {
     eprintln!("turn: yaw {:.2} speed {:.2}", st.yaw_rate, st.forward_speed);
     assert!(st.yaw_rate > 0.05, "left steer turns left: {}", st.yaw_rate);
     assert!(roll_pitch(&chassis(&sim, v)).0 < 20.0);
+    // Arcade skid steer: steer alone while rolling still rotates the hull, and in
+    // reverse left steer still yaws left (the hull rotates, not the "car" path).
+    drive(&mut sim, v, VehicleInput { steer: 1.0, ..Default::default() }, 90);
+    let st = sim.vehicle_state(v);
+    eprintln!("coast + steer: yaw {:.2} speed {:.2}", st.yaw_rate, st.forward_speed);
+    assert!(st.yaw_rate < -0.2, "steer-only yaws right while moving: {}", st.yaw_rate);
+    drive(&mut sim, v, VehicleInput { brake: 1.0, ..Default::default() }, 90);
+    drive(&mut sim, v, throttle(-1.0, 0.0), 180);
+    let st = sim.vehicle_state(v);
+    eprintln!("reverse: speed {:.2} gear {}", st.forward_speed, st.gear);
+    assert!(st.forward_speed < -1.0, "tank reverses: {}", st.forward_speed);
+    drive(&mut sim, v, throttle(-1.0, -1.0), 90);
+    let st = sim.vehicle_state(v);
+    eprintln!("reverse + left: yaw {:.2} speed {:.2}", st.yaw_rate, st.forward_speed);
+    assert!(st.yaw_rate > 0.2, "left steer yaws left in reverse too: {}", st.yaw_rate);
 }
 
 #[test]
@@ -564,6 +579,65 @@ fn crashing_into_light_crates_does_not_launch_the_vehicle() {
         assert!(max_y < 6.0, "{}: launched to y {max_y}", preset.name);
         assert!(max_fn < 4.0 * weight, "{}: wheel load {max_fn} N", preset.name);
     }
+}
+
+#[test]
+fn handbrake_locks_the_rear_and_kicks_the_tail_out() {
+    // Locked rear tyres slide along their slip velocity (mostly longitudinal), so they
+    // lose lateral grip and the car rotates much faster than with steering alone.
+    let heading_after = |handbrake: f32| {
+        let mut sim = world();
+        let v = spawn(&mut sim, &presets::sedan(), 1.0);
+        run(&mut sim, 60);
+        for _ in 0..400 {
+            let e = 15.0 - sim.vehicle_state(v).forward_speed;
+            sim.set_vehicle_input(v, throttle((e * 0.4).clamp(0.0, 1.0), 0.0));
+            sim.step().expect("step");
+            if e.abs() < 0.2 {
+                break;
+            }
+        }
+        sim.set_vehicle_input(v, VehicleInput { steer: -1.0, handbrake, ..Default::default() });
+        let mut heading = 0.0f32;
+        for _ in 0..60 {
+            sim.step().expect("step");
+            heading += sim.vehicle_state(v).yaw_rate / 60.0;
+        }
+        let st = sim.vehicle_state(v);
+        (heading.to_degrees(), st.wheels[2].omega.abs() + st.wheels[3].omega.abs())
+    };
+    let (plain, _) = heading_after(0.0);
+    let (hand, rear_spin) = heading_after(1.0);
+    eprintln!("1 s from 15 m/s, full lock: plain {plain:.1}°, handbrake {hand:.1}° (rear ω {rear_spin:.2})");
+    assert!(rear_spin < 0.5, "handbrake locks the rear wheels");
+    assert!(hand > 1.6 * plain, "handbrake turn rotates harder: {hand}° vs {plain}°");
+}
+
+#[test]
+fn motorcycle_holds_a_straight_line_under_full_throttle_after_a_turn() {
+    // Play-test regression: after a slow turn, full throttle swapped the bike's ends
+    // (wheelspin stripped the rear's side grip). Traction control and the
+    // peak-normalised combined-slip blend keep it straight.
+    let mut sim = world();
+    let v = spawn(&mut sim, &presets::motorcycle(), 1.2);
+    run(&mut sim, 90);
+    drive(&mut sim, v, throttle(0.3, -0.6), 180);
+    sim.set_vehicle_input(v, throttle(1.0, 0.0));
+    let (mut max_yaw, mut max_lean) = (0.0f32, 0.0f32);
+    for i in 0..480 {
+        sim.step().expect("step");
+        if i < 120 {
+            continue; // straightening up
+        }
+        let st = sim.vehicle_state(v);
+        max_yaw = max_yaw.max(st.yaw_rate.abs());
+        max_lean = max_lean.max(roll_pitch(&chassis(&sim, v)).0);
+    }
+    let st = sim.vehicle_state(v);
+    eprintln!("straight: speed {:.1} gear {} max |yaw| {max_yaw:.2} max tilt {max_lean:.1}°", st.forward_speed, st.gear);
+    assert!(st.forward_speed > 25.0, "accelerates: {}", st.forward_speed);
+    assert!(max_yaw < 0.3, "holds its heading: |yaw| up to {max_yaw}");
+    assert!(max_lean < 15.0, "stays upright: {max_lean}°");
 }
 
 #[test]

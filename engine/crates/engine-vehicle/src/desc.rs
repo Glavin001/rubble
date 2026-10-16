@@ -43,6 +43,13 @@ impl Curve {
         Self(vec![[0.0, 0.0], [3.0, 1.2], [20.0, 1.0]])
     }
 
+    /// Road-car steer-vs-speed scale (x = m/s): full lock while parking, a quarter at
+    /// motorway speed, so a full keyboard steer stays near the grip limit instead of
+    /// asking for ~2 g and sliding.
+    pub fn road_steering() -> Self {
+        Self(vec![[0.0, 1.0], [8.0, 1.0], [20.0, 0.5], [35.0, 0.32], [60.0, 0.25]])
+    }
+
     /// Jolt `VehicleEngineSettings::mNormalizedTorque` default (x = RPM / maxRPM).
     pub fn jolt_torque() -> Self {
         Self(vec![[0.0, 0.8], [0.66, 1.0], [1.0, 0.8]])
@@ -522,13 +529,12 @@ impl Default for TrackDesc {
 pub struct TracksDesc {
     pub left: TrackDesc,
     pub right: TrackDesc,
-    /// Inner track ratio at full steer while driving (Jolt sample: 0.6).
-    pub turn_ratio: f32,
-    /// Below this forward speed, steer with no throttle pivots in place.
-    pub pivot_speed: f32,
+    /// How much steer feeds each track in the arcade mix (left = throttle + k·steer,
+    /// right = throttle − k·steer); 1 pivots at full steer from rest.
+    pub steer_strength: f32,
     /// Cap the track ratio so the turn it asks for needs at most this lateral
-    /// acceleration (in g) at the current speed; 0 = Jolt's fixed ratio, which
-    /// spins a fast tank out.
+    /// acceleration (in g) at the current speed; 0 = uncapped, which spins a fast
+    /// tank out at full steer.
     pub turn_grip_g: f32,
 }
 
@@ -537,8 +543,7 @@ impl Default for TracksDesc {
         Self {
             left: TrackDesc::default(),
             right: TrackDesc::default(),
-            turn_ratio: 0.6,
-            pivot_speed: 1.0,
+            steer_strength: 1.0,
             turn_grip_g: 0.5,
         }
     }
@@ -556,6 +561,10 @@ pub struct AssistDesc {
     pub upright_stiffness: f32,
     /// Damping of the tilt rate (1/s).
     pub upright_damping: f32,
+    /// Traction control: cut engine torque while a driven wheel's slip ratio is past
+    /// the grip peak, so full throttle does not spin the tyre (a spinning tyre has
+    /// little lateral grip left and swings the tail out).
+    pub traction_control: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

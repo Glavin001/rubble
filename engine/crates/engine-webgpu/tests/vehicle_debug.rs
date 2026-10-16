@@ -170,6 +170,10 @@ fn trace_tank_steer_start() {
     for _ in 0..pre {
         sim.step().expect("step");
     }
+    sim.set_vehicle_input(v, VehicleInput { brake: 0.6, ..Default::default() });
+    for _ in 0..env("BRAKE", 0.0) as u32 {
+        sim.step().expect("step");
+    }
     sim.set_vehicle_input(v, VehicleInput { forward, steer, ..Default::default() });
     let base = sim.vehicle_host().capacity.layout().vehicle_base;
     for i in 0..120 {
@@ -344,5 +348,173 @@ fn trace_constant_circles() {
         }
         let st = sim.vehicle_state(v);
         eprintln!("{:>20}: max speed {max_speed:5.1} m/s, min up.y {min_up:.2}, final yaw {:.2} contacts {}", desc.name, st.yaw_rate, st.contacts);
+    }
+}
+
+/// Handbrake turn vs plain turn from 15 m/s (`PRESET`, `--ignored`): yaw rate,
+/// slip angle and rear wheel state every 6 steps.
+#[test]
+#[ignore]
+fn trace_handbrake_turn() {
+    let name = std::env::var("PRESET").unwrap_or_else(|_| "sedan".into());
+    let hbs: Vec<f32> = if std::env::var("NOHB").is_ok() { vec![0.0] } else { vec![0.0, 1.0] };
+    for hb in hbs {
+        let mut sim = WgpuSim::new(WorldCapacity {
+            max_bodies: 4096,
+            max_colliders: 8192,
+            max_contacts: 32768,
+            max_joints: 64,
+            max_candidates: 65536,
+            max_colors: 32,
+            max_commands: 64,
+            max_hull_vertices: 64,
+        })
+        .expect("wgpu");
+        let mut p = AvbdParams::default();
+        p.iterations = 8;
+        sim.set_params(p);
+        sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+        let mut g = BodyState::dynamic(glam::Vec3::new(0.0, -5.0, 0.0), glam::Quat::IDENTITY, 1.0, glam::Vec3::ONE);
+        g.inv_mass = 0.0;
+        g.inv_inertia = [0.0; 3];
+        g.flags = 0;
+        let ground = sim.add_body(g);
+        sim.add_collider(Collider {
+            body: ground,
+            shape: ShapeType::Box as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [400.0, 5.0, 400.0, 400.0],
+        });
+        let desc = presets::by_name(&name).expect("preset");
+        let v = sim.add_vehicle(&desc, [0.0, 2.0, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
+        for _ in 0..60 {
+            sim.step().expect("step");
+        }
+        for _ in 0..400 {
+            let e = 15.0 - sim.vehicle_state(v).forward_speed;
+            sim.set_vehicle_input(v, VehicleInput { forward: (e * 0.4).clamp(0.0, 1.0), ..Default::default() });
+            sim.step().expect("step");
+            if e.abs() < 0.2 {
+                break;
+            }
+        }
+        let env = |k: &str, d: f32| std::env::var(k).map(|s| s.parse().unwrap()).unwrap_or(d);
+        sim.set_vehicle_input(v, VehicleInput { forward: env("FWD", 0.0), steer: env("STEER", -1.0), handbrake: hb, ..Default::default() });
+        let mut heading = 0.0f32;
+        for i in 0..72 {
+            sim.step().expect("step");
+            let st = sim.vehicle_state(v);
+            heading += st.yaw_rate / 60.0;
+            if i % 6 == 5 {
+                eprintln!(
+                    "hb {hb} t {:.2}: yaw {:.2} heading {:5.1}° fwd {:.1} lat {:.1} rear ω {:?} slide {:?} fT {:?} fL {:?}",
+                    (i + 1) as f32 / 60.0,
+                    st.yaw_rate,
+                    heading.to_degrees(),
+                    st.forward_speed,
+                    st.lateral_speed,
+                    st.wheels.iter().map(|w| (w.omega * 10.0).round() / 10.0).collect::<Vec<_>>(),
+                    st.wheels.iter().map(|w| w.sliding).collect::<Vec<_>>(),
+                    st.wheels.iter().map(|w| w.lateral_force as i32).collect::<Vec<_>>(),
+                    st.wheels.iter().map(|w| w.longitudinal_force as i32).collect::<Vec<_>>(),
+                );
+            }
+        }
+    }
+}
+
+/// Straight-line full throttle (`PRESET`, `FWD`, `SECS`, `--ignored`): heading drift,
+/// lean, wheel loads and contact every 0.5 s.
+#[test]
+#[ignore]
+fn trace_straight_line() {
+    let env = |k: &str, d: f32| std::env::var(k).map(|s| s.parse().unwrap()).unwrap_or(d);
+    let name = std::env::var("PRESET").unwrap_or_else(|_| "motorcycle".into());
+    let mut sim = WgpuSim::new(WorldCapacity {
+        max_bodies: 4096,
+        max_colliders: 8192,
+        max_contacts: 32768,
+        max_joints: 64,
+        max_candidates: 65536,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .expect("wgpu");
+    let mut p = AvbdParams::default();
+    p.iterations = 8;
+    sim.set_params(p);
+    sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+    let mut g = BodyState::dynamic(glam::Vec3::new(0.0, -5.0, 0.0), glam::Quat::IDENTITY, 1.0, glam::Vec3::ONE);
+    g.inv_mass = 0.0;
+    g.inv_inertia = [0.0; 3];
+    g.flags = 0;
+    let ground = sim.add_body(g);
+    sim.add_collider(Collider {
+        body: ground,
+        shape: ShapeType::Box as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [800.0, 5.0, 800.0, 800.0],
+    });
+    let desc = presets::by_name(&name).expect("preset");
+    let v = sim.add_vehicle(&desc, [0.0, 2.0, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("vehicle");
+    for _ in 0..90 {
+        sim.step().expect("step");
+    }
+    // Optional warm-up: a slow turn (PRE_STEER for PRE_SECS at 0.3 throttle) so the
+    // straight run starts from a realistic, slightly asymmetric state.
+    for i in 0..(env("PRE_SECS", 0.0) * 60.0) as u32 {
+        sim.set_vehicle_input(v, VehicleInput { forward: 0.3, steer: env("PRE_STEER", 0.0), ..Default::default() });
+        sim.step().expect("step");
+        if i % 15 == 14 {
+            let c = sim.read_body(sim.vehicle_host().chassis_body(v));
+            let q = glam::Quat::from_array(c.orientation);
+            let up = q * glam::Vec3::Y;
+            let lean = up.dot(glam::Vec3::Y.cross(q * glam::Vec3::Z).normalize()).asin().to_degrees();
+            let st = sim.vehicle_state(v);
+            eprintln!(
+                "pre {:4.2}: speed {:5.1} yaw {:5.2} lean {lean:5.1}° Fn {:?} slide {:?} slip {:?}",
+                (i + 1) as f32 / 60.0,
+                st.forward_speed,
+                st.yaw_rate,
+                st.wheels.iter().map(|w| w.suspension_force as i32).collect::<Vec<_>>(),
+                st.wheels.iter().map(|w| w.sliding).collect::<Vec<_>>(),
+                st.wheels.iter().map(|w| (w.slip_ratio * 100.0).round() / 100.0).collect::<Vec<_>>(),
+            );
+        }
+    }
+    sim.set_vehicle_input(v, VehicleInput { forward: env("FWD", 1.0), ..Default::default() });
+    let steps = (env("SECS", 15.0) * 60.0) as u32;
+    for i in 0..steps {
+        sim.step().expect("step");
+        if i % 30 == 29 {
+            let c = sim.read_body(sim.vehicle_host().chassis_body(v));
+            let q = glam::Quat::from_array(c.orientation);
+            let fwd = q * glam::Vec3::Z;
+            let up = q * glam::Vec3::Y;
+            let lean = up.dot(glam::Vec3::Y.cross(fwd).normalize()).asin().to_degrees();
+            let heading = fwd.x.atan2(fwd.z).to_degrees();
+            let st = sim.vehicle_state(v);
+            eprintln!(
+                "t {:4.1}: speed {:5.1} gear {} heading {heading:6.1}° yaw {:5.2} lean {lean:5.1}° pitch {:5.1}° x {:6.2} contacts {} Fn {:?} slide {:?}",
+                (i + 1) as f32 / 60.0,
+                st.forward_speed,
+                st.gear,
+                st.yaw_rate,
+                fwd.y.asin().to_degrees(),
+                c.position[0],
+                st.contacts,
+                st.wheels.iter().map(|w| w.suspension_force as i32).collect::<Vec<_>>(),
+                st.wheels.iter().map(|w| w.sliding).collect::<Vec<_>>(),
+            );
+        }
     }
 }

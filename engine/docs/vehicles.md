@@ -23,7 +23,7 @@ Attached wheels are not bodies:
 | Suspension | soft, one-sided, implicit spring-damper | `K = m_eff ω²`, `D = 2 m_eff ζ ω` (Jolt), folded as `K + D/dt` (newton VBD); `1/cos` slope correction; preload |
 | Bump stop | compliant (default 6 Hz) or rigid | compliant avoids the full-compression load spikes that break mounts |
 | Anti-roll bar | pair row | active only when both wheels touch (Jolt) |
-| Longitudinal / lateral friction | hard AVBD rows with λ | bounded by a friction ellipse `μ(slip)·Fn` (or Jolt's independent box limits per wheel); stick anchors persist across steps so parked cars do not creep |
+| Longitudinal / lateral friction | hard AVBD rows with λ | bounded by a friction ellipse `μ(slip)·Fn`, shared along the slip velocity once saturated (combined slip), or by Jolt's independent box limits per wheel; stick anchors persist across steps so parked cars do not creep |
 | Wheel spin `y` | extra 1-DoF per spin group | solved **exactly** each iteration (monotone 1-D root incl. tyre and brake limits), folded into the chassis with the Schur complement of its regime; a group is one wheel, or every wheel of a track |
 | Brake / handbrake / rolling resistance | bounded servo row on `y` toward `y*` (0, or the steering-brake target of a track) | locked wheels hold positionally |
 | Motorcycle lean | soft angular row about forward | Jolt `MotorcycleController` spring/damper/integral toward the ground-force direction, plus the linear force that keeps the tyres from being dragged sideways |
@@ -58,8 +58,10 @@ Tracked vehicles (`tracks: Some(TracksDesc)`, a port of Jolt `TrackedVehicleCont
 each track's wheels form one spin group led by its driven wheel, which carries the track
 inertia, damping, brake and differential ratio. The engine is tied to the faster track,
 and each track gets `diff·ratio·transmission` torque up to the speed the engine allows.
-The left/right ratio sync conserves momentum. Steer with no throttle below `pivot_speed`
-counter-rotates the tracks to pivot. Two additions keep Jolt's ratio steering working
+The left/right ratio sync conserves momentum. Input is an arcade skid-steer mix: left
+track = throttle + k·steer, right = throttle − k·steer (`steer_strength` k). So steer
+always rotates the hull the same way: a pivot from rest, a track-ratio turn while driving,
+and the same rotation sense in reverse. Two additions keep Jolt's ratio steering working
 under implicit tyre rows, which would otherwise pull a synced track straight back to
 ground speed:
 * While driving, the inner track's brake holds it at `ratio ×` the outer track's speed.
@@ -146,9 +148,9 @@ controller).
 | Drive | drivetrain {engine curve, min/max RPM, inertia, damping; gearbox auto/manual, ratios, reverse, switch/release/latency, shift RPMs, clutch strength; differentials {wheels, ratio, split, LSD, torque share}; inter-diff LSD} or direct {torque, top speed} |
 | Stability | anti-roll bars, max pitch/roll, max slope for contacts, reverse-brake behaviour |
 | Aero | drag, downforce, aero centre |
-| Assists (opt-in) | air control (pitch/yaw per input while airborne), upright stiffness/damping |
+| Assists (opt-in) | air control (pitch/yaw per input while airborne), upright stiffness/damping, traction control |
 | Queries | ray / sphere cast, query interval (probe every N steps, extrapolate between) |
-| Tracks | per track: wheels, driven wheel, inertia, damping, brake torque, differential ratio; turn ratio, pivot speed, turn grip (g) |
+| Tracks | per track: wheels, driven wheel, inertia, damping, brake torque, differential ratio; steer strength, turn grip (g) |
 | Motorcycle | max lean, lean spring/damping/integral + decay, target smoothing, lean-limited steering |
 
 ## Limits and next steps
