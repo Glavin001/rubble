@@ -844,6 +844,8 @@ struct Entry {
     pair_offsets: std::collections::HashMap<super::ChunkPair, Vec<(f64, Vec3)>>,
     contact: ContactLedger,
     contact_force: bool,
+    /// Largest hidden displacement at a contact row in the state this step started from.
+    displacement: f64,
 }
 
 struct Window<'a> {
@@ -868,6 +870,20 @@ struct Window<'a> {
     psi_rows: (Vec<f64>, Vec<f64>),
     bin_rows: (Vec<f64>, Vec<f64>),
     report: WindowReport,
+    step_displacement: f64,
+}
+
+impl WindowReport {
+    /// Book the steps of `entries` that stand (their states were checked).
+    fn book(&mut self, entries: &[Entry]) {
+        for e in entries {
+            self.max_displacement = self.max_displacement.max(e.displacement);
+            if e.contact_force {
+                self.contact_steps += 1;
+                self.first_contact.get_or_insert(e.time);
+            }
+        }
+    }
 }
 
 fn par_rows<F: Fn(usize) -> f64 + Sync + Send>(parallel: bool, n: usize, f: F) -> Vec<f64> {
@@ -998,7 +1014,7 @@ impl<'a> Window<'a> {
             for d in 0..6 {
                 if let Some(i) = self.basis.dof[c][d] {
                     let (x, xv) = (self.x0[i] + both[2 * r], both[2 * r + 1]);
-                    self.report.max_displacement = self.report.max_displacement.max(both[2 * r].abs());
+                    self.step_displacement = self.step_displacement.max(both[2 * r].abs());
                     if d < 3 {
                         u[d] = x;
                         v[d] = xv;
@@ -1158,6 +1174,7 @@ impl<'a> Window<'a> {
             pair_offsets: world.pair_offsets.clone(),
             contact: world.contact,
             contact_force: false,
+            displacement: 0.0,
         }
     }
 
@@ -1610,6 +1627,7 @@ pub fn run(world: &mut World, basis: &ModalBasis, cfg: &ModalConfig) -> ModalRes
             end_state: None,
             timings: WindowTimings::default(),
         },
+        step_displacement: 0.0,
     };
     win.report.timings.setup = secs(t_setup);
 
@@ -1631,15 +1649,15 @@ pub fn run(world: &mut World, basis: &ModalBasis, cfg: &ModalConfig) -> ModalRes
             let t = Instant::now();
             let mut e = win.snapshot(world, frame, sub, nsub);
             win.report.timings.bodies += secs(t);
+            win.step_displacement = 0.0;
             let (g_re, g_im, contact) = win.step(world);
             e.g_re = g_re;
             e.g_im = g_im;
             e.contact_force = contact;
+            e.displacement = win.step_displacement;
             blk.push(e);
             win.report.steps += 1;
             if contact {
-                win.report.contact_steps += 1;
-                win.report.first_contact.get_or_insert(world.solver.time - dt);
                 quiet = 0;
             } else {
                 quiet += 1;
@@ -1657,6 +1675,8 @@ pub fn run(world: &mut World, basis: &ModalBasis, cfg: &ModalConfig) -> ModalRes
                         }
                     };
                     let previous = (if k > 0 { Some(&blk[k - 1]) } else { prev.as_ref() }).map(|p| (p.c_re.clone(), p.c_im.clone(), p.dt));
+                    win.report.book(&blk[..k]);
+                    win.report.max_displacement = win.report.max_displacement.max(blk[k].displacement);
                     let e = blk.swap_remove(k);
                     win.restore(world, &e);
                     win.write_all(world, previous.as_ref().map(|p| (&p.0[..], &p.1[..], p.2)));
@@ -1669,6 +1689,7 @@ pub fn run(world: &mut World, basis: &ModalBasis, cfg: &ModalConfig) -> ModalRes
                     world.finish_frame_explicit(e.sub, e.nsub, e.dt);
                     return Ok(win.report);
                 }
+                win.report.book(&blk);
                 prev = blk.pop();
                 blk.clear();
                 // Certificate once the contact has stopped.
