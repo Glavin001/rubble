@@ -308,6 +308,61 @@ pub fn scale_bond_springs(joints: JsValue, bodies: JsValue, dt: f64, scale: Opti
     to_js(&scale_bond_springs_with(&joints, &bodies, dt, scale.unwrap_or(BOND_PENALTY_SCALE), cap.unwrap_or(BOND_PENALTY_CAP)))
 }
 
+/// Orbit camera and click-to-shoot rays (shared with the Metal viewer).
+#[wasm_bindgen]
+pub struct Orbit(engine_fracture::view::Orbit);
+
+#[wasm_bindgen]
+impl Orbit {
+    #[wasm_bindgen(constructor)]
+    pub fn new(scene: &Scene) -> Orbit {
+        Orbit(engine_fracture::view::Orbit::new(&scene.0))
+    }
+    pub fn drag(&mut self, dx: f64, dy: f64) {
+        self.0.drag(dx, dy)
+    }
+    pub fn zoom(&mut self, delta_y: f64) {
+        self.0.zoom(delta_y)
+    }
+    /// Column-major view-projection for the draw shader.
+    #[wasm_bindgen(js_name = viewProj)]
+    pub fn view_proj(&self, aspect: f64) -> Vec<f32> {
+        self.0.view_proj(aspect).to_vec()
+    }
+    /// `{origin, direction}` through a viewport point (u, v in 0..1 from the top left).
+    pub fn aim(&self, u: f64, v: f64, aspect: f64, projectile_radius: f64) -> Result<JsValue, JsError> {
+        to_js(&self.0.aim(u, v, aspect, projectile_radius))
+    }
+}
+
+/// The ground quad for a scene extent (10-float render vertices).
+#[wasm_bindgen(js_name = floorVertices)]
+pub fn floor_vertices(extent: f64) -> Vec<f32> {
+    engine_fracture::view::floor_vertices(extent)
+}
+
+/// Indexed render mesh with exact duplicate corners merged.
+#[wasm_bindgen]
+pub struct IndexedMesh {
+    vertices: Vec<f32>,
+    index: Vec<u32>,
+}
+
+#[wasm_bindgen]
+impl IndexedMesh {
+    #[wasm_bindgen(constructor)]
+    pub fn new(vertices: &[f32]) -> IndexedMesh {
+        let (vertices, index) = engine_fracture::view::index_mesh(vertices);
+        IndexedMesh { vertices, index }
+    }
+    pub fn vertices(&self) -> Vec<f32> {
+        self.vertices.clone()
+    }
+    pub fn index(&self) -> Vec<u32> {
+        self.index.clone()
+    }
+}
+
 /// The bundled scene catalogue (Scene menu of both hosts).
 #[wasm_bindgen]
 pub fn samples() -> Result<JsValue, JsError> {

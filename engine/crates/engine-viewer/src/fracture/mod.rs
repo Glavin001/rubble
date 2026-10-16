@@ -1,5 +1,6 @@
-//! Native Metal fracture viewer: Shardwright GLB → Slang AVBD (Slang → MSL) → Metal draw.
-//! Native counterpart of `engine-webgpu/fracture/` (same kernels, dispatch order and ABI).
+//! Native Metal fracture lab: the browser lab's host plan, scenes and Slang
+//! kernels (`engine-fracture`, Slang -> MSL) on Metal, drawn with the shared
+//! Slang draw shader. Counterpart of `engine-webgpu/fracture/`.
 
 pub mod render;
 pub mod sim;

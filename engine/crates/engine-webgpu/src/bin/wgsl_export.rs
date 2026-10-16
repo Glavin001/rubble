@@ -38,6 +38,16 @@ fn main() -> anyhow::Result<()> {
         names.len()
     );
     std::fs::write(out.join("manifest.json"), manifest)?;
+    // The fracture lab's draw shader: one module, the Metal viewer's entries.
+    let draw = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../slang/render/fracture_draw.slang");
+    let status = std::process::Command::new(engine_slang_build::find_slangc()?)
+        .args(["-target", "wgsl", "-entry", "vs", "-stage", "vertex"])
+        .args(["-entry", "fs", "-stage", "fragment", "-entry", "ground", "-stage", "fragment", "-entry", "wire", "-stage", "fragment"])
+        .arg("-o")
+        .arg(out.join("fracture_draw.wgsl"))
+        .arg(&draw)
+        .status()?;
+    anyhow::ensure!(status.success(), "slangc failed for {}", draw.display());
     println!("Wrote {} WGSL modules to {}", names.len(), out.display());
     if bad > 0 {
         anyhow::bail!("{bad} translations failed");
