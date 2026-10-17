@@ -2,7 +2,7 @@
 //! Every body owns exactly one collider,
 //! added in body order, so the browser renderer can draw instance i as body i.
 
-use engine_metal::SceneBuilder;
+use engine_schema::scene::SceneBuilder;
 use engine_schema::*;
 use glam::Vec3;
 

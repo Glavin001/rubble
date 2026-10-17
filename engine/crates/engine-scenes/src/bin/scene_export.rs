@@ -6,9 +6,11 @@
 //!
 //! Writes `crates/engine-webgpu/generated/scenes/<id>.bin` (WorldSnapshot
 //! records) and `<id>.json` (counts, interaction slots, joint field offsets).
+//! Scenes are built on the host (`build_host`), so this needs no GPU and runs on any
+//! platform; `--no-default-features` leaves out the Metal world (the Linux web build).
 //! The page uploads the records as-is; scene logic stays in Rust.
 
-use engine_scenes::build_world;
+use engine_scenes::build_host;
 use engine_schema::*;
 use glam::Vec3;
 use std::mem::offset_of;
@@ -40,7 +42,7 @@ fn main() -> anyhow::Result<()> {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine-webgpu/generated/scenes");
     std::fs::create_dir_all(&out)?;
     for (name, id) in pairs {
-        let (world, info) = build_world(&name)?;
+        let (world, info) = build_host(&name)?;
         let mut snap = world.snapshot();
         let render_bodies = snap.colliders.len();
         for (i, c) in snap.colliders.iter().enumerate() {

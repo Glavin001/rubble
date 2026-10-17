@@ -12,6 +12,7 @@ pub mod convex;
 pub mod handles;
 pub mod joint;
 pub mod params;
+pub mod scene;
 pub mod snapshot;
 pub mod vehicle;
 

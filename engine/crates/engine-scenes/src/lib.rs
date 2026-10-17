@@ -3,8 +3,9 @@
 //! three-avbd is **Z-up**; this engine is **Y-up**. Coordinates are converted as
 //! `(x, y, z)_demo → (x, z, y)_engine`.
 
-use engine_exec::PhysicsBackend;
-use engine_metal::{MetalWorld, SceneBuilder};
+#[cfg(feature = "metal")]
+use engine_metal::MetalWorld;
+use engine_schema::scene::{HostWorld, SceneBuilder, SceneSink};
 use engine_schema::{AvbdParams, BodyState, WorldCapacity, FLAG_REUSE_CONTACTS};
 use glam::{Quat, Vec3};
 
@@ -1052,14 +1053,24 @@ pub fn list_scenes() -> &'static [SceneDef] {
     &ALL
 }
 
-pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo)> {
+/// Solver settings a scene runs with, besides its bodies: shared by the Metal world
+/// ([`build_world`]) and the host export ([`build_host`]), so both see the same scene.
+pub struct SceneSetup {
+    pub scene: &'static SceneDef,
+    pub params: AvbdParams,
+    /// Island gate rounds for sleeping (Metal world only; not part of a snapshot).
+    pub sleep_island_rounds: Option<u32>,
+    /// Friction of the default material, when the scene overrides it.
+    pub default_friction: Option<f32>,
+}
+
+pub fn scene_setup(name: &str) -> anyhow::Result<SceneSetup> {
     let scene = find_scene(name).ok_or_else(|| {
         anyhow::anyhow!(
             "unknown scene {:?}; try --list",
             name
         )
     })?;
-    let mut world = MetalWorld::new(scene.info.capacity.clone())?;
     let mut params = AvbdParams::default();
     params.iterations = scene.info.iterations;
     if let Ok(v) = std::env::var("PILE_ITERS") {
@@ -1151,7 +1162,8 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
             }
         }
     }
-    world.set_params(params);
+    let mut sleep_island_rounds = None;
+    let mut default_friction = None;
     if scene.info.name.starts_with("Box Pile") {
         // Impact-wake + 1-round gate: ~19k/32k sleep @1200 with deep held. rounds=0
         // sleeps a bit less. Stacks/columns keep default 8.
@@ -1159,17 +1171,22 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
-        world.set_sleep_island_rounds(rounds);
+        sleep_island_rounds = Some(rounds);
         // μ=0.7 settles deep C0 better than three-avbd's 0.5 on our Metal path; 0.5 left
         // more flyers. PILE_MU overrides for A/B.
         let mu = std::env::var("PILE_MU")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.7);
-        world.set_default_friction(mu);
+        default_friction = Some(mu);
     }
+    Ok(SceneSetup { scene, params, sleep_island_rounds, default_friction })
+}
+
+/// Adds the scene's ground and bodies to `world`.
+pub fn populate(world: &mut dyn SceneSink, scene: &SceneDef) {
     {
-        let mut b = SceneBuilder::new(&mut world);
+        let mut b = SceneBuilder::new(world);
         // three-avbd `ground(extent)` is a static box slab (top at 0.5), not a plane.
         // Pyramid 30 collapsed on our infinite plane (contacts churned 117k→92k on step 1);
         // box-box ground matches the oracle manifold path. Ring/Pile/Columns same.
@@ -1192,8 +1209,35 @@ pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo
         }
         (scene.build)(&mut b);
     }
-    Ok((world, &scene.info))
 }
+
+/// Builds `name` into a Metal world.
+#[cfg(feature = "metal")]
+pub fn build_world(name: &str) -> anyhow::Result<(MetalWorld, &'static SceneInfo)> {
+    let setup = scene_setup(name)?;
+    let mut world = MetalWorld::new(setup.scene.info.capacity.clone())?;
+    engine_exec::PhysicsBackend::set_params(&mut world, setup.params);
+    if let Some(rounds) = setup.sleep_island_rounds {
+        world.set_sleep_island_rounds(rounds);
+    }
+    if let Some(mu) = setup.default_friction {
+        world.set_default_friction(mu);
+    }
+    populate(&mut world, setup.scene);
+    Ok((world, &setup.scene.info))
+}
+
+/// Builds `name` on the host, without a GPU, for export as a snapshot.
+pub fn build_host(name: &str) -> anyhow::Result<(HostWorld, &'static SceneInfo)> {
+    let setup = scene_setup(name)?;
+    let mut world = HostWorld::new(setup.params);
+    if let Some(mu) = setup.default_friction {
+        world.set_default_friction(mu);
+    }
+    populate(&mut world, setup.scene);
+    Ok((world, &setup.scene.info))
+}
+
 
 #[cfg(test)]
 mod scene_conversion_tests {
