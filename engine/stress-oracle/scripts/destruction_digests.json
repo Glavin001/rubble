@@ -1,0 +1,18 @@
+{
+ "accuracy/b4_sudden": "dc51c8c488b0f416",
+ "accuracy/b5_v10": "3257c0724e55876b",
+ "accuracy/b5_v15": "b5b3403d989ff489",
+ "accuracy/b5_v20": "cc08e84820ec97e7",
+ "accuracy/b5_v30": "382ca994d692a38e",
+ "accuracy/b5_v40": "5d9072274e4fef1f",
+ "accuracy/b8_sudden": "1ebcc6ef764a7709",
+ "accuracy/floor_drop": "1f0be3551b1b37c3",
+ "accuracy/house_car": "b0ce41be698f210c",
+ "accuracy/house_idle": "4380443f8abf9479",
+ "accuracy/house_ram": "a3401e779ca41730",
+ "accuracy/wall_ram": "cc3428393fd83a27",
+ "realtime/b5_v20": "cc08e84820ec97e7",
+ "realtime/house_idle": "4380443f8abf9479",
+ "realtime/house_ram": "a3401e779ca41730",
+ "realtime/wall_ram": "cc3428393fd83a27"
+}
