@@ -1,0 +1,278 @@
+name: Legacy CI
+
+# The original wgpu engine (root workspace: crates/, web/). The engine in engine/
+# replaced it; its jobs run only when started by hand (Actions → Legacy CI → Run).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  # Override rust-toolchain.toml (pinned to nightly for spirv-builder)
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run tests
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          # Find the lavapipe ICD file (name varies by distro/version)
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo nextest run --workspace --profile ci
+      - name: Publish test results
+        uses: mikepenz/action-junit-report@v5
+        if: always()
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Test Results
+
+  heavy-test:
+    name: Heavy Physics Tests
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run ignored heavy tests
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo nextest run --workspace --profile heavy --run-ignored ignored-only
+      - name: Publish heavy test results
+        uses: mikepenz/action-junit-report@v5
+        if: always()
+        with:
+          report_paths: target/nextest/heavy/junit-heavy.xml
+          check_name: Heavy Physics Results
+
+  known-failures:
+    name: Known Physics Failures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run known-failure scenarios
+        continue-on-error: true
+        env:
+          WGPU_BACKEND: vulkan
+          RUBBLE_RUN_KNOWN_FAILURES: "1"
+        run: |
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo nextest run --workspace --profile ci
+      - name: Summarize known-failure results
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Known Physics Failures
+          # This job tracks scenarios we expect to fail. Don't fail the check
+          # or the job when failures are present — they're expected.
+          fail_on_failure: false
+          require_tests: false
+          annotate_only: true
+          detailed_summary: true
+          include_passed: true
+
+  perf:
+    name: Perf Baselines (non-blocking)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Run perf harness vs committed baselines
+        continue-on-error: true
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo test -p rubble3d --test perf_baseline_tests --release -- --ignored --nocapture
+      - name: Upload perf report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-report
+          path: target/perf-report.json
+          if-no-files-found: ignore
+
+  coverage:
+    name: Coverage
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect Rust coverage
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*' 2>/dev/null | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            export VK_ICD_FILENAMES="$LVP_ICD"
+          fi
+          cargo llvm-cov --workspace --lcov --output-path target/llvm-cov/lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-cov
+          path: target/llvm-cov/
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  viewer-build:
+    name: Viewer Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Build native viewer examples
+        run: cargo build -p rubble-viewer --examples --release
+
+  wasm-build:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies and build (WASM + Vite)
+        run: ./web/build.sh
+      - name: Upload web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+
+  e2e:
+    name: E2E Tests (Playwright + SwiftShader)
+    needs: wasm-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        run: cd web && npm ci
+      - name: Install Playwright Chromium
+        run: cd web && npx playwright install chromium
+      - name: Download web build
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+      - name: Run Playwright tests
+        env:
+          CI: "true"
+        run: cd web && npx playwright test --reporter=line
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-results
+          path: web/test-results/

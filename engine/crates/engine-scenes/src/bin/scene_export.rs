@@ -28,6 +28,19 @@ fn main() -> anyhow::Result<()> {
             ("Ragdoll Pile (10k)".into(), "ragdolls10k".into()),
             ("Hinge Chains (10k)".into(), "hingechains10k".into()),
             ("Motor Field (10k)".into(), "motorfield10k".into()),
+            // The legacy rubble web demo's scenes (engine_scenes::legacy).
+            ("Empty".into(), "legacy-empty".into()),
+            ("Ground".into(), "legacy-ground".into()),
+            ("Dynamic Friction".into(), "legacy-dynamic-friction".into()),
+            ("Static Friction".into(), "legacy-static-friction".into()),
+            ("Legacy Pyramid".into(), "legacy-pyramid".into()),
+            ("Legacy Stack".into(), "legacy-stack".into()),
+            ("Stack Ratio".into(), "legacy-stack-ratio".into()),
+            ("Scatter".into(), "legacy-scatter".into()),
+            ("Scatter Boxes".into(), "legacy-scatter-boxes".into()),
+            ("Grid Boxes".into(), "legacy-grid-boxes".into()),
+            ("Slanted Grid".into(), "legacy-slanted-grid".into()),
+            ("10k Grid".into(), "legacy-grid10k".into()),
         ]
     } else {
         args.chunks(2)

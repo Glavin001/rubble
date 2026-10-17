@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --target wasm32-unknown-unknown",
-  "buildCommand": "bash web/build.sh",
-  "outputDirectory": "web/dist",
+  "installCommand": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --target wasm32-unknown-unknown",
+  "buildCommand": "bash engine/scripts/build-web.sh",
+  "outputDirectory": "engine/web-dist",
   "framework": null
 }
