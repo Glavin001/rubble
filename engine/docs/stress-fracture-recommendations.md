@@ -1,5 +1,7 @@
 # Stress-fracture performance: what is done, and what needs your decision
 
+The running index of every stress-solver improvement (adopted, rejected with rationale, off by default, open) is [`stress-solver-tracker.md`](stress-solver-tracker.md).
+
 Every change adopted keeps the physics the oracle defines. The lossless changes below
 were gated bit for bit: the same end-state digest on all 15 `stress_bench` regimes
 (accuracy and town sets, `STRESS_GPU_FIXED_HORIZON=1`), plus the integrated and
