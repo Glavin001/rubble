@@ -373,7 +373,29 @@ your call; the rest need building.
           0.6–10× the weight. So it is not a reference ours can match there. vibe-land's
           native GPU stage solves the same equations with another scheme; its captured
           forces are the reference to try next.
-      - **Splits are the spikes (p95 ~155 ms).** Each one downloads the mirror (12–30 ms)
+      - **Blast GPU solver strategies, read from its source** (stressgpu
+        `detail/README.md`), mapped to ours:
+        - per-component blocks;
+        - f32, warm start and a fixed cap with unconverged answers published;
+        - a Chebyshev block-Jacobi preconditioner;
+        - rigid-mode projection;
+        - a settled / idle skip;
+        - captured, GPU-owned execution.
+
+        The resident QS frame has each of these, or a finer-grained equivalent: the
+        repeat gate, fixed points and certification. The one not adopted is the
+        whole-GPU cooperative kernel with a V-cycle for components over 8,192 nodes;
+        our largest island is ~1,800 chunks and the solve is 3–4 ms. Its cascade costs
+        ~5 ms per bombard frame. What separated us from Blast's tick was rubble.
+      - **Look-ahead CCD** (`STRESS_RUBBLE_SPECULATIVE_CCD=1`, your decision: opt-in,
+        measured). rubble's `FLAG_SPEC_VELOCITY` contacts with a reach cap
+        (`STRESS_RUBBLE_SPEC_REACH`, default 3 m; `WgpuSim::set_spec_reach_max`, host
+        word 31) replace the fast projectiles' CCD substeps.
+        - Bombard median **17.9 → 9.1 ms**, below Blast's 11.4.
+        - The outcome differs: broken bonds 2,650 → 5,071, fragments 865 → 1,668. Each
+          impact is resolved in one step instead of 2–3, so it is not adopted.
+        - Guard 24/24 with it off.
+      - **Splits are the spikes (p95 ~155 ms, now ~55 with splits in place).** Each one downloads the mirror (12–30 ms)
         and rebuilds the tables of all 52k chunks (~50 ms) for a few changed clusters.
         The new fragments' first solves come on top. Next: re-lay out only the split
         islands (phase 6e).

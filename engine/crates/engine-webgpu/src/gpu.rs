@@ -59,6 +59,8 @@ pub struct WgpuSim {
     compact_contacts: bool,
     persistent_contacts: bool,
     sparse_start: u32,
+    /// The look-ahead contacts' largest reach per collider (m; 0: the kernels' 0.5).
+    spec_reach_max: f32,
     manifold_persistence: bool,
     /// Opt-in three-avbd shape: warm-hash insert per previous manifold.
     pub(crate) manifold_hash_insert: bool,
@@ -523,6 +525,7 @@ impl WgpuSim {
             counter_upload,
             compact_contacts,
             persistent_contacts,
+            spec_reach_max: 0.0,
             sparse_start: if capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8 {
                 env_str("ENGINE_SPARSE_COLORS")
                     .and_then(|v| v.parse::<u32>().ok())
@@ -1048,6 +1051,13 @@ impl WgpuSim {
         bodies
     }
 
+    /// The largest reach (m) the look-ahead contacts (`FLAG_SPEC_VELOCITY`) give one
+    /// collider; 0 keeps the kernels' default (0.5 m). A fast body's contacts are found
+    /// within its step's motion up to this, so it needs no substeps to meet what it hits.
+    pub fn set_spec_reach_max(&mut self, reach: f32) {
+        self.spec_reach_max = reach;
+    }
+
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
         self.step_inner(false)
     }
@@ -1422,7 +1432,7 @@ impl WgpuSim {
     /// forwards last step's counts before resetting them (no host readback).
     fn write_host_uniforms_ex(&self, pipelined: bool) {
         let inputs = self.step_inputs();
-        let s = rigid_plan::host_words(
+        let mut s = rigid_plan::host_words(
             &self.capacity,
             &self.step_modes(),
             &inputs,
@@ -1435,6 +1445,9 @@ impl WgpuSim {
                 persist_list_limit: self.persist_list_limit,
             },
         );
+        // Word 31: the look-ahead contacts' reach cap (FLAG_SPEC_VELOCITY), 0: the
+        // kernels' default.
+        s[31] = self.spec_reach_max.to_bits();
         self.queue
             .write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
         let c = rigid_plan::step_counters(&inputs);

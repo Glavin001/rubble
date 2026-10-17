@@ -49,7 +49,7 @@ impl ResidentEngine for RubbleEngine {
 
     fn resident_substeps(&mut self, dt: f64) -> u32 {
         let mut n = self.substeps.max(1);
-        let ccd: Vec<u32> = self.bodies.iter().filter(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)).map(|(_, e)| e.id).collect();
+        let ccd: Vec<u32> = self.bodies.iter().filter(|(k, e)| !self.speculative_ccd && e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)).map(|(_, e)| e.id).collect();
         if !ccd.is_empty() {
             // The CCD bound needs the fast bodies' speeds: read back (counted).
             self.resident_reads += 1;

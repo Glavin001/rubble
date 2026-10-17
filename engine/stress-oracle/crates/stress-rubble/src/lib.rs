@@ -55,6 +55,9 @@ use std::ops::Range;
 
 use engine_schema::convex::{convex_collider_params, principal_axes, CollisionFilter, ConvexHull, HullArena};
 use engine_schema::{AvbdParams, BodyFlags, BodyState, Collider, ShapeType, WorldCapacity, FLAG_CONTACT_GAP, FLAG_WORLD_INERTIA};
+
+/// rubble's look-ahead contacts (world_step.slang `FLAG_SPEC_VELOCITY`).
+const FLAG_SPEC_VELOCITY: u32 = 1 << 14;
 use engine_webgpu::{SimSnapshot, WgpuSim};
 use stress_ref::engine::{BodyGeometry, BodyKey, BodyMotion, EngineBody, EngineContact, RigidEngine};
 use stress_ref::math::{Mat3, Pose, Quat, Vec3};
@@ -381,6 +384,8 @@ pub struct RubbleEngine {
     pub resident_reads: u64,
     /// The resident frame's speculative contact range (`resident_substeps`).
     resident_offset: f32,
+    /// Look-ahead contacts instead of CCD substeps (`STRESS_RUBBLE_SPECULATIVE_CCD`).
+    pub speculative_ccd: bool,
 }
 
 /// The default capacity: room for a few thousand bodies (every rebuilt cluster takes
@@ -454,7 +459,17 @@ impl RubbleEngine {
         if let Some(n) = std::env::var("STRESS_RUBBLE_ITERATIONS").ok().and_then(|v| v.parse().ok()) {
             params.iterations = n;
         }
+        // `STRESS_RUBBLE_SPECULATIVE_CCD=1` (opt-in, measured): rubble's look-ahead contacts
+        // (FLAG_SPEC_VELOCITY: each moving collider's contacts found within its step's
+        // motion, PhysX-style speculative CCD) with a reach cap of
+        // `STRESS_RUBBLE_SPEC_REACH` m (default 3) instead of CCD substeps.
+        let speculative_ccd = std::env::var("STRESS_RUBBLE_SPECULATIVE_CCD").is_ok_and(|v| v == "1");
+        if speculative_ccd {
+            params.flags |= FLAG_SPEC_VELOCITY;
+            sim.set_spec_reach_max(std::env::var("STRESS_RUBBLE_SPEC_REACH").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0));
+        }
         sim.set_params(params);
+        let _ = speculative_ccd;
         // Small coupling scenes dispatch only the colours in use by default (engine 8ev).
         Ok(RubbleEngine {
             sim,
@@ -475,6 +490,7 @@ impl RubbleEngine {
             layout_version: 0,
             resident_reads: 0,
             resident_offset: 0.01,
+            speculative_ccd: std::env::var("STRESS_RUBBLE_SPECULATIVE_CCD").is_ok_and(|v| v == "1"),
         })
     }
 
@@ -753,7 +769,7 @@ impl RigidEngine for RubbleEngine {
 
         // Substeps: CCD bodies move at most half their thinnest extent per substep.
         let mut n = self.substeps.max(1);
-        for (_, e) in self.bodies.iter().filter(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)) {
+        for (_, e) in self.bodies.iter().filter(|(k, e)| !self.speculative_ccd && e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)) {
             let s = &all[e.id as usize];
             let travel = glam::Vec3::from_array(s.linear_vel).length() as f64 * dt + glam::Vec3::from_array(s.angular_vel).length() as f64 * e.thin * dt;
             let need = (travel / (0.5 * e.thin)).ceil() as u32;
