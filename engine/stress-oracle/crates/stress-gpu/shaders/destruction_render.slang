@@ -1,5 +1,6 @@
 // Draws the engine-coupled world (`GpuWorld`) straight from the stress solver's GPU
-// state: every chunk an oriented box at its island's pose (world.slang `chunk_world`,
+// state: every chunk its convex hull (`chunk_hull_vs`, triangles in the chunk's own frame
+// from the host) or its oriented box (`chunk_vs`) at its island's pose (world.slang `chunk_world`,
 // `chunk_box`: island rotation x hidden rotation x chunk rotation, centre at rest centre
 // + u), coloured by the largest utilization (failure index) of its unbroken bonds, read
 // from the bonds' joint state through the chunk's CSR incidence. Chunks without an
@@ -7,7 +8,7 @@
 // tables (quiet clusters) come from the host's mirror (`host_chunks`). Impactors are
 // drawn from the impactor records (spheres and boxes), and the ground as a checkered
 // plane.
-// Vertices come from the vertex index: no vertex buffers.
+// Vertices come from the vertex index and storage buffers: no vertex buffers.
 
 import joint;
 import common;
@@ -74,6 +75,16 @@ struct HostChunk
     float4 axis2;
 };
 [[vk::binding(7, 0)]] StructuredBuffer<HostChunk> host_chunks;
+// Hull triangles in a chunk's own frame (centred, chunk axes: the box's frame), three
+// vertices each; pos.w holds the chunk's index (GPU table index for `hull_verts`, host
+// chunk index for `host_hull_verts`).
+struct HullVertex
+{
+    float4 pos;
+    float4 normal;
+};
+[[vk::binding(8, 0)]] StructuredBuffer<HullVertex> hull_verts;
+[[vk::binding(9, 0)]] StructuredBuffer<HullVertex> host_hull_verts;
 
 struct VertexOut
 {
@@ -128,19 +139,15 @@ Quat rotation_of(float4 hi, float4 lo)
     return normalized(quat_of(hi + lo));
 }
 
-[shader("vertex")]
-VertexOut chunk_vs(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
+// A point and normal in GPU chunk `c`'s own frame, at the chunk's pose and colour.
+VertexOut chunk_vertex(uint c, float3 p, float3 n)
 {
-    float3 p;
-    float3 n;
-    box_corner(vertex, p, n);
-    uint c = instance;
     ChunkStatic ch = chunks[c];
     Island isl = islands[ch.info.y];
     Quat q = rotation_of(isl.rotation, isl.rotation_err);
     float3 th = state[4 * c + 1].xyz;
     Quat hidden = from_axis_angle(th, length(th));
-    float3 local = float3(dot(ch.crot0.xyz, p * ch.half.xyz), dot(ch.crot1.xyz, p * ch.half.xyz), dot(ch.crot2.xyz, p * ch.half.xyz));
+    float3 local = float3(dot(ch.crot0.xyz, p), dot(ch.crot1.xyz, p), dot(ch.crot2.xyz, p));
     float3 local_n = float3(dot(ch.crot0.xyz, n), dot(ch.crot1.xyz, n), dot(ch.crot2.xyz, n));
     float3 body = ch.center.xyz + state[4 * c].xyz + rotate(hidden, local);
     float3 world = (isl.position.xyz + isl.position_err.xyz) + rotate(q, body);
@@ -166,19 +173,48 @@ VertexOut chunk_vs(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
 }
 
 [shader("vertex")]
-VertexOut host_chunk_vs(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
+VertexOut chunk_vs(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
 {
     float3 p;
     float3 n;
     box_corner(vertex, p, n);
-    HostChunk hc = host_chunks[instance];
-    float3 world = hc.center.xyz + hc.axis0.xyz * (p.x * hc.axis0.w) + hc.axis1.xyz * (p.y * hc.axis1.w) + hc.axis2.xyz * (p.z * hc.axis2.w);
+    return chunk_vertex(instance, p * chunks[instance].half.xyz, n);
+}
+
+[shader("vertex")]
+VertexOut chunk_hull_vs(uint vertex: SV_VertexID)
+{
+    HullVertex v = hull_verts[vertex];
+    return chunk_vertex(uint(v.pos.w), v.pos.xyz, v.normal.xyz);
+}
+
+// A point and normal in host chunk `hc`'s own frame, at its (world) pose and colour.
+VertexOut host_vertex(HostChunk hc, float3 p, float3 n)
+{
+    float3 world = hc.center.xyz + hc.axis0.xyz * p.x + hc.axis1.xyz * p.y + hc.axis2.xyz * p.z;
     VertexOut o;
     o.position = clip_of(world);
     o.normal = hc.axis0.xyz * n.x + hc.axis1.xyz * n.y + hc.axis2.xyz * n.z;
     o.color = hc.center.w >= 0.0 ? ramp(hc.center.w) : float3(0.55, 0.52, 0.48);
     o.world = world;
     return o;
+}
+
+[shader("vertex")]
+VertexOut host_chunk_vs(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
+{
+    float3 p;
+    float3 n;
+    box_corner(vertex, p, n);
+    HostChunk hc = host_chunks[instance];
+    return host_vertex(hc, p * float3(hc.axis0.w, hc.axis1.w, hc.axis2.w), n);
+}
+
+[shader("vertex")]
+VertexOut host_hull_vs(uint vertex: SV_VertexID)
+{
+    HullVertex v = host_hull_verts[vertex];
+    return host_vertex(host_chunks[uint(v.pos.w)], v.pos.xyz, v.normal.xyz);
 }
 
 [shader("vertex")]

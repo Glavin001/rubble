@@ -11,7 +11,7 @@ use stress_gpu::shaders;
 use winit::window::Window;
 
 use crate::font;
-use crate::sim::{HostChunk, Sim};
+use crate::sim::{HostChunk, HullVertex, Sim};
 
 /// Uniforms of `destruction_render.slang` (`Camera`).
 #[repr(C)]
@@ -106,8 +106,16 @@ pub struct Renderer {
     group: wgpu::BindGroupLayout,
     chunk_pipeline: wgpu::RenderPipeline,
     host_chunk_pipeline: wgpu::RenderPipeline,
+    hull_pipeline: wgpu::RenderPipeline,
+    host_hull_pipeline: wgpu::RenderPipeline,
     /// The host chunks (`Sim::host_chunks`), their count and the signature they are of.
     host_chunks: (wgpu::Buffer, u32, Option<u64>),
+    /// Hull triangles (vertex buffers and counts) of the GPU-table and host chunks, rebuilt
+    /// with `host_chunks`.
+    hulls: (wgpu::Buffer, u32),
+    host_hulls: (wgpu::Buffer, u32),
+    /// Draw chunks as their oriented boxes instead of their hulls (key B).
+    pub boxes: bool,
     impactor_pipeline: wgpu::RenderPipeline,
     ground_pipeline: wgpu::RenderPipeline,
     hud_group: wgpu::BindGroupLayout,
@@ -138,7 +146,7 @@ impl Renderer {
         surface.configure(&gpu.device, &config);
 
         let camera = gpu.uniform("camera", &<CameraUniform as bytemuck::Zeroable>::zeroed());
-        let bindings = [Binding::Uniform, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage];
+        let bindings = [Binding::Uniform, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage, Binding::Storage];
         let (group, layout) = gpu.layout("destruction render", &bindings, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT);
         let module = gpu.module(&shaders::DESTRUCTION_RENDER);
         let depth_state = |write: bool, compare: wgpu::CompareFunction| wgpu::DepthStencilState {
@@ -163,6 +171,8 @@ impl Renderer {
         };
         let chunk_pipeline = pipeline("chunks", "chunk_vs", "lit_fs");
         let host_chunk_pipeline = pipeline("host chunks", "host_chunk_vs", "lit_fs");
+        let hull_pipeline = pipeline("chunk hulls", "chunk_hull_vs", "lit_fs");
+        let host_hull_pipeline = pipeline("host chunk hulls", "host_hull_vs", "lit_fs");
         let impactor_pipeline = pipeline("impactors", "impactor_vs", "lit_fs");
         let ground_pipeline = pipeline("ground", "ground_vs", "ground_fs");
 
@@ -202,6 +212,11 @@ impl Renderer {
             chunk_pipeline,
             host_chunk_pipeline,
             host_chunks: (gpu.storage("host chunks", &[HostChunk::default()]), 0, None),
+            hull_pipeline,
+            host_hull_pipeline,
+            hulls: (gpu.storage("chunk hulls", &[HullVertex::default()]), 0),
+            host_hulls: (gpu.storage("host chunk hulls", &[HullVertex::default()]), 0),
+            boxes: false,
             impactor_pipeline,
             ground_pipeline,
             hud_group,
@@ -293,13 +308,20 @@ impl Renderer {
         // The solver's buffers are replaced by its rebuilds: bound afresh every frame.
         let signature = sim.host_chunk_signature();
         if self.host_chunks.2 != Some(signature) {
-            let list = sim.host_chunks();
+            let (list, host_hulls) = sim.host_chunks();
             let n = list.len() as u32;
             let data = if list.is_empty() { vec![HostChunk::default()] } else { list };
             self.host_chunks = (self.gpu.storage("host chunks", &data), n, Some(signature));
+            let upload = |label: &str, v: Vec<HullVertex>| {
+                let n = v.len() as u32;
+                let v = if v.is_empty() { vec![HullVertex::default()] } else { v };
+                (self.gpu.storage(label, &v), n)
+            };
+            self.hulls = upload("chunk hulls", sim.chunk_hulls());
+            self.host_hulls = upload("host chunk hulls", host_hulls);
         }
         let rb = sim.world.solver.render_buffers();
-        let bind = self.gpu.bind(&self.group, &[&self.camera, rb.chunks, rb.islands, rb.state, rb.index, rb.bond_dyn, rb.impactors, &self.host_chunks.0]);
+        let bind = self.gpu.bind(&self.group, &[&self.camera, rb.chunks, rb.islands, rb.state, rb.index, rb.bond_dyn, rb.impactors, &self.host_chunks.0, &self.hulls.0, &self.host_hulls.0]);
         let hud_bind = self.upload_hud(hud);
 
         let texture = frame.as_ref().map_or(&self.offscreen, |f| &f.texture);
@@ -329,12 +351,22 @@ impl Renderer {
                 pass.draw(0..6, 0..1);
             }
             if !crate::sim::host_chunks_only() {
-                pass.set_pipeline(&self.chunk_pipeline);
-                pass.draw(0..36, 0..rb.chunk_count);
+                if self.boxes {
+                    pass.set_pipeline(&self.chunk_pipeline);
+                    pass.draw(0..36, 0..rb.chunk_count);
+                } else if self.hulls.1 > 0 {
+                    pass.set_pipeline(&self.hull_pipeline);
+                    pass.draw(0..self.hulls.1, 0..1);
+                }
             }
             if self.host_chunks.1 > 0 {
-                pass.set_pipeline(&self.host_chunk_pipeline);
-                pass.draw(0..36, 0..self.host_chunks.1);
+                if self.boxes {
+                    pass.set_pipeline(&self.host_chunk_pipeline);
+                    pass.draw(0..36, 0..self.host_chunks.1);
+                } else if self.host_hulls.1 > 0 {
+                    pass.set_pipeline(&self.host_hull_pipeline);
+                    pass.draw(0..self.host_hulls.1, 0..1);
+                }
             }
             if rb.impactor_count > 0 {
                 pass.set_pipeline(&self.impactor_pipeline);

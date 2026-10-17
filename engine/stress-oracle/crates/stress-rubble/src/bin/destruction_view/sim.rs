@@ -248,7 +248,33 @@ pub struct HostChunk {
     pub axes: [[f32; 4]; 3],
 }
 
+/// One vertex of a chunk's hull triangles in the chunk's own frame, as
+/// `destruction_render.slang`'s `HullVertex` (pos.w: the chunk's index).
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HullVertex {
+    pub pos: [f32; 4],
+    pub normal: [f32; 4],
+}
+
+fn push_hull(ch: &stress_ref::structure::ChunkData, index: usize, out: &mut Vec<HullVertex>) {
+    for (p, n) in stress_rubble::render::chunk_triangles(ch) {
+        out.push(HullVertex { pos: [p[0], p[1], p[2], index as f32], normal: [n[0], n[1], n[2], 0.0] });
+    }
+}
+
 impl Sim {
+    /// Hull triangles of every chunk in the GPU tables, tagged with its table index (they
+    /// change only with `host_chunk_signature`).
+    pub fn chunk_hulls(&self) -> Vec<HullVertex> {
+        let m = &self.world.solver.mirror;
+        let mut out = Vec::new();
+        for (k, &(s, c)) in self.world.solver.chunk_order().iter().enumerate() {
+            push_hull(&m.structures[s].chunks[c], k, &mut out);
+        }
+        out
+    }
+
     /// A signature of what the GPU tables hold and of the topology: the host chunks
     /// change only with it (excluded clusters do not move while out).
     pub fn host_chunk_signature(&self) -> u64 {
@@ -260,12 +286,14 @@ impl Sim {
         h.finish()
     }
 
-    /// Every active chunk not in the GPU tables, from the mirror (`world.rs chunk_box`).
-    pub fn host_chunks(&self) -> Vec<HostChunk> {
+    /// Every active chunk not in the GPU tables, from the mirror (`world.rs chunk_box`),
+    /// and their hull triangles tagged with the host chunk's index.
+    pub fn host_chunks(&self) -> (Vec<HostChunk>, Vec<HullVertex>) {
         let m = &self.world.solver.mirror;
         let on_gpu: std::collections::HashSet<(usize, usize)> =
             if host_chunks_only() { Default::default() } else { self.world.solver.chunk_order().iter().copied().collect() };
         let mut out = Vec::new();
+        let mut hulls = Vec::new();
         for (s, st) in m.structures.iter().enumerate() {
             if (0..st.chunks.len()).all(|c| on_gpu.contains(&(s, c))) {
                 continue;
@@ -291,13 +319,14 @@ impl Sim {
                 let p = m.chunk_position(s, c);
                 let h = ch.half_extents;
                 let half = [h.x, h.y, h.z];
+                push_hull(ch, out.len(), &mut hulls);
                 out.push(HostChunk {
                     center: [p.x as f32, p.y as f32, p.z as f32, util[c] as f32],
                     axes: std::array::from_fn(|k| [r.m[0][k] as f32, r.m[1][k] as f32, r.m[2][k] as f32, half[k] as f32]),
                 });
             }
         }
-        out
+        (out, hulls)
     }
 }
 

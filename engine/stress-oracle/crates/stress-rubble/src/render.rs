@@ -212,6 +212,29 @@ fn hull_triangles(vertices: &[Vec3], faces: &[(Vec<usize>, Vec3)], object: u32, 
     }
 }
 
+/// One chunk's flat-shaded triangles in its own frame (centred, chunk axes): its convex
+/// hull, or its box when it has none.
+fn chunk_mesh(ch: &stress_ref::structure::ChunkData, object: u32, out: &mut Vec<Vertex>) {
+    match &ch.hull {
+        Some(h) => {
+            let faces: Vec<(Vec<usize>, Vec3)> = h.faces.iter().map(|f| (f.vertices.clone(), f.normal)).collect();
+            hull_triangles(&h.vertices, &faces, object, out);
+        }
+        None => {
+            let (v, f) = box_faces(ch.half_extents);
+            hull_triangles(&v, &f, object, out);
+        }
+    }
+}
+
+/// [`chunk_mesh`] as (position, face normal) per vertex, three per triangle, for other
+/// renderers (`destruction-view` draws these at the GPU solver's chunk poses).
+pub fn chunk_triangles(ch: &stress_ref::structure::ChunkData) -> Vec<([f32; 3], [f32; 3])> {
+    let mut verts = Vec::new();
+    chunk_mesh(ch, 0, &mut verts);
+    verts.into_iter().map(|v| (v.pos, v.normal)).collect()
+}
+
 fn box_faces(h: Vec3) -> (Vec<Vec3>, Vec<(Vec<usize>, Vec3)>) {
     let verts: Vec<Vec3> = (0..8).map(|k| Vec3::new(if k & 1 == 0 { -h.x } else { h.x }, if k & 2 == 0 { -h.y } else { h.y }, if k & 4 == 0 { -h.z } else { h.z })).collect();
     let mut faces = Vec::new();
@@ -292,16 +315,7 @@ impl Renderer {
         for st in &solver.structures {
             let mut ids = Vec::with_capacity(st.chunks.len());
             for ch in &st.chunks {
-                match &ch.hull {
-                    Some(h) => {
-                        let faces: Vec<(Vec<usize>, Vec3)> = h.faces.iter().map(|f| (f.vertices.clone(), f.normal)).collect();
-                        hull_triangles(&h.vertices, &faces, object, &mut verts);
-                    }
-                    None => {
-                        let (v, f) = box_faces(ch.half_extents);
-                        hull_triangles(&v, &f, object, &mut verts);
-                    }
-                }
+                chunk_mesh(ch, object, &mut verts);
                 ids.push(object);
                 object += 1;
             }
