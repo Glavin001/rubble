@@ -120,13 +120,13 @@
     // Record slots (8ed) resolve the pair key and previous run without loading
     // previous contacts: ring manifold/record 11.42/11.21/11.83/11.35 ms, gables
     // 34.41/32.68/35.05/32.74 ms, bit-identical workloads.
-    const hashInsertMode = qs.get('hashInsert') || 'record';
+    let hashInsertMode = qs.get('hashInsert') || 'record';
     if (!['contact', 'manifold', 'record'].includes(hashInsertMode))
       throw new Error('hashInsert must be contact, manifold or record');
     // record: per-manifold insert of 16-byte slots holding the pair key and its
     // previous run, so lookups never load previous contacts to compare keys.
-    const warmRecordHash = hashInsertMode === 'record';
-    const manifoldHashInsert = hashInsertMode === 'manifold' || warmRecordHash;
+    let warmRecordHash = hashInsertMode === 'record';
+    let manifoldHashInsert = hashInsertMode === 'manifold' || warmRecordHash;
     // Narrowphase finishes reused copies for moving pairs; persistence skips
     // points tagged final (8eh). Gables pass/copy 30.95/30.19/30.98/30.21 ms,
     // ring 11.37/11.27/11.38/11.27 ms. reuse=pass keeps the separate-pass control.
@@ -316,6 +316,15 @@
     };
     const cfg = SCENES[scene];
     if (!cfg) throw new Error(`unknown scene ${scene}; try ${Object.keys(SCENES).join(', ')}`);
+    // Manifold and record inserts run before narrowphase over last step's
+    // manifolds, so they need contact reuse (FLAG_REUSE_CONTACTS). A scene without
+    // it (wall smash) falls back to the contact insert, as the native host does
+    // (gpu.rs record_hash/manifold_insert); an explicit ?hashInsert= still errors.
+    if (!((cfg.flags || 0) & 1) && !qs.has('hashInsert')) {
+      hashInsertMode = 'contact';
+      warmRecordHash = false;
+      manifoldHashInsert = false;
+    }
     const sceneSelect = document.getElementById('sceneSelect');
     for (const [id, s] of Object.entries(SCENES)) {
       const opt = document.createElement('option');
