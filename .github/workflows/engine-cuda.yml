@@ -1,0 +1,114 @@
+name: Engine CUDA
+
+# engine-cuda's GPU tests on Modal. Everything that compiles runs here on the
+# free runner; Modal only executes the prebuilt test binaries on a single-use
+# T4 (~1 cent a run). A run is skipped when the same inputs already passed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - engine/slang/**
+      - engine/crates/engine-cuda/**
+      - engine/crates/engine-exec/**
+      - engine/crates/engine-schema/**
+      - engine/crates/engine-slang-build/**
+      - engine/tools/cuda/**
+      - engine/tools/modal/**
+      - .github/workflows/engine-cuda.yml
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - engine/slang/**
+      - engine/crates/engine-cuda/**
+      - engine/crates/engine-exec/**
+      - engine/crates/engine-schema/**
+      - engine/crates/engine-slang-build/**
+      - engine/tools/cuda/**
+      - engine/tools/modal/**
+      - .github/workflows/engine-cuda.yml
+  workflow_dispatch:
+    inputs:
+      gpu:
+        description: Modal GPU (T4 for correctness, L40S for 4090-class timing)
+        default: T4
+      perf:
+        description: Run only the timed 10k-body test
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-cuda-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: stable
+  SLANGC: /opt/slang/bin/slangc
+  NVCC: /usr/local/cuda-12.8/bin/nvcc
+  ENGINE_CUDA_REQUIRE_PTX: "1"
+
+jobs:
+  cuda:
+    name: Build, then test on Modal
+    # Ubuntu 22.04's glibc (2.35) runs on Modal's Debian bookworm image (2.36).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inputs fingerprint
+        id: fp
+        run: echo "key=engine-cuda-green-${{ inputs.gpu || 'T4' }}-${{ inputs.perf || false }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-cuda/**', 'engine/crates/engine-exec/**', 'engine/crates/engine-schema/**', 'engine/crates/engine-slang-build/**', 'engine/tools/cuda/**', 'engine/tools/modal/**') }}" >> "$GITHUB_OUTPUT"
+      - name: Already green for these inputs?
+        id: green
+        uses: actions/cache/restore@v4
+        with:
+          path: .engine-cuda-green
+          key: ${{ steps.fp.outputs.key }}
+          lookup-only: true
+      - name: Install slangc and nvcc
+        if: steps.green.outputs.cache-hit != 'true'
+        run: sudo engine/tools/cuda/install_linux_toolchain.sh
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.green.outputs.cache-hit != 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.green.outputs.cache-hit != 'true'
+        with:
+          workspaces: engine
+      - name: CPU tests (sources, device code embedded; GPU tests skip)
+        if: steps.green.outputs.cache-hit != 'true'
+        working-directory: engine
+        run: cargo test -p engine-cuda --release
+      - name: Package test binaries
+        if: steps.green.outputs.cache-hit != 'true'
+        run: |
+          python3 -m pip install --quiet modal==1.6.2  # same pin as engine/tools/modal/modal.sh
+          python3 engine/tools/modal/cuda_tests.py --package cuda-tests.tar.gz
+          ls -lh cuda-tests.tar.gz
+      # Pushes to main, a PR labelled `cuda`, or a manual run spend GPU time.
+      - name: GPU tests on Modal
+        if: >-
+          steps.green.outputs.cache-hit != 'true' && (
+            github.event_name != 'pull_request' ||
+            contains(github.event.pull_request.labels.*.name, 'cuda'))
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ]; then
+            echo "::warning::MODAL_TOKEN_ID/MODAL_TOKEN_SECRET not set; skipping the GPU run"
+            exit 0
+          fi
+          set -o pipefail
+          args=(--archive cuda-tests.tar.gz --gpu "${{ inputs.gpu || 'T4' }}")
+          if [ "${{ inputs.perf }}" = "true" ]; then args+=(--perf); fi
+          python3 -m modal run engine/tools/modal/cuda_tests.py "${args[@]}" | tee modal.log
+          mkdir -p .engine-cuda-green && cp modal.log .engine-cuda-green/
+      - name: Remember green inputs
+        if: hashFiles('.engine-cuda-green/modal.log') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .engine-cuda-green
+          key: ${{ steps.fp.outputs.key }}

@@ -51,7 +51,7 @@ fastest *passing* configuration of each engine.
 | `jolt-1t` / `jolt-mt` | Jolt Physics 5.6, one thread / many (job system) | CPU | batch |
 | `physx-cpu-1t` / `physx-cpu-mt` | PhysX TGS, 1 / many worker threads | CPU | batch |
 | `physx-gpu` | PhysX with GPU dynamics and GPU broadphase | CUDA GPU on NVIDIA; on macOS the same CUDA module on Metal via CuMetal | batch, sync |
-| `rubble-cuda` | rubble's CUDA path (`engine/crates/engine-cuda`) | *pending: engine-cuda emits CUDA source but has no host yet; on macOS it would run through CuMetal like PhysX* | — |
+| `rubble-cuda` | rubble's CUDA path (`engine/crates/engine-cuda`) | *pending: engine-cuda's `CudaSim` host exists (GPU tests on Modal, see `engine/TOOLCHAIN.md`) but has no bench adapter yet; on macOS it would run through CuMetal like PhysX* | — |
 
 ### Comparisons
 

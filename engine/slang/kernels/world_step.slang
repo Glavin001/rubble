@@ -4190,9 +4190,10 @@ void prefix_color_tiles(uint3 tid : SV_DispatchThreadID)
     for (uint group = 0u; group < groups; group++)
     {
         uint index = color * groups + group;
-        uint count = gColorOffsets[index];
+        // Read before the store (see prefix_color_tiles_parallel).
+        uint next = sum + gColorOffsets[index];
         gColorOffsets[index] = sum;
-        sum += count;
+        sum = next;
     }
     ASTORE(gColorCounts[color], sum);
 }
@@ -4229,9 +4230,11 @@ void prefix_color_tiles_parallel(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
     for (uint group = start; group < end; group++)
     {
         uint index = color * groups + group;
-        uint count = gColorOffsets[index];
+        // Use the count before overwriting it: Slang's CUDA output otherwise
+        // keeps `count` as a pointer and reads it back after the store.
+        uint next = prefix + gColorOffsets[index];
         gColorOffsets[index] = prefix;
-        prefix += count;
+        prefix = next;
     }
     if (local == 63u) ASTORE(gColorCounts[color], gsPackBlockSums[63]);
 }

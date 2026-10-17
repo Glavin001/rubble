@@ -3,15 +3,19 @@ name = "engine-cuda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CUDA grid-stride submission of the shared Slang phase graph (NVIDIA Linux)"
+description = "CUDA replay of the shared rigid step graph (Slang → CUDA → PTX, NVIDIA Linux)"
 
 [dependencies]
 engine-schema.workspace = true
 engine-exec.workspace = true
-engine-slang-build.workspace = true
 anyhow.workspace = true
+bytemuck.workspace = true
 log.workspace = true
+# Driver API only, loaded at run time: builds without CUDA installed and needs
+# just the NVIDIA driver (libcuda) where it runs.
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "dynamic-loading", "cuda-12060"] }
 
 [build-dependencies]
 engine-slang-build.workspace = true
+engine-exec.workspace = true
 anyhow.workspace = true

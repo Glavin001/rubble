@@ -7,3 +7,4 @@ description = "Invoke offline slangc and embed generated Metal / SPIR-V / CUDA a
 
 [dependencies]
 anyhow.workspace = true
+serde_json.workspace = true
