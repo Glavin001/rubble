@@ -70,6 +70,10 @@
     const warnEl = document.getElementById('warn');
     const canvas = document.getElementById('c');
     const fail = (e) => { errEl.textContent = String(e && e.stack || e); statusEl.textContent = 'stopped'; };
+    // Setup runs at module top level (scene snapshots, adapter, pipelines); show
+    // its failures on the page instead of only in the console.
+    addEventListener('unhandledrejection', (e) => fail(e.reason));
+    addEventListener('error', (e) => fail(e.error || e.message));
     const warnOnce = (() => {
       const seen = new Set();
       return (msg) => {
