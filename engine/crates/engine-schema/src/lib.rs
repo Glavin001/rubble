@@ -10,11 +10,15 @@ use serde::{Deserialize, Serialize};
 pub mod commands;
 pub mod convex;
 pub mod handles;
+pub mod joint;
 pub mod params;
+pub mod snapshot;
 
 pub use commands::*;
 pub use handles::*;
+pub use joint::*;
 pub use params::*;
+pub use snapshot::*;
 
 /// ABI probe used by Gate 0 layout round-trips (must match `slang/kernels/abi_probe.slang`).
 #[repr(C)]
@@ -76,20 +80,6 @@ pub enum ShapeType {
     Box = 2,
     ConvexHull = 3,
     Plane = 4,
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JointType {
-    Ball = 0,
-    Fixed = 1,
-    Hinge = 2,
-    Slider = 3,
-    D6 = 4,
-    Distance = 5,
-    MaxDistance = 6,
-    /// Breakable weld (all six DOF) carrying `Joint::strength` capacities.
-    Bond = 7,
 }
 
 /// Slots in the joint-pair hash (`jointHashSize()` in world_step.slang): a power
@@ -234,36 +224,6 @@ pub struct Manifold {
     pub friction: f32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct Joint {
-    pub body_a: u32,
-    pub body_b: u32,
-    pub joint_type: u32,
-    pub flags: u32,
-    pub local_anchor_a: [f32; 3],
-    pub stiffness: f32,
-    pub local_anchor_b: [f32; 3],
-    pub damping: f32,
-    pub axis_a: [f32; 3],
-    pub limit_min: f32,
-    pub axis_b: [f32; 3],
-    pub limit_max: f32,
-    /// Constraint value at beginning of timestep (demo3d `C0Lin`).
-    pub c0: [f32; 3],
-    pub _pad_c0: f32,
-    pub lambda: [f32; 6],
-    pub k: [f32; 6],
-    /// Bond joints: the bond frame's u axis in body A's frame (normal: `axis_b`).
-    pub frame_u: [f32; 3],
-    pub _pad_frame_u: f32,
-    /// Bond break capacities: tension (N), compression (N), shear (N), bending
-    /// moment (N m); <= 0 means that mode never breaks.
-    pub strength: [f32; 4],
-    /// Bond angular violation at step start (GPU-owned).
-    pub c0_ang: [f32; 3],
-    pub _pad_c0_ang: f32,
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -336,6 +296,7 @@ mod tests {
         assert_eq!(size_of::<Contact>(), 128);
         assert_eq!(size_of::<Manifold>(), 32);
         assert_eq!(size_of::<StepCounters>(), 80);
+        assert_eq!(size_of::<Joint>(), 288);
         assert_eq!(align_of::<BodyState>(), 4);
     }
 }

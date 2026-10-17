@@ -76,7 +76,7 @@ This document is the result of a line‑by‑line read of all three solvers. Eve
 | SIMD lane‑split primal (8 thr/body) | ✅ | ✗ | ✗ |
 | Restitution | ✗ | ✗ (dead code) | **✗ (param exists, unused)** |
 | Sleeping / islands | ✗ | optional | ✗ |
-| Joints / springs | ✅ | ✅ | **✗** |
+| Joints / springs | ✅ | ✅ | ✅ D6 presets, limits, motors, breaking in the Slang engine (`engine/docs/JOINTS.md`) |
 | Cloth / tet‑FEM soft bodies | ✅ | ✅ | ✗ |
 | CPU reference solver (for parity tests) | ✅ | ✗ | **✗** |
 | Narrowphase shape coverage | broad | mostly box+sphere | **broad (box/capsule/hull/compound/plane), 2D+3D** ✅ |

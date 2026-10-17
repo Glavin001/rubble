@@ -85,61 +85,65 @@ public struct Manifold
 
 public struct Joint
 {
+    // Layout mirrors engine-schema `Joint` (288 B). Row math: joints.slang.
     uint bodyA;
     uint bodyB;
-    uint jointType;
     uint flags;
-    float3 localAnchorA;
-    float stiffness;
-    float3 localAnchorB;
-    float damping;
-    float3 axisA;
-    float limitMin;
-    float3 axisB;
-    float limitMax;
-    float3 c0;
-    float _padC0;
-    float lambda0;
-    float lambda1;
-    float lambda2;
-    float lambda3;
-    float lambda4;
-    float lambda5;
-    float k0;
-    float k1;
-    float k2;
-    float k3;
-    float k4;
-    float k5;
-    // Bond joints (JOINT_BOND): the bond frame's u axis in A's frame (the
-    // normal is axisB), and break capacities from the baked bond: x tension
-    // (N), y compression (N), z shear (N), w bending moment (N m). A capacity
-    // <= 0 means that mode never breaks.
-    float3 frameU;
-    float _padFrameU;
-    float4 strength;
-    // Bond angular violation at step start (C0 of the angular rows; c0 holds
-    // the linear one), for AVBD stabilization.
-    float3 c0Ang;
-    float _padC0Ang;
+    uint motion; // 2 bits per DOF (X, Y, Z, twist, swing1, swing2)
+    float3 anchorA;
+    float torqueArm;
+    float4 frameA;
+    float3 anchorB;
+    float linStiffness;
+    float4 frameB;
+    float4 restStart;
+    float3 linLo;
+    float twistLo;
+    float3 linHi;
+    float twistHi;
+    float swingY;
+    float swingZ;
+    float radialMin;
+    float radialMax;
+    float angStiffness;
+    float limitStiffness;
+    float limitDamping;
+    float driveForceLimit;
+    float breakForce;
+    float breakTorque;
+    float yieldTorque;
+    float breakBend;
+    float driveTarget;
+    float driveVelocity;
+    float driveStiffness;
+    float driveDamping;
+    // λ, penalty and C0 per row slot (slots 0..3 in *Lo, 4..7 in *Hi). float4
+    // pairs rather than float[8]: struct copies then need no SPIR-V
+    // OpCopyLogical, which naga's SPIR-V front end rejects.
+    float4 lambdaLo;
+    float4 lambdaHi;
+    float4 penaltyLo;
+    float4 penaltyHi;
+    float4 c0Lo;
+    float4 c0Hi;
 };
 
-public static const uint JOINT_BALL = 0u;
-public static const uint JOINT_FIXED = 1u;
-public static const uint JOINT_HINGE = 2u;
-public static const uint JOINT_SLIDER = 3u;
-public static const uint JOINT_D6 = 4u;
-public static const uint JOINT_DISTANCE = 5u;
-public static const uint JOINT_MAX_DISTANCE = 6u;
-// Breakable bond: six AVBD rows in the bond frame (normal axisB and frameU in
-// A's frame) about the rest pose (relative rotation in axisA.xyz + limitMin as
-// a quaternion). Fixed penalty k0..k5 (normal, u, v, about u, about v, about
-// normal) proportional to Shardwright's elastic springs, so redundant bonds
-// share load as the bake's stress model does; lambda0..5 accumulate the row
-// forces. Breaks when they exceed the baked capacities (strength).
-public static const uint JOINT_BOND = 7u;
-// Joint.flags: set once a bond breaks; broken joints are skipped everywhere.
 public static const uint JOINT_FLAG_BROKEN = 1u;
+public static const uint JOINT_FLAG_COLLIDE = 2u;
+public static const uint JOINT_FLAG_RADIAL = 4u;
+public static const uint JOINT_FLAG_CONE = 8u;
+public static const uint JOINT_FLAG_DRIVE = 16u;
+public static const uint JOINT_DRIVE_DOF_SHIFT = 8u;
+public static const uint MOTION_LOCKED = 0u;
+public static const uint MOTION_LIMITED = 1u;
+public static const uint MOTION_FREE = 2u;
+public static const float JOINT_HARD = 1.0e30;
+public static const float JOINT_BIG = 3.0e38;
+// Fracture bond (JOINT_FLAG_BOND): a weld whose six rows run in the bond frame
+// (frame A: X = normal A->B, Y = u, Z = v) with fixed per-row penalties set by
+// the host, breaking by Shardwright's utilization against the capacities
+// stored in linLo (tension, compression, shear) and twistLo (bending).
+public static const uint JOINT_FLAG_BOND = 32u;
 
 public struct AvbdParams
 {
