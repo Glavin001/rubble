@@ -11,6 +11,9 @@ GPU shader compilation is a separate startup cost.
 
 ## Run
 
+The `assets/*.glb` files are stored in Git LFS. If they are ~130-byte pointer files,
+run `git lfs install && git lfs pull` first.
+
 From the Rubble repository root, with the Slang toolchain described in
 [`engine/TOOLCHAIN.md`](../../../TOOLCHAIN.md):
 

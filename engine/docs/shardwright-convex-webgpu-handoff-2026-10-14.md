@@ -19,8 +19,8 @@ The most recent request is to produce this handoff. No commit, PR, merge, or pub
 
 ## 2. Immediate takeover facts
 
-- Rubble checkout: `/Users/glavin/Development/rubble`.
-- Shardwright checkout: `/Users/glavin/Development/ShardWright`.
+- Rubble checkout: this repository.
+- Shardwright checkout: a sibling `ShardWright` checkout (`../ShardWright`).
 - Rubble HEAD when this report was prepared: `15ea7b122a2e879dc798dcd2d6abe3ed8ae50de0` (`WIP: harden full-scale AVBD WebGPU scenes and reduce ring cost`).
 - Shardwright HEAD: `f10ce21970dba09530b0bd5687885945d81ef370`.
 - Other work modified and committed shared Rubble code during this effort. Historical GPU results are from the evolving working tree, **not a clean, isolated benchmark of the current HEAD**. Regenerate all required shaders together before reproducing results.

@@ -5,7 +5,18 @@ GPU-accelerated rigid-body physics in Rust ([wgpu](https://github.com/gfx-rs/wgp
 - **Status**: [TODO.md](TODO.md) (Rubble spec checklist)
 - **CI**: [.github/workflows/ci.yml](.github/workflows/ci.yml) on pushes/PRs to `main`
 
+## Repository layout
+
+| Path | What | Docs |
+|------|------|------|
+| `crates/`, `web/` | The original wgpu rigid-body crates (2D/3D), WASM build and web demos: the root Cargo workspace below | this file |
+| `engine/` | The Slang AVBD engine: one Slang source for Metal, WebGPU (wgpu and the browser) and CUDA; convex hulls, D6 joints, vehicles, fracture lab, sleeping. Its own Cargo workspace | [engine/README.md](engine/README.md), [engine/DECISIONS.md](engine/DECISIONS.md) |
+| `engine/stress-oracle/` | Destruction stress solver: the CPU f64 reference (`stress-ref`), the GPU solver (`stress-gpu`) and its coupling to the engine (`stress-rubble`), viewers and benchmarks. Its own Cargo workspace | [README](engine/stress-oracle/README.md), [improvement tracker](engine/docs/stress-solver-tracker.md) |
+| `bench/` | Cross-engine rigid-body benchmark (rubble, three-avbd, rapier, PhysX) | [bench/README.md](bench/README.md) |
+
 ## Prerequisites
+
+0. Install **[Git LFS](https://git-lfs.com/)** before cloning (`git lfs install`), or run `git lfs pull` after. The fracture-lab assets (`engine/crates/engine-webgpu/fracture/assets/*.glb`, about 118 MB) are stored in LFS; without it they are small pointer files and the fracture lab, its tests and the fracture viewer cannot load them. CI rejects new files over 5 MB that are not in LFS.
 
 1. Install **Rust stable** with [rustup](https://rustup.rs/) (matches CI).
 2. For **GPU tests**, you need a stack wgpu can use (see Linux or macOS below). For **rust-GPU shader work**, `rust-toolchain.toml` pins nightly; everyday `cargo check`, tests, `fmt`, and `clippy` use **stable** like CI.
@@ -196,3 +207,4 @@ flags, so `npm --prefix web test` works without extra setup.
 | Clippy | `cargo clippy --workspace --all-targets -- -D warnings` |
 | WASM | `./web/build.sh` (see [web/build.sh](web/build.sh), [web/package.json](web/package.json)) |
 | E2E | Playwright on `web/dist` |
+| Large files | [.github/scripts/check-large-files.sh](.github/scripts/check-large-files.sh): no raw file over 5 MB, every `*.glb` an LFS pointer |

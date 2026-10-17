@@ -3,9 +3,9 @@
 **Speed:** beat every open-source **GPU** alternative — **fair bar = Chrome WebGPU ↔ Chrome WebGPU** (`three-avbd` first; our path is Slang→SPIR-V→WGSL). Native Metal `scene_fps` is the M3 interactive gate, not the oracle claim.  
 **Accuracy:** use their **existing** CPU refs when available (three-avbd f64/CpuRef, demo3d, sandbox CPU) plus GPU physical envelopes — never invent a home-grown Rust AVBD.
 
-Primary: [three-avbd](../inspiration/pinned/three-avbd) WebGPU. Also: avbd-sandbox GPU, beat-box Slang, Newton VBD GPU ideas, Jolt island/sleep patterns.
+Primary: three-avbd WebGPU (local reference clone in `inspiration/pinned/three-avbd`, git-ignored). Also: avbd-sandbox GPU, beat-box Slang, Newton VBD GPU ideas, Jolt island/sleep patterns.
 
-Full engine audit and roadmap: [ENGINE_AUDIT_2026-10-16.md](ENGINE_AUDIT_2026-10-16.md). Reports folded from exploration agents: [Mine three-avbd GPU opts](62027ae2-38f8-4e81-8fca-082631dbb3ea), [Mine demo3d+sandbox+beat-box](f03d9f0e-64ea-4a66-9bed-dcc3917b4571), [Mine Newton+Jolt opts](2c62a165-94d0-4421-b6c4-a1d68b03215c).
+Full engine audit and roadmap: [ENGINE_AUDIT_2026-10-16.md](ENGINE_AUDIT_2026-10-16.md). Reports folded from exploration agents: Mine three-avbd GPU opts, Mine demo3d+sandbox+beat-box, Mine Newton+Jolt opts.
 
 ## MUST-COPY (landed / in progress)
 

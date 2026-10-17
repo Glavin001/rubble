@@ -2,7 +2,7 @@
 
 **Where it lives**
 - Branch `feat/convex-hulls`, worktree
-  `/Users/glavin/Development/rubble/.claude/worktrees/convex-hulls`.
+  the `feat/convex-hulls` worktree.
 - Latest commit: `610585c`. Nothing is pushed.
 - Detail and evidence: `sleep-investigation-2026-10-16.md`.
 - Your pending decisions: `sleep-decisions-pending.md`.
