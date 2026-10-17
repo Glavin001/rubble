@@ -21,13 +21,21 @@ struct CascadeParams
     uint island_count;
     uint result_base;   // scratch: the static solves' results (one float4 per island; w converged)
     uint pass_index;
-    uint pad;
+    uint sload_base;    // scratch: the static solves' loads (2 float4 per chunk)
+    uint gate_flag_base; // gate: per island, x = 1 while its stored loads are an unconverged solve's
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 // Status record (uint words): 0 the next pass runs, 1 a bond disconnected (pass + 1),
 // 2 passes run, 3 unconverged solves, 4 damage grew in the last pass run; per island
-// from 16: bit 0 solved this pass, bit 1 converged, bit 2 damaged, bit 3 disconnected
-// (of the last pass run).
+// from 16: bit 0 solved this pass, bit 1 converged, bit 2 damaged, bit 3 disconnected,
+// bit 4 skipped as a repeat of an unconverged solve (of the last pass run).
+//
+// The repeat gate (`cascade_gate`): an unconverged solve leaves its island as it found it
+// (its state restored, no commit), so a solve of that island with the same loads, bit for
+// bit, returns the same verdict on the same state. It is skipped: lossless.
 static const uint ST_RUN = 0;
 static const uint ST_DISCONNECTED = 1;
 static const uint ST_PASSES = 2;
@@ -43,6 +51,9 @@ static const uint ISLAND_SOLVE = 8;
 [[vk::binding(3, 0)]] RWStructuredBuffer<float4> state;
 [[vk::binding(4, 0)]] StructuredBuffer<float4> backup;
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint> status;
+// The loads of each island's last unconverged solve (2 float4 per chunk), then per island
+// its flag (`gate_flag_base`).
+[[vk::binding(6, 0)]] RWStructuredBuffer<float4> gate;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -76,12 +87,53 @@ void cascade_restore(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     if (converged)
     {
         if (thread.x == 0)
+        {
             status[ST_ISLANDS + i] = s | 2u;
+            gate[params.gate_flag_base + i] = float4(0.0);
+        }
         return;
     }
     Island isl = islands[i];
     for (uint k = 4 * isl.range.x + thread.x; k < 4 * isl.range.y; k += 64)
         state[k] = backup[k];
+    // The loads this unconverged solve saw, for the repeat gate.
+    for (uint k = 2 * isl.range.x + thread.x; k < 2 * isl.range.y; k += 64)
+        gate[k] = scratch[params.sload_base + k];
+    if (thread.x == 0)
+        gate[params.gate_flag_base + i] = float4(1.0, 0.0, 0.0, 0.0);
+}
+
+// One group per island flagged for a solve: a repeat of its last unconverged solve (the
+// same loads, bit for bit) is skipped.
+groupshared uint g_differs;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cascade_gate(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint i = group.x;
+    if (i >= params.island_count)
+        return;
+    uint s = status[ST_ISLANDS + i];
+    if (status[ST_RUN] == 0 || (s & 1u) == 0 || gate[params.gate_flag_base + i].x == 0.0)
+        return;
+    if (thread.x == 0)
+        g_differs = 0;
+    GroupMemoryBarrierWithGroupSync();
+    Island isl = islands[i];
+    uint differs = 0;
+    for (uint k = 2 * isl.range.x + thread.x; k < 2 * isl.range.y; k += 64)
+    {
+        if (any(asuint(gate[k]) != asuint(scratch[params.sload_base + k])))
+            differs = 1;
+    }
+    if (differs != 0)
+        g_differs = 1;
+    GroupMemoryBarrierWithGroupSync();
+    if (thread.x != 0 || g_differs != 0)
+        return;
+    islands[i].info.z = isl.info.z & ~ISLAND_SOLVE;
+    status[ST_ISLANDS + i] = 16u;
 }
 
 [shader("compute")]
@@ -118,6 +170,11 @@ void cascade_end(uint3 thread: SV_GroupThreadID)
     for (uint i = tid; i < params.island_count; i += 256)
     {
         uint s = status[ST_ISLANDS + i];
+        if ((s & 16u) != 0)
+        {
+            unconverged++;
+            continue;
+        }
         if ((s & 1u) == 0)
             continue;
         if ((s & 2u) == 0)

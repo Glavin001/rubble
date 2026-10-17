@@ -550,6 +550,8 @@ pub struct GpuSolver {
     pub plan_check: crate::gpu_plan::PlanCheck,
     cascade_islands: Option<(u64, wgpu::Buffer)>,
     cascade_status: Option<wgpu::Buffer>,
+    /// The repeat gate's loads and flags, by layout generation (cascade.slang).
+    cascade_gate: Option<(u64, wgpu::Buffer)>,
     pub stopped_at_plan: bool,
     pub profile: Profile,
     /// The code paths that ran so far (`coverage`): the device's words OR-ed after every
@@ -623,6 +625,7 @@ impl GpuSolver {
             plan_check: Default::default(),
             cascade_islands: None,
             cascade_status: None,
+            cascade_gate: None,
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
@@ -2510,6 +2513,13 @@ impl GpuSolver {
         if self.state_backup.as_ref().is_none_or(|b| b.size() != size) {
             self.state_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("state backup"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
         }
+        // `STRESS_QS_REPEAT_GATE=0`: every flagged island solved, repeats included.
+        let gate_on = std::env::var("STRESS_QS_REPEAT_GATE").map_or(true, |v| v != "0");
+        let n_chunks = self.layout.chunks.len();
+        if self.cascade_gate.as_ref().is_none_or(|(g, _)| *g != generation) {
+            self.cascade_gate = Some((generation, gpu.storage("cascade gate", &vec![[0f32; 4]; 2 * n_chunks + n_islands + 1])));
+        }
+        let gate = self.cascade_gate.as_ref().expect("cascade gate").1.clone();
         let status = self.cascade_status.clone().expect("cascade status");
         let layout_islands = self.cascade_islands.as_ref().expect("cascade islands").1.clone();
         let backup = self.state_backup.clone().expect("state backup");
@@ -2528,8 +2538,11 @@ impl GpuSolver {
         let islands_bytes = std::mem::size_of::<Island>() as u64 * (n_islands as u64 + 1);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for pass in first..first + passes {
-            let cp = gpu.uniform("cascade pass", &crate::resident::CascadeParams { island_count: n_islands as u32, result_base, pass_index: pass as u32, pad: 0 });
-            let bind = gpu.bind(&kernels.begin.group, &[&cp, &self.buffers.islands, &self.buffers.scratch, &self.buffers.state, &backup, &status]);
+            let cp = gpu.uniform(
+                "cascade pass",
+                &crate::resident::CascadeParams { island_count: n_islands as u32, result_base, pass_index: pass as u32, sload_base: p.sload_base, gate_flag_base: 2 * n_chunks as u32, pad: [0; 3] },
+            );
+            let bind = gpu.bind(&kernels.begin.group, &[&cp, &self.buffers.islands, &self.buffers.scratch, &self.buffers.state, &backup, &status, &gate]);
             let run = |encoder: &mut wgpu::CommandEncoder, k: &crate::gpu::Kernel, groups: u32| {
                 let mut c = encoder.begin_compute_pass(&Default::default());
                 c.set_pipeline(&k.pipeline);
@@ -2548,6 +2561,9 @@ impl GpuSolver {
             run(&mut encoder, &kernels.begin, crate::gpu::groups(n_islands, 64));
             encoder.copy_buffer_to_buffer(&self.buffers.state, 0, &backup, 0, size);
             pre(self, &mut encoder, pass);
+            if gate_on {
+                run(&mut encoder, &kernels.gate, n_islands.max(1) as u32);
+            }
             world(&mut encoder, &self.kernels.statics);
             run(&mut encoder, &kernels.restore, n_islands.max(1) as u32);
             // commit_resident: the converged islands flagged, their damage committed with

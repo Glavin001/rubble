@@ -52,6 +52,10 @@ fn weak_cantilever() -> Scene {
 /// (bond damage bits, alive bonds, clusters, impactor speed bits, resident frames, free
 /// clusters' heights) after the run.
 fn run(gpu: &Gpu, scene: &Scene, resident: bool) -> (Vec<u64>, usize, usize, u64, u64, Vec<u64>) {
+    run_with(gpu, scene, resident, None)
+}
+
+fn run_with(gpu: &Gpu, scene: &Scene, resident: bool, budget: Option<(u32, u32)>) -> (Vec<u64>, usize, usize, u64, u64, Vec<u64>) {
     std::env::set_var("STRESS_GPU_FIXED_HORIZON", "1");
     std::env::set_var("STRESS_GPU_QUIET_EXCLUDE", "0");
     let engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble");
@@ -59,6 +63,7 @@ fn run(gpu: &Gpu, scene: &Scene, resident: bool) -> (Vec<u64>, usize, usize, u64
     w.fast_qs = !resident;
     w.redo_fractured_frames = false;
     w.set_impact_islands(false);
+    w.solver.mirror.config.static_budget = budget;
     let frames = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     for _ in 0..frames {
         w.step_frame(gpu).expect("frame");
@@ -105,4 +110,23 @@ fn resident_frame_splits_as_the_fast_frame() {
     let fell = fast.5.iter().map(|&z| 0.3 - f64::from_bits(z)).fold(0.0, f64::max);
     eprintln!("fragments fell up to {fell:.3} m");
     assert_eq!((fast.0, fast.1, fast.2, fast.5), (resident.0, resident.1, resident.2, resident.5));
+}
+
+/// The repeat gate (cascade.slang `cascade_gate`): with a budget the solves stop short of
+/// convergence, and the gate skips each repeat of an unconverged solve. The outcome is
+/// the same as solving every one again.
+#[test]
+fn repeat_gate_is_lossless() {
+    let Ok(gpu) = Gpu::new() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let s = scene();
+    std::env::set_var("STRESS_QS_REPEAT_GATE", "0");
+    let every = run_with(&gpu, &s, true, Some((1, 4)));
+    std::env::set_var("STRESS_QS_REPEAT_GATE", "1");
+    let gated = run_with(&gpu, &s, true, Some((1, 4)));
+    std::env::remove_var("STRESS_QS_REPEAT_GATE");
+    assert!(gated.4 > 0, "no resident frame ran");
+    assert_eq!((every.0, every.1, every.2, every.3, every.5), (gated.0, gated.1, gated.2, gated.3, gated.5));
 }

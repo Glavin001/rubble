@@ -323,6 +323,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
             );
         }
         if trace {
+            w.sync(gpu);
             eprintln!("frame {f} digest {}", digest(&w.solver.mirror, &w.solver.impactors));
         }
     }
@@ -334,6 +335,23 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "replans": w.solver.replans, "resumed_halts": w.solver.resumed_halts, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries, "plan_check": format!("{:?}", w.solver.plan_check),
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
     let digest = digest(&w.solver.mirror, &w.solver.impactors);
+    // STRESS_BENCH_DUMP=path: the end state (chunk displacements, cluster and impactor
+    // positions) as JSON, for comparing runs beyond their digests.
+    if let Ok(path) = std::env::var("STRESS_BENCH_DUMP") {
+        let m = &w.solver.mirror;
+        let u: Vec<[f64; 3]> = m.chunks.iter().flatten().map(|st| st.u.to_array()).collect();
+        let clusters: Vec<[f64; 3]> = m.clusters.iter().map(|c| c.pose.position.to_array()).collect();
+        let imps: Vec<[f64; 3]> = w.solver.impactors.iter().map(|i| i.pose.position.to_array()).collect();
+        let th: Vec<[f64; 3]> = m.chunks.iter().flatten().map(|st| st.th.to_array()).collect();
+        let v: Vec<[f64; 3]> = m.chunks.iter().flatten().map(|st| st.v.to_array()).collect();
+        let wv: Vec<[f64; 3]> = m.chunks.iter().flatten().map(|st| st.w.to_array()).collect();
+        let cv: Vec<[f64; 3]> = m.clusters.iter().map(|c| c.velocity.to_array()).collect();
+        let cw: Vec<[f64; 3]> = m.clusters.iter().map(|c| c.angular_velocity.to_array()).collect();
+        let cr: Vec<[f64; 3]> = m.clusters.iter().map(|c| [c.pose.rotation.x, c.pose.rotation.y, c.pose.rotation.z]).collect();
+        let iv: Vec<[f64; 3]> = w.solver.impactors.iter().map(|i| i.velocity.to_array()).collect();
+        let iw: Vec<[f64; 3]> = w.solver.impactors.iter().map(|i| i.angular_velocity.to_array()).collect();
+        std::fs::write(path, serde_json::json!({"u": u, "th": th, "v": v, "w": wv, "clusters": clusters, "cluster_v": cv, "cluster_w": cw, "cluster_rot": cr, "impactors": imps, "imp_v": iv, "imp_w": iw}).to_string()).expect("dump");
+    }
     let metrics = metrics(scene, &o);
     Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, metrics, digest }
 }

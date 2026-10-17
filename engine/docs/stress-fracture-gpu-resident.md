@@ -207,10 +207,21 @@ measured before the next.
     cascade, 16–17.5 ms with the GPU cascade**. Engine preparation falls from 2.6 to
     0.6 ms, and the download (2.3–2.8 ms) and host loads are gone. What remains (~16 ms)
     is the static solve on the GPU, the next item.
+  - **The repeat gate (lossless).** `cascade.slang` `cascade_gate` replaces quiet
+    exclusion for resident frames. An unconverged solve leaves its island as it found
+    it: the state is restored and nothing is committed. A later solve of that island with
+    the same loads, bit for bit, would return the same verdict, so it is skipped.
+    `STRESS_QS_REPEAT_GATE=0` turns it off. `tests/resident_gpu.rs`
+    `repeat_gate_is_lossless` checks it.
+    - Vibe Town idle with the gate (budget 2 × 32): **median 4.2–4.3 ms**, against 16 ms
+      without it and 35 ms for the fast frame. The digest is unchanged.
+    - Vibe Town rammed: median 7.6 ms, p95 9.9, max 41 (19 / 23 / 50 without the gate;
+      fast 39 / 46 / 65). The gated and ungated digests are the same.
+    - The fast frame's digest differs from the resident one there, and only in the
+      mirror. Every chunk state and cluster pose is equal; one impactor velocity component
+      is 0.0 against −0.0. The fast frame's mirror takes the engine's motion through
+      `interpolate(start, end, 1)`, while the resident sync copies the end.
   - **Not covered yet:**
-    - Quiet-cluster exclusion is off in resident frames. It is chosen from the host's
-      engine loads; the GPU-native replacement is "same loads, same state → skip the
-      solve".
     - Impact islands (tiered and explicit frames) still take the host path. They need
       `resident_filter`'s pulses as load terms (`load_range.zw`) and phase 6.
     - Splits are on the host.

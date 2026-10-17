@@ -222,7 +222,22 @@ your call; the rest need building.
     Phases 1 and 2a are done: shared rubble buffers, the collider table, and the contact
     ingest on the GPU (`coupling.slang`). The ingest matches the host's manifolds to f32
     rounding (`stress-rubble/tests/ingest_gpu.rs`). It is off by default and the guard is
-    bit-identical. Next is 2b, the load filter on the GPU.
+    bit-identical.
+
+    **The resident quasi-static frame** (`GpuWorld::with_resident_engine`,
+    `STRESS_RESIDENT=1`) is now complete: phases 2b–5 for the quasi-static coupling.
+    - rubble steps without read-backs.
+    - The loads are formed on the GPU.
+    - The static cascade runs under GPU control.
+    - The frame needs one status read.
+    - The repeat gate is lossless.
+
+    It gives the fast frame's outcomes; the digests match except for a mirror-only −0.0.
+    Vibe Town idle: 35 → **4.2 ms** median.
+
+    For island frames, phase 6a (the contact plan on the GPU) is done and checked against
+    the host plan. Phases 6b–6e (tables, snapshots, routing and splits on the GPU) remain;
+    they are the impact mode's host overhead, about 20 % of an island frame.
 12a. **Tiered router calibration.** The tiered coupling's impact speed (5 m/s) and its
     island membership (any overlap joins a component) are uncalibrated. On house_ram the
     island lasts 0.73 s because fragments touching the ram close at 5–9 m/s. Item 8's

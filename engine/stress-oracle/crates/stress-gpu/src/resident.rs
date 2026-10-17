@@ -293,24 +293,26 @@ impl<T: ResidentEngine> stress_ref::engine::RigidEngine for SharedEngine<T> {
 /// The resident cascade's kernels (`shaders/cascade.slang`).
 pub struct CascadeKernels {
     pub begin: Kernel,
+    pub gate: Kernel,
     pub restore: Kernel,
     pub settle: Kernel,
     pub end: Kernel,
 }
 
-const CASCADE_BINDINGS: [Binding; 6] = [
+const CASCADE_BINDINGS: [Binding; 7] = [
     Binding::Uniform,   // params
     Binding::StorageRw, // islands
     Binding::Storage,   // scratch
     Binding::StorageRw, // state
     Binding::Storage,   // state backup
     Binding::StorageRw, // status
+    Binding::StorageRw, // repeat gate
 ];
 
 impl CascadeKernels {
     pub fn new(gpu: &Gpu) -> CascadeKernels {
         let k = |e: &str| gpu.compute(&shaders::CASCADE, e, &CASCADE_BINDINGS);
-        CascadeKernels { begin: k("cascade_begin"), restore: k("cascade_restore"), settle: k("cascade_settle"), end: k("cascade_end") }
+        CascadeKernels { begin: k("cascade_begin"), gate: k("cascade_gate"), restore: k("cascade_restore"), settle: k("cascade_settle"), end: k("cascade_end") }
     }
 }
 
@@ -320,7 +322,9 @@ pub struct CascadeParams {
     pub island_count: u32,
     pub result_base: u32,
     pub pass_index: u32,
-    pub pad: u32,
+    pub sload_base: u32,
+    pub gate_flag_base: u32,
+    pub pad: [u32; 3],
 }
 
 /// First per-island word of the cascade's status record (cascade.slang `ST_ISLANDS`).
