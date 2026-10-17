@@ -47,6 +47,11 @@ impl GpuWorld {
         let mut w = GpuWorld::with_engine(gpu, scene, Box::new(SharedEngine(shared.clone())))?;
         w.solver.quiet_quasi_static = false;
         w.resident_engine = Some(shared);
+        // Room for splits laid out in place (`GpuSolver::split_resident`).
+        w.solver.island_headroom = (w.solver.mirror.clusters.len() / 2).max(256);
+        w.solver.state_on_gpu = true;
+        w.solver.sync(gpu);
+        w.solver.rebuild(gpu, 0.0)?;
         Ok(w)
     }
 
@@ -240,19 +245,27 @@ impl GpuWorld {
             // A split: the mirror (state and the engine's motion), split and tables; the
             // cascade goes on from the next pass.
             let t_split = std::time::Instant::now();
-            self.solver.sync(gpu);
             self.resident_sync_motion();
-            let t_synced = t_split.elapsed().as_secs_f64() * 1e3;
-            for &ci in out.disconnected.iter().rev() {
-                self.solver.mirror.split_cluster(ci);
-            }
-            let t_splits = t_split.elapsed().as_secs_f64() * 1e3;
-            if let Some(l) = self.solver.loads.as_mut() {
-                l.topology_version += 1;
-            }
-            self.solver.rebuild(gpu, 0.0)?;
-            if trace {
-                eprintln!("resident split: {} clusters split, sync {t_synced:.1} ms, split {:.1} ms, rebuild {:.1} ms", out.disconnected.len(), t_splits - t_synced, t_split.elapsed().as_secs_f64() * 1e3 - t_splits);
+            // In place when the tables can take it (`STRESS_QS_SPLIT_IN_PLACE=0`: never).
+            let in_place = std::env::var("STRESS_QS_SPLIT_IN_PLACE").map_or(true, |v| v != "0") && self.solver.split_resident(gpu, &out.disconnected)?;
+            if in_place {
+                if trace {
+                    eprintln!("resident split: {} clusters split in place, {:.1} ms", out.disconnected.len(), t_split.elapsed().as_secs_f64() * 1e3);
+                }
+            } else {
+                self.solver.sync(gpu);
+                let t_synced = t_split.elapsed().as_secs_f64() * 1e3;
+                for &ci in out.disconnected.iter().rev() {
+                    self.solver.mirror.split_cluster(ci);
+                }
+                let t_splits = t_split.elapsed().as_secs_f64() * 1e3;
+                if let Some(l) = self.solver.loads.as_mut() {
+                    l.topology_version += 1;
+                }
+                self.solver.rebuild(gpu, 0.0)?;
+                if trace {
+                    eprintln!("resident split: {} clusters split, sync {t_synced:.1} ms, split {:.1} ms, rebuild {:.1} ms", out.disconnected.len(), t_splits - t_synced, t_split.elapsed().as_secs_f64() * 1e3 - t_splits);
+                }
             }
             split = true;
             first = at + 1;

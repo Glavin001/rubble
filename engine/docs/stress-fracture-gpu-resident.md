@@ -264,6 +264,26 @@ positions and velocities. Residency here therefore needs the plan on the GPU. Ph
 - **6d. Routing on the GPU.** `select_islands` from engine contacts and bounds. Island
   bodies are frozen and released in rubble's body buffer by kernel. The write-back is
   done by kernel.
+- **6e, first step (done): splits laid out in place** (`GpuSolver::split_resident`,
+  in the resident frame).
+  - Only the parents' chunk states and bond records are read back.
+  - Each parent's children take its chunk and bond ranges, in a full pack's order. The
+    cluster that `split_cluster` moves into the parent's index keeps its ranges. The
+    cut bonds keep their slots, in no island, padding their chunks' incidence with zero
+    loads.
+  - Only the parents' ranges, the island records and their chunks' incidence are
+    written.
+  - The tables hold island headroom (`island_headroom`); a split that exceeds it, or
+    contacts planned, falls back to sync and rebuild. A refresh after an in-place split
+    rebuilds from scratch.
+  - Resident worlds now read settled islands' state on a sync (`state_on_gpu`): a
+    rebuild had been dropping every island's GPU equilibrium.
+  - stress-ref's `split_cluster` drops just the cut bonds from the adjacency instead of
+    rebuilding the whole structure's: 12 ms per split on Vibe Town, the same lists
+    (guard 24/24).
+  - Bombard: split frames 130–225 → 37–60 ms (p95 160 → 60).
+  - An in-place split still costs ~12–20 ms, most of it host bookkeeping over the
+    parent's chunks.
 - **6e. Splits on the GPU.** From the connectivity labels; new rubble bodies from a
   free-slot list. The f64 mirror is synced only on demand.
 

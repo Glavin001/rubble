@@ -546,7 +546,7 @@ impl ReferenceSolver {
     }
 
     /// Connected components of `chunks` over connected bonds (deterministic order).
-    fn components(&self, s: usize, chunks: &[usize]) -> Vec<Vec<usize>> {
+    pub fn components(&self, s: usize, chunks: &[usize]) -> Vec<Vec<usize>> {
         let n = self.structures[s].chunks.len();
         let mut member = vec![false; n];
         chunks.iter().for_each(|&c| member[c] = true);
@@ -2067,6 +2067,7 @@ impl ReferenceSolver {
                 comp_of[c] = k;
             }
         }
+        let mut cut = Vec::new();
         for &bi in &parent.bonds {
             let g = &self.bonds[s][bi].geometry;
             if comp_of[g.a] != comp_of[g.b] {
@@ -2086,9 +2087,18 @@ impl ReferenceSolver {
                     self.energy.split_release += b.stored;
                 }
                 self.bonds[s][bi].alive = false;
+                cut.push(bi);
             }
         }
-        self.rebuild_adjacency(s);
+        // `rebuild_adjacency` without rebuilding: the cut bonds leave their two chunks'
+        // lists, every other entry keeps its order (the same lists, for the cost of the
+        // parent's cut bonds rather than the whole structure's).
+        for &bi in &cut {
+            let g = &self.bonds[s][bi].geometry;
+            let (a, b) = (g.a, g.b);
+            self.chunk_bonds[s][a].retain(|&x| x != bi);
+            self.chunk_bonds[s][b].retain(|&x| x != bi);
+        }
         let mut children = Vec::new();
         for comp in comps {
             // Linear and angular momentum of the child from its chunks' exact velocities.

@@ -391,6 +391,15 @@ struct Buffers {
     contact_settled: bool,
 }
 
+/// The chunk and bond tables as uploaded (`Layout::host`), and the chunk-to-bond
+/// incidence's length at the start of `index`.
+struct HostTables {
+    chunk_static: Vec<stress_layout::ChunkStatic>,
+    bond_static: Vec<stress_layout::BondStatic>,
+    /// The incidence (the start of `index`).
+    csr: Vec<u32>,
+}
+
 /// The resident cascade's repeat gate (cascade.slang) for one layout: its buffer, and the
 /// clusters, island ranges and chunks it was made for (entries follow their clusters
 /// across layouts).
@@ -405,6 +414,10 @@ struct CascadeGate {
 /// Where each GPU chunk and bond lives in the mirror, the probe items by slot, the
 /// contact plan.
 struct Layout {
+    /// Islands the buffers hold room for (`island_headroom` past the layout's).
+    island_cap: usize,
+    /// With island headroom: the static tables as uploaded, for a split in place.
+    host: Option<HostTables>,
     chunks: Vec<(usize, usize)>,
     bonds: Vec<(usize, usize)>,
     islands: Vec<Island>,
@@ -529,6 +542,15 @@ pub struct GpuSolver {
     pub extra_terms: Vec<LoadTerm>,
     /// Bumped by every new layout (`build`): tables keyed by GPU chunk follow it.
     pub layout_generation: u64,
+    /// Islands the tables leave room for past the layout's own (0: none), so a split can
+    /// be laid out in place (`split_resident`).
+    pub island_headroom: usize,
+    /// Settled islands' chunk state changes on the GPU too (their static solves run
+    /// there: the resident frame), so a sync reads it back.
+    pub state_on_gpu: bool,
+    /// The layout was changed in place (`split_resident`): its order is not a fresh
+    /// pack's, so a refresh syncs and rebuilds.
+    layout_in_place: bool,
     /// Whether the solver resolves contacts itself (standalone world); off under an
     /// engine, which owns them.
     pub own_contacts: bool,
@@ -606,7 +628,7 @@ impl GpuSolver {
         let step_times = vec![mirror.time];
         let mut loads = loads;
         let pair_memory = HashMap::new();
-        let (layout, buffers) = Self::build(gpu, &kernels, &mirror, loads.as_mut(), &impactors, &pair_memory, 4, 0.0, mirror.time, None, &[], &[])?;
+        let (layout, buffers) = Self::build(gpu, &kernels, &mirror, loads.as_mut(), &impactors, &pair_memory, 4, 0.0, mirror.time, None, &[], &[], 0)?;
         Ok(GpuSolver {
             mirror,
             loads,
@@ -643,6 +665,9 @@ impl GpuSolver {
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
             layout_generation: 0,
+            island_headroom: 0,
+            state_on_gpu: false,
+            layout_in_place: false,
             own_contacts: true,
             batch_rounds: batch_start(),
             replans: 0,
@@ -661,7 +686,8 @@ impl GpuSolver {
         }
         let stride = self.buffers.params.probe_stride;
         self.plan_until = self.mirror.time + horizon;
-        let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, None, &self.extra_terms, &self.excluded)?;
+        let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, None, &self.extra_terms, &self.excluded, self.island_headroom)?;
+        self.layout_in_place = false;
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
@@ -677,7 +703,7 @@ impl GpuSolver {
         // `STRESS_GPU_PLAN_CHECK=1`: the GPU's plan from the same state, to compare.
         let gpu_plan = (horizon > 0.0 && std::env::var("STRESS_GPU_PLAN_CHECK").is_ok_and(|v| v == "1")).then(|| (self.gpu_plan(gpu, horizon), self.layout.chunks.clone()));
         let (layout, buffers) =
-            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
+            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded, self.island_headroom)?;
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
@@ -804,6 +830,7 @@ impl GpuSolver {
         keep: Option<&Buffers>,
         extra_terms: &[LoadTerm],
         excluded: &[u64],
+        island_headroom: usize,
     ) -> Result<(Layout, Buffers), String> {
         if m.config.mode == SolveMode::Implicit {
             return Err("the implicit solve mode is not on the GPU yet".into());
@@ -930,6 +957,7 @@ impl GpuSolver {
         let pair_slots = 2 * plan.pairs.len();
         let cand_count: usize = plan.impactor_chunks.iter().map(|l| l.len()).sum();
         let slots = pair_slots + cand_count;
+        let csr_host = (island_headroom > 0).then(|| csr.clone());
         let mut index = csr;
         let pair_index = index.len() as u32;
         let samples = |k: u32| sample_count(&m.structures[chunks[k as usize].0].chunks[chunks[k as usize].1]) as u32;
@@ -1126,8 +1154,12 @@ impl GpuSolver {
         index.extend(contact_bond_list);
         // The sentinel island (batch control) after the islands.
         let halt_index = islands.len() as u32;
+        // Room for `island_headroom` more islands (a split in place, `split_resident`):
+        // the regions after the islands' result slots stay where they are.
+        let island_cap = islands.len() + island_headroom;
         let mut islands_gpu = islands.clone();
         islands_gpu.push(Island::default());
+        islands_gpu.resize(island_cap + 1, Island::default());
 
         let mut materials = vec![GpuJointMaterial::default(); MAX_MATERIALS];
         materials[..table.materials.len()].copy_from_slice(&table.materials);
@@ -1145,7 +1177,7 @@ impl GpuSolver {
         let cframe_base = cload_base + 2 * n;
         // Static solves: 23 float4 per chunk, 2 per bond, 1 per island.
         let statics_base = cframe_base + 2 * n;
-        let cplan_base = statics_base + 23 * n + 2 * bonds.len() + islands.len() + 1;
+        let cplan_base = statics_base + 23 * n + 2 * bonds.len() + island_cap + 1;
         let iplan_base = cplan_base + 4 * n;
         let sload_base = iplan_base + 4 * impactors.len().max(1);
         let scratch_len = sload_base + 2 * n;
@@ -1302,7 +1334,7 @@ impl GpuSolver {
         let bind_contact = bind(&params_contact);
         mark("buffers");
         Ok((
-            Layout { chunks, bonds, islands, items: layout_items, plan, pair_state, gpu_impactors },
+            Layout { chunks, bonds, islands, items: layout_items, plan, pair_state, gpu_impactors, island_cap, host: (island_headroom > 0).then(|| HostTables { chunk_static: chunk_static.clone(), bond_static: bond_static.clone(), csr: csr_host.unwrap_or_default() }) },
             Buffers {
                 bonds_static: bonds_buf.clone(),
                 materials: materials.clone(),
@@ -1369,7 +1401,7 @@ impl GpuSolver {
             }
             let stride = stride.max(self.buffers.params.probe_stride);
             let keep = if full { None } else { Some(&self.buffers) };
-            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, start_time, keep, &self.extra_terms, &self.excluded)?;
+            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, start_time, keep, &self.extra_terms, &self.excluded, self.island_headroom)?;
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
@@ -1636,7 +1668,7 @@ impl GpuSolver {
             let record_len = if owned_impactors { 2 * self.impactors.len() as u64 * p.record_stride as u64 * f4 } else { 0 };
             let mut read = gpu
                 .read_ranges(&[
-                    (&self.buffers.islands, 0, self.buffers.islands.size()),
+                    (&self.buffers.islands, 0, std::mem::size_of::<Island>() as u64 * (self.layout.islands.len() as u64 + 1)),
                     (&self.buffers.scratch, p.probe_base as u64 * f4, probe_len),
                     (&self.buffers.scratch, p.record_base as u64 * f4, record_len),
                     (&self.buffers.impactors, 0, if owned_impactors { self.buffers.impactors.size() } else { 0 }),
@@ -1754,7 +1786,7 @@ impl GpuSolver {
             let left_now = self.mirror.clusters.iter().filter_map(|c| remaining.get(&c.id).copied()).max().unwrap_or(0).max(pipeline_left);
             let reached = self.step_times[start + substeps - left_now];
             self.plan_until = reached + dt * left_now as f64;
-            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, self.buffers.params.probe_stride, dt * left_now as f64, reached, None, &self.extra_terms, &self.excluded)?;
+            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, self.buffers.params.probe_stride, dt * left_now as f64, reached, None, &self.extra_terms, &self.excluded, self.island_headroom)?;
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
@@ -2062,7 +2094,7 @@ impl GpuSolver {
         let mut runs: Vec<(usize, usize)> = Vec::new();
         for isl in &self.layout.islands {
             let (c0, c1) = (isl.range[0] as usize, isl.range[1] as usize);
-            if isl.info[0] & ISLAND_SETTLED != 0 || c0 == c1 {
+            if (isl.info[0] & ISLAND_SETTLED != 0 && !self.state_on_gpu) || c0 == c1 {
                 continue;
             }
             match runs.last_mut() {
@@ -2077,10 +2109,9 @@ impl GpuSolver {
         let (lb, le) = (p.ledger_base as usize, p.ledger_base as usize + plan.pairs.len() + n);
         let (cb, ce) = (p.cand_base as usize, p.cand_base as usize + 3 * p.cand_count as usize);
         let f4 = std::mem::size_of::<[f32; 4]>() as u64;
-        let whole = |b: &wgpu::Buffer| (b.size(), 0u64);
         let mut parts: Vec<(&wgpu::Buffer, u64, u64)> = runs.iter().map(|&(a, b)| (&self.buffers.state, 4 * a as u64 * f4, 4 * (b - a) as u64 * f4)).collect();
         let at_islands = parts.len();
-        parts.push((&self.buffers.islands, 0, whole(&self.buffers.islands).0));
+        parts.push((&self.buffers.islands, 0, std::mem::size_of::<Island>() as u64 * (self.layout.islands.len() as u64 + 1)));
         let at_imps = parts.len();
         parts.push((&self.buffers.impactors, 0, if self.impactors.is_empty() { 0 } else { self.buffers.impactors.size() }));
         let at_loads = parts.len();
@@ -2104,7 +2135,7 @@ impl GpuSolver {
         let m = &mut self.mirror;
         // Settled islands' chunks and bonds never change on the GPU: the mirror keeps its
         // own (f64) equilibrium for them, which the next static solve starts from.
-        let frozen: Vec<bool> = self.layout.islands.iter().map(|isl| isl.info[0] & ISLAND_SETTLED != 0).collect();
+        let frozen: Vec<bool> = self.layout.islands.iter().map(|isl| isl.info[0] & ISLAND_SETTLED != 0 && !self.state_on_gpu).collect();
         for (k, &(s, c)) in self.layout.chunks.iter().enumerate() {
             if frozen[m.chunks[s][c].cluster] {
                 continue;
@@ -2234,18 +2265,22 @@ impl GpuSolver {
 
     fn apply_bonds(&mut self, gpu: &Gpu, bond_dyn: Vec<BondDyn>) {
         self.bonds_stale = false;
+        self.apply_bond_range(gpu, 0, bond_dyn);
+    }
+
+    /// The GPU's records of bonds `first..first + bond_dyn.len()` into the mirror (their
+    /// history, forces, energies and events), the per-download accumulators reset there.
+    fn apply_bond_range(&mut self, gpu: &Gpu, first: usize, bond_dyn: Vec<BondDyn>) {
         let m = &mut self.mirror;
-        // Settled bonds change on the GPU too (static fatigue): every bond is taken.
-        let frozen_bond = vec![false; self.layout.bonds.len()];
         // Events in the reference's order: by substep, then cluster, then bond.
         let mut events: Vec<(u32, usize, usize, u8, SolverEvent)> = Vec::new();
         let mut cleared = Vec::new();
         let (mut dissipated, mut overshoot, mut damped) = (0.0, 0.0, 0.0);
-        for (k, &(s, bi)) in self.layout.bonds.iter().enumerate() {
-            if frozen_bond[k] {
-                continue;
-            }
-            let bd = &bond_dyn[k];
+        // (A buffer for no bonds still holds one record: only the layout's are taken.)
+        let count = bond_dyn.len().min(self.layout.bonds.len().saturating_sub(first));
+        for (j, &(s, bi)) in self.layout.bonds[first..first + count].iter().enumerate() {
+            let k = first + j;
+            let bd = &bond_dyn[j];
             let b = &mut m.bonds[s][bi];
             let previous = b.joint.clone();
             b.joint = from_gpu_state(&bd.js, &previous);
@@ -2285,7 +2320,7 @@ impl GpuSolver {
                 ));
             }
             if bd.events != [0; 4] || bd.sums != [0.0; 4] {
-                cleared.push(k);
+                cleared.push(j);
             }
         }
         events.sort_by_key(|e| (e.0, e.1, e.2, e.3));
@@ -2296,12 +2331,12 @@ impl GpuSolver {
         // Reset the per-download accumulators and events on the GPU.
         if !cleared.is_empty() {
             let mut reset = bond_dyn;
-            for &k in &cleared {
-                reset[k].sums = [0.0; 4];
-                reset[k].comps = [0.0; 4];
-                reset[k].events = [0; 4];
+            for &j in &cleared {
+                reset[j].sums = [0.0; 4];
+                reset[j].comps = [0.0; 4];
+                reset[j].events = [0; 4];
             }
-            gpu.queue.write_buffer(&self.buffers.bond_dyn, 0, bytemuck::cast_slice(&reset));
+            gpu.queue.write_buffer(&self.buffers.bond_dyn, (std::mem::size_of::<BondDyn>() * first) as u64, bytemuck::cast_slice(&reset));
         }
         let _ = &self.layout.gpu_impactors;
     }
@@ -2429,6 +2464,11 @@ impl GpuSolver {
         r.iter().zip(&self.layout.islands).map(|(v, isl)| (v[0], v[1].to_bits(), v[2].to_bits(), v[3] != 0.0, isl.range[1] - isl.range[0], isl.range[3] - isl.range[2])).collect()
     }
 
+    /// Islands in the current layout.
+    pub fn layout_islands(&self) -> usize {
+        self.layout.islands.len()
+    }
+
     /// The GPU chunks' (structure, chunk), by GPU chunk index.
     pub fn gpu_chunks(&self) -> &[(usize, usize)] {
         &self.layout.chunks
@@ -2477,21 +2517,22 @@ impl GpuSolver {
         let stride = self.buffers.params.probe_stride;
         self.plan_until = self.mirror.time;
         let quiet = self.quiet_clusters();
-        if quiet != self.excluded {
+        if quiet != self.excluded || self.layout_in_place {
+            self.layout_in_place = false;
             if !self.state_current {
                 self.download_keeping_host_motion(gpu);
             }
             self.sync(gpu);
             self.excluded = quiet;
             let (layout, buffers) =
-                Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, None, &self.extra_terms, &self.excluded)?;
+                Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, None, &self.extra_terms, &self.excluded, self.island_headroom)?;
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
             return Ok(());
         }
         let (layout, buffers) =
-            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
+            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded, self.island_headroom)?;
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
@@ -2782,7 +2823,7 @@ impl GpuSolver {
         gpu.queue.submit([encoder.finish()]);
         self.state_current = false;
         self.bonds_stale = true;
-        let mut read: Vec<Island> = gpu.read(&self.buffers.islands);
+        let mut read: Vec<Island> = gpu.read_range(&self.buffers.islands, 0, self.layout.islands.len() + 1);
         read.pop();
         self.coverage |= read.iter().fold(0, |a, i| a | i.done[1]) as u64;
         // The tables' own flags back for the next dispatch.
@@ -3122,7 +3163,7 @@ impl GpuSolver {
         gpu.queue.submit([encoder.finish()]);
         self.state_current = false;
         self.bonds_stale = true;
-        let mut read: Vec<Island> = gpu.read(&self.buffers.islands);
+        let mut read: Vec<Island> = gpu.read_range(&self.buffers.islands, 0, self.layout.islands.len() + 1);
         read.pop();
         self.coverage |= read.iter().fold(0, |a, i| a | i.done[1]) as u64;
         let damaged = (0..read.len()).filter(|&ci| read[ci].info[2] & ISLAND_DAMAGED != 0).collect();
@@ -3180,5 +3221,354 @@ impl GpuSolver {
     /// Time after `n` substeps since the start.
     pub fn time_after(&self, n: usize) -> f64 {
         self.step_times[n]
+    }
+}
+
+impl GpuSolver {
+    /// `ReferenceSolver::split_cluster` of `parents` (cluster indices) laid out in place
+    /// (docs/stress-fracture-gpu-resident.md phase 6e): only the parents' chunk states
+    /// and bond records are read back; each parent's children take its chunk and bond
+    /// ranges (their chunks and bonds in the order a full pack gives them), the cluster
+    /// the split moves into a parent's index keeps its ranges, and only those ranges,
+    /// the islands and the chunk-to-bond incidence of the parents' chunks are written.
+    /// The other islands' tables (and their GPU equilibria) stay as they are.
+    ///
+    /// Returns false, having changed nothing, when the tables cannot take it in place
+    /// (no island headroom left, contacts planned, quiet clusters left out, load terms):
+    /// the caller syncs, splits and rebuilds.
+    pub fn split_resident(&mut self, gpu: &Gpu, parents: &[usize]) -> Result<bool, String> {
+        let why = |reason: &str| {
+            if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
+                eprintln!("split in place: not taken ({reason})");
+            }
+            Ok(false)
+        };
+        let Some(host) = self.layout.host.as_ref() else { return why("no host tables") };
+        let plan = &self.layout.plan;
+        if !self.excluded.is_empty() || !plan.pairs.is_empty() || !plan.ground.is_empty() || self.buffers.params.cand_count > 0 || !self.layout.items.is_empty() {
+            return why("contacts planned, probes or quiet clusters");
+        }
+        let mut parents: Vec<usize> = parents.to_vec();
+        parents.sort_unstable();
+        parents.dedup();
+        let old_islands = self.layout.islands.clone();
+        let t_split = std::time::Instant::now();
+        let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
+        let mut stamps: Vec<(&str, f64)> = Vec::new();
+        // The parents' chunk states and bond records, read back together.
+        let f4 = 16u64;
+        let bond_bytes = std::mem::size_of::<BondDyn>() as u64;
+        let mut parts: Vec<(&wgpu::Buffer, u64, u64)> = Vec::new();
+        for &ci in &parents {
+            let r = old_islands[ci].range;
+            parts.push((&self.buffers.state, 4 * r[0] as u64 * f4, 4 * (r[1] - r[0]) as u64 * f4));
+            parts.push((&self.buffers.bond_dyn, r[2] as u64 * bond_bytes, (r[3] - r[2]) as u64 * bond_bytes));
+        }
+        let read = gpu.read_ranges(&parts);
+        let mut parent_state: HashMap<usize, Vec<[f32; 4]>> = HashMap::new();
+        let mut parent_bonds: HashMap<usize, Vec<BondDyn>> = HashMap::new();
+        for (i, &ci) in parents.iter().enumerate() {
+            parent_state.insert(ci, bytemuck::pod_collect_to_vec(&read[2 * i]));
+            parent_bonds.insert(ci, bytemuck::pod_collect_to_vec(&read[2 * i + 1]));
+        }
+        if trace {
+            stamps.push(("read", t_split.elapsed().as_secs_f64() * 1e3));
+        }
+        // Into the mirror: the parents' chunk states (sync's conversion) and bonds.
+        for &ci in &parents {
+            let r = old_islands[ci].range;
+            let st = &parent_state[&ci];
+            for k in r[0] as usize..r[1] as usize {
+                let (s, c) = self.layout.chunks[k];
+                let j = k - r[0] as usize;
+                let m = &mut self.mirror;
+                let cs = &mut m.chunks[s][c];
+                cs.u = vec3(st[4 * j]);
+                cs.th = vec3(st[4 * j + 1]);
+                cs.v = vec3(st[4 * j + 2]);
+                cs.w = vec3(st[4 * j + 3]);
+                if m.structures[s].chunks[c].support != Support::None {
+                    cs.reaction = (Vec3::new(st[4 * j + 1][3] as f64, st[4 * j + 2][3] as f64, st[4 * j + 3][3] as f64), Vec3::ZERO);
+                }
+            }
+            self.apply_bond_range(gpu, r[2] as usize, parent_bonds[&ci].clone());
+        }
+        let host = self.layout.host.as_ref().expect("host tables");
+        if trace {
+            stamps.push(("apply", t_split.elapsed().as_secs_f64() * 1e3));
+        }
+        // Room for the children, before anything is split.
+        let added: usize = parents.iter().map(|&ci| self.mirror.components(self.mirror.clusters[ci].structure, &self.mirror.clusters[ci].chunks.clone()).len().saturating_sub(1)).sum();
+        if self.mirror.clusters.len() + added > self.layout.island_cap {
+            return why("no island headroom left");
+        }
+        if trace {
+            stamps.push(("components", t_split.elapsed().as_secs_f64() * 1e3));
+        }
+        // The split, on the host (as `split_cluster` does it: the last cluster moves into
+        // a split parent's index, the children are appended).
+        let old_ids: Vec<u64> = self.mirror.clusters.iter().map(|c| c.id).collect();
+        let parent_ids: Vec<u64> = parents.iter().map(|&ci| old_ids[ci]).collect();
+        for &ci in parents.iter().rev() {
+            self.mirror.split_cluster(ci);
+        }
+        let m = &self.mirror;
+        let n_new = m.clusters.len();
+        if n_new > self.layout.island_cap {
+            return Err("split in place: more children than counted".into());
+        }
+        if trace {
+            stamps.push(("split_cluster", t_split.elapsed().as_secs_f64() * 1e3));
+        }
+        let old_index: HashMap<u64, usize> = old_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let old_chunk_at: HashMap<(usize, usize), usize> = parents
+            .iter()
+            .flat_map(|&ci| {
+                let r = old_islands[ci].range;
+                (r[0] as usize..r[1] as usize).map(|k| (self.layout.chunks[k], k)).collect::<Vec<_>>()
+            })
+            .collect();
+        let old_bond_at: HashMap<(usize, usize), usize> = parents
+            .iter()
+            .flat_map(|&ci| {
+                let r = old_islands[ci].range;
+                (r[2] as usize..r[3] as usize).map(|b| (self.layout.bonds[b], b)).collect::<Vec<_>>()
+            })
+            .collect();
+        let parent_of_chunk = |k: usize| parents.iter().copied().find(|&ci| (old_islands[ci].range[0] as usize..old_islands[ci].range[1] as usize).contains(&k));
+        // The parents' records as they were (the tables are rewritten in place below).
+        let mut old_chunk_rec: HashMap<usize, stress_layout::ChunkStatic> = HashMap::new();
+        let mut old_bond_rec: HashMap<usize, stress_layout::BondStatic> = HashMap::new();
+        let mut old_bond_key: HashMap<usize, (usize, usize)> = HashMap::new();
+        for &ci in &parents {
+            let r = old_islands[ci].range;
+            for k in r[0] as usize..r[1] as usize {
+                old_chunk_rec.insert(k, host.chunk_static[k]);
+            }
+            for b in r[2] as usize..r[3] as usize {
+                old_bond_rec.insert(b, host.bond_static[b]);
+                old_bond_key.insert(b, self.layout.bonds[b]);
+            }
+        }
+        let host = self.layout.host.as_mut().expect("host tables");
+        let mut chunks = std::mem::take(&mut self.layout.chunks);
+        let mut bonds = std::mem::take(&mut self.layout.bonds);
+        let mut chunk_static = std::mem::take(&mut host.chunk_static);
+        let mut bond_static = std::mem::take(&mut host.bond_static);
+        let old_csr = std::mem::take(&mut host.csr);
+        let mut islands: Vec<Island> = Vec::with_capacity(n_new);
+        // Per parent: the next free chunk and bond of its ranges.
+        let mut cursor: HashMap<usize, (u32, u32)> = parents.iter().map(|&ci| (ci, (old_islands[ci].range[0], old_islands[ci].range[2]))).collect();
+        // Moved chunks and bonds (old -> new index), and the ranges to upload.
+        let mut chunk_moves: Vec<(usize, usize)> = Vec::new();
+        let mut bond_moves: Vec<(usize, usize)> = Vec::new();
+        let mut dirty_chunks: Vec<(usize, usize)> = Vec::new();
+        let mut dirty_bonds: Vec<(usize, usize)> = Vec::new();
+        let mut new_state: HashMap<usize, [f32; 4]> = HashMap::new();
+        let mut new_bond_dyn: HashMap<usize, BondDyn> = HashMap::new();
+        for (j, cl) in m.clusters.iter().enumerate() {
+            match old_index.get(&cl.id) {
+                Some(&oi) if !parent_ids.contains(&cl.id) => {
+                    let isl = old_islands[oi];
+                    if oi != j {
+                        // Moved to a new index: its chunks and bonds name it.
+                        for k in isl.range[0] as usize..isl.range[1] as usize {
+                            chunk_static[k].info[1] = j as u32;
+                        }
+                        for b in isl.range[2] as usize..isl.range[3] as usize {
+                            bond_static[b].law.ids[3] = j as u32;
+                        }
+                        dirty_chunks.push((isl.range[0] as usize, isl.range[1] as usize));
+                        dirty_bonds.push((isl.range[2] as usize, isl.range[3] as usize));
+                    }
+                    islands.push(isl);
+                }
+                _ => {
+                    // A child: its chunks and bonds take the next part of its parent's.
+                    let s = cl.structure;
+                    let first = old_chunk_at.get(&(s, cl.chunks[0])).copied().ok_or("split child outside its parent")?;
+                    let parent = parent_of_chunk(first).ok_or("split child without a parent")?;
+                    let (c0, b0) = cursor[&parent];
+                    let mut k = c0 as usize;
+                    for &c in &cl.chunks {
+                        let ok = old_chunk_at[&(s, c)];
+                        let mut rec = old_chunk_rec[&ok];
+                        rec.info[1] = j as u32;
+                        chunk_static[k] = rec;
+                        chunks[k] = (s, c);
+                        let pr = old_islands[parent].range;
+                        let st = &parent_state[&parent];
+                        for q in 0..4 {
+                            new_state.insert(4 * k + q, st[4 * (ok - pr[0] as usize) + q]);
+                        }
+                        chunk_moves.push((ok, k));
+                        k += 1;
+                    }
+                    let new_index: HashMap<usize, usize> = chunk_moves.iter().filter(|(_, n)| (c0 as usize..k).contains(n)).map(|&(o, n)| (o, n)).collect();
+                    let mut b = b0 as usize;
+                    for &bi in &cl.bonds {
+                        let ob = old_bond_at[&(s, bi)];
+                        let mut rec = old_bond_rec[&ob];
+                        let (oa, obb) = (rec.law.ids[1] as usize, rec.law.ids[2] as usize);
+                        rec.law.ids = [rec.law.ids[0], new_index[&oa] as u32, new_index[&obb] as u32, j as u32];
+                        bond_static[b] = rec;
+                        bonds[b] = (s, bi);
+                        let pr = old_islands[parent].range;
+                        new_bond_dyn.insert(b, parent_bonds[&parent][ob - pr[2] as usize]);
+                        bond_moves.push((ob, b));
+                        b += 1;
+                    }
+                    let mut isl = stress_layout::island_record(m, j, c0, k as u32);
+                    isl.range[2] = b0;
+                    isl.range[3] = b as u32;
+                    islands.push(isl);
+                    cursor.insert(parent, (k as u32, b as u32));
+                }
+            }
+        }
+        if trace {
+            stamps.push(("layout", t_split.elapsed().as_secs_f64() * 1e3));
+        }
+        // Each parent's bonds the children do not hold (those the split cut) keep their
+        // slots, in no island; their records and zero loads stay there for the
+        // incidence's padding.
+        let mut dead: HashMap<usize, usize> = HashMap::new();
+        for &ci in &parents {
+            let r = old_islands[ci].range;
+            let (_, b_end) = cursor[&ci];
+            let held: std::collections::HashSet<usize> = bond_moves.iter().map(|&(o, _)| o).collect();
+            let mut b = b_end as usize;
+            for ob in r[2] as usize..r[3] as usize {
+                if held.contains(&ob) {
+                    continue;
+                }
+                let mut rec = old_bond_rec[&ob];
+                rec.law.ids[3] = u32::MAX;
+                bond_static[b] = rec;
+                bonds[b] = old_bond_key[&ob];
+                new_bond_dyn.insert(b, parent_bonds[&ci][ob - r[2] as usize]);
+                dead.entry(ci).or_insert(b);
+                b += 1;
+            }
+            if b != r[3] as usize {
+                return Err(format!("split in place: parent {ci}'s bonds do not add up"));
+            }
+            dirty_chunks.push((r[0] as usize, r[1] as usize));
+            dirty_bonds.push((r[2] as usize, r[3] as usize));
+        }
+        // The parents' chunks' incidence: each chunk keeps its slots, its entries now its
+        // remaining bonds (in bond order), padded with a cut bond's (zero loads).
+        let mut csr = old_csr.clone();
+        for &ci in &parents {
+            let r = old_islands[ci].range;
+            // A cut bond of this split, or the padding an earlier one left in these chunks
+            // (an entry for a bond outside the parent's range: zero loads either way).
+            let pad = dead.get(&ci).map(|&b| 2 * b as u32).or_else(|| {
+                (old_csr[r[0] as usize] as usize..old_csr[r[1] as usize] as usize).map(|e| old_csr[e]).find(|&e| !(r[2] as usize..r[3] as usize).contains(&((e >> 1) as usize)))
+            });
+            let mut incident: HashMap<usize, Vec<u32>> = HashMap::new();
+            for b in r[2] as usize..cursor[&ci].1 as usize {
+                let ids = bond_static[b].law.ids;
+                incident.entry(ids[1] as usize).or_default().push(2 * b as u32);
+                incident.entry(ids[2] as usize).or_default().push(2 * b as u32 + 1);
+            }
+            let degree = |old_k: usize| (old_csr[old_k + 1] - old_csr[old_k]) as usize;
+            let new_to_old: HashMap<usize, usize> = chunk_moves.iter().filter(|(_, nk)| (r[0] as usize..r[1] as usize).contains(nk)).map(|&(o, nk)| (nk, o)).collect();
+            let mut at = old_csr[r[0] as usize];
+            for k in r[0] as usize..r[1] as usize {
+                csr[k] = at;
+                let d = degree(new_to_old[&k]);
+                let list = incident.remove(&k).unwrap_or_default();
+                if list.len() > d {
+                    return Err(format!("split in place: chunk {k} gained bonds"));
+                }
+                for q in 0..d {
+                    csr[at as usize + q] = match list.get(q) {
+                        Some(&e) => e,
+                        None => pad.ok_or("split in place: no cut bond to pad with")?,
+                    };
+                }
+                at += d as u32;
+            }
+            if at != old_csr[r[1] as usize] {
+                return Err("split in place: incidence does not add up".into());
+            }
+        }
+        if trace {
+            stamps.push(("incidence", t_split.elapsed().as_secs_f64() * 1e3));
+        }
+        // Uploads: the changed ranges, the islands (and the sentinel), the incidence.
+        let cs_bytes = std::mem::size_of::<stress_layout::ChunkStatic>() as u64;
+        let bs_bytes = std::mem::size_of::<stress_layout::BondStatic>() as u64;
+        for &(a, b) in &dirty_chunks {
+            if b > a {
+                gpu.queue.write_buffer(&self.buffers.chunk_static, a as u64 * cs_bytes, bytemuck::cast_slice(&chunk_static[a..b]));
+            }
+        }
+        for &(a, b) in &dirty_bonds {
+            if b > a {
+                gpu.queue.write_buffer(&self.buffers.bonds_static, a as u64 * bs_bytes, bytemuck::cast_slice(&bond_static[a..b]));
+            }
+        }
+        let p = &mut self.buffers.params;
+        for &ci in &parents {
+            let r = old_islands[ci].range;
+            let (c0, c1, b0, b1) = (r[0] as usize, r[1] as usize, r[2] as usize, r[3] as usize);
+            // The parent's ranges, each in one write.
+            let state: Vec<[f32; 4]> = (4 * c0..4 * c1).map(|k| new_state[&k]).collect();
+            gpu.queue.write_buffer(&self.buffers.state, 4 * c0 as u64 * f4, bytemuck::cast_slice(&state));
+            let dyns: Vec<BondDyn> = (b0..b1).map(|b| new_bond_dyn[&b]).collect();
+            if !dyns.is_empty() {
+                gpu.queue.write_buffer(&self.buffers.bond_dyn, b0 as u64 * bond_bytes, bytemuck::cast_slice(&dyns));
+            }
+            // The children's static-solve slots cleared (a rebuild's cleared scratch: the
+            // compensated displacement parts with them), and the cut bonds' loads.
+            gpu.queue.write_buffer(&self.buffers.scratch, (p.statics_base as u64 + 23 * c0 as u64) * f4, bytemuck::cast_slice(&vec![[0f32; 4]; 23 * (c1 - c0)]));
+            let cut = cursor[&ci].1 as usize;
+            if b1 > cut {
+                gpu.queue.write_buffer(&self.buffers.scratch, 3 * cut as u64 * f4, bytemuck::cast_slice(&vec![[0f32; 4]; 3 * (b1 - cut)]));
+            }
+            // The incidence of its chunks: their offsets and their entries.
+            gpu.queue.write_buffer(&self.buffers.index, 4 * c0 as u64, bytemuck::cast_slice(&csr[c0..c1]));
+            let (e0, e1) = (old_csr[c0] as usize, old_csr[c1] as usize);
+            if e1 > e0 {
+                gpu.queue.write_buffer(&self.buffers.index, 4 * e0 as u64, bytemuck::cast_slice(&csr[e0..e1]));
+            }
+        }
+        let mut with_sentinel = islands.clone();
+        with_sentinel.push(Island::default());
+        gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&with_sentinel));
+        p.halt_index = n_new as u32;
+        let params = *p;
+        gpu.queue.write_buffer(&self.buffers.params_segment, 0, bytemuck::bytes_of(&params));
+        gpu.queue.write_buffer(&self.buffers.params_contact, 0, bytemuck::bytes_of(&params));
+        if trace {
+            stamps.push(("uploads", t_split.elapsed().as_secs_f64() * 1e3));
+        }
+        // The layout follows.
+        let host = self.layout.host.as_mut().expect("host tables");
+        host.chunk_static = chunk_static;
+        host.bond_static = bond_static;
+        host.csr = csr;
+        self.layout.chunks = chunks;
+        self.layout.bonds = bonds;
+        self.layout.islands = islands;
+        self.layout_generation += 1;
+        self.bonds_stale = true;
+        self.state_current = false;
+        self.layout_in_place = true;
+        if trace {
+            let mut last = 0.0;
+            let parts: Vec<String> = stamps.iter().map(|(n, t)| {
+                let d = t - last;
+                last = *t;
+                format!("{n} {d:.1}")
+            }).collect();
+            eprintln!("split in place stages (ms): {}", parts.join(", "));
+        }
+        if let Some(l) = self.loads.as_mut() {
+            l.topology_version += 1;
+        }
+        Ok(true)
     }
 }
