@@ -1,0 +1,6 @@
+# metric_direction: lower_is_better
+iteration	commit	metric	delta	guard	guard-metric	status	description
+0	04628b1	92.45000056922436	0.0	pass	-	baseline	initial state — stress benchmark median baseline, p95 observed at 111.50000265240669
+1	e201a42	89.30000150203705	-3.150	pass	-	keep	batch final render-transform extraction into the last wasm device step
+2	d4e48b5	88.60000114142895	-0.700	pass	-	keep	cache coloring reset and step bind groups to reduce per-frame solve overhead
+3	1fa406d	78.49999950826168	-10.100	pass	-	keep	cache adjacency graph bind groups and reuse the graph params buffer
