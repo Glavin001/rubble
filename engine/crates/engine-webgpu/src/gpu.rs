@@ -10,6 +10,10 @@ use engine_exec::{ExecError, PhaseTimingsMs};
 use engine_schema::convex::HullArena;
 use engine_schema::*;
 use std::collections::HashMap;
+use engine_vehicle::{
+    FunctionalState, Ray, RayHit, VehicleBackend, VehicleCapacity, VehicleDesc, VehicleEvent, VehicleHandle,
+    VehicleHost, VehicleInput, VehicleState, WheelDesc,
+};
 
 use engine_exec::rigid_plan::{BIND_COUNT, PASS_ALIGN};
 
@@ -135,6 +139,10 @@ pub struct WgpuSim {
     counter_upload: wgpu::Buffer,
     /// Offset of the last step's contact rows in binding 4 (`last_contacts`).
     last_contact_offset: u32,
+    /// Vehicle controller pool (`vehicle_step.slang`).
+    vehicles: Option<VehicleHost>,
+    /// Event ring read cursor (`poll_joint_breaks`).
+    events_seen: u32,
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -291,6 +299,22 @@ impl WgpuSim {
         compact_contacts: bool,
         persistent_contacts: bool,
     ) -> anyhow::Result<Self> {
+        Self::new_full(capacity, compact_contacts, persistent_contacts, VehicleCapacity::default())
+    }
+
+    /// Canonical contacts with an explicit vehicle pool size.
+    pub fn new_with_vehicles(capacity: WorldCapacity, vehicles: VehicleCapacity) -> anyhow::Result<Self> {
+        Self::new_full(capacity, false, false, vehicles)
+    }
+
+    fn new_full(
+        mut capacity: WorldCapacity,
+        compact_contacts: bool,
+        persistent_contacts: bool,
+        vehicle_capacity: VehicleCapacity,
+    ) -> anyhow::Result<Self> {
+        // One tyre joint per vehicle wheel slot rides on top of the user joints.
+        capacity.max_joints += vehicle_capacity.max_wheels;
         anyhow::ensure!(
             capacity.max_colliders < 0x7fff_ffff,
             "grid collider ID overlaps awake-dynamic flag or empty sentinel"
@@ -306,7 +330,15 @@ impl WgpuSim {
             "compact pair index exceeds 31 bits"
         );
         let (info, device, queue) = default_device()?;
-        Self::with_device_storage(capacity, compact_contacts, persistent_contacts, info, device, queue)
+        Self::with_device_storage(
+            capacity,
+            compact_contacts,
+            persistent_contacts,
+            vehicle_capacity,
+            info,
+            device,
+            queue,
+        )
     }
 
     /// The simulation on an existing device (e.g. one shared with the GPU stress solver,
@@ -317,13 +349,22 @@ impl WgpuSim {
         device: wgpu::Device,
         queue: wgpu::Queue,
     ) -> anyhow::Result<Self> {
-        Self::with_device_storage(capacity, false, false, info, device, queue)
+        Self::with_device_storage(
+            capacity,
+            false,
+            false,
+            VehicleCapacity::default(),
+            info,
+            device,
+            queue,
+        )
     }
 
     fn with_device_storage(
         capacity: WorldCapacity,
         compact_contacts: bool,
         persistent_contacts: bool,
+        vehicle_capacity: VehicleCapacity,
         info: wgpu::AdapterInfo,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -334,6 +375,13 @@ impl WgpuSim {
         }
 
         let sizes = rigid_plan::buffer_sizes(&capacity, compact_contacts, persistent_contacts);
+        // Collider AABBs, then a 4-entry wheel-row block per vehicle and a
+        // 4-entry ground block per wheel slot (two-body tyre rows); the vehicle
+        // pool itself is binding 31.
+        let aabb_tail = capacity.max_bodies + capacity.max_colliders;
+        let mut sizes = sizes;
+        sizes[9] += u64::from(4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels)) * 32;
+        sizes[31] = vehicle_capacity.bytes().max(16);
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         for (i, &bytes) in sizes.iter().enumerate() {
             let usage = wgpu::BufferUsages::COPY_DST
@@ -539,6 +587,8 @@ impl WgpuSim {
             hull_records_capacity: hull_records,
             wake_pending: false,
             last_contact_offset: 0,
+            vehicles: Some(VehicleHost::new(vehicle_capacity, aabb_tail)),
+            events_seen: 0,
         };
         // Kernel fixtures in the unit tests set the modes they exercise on top
         // of the pre-P0 controls; integration tests run the shipped defaults.
@@ -571,6 +621,12 @@ impl WgpuSim {
 
     pub fn chip(&self) -> &str {
         &self.chip
+    }
+
+    /// Overwrite one of the 64 material slots (friction is combined per contact).
+    pub fn set_material(&mut self, index: u32, material: Material) {
+        assert!(index < 64, "material slot out of range");
+        self.queue.write_buffer(&self.bufs[3], u64::from(index) * 16, bytes_of(&material));
     }
 
     pub fn set_params(&mut self, params: AvbdParams) {
@@ -1008,7 +1064,9 @@ impl WgpuSim {
         let counters = self.read_counters();
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
-        self.manifolds_valid = counters.overflow_flags == 0;
+        // Wheel queries walk this step's broadphase grid, so vehicle worlds
+        // never reuse a whole step's manifolds.
+        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0;
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -1031,12 +1089,14 @@ impl WgpuSim {
         let wall = std::time::Instant::now();
         // Skip only when the counters describe the latest step: pipelined steps
         // leave them stale until `drain`.
+        let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
         if self.steps_done > 0
             && self.counted_steps == self.steps_done
             && self.last_counters.awake_count == 0
             && self.command_count == 0
             && self.body_count > 0
             && !self.wake_pending
+            && !vehicles_dirty
         {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;
@@ -1097,6 +1157,9 @@ impl WgpuSim {
         drop(pass);
         self.queue.submit([enc.finish()]);
 
+        if let Some(v) = self.vehicles.as_mut() {
+            v.dirty = false;
+        }
         if !read {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);
@@ -1111,7 +1174,7 @@ impl WgpuSim {
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
-        self.manifolds_valid = counters.overflow_flags == 0;
+        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0;
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -1195,6 +1258,11 @@ impl WgpuSim {
         }
     }
 
+    /// Vehicles in the pool (0 = the vehicle passes are not encoded).
+    fn vehicle_count(&self) -> u32 {
+        self.vehicles.as_ref().map_or(0, |v| v.vehicle_count())
+    }
+
     fn step_inputs(&self) -> rigid_plan::StepInputs {
         // Same size the uniforms publish; records clear four words per slot.
         let prev_n = self
@@ -1218,6 +1286,8 @@ impl WgpuSim {
                 * if self.record_hash() { 4 } else { 1 },
             steps_done: self.steps_done,
             last: self.last_counters,
+            vehicle_count: self.vehicle_count(),
+            wheel_count: self.vehicles.as_ref().map_or(0, |v| v.wheel_count()),
         }
     }
 
@@ -1357,6 +1427,185 @@ impl WgpuSim {
 
     pub fn timings_ms(&self) -> f64 {
         self.last_timings.total_gpu
+    }
+
+    // ---------------------------------------------------------------------
+    // Vehicles (slang/kernels/vehicle_step.slang)
+    // ---------------------------------------------------------------------
+
+    fn with_vehicles<R>(&mut self, f: impl FnOnce(&mut VehicleHost, &mut Self) -> R) -> R {
+        let mut host = self.vehicles.take().expect("vehicle host");
+        let r = f(&mut host, self);
+        self.vehicles = Some(host);
+        r
+    }
+
+    pub fn vehicle_host(&self) -> &VehicleHost {
+        self.vehicles.as_ref().expect("vehicle host")
+    }
+
+    /// Spawn a vehicle (chassis + parked wheel/part bodies) at a chassis pose.
+    pub fn add_vehicle(
+        &mut self,
+        desc: &VehicleDesc,
+        position: [f32; 3],
+        rotation: [f32; 4],
+    ) -> Result<VehicleHandle, String> {
+        self.with_vehicles(|h, sim| h.add_vehicle(sim, desc, position, rotation))
+    }
+
+    pub fn set_vehicle_input(&mut self, v: VehicleHandle, input: VehicleInput) {
+        self.with_vehicles(|h, sim| h.set_input(sim, v, input));
+    }
+
+    pub fn set_functional_state(&mut self, v: VehicleHandle, state: FunctionalState) {
+        self.with_vehicles(|h, sim| h.set_functional_state(sim, v, state));
+    }
+
+    pub fn detach_wheel(&mut self, v: VehicleHandle, wheel: u32) {
+        self.with_vehicles(|h, sim| h.detach_wheel(sim, v, wheel));
+    }
+
+    pub fn disable_wheel(&mut self, v: VehicleHandle, wheel: u32) {
+        self.with_vehicles(|h, sim| h.disable_wheel(sim, v, wheel));
+    }
+
+    pub fn detach_part(&mut self, v: VehicleHandle, part: u32) {
+        self.with_vehicles(|h, sim| h.detach_part(sim, v, part));
+    }
+
+    pub fn disable_part(&mut self, v: VehicleHandle, part: u32) {
+        self.with_vehicles(|h, sim| h.disable_part(sim, v, part));
+    }
+
+    pub fn add_wheel(&mut self, v: VehicleHandle, wheel: &WheelDesc) -> Result<u32, String> {
+        self.with_vehicles(|h, sim| h.add_wheel(sim, v, wheel))
+    }
+
+    pub fn set_wheel_params(&mut self, v: VehicleHandle, wheel: u32, desc: &WheelDesc) {
+        self.with_vehicles(|h, sim| h.set_wheel_params(sim, v, wheel, desc));
+    }
+
+    /// Wheel probes scan every collider instead of walking the broadphase grid
+    /// (a reference oracle; the grid walk is the default).
+    pub fn set_vehicle_full_scan(&mut self, on: bool) {
+        self.with_vehicles(|h, sim| {
+            h.full_scan_queries = on;
+            let header = h.header();
+            sim.write_slots(0, &header);
+        });
+    }
+
+    pub fn wake_vehicle(&mut self, v: VehicleHandle) {
+        self.with_vehicles(|h, sim| h.wake(sim, v));
+    }
+
+    pub fn vehicle_state(&self, v: VehicleHandle) -> VehicleState {
+        self.vehicle_host().read_state(self, v)
+    }
+
+    /// Vehicle events since the previous call (severing, functional changes,
+    /// contact and slide transitions).
+    pub fn poll_vehicle_events(&mut self) -> Vec<VehicleEvent> {
+        self.with_vehicles(|h, sim| h.poll_events(sim))
+    }
+
+    /// Joints that broke since the previous call (read from the event ring).
+    pub fn poll_joint_breaks(&mut self) -> Vec<JointBreak> {
+        let words: Vec<u32> = self.read_buffer_range(
+            21,
+            u64::from(EVENT_RING_BASE) * 4,
+            (4 + 4 * EVENT_RING_CAPACITY) as usize,
+        );
+        let mut out = Vec::new();
+        let lost = decode_joint_breaks(&words, &mut self.events_seen, &mut out);
+        if lost > 0 {
+            eprintln!("event ring overflow: {lost} events lost");
+        }
+        out
+    }
+
+    /// Batched scene ray casts against the current poses.
+    pub fn raycast_batch(&mut self, rays: &[Ray]) -> Vec<Option<RayHit>> {
+        if rays.is_empty() {
+            return Vec::new();
+        }
+        self.with_vehicles(|h, sim| h.write_rays(sim, rays));
+        self.write_host_uniforms();
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rays") });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("rays"), timestamp_writes: None });
+            self.disp(&mut pass, "build_aabbs", u64::from(self.collider_count.max(1)), None);
+            self.disp(&mut pass, "raycast_batch", rays.len() as u64 * 64, None);
+        }
+        self.queue.submit([enc.finish()]);
+        self.vehicle_host().read_ray_hits(self)
+    }
+}
+
+impl VehicleBackend for WgpuSim {
+    fn body_count(&self) -> u32 {
+        self.body_count
+    }
+
+    fn joint_count(&self) -> u32 {
+        self.joint_count
+    }
+
+    fn append_joints(&mut self, joints: &[engine_schema::Joint]) {
+        if joints.is_empty() {
+            return;
+        }
+        assert!(self.joint_count + joints.len() as u32 <= self.capacity.max_joints, "joint capacity exhausted");
+        let stride = std::mem::size_of::<engine_schema::Joint>() as u64;
+        self.queue.write_buffer(&self.bufs[5], u64::from(self.joint_count) * stride, bytemuck::cast_slice(joints));
+        self.joint_count += joints.len() as u32;
+    }
+
+    fn collider_count(&self) -> u32 {
+        self.collider_count
+    }
+
+    fn append_bodies(&mut self, bodies: &[BodyState]) {
+        self.add_bodies(bodies);
+    }
+
+    fn append_colliders(&mut self, colliders: &[Collider]) {
+        self.add_colliders(colliders);
+    }
+
+    fn write_body(&mut self, index: u32, body: &BodyState) {
+        let stride = std::mem::size_of::<BodyState>() as u64;
+        self.queue.write_buffer(&self.bufs[0], u64::from(index) * stride, bytes_of(body));
+        self.queue.write_buffer(
+            &self.bufs[0],
+            (u64::from(self.capacity.max_bodies) + u64::from(index)) * stride,
+            bytes_of(body),
+        );
+        self.host_bodies[index as usize] = *body;
+    }
+
+    fn write_collider(&mut self, index: u32, collider: &Collider) {
+        self.queue.write_buffer(
+            &self.bufs[2],
+            u64::from(index) * std::mem::size_of::<Collider>() as u64,
+            bytes_of(collider),
+        );
+        self.host_cols[index as usize] = *collider;
+    }
+
+    fn write_slots(&mut self, slot: u32, data: &[[u32; 4]]) {
+        if !data.is_empty() {
+            self.queue.write_buffer(&self.bufs[31], u64::from(slot) * 16, bytemuck::cast_slice(data));
+        }
+    }
+
+    fn write_curve_points(&mut self, byte_offset: u64, points: &[[f32; 2]]) {
+        self.queue.write_buffer(&self.bufs[31], byte_offset, bytemuck::cast_slice(points));
+    }
+
+    fn read_slots(&self, slot: u32, count: u32) -> Vec<[u32; 4]> {
+        self.read_buffer_range(31, u64::from(slot) * 16, count as usize)
     }
 }
 

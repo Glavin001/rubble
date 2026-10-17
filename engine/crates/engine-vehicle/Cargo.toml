@@ -1,0 +1,12 @@
+[package]
+name = "engine-vehicle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vehicle descriptors, presets and GPU record packing for the AVBD vehicle controller"
+
+[dependencies]
+engine-schema.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
