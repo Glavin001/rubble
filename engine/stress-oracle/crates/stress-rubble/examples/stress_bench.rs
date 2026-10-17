@@ -127,6 +127,8 @@ pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
 
 /// `--authored`: packs import with their own (game) bond strengths.
 static AUTHORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AUTHORED_FATAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PACK_MASSES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Any scene packs (`--pack PATH`, repeatable), each intact (idle) and rammed, as `packs`.
 pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scene)> {
@@ -134,7 +136,7 @@ pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scen
     for path in paths {
         let name = path.file_stem().expect("pack file name").to_string_lossy().to_string();
         let name = name.as_str();
-        let options = stress_ref::scene_pack::ImportOptions { authored_strengths: AUTHORED.load(std::sync::atomic::Ordering::Relaxed) };
+        let options = stress_ref::scene_pack::ImportOptions { authored_strengths: AUTHORED.load(std::sync::atomic::Ordering::Relaxed), authored_fatal: AUTHORED_FATAL.load(std::sync::atomic::Ordering::Relaxed), pack_masses: PACK_MASSES.load(std::sync::atomic::Ordering::Relaxed) };
         let scene = stress_ref::scene_pack::import_with(path, name, "structure", options).unwrap_or_else(|e| panic!("{name} pack: {e}"));
         let mut idle = configure(scene.clone(), seconds);
         idle.name = format!("{name}_idle");
@@ -365,6 +367,7 @@ fn main() {
     let mut pack_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut config = "realtime".to_string();
     let mut overrides: Vec<(String, bool)> = Vec::new();
+    let mut methods: Vec<(String, bool)> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -378,7 +381,21 @@ fn main() {
                 let (n, on) = v.split_once('=').expect("--feature NAME=on|off");
                 overrides.push((n.to_string(), on == "on"));
             }
+            // A method switch on top of the configuration (e.g. blast_stiffness=on).
+            "--method" => {
+                let v = args.next().expect("--method NAME=on|off");
+                let (n, on) = v.split_once('=').expect("--method NAME=on|off");
+                methods.push((n.to_string(), on == "on"));
+            }
             "--authored" => AUTHORED.store(true, std::sync::atomic::Ordering::Relaxed),
+            // The pack's fatal limits as strengths (Blast breaks there; `--authored` uses
+            // the elastic ones).
+            // The pack's node masses and mass-0 supports (Blast's inputs).
+            "--pack-masses" => PACK_MASSES.store(true, std::sync::atomic::Ordering::Relaxed),
+            "--authored-fatal" => {
+                AUTHORED.store(true, std::sync::atomic::Ordering::Relaxed);
+                AUTHORED_FATAL.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             "--pack" => {
                 pack_paths.push(args.next().expect("--pack PATH").into());
                 set = "packs".into();
@@ -410,6 +427,9 @@ fn main() {
         }
         for (n, on) in &overrides {
             scene.sim.features.set(n, *on).unwrap_or_else(|e| panic!("--feature: {e}"));
+        }
+        for (n, on) in &methods {
+            scene.sim.methods.set(n, *on).unwrap_or_else(|e| panic!("--method: {e}"));
         }
         let _ = islands;
         for repeat in 0..repeats.max(1) {

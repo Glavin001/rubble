@@ -552,6 +552,7 @@ pub struct GpuSolver {
     cascade_status: Option<wgpu::Buffer>,
     /// The repeat gate's loads and flags, by layout generation (cascade.slang).
     cascade_gate: Option<(u64, wgpu::Buffer)>,
+    bond_backup: Option<wgpu::Buffer>,
     pub stopped_at_plan: bool,
     pub profile: Profile,
     /// The code paths that ran so far (`coverage`): the device's words OR-ed after every
@@ -626,6 +627,7 @@ impl GpuSolver {
             cascade_islands: None,
             cascade_status: None,
             cascade_gate: None,
+            bond_backup: None,
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
@@ -2398,6 +2400,15 @@ impl GpuSolver {
     }
 
     /// The ids of the clusters left out of the GPU tables as quiet (sorted).
+    /// Each island's last static solve result (residual, Newton steps, CG iterations,
+    /// converged), with its chunk and bond counts: a diagnostic read.
+    pub fn statics_results(&self, gpu: &Gpu) -> Vec<(f32, u32, u32, bool, u32, u32)> {
+        let p = self.buffers.params;
+        let at = p.statics_base as usize + 23 * self.layout.chunks.len() + 2 * self.layout.bonds.len();
+        let r: Vec<[f32; 4]> = gpu.read_range(&self.buffers.scratch, at, self.layout.islands.len());
+        r.iter().zip(&self.layout.islands).map(|(v, isl)| (v[0], v[1].to_bits(), v[2].to_bits(), v[3] != 0.0, isl.range[1] - isl.range[0], isl.range[3] - isl.range[2])).collect()
+    }
+
     /// The GPU chunks' (structure, chunk), by GPU chunk index.
     pub fn gpu_chunks(&self) -> &[(usize, usize)] {
         &self.layout.chunks
@@ -2520,6 +2531,11 @@ impl GpuSolver {
             self.cascade_gate = Some((generation, gpu.storage("cascade gate", &vec![[0f32; 4]; 2 * n_chunks + n_islands + 1])));
         }
         let gate = self.cascade_gate.as_ref().expect("cascade gate").1.clone();
+        let bond_bytes = self.buffers.bond_dyn.size();
+        if self.bond_backup.as_ref().is_none_or(|b| b.size() != bond_bytes) {
+            self.bond_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("bond backup"), size: bond_bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        }
+        let bond_backup = self.bond_backup.clone().expect("bond backup");
         let status = self.cascade_status.clone().expect("cascade status");
         let layout_islands = self.cascade_islands.as_ref().expect("cascade islands").1.clone();
         let backup = self.state_backup.clone().expect("state backup");
@@ -2540,9 +2556,17 @@ impl GpuSolver {
         for pass in first..first + passes {
             let cp = gpu.uniform(
                 "cascade pass",
-                &crate::resident::CascadeParams { island_count: n_islands as u32, result_base, pass_index: pass as u32, sload_base: p.sload_base, gate_flag_base: 2 * n_chunks as u32, pad: [0; 3] },
+                &crate::resident::CascadeParams {
+                    island_count: n_islands as u32,
+                    result_base,
+                    pass_index: pass as u32,
+                    sload_base: p.sload_base,
+                    gate_flag_base: 2 * n_chunks as u32,
+                    bond_words: (std::mem::size_of::<BondDyn>() / 16) as u32,
+                    pad: [0; 2],
+                },
             );
-            let bind = gpu.bind(&kernels.begin.group, &[&cp, &self.buffers.islands, &self.buffers.scratch, &self.buffers.state, &backup, &status, &gate]);
+            let bind = gpu.bind(&kernels.begin.group, &[&cp, &self.buffers.islands, &self.buffers.scratch, &self.buffers.state, &backup, &status, &gate, &self.buffers.bond_dyn, &bond_backup]);
             let run = |encoder: &mut wgpu::CommandEncoder, k: &crate::gpu::Kernel, groups: u32| {
                 let mut c = encoder.begin_compute_pass(&Default::default());
                 c.set_pipeline(&k.pipeline);
@@ -2560,6 +2584,9 @@ impl GpuSolver {
             encoder.copy_buffer_to_buffer(&layout_islands, 0, &self.buffers.islands, 0, islands_bytes);
             run(&mut encoder, &kernels.begin, crate::gpu::groups(n_islands, 64));
             encoder.copy_buffer_to_buffer(&self.buffers.state, 0, &backup, 0, size);
+            if gate_on {
+                encoder.copy_buffer_to_buffer(&self.buffers.bond_dyn, 0, &bond_backup, 0, bond_bytes);
+            }
             pre(self, &mut encoder, pass);
             if gate_on {
                 run(&mut encoder, &kernels.gate, n_islands.max(1) as u32);
@@ -2573,6 +2600,9 @@ impl GpuSolver {
             encoder.copy_buffer_to_buffer(if pass == 0 { &commit_first } else { &commit_later }, 0, &self.buffers.params_segment, 0, params_bytes);
             world(&mut encoder, &self.kernels.fatigue);
             encoder.copy_buffer_to_buffer(&orig, 0, &self.buffers.params_segment, 0, params_bytes);
+            if gate_on {
+                run(&mut encoder, &kernels.fixed, n_islands.max(1) as u32);
+            }
             run(&mut encoder, &kernels.end, 1);
         }
         gpu.queue.submit([encoder.finish()]);

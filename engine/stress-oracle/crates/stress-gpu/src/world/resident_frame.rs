@@ -194,13 +194,24 @@ impl GpuWorld {
             for cl in self.solver.mirror.clusters.iter_mut().filter(|c| !c.bonds.is_empty()) {
                 cl.activity = Activity::Settled;
             }
+            if std::env::var("STRESS_GPU_QS_RESULTS").is_ok() {
+                for (i, r) in self.solver.statics_results(gpu).iter().enumerate() {
+                    if out.solved.contains(&i) || r.0 != 0.0 {
+                        let cl = &self.solver.mirror.clusters[i];
+                        let name = self.scene.bodies.get(cl.structure).map_or("?", |b| b.name.as_str());
+                        eprintln!("island {i}: residual {:.3e}, newton {}, cg {}, converged {}, {} chunks, {} bonds, anchored {}, structure {} {name}", r.0, r.1, r.2, r.3, r.4, r.5, cl.anchored, cl.structure);
+                    }
+                }
+            }
             if trace {
                 eprintln!(
-                    "resident qs passes {first}..: {} run, {} of {} solved converged, {} unconverged in all, {:.1} ms, {} disconnected",
+                    "resident qs passes {first}..: {} run, {} of {} solved converged, {} unconverged in all, skipped {} repeats and {} fixed points, {:.1} ms, {} disconnected",
                     out.passes,
                     out.converged.len(),
                     out.solved.len(),
                     out.unconverged,
+                    out.skipped_unconverged,
+                    out.skipped_fixed,
                     t_pass.elapsed().as_secs_f64() * 1e3,
                     out.disconnected.len()
                 );

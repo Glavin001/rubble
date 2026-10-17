@@ -255,6 +255,45 @@ your call; the rest need building.
     that). Next: a wide (multi-group) static solve or multigrid (item 10), then the
     engine's per-frame `prepare` (2–20 ms). Smaller scenes are already real time in `qs`:
     house_ram median 2.8 ms, p95 7.8; fractured high-rise rammed median 4.4–7.5, p95 11–14.
+    **What Blast's GPU solve is, and a matched configuration (2026-10-17).** The full
+    study, with citations, is the side-session note `blast-stress-solver-research.md`.
+    - **Blast's model** (vibe-land's runtime profile is the native PhysX destruction
+      stage running Blast's CUDA kernels via CuMetal):
+      - forces: the least-work forces of a linear network of isotropic bond springs,
+        weighted `sqrt(E A / L)` with floors A ≥ 1e-4 and L ≥ 0.05; rotational stiffness
+        is `k l^2`, one `l` per graph;
+      - loads: gravity, centrifugal, and contact impulse / dt at the chunk (no torque);
+      - solver: f32 PCG with a Chebyshev block-Jacobi preconditioner, 16 iterations a
+        tick, warm-started, tolerance 1e-3; unconverged answers are published and graded
+        (the cap binds every Vibe Town tick);
+      - stress: force / remaining area, with the bending gain capped at 3;
+      - fracture: at the fatal limit outright, erosion at 2/s between the elastic and
+        fatal limits.
+    - **Matched configuration** (measurement switches, all off by default):
+      - `--config blast` (the base material model, quasi-static);
+      - `--authored-fatal` (the pack's fatal limits as strengths);
+      - `--pack-masses` (the pack's node masses and mass-0 supports);
+      - `--method blast_model=on` (Blast's isotropic stiffness and capped section gains).
+    - **Each switch's effect on Vibe Town idle, resident:**
+
+      | Configuration | What happens |
+      |---|---|
+      | elastic limits (`--authored`) | 196 of 278 clusters have no equilibrium (Newton fails at residuals of 0.07 to 2), so they never fracture |
+      | fatal limits | 204 of 278 converge |
+      | fatal limits, `blast` features | 3,251 bonds break: the town collapses |
+      | plus Blast's stiffness | 13,779 bonds break |
+      | plus the capped stress gain | 273 of 278 converge, 969 bonds break at the start |
+      | plus the pack's masses (the full match) | every cluster converges; the town stands; 493 bonds break as the first frame settles (Blast: none) |
+
+      The remaining gap is the converged answer against Blast's unconverged 16 iterations,
+      the L1 against L2 bending norm, and the damage law.
+    - **Cost of the matched configuration: median ~55–60 ms.** 129 clusters are at exact
+      fixed points and the repeat gate skips them. The other 155 take one Newton step a
+      frame: `island_statics` certifies convergence at f32's floor only after a step
+      shows the residual has stopped falling, and that step re-rounds the state. Skipping
+      it would change results at the rounding level, which is your call. The other lever
+      is the static solve's per-iteration latency on the large islands (one threadgroup
+      per island).
 12c. **Quasi-static frames at scale** (fractured downtown, authored, 34 ms): two full layout builds per frame (~6.5 ms each: pack 1.8, terms 1.5, uploads 2.8), the tail's solves of the 7 fatigue-active buildings, and the write-back; then item 11.
 12b. **Static solves in the tiered coupling:** the budget is a per-frame cost bound
     (Blast's choice); a warm-started multigrid (item 10) would converge within it.

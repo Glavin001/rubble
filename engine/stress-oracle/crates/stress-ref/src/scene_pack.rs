@@ -139,6 +139,15 @@ pub struct ImportOptions {
     /// breaks against), on the calibrated material's stiffness and fracture energy.
     /// For like-for-like runs against the game; off: the calibrated strengths.
     pub authored_strengths: bool,
+    /// With `authored_strengths`: the pack's fatal limits instead of its elastic ones.
+    /// Blast's damage law breaks a bond outright at its fatal limit and only erodes it,
+    /// at a rate, between the two; on impacts and loads of a few frames it breaks there.
+    /// For the like-for-like comparison with Blast; off: the elastic limits.
+    pub authored_fatal: bool,
+    /// The pack's own node masses (each chunk at the density that gives it) and its
+    /// supports (nodes of mass 0 only), as its Blast solver sees them, instead of the
+    /// calibrated densities and supports at grade. For the like-for-like comparison.
+    pub pack_masses: bool,
 }
 
 pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Scene, String> {
@@ -173,7 +182,10 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
     let scale = json["defaults"]["solver"]["materialScale"].as_f64().unwrap_or(1.0);
     let authored: Vec<Option<(f64, f64, f64)>> = json["defaults"]["solver"]["materials"]
         .as_array()
-        .map(|a| a.iter().map(|m| Some((m["tensionElastic"].as_f64()? * scale, m["compressionElastic"].as_f64()? * scale, m["shearElastic"].as_f64()? * scale))).collect())
+        .map(|a| {
+            let (t, c, sh) = if options.authored_fatal { ("tensionFatal", "compressionFatal", "shearFatal") } else { ("tensionElastic", "compressionElastic", "shearElastic") };
+            a.iter().map(|m| Some((m[t].as_f64()? * scale, m[c].as_f64()? * scale, m[sh].as_f64()? * scale))).collect()
+        })
         .unwrap_or_default();
     let classify = |asset: &str| if options.authored_strengths { map_material_authored(asset) } else { map_material(asset) };
 
@@ -203,8 +215,18 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
         let mut c = chunk(centroid + com, half, mat);
         c.hull = Some(hull.vertices.iter().map(|v| v.to_array()).collect());
         let lowest = hull.vertices.iter().map(|v| v.z).fold(f64::INFINITY, f64::min) + c.center[2];
-        if node["mass"].as_f64().unwrap_or(0.0) <= 0.0 || lowest <= GRADE + SEAM {
+        let node_mass = node["mass"].as_f64().unwrap_or(0.0);
+        if node_mass <= 0.0 || (!options.pack_masses && lowest <= GRADE + SEAM) {
             c.support = Support::Fixed;
+        }
+        if options.pack_masses && node_mass > 0.0 {
+            // A chunk material of its own, at the density that gives the pack's mass.
+            let volume = hull.unit_mass().volume;
+            let key = format!("{mat}#mass{i}");
+            let mut m = material_preset(mat);
+            m.density = node_mass / volume;
+            scene.materials.insert(key.clone(), m);
+            c.material = key;
         }
         if let Some(t) = node_types.get(i).filter(|t| !t.is_empty()) {
             c.groups.push(t.clone());

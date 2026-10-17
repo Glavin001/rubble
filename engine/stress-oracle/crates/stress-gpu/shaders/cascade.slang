@@ -22,8 +22,8 @@ struct CascadeParams
     uint result_base;   // scratch: the static solves' results (one float4 per island; w converged)
     uint pass_index;
     uint sload_base;    // scratch: the static solves' loads (2 float4 per chunk)
-    uint gate_flag_base; // gate: per island, x = 1 while its stored loads are an unconverged solve's
-    uint pad0;
+    uint gate_flag_base; // gate: per island, x = 1 while its stored loads are an unconverged solve's, 2 a fixed point's
+    uint bond_words;    // float4 per bond record (world.slang `BondDyn`)
     uint pad1;
     uint pad2;
 };
@@ -31,11 +31,18 @@ struct CascadeParams
 // Status record (uint words): 0 the next pass runs, 1 a bond disconnected (pass + 1),
 // 2 passes run, 3 unconverged solves, 4 damage grew in the last pass run; per island
 // from 16: bit 0 solved this pass, bit 1 converged, bit 2 damaged, bit 3 disconnected,
-// bit 4 skipped as a repeat of an unconverged solve (of the last pass run).
+// bit 4 skipped as a repeat of an unconverged solve, bit 5 skipped as a repeat at a fixed
+// point (of the last pass run).
 //
-// The repeat gate (`cascade_gate`): an unconverged solve leaves its island as it found it
-// (its state restored, no commit), so a solve of that island with the same loads, bit for
-// bit, returns the same verdict on the same state. It is skipped: lossless.
+// The repeat gate (`cascade_gate`), lossless: the solve and the commit are deterministic
+// functions of an island's loads, chunk states and bond records, so a repeat of their
+// inputs, bit for bit, repeats their outcome.
+// - An unconverged solve leaves its island as it found it (its state restored, no
+//   commit): the same loads again give the same verdict on the same state.
+// - A converged solve and its commit that left the state and the bond records as they
+//   found them (`cascade_fixed`): the island is at a fixed point, and the same loads
+//   again leave it there.
+// Either repeat is skipped.
 static const uint ST_RUN = 0;
 static const uint ST_DISCONNECTED = 1;
 static const uint ST_PASSES = 2;
@@ -54,6 +61,8 @@ static const uint ISLAND_SOLVE = 8;
 // The loads of each island's last unconverged solve (2 float4 per chunk), then per island
 // its flag (`gate_flag_base`).
 [[vk::binding(6, 0)]] RWStructuredBuffer<float4> gate;
+[[vk::binding(7, 0)]] StructuredBuffer<float4> bond_dyn;
+[[vk::binding(8, 0)]] StructuredBuffer<float4> bond_backup;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -84,8 +93,13 @@ void cascade_restore(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     if (status[ST_RUN] == 0 || (s & 1u) == 0)
         return;
     bool converged = scratch[params.result_base + i].w != 0.0;
+    Island isl = islands[i];
+    // The loads this solve saw, for the repeat gate.
+    for (uint k = 2 * isl.range.x + thread.x; k < 2 * isl.range.y; k += 64)
+        gate[k] = scratch[params.sload_base + k];
     if (converged)
     {
+        // A fixed point only once its commit is known to change nothing (`cascade_fixed`).
         if (thread.x == 0)
         {
             status[ST_ISLANDS + i] = s | 2u;
@@ -93,14 +107,48 @@ void cascade_restore(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         }
         return;
     }
-    Island isl = islands[i];
     for (uint k = 4 * isl.range.x + thread.x; k < 4 * isl.range.y; k += 64)
         state[k] = backup[k];
-    // The loads this unconverged solve saw, for the repeat gate.
-    for (uint k = 2 * isl.range.x + thread.x; k < 2 * isl.range.y; k += 64)
-        gate[k] = scratch[params.sload_base + k];
     if (thread.x == 0)
         gate[params.gate_flag_base + i] = float4(1.0, 0.0, 0.0, 0.0);
+}
+
+// One group per island solved and committed this pass: a fixed point when the solve and
+// its commit left its chunk states and bond records bit for bit as they were.
+groupshared uint g_moved;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cascade_fixed(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint i = group.x;
+    if (i >= params.island_count)
+        return;
+    uint s = status[ST_ISLANDS + i];
+    // Only the first pass commits with the frame's duration: the fixed points a later
+    // frame's first pass can rely on.
+    if (status[ST_RUN] == 0 || (s & 3u) != 3u || params.pass_index != 0)
+        return;
+    if (thread.x == 0)
+        g_moved = 0;
+    GroupMemoryBarrierWithGroupSync();
+    Island isl = islands[i];
+    uint moved = 0;
+    for (uint k = 4 * isl.range.x + thread.x; k < 4 * isl.range.y; k += 64)
+    {
+        if (any(asuint(state[k]) != asuint(backup[k])))
+            moved = 1;
+    }
+    for (uint k = params.bond_words * isl.range.z + thread.x; k < params.bond_words * isl.range.w; k += 64)
+    {
+        if (any(asuint(bond_dyn[k]) != asuint(bond_backup[k])))
+            moved = 1;
+    }
+    if (moved != 0)
+        g_moved = 1;
+    GroupMemoryBarrierWithGroupSync();
+    if (thread.x == 0 && g_moved == 0)
+        gate[params.gate_flag_base + i] = float4(2.0, 0.0, 0.0, 0.0);
 }
 
 // One group per island flagged for a solve: a repeat of its last unconverged solve (the
@@ -115,7 +163,8 @@ void cascade_gate(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     if (i >= params.island_count)
         return;
     uint s = status[ST_ISLANDS + i];
-    if (status[ST_RUN] == 0 || (s & 1u) == 0 || gate[params.gate_flag_base + i].x == 0.0)
+    float flag = gate[params.gate_flag_base + i].x;
+    if (status[ST_RUN] == 0 || (s & 1u) == 0 || flag == 0.0 || (flag == 2.0 && params.pass_index != 0))
         return;
     if (thread.x == 0)
         g_differs = 0;
@@ -133,7 +182,7 @@ void cascade_gate(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     if (thread.x != 0 || g_differs != 0)
         return;
     islands[i].info.z = isl.info.z & ~ISLAND_SOLVE;
-    status[ST_ISLANDS + i] = 16u;
+    status[ST_ISLANDS + i] = flag == 2.0 ? 32u : 16u;
 }
 
 [shader("compute")]

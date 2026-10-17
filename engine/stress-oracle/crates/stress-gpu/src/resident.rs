@@ -294,12 +294,13 @@ impl<T: ResidentEngine> stress_ref::engine::RigidEngine for SharedEngine<T> {
 pub struct CascadeKernels {
     pub begin: Kernel,
     pub gate: Kernel,
+    pub fixed: Kernel,
     pub restore: Kernel,
     pub settle: Kernel,
     pub end: Kernel,
 }
 
-const CASCADE_BINDINGS: [Binding; 7] = [
+const CASCADE_BINDINGS: [Binding; 9] = [
     Binding::Uniform,   // params
     Binding::StorageRw, // islands
     Binding::Storage,   // scratch
@@ -307,12 +308,14 @@ const CASCADE_BINDINGS: [Binding; 7] = [
     Binding::Storage,   // state backup
     Binding::StorageRw, // status
     Binding::StorageRw, // repeat gate
+    Binding::Storage,   // bond records
+    Binding::Storage,   // bond records backup
 ];
 
 impl CascadeKernels {
     pub fn new(gpu: &Gpu) -> CascadeKernels {
         let k = |e: &str| gpu.compute(&shaders::CASCADE, e, &CASCADE_BINDINGS);
-        CascadeKernels { begin: k("cascade_begin"), gate: k("cascade_gate"), restore: k("cascade_restore"), settle: k("cascade_settle"), end: k("cascade_end") }
+        CascadeKernels { begin: k("cascade_begin"), gate: k("cascade_gate"), fixed: k("cascade_fixed"), restore: k("cascade_restore"), settle: k("cascade_settle"), end: k("cascade_end") }
     }
 }
 
@@ -324,7 +327,8 @@ pub struct CascadeParams {
     pub pass_index: u32,
     pub sload_base: u32,
     pub gate_flag_base: u32,
-    pub pad: [u32; 3],
+    pub bond_words: u32,
+    pub pad: [u32; 2],
 }
 
 /// First per-island word of the cascade's status record (cascade.slang `ST_ISLANDS`).
@@ -361,6 +365,10 @@ pub struct CascadeOutcome {
     /// The clusters solved in the last pass run, and those that converged.
     pub solved: Vec<usize>,
     pub converged: Vec<usize>,
+    /// Islands the repeat gate skipped: repeats of an unconverged solve, and of a fixed
+    /// point.
+    pub skipped_unconverged: usize,
+    pub skipped_fixed: usize,
 }
 
 impl CascadeOutcome {
@@ -373,7 +381,9 @@ impl CascadeOutcome {
             disconnected: (0..islands).filter(|&i| per[i] & 8 != 0).collect(),
             damaged: st[4] != 0,
             solved: (0..islands).filter(|&i| per[i] & 1 != 0).collect(),
-            converged: (0..islands).filter(|&i| per[i] & 3 == 3).collect(),
+            converged: (0..islands).filter(|&i| per[i] & 3 == 3 || per[i] & 32 != 0).collect(),
+            skipped_unconverged: per.iter().filter(|&&p| p & 16 != 0).count(),
+            skipped_fixed: per.iter().filter(|&&p| p & 32 != 0).count(),
         }
     }
 }

@@ -598,6 +598,18 @@ pub struct Methods {
     /// implicit mode and in the engine-coupled frame (single rate there). Off: every
     /// bond at every substep.
     pub multirate: bool,
+    /// Blast's bond model, for the like-for-like comparison with its quasi-static solve
+    /// (measurement only; docs/stress-solver-tracker.md 12d).
+    /// - Stiffness: Blast's least-work force distribution is that of a network of
+    ///   isotropic bond springs: axial and shear stiffness `E max(A, 1e-4) / max(L, 0.05)`
+    ///   alike, every rotational stiffness that times `l^2`, `l` one mean offset (chunk
+    ///   centre to bond centroid) for the whole structure.
+    /// - Stress: Blast's capped section gain (NvBlastExtStressFormula.h, `bendGainMax` 3):
+    ///   bending `M / A * min(6 / sqrt(A), 3)`, twist `T / A * min(4.81 / sqrt(A), 3)`, as
+    ///   section moduli `A / gain`.
+    /// Off: the physical springs (`EA/L`, `GA/L`, `EI/L`, `GJ/L`) and section moduli.
+    #[serde(default)]
+    pub blast_model: bool,
 }
 
 impl Default for Methods {
@@ -648,6 +660,7 @@ impl Methods {
             corotational_bonds: false,
             rayleigh_damping: false,
             multirate: false,
+            blast_model: false,
         }
     }
 
@@ -671,7 +684,7 @@ impl Methods {
     }
 
     /// Names of every switch, in declaration order.
-    pub const NAMES: [&'static str; 17] = ["layer_contact", "scaled_step_bound", "exact_joint_patch", "patch_after_damage", "exact_rate_filter", "frame_contact_step", "exact_frame_transfer", "contact_crushing", "tangent_statics", "true_step", "lattice_contact_step", "implicit_contact_steps", "implicit_contact_windows", "implicit_failure_windows", "corotational_bonds", "rayleigh_damping", "multirate"];
+    pub const NAMES: [&'static str; 18] = ["layer_contact", "scaled_step_bound", "exact_joint_patch", "patch_after_damage", "exact_rate_filter", "frame_contact_step", "exact_frame_transfer", "contact_crushing", "tangent_statics", "true_step", "lattice_contact_step", "implicit_contact_steps", "implicit_contact_windows", "implicit_failure_windows", "corotational_bonds", "rayleigh_damping", "multirate", "blast_model"];
 
     /// Set a switch by name.
     pub fn set(&mut self, name: &str, on: bool) -> Result<(), String> {
@@ -693,6 +706,7 @@ impl Methods {
             "corotational_bonds" => &mut self.corotational_bonds,
             "rayleigh_damping" => &mut self.rayleigh_damping,
             "multirate" => &mut self.multirate,
+            "blast_model" => &mut self.blast_model,
             _ => return Err(format!("unknown method '{name}' (known: {})", Self::NAMES.join(", "))),
         };
         *slot = on;

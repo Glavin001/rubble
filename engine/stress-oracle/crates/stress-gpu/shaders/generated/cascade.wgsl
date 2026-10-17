@@ -5,7 +5,7 @@ struct CascadeParams_std140_0
     @align(8) pass_index_0 : u32,
     @align(4) sload_base_0 : u32,
     @align(16) gate_flag_base_0 : u32,
-    @align(4) pad0_0 : u32,
+    @align(4) bond_words_0 : u32,
     @align(8) pad1_0 : u32,
     @align(4) pad2_0 : u32,
 };
@@ -54,6 +54,10 @@ struct Island_std430_0
 @binding(3) @group(0) var<storage, read_write> state_0 : array<vec4<f32>>;
 
 @binding(4) @group(0) var<storage, read> backup_0 : array<vec4<f32>>;
+
+@binding(7) @group(0) var<storage, read> bond_dyn_0 : array<vec4<f32>>;
+
+@binding(8) @group(0) var<storage, read> bond_backup_0 : array<vec4<f32>>;
 
 struct Island_0
 {
@@ -214,37 +218,16 @@ fn cascade_restore(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_in
     {
         return;
     }
-    if((scratch_0[params_0.result_base_0 + i_1].w) != 0.0f)
-    {
-        if((thread_0.x) == u32(0))
-        {
-            status_0[_S4] = (s_0 | (u32(2)));
-            gate_0[params_0.gate_flag_base_0 + i_1] = vec4<f32>(0.0f);
-        }
-        return;
-    }
+    var converged_0 : bool = (scratch_0[params_0.result_base_0 + i_1].w) != 0.0f;
     var _S6 : vec4<u32> = islands_0[i_1].range_0;
     var _S7 : u32 = islands_0[i_1].range_0.x;
     var _S8 : u32 = thread_0.x;
-    var k_0 : u32 = u32(4) * _S7 + _S8;
+    var k_0 : u32 = u32(2) * _S7 + _S8;
     loop
     {
         var _S9 : u32 = _S6.y;
         _S3 = _S9;
-        if(k_0 < (u32(4) * _S9))
-        {
-        }
-        else
-        {
-            break;
-        }
-        state_0[k_0] = backup_0[k_0];
-        k_0 = k_0 + u32(64);
-    }
-    k_0 = u32(2) * _S7 + _S8;
-    loop
-    {
-        if(k_0 < (u32(2) * _S3))
+        if(k_0 < (u32(2) * _S9))
         {
         }
         else
@@ -254,9 +237,126 @@ fn cascade_restore(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_in
         gate_0[k_0] = scratch_0[params_0.sload_base_0 + k_0];
         k_0 = k_0 + u32(64);
     }
+    if(converged_0)
+    {
+        if(_S8 == u32(0))
+        {
+            status_0[_S4] = (s_0 | (u32(2)));
+            gate_0[params_0.gate_flag_base_0 + i_1] = vec4<f32>(0.0f);
+        }
+        return;
+    }
+    k_0 = u32(4) * _S7 + _S8;
+    loop
+    {
+        if(k_0 < (u32(4) * _S3))
+        {
+        }
+        else
+        {
+            break;
+        }
+        state_0[k_0] = backup_0[k_0];
+        k_0 = k_0 + u32(64);
+    }
     if(_S8 == u32(0))
     {
         gate_0[params_0.gate_flag_base_0 + i_1] = vec4<f32>(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+    return;
+}
+
+var<workgroup> g_moved_0 : u32;
+
+@compute
+@workgroup_size(64, 1, 1)
+fn cascade_fixed(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invocation_id) thread_1 : vec3<u32>)
+{
+    var i_2 : u32 = group_1.x;
+    if(i_2 >= (params_0.island_count_0))
+    {
+        return;
+    }
+    var s_1 : u32 = status_0[u32(16) + i_2];
+    var _S10 : bool;
+    if(status_0[u32(0)] == u32(0))
+    {
+        _S10 = true;
+    }
+    else
+    {
+        _S10 = ((s_1 & (u32(3)))) != u32(3);
+    }
+    if(_S10)
+    {
+        _S10 = true;
+    }
+    else
+    {
+        _S10 = (params_0.pass_index_0) != u32(0);
+    }
+    if(_S10)
+    {
+        return;
+    }
+    var _S11 : u32 = thread_1.x;
+    var _S12 : bool = _S11 == u32(0);
+    if(_S12)
+    {
+        g_moved_0 = u32(0);
+    }
+    workgroupBarrier();
+    var _S13 : vec4<u32> = islands_0[i_2].range_0;
+    var _S14 : u32 = u32(4) * islands_0[i_2].range_0.x + _S11;
+    var moved_0 : u32 = u32(0);
+    var k_1 : u32 = _S14;
+    loop
+    {
+        if(k_1 < (u32(4) * _S13.y))
+        {
+        }
+        else
+        {
+            break;
+        }
+        if((any(((bitcast<vec4<u32>>((state_0[k_1]))) != (bitcast<vec4<u32>>((backup_0[k_1])))))))
+        {
+            moved_0 = u32(1);
+        }
+        k_1 = k_1 + u32(64);
+    }
+    k_1 = params_0.bond_words_0 * _S13.z + _S11;
+    loop
+    {
+        if(k_1 < (params_0.bond_words_0 * _S13.w))
+        {
+        }
+        else
+        {
+            break;
+        }
+        if((any(((bitcast<vec4<u32>>((bond_dyn_0[k_1]))) != (bitcast<vec4<u32>>((bond_backup_0[k_1])))))))
+        {
+            moved_0 = u32(1);
+        }
+        k_1 = k_1 + u32(64);
+    }
+    if(moved_0 != u32(0))
+    {
+        g_moved_0 = u32(1);
+    }
+    workgroupBarrier();
+    if(_S12)
+    {
+        _S10 = g_moved_0 == u32(0);
+    }
+    else
+    {
+        _S10 = false;
+    }
+    if(_S10)
+    {
+        gate_0[params_0.gate_flag_base_0 + i_2] = vec4<f32>(2.0f, 0.0f, 0.0f, 0.0f);
     }
     return;
 }
@@ -265,80 +365,104 @@ var<workgroup> g_differs_0 : u32;
 
 @compute
 @workgroup_size(64, 1, 1)
-fn cascade_gate(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invocation_id) thread_1 : vec3<u32>)
+fn cascade_gate(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invocation_id) thread_2 : vec3<u32>)
 {
-    var i_2 : u32 = group_1.x;
-    if(i_2 >= (params_0.island_count_0))
+    var i_3 : u32 = group_2.x;
+    if(i_3 >= (params_0.island_count_0))
     {
         return;
     }
-    var _S10 : u32 = u32(16) + i_2;
-    var s_1 : u32 = status_0[_S10];
-    var _S11 : bool;
+    var _S15 : u32 = u32(16) + i_3;
+    var s_2 : u32 = status_0[_S15];
+    var flag_0 : f32 = gate_0[params_0.gate_flag_base_0 + i_3].x;
+    var _S16 : bool;
     if(status_0[u32(0)] == u32(0))
     {
-        _S11 = true;
+        _S16 = true;
     }
     else
     {
-        _S11 = ((s_1 & (u32(1)))) == u32(0);
+        _S16 = ((s_2 & (u32(1)))) == u32(0);
     }
-    if(_S11)
+    if(_S16)
     {
-        _S11 = true;
+        _S16 = true;
     }
     else
     {
-        _S11 = (gate_0[params_0.gate_flag_base_0 + i_2].x) == 0.0f;
+        _S16 = flag_0 == 0.0f;
     }
-    if(_S11)
+    if(_S16)
+    {
+        _S16 = true;
+    }
+    else
+    {
+        if(flag_0 == 2.0f)
+        {
+            _S16 = (params_0.pass_index_0) != u32(0);
+        }
+        else
+        {
+            _S16 = false;
+        }
+    }
+    if(_S16)
     {
         return;
     }
-    var _S12 : u32 = thread_1.x;
-    if(_S12 == u32(0))
+    var _S17 : u32 = thread_2.x;
+    if(_S17 == u32(0))
     {
         g_differs_0 = u32(0);
     }
     workgroupBarrier();
-    var isl_1 : Island_std430_0 = islands_0[i_2];
-    var _S13 : u32 = u32(2) * islands_0[i_2].range_0.x + _S12;
+    var isl_1 : Island_std430_0 = islands_0[i_3];
+    var _S18 : u32 = u32(2) * islands_0[i_3].range_0.x + _S17;
     var differs_0 : u32 = u32(0);
-    var k_1 : u32 = _S13;
+    var k_2 : u32 = _S18;
     loop
     {
-        if(k_1 < (u32(2) * isl_1.range_0.y))
+        if(k_2 < (u32(2) * isl_1.range_0.y))
         {
         }
         else
         {
             break;
         }
-        if((any(((bitcast<vec4<u32>>((gate_0[k_1]))) != (bitcast<vec4<u32>>((scratch_0[params_0.sload_base_0 + k_1])))))))
+        if((any(((bitcast<vec4<u32>>((gate_0[k_2]))) != (bitcast<vec4<u32>>((scratch_0[params_0.sload_base_0 + k_2])))))))
         {
             differs_0 = u32(1);
         }
-        k_1 = k_1 + u32(64);
+        k_2 = k_2 + u32(64);
     }
     if(differs_0 != u32(0))
     {
         g_differs_0 = u32(1);
     }
     workgroupBarrier();
-    if(_S12 != u32(0))
+    if(_S17 != u32(0))
     {
-        _S11 = true;
+        _S16 = true;
     }
     else
     {
-        _S11 = g_differs_0 != u32(0);
+        _S16 = g_differs_0 != u32(0);
     }
-    if(_S11)
+    if(_S16)
     {
         return;
     }
-    islands_0[i_2].info_0[i32(2)] = ((isl_1.info_0.z) & (u32(4294967287)));
-    status_0[_S10] = u32(16);
+    islands_0[i_3].info_0[i32(2)] = ((isl_1.info_0.z) & (u32(4294967287)));
+    if(flag_0 == 2.0f)
+    {
+        differs_0 = u32(32);
+    }
+    else
+    {
+        differs_0 = u32(16);
+    }
+    status_0[_S15] = differs_0;
     return;
 }
 
@@ -346,84 +470,84 @@ fn cascade_gate(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invoc
 @workgroup_size(64, 1, 1)
 fn cascade_settle(@builtin(global_invocation_id) id_1 : vec3<u32>)
 {
-    var i_3 : u32 = id_1.x;
-    if(i_3 >= (params_0.island_count_0))
+    var i_4 : u32 = id_1.x;
+    if(i_4 >= (params_0.island_count_0))
     {
         return;
     }
-    var s_2 : u32 = status_0[u32(16) + i_3];
+    var s_3 : u32 = status_0[u32(16) + i_4];
     var isl_2 : Island_0;
-    isl_2.range_0 = islands_0[i_3].range_0;
-    isl_2.info_0 = islands_0[i_3].info_0;
-    isl_2.com_0 = islands_0[i_3].com_0;
-    isl_2.inertia0_0 = islands_0[i_3].inertia0_0;
-    isl_2.inertia1_0 = islands_0[i_3].inertia1_0;
-    isl_2.inertia2_0 = islands_0[i_3].inertia2_0;
-    isl_2.inv0_0 = islands_0[i_3].inv0_0;
-    isl_2.inv1_0 = islands_0[i_3].inv1_0;
-    isl_2.inv2_0 = islands_0[i_3].inv2_0;
-    isl_2.wcom_0 = islands_0[i_3].wcom_0;
-    isl_2.winv0_0 = islands_0[i_3].winv0_0;
-    isl_2.winv1_0 = islands_0[i_3].winv1_0;
-    isl_2.winv2_0 = islands_0[i_3].winv2_0;
-    isl_2.rotation_0 = islands_0[i_3].rotation_0;
-    isl_2.position_0 = islands_0[i_3].position_0;
-    isl_2.position_err_0 = islands_0[i_3].position_err_0;
-    isl_2.velocity_0 = islands_0[i_3].velocity_0;
-    isl_2.velocity_err_0 = islands_0[i_3].velocity_err_0;
-    isl_2.angular_velocity_0 = islands_0[i_3].angular_velocity_0;
-    isl_2.done_0 = islands_0[i_3].done_0;
-    isl_2.coverage_0 = islands_0[i_3].coverage_0;
-    isl_2.wide_groups_0 = islands_0[i_3].wide_groups_0;
-    isl_2.done_pad_0 = islands_0[i_3].done_pad_0;
-    isl_2.probes_0 = islands_0[i_3].probes_0;
-    isl_2.energy_0 = islands_0[i_3].energy_0;
-    isl_2.rotation_err_0 = islands_0[i_3].rotation_err_0;
-    isl_2.momentum_0 = islands_0[i_3].momentum_0;
-    isl_2.momentum_err_0 = islands_0[i_3].momentum_err_0;
+    isl_2.range_0 = islands_0[i_4].range_0;
+    isl_2.info_0 = islands_0[i_4].info_0;
+    isl_2.com_0 = islands_0[i_4].com_0;
+    isl_2.inertia0_0 = islands_0[i_4].inertia0_0;
+    isl_2.inertia1_0 = islands_0[i_4].inertia1_0;
+    isl_2.inertia2_0 = islands_0[i_4].inertia2_0;
+    isl_2.inv0_0 = islands_0[i_4].inv0_0;
+    isl_2.inv1_0 = islands_0[i_4].inv1_0;
+    isl_2.inv2_0 = islands_0[i_4].inv2_0;
+    isl_2.wcom_0 = islands_0[i_4].wcom_0;
+    isl_2.winv0_0 = islands_0[i_4].winv0_0;
+    isl_2.winv1_0 = islands_0[i_4].winv1_0;
+    isl_2.winv2_0 = islands_0[i_4].winv2_0;
+    isl_2.rotation_0 = islands_0[i_4].rotation_0;
+    isl_2.position_0 = islands_0[i_4].position_0;
+    isl_2.position_err_0 = islands_0[i_4].position_err_0;
+    isl_2.velocity_0 = islands_0[i_4].velocity_0;
+    isl_2.velocity_err_0 = islands_0[i_4].velocity_err_0;
+    isl_2.angular_velocity_0 = islands_0[i_4].angular_velocity_0;
+    isl_2.done_0 = islands_0[i_4].done_0;
+    isl_2.coverage_0 = islands_0[i_4].coverage_0;
+    isl_2.wide_groups_0 = islands_0[i_4].wide_groups_0;
+    isl_2.done_pad_0 = islands_0[i_4].done_pad_0;
+    isl_2.probes_0 = islands_0[i_4].probes_0;
+    isl_2.energy_0 = islands_0[i_4].energy_0;
+    isl_2.rotation_err_0 = islands_0[i_4].rotation_err_0;
+    isl_2.momentum_0 = islands_0[i_4].momentum_0;
+    isl_2.momentum_err_0 = islands_0[i_4].momentum_err_0;
     isl_2.info_0[i32(0)] = ((isl_2.info_0[i32(0)]) & (u32(4294967279)));
     isl_2.info_0[i32(2)] = ((isl_2.info_0[i32(2)]) & (u32(4294967247)));
-    var _S14 : bool;
+    var _S19 : bool;
     if(status_0[u32(0)] != u32(0))
     {
-        _S14 = ((s_2 & (u32(3)))) == u32(3);
+        _S19 = ((s_3 & (u32(3)))) == u32(3);
     }
     else
     {
-        _S14 = false;
+        _S19 = false;
     }
-    if(_S14)
+    if(_S19)
     {
         isl_2.info_0[i32(0)] = ((isl_2.info_0[i32(0)]) | (u32(16)));
     }
-    islands_0[i_3].range_0 = isl_2.range_0;
-    islands_0[i_3].info_0 = isl_2.info_0;
-    islands_0[i_3].com_0 = isl_2.com_0;
-    islands_0[i_3].inertia0_0 = isl_2.inertia0_0;
-    islands_0[i_3].inertia1_0 = isl_2.inertia1_0;
-    islands_0[i_3].inertia2_0 = isl_2.inertia2_0;
-    islands_0[i_3].inv0_0 = isl_2.inv0_0;
-    islands_0[i_3].inv1_0 = isl_2.inv1_0;
-    islands_0[i_3].inv2_0 = isl_2.inv2_0;
-    islands_0[i_3].wcom_0 = isl_2.wcom_0;
-    islands_0[i_3].winv0_0 = isl_2.winv0_0;
-    islands_0[i_3].winv1_0 = isl_2.winv1_0;
-    islands_0[i_3].winv2_0 = isl_2.winv2_0;
-    islands_0[i_3].rotation_0 = isl_2.rotation_0;
-    islands_0[i_3].position_0 = isl_2.position_0;
-    islands_0[i_3].position_err_0 = isl_2.position_err_0;
-    islands_0[i_3].velocity_0 = isl_2.velocity_0;
-    islands_0[i_3].velocity_err_0 = isl_2.velocity_err_0;
-    islands_0[i_3].angular_velocity_0 = isl_2.angular_velocity_0;
-    islands_0[i_3].done_0 = isl_2.done_0;
-    islands_0[i_3].coverage_0 = isl_2.coverage_0;
-    islands_0[i_3].wide_groups_0 = isl_2.wide_groups_0;
-    islands_0[i_3].done_pad_0 = isl_2.done_pad_0;
-    islands_0[i_3].probes_0 = isl_2.probes_0;
-    islands_0[i_3].energy_0 = isl_2.energy_0;
-    islands_0[i_3].rotation_err_0 = isl_2.rotation_err_0;
-    islands_0[i_3].momentum_0 = isl_2.momentum_0;
-    islands_0[i_3].momentum_err_0 = isl_2.momentum_err_0;
+    islands_0[i_4].range_0 = isl_2.range_0;
+    islands_0[i_4].info_0 = isl_2.info_0;
+    islands_0[i_4].com_0 = isl_2.com_0;
+    islands_0[i_4].inertia0_0 = isl_2.inertia0_0;
+    islands_0[i_4].inertia1_0 = isl_2.inertia1_0;
+    islands_0[i_4].inertia2_0 = isl_2.inertia2_0;
+    islands_0[i_4].inv0_0 = isl_2.inv0_0;
+    islands_0[i_4].inv1_0 = isl_2.inv1_0;
+    islands_0[i_4].inv2_0 = isl_2.inv2_0;
+    islands_0[i_4].wcom_0 = isl_2.wcom_0;
+    islands_0[i_4].winv0_0 = isl_2.winv0_0;
+    islands_0[i_4].winv1_0 = isl_2.winv1_0;
+    islands_0[i_4].winv2_0 = isl_2.winv2_0;
+    islands_0[i_4].rotation_0 = isl_2.rotation_0;
+    islands_0[i_4].position_0 = isl_2.position_0;
+    islands_0[i_4].position_err_0 = isl_2.position_err_0;
+    islands_0[i_4].velocity_0 = isl_2.velocity_0;
+    islands_0[i_4].velocity_err_0 = isl_2.velocity_err_0;
+    islands_0[i_4].angular_velocity_0 = isl_2.angular_velocity_0;
+    islands_0[i_4].done_0 = isl_2.done_0;
+    islands_0[i_4].coverage_0 = isl_2.coverage_0;
+    islands_0[i_4].wide_groups_0 = isl_2.wide_groups_0;
+    islands_0[i_4].done_pad_0 = isl_2.done_pad_0;
+    islands_0[i_4].probes_0 = isl_2.probes_0;
+    islands_0[i_4].energy_0 = isl_2.energy_0;
+    islands_0[i_4].rotation_err_0 = isl_2.rotation_err_0;
+    islands_0[i_4].momentum_0 = isl_2.momentum_0;
+    islands_0[i_4].momentum_err_0 = isl_2.momentum_err_0;
     return;
 }
 
@@ -435,47 +559,47 @@ var<workgroup> g_unconverged_0 : array<u32, i32(256)>;
 
 @compute
 @workgroup_size(256, 1, 1)
-fn cascade_end(@builtin(local_invocation_id) thread_2 : vec3<u32>)
+fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
 {
     var damaged_0 : u32;
-    var tid_0 : u32 = thread_2.x;
+    var tid_0 : u32 = thread_3.x;
     if(status_0[u32(0)] == u32(0))
     {
         return;
     }
     var damaged_1 : u32 = u32(0);
     var disconnected_0 : u32 = u32(0);
-    var i_4 : u32 = tid_0;
+    var i_5 : u32 = tid_0;
     var unconverged_0 : u32 = u32(0);
     loop
     {
-        if(i_4 < (params_0.island_count_0))
+        if(i_5 < (params_0.island_count_0))
         {
         }
         else
         {
             break;
         }
-        var _S15 : u32 = u32(16) + i_4;
-        var s_3 : u32 = status_0[_S15];
-        if(((status_0[_S15] & (u32(16)))) != u32(0))
+        var _S20 : u32 = u32(16) + i_5;
+        var s_4 : u32 = status_0[_S20];
+        if(((status_0[_S20] & (u32(16)))) != u32(0))
         {
             unconverged_0 = unconverged_0 + u32(1);
-            i_4 = i_4 + u32(256);
+            i_5 = i_5 + u32(256);
             continue;
         }
-        if(((s_3 & (u32(1)))) == u32(0))
+        if(((s_4 & (u32(1)))) == u32(0))
         {
-            i_4 = i_4 + u32(256);
+            i_5 = i_5 + u32(256);
             continue;
         }
-        if(((s_3 & (u32(2)))) == u32(0))
+        if(((s_4 & (u32(2)))) == u32(0))
         {
             unconverged_0 = unconverged_0 + u32(1);
-            i_4 = i_4 + u32(256);
+            i_5 = i_5 + u32(256);
             continue;
         }
-        var z_0 : u32 = islands_0[i_4].info_0.z;
+        var z_0 : u32 = islands_0[i_5].info_0.z;
         var add_0 : u32;
         if(((z_0 & (u32(16)))) != u32(0))
         {
@@ -500,10 +624,10 @@ fn cascade_end(@builtin(local_invocation_id) thread_2 : vec3<u32>)
             disconnected_1 = disconnected_0;
             add_1 = add_0;
         }
-        status_0[_S15] = (s_3 | (add_1));
+        status_0[_S20] = (s_4 | (add_1));
         damaged_1 = damaged_0;
         disconnected_0 = disconnected_1;
-        i_4 = i_4 + u32(256);
+        i_5 = i_5 + u32(256);
     }
     g_damaged_0[tid_0] = damaged_1;
     g_disconnected_0[tid_0] = disconnected_0;
@@ -521,10 +645,10 @@ fn cascade_end(@builtin(local_invocation_id) thread_2 : vec3<u32>)
         }
         if(tid_0 < damaged_0)
         {
-            var _S16 : u32 = tid_0 + damaged_0;
-            g_damaged_0[tid_0] = ((g_damaged_0[tid_0]) | ((g_damaged_0[_S16])));
-            g_disconnected_0[tid_0] = ((g_disconnected_0[tid_0]) | ((g_disconnected_0[_S16])));
-            g_unconverged_0[tid_0] = g_unconverged_0[tid_0] + g_unconverged_0[_S16];
+            var _S21 : u32 = tid_0 + damaged_0;
+            g_damaged_0[tid_0] = ((g_damaged_0[tid_0]) | ((g_damaged_0[_S21])));
+            g_disconnected_0[tid_0] = ((g_disconnected_0[tid_0]) | ((g_disconnected_0[_S21])));
+            g_unconverged_0[tid_0] = g_unconverged_0[tid_0] + g_unconverged_0[_S21];
         }
         workgroupBarrier();
         damaged_0 = (damaged_0 >> (u32(1)));
@@ -540,16 +664,16 @@ fn cascade_end(@builtin(local_invocation_id) thread_2 : vec3<u32>)
     {
         status_0[u32(1)] = params_0.pass_index_0 + u32(1);
     }
-    var _S17 : bool;
+    var _S22 : bool;
     if((g_damaged_0[i32(0)]) != u32(0))
     {
-        _S17 = (g_disconnected_0[i32(0)]) == u32(0);
+        _S22 = (g_disconnected_0[i32(0)]) == u32(0);
     }
     else
     {
-        _S17 = false;
+        _S22 = false;
     }
-    if(_S17)
+    if(_S22)
     {
         damaged_1 = u32(1);
     }
