@@ -89,3 +89,54 @@ would route is missed.
   free-slot list with colliders re-assigned (chunk hulls are already in rubble's hull
   arena, so nothing is re-cooked);
 - the mirror is updated asynchronously (non-blocking map) for observations and tests only.
+
+## Stages 2 and 3: the resident frame (plan of 2026-10-17)
+
+Your direction: the whole coupled frame stays on the GPU; the host configures it,
+submits it and reads one small status record. Built in phases, each landing working and
+measured before the next.
+
+### Where a coupled frame crosses to the host today (measured inventory)
+
+- **rubble** (`RubbleEngine::step`): per engine substep a blocking counter read (80 B),
+  a blocking contact read (`last_contacts`, rows × 128 B) and a blocking body read
+  (bodies × 112 B); `motion`, `set_motion` and `sync_bodies` read bodies again; the
+  collider → (structure, chunk) table exists only on the host (`owners`).
+- **stress-gpu** (`GpuWorld::step_frame_coupled`): a full `download` at frame start and at
+  the write-back (state, islands, impactors, loads, ledgers, the whole `bond_dyn`); two
+  table rebuilds (`refresh` → `build`, re-packing from the f64 mirror); one blocking
+  read-back per substep batch; host splits with a download and a full rebuild each;
+  contact plans on the host; the quasi-static tail's sync and host commit.
+- **Host decisions:** routing (`select_islands`), the load filter (`LoadFilter`), contact
+  planning (`contacts::plan`, `engaged_contact_dt`), splits (`split_cluster`), the quiet
+  set and the frame verification (`fractured_since`).
+
+### Phases
+
+1. **Shared buffers and the collider table.** `WgpuSim` exposes its body, collider and
+   contact buffers and the last step's contact range; the coupling uploads a
+   collider → GPU chunk table (and body → island) whenever either side's layout changes.
+2. **Engine contacts to stress loads on the GPU.** After each rubble substep, an ingest
+   kernel reads that substep's contact rows (GPU → GPU, no host) and accumulates each
+   chunk's impulse, point and closing speed in a fixed order (rows grouped by chunk:
+   deterministic sums, no float atomics); a second kernel applies the load filter's
+   sustained / pulse split (`LoadFilter`) into the stress solver's load slots. Replaces
+   `last_contacts`, the host filter and the per-frame rebuild for loads.
+3. **rubble without readbacks:** `step_submit` (counts forwarded on the GPU) for every
+   engine substep; CCD substep counts from a GPU bound or a conservative host bound.
+4. **Poses and write-back on the GPU:** driven clusters' rigid frames written into the
+   island records from rubble's body buffer; island bodies written back into it
+   (freeze/release by kernel); no `download`/`refresh` per frame.
+5. **One submission per frame:** rubble's substeps, the ingest, the stress substeps (the
+   batch's halt flags already make later dispatches no-ops) and the quasi-static solves
+   and commits (`equilibrate_resident`, `commit_resident`) encoded together; one small
+   status read (halts, splits, unconverged counts) at the end.
+6. **Stage 3, splits on the GPU:** new clusters from the device connectivity labels
+   (`island_connected_*`), mass properties by reductions, new rubble bodies from a
+   free-slot list with colliders re-pointed; then routing (`select_islands` per cluster
+   from GPU bounds) and contact planning in kernels; the f64 mirror synced only on demand
+   (observations, tests).
+
+Gate per phase: the opt-in resident frame's outcomes within the GPU solve's run-to-run
+spread and the oracle gates on the realtime, accuracy and pack sets; the default path
+bit-identical (`scripts/destruction_peak.py guard`) until the resident frame is adopted.
