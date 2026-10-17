@@ -12,7 +12,9 @@ Update it whenever an item is adopted, rejected or added. Each item lists its la
 - **Oracle**: the CPU f64 reference solver (`stress-oracle/crates/stress-ref`), which the GPU
   solver is gated against.
 
-Status as of 2026-10-17 (combined branch `integrate/raw`, PR #32).
+Status as of 2026-10-17 (combined branch `integrate/raw`, PR #32), updated the same day by
+branch `claude/stress-top3-roi-8a4275` (items 1, 2 and 11; measurements in
+[`../stress-oracle/findings/substep-latency.md`](../stress-oracle/findings/substep-latency.md)).
 
 Sources:
 - [`stress-fracture.md`](stress-fracture.md): overview and scale results.
@@ -42,6 +44,12 @@ Sources:
   a fifth of the 514 ms frame.
 - So the levers are: fewer substeps, cheaper substeps (latency), and moving host work onto
   the GPU.
+- **What a substep's latency is made of** (2026-10-17, `findings/substep-latency.md`): a
+  dependent instruction costs 1.6–3 ns on M3 Max and a dispatch about 1–2.5 µs. A substep
+  is now two dependent dispatches whose kernels execute thousands of instructions on their
+  critical path (the joint law alone about 4.7k). Real time for a rammed house at its
+  2,200–2,900 substeps per frame would need about 7 µs per substep; lossless kernel work
+  reaches about 45 µs.
 
 Frame times (M3 Max, mean; the three-way benchmark):
 
@@ -87,6 +95,10 @@ Optional switches are listed under "Built, off by default" below.
 | Adaptive dispatch in rubble (P0, DECISIONS 8ev): colours dispatched = last count + 4, then a sparse tail | Coupling (engine) | Fewer empty dispatches per step. Supersedes the stress session's colour trim (697e41a), which was dropped in the merge |
 | Contact neighbour (skin) list in place of `chunk_pairs` every substep | Oracle | 182/182 identical; pair search 2–6× faster; CPU 1–10 % |
 | Oracle runtime series (18 bit-exact commits) | Oracle | 22 bench cells 531.6 → 209.8 s (2.5×) |
+| Contact pipeline in two dispatches per substep (`forces_and_bonds`, `islands_sums_impactors`; travel checks at the previous substep's end, stop recorded as a substep) | GPU | house_ram 50.1 → 45.3 µs per substep; bit-identical on every `stress_bench` set (33 scenes, re-plans included). `STRESS_GPU_FUSE=0` restores three |
+| The same with settled contact islands (a waking island runs its joint law inline; a law-free kernel variant when none is settled) | GPU | town16_one_ram worst frame 346 → 254 ms; house_ram 46.6 → 44.8 µs per substep |
+| Segment-mode bonds over 512 threads (`island_frame_bonds_wide`; chunks and reductions on the first 256) | GPU | house-1story segment +4.5 %, brick-building +2.7 %; bit-identical |
+| Impactors' substep counter written in place (no blocking read-back per batch) | GPU | Fracture frames' host time; A/B under load: house_ram worst 854 → 746 ms |
 
 ### Accuracy and model
 
@@ -121,6 +133,8 @@ Optional switches are listed under "Built, off by default" below.
 | Quasi-static solve budget (`STRESS_GPU_STATICS_NEWTON=N`) | GPU | Villa 1.9 → 0.65 s/frame, same outcome | Lossy: house-2story rammed breaks 7 bonds instead of 34. Would need to be an explicit engine-wide setting |
 | Stress safety 0.9 instead of 0.5 | GPU | About 45 % fewer substeps | Measured accuracy cost (house ram 2.62 vs 3.04): keep 0.5 |
 | `true_step` in the oracle | Oracle | −9 % CPU | s_arch fragments 8 → 14 |
+| **Tiered coupling** (`--config tiered`, `GpuWorld::set_tiered`): quasi-static mode with explicit impact islands; only a scene impactor's contact closing faster than `STRESS_TIERED_SPEED` (5 m/s) seeds an island; promotion renews only on fractures under the engine's loads | Coupling | Fractured high-rise 10F (vibe-land, 1,096 chunks): idle median 39 → 4 ms, rammed median 84 → 8 ms, peak 172 → 94 ms. house_ram 1 s: explicit frames until the island ends (0.73 s), then 10–13 ms frames | A model change (Blast's model outside impacts). Island frames keep the explicit cost (140–250 ms on house_ram). The router's impact speed is uncalibrated |
+| Static-solve budget (`SolverConfig::static_budget`, `STRESS_TIERED_BUDGET=newton,cg`), applied after setup | GPU | Tiered house_ram aftermath frames 425 → 13 ms (4 × 64) or 10 ms (2 × 32), broken bonds unchanged (198). Blast-equivalent rung: peak 238 → 43 ms at 4 Newton steps, same outcome | Unconverged solves keep their start state: lossy against converged statics |
 
 ## Rejected (tried and measured)
 
@@ -146,6 +160,13 @@ Optional switches are listed under "Built, off by default" below.
 | Oracle micro-optimisations: intact-patch skip, multiply-rotate hasher, branchless patch loop, depth table, pooled bond sets | Oracle | +11 %, —, 128 vs 100 ns, +7.7 %, noise | Slower or within noise |
 | Colour trim in the coupling (697e41a) | Coupling | Floor drop 4.4 → 2.6 ms per rubble step | Superseded by adaptive dispatch (P0); dropped in the merge |
 | Emit-solver-pairs fork experiments (early SolverPairs, workgroup-ordered awake list, lazy partner load) | Coupling (engine) | Within noise | Rejected in engine DECISIONS 8eq |
+| **Intact-only kernel with escalation (was item 2)** | GPU | Contact pipeline: the bond dispatch costs 16.0 µs with the full law (no damage evolution) and 16.5 µs with a bare spring; the impactor integration sets it. Segment mode: damage evolution, the only part an intact bond can skip without changing results, is 4 % of the law (36.0 → 34.6 µs) | The ×2.5–6 compared the full law with a kernel that skips required state (rate filter, fatigue, friction offsets, rebar, utilization). No lossless gain where production spends its time |
+| Indirect command buffer / persistent-kernel replay (part of item 1) | GPU | Three trivial dependent dispatches cost 7–8 µs of a 45 µs substep. An ICB replays only host encoding (5–6 ms per frame); a persistent kernel needs a grid barrier Metal does not guarantee (no forward progress between threadgroups) | Launch is not the latency; kernel critical paths are. The two-dispatch merge took the launch share that was available |
+| Submitting a batch in 512-dispatch slices (overlap encoding with the GPU) | GPU | Peak 273.5 vs 275.8 ms | Within noise |
+| Drift moments summed in the chunk update (one chunk pass fewer) | GPU | 44.8 → 45.1 µs per substep | Barriers and dependent math set the island kernel, not loads |
+| The waking island's joint law as a `[noinline]` call | GPU | Spill 1,328 → 1,680 B, threadgroup memory 19.5 KB | Worse; replaced by a kernel variant |
+| Segment-mode bonds over 1024 threads | GPU | house-1story 24.5k → 21.0k substeps/s | Register spills at 1,024 threads; 512 kept |
+| Stress safety 0.9 in the tiered coupling | GPU | Substeps −14 % (129k → 111k); broken bonds 198 → 273, fragments 39 → 60 | Contact sets most island steps: poor trade |
 
 ## Open: planned or proposed
 
@@ -154,13 +175,12 @@ your call; the rest need building.
 
 ### Fewer or cheaper substeps
 
-1. **Low-latency substep replay.** Record a frame's substeps once and replay them on the
-   GPU (an indirect command buffer on Metal, or a persistent kernel). The per-substep
-   latency drops from about 24 µs toward 2–5 µs. This is the main lever for a single
-   building. Not built.
-2. **Intact-only kernel with escalation to the full law.** Measured ×2.5–6 per substep
-   (house-1story 24.9 → 9.4 µs). The kernel exists for benchmarks; it isn't in the coupled
-   solver.
+1. **Substep latency: kernel critical paths.** Replay was the wrong lever (see Rejected);
+   the two-dispatch pipeline is done. What remains is the instructions on each kernel's
+   critical path: the island kernel (about 23 µs: barriers, rigid frame, travel checks) and
+   the forces dispatch (about 14 µs). Needs GPU counters (an Xcode capture) to aim; each
+   lossless trial so far gave 0–4 %.
+2. *(Rejected, see above: the intact-only kernel.)*
 3. **Sliver elimination**, in the assets or as a solver switch. ×1.6–4.5 fewer substeps
    (×4.51 on house-1story). Prove it in the oracle first. With item 2 it brings an awake
    house to about 2–4 ms (roadmap estimate).
@@ -182,7 +202,23 @@ your call; the rest need building.
 
 11. **GPU-resident coupling, Stage 3:** routing, contact planning and splits on the GPU,
     with no CPU mirror inside a frame. Expected 3.5–5× on many-house destruction. It is
-    also the prerequisite for a browser version.
+    also the prerequisite for a browser version. **Scoped 2026-10-17** (house_ram fracture
+    frame 1: 234 ms, of which host 60–75 ms: 21 host splits 19 ms, 61 batches' encode
+    21 ms and readbacks 13 ms, downloads 10 ms; 41 % of its 3,759 encoded rounds launch
+    empty after halts). First stage, in this order:
+    1. splits on the GPU from the labels the device connectivity check already computes
+       (label propagation): new clusters' chunk lists and mass properties by reductions,
+       the host only re-indexing; gate: digests within the GPU's run-to-run spread, as
+       `stress-fracture-gpu-resident.md` stage 3 states (f32 mass properties);
+    2. halts that need no host work resume in the same submission (indirect dispatch
+       sizes zeroed per halted island instead of ending the batch);
+    3. contact planning per segment on the GPU (swept boxes through rubble's broadphase).
+12a. **Tiered router calibration.** The tiered coupling's impact speed (5 m/s) and its
+    island membership (any overlap joins a component) are uncalibrated. On house_ram the
+    island lasts 0.73 s because fragments touching the ram close at 5–9 m/s. Item 8's
+    critical-speed router is the principled version.
+12b. **Static solves in the tiered coupling:** the budget is a per-frame cost bound
+    (Blast's choice); a warm-started multigrid (item 10) would converge within it.
 12. Stage 2: one submission per frame with shared buffers. About 5 % on destruction
     frames.
 13. Use rubble's pipelined `step_submit`, which takes the previous step's counts on the
@@ -221,6 +257,14 @@ your call; the rest need building.
 26. Cross-platform determinism of Shardwright bakes (unchecked across OS and architecture).
 
 ### Bugs and robustness
+
+- **A travel-check stop races the contact kernels of its substep** (found 2026-10-17).
+  When STOP_NOW lands inside `contact_forces`, pairs and candidates already started there
+  have advanced their contact history for a substep that is then re-planned and run
+  again (crush passes likewise). Deterministic in practice (the pairs win), so digests
+  repeat; the two-dispatch pipeline keeps the behaviour for bit-identity. Not running
+  the stopped substep's contact work is more correct but changes re-planning scenes:
+  a fidelity decision.
 
 27. `destruction-view` panicked on non-convex fragment hulls (house_ram, town). The
     `stress-rubble` box fallback may cover it; unverified.

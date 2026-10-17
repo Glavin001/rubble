@@ -577,3 +577,34 @@ cited textbook factor, or the oracle's own uncertainty.
       damping (60).
     - The static and implicit solves keep the small-strain map (their geometric
       tangent is open, see IMPROVEMENTS.md).
+62. **The intact-only kernel is not wired in (tracker item 2, rejected), 2026-10-17.**
+    - In the coupled production path the joint law runs one bond per thread in a
+      dispatch whose latency is set by the impactor integration: 16.0 µs with the full
+      law (no damage evolution), 16.5 µs with a bare spring.
+    - In segment mode the only part an intact bond can skip without changing results
+      is damage evolution, 4 % of the law. Everything else is state each substep must
+      update exactly: rate filter, fatigue, contact-interface friction offsets
+      (`patch_after_damage` is off in the established methods), rebar, utilization.
+    - Measurements: `findings/substep-latency.md`.
+63. **The contact pipeline runs in two dispatches per substep, bit-identically
+    (tracker item 1), 2026-10-17.**
+    - The bonds move to the contact-forces dispatch and the contact sums into the
+      island kernel; the impactors integrate beside the islands.
+    - The travel checks move to the end of the previous substep and record the substep
+      they stop. Every kernel compares that with its own substep, so the stopped
+      substep runs exactly what the three-dispatch order ran (crush passes and contact
+      forces yes; the joint law, sums, islands and impactors no).
+    - Digests equal 655ed12 on all 33 `stress_bench` scenes. `STRESS_GPU_FUSE=0`
+      restores three dispatches.
+    - Replay (indirect command buffers, a persistent kernel) is rejected: launches are
+      7–8 µs of a 45 µs substep, and Metal guarantees no grid barrier.
+64. **The tiered coupling is built and off by default (a model change awaiting
+    calibration), 2026-10-17.**
+    - Your direction: quasi-static outside impact islands, explicit inside them, with
+      the island's physical end criterion. `--config tiered`, `GpuWorld::set_tiered`.
+    - Static solves may take a fixed budget (`SolverConfig::static_budget`), as Blast
+      does; unbudgeted aftermath frames cost 425 ms on house_ram, 4 × 64 cost 13 ms.
+    - Fractured high-rise 10F: idle median 39 → 4 ms, rammed median 84 → 8 ms.
+    - Open: the router's impact speed (5 m/s) and island membership are uncalibrated;
+      island frames keep the explicit cost. Stress safety 0.9 was measured and not
+      taken (−14 % substeps, +38 % broken bonds).
