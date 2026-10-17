@@ -158,9 +158,16 @@ impl GpuWorld {
         }
         let n = engine.borrow_mut().resident_substeps(fdt);
         self.resident_tables(gpu, n);
+        let phases = std::env::var("STRESS_RESIDENT_PHASES").is_ok();
+        let t_engine = std::time::Instant::now();
         {
             let r = self.resident.as_ref().expect("resident tables");
             engine.borrow_mut().step_resident(gpu, fdt, n, &r.ingest)?;
+        }
+        if phases {
+            let encode = t_engine.elapsed().as_secs_f64() * 1e3;
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            eprintln!("resident phases: engine {n} substeps + ingest: encode {encode:.1} ms, done {:.1} ms", t_engine.elapsed().as_secs_f64() * 1e3);
         }
         self.prepare_seconds += t_prepare.elapsed().as_secs_f64();
         let tail = std::time::Instant::now();
@@ -183,6 +190,11 @@ impl GpuWorld {
                 }
                 r.qs.encode_static_loads(gpu, enc, &r.ingest, s);
             });
+            if phases {
+                let encode = t_pass.elapsed().as_secs_f64() * 1e3;
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                eprintln!("resident phases: cascade encode {encode:.1} ms, done {:.1} ms", t_pass.elapsed().as_secs_f64() * 1e3);
+            }
             let e = engine.borrow();
             let read = gpu.read_ranges(&[run.range(), e.resident_status(), r.qs.status_range()]);
             drop(e);

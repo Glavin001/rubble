@@ -324,6 +324,21 @@ your call; the rest need building.
         rebuilds; this is lossless.
       - Next: splits on the GPU (phase 6e), and the static solve's latency on the
         struck clusters.
+    - **Where a bombard frame goes now** (GPU timestamps: `STRESS_GPU_TIMING=1` for the
+      cascade, `RUBBLE_GPU_TIMING=1` per phase of rubble's step; wall clock per phase:
+      `STRESS_RESIDENT_PHASES=1`):
+      - **Barrier fix.** The Metal group barriers fenced texture and imageblock memory
+        too. Dropping those (bit-identical) took the static solve from 38 to 20 ms a frame.
+      - **The stress cascade: ~5–6 ms a frame.** The static solves are 3.2 ms of GPU time
+        (92 islands, 1 × 32 CG) and the commit 0.25 ms.
+      - **rubble: ~17 ms.** The fast projectiles' CCD needs 3 substeps of 5–6 ms each.
+        A substep is broadphase ~0.55 ms, narrowphase ~0.55 ms, and 10 primal
+        iterations of ~0.33 ms each. Those are 8 colours of indirect dispatches, so
+        dispatch latency dominates; the dual passes are ~0.01 ms.
+      - **Speculative contacts** (`STRESS_RUBBLE_SPECULATIVE=1`, item 14, one step)
+        overflow rubble's candidate capacity here. Its contact range is one global offset
+        (~2.3 m for a 140 m/s meteor), so it needs per-body margins before it can stand
+        in for the CCD substeps.
 12c. **Quasi-static frames at scale** (fractured downtown, authored, 34 ms): two full layout builds per frame (~6.5 ms each: pack 1.8, terms 1.5, uploads 2.8), the tail's solves of the 7 fatigue-active buildings, and the write-back; then item 11.
 12b. **Static solves in the tiered coupling:** the budget is a per-frame cost bound
     (Blast's choice); a warm-started multigrid (item 10) would converge within it.

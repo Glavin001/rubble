@@ -379,6 +379,8 @@ pub struct RubbleEngine {
     layout_version: u64,
     /// Resident frames that read bodies back for the CCD bound.
     pub resident_reads: u64,
+    /// The resident frame's speculative contact range (`resident_substeps`).
+    resident_offset: f32,
 }
 
 /// The default capacity: room for a few thousand bodies (every rebuilt cluster takes
@@ -465,6 +467,7 @@ impl RubbleEngine {
             ingest_check: None,
             layout_version: 0,
             resident_reads: 0,
+            resident_offset: 0.01,
         })
     }
 

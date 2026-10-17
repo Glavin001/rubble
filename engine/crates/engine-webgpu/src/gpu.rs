@@ -1141,6 +1141,65 @@ impl WgpuSim {
                 );
             }
         }
+        // `RUBBLE_GPU_TIMING=1` (diagnostic): a timestamped pass per phase of the plan,
+        // each phase's GPU time printed after the step (waits for it).
+        let timing = std::env::var("RUBBLE_GPU_TIMING").is_ok_and(|v| v == "1")
+            && self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        if timing {
+            // A phase marker follows its commands: segment k is the k-th phase.
+            let mut names: Vec<&str> = Vec::new();
+            for c in &cmds {
+                if let rigid_plan::Cmd::Phase { name } = *c {
+                    names.push(name);
+                }
+            }
+            names.push("tail");
+            let queries = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("step phases"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2 * names.len() as u32,
+            });
+            let mut segment = 0u32;
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("step"),
+                timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &queries, beginning_of_pass_write_index: Some(0), end_of_pass_write_index: Some(1) }),
+            });
+            for c in &cmds {
+                match *c {
+                    rigid_plan::Cmd::Copy { .. } => {}
+                    rigid_plan::Cmd::Phase { .. } => {
+                        drop(pass);
+                        segment += 1;
+                        pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("step"),
+                            timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &queries, beginning_of_pass_write_index: Some(2 * segment), end_of_pass_write_index: Some(2 * segment + 1) }),
+                        });
+                    }
+                    rigid_plan::Cmd::Dispatch { kernel, threads, pass: p } => self.disp(&mut pass, kernel, threads, Some(p)),
+                    rigid_plan::Cmd::Indirect { kernel, slot, pass: p } => {
+                        if kernel.starts_with("solve_primal_color") {
+                            self.disp_indirect(&mut pass, slot);
+                        } else {
+                            self.disp_work(&mut pass, kernel, slot, Some(p));
+                        }
+                    }
+                }
+            }
+            drop(pass);
+            let resolve = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("step phases"), size: 16 * names.len() as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("step phases read"), size: 16 * names.len() as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            enc.resolve_query_set(&queries, 0..2 * names.len() as u32, &resolve, 0);
+            enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, 16 * names.len() as u64);
+            self.queue.submit([enc.finish()]);
+            let slice = staging.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            let t: Vec<u64> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
+            let period = self.queue.get_timestamp_period() as f64 * 1e-6;
+            let parts: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("{n} {:.2}", t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period)).collect();
+            eprintln!("rubble step GPU ms: {}", parts.join(", "));
+            return self.finish_step(read, wall);
+        }
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
@@ -1162,7 +1221,11 @@ impl WgpuSim {
         }
         drop(pass);
         self.queue.submit([enc.finish()]);
+        self.finish_step(read, wall)
+    }
 
+    /// The step's host bookkeeping after its submission (and its counters, `read`).
+    fn finish_step(&mut self, read: bool, wall: std::time::Instant) -> Result<StepCounters, ExecError> {
         if let Some(v) = self.vehicles.as_mut() {
             v.dirty = false;
         }

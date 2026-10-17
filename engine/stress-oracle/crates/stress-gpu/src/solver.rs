@@ -2598,6 +2598,9 @@ impl GpuSolver {
         let orig = gpu.storage("cascade params", std::slice::from_ref(&p));
         let kernels = self.cascade.as_ref().expect("cascade kernels");
         let islands_bytes = std::mem::size_of::<Island>() as u64 * (n_islands as u64 + 1);
+        // `STRESS_GPU_TIMING=1`: the solves' and commits' GPU times (a diagnostic read).
+        let timing = (std::env::var("STRESS_GPU_TIMING").is_ok_and(|v| v == "1") && gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY))
+            .then(|| gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("cascade timestamps"), ty: wgpu::QueryType::Timestamp, count: 4 * passes as u32 }));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for pass in first..first + passes {
             let cp = gpu.uniform(
@@ -2624,8 +2627,9 @@ impl GpuSolver {
                 c.set_bind_group(0, &bind, &[]);
                 c.dispatch_workgroups(groups, 1, 1);
             };
-            let world = |encoder: &mut wgpu::CommandEncoder, k: &Kernel| {
-                let mut c = encoder.begin_compute_pass(&Default::default());
+            let world = |encoder: &mut wgpu::CommandEncoder, k: &Kernel, slot: u32| {
+                let stamps = timing.as_ref().map(|q| wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(2 * slot), end_of_pass_write_index: Some(2 * slot + 1) });
+                let mut c = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: stamps });
                 c.set_pipeline(&k.pipeline);
                 c.set_bind_group(0, &self.buffers.bind_segment, &[]);
                 c.dispatch_workgroups(n_islands.max(1) as u32, 1, 1);
@@ -2642,21 +2646,32 @@ impl GpuSolver {
             if gate_on {
                 run(&mut encoder, &kernels.gate, n_islands.max(1) as u32);
             }
-            world(&mut encoder, &self.kernels.statics);
+            world(&mut encoder, &self.kernels.statics, 2 * (pass - first) as u32);
             run(&mut encoder, &kernels.restore, n_islands.max(1) as u32);
             // commit_resident: the converged islands flagged, their damage committed with
             // the frame's duration (the first pass) or none.
             encoder.copy_buffer_to_buffer(&layout_islands, 0, &self.buffers.islands, 0, islands_bytes);
             run(&mut encoder, &kernels.settle, crate::gpu::groups(n_islands, 64));
             encoder.copy_buffer_to_buffer(if pass == 0 { &commit_first } else { &commit_later }, 0, &self.buffers.params_segment, 0, params_bytes);
-            world(&mut encoder, &self.kernels.fatigue);
+            world(&mut encoder, &self.kernels.fatigue, 2 * (pass - first) as u32 + 1);
             encoder.copy_buffer_to_buffer(&orig, 0, &self.buffers.params_segment, 0, params_bytes);
             if gate_on {
                 run(&mut encoder, &kernels.fixed, n_islands.max(1) as u32);
             }
             run(&mut encoder, &kernels.end, 1);
         }
+        let resolve = timing.as_ref().map(|q| {
+            let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("cascade timestamps"), size: 8 * 4 * passes as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+            encoder.resolve_query_set(q, 0..4 * passes as u32, &b, 0);
+            b
+        });
         gpu.queue.submit([encoder.finish()]);
+        if let Some(b) = resolve {
+            let t: Vec<u64> = gpu.read(&b);
+            let period = gpu.queue.get_timestamp_period() as f64 * 1e-6;
+            let ms: Vec<String> = (0..2 * passes).map(|q| format!("{:.2}", t[2 * q + 1].saturating_sub(t[2 * q]) as f64 * period)).collect();
+            eprintln!("cascade GPU ms (solve, commit per pass): {}", ms.join(" "));
+        }
         self.state_current = false;
         self.bonds_stale = true;
         self.coverage |= coverage::STATICS | coverage::SETTLED_FATIGUE;
