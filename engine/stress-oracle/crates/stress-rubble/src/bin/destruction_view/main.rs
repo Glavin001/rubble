@@ -4,8 +4,8 @@
 //! before the step and no frame rewinds (`redo_fractured_frames = false`), exactly as
 //! `stress_bench --solver rubble-gpu` runs it. Nothing is drawn from the host: chunks,
 //! clusters and impactors come straight from the stress solver's GPU buffers, every chunk
-//! coloured by the largest utilization of its unbroken bonds (blue 0, red at failure;
-//! grey: no bond left).
+//! drawn as its convex hull (its box for box chunks) and coloured by the largest
+//! utilization of its unbroken bonds (blue 0, red at failure; grey: no bond left).
 //!
 //!   cargo run --release -p stress-rubble --bin destruction-view -- --scene wall_ram
 //!
@@ -17,7 +17,7 @@
 //!
 //! Controls: click fire, left drag orbit, right or shift drag pan, wheel zoom, Space
 //! pause, . (or N) one frame while paused, R reset, 1-9 scene, [ ] projectile speed,
-//! - = projectile size, Esc quit.
+//! - = projectile size, B chunk hulls / oriented boxes, Esc quit.
 //!
 //! Frames are paced to simulated time: one `frame_dt` of simulation per `frame_dt` of
 //! wall clock when the pipeline keeps up, one frame per redraw (slow motion, shown as the
@@ -297,6 +297,11 @@ impl App {
                     self.paused = true;
                     self.step_once = true;
                 }
+                "b" => {
+                    if let Some(g) = self.gfx.as_mut() {
+                        g.boxes = !g.boxes;
+                    }
+                }
                 "[" | "]" => {
                     if let Some(sim) = self.sim.as_mut() {
                         sim.shot.speed *= if c.as_str() == "]" { 1.25 } else { 0.8 };
@@ -384,7 +389,7 @@ impl App {
             WHITE,
         ));
         out.push(("colour: bond utilization, blue 0 -> red 1 (failure); grey: no bond left".into(), DIM));
-        out.push(("click fire  drag orbit  right/shift-drag pan  wheel zoom  space pause  . step  R reset  1-9 scene  [ ] speed  - = size".into(), DIM));
+        out.push(("click fire  drag orbit  right/shift-drag pan  wheel zoom  space pause  . step  R reset  1-9 scene  [ ] speed  - = size  B hulls/boxes".into(), DIM));
         if let Some((m, at)) = &self.message {
             if at.elapsed() < Duration::from_secs(4) {
                 out.push((m.clone(), WARN));
