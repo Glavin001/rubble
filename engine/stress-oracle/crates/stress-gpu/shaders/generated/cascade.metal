@@ -11,7 +11,7 @@ struct CascadeParams_0
     uint gate_flag_base_0;
     uint bond_words_0;
     uint certify_0;
-    uint pad2_0;
+    uint unconverged_0;
 };
 
 struct Island_natural_0
@@ -327,6 +327,14 @@ struct Island_0
                 _S36 = 0.0f;
             }
             *_S35 = packed_float4(float4(_S36, 0.0f, 0.0f, 0.0f)) ;
+        }
+        return;
+    }
+    if(((&kernelContext_1)->params_0->unconverged_0) != 0U)
+    {
+        if(_S33 == 0U)
+        {
+            *((&kernelContext_1)->gate_0+((&kernelContext_1)->params_0->gate_flag_base_0 + i_1)) = packed_float4(float4(0.0f) ) ;
         }
         return;
     }
@@ -678,7 +686,21 @@ struct Island_0
     bool _S73;
     if((*((&kernelContext_4)->status_0+0U)) != 0U)
     {
-        _S73 = (s_3 & 3U) == 3U;
+        if((s_3 & 3U) == 3U)
+        {
+            _S73 = true;
+        }
+        else
+        {
+            if(((&kernelContext_4)->params_0->unconverged_0) == 2U)
+            {
+                _S73 = (s_3 & 1U) != 0U;
+            }
+            else
+            {
+                _S73 = false;
+            }
+        }
     }
     else
     {
@@ -722,7 +744,7 @@ struct Island_0
 
 [[kernel]] void cascade_end(uint3 thread_3 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_6 [[buffer(0)]], uint device* status_6 [[buffer(5)]], Island_natural_0 device* islands_6 [[buffer(1)]], packed_float4 device* scratch_6 [[buffer(2)]], packed_float4 device* gate_6 [[buffer(6)]], packed_float4 device* state_6 [[buffer(3)]], packed_float4 device* backup_6 [[buffer(4)]], packed_float4 device* bond_dyn_6 [[buffer(7)]], packed_float4 device* bond_backup_6 [[buffer(8)]])
 {
-    uint damaged_0;
+    uint unconverged_1;
     thread KernelContext_0 kernelContext_5;
     (&kernelContext_5)->params_0 = params_6;
     (&kernelContext_5)->status_0 = status_6;
@@ -748,10 +770,10 @@ struct Island_0
     {
         return;
     }
-    uint damaged_1 = 0U;
+    uint damaged_0 = 0U;
     uint disconnected_0 = 0U;
     uint i_5 = tid_0;
-    uint unconverged_0 = 0U;
+    uint unconverged_2 = 0U;
     for(;;)
     {
         if(i_5 < ((&kernelContext_5)->params_0->island_count_0))
@@ -766,7 +788,7 @@ struct Island_0
         uint s_4 = *_S76;
         if(((*_S76) & 16U) != 0U)
         {
-            unconverged_0 = unconverged_0 + 1U;
+            unconverged_2 = unconverged_2 + 1U;
             i_5 = i_5 + 256U;
             continue;
         }
@@ -777,20 +799,30 @@ struct Island_0
         }
         if((s_4 & 2U) == 0U)
         {
-            unconverged_0 = unconverged_0 + 1U;
-            i_5 = i_5 + 256U;
-            continue;
+            uint _S77 = unconverged_2 + 1U;
+            if(((&kernelContext_5)->params_0->unconverged_0) != 2U)
+            {
+                unconverged_2 = _S77;
+                i_5 = i_5 + 256U;
+                continue;
+            }
+            unconverged_1 = _S77;
+        }
+        else
+        {
+            unconverged_1 = unconverged_2;
         }
         uint z_0 = (uint4(((&kernelContext_5)->islands_0+i_5)->info_0) ).z;
+        uint damaged_1;
         uint add_0;
         if((z_0 & 16U) != 0U)
         {
-            damaged_0 = 1U;
+            damaged_1 = 1U;
             add_0 = 4U;
         }
         else
         {
-            damaged_0 = damaged_1;
+            damaged_1 = damaged_0;
             add_0 = 0U;
         }
         uint disconnected_1;
@@ -811,33 +843,34 @@ struct Island_0
             *((&kernelContext_5)->gate_0+((&kernelContext_5)->params_0->gate_flag_base_0 + i_5)) = packed_float4(float4(0.0f) ) ;
         }
         *((&kernelContext_5)->status_0+_S75) = s_4 | add_1;
-        damaged_1 = damaged_0;
+        damaged_0 = damaged_1;
         disconnected_0 = disconnected_1;
+        unconverged_2 = unconverged_1;
         i_5 = i_5 + 256U;
     }
-    (*(&kernelContext_5)->g_damaged_0)[tid_0] = damaged_1;
+    (*(&kernelContext_5)->g_damaged_0)[tid_0] = damaged_0;
     (*(&kernelContext_5)->g_disconnected_0)[tid_0] = disconnected_0;
-    (*(&kernelContext_5)->g_unconverged_0)[tid_0] = unconverged_0;
+    (*(&kernelContext_5)->g_unconverged_0)[tid_0] = unconverged_2;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    damaged_0 = 128U;
+    unconverged_1 = 128U;
     for(;;)
     {
-        if(damaged_0 > 0U)
+        if(unconverged_1 > 0U)
         {
         }
         else
         {
             break;
         }
-        if(tid_0 < damaged_0)
+        if(tid_0 < unconverged_1)
         {
-            uint _S77 = tid_0 + damaged_0;
-            (*(&kernelContext_5)->g_damaged_0)[tid_0] = ((*(&kernelContext_5)->g_damaged_0)[tid_0]) | (*(&kernelContext_5)->g_damaged_0)[_S77];
-            (*(&kernelContext_5)->g_disconnected_0)[tid_0] = ((*(&kernelContext_5)->g_disconnected_0)[tid_0]) | (*(&kernelContext_5)->g_disconnected_0)[_S77];
-            (*(&kernelContext_5)->g_unconverged_0)[tid_0] = (*(&kernelContext_5)->g_unconverged_0)[tid_0] + (*(&kernelContext_5)->g_unconverged_0)[_S77];
+            uint _S78 = tid_0 + unconverged_1;
+            (*(&kernelContext_5)->g_damaged_0)[tid_0] = ((*(&kernelContext_5)->g_damaged_0)[tid_0]) | (*(&kernelContext_5)->g_damaged_0)[_S78];
+            (*(&kernelContext_5)->g_disconnected_0)[tid_0] = ((*(&kernelContext_5)->g_disconnected_0)[tid_0]) | (*(&kernelContext_5)->g_disconnected_0)[_S78];
+            (*(&kernelContext_5)->g_unconverged_0)[tid_0] = (*(&kernelContext_5)->g_unconverged_0)[tid_0] + (*(&kernelContext_5)->g_unconverged_0)[_S78];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        damaged_0 = damaged_0 >> 1U;
+        unconverged_1 = unconverged_1 >> 1U;
     }
     if(tid_0 != 0U)
     {
@@ -850,25 +883,25 @@ struct Island_0
     {
         *((&kernelContext_5)->status_0+1U) = (&kernelContext_5)->params_0->pass_index_0 + 1U;
     }
-    uint device* _S78 = (&kernelContext_5)->status_0+0U;
-    bool _S79;
+    uint device* _S79 = (&kernelContext_5)->status_0+0U;
+    bool _S80;
     if(((*(&kernelContext_5)->g_damaged_0)[int(0)]) != 0U)
     {
-        _S79 = ((*(&kernelContext_5)->g_disconnected_0)[int(0)]) == 0U;
+        _S80 = ((*(&kernelContext_5)->g_disconnected_0)[int(0)]) == 0U;
     }
     else
     {
-        _S79 = false;
+        _S80 = false;
     }
-    if(_S79)
+    if(_S80)
     {
-        damaged_1 = 1U;
+        damaged_0 = 1U;
     }
     else
     {
-        damaged_1 = 0U;
+        damaged_0 = 0U;
     }
-    *_S78 = damaged_1;
+    *_S79 = damaged_0;
     return;
 }
 

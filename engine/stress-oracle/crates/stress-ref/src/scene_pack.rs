@@ -173,6 +173,8 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
         None => vec!["reinforced-concrete".to_string(); nodes.len()],
     };
     let node_types: Vec<String> = sc["nodeTypes"].as_array().map(|a| a.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+    // The building each node belongs to (`house@house-18`), for selecting it (targets).
+    let node_groups: Vec<String> = sc["nodeGroups"].as_array().map(|a| a.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
     let pack_materials: Vec<String> = json["defaults"]["solver"]["materials"]
         .as_array()
         .map(|a| a.iter().map(|m| m["name"].as_str().unwrap_or("").to_string()).collect())
@@ -230,6 +232,9 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
         }
         if let Some(t) = node_types.get(i).filter(|t| !t.is_empty()) {
             c.groups.push(t.clone());
+        }
+        if let Some(g) = node_groups.get(i).filter(|g| !g.is_empty()) {
+            c.groups.push(g.clone());
         }
         scene.materials.entry(mat.to_string()).or_insert_with(|| material_preset(mat));
         chunks.push(c);

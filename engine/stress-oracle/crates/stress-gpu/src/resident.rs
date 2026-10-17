@@ -329,7 +329,7 @@ pub struct CascadeParams {
     pub gate_flag_base: u32,
     pub bond_words: u32,
     pub certify: u32,
-    pub pad: u32,
+    pub unconverged: u32,
 }
 
 /// First per-island word of the cascade's status record (cascade.slang `ST_ISLANDS`).

@@ -144,10 +144,58 @@ pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scen
         lo.x = surface_lo_x(&scene);
         let mut ram = configure(stress_ref::scenes::ram_at(scene, "ram", lo, hi), seconds);
         ram.name = format!("{name}_ram");
+        let mut bombard = idle.clone();
+        bombard.name = format!("{name}_bombard");
         out.push((idle.name.clone(), idle));
         out.push((ram.name.clone(), ram));
+        out.push((bombard.name.clone(), bombard));
     }
     out
+}
+
+/// vibe-land's `town-bombard` (scripts/perf/suite.json), as close as a pack allows:
+/// cannonballs (10,650 kg steel, 60 m/s) and meteors (2 m, 3,300 kg/m^3, 140 m/s) into
+/// four houses and the cinema, one every 10 frames, aimed `height` above each building's
+/// base from 20 m off its -x side. The suite's places are its city layout's names; the
+/// pack's buildings (`nodeGroups`) stand in for them. `(frame, impactor)`.
+fn bombard_shots(scene: &Scene) -> Vec<(usize, stress_ref::scene::ImpactorDesc)> {
+    use stress_ref::scene::{ImpactorDesc, ImpactorShape};
+    let plan = [("house@house-14", "cannonball", 1.5), ("house@house-18", "meteor", 2.0), ("house@house-25", "cannonball", 1.5), ("cinema@cinema-150", "meteor", 2.0), ("house@house-32", "cannonball", 1.5)];
+    let mut shots = Vec::new();
+    for (k, (group, kind, height)) in plan.iter().enumerate() {
+        let chunks: Vec<&stress_ref::scene::ChunkDesc> = scene.bodies.iter().flat_map(|b| &b.chunks).filter(|c| c.groups.iter().any(|g| g == group)).collect();
+        if chunks.is_empty() {
+            continue;
+        }
+        let n = chunks.len() as f64;
+        let (cx, cy) = (chunks.iter().map(|c| c.center[0]).sum::<f64>() / n, chunks.iter().map(|c| c.center[1]).sum::<f64>() / n);
+        let base = chunks.iter().map(|c| c.center[2]).fold(f64::INFINITY, f64::min);
+        let lo_x = chunks.iter().map(|c| c.center[0]).fold(f64::INFINITY, f64::min);
+        let target = [lo_x, cy, base + height];
+        let _ = cx;
+        let (speed, radius, mass) = if *kind == "meteor" { (140.0, 2.0, 3300.0 * 4.0 / 3.0 * std::f64::consts::PI * 8.0) } else { (60.0, (10650.0 / 7850.0 * 3.0 / (4.0 * std::f64::consts::PI)).cbrt(), 10650.0) };
+        let origin = [target[0] - 20.0, target[1], target[2] + 6.0];
+        let d = [target[0] - origin[0], target[1] - origin[1], target[2] - origin[2]];
+        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let t = dist / speed;
+        let g = -scene.gravity[2];
+        let velocity = [d[0] / t, d[1] / t, d[2] / t + 0.5 * g * t];
+        shots.push((
+            10 * k,
+            ImpactorDesc {
+                name: format!("{kind}{k}"),
+                shape: ImpactorShape::Sphere { radius },
+                mass,
+                position: origin,
+                orientation: [1.0, 0.0, 0.0, 0.0],
+                velocity,
+                angular_velocity: [0.0; 3],
+                material: "projectile".into(),
+                crush: None,
+            },
+        ));
+    }
+    shots
 }
 
 /// The scale set: 256 copies of house-1story, intact or with four of them rammed (the
@@ -264,6 +312,17 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
             panic!("{e}");
         }
     }
+    // STRESS_QS_UNCONVERGED=restore|keep|commit: what an unconverged static solve leaves
+    // (Blast: commit). STRESS_QS_PASSES=n: the frame's cascade passes at most (Blast: 2).
+    match std::env::var("STRESS_QS_UNCONVERGED").as_deref() {
+        Ok("keep") => w.solver.mirror.config.static_unconverged = stress_ref::solver::UnconvergedSolve::KeepIterate,
+        Ok("commit") => w.solver.mirror.config.static_unconverged = stress_ref::solver::UnconvergedSolve::CommitIterate,
+        Ok("restore") | Err(_) => {}
+        Ok(other) => panic!("STRESS_QS_UNCONVERGED={other}: restore, keep or commit"),
+    }
+    if let Some(n) = std::env::var("STRESS_QS_PASSES").ok().and_then(|v| v.parse().ok()) {
+        w.solver.mirror.config.static_passes = Some(n);
+    }
     // STRESS_QS_BUDGET=newton,cg: quasi-static solves within a budget after setup.
     if let Some((n, cg)) = std::env::var("STRESS_QS_BUDGET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
         w.solver.mirror.config.static_budget = Some((n, cg));
@@ -289,7 +348,15 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     }
     // STRESS_BENCH_FRAMES=1: each frame's profile deltas on stderr.
     let per_frame = std::env::var("STRESS_BENCH_FRAMES").is_ok();
+    let shots = if scene.name.ends_with("_bombard") { bombard_shots(scene) } else { Vec::new() };
+    if !shots.is_empty() {
+        w.scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    }
     for f in 0..n {
+        for (_, desc) in shots.iter().filter(|(at, _)| *at == f) {
+            let imp = stress_ref::world::Impactor::from_desc(desc, &w.scene);
+            w.add_impactor(gpu, imp).expect("projectile");
+        }
         let before = w.solver.profile.clone();
         let (splits, replans, tail) = (w.solver.host_splits, w.solver.replans, w.tail_seconds);
         let (prep, refresh, back, seg) = (w.prepare_seconds, w.refresh_seconds, w.write_back_seconds, w.segment_setup_seconds);

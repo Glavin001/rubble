@@ -165,7 +165,7 @@ impl GpuWorld {
         self.prepare_seconds += t_prepare.elapsed().as_secs_f64();
         let tail = std::time::Instant::now();
         let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
-        let max = StaticOptions::default().max_cascade.max(1);
+        let max = self.solver.mirror.config.static_passes.unwrap_or(StaticOptions::default().max_cascade).max(1);
         let mut split = false;
         let mut first = 0;
         let mut unconverged = 0;
@@ -227,15 +227,21 @@ impl GpuWorld {
             };
             // A split: the mirror (state and the engine's motion), split and tables; the
             // cascade goes on from the next pass.
+            let t_split = std::time::Instant::now();
             self.solver.sync(gpu);
             self.resident_sync_motion();
+            let t_synced = t_split.elapsed().as_secs_f64() * 1e3;
             for &ci in out.disconnected.iter().rev() {
                 self.solver.mirror.split_cluster(ci);
             }
+            let t_splits = t_split.elapsed().as_secs_f64() * 1e3;
             if let Some(l) = self.solver.loads.as_mut() {
                 l.topology_version += 1;
             }
             self.solver.rebuild(gpu, 0.0)?;
+            if trace {
+                eprintln!("resident split: {} clusters split, sync {t_synced:.1} ms, split {:.1} ms, rebuild {:.1} ms", out.disconnected.len(), t_splits - t_synced, t_split.elapsed().as_secs_f64() * 1e3 - t_splits);
+            }
             split = true;
             first = at + 1;
             if first >= max {
@@ -252,7 +258,11 @@ impl GpuWorld {
             for cl in &mut self.solver.mirror.clusters {
                 cl.driven = true;
             }
+            let t_wb = std::time::Instant::now();
             self.with_shell_mut(|w| w.coupled_write_back(&[]));
+            if trace {
+                eprintln!("resident split: engine bodies {:.1} ms", t_wb.elapsed().as_secs_f64() * 1e3);
+            }
         }
         self.write_back_seconds += t_back.elapsed().as_secs_f64();
         if trace {

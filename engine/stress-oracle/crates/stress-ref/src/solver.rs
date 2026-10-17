@@ -47,6 +47,18 @@ use crate::structure::{BondData, Structure};
 /// Residual static-fatigue strength factor at which a bond "creaks" ([`SolverEvent::Creaked`]).
 pub const CREAK_STRENGTH: f64 = 0.99;
 
+/// What an unconverged static solve leaves (`SolverConfig::static_unconverged`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnconvergedSolve {
+    /// Its start state; nothing committed.
+    #[default]
+    Restore,
+    /// Its iterate; nothing committed.
+    KeepIterate,
+    /// Its iterate, its damage committed.
+    CommitIterate,
+}
+
 #[derive(Clone, Debug)]
 pub struct SolverConfig {
     pub gravity: Vec3,
@@ -66,6 +78,16 @@ pub struct SolverConfig {
     /// iterations per step), as Blast's solver runs a fixed iteration count: an
     /// unconverged solve keeps its start state. `None`: to convergence (the default).
     pub static_budget: Option<(u32, u32)>,
+    /// What a static solve that ends unconverged leaves (the GPU's resident cascade):
+    /// its start state (the default: nothing committed), or, as Blast's solver does, its
+    /// iterate (the next frame's solve continues from it; Blast's warm start), and with
+    /// `CommitIterate` its damage committed too (Blast publishes and grades unconverged
+    /// answers, `PX_DESTRUCTION_ALLOW_UNCONVERGED`). For the like-for-like comparison.
+    pub static_unconverged: UnconvergedSolve,
+    /// The same frame's cascade of static solves and commits stops after this many
+    /// passes (Blast evaluates at most twice a tick: the trial and one correction).
+    /// `None`: until no damage grows (up to `StaticOptions::max_cascade`).
+    pub static_passes: Option<usize>,
     /// Adaptive mode: relative load change that wakes a settled cluster.
     pub wake_threshold: f64,
     pub features: Features,
@@ -86,6 +108,8 @@ impl SolverConfig {
             active_time: 0.5,
             tiered: false,
             static_budget: None,
+            static_unconverged: UnconvergedSolve::Restore,
+            static_passes: None,
             wake_threshold: 0.02,
             features: scene.sim.features,
             methods: scene.sim.methods,

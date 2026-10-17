@@ -391,6 +391,17 @@ struct Buffers {
     contact_settled: bool,
 }
 
+/// The resident cascade's repeat gate (cascade.slang) for one layout: its buffer, and the
+/// clusters, island ranges and chunks it was made for (entries follow their clusters
+/// across layouts).
+struct CascadeGate {
+    generation: u64,
+    buffer: wgpu::Buffer,
+    ids: Vec<u64>,
+    ranges: Vec<[u32; 4]>,
+    chunks: Vec<(usize, usize)>,
+}
+
 /// Where each GPU chunk and bond lives in the mirror, the probe items by slot, the
 /// contact plan.
 struct Layout {
@@ -551,7 +562,7 @@ pub struct GpuSolver {
     cascade_islands: Option<(u64, wgpu::Buffer)>,
     cascade_status: Option<wgpu::Buffer>,
     /// The repeat gate's loads and flags, by layout generation (cascade.slang).
-    cascade_gate: Option<(u64, wgpu::Buffer)>,
+    cascade_gate: Option<CascadeGate>,
     bond_backup: Option<wgpu::Buffer>,
     pub stopped_at_plan: bool,
     pub profile: Profile,
@@ -797,13 +808,25 @@ impl GpuSolver {
         if m.config.mode == SolveMode::Implicit {
             return Err("the implicit solve mode is not on the GPU yet".into());
         }
+        let prof = std::env::var("STRESS_GPU_BUILD_PROFILE").is_ok();
+        let t_build = std::time::Instant::now();
+        let mut t_last = 0.0f64;
+        let mut mark = |what: &str| {
+            if prof {
+                let now = t_build.elapsed().as_secs_f64() * 1e3;
+                eprintln!("build {what}: {:.1} ms", now - t_last);
+                t_last = now;
+            }
+        };
         let (mut terms, items) = match loads {
             Some(ref mut l) => (l.terms(m, m.time), l.probe_items(m)),
             None => (Vec::new(), Vec::new()),
         };
+        mark("terms");
         let scene: Option<&Scene> = loads.as_deref().map(|l| &l.scene);
         terms.extend_from_slice(extra_terms);
         let StructureTables { chunk_index, chunks, mut chunk_static, state, mut islands, table, bonds, bond_index, bond_static, bond_dyn, csr } = stress_layout::pack_with(m, &m.clusters.iter().map(|cl| excluded.binary_search(&cl.id).is_ok()).collect::<Vec<_>>())?;
+        mark("pack");
         let n = chunks.len();
 
         // Load terms by GPU chunk (stable: the reference's order within a chunk), then
@@ -884,6 +907,7 @@ impl GpuSolver {
             packed.push([0.0; 4]);
         }
 
+        mark("loads+probes+hulls");
         // ---------------------------------------------------------------- contacts
         let plan = match &scene {
             Some(scene) if horizon > 0.0 && (m.clusters.len() > 1 || !impactors.is_empty() || scene.ground.is_some()) => plan(scene, m, impactors, &chunks, horizon),
@@ -942,7 +966,7 @@ impl GpuSolver {
         // Each chunk's contact plan, for the scratch (`cplan_base`).
         let mut chunk_plan = vec![[[0f32; 4]; 4]; chunks.len()];
         // Contact modulus and friction by material name (looked up once per name).
-        let mut contact_material: Vec<(&str, (f64, f64))> = Vec::new();
+        let mut contact_material: HashMap<&str, (f64, f64)> = HashMap::new();
         for (k, &(s, c)) in chunks.iter().enumerate() {
             let ci = m.chunks[s][c].cluster;
             let data = &m.structures[s].chunks[c];
@@ -954,14 +978,7 @@ impl GpuSolver {
                 segments.extend([k as u32, entries + at as u32, entries + end as u32]);
             }
             let (e, mu) = match &scene {
-                Some(scene) => match contact_material.iter().find(|(name, _)| *name == data.material.as_str()) {
-                    Some(&(_, em)) => em,
-                    None => {
-                        let em = (modulus(scene, &data.material), scene.material(&data.material).friction);
-                        contact_material.push((data.material.as_str(), em));
-                        em
-                    }
-                },
+                Some(scene) => *contact_material.entry(data.material.as_str()).or_insert_with(|| (modulus(scene, &data.material), scene.material(&data.material).friction)),
                 None => (1.0, 0.0),
             };
             let (start_hi, start_lo) = split(m.chunk_position(s, c));
@@ -995,6 +1012,7 @@ impl GpuSolver {
             let biggest = islands.iter().map(|isl| isl.range[1] - isl.range[0]).max().unwrap_or(0);
             eprintln!("contacts: {} pairs, longest chunk list {per_chunk}, busiest island {per_island} entries, biggest island {biggest} chunks, {} islands", plan.pairs.len(), islands.len());
         }
+        mark("contact tables");
         let mut cstate: Vec<[f32; 4]> = Vec::with_capacity(state_len as usize);
         let mut remembered = Vec::new();
         for (i, (key, ..)) in plan.pairs.iter().enumerate() {
@@ -1196,6 +1214,7 @@ impl GpuSolver {
             ..Default::default()
         };
 
+        mark("impactors+wide+params");
         let params_segment = gpu.uniform("params segment", &params);
         let params_contact = gpu.uniform("params contact", &params);
         // A re-plan (same topology) keeps the GPU's chunk state, bond history and static
@@ -1281,6 +1300,7 @@ impl GpuSolver {
         };
         let bind_segment = bind(&params_segment);
         let bind_contact = bind(&params_contact);
+        mark("buffers");
         Ok((
             Layout { chunks, bonds, islands, items: layout_items, plan, pair_state, gpu_impactors },
             Buffers {
@@ -2530,10 +2550,33 @@ impl GpuSolver {
         // Newton step at f32's floor) instead of certified (cascade.slang).
         let certify = gate_on && std::env::var("STRESS_QS_CERTIFY").map_or(true, |v| v != "0");
         let n_chunks = self.layout.chunks.len();
-        if self.cascade_gate.as_ref().is_none_or(|(g, _)| *g != generation) {
-            self.cascade_gate = Some((generation, gpu.storage("cascade gate", &vec![[0f32; 4]; 2 * n_chunks + n_islands + 1])));
+        if self.cascade_gate.as_ref().is_none_or(|g| g.generation != generation) {
+            // A new layout (a split, a rebuild): every island whose cluster kept its chunks
+            // keeps its gate entry (its loads, chunk states and bond records are where they
+            // were: the tables were rebuilt from the synced mirror).
+            let buffer = gpu.storage("cascade gate", &vec![[0f32; 4]; 2 * n_chunks + n_islands + 1]);
+            let ids: Vec<u64> = self.mirror.clusters.iter().map(|c| c.id).collect();
+            let carry = std::env::var("STRESS_QS_GATE_CARRY").map_or(true, |v| v != "0");
+            if let Some(old) = self.cascade_gate.take().filter(|_| carry) {
+                let at: HashMap<u64, usize> = old.ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                for (i, isl) in self.layout.islands.iter().enumerate() {
+                    let Some(&j) = at.get(&ids[i]) else { continue };
+                    let (r, q) = (isl.range, old.ranges[j]);
+                    let (new_chunks, old_chunks) = (&self.layout.chunks[r[0] as usize..r[1] as usize], &old.chunks[q[0] as usize..q[1] as usize]);
+                    if new_chunks != old_chunks || r[3] - r[2] != q[3] - q[2] {
+                        continue;
+                    }
+                    if r[1] > r[0] {
+                        encoder.copy_buffer_to_buffer(&old.buffer, 16 * 2 * q[0] as u64, &buffer, 16 * 2 * r[0] as u64, 16 * 2 * (r[1] - r[0]) as u64);
+                    }
+                    encoder.copy_buffer_to_buffer(&old.buffer, 16 * (2 * old.chunks.len() + j) as u64, &buffer, 16 * (2 * n_chunks + i) as u64, 16);
+                }
+                gpu.queue.submit([encoder.finish()]);
+            }
+            self.cascade_gate = Some(CascadeGate { generation, buffer, ids, ranges: self.layout.islands.iter().map(|i| i.range).collect(), chunks: self.layout.chunks.clone() });
         }
-        let gate = self.cascade_gate.as_ref().expect("cascade gate").1.clone();
+        let gate = self.cascade_gate.as_ref().expect("cascade gate").buffer.clone();
         let bond_bytes = self.buffers.bond_dyn.size();
         if self.bond_backup.as_ref().is_none_or(|b| b.size() != bond_bytes) {
             self.bond_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("bond backup"), size: bond_bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
@@ -2567,7 +2610,11 @@ impl GpuSolver {
                     gate_flag_base: 2 * n_chunks as u32,
                     bond_words: (std::mem::size_of::<BondDyn>() / 16) as u32,
                     certify: certify as u32,
-                    pad: 0,
+                    unconverged: match self.mirror.config.static_unconverged {
+                        stress_ref::solver::UnconvergedSolve::Restore => 0,
+                        stress_ref::solver::UnconvergedSolve::KeepIterate => 1,
+                        stress_ref::solver::UnconvergedSolve::CommitIterate => 2,
+                    },
                 },
             );
             let bind = gpu.bind(&kernels.begin.group, &[&cp, &self.buffers.islands, &self.buffers.scratch, &self.buffers.state, &backup, &status, &gate, &self.buffers.bond_dyn, &bond_backup]);

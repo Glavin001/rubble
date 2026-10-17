@@ -302,9 +302,28 @@ your call; the rest need building.
       - Matched Vibe Town idle: **55–60 → 9.7 ms median**, with 263 of 284 clusters at
         fixed points. Broken bonds are unchanged (493) and here even the digest is
         unchanged.
-      - Next, Blast's remaining behaviours as switches: committing unconverged iterates
-        (`ALLOW_UNCONVERGED`), at most two evaluations a tick, and a 16-iteration
-        warm-started budget.
+    - **Blast's per-tick behaviour as configuration** (`SolverConfig`, off by default):
+      - `static_unconverged` (`STRESS_QS_UNCONVERGED=keep|commit`): keep an unconverged
+        iterate (Blast's warm start), or keep it and commit its damage (Blast's
+        `ALLOW_UNCONVERGED`);
+      - `static_passes` (`STRESS_QS_PASSES=2`): at most two evaluations a frame.
+
+      Used with `STRESS_QS_BUDGET=1,32` and `STRESS_GPU_STATICS_TOL=1e-3`.
+    - **Vibe Town bombard** (`vibe-town_bombard`): vibe-land's town-bombard as close as
+      the pack allows. Cannonballs (10,650 kg at 60 m/s) and meteors (2 m at 140 m/s)
+      are fired at four houses and the cinema, one every 10 frames.
+      - Matched configuration with Blast's per-tick behaviour, after the warm-up:
+        **median 21–37 ms, split frames 130–225 ms**. 3,157 bonds break, against
+        Blast's 638.
+      - Blast's numbers for comparison (its whole server tick): median 11.4 ms, p95 15.3,
+        worst 35.5.
+      - Split frames were 1.3–2.5 s until a quadratic contact-material lookup in `build`
+        became a hash map (lossless).
+      - A split frame is now: the mirror sync (12–31 ms), the rebuild (~50 ms), and the
+        new clusters' first solves (~100 ms). The repeat gate now carries over
+        rebuilds; this is lossless.
+      - Next: splits on the GPU (phase 6e), and the static solve's latency on the
+        struck clusters.
 12c. **Quasi-static frames at scale** (fractured downtown, authored, 34 ms): two full layout builds per frame (~6.5 ms each: pack 1.8, terms 1.5, uploads 2.8), the tail's solves of the 7 fatigue-active buildings, and the write-back; then item 11.
 12b. **Static solves in the tiered coupling:** the budget is a per-frame cost bound
     (Blast's choice); a warm-started multigrid (item 10) would converge within it.

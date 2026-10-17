@@ -25,7 +25,7 @@ struct CascadeParams
     uint gate_flag_base; // gate: per island, x = 1 while its stored loads are an unconverged solve's, 2 a fixed point's
     uint bond_words;    // float4 per bond record (world.slang `BondDyn`)
     uint certify;       // 1: a converged solve's repeat counts as converged (bit 6)
-    uint pad2;
+    uint unconverged;   // an unconverged solve: 0 restored, 1 its iterate kept, 2 kept and committed (SolverConfig::static_unconverged)
 };
 
 // Status record (uint words): 0 the next pass runs, 1 a bond disconnected (pass + 1),
@@ -112,6 +112,13 @@ void cascade_restore(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             status[ST_ISLANDS + i] = s | 2u;
             gate[params.gate_flag_base + i] = float4(params.certify != 0 ? 3.0 : 0.0, 0.0, 0.0, 0.0);
         }
+        return;
+    }
+    if (params.unconverged != 0)
+    {
+        // Its iterate kept (Blast's warm start): no repeat of it stands.
+        if (thread.x == 0)
+            gate[params.gate_flag_base + i] = float4(0.0);
         return;
     }
     for (uint k = 4 * isl.range.x + thread.x; k < 4 * isl.range.y; k += 64)
@@ -204,7 +211,9 @@ void cascade_settle(uint3 id: SV_DispatchThreadID)
     Island isl = islands[i];
     isl.info.x &= ~ISLAND_SETTLED;
     isl.info.z &= ~(ISLAND_DAMAGED | ISLAND_DISCONNECTED);
-    if (status[ST_RUN] != 0 && (s & 3u) == 3u)
+    // Committed: the converged solves, and with `unconverged` 2 every solve (Blast's
+    // unconverged answers graded).
+    if (status[ST_RUN] != 0 && ((s & 3u) == 3u || (params.unconverged == 2 && (s & 1u) != 0)))
         isl.info.x |= ISLAND_SETTLED;
     islands[i] = isl;
 }
@@ -237,7 +246,8 @@ void cascade_end(uint3 thread: SV_GroupThreadID)
         if ((s & 2u) == 0)
         {
             unconverged++;
-            continue;
+            if (params.unconverged != 2)
+                continue;
         }
         uint z = islands[i].info.z;
         uint add = 0;
