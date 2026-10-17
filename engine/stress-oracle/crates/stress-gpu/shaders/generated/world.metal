@@ -3788,7 +3788,7 @@ void island_frame_at_0(uint gi_0, uint tid_4, KernelContext_0 thread* kernelCont
                 contact_segment_0(c_17, kernelContext_39);
                 c_17 = c_17 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S583;
         if(settled_0)
@@ -3924,7 +3924,7 @@ void island_frame_at_0(uint gi_0, uint tid_4, KernelContext_0 thread* kernelCont
                     *kernelContext_39->g_halt_0 = 1U;
                 }
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             c_17 = (&isl_9)->range_0.x + ct_1;
             for(;;)
             {
@@ -3940,7 +3940,7 @@ void island_frame_at_0(uint gi_0, uint tid_4, KernelContext_0 thread* kernelCont
                 chunk_update_0(c_17, &_S594, &_S595, _S576, _S578, k_12, contact_island_0, &work_2, &work_err_1, kernelContext_39);
                 c_17 = c_17 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         if(_S569)
         {
@@ -4022,7 +4022,7 @@ void island_frame_at_0(uint gi_0, uint tid_4, KernelContext_0 thread* kernelCont
                 thread Island_0 _S600 = isl_9;
                 drift_rigid_0(&_S600, &rg_7, tr_3, phi_3, dv_3, dw_2);
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S601;
         if(_S571)
@@ -4238,7 +4238,7 @@ void island_frame_at_0(uint gi_0, uint tid_4, KernelContext_0 thread* kernelCont
     }
     if(contact_island_0)
     {
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         if(done_1 > 0U)
         {
             c_17 = (&isl_9)->range_0.x + ct_1;
@@ -4466,7 +4466,7 @@ void island_frame_at_1(uint gi_1, uint tid_5, KernelContext_0 thread* kernelCont
                 contact_segment_0(c_20, kernelContext_40);
                 c_20 = c_20 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S655;
         if(settled_1)
@@ -4579,7 +4579,7 @@ void island_frame_at_1(uint gi_1, uint tid_5, KernelContext_0 thread* kernelCont
             {
                 *kernelContext_40->g_halt_0 = 1U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             c_20 = (&isl_10)->range_0.x + ct_2;
             for(;;)
             {
@@ -4595,7 +4595,7 @@ void island_frame_at_1(uint gi_1, uint tid_5, KernelContext_0 thread* kernelCont
                 chunk_update_0(c_20, &_S665, &_S666, _S649, _S650, k_13, contact_island_1, &work_3, &work_err_2, kernelContext_40);
                 c_20 = c_20 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         if(_S642)
         {
@@ -4677,7 +4677,7 @@ void island_frame_at_1(uint gi_1, uint tid_5, KernelContext_0 thread* kernelCont
                 thread Island_0 _S671 = isl_10;
                 drift_rigid_0(&_S671, &rg_8, tr_4, phi_4, dv_4, dw_3);
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S672;
         if(_S644)
@@ -4893,7 +4893,7 @@ void island_frame_at_1(uint gi_1, uint tid_5, KernelContext_0 thread* kernelCont
     }
     if(contact_island_1)
     {
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         if(done_2 > 0U)
         {
             c_20 = (&isl_10)->range_0.x + ct_2;
@@ -5183,7 +5183,7 @@ void island_frame_at_2(uint gi_2, uint tid_6, KernelContext_0 thread* kernelCont
             {
                 *kernelContext_41->g_halt_0 = 1U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             c_23 = (&isl_11)->range_0.x + ct_3;
             for(;;)
             {
@@ -5199,7 +5199,7 @@ void island_frame_at_2(uint gi_2, uint tid_6, KernelContext_0 thread* kernelCont
                 chunk_update_0(c_23, &_S732, &_S733, _S718, _S719, k_14, contact_island_2, &work_4, &work_err_3, kernelContext_41);
                 c_23 = c_23 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         if(_S713)
         {
@@ -5281,7 +5281,7 @@ void island_frame_at_2(uint gi_2, uint tid_6, KernelContext_0 thread* kernelCont
                 thread Island_0 _S738 = isl_11;
                 drift_rigid_0(&_S738, &rg_9, tr_5, phi_5, dv_5, dw_4);
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S739;
         if(_S715)
@@ -5774,7 +5774,7 @@ void island_frame_at_3(uint gi_3, uint tid_7, KernelContext_0 thread* kernelCont
                 }
                 c_26 = c_26 + 512U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             c_27 = (&isl_12)->range_0.x + ct_4;
             for(;;)
             {
@@ -5790,7 +5790,7 @@ void island_frame_at_3(uint gi_3, uint tid_7, KernelContext_0 thread* kernelCont
                 chunk_update_0(c_27, &_S800, &_S801, _S785, _S787, k_15, contact_island_3, &work_5, &work_err_4, kernelContext_42);
                 c_27 = c_27 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S802;
         if(_S780)
@@ -5873,7 +5873,7 @@ void island_frame_at_3(uint gi_3, uint tid_7, KernelContext_0 thread* kernelCont
                 thread Island_0 _S807 = isl_12;
                 drift_rigid_0(&_S807, &rg_10, tr_6, phi_6, dv_6, dw_5);
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S808;
         if(_S782)
@@ -6366,7 +6366,7 @@ void island_frame_at_4(uint gi_4, uint tid_8, KernelContext_0 thread* kernelCont
                 }
                 c_29 = c_29 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             c_30 = (&isl_13)->range_0.x + ct_5;
             for(;;)
             {
@@ -6382,7 +6382,7 @@ void island_frame_at_4(uint gi_4, uint tid_8, KernelContext_0 thread* kernelCont
                 chunk_update_0(c_30, &_S869, &_S870, _S854, _S856, k_16, contact_island_4, &work_6, &work_err_5, kernelContext_43);
                 c_30 = c_30 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S871;
         if(_S849)
@@ -6465,7 +6465,7 @@ void island_frame_at_4(uint gi_4, uint tid_8, KernelContext_0 thread* kernelCont
                 thread Island_0 _S876 = isl_13;
                 drift_rigid_0(&_S876, &rg_11, tr_7, phi_7, dv_7, dw_6);
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         }
         bool _S877;
         if(_S851)
@@ -9607,7 +9607,7 @@ void project_load_slot_0(uint tid_19, const Island_natural_0 thread* isl_29, uin
         *(kernelContext_83->scratch_0+_S1401) = packed_float4(float4((float4(*(kernelContext_83->scratch_0+_S1401)) ).xyz - rows_mul_0(float4(_S1398->inertia0_1) , float4(_S1398->inertia1_1) , float4(_S1398->inertia2_1) , _S1397), 0.0f)) ;
         c_39 = c_39 + 256U;
     }
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     return;
 }
 
@@ -10349,7 +10349,7 @@ void project_displacement_slot_0(uint tid_21, const Island_natural_0 thread* isl
         *(kernelContext_95->scratch_0+_S1480) = packed_float4(float4((float4(*(kernelContext_95->scratch_0+_S1480)) ).xyz - _S1478, 0.0f)) ;
         c_48 = c_48 + 256U;
     }
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     return;
 }
 
@@ -10458,7 +10458,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
         *((&kernelContext_99)->scratch_0+_S1512) = _S1511;
         c_50 = c_50 + 256U;
     }
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     if(free_0)
     {
         project_load_slot_0(tid_22, &_S1501, 0U, &kernelContext_99);
@@ -10497,7 +10497,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
             write_bond_loads_0(i_20, i_20, _S1518.force_lin_1, _S1518.force_ang_1, 0.0f, &kernelContext_99);
             i_20 = i_20 + 256U;
         }
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         float4 _S1519 = float4(0.0f) ;
         thread float4 magnitude_0 = _S1519;
         thread float4 unused_m_0 = _S1519;
@@ -10528,7 +10528,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
             *((&kernelContext_99)->scratch_0+_S1525) = packed_float4(r_ang_0) ;
             c_50 = c_50 + 256U;
         }
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         group_sum2_0(tid_22, &magnitude_0, &unused_m_0, &kernelContext_99);
         if(free_0)
         {
@@ -10612,7 +10612,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
             *((&kernelContext_99)->scratch_0+(_S1534 + 1U)) = packed_float4(float4(_S1533.z * f_ang_2.x, _S1533.w * f_ang_2.y, (float4((&_S1531)->stiff1_0) ).x * f_ang_2.z, 0.0f)) ;
             i_21 = i_21 + 256U;
         }
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         uint c_51 = _S1506;
         for(;;)
         {
@@ -10631,7 +10631,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
             *((&kernelContext_99)->scratch_0+_S1538) = _S1537;
             c_51 = c_51 + 256U;
         }
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         uint c_52 = _S1506;
         for(;;)
         {
@@ -10645,7 +10645,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
             precondition_0(c_52, &kernelContext_99);
             c_52 = c_52 + 256U;
         }
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         if(free_0)
         {
             project_displacement_slot_0(tid_22, &_S1501, 6U, &kernelContext_99);
@@ -10670,7 +10670,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
             *_S1543 = packed_float4(float4(*((&kernelContext_99)->scratch_0+_S1544)) ) ;
             c_53 = c_53 + 256U;
         }
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         float _S1545 = island_dot_0(tid_22, c0_1, c1_1, 4U, 6U, &kernelContext_99);
         float _S1546 = island_dot_0(tid_22, c0_1, c1_1, 4U, 4U, &kernelContext_99);
         float _S1547 = sqrt(_S1546);
@@ -10722,7 +10722,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
                 write_bond_loads_0(i_22, i_22, d_lin_7 * (float4(*((&kernelContext_99)->scratch_0+_S1556)) ).xyz, d_ang_6 * (float4(*((&kernelContext_99)->scratch_0+(_S1556 + 1U))) ).xyz, 0.0f, &kernelContext_99);
                 i_22 = i_22 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             c_49 = _S1506;
             for(;;)
             {
@@ -10749,7 +10749,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
                 *((&kernelContext_99)->scratch_0+_S1562) = packed_float4(ap_ang_0) ;
                 c_49 = c_49 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             float _S1563 = island_dot_0(tid_22, c0_1, c1_1, 8U, 10U, &kernelContext_99);
             uint _S1564 = cg_total_1 + 1U;
             if(_S1563 <= 0.0f)
@@ -10791,7 +10791,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
                 *_S1580 = packed_float4(float4(_S1581 - _S1570 * (float4(*((&kernelContext_99)->scratch_0+_S1582)) ).xyz, 0.0f)) ;
                 c_54 = c_54 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             float _S1583 = island_dot_0(tid_22, c0_1, c1_1, 4U, 4U, &kernelContext_99);
             if((sqrt(_S1583)) <= (0.00009999999747379f * _S1547))
             {
@@ -10811,7 +10811,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
                 precondition_0(c_55, &kernelContext_99);
                 c_55 = c_55 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             if(free_0)
             {
                 project_displacement_slot_0(tid_22, &_S1501, 6U, &kernelContext_99);
@@ -10839,7 +10839,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
                 *_S1591 = packed_float4(float4((float4(*((&kernelContext_99)->scratch_0+_S1592)) ).xyz + _S1589 * (float4(*((&kernelContext_99)->scratch_0+_S1590)) ).xyz, 0.0f)) ;
                 c_56 = c_56 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             uint _S1593 = k_25 + 1U;
             rz_0 = _S1584;
             k_25 = _S1593;
@@ -10873,7 +10873,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
             *((&kernelContext_99)->scratch_0+_S1597) = packed_float4(float4(th_lo_0, 0.0f)) ;
             c_49 = c_49 + 256U;
         }
-        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         uint _S1600 = newton_0 + 1U;
         previous_2 = residual_1;
         residual_0 = residual_1;
@@ -10915,7 +10915,7 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
         write_bond_loads_0(i_20, i_20, _S1601.force_lin_1, _S1601.force_ang_1, max(_S1601.measures_0.tension_0, _S1601.measures_0.compression_0), &kernelContext_99);
         i_20 = i_20 + 256U;
     }
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     c_50 = _S1506;
     for(;;)
     {

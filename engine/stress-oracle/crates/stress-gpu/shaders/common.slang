@@ -309,3 +309,18 @@ public void comp_add1(inout float sum, inout float err, float x)
         err += (x - t) + sum;
     sum = t;
 }
+
+// A group barrier over device and threadgroup memory (`AllMemoryBarrierWithGroupSync`
+// without its texture and imageblock fences, which Metal otherwise adds and these kernels
+// never need: the same ordering of every buffer they use, at about half the cost of the
+// static solve's barriers).
+public void device_group_barrier()
+{
+    __target_switch
+    {
+    case metal:
+        __intrinsic_asm "threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup)";
+    default:
+        AllMemoryBarrierWithGroupSync();
+    }
+}

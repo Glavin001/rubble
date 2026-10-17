@@ -841,6 +841,12 @@ fn contact_segment_0( g_1 : u32)
     return;
 }
 
+fn device_group_barrier_0()
+{
+    storageBarrier(); textureBarrier(); workgroupBarrier();;
+    return;
+}
+
 fn time_since_0( origin_0 : vec4<f32>,  k_4 : u32,  dt_2 : f32) -> f32
 {
     return params_0.t_hi_0 - origin_0.x + (params_0.t_lo_0 - origin_0.y) + f32(k_4) * dt_2;
@@ -3828,7 +3834,7 @@ fn island_frame_at_0( gi_0 : u32,  tid_4 : u32)
                 contact_segment_0(c_16);
                 c_16 = c_16 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S344 : bool;
         if(settled_0)
@@ -3960,7 +3966,7 @@ fn island_frame_at_0( gi_0 : u32,  tid_4 : u32)
                     g_halt_0 = u32(1);
                 }
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             c_16 = isl_9.range_0.x + ct_1;
             loop
             {
@@ -3974,7 +3980,7 @@ fn island_frame_at_0( gi_0 : u32,  tid_4 : u32)
                 chunk_update_0(c_16, isl_9, rg_7, _S339, _S341, k_12, contact_island_0, &(work_2), &(work_err_1));
                 c_16 = c_16 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         if(_S334)
         {
@@ -4054,7 +4060,7 @@ fn island_frame_at_0( gi_0 : u32,  tid_4 : u32)
             {
                 drift_rigid_0(isl_9, &(rg_7), tr_3, phi_3, dv_3, dw_2);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S354 : bool;
         if(_S336)
@@ -4264,7 +4270,7 @@ fn island_frame_at_0( gi_0 : u32,  tid_4 : u32)
     }
     if(contact_island_0)
     {
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         if(done_1 > u32(0))
         {
             c_16 = isl_9.range_0.x + ct_1;
@@ -4463,7 +4469,7 @@ fn island_frame_at_1( gi_1 : u32,  tid_5 : u32)
                 contact_segment_0(c_19);
                 c_19 = c_19 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S374 : bool;
         if(settled_1)
@@ -4572,7 +4578,7 @@ fn island_frame_at_1( gi_1 : u32,  tid_5 : u32)
             {
                 g_halt_0 = u32(1);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             c_19 = isl_10.range_0.x + ct_2;
             loop
             {
@@ -4586,7 +4592,7 @@ fn island_frame_at_1( gi_1 : u32,  tid_5 : u32)
                 chunk_update_0(c_19, isl_10, rg_8, _S370, _S371, k_13, contact_island_1, &(work_3), &(work_err_2));
                 c_19 = c_19 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         if(_S365)
         {
@@ -4666,7 +4672,7 @@ fn island_frame_at_1( gi_1 : u32,  tid_5 : u32)
             {
                 drift_rigid_0(isl_10, &(rg_8), tr_4, phi_4, dv_4, dw_3);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S383 : bool;
         if(_S367)
@@ -4876,7 +4882,7 @@ fn island_frame_at_1( gi_1 : u32,  tid_5 : u32)
     }
     if(contact_island_1)
     {
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         if(done_2 > u32(0))
         {
             c_19 = isl_10.range_0.x + ct_2;
@@ -5417,7 +5423,7 @@ fn island_frame_at_2( gi_2 : u32,  tid_7 : u32)
             {
                 g_halt_0 = u32(1);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             c_26 = isl_16.range_0.x + ct_3;
             loop
             {
@@ -5431,7 +5437,7 @@ fn island_frame_at_2( gi_2 : u32,  tid_7 : u32)
                 chunk_update_1(c_26, isl_16, rg_14, _S446, _S447, k_15, contact_island_2, &(work_5), &(work_err_4));
                 c_26 = c_26 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         if(_S443)
         {
@@ -5511,7 +5517,7 @@ fn island_frame_at_2( gi_2 : u32,  tid_7 : u32)
             {
                 drift_rigid_1(isl_16, &(rg_14), tr_7, phi_6, dv_7, dw_5);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S457 : bool;
         if(_S445)
@@ -5966,7 +5972,7 @@ fn island_frame_at_3( gi_3 : u32,  tid_8 : u32)
                 }
                 c_29 = c_29 + u32(512);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             c_30 = isl_17.range_0.x + ct_4;
             loop
             {
@@ -5980,7 +5986,7 @@ fn island_frame_at_3( gi_3 : u32,  tid_8 : u32)
                 chunk_update_0(c_30, isl_17, rg_15, _S471, _S473, k_16, contact_island_3, &(work_6), &(work_err_5));
                 c_30 = c_30 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S480 : bool;
         if(_S468)
@@ -6061,7 +6067,7 @@ fn island_frame_at_3( gi_3 : u32,  tid_8 : u32)
             {
                 drift_rigid_0(isl_17, &(rg_15), tr_8, phi_7, dv_8, dw_6);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S484 : bool;
         if(_S470)
@@ -6516,7 +6522,7 @@ fn island_frame_at_4( gi_4 : u32,  tid_9 : u32)
                 }
                 c_32 = c_32 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             c_33 = isl_18.range_0.x + ct_5;
             loop
             {
@@ -6530,7 +6536,7 @@ fn island_frame_at_4( gi_4 : u32,  tid_9 : u32)
                 chunk_update_1(c_33, isl_18, rg_16, _S498, _S500, k_17, contact_island_4, &(work_7), &(work_err_6));
                 c_33 = c_33 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S507 : bool;
         if(_S495)
@@ -6611,7 +6617,7 @@ fn island_frame_at_4( gi_4 : u32,  tid_9 : u32)
             {
                 drift_rigid_1(isl_18, &(rg_16), tr_9, phi_8, dv_9, dw_7);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
         }
         var _S511 : bool;
         if(_S497)
@@ -9863,7 +9869,7 @@ fn project_load_slot_0( tid_26 : u32,  isl_40 : ptr<function, Island_std430_0>, 
         scratch_0[_S831] = vec4<f32>(scratch_0[_S831].xyz - rows_mul_0(chunks_0[c_44].inertia0_1, chunks_0[c_44].inertia1_1, chunks_0[c_44].inertia2_1, _S829), 0.0f);
         c_44 = c_44 + u32(256);
     }
-    storageBarrier(); textureBarrier(); workgroupBarrier();;
+    device_group_barrier_0();
     return;
 }
 
@@ -12073,7 +12079,7 @@ fn project_displacement_slot_0( tid_28 : u32,  isl_41 : ptr<function, Island_std
         scratch_0[_S1010] = vec4<f32>(scratch_0[_S1010].xyz - _S1008, 0.0f);
         c_54 = c_54 + u32(256);
     }
-    storageBarrier(); textureBarrier(); workgroupBarrier();;
+    device_group_barrier_0();
     return;
 }
 
@@ -12156,7 +12162,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
         scratch_0[sv_0(c_56, u32(22))] = _S1042;
         c_56 = c_56 + u32(256);
     }
-    storageBarrier(); textureBarrier(); workgroupBarrier();;
+    device_group_barrier_0();
     if(free_0)
     {
         project_load_slot_0(tid_29, &(_S1036), u32(0));
@@ -12195,7 +12201,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
             write_bond_loads_0(i_21, i_21, resp_3.force_lin_1, resp_3.force_ang_1, 0.0f);
             i_21 = i_21 + u32(256);
         }
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         var _S1048 : vec4<f32> = vec4<f32>(0.0f);
         var magnitude_0 : vec4<f32> = _S1048;
         var unused_m_0 : vec4<f32> = _S1048;
@@ -12220,7 +12226,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
             scratch_0[sv_0(c_56, u32(5))] = r_ang_0;
             c_56 = c_56 + u32(256);
         }
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         group_sum2_1(tid_29, &(magnitude_0), &(unused_m_0));
         if(free_0)
         {
@@ -12302,7 +12308,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
             scratch_0[_S1055 + u32(1)] = vec4<f32>(_S1053.stiff0_0.z * f_ang_3.x, _S1053.stiff0_0.w * f_ang_3.y, _S1053.stiff1_0.x * f_ang_3.z, 0.0f);
             i_22 = i_22 + u32(256);
         }
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         var c_57 : u32 = _S1040;
         loop
         {
@@ -12318,7 +12324,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
             scratch_0[sv_0(c_57, u32(3))] = _S1048;
             c_57 = c_57 + u32(256);
         }
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         var c_58 : u32 = _S1040;
         loop
         {
@@ -12332,7 +12338,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
             precondition_0(c_58);
             c_58 = c_58 + u32(256);
         }
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         if(free_0)
         {
             project_displacement_slot_0(tid_29, &(_S1036), u32(6));
@@ -12351,7 +12357,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
             scratch_0[sv_0(c_59, u32(9))] = scratch_0[sv_0(c_59, u32(7))];
             c_59 = c_59 + u32(256);
         }
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         var _S1057 : f32 = island_dot_0(tid_29, c0_1, c1_1, u32(4), u32(6));
         var _S1058 : f32 = island_dot_0(tid_29, c0_1, c1_1, u32(4), u32(4));
         var _S1059 : f32 = sqrt(_S1058);
@@ -12395,7 +12401,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
                 write_bond_loads_0(i_23, i_23, d_lin_13 * scratch_0[_S1060].xyz, d_ang_11 * scratch_0[_S1060 + u32(1)].xyz, 0.0f);
                 i_23 = i_23 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             c_55 = _S1040;
             loop
             {
@@ -12416,7 +12422,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
                 scratch_0[sv_0(c_55, u32(11))] = ap_ang_0;
                 c_55 = c_55 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             var pap_0 : f32 = island_dot_0(tid_29, c0_1, c1_1, u32(8), u32(10));
             var _S1061 : u32 = cg_total_1 + u32(1);
             if(pap_0 <= 0.0f)
@@ -12446,7 +12452,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
                 scratch_0[_S1067] = vec4<f32>(scratch_0[_S1067].xyz - _S1064 * scratch_0[sv_0(c_60, u32(11))].xyz, 0.0f);
                 c_60 = c_60 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             var _S1068 : f32 = island_dot_0(tid_29, c0_1, c1_1, u32(4), u32(4));
             if((sqrt(_S1068)) <= (0.00009999999747379f * _S1059))
             {
@@ -12466,7 +12472,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
                 precondition_0(c_61);
                 c_61 = c_61 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             if(free_0)
             {
                 project_displacement_slot_0(tid_29, &(_S1036), u32(6));
@@ -12490,7 +12496,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
                 scratch_0[_S1072] = vec4<f32>(scratch_0[sv_0(c_62, u32(7))].xyz + _S1071 * scratch_0[_S1072].xyz, 0.0f);
                 c_62 = c_62 + u32(256);
             }
-            storageBarrier(); textureBarrier(); workgroupBarrier();;
+            device_group_barrier_0();
             var _S1073 : u32 = k_30 + u32(1);
             rz_0 = rz_new_0;
             k_30 = _S1073;
@@ -12522,7 +12528,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
             scratch_0[_S1077] = vec4<f32>(th_lo_0, 0.0f);
             c_55 = c_55 + u32(256);
         }
-        storageBarrier(); textureBarrier(); workgroupBarrier();;
+        device_group_barrier_0();
         var _S1078 : u32 = newton_0 + u32(1);
         previous_1 = residual_1;
         residual_0 = residual_1;
@@ -12577,7 +12583,7 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
         write_bond_loads_0(i_21, i_21, resp_4.force_lin_1, resp_4.force_ang_1, max(resp_4.measures_0.tension_0, resp_4.measures_0.compression_0));
         i_21 = i_21 + u32(256);
     }
-    storageBarrier(); textureBarrier(); workgroupBarrier();;
+    device_group_barrier_0();
     c_56 = _S1040;
     loop
     {

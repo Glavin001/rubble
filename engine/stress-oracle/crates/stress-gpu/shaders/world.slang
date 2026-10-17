@@ -2053,7 +2053,7 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
             uint g1 = chunks[isl.range.y - 1].cinfo.y;
             for (uint g = chunks[isl.range.x].cinfo.x + ct; g < g1; g += THREADS)
                 contact_segment(g);
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
         }
         // 0. A settled island (world.rs `wake_loaded_clusters`): its loads recorded;
         // it wakes, and takes this substep explicitly, when they changed.
@@ -2095,11 +2095,11 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
             }
             else if (tid == 0 && (islands[gi].info.z & ISLAND_HALT_PENDING) != 0)
                 g_halt = 1;
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
             // 3. Chunks.
             for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
                 chunk_update(c, isl, rg, dt, rml, k, contact_island, work, work_err);
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
         }
         // 4. Rigid integration.
         if (free_motion && !quiet)
@@ -2126,7 +2126,7 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
                 drift_apply(c, wcom, tr, phi, dv, dw);
             if (!driven)
                 drift_rigid(isl, rg, tr, phi, dv, dw);
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
         }
         // 6. Probe values after the substep (thread 0, in item order).
         if (tid == 0 && isl.probes.y > isl.probes.x)
@@ -2192,7 +2192,7 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
     // The next substep's travel check, from the state this one reached.
     if (FOLD_SUMS != 0 && contact_island)
     {
-        AllMemoryBarrierWithGroupSync();
+        device_group_barrier();
         if (done > 0)
             for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
                 travel_check(c, true);
@@ -2827,7 +2827,7 @@ void project_load_slot(uint tid, Island isl, uint slot)
         scratch[sv(c, slot)] = float4(scratch[sv(c, slot)].xyz - (a + cross(alpha, r)) * ch.center.w, 0.0);
         scratch[sv(c, slot + 1)] = float4(scratch[sv(c, slot + 1)].xyz - rows_mul(ch.inertia0, ch.inertia1, ch.inertia2, alpha), 0.0);
     }
-    AllMemoryBarrierWithGroupSync();
+    device_group_barrier();
 }
 
 // statics.rs `project_displacement` (rigid modes off, mass-orthogonally) on a slot.
@@ -2853,7 +2853,7 @@ void project_displacement_slot(uint tid, Island isl, uint slot)
         scratch[sv(c, slot)] = float4(scratch[sv(c, slot)].xyz - t - cross(th0, r), 0.0);
         scratch[sv(c, slot + 1)] = float4(scratch[sv(c, slot + 1)].xyz - th0, 0.0);
     }
-    AllMemoryBarrierWithGroupSync();
+    device_group_barrier();
 }
 
 float block_get(uint c, uint i, uint j)
@@ -3023,7 +3023,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         scratch[sv(c, 21)] = float4(0.0);
         scratch[sv(c, 22)] = float4(0.0);
     }
-    AllMemoryBarrierWithGroupSync();
+    device_group_barrier();
     if (free)
         project_load_slot(tid, isl, 0);
     float scale = max(sqrt(island_dot(tid, c0, c1, 0, 0)), 1e-30);
@@ -3044,7 +3044,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             JointResponse resp = static_response(i);
             write_bond_loads(i, bonds[i], resp.force_lin, resp.force_ang, 0.0);
         }
-        AllMemoryBarrierWithGroupSync();
+        device_group_barrier();
         float4 magnitude = float4(0.0);
         float4 unused_m = float4(0.0);
         for (uint c = c0 + tid; c < c1; c += THREADS)
@@ -3059,7 +3059,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             scratch[sv(c, 4)] = r_lin;
             scratch[sv(c, 5)] = r_ang;
         }
-        AllMemoryBarrierWithGroupSync();
+        device_group_barrier();
         group_sum2<THREADS>(tid, magnitude, unused_m);
         if (free)
             project_load_slot(tid, isl, 4);
@@ -3102,18 +3102,18 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             scratch[statics_bond_slot(i)] = float4(st0.y * f_lin.x, st0.y * f_lin.y, st0.x * f_lin.z, 0.0);
             scratch[statics_bond_slot(i) + 1] = float4(st0.z * f_ang.x, st0.w * f_ang.y, b.law.stiff1.x * f_ang.z, 0.0);
         }
-        AllMemoryBarrierWithGroupSync();
+        device_group_barrier();
         for (uint c = c0 + tid; c < c1; c += THREADS)
         {
             assemble_block(c);
             scratch[sv(c, 2)] = float4(0.0);
             scratch[sv(c, 3)] = float4(0.0);
         }
-        AllMemoryBarrierWithGroupSync();
+        device_group_barrier();
         // Conjugate gradients for K x = r (pcg_solve); r is consumed.
         for (uint c = c0 + tid; c < c1; c += THREADS)
             precondition(c);
-        AllMemoryBarrierWithGroupSync();
+        device_group_barrier();
         if (free)
             project_displacement_slot(tid, isl, 6);
         for (uint c = c0 + tid; c < c1; c += THREADS)
@@ -3121,7 +3121,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             scratch[sv(c, 8)] = scratch[sv(c, 6)];
             scratch[sv(c, 9)] = scratch[sv(c, 7)];
         }
-        AllMemoryBarrierWithGroupSync();
+        device_group_barrier();
         float rz = island_dot(tid, c0, c1, 4, 6);
         float norm0 = sqrt(island_dot(tid, c0, c1, 4, 4));
         // Inexact Newton: each correction to 1e-4 of its residual.
@@ -3139,7 +3139,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
                 bond_kinematics(b, scratch[sv(ca, 8)].xyz, scratch[sv(ca, 9)].xyz, scratch[sv(cb, 8)].xyz, scratch[sv(cb, 9)].xyz, d_lin, d_ang);
                 write_bond_loads(i, b, d_lin * scratch[statics_bond_slot(i)].xyz, d_ang * scratch[statics_bond_slot(i) + 1].xyz, 0.0);
             }
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
             for (uint c = c0 + tid; c < c1; c += THREADS)
             {
                 float3 fi;
@@ -3151,7 +3151,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
                 scratch[sv(c, 10)] = ap_lin;
                 scratch[sv(c, 11)] = ap_ang;
             }
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
             float pap = island_dot(tid, c0, c1, 8, 10);
             cg_total++;
             if (pap <= 0.0)
@@ -3164,12 +3164,12 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
                 scratch[sv(c, 4)] = float4(scratch[sv(c, 4)].xyz - alpha * scratch[sv(c, 10)].xyz, 0.0);
                 scratch[sv(c, 5)] = float4(scratch[sv(c, 5)].xyz - alpha * scratch[sv(c, 11)].xyz, 0.0);
             }
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
             if (sqrt(island_dot(tid, c0, c1, 4, 4)) <= cg_tol * norm0)
                 break;
             for (uint c = c0 + tid; c < c1; c += THREADS)
                 precondition(c);
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
             if (free)
                 project_displacement_slot(tid, isl, 6);
             float rz_new = island_dot(tid, c0, c1, 4, 6);
@@ -3180,7 +3180,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
                 scratch[sv(c, 8)] = float4(scratch[sv(c, 6)].xyz + beta * scratch[sv(c, 8)].xyz, 0.0);
                 scratch[sv(c, 9)] = float4(scratch[sv(c, 7)].xyz + beta * scratch[sv(c, 9)].xyz, 0.0);
             }
-            AllMemoryBarrierWithGroupSync();
+            device_group_barrier();
         }
         // The Newton correction, compensated.
         for (uint c = c0 + tid; c < c1; c += THREADS)
@@ -3196,7 +3196,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             scratch[sv(c, 21)] = float4(u_lo, 0.0);
             scratch[sv(c, 22)] = float4(th_lo, 0.0);
         }
-        AllMemoryBarrierWithGroupSync();
+        device_group_barrier();
         newton = it + 1;
     }
     // Equilibrium: no deformation velocity; reactions; the bond forces at it.
@@ -3209,7 +3209,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         bond_dyn[i] = bd;
         write_bond_loads(i, bonds[i], resp.force_lin, resp.force_ang, max(resp.measures.tension, resp.measures.compression));
     }
-    AllMemoryBarrierWithGroupSync();
+    device_group_barrier();
     for (uint c = c0 + tid; c < c1; c += THREADS)
     {
         float3 fi;
