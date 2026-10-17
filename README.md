@@ -321,5 +321,9 @@ GPU tests (Metal, wgpu, the stress solver) need a real adapter and run locally; 
 don't predict real ones. The legacy workspace's jobs are in
 [legacy.yml](.github/workflows/legacy.yml), manual only.
 
-Vercel builds the same site for every push (production from `main`). The project needs
-**Git LFS enabled** (Project Settings → Git) so the fracture assets are real files.
+Vercel builds the same site from [vercel.json](vercel.json): production from `main`
+([rubble-tau.vercel.app](https://rubble-tau.vercel.app)) and a preview for every pull
+request. A Linux build takes about 10 minutes. Pushes that change nothing the site uses
+(docs, the stress solver, the legacy crates) skip the build (`ignoreCommand`). The project
+needs **Git LFS enabled** (Project Settings → Git) so the fracture assets are real files;
+that setting can't live in `vercel.json`.
