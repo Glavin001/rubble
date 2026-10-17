@@ -110,6 +110,11 @@ pub struct GpuWorld {
     /// engine's loads only, not after its own island's fractures, so islands end with
     /// their impacts. A model change against the explicit coupling (measured, opt-in).
     pub tiered: bool,
+    /// Host seconds in the coupled frame's phases: the engine's step and the islands
+    /// (`coupled_prepare`), the solver refresh, and the write-back with its refresh.
+    pub prepare_seconds: f64,
+    pub refresh_seconds: f64,
+    pub write_back_seconds: f64,
     /// Coupled quasi-static frames: each cluster's (by id) last solve inputs that left its
     /// state unchanged (`static_inputs`), and whether that solve converged.
     static_repeats: std::collections::HashMap<u64, (StaticInputs, bool)>,
@@ -203,6 +208,9 @@ impl GpuWorld {
             unchanged_next: std::collections::HashSet::new(),
             segment_retries: 0,
             tiered: false,
+            prepare_seconds: 0.0,
+            refresh_seconds: 0.0,
+            write_back_seconds: 0.0,
             static_repeats: std::collections::HashMap::new(),
         };
         let values: Vec<f64> = (0..scene.probes.len()).map(|p| w.probe_value(p)).collect();
@@ -336,7 +344,9 @@ impl GpuWorld {
             }
             self.solver.mirror_check("frame start");
             self.solver.mirror.unchanged = self.unchanged_next.clone();
+            let t_prepare = std::time::Instant::now();
             let f = self.with_shell_mut(|w| w.coupled_prepare(&forced));
+            self.prepare_seconds += t_prepare.elapsed().as_secs_f64();
             self.solver.mirror_check("after coupled_prepare (engine step)");
             self.filter.ingest(&self.solver.mirror, f.t0, fdt, &f.impulses);
             // Quasi-static (no islands, nothing integrated explicitly): the substeps only
@@ -364,7 +374,9 @@ impl GpuWorld {
                     }
                 }
             }
+            let t_refresh = std::time::Instant::now();
             self.solver.refresh(gpu)?;
+            self.refresh_seconds += t_refresh.elapsed().as_secs_f64();
             excluded_mid = self.solver.excluded_ids().iter().copied().collect();
             let (mut n, mut h) = (f.n, f.h);
             if qs_one_step {
@@ -560,6 +572,7 @@ impl GpuWorld {
             forced.extend(broke);
         };
         // Driven bodies at the engine's end of the frame; island bodies back to the engine.
+        let t_back = std::time::Instant::now();
         self.solver.download(gpu);
         self.with_shell_mut(|w| {
             w.set_driven_motion(1.0);
@@ -568,6 +581,7 @@ impl GpuWorld {
         self.solver.mirror_check("after write-back");
         self.solver.refresh(gpu)?;
         self.unchanged_next = self.solver.excluded_ids().iter().copied().filter(|id| excluded_mid.contains(id)).collect();
+        self.write_back_seconds += t_back.elapsed().as_secs_f64();
         self.solver.mirror.unchanged.clear();
         Ok(())
     }

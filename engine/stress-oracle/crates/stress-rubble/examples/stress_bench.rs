@@ -264,6 +264,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     for f in 0..n {
         let before = w.solver.profile.clone();
         let (splits, replans, tail) = (w.solver.host_splits, w.solver.replans, w.tail_seconds);
+        let (prep, refresh, back) = (w.prepare_seconds, w.refresh_seconds, w.write_back_seconds);
         let t = Instant::now();
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
@@ -271,8 +272,11 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
             let p = &w.solver.profile;
             let ms = |a: f64, b: f64| (a - b) * 1e3;
             eprintln!(
-                "frame {f}: {:.1} ms; tail {:.1}, gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans; clusters {} ({} in islands), ram {:.2} m/s",
+                "frame {f}: {:.1} ms; prepare {:.1}, refresh {:.1}, write-back {:.1}, tail {:.1}, gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans; clusters {} ({} in islands), ram {:.2} m/s",
                 frames[f],
+                ms(w.prepare_seconds, prep),
+                ms(w.refresh_seconds, refresh),
+                ms(w.write_back_seconds, back),
                 ms(w.tail_seconds, tail),
                 ms(p.gpu, before.gpu),
                 ms(p.encode, before.encode),
