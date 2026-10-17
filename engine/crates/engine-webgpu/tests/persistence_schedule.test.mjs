@@ -52,7 +52,8 @@ for(const value of ['-1','33','2.5','invalid']) {
 // WebGPU robust access may hide that mistake as missing collision work.
 for (const [query, expectedMode] of [
   ['?scene=ring110k', 'persistent'], ['?scene=gables506k', 'persistent'],
-  ['?scene=gables506k&contacts=canonical', 'canonical'], ['?scene=columns', 'canonical'],
+  ['?scene=gables506k&contacts=canonical', 'canonical'], ['?scene=columns', 'persistent'],
+  ['?scene=columns&contacts=canonical', 'canonical'],
   ['?scene=ring110k&contacts=canonical', 'canonical'],
   ['?scene=ring110k&contacts=compact', 'compact'],
   ['?scene=gables506k&contacts=persistent', 'persistent'],
@@ -198,7 +199,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
 const modeSource = html.slice(html.indexOf('const qs ='), html.indexOf('const regressionKind ='));
 for (const [query, expected] of [['?scene=ring110k','record'],['?scene=gables506k','record'],
   ['?scene=ring110k&hashInsert=manifold','manifold'],
-  ['?scene=columns','contact'],['?scene=ring110k&hashInsert=contact','contact'],
+  ['?scene=columns','record'],['?scene=ring110k&hashInsert=contact','contact'],
   ['?scene=gables506k&hashInsert=contact','contact'],['?scene=columns&hashInsert=manifold','manifold']]) {
   test(`hash insert mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nhashInsertMode`,{URLSearchParams,location:{search:query}}),expected);
@@ -209,9 +210,9 @@ test('invalid hash insert mode fails before allocating GPU work', () => {
     /hashInsert must be contact, manifold or record/);
 });
 
-// Split broadphase grid (8ej): ring defaults to it, gables keeps the scaled table.
+// Split broadphase grid (8ej): every scene's default since P0 (8et).
 for (const [query, mode, split] of [['?scene=ring110k','split',true],['?scene=gables506k','split',true],
-  ['?scene=columns','scaled',false],['?scene=ring110k&grid=scaled','scaled',false],
+  ['?scene=columns','split',true],['?scene=ring110k&grid=scaled','scaled',false],
   ['?scene=gables506k&grid=split','split',true],['?scene=ring110k&grid=fixed','fixed',false]]) {
   test(`grid mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nJSON.stringify([gridMode, gridSplit])`,{URLSearchParams,location:{search:query}}),JSON.stringify([mode, split]));
@@ -224,7 +225,7 @@ test('invalid grid mode fails before allocating GPU work', () => {
 
 // Two-pass narrowphase (8ek): default wherever reuse=copy runs.
 for (const [query, mode] of [['?scene=ring110k','split'],['?scene=gables506k','split'],
-  ['?scene=columns','fused'],['?scene=ring110k&np=fused','fused'],['?scene=ring110k&reuse=pass','fused']]) {
+  ['?scene=columns','split'],['?scene=columns&contacts=canonical','fused'],['?scene=ring110k&np=fused','fused'],['?scene=ring110k&reuse=pass','fused']]) {
   test(`narrowphase mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nnpMode`,{URLSearchParams,location:{search:query}}),mode);
   });
@@ -288,14 +289,14 @@ for (const detailedProfile of [false, true]) {
 
 // Packed-pair CSR endpoints (8el): default under persistent contacts.
 for (const [query, mode] of [['?scene=ring110k','pairs'],['?scene=gables506k','pairs'],
-  ['?scene=columns','manifold'],['?scene=ring110k&endpoints=manifold','manifold'],
+  ['?scene=columns','pairs'],['?scene=columns&contacts=canonical','manifold'],['?scene=ring110k&endpoints=manifold','manifold'],
   ['?scene=ring110k&persistence=manifold','pairs']]) {
   test(`CSR endpoint mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nendpointsMode`,{URLSearchParams,location:{search:query}}),mode);
   });
 }
 test('endpoints=pairs without persistent contacts fails before allocating GPU work', () => {
-  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=columns&endpoints=pairs'}}),
+  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=columns&contacts=canonical&endpoints=pairs'}}),
     /endpoints=pairs requires persistent contacts/);
 });
 for (const earlyPairPack of [false, true]) {
@@ -313,7 +314,7 @@ for (const earlyPairPack of [false, true]) {
 
 // Persist work list (8em).
 for (const [query, mode] of [['?scene=ring110k','list'],['?scene=gables506k','list'],
-  ['?scene=columns','scan'],['?scene=ring110k&persist=scan','scan'],['?scene=ring110k&reuse=pass','scan']]) {
+  ['?scene=columns','list'],['?scene=columns&contacts=canonical','scan'],['?scene=ring110k&persist=scan','scan'],['?scene=ring110k&reuse=pass','scan']]) {
   test(`persist mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\npersistMode`,{URLSearchParams,location:{search:query}}),mode);
   });
@@ -490,7 +491,7 @@ test('broadphase grid table scales with colliders and clears every head', () => 
   for (const gridSplit of [false, true]) {
   const trace = [];
   const pass = () => ({id:0, setPipeline() {}, setBindGroup() {}, dispatchWorkgroupsIndirect() {}, end() {}});
-  runInNewContext(`${clearSource}\n${source}\nencodeStep(encoder, false)`, {
+  runInNewContext(`${clearSource}\n${source}\nencodeStep(encoder, false)`, {...DISPATCH,
     detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
     last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
     nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
@@ -525,7 +526,8 @@ test('record warm hash slots cover manifolds even with a stale contact seed', ()
 // playback even though it is reported a frame late.
 test('live readback ring drains queued frames and surfaces late coloring overflow', async () => {
   const block = html.slice(html.indexOf('const LIVE_IN_FLIGHT'), html.indexOf('async function frame('));
-  const counters = new Uint32Array(16);
+  // The full 80-byte counter block (20 words) since 8ev reads colorRounds (word 17).
+  const counters = new Uint32Array(20);
   counters[2] = 1174316; counters[4] = 256703; counters[5] = 110441; counters[6] = 11; counters[12] = 246481;
   const makeBuffer = () => ({ getMappedRange: () => counters.buffer.slice(0), unmap() { this.unmapped = true; } });
   const device = { createBuffer: makeBuffer };
@@ -544,7 +546,7 @@ test('live readback ring drains queued frames and surfaces late coloring overflo
   assert.equal(drained, true);
   const buf = makeBuffer();
   ctx.readLiveCounters(buf);
-  assert.deepEqual({ ...ctx.last }, { contact: 1174316, candidate: 256703, awake: 110441, color: 11, manifold: 246481, overflow: 0 });
+  assert.deepEqual({ ...ctx.last }, { contact: 1174316, candidate: 256703, awake: 110441, color: 11, manifold: 246481, overflow: 0, colorRounds: 0 });
   assert.ok(buf.unmapped, 'Readback buffers must be unmapped before reuse.');
   counters[7] = 8;
   assert.throws(() => ctx.readLiveCounters(makeBuffer()), /Graph coloring is incomplete/);
@@ -552,8 +554,8 @@ test('live readback ring drains queued frames and surfaces late coloring overflo
   await assert.rejects(ctx.drainLive(), /late coloring overflow/, 'A deferred readback failure must stop the next drain.');
 });
 
-for (const [query, expected] of [['?scene=ring110k','copy'],['?scene=gables506k','copy'],['?scene=columns','pass'],
-  ['?scene=ring110k&reuse=pass','pass'],['?scene=ring110k&contacts=canonical','pass'],['?scene=gables506k&contacts=compact','pass']]) {
+for (const [query, expected] of [['?scene=ring110k','copy'],['?scene=gables506k','copy'],['?scene=columns','copy'],
+  ['?scene=columns&contacts=canonical','pass'],['?scene=ring110k&reuse=pass','pass'],['?scene=ring110k&contacts=canonical','pass'],['?scene=gables506k&contacts=compact','pass']]) {
   test(`reuse copy mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nreuseMode`,{URLSearchParams,location:{search:query}}),expected);
   });
