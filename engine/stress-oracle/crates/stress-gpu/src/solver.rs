@@ -270,8 +270,10 @@ const K_FORCES_BONDS: usize = 17;
 const K_ISLANDS_SUMS: usize = 18;
 /// Its travel checks before a batch's first substep (later ones run at each substep's end).
 const K_TRAVEL: usize = 19;
+/// `K_ISLANDS_SUMS` able to wake a settled contact island (with its joint law).
+const K_ISLANDS_SUMS_WAKE: usize = 20;
 /// Kernel names by `K_*` index.
-pub const KERNEL_NAMES: [&str; 20] = [
+pub const KERNEL_NAMES: [&str; 21] = [
     "island_frame",
     "contact_forces",
     "impactor_shares",
@@ -292,6 +294,7 @@ pub const KERNEL_NAMES: [&str; 20] = [
     "forces_and_bonds",
     "islands_sums_impactors",
     "travel_start",
+    "islands_sums_impactors_wake",
 ];
 /// Contact contributions per segment (`contact_sums`, one thread each).
 const SEGMENT: usize = 8;
@@ -326,6 +329,7 @@ struct Kernels {
     forces_bonds: Kernel,
     islands_sums: Kernel,
     travel: Kernel,
+    islands_sums_wake: Kernel,
     statics: Kernel,
     fatigue: Kernel,
 }
@@ -420,8 +424,8 @@ pub struct Profile {
     pub max_chunk_contacts: usize,
     pub max_island_contacts: usize,
     /// GPU time (s) and dispatches per kernel (`KERNEL_NAMES`), with `STRESS_GPU_TIMING=1`.
-    pub kernels: [f64; 20],
-    pub kernel_dispatches: [u64; 20],
+    pub kernels: [f64; 21],
+    pub kernel_dispatches: [u64; 21],
     /// `tangent_statics`: static solves delegated to the mirror (`equilibrate`), and the
     /// host time they took (s).
     pub statics_delegated: u64,
@@ -550,6 +554,7 @@ impl GpuSolver {
             forces_bonds: gpu.compute(&shaders::WORLD, "forces_and_bonds", &WORLD_BINDINGS),
             islands_sums: gpu.compute(&shaders::WORLD, "islands_sums_impactors", &WORLD_BINDINGS),
             travel: gpu.compute(&shaders::WORLD, "travel_start", &WORLD_BINDINGS),
+            islands_sums_wake: gpu.compute(&shaders::WORLD, "islands_sums_impactors_wake", &WORLD_BINDINGS),
             statics: gpu.compute(&shaders::WORLD, "island_statics", &WORLD_BINDINGS),
             fatigue: gpu.compute(&shaders::WORLD, "settled_fatigue", &WORLD_BINDINGS),
         };
@@ -1331,7 +1336,7 @@ impl GpuSolver {
                     }
                     let forces = (p.pair_count + p.cand_count) * p.pair_lanes.max(1);
                     ops.push((K_FORCES_BONDS, forces.div_ceil(256) + self.buffers.contact_bond_groups, true));
-                    ops.push((K_ISLANDS_SUMS, islands_n + impactors_n, true));
+                    ops.push((if self.buffers.contact_settled { K_ISLANDS_SUMS_WAKE } else { K_ISLANDS_SUMS }, islands_n + impactors_n, true));
                     continue;
                 }
                 if contact {
@@ -1395,6 +1400,7 @@ impl GpuSolver {
                 &self.kernels.forces_bonds,
                 &self.kernels.islands_sums,
                 &self.kernels.travel,
+                &self.kernels.islands_sums_wake,
             ];
             let bind = |contact: bool| if contact { &self.buffers.bind_contact } else { &self.buffers.bind_segment };
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -1435,7 +1441,7 @@ impl GpuSolver {
             if let Some(timing) = &self.timing {
                 let stamps: Vec<u64> = gpu.read(&timing.resolve);
                 let period = gpu.queue.get_timestamp_period() as f64 * 1e-9;
-                let mut batch = [(0.0f64, 0.0f64, 0u32); 20];
+                let mut batch = [(0.0f64, 0.0f64, 0u32); 21];
                 for (q, &(k, ..)) in ops.iter().enumerate() {
                     let secs = stamps[2 * q + 1].saturating_sub(stamps[2 * q]) as f64 * period;
                     self.profile.kernels[k] += secs;

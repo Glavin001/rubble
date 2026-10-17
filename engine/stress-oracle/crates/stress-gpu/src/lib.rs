@@ -73,6 +73,7 @@ pub mod shaders {
             ("contact_islands_and_wide_chunks", (256, 1, 1)),
             ("forces_and_bonds", (256, 1, 1)),
             ("islands_sums_impactors", (256, 1, 1)),
+            ("islands_sums_impactors_wake", (256, 1, 1)),
             ("travel_start", (64, 1, 1)),
         ]);
     pub const STRESS_RENDER: ShaderSet = shader_set!("stress_render", [("stress_vs", (1, 1, 1)), ("stress_fs", (1, 1, 1))]);

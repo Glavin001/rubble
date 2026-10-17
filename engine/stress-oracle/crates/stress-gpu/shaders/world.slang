@@ -1988,7 +1988,9 @@ void contact_split_at(uint at)
 // (`contact_bonds_at`), a disconnection reported by ISLAND_HALT_PENDING; the joint law
 // then is not compiled into this kernel. FOLD_SUMS 1 (the two-dispatch pipeline, with
 // INLINE_BONDS 0): the island sums its chunks' contact segments itself, sees its
-// substep's stop (STOP_NOW), and checks its chunks' travel for the next substep.
+// substep's stop (STOP_NOW), and checks its chunks' travel for the next substep; 2: also
+// the joint law of a settled island that wakes (compiled in only for batches that hold a
+// settled contact island: islands settle only on the host, between batches).
 void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : uint>(uint gi, uint tid)
 {
     // Chunk loops and reductions on the first THREADS threads (a GROUP above THREADS
@@ -2084,7 +2086,7 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
             // 2. Bonds. The two-dispatch pipeline ran them with the contact forces, except
             // a settled island's (`bond_group_at` skips it): one that wakes this substep
             // takes its joint law here.
-            if (INLINE_BONDS != 0 || (FOLD_SUMS != 0 && woke))
+            if (INLINE_BONDS != 0 || (FOLD_SUMS == 2 && woke))
             {
                 for (uint i = isl.range.z + tid; i < isl.range.w; i += GROUP)
                     if (bond_update(i, dt, fracture, abs_step, false))
@@ -3450,6 +3452,17 @@ void islands_sums_impactors(uint3 group: SV_GroupID, uint3 thread: SV_GroupThrea
 {
     if (group.x < params.halt_index)
         island_frame_at<0, 1, THREADS>(group.x, thread.x);
+    else
+        impactor_integrate_at(group.x - params.halt_index, thread.x, true);
+}
+
+// `islands_sums_impactors` for a batch with a settled contact island (it may wake).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void islands_sums_impactors_wake(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    if (group.x < params.halt_index)
+        island_frame_at<0, 2, THREADS>(group.x, thread.x);
     else
         impactor_integrate_at(group.x - params.halt_index, thread.x, true);
 }
