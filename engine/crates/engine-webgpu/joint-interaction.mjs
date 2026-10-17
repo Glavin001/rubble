@@ -147,13 +147,19 @@ export function installJointControls({ device, bodyBuffer, jointBuffer, snap, ma
     for (const s of meta.servos) writeF32(jointBuffer, jointOff(s.id, L.driveTarget), [s.target * Math.sin(t * 2 * Math.PI / 3)]);
   }
 
+  // The page re-uploaded the scene's bodies and joints: drop the grab, motors back on.
+  function reset() {
+    grab = null;
+    motorsOn = true;
+  }
+
   addEventListener('keydown', (e) => {
     if (e.key === 'f' || e.key === 'F') fire();
     else if (e.key === 'm' || e.key === 'M') toggleMotors();
   });
 
   return {
-    startGrab, moveGrab, endGrab, beforeStep, fire, toggleMotors,
+    startGrab, moveGrab, endGrab, beforeStep, fire, toggleMotors, reset,
     legend: `Ctrl/Alt-drag grabs a body (soft drag joint) · F fires a ball · M toggles ${meta.motors.length} motors · ${meta.servos.length} servo(s) sweep`,
   };
 }

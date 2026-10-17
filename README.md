@@ -4,6 +4,11 @@ GPU rigid-body physics with destruction, in Rust and [Slang](https://shader-slan
 One Slang source for the solver compiles to Metal, WebGPU (native wgpu and the browser)
 and CUDA. The engine lives in [`engine/`](engine/README.md).
 
+**Live demos (WebGPU):** [rubble-tau.vercel.app](https://rubble-tau.vercel.app): the
+scene gallery, the vehicle demo, the fracture lab, and the twelve scenes of the legacy
+rubble demo rebuilt on the new engine for side-by-side comparison. Every pull request
+gets a Vercel preview of the same site.
+
 - **Solver:** AVBD (augmented vertex block descent) on the GPU, with island sleeping
 - **Shapes:** boxes, spheres, capsules, convex hulls and compound bodies
 - **Joints:** one D6 joint record (ball, hinge, slider, fixed, distance, spring, motors,
@@ -52,33 +57,44 @@ that are not in LFS.
 
 You also need Rust stable, `slangc` (the pinned version is in
 [engine/TOOLCHAIN.md](engine/TOOLCHAIN.md)), and for the browser demos the
-`wasm32-unknown-unknown` target and [wasm-pack](https://rustwasm.github.io/wasm-pack/).
+`wasm32-unknown-unknown` target. The web build below downloads the pinned `slangc` and
+`wasm-pack` itself when they are not installed.
 
 ### Browser demos (WebGPU)
 
-From the repository root:
+From the repository root, build the site (the same build as Vercel and CI; Linux or
+macOS, no GPU needed) and serve it:
 
 ```bash
-(cd engine && cargo run -p engine-webgpu --release --bin wgsl_export)
+bash engine/scripts/build-web.sh
 ```
 
 ```bash
-wasm-pack build engine/crates/engine-fracture-wasm --release --target web --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
+python3 -m http.server 8080 -d engine/web-dist
 ```
+
+Then open `http://localhost:8080/` in a WebGPU browser (Chrome or Edge on desktop). The
+build runs `wgsl_export` (Slang kernels to WGSL, the vehicle wasm), the fracture-lab
+wasm and `scene_export` (the Rust-built scenes as GPU snapshots), then copies the pages
+into `engine/web-dist/`. `demo.html` takes `?scene=`: `ring110k`, `wall`, `joints`,
+`ragdolls10k`, `legacyPyramid`, `legacyGrid10k`, and the rest of its scene menu.
+
+### Legacy scenes on the new engine
+
+[`engine-scenes/src/legacy.rs`](engine/crates/engine-scenes/src/legacy.rs) rebuilds the
+legacy web demo's 3D scenes (Empty, Ground, Dynamic Friction, Static Friction, Pyramid,
+Stack, Stack Ratio, Scatter, Scatter Boxes, Grid Boxes, Slanted Grid, 10k Grid) body for
+body: the same sizes, masses, positions, velocities and per-body friction, legacy
+gravity (−9.81) and 12 iterations. Legacy's random scenes used an unseeded RNG; the port
+uses a fixed seed. They are the `legacy ·` entries in `demo.html`, and natively:
 
 ```bash
-(cd engine && cargo run -p engine-scenes --release --bin scene_export)
+(cd engine && cargo run -p engine-scenes --release --bin demo_viewer -- "10k Grid")
 ```
 
-```bash
-python3 -m http.server 8080 -d engine/crates/engine-webgpu
-```
-
-Then open `http://localhost:8080/demo.html`, `/vehicle.html` or `/fracture/` in a
-WebGPU browser (Chrome or Edge on desktop). `wgsl_export` compiles the Slang kernels to
-WGSL and builds the vehicle wasm; `scene_export` writes the joint scenes (it needs
-Metal today). Scenes take `?scene=`: `ring110k`, `wall`, `joints`, `ragdolls10k`, and
-more in the demo's scene menu.
+`100k Grid` (`?scene=legacyGrid100k`) is the 10k grid scaled to 100,000 cubes
+(50 × 40 × 50). It isn't in the legacy demo; it uses the same cubes and spacing at the
+10,000+ body scale the engine targets.
 
 ### Native (macOS / Metal)
 
@@ -104,8 +120,9 @@ WebGPU regression checks.
 
 The original wgpu rigid-body engine (2D and 3D), with its WASM build, Vite web demos and
 native viewer. The new engine in `engine/` replaces it; it is kept for reference and
-comparison. The root workspace commands below and the CI jobs in
-[.github/workflows/ci.yml](.github/workflows/ci.yml) build and test it.
+comparison. The root workspace commands below build and test it; its CI jobs are in
+[.github/workflows/legacy.yml](.github/workflows/legacy.yml) and run only when started
+by hand (Actions → Legacy CI). Its web demo is no longer deployed.
 
 ### Prerequisites
 
@@ -233,7 +250,7 @@ See [crates/rubble-viewer/examples/](crates/rubble-viewer/examples/) for the dem
 
 ### Web and WASM (optional)
 
-The canonical production build is **[web/build.sh](web/build.sh)** — same script as **CI** and **Vercel** (`npm ci` plus `npm run build:all`). Granular steps live in [web/package.json](web/package.json) (`wasm`, `build`, `build:all`). **wasm-pack** comes from that package’s [devDependencies](web/package.json), not `cargo install`.
+The legacy web build is **[web/build.sh](web/build.sh)** (`npm ci` plus `npm run build:all`); the manual Legacy CI workflow uses it. Granular steps live in [web/package.json](web/package.json) (`wasm`, `build`, `build:all`). **wasm-pack** comes from that package’s [devDependencies](web/package.json), not `cargo install`.
 
 1. Install **Node 20** (same major version as CI).
 
@@ -290,12 +307,23 @@ flags, so `npm --prefix web test` works without extra setup.
 
 ## CI at a glance
 
+[.github/workflows/ci.yml](.github/workflows/ci.yml), on pushes to `main` and on pull
+requests:
+
 | Job | What runs |
 |-----|-----------|
-| Check | `cargo check --workspace --all-targets` |
-| Test | `cargo nextest run --workspace --profile ci` with `WGPU_BACKEND=vulkan` |
-| Format | `cargo fmt --all -- --check` |
-| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` |
-| WASM | `./web/build.sh` (see [web/build.sh](web/build.sh), [web/package.json](web/package.json)) |
-| E2E | Playwright on `web/dist` |
+| Web demos | [engine/scripts/build-web.sh](engine/scripts/build-web.sh) on Linux (the Vercel build), then the JS tests of the WebGPU host, vehicle and fracture modules; uploads the site |
+| Engine host tests | `cargo test` of `engine-schema`, `engine-exec`, `engine-scenes` (host build), `engine-vehicle` and `engine-fracture`: no GPU |
 | Large files | [.github/scripts/check-large-files.sh](.github/scripts/check-large-files.sh): no raw file over 5 MB, every `*.glb` an LFS pointer |
+
+GPU tests (Metal, wgpu, the stress solver) need a real adapter and run locally; see
+[engine/README.md](engine/README.md). CI does no performance testing: software GPUs
+don't predict real ones. The legacy workspace's jobs are in
+[legacy.yml](.github/workflows/legacy.yml), manual only.
+
+Vercel builds the same site from [vercel.json](vercel.json): production from `main`
+([rubble-tau.vercel.app](https://rubble-tau.vercel.app)) and a preview for every pull
+request. A Linux build takes about 10 minutes. Pushes that change nothing the site uses
+(docs, the stress solver, the legacy crates) skip the build (`ignoreCommand`). The project
+needs **Git LFS enabled** (Project Settings → Git) so the fracture assets are real files;
+that setting can't live in `vercel.json`.

@@ -21,6 +21,12 @@
     #sceneSelect:focus { outline: 1px solid #6b7a9e; }
     #sleepLabel { display: flex; align-items: center; gap: 5px; margin-left: 10px; color: #d7dbe6; cursor: pointer; }
     #sleepLabel.locked { color: #8b93a7; cursor: default; }
+    #resetBtn {
+      background: #1c2030; color: #d7dbe6; border: 1px solid #3a4158;
+      border-radius: 4px; padding: 3px 10px; font: inherit; cursor: pointer;
+    }
+    #resetBtn:hover { border-color: #6b7a9e; }
+    #resetBtn:disabled { color: #8b93a7; cursor: default; }
     #rates {
       display: grid;
       grid-template-columns: auto auto;
@@ -45,6 +51,8 @@
       <label id="sleepLabel" for="sleepToggle" title="Let resting bodies fall asleep (URL: sleep=on|off)">
         <input type="checkbox" id="sleepToggle"> Sleep
       </label>
+      <button id="resetBtn" type="button" title="Restart this scene from its first step (R)" disabled>Reset</button>
+      <a href="./" style="color:#b8d7ff;margin-left:10px">All demos</a>
       <a href="./vehicle.html" style="color:#b8d7ff;margin-left:10px">Drive a vehicle →</a>
     </div>
     <div id="rates">
@@ -318,6 +326,77 @@
         lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
         eye: [30, 30, -70], look: [0, 2, 0], far: 800, ground: 80,
       },
+      // Legacy rubble web demo scenes (engine-scenes `legacy`): the same bodies, masses,
+      // velocities and per-body friction as crates/rubble-scenes, for side-by-side
+      // comparison. Each brings its own ground; gravity comes from the snapshot (−9.81).
+      // Static friction draws no floor: legacy placed its boxes on the part of the ramp
+      // below the floor slab (y ≈ −5), and the port keeps that geometry.
+      legacyEmpty: {
+        title: 'legacy · empty', snapshot: 'legacy-empty',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
+        eye: [0, 6, -20], look: [0, 0, 0], far: 600, ground: 50,
+      },
+      legacyGround: {
+        title: 'legacy · ground', snapshot: 'legacy-ground',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
+        eye: [0, 6, -16], look: [0, 1, 0], far: 600, ground: 50,
+      },
+      legacyDynamicFriction: {
+        title: 'legacy · dynamic friction (μ 5 → 0)', snapshot: 'legacy-dynamic-friction',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
+        eye: [10, 18, -58], look: [10, 0, -20], far: 800, ground: 120,
+      },
+      legacyStaticFriction: {
+        title: 'legacy · static friction ramp (μ 0.25 → 0.5)', snapshot: 'legacy-static-friction',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
+        eye: [-34, 8, -34], look: [-8, -3, 0], far: 600, ground: 0,
+      },
+      legacyPyramid: {
+        title: 'legacy · pyramid 136', snapshot: 'legacy-pyramid',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
+        eye: [0, 8, -26], look: [0, 6, 0], far: 600, ground: 50,
+      },
+      legacyStack: {
+        title: 'legacy · stack 10', snapshot: 'legacy-stack',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
+        eye: [0, 8, -22], look: [0, 7, 0], far: 600, ground: 50,
+      },
+      legacyStackRatio: {
+        title: 'legacy · stack ratio 1:8', snapshot: 'legacy-stack-ratio',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0.5,
+        eye: [0, 12, -36], look: [0, 8, 0], far: 600, ground: 50,
+      },
+      legacyScatter: {
+        title: 'legacy · scatter 3k (spheres, boxes, capsules)', snapshot: 'legacy-scatter',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
+        eye: [24, 18, 32], look: [0, 3, 0], far: 1200, ground: 300,
+      },
+      legacyScatterBoxes: {
+        title: 'legacy · scatter boxes 4k', snapshot: 'legacy-scatter-boxes',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
+        eye: [26, 20, 34], look: [0, 3, 0], far: 1200, ground: 300,
+      },
+      legacyGridBoxes: {
+        title: 'legacy · grid boxes 1.5k', snapshot: 'legacy-grid-boxes',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
+        eye: [10, 10, 14], look: [0, 5, 0], far: 1200, ground: 300,
+      },
+      legacySlantedGrid: {
+        title: 'legacy · slanted grid 3.2k', snapshot: 'legacy-slanted-grid',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
+        eye: [14, 10, 18], look: [0, 5, 0], far: 1200, ground: 300,
+      },
+      legacyGrid10k: {
+        title: 'legacy · grid 10k', snapshot: 'legacy-grid10k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
+        eye: [22, 16, 28], look: [0, 5, 0], far: 1200, ground: 300,
+      },
+      // Not in the legacy demo: its 10k grid scaled to 100k (50 × 40 × 50).
+      legacyGrid100k: {
+        title: 'grid 100k (legacy grid ×10)', snapshot: 'legacy-grid100k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
+        eye: [46, 30, 58], look: [0, 9, 0], far: 2000, ground: 300,
+      },
     };
     const cfg = SCENES[scene];
     if (!cfg) throw new Error(`unknown scene ${scene}; try ${Object.keys(SCENES).join(', ')}`);
@@ -533,7 +612,7 @@
     }
 
     const params = {
-      dt: 1 / 60, gravityY: -10, iterations: cfg.iterations, flags: cfg.flags || 0,
+      dt: 1 / 60, gravityY: snap?.meta.params?.gravityY ?? -10, iterations: cfg.iterations, flags: cfg.flags || 0,
       alpha: cfg.alpha ?? 0.99, gamma: 0.999, betaLin: cfg.betaLin ?? 10000, betaAng: 100,
       kStart: 1000, kMaxN: 1e10, kMaxT: 1e6, contactOffset: 0.01,
       sleepLin: cfg.sleepLin ?? 0.15, sleepAng: cfg.sleepAng ?? 0.15, sleepTime: cfg.sleepTime ?? 0.5, residualExit: 1e-4,
@@ -636,7 +715,7 @@ struct Collider {
   localRot: vec4f,
   params: vec4f,
 };
-struct Frame { viewProj: mat4x4<f32>, mode: u32 };
+struct Frame { viewProj: mat4x4<f32>, mode: u32, projectile: u32 };
 struct Eye { pos: vec3f, _pad: f32 };
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(1) var<uniform> frame: Frame;
@@ -655,6 +734,8 @@ struct VsOut {
   @location(2) world: vec3f,
   @location(3) center: vec3f,
   @location(4) radius: f32,
+  // Capsule: world-space half segment (axis · half length); zero for spheres.
+  @location(5) axis: vec3f,
 };
 
 @vertex fn vs(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> VsOut {
@@ -662,10 +743,16 @@ struct VsOut {
   let col = cols[inst + 1u];
   var half = col.params.xyz;
   var radius = 0.0;
+  var axis = vec3f(0.0);
   if (col.shape == 0u) {
     // Bounds cube of half-extent r; fragment ray-hits the sphere so corners do not stick out.
     half = vec3f(col.params.x);
     radius = col.params.x;
+  } else if (col.shape == 1u) {
+    // Capsule along local Y (radius, half length): bounds box, ray-hit in the fragment.
+    half = vec3f(col.params.x, col.params.y + col.params.x, col.params.x);
+    radius = col.params.x;
+    axis = quatRotate(b.orientation, vec3f(0.0, col.params.y, 0.0));
   }
   let world = b.position + quatRotate(b.orientation, corner * (half / 0.5));
   var o: VsOut;
@@ -674,8 +761,11 @@ struct VsOut {
   o.world = world;
   o.center = b.position;
   o.radius = radius;
-  // 0 position tint, 1 awake/sleep, 2 speed. The ball stays gray.
-  if (col.shape == 0u) {
+  o.axis = axis;
+  // 0 position tint, 1 awake/sleep, 2 speed. The ball stays gray: the projectile when
+  // the scene names one (frame.projectile), else every sphere.
+  let isBall = col.shape == 0u && (frame.projectile == 0xffffffffu || col.body == frame.projectile);
+  if (isBall) {
     o.color = vec3f(0.75, 0.78, 0.82);
   } else if (frame.mode == 1u) {
     let sleeping = (b.flags & 4u) != 0u;
@@ -692,7 +782,48 @@ struct VsOut {
 
 @fragment fn fs(i: VsOut) -> @location(0) vec4f {
   var n = normalize(i.normal);
-  if (i.radius > 0.0) {
+  if (i.radius > 0.0 && dot(i.axis, i.axis) > 0.0) {
+    // Ray vs capsule (segment center ± axis, radius).
+    let rd = normalize(i.world - eye.pos);
+    let pa = i.center - i.axis;
+    let ba = 2.0 * i.axis;
+    let oa = eye.pos - pa;
+    let baba = dot(ba, ba);
+    let bard = dot(ba, rd);
+    let baoa = dot(ba, oa);
+    let rdoa = dot(rd, oa);
+    let oaoa = dot(oa, oa);
+    let qa = baba - bard * bard;
+    let qb = baba * rdoa - baoa * bard;
+    let qc = baba * oaoa - baoa * baoa - i.radius * i.radius * baba;
+    var tHit = -1.0;
+    let h = qb * qb - qa * qc;
+    if (h >= 0.0 && qa > 1e-8) {
+      let t = (-qb - sqrt(h)) / qa;
+      let y = baoa + t * bard;
+      if (y > 0.0 && y < baba) {
+        tHit = t;
+      }
+    }
+    if (tHit < 0.0) {
+      // End caps: the nearer sphere.
+      let ca = eye.pos - pa;
+      let cb = eye.pos - (pa + ba);
+      let ba0 = dot(rd, ca);
+      let ha = ba0 * ba0 - (dot(ca, ca) - i.radius * i.radius);
+      let bb0 = dot(rd, cb);
+      let hb = bb0 * bb0 - (dot(cb, cb) - i.radius * i.radius);
+      if (ha >= 0.0) { tHit = -ba0 - sqrt(ha); }
+      if (hb >= 0.0) {
+        let tb = -bb0 - sqrt(hb);
+        if (tHit < 0.0 || (tb > 0.0 && tb < tHit)) { tHit = tb; }
+      }
+    }
+    if (tHit < 0.0) { discard; }
+    let p = eye.pos + rd * tHit;
+    let k = clamp(dot(p - pa, ba) / baba, 0.0, 1.0);
+    n = normalize(p - (pa + ba * k));
+  } else if (i.radius > 0.0) {
     let rd = normalize(i.world - eye.pos);
     let oc = eye.pos - i.center;
     let b = dot(oc, rd);
@@ -1574,7 +1705,7 @@ struct VsOut {
     }
     const ground = [];
     const G = cfg.ground;
-    const gy = 0.5;
+    const gy = cfg.groundY ?? 0.5;
     for (const [x, z] of [[-G, -G], [G, -G], [G, G], [-G, -G], [G, G], [-G, G]]) ground.push(x, gy, z);
     const boxVbo = device.createBuffer({ size: cube.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     const groundVbo = device.createBuffer({ size: ground.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
@@ -1592,16 +1723,39 @@ struct VsOut {
       const view = mul(perspective(Math.PI / 5, aspect, 0.2, cfg.far), lookAt(cam, target, [0, 1, 0]));
       frameF.set(view);
       frameU[16] = colorMode;
+      frameU[17] = snap ? snap.meta.projectile : 0xffffffff;
       device.queue.writeBuffer(frameBuf, 0, frameScratch);
       eyeScratch[0] = cam[0]; eyeScratch[1] = cam[1]; eyeScratch[2] = cam[2]; eyeScratch[3] = 0;
       device.queue.writeBuffer(eyeBuf, 0, eyeScratch);
     }
     const colorNames = ['position tint (red −X/down, yellow +X/up)', 'awake amber, sleeping blue', 'speed: blue still, red above 3 m/s'];
     function showLegend() {
-      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed. Friction μ ${cfg.friction}. Drag to orbit, scroll to zoom, right-drag to pan.` + (jointControls ? ` ${jointControls.legend}.` : '');
+      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed, R reset. Friction μ ${cfg.frictionLabel ?? cfg.friction}. Drag to orbit, scroll to zoom, right-drag to pan.` + (jointControls ? ` ${jointControls.legend}.` : '');
     }
     showLegend();
+    // Reset: restart the scene from its first step without reloading the page.
+    // In-flight steps and readbacks finish first, so none lands after the restore.
+    const resetBtn = document.getElementById('resetBtn');
+    let resetting = false;
+    async function resetScene() {
+      if (resetting || measuring) return;
+      resetting = true;
+      resetBtn.disabled = true;
+      try {
+        await drainLive();
+        restoreScene();
+        if (jointControls) jointControls.reset();
+        lastCompletion = 0;
+        resetRates();
+      } catch (e) { fail(e); } finally {
+        resetting = false;
+        resetBtn.disabled = false;
+      }
+    }
+    window.__resetScene = resetScene;
+    resetBtn.addEventListener('click', () => { resetScene(); resetBtn.blur(); });
     addEventListener('keydown', (e) => {
+      if ((e.key === 'r' || e.key === 'R') && !e.metaKey && !e.ctrlKey) { resetScene(); return; }
       if (e.key === '1') colorMode = 0;
       else if (e.key === '2') colorMode = 1;
       else if (e.key === '3') colorMode = 2;
@@ -1991,6 +2145,7 @@ struct VsOut {
       drawWorld();
     } else {
       statusEl.textContent = `playing ${bodies.length - 1} bodies from the start…`;
+      resetBtn.disabled = false;
       requestAnimationFrame(frame);
     }
   </script>

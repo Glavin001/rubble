@@ -81,9 +81,9 @@ Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
 | `crates/engine-schema` | ABI, handles, commands |
 | `crates/engine-exec` | Phase graph, backend trait, and `rigid_plan`: the one step graph every host replays (DECISIONS 8et) |
 | `crates/engine-metal` | M3 proof backend + benches; `MetalSim` replays `rigid_plan` natively |
-| `crates/engine-scenes` | Demo/benchmark scene builders + `demo_viewer`; `scene_export` writes the browser's joint scenes |
+| `crates/engine-scenes` | Demo/benchmark scene builders (incl. the legacy rubble scenes, `legacy.rs`) + `demo_viewer`; `scene_export` writes the browser's scene snapshots, built on the host (`--no-default-features` drops Metal) |
 | `crates/engine-oracles` | three-avbd / Newton / Jolt / demo3d adapters |
-| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke`; `demo.html`, `vehicle.html`, `fracture/` lab |
+| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke`; `index.html`, `demo.html`, `vehicle.html`, `fracture/` lab; the site is built by `scripts/build-web.sh` |
 | `crates/engine-vehicle` | Vehicle descriptors, presets, GPU record packing, host bookkeeping |
 | `crates/engine-vehicle-wasm` | wasm-bindgen face of `engine-vehicle` for the browser vehicle demo |
 | `crates/engine-fracture` | Fracture-lab host logic shared by the browser and Metal hosts: Shardwright GLB reader, scene builders, tick plan; stress cooking |

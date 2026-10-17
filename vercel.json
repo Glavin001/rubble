@@ -1,7 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --target wasm32-unknown-unknown",
-  "buildCommand": "bash web/build.sh",
-  "outputDirectory": "web/dist",
-  "framework": null
+  "installCommand": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --target wasm32-unknown-unknown",
+  "buildCommand": "bash engine/scripts/build-web.sh",
+  "outputDirectory": "engine/web-dist",
+  "framework": null,
+  "ignoreCommand": "git diff --quiet \"${VERCEL_GIT_PREVIOUS_SHA:-HEAD^}\" HEAD -- engine vercel.json ':(exclude)engine/docs' ':(exclude)engine/stress-oracle' ':(exclude)engine/*.md'"
 }

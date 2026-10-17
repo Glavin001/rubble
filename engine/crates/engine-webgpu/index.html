@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>rubble WebGPU demos</title>
+  <meta name="description" content="GPU rigid-body physics with destruction: one Slang solver compiled to WGSL, running in the browser." />
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; background: #12141a; color: #d7dbe6; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 64rem; margin: 0 auto; padding: 32px 16px 48px; }
+    h1 { font-size: 28px; margin: 0 0 4px; }
+    h2 { font-size: 17px; margin: 32px 0 10px; color: #b8c2da; }
+    p { margin: 0 0 10px; color: #a9b1c4; max-width: 46rem; }
+    a { color: #b8d7ff; }
+    code { font: 13px ui-monospace, Menlo, monospace; color: #d7dbe6; }
+    #gpu { margin: 14px 0 0; padding: 10px 12px; border-radius: 6px; background: #1c2030; border: 1px solid #3a4158; font-size: 14px; }
+    #gpu.bad { border-color: #7a3a3a; color: #ffb4b4; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 10px; }
+    .card { display: block; padding: 12px 14px; border-radius: 8px; background: #1a1d27; border: 1px solid #2c3244; text-decoration: none; color: inherit; }
+    .card:hover, .card:focus-visible { border-color: #6b7a9e; background: #1f2332; outline: none; }
+    .card strong { display: block; color: #e6e9f2; font-size: 15px; }
+    .card span { display: block; color: #8b93a7; font-size: 13px; margin-top: 2px; }
+    .big .card { padding: 16px 18px; }
+    .big .card strong { font-size: 17px; }
+    footer { margin-top: 40px; color: #6f7790; font-size: 13px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>rubble</h1>
+  <p>GPU rigid-body physics with destruction. One Slang solver (AVBD) is compiled to WGSL
+    and runs here in your browser on WebGPU; the same source runs natively on Metal, wgpu
+    and CUDA. Boxes, spheres, capsules, convex hulls, D6 joints, vehicles and fracture,
+    with island sleeping.</p>
+  <div id="gpu">Checking WebGPU…</div>
+
+  <h2>Demos</h2>
+  <div class="grid big">
+    <a class="card" href="./demo.html?scene=ring110k"><strong>Scenes</strong><span>Brick rings, walls, piles and columns up to 506k bodies; joints and ragdolls</span></a>
+    <a class="card" href="./vehicle.html"><strong>Vehicles</strong><span>Drive cars, tanks and motorcycles; break parts off (WASD, Space, B)</span></a>
+    <a class="card" href="./fracture/"><strong>Fracture lab</strong><span>Shardwright houses and arches: shoot them, break bonds</span></a>
+  </div>
+
+  <h2>Legacy rubble scenes, on the new engine</h2>
+  <p>The twelve 3D scenes of the original rubble web demo, rebuilt body for body (same
+    sizes, masses, velocities and per-body friction), so the two engines can be compared
+    on the same scenarios.</p>
+  <div class="grid">
+    <a class="card" href="./demo.html?scene=legacyPyramid"><strong>Pyramid</strong><span>136 boxes</span></a>
+    <a class="card" href="./demo.html?scene=legacyStack"><strong>Stack</strong><span>10 dropped cubes</span></a>
+    <a class="card" href="./demo.html?scene=legacyStackRatio"><strong>Stack Ratio</strong><span>Cubes 1–8 m, equal mass</span></a>
+    <a class="card" href="./demo.html?scene=legacyDynamicFriction"><strong>Dynamic Friction</strong><span>Sliding boxes, μ 5 → 0</span></a>
+    <a class="card" href="./demo.html?scene=legacyStaticFriction"><strong>Static Friction</strong><span>Boxes on a 30° ramp, μ 0.25 → 0.5</span></a>
+    <a class="card" href="./demo.html?scene=legacyScatter"><strong>Scatter</strong><span>3k spheres, boxes and capsules</span></a>
+    <a class="card" href="./demo.html?scene=legacyScatterBoxes"><strong>Scatter Boxes</strong><span>4k random boxes</span></a>
+    <a class="card" href="./demo.html?scene=legacyGridBoxes"><strong>Grid Boxes</strong><span>1.5k jittered cubes</span></a>
+    <a class="card" href="./demo.html?scene=legacySlantedGrid"><strong>Slanted Grid</strong><span>3.2k cubes in leaning columns</span></a>
+    <a class="card" href="./demo.html?scene=legacyGrid10k"><strong>10k Grid</strong><span>10,000 cubes</span></a>
+    <a class="card" href="./demo.html?scene=legacyGrid100k"><strong>100k Grid</strong><span>The 10k grid ×10: 100,000 cubes (not in legacy)</span></a>
+    <a class="card" href="./demo.html?scene=legacyGround"><strong>Ground</strong><span>One box dropped</span></a>
+    <a class="card" href="./demo.html?scene=legacyEmpty"><strong>Empty</strong><span>Nothing; the fixed per-step cost</span></a>
+  </div>
+
+  <h2>Showcase scenes</h2>
+  <div class="grid">
+    <a class="card" href="./demo.html?scene=ring110k"><strong>Brick ring 110k</strong><span>110,441 bricks hit by a ball</span></a>
+    <a class="card" href="./demo.html?scene=wall"><strong>Wall smash</strong><span>2k bricks</span></a>
+    <a class="card" href="./demo.html?scene=pile"><strong>Box pile 32k</strong><span>Random drop, settles to sleep</span></a>
+    <a class="card" href="./demo.html?scene=columns"><strong>Box columns 100k</strong><span>Tall stacks</span></a>
+    <a class="card" href="./demo.html?scene=gables506k"><strong>Brick gables 506k</strong><span>Half a million bodies (needs a fast GPU)</span></a>
+    <a class="card" href="./demo.html?scene=joints"><strong>Joints</strong><span>Hinges, chains, motors, ragdolls</span></a>
+    <a class="card" href="./demo.html?scene=ragdolls10k"><strong>Ragdoll pile 10k</strong><span>11k bodies, 10k D6 joints</span></a>
+    <a class="card" href="./vehicle.html?scene=traffic"><strong>Traffic</strong><span>49 vehicles</span></a>
+  </div>
+
+  <footer>Source: <a href="https://github.com/Glavin001/rubble">github.com/Glavin001/rubble</a>.
+    Needs WebGPU: desktop Chrome or Edge, or a recent Safari. Drag to orbit, scroll to zoom.</footer>
+</main>
+<script>
+  (async () => {
+    const el = document.getElementById('gpu');
+    const bad = (msg) => { el.textContent = msg; el.classList.add('bad'); };
+    if (!navigator.gpu) return bad('WebGPU is not available in this browser. Try desktop Chrome or Edge.');
+    try {
+      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      if (!adapter) return bad('WebGPU is present but no GPU adapter was found.');
+      const info = adapter.info || {};
+      const name = [info.vendor, info.architecture || info.device].filter(Boolean).join(' · ');
+      el.textContent = `WebGPU ready${name ? `: ${name}` : ''}.`;
+    } catch (e) {
+      bad(`WebGPU adapter request failed: ${e.message || e}`);
+    }
+  })();
+</script>
+</body>
+</html>
