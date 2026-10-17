@@ -89,6 +89,9 @@ pub struct StepInputs {
     pub warm_hash_words: u64,
     pub steps_done: u32,
     pub last: StepCounters,
+    /// Vehicle controller pool in use (`vehicle_step.slang`; 0 = no vehicle passes).
+    pub vehicle_count: u32,
+    pub wheel_count: u32,
 }
 
 /// JP rounds dispatched this step; later rounds run in `color_bodies_tail`.
@@ -212,6 +215,10 @@ pub fn encode_step(
         });
     }
 
+    let vehicles = i.vehicle_count > 0;
+    if vehicles {
+        e.d("vehicle_input", u64::from(i.vehicle_count));
+    }
     if !reuse_manifolds {
         e.d("build_aabbs", n_cols);
         if i.joint_count > 0 {
@@ -224,6 +231,13 @@ pub fn encode_step(
         );
         e.d("broadphase_insert", n_cols);
         e.d("broadphase_query", n_cols);
+        if vehicles {
+            // One workgroup per wheel, cast at x⁻ through this step's grid (the
+            // contact hash reuses its heads later in the step); then, before
+            // the constraint graph, link wheels standing on dynamic bodies.
+            e.d("wheel_query", u64::from(i.wheel_count) * 64);
+            e.d("vehicle_link", u64::from(i.wheel_count.max(1)));
+        }
     }
     e.d(work_args, 64);
     e.phase("broadphase");
@@ -367,6 +381,9 @@ pub fn encode_step(
     e.w("record_color_degrees", 67);
     e.d("write_color_args", 64);
     e.d("predict_bodies", n_bodies);
+    if vehicles {
+        e.d("vehicle_prepare", u64::from(i.vehicle_count));
+    }
 
     if m.compact_contacts && !m.fused_persistence && !early_pair_pack {
         if !m.persistent_contacts {
@@ -397,9 +414,15 @@ pub fn encode_step(
         }
         e.phase("primal");
         e.wp(dual, 65, u32::from(iter + 1 == i.iterations));
+        if vehicles {
+            e.d("vehicle_iterate", u64::from(i.vehicle_count));
+        }
         e.phase("dual");
     }
     e.d("extract_velocity_sleep", n_bodies);
+    if vehicles {
+        e.d("vehicle_post", u64::from(i.vehicle_count));
+    }
     e.d("write_sleep_args", 64);
     // A sleep time beyond any run's length cannot produce candidates, so the
     // island gate has nothing to revoke (ring/gables benchmarks: 1e6 s).
@@ -416,6 +439,12 @@ pub fn encode_step(
 /// Entries a persistent-contact host replays (every name `encode_step` can
 /// emit, resolved with [`resolve_entry`]). Native hosts compile exactly these.
 pub const PERSISTENT_ENTRIES: &[&str] = &[
+    "vehicle_input",
+    "wheel_query",
+    "vehicle_link",
+    "vehicle_prepare",
+    "vehicle_iterate",
+    "vehicle_post",
     "build_aabbs",
     "joint_hash_clear",
     "joint_hash_insert",
@@ -477,7 +506,21 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
 ];
 
 /// Slang source (under `slang/kernels/`) that defines `entry`.
+/// Vehicle controller entries (`vehicle_step.slang`).
+pub const VEHICLE_ENTRIES: &[&str] = &[
+    "vehicle_input",
+    "wheel_query",
+    "vehicle_link",
+    "vehicle_prepare",
+    "vehicle_iterate",
+    "vehicle_post",
+    "raycast_batch",
+];
+
 pub fn kernel_source(entry: &str) -> &'static str {
+    if VEHICLE_ENTRIES.contains(&entry) {
+        return "vehicle_step.slang";
+    }
     if entry.starts_with("convex_") {
         return if entry.ends_with("_persistent") {
             "convex_persistent.slang"
@@ -550,7 +593,7 @@ pub fn pair_warm_key(a: u32, b: u32) -> u32 {
 }
 
 /// GPU bindings every rigid host allocates (`BIND(0..30)` in world_step.slang).
-pub const BIND_COUNT: usize = 31;
+pub const BIND_COUNT: usize = 32;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
 
@@ -621,7 +664,9 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[18] = b(c.max_hull_vertices, 16);
     s[19] = u64::from(engine_schema::joint_hash_size(c.max_joints)) * 3 * 4;
     s[20] = b(c.max_bodies, 4);
-    s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
+    // Scratch: host-reset words 0..63, uniform-grid large list 64..79, the
+    // oversized-static count (80), then the event ring and the static list.
+    s[21] = u64::from(engine_schema::SCRATCH_WORDS) * 4;
     s[22] = 96 * PASS_ALIGN;
     // Colour slots 0..63, work 64..73 (persist list 70/71, carry 72, previous
     // contacts 73), convex 74..76.
@@ -634,6 +679,7 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[29] = b(c.max_candidates, 32);
     // SAT separating-feature cache (convex_step gSatCache): uint2 slots, power of two.
     s[30] = u64::from(c.max_candidates.max(1024).next_power_of_two()) * 8;
+    // Vehicle pool (vehicle_step gVehicleData): hosts with vehicles resize it.
     if persistent {
         s[4] = u64::from(c.max_contacts) * 2 * 32;
         s[27] = u64::from(c.max_contacts) * 2 * 64;
@@ -725,7 +771,9 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     s[28] = u32::from(m.carry_rest);
     // Degree-aware primal lanes for convex/compound scenes (high-degree bodies).
     s[29] = u32::from(i.has_convex);
-    s[30] = u32::from(h.has_filters);
+    // Bit 0: category/mask/group filters. Bit 1: vehicle sever grace (severed
+    // parts ignore their chassis by collider generation) unless filters are on.
+    s[30] = u32::from(h.has_filters) | (u32::from(!h.has_filters && i.vehicle_count > 0) << 1);
     s
 }
 
@@ -777,6 +825,8 @@ mod tests {
                 color_rounds: rounds,
                 ..StepCounters::default()
             },
+            vehicle_count: 0,
+            wheel_count: 0,
         }
     }
 

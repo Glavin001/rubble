@@ -45,6 +45,7 @@
       <label id="sleepLabel" for="sleepToggle" title="Let resting bodies fall asleep (URL: sleep=on|off)">
         <input type="checkbox" id="sleepToggle"> Sleep
       </label>
+      <a href="./vehicle.html" style="color:#b8d7ff;margin-left:10px">Drive a vehicle →</a>
     </div>
     <div id="rates">
       <div><span class="lbl">TPS</span> <strong class="val" id="tpsVal">—</strong><span class="sub" id="stepMsVal"></span></div>
@@ -429,7 +430,8 @@
       s[6] = 256;
       s[7] = 256;
       s[8] = b(cap.maxCommands, 64);
-      s[9] = b(cap.maxBodies + cap.maxColliders, 32);
+      // Collider AABBs, then the oversized-static list (1024 records, host scalar 29).
+      s[9] = b(cap.maxBodies + cap.maxColliders + 1024, 32);
       s[10] = b(cap.maxCandidates, 16);
       s[11] = b(cap.maxBodies, 4);
       s[12] = b(cap.maxBodies, 4);
@@ -439,7 +441,7 @@
       s[16] = b(cap.maxColors * Math.max(1, Math.ceil(cap.maxBodies / 64)), 4);
       s[17] = b(cap.maxColors, 4);
       s[18] = b(cap.maxHull, 16);
-      s[19] = 65536 * 4;
+      s[19] = (65536 + 4 + 4 * 1024) * 4; // joint pair hash, then the event ring
       s[20] = b(cap.maxBodies, 4);
       s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
       s[22] = 96 * PASS_ALIGN;
@@ -1098,6 +1100,7 @@ struct VsOut {
       s[27] = localRepair ? 1 : 0;
       s[28] = carryRest ? 1 : 0;
       s[24] = csrBase;
+      s[29] = cap.maxBodies + cap.maxColliders; // oversized-static list base
       s[4] = Math.min(cap.maxColors, 32);
       return s;
     }
