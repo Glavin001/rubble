@@ -1,29 +1,29 @@
-/// WGSL source for GPU warmstart impulse transfer between frames.
-///
-/// Matches new contacts against previous-frame contacts by body pair and feature
-/// ID, then transfers cached solver state (impulses, penalties, flags) with
-/// decay.
-///
-/// Historically this was an O(new x prev) linear scan (each new contact scanned
-/// every previous contact). That is quadratic in contact count and collapses at
-/// the 10k-body target (~50k contacts => billions of iterations/frame). W4a-3
-/// replaces it with an open-addressing hash map keyed by
-/// `(min(body_a,body_b), max(body_a,body_b), feature_id)`:
-///
-///   1. `WARMSTART_MAP_INSERT_WGSL` builds the map from `prev_contacts`.
-///   2. `WARMSTART_MATCH_WGSL` looks up each new contact in O(1) expected.
-///
-/// Determinism: inserters only `atomicCompareExchangeWeak` a 32-bit hash word to
-/// claim a bucket — they never read another inserter's non-atomic key writes, so
-/// there is no intra-dispatch visibility hazard. The full key is written after
-/// the claim and verified on lookup in the *following* dispatch (writes visible
-/// across the pass boundary). For unique keys (structured feature IDs, e.g. the
-/// box/pyramid scenes) each key claims one deterministic base bucket, so the
-/// result is bit-identical to the old linear scan. Only contacts that genuinely
-/// share `(lo,hi,feature_id)` (e.g. capsule cap points with a constant feature
-/// id) resolve to a scheduling-dependent occupant — the same approximation the
-/// linear scan already made (it took whichever matched first), and covered by
-/// the oracle's tolerance rather than the bitwise determinism probe.
+//! WGSL source for GPU warmstart impulse transfer between frames.
+//!
+//! Matches new contacts against previous-frame contacts by body pair and feature
+//! ID, then transfers cached solver state (impulses, penalties, flags) with
+//! decay.
+//!
+//! Historically this was an O(new x prev) linear scan (each new contact scanned
+//! every previous contact). That is quadratic in contact count and collapses at
+//! the 10k-body target (~50k contacts => billions of iterations/frame). W4a-3
+//! replaces it with an open-addressing hash map keyed by
+//! `(min(body_a,body_b), max(body_a,body_b), feature_id)`:
+//!
+//!   1. `WARMSTART_MAP_INSERT_WGSL` builds the map from `prev_contacts`.
+//!   2. `WARMSTART_MATCH_WGSL` looks up each new contact in O(1) expected.
+//!
+//! Determinism: inserters only `atomicCompareExchangeWeak` a 32-bit hash word to
+//! claim a bucket — they never read another inserter's non-atomic key writes, so
+//! there is no intra-dispatch visibility hazard. The full key is written after
+//! the claim and verified on lookup in the *following* dispatch (writes visible
+//! across the pass boundary). For unique keys (structured feature IDs, e.g. the
+//! box/pyramid scenes) each key claims one deterministic base bucket, so the
+//! result is bit-identical to the old linear scan. Only contacts that genuinely
+//! share `(lo,hi,feature_id)` (e.g. capsule cap points with a constant feature
+//! id) resolve to a scheduling-dependent occupant — the same approximation the
+//! linear scan already made (it took whichever matched first), and covered by
+//! the oracle's tolerance rather than the bitwise determinism probe.
 
 /// Shared prelude: the `Contact` layout, warmstart params, feature-skip
 /// constants, and the composite-key hash. Concatenated into both kernels.
