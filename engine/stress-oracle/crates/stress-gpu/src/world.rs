@@ -858,6 +858,9 @@ impl GpuWorld {
             if pass == 0 {
                 first = clusters.clone();
             }
+            // STRESS_GPU_QS_TRACE=1: each cascade pass's time and work on stderr.
+            let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
+            let t_pass = std::time::Instant::now();
             let results = if skip_repeats {
                 let m = &self.solver.mirror;
                 let inputs: Vec<StaticInputs> = clusters.iter().map(|&ci| StaticInputs::of(m, ci, loads)).collect();
@@ -896,8 +899,13 @@ impl GpuWorld {
                     }
                 }
             }
+            let t_solved = t_pass.elapsed().as_secs_f64() * 1e3;
             for &ci in to_split.iter().rev() {
                 m.split_cluster(ci);
+            }
+            if trace {
+                let ok = results.iter().filter(|&&r| r).count();
+                eprintln!("qs pass {pass}: {} clusters ({ok} converged), solve and commit {t_solved:.1} ms, damage {any}, {} splits", clusters.len(), to_split.len());
             }
             if !any {
                 break;
@@ -907,7 +915,11 @@ impl GpuWorld {
             if let Some(l) = self.solver.loads.as_mut() {
                 l.topology_version += 1;
             }
+            let t_rebuild = std::time::Instant::now();
             self.solver.rebuild(gpu, 0.0)?;
+            if trace {
+                eprintln!("qs pass {pass}: rebuild {:.1} ms", t_rebuild.elapsed().as_secs_f64() * 1e3);
+            }
         }
         Ok((converged, structural, first))
     }
