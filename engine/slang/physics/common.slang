@@ -24,6 +24,8 @@ static const uint BODY_DYNAMIC = 1u;
 static const uint BODY_KINEMATIC = 2u;
 static const uint BODY_SLEEPING = 4u;
 static const uint BODY_AWAKE = 8u;
+// Vehicle chassis: initialPad holds asfloat(gAabbs index) of its 4-entry wheel block.
+static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
 
 struct Collider
 {
@@ -90,61 +92,72 @@ struct Manifold
 
 struct Joint
 {
+    // Layout mirrors engine-schema `Joint` (288 B). Row math: joints.slang.
     uint bodyA;
     uint bodyB;
-    uint jointType;
     uint flags;
-    float3 localAnchorA;
-    float stiffness;
-    float3 localAnchorB;
-    float damping;
-    float3 axisA;
-    float limitMin;
-    float3 axisB;
-    float limitMax;
-    float3 c0;
-    float _padC0;
-    float lambda0;
-    float lambda1;
-    float lambda2;
-    float lambda3;
-    float lambda4;
-    float lambda5;
-    float k0;
-    float k1;
-    float k2;
-    float k3;
-    float k4;
-    float k5;
-    // Bond joints (JOINT_BOND): the bond frame's u axis in A's frame (the
-    // normal is axisB), and break capacities from the baked bond: x tension
-    // (N), y compression (N), z shear (N), w bending moment (N m). A capacity
-    // <= 0 means that mode never breaks.
-    float3 frameU;
-    float _padFrameU;
-    float4 strength;
-    // Bond angular violation at step start (C0 of the angular rows; c0 holds
-    // the linear one), for AVBD stabilization.
-    float3 c0Ang;
-    float _padC0Ang;
+    uint motion; // 2 bits per DOF (X, Y, Z, twist, swing1, swing2)
+    float3 anchorA;
+    float torqueArm;
+    float4 frameA;
+    float3 anchorB;
+    float linStiffness;
+    float4 frameB;
+    float4 restStart;
+    float3 linLo;
+    float twistLo;
+    float3 linHi;
+    float twistHi;
+    float swingY;
+    float swingZ;
+    float radialMin;
+    float radialMax;
+    float angStiffness;
+    float limitStiffness;
+    float limitDamping;
+    float driveForceLimit;
+    float breakForce;
+    float breakTorque;
+    float yieldTorque;
+    float breakBend;
+    float driveTarget;
+    float driveVelocity;
+    float driveStiffness;
+    float driveDamping;
+    // λ, penalty and C0 per row slot (slots 0..3 in *Lo, 4..7 in *Hi). float4
+    // pairs rather than float[8]: struct copies then need no SPIR-V
+    // OpCopyLogical, which naga's SPIR-V front end rejects.
+    float4 lambdaLo;
+    float4 lambdaHi;
+    float4 penaltyLo;
+    float4 penaltyHi;
+    float4 c0Lo;
+    float4 c0Hi;
 };
 
-static const uint JOINT_BALL = 0u;
-static const uint JOINT_FIXED = 1u;
-static const uint JOINT_HINGE = 2u;
-static const uint JOINT_SLIDER = 3u;
-static const uint JOINT_D6 = 4u;
-static const uint JOINT_DISTANCE = 5u;
-static const uint JOINT_MAX_DISTANCE = 6u;
-// Breakable bond: six AVBD rows in the bond frame (normal axisB and frameU in
-// A's frame) about the rest pose (relative rotation in axisA.xyz + limitMin as
-// a quaternion). Fixed penalty k0..k5 (normal, u, v, about u, about v, about
-// normal) proportional to Shardwright's elastic springs, so redundant bonds
-// share load as the bake's stress model does; lambda0..5 accumulate the row
-// forces. Breaks when they exceed the baked capacities (strength).
-static const uint JOINT_BOND = 7u;
-// Joint.flags: set once a bond breaks; broken joints are skipped everywhere.
 static const uint JOINT_FLAG_BROKEN = 1u;
+static const uint JOINT_FLAG_COLLIDE = 2u;
+static const uint JOINT_FLAG_RADIAL = 4u;
+static const uint JOINT_FLAG_CONE = 8u;
+static const uint JOINT_FLAG_DRIVE = 16u;
+static const uint JOINT_DRIVE_DOF_SHIFT = 8u;
+static const uint MOTION_LOCKED = 0u;
+static const uint MOTION_LIMITED = 1u;
+static const uint MOTION_FREE = 2u;
+static const float JOINT_HARD = 1.0e30;
+static const float JOINT_BIG = 3.0e38;
+// Fracture bond (JOINT_FLAG_BOND): a weld whose six rows run in the bond frame
+// (frame A: X = normal A->B, Y = u, Z = v) with fixed per-row penalties set by
+// the host, breaking by Shardwright's utilization against the capacities
+// stored in linLo (tension, compression, shear) and twistLo (bending).
+static const uint JOINT_FLAG_BOND = 32u;
+// Vehicle wheel standing on a dynamic body (vehicle_link): links chassis and
+// ground in the graph; the ground body's primal adds the wheel's ground block,
+// whose gAabbs index is in Joint.motion. Pair hash, warm start and dual skip it.
+static const uint JOINT_FLAG_TYRE = 64u;
+// Set by solve_dual on the final iteration while the multipliers still move:
+// the joint's bodies may not fall asleep with unconverged forces.
+static const uint JOINT_FLAG_UNSETTLED = 128u;
 
 struct AvbdParams
 {
@@ -199,6 +212,7 @@ static const uint CCD_CANDIDATE_MISS = 32u;
 static const uint OVERFLOW_MANIFOLDS = 64u;
 static const uint OVERFLOW_BP_CHAIN = 128u;
 static const uint OVERFLOW_WARM_HASH = 256u; // record warm hash probe limit exhausted
+static const uint OVERFLOW_LARGE_STATICS = 512u; // more oversized statics than LARGE_STATIC_CAP
 
 struct GpuCommand
 {

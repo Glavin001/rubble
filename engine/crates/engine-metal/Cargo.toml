@@ -8,6 +8,7 @@ description = "Metal compute backend and M3 proof path (Slang → MSL)"
 [dependencies]
 engine-schema.workspace = true
 engine-exec.workspace = true
+engine-vehicle.workspace = true
 engine-slang-build.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
@@ -24,6 +25,7 @@ serde_json.workspace = true
 
 [build-dependencies]
 engine-slang-build.workspace = true
+engine-exec.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]

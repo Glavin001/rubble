@@ -45,10 +45,11 @@
       <label id="sleepLabel" for="sleepToggle" title="Let resting bodies fall asleep (URL: sleep=on|off)">
         <input type="checkbox" id="sleepToggle"> Sleep
       </label>
+      <a href="./vehicle.html" style="color:#b8d7ff;margin-left:10px">Drive a vehicle →</a>
     </div>
     <div id="rates">
       <div><span class="lbl">TPS</span> <strong class="val" id="tpsVal">—</strong><span class="sub" id="stepMsVal"></span></div>
-      <div><span class="lbl">Max TPS</span> <strong class="val" id="maxTpsVal">—</strong><span class="sub">uncapped</span></div>
+      <div title="1000 ÷ physics step cost: GPU pass time with timestamp queries, otherwise an estimate from submission busy time"><span class="lbl">Max TPS</span> <strong class="val" id="maxTpsVal">—</strong><span class="sub" id="maxTpsSub"></span></div>
       <div><span class="lbl">FPS</span> <strong class="val" id="fpsVal">—</strong><span class="sub" id="frameMsVal"></span></div>
       <div><span class="lbl">Max FPS</span> <strong class="val" id="maxFpsVal">—</strong><span class="sub">uncapped</span></div>
     </div>
@@ -64,11 +65,16 @@
     import { runRingRegression } from "./ring-regression.mjs";
     import { runGablesRegression } from "./gables-regression.mjs";
     import { measurePhysicsBatches, assertBenchmarkWorkload } from "./physics-benchmark.mjs?v=2";
+    import { installJointControls } from "./joint-interaction.mjs";
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
     const canvas = document.getElementById('c');
     const fail = (e) => { errEl.textContent = String(e && e.stack || e); statusEl.textContent = 'stopped'; };
+    // Setup runs at module top level (scene snapshots, adapter, pipelines); show
+    // its failures on the page instead of only in the console.
+    addEventListener('unhandledrejection', (e) => fail(e.reason));
+    addEventListener('error', (e) => fail(e.error || e.message));
     const warnOnce = (() => {
       const seen = new Set();
       return (msg) => {
@@ -87,6 +93,11 @@
     // Diagnostic switches retain identical scenes and solver iteration counts.
     const incrementalColors = qs.get('coloring') !== 'rebuild';
     // Ring-only measured default; sparse=32 retains the separate-color control.
+    // ENGINE_AUDIT P1-A: adaptive dispatch counts with completeness tails.
+    // colors=full / rounds=full keep the fixed-palette controls.
+    const COLOR_ROUND_LIMIT = 32, COLOR_ROUND_HEADROOM = 2, COLOR_HEADROOM = 4, SLEEP_NEVER_S = 1e5;
+    const colorsFull = qs.get('colors') === 'full';
+    const roundsFull = qs.get('rounds') === 'full';
     const sparseStart = qs.has('sparse') ? Number(qs.get('sparse')) : scene === 'ring110k' ? 10 : 32;
     if (!Number.isInteger(sparseStart) || sparseStart < 0 || sparseStart > 32)
       throw new Error('sparse must be an integer color index from 0 through 32');
@@ -100,7 +111,9 @@
     // native persistent gables gate fails only through column-9 debris striking
     // column 10 (decision 8ea), so native keeps canonical. Other scenes opt in;
     // compact/canonical retain comparison controls.
-    const persistentByDefault = ['ring110k', 'gables506k'].includes(scene) && !qs.has('contacts');
+    // All scenes default to the persistent path since the ENGINE_AUDIT P0 (one fast
+    // configuration on every host); contacts=canonical/compact keep the controls.
+    const persistentByDefault = !qs.has('contacts');
     const persistentContacts = qs.get('contacts') === 'persistent' || persistentByDefault;
     const compactContacts = persistentContacts || qs.get('contacts') === 'compact';
     const manifoldPersistence = qs.get('persistence') === 'manifold';
@@ -112,17 +125,17 @@
     // Record slots (8ed) resolve the pair key and previous run without loading
     // previous contacts: ring manifold/record 11.42/11.21/11.83/11.35 ms, gables
     // 34.41/32.68/35.05/32.74 ms, bit-identical workloads.
-    const hashInsertMode = qs.get('hashInsert') || (['ring110k', 'gables506k'].includes(scene) ? 'record' : 'contact');
+    let hashInsertMode = qs.get('hashInsert') || 'record';
     if (!['contact', 'manifold', 'record'].includes(hashInsertMode))
       throw new Error('hashInsert must be contact, manifold or record');
     // record: per-manifold insert of 16-byte slots holding the pair key and its
     // previous run, so lookups never load previous contacts to compare keys.
-    const warmRecordHash = hashInsertMode === 'record';
-    const manifoldHashInsert = hashInsertMode === 'manifold' || warmRecordHash;
+    let warmRecordHash = hashInsertMode === 'record';
+    let manifoldHashInsert = hashInsertMode === 'manifold' || warmRecordHash;
     // Narrowphase finishes reused copies for moving pairs; persistence skips
     // points tagged final (8eh). Gables pass/copy 30.95/30.19/30.98/30.21 ms,
     // ring 11.37/11.27/11.38/11.27 ms. reuse=pass keeps the separate-pass control.
-    const reuseMode = qs.get('reuse') || (['ring110k', 'gables506k'].includes(scene) && persistentContacts
+    const reuseMode = qs.get('reuse') || (persistentContacts
       && !manifoldPersistence && !fusedPersistence ? 'copy' : 'pass');
     if (!['pass', 'copy'].includes(reuseMode)) throw new Error('reuse must be pass or copy');
     if (reuseMode === 'copy' && (!persistentContacts || manifoldPersistence || fusedPersistence))
@@ -174,15 +187,16 @@
     // walk their own cell plus 13 forward cells; sleepers and small statics stay
     // in a second, fully walked table. Ring scaled/split 11.04/10.92/11.05/10.86/
     // 11.02/10.82 ms (grid 1.11->0.92) with identical workload snapshots; gables
-    // was neutral (29.34/29.15/29.37 ms), so it keeps scaled.
-    const gridMode = qs.get('grid') || (scene === 'ring110k' ? 'split' : 'scaled');
+    // was neutral (29.34/29.15/29.37 ms) until 8eo moved split links into the
+    // AABB: gables scaled/split/split/scaled 25.94/25.89/25.93/26.21 ms (8ep).
+    const gridMode = qs.get('grid') || 'split';
     if (!['fixed', 'scaled', 'split'].includes(gridMode)) throw new Error('grid must be fixed, scaled or split');
     const gridSplit = gridMode === 'split';
     const detailedProfile = qs.get('profile') === 'detail';
     const graphProfile = qs.get('profile') === 'graph';
     // Diagnostic: one timestamped pass per primal color (and the sparse tail).
     const colorProfile = qs.get('profile') === 'colors';
-    const spatialOrder = qs.get('order') === 'morton';
+    const spatialOrder = qs.get('order') === 'morton' && !(qs.get('scene') || '').match(/^(joints|ragdolls|hingechains|motorfield)/);
     const physicalAdjacency = qs.get('adjacency') !== 'append';
     const regressionKind = qs.get('check');
     const regressionEnabled = ['ring', 'gables'].includes(regressionKind);
@@ -277,9 +291,45 @@
         eye: [0, 80, -120], look: [0, 10, 0], far: 4000, ground: 256, flags: 1, sleepTime: 1e6,
         cap: { ...sceneCap(524288), maxContacts: 6 * 1048576, maxCandidates: 4 * 1048576 },
       },
+      // Joint scenes: built by engine-scenes in Rust, exported as raw GPU
+      // records (cargo run -p engine-scenes --release --bin scene_export).
+      joints: {
+        title: 'joints showcase', snapshot: 'joints',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [0, 12, -22], look: [0, 2.5, 1], far: 400, ground: 60,
+      },
+      ragdolls: {
+        title: 'ragdolls 40', snapshot: 'ragdolls',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.6,
+        eye: [6, 6, -11], look: [0, 1.5, 0], far: 400, ground: 40,
+      },
+      ragdolls10k: {
+        title: 'ragdoll pile 11k bodies, 10k joints', snapshot: 'ragdolls10k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.6,
+        eye: [16, 14, -22], look: [0, 1, 0], far: 600, ground: 60,
+      },
+      hingechains10k: {
+        title: 'hinge chains 10k bodies, 10k joints', snapshot: 'hingechains10k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [40, 30, -90], look: [0, 8, 0], far: 800, ground: 120,
+      },
+      motorfield10k: {
+        title: 'motor field 10k bodies, 2.5k motors', snapshot: 'motorfield10k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5,
+        eye: [30, 30, -70], look: [0, 2, 0], far: 800, ground: 80,
+      },
     };
     const cfg = SCENES[scene];
     if (!cfg) throw new Error(`unknown scene ${scene}; try ${Object.keys(SCENES).join(', ')}`);
+    // Manifold and record inserts run before narrowphase over last step's
+    // manifolds, so they need contact reuse (FLAG_REUSE_CONTACTS). A scene without
+    // it (wall smash) falls back to the contact insert, as the native host does
+    // (gpu.rs record_hash/manifold_insert); an explicit ?hashInsert= still errors.
+    if (!((cfg.flags || 0) & 1) && !qs.has('hashInsert')) {
+      hashInsertMode = 'contact';
+      warmRecordHash = false;
+      manifoldHashInsert = false;
+    }
     const sceneSelect = document.getElementById('sceneSelect');
     for (const [id, s] of Object.entries(SCENES)) {
       const opt = document.createElement('option');
@@ -295,6 +345,31 @@
       if (sceneSelect.value !== 'pyramid') next.searchParams.delete('levels');
       location.href = next.href;
     });
+    // Snapshot scenes size the world from the exported counts.
+    async function loadSnapshot(id) {
+      const base = `./generated/scenes/${id}`;
+      const metaRes = await fetch(`${base}.json`, { cache: 'no-store' });
+      if (!metaRes.ok) throw new Error(`missing ${base}.json; run: cargo run -p engine-scenes --release --bin scene_export`);
+      const meta = await metaRes.json();
+      const bin = await (await fetch(`${base}.bin`, { cache: 'no-store' })).arrayBuffer();
+      const magic = new TextDecoder().decode(new Uint8Array(bin, 0, 8));
+      if (magic !== 'RUBSNAP1') throw new Error(`${base}.bin is not a WorldSnapshot`);
+      const [nb, nc, nm, nj] = new Uint32Array(bin, 8, 4);
+      let off = 24;
+      const take = (n, stride) => { const v = new Uint8Array(bin, off, n * stride); off += n * stride; return v; };
+      return {
+        meta,
+        bodies: take(nb, 112), colliders: take(nc, 64), materials: take(nm, 16), joints: take(nj, meta.jointLayout.stride),
+        counts: { bodies: nb, colliders: nc, joints: nj },
+      };
+    }
+    const snap = cfg.snapshot ? await loadSnapshot(cfg.snapshot) : null;
+    if (snap) {
+      cfg.iterations = cfg.iterations ?? snap.meta.iterations;
+      cfg.cap = sceneCap(snap.counts.bodies, { maxJoints: Math.max(64, snap.counts.joints) });
+      cfg.title = `${cfg.title}, ${cfg.iterations} iterations`;
+    }
+    const jointCount = snap ? snap.counts.joints : 0;
     const cap = cfg.cap;
     const lead = cfg.lead;
     const eye0 = cfg.eye;
@@ -311,13 +386,23 @@
       return [target[0] + orbitDist * cp * sy, target[1] + orbitDist * sp, target[2] + orbitDist * cp * cy];
     }
     let drag = null;
+    let jointControls = null;
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('pointerdown', (e) => {
+      if (jointControls && (e.ctrlKey || e.altKey || e.metaKey) && e.button === 0) {
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capture */ }
+        jointControls.startGrab(e);
+        return;
+      }
       drag = { id: e.pointerId, x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey || e.button === 1 };
       try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capture */ }
     });
-    canvas.addEventListener('pointerup', (e) => { if (drag && drag.id === e.pointerId) drag = null; });
+    canvas.addEventListener('pointerup', (e) => {
+      if (jointControls && jointControls.endGrab(e)) return;
+      if (drag && drag.id === e.pointerId) drag = null;
+    });
     canvas.addEventListener('pointermove', (e) => {
+      if (jointControls && jointControls.moveGrab(e)) return;
       if (!drag || drag.id !== e.pointerId) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.x = e.clientX; drag.y = e.clientY;
@@ -354,11 +439,12 @@
       s[2] = b(cap.maxColliders, 64);
       s[3] = b(64, 16);
       s[4] = b(cap.maxContacts * 2, persistentContacts ? 32 : 128);
-      s[5] = b(cap.maxJoints, 256);
+      s[5] = b(cap.maxJoints, 288); // engine-schema Joint
       s[6] = 256;
       s[7] = 256;
       s[8] = b(cap.maxCommands, 64);
-      s[9] = b(cap.maxBodies + cap.maxColliders, 32);
+      // Collider AABBs, then the oversized-static list (1024 records, host scalar 29).
+      s[9] = b(cap.maxBodies + cap.maxColliders + 1024, 32);
       s[10] = b(cap.maxCandidates, 16);
       s[11] = b(cap.maxBodies, 4);
       s[12] = b(cap.maxBodies, 4);
@@ -368,7 +454,7 @@
       s[16] = b(cap.maxColors * Math.max(1, Math.ceil(cap.maxBodies / 64)), 4);
       s[17] = b(cap.maxColors, 4);
       s[18] = b(cap.maxHull, 16);
-      s[19] = 65536 * 4;
+      s[19] = (65536 + 4 + 4 * 1024) * 4; // joint pair hash, then the event ring
       s[20] = b(cap.maxBodies, 4);
       s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
       s[22] = 96 * PASS_ALIGN;
@@ -395,10 +481,13 @@
       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
       'csr_scatter_contacts', 'csr_sort', 'csr_sort_append', 'init_colors', 'color_bodies',
       'pack_color_lists', 'write_color_args', 'write_work_args', 'predict_bodies', 'solve_primal_color',
-      ...(sparseStart < 32 ? [compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse'] : []),
+      // Sparse colour tail and JP-round tail: the adaptive dispatch counts
+      // (ENGINE_AUDIT P1-A) rely on them to finish every step completely.
+      compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 'color_bodies_tail',
       'count_color_tiles', 'prefix_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
+      ...(jointCount > 0 ? ['joint_hash_clear', 'joint_hash_insert', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints'] : []),
     ];
 
     function bindingsOf(wgsl) {
@@ -741,7 +830,17 @@ struct VsOut {
       colliders.push({ body: id, shape: 0, density, params: [radius, 0, 0, radius] });
     };
     statusEl.textContent = `building ${scene}…`;
-    if (scene === 'ring') {
+    if (snap) {
+      // Bodies 0..renderBodies-1 own collider i; trailing bodies (mouse) have none.
+      const bv = new DataView(snap.bodies.buffer, snap.bodies.byteOffset, snap.bodies.byteLength);
+      const cv = new DataView(snap.colliders.buffer, snap.colliders.byteOffset, snap.colliders.byteLength);
+      for (let i = 0; i < snap.meta.renderBodies; i++) {
+        const o = i * 112;
+        bodies.push({ p: [bv.getFloat32(o, true), bv.getFloat32(o + 4, true), bv.getFloat32(o + 8, true)], invMass: bv.getFloat32(o + 12, true) });
+        colliders.push({ body: i, shape: cv.getUint32(i * 64 + 4, true), params: [0, 0, 0, cv.getFloat32(i * 64 + 60, true)] });
+        if (i > 0) maxSmallR = Math.max(maxSmallR, cv.getFloat32(i * 64 + 60, true));
+      }
+    } else if (scene === 'ring') {
       buildRing(addBrick, addBall, 12, 20, 2, 10);
     } else if (scene === 'ring110k') {
       buildRing(addBrick, addBall, 80, 40, 4, 10);
@@ -829,7 +928,13 @@ struct VsOut {
     if (bodies.length > cap.maxBodies) throw new Error(`${bodies.length} bodies exceed capacity ${cap.maxBodies}`);
     params.gridCellSize = Math.max(0.5, 2 * maxSmallR * 1.0001);
     const storageOrder = spatialOrder ? mortonSceneOrder(bodies, colliders) : null;
-    bodies.forEach((b, sceneId) => {
+    if (snap) {
+      new Uint8Array(bodyBytes).set(snap.bodies, 0);
+      new Uint8Array(bodyBytes).set(snap.bodies, cap.maxBodies * 112); // x⁻ = x
+      new Uint8Array(colBytes).set(snap.colliders, 0);
+      device.queue.writeBuffer(bufs[3], 0, snap.materials);
+      device.queue.writeBuffer(bufs[5], 0, snap.joints);
+    } else bodies.forEach((b, sceneId) => {
       const gpu = storageOrder ? storageOrder.sceneToGpu[sceneId] : sceneId;
       writeBody(bodyBytes, gpu, b);
       writeBody(bodyBytes, cap.maxBodies + gpu, b);
@@ -837,6 +942,12 @@ struct VsOut {
     });
     device.queue.writeBuffer(bufs[0], 0, bodyBytes);
     device.queue.writeBuffer(bufs[2], 0, colBytes);
+    if (snap) {
+      jointControls = installJointControls({
+        device, bodyBuffer: bufs[0], jointBuffer: bufs[5], snap, maxBodies: cap.maxBodies, canvas,
+        camera: { eye: cameraEye, target: () => target, fovY: Math.PI / 5 },
+      });
+    }
 
     const persistentEntries = {
       narrowphase: 'narrowphase_persistent', contact_hash_insert: 'contact_hash_insert_persistent',
@@ -909,13 +1020,13 @@ struct VsOut {
     statusEl.textContent = 'pipelines ready · building renderer…';
     await new Promise((r) => setTimeout(r, 0));
 
-    const staging = device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const staging = device.createBuffer({ size: 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     // Full body buffer for settle KE / height samples (settled scenes only).
     const bodySnap = (cfg.settled || qs.has("check"))
       ? device.createBuffer({ size: sizes[0], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })
       : null;
-    let bodyCount = bodies.length;
-    let colliderCount = bodies.length;
+    let bodyCount = snap ? snap.counts.bodies : bodies.length;
+    let colliderCount = snap ? snap.counts.colliders : bodies.length;
     // Seed dispatch sizes so frame 0 / bench lead-ins without per-step readback
     // do not use a 1024-slot contact hash for 100k-body scenes.
     const seedContacts = Math.min(cap.maxContacts, Math.max(256, (bodies.length - 1) * 4));
@@ -941,14 +1052,16 @@ struct VsOut {
     const colorCountsBytes = colorCountWords * 4;
     // One queue upload + GPU copies into the four step buffers (cheaper than 4 writeBuffers).
     const hostUpload = device.createBuffer({
-      size: 256 + 256 + 64 + colorCountsBytes,
+      size: 256 + 256 + 80 + colorCountsBytes,
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    const hostUploadCpu = new ArrayBuffer(256 + 256 + 64 + colorCountsBytes);
+    const hostUploadCpu = new ArrayBuffer(256 + 256 + 80 + colorCountsBytes);
     const hostScratchView = new Uint32Array(hostUploadCpu, 0, 64);
     const hostParamsView = new Uint8Array(hostUploadCpu, 256, 208);
-    const hostCountersView = new Uint32Array(hostUploadCpu, 512, 16);
-    const hostColorsView = new Uint32Array(hostUploadCpu, 576, colorCountWords);
+    // Counters reset each step: all 80 bytes, so colorRounds (word 17) restarts
+    // and colorRoundLimit (word 18) tells color_bodies_tail the round budget.
+    const hostCountersView = new Uint32Array(hostUploadCpu, 512, 20);
+    const hostColorsView = new Uint32Array(hostUploadCpu, 592, colorCountWords);
 
     // Warm hash size: words (one per slot), or 16-byte record slots inside the
     // pre-CSR region. Records hold one entry per previous manifold; size them
@@ -1000,6 +1113,7 @@ struct VsOut {
       s[27] = localRepair ? 1 : 0;
       s[28] = carryRest ? 1 : 0;
       s[24] = csrBase;
+      s[29] = cap.maxBodies + cap.maxColliders; // oversized-static list base
       s[4] = Math.min(cap.maxColors, 32);
       return s;
     }
@@ -1012,6 +1126,8 @@ struct VsOut {
       hostCountersView.fill(0);
       hostCountersView[0] = bodyCount;
       hostCountersView[1] = colliderCount;
+      hostCountersView[18] = COLOR_ROUND_LIMIT;
+      hostCountersView[3] = jointCount;
       hostColorsView.fill(0);
       device.queue.writeBuffer(hostUpload, 0, hostUploadCpu);
       // Prefer GPU copies from one upload — four tiny writeBuffers were ~0.3 ms of ring wall.
@@ -1022,8 +1138,8 @@ struct VsOut {
       if (steps > 0) enc.copyBufferToBuffer(bufs[7], 8, bufs[6], 80 + 7 * 4, 4);
       // manifoldCount (byte 48) sizes the per-manifold warm-hash insert.
       if (steps > 0 && (manifoldHashInsert || carryRest)) enc.copyBufferToBuffer(bufs[7], 48, bufs[6], 80 + 13 * 4, 4);
-      enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 64);
-      enc.copyBufferToBuffer(hostUpload, 576, bufs[17], 0, colorCountsBytes);
+      enc.copyBufferToBuffer(hostUpload, 512, bufs[7], 0, 80);
+      enc.copyBufferToBuffer(hostUpload, 592, bufs[17], 0, colorCountsBytes);
     }
 
     function groups(threads) {
@@ -1046,7 +1162,8 @@ struct VsOut {
       pass.dispatchWorkgroupsIndirect(bufs[23], slot * 12);
     }
 
-    function encodeStep(enc, readback, beginPass) {
+    // stepTimestamps: optional timestampWrites for the whole (unsplit) step pass.
+    function encodeStep(enc, readback, beginPass, stepTimestamps) {
       const nBodies = Math.max(bodyCount, 1);
       const nCols = Math.max(colliderCount, 1);
       const prevContacts = Math.min(Math.max(last.contact, 256), cap.maxContacts);
@@ -1054,13 +1171,18 @@ struct VsOut {
       const hashN = warmHashSlots(prevContacts) * (warmRecordHash ? 4 : 1);
 
       writeHost(enc);
-      let pass = beginPass ? beginPass() : enc.beginComputePass();
+      let pass = beginPass ? beginPass()
+        : enc.beginComputePass(stepTimestamps ? { timestampWrites: stepTimestamps } : undefined);
       const nextPhase = () => {
         if (!beginPass) return;
         pass.end();
         pass = beginPass();
       };
       disp(pass, 'build_aabbs', nCols);
+      if (jointCount > 0) {
+        disp(pass, 'joint_hash_clear', 65536);
+        disp(pass, 'joint_hash_insert', jointCount);
+      }
       disp(pass, 'broadphase_clear', gridClearWords());
       nextPhase();
       disp(pass, 'broadphase_insert', nCols);
@@ -1106,11 +1228,13 @@ struct VsOut {
       } else dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
       if (earlyPairPack) dispWork(pass, 'pack_solver_contacts', 66);
       nextPhase();
+      if (jointCount > 0) disp(pass, 'warmstart_joints', jointCount);
       disp(pass, 'build_awake_list', nBodies);
       disp(pass, 'write_work_args', 64);
       if (graphProfile) nextPhase();
       disp(pass, 'csr_clear', nBodies + 1);
       dispWork(pass, 'csr_degree_contacts', 66);
+      if (jointCount > 0) disp(pass, 'csr_degree_joints', jointCount);
       if (graphProfile) nextPhase();
       if (bodyCount <= 512) {
         disp(pass, 'csr_prefix', 1);
@@ -1121,17 +1245,23 @@ struct VsOut {
       }
       if (graphProfile) nextPhase();
       dispWork(pass, 'csr_scatter_contacts', 66);
+      if (jointCount > 0) disp(pass, 'csr_scatter_joints', jointCount);
       if (graphProfile) nextPhase();
       dispWork(pass, physicalAdjacency ? 'csr_sort' : 'csr_sort_append', 67);
       if (graphProfile) nextPhase();
       dispWork(pass, 'init_colors', 67);
       disp(pass, 'write_work_args', 64);
       if (graphProfile) nextPhase();
-      // JP dependency depth exceeds 16 on the active 110k ring.
-      const colorRounds = 32;
       // Local repair runs first; slot 69 is then zero and the rounds launch nothing.
       if (localRepair) disp(pass, 'color_bodies_local', 64);
-      for (let round = 0; round < colorRounds; round++) dispWork(pass, 'color_bodies', incrementalColors ? 69 : 67, round % 16);
+      // Rounds dispatched: last readback's need plus headroom (JP depth exceeds 16
+      // on the active 110k ring, so the budget stays 32); color_bodies_tail runs
+      // any further rounds in one workgroup, so colouring always finishes (8cl).
+      // Pass value = round index, so blocked bodies record the true depth.
+      const colorRounds = roundsFull ? COLOR_ROUND_LIMIT
+        : Math.min(COLOR_ROUND_LIMIT, Math.max(1, (last.colorRounds || 0) + 1 + COLOR_ROUND_HEADROOM));
+      for (let round = 0; round < colorRounds; round++) dispWork(pass, 'color_bodies', incrementalColors ? 69 : 67, round);
+      if (colorRounds < COLOR_ROUND_LIMIT) disp(pass, 'color_bodies_tail', 64, colorRounds);
       if (graphProfile) nextPhase();
       if (stablePacking) {
         disp(pass, 'count_color_tiles', nBodies);
@@ -1150,28 +1280,35 @@ struct VsOut {
         if (!persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
         dispWork(pass, 'pack_solver_contacts', 66);
       }
+      // Colours dispatched one by one: last readback's colour count plus headroom
+      // (an empty indirect dispatch still costs a barrier); later colours run in
+      // the sparse tail, which loops to this step's real GPU colour count.
+      const tailOk = cap.maxBodies <= 65536 * 8;
+      const colorEstimate = colorsFull || !tailOk || !(last.color > 0) ? colors : Math.max(1, last.color + COLOR_HEADROOM);
+      const primalStart = Math.min(colors, sparseStart, colorEstimate);
       for (let iter = 0; iter < params.iterations; iter++) {
         if (beginPass && iter > 0) nextPhase();
         const primal = pipes[compactContacts ? "solve_primal_color_compact" : "solve_primal_color"];
-        for (let color = 0; color < Math.min(colors, sparseStart); color++) {
+        for (let color = 0; color < primalStart; color++) {
           if (beginPass && colorProfile && color > 0) nextPhase();
           pass.setPipeline(primal.pipeline);
           pass.setBindGroup(0, primal.bind, [color * PASS_ALIGN]);
           pass.dispatchWorkgroupsIndirect(bufs[23], color * 12);
         }
-        if (beginPass && colorProfile && sparseStart < colors && sparseStart > 0) nextPhase();
-        if (sparseStart < colors) disp(pass, compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, sparseStart);
+        if (beginPass && colorProfile && primalStart < colors && primalStart > 0) nextPhase();
+        if (primalStart < colors) disp(pass, compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, primalStart);
         if (beginPass) nextPhase();
         dispWork(pass, compactContacts ? 'solve_dual_compact' : 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
       }
       disp(pass, 'extract_velocity_sleep', nBodies);
       nextPhase();
       disp(pass, 'write_sleep_args', 64);
-      for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
+      // A sleep time beyond any run's length produces no candidates to revoke.
+      if (!(params.sleepTime >= SLEEP_NEVER_S)) for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
       dispWork(pass, 'sleep_island_commit', 67);
       pass.end();
       if (readback) {
-        enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
+        enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 80);
       }
     }
 
@@ -1185,12 +1322,12 @@ struct VsOut {
 
     async function readCounters() {
       const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 64);
+      enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 80);
       device.queue.submit([enc.finish()]);
       await staging.mapAsync(GPUMapMode.READ);
       const c = new Uint32Array(staging.getMappedRange().slice(0));
       staging.unmap();
-      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], colorRounds: c[17] };
       if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
     }
 
@@ -1217,6 +1354,7 @@ struct VsOut {
     function restoreScene() {
       device.queue.writeBuffer(bufs[0], 0, bodyBytes);
       device.queue.writeBuffer(bufs[2], 0, colBytes);
+      if (snap) device.queue.writeBuffer(bufs[5], 0, snap.joints);
       parity = 0;
       steps = 0;
       last = {
@@ -1239,8 +1377,9 @@ struct VsOut {
       }
       await readCounters();
       const workloadStart = { ...last, colorBuckets: await readColorBuckets() };
+      const sleepOn = params.sleepTime < SLEEP_OFF_TIME;
       const validateWorkload = stage => assertBenchmarkWorkload({
-        scene, totalBodies: bodyCount, iterations: params.iterations, dt: params.dt, counters: last, stage,
+        scene, totalBodies: bodyCount, iterations: params.iterations, dt: params.dt, counters: last, stage, allowSleep: sleepOn,
       });
       validateWorkload('after lead-in');
       timingSamples = await measurePhysicsBatches({
@@ -1253,6 +1392,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
+        sleep: sleepOn,
         sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
@@ -1265,6 +1405,36 @@ struct VsOut {
     }
 
     let phaseSamples;
+    // Resolved timestamps are nanoseconds; a reversed pair is invalid evidence.
+    function timestampMs(stamps, a, b) {
+      if (stamps[b] < stamps[a]) throw new Error(`Physics profiler timestamp ${b} precedes ${a}; GPU timing sample is invalid.`);
+      return Number(stamps[b] - stamps[a]) / 1e6;
+    }
+    // Live HUD step cost. Playback steps once per rAF, so completion-to-completion
+    // intervals are pinned to the display refresh, not the engine. With
+    // 'timestamp-query' each live step's single compute pass is timestamped (GPU
+    // time, render excluded). Otherwise (Safari/iOS) busy time stands in: completion
+    // minus the later of submit and the previous completion. That equals the step
+    // cost while the queue is saturated and otherwise adds readback latency, so the
+    // estimate reads high and is labelled as one.
+    function liveStepSample({ stamps, submittedAt, completedAt, previousCompletedAt }) {
+      if (stamps && stamps[1] > stamps[0]) return { ms: timestampMs(stamps, 0, 1), source: 'gpu' };
+      return { ms: completedAt - Math.max(submittedAt, previousCompletedAt), source: 'estimate' };
+    }
+    // Median over a rate window; GPU samples win, so an occasional invalid timestamp
+    // pair cannot mix estimate latency into a GPU-timed readout.
+    function summarizeStepCost(samples) {
+      const gpu = samples.filter(sample => sample.source === 'gpu');
+      const used = (gpu.length ? gpu : samples).map(sample => sample.ms).filter(ms => ms > 0).sort((a, b) => a - b);
+      if (!used.length) return { stepMs: 0, maxTps: 0, source: 'none' };
+      const stepMs = used[used.length >> 1];
+      return { stepMs, maxTps: 1000 / stepMs, source: gpu.length ? 'gpu' : 'estimate' };
+    }
+    function stepCostLabels({ stepMs, maxTps, source }) {
+      if (source === 'gpu') return { step: `${stepMs.toFixed(1)} ms/step GPU`, maxTps: maxTps.toFixed(0), maxTpsSub: 'GPU-timed' };
+      if (source === 'estimate') return { step: `≈${stepMs.toFixed(1)} ms/step est.`, maxTps: `≈${maxTps.toFixed(0)}`, maxTpsSub: 'estimate' };
+      return { step: '', maxTps: '—', maxTpsSub: '' };
+    }
     function preSolveProfileParts() {
       const graph = graphProfile
         ? ['awake', 'csrDegree', 'csrPrefix', 'csrScatter', 'csrSort', 'colorInit', 'colorRepair', 'colorPack', 'predict']
@@ -1330,10 +1500,7 @@ struct VsOut {
         const completedAt = performance.now();
         const stamps = new BigUint64Array(read.getMappedRange().slice(0));
         read.unmap();
-        const ms = (a, b) => {
-          if (stamps[b] < stamps[a]) throw new Error(`Physics profiler timestamp ${b} precedes ${a}; GPU timing sample is invalid.`);
-          return Number(stamps[b] - stamps[a]) / 1e6;
-        };
+        const ms = (a, b) => timestampMs(stamps, a, b);
         let primal = 0, dual = 0;
         const perColor = new Array(primalPasses).fill(0);
         for (let iter = 0; iter < params.iterations; iter++) {
@@ -1431,7 +1598,7 @@ struct VsOut {
     }
     const colorNames = ['position tint (red −X/down, yellow +X/up)', 'awake amber, sleeping blue', 'speed: blue still, red above 3 m/s'];
     function showLegend() {
-      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed. Friction μ ${cfg.friction}. Drag to orbit, scroll to zoom, right-drag to pan.`;
+      document.getElementById('legend').textContent = `Color: ${colorNames[colorMode]}. Keys 1 position, 2 awake/sleep, 3 speed. Friction μ ${cfg.friction}. Drag to orbit, scroll to zoom, right-drag to pan.` + (jointControls ? ` ${jointControls.legend}.` : '');
     }
     showLegend();
     addEventListener('keydown', (e) => {
@@ -1507,6 +1674,7 @@ struct VsOut {
     const tpsVal = document.getElementById('tpsVal');
     const fpsVal = document.getElementById('fpsVal');
     const maxTpsVal = document.getElementById('maxTpsVal');
+    const maxTpsSub = document.getElementById('maxTpsSub');
     const maxFpsVal = document.getElementById('maxFpsVal');
     const stepMsVal = document.getElementById('stepMsVal');
     const frameMsVal = document.getElementById('frameMsVal');
@@ -1515,52 +1683,57 @@ struct VsOut {
     let phases = '';
     let benchStarted = false;
     let measuring = false;
-    // Rolling 1 s windows: TPS = physics steps/s, FPS = rAF presents/s (can diverge if
-    // measuring pauses steps, or if multiple steps per frame are added later).
-    // Max TPS/FPS = 1000/ms — headroom if uncapped by display refresh / rAF.
+    // Rolling 1 s windows: TPS = physics steps/s, FPS = rAF presents/s (observed,
+    // so display-bound). Max TPS = 1000 / measured physics step cost (see
+    // liveStepSample); Max FPS = 1000 / CPU time per rAF callback.
     let rateWindowStart = performance.now();
     let rateSteps = 0;
     let rateFrames = 0;
-    let rateStepMsSum = 0;
     let rateFrameMsSum = 0;
-    let showTps = 0;
-    let showFps = 0;
-    let showMaxTps = 0;
-    let showMaxFps = 0;
-    let showStepMs = 0;
-    let showFrameMs = 0;
-    function bumpRates(didStep, stepMs, frameMs) {
+    let rateStepCosts = [];
+    function resetRates() {
+      rateWindowStart = performance.now();
+      rateSteps = 0;
+      rateFrames = 0;
+      rateFrameMsSum = 0;
+      rateStepCosts = [];
+    }
+    function addStepCost(sample) {
+      if (!measuring) rateStepCosts.push(sample);
+    }
+    // benchWall pauses live steps and saturates the queue: no live rate means anything.
+    function showMeasuring() {
+      for (const el of [tpsVal, maxTpsVal, fpsVal, maxFpsVal]) el.textContent = '—';
+      stepMsVal.textContent = 'paused';
+      maxTpsSub.textContent = 'measuring…';
+      frameMsVal.textContent = '';
+      window.__RATES__ = { measuring: true };
+    }
+    function bumpRates(didStep, frameMs) {
       rateFrames++;
       rateFrameMsSum += frameMs;
-      if (didStep) {
-        rateSteps++;
-        rateStepMsSum += stepMs;
-      }
+      if (didStep) rateSteps++;
       const elapsed = performance.now() - rateWindowStart;
-      if (elapsed >= 1000) {
-        const sec = elapsed / 1000;
-        showTps = rateSteps / sec;
-        showFps = rateFrames / sec;
-        showStepMs = rateSteps > 0 ? rateStepMsSum / rateSteps : 0;
-        showFrameMs = rateFrames > 0 ? rateFrameMsSum / rateFrames : 0;
-        showMaxTps = showStepMs > 1e-6 ? 1000 / showStepMs : 0;
-        showMaxFps = showFrameMs > 1e-6 ? 1000 / showFrameMs : 0;
-        tpsVal.textContent = showTps.toFixed(0);
-        fpsVal.textContent = showFps.toFixed(0);
-        maxTpsVal.textContent = showMaxTps > 0 ? showMaxTps.toFixed(0) : '—';
-        maxFpsVal.textContent = showMaxFps > 0 ? showMaxFps.toFixed(0) : '—';
-        stepMsVal.textContent = showStepMs > 0 ? `${showStepMs.toFixed(1)} ms/step` : '';
-        frameMsVal.textContent = showFrameMs > 0 ? `${showFrameMs.toFixed(1)} ms/frame` : '';
-        window.__RATES__ = {
-          tps: showTps, fps: showFps, maxTps: showMaxTps, maxFps: showMaxFps,
-          stepMs: showStepMs, frameMs: showFrameMs,
-        };
-        rateWindowStart = performance.now();
-        rateSteps = 0;
-        rateFrames = 0;
-        rateStepMsSum = 0;
-        rateFrameMsSum = 0;
-      }
+      if (elapsed < 1000) return;
+      const sec = elapsed / 1000;
+      const tps = rateSteps / sec;
+      const fps = rateFrames / sec;
+      const frameMsAvg = rateFrames > 0 ? rateFrameMsSum / rateFrames : 0;
+      const maxFps = frameMsAvg > 1e-6 ? 1000 / frameMsAvg : 0;
+      const cost = summarizeStepCost(rateStepCosts);
+      const labels = stepCostLabels(cost);
+      tpsVal.textContent = tps.toFixed(0);
+      fpsVal.textContent = fps.toFixed(0);
+      maxTpsVal.textContent = labels.maxTps;
+      maxTpsSub.textContent = labels.maxTpsSub;
+      maxFpsVal.textContent = maxFps > 0 ? maxFps.toFixed(0) : '—';
+      stepMsVal.textContent = labels.step;
+      frameMsVal.textContent = frameMsAvg > 0 ? `${frameMsAvg.toFixed(1)} ms/frame` : '';
+      window.__RATES__ = {
+        tps, fps, maxTps: cost.maxTps, maxFps,
+        stepMs: cost.stepMs, stepSource: cost.source, frameMs: frameMsAvg,
+      };
+      resetRates();
     }
     // Live playback pipelines counter readback instead of draining the GPU every
     // frame: up to LIVE_IN_FLIGHT frames stay queued and counters arrive one or two
@@ -1585,21 +1758,30 @@ struct VsOut {
     };
 
     const LIVE_IN_FLIGHT = 2;
+    // Each live readback carries the 80-byte counters, then (with timestamp-query)
+    // the begin/end timestamps of that step's compute pass. One query set and
+    // resolve buffer serve every frame: queue order keeps frames from overlapping.
+    const liveTimestamps = wantTimestamps ? {
+      querySet: device.createQuerySet({ type: 'timestamp', count: 2 }),
+      resolve: device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+    } : null;
     const liveFree = Array.from({ length: LIVE_IN_FLIGHT }, () =>
-      device.createBuffer({ size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+      device.createBuffer({ size: liveTimestamps ? 96 : 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
     const livePending = new Set();
     let liveError = null;
     let lastCompletion = 0;
-    let liveStepMs = 0;
     async function drainLive() {
       await Promise.all([...livePending]);
       if (liveError) throw liveError;
     }
+    // Returns the step's [begin, end] pass timestamps, or null without timestamp-query.
     function readLiveCounters(buf) {
-      const c = new Uint32Array(buf.getMappedRange().slice(0));
+      const bytes = buf.getMappedRange().slice(0);
       buf.unmap();
-      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7] };
+      const c = new Uint32Array(bytes, 0, 20);
+      last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], colorRounds: c[17] };
       if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
+      return bytes.byteLength >= 96 ? new BigUint64Array(bytes, 80, 2) : null;
     }
 
     async function frame(now) {
@@ -1612,9 +1794,9 @@ struct VsOut {
         return;
       }
       // Skip overlapping rAF ticks while benchWall awaits — concurrent mapAsync on
-      // staging hung the replay at step 1 after measuring. Still count FPS.
+      // staging hung the replay at step 1 after measuring. Nothing is drawn, so the
+      // HUD shows measuring instead of rates (see showMeasuring).
       if (measuring) {
-        bumpRates(false, 0, performance.now() - now);
         requestAnimationFrame(frame);
         return;
       }
@@ -1640,30 +1822,39 @@ struct VsOut {
           requestAnimationFrame(frame);
           return;
         }
-        encodeStep(enc, false);
-        const rp = enc.beginRenderPass({
+        if (jointControls) jointControls.beforeStep(steps * params.dt);
+        // Physics and its readback go in their own submission, mapped before the
+        // render is submitted, so completion (the fallback estimate) excludes drawing.
+        const readback = liveFree.pop();
+        encodeStep(enc, false, undefined, liveTimestamps && { querySet: liveTimestamps.querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 });
+        enc.copyBufferToBuffer(bufs[7], 0, readback, 0, 80);
+        if (liveTimestamps) {
+          enc.resolveQuerySet(liveTimestamps.querySet, 0, 2, liveTimestamps.resolve, 0);
+          enc.copyBufferToBuffer(liveTimestamps.resolve, 0, readback, 80, 16);
+        }
+        device.queue.submit([enc.finish()]);
+        const submittedAt = performance.now();
+        parity ^= 1;
+        steps++;
+        const pending = readback.mapAsync(GPUMapMode.READ).then(() => {
+          const completedAt = performance.now();
+          const stamps = readLiveCounters(readback);
+          liveFree.push(readback);
+          addStepCost(liveStepSample({ stamps, submittedAt, completedAt, previousCompletedAt: lastCompletion }));
+          lastCompletion = completedAt;
+        }).catch(e => { liveError = liveError || e; });
+        livePending.add(pending);
+        pending.finally(() => livePending.delete(pending));
+        const renderEnc = device.createCommandEncoder();
+        const rp = renderEnc.beginRenderPass({
           colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
           depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
         });
         rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
         rp.setPipeline(boxPipe); rp.setBindGroup(0, boxBind); rp.setVertexBuffer(0, boxVbo); rp.draw(36, bodies.length - 1);
         rp.end();
-        const readback = liveFree.pop();
-        enc.copyBufferToBuffer(bufs[7], 0, readback, 0, 64);
-        device.queue.submit([enc.finish()]);
-        parity ^= 1;
-        steps++;
-        const pending = readback.mapAsync(GPUMapMode.READ).then(() => {
-          readLiveCounters(readback);
-          liveFree.push(readback);
-          // Completion interval: per-step GPU throughput while the queue stays busy.
-          const t = performance.now();
-          if (lastCompletion > 0) liveStepMs = t - lastCompletion;
-          lastCompletion = t;
-        }).catch(e => { liveError = liveError || e; });
-        livePending.add(pending);
-        pending.finally(() => livePending.delete(pending));
-        bumpRates(true, liveStepMs, performance.now() - now);
+        device.queue.submit([renderEnc.finish()]);
+        bumpRates(true, performance.now() - now);
         if (cfg.settled && (steps === 1 || steps % 30 === 0 || steps === lead)) {
           await sampleSettle();
         }
@@ -1671,7 +1862,9 @@ struct VsOut {
         const settleLabel = cfg.settled && settle.sampleStep
           ? ` · sleep ${settle.sleeping}/${dyn} · KE ${settle.ke.toFixed(1)} · max|v| ${settle.maxV.toFixed(3)} · h ${settle.maxY.toFixed(2)}/${initialMaxY.toFixed(2)}`
           : '';
-        const timingLabel = wallMs > 0 ? `wall ${wallMs.toFixed(2)} ms ${phases}`
+        // Sleep on: the production configuration, not the all-awake three-avbd comparison.
+        const sleepLabel = params.sleepTime < SLEEP_OFF_TIME ? ' (sleep on, not comparable to three-avbd)' : '';
+        const timingLabel = wallMs > 0 ? `wall ${wallMs.toFixed(2)} ms${sleepLabel} ${phases}`
           : benchmarkEnabled ? (cfg.settled ? 'timing after settle…' : 'timing after impact…')
           : 'live playback';
         statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${params.iterations} iters · ${timingLabel} · step ${steps} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)}`;
@@ -1691,6 +1884,7 @@ struct VsOut {
         if (benchmarkEnabled && !benchStarted && steps >= lead) {
           benchStarted = true;
           measuring = true;
+          showMeasuring();
           await drainLive();
           lastCompletion = 0;
           statusEl.textContent = cfg.settled
@@ -1720,6 +1914,8 @@ struct VsOut {
             statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases}${cfg.settled ? ` · settle KE ${pre.ke.toFixed(1)} sleep ${pre.sleeping}/${dyn} h ${pre.maxY.toFixed(2)}/${initialMaxY.toFixed(2)} ${ok ? 'STABLE' : 'UNSTABLE'}` : ''} · replaying…`;
           } finally {
             measuring = false;
+            lastCompletion = 0;
+            resetRates();
           }
         }
         requestAnimationFrame(frame);

@@ -196,7 +196,7 @@ fn run_mode(scene: &Scene, candidates: &[CandidatePair], mode: u32, grid_words: 
     bytes.extend_from_slice(bytemuck::cast_slice(&scratch));
     bytes.extend_from_slice(bytemuck::cast_slice(&scene.bodies));
     bytes.extend_from_slice(bytemuck::cast_slice(&scene.colliders));
-    if mode == 0 {
+    if mode == 0 || mode == 3 {
         bytes.extend_from_slice(bytemuck::cast_slice(candidates));
     }
     bytes.extend_from_slice(bytemuck::cast_slice(arena.records()));
@@ -914,4 +914,396 @@ fn collision_filters_remove_pairs_and_keep_the_rest() {
         }
     }
     assert!(required > 20, "fixture kept only {required} allowed overlaps");
+}
+
+// ---- box/capsule and capsule/plane (world_step.slang narrowphase) ----------------
+
+/// Narrowphase on exactly these (A, B) candidates, then the (idle) convex stages.
+fn run_narrowphase(scene: &Scene, pairs: &[(u32, u32)]) -> Output {
+    let cands: Vec<CandidatePair> =
+        pairs.iter().map(|&(a, b)| CandidatePair { collider_a: a, collider_b: b, key: (a << 16) ^ b, _pad: 0 }).collect();
+    run_mode(scene, &cands, 3, 0)
+}
+
+/// World-space contact points (pA, pB), normal and feature of one pair's manifold.
+fn pair_contacts(scene: &Scene, out: &Output, a: u32, b: u32) -> Vec<(Vec3, Vec3, Vec3, u32)> {
+    let world = |c: u32, local: [f32; 3]| {
+        let body = &scene.bodies[scene.colliders[c as usize].body as usize];
+        Vec3::from_array(body.position) + Quat::from_array(body.orientation) * Vec3::from_array(local)
+    };
+    let ms: Vec<&Manifold> = out.manifolds.iter().filter(|m| m.collider_a == a && m.collider_b == b).collect();
+    assert!(ms.len() <= 1, "pair {a},{b}: {} manifolds", ms.len());
+    let Some(m) = ms.first() else { return Vec::new() };
+    let run = &out.contacts[m.contact_start as usize..(m.contact_start + m.contact_count) as usize];
+    run.iter()
+        .map(|c| {
+            assert_eq!((c.collider_a, c.collider_b), (a, b));
+            assert_eq!(c.normal, m.normal, "pair {a},{b}: contact normal differs from the manifold's");
+            (world(a, c.anchor_a), world(b, c.anchor_b), Vec3::from_array(c.normal), c.feature_id)
+        })
+        .collect()
+}
+
+fn capsule_segment(scene: &Scene, c: usize) -> (Vec3, Vec3, f32) {
+    let Shape::Capsule(r, l) = scene.shapes[c] else { panic!("collider {c} is not a capsule") };
+    let pose = scene.pose(c);
+    let axis = pose.rotation * Vec3::Y * l;
+    (pose.position - axis, pose.position + axis, r)
+}
+
+fn segment_distance(p: Vec3, s0: Vec3, s1: Vec3) -> f32 {
+    let d = s1 - s0;
+    let t = if d.length_squared() > 1e-12 { ((p - s0).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+    (p - (s0 + d * t)).length()
+}
+
+/// Exact-to-sampling capsule/box separation and whether the segment enters the box.
+fn capsule_box_separation(scene: &Scene, cap: usize, bx: usize) -> (f32, bool) {
+    capsule_box_separation_n(scene, cap, bx, 4096)
+}
+
+fn capsule_box_separation_n(scene: &Scene, cap: usize, bx: usize, samples: usize) -> (f32, bool) {
+    let (s0, s1, r) = capsule_segment(scene, cap);
+    let (hull, scale) = scene.hull_of(bx).unwrap();
+    let pose = scene.pose(bx);
+    let d = (0..=samples)
+        .map(|k| point_distance(&hull, scale, pose, s0.lerp(s1, k as f32 / samples as f32)))
+        .fold(f32::INFINITY, f32::min);
+    (d - r, d < 1e-4)
+}
+
+fn box_support(scene: &Scene, bx: usize, n: Vec3) -> f32 {
+    let Shape::Box(h) = scene.shapes[bx] else { panic!("collider {bx} is not a box") };
+    let pose = scene.pose(bx);
+    n.dot(pose.position) + (0..3).map(|i| n.dot(pose.rotation * Vec3::AXES[i]).abs() * h[i]).sum::<f32>()
+}
+
+/// Random box/capsule pairs, half placed within a few mm of touching.
+fn box_capsule_scene(seed: u32, pairs: usize) -> (Scene, Vec<(u32, u32)>) {
+    let mut seed = seed;
+    let mut s = Scene::new();
+    let mut out = Vec::new();
+    for i in 0..pairs {
+        let origin = Vec3::new(i as f32 * 8.0, 0.0, 0.0);
+        let half = Vec3::new(0.1 + rng(&mut seed) * 0.5, 0.1 + rng(&mut seed) * 0.5, 0.1 + rng(&mut seed) * 0.5);
+        let a = s.body(origin, random_rot(&mut seed));
+        let bx = s.add(a, Shape::Box(half), Vec3::ZERO, Quat::IDENTITY);
+        let r = 0.05 + rng(&mut seed) * 0.25;
+        let l = if i % 7 == 0 { 0.0 } else { rng(&mut seed) * 0.6 };
+        let dir = Vec3::new(rng(&mut seed) - 0.5, rng(&mut seed) - 0.5, rng(&mut seed) - 0.5).normalize();
+        let b = s.body(origin, random_rot(&mut seed));
+        let cap = s.add(b, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+        let reach = half.length() + l + r + 0.1;
+        if i % 2 == 0 {
+            // Bisect the offset along `dir` to a separation in [-3 mm, +2 mm].
+            let target = rng(&mut seed) * 0.005 - 0.003;
+            let (mut lo, mut hi) = (0.0f32, reach);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                s.bodies[b as usize].position = (origin + dir * mid).to_array();
+                if capsule_box_separation_n(&s, cap as usize, bx as usize, 256).0 < target { lo = mid } else { hi = mid }
+            }
+        } else {
+            s.bodies[b as usize].position = (origin + dir * rng(&mut seed) * reach).to_array();
+        }
+        out.push((bx, cap));
+    }
+    (s, out)
+}
+
+#[test]
+fn box_capsule_contacts_match_distance_oracle_in_both_orders() {
+    let (mut hits, mut shallow) = (0, 0);
+    for seed in [5u32, 19, 314] {
+        let (scene, pairs) = box_capsule_scene(seed, 160);
+        let both: Vec<(u32, u32)> = pairs.iter().flat_map(|&(bx, cap)| [(bx, cap), (cap, bx)]).collect();
+        let out = run_narrowphase(&scene, &both);
+        assert_eq!(out.counters.overflow_flags, 0);
+        for &(bx, cap) in &pairs {
+            let label = format!("seed {seed} box {bx} capsule {cap}");
+            let (sep, inside) = capsule_box_separation(&scene, cap as usize, bx as usize);
+            let fwd = pair_contacts(&scene, &out, bx, cap);
+            let rev = pair_contacts(&scene, &out, cap, bx);
+            assert!(fwd.len() <= 2, "{label}: {} contacts", fwd.len());
+            if sep > AMBIGUOUS {
+                assert!(fwd.is_empty(), "{label}: separated by {sep} but has {} contacts", fwd.len());
+            } else if sep < -AMBIGUOUS {
+                assert!(!fwd.is_empty(), "{label}: overlapping by {} but no contact", -sep);
+            }
+            // The capsule-first order is the exact mirror: same points swapped, -n.
+            assert_eq!(fwd.len(), rev.len(), "{label}: orders disagree on the count");
+            for (f, r) in fwd.iter().zip(&rev) {
+                assert!((f.0 - r.1).length() < 1e-5 && (f.1 - r.0).length() < 1e-5, "{label}: orders disagree on points");
+                assert!((f.2 + r.2).length() < 1e-6 && f.3 == r.3, "{label}: orders disagree on normal/feature");
+            }
+            let (s0, s1, radius) = capsule_segment(&scene, cap as usize);
+            let (hull, scale) = scene.hull_of(bx as usize).unwrap();
+            let mut deepest = f32::NEG_INFINITY;
+            for &(pa, pb, n, feature) in &fwd {
+                assert!((n.length() - 1.0).abs() < 1e-4, "{label}: non-unit normal");
+                assert_eq!(feature & 0xFF00_0000, 0x0600_0000, "{label}: feature {feature:#x}");
+                let on_box = surface_distance(&hull, scale, scene.pose(bx as usize), pa);
+                assert!(on_box.abs() < 1e-3, "{label}: pA {on_box} off the box surface");
+                // pB is the capsule's support along -n at its segment point:
+                // on the surface, or inside when the segment tilts toward the box.
+                let on_cap = segment_distance(pb, s0, s1) - radius;
+                assert!(on_cap < 1e-3, "{label}: pB {on_cap} outside the capsule");
+                // pA lies on the box's support plane along n (n leaves the box).
+                let support = box_support(&scene, bx as usize, n) - n.dot(pa);
+                assert!(support.abs() < 1e-3, "{label}: n is not an outward box normal at pA ({support})");
+                let gap = n.dot(pb - pa);
+                assert!(gap <= 1e-4, "{label}: contact gap {gap} > 0");
+                deepest = deepest.max(-gap);
+            }
+            let ids: std::collections::HashSet<u32> = fwd.iter().map(|c| c.3).collect();
+            assert_eq!(ids.len(), fwd.len(), "{label}: duplicate feature ids");
+            if !fwd.is_empty() {
+                hits += 1;
+            }
+            if !fwd.is_empty() && !inside {
+                assert!((deepest + sep).abs() < 1e-3, "{label}: depth {deepest} vs oracle {}", -sep);
+                shallow += 1;
+            }
+        }
+    }
+    eprintln!("box/capsule: {hits} touching pairs, {shallow} with exact depth");
+    assert!(hits > 200 && shallow > 150, "fixture too thin: {hits} hits, {shallow} exact");
+}
+
+#[test]
+fn capsule_lying_on_a_box_face_gets_two_segment_contacts() {
+    let mut s = Scene::new();
+    let a = s.body(Vec3::ZERO, Quat::IDENTITY);
+    let bx = s.add(a, Shape::Box(Vec3::new(1.0, 0.25, 1.0)), Vec3::ZERO, Quat::IDENTITY);
+    let (r, l, depth) = (0.1f32, 0.4f32, 0.005f32);
+    let lying = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2); // local Y → world -X
+    // Centred, yawed, and hanging 0.3 past the +X edge (clipped there).
+    let cases = [(Vec3::ZERO, 0.0f32, [-0.4f32, 0.4]), (Vec3::new(0.1, 0.0, -0.2), 0.7, [-0.4, 0.4]), (Vec3::new(0.9, 0.0, 0.3), 0.0, [-0.4, 0.1])];
+    for (offset, yaw, along) in cases {
+        let rot = Quat::from_rotation_y(yaw) * lying;
+        let centre = offset + Vec3::Y * (0.25 + r - depth);
+        let b = s.body(centre, rot);
+        let cap = s.add(b, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+        let out = run_narrowphase(&s, &[(bx, cap), (cap, bx)]);
+        let label = format!("offset {offset} yaw {yaw}");
+        for (a_id, b_id, up) in [(bx, cap, 1.0f32), (cap, bx, -1.0)] {
+            let cs = pair_contacts(&s, &out, a_id, b_id);
+            assert_eq!(cs.len(), 2, "{label}: {} contacts", cs.len());
+            let axis = rot * Vec3::Y;
+            let mut ts: Vec<f32> = cs
+                .iter()
+                .map(|&(pa, pb, n, _)| {
+                    assert!((n - Vec3::Y * up).length() < 1e-5, "{label}: normal {n}");
+                    assert!((n.dot(pb - pa) + depth).abs() < 1e-5, "{label}: depth {}", -n.dot(pb - pa));
+                    let on_box = if up > 0.0 { pa } else { pb };
+                    assert!((on_box.y - 0.25).abs() < 1e-5, "{label}: box point {on_box}");
+                    (on_box - Vec3::new(centre.x, 0.25, centre.z)).dot(axis) * -1.0
+                })
+                .collect();
+            ts.sort_by(f32::total_cmp);
+            // World points along the capsule's -local-Y (world +X before yaw).
+            let expect = if offset.x > 0.5 { [-0.4, 0.1] } else { along };
+            assert!((ts[0] - expect[0]).abs() < 1e-4 && (ts[1] - expect[1]).abs() < 1e-4, "{label}: points at {ts:?}");
+        }
+    }
+}
+
+#[test]
+fn capsule_plane_contacts_are_the_end_caps_within_margin_in_both_orders() {
+    let mut seed = 23u32;
+    let mut s = Scene::new();
+    let ground = s.static_body();
+    let n = Vec3::new(0.1, 1.0, -0.2).normalize();
+    let w = 0.3f32;
+    let plane = s.add(ground, Shape::Plane(n, w), Vec3::ZERO, Quat::IDENTITY);
+    let mut pairs = Vec::new();
+    for i in 0..200 {
+        let rot = random_rot(&mut seed);
+        let (r, l) = (0.05 + rng(&mut seed) * 0.2, rng(&mut seed) * 0.5);
+        let p = Vec3::new(i as f32 * 3.0, 0.0, rng(&mut seed));
+        let height = w + (rng(&mut seed) - 0.6) * (r + l);
+        let b = s.body(p + n * (height - n.dot(p)), rot);
+        let cap = s.add(b, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+        pairs.push(cap);
+    }
+    let both: Vec<(u32, u32)> = pairs.iter().flat_map(|&c| [(c, plane), (plane, c)]).collect();
+    let out = run_narrowphase(&s, &both);
+    let mut two = 0;
+    for &cap in &pairs {
+        let (s0, s1, r) = capsule_segment(&s, cap as usize);
+        let gaps = [n.dot(s0) - w - r, n.dot(s1) - w - r];
+        let fwd = pair_contacts(&s, &out, cap, plane);
+        let rev = pair_contacts(&s, &out, plane, cap);
+        let expected: Vec<usize> = (0..2).filter(|&k| gaps[k] < MARGIN).collect();
+        if gaps.iter().all(|g| (g - MARGIN).abs() > 1e-5) && (s1 - s0).length() > 1e-3 {
+            assert_eq!(fwd.len(), expected.len(), "capsule {cap}: gaps {gaps:?}");
+        }
+        assert_eq!(fwd.len(), rev.len());
+        for (&(pa, pb, nc, feature), r_c) in fwd.iter().zip(&rev) {
+            assert!((nc + n).length() < 1e-5, "capsule {cap}: normal {nc}");
+            let k = (feature & 1) as usize;
+            assert_eq!(feature & !1, 0x0500_0000, "capsule {cap}: feature {feature:#x}");
+            let cap_end = [s0, s1][k];
+            assert!((pa - (cap_end - n * r)).length() < 1e-5, "capsule {cap}: capsule point");
+            assert!((n.dot(pb) - w).abs() < 1e-5, "capsule {cap}: plane point off the plane");
+            assert!((nc.dot(pb - pa) - gaps[k]).abs() < 1e-5, "capsule {cap}: depth");
+            assert!((pa - r_c.1).length() < 1e-6 && (pb - r_c.0).length() < 1e-6 && (nc + r_c.2).length() < 1e-6 && feature == r_c.3);
+        }
+        if fwd.len() == 2 {
+            two += 1;
+        }
+    }
+    assert!(two > 20, "only {two} capsules touch with both caps");
+}
+
+#[test]
+fn box_capsule_and_capsule_plane_contacts_are_deterministic() {
+    let (scene, pairs) = box_capsule_scene(99, 64);
+    let both: Vec<(u32, u32)> = pairs.iter().flat_map(|&(bx, cap)| [(bx, cap), (cap, bx)]).collect();
+    let a = run_narrowphase(&scene, &both);
+    let b = run_narrowphase(&scene, &both);
+    assert!(!a.contacts.is_empty());
+    assert_eq!(bytemuck::cast_slice::<Contact, u8>(&a.contacts), bytemuck::cast_slice::<Contact, u8>(&b.contacts));
+}
+
+/// Sampled capsule/capsule separation (exact distance to B's segment per sample).
+fn capsule_capsule_separation(scene: &Scene, a: usize, b: usize, samples: usize) -> f32 {
+    let (a0, a1, ra) = capsule_segment(scene, a);
+    let (b0, b1, rb) = capsule_segment(scene, b);
+    (0..=samples)
+        .map(|k| segment_distance(a0.lerp(a1, k as f32 / samples as f32), b0, b1))
+        .fold(f32::INFINITY, f32::min)
+        - ra
+        - rb
+}
+
+/// Random capsule pairs: a third near-parallel (< 2.5°), half placed within a few
+/// mm of touching.
+fn capsule_pair_scene(seed: u32, pairs: usize) -> (Scene, Vec<(u32, u32)>) {
+    let mut seed = seed;
+    let mut s = Scene::new();
+    let mut out = Vec::new();
+    for i in 0..pairs {
+        // A small grid keeps f32 world coordinates precise (the pairs never interact).
+        let origin = Vec3::new((i % 16) as f32 * 4.0, (i / 16) as f32 * 4.0, 0.0);
+        let qa = random_rot(&mut seed);
+        let a = s.body(origin, qa);
+        let (ra, la) = (0.05 + rng(&mut seed) * 0.25, if i % 11 == 0 { 0.0 } else { rng(&mut seed) * 0.8 });
+        let ca = s.add(a, Shape::Capsule(ra, la), Vec3::ZERO, Quat::IDENTITY);
+        let qb = if i % 3 == 0 {
+            let axis = Vec3::new(rng(&mut seed) - 0.5, rng(&mut seed) - 0.5, rng(&mut seed) - 0.5).normalize();
+            let flip = if i % 2 == 0 { Quat::IDENTITY } else { Quat::from_rotation_x(std::f32::consts::PI) };
+            Quat::from_axis_angle(axis, rng(&mut seed) * 0.045) * qa * flip
+        } else {
+            random_rot(&mut seed)
+        };
+        let b = s.body(origin, qb);
+        let (rb, lb) = (0.05 + rng(&mut seed) * 0.25, rng(&mut seed) * 0.8);
+        let cb = s.add(b, Shape::Capsule(rb, lb), Vec3::ZERO, Quat::IDENTITY);
+        let dir = Vec3::new(rng(&mut seed) - 0.5, rng(&mut seed) - 0.5, rng(&mut seed) - 0.5).normalize();
+        let reach = la + lb + ra + rb + 0.1;
+        if i % 2 == 0 {
+            let target = rng(&mut seed) * 0.005 - 0.003;
+            let (mut lo, mut hi) = (0.0f32, reach);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                s.bodies[b as usize].position = (origin + dir * mid).to_array();
+                if capsule_capsule_separation(&s, ca as usize, cb as usize, 256) < target { lo = mid } else { hi = mid }
+            }
+        } else {
+            s.bodies[b as usize].position = (origin + dir * rng(&mut seed) * reach).to_array();
+        }
+        out.push((ca, cb));
+    }
+    (s, out)
+}
+
+#[test]
+fn capsule_capsule_contacts_match_distance_oracle_in_both_orders() {
+    let (mut hits, mut multi) = (0, 0);
+    for seed in [8u32, 21, 4242] {
+        let (scene, pairs) = capsule_pair_scene(seed, 180);
+        let both: Vec<(u32, u32)> = pairs.iter().flat_map(|&(a, b)| [(a, b), (b, a)]).collect();
+        let out = run_narrowphase(&scene, &both);
+        assert_eq!(out.counters.overflow_flags, 0);
+        for &(a, b) in &pairs {
+            let label = format!("seed {seed} capsules {a},{b}");
+            let sep = capsule_capsule_separation(&scene, a as usize, b as usize, 4096);
+            let fwd = pair_contacts(&scene, &out, a, b);
+            let rev = pair_contacts(&scene, &out, b, a);
+            assert!(fwd.len() <= 3, "{label}: {} contacts", fwd.len());
+            if sep > AMBIGUOUS {
+                assert!(fwd.is_empty(), "{label}: separated by {sep} but has {} contacts", fwd.len());
+            } else if sep < -AMBIGUOUS {
+                assert!(!fwd.is_empty(), "{label}: overlapping by {} but no contact", -sep);
+            }
+            // Swapping A and B mirrors the manifold up to which segment is
+            // clipped; compare the deepest contact, which both orders must find.
+            let deepest = |cs: &[(Vec3, Vec3, Vec3, u32)]| cs.iter().map(|c| -c.2.dot(c.1 - c.0)).fold(f32::NEG_INFINITY, f32::max);
+            if !fwd.is_empty() {
+                assert!(!rev.is_empty(), "{label}: only one order collides");
+                assert!((fwd[0].2 + rev[0].2).length() < 1e-3, "{label}: orders disagree on the normal");
+                assert!((deepest(&fwd) - deepest(&rev)).abs() < 1e-4, "{label}: orders disagree on depth {} vs {} (oracle {})", deepest(&fwd), deepest(&rev), -sep);
+            }
+            let (a0, a1, ra) = capsule_segment(&scene, a as usize);
+            let (b0, b1, rb) = capsule_segment(&scene, b as usize);
+            for &(pa, pb, n, feature) in &fwd {
+                assert!((n.length() - 1.0).abs() < 1e-4, "{label}: non-unit normal");
+                assert_eq!(feature & 0xFF00_0000, 0x0700_0000, "{label}: feature {feature:#x}");
+                assert!(segment_distance(pa, a0, a1) - ra < 1e-4, "{label}: pA outside capsule A");
+                assert!(segment_distance(pb, b0, b1) - rb < 1e-4, "{label}: pB outside capsule B");
+                assert!(n.dot(pb - pa) <= 1e-4, "{label}: contact gap {} > 0", n.dot(pb - pa));
+            }
+            let ids: std::collections::HashSet<u32> = fwd.iter().map(|c| c.3).collect();
+            assert_eq!(ids.len(), fwd.len(), "{label}: duplicate feature ids");
+            if !fwd.is_empty() {
+                hits += 1;
+                assert!((deepest(&fwd) + sep).abs() < 1e-3, "{label}: depth {} vs oracle {}", deepest(&fwd), -sep);
+            }
+            if fwd.len() >= 2 {
+                multi += 1;
+            }
+        }
+    }
+    eprintln!("capsule/capsule: {hits} touching pairs, {multi} with 2+ contacts");
+    assert!(hits > 200 && multi > 40, "fixture too thin: {hits} hits, {multi} multi-contact");
+}
+
+#[test]
+fn parallel_capsules_get_overlap_end_contacts_and_crossed_get_one() {
+    let mut s = Scene::new();
+    let lying = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2); // local Y → world -X
+    let (r, l, depth) = (0.1f32, 0.5f32, 0.004f32);
+    let a = s.body(Vec3::ZERO, lying);
+    let ca = s.add(a, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+    // Parallel, on top, shifted 0.3 along X: overlap x ∈ [-0.2, 0.5].
+    let b = s.body(Vec3::new(0.3, 2.0 * r - depth, 0.0), lying);
+    let cb = s.add(b, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+    // Crossed at 90° on top.
+    let c = s.body(Vec3::new(20.0, 2.0 * r - depth, 0.0), Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+    let base = s.body(Vec3::new(20.0, 0.0, 0.0), lying);
+    let cbase = s.add(base, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+    let cc = s.add(c, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+    let out = run_narrowphase(&s, &[(ca, cb), (cb, ca), (cbase, cc), (cc, cbase)]);
+    for (x, y, up) in [(ca, cb, 1.0f32), (cb, ca, -1.0)] {
+        let cs = pair_contacts(&s, &out, x, y);
+        assert_eq!(cs.len(), 2, "parallel: {} contacts", cs.len());
+        let mut xs: Vec<f32> = cs
+            .iter()
+            .map(|&(pa, pb, n, _)| {
+                assert!((n - Vec3::Y * up).length() < 1e-5, "parallel: normal {n}");
+                assert!((n.dot(pb - pa) + depth).abs() < 1e-5, "parallel: depth {}", -n.dot(pb - pa));
+                pa.x
+            })
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        assert!((xs[0] + 0.2).abs() < 1e-5 && (xs[1] - 0.5).abs() < 1e-5, "parallel: contacts at x {xs:?}");
+    }
+    for (x, y) in [(cbase, cc), (cc, cbase)] {
+        let cs = pair_contacts(&s, &out, x, y);
+        assert_eq!(cs.len(), 1, "crossed: {} contacts", cs.len());
+        let (pa, pb, n, _) = cs[0];
+        assert!((n.dot(pb - pa) + depth).abs() < 1e-5 && n.y.abs() > 0.99999, "crossed: n {n}");
+        assert!((pa.x - 20.0).abs() < 1e-5 && pa.z.abs() < 1e-5, "crossed: point {pa}");
+    }
 }

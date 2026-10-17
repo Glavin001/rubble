@@ -1,0 +1,65 @@
+[package]
+name = "stress-gpu"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Single-precision GPU stress solver (Slang kernels, wgpu: Metal natively, WebGPU in the browser), diffed against stress-ref"
+
+[dependencies]
+stress-ref = { path = "../stress-ref" }
+stress-layout = { path = "../stress-layout" }
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+winit = "0.30"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "stress-gpu-view"
+path = "src/bin/stress_gpu_view.rs"
+
+[[bin]]
+name = "stress-gpu-bench"
+path = "src/bin/stress_gpu_bench.rs"
+
+[[bin]]
+name = "stress-gpu-run"
+path = "src/bin/stress_gpu_run.rs"
+
+[[bin]]
+name = "stress-gpu-steps"
+path = "src/bin/stress_gpu_steps.rs"
+
+[[bin]]
+name = "stress-gpu-stepcheck"
+path = "src/bin/stress_gpu_stepcheck.rs"
+
+[[bin]]
+name = "stress-gpu-support"
+path = "src/bin/stress_gpu_support.rs"
+
+[[bin]]
+name = "stress-gpu-events"
+path = "src/bin/stress_gpu_events.rs"
+
+[[bin]]
+name = "stress-gpu-spread"
+path = "src/bin/stress_gpu_spread.rs"
+
+[[bin]]
+name = "stress-gpu-fps"
+path = "src/bin/stress_gpu_fps.rs"
+
+[[bin]]
+name = "stress-gpu-latency"
+path = "src/bin/stress_gpu_latency.rs"
+
+[[bin]]
+name = "stress-gpu-coupled-fps"
+path = "src/bin/stress_gpu_coupled_fps.rs"
+
+[[bin]]
+name = "stress-gpu-gate"
+path = "src/bin/stress_gpu_gate.rs"

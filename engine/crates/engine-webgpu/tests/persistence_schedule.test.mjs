@@ -10,6 +10,14 @@ const start = html.indexOf('function encodeStep(');
 const end = html.indexOf('function submitPhysics()', start);
 assert.ok(start >= 0 && end > start);
 const source = html.slice(start, end);
+// The encoder's dispatch-count constants (8ev), read from the shipped page, with the
+// fixed-palette controls on (colors=full, rounds=full): these tests check the full
+// schedule; adaptive counts are exercised by the browser regressions.
+const dispatchSource = html.slice(html.indexOf('const COLOR_ROUND_LIMIT'), html.indexOf('const colorsFull'));
+const DISPATCH = {
+  ...runInNewContext(`${dispatchSource}({COLOR_ROUND_LIMIT, COLOR_ROUND_HEADROOM, COLOR_HEADROOM, SLEEP_NEVER_S})`),
+  colorsFull: true, roundsFull: true,
+};
 
 for (const [query, expected] of [
   ['?scene=ring110k', true], ['?scene=gables506k', true],
@@ -44,7 +52,8 @@ for(const value of ['-1','33','2.5','invalid']) {
 // WebGPU robust access may hide that mistake as missing collision work.
 for (const [query, expectedMode] of [
   ['?scene=ring110k', 'persistent'], ['?scene=gables506k', 'persistent'],
-  ['?scene=gables506k&contacts=canonical', 'canonical'], ['?scene=columns', 'canonical'],
+  ['?scene=gables506k&contacts=canonical', 'canonical'], ['?scene=columns', 'persistent'],
+  ['?scene=columns&contacts=canonical', 'canonical'],
   ['?scene=ring110k&contacts=canonical', 'canonical'],
   ['?scene=ring110k&contacts=compact', 'compact'],
   ['?scene=gables506k&contacts=persistent', 'persistent'],
@@ -92,8 +101,8 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         passes.push(p);
         return p;
       };
-      const context = {
-        detailedProfile, graphProfile, colorProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
+      const context = {...DISPATCH,
+        detailedProfile, graphProfile, colorProfile:false, bodyCount:110442, colliderCount:110442, jointCount:0, last:{contact:1_170_000},
         cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
@@ -190,7 +199,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
 const modeSource = html.slice(html.indexOf('const qs ='), html.indexOf('const regressionKind ='));
 for (const [query, expected] of [['?scene=ring110k','record'],['?scene=gables506k','record'],
   ['?scene=ring110k&hashInsert=manifold','manifold'],
-  ['?scene=columns','contact'],['?scene=ring110k&hashInsert=contact','contact'],
+  ['?scene=columns','record'],['?scene=ring110k&hashInsert=contact','contact'],
   ['?scene=gables506k&hashInsert=contact','contact'],['?scene=columns&hashInsert=manifold','manifold']]) {
   test(`hash insert mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nhashInsertMode`,{URLSearchParams,location:{search:query}}),expected);
@@ -201,9 +210,9 @@ test('invalid hash insert mode fails before allocating GPU work', () => {
     /hashInsert must be contact, manifold or record/);
 });
 
-// Split broadphase grid (8ej): ring defaults to it, gables keeps the scaled table.
-for (const [query, mode, split] of [['?scene=ring110k','split',true],['?scene=gables506k','scaled',false],
-  ['?scene=columns','scaled',false],['?scene=ring110k&grid=scaled','scaled',false],
+// Split broadphase grid (8ej): every scene's default since P0 (8et).
+for (const [query, mode, split] of [['?scene=ring110k','split',true],['?scene=gables506k','split',true],
+  ['?scene=columns','split',true],['?scene=ring110k&grid=scaled','scaled',false],
   ['?scene=gables506k&grid=split','split',true],['?scene=ring110k&grid=fixed','fixed',false]]) {
   test(`grid mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nJSON.stringify([gridMode, gridSplit])`,{URLSearchParams,location:{search:query}}),JSON.stringify([mode, split]));
@@ -216,7 +225,7 @@ test('invalid grid mode fails before allocating GPU work', () => {
 
 // Two-pass narrowphase (8ek): default wherever reuse=copy runs.
 for (const [query, mode] of [['?scene=ring110k','split'],['?scene=gables506k','split'],
-  ['?scene=columns','fused'],['?scene=ring110k&np=fused','fused'],['?scene=ring110k&reuse=pass','fused']]) {
+  ['?scene=columns','split'],['?scene=columns&contacts=canonical','fused'],['?scene=ring110k&np=fused','fused'],['?scene=ring110k&reuse=pass','fused']]) {
   test(`narrowphase mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nnpMode`,{URLSearchParams,location:{search:query}}),mode);
   });
@@ -232,8 +241,8 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=
   const trace = [], passes = [];
   const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
     dispatchWorkgroupsIndirect() { trace.push({name:'primal'}); }, end() {}}; passes.push(p); return p; };
-  const context = {
-    detailedProfile, graphProfile:false, colorProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
+  const context = {...DISPATCH,
+    detailedProfile, graphProfile:false, colorProfile:false, bodyCount:110442, colliderCount:110442, jointCount:0, last:{contact:1_170_000},
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
@@ -280,14 +289,14 @@ for (const detailedProfile of [false, true]) {
 
 // Packed-pair CSR endpoints (8el): default under persistent contacts.
 for (const [query, mode] of [['?scene=ring110k','pairs'],['?scene=gables506k','pairs'],
-  ['?scene=columns','manifold'],['?scene=ring110k&endpoints=manifold','manifold'],
+  ['?scene=columns','pairs'],['?scene=columns&contacts=canonical','manifold'],['?scene=ring110k&endpoints=manifold','manifold'],
   ['?scene=ring110k&persistence=manifold','pairs']]) {
   test(`CSR endpoint mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nendpointsMode`,{URLSearchParams,location:{search:query}}),mode);
   });
 }
 test('endpoints=pairs without persistent contacts fails before allocating GPU work', () => {
-  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=columns&endpoints=pairs'}}),
+  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=columns&contacts=canonical&endpoints=pairs'}}),
     /endpoints=pairs requires persistent contacts/);
 });
 for (const earlyPairPack of [false, true]) {
@@ -305,7 +314,7 @@ for (const earlyPairPack of [false, true]) {
 
 // Persist work list (8em).
 for (const [query, mode] of [['?scene=ring110k','list'],['?scene=gables506k','list'],
-  ['?scene=columns','scan'],['?scene=ring110k&persist=scan','scan'],['?scene=ring110k&reuse=pass','scan']]) {
+  ['?scene=columns','list'],['?scene=columns&contacts=canonical','scan'],['?scene=ring110k&persist=scan','scan'],['?scene=ring110k&reuse=pass','scan']]) {
   test(`persist mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\npersistMode`,{URLSearchParams,location:{search:query}}),mode);
   });
@@ -389,10 +398,10 @@ test('host upload publishes the previous GPU manifold count before counters rese
   const hostSource = html.slice(html.indexOf('function scratchWords()'), html.indexOf('function groups('));
   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
     const copies = [];
-    const context = {
+    const context = {...DISPATCH,
       manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152), steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
-      last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
+      last:{contact:100}, jointCount:0, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
       hostScratchView:new Uint32Array(64), hostParamsView:new Uint8Array(208),
       hostCountersView:new Uint32Array(16), hostColorsView:new Uint32Array(32),
@@ -433,8 +442,8 @@ for (const sparseStart of [10, 32, 0]) {
     const passes = [], trace = [];
     const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
       dispatchWorkgroupsIndirect() { trace.push({name:'primal', phase:p.id}); }, end() {}}; passes.push(p); return p; };
-    const context = {
-      detailedProfile:false, graphProfile:false, colorProfile:true, bodyCount:110442, colliderCount:110442,
+    const context = {...DISPATCH,
+      detailedProfile:false, graphProfile:false, colorProfile:true, bodyCount:110442, colliderCount:110442, jointCount:0,
       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
@@ -482,8 +491,8 @@ test('broadphase grid table scales with colliders and clears every head', () => 
   for (const gridSplit of [false, true]) {
   const trace = [];
   const pass = () => ({id:0, setPipeline() {}, setBindGroup() {}, dispatchWorkgroupsIndirect() {}, end() {}});
-  runInNewContext(`${clearSource}\n${source}\nencodeStep(encoder, false)`, {
-    detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
+  runInNewContext(`${clearSource}\n${source}\nencodeStep(encoder, false)`, {...DISPATCH,
+    detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923, jointCount:0,
     last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
     nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
     manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576, gridSplit, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
@@ -517,12 +526,12 @@ test('record warm hash slots cover manifolds even with a stale contact seed', ()
 // playback even though it is reported a frame late.
 test('live readback ring drains queued frames and surfaces late coloring overflow', async () => {
   const block = html.slice(html.indexOf('const LIVE_IN_FLIGHT'), html.indexOf('async function frame('));
-  const counters = new Uint32Array(16);
-  counters[2] = 1174316; counters[4] = 256703; counters[5] = 110441; counters[6] = 11; counters[12] = 246481;
+  const counters = new Uint32Array(20); // 80-byte GPU counter block; no timestamp-query here.
+  counters[2] = 1174316; counters[4] = 256703; counters[5] = 110441; counters[6] = 11; counters[12] = 246481; counters[17] = 3;
   const makeBuffer = () => ({ getMappedRange: () => counters.buffer.slice(0), unmap() { this.unmapped = true; } });
   const device = { createBuffer: makeBuffer };
   const ctx = runInNewContext(`${block}\n({ liveFree, livePending, drainLive, readLiveCounters, get last() { return last; }, setError(e) { liveError = e; } })`,
-    { device, GPUBufferUsage: { MAP_READ: 1, COPY_DST: 8 }, last: null, Promise, Set, Array, Uint32Array, Error });
+    { device, wantTimestamps: false, GPUBufferUsage: { MAP_READ: 1, COPY_DST: 8 }, last: null, Promise, Set, Array, Uint32Array, BigUint64Array, Error });
   assert.equal(ctx.liveFree.length, 2, 'Two frames in flight bound latency to two physics steps.');
   let resolve;
   const pending = new Promise(r => { resolve = r; });
@@ -535,8 +544,8 @@ test('live readback ring drains queued frames and surfaces late coloring overflo
   await drain;
   assert.equal(drained, true);
   const buf = makeBuffer();
-  ctx.readLiveCounters(buf);
-  assert.deepEqual({ ...ctx.last }, { contact: 1174316, candidate: 256703, awake: 110441, color: 11, manifold: 246481, overflow: 0 });
+  assert.equal(ctx.readLiveCounters(buf), null, 'Without timestamp-query the readback carries no GPU step time.');
+  assert.deepEqual({ ...ctx.last }, { contact: 1174316, candidate: 256703, awake: 110441, color: 11, manifold: 246481, overflow: 0, colorRounds: 3 });
   assert.ok(buf.unmapped, 'Readback buffers must be unmapped before reuse.');
   counters[7] = 8;
   assert.throws(() => ctx.readLiveCounters(makeBuffer()), /Graph coloring is incomplete/);
@@ -544,8 +553,8 @@ test('live readback ring drains queued frames and surfaces late coloring overflo
   await assert.rejects(ctx.drainLive(), /late coloring overflow/, 'A deferred readback failure must stop the next drain.');
 });
 
-for (const [query, expected] of [['?scene=ring110k','copy'],['?scene=gables506k','copy'],['?scene=columns','pass'],
-  ['?scene=ring110k&reuse=pass','pass'],['?scene=ring110k&contacts=canonical','pass'],['?scene=gables506k&contacts=compact','pass']]) {
+for (const [query, expected] of [['?scene=ring110k','copy'],['?scene=gables506k','copy'],['?scene=columns','copy'],
+  ['?scene=columns&contacts=canonical','pass'],['?scene=ring110k&reuse=pass','pass'],['?scene=ring110k&contacts=canonical','pass'],['?scene=gables506k&contacts=compact','pass']]) {
   test(`reuse copy mode parses explicitly (${query})`, () => {
     assert.equal(runInNewContext(`${modeSource}\nreuseMode`,{URLSearchParams,location:{search:query}}),expected);
   });

@@ -25,6 +25,16 @@ fn main() -> Result<()> {
 
     let world = slang_root.join("kernels/world_step.slang");
     let compact = slang_root.join("kernels/compact_solve.slang");
+    let vehicle = slang_root.join("kernels/vehicle_step.slang");
+    let vehicle_entries = [
+        "vehicle_input",
+        "wheel_query",
+        "vehicle_link",
+        "vehicle_prepare",
+        "vehicle_iterate",
+        "vehicle_post",
+        "raycast_batch",
+    ];
     let entries = [
         "apply_commands",
         "predict_bodies",
@@ -90,11 +100,20 @@ fn main() -> Result<()> {
         "convex_sat_small",
         "convex_sat_large",
         "convex_manifold",
+        "vehicle_input",
+        "wheel_query",
+        "vehicle_link",
+        "vehicle_prepare",
+        "vehicle_iterate",
+        "vehicle_post",
+        "raycast_batch",
     ];
     let convex = slang_root.join("kernels/convex_step.slang");
     for entry in entries {
         compile(
-            if entry.starts_with("convex_") {
+            if vehicle_entries.contains(&entry) {
+                &vehicle
+            } else if entry.starts_with("convex_") {
                 &convex
             } else if entry.ends_with("_compact")
                 || (entry == "pack_solver_contacts" || entry == "clear_solver_contacts")
@@ -118,6 +137,8 @@ fn main() -> Result<()> {
     for entry in entries.iter().chain(["abi_roundtrip"].iter()) {
         let src = if *entry == "abi_roundtrip" {
             &abi
+        } else if vehicle_entries.contains(entry) {
+            &vehicle
         } else if entry.starts_with("convex_") {
             &convex
         } else if entry.ends_with("_compact")
@@ -144,5 +165,79 @@ fn main() -> Result<()> {
     }
 
     println!("cargo:rustc-env=ENGINE_MSL_DIR={}", msl_dir.display());
+    rigid_kernels(&slang_root, &out_dir)?;
+    Ok(())
+}
+
+/// The shared rigid step graph's kernels (`engine_exec::rigid_plan`), compiled
+/// with the browser's `ENGINE_WGSL` buffer layout so `MetalSim` replays exactly
+/// the commands the WebGPU host does. Emits `rigid_kernels.rs`.
+fn rigid_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<()> {
+    use engine_exec::rigid_plan::{kernel_source, PERSISTENT_ENTRIES};
+    use engine_slang_build::msl_layout::{bind_slots, compile_kernel, msl_buffers};
+    use std::fmt::Write;
+    let slangc = find_slangc()?;
+    let dir = out_dir.join("rigid_msl");
+    std::fs::create_dir_all(&dir)?;
+    let kernels = root.join("kernels");
+    let slots = bind_slots(&[
+        kernels.join("world_step.slang"),
+        kernels.join("convex_step.slang"),
+        kernels.join("vehicle_step.slang"),
+        root.join("physics/contact_storage.slang"),
+    ])?;
+    // The world_step entries are large: compile them in parallel.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut compiled: Vec<_> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&entry) = PERSISTENT_ENTRIES.get(k) else {
+                            break;
+                        };
+                        let dest = dir.join(format!("{entry}.metal"));
+                        let source = kernels.join(kernel_source(entry));
+                        done.push((
+                            k,
+                            dest.clone(),
+                            compile_kernel(&slangc, root, &source, entry, &dest),
+                        ));
+                    }
+                    done
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap())
+            .collect()
+    });
+    compiled.sort_by_key(|(k, _, _)| *k);
+    let mut table = String::from(
+        "/// Rigid plan kernels: (entry, MSL, threads, [(metal buffer, host slot)])\n\
+         pub static RIGID_KERNELS: &[RigidKernel] = &[\n",
+    );
+    for (k, dest, r) in compiled {
+        let entry = PERSISTENT_ENTRIES[k];
+        let (msl, threads) = r?;
+        let mut binds = String::new();
+        for (global, index) in msl_buffers(&msl, entry, "[[kernel]]")? {
+            let slot = slots
+                .get(&global)
+                .ok_or_else(|| anyhow::anyhow!("{entry}: global {global} has no BIND slot"))?;
+            write!(binds, "({index}, {slot}), ")?;
+        }
+        writeln!(
+            table,
+            "    RigidKernel {{ entry: {entry:?}, msl: include_str!({:?}), threads: {threads:?}, binds: &[{binds}] }},",
+            dest.display().to_string()
+        )?;
+    }
+    table.push_str("];\n");
+    std::fs::write(out_dir.join("rigid_kernels.rs"), table)?;
     Ok(())
 }

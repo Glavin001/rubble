@@ -4,7 +4,7 @@ import {Plan,sceneHandle} from './wasm.mjs';
 // step state and the ordered dispatch schedule; this file creates the
 // buffers and pipelines and replays each tick's commands. The Metal viewer
 // (engine-viewer/src/fracture/sim.rs) replays the same commands.
-const PASS_ALIGN=256,COUNTER_BYTES=80,UPLOAD_BYTES=1120,BODY_BYTES=112,JOINT_BYTES=192;
+const PASS_ALIGN=256,COUNTER_BYTES=80,UPLOAD_BYTES=1120,BODY_BYTES=112,JOINT_BYTES=288;
 const OP_DISPATCH=0,OP_INDIRECT=1,OP_COPY=2,HOST_UPLOAD=255;
 const KERNELS=Plan.kernels(),PHASES=Plan.phases();
 // One step encoded as several command buffers, split after these phases. Submitted
@@ -291,18 +291,20 @@ return {
      points:new Float32Array(await readBuffer(bufs[27],base*64,last.contact*64))};
  },
  get shots(){return plan.shots},
- // Joint lambda0..5, k0..5 and flags per joint (preloading, diagnostics).
+ // Bond row forces (lambda) and penalties (k) per joint, D6 slot order: normal,
+ // u, v, about normal, about u, about v (engine-schema Joint: flags word 2,
+ // lambda words 48.., penalty words 56..).
  async jointState(){
    if(!jointCount)return {lambda:[],k:[]};
    const f=new Float32Array(await readBuffer(bufs[5],0,jointCount*JOINT_BYTES)),w=JOINT_BYTES/4;
    const u=new Uint32Array(f.buffer);
-   return {lambda:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+24,i*w+30))),k:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+30,i*w+36))),flags:Array.from({length:jointCount},(_,i)=>u[i*w+3])};
+   return {lambda:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+48,i*w+54))),k:Array.from({length:jointCount},(_,i)=>Array.from(f.subarray(i*w+56,i*w+62))),flags:Array.from({length:jointCount},(_,i)=>u[i*w+2])};
  },
  // Joint flags (bit 0 = broken), read back for tests and the HUD.
  async jointFlags(){
    if(!jointCount)return new Uint32Array(0);
    const v=new Uint32Array(await readBuffer(bufs[5],0,jointCount*JOINT_BYTES));
-   return Uint32Array.from({length:jointCount},(_,i)=>v[i*JOINT_BYTES/4+3]);
+   return Uint32Array.from({length:jointCount},(_,i)=>v[i*JOINT_BYTES/4+2]);
  },
  set incrementalColoring(v){plan.incrementalColoring=!!v},
  // Solver parameters (dt, iterations, ...), packed every step; setParams merges.

@@ -10,6 +10,14 @@ const start = html.indexOf('let phaseSamples;');
 const end = html.indexOf('async function sampleSettle()', start);
 assert.ok(start >= 0 && end > start, 'demo profiler entry points must remain testable');
 const source = html.slice(start, end);
+// The encoder's dispatch-count constants (8ev), read from the shipped page, with the
+// fixed-palette controls on (colors=full, rounds=full): these tests check the full
+// schedule; adaptive counts are exercised by the browser regressions.
+const dispatchSource = html.slice(html.indexOf('const COLOR_ROUND_LIMIT'), html.indexOf('const colorsFull'));
+const DISPATCH = {
+  ...runInNewContext(`${dispatchSource}({COLOR_ROUND_LIMIT, COLOR_ROUND_HEADROOM, COLOR_HEADROOM, SLEEP_NEVER_S})`),
+  colorsFull: true, roundsFull: true,
+};
 const plain = value => JSON.parse(JSON.stringify(value));
 
 const bucketSource = html.slice(html.indexOf('async function readColorBuckets()'), html.indexOf('function restoreScene()'));
@@ -37,7 +45,7 @@ for (const scenario of ['valid', 'coverage mismatch', 'device loss']) {
       },
       finish() { assert.ok(state.copied); return this; },
     };
-    const context = {
+    const context = {...DISPATCH,
       cap: {maxColors: 4}, last: {awake: scenario === 'coverage mismatch' ? 32 : 31}, bufs: buffers,
       GPUBufferUsage: {COPY_DST: 2, MAP_READ: 4}, GPUMapMode: {READ: 1}, Uint32Array,
       device: {
@@ -60,9 +68,9 @@ test('benchmark captures color buckets before and after timing without readbacks
   const wallSource = html.slice(html.indexOf('let timingSamples;'), html.indexOf('let phaseSamples;'));
   const events = [];
   let measuring = false;
-  const context = {
+  const context = {...DISPATCH,
     lead: 0, scene: 'ring110k', bodyCount: 110442,
-    params: {iterations: 4, dt: 1/60}, stablePacking: true, persistentContacts: true,
+    params: {iterations: 4, dt: 1/60}, SLEEP_OFF_TIME: 1e6, stablePacking: true, persistentContacts: true,
     compactContacts: true, sparseStart: 32, parallelColorPrefix:false, physicalAdjacency: true, spatialOrder: false,
     fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', reuseMode: 'pass', npMode: 'fused', persistMode: 'scan', repairMode: 'rounds', restMode: 'drop', endpointsMode: 'manifold', gridMode: 'fixed', info: {}, navigator: {userAgent: 'test'},
     last: {awake: 110441}, submitPhysics() {}, device: {queue: {async onSubmittedWorkDone() {}}},
@@ -103,7 +111,7 @@ function fixture({ graphProfile = false, detailedProfile = false, reuse = true, 
     resolveQuerySet(_q, first, count) { assert.equal(first, 0); assert.equal(count, stamps.length); },
     copyBufferToBuffer() {}, finish() { return this; },
   };
-  const context = {
+  const context = {...DISPATCH,
     params: {iterations, flags: reuse ? 1 : 0}, detailedProfile, graphProfile, colorProfile: false, compactContacts, parity: 0, steps: 166, wantTimestamps: true,
     performance: {now() { return clock; }},
     GPUBufferUsage: {QUERY_RESOLVE: 1, COPY_SRC: 2, MAP_READ: 4, COPY_DST: 8},
@@ -204,3 +212,101 @@ for (const reuse of [false, true]) {
     assert.equal(state.submissions, 10); assert.equal(state.destroyed, 30);
   });
 }
+
+// Live HUD step cost. Playback steps once per rAF, so completion intervals are
+// display-bound; Max TPS must come from the step's own cost. The numbers mirror
+// ring110k on an M3 Max: ~11 ms GPU per step behind a 60 Hz display.
+const liveCost = expr => runInNewContext(`${source}\n${expr}`, {BigUint64Array, Error});
+const ns = ms => BigInt(Math.round(ms * 1e6));
+
+test('live step cost uses the step pass timestamps, not the display-bound completion interval', () => {
+  // Completions 16.7 ms apart, as at 60 Hz: the old HUD reported exactly that.
+  const sample = liveCost(`liveStepSample({stamps: new BigUint64Array([${ns(500)}n, ${ns(511.1)}n]), submittedAt: 1000, completedAt: 1016.7, previousCompletedAt: 1000})`);
+  assert.equal(sample.source, 'gpu');
+  assert.ok(Math.abs(sample.ms - 11.1) < 1e-9);
+});
+
+test('without valid timestamps the live estimate is submission busy time and is labelled', () => {
+  // Idle queue: the GPU could not start before submit, so busy = completion - submit.
+  const idle = liveCost(`liveStepSample({stamps: null, submittedAt: 1000, completedAt: 1012.5, previousCompletedAt: 990})`);
+  assert.deepEqual(plain(idle), {ms: 12.5, source: 'estimate'});
+  // Saturated queue: this step waited for the previous one, so the interval counts.
+  const busy = liveCost(`liveStepSample({stamps: null, submittedAt: 1000, completedAt: 1030, previousCompletedAt: 1018})`);
+  assert.deepEqual(plain(busy), {ms: 12, source: 'estimate'});
+  // Zeroed or reversed timestamp pairs are not GPU evidence.
+  for (const pair of ['0n, 0n', `${ns(12)}n, ${ns(11)}n`]) {
+    const bad = liveCost(`liveStepSample({stamps: new BigUint64Array([${pair}]), submittedAt: 1000, completedAt: 1013, previousCompletedAt: 0})`);
+    assert.equal(bad.source, 'estimate');
+  }
+});
+
+test('step cost window reports a median, prefers GPU samples and derives Max TPS from cost', () => {
+  const gpu = [11.0, 11.2, 10.9, 25.0, 11.1].map(ms => ({ms, source: 'gpu'}));
+  const mixed = [...gpu, {ms: 16.7, source: 'estimate'}, {ms: 16.7, source: 'estimate'}];
+  const result = plain(liveCost(`summarizeStepCost(${JSON.stringify(mixed)})`));
+  assert.equal(result.source, 'gpu');
+  assert.equal(result.stepMs, 11.1, 'a hitch must not move the readout, and estimates must not mix into GPU time');
+  assert.ok(Math.abs(result.maxTps - 1000 / 11.1) < 1e-9);
+  assert.deepEqual(plain(liveCost(`stepCostLabels(${JSON.stringify(result)})`)),
+    {step: '11.1 ms/step GPU', maxTps: '90', maxTpsSub: 'GPU-timed'});
+  const estimate = plain(liveCost(`summarizeStepCost([{ms: 14, source: 'estimate'}, {ms: 13, source: 'estimate'}, {ms: 15, source: 'estimate'}])`));
+  assert.deepEqual(estimate, {stepMs: 14, maxTps: 1000 / 14, source: 'estimate'});
+  assert.deepEqual(plain(liveCost(`stepCostLabels(${JSON.stringify(estimate)})`)),
+    {step: '≈14.0 ms/step est.', maxTps: '≈71', maxTpsSub: 'estimate'});
+  assert.deepEqual(plain(liveCost(`stepCostLabels(summarizeStepCost([]))`)), {step: '', maxTps: '—', maxTpsSub: ''});
+});
+
+test('live HUD keeps TPS observed, Max TPS from step cost, and shows measuring while benchWall runs', () => {
+  const rates = html.slice(html.indexOf('    // Rolling 1 s windows'), html.indexOf('    // Live playback pipelines counter readback'));
+  const el = () => ({textContent: ''});
+  const dom = {tpsVal: el(), fpsVal: el(), maxTpsVal: el(), maxTpsSub: el(), maxFpsVal: el(), stepMsVal: el(), frameMsVal: el()};
+  let clock = 0;
+  const context = {...dom, performance: {now: () => clock}, window: {}, BigUint64Array, Error, measuring: false};
+  const hud = runInNewContext(`${source}\n${rates}\n({bumpRates, addStepCost, showMeasuring, resetRates, set measuring(v) { measuring = v; }})`, context);
+  const playSecond = () => {
+    for (let frame = 0; frame < 60; frame++) {
+      clock += 16.7;
+      hud.addStepCost({ms: 11.1, source: 'gpu'});
+      hud.bumpRates(true, 2);
+    }
+  };
+  playSecond();
+  assert.equal(dom.tpsVal.textContent, '60', 'TPS is the observed, display-bound step rate');
+  assert.equal(dom.maxTpsVal.textContent, '90', 'Max TPS is 1000 / GPU step cost, not 1000 / 16.7 ms');
+  assert.equal(dom.maxTpsSub.textContent, 'GPU-timed');
+  assert.equal(dom.stepMsVal.textContent, '11.1 ms/step GPU');
+  assert.equal(context.window.__RATES__.stepSource, 'gpu');
+
+  hud.measuring = true;
+  hud.showMeasuring();
+  for (const id of ['tpsVal', 'maxTpsVal', 'fpsVal', 'maxFpsVal']) assert.equal(dom[id].textContent, '—');
+  assert.equal(dom.maxTpsSub.textContent, 'measuring…');
+  // Late live completions and benchWall's saturated queue must not reach the HUD.
+  hud.addStepCost({ms: 45, source: 'estimate'});
+  hud.measuring = false;
+  hud.resetRates();
+  playSecond();
+  assert.equal(dom.stepMsVal.textContent, '11.1 ms/step GPU');
+  assert.equal(dom.maxTpsVal.textContent, '90');
+});
+
+test('live readback decodes the step pass timestamps after the counters', () => {
+  const block = html.slice(html.indexOf('const LIVE_IN_FLIGHT'), html.indexOf('async function frame('));
+  const bytes = new ArrayBuffer(96);
+  new Uint32Array(bytes, 0, 20)[5] = 110441;
+  new BigUint64Array(bytes, 80, 2).set([ns(500), ns(511.1)]);
+  const sizes = [];
+  const device = {
+    createBuffer({size}) { sizes.push(size); return {getMappedRange: () => bytes.slice(0), unmap() {}}; },
+    createQuerySet({type, count}) { assert.equal(type, 'timestamp'); assert.equal(count, 2); return {}; },
+  };
+  const ctx = runInNewContext(`${block}\n({liveFree, readLiveCounters, get last() { return last; }})`, {
+    device, wantTimestamps: true, last: null, Promise, Set, Array, Uint32Array, BigUint64Array, Error,
+    GPUBufferUsage: {MAP_READ: 1, COPY_DST: 8, QUERY_RESOLVE: 16, COPY_SRC: 4},
+  });
+  assert.deepEqual(sizes, [16, 96, 96], 'one shared resolve buffer; each readback holds counters + two timestamps');
+  const stamps = ctx.readLiveCounters(ctx.liveFree[0]);
+  assert.equal(ctx.last.awake, 110441);
+  assert.deepEqual(Array.from(stamps), [ns(500), ns(511.1)]);
+  assert.ok(Math.abs(liveCost(`liveStepSample({stamps: new BigUint64Array([${stamps[0]}n, ${stamps[1]}n])}).ms`) - 11.1) < 1e-9);
+});

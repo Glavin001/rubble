@@ -6,7 +6,7 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 mod gpu;
-pub use gpu::WgpuSim;
+pub use gpu::{default_device, SimSnapshot, WgpuSim};
 
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
@@ -69,8 +69,14 @@ impl WebGpuWorld {
                     {
                         // These entries access buffers only. Slang over-lowers
                         // DeviceMemoryBarrierWithGroupSync to a texture barrier
-                        // unavailable in the supported WGSL/Naga version.
+                        // unavailable in the supported WGSL/Naga version, and
+                        // ends it with an empty statement (`;;`) that Tint
+                        // accepts but Safari's WGSL parser rejects.
                         w.replace(
+                            "storageBarrier(); textureBarrier(); workgroupBarrier();;",
+                            "storageBarrier(); workgroupBarrier();",
+                        )
+                        .replace(
                             "storageBarrier(); textureBarrier(); workgroupBarrier();",
                             "storageBarrier(); workgroupBarrier();",
                         )
@@ -150,26 +156,7 @@ impl WebGpuWorld {
     /// Create a wgpu device and load every successfully translated WGSL module.
     /// Returns adapter label + counts (ok / fail).
     pub fn smoke_device() -> anyhow::Result<String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| anyhow::anyhow!("no wgpu adapter"))?;
-        let info = adapter.get_info();
-        let (device, _queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("engine-webgpu"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: Default::default(),
-            },
-            None,
-        ))?;
+        let (info, device, _queue) = crate::gpu::default_device()?;
 
         let report = Self::compile_shaders_report();
         let mut loaded = 0u32;
@@ -659,6 +646,15 @@ mod tests {
             assert!(!module.global_variables.iter().any(|(_, global)|
                 global.binding.as_ref().is_some_and(|b| b.group == 0 && b.binding == 21)),
                 "{name}: production contact reuse binds the shared scratch/statistics buffer. The removed hit/miss/generation diagnostics serialized every body/pair on six global atomic counters; keep optional instrumentation out of the default performance path.");
+        }
+    }
+
+    #[test]
+    fn exported_wgsl_has_no_empty_statements() {
+        // Safari's WGSL parser rejects `;;` ("Not a valid statement"); Tint accepts it.
+        for (name, result) in WebGpuWorld::compile_shaders_report() {
+            let source = result.unwrap();
+            assert!(!source.contains(";;"), "{name}: empty statement `;;` breaks Safari");
         }
     }
 

@@ -1,0 +1,20 @@
+[package]
+name = "bench-jolt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Benchmark adapter: Jolt Physics 5.6 (C++ shim over FFI; CPU)"
+
+[[bin]]
+name = "bench-jolt"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+bench-core.workspace = true
+
+[build-dependencies]
+cc = "1.0"
+serde_json.workspace = true

@@ -16,6 +16,9 @@ For single-file Shardwright asset import, see the
 Convex hulls and compound bodies (packed hull ABI, broadphase, cooperative SAT,
 CPU/GPU verification) are described in [docs/convex-hulls.md](docs/convex-hulls.md).
 
+Vehicles (raycast wheels solved inside AVBD, drivetrain, tanks and motorcycles, severable parts, drivable
+WebGPU demo `vehicle.html`): see [docs/vehicles.md](docs/vehicles.md).
+
 ## Quick start (Metal)
 
 ```bash
@@ -76,11 +79,21 @@ Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
 |------|------|
 | `slang/` | Single numerical source |
 | `crates/engine-schema` | ABI, handles, commands |
-| `crates/engine-exec` | Phase graph |
-| `crates/engine-metal` | M3 proof backend + benches |
-| `crates/engine-scenes` | Demo/benchmark scene builders + `demo_viewer` |
+| `crates/engine-exec` | Phase graph, backend trait, and `rigid_plan`: the one step graph every host replays (DECISIONS 8et) |
+| `crates/engine-metal` | M3 proof backend + benches; `MetalSim` replays `rigid_plan` natively |
+| `crates/engine-scenes` | Demo/benchmark scene builders + `demo_viewer`; `scene_export` writes the browser's joint scenes |
 | `crates/engine-oracles` | three-avbd / Newton / Jolt / demo3d adapters |
-| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke` |
+| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke`; `demo.html`, `vehicle.html`, `fracture/` lab |
+| `crates/engine-vehicle` | Vehicle descriptors, presets, GPU record packing, host bookkeeping |
+| `crates/engine-vehicle-wasm` | wasm-bindgen face of `engine-vehicle` for the browser vehicle demo |
+| `crates/engine-fracture` | Fracture-lab host logic shared by the browser and Metal hosts: Shardwright GLB reader, scene builders, tick plan; stress cooking |
+| `crates/engine-fracture-wasm` | wasm-bindgen bindings of `engine-fracture` for the browser fracture lab |
+| `crates/engine-slang-build` | Runs `slangc` offline and embeds the Metal / SPIR-V / CUDA artifacts |
 | `crates/engine-cuda` | CUDA source emission |
-| `crates/engine-viewer` | Buffer-shared draw |
+| `crates/engine-viewer` | Buffer-shared draw; native Metal `fracture_viewer` |
 | `conformance/` | Oracle scene schema + adapter JSON |
+| `stress-oracle/` | Destruction stress solver (own workspace): CPU reference, GPU solver, rubble coupling, `destruction-view`; see its README and [docs/stress-solver-tracker.md](docs/stress-solver-tracker.md) |
+| `docs/` | Design notes, benchmarks and baselines (`docs/baselines/`), joints (`docs/JOINTS.md`), convex hulls (`docs/convex-hulls.md`) |
+
+Large assets (the fracture GLBs) are in Git LFS: run `git lfs install` before cloning, or
+`git lfs pull` after.

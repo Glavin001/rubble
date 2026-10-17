@@ -2,6 +2,7 @@
 #include "../physics/common.slang"
 #include "../physics/atomics.slang"
 #include "../physics/box_collide.slang"
+#include "../physics/joints.slang"
 
 BIND(0) RWStructuredBuffer<BodyState> gBodies;
 #if !defined(ENGINE_WGSL)
@@ -99,6 +100,24 @@ static const uint EVENT_SLEEP = 1u;
 static const uint EVENT_WAKE = 2u;
 static const uint EVENT_BREAK = 3u;
 static const uint EVENT_OVERFLOW = 4u;
+
+// Event ring in gScratchAtomics after its 96 host/list words (engine-schema
+// EVENT_RING_*; gEvents belongs to the joint-pair hash, which grows with the
+// joint count): a monotonically increasing write cursor, then 4-word records
+// [type, id, a, b]. Hosts read the records since their last read; never cleared.
+static const uint EVENT_RING_BASE = 96u;
+static const uint EVENT_RING_CAPACITY = 1024u;
+
+void emitEvent(uint type, uint id, uint a, uint b)
+{
+    uint n;
+    AADD3(gScratchAtomics[EVENT_RING_BASE], 1u, n);
+    uint r = EVENT_RING_BASE + 4u + 4u * (n % EVENT_RING_CAPACITY);
+    ASTORE(gScratchAtomics[r], type);
+    ASTORE(gScratchAtomics[r + 1u], id);
+    ASTORE(gScratchAtomics[r + 2u], a);
+    ASTORE(gScratchAtomics[r + 3u], b);
+}
 
 bool bodyIsDynamic(BodyState b) { return b.invMass > 0.0 && (b.flags & BODY_DYNAMIC) != 0u; }
 bool bodyIsSleeping(BodyState b) { return (b.flags & BODY_SLEEPING) != 0u; }
@@ -391,6 +410,16 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
 }
 
 static const uint GRID_HASH_SIZE = 131072u;
+// Oversized statics (wider than half a grid cell) cannot be found from the
+// uniform grid's 27-cell stencil, so broadphase_insert lists their collider ids:
+// count in gScratchAtomics[80], ids after the event ring (engine-schema
+// LARGE_STATIC_*). Order follows the atomic append; every listed static is
+// tested, so the result does not depend on it.
+static const uint LARGE_STATIC_COUNT = 80u;
+static const uint LARGE_STATIC_CAP = 1024u;
+static const uint LARGE_STATIC_BASE = EVENT_RING_BASE + 4u + 4u * EVENT_RING_CAPACITY;
+uint largeStaticCount() { return min(ALOAD(gScratchAtomics[LARGE_STATIC_COUNT]), LARGE_STATIC_CAP); }
+uint largeStaticCollider(uint k) { return ALOAD(gScratchAtomics[LARGE_STATIC_BASE + k]); }
 // Heads/links carry immutable broadphase eligibility alongside the collider ID.
 // Collider IDs occupy 31 bits; 0xffffffff remains the empty-list sentinel.
 static const uint GRID_AWAKE_DYNAMIC = 0x80000000u;
@@ -456,7 +485,6 @@ uint jointPairHash(uint bodyA, uint bodyB)
     return (lo * 73856093u) ^ (hi * 19349663u) ^ (lo << 16) ^ (hi >> 3);
 }
 
-bool jointBroken(Joint j) { return (j.flags & JOINT_FLAG_BROKEN) != 0u; }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -475,7 +503,9 @@ void joint_hash_insert(uint3 tid : SV_DispatchThreadID)
     uint nJ = gCounters[0].jointCount;
     if (i >= nJ) return;
     Joint jj = gJoints[i];
-    if (jointBroken(jj)) return;
+    // Broken joints stop filtering; COLLIDE joints never filter (PhysX flag);
+    // a wheel standing on a crate must still let the chassis collide with it.
+    if ((jj.flags & (JOINT_FLAG_BROKEN | JOINT_FLAG_COLLIDE | JOINT_FLAG_TYRE)) != 0u) return;
     uint mask = jointHashSize() - 1u;
     uint h = jointPairHash(jj.bodyA, jj.bodyB) & mask;
     for (uint probe = 0; probe < JOINT_HASH_PROBES; probe++)
@@ -565,10 +595,25 @@ bool lookAheadSeparated(uint i, uint j)
     return any(imx < jmn) || any(jmx < imn);
 }
 
+// Vehicle sever grace (HOST_S(30) bit 1, set by vehicle hosts when the scene has
+// no category filters): Collider.generation = ignored body + 1 (0 = none), so a
+// severed wheel or part does not explode out of the chassis it was attached
+// to. The vehicle kernels write it on the GPU and clear it once they separate.
+bool collidersIgnoreBody(uint i, uint j)
+{
+    Collider a = gColliders[i];
+    Collider b = gColliders[j];
+    return (a.generation != 0u && a.generation - 1u == b.body) ||
+           (b.generation != 0u && b.generation - 1u == a.body);
+}
+
 void emitCandidate(uint i, uint j)
 {
     if (i == j) return;
-    if (HOST_S(30) != 0u && collidersFilteredOut(i, j)) return;
+    uint filterMode = HOST_S(30);
+    if ((filterMode & 1u) != 0u ? collidersFilteredOut(i, j)
+        : (filterMode & 2u) != 0u && collidersIgnoreBody(i, j))
+        return;
     if (lookAheadSeparated(i, j)) return;
     uint a = min(i, j);
     uint b = max(i, j);
@@ -597,6 +642,14 @@ void broadphase_clear(uint3 tid : SV_DispatchThreadID)
     if (i >= gridHashSize() * (gridSplit() ? 2u : 1u)) return;
     ASTORE(gConstraintIds[i], 0xFFFFFFFFu);
     if (i == 0u && gridSplit()) ASTORE(gScratchAtomics[52], 0u);
+    // Metal hosts do not rewrite GPU-owned scratch words each step: reset the
+    // large-dynamic (25), plane (42) and large-static (53) list counts here.
+    if (i == 0u)
+    {
+        ASTORE(gScratchAtomics[25], 0u);
+        ASTORE(gScratchAtomics[42], 0u);
+        ASTORE(gScratchAtomics[LARGE_STATIC_COUNT], 0u);
+    }
 }
 
 BoxObb worldObbFromCache(uint colliderIdx)
@@ -922,6 +975,21 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
     float3 ext = box.mx - box.mn;
     // Oversized statics are probed separately; large dynamics use the explicit list.
     BodyState bIns = gBodies[col.body];
+    // Statics wider than a cell (ramps, walls, ground) cannot be found from the
+    // 27-cell stencil: list them. Past LARGE_STATIC_CAP
+    // flag the overflow and keep the legacy behaviour (grid, or endpoint probe).
+    float boundR = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
+    if (!bodyIsDynamic(bIns) && boundR > 0.5 * cellSize)
+    {
+        uint slot;
+        AADD3(gScratchAtomics[LARGE_STATIC_COUNT], 1, slot);
+        if (slot < LARGE_STATIC_CAP)
+        {
+            ASTORE(gScratchAtomics[LARGE_STATIC_BASE + slot], i);
+            return;
+        }
+        AOR2(gCounters[0].overflowFlags, OVERFLOW_LARGE_STATICS);
+    }
     if (!bodyIsDynamic(bIns) &&
         (ext.x >= cellSize * 4.0 || ext.y >= cellSize * 4.0 || ext.z >= cellSize * 4.0))
         return;
@@ -1206,18 +1274,71 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         }
     }
     }
-    // Oversized statics are not in the grid/list. The scene builder puts ground
-    // at an endpoint. Large dynamics were already handled exactly once above.
-    for (uint t = 0u; t < 2u; t++)
+    if (queryLarge)
+    {
+        // Large dynamics (vehicle chassis, smash balls) do not use the 27-cell
+        // stencil. Small dynamics and sleepers find them through the large list;
+        // small statics never query, so walk the grid cells under this AABB for them.
+        int3 lo = int3(floor(box.mn / cellSize));
+        int3 hi = int3(floor(box.mx / cellSize));
+        int3 span = hi - lo + int3(1, 1, 1);
+        if (span.x * span.y * span.z <= 512)
+        {
+            uint tableBase = gridSplit() ? gridHashSize() : 0u;
+            for (int z = lo.z; z <= hi.z; z++)
+            for (int y = lo.y; y <= hi.y; y++)
+            for (int x = lo.x; x <= hi.x; x++)
+            {
+                uint link = ALOAD(gConstraintIds[tableBase + gridHash(x, y, z)]);
+                uint guard = 0u;
+                while (link != 0xFFFFFFFFu && guard < 4096u)
+                {
+                    uint cur = link & GRID_COLLIDER_MASK;
+                    Aabb ab = gAabbs[base + cur];
+                    link = gridSplit() ? asuint(ab._pad1) : gColorLists[cur];
+                    guard++;
+                    int3 cell = int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize));
+                    if (cell.x != x || cell.y != y || cell.z != z) continue;
+                    if (box.mx.x < ab.mn.x || ab.mx.x < box.mn.x ||
+                        box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
+                        box.mx.z < ab.mn.z || ab.mx.z < box.mn.z)
+                        continue;
+                    Collider other = gColliders[cur];
+                    if (other.body == col.body || other.shape == SHAPE_PLANE) continue;
+                    if (bodyIsDynamic(gBodies[other.body])) continue;
+                    if (bodiesJointed(col.body, other.body)) continue;
+                    if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)) continue;
+                    emitCandidate(i, cur);
+                }
+            }
+        }
+    }
+    // Oversized statics are not in the grid. broadphase_insert lists up to
+    // LARGE_STATIC_CAP of them; on overflow the legacy endpoint probe (ground at
+    // collider 0 or last) applies. Large dynamics were handled exactly once above.
+    uint nLargeStatic = ALOAD(gScratchAtomics[LARGE_STATIC_COUNT]);
+    uint nListed = largeStaticCount();
+    bool listOverflow = nLargeStatic > LARGE_STATIC_CAP;
+    uint nProbe = nListed + (listOverflow ? 2u : 0u);
+    for (uint t = 0u; t < nProbe; t++)
     {
         if (gCounters[0].colliderCount == 0u) break;
-        uint j = (t == 0u) ? 0u : (gCounters[0].colliderCount - 1u);
-        if (j == i || (t == 1u && j == 0u)) continue;
+        bool endpoint = t >= nListed;
+        uint j = !endpoint ? largeStaticCollider(t)
+            : ((t == nListed) ? 0u : (gCounters[0].colliderCount - 1u));
+        if (j == i || (endpoint && t > nListed && j == 0u)) continue;
+        if (endpoint)
+        {
+            bool listed = false;
+            for (uint u = 0u; u < nListed; u++)
+                if (largeStaticCollider(u) == j) listed = true;
+            if (listed) continue;
+        }
         Collider other = gColliders[j];
         if (other.shape == SHAPE_PLANE || other.body == col.body) continue;
         Aabb ab = gAabbs[base + j];
         float3 ext = ab.mx - ab.mn;
-        if (ext.x < cellSize * 4.0 && ext.y < cellSize * 4.0 && ext.z < cellSize * 4.0)
+        if (endpoint && ext.x < cellSize * 4.0 && ext.y < cellSize * 4.0 && ext.z < cellSize * 4.0)
             continue;
         // Dynamic-static always from the mover.
         BodyState ob = gBodies[other.body];
@@ -1856,7 +1977,16 @@ static const float NEAREST_FRACTION = 0.05;
 
 uint pairWarmKey(uint colA, uint colB)
 {
-    uint h = colA * 73856093u ^ colB * 19349663u;
+    // Finalize with a full-avalanche mixer (murmur3 fmix32): the slot is the low
+    // bits, and the plain prime-xor key left Morton-ordered neighbour pairs
+    // (three-avbd's spatialSort builders) in clusters longer than the 64-slot
+    // linear probe even at 25% load, overflowing the record hash on gables506k.
+    uint h = colA * 0x9E3779B1u ^ (colB + 0x7F4A7C15u) * 0x85EBCA77u;
+    h ^= h >> 16;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15;
+    h *= 0x846CA68Bu;
+    h ^= h >> 16;
     return h == CONTACT_HASH_EMPTY ? (colA ^ colB ^ 0xA5A5A5A5u) : h;
 }
 
@@ -2390,16 +2520,39 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
         // Swap to box-vs-plane then flip normal / points for A=plane, B=box.
         BoxManifold mf = collideBoxPlane(posB, rotB, cb.params.xyz, ca.params.xyz, ca.params.w, detect);
         if (mf.count > 0)
-        {
-            mf.normal = -mf.normal;
-            for (int k = 0; k < mf.count; k++)
-            {
-                float3 tmp = mf.pts[k].pA;
-                mf.pts[k].pA = mf.pts[k].pB;
-                mf.pts[k].pB = tmp;
-            }
-            emitManifold(pair, ba, bb, ca, cb, mf, margin);
-        }
+            emitManifold(pair, ba, bb, ca, cb, flipManifold(mf), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_BOX && cb.shape == SHAPE_CAPSULE)
+    {
+        emitManifold(pair, ba, bb, ca, cb,
+            collideBoxCapsule(posA, rotA, ca.params.xyz, posB, rotB, cb.params.x, cb.params.y, speculativeMargin()), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_BOX)
+    {
+        BoxManifold mf = collideBoxCapsule(posB, rotB, cb.params.xyz, posA, rotA, ca.params.x, ca.params.y, speculativeMargin());
+        if (mf.count > 0)
+            emitManifold(pair, ba, bb, ca, cb, flipManifold(mf), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CAPSULE)
+    {
+        emitManifold(pair, ba, bb, ca, cb,
+            collideCapsules(posA, rotA, ca.params.x, ca.params.y, posB, rotB, cb.params.x, cb.params.y, speculativeMargin()), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_PLANE)
+    {
+        emitManifold(pair, ba, bb, ca, cb,
+            collideCapsulePlane(posA, rotA, ca.params.x, ca.params.y, cb.params.xyz, cb.params.w, margin), margin);
+        return;
+    }
+    if (ca.shape == SHAPE_PLANE && cb.shape == SHAPE_CAPSULE)
+    {
+        BoxManifold mf = collideCapsulePlane(posB, rotB, cb.params.x, cb.params.y, ca.params.xyz, ca.params.w, margin);
+        if (mf.count > 0)
+            emitManifold(pair, ba, bb, ca, cb, flipManifold(mf), margin);
         return;
     }
 
@@ -2517,22 +2670,6 @@ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState b
             pA = posA + nrm * rGeo;
         }
     }
-    else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_CAPSULE)
-    {
-        float rA = ca.params.x;
-        float rB = cb.params.x;
-        float3 axA = quatRotate(rotA, float3(0, 1, 0));
-        float3 axB = quatRotate(rotB, float3(0, 1, 0));
-        float3 a0 = posA - axA * ca.params.y;
-        float3 a1 = posA + axA * ca.params.y;
-        float3 b0 = posB - axB * cb.params.y;
-        float3 b1 = posB + axB * cb.params.y;
-        float3 midA = 0.5 * (a0 + a1);
-        float3 midB = 0.5 * (b0 + b1);
-        float sep = length(midB - midA) - ca.params.y - cb.params.y;
-        if (sep < rA + rB + detect)
-            hit = sphereSphere(midA, rA + ca.params.y * 0.25, midB, rB + cb.params.y * 0.25, detect, nrm, pen, pA, pB);
-    }
     else if (ca.shape == SHAPE_CAPSULE && cb.shape == SHAPE_SPHERE)
     {
         float3 axis = quatRotate(rotA, float3(0, 1, 0));
@@ -2640,58 +2777,29 @@ void narrowphase_fresh(uint3 tid : SV_DispatchThreadID)
     narrowphaseShapes(pair, ca, cb, gBodies[ca.body], gBodies[cb.body]);
 }
 
+JointBall loadJointBall(uint i)
+{
+    JointBall v;
+    v.bodyA = gJoints[i].bodyA;
+    v.bodyB = gJoints[i].bodyB;
+    v.anchorA = gJoints[i].anchorA;
+    v.anchorB = gJoints[i].anchorB;
+    v.linStiffness = gJoints[i].linStiffness;
+    v.breakForce = gJoints[i].breakForce;
+    v.c0 = gJoints[i].c0Lo.xyz;
+    v.lambda = gJoints[i].lambdaLo.xyz;
+    v.penalty = gJoints[i].penaltyLo.xyz;
+    return v;
+}
+
+bool jointHeaderIsBall(uint flags, uint motion)
+{
+    return (motion & 0xFFFu) == 0xA80u && (flags & (JOINT_FLAG_RADIAL | JOINT_FLAG_CONE | JOINT_FLAG_DRIVE)) == 0u;
+}
+
 // demo3d Joint::initialize — store C0, decay λ/k (Eq. 19).
-// Bond angular violation, world frame: the rotation taking B's rest
-// orientation (A's orientation times the rest relative rotation q0, stored in
-// axisA.xyz + limitMin) to B's current one, as a rotation vector. For small
-// angles it is thetaB - thetaA, so its Jacobian is -I on A and +I on B.
-float3 bondAngularError(Joint j, BodyState a, BodyState b)
-{
-    float4 target = quatMul(a.orientation, float4(j.axisA, j.limitMin));
-    float4 dq = quatMul(b.orientation, quatConjugate(target));
-    return 2.0 * (dq.w < 0.0 ? -dq.xyz : dq.xyz);
-}
-
-// Bond frame in world space: normal (A->B), u, v.
-float3x3 bondFrame(Joint j, BodyState a)
-{
-    float3 n = normalize(quatRotate(a.orientation, j.axisB));
-    float3 u = normalize(quatRotate(a.orientation, j.frameU));
-    return float3x3(n, u, cross(n, u));
-}
-
-// Bond row violations in the bond frame, stabilized as AVBD does for hard
-// constraints (C - alpha C0): linear rows (normal, u, v) of C = anchorA -
-// anchorB and angular rows (about u, v, normal) of thetaB - thetaA. Pulling
-// apart along the A->B normal makes the normal row negative.
-void bondViolation(Joint j, BodyState a, BodyState b, float alpha, out float3 lin, out float3 ang)
-{
-    float3x3 F = bondFrame(j, a);
-    float3 C = transformPoint(a.position, a.orientation, j.localAnchorA)
-             - transformPoint(b.position, b.orientation, j.localAnchorB) - alpha * j.c0;
-    float3 Cang = bondAngularError(j, a, b) - alpha * j.c0Ang;
-    lin = float3(dot(C, F[0]), dot(C, F[1]), dot(C, F[2]));
-    ang = float3(dot(Cang, F[1]), dot(Cang, F[2]), dot(Cang, F[0]));
-}
-
-// Shardwright's bond utilization (tools/sim): tension plus bending against
-// their capacities, compression, and shear; > 1 breaks. Torsion is not part
-// of the reference criterion.
-bool bondOverloaded(Joint j, float3 lin, float3 ang)
-{
-    float tension = max(-lin.x, 0.0);
-    float compression = max(lin.x, 0.0);
-    float shear = length(lin.yz);
-    float bending = length(ang.xy);
-    float4 cap = j.strength;
-    float u = (cap.x > 0.0 ? tension / cap.x : 0.0) + (cap.w > 0.0 ? bending / cap.w : 0.0);
-    if (cap.y > 0.0) u = max(u, compression / cap.y);
-    if (cap.z > 0.0) u = max(u, shear / cap.z);
-    return u > 1.0;
-}
-
-// Wake through intact bonds (one hop per dispatch; hosts run a few rounds): a
-// sleeping body bonded to an awake one must move with it, or it would act as a
+// Wake through intact joints (one hop per dispatch; hosts run a few rounds): a
+// sleeping body bonded or jointed to an awake one must move with it, or it would act as a
 // fixed anchor and overload the bond. Bonded islands sleep together (gate).
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -2700,7 +2808,7 @@ void bond_wake(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (i >= gCounters[0].jointCount) return;
     Joint j = gJoints[i];
-    if (j.jointType != JOINT_BOND || jointBroken(j)) return;
+    if (jointBroken(j)) return;
     BodyState a = gBodies[j.bodyA];
     BodyState b = gBodies[j.bodyB];
     bool sleepA = bodyIsDynamic(a) && bodyIsSleeping(a);
@@ -2724,44 +2832,40 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
-    AvbdParams p = PARAMS;
     Joint j = gJoints[i];
-    BodyState a = gBodies[j.bodyA];
-    BodyState b = gBodies[j.bodyB];
-    if (j.jointType == JOINT_BOND)
+    // Broken joints are inert; the vehicle kernels own tyre joints.
+    if ((j.flags & (JOINT_FLAG_BROKEN | JOINT_FLAG_TYRE)) != 0u) return;
+    AvbdParams p = PARAMS;
+    BodyState ja = gBodies[j.bodyA];
+    BodyState jb = gBodies[j.bodyB];
+    // A joint never links a sleeping body to an awake one: wake the sleeper so
+    // the island moves together (contacts wake in the narrowphase).
+    if (bodyIsDynamic(jb) && bodyIsSleeping(jb) && canWake(ja))
     {
-        // Broken bonds are inert; a bond between two bodies that are both
-        // asleep or static stays frozen, like the sleeping contacts it stands
-        // for. Its penalty is fixed (proportional to the baked springs); only
-        // the multipliers decay, as for every AVBD constraint.
-        if (jointBroken(j) || (!bodyMoving(a) && !bodyMoving(b))) return;
-        j.c0 = transformPoint(a.position, a.orientation, j.localAnchorA)
-             - transformPoint(b.position, b.orientation, j.localAnchorB);
-        j.c0Ang = bondAngularError(j, a, b);
-        float decay = p.alpha * p.gamma;
-        j.lambda0 *= decay; j.lambda1 *= decay; j.lambda2 *= decay;
-        j.lambda3 *= decay; j.lambda4 *= decay; j.lambda5 *= decay;
-        gJoints[i] = j;
+        gBodies[j.bodyB].flags = wokenFlags(jb.flags);
+        gBodies[j.bodyB].sleepTimer = 0.0;
+    }
+    if (bodyIsDynamic(ja) && bodyIsSleeping(ja) && canWake(jb))
+    {
+        gBodies[j.bodyA].flags = wokenFlags(ja.flags);
+        gBodies[j.bodyA].sleepTimer = 0.0;
+    }
+    // Stasis while both ends rest (asleep or static), like the sleeping
+    // contacts: keep λ and k for the wake.
+    if (!bodyMoving(gBodies[j.bodyA]) && !bodyMoving(gBodies[j.bodyB])) return;
+    if (jointHeaderIsBall(j.flags, j.motion))
+    {
+        float3 C = (ja.position + quatRotate(ja.orientation, j.anchorA)) - (jb.position + quatRotate(jb.orientation, j.anchorB));
+        float ag = p.alpha * p.gamma;
+        gJoints[i].c0Lo.xyz = C;
+        gJoints[i].lambdaLo.xyz = j.linStiffness >= JOINT_HARD ? j.lambdaLo.xyz * ag : float3(0.0);
+        gJoints[i].penaltyLo.xyz = clamp(j.penaltyLo.xyz * p.gamma, float3(p.kStart), float3(p.kMaxN));
         return;
     }
-    float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
-    float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
-    j.c0 = wa - wb;
-    j.lambda0 *= p.alpha * p.gamma;
-    j.lambda1 *= p.alpha * p.gamma;
-    j.lambda2 *= p.alpha * p.gamma;
-    j.lambda3 *= p.alpha * p.gamma;
-    j.lambda4 *= p.alpha * p.gamma;
-    j.lambda5 *= p.alpha * p.gamma;
-    float kMin = p.kStart;
-    float kMax = max(j.stiffness, kMin);
-    j.k0 = clamp(j.k0 * p.gamma, kMin, kMax);
-    j.k1 = clamp(j.k1 * p.gamma, kMin, kMax);
-    j.k2 = clamp(j.k2 * p.gamma, kMin, kMax);
-    j.k3 = clamp(j.k3 * p.gamma, kMin, kMax);
-    j.k4 = clamp(j.k4 * p.gamma, kMin, kMax);
-    j.k5 = clamp(j.k5 * p.gamma, kMin, kMax);
-    gJoints[i] = j;
+    jointWarmstart(j, ja, jb, p.alpha, p.gamma, p.kStart, p.kMaxN);
+    gJoints[i].lambdaLo = j.lambdaLo; gJoints[i].lambdaHi = j.lambdaHi;
+    gJoints[i].penaltyLo = j.penaltyLo; gJoints[i].penaltyHi = j.penaltyHi;
+    gJoints[i].c0Lo = j.c0Lo; gJoints[i].c0Hi = j.c0Hi;
 }
 
 // Prev-contact warm-start hash in gConstraintIds (open address). Built before NP
@@ -3247,7 +3351,7 @@ void csr_degree_joints(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
-    if (jointBroken(gJoints[i])) return;
+    if ((gJoints[i].flags & JOINT_FLAG_BROKEN) != 0u) return;
     uint2 e = constraintEndpoints(i);
     csrCountEndpoint(e.x);
     csrCountEndpoint(e.y);
@@ -3465,7 +3569,7 @@ void csr_scatter_joints(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     uint n = gCounters[0].jointCount;
     if (i >= n) return;
-    if (jointBroken(gJoints[i])) return;
+    if ((gJoints[i].flags & JOINT_FLAG_BROKEN) != 0u) return;
     uint2 e = constraintEndpoints(i);
     csrFillEndpoint(e.x, e.y, i);
     csrFillEndpoint(e.y, e.x, i);
@@ -4231,6 +4335,44 @@ void pack_solver_contacts(uint3 tid : SV_DispatchThreadID)
 }
 #endif
 
+// Vehicle block: 4 Aabb records (32 floats) = lower-triangle H (21, primalReduceStep
+// order), gradient g (6), active flag. Written by vehicle_step.slang kernels.
+void addVehicleBlock(inout Mat6 A, inout Vec6 rhs, uint at)
+{
+    Aabb e3 = gAabbs[at + 3u];
+    if (e3._pad0 == 0.0) return; // float 27: block inactive
+    Aabb e0 = gAabbs[at];
+    Aabb e1 = gAabbs[at + 1u];
+    Aabb e2 = gAabbs[at + 2u];
+    A.m[0] += e0.mn.x;
+    A.m[6] += e0.mn.y;
+    A.m[7] += e0.mn.z;
+    A.m[12] += e0._pad0;
+    A.m[13] += e0.mx.x;
+    A.m[14] += e0.mx.y;
+    A.m[18] += e0.mx.z;
+    A.m[19] += e0._pad1;
+    A.m[20] += e1.mn.x;
+    A.m[21] += e1.mn.y;
+    A.m[24] += e1.mn.z;
+    A.m[25] += e1._pad0;
+    A.m[26] += e1.mx.x;
+    A.m[27] += e1.mx.y;
+    A.m[28] += e1.mx.z;
+    A.m[30] += e1._pad1;
+    A.m[31] += e2.mn.x;
+    A.m[32] += e2.mn.y;
+    A.m[33] += e2.mn.z;
+    A.m[34] += e2._pad0;
+    A.m[35] += e2.mx.x;
+    rhs.v[0] += e2.mx.y;
+    rhs.v[1] += e2.mx.z;
+    rhs.v[2] += e2._pad1;
+    rhs.v[3] += e3.mn.x;
+    rhs.v[4] += e3.mn.y;
+    rhs.v[5] += e3.mn.z;
+}
+
 // Accumulate body Newton's system for adjacency entries lane, lane+lanes, ...
 // Lane 0 also adds the inertial mass block (three-avbd accumulate).
 void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 rhs)
@@ -4290,6 +4432,9 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             rhs.v[4] = (inertia.y / dt2) * dangTarget.y;
             rhs.v[5] = (inertia.z / dt2) * dangTarget.z;
         }
+        // Vehicle chassis: wheel rows are unary, so vehicle_prepare/iterate fold them
+        // (wheel spin condensed) into one 6×6 block at this exact pose.
+        if ((b.flags & BODY_VEHICLE) != 0u) addVehicleBlock(A, rhs, asuint(b.initialPad));
     }
 
     uint nJ = gCounters[0].jointCount;
@@ -4427,91 +4572,28 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
         }
         else
         {
-            Joint j = gJoints[id];
-            if (jointBroken(j)) continue;
-            bool isA = j.bodyA == bodyIdx;
-            BodyState ba = gBodies[j.bodyA];
-            BodyState bb = gBodies[j.bodyB];
-            if (j.jointType == JOINT_BOND)
+            uint jflags = gJoints[id].flags;
+            if ((jflags & JOINT_FLAG_BROKEN) != 0u) continue;
+            if ((jflags & JOINT_FLAG_TYRE) != 0u)
             {
-                // Six AVBD rows in the bond frame: f = k Creg + lambda.
-                float3x3 F = bondFrame(j, ba);
-                float3 lin, ang;
-                bondViolation(j, ba, bb, p.alpha, lin, ang);
-                float3 r = quatRotate(b.orientation, isA ? j.localAnchorA : j.localAnchorB);
-                float kLin[3] = { j.k0, j.k1, j.k2 };
-                float lLin[3] = { j.lambda0, j.lambda1, j.lambda2 };
-                // Angular rows in frame order (normal, u, v) -> stored (u, v, normal).
-                float kAng[3] = { j.k5, j.k3, j.k4 };
-                float lAng[3] = { j.lambda5, j.lambda3, j.lambda4 };
-                float cAng[3] = { ang.z, ang.x, ang.y };
-                float s = isA ? -1.0 : 1.0;
-                float3 fWorld = float3(0, 0, 0);
-                for (int row = 0; row < 3; row++)
-                {
-                    float3 d = F[row];
-                    Vec6 jl = jacobianLin(d, r, !isA);
-                    mat6AddOuter(A, jl, kLin[row]);
-                    vec6AddScaled(rhs, jl, kLin[row] * lin[row] + lLin[row]);
-                    fWorld += d * (kLin[row] * lin[row] + lLin[row]);
-                    Vec6 ja = vec6Zero();
-                    ja.v[3] = s * d.x; ja.v[4] = s * d.y; ja.v[5] = s * d.z;
-                    mat6AddOuter(A, ja, kAng[row]);
-                    vec6AddScaled(rhs, ja, kAng[row] * cAng[row] + lAng[row]);
-                }
-                if ((p.flags & FLAG_BOND_GEOMETRIC) != 0u)
-                {
-                    // Diagonally lumped geometric stiffness of the anchor point
-                    // (AVBD Sec. 3.5; avbd-demo3d Joint): the Hessian of F·(R r),
-                    // H = ½(F rᵀ + r Fᵀ) − (F·r) I, stamped as diag(|columns|).
-                    float3 rr = isA ? r : -r;
-                    float3 fv = fWorld;
-                    float fr = dot(fv, rr);
-                    float3 c0 = 0.5 * (fv * rr.x + rr * fv.x) - float3(fr, 0, 0);
-                    float3 c1 = 0.5 * (fv * rr.y + rr * fv.y) - float3(0, fr, 0);
-                    float3 c2 = 0.5 * (fv * rr.z + rr * fv.z) - float3(0, 0, fr);
-                    mat6AddDiag(A, float3(0, 0, 0), float3(length(c0), length(c1), length(c2)));
-                }
+                // Wheel on this body: its share of the tyre rows, assembled by the
+                // vehicle kernels at both bodies' current iterates (ground block
+                // index in motion). The chassis side is already in the chassis's
+                // own vehicle block.
+                uint ta = gJoints[id].bodyA;
+                if (gJoints[id].bodyB == bodyIdx && ta != bodyIdx) addVehicleBlock(A, rhs, gJoints[id].motion);
                 continue;
             }
-            float3 wa = transformPoint(ba.position, ba.orientation, j.localAnchorA);
-            float3 wb = transformPoint(bb.position, bb.orientation, j.localAnchorB);
-            float3 C = wa - wb;
-            float3 local = isA ? j.localAnchorA : j.localAnchorB;
-            float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
-            float k = max(j.k0, p.kStart);
-            contributeBallJoint(A, rhs, b.position, b.orientation, local, C, j.c0, k, lam, isA, p.alpha);
-            if (j.jointType == JOINT_FIXED || j.jointType == JOINT_HINGE || j.jointType == JOINT_D6)
+            if (jointHeaderIsBall(jflags, gJoints[id].motion))
             {
-                BodyState other = isA ? bb : ba;
-                float3 axis = isA ? j.axisA : j.axisB;
-                float3 worldAxis = quatRotate(b.orientation, axis);
-                float3 otherAxis = quatRotate(other.orientation, isA ? j.axisB : j.axisA);
-                float3 Cang = cross(worldAxis, otherAxis);
-                for (int ax = 0; ax < 3; ax++)
-                {
-                    if (j.jointType == JOINT_HINGE && ax == 0) continue;
-                    Vec6 jj = vec6Zero();
-                    jj.v[3 + ax] = isA ? 1.0 : -1.0;
-                    float f = k * (1.0 - p.alpha) * Cang[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
-                    mat6AddOuter(A, jj, k);
-                    vec6AddScaled(rhs, jj, f);
-                }
+                JointBall jb = loadJointBall(id);
+                jointContributeBall(A, rhs, jb, gBodies[jb.bodyA], gBodies[jb.bodyB], jb.bodyA == bodyIdx, p.alpha, p.kStart);
             }
-            if (j.jointType == JOINT_SLIDER)
+            else
             {
-                float3 axis = normalize(j.axisA);
-                float3 d = wa - wb;
-                float3 radial = d - axis * dot(d, axis);
-                for (int ax = 0; ax < 3; ax++)
-                {
-                    float3 n = float3(ax == 0 ? 1.0 : 0.0, ax == 1 ? 1.0 : 0.0, ax == 2 ? 1.0 : 0.0);
-                    if (abs(dot(n, axis)) > 0.9) continue;
-                    Vec6 jj = jacobianLin(n, isA ? (wa - b.position) : (wb - b.position), !isA);
-                    float f = k * (1.0 - p.alpha) * radial[ax] + (ax == 0 ? j.lambda3 : ax == 1 ? j.lambda4 : j.lambda5);
-                    mat6AddOuter(A, jj, k);
-                    vec6AddScaled(rhs, jj, f);
-                }
+                Joint j = gJoints[id];
+                jointContributePrimal(A, rhs, j, gBodies[j.bodyA], gBodies[j.bodyB], j.bodyA == bodyIdx, p.alpha, p.dt, p.kStart,
+                                      (p.flags & FLAG_BOND_GEOMETRIC) != 0u);
             }
         }
     }
@@ -4747,6 +4829,7 @@ void solve_primal_one(uint3 tid : SV_DispatchThreadID)
     solvePrimalForBody(PASS_U);
 }
 
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void solve_dual(uint3 tid : SV_DispatchThreadID)
@@ -4873,38 +4956,68 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
     uint nJ = gCounters[0].jointCount;
     if (i < nJ)
     {
-        Joint j = gJoints[i];
-        BodyState a = gBodies[j.bodyA];
-        BodyState b = gBodies[j.bodyB];
-        if (j.jointType == JOINT_BOND)
+        uint jflags = gJoints[i].flags;
+        // Broken joints are inert, the vehicle kernels own tyre joints, and a
+        // joint whose ends both rest (asleep or static) keeps its λ and k.
+        bool live = (jflags & (JOINT_FLAG_BROKEN | JOINT_FLAG_TYRE)) == 0u
+            && (bodyMoving(gBodies[gJoints[i].bodyA]) || bodyMoving(gBodies[gJoints[i].bodyB]));
+        // On the final iteration (PASS_U != 0) λ is this step's converged
+        // constraint force: breaking is decided there (bonds never while a host
+        // preloads a structure), and a joint whose multipliers still move is
+        // marked unsettled so its bodies cannot fall asleep on it.
+        bool last = PASS_U != 0u;
+        float4 lamLo0 = gJoints[i].lambdaLo;
+        float4 lamHi0 = gJoints[i].lambdaHi;
+        bool broke = false;
+        float force = 0.0, torque = 0.0;
+        if (live && jointHeaderIsBall(jflags, gJoints[i].motion))
         {
-            // Frozen while both ends sleep or are static, inert once broken.
-            if (jointBroken(j) || (!bodyMoving(a) && !bodyMoving(b))) return;
-            float3 cl, ca;
-            bondViolation(j, a, b, p.alpha, cl, ca);
-            float3 lin = float3(j.lambda0, j.lambda1, j.lambda2) + float3(j.k0, j.k1, j.k2) * cl;
-            float3 ang = float3(j.lambda3, j.lambda4, j.lambda5) + float3(j.k3, j.k4, j.k5) * ca;
-            j.lambda0 = lin.x; j.lambda1 = lin.y; j.lambda2 = lin.z;
-            j.lambda3 = ang.x; j.lambda4 = ang.y; j.lambda5 = ang.z;
-            // The final iteration's forces decide breaking; a broken bond drops
-            // out of the hash, CSR and solve from the next step on.
-            if (PASS_U != 0u && (p.flags & FLAG_BOND_PRELOAD) == 0u && bondOverloaded(j, lin, ang))
-                j.flags |= JOINT_FLAG_BROKEN;
-            gJoints[i] = j;
-            return;
+            JointBall jb = loadJointBall(i);
+            jointDualBall(jb, gBodies[jb.bodyA], gBodies[jb.bodyB], p.alpha, p.kStart, p.kMaxN, p.betaLin);
+            force = length(jb.lambda);
+            broke = last && force > jb.breakForce;
+            gJoints[i].lambdaLo.xyz = broke ? float3(0.0) : jb.lambda;
+            gJoints[i].penaltyLo.xyz = broke ? float3(0.0) : jb.penalty;
         }
-        float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
-        float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
-        float3 C = wa - wb; // shared with primal
-        float k = max(j.k0, p.kStart);
-        float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
-        // demo3d dual: C_hat = C - alpha * C0
-        float3 Creg = C - p.alpha * j.c0;
-        lam = k * Creg + lam;
-        j.lambda0 = lam.x; j.lambda1 = lam.y; j.lambda2 = lam.z;
-        j.k0 = min(k + p.betaLin * length(Creg), min(j.stiffness, p.kMaxN));
-        j.k1 = j.k0; j.k2 = j.k0;
-        gJoints[i] = j;
+        else if (live)
+        {
+            Joint j = gJoints[i];
+            BodyState a = gBodies[j.bodyA];
+            BodyState b = gBodies[j.bodyB];
+            float4 frameB0 = j.frameB;
+            bool mayBreak = last && (!jointIsBond(j) || (p.flags & FLAG_BOND_PRELOAD) == 0u);
+            broke = jointDual(j, a, b, p.alpha, p.dt, p.kStart, p.kMaxN, p.betaLin, p.betaAng, mayBreak, force, torque);
+            gJoints[i].lambdaLo = j.lambdaLo; gJoints[i].lambdaHi = j.lambdaHi;
+            gJoints[i].penaltyLo = j.penaltyLo; gJoints[i].penaltyHi = j.penaltyHi;
+            if (any(j.frameB != frameB0))
+            {
+                gJoints[i].frameB = j.frameB;
+                gJoints[i].c0Lo = j.c0Lo; gJoints[i].c0Hi = j.c0Hi;
+            }
+        }
+        if (live && last)
+        {
+            uint flags = jflags;
+            if (broke)
+            {
+                // Leaves the hash, CSR and solve from the next step; its bodies
+                // collide again. Hosts read the event ring (or scan flags).
+                flags |= JOINT_FLAG_BROKEN;
+                emitEvent(EVENT_BREAK, i, asuint(force), asuint(torque));
+            }
+            else
+            {
+                float4 lo = gJoints[i].lambdaLo, hi = gJoints[i].lambdaHi;
+                float3 lin = lo.xyz, ang = float3(lo.w, hi.x, hi.y);
+                float3 lin0 = lamLo0.xyz, ang0 = float3(lamLo0.w, lamHi0.x, lamHi0.y);
+                // Converged when the last iteration moved the multipliers by
+                // < 0.01 % (plus 0.1 N / 0.1 N·m of noise floor).
+                bool moving = length(lin - lin0) > 1.0e-4 * length(lin) + 0.1
+                    || length(ang - ang0) > 1.0e-4 * length(ang) + 0.1;
+                flags = moving ? (flags | JOINT_FLAG_UNSETTLED) : (flags & ~JOINT_FLAG_UNSETTLED);
+            }
+            if (flags != jflags) gJoints[i].flags = flags;
+        }
     }
 }
 
@@ -5023,8 +5136,9 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
             float movedVel = length(dLin) + length(dAng) * extent;
             float moved = min(movedPose, movedVel);
             slow = fresh || moved < p.sleepLin * p.sleepTime;
-            // Diagnostics (sleep-diag.mjs): this window's displacement.
-            gBodies[i].initialPad = moved;
+            // Diagnostics (sleep-diag.mjs): this window's displacement. A vehicle
+            // chassis keeps its wheel-block index in initialPad.
+            if ((b.flags & BODY_VEHICLE) == 0u) gBodies[i].initialPad = moved;
             // A candidate held awake (by its island) restarts the window every
             // sleepTime, so the limit is drift per window, like a speed.
             bool rewindow = slow && b.sleepTimer >= 2.0 * p.sleepTime;
@@ -5074,7 +5188,7 @@ void write_sleep_args(uint3 tid : SV_DispatchThreadID)
 {
     if (dispatchIndex(tid) != 0u) return;
     bool anyCandidate = ALOAD(gScratchAtomics[13]) != 0u;
-    // Manifolds, then joints (bonds join islands), one thread each.
+    // Manifolds, then joints (joints and bonds join islands), one thread each.
     writeDispatchArgs(66u, anyCandidate ? min(ALOAD(gCounters[0].manifoldCount), HOST_S(10)) + gCounters[0].jointCount : 0u);
     writeDispatchArgs(67u, anyCandidate ? gCounters[0].bodyCount : 0u);
 }
@@ -5109,19 +5223,32 @@ void sleep_island_gate(uint3 tid : SV_DispatchThreadID)
         ba = gColliders[m.colliderA].body;
         bb = gColliders[m.colliderB].body;
     }
-    else
+    bool driven = false;
+    if (i >= n)
     {
-        // Intact bonds tie their bodies into one island, like contacts.
+        // Intact joints and bonds tie their bodies into one island, like contacts.
         if (i - n >= gCounters[0].jointCount) return;
         Joint j = gJoints[i - n];
-        if (j.jointType != JOINT_BOND || jointBroken(j)) return;
+        if (jointBroken(j)) return;
         ba = j.bodyA;
         bb = j.bodyB;
+        // A running drive keeps its bodies awake, even against a static hub, and
+        // so do multipliers that are still converging (a stiff chain can be
+        // nearly still long before its forces settle). Tyre joints (chassis on a
+        // dynamic ground body) just join the island.
+        driven = ((j.flags & JOINT_FLAG_DRIVE) != 0u && (j.driveVelocity != 0.0 || j.driveStiffness > 0.0))
+            || (j.flags & JOINT_FLAG_UNSETTLED) != 0u;
     }
     BodyState a = gBodies[ba];
     BodyState b = gBodies[bb];
     bool dynA = bodyIsDynamic(a);
     bool dynB = bodyIsDynamic(b);
+    if (driven)
+    {
+        if (dynA && !bodyIsSleeping(a)) gCcdFlags[ba] = 0;
+        if (dynB && !bodyIsSleeping(b)) gCcdFlags[bb] = 0;
+        return;
+    }
     if (!dynA || !dynB) return;
     // Sleeping neighbor is fine (already out of the island). Awake non-candidate blocks.
     uint fa = gCcdFlags[ba];

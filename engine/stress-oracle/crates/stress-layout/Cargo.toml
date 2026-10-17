@@ -1,0 +1,11 @@
+[package]
+name = "stress-layout"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The GPU stress solver's data layout (records, joint-law data, structure packing) from stress-ref's state, without a GPU: shared by stress-gpu and rubble's cooker"
+
+[dependencies]
+stress-ref = { path = "../stress-ref" }
+bytemuck = { version = "1", features = ["derive"] }

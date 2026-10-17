@@ -11,6 +11,9 @@ GPU shader compilation is a separate startup cost.
 
 ## Run
 
+The `assets/*.glb` files are stored in Git LFS. If they are ~130-byte pointer files,
+run `git lfs install && git lfs pull` first.
+
 From the Rubble repository root, with the Slang toolchain described in
 [`engine/TOOLCHAIN.md`](../../../TOOLCHAIN.md):
 
@@ -154,7 +157,8 @@ grid diverge at tick ~296).
 ### Breakable bonds (experimental, opt-in)
 
 “Breakable bonds (experimental)” turns each baked bond of the selected level into
-a `JOINT_BOND` weld (`world_step.slang`):
+a D6 bond joint (`JointDesc::bond`, `JOINT_FLAG_BOND`; rows in
+`slang/physics/joints.slang`, see `engine/docs/JOINTS.md`):
 
 - **Rows.** Six AVBD rows in the bond frame (normal, u, v; bending about u and v;
   torsion) about the baked rest pose. Each row has a fixed penalty and an

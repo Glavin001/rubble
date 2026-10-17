@@ -11,6 +11,7 @@ export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
 cargo test -p engine-webgpu --release --lib --test columns_hold --test ring_hold --test gables_hold --test render_abi -- --nocapture --test-threads=1
 cargo test -p engine-metal --release --lib -- --nocapture --test-threads=1
 cargo test -p engine-metal --release --test oracle_accuracy --test avbd_slice --test columns_wgpu_parity --test webgpu_parity -- --nocapture --test-threads=1
+cargo test -p engine-metal --release --test joints --test joints_wgpu_parity -- --nocapture --test-threads=1
 cargo test -p engine-scenes --release --lib scene_conversion
 ```
 
@@ -52,6 +53,32 @@ stay within the recorded three-avbd trajectory bounds. The initial 20 steps also
 check every brick before impact. The fixture uses
 `add_bodies`/`add_colliders` to avoid exhausting staging resources with more than
 a million tiny uploads before the first GPU submission.
+
+## Vehicle demo
+
+`vehicle.html` drives the same WGSL kernels through `world-host.mjs` (a port of
+`WgpuSim::step`) and `vehicle.mjs` (a thin wrapper over `engine-vehicle`'s packer and
+`VehicleHost`, compiled to wasm from `../engine-vehicle-wasm`). Run
+`cargo run -p engine-webgpu --release --bin wgsl_export` first: it also writes
+`generated/vehicle_presets.json` and builds `generated/vehicle_wasm/` with `wasm-pack`
+(needs the `wasm32-unknown-unknown` target). `node --test tests/vehicle_layout.test.mjs`
+checks the wrapper.
+
+- `?scene=playground|destruction|traffic`, `?preset=<name>`, `?spawn=x,z,yaw` (player
+  pose), `?vehicles=N` (traffic), `?sleep=off`, `?stopAt=N`
+- Keys: WASD / arrows, Space handbrake, X sever a wheel, Z remove a wheel, P sever a part,
+  B cannonball, R reset, C camera. Gamepads work (triggers, left stick, A handbrake).
+- Hooks: `__step(n, input)` (advance without rAF, returns state), `__vehicleState()`,
+  `__setVehicleInput(h, input)`, `__chassisPoses()` (every vehicle's pose/up/speed),
+  `__record(script, opts)` (frame-locked scripted drive uploading JPEG frames), `__world`.
+
+Demo videos: `node --experimental-websocket record-vehicle-demos.mjs [take ...] [--reel]`
+serves this directory, drives headless Chrome through the scripted takes (sedan ramps,
+motorcycle slalom, tank wall breach, monster truck vs crates, kart on ice, destruction,
+traffic) one physics step per 60 fps frame, and writes `recordings/<take>.mp4` plus a
+one-frame-per-second `<take>_sheet.jpg` for review (needs Chrome and ffmpeg).
+
+See [../../docs/vehicles.md](../../docs/vehicles.md).
 
 ## Browser verification
 
@@ -291,3 +318,12 @@ WGSL and timing protocol through native wgpu, with the same full-buffer checks.
 Use `GPU_PROBE_WORKGROUP=256` (native) or `?group=256` (browser) to compare a
 256-thread group against the default 64. Run native and browser probes serially.
 The probe uses its own device/buffers and does not modify the physics backend.
+
+## Joint scenes in the browser
+
+`demo.html?scene=joints` (also `ragdolls`, `ragdolls10k`, `hingechains10k`, `motorfield10k`)
+loads scenes built by `engine-scenes` and exported as raw GPU records
+(`cargo run -p engine-scenes --release --bin scene_export`), so the browser steps exactly
+the records the native tests use. Alt-drag grabs a body, `F` fires a ball, `M` toggles
+motors. `node tools/record-joints.mjs` records each scene in headless Chrome WebGPU to
+`test-results/joints/`. See `engine/docs/JOINTS.md`.

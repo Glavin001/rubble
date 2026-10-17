@@ -10,11 +10,16 @@ use serde::{Deserialize, Serialize};
 pub mod commands;
 pub mod convex;
 pub mod handles;
+pub mod joint;
 pub mod params;
+pub mod snapshot;
+pub mod vehicle;
 
 pub use commands::*;
 pub use handles::*;
+pub use joint::*;
 pub use params::*;
+pub use snapshot::*;
 
 /// ABI probe used by Gate 0 layout round-trips (must match `slang/kernels/abi_probe.slang`).
 #[repr(C)]
@@ -76,20 +81,6 @@ pub enum ShapeType {
     Box = 2,
     ConvexHull = 3,
     Plane = 4,
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JointType {
-    Ball = 0,
-    Fixed = 1,
-    Hinge = 2,
-    Slider = 3,
-    D6 = 4,
-    Distance = 5,
-    MaxDistance = 6,
-    /// Breakable weld (all six DOF) carrying `Joint::strength` capacities.
-    Bond = 7,
 }
 
 /// Slots in the joint-pair hash (`jointHashSize()` in world_step.slang): a power
@@ -234,35 +225,52 @@ pub struct Manifold {
     pub friction: f32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct Joint {
-    pub body_a: u32,
-    pub body_b: u32,
-    pub joint_type: u32,
-    pub flags: u32,
-    pub local_anchor_a: [f32; 3],
-    pub stiffness: f32,
-    pub local_anchor_b: [f32; 3],
-    pub damping: f32,
-    pub axis_a: [f32; 3],
-    pub limit_min: f32,
-    pub axis_b: [f32; 3],
-    pub limit_max: f32,
-    /// Constraint value at beginning of timestep (demo3d `C0Lin`).
-    pub c0: [f32; 3],
-    pub _pad_c0: f32,
-    pub lambda: [f32; 6],
-    pub k: [f32; 6],
-    /// Bond joints: the bond frame's u axis in body A's frame (normal: `axis_b`).
-    pub frame_u: [f32; 3],
-    pub _pad_frame_u: f32,
-    /// Bond break capacities: tension (N), compression (N), shear (N), bending
-    /// moment (N m); <= 0 means that mode never breaks.
-    pub strength: [f32; 4],
-    /// Bond angular violation at step start (GPU-owned).
-    pub c0_ang: [f32; 3],
-    pub _pad_c0_ang: f32,
+/// Event ring in the scratch-atomics buffer (binding 21), after the 96 words
+/// the hosts and kernels use: word `EVENT_RING_BASE` is a monotonically
+/// increasing write cursor, then `EVENT_RING_CAPACITY` records of four words
+/// `[type, id, a, b]` at `EVENT_RING_BASE + 4 + 4 * (n % EVENT_RING_CAPACITY)`.
+/// (The events buffer belongs to the joint-pair hash, whose size follows the
+/// joint count.)
+pub const EVENT_RING_BASE: u32 = 96;
+pub const EVENT_RING_CAPACITY: u32 = 1024;
+/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring).
+pub const SCRATCH_WORDS: u32 = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+/// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
+pub const LARGE_STATIC_COUNT: u32 = 80;
+/// First scratch word of the oversized-static collider ids, after the event ring.
+pub const LARGE_STATIC_BASE: u32 = EVENT_RING_BASE + 4 + 4 * EVENT_RING_CAPACITY;
+/// Event record types (`world_step.slang` EVENT_*).
+pub const EVENT_BREAK: u32 = 3;
+
+/// A joint broke this step: its id and the force / torque that exceeded the
+/// threshold (read from the event ring).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointBreak {
+    pub joint: u32,
+    pub force: f32,
+    pub torque: f32,
+}
+
+/// Decode new `EVENT_BREAK` records from a scratch-buffer ring readback.
+/// `words` starts at `EVENT_RING_BASE`; `seen` is the caller's read cursor and is
+/// advanced. Records overwritten before they were read are counted in the return.
+pub fn decode_joint_breaks(words: &[u32], seen: &mut u32, out: &mut Vec<JointBreak>) -> u32 {
+    let cursor = words[0];
+    let lost = cursor.wrapping_sub(*seen).saturating_sub(EVENT_RING_CAPACITY);
+    let mut n = seen.wrapping_add(lost);
+    while n != cursor {
+        let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
+        if words[r] == EVENT_BREAK {
+            out.push(JointBreak {
+                joint: words[r + 1],
+                force: f32::from_bits(words[r + 2]),
+                torque: f32::from_bits(words[r + 3]),
+            });
+        }
+        n = n.wrapping_add(1);
+    }
+    *seen = cursor;
+    lost
 }
 
 #[repr(C)]
@@ -322,11 +330,49 @@ pub const OVERFLOW_COLORS: u32 = 8;
 pub const CCD_BUDGET_EXHAUSTED: u32 = 16;
 pub const CCD_CANDIDATE_MISS: u32 = 32;
 pub const OVERFLOW_MANIFOLDS: u32 = 64;
+pub const OVERFLOW_BP_CHAIN: u32 = 128;
+pub const OVERFLOW_WARM_HASH: u32 = 256;
+/// More oversized statics than `LARGE_STATIC_CAP`: some are found only by the
+/// endpoint probes.
+pub const OVERFLOW_LARGE_STATICS: u32 = 512;
+/// Oversized-static list (statics wider than half a grid cell, uniform grid):
+/// this many collider ids in the scratch-atomics buffer at `LARGE_STATIC_BASE`.
+pub const LARGE_STATIC_CAP: u32 = 1024;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::mem::{align_of, size_of};
+
+    #[test]
+    fn event_ring_decodes_new_breaks_and_counts_overwritten_ones() {
+        let mut words = vec![0u32; (SCRATCH_WORDS - EVENT_RING_BASE) as usize];
+        fn put(words: &mut [u32], n: u32, ty: u32, id: u32) {
+            let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
+            words[r..r + 4].copy_from_slice(&[ty, id, 2.5f32.to_bits(), 0.5f32.to_bits()]);
+            words[0] = n + 1;
+        }
+        put(&mut words, 0, EVENT_BREAK, 7);
+        put(&mut words, 1, 1, 9); // not a break (sleep)
+        put(&mut words, 2, EVENT_BREAK, 8);
+        let (mut seen, mut out) = (0u32, Vec::new());
+        assert_eq!(decode_joint_breaks(&words, &mut seen, &mut out), 0);
+        assert_eq!(out, vec![JointBreak { joint: 7, force: 2.5, torque: 0.5 }, JointBreak { joint: 8, force: 2.5, torque: 0.5 }]);
+        assert_eq!(seen, 3);
+        // Nothing new: nothing returned.
+        out.clear();
+        decode_joint_breaks(&words, &mut seen, &mut out);
+        assert!(out.is_empty());
+        // The ring wraps past the reader: the oldest records are reported lost.
+        for n in 3..3 + EVENT_RING_CAPACITY + 5 {
+            put(&mut words, n, EVENT_BREAK, n);
+        }
+        let lost = decode_joint_breaks(&words, &mut seen, &mut out);
+        assert_eq!(lost, 5);
+        assert_eq!(out.len() as u32, EVENT_RING_CAPACITY);
+        assert_eq!(out[0].joint, 8);
+        assert_eq!(out.last().unwrap().joint, 3 + EVENT_RING_CAPACITY + 4);
+    }
 
     #[test]
     fn abi_sizes() {
@@ -336,6 +382,7 @@ mod tests {
         assert_eq!(size_of::<Contact>(), 128);
         assert_eq!(size_of::<Manifold>(), 32);
         assert_eq!(size_of::<StepCounters>(), 80);
+        assert_eq!(size_of::<Joint>(), 288);
         assert_eq!(align_of::<BodyState>(), 4);
     }
 }

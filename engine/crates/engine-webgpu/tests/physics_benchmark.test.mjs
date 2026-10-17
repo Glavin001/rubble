@@ -29,6 +29,15 @@ test('full-scale impact timings reject missing work with a diagnostic instead of
     'The full-active rule must not reject intentionally settled/sleeping scenes.');
 });
 
+test('sleep-on runs (production configuration) accept sleeping bodies but still reject missing work', () => {
+  const run = { scene: 'gables506k', totalBodies: 505923, iterations: 3, dt: 1 / 60, stage: 'after lead-in', allowSleep: true,
+    counters: { awake: 463265, contact: 3_700_000, manifold: 900_000, color: 9, overflow: 0 } };
+  assert.doesNotThrow(() => assertBenchmarkWorkload(run));
+  assert.throws(() => assertBenchmarkWorkload({ ...run, allowSleep: false }), /sleeping or omitted bodies/);
+  assert.throws(() => assertBenchmarkWorkload({ ...run, counters: { ...run.counters, overflow: 1 } }), /constraints may have been discarded/);
+  assert.throws(() => assertBenchmarkWorkload({ ...run, totalBodies: 505922 }), /total bodies/);
+});
+
 test('physics timing drains actual GPU work and matches the pinned 2 × 5 × 10 protocol', async () => {
   let time = 0, pending = 7, steps = 0;
   const batches = [], clockReads = [];

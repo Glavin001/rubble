@@ -1,8 +1,14 @@
 //! GPU regressions for adjacency construction and contact persistence.
 //! These require a real wgpu adapter; absence fails explicitly instead of skipping.
 use super::*;
+use engine_exec::rigid_plan::HostUniforms;
 use bytemuck::Zeroable;
 use wgpu::util::DeviceExt;
+
+/// Ball joint record for hand-built kernel fixtures (identity frames).
+fn test_ball_joint() -> Joint {
+    JointDesc::ball(0, 0, glam::Vec3::ZERO, glam::Vec3::ZERO).to_gpu()
+}
 
 fn download<T: bytemuck::Pod>(sim: &WgpuSim, binding: usize, offset: u64, count: usize) -> Vec<T> {
     let size = (count * std::mem::size_of::<T>()) as u64;
@@ -18,9 +24,9 @@ fn download<T: bytemuck::Pod>(sim: &WgpuSim, binding: usize, offset: u64, count:
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
-    let _ = sim.device.poll(wgpu::Maintain::Wait);
+    let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().unwrap().unwrap();
-    let result = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
+    let result = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped range")).to_vec();
     staging.unmap();
     result
 }
@@ -1073,13 +1079,15 @@ fn contact_hash_preserves_colliding_pair_heads_across_dead_gaps_and_history_halv
     use std::collections::BTreeMap;
     const HASH_WORDS: u32 = 1024;
     fn key(a: u32, b: u32) -> u32 {
-        let h = a.wrapping_mul(73856093) ^ b.wrapping_mul(19349663);
-        if h == u32::MAX {
-            a ^ b ^ 0xa5a5a5a5
-        } else {
-            h
-        }
+        engine_exec::rigid_plan::pair_warm_key(a, b)
     }
+    // 32 partners whose pair keys share one bucket under the real (mixed) key:
+    // searched, since a finalized key has no arithmetic shortcut to collisions.
+    let bucket0 = key(1, 2) & (HASH_WORDS - 1);
+    let partners: Vec<u32> = (2u32..)
+        .filter(|&b| key(1, b) & (HASH_WORDS - 1) == bucket0)
+        .take(32)
+        .collect();
     let mut points = Vec::new();
     for block in 0..3 {
         for pair in 0..32u32 {
@@ -1089,7 +1097,7 @@ fn contact_hash_preserves_colliding_pair_heads_across_dead_gaps_and_history_halv
             for corner in 0..4 {
                 points.push(Contact {
                     collider_a: 1,
-                    collider_b: 2 + id * HASH_WORDS,
+                    collider_b: partners[id as usize],
                     alive: u32::from(corner != 0 && !(block == 0 && id % 3 == 0)),
                     feature_id: 0x8000_0000 | corner,
                     normal: [f32::NAN; 3],
@@ -1282,9 +1290,9 @@ fn hash_clear_covers_more_than_one_webgpu_dispatch_row() {
         let slice = read.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        let _ = sim.device.poll(wgpu::Maintain::Wait);
+        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().unwrap().unwrap();
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().expect("mapped range");
         let actual: &[u32] = bytemuck::cast_slice(&data);
         for (i, &slot) in actual[..n as usize].iter().enumerate() {
             assert_eq!(slot, u32::MAX,
@@ -1644,10 +1652,10 @@ fn sparse_colors_match_ordered_dispatches_across_dependent_chunks_and_empty_buck
             joints.push(Joint {
                 body_a: i,
                 body_b: other,
-                local_anchor_a: [0.03, 0.04, -0.02],
-                local_anchor_b: [-0.02, 0.01, 0.05],
-                k: [1800. + i as f32 * 13.; 6],
-                ..Joint::zeroed()
+                anchor_a: [0.03, 0.04, -0.02],
+                anchor_b: [-0.02, 0.01, 0.05],
+                penalty: [1800. + i as f32 * 13.; 8],
+                ..test_ball_joint()
             });
         }
         sim.joint_count = joints.len() as u32;
@@ -1807,10 +1815,10 @@ fn primal_reduction_tail_fixture(layout: &str) {
             Joint {
                 body_a: j / 9,
                 body_b: ACTIVE,
-                local_anchor_a: [a, 0.2 - a, 0.3],
-                local_anchor_b: [a + 0.04, 0.15 - a, 0.32],
-                k: [2000.0 + j as f32 * 50.0; 6],
-                ..Joint::zeroed()
+                anchor_a: [a, 0.2 - a, 0.3],
+                anchor_b: [a + 0.04, 0.15 - a, 0.32],
+                penalty: [2000.0 + j as f32 * 50.0; 8],
+                ..test_ball_joint()
             }
         })
         .collect();
@@ -1977,10 +1985,10 @@ fn compact_primal_preserves_mixed_compound_contacts_for_all_lane_widths() {
             joints.push(Joint {
                 body_a: body,
                 body_b: 8,
-                local_anchor_a: [0.02 * row as f32, 0.1, -0.15],
-                local_anchor_b: [-0.1, 0.04 * row as f32, 0.12],
-                k: [2000.0 + row as f32 * 50.0; 6],
-                ..Joint::zeroed()
+                anchor_a: [0.02 * row as f32, 0.1, -0.15],
+                anchor_b: [-0.1, 0.04 * row as f32, 0.12],
+                penalty: [2000.0 + row as f32 * 50.0; 8],
+                ..test_ball_joint()
             });
         }
     }
@@ -2794,16 +2802,28 @@ fn local_color_repair_matches_global_rounds_on_a_lattice() {
         }
         sim.queue.submit([enc.finish()]);
         let pending = download::<StepCounters>(&sim, 7, 0, 1)[0]._pad0;
-        assert_eq!(pending, N, "local={local}: every body must be on the repair list");
+        assert_eq!(
+            pending, N,
+            "local={local}: every body must be on the repair list"
+        );
         let args: Vec<u32> = download(&sim, 23, 69 * 12, 1);
-        assert_eq!(args[0], if local { 0 } else { (N + 63) / 64 },
-            "local={local}: slot 69 must be empty exactly when the local pass owns the repair");
+        assert_eq!(
+            args[0],
+            if local { 0 } else { (N + 63) / 64 },
+            "local={local}: slot 69 must be empty exactly when the local pass owns the repair"
+        );
         let colors: Vec<u32> = download(&sim, 12, 0, N as usize);
         for (body, list) in adjacency.iter().enumerate() {
-            assert!(colors[body] < 64, "local={local}, body {body}: left uncolored");
+            assert!(
+                colors[body] < 64,
+                "local={local}, body {body}: left uncolored"
+            );
             for &other in list {
-                assert_ne!(colors[body], colors[other as usize],
-                    "local={local}: adjacent bodies {body} and {other} share color {}", colors[body]);
+                assert_ne!(
+                    colors[body], colors[other as usize],
+                    "local={local}: adjacent bodies {body} and {other} share color {}",
+                    colors[body]
+                );
             }
         }
         results.push(colors);
@@ -2844,7 +2864,7 @@ fn incremental_coloring_reuses_valid_history_and_repairs_new_conflicts() {
     let joint = Joint {
         body_a: 1,
         body_b: 2,
-        ..Joint::zeroed()
+        ..test_ball_joint()
     };
     sim.queue.write_buffer(&sim.bufs[5], 0, bytes_of(&joint));
     let history_offset = (sim.capacity.max_bodies * sim.capacity.max_colors) as u64 * 4;
@@ -3271,7 +3291,7 @@ fn adjacency_order_uses_physical_neighbors_across_append_permutations_and_high_d
         .map(|i| Joint {
             body_a: 0,
             body_b: i + 1,
-            ..Joint::zeroed()
+            ..test_ball_joint()
         })
         .collect();
     sim.queue
@@ -4113,8 +4133,10 @@ fn mixed_contact_reuse_fixture_mode(
                     .sum();
                 assert_eq!(c._pad2, listed,
                     "{context}: the persist list must hold exactly the points still awaiting persistence");
-                assert!(limit == 0 || listed > limit,
-                    "{context}: the capped case must overflow, or the scan fallback goes untested");
+                assert!(
+                    limit == 0 || listed > limit,
+                    "{context}: the capped case must overflow, or the scan fallback goes untested"
+                );
             }
             if np_split.is_some() {
                 // Every pair the reuse pass rejects is counted once (ABI byte 56),
@@ -4341,12 +4363,7 @@ fn record_warm_hash_resolves_minimum_live_runs_and_flags_exhaustion() {
     use std::collections::BTreeMap;
     const SLOTS: u32 = 256;
     fn key(a: u32, b: u32) -> u32 {
-        let h = a.wrapping_mul(73856093) ^ b.wrapping_mul(19349663);
-        if h == u32::MAX {
-            a ^ b ^ 0xa5a5a5a5
-        } else {
-            h
-        }
+        engine_exec::rigid_plan::pair_warm_key(a, b)
     }
     let mut points = Vec::new();
     for block in 0..3 {
@@ -4625,6 +4642,133 @@ fn convex_first_step_manifolds_are_unique_unit_and_reach_sat() {
     assert!(!manifolds.is_empty());
 }
 
+// ---- capsules on boxes and planes ----------------------------------------------
+
+/// A capsule dropped flat onto a static box face (or a ground plane) settles at
+/// its rest height on two segment contacts: no bounding-sphere stand-off, no
+/// sinking, no tipping. The exact geometry is checked against the CPU oracle in
+/// engine-oracles/tests/convex_slang_cpu.rs.
+#[test]
+fn capsule_rests_flat_on_a_box_and_a_plane_with_two_contacts() {
+    let (r, l) = (0.1f32, 0.4f32);
+    for (support_is_box, yaw) in [(true, 0.0f32), (true, 0.6), (false, 0.0), (false, 0.6)] {
+        let label = format!("{} yaw {yaw}", if support_is_box { "box" } else { "plane" });
+        let mut sim = WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
+        let mut params = AvbdParams { dt: 1.0 / 120.0, iterations: 6, flags: FLAG_REUSE_CONTACTS, ..AvbdParams::default() };
+        params.gravity_y = -9.81;
+        sim.set_params(params);
+        let ground = sim.add_body(BodyState::static_plane_support());
+        let (shape, gparams, top) = if support_is_box {
+            (ShapeType::Box, [1.0, 0.25, 1.0, (2.0f32 + 0.0625).sqrt()], 0.25f32)
+        } else {
+            (ShapeType::Plane, [0.0, 1.0, 0.0, 0.0], 0.0)
+        };
+        sim.add_collider(Collider {
+            body: ground,
+            shape: shape as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: gparams,
+        });
+        let rot = glam::Quat::from_rotation_y(yaw) * glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let cap_body = sim.add_body(BodyState::dynamic(glam::Vec3::new(0.0, top + r + 0.02, 0.0), rot, 1.0, glam::Vec3::splat(0.02)));
+        let cap = sim.add_collider(Collider {
+            body: cap_body,
+            shape: ShapeType::Capsule as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 1.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [r, l, 0.0, r + l],
+        });
+        for step in 0..240 {
+            sim.step().unwrap_or_else(|e| panic!("{label}: step {step}: {e:?}"));
+        }
+        let b = sim.download_bodies()[cap_body as usize];
+        let p = glam::Vec3::from_array(b.position);
+        let rest = top + r;
+        // Equilibrium sits ~contactOffset deep (three-avbd C0 = gap + margin).
+        let margin = sim.params.contact_offset;
+        assert!(p.y > rest - margin - 0.005 && p.y < rest + 0.005, "{label}: capsule at y {} (rest {rest})", p.y);
+        let axis = glam::Quat::from_array(b.orientation) * glam::Vec3::Y;
+        assert!(axis.y.abs() < 0.02, "{label}: capsule tipped (axis {axis})");
+        assert!(glam::Vec3::from_array(b.linear_vel).length() < 0.05, "{label}: still moving {:?}", b.linear_vel);
+        let m: Vec<Manifold> = download(&sim, 25, 0, sim.last_counters.manifold_count as usize);
+        let pair: Vec<&Manifold> = m.iter().filter(|m| m.collider_a == cap || m.collider_b == cap).collect();
+        assert_eq!(pair.len(), 1, "{label}: {} manifolds for the capsule", pair.len());
+        assert_eq!(pair[0].contact_count, 2, "{label}: {} contacts", pair[0].contact_count);
+        let n = glam::Vec3::from_array(pair[0].normal);
+        let up = if pair[0].collider_b == cap { 1.0 } else { -1.0 };
+        assert!((n - glam::Vec3::Y * up).length() < 1e-3, "{label}: normal {n}");
+    }
+}
+
+/// A capsule laid across two static parallel capsules (one crossing contact each),
+/// and one laid in the groove between them (two parallel contacts each), settles
+/// at its rest height without sinking, rolling or sliding.
+#[test]
+fn capsule_rests_across_and_along_two_capsules() {
+    let (big_r, big_l, r, l, gap) = (0.1f32, 0.5f32, 0.1f32, 0.4f32, 0.15f32);
+    let lying_x = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let lying_z = glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    // (label, top orientation, support half spacing along Z, rest height, contacts per support)
+    let cases = [
+        ("across", lying_z, 0.3f32, big_r + r, 1u32),
+        ("groove", lying_x, gap, ((big_r + r) * (big_r + r) - gap * gap).sqrt(), 2),
+    ];
+    for (label, top_rot, s, rest, per_support) in cases {
+        let mut sim = WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
+        let mut params = AvbdParams { dt: 1.0 / 120.0, iterations: 6, flags: FLAG_REUSE_CONTACTS, ..AvbdParams::default() };
+        params.gravity_y = -9.81;
+        sim.set_params(params);
+        let capsule = |body: u32, radius: f32, half: f32| Collider {
+            body,
+            shape: ShapeType::Capsule as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 1.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [radius, half, 0.0, radius + half],
+        };
+        let mut supports = Vec::new();
+        for z in [-s, s] {
+            let mut st = BodyState::static_plane_support();
+            st.position = [0.0, 0.0, z];
+            st.orientation = lying_x.to_array();
+            let b = sim.add_body(st);
+            supports.push(sim.add_collider(capsule(b, big_r, big_l)));
+        }
+        let top = sim.add_body(BodyState::dynamic(glam::Vec3::new(0.0, rest + 0.02, 0.0), top_rot, 1.0, glam::Vec3::splat(0.02)));
+        let cap = sim.add_collider(capsule(top, r, l));
+        for step in 0..240 {
+            sim.step().unwrap_or_else(|e| panic!("{label}: step {step}: {e:?}"));
+        }
+        let b = sim.download_bodies()[top as usize];
+        let p = glam::Vec3::from_array(b.position);
+        let margin = sim.params.contact_offset;
+        assert!(p.y > rest - 1.5 * margin - 0.005 && p.y < rest + 0.005, "{label}: capsule at y {} (rest {rest})", p.y);
+        assert!(p.x.abs() < 0.01 && p.z.abs() < 0.01, "{label}: capsule drifted to {p}");
+        assert!(glam::Vec3::from_array(b.linear_vel).length() < 0.05, "{label}: still moving {:?}", b.linear_vel);
+        let axis = glam::Quat::from_array(b.orientation) * glam::Vec3::Y;
+        let want = top_rot * glam::Vec3::Y;
+        assert!(axis.dot(want).abs() > 0.999, "{label}: capsule turned (axis {axis})");
+        let m: Vec<Manifold> = download(&sim, 25, 0, sim.last_counters.manifold_count as usize);
+        for &support in &supports {
+            let pair: Vec<&Manifold> = m
+                .iter()
+                .filter(|m| (m.collider_a, m.collider_b) == (cap, support) || (m.collider_a, m.collider_b) == (support, cap))
+                .collect();
+            assert_eq!(pair.len(), 1, "{label}: {} manifolds with support {support}", pair.len());
+            assert_eq!(pair[0].contact_count, per_support, "{label}: {} contacts with support {support}", pair[0].contact_count);
+        }
+    }
+}
+
 // ---- short GPU input/output checks (a few steps at most) ------------------------
 
 #[test]
@@ -4776,7 +4920,13 @@ fn wake_disturbance(nx: u32, nz: u32, height: u32, carry: bool) -> (u32, f32, u3
 }
 
 /// `sleep = false` is the control: the same settle time and window, never asleep.
-fn wake_disturbance_mode(nx: u32, nz: u32, height: u32, carry: bool, sleep: bool) -> (u32, f32, u32) {
+fn wake_disturbance_mode(
+    nx: u32,
+    nz: u32,
+    height: u32,
+    carry: bool,
+    sleep: bool,
+) -> (u32, f32, u32) {
     let columns = nx * nz;
     let bodies = columns * height + 1;
     let mut sim = WgpuSim::new_with_persistent_contacts(WorldCapacity {
@@ -4855,7 +5005,8 @@ fn wake_disturbance_mode(nx: u32, nz: u32, height: u32, carry: bool, sleep: bool
     woke.flags = 9;
     woke.sleep_timer = 0.0;
     let offset = (top * std::mem::size_of::<BodyState>()) as u64;
-    sim.queue.write_buffer(&sim.bufs[0], offset, bytes_of(&woke));
+    sim.queue
+        .write_buffer(&sim.bufs[0], offset, bytes_of(&woke));
     sim.last_counters.awake_count = 1;
     let mut max_awake = 0u32;
     let mut max_disp = 0.0f32;
@@ -4899,10 +5050,66 @@ fn waking_a_sleeping_stack_does_not_jolt_or_cascade() {
         let (_, cold_disp, _) = wake_disturbance(nx, nz, 9, false);
         eprintln!("wake {nx}x{nz}: carry {max_disp} m (awake {max_awake}, others woken {woke_others}), cold restart {cold_disp} m, never-asleep creep {creep} m");
         let limit = 1.5 * creep + 5e-5;
-        assert_eq!(woke_others, 0, "{nx}x{nz}: waking one top box woke {woke_others} sleeping neighbours");
+        assert_eq!(
+            woke_others, 0,
+            "{nx}x{nz}: waking one top box woke {woke_others} sleeping neighbours"
+        );
         assert!(max_disp <= limit,
             "{nx}x{nz}: waking one top box moved bodies {max_disp} m, more than 1.5x the never-asleep creep {creep} m; resting contacts lost their warm start while asleep");
         assert!(cold_disp > limit,
             "{nx}x{nz}: dropping resting pairs ({cold_disp} m) no longer exceeds the limit {limit} m; this test no longer discriminates");
     }
+}
+
+/// Adaptive dispatch (8ev) records last step's colour count plus headroom and lets
+/// `solve_primal_sparse` finish any further colours; the empty buckets it leaves out
+/// did no work, so a stack settling on a static box ends bit for bit where the whole
+/// palette leaves it.
+#[test]
+fn adaptive_colour_dispatches_match_the_whole_palette() {
+    let run = |full: bool| {
+        let mut sim = WgpuSim::new(WorldCapacity::small()).expect("GPU adapter required");
+        if full {
+            sim.use_full_color_palette();
+        }
+        let mut ground = BodyState::zeroed();
+        ground.orientation = [0.0, 0.0, 0.0, 1.0];
+        ground.position = [0.0, -0.5, 0.0];
+        sim.add_body(ground);
+        sim.add_collider(Collider {
+            body: 0,
+            shape: ShapeType::Box as u32,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [5.0, 0.5, 5.0, 0.0],
+            density: 1.0,
+            ..Collider::zeroed()
+        });
+        for i in 0..4u32 {
+            let mut b = BodyState::zeroed();
+            b.orientation = [0.0, 0.0, 0.0, 1.0];
+            b.position = [0.05 * i as f32, 0.55 + 1.02 * i as f32, 0.0];
+            b.inv_mass = 1.0;
+            b.inv_inertia = [6.0, 6.0, 6.0];
+            b.flags = BodyFlags::Dynamic as u32 | BodyFlags::Awake as u32;
+            let id = sim.add_body(b);
+            sim.add_collider(Collider {
+                body: id,
+                shape: ShapeType::Box as u32,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: [0.5, 0.5, 0.5, 0.0],
+                density: 1.0,
+                ..Collider::zeroed()
+            });
+        }
+        let mut colors = 0;
+        for _ in 0..120 {
+            let c = sim.step().expect("step");
+            colors = colors.max(c.color_count);
+        }
+        (bytemuck::cast_slice::<BodyState, u8>(&sim.download_bodies()).to_vec(), colors)
+    };
+    let (whole, colors) = run(true);
+    let (adaptive, _) = run(false);
+    assert!(colors > 0 && 2 * colors <= 32, "the stack should use a few colours: {colors}");
+    assert!(whole == adaptive, "adaptive colour dispatches changed the bodies");
 }

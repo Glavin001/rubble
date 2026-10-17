@@ -1,4 +1,4 @@
-# Local oracle baselines (this machine)
+# three-avbd oracle baselines (M3 Max, 2026-10-13)
 
 **Host:** Apple M3 Max, macOS (darwin 23.x).  
 **Policy:** Accuracy first. Speed bars from **local** runs only — never published ms from other GPUs.
@@ -63,7 +63,7 @@ cd crates/engine-webgpu && python3 -m http.server 8765
 
 ## Speed — three-avbd Chrome WebGPU (local M3 Max, 2026-10-13)
 
-Adapter: `apple · metal-3`. Source: `LOCAL_three_avbd_gpu_bench.json` (small+steady) and `LOCAL_three_avbd_paper_large_steady.json` (paper+large+steady).
+Adapter: `apple · metal-3`. Source: `three-avbd-chrome-small-steady-2026-10-13.json` (small+steady) and `three-avbd-chrome-paper-large-steady-2026-10-13.json` (paper+large+steady).
 
 **Measurement note:** three-avbd reports two numbers. `wallMs` pipelines a batch of steps then one queue drain (CPU encode overlaps GPU). `gpuTotal` is isolated per-step GPU timestamp time. Our Metal `scene_fps` p50 is `commit`+`wait_until_completed` per step — a **cross-API** proxy for gpuTotal, not the fair WebGPU bar.
 
@@ -101,4 +101,4 @@ Interactive gate: p50 ≤ 8.33 ms. Ring smash uses lead=60 (three-avbd). Settled
 
 ## three-avbd CPU log
 
-See `LOCAL_three_avbd_cpu_test.log` (81 passed, 2026-10-13).
+The CPU test log (81 passed, 2026-10-13) was kept locally and is not in the repo.

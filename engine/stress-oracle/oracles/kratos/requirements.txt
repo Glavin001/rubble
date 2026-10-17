@@ -1,0 +1,5 @@
+# Kratos DEM oracle runtime (CPython 3.12, manylinux x86_64). Install with --require-hashes.
+kratosmultiphysics==10.4.4 --hash=sha256:bff506b4ff8c06bc3fdd8427f29076ac8772f608e2c994fde190e100d5995f3c
+kratosdemapplication==10.4.4 --hash=sha256:620eb237bf75f6dcda9dac0ac323906435c1de70c9a698df1ced4f00d0d4ea6f
+numpy==2.5.3 --hash=sha256:b7e18c623bb5c95acb3b3328861272816ba199fb531921c5d6d0b675f1fde9e3
+scipy==1.18.1 --hash=sha256:f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218
