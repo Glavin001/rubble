@@ -1137,6 +1137,15 @@ pub fn all_scenes() -> Vec<SceneDef> {
             },
             build: legacy::grid_10k_boxes,
         },
+        SceneDef {
+            info: SceneInfo {
+                name: "100k Grid",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(100_001),
+            },
+            build: legacy::grid_100k_boxes,
+        },
     ]
 }
 

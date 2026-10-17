@@ -41,6 +41,7 @@ fn main() -> anyhow::Result<()> {
             ("Grid Boxes".into(), "legacy-grid-boxes".into()),
             ("Slanted Grid".into(), "legacy-slanted-grid".into()),
             ("10k Grid".into(), "legacy-grid10k".into()),
+            ("100k Grid".into(), "legacy-grid100k".into()),
         ]
     } else {
         args.chunks(2)

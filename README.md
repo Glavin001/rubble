@@ -92,6 +92,10 @@ uses a fixed seed. They are the `legacy ·` entries in `demo.html`, and natively
 (cd engine && cargo run -p engine-scenes --release --bin demo_viewer -- "10k Grid")
 ```
 
+`100k Grid` (`?scene=legacyGrid100k`) is the 10k grid scaled to 100,000 cubes
+(50 × 40 × 50). It isn't in the legacy demo; it uses the same cubes and spacing at the
+10,000+ body scale the engine targets.
+
 ### Native (macOS / Metal)
 
 ```bash

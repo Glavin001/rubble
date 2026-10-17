@@ -384,6 +384,12 @@
         lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
         eye: [22, 16, 28], look: [0, 5, 0], far: 1200, ground: 300,
       },
+      // Not in the legacy demo: its 10k grid scaled to 100k (50 × 40 × 50).
+      legacyGrid100k: {
+        title: 'grid 100k (legacy grid ×10)', snapshot: 'legacy-grid100k',
+        lead: 60, settled: false, sleepRounds: 8, friction: 0.5, frictionLabel: 'per body (legacy)', groundY: 0,
+        eye: [46, 30, 58], look: [0, 9, 0], far: 2000, ground: 300,
+      },
     };
     const cfg = SCENES[scene];
     if (!cfg) throw new Error(`unknown scene ${scene}; try ${Object.keys(SCENES).join(', ')}`);

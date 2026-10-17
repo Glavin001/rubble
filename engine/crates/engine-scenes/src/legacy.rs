@@ -361,6 +361,12 @@ pub fn grid_10k_boxes(b: &mut SceneBuilder<'_>) {
     grid(b, [20, 25, 20], Vec3::ZERO, 0.0);
 }
 
+/// 50 × 40 × 50 cubes (100,000). Not in the legacy demo: its 10k grid at the scale the
+/// engine targets, built the same way (same cubes, pitch and ground plane).
+pub fn grid_100k_boxes(b: &mut SceneBuilder<'_>) {
+    grid(b, [50, 40, 50], Vec3::ZERO, 0.0);
+}
+
 /// 12 × 22 × 12 cubes (3,168), each layer shifted (0.038, 0, 0.026) from the one below.
 pub fn slanted_grid_boxes(b: &mut SceneBuilder<'_>) {
     grid(b, [12, 22, 12], Vec3::new(0.038, 0.0, 0.026), 0.0);
