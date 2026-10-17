@@ -1108,35 +1108,57 @@ impl GpuSolver {
             Some(k) => k.bond_dyn.clone(),
             None => gpu.storage("bond dyn", &bond_dyn),
         };
-        let mut scratch_init = vec![[0f32; 4]; scratch_len];
-        for (k, rows) in chunk_plan.iter().enumerate() {
-            scratch_init[cplan_base + 4 * k..cplan_base + 4 * k + 4].copy_from_slice(rows);
-        }
+        // The scratch is zero but for these regions: cleared on the GPU (a new buffer is
+        // zero-initialised) and the regions written, instead of uploading the whole image.
+        let mut regions: Vec<(usize, Vec<[f32; 4]>)> = Vec::new();
+        regions.push((cplan_base, chunk_plan.iter().flatten().copied().collect()));
         let (t_hi, t_lo) = split1(plan_time);
+        let mut iplan = vec![[0f32; 4]; 4 * plan.impactor_plan.len()];
         for (i, p) in plan.impactor_plan.iter().enumerate() {
             if let Some(p) = p {
                 let (hi, lo) = split(p.position);
                 let q = p.rotation;
-                scratch_init[iplan_base + 4 * i] = [hi[0], hi[1], hi[2], p.budget as f32];
-                scratch_init[iplan_base + 4 * i + 1] = [lo[0], lo[1], lo[2], t_lo];
-                scratch_init[iplan_base + 4 * i + 2] = [q.x as f32, q.y as f32, q.z as f32, q.w as f32];
-                scratch_init[iplan_base + 4 * i + 3] = v4(p.velocity, t_hi as f64);
+                iplan[4 * i] = [hi[0], hi[1], hi[2], p.budget as f32];
+                iplan[4 * i + 1] = [lo[0], lo[1], lo[2], t_lo];
+                iplan[4 * i + 2] = [q.x as f32, q.y as f32, q.z as f32, q.w as f32];
+                iplan[4 * i + 3] = v4(p.velocity, t_hi as f64);
             }
         }
+        regions.push((iplan_base, iplan));
         // Bond loads from the mirror's forces: settled islands keep them (their bonds are
         // not evaluated) for the section probes.
-        for (i, &(s, bi)) in bonds.iter().enumerate() {
+        let mut bond_loads = Vec::with_capacity(3 * bonds.len());
+        for &(s, bi) in bonds.iter() {
             let b = &m.bonds[s][bi];
             let (fa, ma, _, mb) = b.geometry.chunk_loads(&b.force);
-            scratch_init[3 * i] = v4(fa, b.measures.tension.max(b.measures.compression));
-            scratch_init[3 * i + 1] = v4(ma, 0.0);
-            scratch_init[3 * i + 2] = v4(mb, 0.0);
+            bond_loads.extend([v4(fa, b.measures.tension.max(b.measures.compression)), v4(ma, 0.0), v4(mb, 0.0)]);
         }
+        regions.push((0, bond_loads));
         for &i in &remembered {
             // Pair ledger flags (world.slang): overlap state present.
-            scratch_init[ledger_base + i][3] = f32::from_bits(1);
+            regions.push((ledger_base + i, vec![[0.0, 0.0, 0.0, f32::from_bits(1)]]));
         }
-        let scratch = gpu.storage_into("scratch", &scratch_init, keep.map(|k| &k.scratch));
+        let scratch_bytes = (16 * scratch_len).max(16) as u64;
+        let scratch = match keep.map(|k| &k.scratch).filter(|old| old.size() == scratch_bytes) {
+            Some(old) => {
+                // Queued writes run before the next submission: the clear goes first.
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                encoder.clear_buffer(old, 0, None);
+                gpu.queue.submit([encoder.finish()]);
+                old.clone()
+            }
+            None => gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scratch"),
+                size: scratch_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        };
+        for (at, data) in &regions {
+            if !data.is_empty() {
+                gpu.queue.write_buffer(&scratch, 16 * *at as u64, bytemuck::cast_slice(data));
+            }
+        }
         let islands_buf = gpu.storage_into("islands", &islands_gpu, keep.map(|k| &k.islands));
         let loads_buf = gpu.storage_into("loads", &packed, keep.map(|k| &k.loads));
         let cstate_buf = gpu.storage_into("contact state", &cstate, keep.map(|k| &k.contact_state));
