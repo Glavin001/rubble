@@ -40,6 +40,8 @@ use stress_rubble::scenes::{house, realtime as configure, wall_ram};
 ///   softening, weibull, crack_contact, rate_effects, static_fatigue, buckling, rebar,
 ///   damping       + that model feature, in this order
 ///   realtime      the full real-time configuration (= damping, every feature on)
+///   qs            realtime's features, quasi-static everywhere, impacts included
+///                 (no islands), budgeted static solves (`STRESS_QS_BUDGET`)
 ///   tiered        realtime's features, quasi-static outside impact islands (the
 ///                 tiered coupling, `GpuWorld::set_tiered`)
 pub const LADDER: [&str; 12] = ["blast", "adaptive", "islands", "softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping", "realtime"];
@@ -49,6 +51,12 @@ const LADDER_FEATURES: [&str; 8] = ["softening", "weibull", "crack_contact", "ra
 fn ladder(mut s: Scene, config: &str) -> (Scene, bool) {
     if config == "realtime" {
         return (s, true);
+    }
+    if config == "qs" {
+        // Quasi-static impacts: realtime's features, every body the engine's, the frame's
+        // static solve for every structure (Blast's model; STRESS_QS_BUDGET=newton,cg).
+        s.sim.solve_mode = SolveMode::QuasiStatic;
+        return (s, false);
     }
     if config == "tiered" {
         // The tiered coupling: impact islands explicit, everything else quasi-static.
@@ -240,6 +248,16 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         w.own_dashpot_step = false;
     }
     w.set_impact_islands(islands);
+    // STRESS_BENCH_STRICT_STEP=s: strict mode, fail when a structure's certified step is below s.
+    if let Some(min) = std::env::var("STRESS_BENCH_STRICT_STEP").ok().and_then(|v| v.parse().ok()) {
+        if let Err(e) = w.set_min_stress_step(min) {
+            panic!("{e}");
+        }
+    }
+    // STRESS_QS_BUDGET=newton,cg: quasi-static solves within a budget after setup.
+    if let Some((n, cg)) = std::env::var("STRESS_QS_BUDGET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
+        w.solver.mirror.config.static_budget = Some((n, cg));
+    }
     // Quasi-static with impact islands: the tiered coupling (`--config tiered`).
     if islands && scene.sim.solve_mode == SolveMode::QuasiStatic {
         w.set_tiered(true).expect("tiered coupling");

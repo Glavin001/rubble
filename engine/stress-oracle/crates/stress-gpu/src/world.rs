@@ -262,6 +262,64 @@ impl GpuWorld {
         self.shell.impact_islands = on;
     }
 
+    /// Strict mode: fail when a structure's certified explicit stress step is below
+    /// `min_step` (s), naming the chunks that set it, so the asset is fixed at its source
+    /// (for example its slivers re-exported) instead of the solver taking thousands of
+    /// substeps per frame. Checked now, for the structures as they are.
+    pub fn set_min_stress_step(&mut self, min_step: f64) -> Result<(), String> {
+        let m = &self.solver.mirror;
+        let safety = m.config.courant_safety;
+        let frame_dt = self.scene.sim.frame_dt;
+        let mut report = Vec::new();
+        for (ci, cl) in m.clusters.iter().enumerate() {
+            if cl.bonds.is_empty() {
+                continue;
+            }
+            let mut dts = m.chunk_stable_dts(ci);
+            let gershgorin = dts.iter().map(|&(_, d)| d).fold(f64::INFINITY, f64::min);
+            let damped = if self.own_dashpot_step { self.damped_steps.get(cl.structure).copied().unwrap_or(0.0) } else { 0.0 };
+            let step = gershgorin.max(damped) * safety;
+            if step >= min_step {
+                continue;
+            }
+            dts.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let s = &m.structures[cl.structure];
+            let worst: Vec<String> = dts
+                .iter()
+                .take(10)
+                .map(|&(c, d)| {
+                    let ch = &s.chunks[c];
+                    let h = ch.half_extents;
+                    format!(
+                        "    chunk {c}: {:.2e} s ({:.3} kg, {:.3}x{:.3}x{:.3} m, {}{})",
+                        d * safety,
+                        ch.mass,
+                        2.0 * h.x,
+                        2.0 * h.y,
+                        2.0 * h.z,
+                        ch.material,
+                        if ch.groups.is_empty() { String::new() } else { format!(", {}", ch.groups.join(" ")) }
+                    )
+                })
+                .collect();
+            report.push(format!(
+                "structure '{}' (cluster {}, {} chunks): certified step {:.2e} s < {:.2e} s ({} substeps per {:.4} s frame); its lightest-stepping chunks:\n{}",
+                s.name,
+                cl.id,
+                cl.chunks.len(),
+                step,
+                min_step,
+                (frame_dt / step).ceil(),
+                frame_dt,
+                worst.join("\n")
+            ));
+        }
+        if !report.is_empty() {
+            return Err(format!("strict step: {} structure(s) below the minimum step\n{}", report.len(), report.join("\n")));
+        }
+        Ok(())
+    }
+
     /// The tiered coupling (`tiered`); quasi-static mode only.
     pub fn set_tiered(&mut self, on: bool) -> Result<(), String> {
         if on && self.scene.sim.solve_mode != SolveMode::QuasiStatic {
