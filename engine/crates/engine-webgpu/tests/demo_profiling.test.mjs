@@ -10,6 +10,14 @@ const start = html.indexOf('let phaseSamples;');
 const end = html.indexOf('async function sampleSettle()', start);
 assert.ok(start >= 0 && end > start, 'demo profiler entry points must remain testable');
 const source = html.slice(start, end);
+// The encoder's dispatch-count constants (8ev), read from the shipped page, with the
+// fixed-palette controls on (colors=full, rounds=full): these tests check the full
+// schedule; adaptive counts are exercised by the browser regressions.
+const dispatchSource = html.slice(html.indexOf('const COLOR_ROUND_LIMIT'), html.indexOf('const colorsFull'));
+const DISPATCH = {
+  ...runInNewContext(`${dispatchSource}({COLOR_ROUND_LIMIT, COLOR_ROUND_HEADROOM, COLOR_HEADROOM, SLEEP_NEVER_S})`),
+  colorsFull: true, roundsFull: true,
+};
 const plain = value => JSON.parse(JSON.stringify(value));
 
 const bucketSource = html.slice(html.indexOf('async function readColorBuckets()'), html.indexOf('function restoreScene()'));
@@ -37,7 +45,7 @@ for (const scenario of ['valid', 'coverage mismatch', 'device loss']) {
       },
       finish() { assert.ok(state.copied); return this; },
     };
-    const context = {
+    const context = {...DISPATCH,
       cap: {maxColors: 4}, last: {awake: scenario === 'coverage mismatch' ? 32 : 31}, bufs: buffers,
       GPUBufferUsage: {COPY_DST: 2, MAP_READ: 4}, GPUMapMode: {READ: 1}, Uint32Array,
       device: {
@@ -60,7 +68,7 @@ test('benchmark captures color buckets before and after timing without readbacks
   const wallSource = html.slice(html.indexOf('let timingSamples;'), html.indexOf('let phaseSamples;'));
   const events = [];
   let measuring = false;
-  const context = {
+  const context = {...DISPATCH,
     lead: 0, scene: 'ring110k', bodyCount: 110442,
     params: {iterations: 4, dt: 1/60}, stablePacking: true, persistentContacts: true,
     compactContacts: true, sparseStart: 32, parallelColorPrefix:false, physicalAdjacency: true, spatialOrder: false,
@@ -103,7 +111,7 @@ function fixture({ graphProfile = false, detailedProfile = false, reuse = true, 
     resolveQuerySet(_q, first, count) { assert.equal(first, 0); assert.equal(count, stamps.length); },
     copyBufferToBuffer() {}, finish() { return this; },
   };
-  const context = {
+  const context = {...DISPATCH,
     params: {iterations, flags: reuse ? 1 : 0}, detailedProfile, graphProfile, colorProfile: false, compactContacts, parity: 0, steps: 166, wantTimestamps: true,
     performance: {now() { return clock; }},
     GPUBufferUsage: {QUERY_RESOLVE: 1, COPY_SRC: 2, MAP_READ: 4, COPY_DST: 8},
