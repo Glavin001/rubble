@@ -20,6 +20,7 @@
 //!
 //!   cargo run --release -p stress-rubble --features gpu --example stress_bench -- \
 //!       [--solver oracle|rubble-gpu] [--only REGIME] [--seconds 0.25] [--repeats 1]
+//!       [--pack PATH ...]   (any scene packs, idle and rammed, as the packs set)
 
 use std::time::Instant;
 
@@ -111,9 +112,17 @@ fn surface_lo_x(scene: &Scene) -> f64 {
 /// 400 kg box at 12 m/s into the middle of the -x face, its front 0.2 m from the surface
 /// (`blast_ladder_bench bench PACK ram` fires its ball from the same surface).
 pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+    let paths: Vec<_> = ["house-1story", "house-2story", "villa-savoye", "brick-building", "rig-portal", "rig-toppled", "comp-wall-bay"].iter().map(|n| dir.join(format!("{n}.json"))).collect();
+    packs_at(&paths, seconds)
+}
+
+/// Any scene packs (`--pack PATH`, repeatable), each intact (idle) and rammed, as `packs`.
+pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scene)> {
     let mut out = Vec::new();
-    for name in ["house-1story", "house-2story", "villa-savoye", "brick-building", "rig-portal", "rig-toppled", "comp-wall-bay"] {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../packs/{name}.json"));
+    for path in paths {
+        let name = path.file_stem().expect("pack file name").to_string_lossy().to_string();
+        let name = name.as_str();
         let scene = stress_ref::scene_pack::import(&path, name, "structure").unwrap_or_else(|e| panic!("{name} pack: {e}"));
         let mut idle = configure(scene.clone(), seconds);
         idle.name = format!("{name}_idle");
@@ -300,6 +309,7 @@ fn main() {
     let mut seconds = 0.25;
     let mut repeats = 1usize;
     let mut set = "realtime".to_string();
+    let mut pack_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut config = "realtime".to_string();
     let mut overrides: Vec<(String, bool)> = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -315,6 +325,10 @@ fn main() {
                 let (n, on) = v.split_once('=').expect("--feature NAME=on|off");
                 overrides.push((n.to_string(), on == "on"));
             }
+            "--pack" => {
+                pack_paths.push(args.next().expect("--pack PATH").into());
+                set = "packs".into();
+            }
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).expect("--seconds S"),
             "--repeats" => repeats = args.next().and_then(|v| v.parse().ok()).expect("--repeats N"),
             other => panic!("unknown argument {other}"),
@@ -327,6 +341,7 @@ fn main() {
         "accuracy" => named(accuracy(seconds)),
         "towns" => named(towns(seconds)),
         "scale" => named(scale(seconds)),
+        "packs" if !pack_paths.is_empty() => packs_at(&pack_paths, seconds),
         "packs" => packs(seconds),
         _ => named(regimes(seconds)),
     };
@@ -335,6 +350,10 @@ fn main() {
             continue;
         }
         let (mut scene, islands) = ladder(scene, &config);
+        // STRESS_BENCH_STRESS_SAFETY=x: the bond network's step safety (a measurement).
+        if let Some(x) = std::env::var("STRESS_BENCH_STRESS_SAFETY").ok().and_then(|v| v.parse().ok()) {
+            scene.sim.stress_courant_safety = Some(x);
+        }
         for (n, on) in &overrides {
             scene.sim.features.set(n, *on).unwrap_or_else(|e| panic!("--feature: {e}"));
         }
