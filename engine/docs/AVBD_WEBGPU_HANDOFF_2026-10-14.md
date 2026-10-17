@@ -3,7 +3,7 @@
 > **Continuation update (2026-10-14, after 20:20 UTC):** The experiment described as unfinished in the snapshot below has now been measured and **rejected**. It costs **12.70 ms** versus fresh production **11.91 ms**: narrowphase increases **2.03→3.74 ms**, exceeding removal of the **1.11 ms** warm pass. All45 candidate GPU tests passed, including newly added cold-contact force/penalty assertions; no full-scene accuracy claim was made. The seven production files were restored, candidate wrapper/generated entry removed, and useful cold-contact assertions retained. Browser unit tests pass218/218. Restored production GPU tests pass44/44 (8.15s), and69 production modules were re-exported successfully. The live ring was then opened for the user; stop or navigate away from that live workload before any further GPU timing/tests. See `avbd-ring-inline-narrowphase-trial-2026-10-14.json` and `.patch` for the completed experiment. The sections below preserve the earlier handoff snapshot; **do not resume or adopt that candidate as if it remains in the source tree**. Next optimization should address measured collision/contact traffic with a materially different design. Goal remains incomplete.
 
 **Snapshot:** 2026-10-14, after the 20:13:42 UTC production ring benchmark and subsequent experimental shader export.
-**Repository:** `/Users/glavin/Development/rubble`
+**Repository:** the rubble repository root
 **Branch:** `feat/avbd-attempt-2`
 **Git HEAD:** `501485f4318fe736e2d0610bd6268a4590c67408`
 **Status:** substantial uncommitted implementation and test changes; an explicitly opt-in optimization experiment is unfinished. **The ≥120 physics FPS / three-avbd parity goal is NOT complete.**
@@ -449,11 +449,11 @@ These instructions originated in cloud setup; this current host is macOS, and ac
 
 Node24 used here:
 
-`/Users/glavin/.nvm/versions/node/v24.13.1/bin/node`
+`node`
 
 Slang compiler:
 
-`/Users/glavin/.local/bin/slangc`
+`slangc`
 
 ### Focused build/test/export
 
@@ -467,15 +467,15 @@ cargo run --manifest-path engine/Cargo.toml -p engine-webgpu --release --bin wgs
 Export directory is `engine/crates/engine-webgpu/generated/wgsl/`, gitignored. Current manifest has70 entries; adopted pre-candidate baseline has69. Exporter writes manifest but does not delete obsolete generated files.
 
 ```sh
-/Users/glavin/.nvm/versions/node/v24.13.1/bin/node --test \
+node --test \
   engine/crates/engine-webgpu/tests/demo_profiling.test.mjs \
   engine/crates/engine-webgpu/tests/physics_benchmark.test.mjs \
   engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
 
-/Users/glavin/.nvm/versions/node/v24.13.1/bin/node --experimental-transform-types --test \
+node --experimental-transform-types --test \
   engine/crates/engine-webgpu/tests/scene_builders.test.mjs
 
-/Users/glavin/.nvm/versions/node/v24.13.1/bin/node --test \
+node --test \
   engine/crates/engine-webgpu/tests/spatial_order.test.mjs
 ```
 
@@ -509,7 +509,7 @@ python3 -m http.server 8765 --bind 127.0.0.1
 Reference Vite server was running on5317, tool session59802, cwd `inspiration/pinned/three-avbd`:
 
 ```sh
-/Users/glavin/.nvm/versions/node/v24.13.1/bin/node node_modules/vite/bin/vite.js \
+node node_modules/vite/bin/vite.js \
   --host 127.0.0.1 --port 5317 --strictPort
 ```
 
@@ -532,7 +532,7 @@ Use the supported CUA browser tool. Existing selected IAB browser ID is`2`, tabI
 
 Read current AX/DOM completion state, then captured console `BENCH ` or `REGRESSION ` logs. Logs survive navigation, so verify timestamps and URL before accepting results. A prior user-assisted normal-HTTP navigation resolved access to a restored internal error page; do not request that again unless a real browser blocker recurs.
 
-Avoid waiting on a browser download event here: one call unexpectedly blocked about48 minutes. The reference “Copy results” UI reported copied while the exposed clipboard read was empty. A “Saved” button did not guarantee a fresh file. `/Users/glavin/Downloads/apple-metal-3.json` is the older exact10.31ms/26.32ms report, **not** the fresh9.99ms result. Prefer visible values with stated precision over falsely attributing an old download to a new run.
+Avoid waiting on a browser download event here: one call unexpectedly blocked about48 minutes. The reference “Copy results” UI reported copied while the exposed clipboard read was empty. A “Saved” button did not guarantee a fresh file. `~/Downloads/apple-metal-3.json` (a local download, not in the repo) is the older exact10.31ms/26.32ms report, **not** the fresh9.99ms result. Prefer visible values with stated precision over falsely attributing an old download to a new run.
 
 Read `inspiration/pinned/three-avbd/docs/PLAN.md` and `docs/FINDINGS.md` before work inside the pinned repo. Its AGENTS requires `pnpm check` before declaring changes done and says unavailable GPU tests skip, never pass. This work used it as a reference and did not modify it. Preserve oracle fixtures; never regenerate them to make a failing solver pass.
 

@@ -21,3 +21,7 @@ engine/docs/LOCAL_*
 
 # Shardwright checkouts and bakes (engine/scripts/bake-fracture-assets.sh)
 engine/.tools/
+
+# Local agent scratch: Cursor plans and autoresearch iteration logs
+.cursor/plans/
+autoresearch-results.tsv
