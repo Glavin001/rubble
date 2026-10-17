@@ -7,7 +7,7 @@ description = "Demo/benchmark scenes ported from three-avbd (Z-up → Y-up)"
 
 [dependencies]
 engine-schema.workspace = true
-engine-metal.workspace = true
+engine-metal = { workspace = true, optional = true }
 engine-exec.workspace = true
 glam.workspace = true
 serde.workspace = true
@@ -16,14 +16,57 @@ anyhow.workspace = true
 env_logger.workspace = true
 log.workspace = true
 
+[features]
+# The Metal world and the bins that step it (macOS). Without it the crate builds the
+# scenes on the host only, which is all `scene_export` needs (the Linux web build).
+default = ["metal"]
+metal = ["dep:engine-metal"]
+
+
 [[bin]]
 name = "demo_viewer"
 path = "src/bin/demo_viewer.rs"
+required-features = ["metal"]
 
 [[bin]]
 name = "scene_fps"
 path = "src/bin/scene_fps.rs"
+required-features = ["metal"]
 
 [[bin]]
 name = "gpu_vs_oracles"
 path = "src/bin/gpu_vs_oracles.rs"
+required-features = ["metal"]
+
+[[bin]]
+name = "column_height"
+path = "src/bin/column_height.rs"
+required-features = ["metal"]
+
+[[bin]]
+name = "mini_columns"
+path = "src/bin/mini_columns.rs"
+required-features = ["metal"]
+
+[[bin]]
+name = "bp_diag"
+path = "src/bin/bp_diag.rs"
+required-features = ["metal"]
+
+[[bin]]
+name = "pile_ab"
+path = "src/bin/pile_ab.rs"
+required-features = ["metal"]
+
+[[bin]]
+name = "settle_probe"
+path = "src/bin/settle_probe.rs"
+required-features = ["metal"]
+
+[[bin]]
+name = "scene_export"
+path = "src/bin/scene_export.rs"
+
+[[example]]
+name = "joint_settle"
+required-features = ["metal"]

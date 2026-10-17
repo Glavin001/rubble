@@ -6,7 +6,6 @@ use engine_vehicle::{
     FunctionalState, Ray, RayHit, VehicleBackend, VehicleCapacity, VehicleDesc, VehicleHandle, VehicleHost,
     VehicleInput, VehicleState, WheelDesc,
 };
-use glam::{Quat, Vec3};
 use metal::*;
 use std::mem;
 
@@ -1516,376 +1515,35 @@ fn alloc_u32(device: &Device, count: u32) -> Buffer {
     alloc::<u32>(device, count)
 }
 
-/// Host-side scene helpers for demos and benches.
-pub struct SceneBuilder<'a> {
-    world: &'a mut MetalWorld,
-}
-
-impl<'a> SceneBuilder<'a> {
-    pub fn new(world: &'a mut MetalWorld) -> Self {
-        Self { world }
+/// The scene builders (`engine_schema::scene::SceneBuilder`) write straight into the
+/// GPU world.
+impl engine_schema::scene::SceneSink for MetalWorld {
+    fn add_body(&mut self, state: BodyState) -> u32 {
+        MetalWorld::add_body(self, state)
     }
-
-    pub fn world_mut(&mut self) -> &mut MetalWorld {
-        self.world
+    fn add_collider(&mut self, col: Collider) -> u32 {
+        MetalWorld::add_collider(self, col)
     }
-
-    pub fn add_ground_plane(&mut self, y: f32) -> u32 {
-        let body = self.world.add_body(BodyState {
-            position: [0.0, y, 0.0],
-            inv_mass: 0.0,
-            orientation: [0.0, 0.0, 0.0, 1.0],
-            inv_inertia: [0.0; 3],
-            flags: 0,
-            linear_vel: [0.0; 3],
-            sleep_timer: 0.0,
-            angular_vel: [0.0; 3],
-            generation: 0,
-            initial_pos: [0.0; 3],
-            initial_pad: 0.0,
-            initial_rot: [0.0, 0.0, 0.0, 1.0],
-        });
-        self.world.add_collider(Collider {
-            body,
-            shape: ShapeType::Plane as u32,
-            material: 0,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: 0.0,
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [0.0, 1.0, 0.0, y],
-        });
-        body
+    fn insert_hull(&mut self, hull: &engine_schema::convex::ConvexHull) -> u32 {
+        MetalWorld::insert_hull(self, hull)
     }
-
-    /// Static box ground (three-avbd `ground(extent)`). Top face at `top_y`.
-    /// `half_xz` is the horizontal half-extent (three-avbd: max(100, 2·extent)).
-    /// Thickness is deep so Jacobi soft contacts can't tunnel through a thin slab.
-    pub fn add_ground_box(&mut self, top_y: f32) -> u32 {
-        self.add_ground_box_extent(top_y, 200.0)
+    fn body(&self, id: u32) -> BodyState {
+        MetalWorld::body(self, id)
     }
-
-    pub fn add_ground_box_extent(&mut self, top_y: f32, half_xz: f32) -> u32 {
-        // Top face matches three-avbd (y=0.5). Thickness is deeper than their size.z=1
-        // slab: our Jacobi soft contacts otherwise tunnel through a thin floor at scale.
-        let half_h = 25.0;
-        let hx = half_xz.max(50.0);
-        let body = self.world.add_body(BodyState {
-            position: [0.0, top_y - half_h, 0.0],
-            inv_mass: 0.0,
-            orientation: [0.0, 0.0, 0.0, 1.0],
-            inv_inertia: [0.0; 3],
-            flags: 0,
-            linear_vel: [0.0; 3],
-            sleep_timer: 0.0,
-            angular_vel: [0.0; 3],
-            generation: 0,
-            initial_pos: [0.0; 3],
-            initial_pad: 0.0,
-            initial_rot: [0.0, 0.0, 0.0, 1.0],
-        });
-        self.world.add_collider(Collider {
-            body,
-            shape: ShapeType::Box as u32,
-            material: 0,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: 0.0,
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [hx, half_h, hx, hx.max(half_h)],
-        });
-        body
+    fn set_body(&mut self, id: u32, state: BodyState) {
+        MetalWorld::set_body(self, id, state)
     }
-
-    pub fn add_sphere(&mut self, pos: Vec3, radius: f32, mass: f32) -> u32 {
-        let inertia = 0.4 * mass * radius * radius;
-        let body = self.world.add_body(BodyState::dynamic(
-            pos,
-            Quat::IDENTITY,
-            mass,
-            Vec3::splat(inertia),
-        ));
-        self.world.add_collider(Collider {
-            body,
-            shape: ShapeType::Sphere as u32,
-            material: 0,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: mass / ((4.0 / 3.0) * std::f32::consts::PI * radius.powi(3)),
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [radius, 0.0, 0.0, radius],
-        });
-        body
+    fn add_joint_desc(&mut self, desc: &JointDesc) -> u32 {
+        MetalWorld::add_joint_desc(self, desc)
     }
-
-    pub fn add_box(&mut self, pos: Vec3, half: Vec3, mass: f32) -> u32 {
-        let h = half * 2.0;
-        let inertia = Vec3::new(
-            (1.0 / 12.0) * mass * (h.y * h.y + h.z * h.z),
-            (1.0 / 12.0) * mass * (h.x * h.x + h.z * h.z),
-            (1.0 / 12.0) * mass * (h.x * h.x + h.y * h.y),
-        );
-        let body = self
-            .world
-            .add_body(BodyState::dynamic(pos, Quat::IDENTITY, mass, inertia));
-        self.world.add_collider(Collider {
-            body,
-            shape: ShapeType::Box as u32,
-            material: 0,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: mass / (8.0 * half.x * half.y * half.z),
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            // params.w = bounding-sphere radius (three-avbd length(half)), used by BP sphere cull.
-            params: [half.x, half.y, half.z, half.length()],
-        });
-        body
+    fn add_material(&mut self, m: Material) -> u32 {
+        MetalWorld::add_material(self, m)
     }
-
-    pub fn add_capsule(&mut self, pos: Vec3, radius: f32, half_len: f32, mass: f32) -> u32 {
-        let cyl = std::f32::consts::PI * radius * radius * (2.0 * half_len);
-        let sph = (4.0 / 3.0) * std::f32::consts::PI * radius.powi(3);
-        let vol = (cyl + sph).max(1e-8);
-        let body = self.world.add_body(BodyState::dynamic(
-            pos,
-            Quat::IDENTITY,
-            mass,
-            Vec3::splat(0.2 * mass * (half_len + radius).powi(2)),
-        ));
-        self.world.add_collider(Collider {
-            body,
-            shape: ShapeType::Capsule as u32,
-            material: 0,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: mass / vol,
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [radius, half_len, 0.0, radius + half_len],
-        });
-        body
+    fn set_default_friction(&mut self, friction: f32) {
+        MetalWorld::set_default_friction(self, friction)
     }
-
-    /// Dynamic body made of convex hulls (one hull, or a compound). Hulls are in
-    /// one input frame; `pos`/`rot` place that frame. Mass and inertia are the
-    /// compound's, from uniform `density`; children keep their own colliders.
-    pub fn add_convex_hull(
-        &mut self,
-        hulls: &[engine_schema::convex::ConvexHull],
-        pos: Vec3,
-        rot: Quat,
-        density: f32,
-    ) -> u32 {
-        let cooked = engine_schema::convex::cook_body(hulls, density);
-        let (p, q) = cooked.body_pose(pos, rot);
-        let body = self
-            .world
-            .add_body(BodyState::dynamic(p, q, cooked.mass, cooked.inertia));
-        for child in &cooked.children {
-            let base = self.world.insert_hull(&child.hull);
-            self.world.add_collider(Collider {
-                body,
-                shape: ShapeType::ConvexHull as u32,
-                material: 0,
-                generation: 0,
-                local_pos: child.local_pos.to_array(),
-                density,
-                local_rot: [0.0, 0.0, 0.0, 1.0],
-                params: engine_schema::convex::convex_collider_params(
-                    base,
-                    1.0,
-                    child.hull.bounding_radius(),
-                ),
-            });
-        }
-        body
-    }
-
-    pub fn add_compound_box_sphere(
-        &mut self,
-        pos: Vec3,
-        box_half: Vec3,
-        sphere_offset: Vec3,
-        sphere_radius: f32,
-        mass: f32,
-    ) -> u32 {
-        let body = self.world.add_body(BodyState::dynamic(
-            pos,
-            Quat::IDENTITY,
-            mass,
-            Vec3::splat(0.15 * mass),
-        ));
-        let box_vol = 8.0 * box_half.x * box_half.y * box_half.z;
-        let sph_vol = (4.0 / 3.0) * std::f32::consts::PI * sphere_radius.powi(3);
-        let dens = mass / (box_vol + sph_vol).max(1e-8);
-        self.world.add_collider(Collider {
-            body,
-            shape: ShapeType::Box as u32,
-            material: 0,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: dens,
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [box_half.x, box_half.y, box_half.z, box_half.length()],
-        });
-        self.world.add_collider(Collider {
-            body,
-            shape: ShapeType::Sphere as u32,
-            material: 0,
-            generation: 0,
-            local_pos: sphere_offset.to_array(),
-            density: dens,
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [sphere_radius, 0.0, 0.0, sphere_radius],
-        });
-        body
-    }
-
-    /// Add a joint at rest in the bodies' current orientations (frame B is
-    /// derived from frame A, three-avbd `rest: 'current'`).
-    pub fn add_joint(&mut self, desc: JointDesc) -> u32 {
-        let qa = Quat::from_array(self.world.body(desc.body_a).orientation);
-        let qb = Quat::from_array(self.world.body(desc.body_b).orientation);
-        self.world.add_joint_desc(&desc.rest_from_bodies(qa, qb))
-    }
-
-    /// Body-local frames for a joint placed at a world anchor with a world
-    /// axis (hinge / slider / twist axis = frame X).
-    pub fn world_frames(
-        &self,
-        a: u32,
-        b: u32,
-        anchor: Vec3,
-        axis: Vec3,
-    ) -> (JointFrame, JointFrame) {
-        let ba = self.world.body(a);
-        let bb = self.world.body(b);
-        let qa = Quat::from_array(ba.orientation);
-        let qb = Quat::from_array(bb.orientation);
-        let la = qa.conjugate() * (anchor - Vec3::from_array(ba.position));
-        let lb = qb.conjugate() * (anchor - Vec3::from_array(bb.position));
-        let axis_a = qa.conjugate() * axis;
-        (JointFrame::with_axis(la, axis_a), JointFrame::at(lb))
-    }
-
-    pub fn add_ball_joint(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3) -> u32 {
-        self.add_joint(JointDesc::ball(a, b, anchor_a, anchor_b))
-    }
-
-    pub fn add_fixed_joint(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3) -> u32 {
-        self.add_joint(JointDesc::fixed(
-            a,
-            b,
-            JointFrame::at(anchor_a),
-            JointFrame::at(anchor_b),
-        ))
-    }
-
-    /// Prismatic joint; `axis` is in body A's local frame.
-    pub fn add_slider(
-        &mut self,
-        a: u32,
-        b: u32,
-        anchor_a: Vec3,
-        anchor_b: Vec3,
-        axis: Vec3,
-    ) -> u32 {
-        self.add_joint(JointDesc::slider(
-            a,
-            b,
-            JointFrame::with_axis(anchor_a, axis),
-            JointFrame::at(anchor_b),
-        ))
-    }
-
-    /// D6 with every DOF locked except twist about `axis` (body A local);
-    /// adjust motions with `add_joint(JointDesc::d6(..).with_motion(..))`.
-    pub fn add_d6(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3, axis: Vec3) -> u32 {
-        self.add_joint(
-            JointDesc::d6(
-                a,
-                b,
-                JointFrame::with_axis(anchor_a, axis),
-                JointFrame::at(anchor_b),
-            )
-            .with_motion(Dof::Twist, Motion::Free),
-        )
-    }
-
-    /// Revolute joint about `axis` (body A local).
-    pub fn add_hinge(&mut self, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3, axis: Vec3) -> u32 {
-        self.add_joint(JointDesc::hinge(
-            a,
-            b,
-            JointFrame::with_axis(anchor_a, axis),
-            JointFrame::at(anchor_b),
-        ))
-    }
-
-    pub fn add_distance(
-        &mut self,
-        a: u32,
-        b: u32,
-        anchor_a: Vec3,
-        anchor_b: Vec3,
-        length: f32,
-    ) -> u32 {
-        self.add_joint(JointDesc::distance(a, b, anchor_a, anchor_b, length))
-    }
-
-    pub fn add_spring(
-        &mut self,
-        a: u32,
-        b: u32,
-        anchor_a: Vec3,
-        anchor_b: Vec3,
-        rest: f32,
-        stiffness: f32,
-    ) -> u32 {
-        self.add_joint(JointDesc::spring(a, b, anchor_a, anchor_b, rest, stiffness))
-    }
-
-    pub fn pile_spheres(&mut self, n: u32, spacing: f32) {
-        let side = (n as f32).cbrt().ceil() as u32;
-        let mut placed = 0u32;
-        for y in 0..side {
-            for z in 0..side {
-                for x in 0..side {
-                    if placed >= n {
-                        return;
-                    }
-                    let pos = Vec3::new(
-                        (x as f32 - side as f32 * 0.5) * spacing,
-                        1.0 + y as f32 * spacing,
-                        (z as f32 - side as f32 * 0.5) * spacing,
-                    );
-                    self.add_sphere(pos, spacing * 0.45, 1.0);
-                    placed += 1;
-                }
-            }
-        }
-    }
-
-    pub fn rope_capsules(&mut self, segments: u32, start: Vec3, seg_len: f32) {
-        let half = seg_len * 0.35;
-        let radius = (seg_len * 0.12).min(0.05);
-        let mut prev = None;
-        for i in 0..segments {
-            let pos = start + Vec3::new(0.0, -(i as f32) * seg_len, 0.0);
-            let id = self.add_capsule(pos, radius, half, 0.2);
-            if let Some(p) = prev {
-                self.add_ball_joint(p, id, Vec3::new(0.0, -half, 0.0), Vec3::new(0.0, half, 0.0));
-            }
-            prev = Some(id);
-        }
-    }
-
-    pub fn sleeping_field(&mut self, n: u32, origin: Vec3, spacing: f32) {
-        for i in 0..n {
-            let x = (i % 600) as f32 * spacing;
-            let z = (i / 600) as f32 * spacing;
-            let id = self.add_sphere(origin + Vec3::new(x, 0.5, z), spacing * 0.4, 1.0);
-            self.world.force_sleep(id);
-        }
+    fn force_sleep(&mut self, id: u32) {
+        MetalWorld::force_sleep(self, id)
     }
 }
 

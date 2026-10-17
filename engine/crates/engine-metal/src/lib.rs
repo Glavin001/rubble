@@ -7,7 +7,8 @@ mod world;
 
 pub use device::MetalDevice;
 pub use sim::MetalSim;
-pub use world::{MetalWorld, SceneBuilder};
+pub use engine_schema::scene::SceneBuilder;
+pub use world::MetalWorld;
 
 use engine_schema::AbiProbe;
 use glam::{Mat3, Vec3};
