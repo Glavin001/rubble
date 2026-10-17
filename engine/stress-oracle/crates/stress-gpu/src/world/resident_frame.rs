@@ -205,13 +205,14 @@ impl GpuWorld {
             }
             if trace {
                 eprintln!(
-                    "resident qs passes {first}..: {} run, {} of {} solved converged, {} unconverged in all, skipped {} repeats and {} fixed points, {:.1} ms, {} disconnected",
+                    "resident qs passes {first}..: {} run, {} of {} solved converged, {} unconverged in all, skipped {} repeats and {} fixed points, certified {}, {:.1} ms, {} disconnected",
                     out.passes,
                     out.converged.len(),
                     out.solved.len(),
                     out.unconverged,
                     out.skipped_unconverged,
                     out.skipped_fixed,
+                    out.certified,
                     t_pass.elapsed().as_secs_f64() * 1e3,
                     out.disconnected.len()
                 );

@@ -6,7 +6,7 @@ struct CascadeParams_std140_0
     @align(4) sload_base_0 : u32,
     @align(16) gate_flag_base_0 : u32,
     @align(4) bond_words_0 : u32,
-    @align(8) pad1_0 : u32,
+    @align(8) certify_0 : u32,
     @align(4) pad2_0 : u32,
 };
 
@@ -205,29 +205,36 @@ fn cascade_restore(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_in
     }
     var _S4 : u32 = u32(16) + i_1;
     var s_0 : u32 = status_0[_S4];
-    var _S5 : bool;
+    var converged_0 : bool;
     if(status_0[u32(0)] == u32(0))
     {
-        _S5 = true;
+        converged_0 = true;
     }
     else
     {
-        _S5 = ((s_0 & (u32(1)))) == u32(0);
+        converged_0 = ((s_0 & (u32(1)))) == u32(0);
     }
-    if(_S5)
+    if(converged_0)
     {
         return;
     }
-    var converged_0 : bool = (scratch_0[params_0.result_base_0 + i_1].w) != 0.0f;
-    var _S6 : vec4<u32> = islands_0[i_1].range_0;
-    var _S7 : u32 = islands_0[i_1].range_0.x;
-    var _S8 : u32 = thread_0.x;
-    var k_0 : u32 = u32(2) * _S7 + _S8;
+    if(((s_0 & (u32(64)))) != u32(0))
+    {
+        converged_0 = true;
+    }
+    else
+    {
+        converged_0 = (scratch_0[params_0.result_base_0 + i_1].w) != 0.0f;
+    }
+    var _S5 : vec4<u32> = islands_0[i_1].range_0;
+    var _S6 : u32 = islands_0[i_1].range_0.x;
+    var _S7 : u32 = thread_0.x;
+    var k_0 : u32 = u32(2) * _S6 + _S7;
     loop
     {
-        var _S9 : u32 = _S6.y;
-        _S3 = _S9;
-        if(k_0 < (u32(2) * _S9))
+        var _S8 : u32 = _S5.y;
+        _S3 = _S8;
+        if(k_0 < (u32(2) * _S8))
         {
         }
         else
@@ -239,14 +246,23 @@ fn cascade_restore(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_in
     }
     if(converged_0)
     {
-        if(_S8 == u32(0))
+        if(_S7 == u32(0))
         {
             status_0[_S4] = (s_0 | (u32(2)));
-            gate_0[params_0.gate_flag_base_0 + i_1] = vec4<f32>(0.0f);
+            var _S9 : f32;
+            if((params_0.certify_0) != u32(0))
+            {
+                _S9 = 3.0f;
+            }
+            else
+            {
+                _S9 = 0.0f;
+            }
+            gate_0[params_0.gate_flag_base_0 + i_1] = vec4<f32>(_S9, 0.0f, 0.0f, 0.0f);
         }
         return;
     }
-    k_0 = u32(4) * _S7 + _S8;
+    k_0 = u32(4) * _S6 + _S7;
     loop
     {
         if(k_0 < (u32(4) * _S3))
@@ -259,7 +275,7 @@ fn cascade_restore(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_in
         state_0[k_0] = backup_0[k_0];
         k_0 = k_0 + u32(64);
     }
-    if(_S8 == u32(0))
+    if(_S7 == u32(0))
     {
         gate_0[params_0.gate_flag_base_0 + i_1] = vec4<f32>(1.0f, 0.0f, 0.0f, 0.0f);
     }
@@ -460,7 +476,14 @@ fn cascade_gate(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invoc
     }
     else
     {
-        differs_0 = u32(16);
+        if(flag_0 == 3.0f)
+        {
+            differs_0 = u32(65);
+        }
+        else
+        {
+            differs_0 = u32(16);
+        }
     }
     status_0[_S15] = differs_0;
     return;
@@ -623,6 +646,10 @@ fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
         {
             disconnected_1 = disconnected_0;
             add_1 = add_0;
+        }
+        if(add_1 != u32(0))
+        {
+            gate_0[params_0.gate_flag_base_0 + i_5] = vec4<f32>(0.0f);
         }
         status_0[_S20] = (s_4 | (add_1));
         damaged_1 = damaged_0;

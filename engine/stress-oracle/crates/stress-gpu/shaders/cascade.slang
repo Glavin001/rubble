@@ -24,7 +24,7 @@ struct CascadeParams
     uint sload_base;    // scratch: the static solves' loads (2 float4 per chunk)
     uint gate_flag_base; // gate: per island, x = 1 while its stored loads are an unconverged solve's, 2 a fixed point's
     uint bond_words;    // float4 per bond record (world.slang `BondDyn`)
-    uint pad1;
+    uint certify;       // 1: a converged solve's repeat counts as converged (bit 6)
     uint pad2;
 };
 
@@ -42,7 +42,12 @@ struct CascadeParams
 // - A converged solve and its commit that left the state and the bond records as they
 //   found them (`cascade_fixed`): the island is at a fixed point, and the same loads
 //   again leave it there.
-// Either repeat is skipped.
+// Either repeat is skipped. And, your decision of 2026-10-17 (a change at f32's rounding
+// level, not of the tolerance): a converged solve whose commit grew no damage leaves an
+// equilibrium the next solve with the same loads would only polish (a floor-certified
+// solve takes one more Newton step to see its residual stop falling). That island is
+// certified converged without a solve (bit 6); its commit still runs, after which it
+// may be a fixed point. `certify` off (STRESS_QS_CERTIFY=0): solved again.
 static const uint ST_RUN = 0;
 static const uint ST_DISCONNECTED = 1;
 static const uint ST_PASSES = 2;
@@ -92,18 +97,20 @@ void cascade_restore(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     uint s = status[ST_ISLANDS + i];
     if (status[ST_RUN] == 0 || (s & 1u) == 0)
         return;
-    bool converged = scratch[params.result_base + i].w != 0.0;
+    bool converged = (s & 64u) != 0 || scratch[params.result_base + i].w != 0.0;
     Island isl = islands[i];
     // The loads this solve saw, for the repeat gate.
     for (uint k = 2 * isl.range.x + thread.x; k < 2 * isl.range.y; k += 64)
         gate[k] = scratch[params.sload_base + k];
     if (converged)
     {
-        // A fixed point only once its commit is known to change nothing (`cascade_fixed`).
+        // A fixed point only once its commit is known to change nothing (`cascade_fixed`);
+        // until then a candidate for certification (3), unless its commit grows damage
+        // (`cascade_end`).
         if (thread.x == 0)
         {
             status[ST_ISLANDS + i] = s | 2u;
-            gate[params.gate_flag_base + i] = float4(0.0);
+            gate[params.gate_flag_base + i] = float4(params.certify != 0 ? 3.0 : 0.0, 0.0, 0.0, 0.0);
         }
         return;
     }
@@ -182,7 +189,8 @@ void cascade_gate(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     if (thread.x != 0 || g_differs != 0)
         return;
     islands[i].info.z = isl.info.z & ~ISLAND_SOLVE;
-    status[ST_ISLANDS + i] = flag == 2.0 ? 32u : 16u;
+    // A certified converged repeat stays solved and converged (its commit runs).
+    status[ST_ISLANDS + i] = flag == 2.0 ? 32u : (flag == 3.0 ? (64u | 1u) : 16u);
 }
 
 [shader("compute")]
@@ -243,6 +251,9 @@ void cascade_end(uint3 thread: SV_GroupThreadID)
             add |= 8u;
             disconnected = 1;
         }
+        // Damage grew: its equilibrium moved; no repeat stands for it.
+        if (add != 0)
+            gate[params.gate_flag_base + i] = float4(0.0);
         status[ST_ISLANDS + i] = s | add;
     }
     g_damaged[tid] = damaged;

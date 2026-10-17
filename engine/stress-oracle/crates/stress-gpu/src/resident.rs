@@ -328,7 +328,8 @@ pub struct CascadeParams {
     pub sload_base: u32,
     pub gate_flag_base: u32,
     pub bond_words: u32,
-    pub pad: [u32; 2],
+    pub certify: u32,
+    pub pad: u32,
 }
 
 /// First per-island word of the cascade's status record (cascade.slang `ST_ISLANDS`).
@@ -365,10 +366,11 @@ pub struct CascadeOutcome {
     /// The clusters solved in the last pass run, and those that converged.
     pub solved: Vec<usize>,
     pub converged: Vec<usize>,
-    /// Islands the repeat gate skipped: repeats of an unconverged solve, and of a fixed
-    /// point.
+    /// Islands the repeat gate skipped: repeats of an unconverged solve, of a fixed
+    /// point, and converged repeats certified without a solve.
     pub skipped_unconverged: usize,
     pub skipped_fixed: usize,
+    pub certified: usize,
 }
 
 impl CascadeOutcome {
@@ -384,6 +386,7 @@ impl CascadeOutcome {
             converged: (0..islands).filter(|&i| per[i] & 3 == 3 || per[i] & 32 != 0).collect(),
             skipped_unconverged: per.iter().filter(|&&p| p & 16 != 0).count(),
             skipped_fixed: per.iter().filter(|&&p| p & 32 != 0).count(),
+            certified: per.iter().filter(|&&p| p & 64 != 0).count(),
         }
     }
 }

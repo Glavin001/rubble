@@ -294,6 +294,17 @@ your call; the rest need building.
       it would change results at the rounding level, which is your call. The other lever
       is the static solve's per-iteration latency on the large islands (one threadgroup
       per island).
+    - **Your decision (2026-10-17): floor-certify converged repeats.**
+      - An island's converged solve whose commit grew no damage is certified converged
+        without a solve, when its loads repeat bit for bit and its state is untouched.
+        Its commit still runs, and afterwards it can be a fixed point.
+        `STRESS_QS_CERTIFY=0` turns this off.
+      - Matched Vibe Town idle: **55–60 → 9.7 ms median**, with 263 of 284 clusters at
+        fixed points. Broken bonds are unchanged (493) and here even the digest is
+        unchanged.
+      - Next, Blast's remaining behaviours as switches: committing unconverged iterates
+        (`ALLOW_UNCONVERGED`), at most two evaluations a tick, and a 16-iteration
+        warm-started budget.
 12c. **Quasi-static frames at scale** (fractured downtown, authored, 34 ms): two full layout builds per frame (~6.5 ms each: pack 1.8, terms 1.5, uploads 2.8), the tail's solves of the 7 fatigue-active buildings, and the write-back; then item 11.
 12b. **Static solves in the tiered coupling:** the budget is a per-frame cost bound
     (Blast's choice); a warm-started multigrid (item 10) would converge within it.

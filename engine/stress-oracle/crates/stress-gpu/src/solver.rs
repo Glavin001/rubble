@@ -2526,6 +2526,9 @@ impl GpuSolver {
         }
         // `STRESS_QS_REPEAT_GATE=0`: every flagged island solved, repeats included.
         let gate_on = std::env::var("STRESS_QS_REPEAT_GATE").map_or(true, |v| v != "0");
+        // `STRESS_QS_CERTIFY=0`: a converged solve's repeat is solved again (one polishing
+        // Newton step at f32's floor) instead of certified (cascade.slang).
+        let certify = gate_on && std::env::var("STRESS_QS_CERTIFY").map_or(true, |v| v != "0");
         let n_chunks = self.layout.chunks.len();
         if self.cascade_gate.as_ref().is_none_or(|(g, _)| *g != generation) {
             self.cascade_gate = Some((generation, gpu.storage("cascade gate", &vec![[0f32; 4]; 2 * n_chunks + n_islands + 1])));
@@ -2563,7 +2566,8 @@ impl GpuSolver {
                     sload_base: p.sload_base,
                     gate_flag_base: 2 * n_chunks as u32,
                     bond_words: (std::mem::size_of::<BondDyn>() / 16) as u32,
-                    pad: [0; 2],
+                    certify: certify as u32,
+                    pad: 0,
                 },
             );
             let bind = gpu.bind(&kernels.begin.group, &[&cp, &self.buffers.islands, &self.buffers.scratch, &self.buffers.state, &backup, &status, &gate, &self.buffers.bond_dyn, &bond_backup]);
