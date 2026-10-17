@@ -70,7 +70,7 @@ test('benchmark captures color buckets before and after timing without readbacks
   let measuring = false;
   const context = {...DISPATCH,
     lead: 0, scene: 'ring110k', bodyCount: 110442,
-    params: {iterations: 4, dt: 1/60}, stablePacking: true, persistentContacts: true,
+    params: {iterations: 4, dt: 1/60}, SLEEP_OFF_TIME: 1e6, stablePacking: true, persistentContacts: true,
     compactContacts: true, sparseStart: 32, parallelColorPrefix:false, physicalAdjacency: true, spatialOrder: false,
     fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', reuseMode: 'pass', npMode: 'fused', persistMode: 'scan', repairMode: 'rounds', restMode: 'drop', endpointsMode: 'manifold', gridMode: 'fixed', info: {}, navigator: {userAgent: 'test'},
     last: {awake: 110441}, submitPhysics() {}, device: {queue: {async onSubmittedWorkDone() {}}},
