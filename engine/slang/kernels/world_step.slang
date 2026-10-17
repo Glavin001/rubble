@@ -1736,6 +1736,38 @@ Contact makeContactRow(
     return ct;
 }
 
+// Track belt (conveyor) surface: a collider on a vehicle chassis with a non-zero
+// `density` is a belt whose surface runs at `density` m/s around its local +X axle
+// (vehicle chassis colliders carry no density; vehicle_post writes the speed).
+// The surface velocity at a contact with outward normal nOut is speed·(axle × nOut):
+// backward on the bottom, down the front, forward on top — a track loop.
+bool colliderIsBelt(Collider col, BodyState b)
+{
+    return (b.flags & BODY_VEHICLE) != 0u && col.density != 0.0;
+}
+
+// Same test loading the body only for a collider with density (rare: belts, and
+// colliders the inertia pass reads).
+bool colliderIsBeltLazy(Collider col)
+{
+    return col.density != 0.0 && (gBodies[col.body].flags & BODY_VEHICLE) != 0u;
+}
+
+float3 beltSurfaceDisp(Collider col, BodyState b, float3 nOut, float dt)
+{
+    if (!colliderIsBelt(col, b)) return float3(0, 0, 0);
+    float3 axle = quatRotate(b.initialRot, quatRotate(col.localRot, float3(1, 0, 0)));
+    return col.density * dt * cross(axle, nOut);
+}
+
+// Relative belt travel of a pair this step (n = A→B): the surfaces move by
+// d + belt, so the tangent rows hold t·(dB − dA + sB − sA) at zero.
+float3 pairBeltDisp(Collider ca, Collider cb, BodyState ba, BodyState bb, float3 n)
+{
+    float dt = PARAMS.dt;
+    return beltSurfaceDisp(cb, bb, -n, dt) - beltSurfaceDisp(ca, ba, n, dt);
+}
+
 void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
 {
     // Wake only a sleeping body hit by an awake neighbour with meaningful relative
@@ -3174,7 +3206,9 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
                 Collider colA = gColliders[c.colliderA];
                 Collider colB = gColliders[c.colliderB];
                 bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
-                if (prev._pad0 > 0.5 && !anySphere)
+                // Nor for track belts: the surface runs past the contact every step.
+                bool belt = colliderIsBeltLazy(colA) || colliderIsBeltLazy(colB);
+                if (prev._pad0 > 0.5 && !anySphere && !belt)
                 {
                     c.anchorA = prev.anchorA;
                     c.anchorB = prev.anchorB;
@@ -3333,7 +3367,7 @@ void csr_degree_contacts(uint3 tid : SV_DispatchThreadID)
     // Persistent hosts pack solver pairs before the graph (8el): read the two
     // body ids from the 32-byte pair instead of manifold -> two colliders.
     SolverPair sp = gSolverPairs[i];
-    if ((sp.countAndSphere & ~SOLVER_SPHERE) == 0u) return;
+    if ((sp.countAndSphere & SOLVER_COUNT_MASK) == 0u) return;
     uint2 e = uint2(sp.bodyA, sp.bodyB);
 #else
     Manifold m = gManifolds[i];
@@ -3551,7 +3585,7 @@ void csr_scatter_contacts(uint3 tid : SV_DispatchThreadID)
     uint id = gCounters[0].jointCount + i;
 #if defined(ENGINE_PERSISTENT_CONTACTS)
     SolverPair sp = gSolverPairs[i];
-    if ((sp.countAndSphere & ~SOLVER_SPHERE) == 0u) return;
+    if ((sp.countAndSphere & SOLVER_COUNT_MASK) == 0u) return;
     uint2 e = uint2(sp.bodyA, sp.bodyB);
 #else
     Manifold m = gManifolds[i];
@@ -4264,6 +4298,12 @@ struct SolverPair
 };
 BIND(28) RWStructuredBuffer<SolverPair> gSolverPairs;
 static const uint SOLVER_SPHERE = 0x80000000u;
+// A track-belt pair (pairBeltDisp). The solve kernels have no binding to spare for
+// colliders, so its belt travel is packed here, once per step: μ moves to bits
+// 14..29 of countAndSphere as a half, and `friction` holds the travel along
+// (t1, t2) as two halves. Other pairs keep the plain layout.
+static const uint SOLVER_BELT = 0x40000000u;
+static const uint SOLVER_COUNT_MASK = 0x3FFFu;
 
 void packSolverPair(uint mi, Manifold mf)
 {
@@ -4275,7 +4315,31 @@ void packSolverPair(uint mi, Manifold mf)
     pair.countAndSphere = mf.contactCount |
         ((a.shape == SHAPE_SPHERE || b.shape == SHAPE_SPHERE) ? SOLVER_SPHERE : 0u);
     pair.normal = mf.normal; pair.friction = mf.friction;
+    if (colliderIsBeltLazy(a) || colliderIsBeltLazy(b))
+    {
+        float3 belt = pairBeltDisp(a, b, gBodies[a.body], gBodies[b.body], mf.normal);
+        float3 t1, t2;
+        orthonormalBasis(mf.normal, t1, t2);
+        pair.countAndSphere |= SOLVER_BELT | (f32tof16(mf.friction) << 14u);
+        pair.friction = asfloat(f32tof16(dot(belt, t1)) | (f32tof16(dot(belt, t2)) << 16u));
+    }
     gSolverPairs[mi] = pair;
+}
+
+float solverPairFriction(SolverPair pair)
+{
+    return (pair.countAndSphere & SOLVER_BELT) != 0u
+        ? f16tof32((pair.countAndSphere >> 14u) & 0xFFFFu) : pair.friction;
+}
+
+// World belt travel of a pair this step (pairBeltDisp), from its packed halves.
+float3 solverPairBelt(SolverPair pair)
+{
+    if ((pair.countAndSphere & SOLVER_BELT) == 0u) return float3(0, 0, 0);
+    float3 t1, t2;
+    orthonormalBasis(pair.normal, t1, t2);
+    uint bits = asuint(pair.friction);
+    return t1 * f16tof32(bits & 0xFFFFu) + t2 * f16tof32(bits >> 16u);
 }
 
 Contact solverContact(uint index, float3 normal, float friction)
@@ -4448,7 +4512,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             // Manifold edge: load both bodies once, fold every contact point (three-avbd).
 #if defined(ENGINE_COMPACT_SOLVE)
             SolverPair pair = gSolverPairs[id - nJ];
-            uint contactCount = pair.countAndSphere & ~SOLVER_SPHERE;
+            uint contactCount = pair.countAndSphere & SOLVER_COUNT_MASK;
             uint contactStart = pair.contactStart;
             if (contactCount == 0u) continue;
             uint ba = pair.bodyA, bb = pair.bodyB;
@@ -4466,6 +4530,13 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             bool isA = ba == bodyIdx;
             BodyState bA = gBodies[ba];
             BodyState bB = gBodies[bb];
+            // Track belt: the pair's tangential target this step (zero off belts).
+            float3 belt = float3(0, 0, 0);
+#if defined(ENGINE_COMPACT_SOLVE)
+            belt = solverPairBelt(pair);
+#else
+            belt = pairBeltDisp(colA, colB, bA, bB, mf.normal);
+#endif
             // Sphere lever arms use step-start rotation; static poses stay current.
             float4 rotA = (anySphere && bodyIsDynamic(bA)) ? bA.initialRot : bA.orientation;
             float4 rotB = (anySphere && bodyIsDynamic(bB)) ? bB.initialRot : bB.orientation;
@@ -4495,7 +4566,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             for (uint ci = 0u; ci < contactCount; ci++)
             {
                 #if defined(ENGINE_COMPACT_SOLVE)
-                Contact c = solverContact(contactStart + ci - HOST_S(11), pair.normal, pair.friction);
+                Contact c = solverContact(contactStart + ci - HOST_S(11), pair.normal, solverPairFriction(pair));
 #else
                 Contact c = READ_CONTACT(contactStart + ci);
 #endif
@@ -4509,8 +4580,8 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
                 float3 t2 = c.tangent2;
                 float3 C = float3(
                     contactC0NReg(c.c0N, keep) + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
-                    c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
-                    c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
+                    c.c0T1 * keep + dot(t1, dLinB - dLinA + belt) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
+                    c.c0T2 * keep + dot(t2, dLinB - dLinA + belt) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
                 c.penetration = C.x;
                 // C is already Ĉ; alpha=0 + margin=0 ⇒ contributeContact uses F = k·C + λ.
                 if ((p.flags & FLAG_SLIDE_HESSIAN) != 0u)
@@ -4848,7 +4919,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         if (pairIndex != SOLVER_DEAD)
         {
             pair = gSolverPairs[pairIndex];
-            c = solverContact(i, pair.normal, pair.friction);
+            c = solverContact(i, pair.normal, solverPairFriction(pair));
         }
 #else
         Contact c = READ_CONTACT(curOff + i);
@@ -4875,6 +4946,12 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             Collider colA = gColliders[c.colliderA];
             Collider colB = gColliders[c.colliderB];
             bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+#endif
+            float3 belt = float3(0, 0, 0);
+#if defined(ENGINE_COMPACT_SOLVE)
+            belt = solverPairBelt(pair);
+#else
+            belt = pairBeltDisp(colA, colB, bA, bB, c.normal);
 #endif
             float4 rotA = (anySphere && bodyIsDynamic(bA)) ? bA.initialRot : bA.orientation;
             float4 rotB = (anySphere && bodyIsDynamic(bB)) ? bB.initialRot : bB.orientation;
@@ -4905,8 +4982,8 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
             float3 t2 = c.tangent2;
             float3 cReg = float3(
                 contactC0NReg(c.c0N, keep) + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
-                c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
-                c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
+                c.c0T1 * keep + dot(t1, dLinB - dLinA + belt) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
+                c.c0T2 * keep + dot(t2, dLinB - dLinA + belt) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
             c.penetration = cReg.x;
             float3 f = float3(c.kN, c.kT, c._pad2) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
             // Eq. 16 tests the *unclamped* tangential force. Testing after cone
@@ -5362,7 +5439,8 @@ void recompute_inertia(uint3 tid : SV_DispatchThreadID)
     uint body = dispatchIndex(tid);
     if (body >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[body];
-    if (!bodyIsDynamic(b)) return;
+    // Vehicle chassis mass comes from the packer; their belt colliders reuse density.
+    if (!bodyIsDynamic(b) || (b.flags & BODY_VEHICLE) != 0u) return;
     float mass = 0.0;
     float3 com = float3(0, 0, 0);
     // Pass 1: mass / COM in body frame

@@ -81,13 +81,25 @@
       carry: 'Lab: kart riding on a truck',
       sidewall: 'Lab: crates beside the tyres',
       bridge: 'Lab: plank bridge with breakable bolts',
+      tanklab: 'Lab: tank over rubble, logs and a ledge',
     };
     const scene = qs.get('scene') || 'playground';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
     const presets = await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json();
     const byName = Object.fromEntries(presets.map((p) => [p.name, p]));
-    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' ? 'monster_truck' : 'sedan');
+    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' ? 'monster_truck' : scene === 'tanklab' ? 'tank' : 'sedan');
     if (!byName[presetName]) throw new Error(`unknown preset ${presetName}; have ${Object.keys(byName).join(', ')}`);
+    // ?tracks=shells: the tank as it was before track pods (wheel shells, belly 1 m up),
+    // for side-by-side comparisons.
+    if (qs.get('tracks') === 'shells' && byName[presetName].tracks) {
+      const d = structuredClone(byName[presetName]);
+      d.tracks.left.pod = null;
+      d.tracks.right.pod = null;
+      const belly = d.parts.findIndex((p) => p.name === 'belly');
+      if (belly >= 0) d.parts[0].mass += d.parts.splice(belly, 1)[0].mass;
+      d.name += '_shells';
+      byName[presetName] = d;
+    }
 
     const sceneSel = document.getElementById('sceneSel');
     const presetSel = document.getElementById('presetSel');
@@ -272,6 +284,22 @@
           if (!byName[heavy]) throw new Error(`unknown heavy preset ${heavy}`);
           addVehicle(heavy, [0, Y + 2, -11], 0, { forward: 0, steer: 0, handbrake: 1 });
         }
+      } else if (scene === 'tanklab') {
+        // Mirrors the tank tests in tests/vehicle.rs: rubble in the track paths, logs
+        // across the lane, then a 0.6 m ledge (twice the road wheels' reach).
+        for (let row = 0; row < 7; row++) for (const x of [-1.7, 0, 1.7]) {
+          const h = row % 2 ? 0.175 : 0.12, z = 10 + row * 1.5, j = (row % 3 - 1) * 0.15;
+          const body = boxBody([x + j, h, z], [h, h, h], 1500 * 8 * h * h * h);
+          boxCol(body, [h, h, h], MAT_PROP);
+        }
+        for (const z of [24, 28]) {
+          const half = [2.6, 0.2, 0.2];
+          const body = boxBody([0, 0.2, z], half, 250);
+          boxCol(body, half, MAT_PROP);
+        }
+        staticBox([0, 0.3, 36 + 25], [6, 0.3, 25], [0, 0, 0, 1], MAT_GROUND);
+        for (let z = 0; z <= 80; z += 8) staticBox([7.5, 0.5, z], [0.25, 0.5, 0.25]);
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
       } else if (scene === 'sidewall') {
         // Light crates in two rows that only the tyre outlines reach (outside the body,
         // off the ray lines): the wheel shells shove them.

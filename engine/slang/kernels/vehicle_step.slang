@@ -2047,6 +2047,33 @@ void placeWheelShell(uint wr, uint chassis, uint anchor, bool attached, float L,
     }
 }
 
+// Track belts (V_QUERY.zw = left/right pod colliders): the pod's surface runs at the
+// sprocket's rim speed (world_step reads it from the collider's density as a
+// conveyor). A track whose sprocket is gone parks its pod on the static anchor.
+void updateTrackBelts(uint vr, uint4 cfg, uint anchor)
+{
+    uint4 q = VU(vr + V_QUERY);
+    uint4 leaders = VU(vr + V_TRACK);
+    for (uint side = 0u; side < 2u; side++)
+    {
+        uint pod = side == 0u ? q.z : q.w;
+        uint leader = side == 0u ? leaders.x : leaders.y;
+        if (pod == NO_INDEX || leader == NO_INDEX) continue;
+        uint wr = wheelRec(cfg.y + leader);
+        bool lost = (VU(wr + W_C0).z & (WD_DETACHED | WD_DISABLED)) != 0u;
+        float speed = VD(wr + W_W).x * VD(wr + W_HP).w;
+        uint first = pod & ((1u << POD_COUNT_SHIFT) - 1u);
+        for (uint k = 0u; k < (pod >> POD_COUNT_SHIFT); k++)
+        {
+            // Whole-record store: a partial store mis-translates through naga.
+            Collider col = gColliders[first + k];
+            col.body = lost ? anchor : cfg.x;
+            col.density = lost ? 0.0 : speed;
+            gColliders[first + k] = col;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // vehicle_link: after wheel_query, before the constraint graph. A wheel standing
 // on a dynamic body points its tyre joint (JOINT_FLAG_TYRE) at (chassis, ground) so the two
@@ -2525,6 +2552,8 @@ void vehicle_post(uint3 tid : SV_DispatchThreadID)
             VSet(wr + W_O_N, float4(VD(wr + W_C2).xyz, asfloat(contact ? dyn.x : NO_INDEX)));
         }
     }
+
+    if ((cfg.w & VF_TRACKED) != 0u) updateTrackBelts(vr, cfg, anchor);
 
     float speedFwd = dot(c.linearVel, fwdW);
     float4 d0 = VD(vr + V_D0);
