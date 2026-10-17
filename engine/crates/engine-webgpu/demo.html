@@ -48,7 +48,7 @@
     </div>
     <div id="rates">
       <div><span class="lbl">TPS</span> <strong class="val" id="tpsVal">—</strong><span class="sub" id="stepMsVal"></span></div>
-      <div><span class="lbl">Max TPS</span> <strong class="val" id="maxTpsVal">—</strong><span class="sub">uncapped</span></div>
+      <div title="1000 ÷ physics step cost: GPU pass time with timestamp queries, otherwise an estimate from submission busy time"><span class="lbl">Max TPS</span> <strong class="val" id="maxTpsVal">—</strong><span class="sub" id="maxTpsSub"></span></div>
       <div><span class="lbl">FPS</span> <strong class="val" id="fpsVal">—</strong><span class="sub" id="frameMsVal"></span></div>
       <div><span class="lbl">Max FPS</span> <strong class="val" id="maxFpsVal">—</strong><span class="sub">uncapped</span></div>
     </div>
@@ -1059,7 +1059,8 @@ struct VsOut {
       pass.dispatchWorkgroupsIndirect(bufs[23], slot * 12);
     }
 
-    function encodeStep(enc, readback, beginPass) {
+    // stepTimestamps: optional timestampWrites for the whole (unsplit) step pass.
+    function encodeStep(enc, readback, beginPass, stepTimestamps) {
       const nBodies = Math.max(bodyCount, 1);
       const nCols = Math.max(colliderCount, 1);
       const prevContacts = Math.min(Math.max(last.contact, 256), cap.maxContacts);
@@ -1067,7 +1068,8 @@ struct VsOut {
       const hashN = warmHashSlots(prevContacts) * (warmRecordHash ? 4 : 1);
 
       writeHost(enc);
-      let pass = beginPass ? beginPass() : enc.beginComputePass();
+      let pass = beginPass ? beginPass()
+        : enc.beginComputePass(stepTimestamps ? { timestampWrites: stepTimestamps } : undefined);
       const nextPhase = () => {
         if (!beginPass) return;
         pass.end();
@@ -1290,6 +1292,36 @@ struct VsOut {
     }
 
     let phaseSamples;
+    // Resolved timestamps are nanoseconds; a reversed pair is invalid evidence.
+    function timestampMs(stamps, a, b) {
+      if (stamps[b] < stamps[a]) throw new Error(`Physics profiler timestamp ${b} precedes ${a}; GPU timing sample is invalid.`);
+      return Number(stamps[b] - stamps[a]) / 1e6;
+    }
+    // Live HUD step cost. Playback steps once per rAF, so completion-to-completion
+    // intervals are pinned to the display refresh, not the engine. With
+    // 'timestamp-query' each live step's single compute pass is timestamped (GPU
+    // time, render excluded). Otherwise (Safari/iOS) busy time stands in: completion
+    // minus the later of submit and the previous completion. That equals the step
+    // cost while the queue is saturated and otherwise adds readback latency, so the
+    // estimate reads high and is labelled as one.
+    function liveStepSample({ stamps, submittedAt, completedAt, previousCompletedAt }) {
+      if (stamps && stamps[1] > stamps[0]) return { ms: timestampMs(stamps, 0, 1), source: 'gpu' };
+      return { ms: completedAt - Math.max(submittedAt, previousCompletedAt), source: 'estimate' };
+    }
+    // Median over a rate window; GPU samples win, so an occasional invalid timestamp
+    // pair cannot mix estimate latency into a GPU-timed readout.
+    function summarizeStepCost(samples) {
+      const gpu = samples.filter(sample => sample.source === 'gpu');
+      const used = (gpu.length ? gpu : samples).map(sample => sample.ms).filter(ms => ms > 0).sort((a, b) => a - b);
+      if (!used.length) return { stepMs: 0, maxTps: 0, source: 'none' };
+      const stepMs = used[used.length >> 1];
+      return { stepMs, maxTps: 1000 / stepMs, source: gpu.length ? 'gpu' : 'estimate' };
+    }
+    function stepCostLabels({ stepMs, maxTps, source }) {
+      if (source === 'gpu') return { step: `${stepMs.toFixed(1)} ms/step GPU`, maxTps: maxTps.toFixed(0), maxTpsSub: 'GPU-timed' };
+      if (source === 'estimate') return { step: `≈${stepMs.toFixed(1)} ms/step est.`, maxTps: `≈${maxTps.toFixed(0)}`, maxTpsSub: 'estimate' };
+      return { step: '', maxTps: '—', maxTpsSub: '' };
+    }
     function preSolveProfileParts() {
       const graph = graphProfile
         ? ['awake', 'csrDegree', 'csrPrefix', 'csrScatter', 'csrSort', 'colorInit', 'colorRepair', 'colorPack', 'predict']
@@ -1355,10 +1387,7 @@ struct VsOut {
         const completedAt = performance.now();
         const stamps = new BigUint64Array(read.getMappedRange().slice(0));
         read.unmap();
-        const ms = (a, b) => {
-          if (stamps[b] < stamps[a]) throw new Error(`Physics profiler timestamp ${b} precedes ${a}; GPU timing sample is invalid.`);
-          return Number(stamps[b] - stamps[a]) / 1e6;
-        };
+        const ms = (a, b) => timestampMs(stamps, a, b);
         let primal = 0, dual = 0;
         const perColor = new Array(primalPasses).fill(0);
         for (let iter = 0; iter < params.iterations; iter++) {
@@ -1532,6 +1561,7 @@ struct VsOut {
     const tpsVal = document.getElementById('tpsVal');
     const fpsVal = document.getElementById('fpsVal');
     const maxTpsVal = document.getElementById('maxTpsVal');
+    const maxTpsSub = document.getElementById('maxTpsSub');
     const maxFpsVal = document.getElementById('maxFpsVal');
     const stepMsVal = document.getElementById('stepMsVal');
     const frameMsVal = document.getElementById('frameMsVal');
@@ -1540,52 +1570,57 @@ struct VsOut {
     let phases = '';
     let benchStarted = false;
     let measuring = false;
-    // Rolling 1 s windows: TPS = physics steps/s, FPS = rAF presents/s (can diverge if
-    // measuring pauses steps, or if multiple steps per frame are added later).
-    // Max TPS/FPS = 1000/ms — headroom if uncapped by display refresh / rAF.
+    // Rolling 1 s windows: TPS = physics steps/s, FPS = rAF presents/s (observed,
+    // so display-bound). Max TPS = 1000 / measured physics step cost (see
+    // liveStepSample); Max FPS = 1000 / CPU time per rAF callback.
     let rateWindowStart = performance.now();
     let rateSteps = 0;
     let rateFrames = 0;
-    let rateStepMsSum = 0;
     let rateFrameMsSum = 0;
-    let showTps = 0;
-    let showFps = 0;
-    let showMaxTps = 0;
-    let showMaxFps = 0;
-    let showStepMs = 0;
-    let showFrameMs = 0;
-    function bumpRates(didStep, stepMs, frameMs) {
+    let rateStepCosts = [];
+    function resetRates() {
+      rateWindowStart = performance.now();
+      rateSteps = 0;
+      rateFrames = 0;
+      rateFrameMsSum = 0;
+      rateStepCosts = [];
+    }
+    function addStepCost(sample) {
+      if (!measuring) rateStepCosts.push(sample);
+    }
+    // benchWall pauses live steps and saturates the queue: no live rate means anything.
+    function showMeasuring() {
+      for (const el of [tpsVal, maxTpsVal, fpsVal, maxFpsVal]) el.textContent = '—';
+      stepMsVal.textContent = 'paused';
+      maxTpsSub.textContent = 'measuring…';
+      frameMsVal.textContent = '';
+      window.__RATES__ = { measuring: true };
+    }
+    function bumpRates(didStep, frameMs) {
       rateFrames++;
       rateFrameMsSum += frameMs;
-      if (didStep) {
-        rateSteps++;
-        rateStepMsSum += stepMs;
-      }
+      if (didStep) rateSteps++;
       const elapsed = performance.now() - rateWindowStart;
-      if (elapsed >= 1000) {
-        const sec = elapsed / 1000;
-        showTps = rateSteps / sec;
-        showFps = rateFrames / sec;
-        showStepMs = rateSteps > 0 ? rateStepMsSum / rateSteps : 0;
-        showFrameMs = rateFrames > 0 ? rateFrameMsSum / rateFrames : 0;
-        showMaxTps = showStepMs > 1e-6 ? 1000 / showStepMs : 0;
-        showMaxFps = showFrameMs > 1e-6 ? 1000 / showFrameMs : 0;
-        tpsVal.textContent = showTps.toFixed(0);
-        fpsVal.textContent = showFps.toFixed(0);
-        maxTpsVal.textContent = showMaxTps > 0 ? showMaxTps.toFixed(0) : '—';
-        maxFpsVal.textContent = showMaxFps > 0 ? showMaxFps.toFixed(0) : '—';
-        stepMsVal.textContent = showStepMs > 0 ? `${showStepMs.toFixed(1)} ms/step` : '';
-        frameMsVal.textContent = showFrameMs > 0 ? `${showFrameMs.toFixed(1)} ms/frame` : '';
-        window.__RATES__ = {
-          tps: showTps, fps: showFps, maxTps: showMaxTps, maxFps: showMaxFps,
-          stepMs: showStepMs, frameMs: showFrameMs,
-        };
-        rateWindowStart = performance.now();
-        rateSteps = 0;
-        rateFrames = 0;
-        rateStepMsSum = 0;
-        rateFrameMsSum = 0;
-      }
+      if (elapsed < 1000) return;
+      const sec = elapsed / 1000;
+      const tps = rateSteps / sec;
+      const fps = rateFrames / sec;
+      const frameMsAvg = rateFrames > 0 ? rateFrameMsSum / rateFrames : 0;
+      const maxFps = frameMsAvg > 1e-6 ? 1000 / frameMsAvg : 0;
+      const cost = summarizeStepCost(rateStepCosts);
+      const labels = stepCostLabels(cost);
+      tpsVal.textContent = tps.toFixed(0);
+      fpsVal.textContent = fps.toFixed(0);
+      maxTpsVal.textContent = labels.maxTps;
+      maxTpsSub.textContent = labels.maxTpsSub;
+      maxFpsVal.textContent = maxFps > 0 ? maxFps.toFixed(0) : '—';
+      stepMsVal.textContent = labels.step;
+      frameMsVal.textContent = frameMsAvg > 0 ? `${frameMsAvg.toFixed(1)} ms/frame` : '';
+      window.__RATES__ = {
+        tps, fps, maxTps: cost.maxTps, maxFps,
+        stepMs: cost.stepMs, stepSource: cost.source, frameMs: frameMsAvg,
+      };
+      resetRates();
     }
     // Live playback pipelines counter readback instead of draining the GPU every
     // frame: up to LIVE_IN_FLIGHT frames stay queued and counters arrive one or two
@@ -1610,21 +1645,30 @@ struct VsOut {
     };
 
     const LIVE_IN_FLIGHT = 2;
+    // Each live readback carries the 80-byte counters, then (with timestamp-query)
+    // the begin/end timestamps of that step's compute pass. One query set and
+    // resolve buffer serve every frame: queue order keeps frames from overlapping.
+    const liveTimestamps = wantTimestamps ? {
+      querySet: device.createQuerySet({ type: 'timestamp', count: 2 }),
+      resolve: device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+    } : null;
     const liveFree = Array.from({ length: LIVE_IN_FLIGHT }, () =>
-      device.createBuffer({ size: 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+      device.createBuffer({ size: liveTimestamps ? 96 : 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
     const livePending = new Set();
     let liveError = null;
     let lastCompletion = 0;
-    let liveStepMs = 0;
     async function drainLive() {
       await Promise.all([...livePending]);
       if (liveError) throw liveError;
     }
+    // Returns the step's [begin, end] pass timestamps, or null without timestamp-query.
     function readLiveCounters(buf) {
-      const c = new Uint32Array(buf.getMappedRange().slice(0));
+      const bytes = buf.getMappedRange().slice(0);
       buf.unmap();
+      const c = new Uint32Array(bytes, 0, 20);
       last = { contact: c[2], candidate: c[4], awake: c[5], color: c[6], manifold: c[12], overflow: c[7], colorRounds: c[17] };
       if (last.overflow & 8) throw new Error('Graph coloring is incomplete or exceeds the palette; refusing to solve connected bodies concurrently.');
+      return bytes.byteLength >= 96 ? new BigUint64Array(bytes, 80, 2) : null;
     }
 
     async function frame(now) {
@@ -1637,9 +1681,9 @@ struct VsOut {
         return;
       }
       // Skip overlapping rAF ticks while benchWall awaits — concurrent mapAsync on
-      // staging hung the replay at step 1 after measuring. Still count FPS.
+      // staging hung the replay at step 1 after measuring. Nothing is drawn, so the
+      // HUD shows measuring instead of rates (see showMeasuring).
       if (measuring) {
-        bumpRates(false, 0, performance.now() - now);
         requestAnimationFrame(frame);
         return;
       }
@@ -1665,30 +1709,38 @@ struct VsOut {
           requestAnimationFrame(frame);
           return;
         }
-        encodeStep(enc, false);
-        const rp = enc.beginRenderPass({
+        // Physics and its readback go in their own submission, mapped before the
+        // render is submitted, so completion (the fallback estimate) excludes drawing.
+        const readback = liveFree.pop();
+        encodeStep(enc, false, undefined, liveTimestamps && { querySet: liveTimestamps.querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 });
+        enc.copyBufferToBuffer(bufs[7], 0, readback, 0, 80);
+        if (liveTimestamps) {
+          enc.resolveQuerySet(liveTimestamps.querySet, 0, 2, liveTimestamps.resolve, 0);
+          enc.copyBufferToBuffer(liveTimestamps.resolve, 0, readback, 80, 16);
+        }
+        device.queue.submit([enc.finish()]);
+        const submittedAt = performance.now();
+        parity ^= 1;
+        steps++;
+        const pending = readback.mapAsync(GPUMapMode.READ).then(() => {
+          const completedAt = performance.now();
+          const stamps = readLiveCounters(readback);
+          liveFree.push(readback);
+          addStepCost(liveStepSample({ stamps, submittedAt, completedAt, previousCompletedAt: lastCompletion }));
+          lastCompletion = completedAt;
+        }).catch(e => { liveError = liveError || e; });
+        livePending.add(pending);
+        pending.finally(() => livePending.delete(pending));
+        const renderEnc = device.createCommandEncoder();
+        const rp = renderEnc.beginRenderPass({
           colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.12, 0.16, 0.22, 1], loadOp: 'clear', storeOp: 'store' }],
           depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
         });
         rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
         rp.setPipeline(boxPipe); rp.setBindGroup(0, boxBind); rp.setVertexBuffer(0, boxVbo); rp.draw(36, bodies.length - 1);
         rp.end();
-        const readback = liveFree.pop();
-        enc.copyBufferToBuffer(bufs[7], 0, readback, 0, 80);
-        device.queue.submit([enc.finish()]);
-        parity ^= 1;
-        steps++;
-        const pending = readback.mapAsync(GPUMapMode.READ).then(() => {
-          readLiveCounters(readback);
-          liveFree.push(readback);
-          // Completion interval: per-step GPU throughput while the queue stays busy.
-          const t = performance.now();
-          if (lastCompletion > 0) liveStepMs = t - lastCompletion;
-          lastCompletion = t;
-        }).catch(e => { liveError = liveError || e; });
-        livePending.add(pending);
-        pending.finally(() => livePending.delete(pending));
-        bumpRates(true, liveStepMs, performance.now() - now);
+        device.queue.submit([renderEnc.finish()]);
+        bumpRates(true, performance.now() - now);
         if (cfg.settled && (steps === 1 || steps % 30 === 0 || steps === lead)) {
           await sampleSettle();
         }
@@ -1716,6 +1768,7 @@ struct VsOut {
         if (benchmarkEnabled && !benchStarted && steps >= lead) {
           benchStarted = true;
           measuring = true;
+          showMeasuring();
           await drainLive();
           lastCompletion = 0;
           statusEl.textContent = cfg.settled
@@ -1745,6 +1798,8 @@ struct VsOut {
             statusEl.textContent = `wall ${wallMs.toFixed(2)} ms ${phases}${cfg.settled ? ` · settle KE ${pre.ke.toFixed(1)} sleep ${pre.sleeping}/${dyn} h ${pre.maxY.toFixed(2)}/${initialMaxY.toFixed(2)} ${ok ? 'STABLE' : 'UNSTABLE'}` : ''} · replaying…`;
           } finally {
             measuring = false;
+            lastCompletion = 0;
+            resetRates();
           }
         }
         requestAnimationFrame(frame);
