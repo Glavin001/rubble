@@ -26,6 +26,10 @@ use crate::gpu::Gpu;
 use crate::ingest::EngineIngest;
 use crate::resident::{EngineFrame, ResidentEngine, ResidentQs, SharedEngine};
 
+/// Cascade passes encoded per submission (the cascade rarely needs more; a longer one
+/// takes further windows, one status read each).
+const CASCADE_WINDOW: usize = 4;
+
 pub(super) struct ResidentState {
     ingest: EngineIngest,
     /// Substeps the ingest holds.
@@ -162,59 +166,75 @@ impl GpuWorld {
         let tail = std::time::Instant::now();
         let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
         let max = StaticOptions::default().max_cascade.max(1);
-        let mut unconverged = false;
         let mut split = false;
-        for pass in 0..max {
+        let mut first = 0;
+        let mut unconverged = 0;
+        loop {
+            // The cascade from pass `first` on, under GPU control; then the frame's one
+            // read: the cascade's status, the engine's counters, the pulse slots' status.
             self.resident_tables(gpu, n);
-            let m = &self.solver.mirror;
-            let clusters: Vec<usize> = (0..m.clusters.len()).filter(|&ci| !m.clusters[ci].bonds.is_empty()).collect();
             let t_pass = std::time::Instant::now();
             let r = self.resident.take().expect("resident tables");
-            let converged = self.solver.equilibrate_resident_with(gpu, &clusters, None, &|s, enc| {
+            let window = CASCADE_WINDOW.min(max - first);
+            let run = self.solver.resident_cascade(gpu, fdt, first, window, &|s, enc, pass| {
                 r.qs.encode_poses(gpu, enc, &r.ingest, s);
                 if pass == 0 {
                     r.qs.encode_filter(gpu, enc, &r.ingest, s);
                 }
                 r.qs.encode_static_loads(gpu, enc, &r.ingest, s);
             });
+            let e = engine.borrow();
+            let read = gpu.read_ranges(&[run.range(), e.resident_status(), r.qs.status_range()]);
+            drop(e);
             self.resident = Some(r);
-            let t_solve = t_pass.elapsed().as_secs_f64() * 1e3;
-            unconverged |= converged.iter().any(|&c| !c);
-            let solved: Vec<usize> = clusters.iter().zip(&converged).filter(|(_, &c)| c).map(|(&ci, _)| ci).collect();
-            for &ci in &clusters {
-                self.solver.mirror.clusters[ci].activity = Activity::Settled;
+            let out = run.outcome(&read[0]);
+            engine.borrow_mut().resident_finish(&read[1])?;
+            self.resident.as_ref().expect("resident tables").qs.check(&read[2])?;
+            unconverged += out.unconverged;
+            for cl in self.solver.mirror.clusters.iter_mut().filter(|c| !c.bonds.is_empty()) {
+                cl.activity = Activity::Settled;
             }
-            let (damaged, disconnected) = self.solver.commit_resident(gpu, &solved, if pass == 0 { fdt } else { 0.0 });
             if trace {
-                eprintln!("resident qs pass {pass}: {} clusters ({} converged), solve {t_solve:.1} ms, commit {:.1} ms, {} damaged, {} disconnected", clusters.len(), solved.len(), t_pass.elapsed().as_secs_f64() * 1e3 - t_solve, damaged.len(), disconnected.len());
+                eprintln!(
+                    "resident qs passes {first}..: {} run, {} of {} solved converged, {} unconverged in all, {:.1} ms, {} disconnected",
+                    out.passes,
+                    out.converged.len(),
+                    out.solved.len(),
+                    out.unconverged,
+                    t_pass.elapsed().as_secs_f64() * 1e3,
+                    out.disconnected.len()
+                );
             }
-            if !disconnected.is_empty() {
-                // A split: the mirror (state and the engine's motion), split and tables.
-                self.solver.sync(gpu);
-                self.resident_sync_motion();
-                let mut pending = disconnected.clone();
-                pending.sort_unstable();
-                for &ci in pending.iter().rev() {
-                    self.solver.mirror.split_cluster(ci);
+            let Some(at) = out.disconnected_at else {
+                // The window ran out with damage still growing: the next window.
+                if out.passes == window && out.damaged && first + window < max {
+                    first += window;
+                    continue;
                 }
-                if let Some(l) = self.solver.loads.as_mut() {
-                    l.topology_version += 1;
-                }
-                self.solver.rebuild(gpu, 0.0)?;
-                split = true;
-                continue;
+                break;
+            };
+            // A split: the mirror (state and the engine's motion), split and tables; the
+            // cascade goes on from the next pass.
+            self.solver.sync(gpu);
+            self.resident_sync_motion();
+            for &ci in out.disconnected.iter().rev() {
+                self.solver.mirror.split_cluster(ci);
             }
-            if damaged.is_empty() {
+            if let Some(l) = self.solver.loads.as_mut() {
+                l.topology_version += 1;
+            }
+            self.solver.rebuild(gpu, 0.0)?;
+            split = true;
+            first = at + 1;
+            if first >= max {
                 break;
             }
         }
-        if unconverged {
+        if unconverged > 0 {
             self.shell.static_unconverged_frames += 1;
         }
         self.tail_seconds += tail.elapsed().as_secs_f64();
         let t_back = std::time::Instant::now();
-        engine.borrow_mut().resident_finish()?;
-        self.resident.as_ref().expect("resident tables").qs.check(gpu)?;
         if split {
             // New clusters get their engine bodies (at the engine's end of the frame).
             for cl in &mut self.solver.mirror.clusters {

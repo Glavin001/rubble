@@ -179,19 +179,34 @@ measured before the next.
     - `resident_static_loads` is `static_loads` per solved island.
   - **Solve and commit.** `equilibrate_resident_with` (loads formed by the kernels above
     in the same submission), then `commit_resident`.
-  - **Host role.** The host keeps the cascade's control. Its reads are each pass's
-    verdicts and, at the frame's end, the engine's overflow status. A split syncs the
-    mirror, including the engine's motion (`GpuWorld::sync`), splits on the host and
-    rebuilds the tables.
+  - **The cascade under GPU control (phase 5).** `GpuSolver::resident_cascade` with
+    `shaders/cascade.slang` encodes `fast_static_tail`'s passes, each one as
+    `equilibrate_resident` and `commit_resident` run it:
+    - the layout's island records are copied in on the GPU;
+    - the unconverged solves are restored by a kernel;
+    - a pass's verdict (damage grew, nothing disconnected) decides on the GPU whether
+      the next pass runs.
+
+    Passes go in windows of 4 per submission. One command buffer holding all 200 passes
+    of `max_cascade` failed on Metal, and empty passes still cost dispatches.
+  - **One read per frame.** The frame reads the cascade's status record, rubble's step
+    counters (`WgpuSim::drained`, which replaces `drain`'s own read) and the pulse slots'
+    status, together in one `read_ranges`. A cascade longer than its window, or a split,
+    adds a read.
+  - **Splits.** A split syncs the mirror, including the engine's motion
+    (`GpuWorld::sync`), splits on the host, rebuilds the tables (the frame's filtered loads
+    and pulses carried by chunk) and resumes the cascade at the next pass.
   - **Same results as the fast frame, bit for bit.** Measured on house_ram (qs and blast
     configurations, 25 bonds broken), town16_one_ram (qs, 8 broken), the fractured
     high-rise rammed (qs) and Vibe Town idle. The f32 load path reproduces the host's
-    f64 → f32 loads exactly on these scenes. Covered by `tests/resident_gpu.rs`.
+    f64 → f32 loads exactly on these scenes. Covered by `tests/resident_gpu.rs`: the
+    cracking house, and a weak cantilever that splits at its root, whose fragments fall
+    onto the ground. Damage, clusters and fragment positions match bit for bit.
   - **Vibe Town idle** (281 clusters, authored, qs, budget 2 × 32, interleaved runs on a
-    shared GPU): fast frame median 35–51 ms; **resident 16–21 ms**. Engine preparation
-    falls from 2.6 to 0.6 ms, and the download (2.3–2.8 ms) and host loads are gone. What
-    remains is the static solve on the GPU (~18 ms), which is the next item, and the
-    frame-end wait.
+    shared GPU): fast frame median 35–51 ms; **resident 16–21 ms with host control of the
+    cascade, 16–17.5 ms with the GPU cascade**. Engine preparation falls from 2.6 to
+    0.6 ms, and the download (2.3–2.8 ms) and host loads are gone. What remains (~16 ms)
+    is the static solve on the GPU, the next item.
   - **Not covered yet:**
     - Quiet-cluster exclusion is off in resident frames. It is chosen from the host's
       engine loads; the GPU-native replacement is "same loads, same state → skip the
@@ -199,8 +214,7 @@ measured before the next.
     - Impact islands (tiered and explicit frames) still take the host path. They need
       `resident_filter`'s pulses as load terms (`load_range.zw`) and phase 6.
     - Splits are on the host.
-    - Every dispatch writes small uniforms, and each cascade pass writes the island
-      records from the host. Those are host → GPU writes, not read-backs.
+    - Every dispatch writes small uniforms. Those are host → GPU writes, not read-backs.
 
 Gate per phase: the opt-in resident frame's outcomes within the GPU solve's run-to-run
 spread and the oracle gates on the realtime, accuracy and pack sets; the default path

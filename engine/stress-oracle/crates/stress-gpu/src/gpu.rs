@@ -207,9 +207,13 @@ impl Gpu {
 
     /// A uniform buffer holding `value`.
     pub fn uniform<T: bytemuck::Pod>(&self, label: &str, value: &T) -> wgpu::Buffer {
+        // Padded to 16 bytes: a shader's uniform struct is (Metal checks the binding's
+        // length against it).
+        let bytes = bytemuck::bytes_of(value);
+        let padded = [bytes, &[0u8; 16][..bytes.len().next_multiple_of(16) - bytes.len()]].concat();
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
-            contents: bytemuck::bytes_of(value),
+            contents: &padded,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         })
     }

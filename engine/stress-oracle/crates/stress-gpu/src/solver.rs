@@ -542,6 +542,11 @@ pub struct GpuSolver {
     pub quiet_quasi_static: bool,
     /// `equilibrate_resident`'s copy of the state from before a solve.
     state_backup: Option<wgpu::Buffer>,
+    /// The resident cascade's kernels, status record and the layout's island records
+    /// (by layout generation), made on first use (`resident_cascade`).
+    cascade: Option<crate::resident::CascadeKernels>,
+    cascade_islands: Option<(u64, wgpu::Buffer)>,
+    cascade_status: Option<wgpu::Buffer>,
     pub stopped_at_plan: bool,
     pub profile: Profile,
     /// The code paths that ran so far (`coverage`): the device's words OR-ed after every
@@ -610,6 +615,9 @@ impl GpuSolver {
             static_stable: Vec::new(),
             quiet_quasi_static: false,
             state_backup: None,
+            cascade: None,
+            cascade_islands: None,
+            cascade_status: None,
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
@@ -2391,6 +2399,88 @@ impl GpuSolver {
         self.equilibrate_resident_with(gpu, clusters, Some(loads), &|_, _| {})
     }
 
+    /// world.rs `fast_static_tail`'s cascade of solves and damage commits from pass
+    /// `first` on, every pass encoded in one submission and the next one's run decided on
+    /// the GPU (`shaders/cascade.slang`); `pre(solver, encoder, pass)` forms each pass's
+    /// loads (encoded before its solve). Nothing is read: the caller reads the status
+    /// record (`CascadeRun`), with whatever else the frame reports. The same work as
+    /// `equilibrate_resident` and `commit_resident` per pass (bit for bit), with the
+    /// unconverged solves' states restored on the GPU.
+    pub fn resident_cascade(&mut self, gpu: &Gpu, frame_dt: f64, first: usize, passes: usize, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder, usize)) -> crate::resident::CascadeRun {
+        let n_islands = self.layout.islands.len();
+        if self.cascade.is_none() {
+            self.cascade = Some(crate::resident::CascadeKernels::new(gpu));
+        }
+        let generation = self.layout_generation;
+        if self.cascade_islands.as_ref().is_none_or(|(g, _)| *g != generation) {
+            let mut with_sentinel = self.layout.islands.clone();
+            with_sentinel.push(Island::default());
+            self.cascade_islands = Some((generation, gpu.storage("cascade layout islands", &with_sentinel)));
+        }
+        let words = crate::resident::CASCADE_ST_ISLANDS + n_islands + 1;
+        if self.cascade_status.as_ref().is_none_or(|b| b.size() < 4 * words as u64) {
+            self.cascade_status = Some(gpu.storage("cascade status", &vec![0u32; words]));
+        }
+        let size = self.buffers.state.size();
+        if self.state_backup.as_ref().is_none_or(|b| b.size() != size) {
+            self.state_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("state backup"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        }
+        let status = self.cascade_status.clone().expect("cascade status");
+        let layout_islands = self.cascade_islands.as_ref().expect("cascade islands").1.clone();
+        let backup = self.state_backup.clone().expect("state backup");
+        // The status record: the first pass runs.
+        let mut init = vec![0u32; crate::resident::CASCADE_ST_ISLANDS];
+        init[0] = 1;
+        gpu.queue.write_buffer(&status, 0, bytemuck::cast_slice(&init));
+        let p = self.buffers.params;
+        let result_base = (p.statics_base as usize + 23 * self.layout.chunks.len() + 2 * self.layout.bonds.len()) as u32;
+        let commit_params = |dt: f64| gpu.storage("cascade commit params", std::slice::from_ref(&Params { dt: dt as f32, ..p }));
+        let commit_first = commit_params(frame_dt);
+        let commit_later = commit_params(0.0);
+        let params_bytes = std::mem::size_of::<Params>() as u64;
+        let orig = gpu.storage("cascade params", std::slice::from_ref(&p));
+        let kernels = self.cascade.as_ref().expect("cascade kernels");
+        let islands_bytes = std::mem::size_of::<Island>() as u64 * (n_islands as u64 + 1);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for pass in first..first + passes {
+            let cp = gpu.uniform("cascade pass", &crate::resident::CascadeParams { island_count: n_islands as u32, result_base, pass_index: pass as u32, pad: 0 });
+            let bind = gpu.bind(&kernels.begin.group, &[&cp, &self.buffers.islands, &self.buffers.scratch, &self.buffers.state, &backup, &status]);
+            let run = |encoder: &mut wgpu::CommandEncoder, k: &crate::gpu::Kernel, groups: u32| {
+                let mut c = encoder.begin_compute_pass(&Default::default());
+                c.set_pipeline(&k.pipeline);
+                c.set_bind_group(0, &bind, &[]);
+                c.dispatch_workgroups(groups, 1, 1);
+            };
+            let world = |encoder: &mut wgpu::CommandEncoder, k: &Kernel| {
+                let mut c = encoder.begin_compute_pass(&Default::default());
+                c.set_pipeline(&k.pipeline);
+                c.set_bind_group(0, &self.buffers.bind_segment, &[]);
+                c.dispatch_workgroups(n_islands.max(1) as u32, 1, 1);
+            };
+            // equilibrate_resident: the islands flagged, the states backed up, the loads,
+            // the solves, the unconverged ones restored.
+            encoder.copy_buffer_to_buffer(&layout_islands, 0, &self.buffers.islands, 0, islands_bytes);
+            run(&mut encoder, &kernels.begin, crate::gpu::groups(n_islands, 64));
+            encoder.copy_buffer_to_buffer(&self.buffers.state, 0, &backup, 0, size);
+            pre(self, &mut encoder, pass);
+            world(&mut encoder, &self.kernels.statics);
+            run(&mut encoder, &kernels.restore, n_islands.max(1) as u32);
+            // commit_resident: the converged islands flagged, their damage committed with
+            // the frame's duration (the first pass) or none.
+            encoder.copy_buffer_to_buffer(&layout_islands, 0, &self.buffers.islands, 0, islands_bytes);
+            run(&mut encoder, &kernels.settle, crate::gpu::groups(n_islands, 64));
+            encoder.copy_buffer_to_buffer(if pass == 0 { &commit_first } else { &commit_later }, 0, &self.buffers.params_segment, 0, params_bytes);
+            world(&mut encoder, &self.kernels.fatigue);
+            encoder.copy_buffer_to_buffer(&orig, 0, &self.buffers.params_segment, 0, params_bytes);
+            run(&mut encoder, &kernels.end, 1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
+        self.bonds_stale = true;
+        self.coverage |= coverage::STATICS | coverage::SETTLED_FATIGUE;
+        crate::resident::CascadeRun { status, words, islands: n_islands }
+    }
+
     /// `equilibrate_resident` with the loads from the host (`loads`) or, with `None`,
     /// formed on the GPU by `pre`, which is encoded after the island records are written
     /// and before the solve (the resident frame: `resident.rs`).
@@ -2420,7 +2510,8 @@ impl GpuSolver {
         gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&with_sentinel));
         let size = self.buffers.state.size();
         if self.state_backup.as_ref().is_none_or(|b| b.size() != size) {
-            self.state_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("state backup"), size, usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            // Storage too: the resident cascade restores from it in a kernel.
+            self.state_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("state backup"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
         }
         let backup = self.state_backup.clone().expect("state backup");
         let range = |ci: usize| {

@@ -126,13 +126,17 @@ impl ResidentQs {
                 None => t[at] = [f32::from_bits(NONE), 0.0, 0.0, 0.0],
             }
         }
-        // Carried pulses, by (structure, chunk).
+        // Carried pulses and this frame's filtered loads (a rebuild within the frame's
+        // cascade keeps them: the filter runs once a frame), by (structure, chunk).
         if self.params.chunk_count > 0 && self.params.pulse_cap == cap {
             let old: Vec<[f32; 4]> = gpu.read(&self.ctab);
             let at: HashMap<(usize, usize), usize> = chunks.iter().enumerate().map(|(k, &sc)| (sc, k)).collect();
             for (ok, sc) in self.chunks.iter().enumerate() {
                 let count = old[self.params.pulse_count_base as usize + ok][0].to_bits() as usize;
                 let Some(&k) = at.get(sc) else { continue };
+                for j in 0..2 {
+                    t[eload_base as usize + 2 * k + j] = old[self.params.eload_base as usize + 2 * ok + j];
+                }
                 let from = self.params.pulse_base as usize + 3 * cap as usize * ok;
                 let to = pulse_base as usize + 3 * cap as usize * k;
                 t[to..to + 3 * count].copy_from_slice(&old[from..from + 3 * count]);
@@ -203,10 +207,15 @@ impl ResidentQs {
         (0..n).map(|k| (p(v[2 * k]), p(v[2 * k + 1]))).collect()
     }
 
-    /// Err when a chunk's carried pulses overflowed their slots (read: one float4).
-    pub fn check(&self, gpu: &Gpu) -> Result<(), String> {
-        let s: Vec<[f32; 4]> = gpu.read_range(&self.ctab, self.params.status_base as usize, 1);
-        if s[0][0].to_bits() != 0 {
+    /// The status word's range (for the frame's one read).
+    pub fn status_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        (&self.ctab, 16 * self.params.status_base as u64, 16)
+    }
+
+    /// Err when a chunk's carried pulses overflowed their slots (the status word read).
+    pub fn check(&self, status: &[u8]) -> Result<(), String> {
+        let s: &[u32] = bytemuck::cast_slice(status);
+        if s[0] != 0 {
             return Err(format!("resident frame: a chunk carries more than {} impact pulses past their frame (STRESS_RESIDENT_PULSES)", self.params.pulse_cap));
         }
         Ok(())
@@ -235,9 +244,10 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     /// One frame of `dt` in `n` substeps (nothing frozen, no impulses), each substep's
     /// contact rows into `ingest`, then merged; no read-back.
     fn step_resident(&mut self, gpu: &Gpu, dt: f64, n: u32, ingest: &EngineIngest) -> Result<(), String>;
-    /// The frame's end: wait for the engine's work and report its overflow, if any (the
-    /// frame's one engine read).
-    fn resident_finish(&mut self) -> Result<(), String>;
+    /// The engine's status (its step counters) for the frame's one read.
+    fn resident_status(&self) -> (&wgpu::Buffer, u64, u64);
+    /// The frame's end, with the status read: the engine's overflow, if any.
+    fn resident_finish(&mut self, status: &[u8]) -> Result<(), String>;
 }
 
 /// A resident engine shared between the world's shell (as its `RigidEngine`) and the
@@ -277,5 +287,89 @@ impl<T: ResidentEngine> stress_ref::engine::RigidEngine for SharedEngine<T> {
     }
     fn rest_overlaps(&self) -> Vec<stress_ref::engine::RestOverlap> {
         self.0.borrow().rest_overlaps()
+    }
+}
+
+/// The resident cascade's kernels (`shaders/cascade.slang`).
+pub struct CascadeKernels {
+    pub begin: Kernel,
+    pub restore: Kernel,
+    pub settle: Kernel,
+    pub end: Kernel,
+}
+
+const CASCADE_BINDINGS: [Binding; 6] = [
+    Binding::Uniform,   // params
+    Binding::StorageRw, // islands
+    Binding::Storage,   // scratch
+    Binding::StorageRw, // state
+    Binding::Storage,   // state backup
+    Binding::StorageRw, // status
+];
+
+impl CascadeKernels {
+    pub fn new(gpu: &Gpu) -> CascadeKernels {
+        let k = |e: &str| gpu.compute(&shaders::CASCADE, e, &CASCADE_BINDINGS);
+        CascadeKernels { begin: k("cascade_begin"), restore: k("cascade_restore"), settle: k("cascade_settle"), end: k("cascade_end") }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CascadeParams {
+    pub island_count: u32,
+    pub result_base: u32,
+    pub pass_index: u32,
+    pub pad: u32,
+}
+
+/// First per-island word of the cascade's status record (cascade.slang `ST_ISLANDS`).
+pub const CASCADE_ST_ISLANDS: usize = 16;
+
+/// A submitted resident cascade: its status record to read.
+pub struct CascadeRun {
+    pub status: wgpu::Buffer,
+    pub words: usize,
+    pub islands: usize,
+}
+
+impl CascadeRun {
+    pub fn range(&self) -> (&wgpu::Buffer, u64, u64) {
+        (&self.status, 0, 4 * self.words as u64)
+    }
+
+    pub fn outcome(&self, bytes: &[u8]) -> CascadeOutcome {
+        CascadeOutcome::from_status(bytemuck::cast_slice(bytes), self.islands)
+    }
+}
+
+/// What a resident cascade did.
+#[derive(Clone, Debug, Default)]
+pub struct CascadeOutcome {
+    pub passes: usize,
+    pub unconverged: usize,
+    /// The pass at which a bond disconnected (the cascade stopped there), and the
+    /// islands (clusters) that disconnected in it.
+    pub disconnected_at: Option<usize>,
+    pub disconnected: Vec<usize>,
+    /// Damage grew in the last pass run (the cascade would continue).
+    pub damaged: bool,
+    /// The clusters solved in the last pass run, and those that converged.
+    pub solved: Vec<usize>,
+    pub converged: Vec<usize>,
+}
+
+impl CascadeOutcome {
+    pub fn from_status(st: &[u32], islands: usize) -> CascadeOutcome {
+        let per = &st[CASCADE_ST_ISLANDS..CASCADE_ST_ISLANDS + islands];
+        CascadeOutcome {
+            passes: st[2] as usize,
+            unconverged: st[3] as usize,
+            disconnected_at: (st[1] != 0).then(|| st[1] as usize - 1),
+            disconnected: (0..islands).filter(|&i| per[i] & 8 != 0).collect(),
+            damaged: st[4] != 0,
+            solved: (0..islands).filter(|&i| per[i] & 1 != 0).collect(),
+            converged: (0..islands).filter(|&i| per[i] & 3 == 3).collect(),
+        }
     }
 }

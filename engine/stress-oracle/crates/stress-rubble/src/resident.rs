@@ -95,7 +95,12 @@ impl ResidentEngine for RubbleEngine {
         Ok(())
     }
 
-    fn resident_finish(&mut self) -> Result<(), String> {
-        self.sim.drain().map(|_| ()).map_err(|e| format!("rubble step failed: {e:?} (capacity overflow)"))
+    fn resident_status(&self) -> (&wgpu::Buffer, u64, u64) {
+        (self.sim.counters_buffer(), 0, std::mem::size_of::<engine_schema::StepCounters>() as u64)
+    }
+
+    fn resident_finish(&mut self, status: &[u8]) -> Result<(), String> {
+        let counters: engine_schema::StepCounters = bytemuck::pod_read_unaligned(status);
+        self.sim.drained(counters).map(|_| ()).map_err(|e| format!("rubble step failed: {e:?} (capacity overflow)"))
     }
 }

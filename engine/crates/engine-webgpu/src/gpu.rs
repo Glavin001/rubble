@@ -1062,6 +1062,12 @@ impl WgpuSim {
     /// Wait for every submitted step and refresh the counters (overflow check).
     pub fn drain(&mut self) -> Result<StepCounters, ExecError> {
         let counters = self.read_counters();
+        self.drained(counters)
+    }
+
+    /// `drain` with the counters (`counters_buffer`) read by the host along with other
+    /// reads, after every submitted step finished: one round trip for the host's frame.
+    pub fn drained(&mut self, counters: StepCounters) -> Result<StepCounters, ExecError> {
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
         // Wheel queries walk this step's broadphase grid, so vehicle worlds
