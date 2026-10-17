@@ -1,0 +1,20 @@
+name: Git LFS pull (cached)
+description: >
+  Fetches the repository's Git LFS files through actions/cache, so a run downloads them
+  from GitHub's LFS storage only when they change. Run after actions/checkout with
+  `lfs: false`.
+runs:
+  using: composite
+  steps:
+    - name: List LFS objects
+      shell: bash
+      # Inside the workspace: hashFiles only reads files there.
+      run: git lfs ls-files --long | cut -d ' ' -f1 | sort > .lfs-objects.txt
+    - name: Restore LFS cache
+      uses: actions/cache@v4
+      with:
+        path: .git/lfs/objects
+        key: lfs-${{ hashFiles('.lfs-objects.txt') }}
+    - name: Check out LFS files
+      shell: bash
+      run: git lfs pull
