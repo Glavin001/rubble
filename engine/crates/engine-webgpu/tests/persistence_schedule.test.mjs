@@ -10,6 +10,14 @@ const start = html.indexOf('function encodeStep(');
 const end = html.indexOf('function submitPhysics()', start);
 assert.ok(start >= 0 && end > start);
 const source = html.slice(start, end);
+// The encoder's dispatch-count constants (8ev), read from the shipped page, with the
+// fixed-palette controls on (colors=full, rounds=full): these tests check the full
+// schedule; adaptive counts are exercised by the browser regressions.
+const dispatchSource = html.slice(html.indexOf('const COLOR_ROUND_LIMIT'), html.indexOf('const colorsFull'));
+const DISPATCH = {
+  ...runInNewContext(`${dispatchSource}({COLOR_ROUND_LIMIT, COLOR_ROUND_HEADROOM, COLOR_HEADROOM, SLEEP_NEVER_S})`),
+  colorsFull: true, roundsFull: true,
+};
 
 for (const [query, expected] of [
   ['?scene=ring110k', true], ['?scene=gables506k', true],
@@ -92,7 +100,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         passes.push(p);
         return p;
       };
-      const context = {
+      const context = {...DISPATCH,
         detailedProfile, graphProfile, colorProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
         cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
@@ -232,7 +240,7 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=
   const trace = [], passes = [];
   const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
     dispatchWorkgroupsIndirect() { trace.push({name:'primal'}); }, end() {}}; passes.push(p); return p; };
-  const context = {
+  const context = {...DISPATCH,
     detailedProfile, graphProfile:false, colorProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
@@ -389,7 +397,7 @@ test('host upload publishes the previous GPU manifold count before counters rese
   const hostSource = html.slice(html.indexOf('function scratchWords()'), html.indexOf('function groups('));
   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
     const copies = [];
-    const context = {
+    const context = {...DISPATCH,
       manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152), steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
       last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
@@ -433,7 +441,7 @@ for (const sparseStart of [10, 32, 0]) {
     const passes = [], trace = [];
     const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
       dispatchWorkgroupsIndirect() { trace.push({name:'primal', phase:p.id}); }, end() {}}; passes.push(p); return p; };
-    const context = {
+    const context = {...DISPATCH,
       detailedProfile:false, graphProfile:false, colorProfile:true, bodyCount:110442, colliderCount:110442,
       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
