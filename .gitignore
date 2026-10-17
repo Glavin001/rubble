@@ -1,5 +1,6 @@
 .DS_Store
 /target
+engine/target/
 Cargo.lock
 *.spv
 .claude/
@@ -12,3 +13,15 @@ web/dist*/
 web/src/wasm/
 web/test-results/
 web/playwright-report/
+test-results/
+
+engine/docs/*.png
+engine/docs/*.jpg
+engine/docs/LOCAL_*
+
+# Shardwright checkouts and bakes (engine/scripts/bake-fracture-assets.sh)
+engine/.tools/
+
+# Local agent scratch: Cursor plans and autoresearch iteration logs
+.cursor/plans/
+autoresearch-results.tsv

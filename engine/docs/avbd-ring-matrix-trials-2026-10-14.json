@@ -1,0 +1,618 @@
+{
+  "objectiveStatus": "Open: 120 physics FPS and pinned-reference parity are not achieved.",
+  "protocol": {
+    "name": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "measuredSteps": 100,
+    "statistic": "minimum round median"
+  },
+  "scene": {
+    "name": "ring110k",
+    "totalBodies": 110442,
+    "activeDynamics": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contactLayout": "persistent64+32",
+    "packing": "stable",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact",
+    "sparseStart": 10
+  },
+  "browser": {
+    "name": "Codex in-app browser",
+    "version": "Chrome 155",
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "experiment": "Change only internal Mat6 representation/zero initialization; retain LDLT arithmetic, equilibration, pivot floors, contact equations and scene scheduling.",
+  "decision": "Revert all three matrix experiments. Packed variants were slower; scalar 11.82 ms versus restored 11.87 ms does not establish a speedup relative to recent production 11.80-11.88 ms. Retain the expanded independent oblique-contact oracle.",
+  "runs": [
+    {
+      "wallMs": 12.070000000018627,
+      "measuredAt": "2026-10-14T18:07:49.929Z",
+      "rounds": [
+        [
+          12,
+          12.129999999981374,
+          12.210000000009313,
+          12.210000000009313,
+          12.15
+        ],
+        [
+          12.210000000009313,
+          12.060000000009314,
+          12.070000000018627,
+          12.109999999962747,
+          12.040000000037253
+        ]
+      ],
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.179648,
+        "narrowphase": 2.490368,
+        "warm": 1.114112,
+        "graph": 1.31072,
+        "primal": 4.063232,
+        "dual": 1.7039360000000001,
+        "sleep": 0.065536
+      },
+      "name": "packed lower triangle array (21 floats)",
+      "sourceSha256": {
+        "common.slang": "fa304674688b56582e7f262c8b06399561aa2b20da81c3795ecce208249ef0cd",
+        "world_step.slang": "28fd26abbca25a9a410a5f8b3199f7df09fddcd729f5703e325829b979f1ba8a"
+      },
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "allBatchesWithin120Hz": false
+    },
+    {
+      "wallMs": 11.979999999981374,
+      "measuredAt": "2026-10-14T18:10:09.488Z",
+      "rounds": [
+        [
+          11.980000000027939,
+          12.059999999962747,
+          12.360000000009313,
+          12.110000000009313,
+          12.110000000009313
+        ],
+        [
+          12.179999999981373,
+          12.010000000009313,
+          11.979999999981374,
+          11.9,
+          11.910000000009314
+        ]
+      ],
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.114112,
+        "narrowphase": 2.490368,
+        "warm": 1.114112,
+        "graph": 1.31072,
+        "primal": 3.997696,
+        "dual": 1.7039360000000001,
+        "sleep": 0.065536
+      },
+      "name": "packed array with literal zero initialization",
+      "sourceSha256": {
+        "common.slang": "ce248ed4843208de2033e0a48523b5c7cec0c6715fa70058e00b2837f3cc7bc9",
+        "world_step.slang": "28fd26abbca25a9a410a5f8b3199f7df09fddcd729f5703e325829b979f1ba8a"
+      },
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "allBatchesWithin120Hz": false
+    },
+    {
+      "wallMs": 11.820000000018627,
+      "measuredAt": "2026-10-14T18:12:17.425Z",
+      "rounds": [
+        [
+          11.78999999994412,
+          11.870000000018626,
+          12.009999999962748,
+          11.980000000074506,
+          11.9
+        ],
+        [
+          11.919999999925494,
+          11.820000000018627,
+          11.9,
+          11.81000000005588,
+          11.709999999962747
+        ]
+      ],
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.114112,
+        "narrowphase": 2.490368,
+        "warm": 1.114112,
+        "graph": 1.31072,
+        "primal": 3.8666240000000003,
+        "dual": 1.7039360000000001,
+        "sleep": 0.065536
+      },
+      "name": "21 scalar fields with literal zero initialization",
+      "sourceSha256": {
+        "common.slang": "df6207603d6815f2bfa215fd2546136bf9b9966156c534ee9cbe37af113a1cc6",
+        "world_step.slang": "f2fcd8fa7f38404831d2ff45c8773e6eb28290655c7bba6bcfba2c728a6aaa41"
+      },
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "allBatchesWithin120Hz": false
+    },
+    {
+      "wallMs": 11.869999999925493,
+      "measuredAt": "2026-10-14T18:15:41.480Z",
+      "rounds": [
+        [
+          11.929999999981373,
+          12.079999999981373,
+          12.190000000037253,
+          12.119999999925493,
+          12.140000000037253
+        ],
+        [
+          12.170000000018627,
+          12.06000000005588,
+          11.869999999925493,
+          11.820000000018627,
+          11.740000000037252
+        ]
+      ],
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.114112,
+        "narrowphase": 2.490368,
+        "warm": 1.048576,
+        "graph": 1.31072,
+        "primal": 3.93216,
+        "dual": 1.7039360000000001,
+        "sleep": 0.065536
+      },
+      "name": "restored production (36-float array)",
+      "sourceSha256": {
+        "common.slang": "907de39b6bd36af53d049624c7a068da10a510e2ea6d396ab1141fb45c97e36f",
+        "world_step.slang": "c9db81a24c0990034172c8b70cdd504e37dc2a12c8e70a24a07f58455a386418"
+      },
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "allBatchesWithin120Hz": false
+    }
+  ],
+  "limitations": [
+    "Runs are serial, with no native GPU tests or shader compilation concurrent with browser timing.",
+    "100 measured steps per run; timing statistic is the minimum of two round medians, not a sustained 120 Hz guarantee.",
+    "Phase medians come from 10 later split-pass steps and perturb execution; do not equate their sum with batched wall time.",
+    "All four workload snapshots match exactly; no whole-scene accuracy claim is made for the discarded variants.",
+    "Pinned three-avbd was not remeasured in this experiment."
+  ],
+  "validation": {
+    "focusedTestsPerVariant": 42,
+    "restoredFocusedTests": 42,
+    "movingPrimalCases": 288,
+    "independentDualCases": 144,
+    "obliqueFrame": "normal [3,4,12]/13 with orthogonal tangent basis and unequal penalties; independent CPU system asserts all translation cross-terms nonzero",
+    "mutationProbe": {
+      "mutation": "Omit a.m[13] += k*j2*j1 (yz Hessian outer-product term).",
+      "test": "moving_contact_primal_and_dual_match_independent_dense_oracle",
+      "exitCode": 101,
+      "basis": 1,
+      "endpoint": "A",
+      "poseComponent": 0,
+      "actual": -0.012553151,
+      "expected": -0.014476095979800268,
+      "absoluteErrorMeters": 0.001922944979800268,
+      "restored": true
+    }
+  },
+  "compilerOptimizationProbe": {
+    "decision": "No flag change: O1/O2/O3 produce byte-identical raw WGSL for each of the three probed entries.",
+    "results": [
+      {
+        "entry": "solve_primal_color_persistent",
+        "optimization": 1,
+        "success": true,
+        "sha256": "8a88a033e4fffcc299a830b97ad813f0521adc3654a78f0c5ba27706c0927ccb",
+        "bytes": 54839
+      },
+      {
+        "entry": "solve_primal_color_persistent",
+        "optimization": 2,
+        "success": true,
+        "sha256": "8a88a033e4fffcc299a830b97ad813f0521adc3654a78f0c5ba27706c0927ccb",
+        "bytes": 54839
+      },
+      {
+        "entry": "solve_primal_color_persistent",
+        "optimization": 3,
+        "success": true,
+        "sha256": "8a88a033e4fffcc299a830b97ad813f0521adc3654a78f0c5ba27706c0927ccb",
+        "bytes": 54839
+      },
+      {
+        "entry": "solve_dual_persistent",
+        "optimization": 1,
+        "success": true,
+        "sha256": "0cd750a3fb6645fd449505d1a994bc0b88a63a93304814fc8e0306e88c14facc",
+        "bytes": 23447
+      },
+      {
+        "entry": "solve_dual_persistent",
+        "optimization": 2,
+        "success": true,
+        "sha256": "0cd750a3fb6645fd449505d1a994bc0b88a63a93304814fc8e0306e88c14facc",
+        "bytes": 23447
+      },
+      {
+        "entry": "solve_dual_persistent",
+        "optimization": 3,
+        "success": true,
+        "sha256": "0cd750a3fb6645fd449505d1a994bc0b88a63a93304814fc8e0306e88c14facc",
+        "bytes": 23447
+      },
+      {
+        "entry": "narrowphase",
+        "optimization": 1,
+        "success": true,
+        "sha256": "7f495acdf0a383c1d3a69c206bee0025a696e7f9dc96b11bebdd2c153498abff",
+        "bytes": 82701
+      },
+      {
+        "entry": "narrowphase",
+        "optimization": 2,
+        "success": true,
+        "sha256": "7f495acdf0a383c1d3a69c206bee0025a696e7f9dc96b11bebdd2c153498abff",
+        "bytes": 82701
+      },
+      {
+        "entry": "narrowphase",
+        "optimization": 3,
+        "success": true,
+        "sha256": "7f495acdf0a383c1d3a69c206bee0025a696e7f9dc96b11bebdd2c153498abff",
+        "bytes": 82701
+      }
+    ]
+  }
+}

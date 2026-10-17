@@ -1,0 +1,22 @@
+{
+  "decision": "8ep",
+  "change": "gables506k defaults to grid=split (already the ring default), now that 8eo keeps split-grid links in the AABB.",
+  "gables_ms": {
+    "sequence": [
+      "scaled 25.94",
+      "split 25.89",
+      "split 25.93",
+      "scaled 26.21"
+    ],
+    "gridPhase": {
+      "scaled": 1.84,
+      "split": 1.51
+    }
+  },
+  "gates": {
+    "browserGables240": "PASS bit-identical 0.1172912589201891/0.3304786682128906",
+    "browserUnit": "294/294",
+    "nativeGables240_ENGINE_GRID_split_canonical": "PASS 0.118657/0.330531 (canonical packing is candidate-order sensitive; was 0.118635/0.328483)",
+    "nativeGables240_split_persistent": "PASS 0.118635/0.328483"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "decision": "8dw (rejected)",
+  "change": "Faithful three-avbd dualManifold shape: solve_dual_pairs_{compact,persistent}, one thread per SolverPair loading the pair and both BodyStates once, looping its <=8 contiguous points (single SolverPoint load each); joints kept at index i; work slot 70 = max(manifolds, joints) behind HOST_S(15) with a 71-slot args buffer. Point math shared with the per-contact dual through helpers.",
+  "correctness": "New GPU test pair_dual_matches_contact_dual_bit_for_bit (93 ragged pairs crossing a workgroup, dead points, reserved holes, zero-count pair, sphere arms, sleeping/static pairs, both halves, both pass flavours, compact and persistent) passed; skipping each pair's first point failed it with point-level diagnostics. Ring workload snapshots identical to control. 45 GPU and 236 browser tests passed with the candidate.",
+  "ringABA_ms": {"control1": 11.28, "pairDual": 11.44, "control2": 11.40, "dualPhase": {"control1": 1.70, "pairDual": 1.77, "control2": 1.70}, "pairDualRoundSamples": [[11.37,11.51,11.59,11.53,11.56],[11.52,11.44,11.44,11.41,11.39]]},
+  "interpretation": "Body/pair loads saved per contact appear to be cache hits already; 240k threads each walking ~5 dependent points expose less memory parallelism than 1.18M per-contact threads. Matches the earlier grouped-dual occupancy finding.",
+  "disposition": "All dual sources, host wiring and the 71-slot args change restored byte-for-byte; generated solve_dual_pairs_* removed; 71 production modules re-exported (includes 8dv). 44 GPU and 229 browser tests pass after restoration. Reproducible candidate: docs/avbd-ring-pair-dual-trial.patch (applies against the post-8dv working tree)."
+}

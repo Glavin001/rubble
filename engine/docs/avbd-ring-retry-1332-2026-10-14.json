@@ -1,0 +1,41 @@
+{
+  "measuredAt": "2026-10-14T13:32:47.020Z",
+  "purpose": "Fresh retry requested by user after Mac restart; no implementation changes in this retry.",
+  "url": "http://127.0.0.1:8765/demo.html?scene=ring110k&bench=only",
+  "protocol": "three-avbd-2x5x10",
+  "leadSteps": 60,
+  "untimedStepsPerRound": 3,
+  "stepsPerBatch": 10,
+  "measuredSteps": 100,
+  "rounds": [
+    { "samplesMs": [12.22, 12.40, 12.42, 12.36, 12.33], "medianMs": 12.36 },
+    { "samplesMs": [12.38, 12.29, 12.27, 12.28, 12.30], "medianMs": 12.29 }
+  ],
+  "wallMs": 12.29,
+  "wallStatistic": "minimum of the two round medians",
+  "allBatchesWithin120Hz": false,
+  "totalBodies": 110442,
+  "dynamicBodies": 110441,
+  "iterations": 4,
+  "dt": 0.016666666666666666,
+  "adapter": { "vendor": "apple", "architecture": "metal-3" },
+  "browser": "Codex in-app browser, Chrome 155",
+  "contactLayout": "persistent64+32",
+  "packing": "stable",
+  "adjacency": "physical",
+  "order": "construction",
+  "persistence": "contact",
+  "workload": {
+    "start": { "contact": 1184245, "candidate": 230244, "awake": 110441, "color": 15, "manifold": 227155, "overflow": 0 },
+    "end": { "contact": 1174316, "candidate": 256703, "awake": 110441, "color": 11, "manifold": 246481, "overflow": 0 }
+  },
+  "phaseMediansMs": {
+    "aabbs": 0.131072, "grid": 1.179648, "narrowphase": 2.555904,
+    "warm": 1.048576, "graph": 1.31072, "primal": 4.128768,
+    "dual": 1.703936, "sleep": 0.065536
+  },
+  "phaseCaveat": "Separate later split-pass timestamp samples with readback perturb execution; not the throughput window.",
+  "processCheck": "No ring_hold or cargo process found. Process enumeration does not prove absence of other GPU contention.",
+  "comparison": "Consistent with previous retained optimization measurements of 12.26 and 12.32 ms. The earlier approximately 200 ms slowdown is absent in this run.",
+  "limitations": "Full correctness regression and pinned reference were not rerun for this timing-only retry. The 120 FPS target remains unmet."
+}

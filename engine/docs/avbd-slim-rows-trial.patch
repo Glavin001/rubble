@@ -1,0 +1,296 @@
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -826,7 +826,11 @@
+     for (int k = 0; k < count; k++)
+     {
+         BoxManifoldPt pt = points.pts[k];
++#if defined(ENGINE_SLIM_ROWS)
++        storeSlimContactRow(curOff + cStart + k, mslot, makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu));
++#else
+         STORE_NEW_CONTACT(curOff + cStart + k, mslot, makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu));
++#endif
+     }
+ 
+     Manifold mf;
+@@ -1367,7 +1371,31 @@
+             return;
+         }
+     }
++}
++
++#if defined(ENGINE_SLIM_ROWS)
++// Exactly the Contact loadPersistentContact would return for a full fresh row:
++// metadata from the owning manifold, the generated step from this step.
++Contact loadSlimContactRow(uint absolute)
++{
++    SolverPoint pt = gSolverPoints[absolute];
++    Manifold mf = gManifolds[(pt.pairAndStick & PERSIST_OWNER_MASK) - 1u];
++    Contact c = (Contact)0;
++    c.colliderA = mf.colliderA; c.colliderB = mf.colliderB;
++    c.featureId = asuint(pt.lambda.x);
++    c.alive = 1u;
++    c.normal = mf.normal; c.friction = mf.friction;
++    orthonormalBasis(c.normal, c.tangent1, c.tangent2);
++    c.anchorA = pt.anchorA; c.anchorB = pt.anchorB;
++    c.c0N = pt.c0N; c.c0T1 = pt.c0T1; c.c0T2 = pt.c0T2;
++    c.penetration = pt.c0N;
++    c.lambdaN = 0.0; c.lambdaT1 = pt.lambda.y; c.lambdaT2 = pt.lambda.z;
++    c.kN = pt.penalty.x; c.kT = pt.penalty.y; c._pad2 = pt.penalty.z;
++    c._pad0 = (pt.pairAndStick & SOLVER_STICK) != 0u ? 1.0 : 0.0;
++    c._pad1 = asfloat(HOST_S(17));
++    return c;
+ }
++#endif
+ 
+ // Shared point update; callers choose contact or manifold scheduling. Pair bodies
+ // are immutable during persistence, so manifold scheduling can load them once.
+@@ -1534,7 +1562,11 @@
+     uint state = CONTACT_STATE(curOff + i);
+     if (state == 0u) return;
+     bool reused = state >= 2u;
++#if defined(ENGINE_SLIM_ROWS)
++    Contact c = reused ? READ_CONTACT(HOST_S(8) + state - 2u) : loadSlimContactRow(curOff + i);
++#else
+     Contact c = reused ? READ_CONTACT(HOST_S(8) + state - 2u) : READ_CONTACT(curOff + i);
++#endif
+     BodyState ba = gBodies[gColliders[c.colliderA].body];
+     BodyState bb = gBodies[gColliders[c.colliderB].body];
+     persistContact(i, c, reused, ba, bb);
+--- a/engine/slang/physics/contact_storage.slang
++++ b/engine/slang/physics/contact_storage.slang
+@@ -29,7 +29,12 @@
+ {
+     uint tag = gSolverPoints[absolute].pairAndStick;
+     if ((tag & PERSIST_OWNER_MASK) == 0u) return 0u;
++#if defined(ENGINE_SLIM_ROWS)
++    // Slim rows park the reuse source tag in the hot λN slot (see markPersistentReuse).
++    return (tag & PERSIST_REUSED) != 0u ? asuint(gSolverPoints[absolute].lambda.x) : 1u;
++#else
+     return (tag & PERSIST_REUSED) != 0u ? gContactMeta[absolute].featureId : 1u;
++#endif
+ }
+ 
+ Contact loadPersistentContact(uint absolute)
+@@ -77,12 +82,35 @@
+ 
+ void markPersistentReuse(uint absolute, uint owner, uint sourceTag)
+ {
++#if defined(ENGINE_SLIM_ROWS)
++    // One hot line: the source tag rides in λN until persistence installs the
++    // complete previous record (metadata and forces).
++    gSolverPoints[absolute].lambda.x = asfloat(sourceTag);
++#else
+     // featureId temporarily holds the canonical reuse source tag (previous + 2).
+     // Persistence consumes it before installing the complete previous record.
+     gContactMeta[absolute].featureId = sourceTag;
++#endif
+     gSolverPoints[absolute].pairAndStick = (owner + 1u) | PERSIST_REUSED;
+ }
+ 
++#if defined(ENGINE_SLIM_ROWS)
++// Narrowphase rows write only the 64-byte hot record. Fresh rows have zero λN,
++// so the feature id rides in that slot; colliders, normal, friction and the
++// generated step come from the owning manifold when persistence completes them.
++void storeSlimContactRow(uint absolute, uint owner, Contact c)
++{
++    SolverPoint pt;
++    pt.anchorA = c.anchorA; pt.anchorB = c.anchorB;
++    pt.c0N = c.c0N; pt.c0T1 = c.c0T1; pt.c0T2 = c.c0T2;
++    pt.lambda = float3(asfloat(c.featureId), c.lambdaT1, c.lambdaT2);
++    pt.penalty = float3(c.kN, c.kT, c._pad2);
++    pt.pairAndStick = c.alive == 0u ? 0u : (owner + 1u) |
++        (c._pad0 != 0.0 ? SOLVER_STICK : 0u);
++    gSolverPoints[absolute] = pt;
++}
++#endif
++
+ #define READ_CONTACT(i) loadPersistentContact(i)
+ #define CONTACT_STATE(i) persistentContactState(i)
+ #define STORE_CONTACT(i, c) updatePersistentContact(i, c)
+--- /dev/null
++++ b/engine/slang/kernels/slim_rows.slang
+@@ -0,0 +1,8 @@
++// Opt-in slim narrowphase rows: narrowphase writes only hot 64-byte records;
++// persistence rebuilds metadata from the owning manifold and writes it once.
++#define ENGINE_COMPACT_SOLVE 1
++#define ENGINE_PERSISTENT_CONTACTS 1
++#define ENGINE_SLIM_ROWS 1
++#define narrowphase narrowphase_slim_persistent
++#define persist_contacts persist_contacts_slim_persistent
++#include "world_step.slang"
+--- a/engine/crates/engine-webgpu/build.rs
++++ b/engine/crates/engine-webgpu/build.rs
+@@ -9,6 +9,8 @@
+     "solve_primal_sparse",
+     "solve_primal_sparse_compact",
+     "solve_primal_sparse_persistent",
++    "narrowphase_slim_persistent",
++    "persist_contacts_slim_persistent",
+     "apply_commands",
+     "apply_commands_persistent",
+     "narrowphase_persistent",
+@@ -90,6 +92,7 @@
+     let world = slang_root.join("kernels/world_step.slang");
+     let compact = slang_root.join("kernels/compact_solve.slang");
+     let persistent = slang_root.join("kernels/persistent_solve.slang");
++    let slim = slang_root.join("kernels/slim_rows.slang");
+     let abi = slang_root.join("kernels/abi_probe.slang");
+     compile(
+         &abi,
+@@ -104,7 +107,9 @@
+     for entry in WORLD_ENTRIES {
+         let dest = out.join(format!("{entry}.spv"));
+         match compile(
+-            if entry.ends_with("_persistent") {
++            if entry.ends_with("_slim_persistent") {
++                &slim
++            } else if entry.ends_with("_persistent") {
+                 &persistent
+             } else if entry.ends_with("_compact")
+                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+@@ -155,7 +160,9 @@
+     {
+         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
+         match compile_with_defines(
+-            if entry.ends_with("_persistent") {
++            if entry.ends_with("_slim_persistent") {
++                &slim
++            } else if entry.ends_with("_persistent") {
+                 &persistent
+             } else if entry.ends_with("_compact")
+                 || (entry == &"pack_solver_contacts" || entry == &"clear_solver_contacts")
+--- a/engine/crates/engine-webgpu/demo.html
++++ b/engine/crates/engine-webgpu/demo.html
+@@ -108,6 +108,13 @@
+     if (!['contact', 'manifold'].includes(hashInsertMode))
+       throw new Error('hashInsert must be contact or manifold');
+     const manifoldHashInsert = hashInsertMode === 'manifold';
++    // Opt-in slim narrowphase rows: 64-byte hot writes; persistence completes
++    // metadata from the manifold, so fresh rows skip a 32-byte write and read.
++    const rowsMode = qs.get('rows') || 'full';
++    if (!['full', 'slim'].includes(rowsMode)) throw new Error('rows must be full or slim');
++    if (rowsMode === 'slim' && (!persistentContacts || manifoldPersistence || fusedPersistence))
++      throw new Error('rows=slim requires persistent contacts with per-contact persistence');
++    const slimRows = rowsMode === 'slim';
+     // Broadphase grid table scaled to >=2x colliders (three-avbd sizes its grid
+     // at 2x body capacity); scenes up to 65536 colliders keep 131072 heads.
+     // Gables fixed/scaled: 36.92/35.00/36.34/34.50 ms, grid 3.28->1.90 ms, with
+@@ -320,6 +327,7 @@
+       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
+       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
+       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
++      ...(slimRows ? ['narrowphase_slim_persistent', 'persist_contacts_slim_persistent'] : []),
+       'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
+       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
+       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
+@@ -964,7 +972,7 @@
+       // Narrowphase overwrites gManifolds, so the manifold insert must precede it.
+       if (!reuse && manifoldHashInsert)
+         throw new Error('hashInsert=manifold requires contact reuse (insert before narrowphase)');
+-      dispWork(pass, 'narrowphase', 64);
++      dispWork(pass, slimRows ? 'narrowphase_slim_persistent' : 'narrowphase', 64);
+       disp(pass, 'write_work_args', 64);
+       nextPhase();
+       if (!reuse) {
+@@ -974,7 +982,7 @@
+         if (detailedProfile) nextPhase();
+       }
+       if (fusedPersistence && !persistentContacts) dispWork(pass, 'clear_solver_contacts', 65);
+-      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
++      dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : slimRows ? 'persist_contacts_slim_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+       nextPhase();
+       disp(pass, 'build_awake_list', nBodies);
+       disp(pass, 'write_work_args', 64);
+@@ -1121,7 +1129,7 @@
+         totalBodies: bodyCount,
+         dynamicBodies: bodyCount - 1,
+         iterations: params.iterations,
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, rows: rowsMode, grid: gridMode,
+         dt: params.dt,
+         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
+         userAgent: navigator.userAgent,
+@@ -1507,7 +1515,7 @@
+             const report = {
+               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+               coloring: incrementalColors ? "reuse" : "rebuild",
+-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
++              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, rows: rowsMode, grid: gridMode, colors: last.color,
+               contacts: last.contact, awake: last.awake, overflow: last.overflow,
+               settle: pre, initialMaxY,
+             };
+@@ -1554,6 +1562,7 @@
+       report.order = spatialOrder ? "morton" : "construction";
+       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
+       report.hashInsert = hashInsertMode;
++      report.rows = rowsMode;
+       report.grid = gridMode;
+       // Exercise reset too: stale warm-start data from the completed run must not
+       // contaminate the first frame or the benchmark's lead-in.
+@@ -1579,7 +1588,7 @@
+       const report = {
+         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+         coloring: incrementalColors ? "reuse" : "rebuild",
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, grid: gridMode, colors: last.color,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, rows: rowsMode, grid: gridMode, colors: last.color,
+         contacts: last.contact, awake: last.awake, overflow: last.overflow,
+       };
+       console.log('BENCH', JSON.stringify(report));
+--- a/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
++++ b/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
+@@ -98,7 +98,7 @@
+         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
+         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
+-        manifoldHashInsert:false, gridHashWords:() => 0,
++        manifoldHashInsert:false, gridHashWords:() => 0, slimRows:false,
+         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
+         sleepRounds:8, PASS_ALIGN:256, bufs:[],
+         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+@@ -209,7 +209,7 @@
+     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
+-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0,
++    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0, slimRows:false,
+     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
+     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
+@@ -243,7 +243,7 @@
+   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
+     const copies = [];
+     const context = {
+-      manifoldHashInsert, gridHashWords:() => 0, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
++      manifoldHashInsert, gridHashWords:() => 0, slimRows:false, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
+       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
+       last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
+       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
+@@ -279,7 +279,7 @@
+       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
+-      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0,
++      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0, slimRows:false,
+       physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix:true,
+       sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+       writeHost() {}, disp(p,name) { trace.push({name, phase:p.id}); },
+@@ -314,7 +314,7 @@
+     detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
+     last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
+     nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
+-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576,
++    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576, slimRows:false,
+     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:32, parallelColorPrefix:true,
+     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+     writeHost() {}, disp(p,name,threads) { trace.push({name,threads}); }, dispWork() {}, encoder:{beginComputePass:pass},
+--- a/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
++++ b/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
+@@ -64,7 +64,7 @@
+     lead: 0, scene: 'ring110k', bodyCount: 110442,
+     params: {iterations: 4, dt: 1/60}, stablePacking: true, persistentContacts: true,
+     compactContacts: true, sparseStart: 32, parallelColorPrefix:false, physicalAdjacency: true, spatialOrder: false,
+-    fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', gridMode: 'fixed', info: {}, navigator: {userAgent: 'test'},
++    fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', rowsMode: 'full', gridMode: 'fixed', info: {}, navigator: {userAgent: 'test'},
+     last: {awake: 110441}, submitPhysics() {}, device: {queue: {async onSubmittedWorkDone() {}}},
+     async readCounters() { assert.equal(measuring, false); events.push('counters'); },
+     async readColorBuckets() { assert.equal(measuring, false); events.push('buckets'); return [60000,50441]; },

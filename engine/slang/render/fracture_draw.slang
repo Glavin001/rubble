@@ -1,0 +1,67 @@
+// Fracture lab draw, shared by the browser (WGSL) and the Metal viewer (MSL).
+// Render vertices are body-local and read the live AVBD pose buffer directly
+// (no CPU transform readback). Vertex = 10 floats: position.xyz, normal.xyz,
+// color.rgb, body id. Instanced house copies: copy k draws the same mesh on
+// bodies id + k * instance stride (body 0, the static ground, is shared).
+struct BodyPose { float4 p; float4 q; float4 invI; float4 v; float4 w; float4 ip; float4 iq; };
+// Column-major view-projection; mode.x = instance stride, mode.y = colour mode
+// (0 materials, 1 sleep state: awake orange, asleep blue, static grey).
+struct View { float4 c0; float4 c1; float4 c2; float4 c3; uint4 mode; };
+
+StructuredBuffer<BodyPose> gBodies;
+StructuredBuffer<float> gVerts;
+ConstantBuffer<View> gView;
+
+struct VsOut
+{
+    float4 pos : SV_Position;
+    float3 n : NORMAL;
+    float3 color : COLOR;
+    float3 world : POSITION1;
+};
+
+float3 rotate(float4 q, float3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+
+[shader("vertex")]
+VsOut vs(uint vid : SV_VertexID, uint copy : SV_InstanceID)
+{
+    uint o = vid * 10u;
+    float3 p = float3(gVerts[o], gVerts[o + 1u], gVerts[o + 2u]);
+    float3 n = float3(gVerts[o + 3u], gVerts[o + 4u], gVerts[o + 5u]);
+    uint id = uint(gVerts[o + 9u]);
+    uint index = id == 0u ? 0u : id + copy * gView.mode.x;
+    BodyPose body = gBodies[index];
+    float3 world = body.p.xyz + rotate(body.q, p);
+    VsOut r;
+    r.pos = gView.c0 * world.x + gView.c1 * world.y + gView.c2 * world.z + gView.c3;
+    r.n = rotate(body.q, n);
+    r.color = float3(gVerts[o + 6u], gVerts[o + 7u], gVerts[o + 8u]);
+    if (gView.mode.y == 1u && index != 0u)
+    {
+        // Body flags live in invI.w: dynamic 1, sleeping 4, awake 8.
+        uint flags = asuint(body.invI.w);
+        bool asleep = (flags & 4u) != 0u;
+        r.color = (flags & 1u) != 0u && !asleep ? float3(1.0, 0.45, 0.12) : asleep ? float3(0.25, 0.45, 0.85) : float3(0.45, 0.45, 0.48);
+    }
+    r.world = world;
+    return r;
+}
+
+[shader("fragment")]
+float4 fs(VsOut i) : SV_Target
+{
+    float light = 0.38 + 0.62 * max(0.0, dot(normalize(i.n), normalize(float3(-0.5, 1.0, 0.7))));
+    return float4(pow(i.color * light, float3(0.8)), 1.0);
+}
+
+[shader("fragment")]
+float4 ground(VsOut i) : SV_Target
+{
+    float2 coord = i.world.xz;
+    float2 grid = abs(frac(coord - 0.5) - 0.5) / max(fwidth(coord), float2(0.0001));
+    float line = 1.0 - min(min(grid.x, grid.y), 1.0);
+    return float4(lerp(float3(0.075, 0.1, 0.125), float3(0.13, 0.18, 0.21), line * 0.55), 1.0);
+}
+
+[shader("fragment")]
+float4 wire(VsOut i) : SV_Target { return float4(i.color, 1.0); }

@@ -1,0 +1,30 @@
+[package]
+name = "engine-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Metal viewer binding published pose buffers (no CPU transform readback)"
+
+[dependencies]
+engine-metal.workspace = true
+engine-schema.workspace = true
+engine-exec.workspace = true
+engine-fracture.workspace = true
+glam.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+metal.workspace = true
+objc.workspace = true
+core-graphics-types.workspace = true
+winit.workspace = true
+
+[build-dependencies]
+engine-slang-build.workspace = true
+engine-fracture.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "fracture_viewer"
+path = "src/bin/fracture_viewer.rs"

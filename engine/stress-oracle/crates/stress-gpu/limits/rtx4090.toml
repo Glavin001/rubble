@@ -1,0 +1,69 @@
+# NVIDIA GeForce RTX 4090 (AD102, Ada Lovelace, compute capability 8.9 / sm_89).
+# DOCUMENTED values only: nothing here was measured on this project's hardware
+# (measured = false). Replace with a measured file when a CUDA port of the probes runs on
+# the target; keep the source of each value.
+#
+# Sources:
+#   [cc]   NVIDIA CUDA C++ Programming Guide, "Compute Capabilities" ->
+#          "Technical Specifications per Compute Capability", column 8.9
+#   [tune] NVIDIA Ada GPU Architecture Tuning Guide (CUDA documentation)
+#   [wp]   NVIDIA Ada GPU Architecture whitepaper (AD102)
+#   [spec] NVIDIA GeForce RTX 4090 product specifications
+#   [api]  CUDA Runtime API: cudaDevAttrCooperativeLaunch, cudaLaunchCooperativeKernel,
+#          cudaOccupancyMaxActiveBlocksPerMultiprocessor
+
+[control]
+measured = false
+chip = "NVIDIA GeForce RTX 4090"
+target = "rtx4090"
+architecture = "sm_89"
+note = "documented specifications; per-op latencies, instruction-cache and spill knees, dispatch and round-trip costs are not documented by NVIDIA and must be measured"
+
+[device]
+sm_count = 128                      # [spec][wp] 128 of AD102's 144 SMs enabled
+cuda_cores = 16384                  # [spec] 128 FP32 lanes per SM
+warp_size = 32                      # [cc]
+max_threads_per_block = 1024        # [cc]
+max_threads_per_sm = 1536           # [cc] 8.9
+max_warps_per_sm = 48               # [cc] 8.9
+max_blocks_per_sm = 24              # [cc] 8.9
+boost_clock_mhz = 2520              # [spec]
+base_clock_mhz = 2235               # [spec]
+fp32_tflops = 82.6                  # [spec] non-tensor peak
+
+[registers]
+registers_per_sm = 65536            # [cc] 32-bit registers
+max_registers_per_block = 65536     # [cc]
+max_registers_per_thread = 255      # [cc]
+# Occupancy arithmetic (not measured): a 256-thread block at R registers/thread fits
+# floor(65536 / (256 * R)) blocks per SM by registers, at most 6 by threads (1536 / 256).
+# R <= 42 -> 6 blocks; R = 64 -> 4; R = 96 -> 2; R = 128 -> 2; R = 255 -> 1.
+
+[shared_memory]
+l1_plus_shared_per_sm_bytes = 131072      # [tune] unified 128 KB per SM
+max_shared_per_sm_bytes = 102400          # [cc] 100 KB
+max_shared_per_block_bytes = 101376       # [cc] 99 KB, opt-in (cudaFuncAttributeMaxDynamicSharedMemorySize)
+default_shared_per_block_bytes = 49152    # [cc] 48 KB without opt-in
+shared_memory_banks = 32                  # [cc]
+
+[memory]
+l2_bytes = 75497472                 # [spec][wp] 72 MB (AD102 full die: 96 MB)
+dram_bytes = 25769803776            # [spec] 24 GB GDDR6X
+dram_bus_bits = 384                 # [spec]
+dram_bandwidth_gb_per_s = 1008      # [spec] 21 Gbps x 384 bit
+local_memory_per_thread_bytes = 524288    # [cc] 512 KB (spills and stack live here, cached in L1/L2)
+constant_memory_bytes = 65536             # [cc]
+constant_cache_working_set_per_sm_bytes = 8192   # [cc]
+
+[cooperative_launch]
+supported = true                    # [api] cudaDevAttrCooperativeLaunch = 1 on sm_60+; grid-wide sync via cooperative_groups::this_grid().sync()
+max_coresident_blocks = "sm_count x cudaOccupancyMaxActiveBlocksPerMultiprocessor(kernel, block, smem)"   # [api]
+example_256_thread_blocks_max = 768 # 128 SMs x 6 (thread limit), only if registers (<= 42/thread) and shared memory allow
+example_256_threads_64_regs = 512   # 128 x 4 (register limit)
+
+[watchdog]
+note = "no fixed kernel time limit when the GPU drives no display (Linux headless); with a display: Windows TDR default 2 s, X server watchdog ~5 s (kernelExecTimeoutEnabled)"   # [api] cudaDevAttrKernelExecTimeout
+
+[instruction_cache]
+documented = false
+note = "NVIDIA does not document instruction-cache sizes for Ada; microbenchmark literature reports a small per-partition L0 i-cache (~16 KB on Turing/Ampere-class SMs) backed by a larger L1.5/L1 instruction cache. Measure before relying on it."

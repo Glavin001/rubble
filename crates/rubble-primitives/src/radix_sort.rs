@@ -169,6 +169,122 @@ impl GpuRadixSort {
     }
 
     /// Internal sort on separate key/value buffers.
+    /// Record a full 8-pass stable radix sort of (keys, values) into `encoder`
+    /// (no submits): histograms are cleared with `CommandEncoder::clear_buffer`,
+    /// the per-pass shift uniforms live in `temps` (written before recording,
+    /// queue-ordered ahead of the submission), and the scan is recorded inline.
+    /// After the even number of passes the result is back in `keys`/`values`.
+    /// Supports `16 * num_blocks <= 65536` (i.e. n up to ~1M elements).
+    pub fn record_sort_key_value(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        keys: &GpuBuffer<u32>,
+        values: &GpuBuffer<u32>,
+        n: u32,
+        temps: &mut RadixRecordTemps,
+    ) {
+        if n <= 1 {
+            return;
+        }
+        let num_blocks = rubble_gpu::round_up_workgroups(n, WORKGROUP_SIZE);
+        let hist_size = (RADIX_BUCKETS * num_blocks) as usize;
+        temps.grow(ctx, n as usize, hist_size);
+
+        for pass in 0..NUM_PASSES {
+            let shift = pass * RADIX_BITS;
+            ctx.queue.write_buffer(
+                &temps.pass_params[pass as usize],
+                0,
+                bytemuck::cast_slice(&[n, shift, 0u32, 0]),
+            );
+
+            let (src_keys, src_values, dst_keys, dst_values) = if pass % 2 == 0 {
+                (keys, values, &temps.keys_tmp, &temps.values_tmp)
+            } else {
+                (&temps.keys_tmp, &temps.values_tmp, keys, values)
+            };
+
+            encoder.clear_buffer(temps.histograms.buffer(), 0, Some(hist_size as u64 * 4));
+
+            let hist_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("radix_histogram"),
+                layout: self.histogram_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: src_keys.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: temps.histograms.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: temps.pass_params[pass as usize].as_entire_binding(),
+                    },
+                ],
+            });
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("radix_histogram"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(self.histogram_kernel.pipeline());
+                cpass.set_bind_group(0, &hist_bg, &[]);
+                cpass.dispatch_workgroups(num_blocks, 1, 1);
+            }
+
+            self.prefix_scan.record_exclusive_scan(
+                ctx,
+                encoder,
+                temps.histograms.buffer(),
+                hist_size as u32,
+                &temps.scan_temps,
+            );
+
+            let scatter_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("radix_scatter"),
+                layout: self.scatter_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: src_keys.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: src_values.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: dst_keys.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: dst_values.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: temps.histograms.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: temps.pass_params[pass as usize].as_entire_binding(),
+                    },
+                ],
+            });
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("radix_scatter"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(self.scatter_kernel.pipeline());
+                cpass.set_bind_group(0, &scatter_bg, &[]);
+                cpass.dispatch_workgroups(num_blocks, 1, 1);
+            }
+        }
+    }
+
     pub fn sort_key_value_in_place(
         &self,
         ctx: &GpuContext,
@@ -321,6 +437,43 @@ impl GpuRadixSort {
             encoder.copy_buffer_to_buffer(values_tmp.buffer(), 0, values.buffer(), 0, byte_len);
             ctx.queue.submit(Some(encoder.finish()));
         }
+    }
+}
+
+/// Persistent temporaries for [`GpuRadixSort::record_sort_key_value`].
+pub struct RadixRecordTemps {
+    keys_tmp: GpuBuffer<u32>,
+    values_tmp: GpuBuffer<u32>,
+    histograms: GpuBuffer<u32>,
+    pass_params: Vec<wgpu::Buffer>,
+    scan_temps: crate::prefix_scan::ScanRecordTemps,
+}
+
+impl RadixRecordTemps {
+    pub fn new(ctx: &GpuContext, max_elements: usize) -> Self {
+        let mk = |_i: usize| {
+            ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("radix pass params"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let n = max_elements.max(1);
+        let num_blocks = rubble_gpu::round_up_workgroups(n as u32, WORKGROUP_SIZE) as usize;
+        Self {
+            keys_tmp: GpuBuffer::new(ctx, n),
+            values_tmp: GpuBuffer::new(ctx, n),
+            histograms: GpuBuffer::new(ctx, RADIX_BUCKETS as usize * num_blocks),
+            pass_params: (0..NUM_PASSES as usize).map(mk).collect(),
+            scan_temps: crate::prefix_scan::ScanRecordTemps::new(ctx),
+        }
+    }
+
+    fn grow(&mut self, ctx: &GpuContext, n: usize, hist_size: usize) {
+        self.keys_tmp.grow_if_needed(ctx, n);
+        self.values_tmp.grow_if_needed(ctx, n);
+        self.histograms.grow_if_needed(ctx, hist_size);
     }
 }
 

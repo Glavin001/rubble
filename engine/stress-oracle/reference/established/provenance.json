@@ -1,0 +1,69 @@
+{
+  "generator": "engine/stress-oracle/crates/stress-ref/examples/rubble_references.rs",
+  "oracle_source": "PhysX integration/oracle-stress-gpu ec8118341, copied into rubble 2026-10-16",
+  "methods": "established",
+  "safety_divisor": 1.0,
+  "cases": [
+    {
+      "case": "b2_cantilever",
+      "wall_seconds": 0.5
+    },
+    {
+      "case": "b4_support_loss_sudden",
+      "wall_seconds": 0.0
+    },
+    {
+      "case": "b4_support_loss_gradual",
+      "wall_seconds": 0.0
+    },
+    {
+      "case": "b8_frame_sudden",
+      "wall_seconds": 2.0
+    },
+    {
+      "case": "b8_frame_gradual",
+      "wall_seconds": 4.1
+    },
+    {
+      "case": "b5_wall_impact_v10",
+      "wall_seconds": 21.9
+    },
+    {
+      "case": "b5_wall_impact_v15",
+      "wall_seconds": 23.2
+    },
+    {
+      "case": "b5_wall_impact_v20",
+      "wall_seconds": 8.9
+    },
+    {
+      "case": "b5_wall_impact_v30",
+      "wall_seconds": 6.2
+    },
+    {
+      "case": "b5_wall_impact_v40",
+      "wall_seconds": 5.6
+    },
+    {
+      "case": "ram_into_free_wall",
+      "wall_seconds": 20.7
+    },
+    {
+      "case": "s_arch_keystone_removed",
+      "wall_seconds": 0.2
+    },
+    {
+      "case": "s_floor_drop",
+      "wall_seconds": 12.2
+    },
+    {
+      "case": "s_house_car",
+      "wall_seconds": 16.6
+    },
+    {
+      "case": "house_1story_ram",
+      "wall_seconds": 654.7
+    }
+  ],
+  "note": "Run before the Shardwright importer fixes (flat hulls, recomputed faces); no case here uses the Shardwright importer."
+}

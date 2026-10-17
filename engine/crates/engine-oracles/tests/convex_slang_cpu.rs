@@ -1,0 +1,1309 @@
+//! CPU conformance for the Slang convex narrowphase. The production kernels
+//! (`convex_classify`, `convex_sat_*`, `convex_manifold`) are compiled with
+//! `slangc -target cpp -DENGINE_CPU_TEST=1` (sequential atomics, one SAT lane per
+//! pair) and driven by `convex_cpu/harness.cpp`. Results are compared against the
+//! exhaustive SAT and distance oracles in `engine_schema::convex`.
+//! Needs `slangc` and a C++17 compiler; no GPU.
+
+use engine_schema::convex::*;
+use engine_schema::*;
+use glam::{Quat, Vec3};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+const MARGIN: f32 = 0.01;
+/// Separations this close to zero may legitimately disagree (f32 vs exhaustive).
+const AMBIGUOUS: f32 = 2e-4;
+const FEATURE_TYPE_EDGE: u32 = 3;
+
+fn harness() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let slang = root.join("../../slang/kernels/convex_step.slang");
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("convex_cpu");
+        std::fs::create_dir_all(&dir).unwrap();
+        let generated = dir.join("convex_generated.cpp");
+        let slangc = engine_slang_build::find_slangc().expect("slangc is required for this test");
+        let mut cmd = Command::new(slangc);
+        cmd.arg(&slang).args(["-target", "cpp", "-DENGINE_CPU_TEST=1"]);
+        for e in ["convex_classify", "convex_bucket", "convex_sat_small", "convex_sat_large", "convex_manifold", "build_aabbs", "broadphase_clear", "broadphase_insert", "broadphase_query", "narrowphase", "reuse_all_manifolds"] {
+            cmd.args(["-entry", e, "-stage", "compute"]);
+        }
+        let out = cmd.arg("-o").arg(&generated).output().unwrap();
+        assert!(out.status.success(), "slangc: {}", String::from_utf8_lossy(&out.stderr));
+        let bin = dir.join("harness");
+        let out = Command::new(std::env::var("CXX").unwrap_or_else(|_| "c++".into()))
+            .args(["-std=c++17", "-O2", "-w"])
+            .arg(format!("-DCONVEX_GENERATED=\"{}\"", generated.display()))
+            .arg(root.join("convex_cpu/harness.cpp"))
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "c++: {}", String::from_utf8_lossy(&out.stderr));
+        bin
+    })
+}
+
+#[derive(Clone)]
+enum Shape {
+    Hull(ConvexHull, f32),
+    Box(Vec3),
+    Sphere(f32),
+    Capsule(f32, f32),
+    Plane(Vec3, f32),
+}
+
+#[derive(Clone, Default)]
+struct Scene {
+    bodies: Vec<BodyState>,
+    colliders: Vec<Collider>,
+    shapes: Vec<Shape>,
+    arena: Option<HullArena>,
+}
+
+impl Scene {
+    fn new() -> Self {
+        Self { arena: Some(HullArena::new()), ..Default::default() }
+    }
+    fn body(&mut self, p: Vec3, q: Quat) -> u32 {
+        self.bodies.push(BodyState::dynamic(p, q, 1.0, Vec3::ONE));
+        self.bodies.len() as u32 - 1
+    }
+    fn static_body(&mut self) -> u32 {
+        self.bodies.push(BodyState::static_plane_support());
+        self.bodies.len() as u32 - 1
+    }
+    fn add(&mut self, body: u32, shape: Shape, local_pos: Vec3, local_rot: Quat) -> u32 {
+        let (kind, params) = match &shape {
+            Shape::Hull(h, s) => {
+                let base = self.arena.as_mut().unwrap().insert(h).unwrap();
+                (ShapeType::ConvexHull, convex_collider_params(base, *s, h.bounding_radius()))
+            }
+            Shape::Box(h) => (ShapeType::Box, [h.x, h.y, h.z, h.length()]),
+            Shape::Sphere(r) => (ShapeType::Sphere, [*r, 0.0, 0.0, *r]),
+            Shape::Capsule(r, l) => (ShapeType::Capsule, [*r, *l, 0.0, r + l]),
+            Shape::Plane(n, w) => (ShapeType::Plane, [n.x, n.y, n.z, *w]),
+        };
+        self.colliders.push(Collider {
+            body,
+            shape: kind as u32,
+            material: 0,
+            generation: 0,
+            local_pos: local_pos.to_array(),
+            density: 1.0,
+            local_rot: local_rot.to_array(),
+            params,
+        });
+        self.shapes.push(shape);
+        self.colliders.len() as u32 - 1
+    }
+    fn pose(&self, c: usize) -> Pose {
+        let col = &self.colliders[c];
+        let b = &self.bodies[col.body as usize];
+        let (bp, bq) = (Vec3::from_array(b.position), Quat::from_array(b.orientation));
+        Pose {
+            position: bp + bq * Vec3::from_array(col.local_pos),
+            rotation: bq * Quat::from_array(col.local_rot),
+        }
+    }
+    fn polytope(&self, c: usize) -> Option<WorldPolytope> {
+        match &self.shapes[c] {
+            Shape::Hull(h, s) => Some(WorldPolytope::new(h, Vec3::splat(*s), self.pose(c))),
+            Shape::Box(half) => Some(WorldPolytope::new(&ConvexHull::cuboid(Vec3::ONE), *half, self.pose(c))),
+            _ => None,
+        }
+    }
+    fn hull_of(&self, c: usize) -> Option<(ConvexHull, Vec3)> {
+        match &self.shapes[c] {
+            Shape::Hull(h, s) => Some((h.clone(), Vec3::splat(*s))),
+            Shape::Box(half) => Some((ConvexHull::cuboid(Vec3::ONE), *half)),
+            _ => None,
+        }
+    }
+    /// Every cross-body pair involving a hull whose bounding spheres overlap.
+    fn candidates(&self, hints: &std::collections::HashMap<(u32, u32), u32>) -> Vec<CandidatePair> {
+        let mut out = Vec::new();
+        for i in 0..self.colliders.len() {
+            for j in i + 1..self.colliders.len() {
+                let (a, b) = (&self.colliders[i], &self.colliders[j]);
+                if a.body == b.body || (a.shape != ShapeType::ConvexHull as u32 && b.shape != ShapeType::ConvexHull as u32) {
+                    continue;
+                }
+                let plane = a.shape == ShapeType::Plane as u32 || b.shape == ShapeType::Plane as u32;
+                let d = (self.pose(i).position - self.pose(j).position).length();
+                if !plane && d > a.params[3] + b.params[3] + 0.05 {
+                    continue;
+                }
+                let hint = hints.get(&(i as u32, j as u32)).copied().unwrap_or(0);
+                out.push(CandidatePair { collider_a: i as u32, collider_b: j as u32, key: 0, _pad: 0x8000_0000 | hint });
+            }
+        }
+        out
+    }
+}
+
+struct Output {
+    counters: StepCounters,
+    contacts: Vec<Contact>,
+    manifolds: Vec<Manifold>,
+    /// Pipeline mode: broadphase candidates and collider AABBs (mn, r, mx, body).
+    candidates: Vec<CandidatePair>,
+    aabbs: Vec<[f32; 8]>,
+    /// Mode 2: the collision step's contacts/manifold count before reuse.
+    prev_contacts: Vec<Contact>,
+    prev_manifolds: u32,
+}
+
+fn run(scene: &Scene, candidates: &[CandidatePair]) -> Output {
+    run_mode(scene, candidates, 0, 0)
+}
+
+/// Whole collision front end on the CPU: bounds, hierarchical broadphase,
+/// narrowphase (hull pairs deferred) and the convex stages.
+fn run_pipeline(scene: &Scene, capacity: usize) -> Output {
+    let empty = vec![CandidatePair { collider_a: 0, collider_b: 0, key: 0, _pad: 0 }; capacity];
+    run_mode(scene, &empty, 1, 1 << 17)
+}
+
+/// Pipeline step, then a whole-step manifold reuse into the other contact half.
+fn run_pipeline_then_reuse(scene: &Scene, capacity: usize) -> Output {
+    let empty = vec![CandidatePair { collider_a: 0, collider_b: 0, key: 0, _pad: 0 }; capacity];
+    run_mode(scene, &empty, 2, 1 << 17)
+}
+
+fn run_mode(scene: &Scene, candidates: &[CandidatePair], mode: u32, grid_words: u32) -> Output {
+    let bin = harness();
+    let arena = scene.arena.as_ref().unwrap();
+    let max_contacts = (candidates.len() * 8).max(64) as u32;
+    let mut bytes: Vec<u8> = Vec::new();
+    let head = [0x3158_5643u32, scene.bodies.len() as u32, scene.colliders.len() as u32, candidates.len() as u32, arena.len() as u32, max_contacts, mode, grid_words];
+    bytes.extend_from_slice(bytemuck::cast_slice(&head));
+    let (base, levels) = hierarchical_grid(&scene.colliders, &scene.bodies);
+    let params = AvbdParams { contact_offset: MARGIN, grid_cell_size: base, ..AvbdParams::default() };
+    bytes.extend_from_slice(bytemuck::bytes_of(&params));
+    let mut scratch = [0u32; 64];
+    scratch[1] = scene.bodies.len() as u32; // collider AABBs start after body slots
+    scratch[2] = candidates.len() as u32; // max candidates (and the work list size)
+    scratch[3] = max_contacts;
+    scratch[10] = candidates.len() as u32; // max manifolds
+    scratch[16] = grid_words;
+    scratch[17] = if mode >= 1 { 0 } else { 1 }; // first step builds sleeping bounds
+    scratch[18] = if mode >= 1 { levels } else { 0 };
+    scratch[30] = u32::from(scene.colliders.iter().any(CollisionFilter::is_set)); // filters (HOST_S(30))
+    bytes.extend_from_slice(bytemuck::cast_slice(&scratch));
+    bytes.extend_from_slice(bytemuck::cast_slice(&scene.bodies));
+    bytes.extend_from_slice(bytemuck::cast_slice(&scene.colliders));
+    if mode == 0 || mode == 3 {
+        bytes.extend_from_slice(bytemuck::cast_slice(candidates));
+    }
+    bytes.extend_from_slice(bytemuck::cast_slice(arena.records()));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("convex_cpu");
+    let id = std::thread::current().id();
+    let input = dir.join(format!("in-{id:?}.bin"));
+    let output = dir.join(format!("out-{id:?}.bin"));
+    std::fs::write(&input, &bytes).unwrap();
+    let status = Command::new(bin).arg(&input).arg(&output).output().unwrap();
+    assert!(status.status.success(), "harness failed: {}", String::from_utf8_lossy(&status.stderr));
+    let out = std::fs::read(&output).unwrap();
+    let header = std::mem::size_of::<StepCounters>();
+    let counters: StepCounters = bytemuck::pod_read_unaligned(&out[..header]);
+    let nc = counters.contact_count as usize;
+    let nm = counters.manifold_count as usize;
+    let mut at = header;
+    let contacts = bytemuck::cast_slice::<u8, Contact>(&out[at..at + nc * 128]).to_vec();
+    at += nc * 128;
+    let manifolds = bytemuck::cast_slice::<u8, Manifold>(&out[at..at + nm * 32]).to_vec();
+    at += nm * 32 + candidates.len() * 32;
+    let found = (counters.candidate_count as usize).min(candidates.len());
+    let cands = bytemuck::cast_slice::<u8, CandidatePair>(&out[at..at + found * 16]).to_vec();
+    at += found * 16;
+    let aabbs = bytemuck::cast_slice::<u8, [f32; 8]>(&out[at..at + scene.colliders.len() * 32]).to_vec();
+    at += scene.colliders.len() * 32;
+    let tail: [u32; 2] = *bytemuck::from_bytes(&out[at..at + 8]);
+    at += 8;
+    let prev_contacts = if mode == 2 {
+        bytemuck::cast_slice::<u8, Contact>(&out[at..at + tail[0] as usize * 128]).to_vec()
+    } else {
+        Vec::new()
+    };
+    Output { counters, contacts, manifolds, candidates: cands, aabbs, prev_contacts, prev_manifolds: tail[1] }
+}
+
+/// Distance from a world point to a convex polytope (0 inside).
+fn point_distance(h: &ConvexHull, scale: Vec3, pose: Pose, p: Vec3) -> f32 {
+    let local = pose.rotation.inverse() * (p - pose.position);
+    let verts: Vec<Vec3> = h.vertices.iter().map(|v| *v * scale).collect();
+    let planes: Vec<(Vec3, f32)> = h
+        .faces
+        .iter()
+        .map(|f| {
+            let n = (f.normal / scale).normalize();
+            (n, n.dot(verts[f.indices[0] as usize]))
+        })
+        .collect();
+    if planes.iter().all(|(n, d)| n.dot(local) <= *d) {
+        return 0.0;
+    }
+    let mut best = f32::INFINITY;
+    for (f, (n, d)) in h.faces.iter().zip(&planes) {
+        let s = n.dot(local) - d;
+        if s <= 0.0 {
+            continue;
+        }
+        let q = local - *n * s;
+        let mut inside = true;
+        let mut edge = f32::INFINITY;
+        for k in 0..f.indices.len() {
+            let a = verts[f.indices[k] as usize];
+            let b = verts[f.indices[(k + 1) % f.indices.len()] as usize];
+            let e = b - a;
+            if e.cross(*n).dot(q - a) > 0.0 {
+                inside = false;
+                let t = ((local - a).dot(e) / e.dot(e)).clamp(0.0, 1.0);
+                edge = edge.min((local - (a + e * t)).length());
+            }
+        }
+        best = best.min(if inside { s } else { edge });
+    }
+    best
+}
+
+/// Signed distance of a world point to the hull surface (negative inside).
+fn surface_distance(h: &ConvexHull, scale: Vec3, pose: Pose, p: Vec3) -> f32 {
+    let d = point_distance(h, scale, pose, p);
+    if d > 0.0 {
+        return d;
+    }
+    let local = pose.rotation.inverse() * (p - pose.position);
+    h.faces
+        .iter()
+        .map(|f| {
+            let n = (f.normal / scale).normalize();
+            n.dot(local) - n.dot(h.vertices[f.indices[0] as usize] * scale)
+        })
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// Oracle separation for one candidate (positive = apart).
+fn oracle_separation(scene: &Scene, a: usize, b: usize) -> f32 {
+    let shape_a = &scene.shapes[a];
+    let shape_b = &scene.shapes[b];
+    match (shape_a, shape_b) {
+        (Shape::Plane(n, w), _) | (_, Shape::Plane(n, w)) => {
+            let h = if matches!(shape_a, Shape::Plane(..)) { b } else { a };
+            let poly = scene.polytope(h).unwrap();
+            poly.vertices.iter().map(|v| n.dot(*v) - w).fold(f32::INFINITY, f32::min)
+        }
+        (Shape::Sphere(r), _) | (_, Shape::Sphere(r)) => {
+            let (s, h) = if matches!(shape_a, Shape::Sphere(..)) { (a, b) } else { (b, a) };
+            let (hull, scale) = scene.hull_of(h).unwrap();
+            point_distance(&hull, scale, scene.pose(h), scene.pose(s).position) - r
+        }
+        (Shape::Capsule(r, l), _) | (_, Shape::Capsule(r, l)) => {
+            let (c, h) = if matches!(shape_a, Shape::Capsule(..)) { (a, b) } else { (b, a) };
+            let (hull, scale) = scene.hull_of(h).unwrap();
+            let pose = scene.pose(c);
+            let axis = pose.rotation * Vec3::Y * *l;
+            (0..=256)
+                .map(|k| {
+                    let p = pose.position - axis + axis * (2.0 * k as f32 / 256.0);
+                    point_distance(&hull, scale, scene.pose(h), p)
+                })
+                .fold(f32::INFINITY, f32::min)
+                - r
+        }
+        _ => sat_separation(&scene.polytope(a).unwrap(), &scene.polytope(b).unwrap()).1,
+    }
+}
+
+/// Best face-axis and best edge-axis separations (exhaustive projections).
+fn face_edge_separation(a: &WorldPolytope, b: &WorldPolytope) -> (f32, f32) {
+    let ca = a.vertices.iter().copied().sum::<Vec3>() / a.vertices.len() as f32;
+    let cb = b.vertices.iter().copied().sum::<Vec3>() / b.vertices.len() as f32;
+    let axis = |v: Vec3| {
+        let l = v.length();
+        if l < 1e-6 {
+            return None;
+        }
+        let n = v / l;
+        Some(if n.dot(cb - ca) < 0.0 { -n } else { n })
+    };
+    // Face axes are one-sided (the Minkowski faces): B against A's outward
+    // normals, A against B's. Reversed face normals are not candidates.
+    let span = |vs: &[Vec3], n: Vec3| vs.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(n.dot(*v)), hi.max(n.dot(*v))));
+    let face_a = a.normals.iter().map(|n| span(&b.vertices, *n).0 - span(&a.vertices, *n).1);
+    let face_b = b.normals.iter().map(|n| span(&a.vertices, *n).0 - span(&b.vertices, *n).1);
+    let face = face_a.chain(face_b).fold(f32::NEG_INFINITY, f32::max);
+    let mut edge = f32::NEG_INFINITY;
+    for da in &a.edges {
+        for db in &b.edges {
+            if let Some(n) = axis(da.cross(*db)) {
+                edge = edge.max(a.separation_along(b, n));
+            }
+        }
+    }
+    (face, edge)
+}
+
+struct Report {
+    expected: usize,
+    shallow: usize,
+    /// Largest depth shortfall vs the true penetration for face-bias patches.
+    starved_deficit: f32,
+    checked_depth: usize,
+    worst_axis: f32,
+    worst_surface: f32,
+}
+
+/// Contact existence, manifold normal/depth quality and point placement.
+fn check(scene: &Scene, candidates: &[CandidatePair], out: &Output, label: &str) -> Report {
+    assert_eq!(out.counters.overflow_flags, 0, "{label}: overflow");
+    let mut by_pair: std::collections::HashMap<(u32, u32), Vec<&Contact>> = Default::default();
+    for c in &out.contacts {
+        by_pair.entry((c.collider_a, c.collider_b)).or_default().push(c);
+    }
+    for m in &out.manifolds {
+        assert!(m.contact_count as usize <= 8, "{label}: manifold size");
+    }
+    let mut report = Report { expected: 0, shallow: 0, starved_deficit: 0.0, checked_depth: 0, worst_axis: 0.0, worst_surface: 0.0 };
+    for cand in candidates {
+        let (a, b) = (cand.collider_a as usize, cand.collider_b as usize);
+        let sep = oracle_separation(scene, a, b);
+        let got = by_pair.get(&(cand.collider_a, cand.collider_b));
+        if sep.abs() < AMBIGUOUS {
+            continue;
+        }
+        if sep > 0.0 {
+            assert!(got.is_none(), "{label}: false contact {a},{b} (separation {sep})");
+            continue;
+        }
+        report.expected += 1;
+        let got = got.unwrap_or_else(|| panic!("{label}: missed contact {a},{b} (separation {sep})"));
+        let n = Vec3::from_array(got[0].normal);
+        assert!((n.length() - 1.0).abs() < 1e-3, "{label}: non-unit normal {a},{b}");
+        for c in got.iter() {
+            assert!(c.c0_n.is_finite() && c.anchor_a.iter().chain(&c.anchor_b).all(|x| x.is_finite()));
+        }
+        if let (Some(pa), Some(pb)) = (scene.polytope(a), scene.polytope(b)) {
+            assert!(got.len() <= 4, "{label}: {} points for {a},{b} (MAX_CONVEX_CONTACTS 4)", got.len());
+            let (best_face, best_edge) = face_edge_separation(&pa, &pb);
+            let best = best_face.max(best_edge);
+            let along = pa.separation_along(&pb, n);
+            report.worst_axis = report.worst_axis.min(along - best);
+            // The winning feature type is in feature bits 30..31. A face must be
+            // the best face; an edge must be the best edge and clear the face
+            // bias (edge > 0.95·face + 0.01, CONVEX_EDGE_*).
+            let ty = got[0].feature_id >> 30;
+            if ty == FEATURE_TYPE_EDGE {
+                // Either the edge cleared the face bias, or the biased face's
+                // patch clipped empty and fell back to the best edge pair.
+                assert!(along >= best_edge - 1e-3, "{label}: edge {a},{b} gives {along} vs best edge {best_edge}");
+            } else {
+                assert!(along >= best_face - 1e-3, "{label}: face {a},{b} gives {along} vs best face {best_face}");
+                assert!(best_edge <= 0.95 * along + 0.01 + 1e-3, "{label}: face {a},{b} kept over a clearly better edge {best_edge}");
+            }
+            // Shallow (resting) overlap: the deepest point equals the SAT depth.
+            // Deep overlap: clipped incident points may lie deeper than the
+            // minimum translation, never shallower.
+            // When face bias keeps a face over a slightly better edge axis, the
+            // patch cannot reach the full face depth; it is still at least as
+            // deep as the true minimum penetration `best`.
+            let deepest = got.iter().map(|c| c.c0_n).fold(f32::INFINITY, f32::min) - MARGIN;
+            if along >= best - 1e-4 {
+                if best > -0.1 {
+                    assert!(deepest <= best + 2e-3, "{label}: depth {a},{b}: {deepest} shallower than penetration {best}");
+                }
+            } else {
+                // Face bias kept a face over a slightly better edge; on sliver
+                // faces the deepest support can fall outside the reference face.
+                report.starved_deficit = report.starved_deficit.max(deepest - best);
+            }
+            if along > -0.05 && along >= best - 1e-4 {
+                report.shallow += 1;
+                assert!((deepest - along).abs() < 2e-3 + 0.05 * along.abs(), "{label}: depth {a},{b}: {deepest} vs {along}");
+            }
+            report.checked_depth += 1;
+            // Points lie on their bodies' surfaces (reference points are
+            // projected onto the reference face; incident points are hull points).
+            let (ha, sa) = scene.hull_of(a).unwrap();
+            let (hb, sb) = scene.hull_of(b).unwrap();
+            let ba = &scene.bodies[scene.colliders[a].body as usize];
+            let bb = &scene.bodies[scene.colliders[b].body as usize];
+            for c in got.iter() {
+                let wa = Vec3::from_array(ba.position) + Quat::from_array(ba.orientation) * Vec3::from_array(c.anchor_a);
+                let wb = Vec3::from_array(bb.position) + Quat::from_array(bb.orientation) * Vec3::from_array(c.anchor_b);
+                let da = surface_distance(&ha, sa, scene.pose(a), wa);
+                let db = surface_distance(&hb, sb, scene.pose(b), wb);
+                report.worst_surface = report.worst_surface.max(da.abs()).max(db.abs());
+                let tol = 2e-3 + along.abs();
+                assert!(da.abs() < tol && db.abs() < tol, "{label}: contact {a},{b} off surface ({da}, {db})");
+                assert!(n.dot(wb - wa) <= 2e-3, "{label}: contact {a},{b} is not penetrating along n");
+            }
+        }
+    }
+    report
+}
+
+fn rng(seed: &mut u32) -> f32 {
+    *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+    (*seed >> 8) as f32 / (1u32 << 24) as f32
+}
+
+fn random_rot(seed: &mut u32) -> Quat {
+    Quat::from_xyzw(rng(seed) - 0.5, rng(seed) - 0.5, rng(seed) - 0.5, rng(seed) - 0.5).normalize()
+}
+
+fn prism(n: usize, r: f32, half_h: f32) -> ConvexHull {
+    let mut v = Vec::new();
+    for y in [-half_h, half_h] {
+        for i in 0..n {
+            let t = i as f32 / n as f32 * std::f32::consts::TAU;
+            v.push(Vec3::new(r * t.cos(), y, r * t.sin()));
+        }
+    }
+    ConvexHull::from_points(&v).unwrap()
+}
+
+fn hull_library(seed: &mut u32) -> Vec<ConvexHull> {
+    let mut hulls = vec![
+        ConvexHull::cuboid(Vec3::new(0.5, 0.3, 0.4)),
+        prism(5, 0.5, 0.4),
+        prism(32, 0.6, 0.3),
+        prism(12, 0.4, 0.6),
+    ];
+    for k in 0..6 {
+        let n = 8 + 6 * k;
+        let pts: Vec<Vec3> = (0..n).map(|_| Vec3::new(rng(seed) - 0.5, rng(seed) - 0.5, rng(seed) - 0.5) * 1.1).collect();
+        hulls.push(ConvexHull::from_points(&pts).unwrap());
+    }
+    // 64-vertex bipyramid (124 faces, 186 edges).
+    let mut v: Vec<Vec3> = (0..62)
+        .map(|i| {
+            let t = i as f32 / 62.0 * std::f32::consts::TAU;
+            Vec3::new(0.55 * t.cos(), 0.0, 0.55 * t.sin())
+        })
+        .collect();
+    v.extend([Vec3::Y * 0.6, -Vec3::Y * 0.6]);
+    hulls.push(ConvexHull::from_points(&v).unwrap());
+    // Uncertified adjacency: the exhaustive (no Gauss map, no hill climb) path.
+    let mut open = prism(6, 0.45, 0.35);
+    open.closed = false;
+    hulls.push(open);
+    hulls
+}
+
+fn random_scene(seed: u32, count: usize) -> Scene {
+    let mut seed = seed;
+    let lib = hull_library(&mut seed);
+    let mut s = Scene::new();
+    let ground = s.static_body();
+    s.add(ground, Shape::Plane(Vec3::Y, 0.0), Vec3::ZERO, Quat::IDENTITY);
+    for i in 0..count {
+        let cluster = (i / 6) as f32 * 4.0;
+        let p = Vec3::new(cluster + rng(&mut seed) * 1.6, 0.25 + rng(&mut seed) * 1.4, rng(&mut seed) * 1.6);
+        let b = s.body(p, random_rot(&mut seed));
+        let pick = (rng(&mut seed) * 10.0) as usize;
+        let shape = match pick {
+            0 => Shape::Box(Vec3::new(0.3, 0.25, 0.4)),
+            1 => Shape::Sphere(0.35),
+            2 => Shape::Capsule(0.2, 0.35),
+            _ => Shape::Hull(lib[(rng(&mut seed) * lib.len() as f32) as usize % lib.len()].clone(), if i % 9 == 0 { 1.4 } else { 1.0 }),
+        };
+        s.add(b, shape, Vec3::ZERO, Quat::IDENTITY);
+        // Compound child, offset and rotated in the body frame.
+        if i % 5 == 0 {
+            s.add(b, Shape::Hull(lib[i % lib.len()].clone(), 0.6), Vec3::new(0.6, 0.0, 0.2), random_rot(&mut seed));
+        }
+    }
+    s
+}
+
+/// Pairs of random hulls/boxes slid along their SAT axis to a 1–30 mm overlap:
+/// resting-contact geometry, where depth and feature choice must be exact.
+fn shallow_scene(seed: u32, pairs: usize) -> Scene {
+    let mut seed = seed;
+    let lib = hull_library(&mut seed);
+    let mut s = Scene::new();
+    for i in 0..pairs {
+        let origin = Vec3::new((i % 10) as f32 * 4.0, 0.0, (i / 10) as f32 * 4.0);
+        let a = s.body(origin, random_rot(&mut seed));
+        let pick = |seed: &mut u32| {
+            if rng(seed) < 0.2 {
+                Shape::Box(Vec3::new(0.2 + rng(seed) * 0.3, 0.2 + rng(seed) * 0.3, 0.2 + rng(seed) * 0.3))
+            } else {
+                Shape::Hull(lib[(rng(seed) * lib.len() as f32) as usize % lib.len()].clone(), 0.8 + rng(seed) * 0.6)
+            }
+        };
+        let ca = s.add(a, pick(&mut seed), Vec3::ZERO, Quat::IDENTITY);
+        let dir = Vec3::new(rng(&mut seed) - 0.5, rng(&mut seed) - 0.5, rng(&mut seed) - 0.5).normalize();
+        let b = s.body(origin + dir * 1.5, random_rot(&mut seed));
+        let cb = s.add(b, pick(&mut seed), Vec3::ZERO, Quat::IDENTITY);
+        let target = -(0.001 + rng(&mut seed) * 0.029);
+        for _ in 0..6 {
+            let (n, sep) = sat_separation(&s.polytope(ca as usize).unwrap(), &s.polytope(cb as usize).unwrap());
+            let p = Vec3::from_array(s.bodies[b as usize].position) + n * (target - sep);
+            s.bodies[b as usize].position = p.to_array();
+        }
+    }
+    s
+}
+
+#[test]
+fn resting_contacts_have_exact_depth_and_feature() {
+    for seed in [3u32, 11, 77] {
+        let scene = shallow_scene(seed, 120);
+        let cands = scene.candidates(&Default::default());
+        let out = run(&scene, &cands);
+        let r = check(&scene, &cands, &out, &format!("shallow seed {seed}"));
+        assert!(r.shallow > 60, "seed {seed}: only {} exact-depth checks", r.shallow);
+        eprintln!("shallow seed {seed}: {} contacts, {} exact depth, worst surface {:.5}, face-bias depth deficit {:.4}", r.expected, r.shallow, r.worst_surface, r.starved_deficit);
+        assert!(r.starved_deficit < 0.01, "face-bias depth deficit {}", r.starved_deficit);
+    }
+}
+
+fn hint_from_feature(feature: u32) -> u32 {
+    let ty = feature >> 30;
+    if ty == 0 {
+        0
+    } else if ty == FEATURE_TYPE_EDGE {
+        (ty << 16) | (((feature >> 8) & 255) << 8) | (feature & 255)
+    } else {
+        (ty << 16) | (((feature >> 23) & 127) << 8)
+    }
+}
+
+#[test]
+fn slang_convex_kernels_match_exhaustive_oracles_on_cpu() {
+    let mut total = 0;
+    for seed in [1u32, 7, 42, 1234] {
+        let scene = random_scene(seed, 72);
+        let cands = scene.candidates(&Default::default());
+        let out = run(&scene, &cands);
+        let r = check(&scene, &cands, &out, &format!("seed {seed}"));
+        assert!(r.expected > 20, "seed {seed}: fixture produced only {} contacts", r.expected);
+        assert!(r.checked_depth > 10);
+        total += r.expected;
+        eprintln!(
+            "seed {seed}: {} candidates, {} contacts ({} shallow), {} SAT small / {} large, worst axis {:.4}, worst surface {:.5}",
+            cands.len(),
+            r.expected,
+            r.shallow,
+            out.counters.convex_sat_small,
+            out.counters.convex_sat_large,
+            r.worst_axis,
+            r.worst_surface
+        );
+    }
+    assert!(total > 100);
+}
+
+#[test]
+fn kernels_are_deterministic_and_hints_keep_features() {
+    let scene = random_scene(99, 60);
+    let cands = scene.candidates(&Default::default());
+    let a = run(&scene, &cands);
+    let b = run(&scene, &cands);
+    assert_eq!(bytemuck::cast_slice::<Contact, u8>(&a.contacts), bytemuck::cast_slice::<Contact, u8>(&b.contacts));
+    // Seed every SAT pair with last frame's feature: the cached-face fast path
+    // and edge hysteresis must reproduce the same manifolds on an unchanged pose.
+    let mut hints = std::collections::HashMap::new();
+    for c in &a.contacts {
+        hints.entry((c.collider_a, c.collider_b)).or_insert(hint_from_feature(c.feature_id));
+    }
+    let hinted = scene.candidates(&hints);
+    let h = run(&scene, &hinted);
+    check(&scene, &hinted, &h, "hinted");
+    let key = |o: &Output| {
+        let mut v: Vec<(u32, u32, u32)> = o.contacts.iter().map(|c| (c.collider_a, c.collider_b, c.feature_id)).collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(key(&a), key(&h), "hints changed contact features on an unchanged pose");
+}
+
+#[test]
+fn resting_box_on_hull_gives_four_point_face_manifold() {
+    let mut s = Scene::new();
+    let base = s.body(Vec3::ZERO, Quat::IDENTITY);
+    s.add(base, Shape::Hull(ConvexHull::cuboid(Vec3::new(2.0, 0.5, 2.0)), 1.0), Vec3::ZERO, Quat::IDENTITY);
+    let top = s.body(Vec3::new(0.1, 0.5 + 0.25 - 0.004, -0.05), Quat::from_rotation_y(0.3));
+    s.add(top, Shape::Box(Vec3::new(0.4, 0.25, 0.3)), Vec3::ZERO, Quat::IDENTITY);
+    let cands = s.candidates(&Default::default());
+    let out = run(&s, &cands);
+    check(&s, &cands, &out, "resting box");
+    assert_eq!(out.contacts.len(), 4, "box face on hull face keeps four corners");
+    for c in &out.contacts {
+        assert!((Vec3::from_array(c.normal) - Vec3::Y).length() < 1e-4);
+        assert!((c.c0_n - MARGIN + 0.004).abs() < 1e-4, "depth {}", c.c0_n - MARGIN);
+    }
+}
+
+#[test]
+fn compound_children_offsets_and_rotations_are_respected() {
+    // An L-shaped compound resting across a wall: only the child that reaches
+    // the wall may touch it; the body origin is far from both children.
+    let mut s = Scene::new();
+    let wall = s.body(Vec3::new(3.0, 0.0, 0.0), Quat::IDENTITY);
+    s.add(wall, Shape::Hull(ConvexHull::cuboid(Vec3::new(0.2, 2.0, 2.0)), 1.0), Vec3::ZERO, Quat::IDENTITY);
+    let l = s.body(Vec3::new(0.0, 0.0, 0.0), Quat::from_rotation_z(0.2));
+    let near = s.add(l, Shape::Hull(ConvexHull::cuboid(Vec3::new(1.0, 0.2, 0.2)), 1.0), Vec3::new(2.1, 0.4, 0.0), Quat::from_rotation_y(0.1));
+    let far = s.add(l, Shape::Hull(ConvexHull::cuboid(Vec3::new(0.2, 1.0, 0.2)), 1.0), Vec3::new(-1.0, 0.0, 0.0), Quat::IDENTITY);
+    let cands = s.candidates(&Default::default());
+    let out = run(&s, &cands);
+    check(&s, &cands, &out, "compound");
+    assert!(out.contacts.iter().any(|c| c.collider_b == near || c.collider_a == near), "near child touches the wall");
+    assert!(out.contacts.iter().all(|c| c.collider_a != far && c.collider_b != far));
+}
+
+#[test]
+#[ignore]
+fn debug_pair() {
+    let seed: u32 = std::env::var("SEED").unwrap().parse().unwrap();
+    let count: usize = std::env::var("COUNT").unwrap().parse().unwrap();
+    let pa: u32 = std::env::var("PA").unwrap().parse().unwrap();
+    let pb: u32 = std::env::var("PB").unwrap().parse().unwrap();
+    let scene = if std::env::var_os("SHALLOW").is_some() { shallow_scene(seed, count) } else { random_scene(seed, count) };
+    let mut cands: Vec<CandidatePair> = scene.candidates(&Default::default()).into_iter().filter(|c| c.collider_a == pa && c.collider_b == pb).collect();
+    if std::env::var_os("HINTED").is_some() {
+        let first = run(&scene, &cands);
+        let hint = first.contacts.first().map_or(0, |c| hint_from_feature(c.feature_id));
+        eprintln!("first run: {} contacts, hint {hint:x}", first.contacts.len());
+        cands[0]._pad |= hint;
+    }
+    let out = run(&scene, &cands);
+    let desc = |c: usize| match &scene.shapes[c] {
+        Shape::Hull(h, s) => format!("hull v{} f{} e{} closed {} scale {s}", h.vertices.len(), h.faces.len(), h.edges.len(), h.closed),
+        Shape::Box(h) => format!("box {h}"),
+        _ => "other".into(),
+    };
+    eprintln!("A {} | B {}", desc(pa as usize), desc(pb as usize));
+    let (a, b) = (scene.polytope(pa as usize).unwrap(), scene.polytope(pb as usize).unwrap());
+    eprintln!("oracle face/edge {:?} sat {:?}", face_edge_separation(&a, &b), sat_separation(&a, &b));
+    for c in &out.contacts {
+        let n = Vec3::from_array(c.normal);
+        let ba = &scene.bodies[scene.colliders[pa as usize].body as usize];
+        let bb = &scene.bodies[scene.colliders[pb as usize].body as usize];
+        let wa = Vec3::from_array(ba.position) + Quat::from_array(ba.orientation) * Vec3::from_array(c.anchor_a);
+        let wb = Vec3::from_array(bb.position) + Quat::from_array(bb.orientation) * Vec3::from_array(c.anchor_b);
+        let (ha, sa) = scene.hull_of(pa as usize).unwrap();
+        let (hb, sb) = scene.hull_of(pb as usize).unwrap();
+        eprintln!(
+            "contact feat {:08x} type {} kind {} n {n} along {} c0-m {} surfA {} surfB {}",
+            c.feature_id,
+            c.feature_id >> 30,
+            (c.feature_id >> 14) & 3,
+            a.separation_along(&b, n),
+            c.c0_n - MARGIN,
+            surface_distance(&ha, sa, scene.pose(pa as usize), wa),
+            surface_distance(&hb, sb, scene.pose(pb as usize), wb)
+        );
+    }
+}
+
+
+fn moving(scene: &Scene, c: usize) -> bool {
+    let b = &scene.bodies[scene.colliders[c].body as usize];
+    b.is_dynamic() && !b.is_sleeping()
+}
+
+/// Exact world AABB of a collider (planes: None).
+fn oracle_aabb(scene: &Scene, c: usize) -> Option<(Vec3, Vec3)> {
+    let pose = scene.pose(c);
+    match &scene.shapes[c] {
+        Shape::Plane(..) => None,
+        Shape::Sphere(r) => Some((pose.position - Vec3::splat(*r), pose.position + Vec3::splat(*r))),
+        Shape::Capsule(r, l) => {
+            let e = (pose.rotation * Vec3::Y * *l).abs() + Vec3::splat(*r);
+            Some((pose.position - e, pose.position + e))
+        }
+        _ => {
+            let p = scene.polytope(c).unwrap();
+            let lo = p.vertices.iter().copied().fold(Vec3::INFINITY, Vec3::min);
+            let hi = p.vertices.iter().copied().fold(Vec3::NEG_INFINITY, Vec3::max);
+            Some((lo, hi))
+        }
+    }
+}
+
+fn pipeline_scene(seed: u32) -> Scene {
+    let mut seed = seed;
+    let lib = hull_library(&mut seed);
+    let mut s = Scene::new();
+    let ground = s.static_body();
+    s.add(ground, Shape::Plane(Vec3::Y, 0.0), Vec3::ZERO, Quat::IDENTITY);
+    // Oversized static slab: beyond the top grid level, tested from the large list.
+    let slab = s.static_body();
+    s.bodies[slab as usize].position = [0.0, -0.5, 0.0];
+    s.add(slab, Shape::Hull(ConvexHull::cuboid(Vec3::new(40.0, 0.5, 40.0)), 1.0), Vec3::ZERO, Quat::IDENTITY);
+    for i in 0..220 {
+        let size = [0.15f32, 0.5, 1.0, 2.2][i % 4];
+        let p = Vec3::new(rng(&mut seed) * 14.0, 0.2 + rng(&mut seed) * 4.0, rng(&mut seed) * 14.0);
+        let b = s.body(p, random_rot(&mut seed));
+        match i % 7 {
+            0 => s.bodies[b as usize].flags = BodyFlags::Dynamic as u32 | BodyFlags::Sleeping as u32,
+            1 => {
+                s.bodies[b as usize].inv_mass = 0.0;
+                s.bodies[b as usize].flags = 0;
+            }
+            _ => {}
+        }
+        let shape = match i % 11 {
+            3 => Shape::Sphere(0.3 * size),
+            5 => Shape::Capsule(0.15 * size, 0.3 * size),
+            8 => Shape::Box(Vec3::new(0.4, 0.3, 0.2) * size),
+            _ => Shape::Hull(lib[i % lib.len()].clone(), size),
+        };
+        s.add(b, shape, Vec3::ZERO, Quat::IDENTITY);
+        if i % 4 == 1 {
+            // Compound child far from the body origin.
+            s.add(b, Shape::Hull(lib[(i + 3) % lib.len()].clone(), 0.5 * size), Vec3::new(1.2 * size, 0.0, 0.0), random_rot(&mut seed));
+        }
+    }
+    s
+}
+
+#[test]
+fn hierarchical_broadphase_finds_every_overlap_once() {
+    for seed in [5u32, 17] {
+        let scene = pipeline_scene(seed);
+        let out = run_pipeline(&scene, 1 << 15);
+        assert_eq!(out.counters.overflow_flags, 0, "overflow 0x{:x}", out.counters.overflow_flags);
+        // Exact hull/box bounds (padded 1e-4).
+        for c in 0..scene.colliders.len() {
+            if let (Some((lo, hi)), true) = (oracle_aabb(&scene, c), matches!(scene.shapes[c], Shape::Hull(..))) {
+                let g = out.aabbs[c];
+                let (glo, ghi) = (Vec3::new(g[0], g[1], g[2]), Vec3::new(g[4], g[5], g[6]));
+                assert!((glo - (lo - Vec3::splat(1e-4))).abs().max_element() < 2e-4, "collider {c} min {glo} vs {lo}");
+                assert!((ghi - (hi + Vec3::splat(1e-4))).abs().max_element() < 2e-4, "collider {c} max {ghi} vs {hi}");
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for p in &out.candidates {
+            let (a, b) = (p.collider_a as usize, p.collider_b as usize);
+            assert!(a < b, "canonical order");
+            assert!(seen.insert((a, b)), "duplicate candidate {a},{b}");
+            assert_ne!(scene.colliders[a].body, scene.colliders[b].body, "same-body pair {a},{b}");
+            assert!(moving(&scene, a) || moving(&scene, b), "pair {a},{b} has no moving body");
+        }
+        let mut required = 0;
+        for a in 0..scene.colliders.len() {
+            for b in a + 1..scene.colliders.len() {
+                if scene.colliders[a].body == scene.colliders[b].body || !(moving(&scene, a) || moving(&scene, b)) {
+                    continue;
+                }
+                let (Some(ba), Some(bb)) = (oracle_aabb(&scene, a), oracle_aabb(&scene, b)) else {
+                    // Plane pairs: required when the collider reaches the plane.
+                    let other = if oracle_aabb(&scene, a).is_none() { b } else { a };
+                    if oracle_aabb(&scene, other).is_some_and(|(lo, _)| lo.y < -1e-3) && moving(&scene, other) {
+                        required += 1;
+                        assert!(seen.contains(&(a, b)), "missed plane pair {a},{b}");
+                    }
+                    continue;
+                };
+                if !(ba.0.cmple(bb.1).all() && bb.0.cmple(ba.1).all()) {
+                    continue;
+                }
+                // Hull pairs and box/box pairs use exact separation (the broadphase
+                // OBB test may reject AABB overlaps that a face axis separates).
+                let involves_hull = [a, b].iter().any(|&c| matches!(scene.shapes[c], Shape::Hull(..)))
+                    || [a, b].iter().all(|&c| matches!(scene.shapes[c], Shape::Box(..)));
+                let sep = if involves_hull { oracle_separation(&scene, a, b) } else { -1.0 };
+                if involves_hull && sep > -AMBIGUOUS {
+                    continue;
+                }
+                required += 1;
+                let kind = |c: usize| match scene.shapes[c] { Shape::Hull(..) => "hull", Shape::Box(..) => "box", Shape::Sphere(..) => "sphere", Shape::Capsule(..) => "capsule", Shape::Plane(..) => "plane" };
+                assert!(seen.contains(&(a, b)), "seed {seed}: missed pair {a},{b} {}/{} moving {}/{} (separation {sep})", kind(a), kind(b), moving(&scene, a), moving(&scene, b));
+            }
+        }
+        assert!(required > 50, "fixture produced only {required} required pairs");
+        eprintln!("seed {seed}: {} candidates, {} required overlaps, {} manifolds", out.candidates.len(), required, out.counters.manifold_count);
+        // Hull pairs found by the broadphase reach the convex stages and agree
+        // with the oracles.
+        let hull_pairs: Vec<CandidatePair> = out
+            .candidates
+            .iter()
+            .filter(|p| [p.collider_a, p.collider_b].iter().any(|&c| matches!(scene.shapes[c as usize], Shape::Hull(..))))
+            .copied()
+            .collect();
+        check(&scene, &hull_pairs, &out, &format!("pipeline seed {seed}"));
+    }
+}
+
+
+#[test]
+fn whole_step_manifold_reuse_carries_every_run_once() {
+    let capacity = 1usize << 15;
+    let scene = pipeline_scene(5);
+    let out = run_pipeline_then_reuse(&scene, capacity);
+    assert_eq!(out.counters.overflow_flags, 0);
+    let prev = &out.prev_contacts;
+    assert!(prev.len() > 100, "fixture produced {} contacts", prev.len());
+    assert_eq!(out.contacts.len(), prev.len(), "every previous contact is carried");
+    assert_eq!(out.counters.manifold_count, out.prev_manifolds, "one manifold per previous run");
+    // Canonical storage tags reused points with alive = source index + 2; each
+    // manifold's points are consecutive sources from the head of one run.
+    let cur_off = capacity * 8; // the reuse wrote into the second contact half
+    let mut seen = vec![false; prev.len()];
+    for m in &out.manifolds {
+        assert!(m.contact_count > 0 && m.contact_count <= 8);
+        let local = m.contact_start as usize - cur_off;
+        let head = (out.contacts[local].alive - 2) as usize;
+        assert!(head == 0 || prev[head - 1].collider_a != m.collider_a || prev[head - 1].collider_b != m.collider_b, "run head");
+        for k in 0..m.contact_count as usize {
+            let src = (out.contacts[local + k].alive - 2) as usize;
+            assert_eq!(src, head + k, "consecutive sources");
+            assert!(!seen[src], "source {src} carried twice");
+            seen[src] = true;
+            assert_eq!((prev[src].collider_a, prev[src].collider_b), (m.collider_a, m.collider_b));
+        }
+        assert_eq!(m.normal, prev[head].normal);
+    }
+    assert!(seen.iter().all(|&s| s), "a previous contact was dropped");
+}
+
+#[test]
+fn collision_filters_remove_pairs_and_keep_the_rest() {
+    let mut scene = pipeline_scene(17);
+    // Alternate categories, one negative group, one positive group that
+    // overrides a mask which would otherwise exclude it.
+    for (k, c) in scene.colliders.iter_mut().enumerate() {
+        if matches!(scene.shapes[k], Shape::Plane(..)) {
+            continue;
+        }
+        let f = match k % 5 {
+            0 => CollisionFilter { categories: 0b01, mask: 0b01, group: 0 },
+            1 => CollisionFilter { categories: 0b10, mask: 0b11, group: 0 },
+            2 => CollisionFilter { categories: 0b01, mask: 0b10, group: -3 },
+            3 => CollisionFilter { categories: 0b10, mask: 0b10, group: 4 },
+            _ => CollisionFilter::default(),
+        };
+        f.apply(c);
+    }
+    let out = run_pipeline(&scene, 1 << 15);
+    assert_eq!(out.counters.overflow_flags, 0);
+    let mut seen = std::collections::HashSet::new();
+    for p in &out.candidates {
+        let (a, b) = (p.collider_a as usize, p.collider_b as usize);
+        assert!(CollisionFilter::allows(&scene.colliders[a], &scene.colliders[b]), "filtered pair {a},{b} emitted");
+        seen.insert((a, b));
+    }
+    let mut required = 0;
+    for a in 0..scene.colliders.len() {
+        for b in a + 1..scene.colliders.len() {
+            if scene.colliders[a].body == scene.colliders[b].body || !(moving(&scene, a) || moving(&scene, b)) {
+                continue;
+            }
+            if !CollisionFilter::allows(&scene.colliders[a], &scene.colliders[b]) {
+                continue;
+            }
+            let (Some(ba), Some(bb)) = (oracle_aabb(&scene, a), oracle_aabb(&scene, b)) else { continue };
+            if !(ba.0.cmple(bb.1).all() && bb.0.cmple(ba.1).all()) {
+                continue;
+            }
+            let polytopes = [a, b].iter().all(|&c| matches!(scene.shapes[c], Shape::Hull(..) | Shape::Box(..)));
+            let involves_hull = [a, b].iter().any(|&c| matches!(scene.shapes[c], Shape::Hull(..)));
+            if (polytopes || involves_hull) && oracle_separation(&scene, a, b) > -AMBIGUOUS {
+                continue;
+            }
+            required += 1;
+            assert!(seen.contains(&(a, b)), "allowed pair {a},{b} missed");
+        }
+    }
+    assert!(required > 20, "fixture kept only {required} allowed overlaps");
+}
+
+// ---- box/capsule and capsule/plane (world_step.slang narrowphase) ----------------
+
+/// Narrowphase on exactly these (A, B) candidates, then the (idle) convex stages.
+fn run_narrowphase(scene: &Scene, pairs: &[(u32, u32)]) -> Output {
+    let cands: Vec<CandidatePair> =
+        pairs.iter().map(|&(a, b)| CandidatePair { collider_a: a, collider_b: b, key: (a << 16) ^ b, _pad: 0 }).collect();
+    run_mode(scene, &cands, 3, 0)
+}
+
+/// World-space contact points (pA, pB), normal and feature of one pair's manifold.
+fn pair_contacts(scene: &Scene, out: &Output, a: u32, b: u32) -> Vec<(Vec3, Vec3, Vec3, u32)> {
+    let world = |c: u32, local: [f32; 3]| {
+        let body = &scene.bodies[scene.colliders[c as usize].body as usize];
+        Vec3::from_array(body.position) + Quat::from_array(body.orientation) * Vec3::from_array(local)
+    };
+    let ms: Vec<&Manifold> = out.manifolds.iter().filter(|m| m.collider_a == a && m.collider_b == b).collect();
+    assert!(ms.len() <= 1, "pair {a},{b}: {} manifolds", ms.len());
+    let Some(m) = ms.first() else { return Vec::new() };
+    let run = &out.contacts[m.contact_start as usize..(m.contact_start + m.contact_count) as usize];
+    run.iter()
+        .map(|c| {
+            assert_eq!((c.collider_a, c.collider_b), (a, b));
+            assert_eq!(c.normal, m.normal, "pair {a},{b}: contact normal differs from the manifold's");
+            (world(a, c.anchor_a), world(b, c.anchor_b), Vec3::from_array(c.normal), c.feature_id)
+        })
+        .collect()
+}
+
+fn capsule_segment(scene: &Scene, c: usize) -> (Vec3, Vec3, f32) {
+    let Shape::Capsule(r, l) = scene.shapes[c] else { panic!("collider {c} is not a capsule") };
+    let pose = scene.pose(c);
+    let axis = pose.rotation * Vec3::Y * l;
+    (pose.position - axis, pose.position + axis, r)
+}
+
+fn segment_distance(p: Vec3, s0: Vec3, s1: Vec3) -> f32 {
+    let d = s1 - s0;
+    let t = if d.length_squared() > 1e-12 { ((p - s0).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+    (p - (s0 + d * t)).length()
+}
+
+/// Exact-to-sampling capsule/box separation and whether the segment enters the box.
+fn capsule_box_separation(scene: &Scene, cap: usize, bx: usize) -> (f32, bool) {
+    capsule_box_separation_n(scene, cap, bx, 4096)
+}
+
+fn capsule_box_separation_n(scene: &Scene, cap: usize, bx: usize, samples: usize) -> (f32, bool) {
+    let (s0, s1, r) = capsule_segment(scene, cap);
+    let (hull, scale) = scene.hull_of(bx).unwrap();
+    let pose = scene.pose(bx);
+    let d = (0..=samples)
+        .map(|k| point_distance(&hull, scale, pose, s0.lerp(s1, k as f32 / samples as f32)))
+        .fold(f32::INFINITY, f32::min);
+    (d - r, d < 1e-4)
+}
+
+fn box_support(scene: &Scene, bx: usize, n: Vec3) -> f32 {
+    let Shape::Box(h) = scene.shapes[bx] else { panic!("collider {bx} is not a box") };
+    let pose = scene.pose(bx);
+    n.dot(pose.position) + (0..3).map(|i| n.dot(pose.rotation * Vec3::AXES[i]).abs() * h[i]).sum::<f32>()
+}
+
+/// Random box/capsule pairs, half placed within a few mm of touching.
+fn box_capsule_scene(seed: u32, pairs: usize) -> (Scene, Vec<(u32, u32)>) {
+    let mut seed = seed;
+    let mut s = Scene::new();
+    let mut out = Vec::new();
+    for i in 0..pairs {
+        let origin = Vec3::new(i as f32 * 8.0, 0.0, 0.0);
+        let half = Vec3::new(0.1 + rng(&mut seed) * 0.5, 0.1 + rng(&mut seed) * 0.5, 0.1 + rng(&mut seed) * 0.5);
+        let a = s.body(origin, random_rot(&mut seed));
+        let bx = s.add(a, Shape::Box(half), Vec3::ZERO, Quat::IDENTITY);
+        let r = 0.05 + rng(&mut seed) * 0.25;
+        let l = if i % 7 == 0 { 0.0 } else { rng(&mut seed) * 0.6 };
+        let dir = Vec3::new(rng(&mut seed) - 0.5, rng(&mut seed) - 0.5, rng(&mut seed) - 0.5).normalize();
+        let b = s.body(origin, random_rot(&mut seed));
+        let cap = s.add(b, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+        let reach = half.length() + l + r + 0.1;
+        if i % 2 == 0 {
+            // Bisect the offset along `dir` to a separation in [-3 mm, +2 mm].
+            let target = rng(&mut seed) * 0.005 - 0.003;
+            let (mut lo, mut hi) = (0.0f32, reach);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                s.bodies[b as usize].position = (origin + dir * mid).to_array();
+                if capsule_box_separation_n(&s, cap as usize, bx as usize, 256).0 < target { lo = mid } else { hi = mid }
+            }
+        } else {
+            s.bodies[b as usize].position = (origin + dir * rng(&mut seed) * reach).to_array();
+        }
+        out.push((bx, cap));
+    }
+    (s, out)
+}
+
+#[test]
+fn box_capsule_contacts_match_distance_oracle_in_both_orders() {
+    let (mut hits, mut shallow) = (0, 0);
+    for seed in [5u32, 19, 314] {
+        let (scene, pairs) = box_capsule_scene(seed, 160);
+        let both: Vec<(u32, u32)> = pairs.iter().flat_map(|&(bx, cap)| [(bx, cap), (cap, bx)]).collect();
+        let out = run_narrowphase(&scene, &both);
+        assert_eq!(out.counters.overflow_flags, 0);
+        for &(bx, cap) in &pairs {
+            let label = format!("seed {seed} box {bx} capsule {cap}");
+            let (sep, inside) = capsule_box_separation(&scene, cap as usize, bx as usize);
+            let fwd = pair_contacts(&scene, &out, bx, cap);
+            let rev = pair_contacts(&scene, &out, cap, bx);
+            assert!(fwd.len() <= 2, "{label}: {} contacts", fwd.len());
+            if sep > AMBIGUOUS {
+                assert!(fwd.is_empty(), "{label}: separated by {sep} but has {} contacts", fwd.len());
+            } else if sep < -AMBIGUOUS {
+                assert!(!fwd.is_empty(), "{label}: overlapping by {} but no contact", -sep);
+            }
+            // The capsule-first order is the exact mirror: same points swapped, -n.
+            assert_eq!(fwd.len(), rev.len(), "{label}: orders disagree on the count");
+            for (f, r) in fwd.iter().zip(&rev) {
+                assert!((f.0 - r.1).length() < 1e-5 && (f.1 - r.0).length() < 1e-5, "{label}: orders disagree on points");
+                assert!((f.2 + r.2).length() < 1e-6 && f.3 == r.3, "{label}: orders disagree on normal/feature");
+            }
+            let (s0, s1, radius) = capsule_segment(&scene, cap as usize);
+            let (hull, scale) = scene.hull_of(bx as usize).unwrap();
+            let mut deepest = f32::NEG_INFINITY;
+            for &(pa, pb, n, feature) in &fwd {
+                assert!((n.length() - 1.0).abs() < 1e-4, "{label}: non-unit normal");
+                assert_eq!(feature & 0xFF00_0000, 0x0600_0000, "{label}: feature {feature:#x}");
+                let on_box = surface_distance(&hull, scale, scene.pose(bx as usize), pa);
+                assert!(on_box.abs() < 1e-3, "{label}: pA {on_box} off the box surface");
+                // pB is the capsule's support along -n at its segment point:
+                // on the surface, or inside when the segment tilts toward the box.
+                let on_cap = segment_distance(pb, s0, s1) - radius;
+                assert!(on_cap < 1e-3, "{label}: pB {on_cap} outside the capsule");
+                // pA lies on the box's support plane along n (n leaves the box).
+                let support = box_support(&scene, bx as usize, n) - n.dot(pa);
+                assert!(support.abs() < 1e-3, "{label}: n is not an outward box normal at pA ({support})");
+                let gap = n.dot(pb - pa);
+                assert!(gap <= 1e-4, "{label}: contact gap {gap} > 0");
+                deepest = deepest.max(-gap);
+            }
+            let ids: std::collections::HashSet<u32> = fwd.iter().map(|c| c.3).collect();
+            assert_eq!(ids.len(), fwd.len(), "{label}: duplicate feature ids");
+            if !fwd.is_empty() {
+                hits += 1;
+            }
+            if !fwd.is_empty() && !inside {
+                assert!((deepest + sep).abs() < 1e-3, "{label}: depth {deepest} vs oracle {}", -sep);
+                shallow += 1;
+            }
+        }
+    }
+    eprintln!("box/capsule: {hits} touching pairs, {shallow} with exact depth");
+    assert!(hits > 200 && shallow > 150, "fixture too thin: {hits} hits, {shallow} exact");
+}
+
+#[test]
+fn capsule_lying_on_a_box_face_gets_two_segment_contacts() {
+    let mut s = Scene::new();
+    let a = s.body(Vec3::ZERO, Quat::IDENTITY);
+    let bx = s.add(a, Shape::Box(Vec3::new(1.0, 0.25, 1.0)), Vec3::ZERO, Quat::IDENTITY);
+    let (r, l, depth) = (0.1f32, 0.4f32, 0.005f32);
+    let lying = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2); // local Y → world -X
+    // Centred, yawed, and hanging 0.3 past the +X edge (clipped there).
+    let cases = [(Vec3::ZERO, 0.0f32, [-0.4f32, 0.4]), (Vec3::new(0.1, 0.0, -0.2), 0.7, [-0.4, 0.4]), (Vec3::new(0.9, 0.0, 0.3), 0.0, [-0.4, 0.1])];
+    for (offset, yaw, along) in cases {
+        let rot = Quat::from_rotation_y(yaw) * lying;
+        let centre = offset + Vec3::Y * (0.25 + r - depth);
+        let b = s.body(centre, rot);
+        let cap = s.add(b, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+        let out = run_narrowphase(&s, &[(bx, cap), (cap, bx)]);
+        let label = format!("offset {offset} yaw {yaw}");
+        for (a_id, b_id, up) in [(bx, cap, 1.0f32), (cap, bx, -1.0)] {
+            let cs = pair_contacts(&s, &out, a_id, b_id);
+            assert_eq!(cs.len(), 2, "{label}: {} contacts", cs.len());
+            let axis = rot * Vec3::Y;
+            let mut ts: Vec<f32> = cs
+                .iter()
+                .map(|&(pa, pb, n, _)| {
+                    assert!((n - Vec3::Y * up).length() < 1e-5, "{label}: normal {n}");
+                    assert!((n.dot(pb - pa) + depth).abs() < 1e-5, "{label}: depth {}", -n.dot(pb - pa));
+                    let on_box = if up > 0.0 { pa } else { pb };
+                    assert!((on_box.y - 0.25).abs() < 1e-5, "{label}: box point {on_box}");
+                    (on_box - Vec3::new(centre.x, 0.25, centre.z)).dot(axis) * -1.0
+                })
+                .collect();
+            ts.sort_by(f32::total_cmp);
+            // World points along the capsule's -local-Y (world +X before yaw).
+            let expect = if offset.x > 0.5 { [-0.4, 0.1] } else { along };
+            assert!((ts[0] - expect[0]).abs() < 1e-4 && (ts[1] - expect[1]).abs() < 1e-4, "{label}: points at {ts:?}");
+        }
+    }
+}
+
+#[test]
+fn capsule_plane_contacts_are_the_end_caps_within_margin_in_both_orders() {
+    let mut seed = 23u32;
+    let mut s = Scene::new();
+    let ground = s.static_body();
+    let n = Vec3::new(0.1, 1.0, -0.2).normalize();
+    let w = 0.3f32;
+    let plane = s.add(ground, Shape::Plane(n, w), Vec3::ZERO, Quat::IDENTITY);
+    let mut pairs = Vec::new();
+    for i in 0..200 {
+        let rot = random_rot(&mut seed);
+        let (r, l) = (0.05 + rng(&mut seed) * 0.2, rng(&mut seed) * 0.5);
+        let p = Vec3::new(i as f32 * 3.0, 0.0, rng(&mut seed));
+        let height = w + (rng(&mut seed) - 0.6) * (r + l);
+        let b = s.body(p + n * (height - n.dot(p)), rot);
+        let cap = s.add(b, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+        pairs.push(cap);
+    }
+    let both: Vec<(u32, u32)> = pairs.iter().flat_map(|&c| [(c, plane), (plane, c)]).collect();
+    let out = run_narrowphase(&s, &both);
+    let mut two = 0;
+    for &cap in &pairs {
+        let (s0, s1, r) = capsule_segment(&s, cap as usize);
+        let gaps = [n.dot(s0) - w - r, n.dot(s1) - w - r];
+        let fwd = pair_contacts(&s, &out, cap, plane);
+        let rev = pair_contacts(&s, &out, plane, cap);
+        let expected: Vec<usize> = (0..2).filter(|&k| gaps[k] < MARGIN).collect();
+        if gaps.iter().all(|g| (g - MARGIN).abs() > 1e-5) && (s1 - s0).length() > 1e-3 {
+            assert_eq!(fwd.len(), expected.len(), "capsule {cap}: gaps {gaps:?}");
+        }
+        assert_eq!(fwd.len(), rev.len());
+        for (&(pa, pb, nc, feature), r_c) in fwd.iter().zip(&rev) {
+            assert!((nc + n).length() < 1e-5, "capsule {cap}: normal {nc}");
+            let k = (feature & 1) as usize;
+            assert_eq!(feature & !1, 0x0500_0000, "capsule {cap}: feature {feature:#x}");
+            let cap_end = [s0, s1][k];
+            assert!((pa - (cap_end - n * r)).length() < 1e-5, "capsule {cap}: capsule point");
+            assert!((n.dot(pb) - w).abs() < 1e-5, "capsule {cap}: plane point off the plane");
+            assert!((nc.dot(pb - pa) - gaps[k]).abs() < 1e-5, "capsule {cap}: depth");
+            assert!((pa - r_c.1).length() < 1e-6 && (pb - r_c.0).length() < 1e-6 && (nc + r_c.2).length() < 1e-6 && feature == r_c.3);
+        }
+        if fwd.len() == 2 {
+            two += 1;
+        }
+    }
+    assert!(two > 20, "only {two} capsules touch with both caps");
+}
+
+#[test]
+fn box_capsule_and_capsule_plane_contacts_are_deterministic() {
+    let (scene, pairs) = box_capsule_scene(99, 64);
+    let both: Vec<(u32, u32)> = pairs.iter().flat_map(|&(bx, cap)| [(bx, cap), (cap, bx)]).collect();
+    let a = run_narrowphase(&scene, &both);
+    let b = run_narrowphase(&scene, &both);
+    assert!(!a.contacts.is_empty());
+    assert_eq!(bytemuck::cast_slice::<Contact, u8>(&a.contacts), bytemuck::cast_slice::<Contact, u8>(&b.contacts));
+}
+
+/// Sampled capsule/capsule separation (exact distance to B's segment per sample).
+fn capsule_capsule_separation(scene: &Scene, a: usize, b: usize, samples: usize) -> f32 {
+    let (a0, a1, ra) = capsule_segment(scene, a);
+    let (b0, b1, rb) = capsule_segment(scene, b);
+    (0..=samples)
+        .map(|k| segment_distance(a0.lerp(a1, k as f32 / samples as f32), b0, b1))
+        .fold(f32::INFINITY, f32::min)
+        - ra
+        - rb
+}
+
+/// Random capsule pairs: a third near-parallel (< 2.5°), half placed within a few
+/// mm of touching.
+fn capsule_pair_scene(seed: u32, pairs: usize) -> (Scene, Vec<(u32, u32)>) {
+    let mut seed = seed;
+    let mut s = Scene::new();
+    let mut out = Vec::new();
+    for i in 0..pairs {
+        // A small grid keeps f32 world coordinates precise (the pairs never interact).
+        let origin = Vec3::new((i % 16) as f32 * 4.0, (i / 16) as f32 * 4.0, 0.0);
+        let qa = random_rot(&mut seed);
+        let a = s.body(origin, qa);
+        let (ra, la) = (0.05 + rng(&mut seed) * 0.25, if i % 11 == 0 { 0.0 } else { rng(&mut seed) * 0.8 });
+        let ca = s.add(a, Shape::Capsule(ra, la), Vec3::ZERO, Quat::IDENTITY);
+        let qb = if i % 3 == 0 {
+            let axis = Vec3::new(rng(&mut seed) - 0.5, rng(&mut seed) - 0.5, rng(&mut seed) - 0.5).normalize();
+            let flip = if i % 2 == 0 { Quat::IDENTITY } else { Quat::from_rotation_x(std::f32::consts::PI) };
+            Quat::from_axis_angle(axis, rng(&mut seed) * 0.045) * qa * flip
+        } else {
+            random_rot(&mut seed)
+        };
+        let b = s.body(origin, qb);
+        let (rb, lb) = (0.05 + rng(&mut seed) * 0.25, rng(&mut seed) * 0.8);
+        let cb = s.add(b, Shape::Capsule(rb, lb), Vec3::ZERO, Quat::IDENTITY);
+        let dir = Vec3::new(rng(&mut seed) - 0.5, rng(&mut seed) - 0.5, rng(&mut seed) - 0.5).normalize();
+        let reach = la + lb + ra + rb + 0.1;
+        if i % 2 == 0 {
+            let target = rng(&mut seed) * 0.005 - 0.003;
+            let (mut lo, mut hi) = (0.0f32, reach);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                s.bodies[b as usize].position = (origin + dir * mid).to_array();
+                if capsule_capsule_separation(&s, ca as usize, cb as usize, 256) < target { lo = mid } else { hi = mid }
+            }
+        } else {
+            s.bodies[b as usize].position = (origin + dir * rng(&mut seed) * reach).to_array();
+        }
+        out.push((ca, cb));
+    }
+    (s, out)
+}
+
+#[test]
+fn capsule_capsule_contacts_match_distance_oracle_in_both_orders() {
+    let (mut hits, mut multi) = (0, 0);
+    for seed in [8u32, 21, 4242] {
+        let (scene, pairs) = capsule_pair_scene(seed, 180);
+        let both: Vec<(u32, u32)> = pairs.iter().flat_map(|&(a, b)| [(a, b), (b, a)]).collect();
+        let out = run_narrowphase(&scene, &both);
+        assert_eq!(out.counters.overflow_flags, 0);
+        for &(a, b) in &pairs {
+            let label = format!("seed {seed} capsules {a},{b}");
+            let sep = capsule_capsule_separation(&scene, a as usize, b as usize, 4096);
+            let fwd = pair_contacts(&scene, &out, a, b);
+            let rev = pair_contacts(&scene, &out, b, a);
+            assert!(fwd.len() <= 3, "{label}: {} contacts", fwd.len());
+            if sep > AMBIGUOUS {
+                assert!(fwd.is_empty(), "{label}: separated by {sep} but has {} contacts", fwd.len());
+            } else if sep < -AMBIGUOUS {
+                assert!(!fwd.is_empty(), "{label}: overlapping by {} but no contact", -sep);
+            }
+            // Swapping A and B mirrors the manifold up to which segment is
+            // clipped; compare the deepest contact, which both orders must find.
+            let deepest = |cs: &[(Vec3, Vec3, Vec3, u32)]| cs.iter().map(|c| -c.2.dot(c.1 - c.0)).fold(f32::NEG_INFINITY, f32::max);
+            if !fwd.is_empty() {
+                assert!(!rev.is_empty(), "{label}: only one order collides");
+                assert!((fwd[0].2 + rev[0].2).length() < 1e-3, "{label}: orders disagree on the normal");
+                assert!((deepest(&fwd) - deepest(&rev)).abs() < 1e-4, "{label}: orders disagree on depth {} vs {} (oracle {})", deepest(&fwd), deepest(&rev), -sep);
+            }
+            let (a0, a1, ra) = capsule_segment(&scene, a as usize);
+            let (b0, b1, rb) = capsule_segment(&scene, b as usize);
+            for &(pa, pb, n, feature) in &fwd {
+                assert!((n.length() - 1.0).abs() < 1e-4, "{label}: non-unit normal");
+                assert_eq!(feature & 0xFF00_0000, 0x0700_0000, "{label}: feature {feature:#x}");
+                assert!(segment_distance(pa, a0, a1) - ra < 1e-4, "{label}: pA outside capsule A");
+                assert!(segment_distance(pb, b0, b1) - rb < 1e-4, "{label}: pB outside capsule B");
+                assert!(n.dot(pb - pa) <= 1e-4, "{label}: contact gap {} > 0", n.dot(pb - pa));
+            }
+            let ids: std::collections::HashSet<u32> = fwd.iter().map(|c| c.3).collect();
+            assert_eq!(ids.len(), fwd.len(), "{label}: duplicate feature ids");
+            if !fwd.is_empty() {
+                hits += 1;
+                assert!((deepest(&fwd) + sep).abs() < 1e-3, "{label}: depth {} vs oracle {}", deepest(&fwd), -sep);
+            }
+            if fwd.len() >= 2 {
+                multi += 1;
+            }
+        }
+    }
+    eprintln!("capsule/capsule: {hits} touching pairs, {multi} with 2+ contacts");
+    assert!(hits > 200 && multi > 40, "fixture too thin: {hits} hits, {multi} multi-contact");
+}
+
+#[test]
+fn parallel_capsules_get_overlap_end_contacts_and_crossed_get_one() {
+    let mut s = Scene::new();
+    let lying = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2); // local Y → world -X
+    let (r, l, depth) = (0.1f32, 0.5f32, 0.004f32);
+    let a = s.body(Vec3::ZERO, lying);
+    let ca = s.add(a, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+    // Parallel, on top, shifted 0.3 along X: overlap x ∈ [-0.2, 0.5].
+    let b = s.body(Vec3::new(0.3, 2.0 * r - depth, 0.0), lying);
+    let cb = s.add(b, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+    // Crossed at 90° on top.
+    let c = s.body(Vec3::new(20.0, 2.0 * r - depth, 0.0), Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+    let base = s.body(Vec3::new(20.0, 0.0, 0.0), lying);
+    let cbase = s.add(base, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+    let cc = s.add(c, Shape::Capsule(r, l), Vec3::ZERO, Quat::IDENTITY);
+    let out = run_narrowphase(&s, &[(ca, cb), (cb, ca), (cbase, cc), (cc, cbase)]);
+    for (x, y, up) in [(ca, cb, 1.0f32), (cb, ca, -1.0)] {
+        let cs = pair_contacts(&s, &out, x, y);
+        assert_eq!(cs.len(), 2, "parallel: {} contacts", cs.len());
+        let mut xs: Vec<f32> = cs
+            .iter()
+            .map(|&(pa, pb, n, _)| {
+                assert!((n - Vec3::Y * up).length() < 1e-5, "parallel: normal {n}");
+                assert!((n.dot(pb - pa) + depth).abs() < 1e-5, "parallel: depth {}", -n.dot(pb - pa));
+                pa.x
+            })
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        assert!((xs[0] + 0.2).abs() < 1e-5 && (xs[1] - 0.5).abs() < 1e-5, "parallel: contacts at x {xs:?}");
+    }
+    for (x, y) in [(cbase, cc), (cc, cbase)] {
+        let cs = pair_contacts(&s, &out, x, y);
+        assert_eq!(cs.len(), 1, "crossed: {} contacts", cs.len());
+        let (pa, pb, n, _) = cs[0];
+        assert!((n.dot(pb - pa) + depth).abs() < 1e-5 && n.y.abs() > 0.99999, "crossed: n {n}");
+        assert!((pa.x - 20.0).abs() < 1e-5 && pa.z.abs() < 1e-5, "crossed: point {pa}");
+    }
+}

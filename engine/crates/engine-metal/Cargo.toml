@@ -1,0 +1,42 @@
+[package]
+name = "engine-metal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Metal compute backend and M3 proof path (Slang → MSL)"
+
+[dependencies]
+engine-schema.workspace = true
+engine-exec.workspace = true
+engine-vehicle.workspace = true
+engine-slang-build.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+metal.workspace = true
+objc.workspace = true
+cocoa.workspace = true
+core-graphics-types.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+engine-slang-build.workspace = true
+engine-exec.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+engine-webgpu = { path = "../engine-webgpu" }
+engine-cuda = { path = "../engine-cuda" }
+env_logger.workspace = true
+
+[[bin]]
+name = "abi_probe"
+path = "src/bin/abi_probe.rs"
+
+[[bin]]
+name = "scale_bench"
+path = "src/bin/scale_bench.rs"

@@ -1,0 +1,17 @@
+[package]
+name = "engine-fracture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fracture lab host logic shared by the WebGPU (wasm) and Metal hosts: SHARDWRIGHT_fracture GLB reader, scene builders and the per-tick dispatch plan (no GPU)"
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+engine-schema.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The stress oracle (engine/stress-oracle): the cooker runs the asset through it.
+stress-ref = { path = "../../stress-oracle/crates/stress-ref" }
+stress-layout = { path = "../../stress-oracle/crates/stress-layout" }

@@ -1,4 +1,5 @@
 use crate::GpuError;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// Thin wrapper around a wgpu device and queue.
@@ -6,6 +7,10 @@ pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     staging_pool: Mutex<Vec<(u64, wgpu::Buffer)>>,
+    /// Count of GPU->CPU readbacks (buffer/counter downloads). Used by the
+    /// zero-hot-path-readback assertion (W5): the caller snapshots this around a
+    /// step and asserts it did not change on the resident path.
+    readback_count: AtomicU64,
 }
 
 impl GpuContext {
@@ -14,7 +19,19 @@ impl GpuContext {
             device,
             queue,
             staging_pool: Mutex::new(Vec::new()),
+            readback_count: AtomicU64::new(0),
         }
+    }
+
+    /// Record that a GPU->CPU readback occurred (called by buffer/counter
+    /// download paths). Cheap relaxed increment.
+    pub fn note_readback(&self) {
+        self.readback_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Total GPU->CPU readbacks recorded on this context so far.
+    pub fn readback_count(&self) -> u64 {
+        self.readback_count.load(Ordering::Relaxed)
     }
 
     pub(crate) fn acquire_staging_buffer(&self, size: u64, label: &'static str) -> wgpu::Buffer {

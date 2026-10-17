@@ -144,6 +144,24 @@ fn emit_contact(
     emit_contact_world_points(world_a, world_b, normal, body_a, body_b, feature_id, max_contacts);
 }
 
+// Content-derived disambiguator for the deterministic contact sort: contacts
+// sharing (pair, feature) — e.g. capsule cap points with a constant feature id
+// — get distinct hashes from their quantized positions, making the sort key a
+// total order. Bitwise-identical duplicate points may collide, which is
+// harmless: identical rows commute in float summation.
+fn contact_pos_hash(p: vec3<f32>) -> u32 {
+    let q = vec3<u32>(
+        bitcast<u32>(i32(floor(p.x * 1024.0))),
+        bitcast<u32>(i32(floor(p.y * 1024.0))),
+        bitcast<u32>(i32(floor(p.z * 1024.0))),
+    );
+    var h = q.x * 0x8da6b343u;
+    h = h ^ (q.y * 0xd8163841u);
+    h = h ^ (q.z * 0xcb1ab31fu);
+    h = h * 0x9e3779b1u;
+    return h;
+}
+
 fn emit_contact_world_points(
     world_a: vec3<f32>,
     world_b: vec3<f32>,
@@ -167,11 +185,16 @@ fn emit_contact_world_points(
     let local_a = quat_rotate(quat_conj(q_a), world_a - pos_a);
     let local_b = quat_rotate(quat_conj(q_b), world_b - pos_b);
     contacts[slot].point  = vec4<f32>(point, depth);
-    contacts[slot].normal = vec4<f32>(normal, 0.0);
+    // normal.w stores the frozen solve-start normal separation C0 (AVBD
+    // alpha-stabilization). It is written once at emit and never overwritten by
+    // the primal/dual passes, unlike point.w which tracks the live penetration.
+    contacts[slot].normal = vec4<f32>(normal, depth);
     contacts[slot].tangent = vec4<f32>(tangent, 0.0);
     contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
     contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
-    contacts[slot].lambda = vec4<f32>(0.0);
+    // lambda.w carries the sort disambiguator until the GPU sort consumes it;
+    // warm-start/dual rewrite lambda afterwards.
+    contacts[slot].lambda = vec4<f32>(0.0, 0.0, 0.0, bitcast<f32>(contact_pos_hash(point)));
     let k_start = params.solver.z;
     contacts[slot].penalty = vec4<f32>(k_start, k_start, k_start, 0.0);
     contacts[slot].body_a = body_a;
@@ -203,11 +226,17 @@ fn emit_plane_contact(
     let local_a = quat_rotate(quat_conj(q_a), world_a - pos_a);
     let local_b = quat_rotate(quat_conj(q_b), world_b - pos_b);
     contacts[slot].point = vec4<f32>((world_a + world_b) * 0.5, depth);
-    contacts[slot].normal = vec4<f32>(normal, 0.0);
+    // normal.w = frozen solve-start C0 for AVBD alpha-stabilization (see emit_contact_world_points).
+    contacts[slot].normal = vec4<f32>(normal, depth);
     contacts[slot].tangent = vec4<f32>(tangent, 0.0);
     contacts[slot].local_anchor_a = vec4<f32>(local_a, 0.0);
     contacts[slot].local_anchor_b = vec4<f32>(local_b, 0.0);
-    contacts[slot].lambda = vec4<f32>(0.0);
+    contacts[slot].lambda = vec4<f32>(
+        0.0,
+        0.0,
+        0.0,
+        bitcast<f32>(contact_pos_hash((world_a + world_b) * 0.5)),
+    );
     let k_start = params.solver.z;
     contacts[slot].penalty = vec4<f32>(k_start, k_start, k_start, 0.0);
     contacts[slot].body_a = body_dynamic;
@@ -343,13 +372,48 @@ fn sphere_box_test(
 
 // Clip polygon (up to 8 verts) against a single plane (points on positive side kept).
 // Returns new vertex count.
+// Clip-vertex identity (M3 contact stability): every vertex of the clipped
+// incident polygon is the intersection of exactly two of eight lines in the
+// reference-face plane — the 4 incident-face edges (line ids 0..3) and the 4
+// reference-face clip planes (line ids 4..7). Encoding that unordered line
+// pair as `(min << 3) | max` gives a feature id low byte that is:
+//   - stable: derived from geometry, invariant to Sutherland-Hodgman output
+//     order (the old loop-index ids reshuffled as the incident box rotated,
+//     defeating warm-start and pumping energy into resting stacks), and
+//   - unique within the manifold: no two distinct vertices share a line pair,
+//     which the warm-start hash map requires — duplicate (pair, feature) keys
+//     resolve by insertion race and would break bitwise determinism.
+// Original corner k is the intersection of incident edges (k+3)%4 and k. An
+// intersection vertex inherits the line shared by the clipped segment's
+// endpoints, paired with the clip plane's id.
+
+fn clip_line_pair(l1: u32, l2: u32) -> u32 {
+    return (min(l1, l2) << 3u) | max(l1, l2);
+}
+
+// The line shared by both endpoints of a polygon edge (each id packs two
+// 3-bit line ids). Convex clipping guarantees one exists; fall back to the
+// first line of `id_i` for degenerate float cases.
+fn shared_clip_line(id_i: u32, id_j: u32) -> u32 {
+    let a1 = id_i >> 3u;
+    let a2 = id_i & 7u;
+    let b1 = id_j >> 3u;
+    let b2 = id_j & 7u;
+    if a1 == b1 || a1 == b2 { return a1; }
+    if a2 == b1 || a2 == b2 { return a2; }
+    return a1;
+}
+
 fn clip_polygon_against_plane(
     verts: ptr<function, array<vec3<f32>, 8>>,
+    ids: ptr<function, array<u32, 8>>,
     count: u32,
     plane_normal: vec3<f32>,
     plane_dist: f32,
+    plane_line_id: u32,
 ) -> u32 {
     var out: array<vec3<f32>, 8>;
+    var out_ids: array<u32, 8>;
     var out_count = 0u;
     if count == 0u { return 0u; }
 
@@ -364,6 +428,7 @@ fn clip_polygon_against_plane(
             // Current vertex is inside
             if out_count < 8u {
                 out[out_count] = vi;
+                out_ids[out_count] = (*ids)[i];
                 out_count = out_count + 1u;
             }
             if dj < 0.0 {
@@ -371,6 +436,8 @@ fn clip_polygon_against_plane(
                 let t = di / (di - dj);
                 if out_count < 8u {
                     out[out_count] = vi + (vj - vi) * t;
+                    out_ids[out_count] =
+                        clip_line_pair(shared_clip_line((*ids)[i], (*ids)[j]), plane_line_id);
                     out_count = out_count + 1u;
                 }
             }
@@ -379,6 +446,8 @@ fn clip_polygon_against_plane(
             let t = di / (di - dj);
             if out_count < 8u {
                 out[out_count] = vi + (vj - vi) * t;
+                out_ids[out_count] =
+                    clip_line_pair(shared_clip_line((*ids)[i], (*ids)[j]), plane_line_id);
                 out_count = out_count + 1u;
             }
         }
@@ -386,6 +455,7 @@ fn clip_polygon_against_plane(
 
     for (var i = 0u; i < out_count; i = i + 1u) {
         (*verts)[i] = out[i];
+        (*ids)[i] = out_ids[i];
     }
     return out_count;
 }
@@ -573,6 +643,20 @@ fn box_box_test(
     let he_arr_a = array<f32, 3>(he_a.x, he_a.y, he_a.z);
     let he_arr_b = array<f32, 3>(he_b.x, he_b.y, he_b.z);
 
+    // Face-axis selection hysteresis (M3 contact stability). SAT winners on
+    // near-aligned boxes (e.g. a resting stack) sit in a near-tie between A's
+    // and B's parallel face axes; a bare `>` lets sub-millimeter jitter flip
+    // the winner every frame, which rewrites the contact `feature_id` prefix
+    // and defeats warm-start (each miss re-arms the penalty spring against the
+    // resting penetration -> energy pump). A challenger must beat the incumbent
+    // by this band to take over; axes are enumerated in a fixed order (A.x,
+    // A.y, A.z, then B.x, B.y, B.z), so near-ties resolve to the same axis
+    // every frame for near-constant geometry. The band (sub-mm) is far below
+    // the ~half-extent gap between genuinely different faces, so it never
+    // selects a wrong axis.
+    let face_hyst_abs = 5.0e-4;
+    let face_hyst_rel = 0.05;
+
     // 6 face axes (3 from A, 3 from B)
     for (var i = 0u; i < 3u; i = i + 1u) {
         let axis = axes_a[i];
@@ -583,7 +667,8 @@ fn box_box_test(
         let center_proj = dot(d, axis);
         let separation = abs(center_proj) - (proj_a + proj_b);
         if separation > 0.0 { return; }
-        if !have_face_axis || separation > best_face_sep {
+        let hyst = face_hyst_abs + face_hyst_rel * abs(best_face_sep);
+        if !have_face_axis || separation > best_face_sep + hyst {
             have_face_axis = true;
             best_face_sep = separation;
             best_face_normal = axis * select(1.0, -1.0, center_proj < 0.0);
@@ -600,7 +685,8 @@ fn box_box_test(
         let center_proj = dot(d, axis);
         let separation = abs(center_proj) - (proj_a + proj_b);
         if separation > 0.0 { return; }
-        if !have_face_axis || separation > best_face_sep {
+        let hyst = face_hyst_abs + face_hyst_rel * abs(best_face_sep);
+        if !have_face_axis || separation > best_face_sep + hyst {
             have_face_axis = true;
             best_face_sep = separation;
             best_face_normal = axis * select(1.0, -1.0, center_proj < 0.0);
@@ -794,31 +880,48 @@ fn box_box_test(
     clip_poly[3] = inc_center + inc_u * inc_extent_u - inc_v * inc_extent_v;
     var clip_count = 4u;
 
+    // Stable per-vertex identity (see clip_polygon_against_plane): incident
+    // edge k runs corner k -> corner (k+1)%4, so corner k is the intersection
+    // of edges (k+3)%4 and k. Clip planes get line ids 4..7 in call order.
+    var clip_ids: array<u32, 8>;
+    clip_ids[0] = clip_line_pair(3u, 0u);
+    clip_ids[1] = clip_line_pair(0u, 1u);
+    clip_ids[2] = clip_line_pair(1u, 2u);
+    clip_ids[3] = clip_line_pair(2u, 3u);
+
     // The generic clip helper keeps the positive half-space, so negate the CPU
     // reference planes which keep points on the <= side.
     clip_count = clip_polygon_against_plane(
         &clip_poly,
+        &clip_ids,
         clip_count,
         -ref_u,
         -(dot(ref_u, ref_center) + ref_extent_u),
+        4u,
     );
     clip_count = clip_polygon_against_plane(
         &clip_poly,
+        &clip_ids,
         clip_count,
         ref_u,
         -(dot(-ref_u, ref_center) + ref_extent_u),
+        5u,
     );
     clip_count = clip_polygon_against_plane(
         &clip_poly,
+        &clip_ids,
         clip_count,
         -ref_v,
         -(dot(ref_v, ref_center) + ref_extent_v),
+        6u,
     );
     clip_count = clip_polygon_against_plane(
         &clip_poly,
+        &clip_ids,
         clip_count,
         ref_v,
         -(dot(-ref_v, ref_center) + ref_extent_v),
+        7u,
     );
     let face_feature_prefix =
         0x03000000u |
@@ -871,7 +974,7 @@ fn box_box_test(
                 final_points[final_count] = midpoint;
                 final_world_a[final_count] = world_a;
                 final_world_b[final_count] = world_b;
-                final_features[final_count] = i;
+                final_features[final_count] = clip_ids[i];
                 final_count = final_count + 1u;
             }
         }
@@ -1262,10 +1365,14 @@ fn hull_hull_test(
         }
     }
 
-    // Ensure normal points from A to B
+    // Ensure normal points from A to B (used for the face/clipping geometry below).
     if dot(best_normal, d) < 0.0 {
         best_normal = -best_normal;
     }
+    // The solver convention (and box_box_test) emit the normal from body_b to
+    // body_a, so contacts use `-best_normal`. Without this, hull-hull contacts push
+    // the wrong way (a hull resting on a hull would explode).
+    let contact_normal = -best_normal;
 
     // Edge-edge: emit single contact from closest points on the two edges
     if best_is_edge {
@@ -1276,7 +1383,7 @@ fn hull_hull_test(
         let pts = closest_points_segments(ea0, ea1, eb0, eb1);
         let contact_point = (pts[0] + pts[1]) * 0.5;
         let feature = 0x07000000u | ((best_edge_i & 0xFFu) << 8u) | (best_edge_j & 0xFFu);
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, feature, max_contacts);
+        emit_contact(contact_point, contact_normal, min_depth, body_a, body_b, feature, max_contacts);
         return;
     }
 
@@ -1310,7 +1417,7 @@ fn hull_hull_test(
     if rn_len < 1e-12 {
         // Degenerate face, fall back to single contact
         let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, 0x08000000u, max_contacts);
+        emit_contact(contact_point, contact_normal, min_depth, body_a, body_b, 0x08000000u, max_contacts);
         return;
     }
     ref_normal = ref_normal / rn_len;
@@ -1334,6 +1441,15 @@ fn hull_hull_test(
     clip_poly[2] = hull_world_vert(inc_si, ic1, inc_pos, inc_rot);
     var clip_count = 3u;
 
+    // Vertex ids for the clip helper. Hull-hull still emits loop-index
+    // feature ids below (its manifolds are transient triangle fans, not the
+    // persistent stacks the box-box stability work targets), so these ids are
+    // only used internally by the clipper.
+    var clip_ids: array<u32, 8>;
+    clip_ids[0] = clip_line_pair(2u, 0u);
+    clip_ids[1] = clip_line_pair(0u, 1u);
+    clip_ids[2] = clip_line_pair(1u, 2u);
+
     // Clip against 3 side planes of the reference triangle
     let ref_tri = array<vec3<f32>, 3>(rv0, rv1, rv2);
     for (var i = 0u; i < 3u; i = i + 1u) {
@@ -1344,7 +1460,7 @@ fn hull_hull_test(
         if side_len < 1e-12 { continue; }
         let sn = side_normal / side_len;
         let side_dist = dot(sn, ref_tri[i]);
-        clip_count = clip_polygon_against_plane(&clip_poly, clip_count, sn, side_dist);
+        clip_count = clip_polygon_against_plane(&clip_poly, &clip_ids, clip_count, sn, side_dist, 4u + i);
     }
 
     if clip_count == 0u { return; }
@@ -1367,7 +1483,7 @@ fn hull_hull_test(
     if final_count == 0u {
         // Fallback: single contact at midpoint
         let contact_point = (pos_a + pos_b) * 0.5 + best_normal * min_depth * 0.5;
-        emit_contact(contact_point, best_normal, min_depth, body_a, body_b, 0x09000000u, max_contacts);
+        emit_contact(contact_point, contact_normal, min_depth, body_a, body_b, 0x09000000u, max_contacts);
         return;
     }
 
@@ -1378,7 +1494,7 @@ fn hull_hull_test(
 
     for (var i = 0u; i < emit_count; i = i + 1u) {
         let feature = 0x0A000000u | ((i & 0xFFu) << 0u);
-        emit_contact(out_points[i], best_normal, out_depths[i], body_a, body_b, feature, max_contacts);
+        emit_contact(out_points[i], contact_normal, out_depths[i], body_a, body_b, feature, max_contacts);
     }
 }
 
@@ -1432,9 +1548,12 @@ fn sphere_hull_test(
     }
 
     let depth = -overlap;
+    // `normal` points from the sphere (A) toward the hull (B); the solver convention
+    // emits from body_b to body_a, so the contact uses `-normal` (the contact point
+    // still uses the geometric sphere->hull normal).
     let normal = select(axis, -axis, dot(axis, sphere_pos - hull_pos) > 0.0);
     let contact_point = sphere_pos + normal * (radius + depth * 0.5);
-    emit_contact(contact_point, normal, depth, body_sphere, body_hull, 1u, max_contacts);
+    emit_contact(contact_point, -normal, depth, body_sphere, body_hull, 1u, max_contacts);
 }
 
 // ---------- Box-Hull ----------
@@ -1500,8 +1619,13 @@ fn box_hull_test(
         }
     }
 
+    // `best_normal` points from A (box) to B (hull). The solver convention — and
+    // box_box_test / hull_hull_test — emit the normal from body_b to body_a, so flip
+    // it. Without this the contact pushes the hull the wrong way and the incident
+    // anchor lands on the far face, exploding a hull resting on a box.
+    let contact_normal = -best_normal;
     let contact_point = (box_pos + hull_pos) * 0.5 + best_normal * min_depth * 0.5;
-    emit_contact(contact_point, best_normal, min_depth, body_box, body_hull, 0x0B000000u, max_contacts);
+    emit_contact(contact_point, contact_normal, min_depth, body_box, body_hull, 0x0B000000u, max_contacts);
 }
 
 // ---------- Main dispatch ----------
@@ -1527,7 +1651,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let si_a = props[a].shape_index;
     let si_b = props[b].shape_index;
 
-    let max_contacts = params.counts.x * 8u;
+    let max_contacts = min(params.counts.x * 8u, arrayLength(&contacts));
 
     // Order: ensure st_a <= st_b for consistent dispatch
     var s1 = st_a; var s2 = st_b;
@@ -1608,5 +1732,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         plane_hull_test(pd.xyz, pd.w, p1, r1, i1, b1, b2, max_contacts);
     }
     // SHAPE_PLANE vs SHAPE_PLANE: no collision
+}
+"#;
+
+/// Single-thread prep for the indirect narrowphase dispatch: clamps the
+/// GPU-written pair demand to the pair buffer capacity, emits the dispatch
+/// args, and stages the clamped count for a buffer-to-buffer copy into
+/// `SimParams.counts.z` (so the narrowphase kernel itself is unchanged and
+/// no CPU readback of the pair count is needed on any target).
+///
+/// `params.x` = pair buffer capacity.
+pub const NARROWPHASE_ARGS_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read>       pair_counter:  array<u32>;
+@group(0) @binding(1) var<storage, read_write> dispatch_args: array<u32>;
+@group(0) @binding(2) var<storage, read_write> clamped_count: array<u32>;
+@group(0) @binding(3) var<uniform>             params:        vec4<u32>;
+
+@compute @workgroup_size(1)
+fn main() {
+    let n = min(pair_counter[0], params.x);
+    dispatch_args[0] = (n + 63u) / 64u;
+    dispatch_args[1] = 1u;
+    dispatch_args[2] = 1u;
+    clamped_count[0] = n;
 }
 "#;

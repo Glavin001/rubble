@@ -1,0 +1,437 @@
+{
+  "experiment": "Contact reuse split and by-reference eight-vertex clipping",
+  "hardware": "Apple M3 Max, 128 GB",
+  "browser": "Codex in-app browser, Chrome 155, apple metal-3",
+  "protocol": {
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "wallStatistic": "minimum round median",
+    "samplePrecisionMs": 0.01,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contactLayout": "compact64",
+    "packing": "stable",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact"
+  },
+  "runs": [
+    {
+      "variant": "split reuse, original clipping A",
+      "measuredAt": "2026-10-14T11:34:25.489Z",
+      "wallMs": 17.65,
+      "batchesMs": [
+        [
+          17.54,
+          17.86,
+          17.56,
+          17.82,
+          17.96
+        ],
+        [
+          17.67,
+          17.72,
+          17.37,
+          17.65,
+          17.25
+        ]
+      ],
+      "narrowphaseMs": 4.390912,
+      "workload": {
+        "start": {
+          "contact": 1181436,
+          "candidate": 229974,
+          "awake": 110441,
+          "color": 16,
+          "manifold": 226701,
+          "overflow": 0
+        },
+        "end": {
+          "contact": 1169450,
+          "candidate": 254916,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 245632,
+          "overflow": 0
+        }
+      }
+    },
+    {
+      "variant": "split reuse, original clipping B",
+      "measuredAt": "2026-10-14T11:37:14.239Z",
+      "wallMs": 17.48,
+      "batchesMs": [
+        [
+          17.26,
+          17.34,
+          17.48,
+          17.93,
+          17.9
+        ],
+        [
+          17.76,
+          17.67,
+          17.62,
+          17.68,
+          17.48
+        ]
+      ],
+      "narrowphaseMs": 4.390912,
+      "workload": {
+        "start": {
+          "contact": 1181436,
+          "candidate": 229974,
+          "awake": 110441,
+          "color": 16,
+          "manifold": 226701,
+          "overflow": 0
+        },
+        "end": {
+          "contact": 1169450,
+          "candidate": 254916,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 245632,
+          "overflow": 0
+        }
+      },
+      "reuseCoverage": {
+        "step": 166,
+        "candidates": 254916,
+        "reused": 113241,
+        "fresh": 141675
+      }
+    },
+    {
+      "variant": "combined, pointer8 clipping A",
+      "measuredAt": "2026-10-14T11:38:51.192Z",
+      "wallMs": 15.12,
+      "batchesMs": [
+        [
+          15.05,
+          15.38,
+          15.23,
+          15.23,
+          15.33
+        ],
+        [
+          15.29,
+          15.09,
+          15.12,
+          15.22,
+          14.72
+        ]
+      ],
+      "narrowphaseMs": 1.96608,
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0
+        }
+      }
+    },
+    {
+      "variant": "combined, original value16 clipping control",
+      "measuredAt": "2026-10-14T11:41:01.158Z",
+      "wallMs": 17.73,
+      "batchesMs": [
+        [
+          17.35,
+          17.5,
+          17.96,
+          17.91,
+          17.87
+        ],
+        [
+          17.73,
+          17.84,
+          17.88,
+          17.33,
+          17.25
+        ]
+      ],
+      "narrowphaseMs": 4.521984,
+      "workload": {
+        "start": {
+          "contact": 1181436,
+          "candidate": 229974,
+          "awake": 110441,
+          "color": 16,
+          "manifold": 226701,
+          "overflow": 0
+        },
+        "end": {
+          "contact": 1169450,
+          "candidate": 254916,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 245632,
+          "overflow": 0
+        }
+      }
+    },
+    {
+      "variant": "combined, pointer8 clipping B",
+      "measuredAt": "2026-10-14T11:42:06.219Z",
+      "wallMs": 14.91,
+      "batchesMs": [
+        [
+          14.88,
+          15.25,
+          15.11,
+          15.16,
+          15.33
+        ],
+        [
+          14.91,
+          14.96,
+          15.12,
+          14.86,
+          14.79
+        ]
+      ],
+      "narrowphaseMs": 2.031616,
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0
+        }
+      },
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.6384,
+        "refs": 0.065536,
+        "hashClear": 0.065536,
+        "hashInsert": 0.262144,
+        "narrowphase": 2.031616,
+        "warm": 1.31072,
+        "graph": 1.31072,
+        "primal": 5.24288,
+        "dual": 2.62144,
+        "sleep": 0.065536
+      },
+      "gpuSpanMs": 14.614528,
+      "profiledCompletionMs": 18.3
+    },
+    {
+      "variant": "final retained pointer8, original combined kernel",
+      "measuredAt": "2026-10-14T11:54:08.668Z",
+      "wallMs": 14.91,
+      "batchesMs": [
+        [
+          14.89,
+          15.34,
+          15.44,
+          15.32,
+          15.39
+        ],
+        [
+          15.03,
+          14.91,
+          14.88,
+          15.04,
+          14.75
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0
+        }
+      },
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.6384,
+        "refs": 0.065536,
+        "hashClear": 0.065536,
+        "hashInsert": 0.262144,
+        "narrowphase": 1.96608,
+        "warm": 1.31072,
+        "graph": 1.31072,
+        "primal": 5.177344,
+        "dual": 2.686976,
+        "sleep": 0.065536
+      }
+    }
+  ],
+  "conditions": "Serial browser runs, no simultaneous native GPU tests or compiler work. An extra control that potentially overlapped JS CPU tests was excluded and repeated with all tests stopped.",
+  "profilingCaveat": "Phase medians are from ten later steps with split passes and per-step readback; they perturb execution and are not the throughput window. A zero value can be timestamp quantization.",
+  "finding": "Pointer8 clipping reduces browser wall time by 15\u201316% and narrowphase by about 55%. Split reuse alone has no demonstrated material gain and was removed. Arrays still retain all eight support points.",
+  "validation": {
+    "gpuAndCompilerTestsPassed": 30,
+    "jsTestsPassed": 42,
+    "browserRing480Reset": {
+      "passed": true,
+      "finalMeanFlankDrift": 1.1817874610691919,
+      "ball": [
+        -0.03025226481258869,
+        8.46918773651123,
+        105.19124603271484
+      ],
+      "awake": 110441,
+      "overflow": 0
+    },
+    "remaining": "Native compact-gables correctness issue remains open; original-clipping control reproduces it. Ring 120 FPS and three-avbd performance parity remain unmet.",
+    "browserGables240Reset": {
+      "passed": true,
+      "awake": 505922,
+      "overflow": 0,
+      "finalMeanDrift": 0.11721765612202996,
+      "finalMaxDrift": 0.32660675048828125
+    },
+    "nativeCompactColumnsPassed": 4,
+    "nativeCompactGablesTrials": [
+      {
+        "clipping": "pointer8",
+        "combinedKernel": "helper refactor",
+        "passed": false,
+        "meanDrift": 0.118634,
+        "maxDrift": 0.717522,
+        "limit": 0.6
+      },
+      {
+        "clipping": "pointer16",
+        "combinedKernel": "helper refactor",
+        "passed": false,
+        "meanDrift": 0.118634,
+        "maxDrift": 0.717522,
+        "limit": 0.6
+      },
+      {
+        "clipping": "pointer8",
+        "combinedKernel": "original monolithic",
+        "passed": false,
+        "meanDrift": 0.118634,
+        "maxDrift": 0.717522,
+        "limit": 0.6
+      },
+      {
+        "clipping": "original value16 control",
+        "combinedKernel": "original monolithic",
+        "passed": false,
+        "meanDrift": 0.118634,
+        "maxDrift": 0.717522,
+        "limit": 0.6
+      },
+      {
+        "clipping": "final pointer8",
+        "combinedKernel": "original monolithic, split kernels removed",
+        "passed": false,
+        "meanDrift": 0.118634,
+        "maxDrift": 0.717522,
+        "limit": 0.6
+      }
+    ],
+    "nativeCompactGablesIssue": {
+      "classification": "Reproduces identically with original clipping; not introduced by this optimization. Remains an open correctness issue.",
+      "worstBody": 164354,
+      "column": 5,
+      "initial": [
+        -71.92,
+        4.25,
+        -102.5
+      ],
+      "actual": [
+        -71.53714,
+        3.5324783,
+        -100.593346
+      ],
+      "velocity": [
+        0.88577265,
+        -3.4984157,
+        2.9873655
+      ],
+      "bricksOverLimit": 1
+    },
+    "nativeCanonicalGables240": {
+      "passed": true,
+      "meanDrift": 0.118626,
+      "maxDrift": 0.330369
+    },
+    "nativeCanonicalRing480": {
+      "passed": true,
+      "meanDrift": 1.1635,
+      "ball": [
+        0.06553558,
+        8.492919,
+        105.73839
+      ]
+    },
+    "nativeCompactRing480": {
+      "passed": true,
+      "meanDrift": 1.1278,
+      "ball": [
+        0.350764,
+        8.457996,
+        105.49103
+      ]
+    },
+    "metal": {
+      "libraryPassed": 3,
+      "avbdSlicePassed": 7,
+      "oracleAccuracyPassed": 5,
+      "columnsParityPassed": 3,
+      "maxColumnsPositionDeltaM": 0.000213
+    },
+    "finalBrowserRecheck": {
+      "ring480Reset": true,
+      "gables240Reset": true,
+      "sameCheckpointsAsEarlierOptimizedRuns": true
+    }
+  },
+  "controlBoxSourceSha256": "8a46abe211d5f4b5034dbc443309635180bfda8ccea67afd67bc8f4f7924f992",
+  "budgetMs": 8.333333333333334,
+  "objectiveComplete": false,
+  "experimentSourceSha256": {
+    "engine/slang/physics/box_collide.slang": "b5c7ff8f903e40261aaa29968bed86eb7b0bb797a123a2a8001ae6eda88c1020",
+    "engine/slang/kernels/world_step.slang": "08d06121c889f62d68bf8fae63b71ce72dbc69c5d60b6a4bc2830394511c0e02",
+    "engine/crates/engine-webgpu/demo.html": "c2bf68c33cc076fa1ac1590bfa1033fd52def167f390915fd27714fda741319c",
+    "engine/crates/engine-webgpu/generated/wgsl/narrowphase.wgsl": "4c2953b66447da0eb0f3ac4697f78cd5502e2177fe3cd2a05e51642bc3d647e5"
+  },
+  "sourceSha256": {
+    "engine/slang/physics/box_collide.slang": "b5c7ff8f903e40261aaa29968bed86eb7b0bb797a123a2a8001ae6eda88c1020",
+    "engine/slang/kernels/world_step.slang": "67a581e96185a1393ff3e5e99aacecdab249f550d1c35b678ae805820bbb79c8",
+    "engine/crates/engine-webgpu/demo.html": "0b5bdceec10cd3807a0e43ddfcbff50a3c5aeab3f003331f259b3b6625799ca6",
+    "engine/crates/engine-webgpu/generated/wgsl/narrowphase.wgsl": "1798f598a19f334210df1588a78532a47805cef63df6c8be38615164db3f5d3d"
+  }
+}

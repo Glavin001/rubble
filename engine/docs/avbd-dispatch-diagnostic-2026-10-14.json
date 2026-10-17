@@ -1,0 +1,127 @@
+{
+  "purpose": "Isolate submission/dispatch overhead from large compute-memory workloads. No physics FPS claim.",
+  "hardware": "Apple M3 Max, Metal backend",
+  "protocol": "10 lead steps then pinned 2 x (3 untimed + 5 x 10 timed), same WGSL increment workload in browser and native wgpu",
+  "correctness": "Every element verified after timing: 116 submitted steps; expected increment is dispatches * 116. Large case verifies 8,388,608 words.",
+  "browserAt1014": {
+    "measuredAt": "2026-10-14T10:14:01.510Z",
+    "groupSize": 64,
+    "tiny128DispatchMs": 0.19,
+    "tiny128SeparatePassMs": 0.23,
+    "stream32MiBSingleDispatchMs": 11.71,
+    "stream32MiBSingleDispatchBatchesMs": [
+      [
+        11.71,
+        11.5,
+        11.99,
+        11.21,
+        12.8
+      ],
+      [
+        12,
+        12,
+        8.71,
+        4.89,
+        12.01
+      ]
+    ],
+    "stream32MiB4DispatchMs": 18.4,
+    "stream32MiB4SeparatePassMs": 22.79
+  },
+  "native64": {
+    "groupSize": 64,
+    "tiny128DispatchMs": 0.18905,
+    "tiny128SeparatePassMs": 2.4988458,
+    "stream32MiBSingleDispatchMs": 11.9356959,
+    "stream32MiBSingleDispatchBatchesMs": [
+      [
+        7.1925167,
+        12.7951208,
+        14.4156417,
+        11.8984459,
+        12.0073209
+      ],
+      [
+        11.5330458,
+        8.4603791,
+        12.0015459,
+        11.9797458,
+        11.9356959
+      ]
+    ],
+    "stream32MiB4DispatchMs": 21.5137375,
+    "stream32MiB4SeparatePassMs": 48.7818625
+  },
+  "native256": {
+    "groupSize": 256,
+    "tiny128DispatchMs": 0.1902167,
+    "tiny128SeparatePassMs": 2.2590083,
+    "stream32MiBSingleDispatchMs": 12.7993708,
+    "stream32MiBSingleDispatchBatchesMs": [
+      [
+        12.7993708,
+        14.3261916,
+        13.6239125,
+        12.0875792,
+        11.8897917
+      ],
+      [
+        12.012725,
+        13.590025,
+        12.8845166,
+        15.9767542,
+        12.0308291
+      ]
+    ],
+    "stream32MiB4DispatchMs": 19.3347458,
+    "stream32MiB4SeparatePassMs": 79.186475
+  },
+  "browserAt1048": {
+    "measuredAt": "2026-10-14T10:48:17.271Z",
+    "groupSize": 64,
+    "visibleAndFocusedAtStartAndEnd": true,
+    "tiny128DispatchMs": 0.18,
+    "tiny128SeparatePassMs": 0.22,
+    "stream32MiBSingleDispatchMs": 8.91,
+    "stream32MiBSingleDispatchBatchesMs": [
+      [
+        8.91,
+        2.79,
+        12.42,
+        21.59,
+        3.19
+      ],
+      [
+        9.61,
+        8.79,
+        18.41,
+        13.63,
+        12.77
+      ]
+    ],
+    "stream32MiB4DispatchMs": 15.99,
+    "stream32MiB4DispatchBatchesMs": [
+      [
+        33.61,
+        36.86,
+        25.61,
+        23.99,
+        40.99
+      ],
+      [
+        4.11,
+        15.99,
+        36.77,
+        20.84,
+        13.62
+      ]
+    ],
+    "stream32MiB4SeparatePassMs": 12.79
+  },
+  "inference": "Tiny dispatch cost alone does not explain the physics slowdown. Large compute-memory workload is slow/variable in browser and native wgpu. No pre-slowdown baseline for this microbenchmark exists; this does not prove hardware failure or external GPU contention. Larger workgroup did not restore the single-dispatch performance.",
+  "reproduction": [
+    "dispatch-diagnostic.html",
+    "GPU_PROBE_WORKGROUP=64 cargo run -p engine-webgpu --release --bin gpu_dispatch_probe",
+    "GPU_PROBE_WORKGROUP=256 cargo run -p engine-webgpu --release --bin gpu_dispatch_probe"
+  ]
+}

@@ -1,0 +1,551 @@
+diff --git a/engine/crates/engine-webgpu/build.rs b/engine/crates/engine-webgpu/build.rs
+index 4e947a0..33b4769 100644
+--- a/engine/crates/engine-webgpu/build.rs
++++ b/engine/crates/engine-webgpu/build.rs
+@@ -11,6 +11,7 @@ const WORLD_ENTRIES: &[&str] = &[
+     "solve_primal_sparse_persistent",
+     "narrowphase_copy_persistent",
+     "narrowphase_defer_copy_persistent",
++    "narrowphase_defer_grouped_copy_persistent",
+     "narrowphase_fresh_copy_persistent",
+     "csr_degree_contacts_persistent",
+     "persist_list_copy_persistent",
+@@ -45,6 +46,7 @@ const WORLD_ENTRIES: &[&str] = &[
+     "persist_manifolds_compact",
+     "warmstart_joints",
+     "build_awake_list",
++    "build_awake_list_ordered",
+     "csr_clear",
+     "csr_degree_contacts",
+     "csr_degree_joints",
+@@ -59,6 +61,7 @@ const WORLD_ENTRIES: &[&str] = &[
+     "csr_scatter_contacts",
+     "csr_scatter_joints",
+     "csr_sort",
++    "csr_sort_regs",
+     "csr_sort_append",
+     "color_bodies",
+     "color_bodies_local",
+diff --git a/engine/crates/engine-webgpu/demo.html b/engine/crates/engine-webgpu/demo.html
+index cfb6f4d..36d30a3 100644
+--- a/engine/crates/engine-webgpu/demo.html
++++ b/engine/crates/engine-webgpu/demo.html
+@@ -179,8 +179,19 @@
+     const gridMode = qs.get('grid') || (['ring110k', 'gables506k'].includes(scene) ? 'split' : 'scaled');
+     if (!['fixed', 'scaled', 'split'].includes(gridMode)) throw new Error('grid must be fixed, scaled or split');
+     const gridSplit = gridMode === 'split';
++    // Opt-in: one ascending awake-list run per workgroup (one atomic per group).
++    const awakeMode = qs.get('awake') || 'atomic';
++    if (!['atomic', 'ordered'].includes(awakeMode)) throw new Error('awake must be atomic or ordered');
++    // Opt-in: sort short CSR lists in registers instead of global atomics.
++    const sortMode = qs.get('sort') || 'global';
++    if (!['global', 'regs'].includes(sortMode)) throw new Error('sort must be global or regs');
++    // Opt-in: narrowphase_defer reserves slots with one atomic per workgroup.
++    const npAllocMode = qs.get('npAlloc') || 'thread';
++    if (!['thread', 'group'].includes(npAllocMode)) throw new Error('npAlloc must be thread or group');
++    const awakeListEntry = awakeMode === 'ordered' ? 'build_awake_list_ordered' : 'build_awake_list';
+     const detailedProfile = qs.get('profile') === 'detail';
+     const graphProfile = qs.get('profile') === 'graph';
++    const npProfile = qs.get('profile') === 'np'; // TEMP diagnostic
+     // Diagnostic: one timestamped pass per primal color (and the sparse tail).
+     const colorProfile = qs.get('profile') === 'colors';
+     const spatialOrder = qs.get('order') === 'morton';
+@@ -387,14 +398,14 @@
+       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
+       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
+       ...(reuseCopy ? ['narrowphase_copy_persistent', 'persist_contacts_copy_persistent'] : []),
+-      ...(npSplit ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
++      ...(npSplit ? ['narrowphase_defer_copy_persistent', ...(npAllocMode === 'group' ? ['narrowphase_defer_grouped_copy_persistent'] : []), 'narrowphase_fresh_copy_persistent'] : []),
+       ...(persistList ? ['persist_list_copy_persistent'] : []),
+       ...(localRepair ? ['color_bodies_local'] : []),
+       ...(carryRest ? ['carry_rest_pairs'] : []),
+-      'build_awake_list', 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
++      'build_awake_list', ...(awakeMode === 'ordered' ? ['build_awake_list_ordered'] : []), 'csr_clear', 'csr_degree_contacts', 'csr_prefix',
+       'csr_prefix_blocks', 'csr_prefix_block_sums', 'csr_prefix_add',
+       'csr_prefix_init', 'csr_prefix_scan', 'csr_prefix_finalize', 'csr_prefix_swap',
+-      'csr_scatter_contacts', 'csr_sort', 'csr_sort_append', 'init_colors', 'color_bodies',
++      'csr_scatter_contacts', 'csr_sort', ...(sortMode === 'regs' ? ['csr_sort_regs'] : []), 'csr_sort_append', 'init_colors', 'color_bodies',
+       'pack_color_lists', 'write_color_args', 'write_work_args', 'predict_bodies', 'solve_primal_color',
+       ...(sparseStart < 32 ? [compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse'] : []),
+       'count_color_tiles', 'prefix_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
+@@ -1065,6 +1076,7 @@ struct VsOut {
+       disp(pass, 'broadphase_clear', gridClearWords());
+       nextPhase();
+       disp(pass, 'broadphase_insert', nCols);
++      if (npProfile) nextPhase();
+       disp(pass, 'broadphase_query', nCols);
+       disp(pass, 'write_work_args', 64);
+       if (carryRest) {
+@@ -1087,7 +1099,8 @@ struct VsOut {
+       if (!reuse && manifoldHashInsert)
+         throw new Error('hashInsert=manifold requires contact reuse (insert before narrowphase)');
+       if (npSplit) {
+-        dispWork(pass, 'narrowphase_defer_copy_persistent', 64);
++        dispWork(pass, npAllocMode === 'group' ? 'narrowphase_defer_grouped_copy_persistent' : 'narrowphase_defer_copy_persistent', 64);
++        if (npProfile) nextPhase();
+         dispWork(pass, 'narrowphase_fresh_copy_persistent', 64);
+       } else dispWork(pass, reuseCopy ? 'narrowphase_copy_persistent' : 'narrowphase', 64);
+       disp(pass, 'write_work_args', 64);
+@@ -1107,7 +1120,7 @@ struct VsOut {
+       } else dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
+       if (earlyPairPack) dispWork(pass, 'pack_solver_contacts', 66);
+       nextPhase();
+-      disp(pass, 'build_awake_list', nBodies);
++      disp(pass, awakeListEntry, nBodies);
+       disp(pass, 'write_work_args', 64);
+       if (graphProfile) nextPhase();
+       disp(pass, 'csr_clear', nBodies + 1);
+@@ -1123,7 +1136,7 @@ struct VsOut {
+       if (graphProfile) nextPhase();
+       dispWork(pass, 'csr_scatter_contacts', 66);
+       if (graphProfile) nextPhase();
+-      dispWork(pass, physicalAdjacency ? 'csr_sort' : 'csr_sort_append', 67);
++      dispWork(pass, physicalAdjacency ? (sortMode === 'regs' ? 'csr_sort_regs' : 'csr_sort') : 'csr_sort_append', 67);
+       if (graphProfile) nextPhase();
+       dispWork(pass, 'init_colors', 67);
+       disp(pass, 'write_work_args', 64);
+@@ -1254,7 +1267,7 @@ struct VsOut {
+         totalBodies: bodyCount,
+         dynamicBodies: bodyCount - 1,
+         iterations: params.iterations,
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, awakeList: awakeMode, csrSort: sortMode, npAlloc: npAllocMode,
+         dt: params.dt,
+         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
+         userAgent: navigator.userAgent,
+@@ -1270,6 +1283,7 @@ struct VsOut {
+       const graph = graphProfile
+         ? ['awake', 'csrDegree', 'csrPrefix', 'csrScatter', 'csrSort', 'colorInit', 'colorRepair', 'colorPack', 'predict']
+         : ['graph'];
++      if (npProfile) return ['aabbs', 'gridInsert', 'gridQuery', 'npDefer', 'npFresh', 'warm', ...graph];
+       if (!detailedProfile) return ['aabbs', 'grid', 'narrowphase', 'warm', ...graph];
+       return (params.flags & 1) !== 0
+         ? ['aabbs', 'grid', 'refs', 'hashClear', 'hashInsert', 'narrowphase', 'warm', ...graph]
+@@ -1708,7 +1722,7 @@ struct VsOut {
+             const report = {
+               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+               coloring: incrementalColors ? "reuse" : "rebuild",
+-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
++              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, awakeList: awakeMode, csrSort: sortMode, npAlloc: npAllocMode, colors: last.color,
+               contacts: last.contact, awake: last.awake, overflow: last.overflow,
+               settle: pre, initialMaxY,
+             };
+@@ -1758,6 +1772,8 @@ struct VsOut {
+       report.hashInsert = hashInsertMode;
+       report.reuse = reuseMode;
+       report.grid = gridMode;
++      report.awakeList = awakeMode;
++      report.csrSort = sortMode;
+       report.sleepTime = params.sleepTime;
+       report.np = npMode;
+       report.persist = persistMode;
+@@ -1788,7 +1804,7 @@ struct VsOut {
+       const report = {
+         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+         coloring: incrementalColors ? "reuse" : "rebuild",
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, awakeList: awakeMode, csrSort: sortMode, npAlloc: npAllocMode, colors: last.color,
+         contacts: last.contact, awake: last.awake, overflow: last.overflow,
+       };
+       console.log('BENCH', JSON.stringify(report));
+diff --git a/engine/slang/kernels/reuse_copy.slang b/engine/slang/kernels/reuse_copy.slang
+index 3f81139..b45b49e 100644
+--- a/engine/slang/kernels/reuse_copy.slang
++++ b/engine/slang/kernels/reuse_copy.slang
+@@ -6,6 +6,7 @@
+ #define narrowphase narrowphase_copy_persistent
+ #define narrowphase_defer narrowphase_defer_copy_persistent
+ #define narrowphase_fresh narrowphase_fresh_copy_persistent
++#define narrowphase_defer_grouped narrowphase_defer_grouped_copy_persistent
+ #define persist_contacts persist_contacts_copy_persistent
+ #define persist_list persist_list_copy_persistent
+ #define write_work_args write_work_args_copy_persistent
+diff --git a/engine/slang/kernels/world_step.slang b/engine/slang/kernels/world_step.slang
+index 7e57ec6..f7ae6ba 100644
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -947,14 +947,20 @@ uint persistListRead(uint slot)
+ }
+ 
+ // Lists local contact indices [first, first + count) for the persistence pass.
++// List indices [k, k + count) were already reserved on _pad2.
++void persistListWriteRun(uint k, uint first, uint count)
++{
++    if (k + count > persistListCapacity()) return; // overflow: the scan pass runs
++    for (uint c = 0u; c < count; c++)
++        persistListWrite(k + c, first + c);
++}
++
+ void persistListAppend(uint first, uint count)
+ {
+     if (!persistListEnabled()) return;
+     uint k;
+     AADD3(gCounters[0]._pad2, count, k);
+-    if (k + count > persistListCapacity()) return; // overflow: the scan pass runs
+-    for (uint c = 0u; c < count; c++)
+-        persistListWrite(k + c, first + c);
++    persistListWriteRun(k, first, count);
+ }
+ #endif
+ 
+@@ -1136,20 +1142,21 @@ void update_refs(uint3 tid : SV_DispatchThreadID)
+ }
+ 
+ // three-avbd reuseContacts. Opt-in via params.flags bit0.
+-bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float margin)
++// History run for a candidate pair: start index (out) and length, 0 = no reuse.
++uint reuseHistoryCount(CandidatePair pair, BodyState ba, BodyState bb, out uint startJ)
+ {
+     uint prevOff = HOST_S(8);
+     uint prevN = HOST_S(7);
+     uint hashN = HOST_S(9);
+-    uint startJ = CONTACT_HASH_EMPTY;
++    startJ = CONTACT_HASH_EMPTY;
+     uint count = 0u;
+     if (warmRecords())
+     {
+         // Run start and length were resolved once per manifold at insert time.
+-        if (!findWarmRecord(pair.colliderA, pair.colliderB, startJ, count)) return false;
++        if (!findWarmRecord(pair.colliderA, pair.colliderB, startJ, count)) return 0u;
+         // _pad1 = asfloat(generated step). Skip if either body moved after that.
+         uint generated = asuint(READ_CONTACT(prevOff + startJ)._pad1);
+-        if (generated < max(ba.generation, bb.generation)) return false;
++        if (generated < max(ba.generation, bb.generation)) return 0u;
+     }
+     else
+     {
+@@ -1171,13 +1178,13 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
+     }
+     if (startJ == CONTACT_HASH_EMPTY)
+     {
+-        return false;
++        return 0u;
+     }
+     // _pad1 = asfloat(generated step). Skip if either body moved after that.
+     uint generated = asuint(READ_CONTACT(prevOff + startJ)._pad1);
+     if (generated < max(ba.generation, bb.generation))
+     {
+-        return false;
++        return 0u;
+     }
+ 
+     for (uint k = 0u; k < 8u; k++)
+@@ -1192,19 +1199,22 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
+         count++;
+     }
+     }
+-    if (count == 0u) return false;
++    return count;
++}
+ 
++// Write a reused manifold into preallocated slots (mslot, cStart). listK is the
++// preallocated persist-list index, or ~0u to append with its own atomic.
++void reuseCommit(CandidatePair pair, BodyState ba, BodyState bb, uint startJ, uint count,
++    uint mslot, uint cStart, uint listK)
++{
++    uint prevOff = HOST_S(8);
+     uint maxC = HOST_S(3);
+     uint maxM = HOST_S(10);
+-    uint mslot;
+-    AADD3(gCounters[0].manifoldCount, 1, mslot);
+     if (mslot >= maxM)
+     {
+         AOR2(gCounters[0].overflowFlags, OVERFLOW_MANIFOLDS);
+-        return true;
++        return;
+     }
+-    uint cStart;
+-    AADD3(gCounters[0].contactCount, count, cStart);
+     uint curOff = HOST_S(11);
+     if (cStart >= maxC || cStart + count > maxC)
+     {
+@@ -1217,7 +1227,7 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
+         dead.normal = float3(0, 1, 0);
+         dead.friction = 0.0;
+         gManifolds[mslot] = dead;
+-        return true;
++        return;
+     }
+ 
+     Contact head = READ_CONTACT(prevOff + startJ);
+@@ -1243,7 +1253,11 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
+         MARK_REUSED_CONTACT(curOff + cStart + k, mslot, startJ + k + 2u);
+     }
+ #if defined(ENGINE_REUSE_COPY)
+-    if (atRest) persistListAppend(cStart, count);
++    if (atRest)
++    {
++        if (listK == 0xFFFFFFFFu) persistListAppend(cStart, count);
++        else persistListWriteRun(listK, cStart, count);
++    }
+ #endif
+     Manifold mf;
+     mf.colliderA = pair.colliderA;
+@@ -1254,6 +1268,23 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
+     mf.friction = head.friction;
+     gManifolds[mslot] = mf;
+     wakeFromContact(ba, bb, gColliders[pair.colliderA], gColliders[pair.colliderB]);
++}
++
++bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float margin)
++{
++    uint startJ;
++    uint count = reuseHistoryCount(pair, ba, bb, startJ);
++    if (count == 0u) return false;
++    uint mslot;
++    AADD3(gCounters[0].manifoldCount, 1, mslot);
++    if (mslot >= HOST_S(10))
++    {
++        AOR2(gCounters[0].overflowFlags, OVERFLOW_MANIFOLDS);
++        return true;
++    }
++    uint cStart;
++    AADD3(gCounters[0].contactCount, count, cStart);
++    reuseCommit(pair, ba, bb, startJ, count, mslot, cStart, 0xFFFFFFFFu);
+     return true;
+ }
+ 
+@@ -1522,6 +1553,98 @@ void narrowphase_defer(uint3 tid : SV_DispatchThreadID)
+     narrowphaseShapes(pair, ca, cb, ba, bb);
+ }
+ 
++#if defined(ENGINE_REUSE_COPY)
++groupshared uint gsNpManifolds[64];
++groupshared uint gsNpContacts[64];
++groupshared uint gsNpListed[64];
++groupshared uint gsNpDeferred[64];
++groupshared uint gsNpBase[4];
++
++uint npGroupPrefix(uint lane, uint which)
++{
++    uint sum = 0u;
++    for (uint k = 0u; k < lane; k++)
++    {
++        if (which == 0u) sum += gsNpManifolds[k];
++        else if (which == 1u) sum += gsNpContacts[k];
++        else if (which == 2u) sum += gsNpListed[k];
++        else sum += gsNpDeferred[k];
++    }
++    return sum;
++}
++
++// Opt-in narrowphase_defer: the same reuse/defer decisions, but each workgroup
++// reserves manifolds, contacts, persist-list entries and deferred slots with one
++// atomic per counter instead of one per candidate (~1M pairs on gables).
++[shader("compute")]
++[numthreads(64, 1, 1)]
++void narrowphase_defer_grouped(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
++{
++    uint i = dispatchIndex(tid);
++    uint lane = lid.x;
++    uint n = ALOAD(gCounters[0].candidateCount);
++    bool valid = i < n;
++    CandidatePair pair = (CandidatePair)0;
++    Collider ca = (Collider)0;
++    Collider cb = (Collider)0;
++    BodyState ba = (BodyState)0;
++    BodyState bb = (BodyState)0;
++    uint startJ = 0u;
++    uint count = 0u;
++    bool atRest = false;
++    if (valid)
++    {
++        pair = gCandidates[i];
++        ca = gColliders[pair.colliderA];
++        cb = gColliders[pair.colliderB];
++        ba = gBodies[ca.body];
++        bb = gBodies[cb.body];
++        if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u)
++            count = reuseHistoryCount(pair, ba, bb, startJ);
++        if (count != 0u) atRest = contactPairAtRest(ba, bb);
++    }
++    bool reuse = count != 0u;
++    gsNpManifolds[lane] = reuse ? 1u : 0u;
++    gsNpContacts[lane] = count;
++    gsNpListed[lane] = (reuse && atRest && persistListEnabled()) ? count : 0u;
++    gsNpDeferred[lane] = (valid && !reuse) ? 1u : 0u;
++    GROUP_SYNC();
++    if (lane == 0u)
++    {
++        uint tm = 0u, tc = 0u, tl = 0u, td = 0u;
++        for (uint k = 0u; k < 64u; k++)
++        {
++            tm += gsNpManifolds[k];
++            tc += gsNpContacts[k];
++            tl += gsNpListed[k];
++            td += gsNpDeferred[k];
++        }
++        uint b0 = 0u, b1 = 0u, b2 = 0u, b3 = 0u;
++        if (tm != 0u) AADD3(gCounters[0].manifoldCount, tm, b0);
++        if (tc != 0u) AADD3(gCounters[0].contactCount, tc, b1);
++        if (tl != 0u) AADD3(gCounters[0]._pad2, tl, b2);
++        if (td != 0u) AADD3(gCounters[0]._pad1, td, b3);
++        gsNpBase[0] = b0; gsNpBase[1] = b1; gsNpBase[2] = b2; gsNpBase[3] = b3;
++    }
++    GROUP_SYNC();
++    if (reuse)
++    {
++        uint listK = persistListEnabled() ? gsNpBase[2] + npGroupPrefix(lane, 2u) : 0u;
++        reuseCommit(pair, ba, bb, startJ, count,
++            gsNpBase[0] + npGroupPrefix(lane, 0u), gsNpBase[1] + npGroupPrefix(lane, 1u), listK);
++        return;
++    }
++    if (!valid) return;
++    uint k = gsNpBase[3] + npGroupPrefix(lane, 3u);
++    if (k < narrowphaseDeferCapacity(n))
++    {
++        gCandidates[HOST_S(2) - 1u - k] = pair;
++        return;
++    }
++    narrowphaseShapes(pair, ca, cb, ba, bb);
++}
++#endif
++
+ [shader("compute")]
+ [numthreads(64, 1, 1)]
+ void narrowphase_fresh(uint3 tid : SV_DispatchThreadID)
+@@ -1959,6 +2082,43 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
+     }
+ }
+ 
++groupshared uint gsAwakeFlags[64];
++groupshared uint gsAwakeBase;
++
++// Same set as build_awake_list, but each workgroup publishes its awake bodies as
++// one ascending run with a single global atomic: no per-body contention on
++// awakeCount, and body-indexed reads through gAwakeList stay coalesced.
++[shader("compute")]
++[numthreads(64, 1, 1)]
++void build_awake_list_ordered(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
++{
++    uint i = dispatchIndex(tid);
++    uint local = lid.x;
++    bool awake = false;
++    if (i < gCounters[0].bodyCount)
++    {
++        BodyState b = gBodies[i];
++        awake = bodyIsDynamic(b) && !bodyIsSleeping(b);
++    }
++    gsAwakeFlags[local] = awake ? 1u : 0u;
++    GROUP_SYNC();
++    if (local == 0u)
++    {
++        uint total = 0u;
++        for (uint k = 0u; k < 64u; k++) total += gsAwakeFlags[k];
++        uint base = 0u;
++        if (total != 0u) AADD3(gCounters[0].awakeCount, total, base);
++        gsAwakeBase = base;
++    }
++    GROUP_SYNC();
++    if (awake)
++    {
++        uint rank = 0u;
++        for (uint k = 0u; k < local; k++) rank += gsAwakeFlags[k];
++        gAwakeList[gsAwakeBase + rank] = i;
++    }
++}
++
+ // --- CSR adjacency (three-avbd: degree → scan → scatter → sort) ----------------------------
+ // Constraint id: [0, jointCount) = joints; jointCount + mi = manifold mi (Stage 8b).
+ // CINDEX(0..bodyCount): degree then exclusive starts; [bodyCount] = total.
+@@ -2361,17 +2521,68 @@ void csrSetPartner(uint e, uint partner)
+ #endif
+ }
+ 
+-[shader("compute")]
+-[numthreads(64, 1, 1)]
+-void csr_sort(uint3 tid : SV_DispatchThreadID)
++static const uint CSR_SORT_REGS = 8u;
++
++// Sentinel-padded slots sort last; real edges keep csrEdgeLess order.
++bool csrSlotLess(uint body, uint idA, uint partnerA, uint idB, uint partnerB)
++{
++    if (idA == 0xFFFFFFFFu) return false;
++    if (idB == 0xFFFFFFFFu) return true;
++    return csrEdgeLess(body, idA, partnerA, idB, partnerB);
++}
++
++// Compare-exchange of two register slots (constant indices after inlining).
++#define CSR_CE(a, b) \
++    if (csrSlotLess(body, ids[b], parts[b], ids[a], parts[a])) \
++    { uint ti = ids[a]; ids[a] = ids[b]; ids[b] = ti; \
++      uint tp = parts[a]; parts[a] = parts[b]; parts[b] = tp; }
++
++// Short lists sort in registers: one load and at most one store per edge,
++// instead of an atomic load/store per comparison step. Insertion order as a
++// fixed network; the edge key is a strict total order, so the result matches.
++void csrSortRegs(uint body, uint lo, uint count)
++{
++    uint ids[CSR_SORT_REGS];
++    uint parts[CSR_SORT_REGS];
++    uint orig[CSR_SORT_REGS];
++    for (uint k = 0u; k < CSR_SORT_REGS; k++)
++    {
++        bool live = k < count;
++        ids[k] = live ? ALOAD(gConstraintIds[lo + k]) : 0xFFFFFFFFu;
++        parts[k] = live ? csrPartner(body, lo + k) : 0xFFFFFFFFu;
++        orig[k] = ids[k];
++    }
++    CSR_CE(0, 1)
++    CSR_CE(1, 2) CSR_CE(0, 1)
++    CSR_CE(2, 3) CSR_CE(1, 2) CSR_CE(0, 1)
++    if (count > 4u)
++    {
++        CSR_CE(3, 4) CSR_CE(2, 3) CSR_CE(1, 2) CSR_CE(0, 1)
++        CSR_CE(4, 5) CSR_CE(3, 4) CSR_CE(2, 3) CSR_CE(1, 2) CSR_CE(0, 1)
++        CSR_CE(5, 6) CSR_CE(4, 5) CSR_CE(3, 4) CSR_CE(2, 3) CSR_CE(1, 2) CSR_CE(0, 1)
++        CSR_CE(6, 7) CSR_CE(5, 6) CSR_CE(4, 5) CSR_CE(3, 4) CSR_CE(2, 3) CSR_CE(1, 2) CSR_CE(0, 1)
++    }
++    for (uint k = 0u; k < CSR_SORT_REGS; k++)
++    {
++        if (k < count && ids[k] != orig[k])
++        {
++            ASTORE(gConstraintIds[lo + k], ids[k]);
++            csrSetPartner(lo + k, parts[k]);
++        }
++    }
++}
++
++void csrSortList(uint li, bool regs)
+ {
+-    uint li = dispatchIndex(tid);
+-    if (li >= ALOAD(gCounters[0].awakeCount)) return;
+     uint body = gAwakeList[li];
+     uint lo = ALOAD(CINDEX(body));
+     uint hi = ALOAD(CINDEX(body + 1u));
+     uint count = hi - lo;
+-    if (count <= 32u)
++    if (regs && count <= CSR_SORT_REGS)
++    {
++        csrSortRegs(body, lo, count);
++    }
++    else if (count <= 32u)
+     {
+         // Most bricks have a short list; insertion avoids heap setup there.
+         for (uint i = lo + 1u; i < hi; i++)
+@@ -2431,6 +2642,25 @@ void csr_sort(uint3 tid : SV_DispatchThreadID)
+         gColorLists[HOST_S(1) * (HOST_S(4) + 1u) + body] = compactPreviousColor(body);
+ }
+ 
++[shader("compute")]
++[numthreads(64, 1, 1)]
++void csr_sort(uint3 tid : SV_DispatchThreadID)
++{
++    uint li = dispatchIndex(tid);
++    if (li >= ALOAD(gCounters[0].awakeCount)) return;
++    csrSortList(li, false);
++}
++
++// Opt-in: register sort for lists of at most CSR_SORT_REGS edges.
++[shader("compute")]
++[numthreads(64, 1, 1)]
++void csr_sort_regs(uint3 tid : SV_DispatchThreadID)
++{
++    uint li = dispatchIndex(tid);
++    if (li >= ALOAD(gCounters[0].awakeCount)) return;
++    csrSortList(li, true);
++}
++
+ // three-avbd `priority`: hash32(i + 0x9e3779b9) — independent of round / height.
+ uint jpPriority(uint body)
+ {

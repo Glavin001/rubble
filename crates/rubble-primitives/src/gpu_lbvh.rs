@@ -1299,66 +1299,91 @@ impl GpuLbvh {
     }
 
     fn dispatch_find_pairs(&mut self, ctx: &GpuContext, num_bodies: u32) -> u32 {
-        let max_pairs = (num_bodies as usize * 8) as u32;
-        self.pair_counter.reset(ctx);
-        self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
+        // No-silent-drop guarantee: the traversal kernel counts every overlap
+        // it *attempts* to emit (atomicAdd runs even when the slot is out of
+        // range), so an overflow is detectable. Grow and re-dispatch until the
+        // demand fits — dropping a scheduling-dependent subset of pairs both
+        // loses contacts and makes runs non-reproducible. Capacity is sticky
+        // across frames so steady-state scenes re-dispatch at most once ever.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // wasm: single-shot, no retry
+        let mut max_pairs =
+            ((num_bodies as usize * 8).max(self.pairs_out.capacity() as usize)) as u32;
+        #[cfg_attr(target_arch = "wasm32", allow(clippy::never_loop))] // wasm: single-shot
+        loop {
+            self.pair_counter.reset(ctx);
+            self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
 
-        let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
-        ctx.queue
-            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
+            let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
+            ctx.queue
+                .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
 
-        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("find_pairs"),
-            layout: self.find_pairs_kernel.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.body_indices.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.internal_nodes.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.pairs_out.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.pair_counter.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: self.find_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("find_pairs"),
-                timestamp_writes: None,
+                layout: self.find_pairs_kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.leaf_aabbs_sorted.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.body_indices.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.internal_nodes.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.pairs_out.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.pair_counter.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.find_params_buf.as_entire_binding(),
+                    },
+                ],
             });
-            pass.set_pipeline(self.find_pairs_kernel.pipeline());
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("find_pairs"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.find_pairs_kernel.pipeline());
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
+            }
+            ctx.queue.submit(Some(encoder.finish()));
+
+            // wasm cannot block on a readback mid-frame; the async step path
+            // re-checks the (unclamped) counter itself, so single-shot there.
+            #[cfg(target_arch = "wasm32")]
+            {
+                return max_pairs;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let demand = self.pair_counter.read(ctx);
+                if demand <= max_pairs {
+                    return max_pairs;
+                }
+                max_pairs = demand.next_power_of_two();
+            }
         }
-        ctx.queue.submit(Some(encoder.finish()));
-        max_pairs
     }
 
     /// Find pairs using the GPU-built tree (tree_nodes buffer with absolute indices).
+    ///
+    /// Same no-silent-drop retry as [`Self::dispatch_find_pairs`]: overflow is
+    /// detected from the (unclamped) attempt counter, the buffer grows, and the
+    /// traversal re-runs, so the pair set never depends on GPU scheduling.
     fn dispatch_find_pairs_gpu_tree(&mut self, ctx: &GpuContext, num_bodies: u32) -> u32 {
-        let max_pairs = (num_bodies as usize * 8) as u32;
-        self.pair_counter.reset(ctx);
-        self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
-
         // Lazy compile on first use
         if self.find_pairs_gpu_tree_kernel.is_none() {
             self.find_pairs_gpu_tree_kernel = Some(ComputeKernel::from_wgsl(
@@ -1367,48 +1392,71 @@ impl GpuLbvh {
                 "main",
             ));
         }
-        let kernel = self.find_pairs_gpu_tree_kernel.as_ref().unwrap();
 
-        let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
-        ctx.queue
-            .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // wasm: single-shot, no retry
+        let mut max_pairs =
+            ((num_bodies as usize * 8).max(self.pairs_out.capacity() as usize)) as u32;
+        #[cfg_attr(target_arch = "wasm32", allow(clippy::never_loop))] // wasm: single-shot
+        loop {
+            self.pair_counter.reset(ctx);
+            self.pairs_out.grow_if_needed(ctx, max_pairs as usize);
+            let kernel = self.find_pairs_gpu_tree_kernel.as_ref().unwrap();
 
-        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("find_pairs_gpu_tree"),
-            layout: kernel.bind_group_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.tree_nodes.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.pairs_out.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.pair_counter.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.find_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let find_params: [u32; 4] = [num_bodies, max_pairs, 0, 0];
+            ctx.queue
+                .write_buffer(&self.find_params_buf, 0, bytemuck::cast_slice(&find_params));
+
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("find_pairs_gpu_tree"),
-                timestamp_writes: None,
+                layout: kernel.bind_group_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.tree_nodes.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.pairs_out.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.pair_counter.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.find_params_buf.as_entire_binding(),
+                    },
+                ],
             });
-            pass.set_pipeline(kernel.pipeline());
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("find_pairs_gpu_tree"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(kernel.pipeline());
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(round_up_workgroups(num_bodies, 64), 1, 1);
+            }
+            ctx.queue.submit(Some(encoder.finish()));
+
+            // wasm cannot block on a readback mid-frame; the async step path
+            // re-checks the (unclamped) counter itself, so single-shot there.
+            #[cfg(target_arch = "wasm32")]
+            {
+                return max_pairs;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let demand = self.pair_counter.read(ctx);
+                if demand <= max_pairs {
+                    return max_pairs;
+                }
+                max_pairs = demand.next_power_of_two();
+            }
         }
-        ctx.queue.submit(Some(encoder.finish()));
-        max_pairs
     }
 
     /// Run the full GPU broadphase pipeline on a 3D AABB buffer.

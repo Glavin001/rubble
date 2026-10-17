@@ -1,0 +1,5 @@
+# Exported Slang→WGSL for Chrome harness (regenerate via wgsl_export)
+/generated/
+
+# Demo videos from record-vehicle-demos.mjs
+/recordings/

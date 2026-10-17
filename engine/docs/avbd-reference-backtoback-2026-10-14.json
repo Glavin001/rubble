@@ -1,0 +1,16 @@
+{
+  "measuredAfter": "8ek (commit 98caa0f)",
+  "browser": "Chrome 152 (Claude app), Metal-3, same session, reference then Rubble",
+  "reference": {
+    "source": "inspiration/pinned/three-avbd bench3d.html (UI, 2 decimals)",
+    "ring110k": {"wallMs": 10.22, "gpuMs": 15.86, "contacts": 1173965, "colours": 12},
+    "gables506k": {"wallMs": 26.41, "gpuMs": 32.37, "contacts": 4102693, "colours": 9},
+    "small": {"wallSmash2k": 2.84, "chainMail1_6k": 1.08, "ring9k": 1.77, "gables6_7k": 0.90, "jointedDrop6k": 3.15},
+    "jointedDrop34k": 6.93
+  },
+  "rubble": {
+    "ring110k": {"wallMs": 10.65, "protocol": "three-avbd-2x5x10 bench=only", "defaults": "grid=split np=split reuse=copy hashInsert=record"},
+    "gables506k": {"wallMs": 27.30, "protocol": "three-avbd-2x5x10 bench=only", "defaults": "grid=scaled np=split reuse=copy hashInsert=record"}
+  },
+  "gap": {"ring": "+0.43 ms (+4%)", "gables": "+0.89 ms (+3%)", "ring120Hz": "8.33 ms target; 2.32 ms to go"}
+}

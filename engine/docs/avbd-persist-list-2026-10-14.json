@@ -1,0 +1,38 @@
+{
+  "decision": "8em",
+  "diagnostic": "A temporary pass that only read each contact's 64-byte hot tag (the persist pass's FINAL early-exit) added 0.66 ms to gables warm (1.90 -> 2.56 ms): ~4M early-exit threads each pull a record line, and ~2/3 of gables contacts are already finished in narrowphase.",
+  "change": "Under reuse=copy with HOST_S(22) set, narrowphase lists the local indices of contacts that still need persistence (fresh points and reused pairs at rest), eight per record in the unused top of gManifolds (records [candidateCount, maxM) are never manifold slots). gCounters._pad2 (ABI byte 60) counts them. write_work_args_copy_persistent writes slot 70 = listed (or 0 when the list overflowed) and slot 71 = contact count only on overflow. persist_list runs from slot 70 and the full scan from slot 71, so every contact is persisted exactly once in either mode. The indirect buffer grows to 72 slots in both hosts. Browser default persist=list under reuse=copy; native ENGINE_PERSIST=list. HOST_S(23) caps the list for tests.",
+  "first_attempt_rejected": "Dispatching both list and scan over all contacts (slot 65) with early exits measured gables warm 2.29 vs 1.90 ms: two 4M-thread launches cost more than the scan saved.",
+  "gables_detail_ms": {
+    "scan": {
+      "wall": 26.66,
+      "warm": 1.97
+    },
+    "list": {
+      "wall": 26.13,
+      "warm": 1.44
+    }
+  },
+  "ring_ms": {
+    "sequence": [
+      "list 10.19",
+      "scan 10.44",
+      "scan 10.30",
+      "list 10.36",
+      "scan 10.42",
+      "list 10.34"
+    ],
+    "contaminated": "22.27/22.16 discarded: a live demo tab was opened mid-run",
+    "verdict": "neutral on the ring (fewer finished copies to skip); kept as default because gables gains ~0.5 ms"
+  },
+  "gates": {
+    "gpuLib": "49/49; persist_list_matches_full_scan_and_falls_back_on_overflow (uncapped and capped-to-overflow lists); all reuse fixtures now assert kN >= m/dt^2 on every point (dropping the last listed point and zeroing slot 71 both fail)",
+    "browserUnit": "281/281 (persist parsing/default, rejection without reuse=copy, slots 70/71 after narrowphase work args, HOST_S(22) upload)",
+    "browserRing480": "PASS bit-identical (mean 1.217517997515979)",
+    "browserGables240": "PASS bit-identical 0.1172912589201891/0.3304786682128906",
+    "nativeRing480Columns_ENGINE_PERSIST_list": "PASS bit-identical (1.1753)",
+    "nativeCanonicalGables240": "PASS 0.118635/0.328483",
+    "nativePersistentGables240Diagnostic": "PASS 0.118657/0.330531",
+    "metal": "18/18"
+  }
+}

@@ -361,6 +361,11 @@ pub struct PhysicsWorld3D {
     transforms_cache: Vec<f32>,
     timings_cache: [f32; 7],
     broadphase_cache: [f32; 5],
+    /// When true, enable per-scene adaptive substepping (prevents deep-stack
+    /// energy injection). When false, single-step for maximum speed.
+    accuracy_mode: bool,
+    /// Adaptive substep cap from the last loaded scene (`Scene3D::max_substeps`).
+    scene_substep_cap: u32,
 }
 
 #[wasm_bindgen]
@@ -391,7 +396,35 @@ impl PhysicsWorld3D {
             transforms_cache: Vec::new(),
             timings_cache: [0.0; 7],
             broadphase_cache: [0.0; 5],
+            accuracy_mode: false,
+            scene_substep_cap: 1,
         })
+    }
+
+    fn apply_substep_settings(&mut self) {
+        let cap = if self.accuracy_mode {
+            self.scene_substep_cap.max(1)
+        } else {
+            1
+        };
+        self.world.set_adaptive_substeps(cap);
+    }
+
+    /// Toggle stability mode: adaptive substepping to prevent deep-stack energy
+    /// injection (slower on high-energy scenes). Off = original single-step speed.
+    pub fn set_accuracy_mode(&mut self, enabled: bool) {
+        self.accuracy_mode = enabled;
+        self.apply_substep_settings();
+    }
+
+    /// Whether stability (adaptive substepping) mode is enabled.
+    pub fn accuracy_mode(&self) -> bool {
+        self.accuracy_mode
+    }
+
+    /// Substeps the most recent `step()` ran (1 unless stability mode escalated).
+    pub fn last_substeps(&self) -> u32 {
+        self.world.last_substeps()
     }
 
     /// Add a dynamic sphere. Returns handle index.
@@ -643,6 +676,8 @@ impl PhysicsWorld3D {
             .iter()
             .find(|s| s.name == name)
             .ok_or_else(|| JsError::new(&format!("unknown 3D scene: {name}")))?;
+        self.scene_substep_cap = scene.max_substeps;
+        self.apply_substep_settings();
         let descs = (scene.build)();
         for desc in &descs {
             let handle = self.world.add_body(desc);

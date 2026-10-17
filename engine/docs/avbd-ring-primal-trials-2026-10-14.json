@@ -1,0 +1,687 @@
+{
+  "objectiveStatus": "Open: neither 120 FPS nor full three-avbd parity is established.",
+  "outcome": "All shader experiments reverted. Retain broader cooperative-reduction regression and out-of-window color-bucket diagnostics.",
+  "protocol": {
+    "name": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "measuredSteps": 100,
+    "wallStatistic": "minimum round median",
+    "renderingIncluded": false
+  },
+  "scene": {
+    "name": "ring110k",
+    "totalBodies": 110442,
+    "activeDynamics": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "layout": "persistent64+32",
+    "packing": "stable",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact"
+  },
+  "browser": {
+    "name": "Codex in-app browser",
+    "version": "Chrome 155",
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "runs": [
+    {
+      "name": "original reduction baseline",
+      "measuredAt": "2026-10-14T13:32:47.020Z",
+      "wallMs": 12.29,
+      "primalPhaseMs": 4.128768,
+      "rounds": [
+        [
+          12.22,
+          12.4,
+          12.42,
+          12.36,
+          12.33
+        ],
+        [
+          12.38,
+          12.29,
+          12.27,
+          12.28,
+          12.3
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0
+        }
+      }
+    },
+    {
+      "name": "disjoint scratch halves reduction barriers; reverted",
+      "measuredAt": "2026-10-14T13:38:36.202Z",
+      "wallMs": 12.26,
+      "primalPhaseMs": 4.128768,
+      "rounds": [
+        [
+          12.13,
+          12.3,
+          12.39,
+          12.26,
+          12.38
+        ],
+        [
+          12.36,
+          12.25,
+          12.26,
+          12.12,
+          12.26
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0
+        }
+      }
+    },
+    {
+      "name": "restored original reduction with bucket diagnostics",
+      "measuredAt": "2026-10-14T13:40:33.856Z",
+      "wallMs": 12.3,
+      "primalPhaseMs": 4.128768,
+      "rounds": [
+        [
+          12.16,
+          12.43,
+          12.47,
+          12.4,
+          12.49
+        ],
+        [
+          12.3,
+          12.23,
+          12.3,
+          12.35,
+          12.29
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "name": "fewer lanes: one from 32768, two from 16384; reverted",
+      "measuredAt": "2026-10-14T13:41:43.195Z",
+      "wallMs": 12.51,
+      "primalPhaseMs": 4.456448,
+      "rounds": [
+        [
+          12.36,
+          12.47,
+          12.55,
+          12.52,
+          12.51
+        ],
+        [
+          12.55,
+          12.6,
+          12.53,
+          12.48,
+          12.48
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1183532,
+          "candidate": 230343,
+          "awake": 110441,
+          "color": 16,
+          "manifold": 227198,
+          "overflow": 0,
+          "colorBuckets": [
+            38167,
+            36621,
+            21435,
+            9802,
+            2757,
+            1097,
+            321,
+            125,
+            65,
+            25,
+            11,
+            3,
+            7,
+            2,
+            2,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1172886,
+          "candidate": 257117,
+          "awake": 110441,
+          "color": 13,
+          "manifold": 247333,
+          "overflow": 0,
+          "colorBuckets": [
+            36436,
+            33548,
+            20601,
+            10740,
+            4503,
+            2533,
+            1290,
+            556,
+            187,
+            41,
+            4,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "name": "more lanes: four for 4096..65535; reverted",
+      "measuredAt": "2026-10-14T17:29:07.640Z",
+      "wallMs": 12.19,
+      "primalPhaseMs": 4.063232,
+      "rounds": [
+        [
+          12.67,
+          12.73,
+          12.52,
+          12.49,
+          12.3
+        ],
+        [
+          12.3,
+          12.41,
+          12.19,
+          12.12,
+          12.19
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1183425,
+          "candidate": 230440,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227283,
+          "overflow": 0,
+          "colorBuckets": [
+            38213,
+            36590,
+            21449,
+            9798,
+            2780,
+            1047,
+            316,
+            131,
+            62,
+            28,
+            13,
+            6,
+            5,
+            2,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1170861,
+          "candidate": 257173,
+          "awake": 110441,
+          "color": 13,
+          "manifold": 247151,
+          "overflow": 0,
+          "colorBuckets": [
+            36472,
+            33582,
+            20637,
+            10769,
+            4483,
+            2509,
+            1225,
+            532,
+            180,
+            45,
+            6,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "name": "same-session restored production control",
+      "measuredAt": "2026-10-14T17:29:58.845Z",
+      "wallMs": 12.19,
+      "primalPhaseMs": 4.128768,
+      "rounds": [
+        [
+          12.26,
+          12.48,
+          12.52,
+          12.46,
+          12.46
+        ],
+        [
+          12.24,
+          12.18,
+          12.21,
+          12.19,
+          12.18
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    }
+  ],
+  "caveats": [
+    "Mac/browser restart separated the 13:xx and 17:xx runs. Compare the more-lanes trial only against its 17:29 control.",
+    "Phase medians are from later split-pass timestamp samples with readback, not the batched throughput window.",
+    "Lane-count changes alter floating-point reduction order and trajectories; workload counters differ. Neither lane experiment received full long-scene correctness certification or was adopted.",
+    "Raw batch values rounded to 0.01 ms. Ten-step means do not bound individual-step latency.",
+    "No fresh pinned three-avbd timing in this comparison."
+  ],
+  "productionSourceSha256": "c0203e8dccfb0c0f59d579bf16d7d2c2c7b3a6f0a62fad0f666c3a5200ec8405",
+  "regressionChanges": [
+    "Cooperative solve: canonical/compact/persistent, all four lane widths, 67 nonzero independent bodies at each bucket tail, all scratch slots, partial groups, three repetitions, static-padding byte preservation, serial comparison with body/slot/component diagnostics.",
+    "Benchmark: capture GPU color counts before and after timed window, enforce total equals awake count, always release readback, preserve empty buckets.",
+    "Four new JS tests cover valid diagnostics, incomplete coverage, device loss, and exclusion of diagnostic readbacks from throughput timing."
+  ],
+  "validation": {
+    "browserUnitTestsPassed": 57,
+    "focusedGpuSuite": {
+      "passed": 39,
+      "failed": 0,
+      "productionSourceRestored": true
+    },
+    "browserRing": {
+      "passed": true,
+      "measuredAt": "2026-10-14T17:31:17.104Z",
+      "steps": 480,
+      "resetValidated": true,
+      "awake": 110441,
+      "overflow": 0,
+      "meanFlankDrift": 1.1817874610691919,
+      "ball": [
+        -0.03025226481258869,
+        8.46918773651123,
+        105.19124603271484
+      ],
+      "contacts": 1037330,
+      "wallMs": 12.16,
+      "rounds": [
+        [
+          12.07,
+          12.23,
+          12.38,
+          12.16,
+          12.16
+        ],
+        [
+          12.32,
+          12.38,
+          12.3,
+          12.22,
+          12.39
+        ]
+      ],
+      "timedWorkload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    "unchangedPhysics": "Production world_step.slang hash exactly matches the 8di validated baseline. Columns/Metal oracles were not rerun for these retained diagnostic/test-only changes; prior evidence remains in avbd-ring-grid-filter-ab-2026-10-14.json."
+  }
+}

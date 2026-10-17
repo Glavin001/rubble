@@ -8,6 +8,7 @@ fn main() {
     for scene in scenes_3d() {
         let descs = (scene.build)();
         let scene_idx = viewer.add_scene_descs(scene.name, descs);
+        viewer.set_scene_max_substeps(scene_idx, scene.max_substeps);
         if scene.name == INITIAL_SCENE_3D {
             initial_scene_idx = scene_idx;
         }

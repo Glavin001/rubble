@@ -1,0 +1,24 @@
+[package]
+name = "engine-vehicle-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wasm-bindgen face of engine-vehicle (packer + VehicleHost) for the WebGPU vehicle demo"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+engine-schema.workspace = true
+engine-exec.workspace = true
+glam.workspace = true
+engine-vehicle.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+

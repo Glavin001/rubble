@@ -15,6 +15,7 @@ struct SimParams {
     solver:  vec4<f32>,
     counts:  vec4<u32>,
     quality: vec4<f32>,
+    solver2: vec4<f32>, // (k_max_tangential, max_speed, max_ang_speed, dynamic_mu_scale)
 };
 
 @group(0) @binding(0) var<storage, read_write> bodies:     array<Body>;
@@ -78,6 +79,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         omega_new = dq.xyz / imag_len * (angle / dt);
     } else if active_bodies[idx] == 0u {
         omega_new = bodies[idx].ang_vel.xyz;
+    }
+
+    // Safety velocity clamp (avbd-metal-style): a position-space solver can only
+    // produce a bounded step, but a bad frame (deep spawn overlap, degenerate
+    // geometry) must not launch a body across the world. 0 disables.
+    let max_speed = params.solver2.y;
+    if max_speed > 0.0 {
+        let speed = length(lin_vel);
+        if speed > max_speed {
+            lin_vel = lin_vel * (max_speed / speed);
+        }
+    }
+    let max_ang = params.solver2.z;
+    if max_ang > 0.0 {
+        let w = length(omega_new);
+        if w > max_ang {
+            omega_new = omega_new * (max_ang / w);
+        }
     }
 
     bodies[idx].lin_vel = vec4<f32>(lin_vel, 0.0);

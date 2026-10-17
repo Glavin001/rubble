@@ -1,0 +1,53 @@
+{
+  "oracle": "opencourant",
+  "scene": "b9_panel_high_weibull",
+  "seed": 20,
+  "scene_file": "/home/user/oracle-runs/opencourant/b9_panel_high_weibull_seed20/b9_panel_high_weibull_seed20.scene.json",
+  "scene_sha256": "e11bd38af6c5ca41325635be2bf83b929674093189caeabeb6238c17634ad360",
+  "base_scene_sha256": "b475502f78472a9c188b72e098af9c04e88002542036634bf9f73d2d2675de21",
+  "derive_command": "/tmp/claude-0/tgt/release/stress-ref with-seed scenes/b9_panel_high_weibull.json 20 /home/user/oracle-runs/opencourant/b9_panel_high_weibull_seed20/b9_panel_high_weibull_seed20.scene.json",
+  "tool": {
+    "tool": "OpenCourant (OpenRadioss fork)",
+    "release_tag": "latest-20261006",
+    "commit": "33e685176cccf0c539a3ce07aa2096985a284e2a",
+    "asset": "OpenCourant_linux64.zip",
+    "asset_sha256": "9d67531de156dd9beba05fbfe710dcdc2bcecbdf3dc3a12642cf85dcece80081",
+    "url": "https://github.com/OpenCourant/OpenCourant/releases/download/latest-20261006/OpenCourant_linux64.zip"
+  },
+  "starter_deck_sha256": "4b9bc691be0f40719270d16f4c7677d1d50dbaa56ed50594b924d1fcc53b1e94",
+  "engine_deck_sha256": "7cc398ac68c7de05f181c104c7341ed3f42476b89f14c864f4418503a626ddc4",
+  "options": {
+    "elements_per_chunk": 2,
+    "cohesive_thickness": 0.2,
+    "self_contact": true,
+    "contact_gap_fraction": 0.5,
+    "impact_gap": 0.0002,
+    "dt_safety": 0.6,
+    "threads": 2,
+    "anim_frames": 10,
+    "th_dt": null,
+    "isolid": 24,
+    "contact_damping": 0.05
+  },
+  "command": "python -I oracles/opencourant/pipeline.py scenes/b9_panel_high_weibull.json --seed 20 --threads 2 --stress-ref /tmp/claude-0/tgt/release/stress-ref",
+  "solver_commands": [
+    "/home/user/oracle-env/opencourant/OpenCourant/exec/starter_linux64_gf -i b9_panel_high_weibull_0000.rad -np 1 -nt 2",
+    "/home/user/oracle-env/opencourant/OpenCourant/exec/engine_linux64_gf -i b9_panel_high_weibull_0001.rad -nt 2",
+    "/home/user/oracle-env/opencourant/OpenCourant/exec/th_to_csv_linux64_gf /home/user/oracle-runs/opencourant/b9_panel_high_weibull_seed20/b9_panel_high_weibullT01",
+    "/home/user/oracle-env/opencourant/OpenCourant/exec/anim_to_vtk_linux64_gf <A-files>"
+  ],
+  "threads": 2,
+  "starter_wall_s": 1.38,
+  "engine_wall_s": 284.11,
+  "pipeline_wall_s": 287.02,
+  "engine_cycles": 26593,
+  "model_size": {
+    "nodes": 11880,
+    "elements": 6872,
+    "cohesive": 3352
+  },
+  "python": "3.12.3",
+  "numpy": "2.5.3",
+  "host": "Linux-6.18.44-fc-v80-x86_64-with-glibc2.39",
+  "rundir": "/home/user/oracle-runs/opencourant/b9_panel_high_weibull_seed20"
+}

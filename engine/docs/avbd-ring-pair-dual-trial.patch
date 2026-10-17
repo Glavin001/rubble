@@ -1,0 +1,844 @@
+--- a/engine/crates/engine-webgpu/build.rs
++++ b/engine/crates/engine-webgpu/build.rs
+@@ -20,6 +20,7 @@
+     "solve_primal_color_persistent",
+     "solve_primal_one_persistent",
+     "solve_dual_persistent",
++    "solve_dual_pairs_persistent",
+     "predict_bodies",
+     "build_aabbs",
+     "joint_hash_clear",
+@@ -67,6 +68,7 @@
+     "solve_primal_color_compact",
+     "solve_primal_one_compact",
+     "solve_dual_compact",
++    "solve_dual_pairs_compact",
+     "solve_primal_color",
+     "solve_primal_one",
+     "solve_dual",
+--- a/engine/crates/engine-webgpu/demo.html
++++ b/engine/crates/engine-webgpu/demo.html
+@@ -104,6 +104,12 @@
+     if (!['contact', 'manifold'].includes(hashInsertMode))
+       throw new Error('hashInsert must be contact or manifold');
+     const manifoldHashInsert = hashInsertMode === 'manifold';
++    // Opt-in three-avbd dualManifold shape: one dual thread per solver pair
++    // (loads the pair and both bodies once). Needs compact/persistent pairs.
++    const dualMode = qs.get('dual') || 'contact';
++    if (!['contact', 'pair'].includes(dualMode)) throw new Error('dual must be contact or pair');
++    if (dualMode === 'pair' && !compactContacts) throw new Error('dual=pair requires compact or persistent contacts');
++    const pairDual = dualMode === 'pair';
+     const detailedProfile = qs.get('profile') === 'detail';
+     const graphProfile = qs.get('profile') === 'graph';
+     const spatialOrder = qs.get('order') === 'morton';
+@@ -295,7 +301,7 @@
+       s[20] = b(cap.maxBodies, 4);
+       s[21] = 64 * 4;
+       s[22] = 96 * PASS_ALIGN;
+-      s[23] = b(Math.max(cap.maxColors, 70) * 3, 4);
++      s[23] = b(Math.max(cap.maxColors, 71) * 3, 4);
+       s[24] = b(cap.maxColliders, 80);
+       s[25] = b(cap.maxCandidates, 32);
+       s[26] = b(cap.maxBodies, 32);
+@@ -316,6 +322,7 @@
+       ...(sparseStart < 32 ? [compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse'] : []),
+       'count_color_tiles', 'prefix_color_tiles', 'prefix_color_tiles_parallel', 'scatter_color_tiles',
+       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
++      ...(pairDual ? ['solve_dual_pairs_compact'] : []),
+       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
+     ];
+ 
+@@ -737,6 +744,7 @@
+       persist_manifolds_compact: 'persist_manifolds_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
+       solve_primal_sparse_compact: 'solve_primal_sparse_persistent',
+       solve_primal_color_compact: 'solve_primal_color_persistent', solve_dual_compact: 'solve_dual_persistent',
++      solve_dual_pairs_compact: 'solve_dual_pairs_persistent',
+     };
+     const shaderEntry = name => persistentContacts ? (persistentEntries[name] || name) : name;
+     const sources = {};
+@@ -861,6 +869,7 @@
+       s[26] = incrementalColors ? 1 : 0; // history row + compact work slot 69
+       // s[13] receives the previous GPU manifold count in writeHost.
+       s[14] = manifoldHashInsert ? 1 : 0;
++      s[15] = pairDual ? 1 : 0; // work slot 70 = max(manifolds, joints)
+       s[24] = csrBase;
+       s[4] = Math.min(cap.maxColors, 32);
+       return s;
+@@ -1010,7 +1019,7 @@
+         }
+         if (sparseStart < colors) disp(pass, compactContacts ? 'solve_primal_sparse_compact' : 'solve_primal_sparse', 64, sparseStart);
+         if (beginPass) nextPhase();
+-        dispWork(pass, compactContacts ? 'solve_dual_compact' : 'solve_dual', 65, iter + 1 === params.iterations ? 1 : 0);
++        dispWork(pass, pairDual ? 'solve_dual_pairs_compact' : compactContacts ? 'solve_dual_compact' : 'solve_dual', pairDual ? 70 : 65, iter + 1 === params.iterations ? 1 : 0);
+       }
+       disp(pass, 'extract_velocity_sleep', nBodies);
+       nextPhase();
+@@ -1101,7 +1110,7 @@
+         totalBodies: bodyCount,
+         dynamicBodies: bodyCount - 1,
+         iterations: params.iterations,
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, dual: dualMode,
+         dt: params.dt,
+         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
+         userAgent: navigator.userAgent,
+@@ -1473,7 +1482,7 @@
+             const report = {
+               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+               coloring: incrementalColors ? "reuse" : "rebuild",
+-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
++              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, dual: dualMode, colors: last.color,
+               contacts: last.contact, awake: last.awake, overflow: last.overflow,
+               settle: pre, initialMaxY,
+             };
+@@ -1520,6 +1529,7 @@
+       report.order = spatialOrder ? "morton" : "construction";
+       report.persistence = fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact";
+       report.hashInsert = hashInsertMode;
++      report.dual = dualMode;
+       // Exercise reset too: stale warm-start data from the completed run must not
+       // contaminate the first frame or the benchmark's lead-in.
+       restoreScene();
+@@ -1544,7 +1554,7 @@
+       const report = {
+         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
+         coloring: incrementalColors ? "reuse" : "rebuild",
+-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, colors: last.color,
++        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, dual: dualMode, colors: last.color,
+         contacts: last.contact, awake: last.awake, overflow: last.overflow,
+       };
+       console.log('BENCH', JSON.stringify(report));
+--- a/engine/crates/engine-webgpu/src/gpu.rs
++++ b/engine/crates/engine-webgpu/src/gpu.rs
+@@ -22,6 +22,8 @@
+     manifold_persistence: bool,
+     /// Opt-in three-avbd shape: warm-hash insert per previous manifold.
+     pub(crate) manifold_hash_insert: bool,
++    /// Opt-in three-avbd dualManifold shape: one dual thread per solver pair.
++    pub(crate) pair_dual: bool,
+     fused_persistence: bool,
+     device: wgpu::Device,
+     queue: wgpu::Queue,
+@@ -104,6 +106,7 @@
+         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
+         "solve_primal_one_compact" => "solve_primal_one_persistent",
+         "solve_dual_compact" => "solve_dual_persistent",
++        "solve_dual_pairs_compact" => "solve_dual_pairs_persistent",
+         _ => name,
+     }
+ }
+@@ -350,6 +353,14 @@
+             manifold_persistence: std::env::var("ENGINE_MANIFOLD_PERSISTENCE").as_deref()
+                 == Ok("1"),
+             manifold_hash_insert: std::env::var("ENGINE_HASH_INSERT").as_deref() == Ok("manifold"),
++            pair_dual: {
++                let pair = std::env::var("ENGINE_DUAL").as_deref() == Ok("pair");
++                assert!(
++                    !pair || compact_contacts,
++                    "ENGINE_DUAL=pair needs compact/persistent solver pairs"
++                );
++                pair
++            },
+             device,
+             queue,
+             capacity,
+@@ -667,14 +678,17 @@
+                     Some(self.sparse_start),
+                 );
+             }
++            let (dual, slot) = if self.pair_dual {
++                ("solve_dual_pairs_compact", 70)
++            } else if self.compact_contacts {
++                ("solve_dual_compact", 65)
++            } else {
++                ("solve_dual", 65)
++            };
+             self.disp_work(
+                 &mut pass,
+-                if self.compact_contacts {
+-                    "solve_dual_compact"
+-                } else {
+-                    "solve_dual"
+-                },
+-                65,
++                dual,
++                slot,
+                 Some(u32::from(iter + 1 == self.params.iterations)),
+             );
+         }
+@@ -803,7 +817,8 @@
+             s[13] = self.last_counters.manifold_count;
+             s[14] = 1;
+         }
+-        // CSR index region starts past the hash/id words inside gConstraintIds.
++        s[15] = u32::from(self.pair_dual); // work slot 70 (71-slot args buffer)
++                                           // CSR index region starts past the hash/id words inside gConstraintIds.
+         s[24] = ids_len;
+         s[4] = self.capacity.max_colors.min(32);
+         self.queue
+@@ -927,7 +942,7 @@
+     s[20] = b(c.max_bodies, 4);
+     s[21] = 64 * 4;
+     s[22] = 96 * PASS_ALIGN;
+-    s[23] = b(c.max_colors.max(70) * 3, 4);
++    s[23] = b(c.max_colors.max(71) * 3, 4);
+     s[24] = b(c.max_colliders, 80);
+     s[25] = b(c.max_candidates, 32);
+     s[26] = b(c.max_bodies, 32);
+--- a/engine/crates/engine-webgpu/src/gpu_tests.rs
++++ b/engine/crates/engine-webgpu/src/gpu_tests.rs
+@@ -3887,6 +3887,240 @@
+             }
+             assert_eq!(counts, totals,
+                 "{kernel}: groups={groups}: published color totals differ; empty colors and zero-body reset must overwrite stale counts");
++        }
++    }
++}
++
++/// three-avbd dualManifold shape (`solve_dual_pairs_*`) must be a pure
++/// scheduling change: one thread per solver pair loading both bodies once has to
++/// write exactly the bits the per-contact dual writes. The fixture crosses a
++/// workgroup with ragged 1..8-point pairs, dead points inside a run, reserved
++/// holes between runs, a zero-count pair, sphere lever arms, sleeping/static
++/// pairs, both history halves, both pass flavours and all compact layouts.
++#[test]
++fn pair_dual_matches_contact_dual_bit_for_bit() {
++    let mut seed = 0x2545_f491u32;
++    let mut rnd = move |lo: f32, hi: f32| {
++        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
++        lo + (hi - lo) * ((seed >> 8) as f32 / (1u32 << 24) as f32)
++    };
++    let unit_quat = |q: [f32; 4]| {
++        let n = q.iter().map(|v| v * v).sum::<f32>().sqrt();
++        q.map(|v| v / n)
++    };
++    const BODIES: u32 = 40;
++    let bodies: Vec<BodyState> = (0..BODIES)
++        .map(|id| {
++            let (inv_mass, flags) = match id {
++                0 => (0.0, 0),       // static
++                36..=38 => (4.0, 5), // sleeping
++                _ => (4.0, 9),       // awake dynamic
++            };
++            let mut q = unit_quat([rnd(-0.3, 0.3), rnd(-0.3, 0.3), rnd(-0.3, 0.3), 1.0]);
++            if id % 7 == 3 {
++                q = q.map(|v| -v); // opposite hemisphere from initial_rot
++            }
++            BodyState {
++                position: [rnd(-1.0, 1.0), rnd(0.0, 2.0), rnd(-1.0, 1.0)],
++                inv_mass,
++                orientation: q,
++                inv_inertia: [6.0, 6.0, 6.0],
++                flags,
++                initial_pos: [rnd(-1.0, 1.0), rnd(0.0, 2.0), rnd(-1.0, 1.0)],
++                initial_rot: unit_quat([rnd(-0.3, 0.3), rnd(-0.3, 0.3), rnd(-0.3, 0.3), 1.0]),
++                ..BodyState::zeroed()
++            }
++        })
++        .collect();
++    let colliders: Vec<Collider> = (0..BODIES)
++        .map(|body| Collider {
++            body,
++            shape: if body == 5 {
++                ShapeType::Sphere as u32
++            } else {
++                ShapeType::Box as u32
++            },
++            ..Collider::zeroed()
++        })
++        .collect();
++    // Pair list: awake/awake, static/awake, sphere, sleeping/sleeping,
++    // static/sleeping, and a zero-count record.
++    let mut pairs: Vec<(u32, u32, u32)> = Vec::new();
++    for m in 0..93u32 {
++        let (a, b) = match m {
++            10 => (36, 37), // both asleep: forces must be preserved
++            11 => (0, 38),  // static/sleeping
++            12 => (5, 6),   // sphere lever arms
++            13 => (7, 5),   // sphere as endpoint B
++            14 => (0, 9),   // static endpoint A
++            _ => (1 + m % 35, 1 + (m * 7 + 3) % 35),
++        };
++        let b = if a == b { a % 35 + 1 } else { b };
++        let count = if m == 20 { 0 } else { 1 + m % 8 };
++        pairs.push((a, b, count));
++    }
++    for (persistent, compact) in [(false, true), (true, true)] {
++        let mut sim = if persistent {
++            WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
++        } else {
++            WgpuSim::new_with_compact_contacts(WorldCapacity::small(), compact)
++        }
++        .expect("GPU adapter required");
++        sim.params.alpha = 0.95;
++        sim.params.beta_lin = 1.0e4;
++        sim.params.k_max_n = 1.0e9;
++        sim.params.k_max_t = 1.0e6;
++        sim.queue
++            .write_buffer(&sim.bufs[0], 0, bytemuck::cast_slice(&bodies));
++        sim.queue
++            .write_buffer(&sim.bufs[2], 0, bytemuck::cast_slice(&colliders));
++        for parity in 0..2u32 {
++            sim.contacts_parity = parity;
++            sim.write_host_uniforms();
++            let cur = parity * sim.capacity.max_contacts;
++            let mut contacts = Vec::new();
++            let mut owners = Vec::new();
++            let mut manifolds = Vec::new();
++            for (mi, &(a, b, count)) in pairs.iter().enumerate() {
++                if mi % 9 == 4 {
++                    contacts.push(Contact::zeroed()); // reserved hole between runs
++                    owners.push(0);
++                }
++                let n = {
++                    let v = [rnd(-0.4, 0.4), 1.0, rnd(-0.4, 0.4)];
++                    let l = v.iter().map(|x| x * x).sum::<f32>().sqrt();
++                    v.map(|x| x / l)
++                };
++                manifolds.push(Manifold {
++                    collider_a: a,
++                    collider_b: b,
++                    contact_start: cur + contacts.len() as u32,
++                    contact_count: count,
++                    normal: n,
++                    friction: 0.5,
++                });
++                for k in 0..count {
++                    let dead = mi % 11 == 6 && k == 1;
++                    contacts.push(Contact {
++                        collider_a: a,
++                        collider_b: b,
++                        alive: u32::from(!dead),
++                        normal: n,
++                        friction: 0.5,
++                        anchor_a: [rnd(-0.5, 0.5), rnd(-0.25, 0.25), rnd(-0.25, 0.25)],
++                        anchor_b: [rnd(-0.5, 0.5), rnd(-0.25, 0.25), rnd(-0.25, 0.25)],
++                        c0_n: rnd(-0.03, 0.01),
++                        c0_t1: rnd(-0.01, 0.01),
++                        c0_t2: rnd(-0.01, 0.01),
++                        lambda_n: rnd(-50.0, 0.0),
++                        lambda_t1: rnd(-20.0, 20.0),
++                        lambda_t2: rnd(-20.0, 20.0),
++                        k_n: rnd(1.0e2, 1.0e5),
++                        k_t: rnd(1.0, 1.0e3),
++                        _pad: [if k % 3 == 0 { 1.0 } else { 0.0 }, 0.0, rnd(1.0, 1.0e3)],
++                        ..Contact::zeroed()
++                    });
++                    owners.push(mi as u32);
++                }
++            }
++            let n_points = contacts.len();
++            let hot_first = if persistent { cur } else { 0 };
++            for pass_flag in [0u32, 1] {
++                let mut results = Vec::new();
++                for pair_dual in [false, true] {
++                    let context = format!("persistent={persistent}, parity={parity}, final_pass={pass_flag}, pair_dual={pair_dual}");
++                    write_contact_fixture(&sim, cur, &contacts, &owners);
++                    sim.queue
++                        .write_buffer(&sim.bufs[25], 0, bytemuck::cast_slice(&manifolds));
++                    sim.queue.write_buffer(
++                        &sim.bufs[7],
++                        0,
++                        bytes_of(&StepCounters {
++                            body_count: BODIES,
++                            collider_count: BODIES,
++                            contact_count: n_points as u32,
++                            manifold_count: manifolds.len() as u32,
++                            ..Default::default()
++                        }),
++                    );
++                    let mut enc = sim.device.create_command_encoder(&Default::default());
++                    {
++                        let mut pass = enc.begin_compute_pass(&Default::default());
++                        if !persistent {
++                            sim.disp(&mut pass, "clear_solver_contacts", n_points as u64, None);
++                        }
++                        sim.disp(
++                            &mut pass,
++                            "pack_solver_contacts",
++                            manifolds.len() as u64,
++                            None,
++                        );
++                    }
++                    sim.queue.submit([enc.finish()]);
++                    let before: Vec<u32> =
++                        download(&sim, 27, u64::from(hot_first) * 64, n_points * 16);
++                    let mut enc = sim.device.create_command_encoder(&Default::default());
++                    {
++                        let mut pass = enc.begin_compute_pass(&Default::default());
++                        if pair_dual {
++                            sim.disp(
++                                &mut pass,
++                                "solve_dual_pairs_compact",
++                                manifolds.len() as u64,
++                                Some(pass_flag),
++                            );
++                        } else {
++                            sim.disp(
++                                &mut pass,
++                                "solve_dual_compact",
++                                n_points as u64,
++                                Some(pass_flag),
++                            );
++                        }
++                    }
++                    sim.queue.submit([enc.finish()]);
++                    let hot: Vec<u32> =
++                        download(&sim, 27, u64::from(hot_first) * 64, n_points * 16);
++                    let canonical: Vec<u32> = if persistent {
++                        Vec::new()
++                    } else {
++                        download(&sim, 4, u64::from(cur) * 128, n_points * 32)
++                    };
++                    // The fixture must exercise real updates, and inactive pairs must not move.
++                    let changed = (0..n_points)
++                        .filter(|&p| {
++                            hot[p * 16 + 8..p * 16 + 15] != before[p * 16 + 8..p * 16 + 15]
++                        })
++                        .count();
++                    assert!(changed > 200, "{context}: only {changed} points changed; the fixture no longer exercises the dual");
++                    let mut offset = 0usize;
++                    for (mi, &(_, _, count)) in pairs.iter().enumerate() {
++                        if mi % 9 == 4 {
++                            assert_eq!(
++                                hot[offset * 16..offset * 16 + 16],
++                                before[offset * 16..offset * 16 + 16],
++                                "{context}: reserved hole {offset} before pair {mi} was written"
++                            );
++                            offset += 1;
++                        }
++                        if mi == 10 || mi == 11 {
++                            assert_eq!(hot[offset * 16..(offset + count as usize) * 16], before[offset * 16..(offset + count as usize) * 16],
++                                "{context}: pair {mi} has no moving endpoint; its forces/penalties must stay unchanged");
++                        }
++                        offset += count as usize;
++                    }
++                    results.push((hot, canonical));
++                }
++                let (contact, pair) = (&results[0], &results[1]);
++                for p in 0..n_points {
++                    assert_eq!(contact.0[p * 16..p * 16 + 16], pair.0[p * 16..p * 16 + 16],
++                        "persistent={persistent}, parity={parity}, final_pass={pass_flag}: hot point {p} differs between per-contact and per-pair dual (words 8..10 lambda, 12..14 penalty, 15 tag); the pair schedule skipped, double-updated or mis-tagged this point");
++                }
++                for p in 0..contact.1.len() / 32 {
++                    assert_eq!(contact.1[p * 32..p * 32 + 32], pair.1[p * 32..p * 32 + 32],
++                        "parity={parity}, final_pass={pass_flag}: canonical copyback for contact {p} differs between dual schedules");
++                }
++            }
+         }
+     }
+ }
+--- a/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
++++ b/engine/crates/engine-webgpu/tests/demo_profiling.test.mjs
+@@ -64,7 +64,7 @@
+     lead: 0, scene: 'ring110k', bodyCount: 110442,
+     params: {iterations: 4, dt: 1/60}, stablePacking: true, persistentContacts: true,
+     compactContacts: true, sparseStart: 32, parallelColorPrefix:false, physicalAdjacency: true, spatialOrder: false,
+-    fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', info: {}, navigator: {userAgent: 'test'},
++    fusedPersistence: false, manifoldPersistence: false, hashInsertMode: 'contact', dualMode: 'contact', info: {}, navigator: {userAgent: 'test'},
+     last: {awake: 110441}, submitPhysics() {}, device: {queue: {async onSubmittedWorkDone() {}}},
+     async readCounters() { assert.equal(measuring, false); events.push('counters'); },
+     async readColorBuckets() { assert.equal(measuring, false); events.push('buckets'); return [60000,50441]; },
+--- a/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
++++ b/engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs
+@@ -97,7 +97,7 @@
+         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
+         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
+-        manifoldHashInsert:false,
++        manifoldHashInsert:false, pairDual:false,
+         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
+         sleepRounds:8, PASS_ALIGN:256, bufs:[],
+         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+@@ -199,7 +199,7 @@
+     /hashInsert must be contact or manifold/);
+ });
+ 
+-function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false}) {
++function encodeTrace({reuse, manifoldHashInsert, pairDual=false, detailedProfile=false}) {
+   const trace = [], passes = [];
+   const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
+     dispatchWorkgroupsIndirect() { trace.push({name:'primal'}); }, end() {}}; passes.push(p); return p; };
+@@ -208,7 +208,7 @@
+     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
+     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
+     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
+-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert,
++    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, pairDual,
+     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
+     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
+     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
+@@ -242,7 +242,7 @@
+   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
+     const copies = [];
+     const context = {
+-      manifoldHashInsert, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
++      manifoldHashInsert, pairDual:false, steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
+       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
+       last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
+       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
+@@ -265,3 +265,43 @@
+   }
+ });
+ 
++// Opt-in three-avbd dualManifold shape: one dual thread per solver pair.
++for (const [query, expected] of [['?scene=ring110k','contact'],['?scene=ring110k&dual=pair','pair'],
++  ['?scene=gables506k&contacts=persistent&dual=pair','pair']]) {
++  test(`dual scheduling mode parses explicitly (${query})`, () => {
++    assert.equal(runInNewContext(`${modeSource}\ndualMode`,{URLSearchParams,location:{search:query}}),expected);
++  });
++}
++test('pair dual is rejected without solver pairs or with an unknown mode', () => {
++  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=gables506k&dual=pair'}}),
++    /dual=pair requires compact or persistent contacts/);
++  assert.throws(()=>runInNewContext(modeSource,{URLSearchParams,location:{search:'?scene=ring110k&dual=manifold'}}),
++    /dual must be contact or pair/);
++});
++for (const detailedProfile of [false, true]) {
++  test(`pair dual replaces every per-contact dual and uses work slot 70 (detail=${detailedProfile})`, () => {
++    const trace = encodeTrace({reuse:true, manifoldHashInsert:true, pairDual:true, detailedProfile});
++    assert.equal(trace.filter(c=>c.name==='solve_dual_compact').length,0,'Running both duals would apply two force updates per iteration.');
++    const dual = trace.filter(c=>c.name==='solve_dual_pairs_compact');
++    assert.equal(dual.length,4,'One pair dual per solver iteration.');
++    assert.deepEqual(dual.map(c=>c.slot),[70,70,70,70],'Slot 70 covers max(manifolds, joints); slot 65 counts contacts.');
++    const at = name => trace.flatMap((c,i)=>c.name===name?[i]:[]);
++    const packs = at('pack_solver_contacts');
++    assert.equal(packs.length,1);
++    assert.ok(packs[0] < at('solve_dual_pairs_compact')[0],'Solver pairs must be packed before the pair dual reads them.');
++  });
++}
++test('pair dual publishes HOST_S(15) and allocates the 71st indirect slot', () => {
++  const allocation = html.slice(html.indexOf('function bufferSizes()'), html.indexOf('const K = ['));
++  const cap = {maxBodies:64,maxColliders:128,maxContacts:257,maxCandidates:129,maxJoints:3,maxColors:32,maxCommands:8,maxHull:16};
++  const sizes = runInNewContext(`${modeSource}\n${allocation}\nbufferSizes()`,
++    {URLSearchParams,location:{search:'?scene=ring110k&dual=pair'},cap,csrBase:32768,PASS_ALIGN:256});
++  assert.ok(sizes[23] >= 71*12,'write_work_args writes slot 70 when HOST_S(15) is set; a 70-slot buffer overflows.');
++  const hostSource = html.slice(html.indexOf('function scratchWords()'), html.indexOf('function writeHost('));
++  for (const pairDual of [false, true]) {
++    const s = runInNewContext(`${hostSource}\nscratchWords()`, {pairDual, manifoldHashInsert:false, steps:1, parity:0,
++      bodyCount:10, incrementalColors:true, csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n=>2**Math.ceil(Math.log2(n)),
++      last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32}, scratchU32:new Uint32Array(64)});
++    assert.equal(s[15], pairDual ? 1 : 0);
++  }
++});
+--- a/engine/slang/kernels/compact_solve.slang
++++ b/engine/slang/kernels/compact_solve.slang
+@@ -5,5 +5,6 @@
+ #define solve_primal_one solve_primal_one_compact
+ #define persist_manifolds persist_manifolds_compact
+ #define solve_dual solve_dual_compact
++#define solve_dual_pairs solve_dual_pairs_compact
+ #define solve_primal_sparse solve_primal_sparse_compact
+ #include "world_step.slang"
+--- a/engine/slang/kernels/persistent_solve.slang
++++ b/engine/slang/kernels/persistent_solve.slang
+@@ -11,5 +11,6 @@
+ #define solve_primal_color solve_primal_color_persistent
+ #define solve_primal_one solve_primal_one_persistent
+ #define solve_dual solve_dual_persistent
++#define solve_dual_pairs solve_dual_pairs_persistent
+ #define solve_primal_sparse solve_primal_sparse_persistent
+ #include "world_step.slang"
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -2115,6 +2115,10 @@
+                                             : min(HOST_S(7), HOST_S(3)));
+     // Opt-in keeps hosts without a history row / slot 69 compatible.
+     if (HOST_S(26) != 0u) writeDispatchArgs(69u, ALOAD(gCounters[0].recolorCount));
++    // Opt-in per-pair dual; hosts set HOST_S(15) only with a 71-slot args buffer.
++    if (HOST_S(15) != 0u)
++        writeDispatchArgs(70u, max(min(ALOAD(gCounters[0].manifoldCount), HOST_S(10)),
++                                   gCounters[0].jointCount));
+ }
+ 
+ // Write Metal indirect threadgroup counts for each colour (0 groups ⇒ skipped).
+@@ -2356,9 +2360,8 @@
+     gSolverPairs[mi] = pair;
+ }
+ 
+-Contact solverContact(uint index, float3 normal, float friction)
++Contact solverContactFromPoint(SolverPoint pt, float3 normal, float friction)
+ {
+-    SolverPoint pt = loadSolverPoint(index);
+     Contact c = (Contact)0;
+     c.alive = (pt.pairAndStick & SOLVER_DEAD) != SOLVER_DEAD ? 1u : 0u;
+     c.normal = normal; c.friction = friction;
+@@ -2371,6 +2374,11 @@
+     return c;
+ }
+ 
++Contact solverContact(uint index, float3 normal, float friction)
++{
++    return solverContactFromPoint(loadSolverPoint(index), normal, friction);
++}
++
+ [shader("compute")]
+ [numthreads(64, 1, 1)]
+ void clear_solver_contacts(uint3 tid : SV_DispatchThreadID)
+@@ -2787,8 +2795,111 @@
+ {
+     if (dispatchIndex(tid) != 0) return;
+     solvePrimalForBody(PASS_U);
++}
++
++// Dual update for one live contact whose endpoints are not both at rest.
++// Shared by per-contact and per-pair scheduling so both produce identical bits.
++Contact dualContactUpdate(Contact c, BodyState bA, BodyState bB, bool anySphere, AvbdParams p)
++{
++    float4 rotA = (anySphere && bodyIsDynamic(bA)) ? bA.initialRot : bA.orientation;
++    float4 rotB = (anySphere && bodyIsDynamic(bB)) ? bB.initialRot : bB.orientation;
++    // three-avbd evalContact: Ĉ = c0*(1-α) + J·(x-x⁻), not absolute geometric C.
++    bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
++    bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
++    float3 dLinA = moveA ? (bA.position - bA.initialPos) : float3(0, 0, 0);
++    float3 dLinB = moveB ? (bB.position - bB.initialPos) : float3(0, 0, 0);
++    float3 dAngA = float3(0, 0, 0);
++    float3 dAngB = float3(0, 0, 0);
++    if (moveA)
++    {
++        float4 qA = bA.orientation;
++        if (dot(qA, bA.initialRot) < 0.0) qA = -qA;
++        dAngA = quatSubVec(qA, bA.initialRot);
++    }
++    if (moveB)
++    {
++        float4 qB = bB.orientation;
++        if (dot(qB, bB.initialRot) < 0.0) qB = -qB;
++        dAngB = quatSubVec(qB, bB.initialRot);
++    }
++    float3 rAW = quatRotate(rotA, c.anchorA);
++    float3 rBW = quatRotate(rotB, c.anchorB);
++    float keep = 1.0 - p.alpha;
++    float3 n = c.normal;
++    float3 t1 = c.tangent1;
++    float3 t2 = c.tangent2;
++    float3 cReg = float3(
++        c.c0N * keep + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
++        c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
++        c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
++    c.penetration = cReg.x;
++    float3 f = float3(c.kN, c.kT, c._pad2) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
++    // Eq. 16 tests the *unclamped* tangential force. Testing after cone
++    // projection always accepts sliding rows and ramps friction without bound.
++    float rawFriction = length(f.yz);
++    float bound = c.friction * max(-f.x, 0.0);
++    f = projectContactForce(f, c.friction);
++    c.lambdaN = f.x;
++    c.lambdaT1 = f.y;
++    c.lambdaT2 = f.z;
++    if (f.x < 0.0) c.kN = min(c.kN + p.betaLin * abs(cReg.x), p.kMaxN);
++    if (rawFriction <= bound)
++    {
++        c.kT = min(c.kT + p.betaLin * abs(cReg.y), p.kMaxT);
++        c._pad2 = min(c._pad2 + p.betaLin * abs(cReg.z), p.kMaxT);
++        c._pad0 = length(cReg.yz) < 1.0e-5 ? 1.0 : 0.0;
++    }
++    return c;
+ }
+ 
++// The dual changes forces/penalties, not geometry. Avoid writing the full
++// 128-byte record for every contact on every solver iteration.
++void storeDualContact(uint i, uint pairIndex, Contact c)
++{
++#if defined(ENGINE_COMPACT_SOLVE)
++    gSolverPoints[solverPointIndex(i)].lambda = float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
++    gSolverPoints[solverPointIndex(i)].penalty = float3(c.kN, c.kT, c._pad2);
++    gSolverPoints[solverPointIndex(i)].pairAndStick = solverPointTag(pairIndex, c._pad0 != 0.0);
++#endif
++#if !defined(ENGINE_PERSISTENT_CONTACTS)
++    uint curOff = HOST_S(11);
++#if defined(ENGINE_COMPACT_SOLVE)
++    // The final iteration publishes the canonical warm-start/debug state.
++    // Earlier iterations touch only the compact hot records.
++    if (PASS_U != 0u)
++#endif
++    {
++    gContacts[curOff + i].penetration = c.penetration;
++    gContacts[curOff + i].lambdaN = c.lambdaN;
++    gContacts[curOff + i].lambdaT1 = c.lambdaT1;
++    gContacts[curOff + i].lambdaT2 = c.lambdaT2;
++    gContacts[curOff + i].kN = c.kN;
++    gContacts[curOff + i].kT = c.kT;
++    gContacts[curOff + i]._pad0 = c._pad0;
++    gContacts[curOff + i]._pad2 = c._pad2;
++    }
++#endif
++}
++
++void dualJoint(uint i, AvbdParams p)
++{
++    Joint j = gJoints[i];
++    BodyState a = gBodies[j.bodyA];
++    BodyState b = gBodies[j.bodyB];
++    float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
++    float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
++    float3 C = wa - wb; // shared with primal
++    float k = max(j.k0, p.kStart);
++    float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
++    // demo3d dual: C_hat = C - alpha * C0
++    float3 Creg = C - p.alpha * j.c0;
++    lam = k * Creg + lam;
++    j.lambda0 = lam.x; j.lambda1 = lam.y; j.lambda2 = lam.z;
++    j.k0 = min(k + p.betaLin * length(Creg), min(j.stiffness, p.kMaxN));
++    j.k1 = j.k0; j.k2 = j.k0;
++    gJoints[i] = j;
++}
++
+ [shader("compute")]
+ [numthreads(64, 1, 1)]
+ void solve_dual(uint3 tid : SV_DispatchThreadID)
+@@ -2799,7 +2910,6 @@
+     AvbdParams p = PARAMS;
+     if (i < n)
+     {
+-        uint curOff = HOST_S(11);
+         #if defined(ENGINE_COMPACT_SOLVE)
+         uint pairIndex = loadSolverPoint(i).pairAndStick & SOLVER_DEAD;
+         Contact c = (Contact)0;
+@@ -2810,7 +2920,8 @@
+             c = solverContact(i, pair.normal, pair.friction);
+         }
+ #else
+-        Contact c = READ_CONTACT(curOff + i);
++        uint pairIndex = 0u;
++        Contact c = READ_CONTACT(HOST_S(11) + i);
+ #endif
+         if (c.alive != 0)
+         {
+@@ -2835,101 +2946,48 @@
+             Collider colB = gColliders[c.colliderB];
+             bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+ #endif
+-            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? bA.initialRot : bA.orientation;
+-            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? bB.initialRot : bB.orientation;
+-            // three-avbd evalContact: Ĉ = c0*(1-α) + J·(x-x⁻), not absolute geometric C.
+-            bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
+-            bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
+-            float3 dLinA = moveA ? (bA.position - bA.initialPos) : float3(0, 0, 0);
+-            float3 dLinB = moveB ? (bB.position - bB.initialPos) : float3(0, 0, 0);
+-            float3 dAngA = float3(0, 0, 0);
+-            float3 dAngB = float3(0, 0, 0);
+-            if (moveA)
+-            {
+-                float4 qA = bA.orientation;
+-                if (dot(qA, bA.initialRot) < 0.0) qA = -qA;
+-                dAngA = quatSubVec(qA, bA.initialRot);
++            storeDualContact(i, pairIndex, dualContactUpdate(c, bA, bB, anySphere, p));
+             }
+-            if (moveB)
+-            {
+-                float4 qB = bB.orientation;
+-                if (dot(qB, bB.initialRot) < 0.0) qB = -qB;
+-                dAngB = quatSubVec(qB, bB.initialRot);
+-            }
+-            float3 rAW = quatRotate(rotA, c.anchorA);
+-            float3 rBW = quatRotate(rotB, c.anchorB);
+-            float keep = 1.0 - p.alpha;
+-            float3 n = c.normal;
+-            float3 t1 = c.tangent1;
+-            float3 t2 = c.tangent2;
+-            float3 cReg = float3(
+-                c.c0N * keep + dot(n, dLinB - dLinA) - dot(cross(rAW, n), dAngA) + dot(cross(rBW, n), dAngB),
+-                c.c0T1 * keep + dot(t1, dLinB - dLinA) - dot(cross(rAW, t1), dAngA) + dot(cross(rBW, t1), dAngB),
+-                c.c0T2 * keep + dot(t2, dLinB - dLinA) - dot(cross(rAW, t2), dAngA) + dot(cross(rBW, t2), dAngB));
+-            c.penetration = cReg.x;
+-            float3 f = float3(c.kN, c.kT, c._pad2) * cReg + float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
+-            // Eq. 16 tests the *unclamped* tangential force. Testing after cone
+-            // projection always accepts sliding rows and ramps friction without bound.
+-            float rawFriction = length(f.yz);
+-            float bound = c.friction * max(-f.x, 0.0);
+-            f = projectContactForce(f, c.friction);
+-            c.lambdaN = f.x;
+-            c.lambdaT1 = f.y;
+-            c.lambdaT2 = f.z;
+-            if (f.x < 0.0) c.kN = min(c.kN + p.betaLin * abs(cReg.x), p.kMaxN);
+-            if (rawFriction <= bound)
+-            {
+-                c.kT = min(c.kT + p.betaLin * abs(cReg.y), p.kMaxT);
+-                c._pad2 = min(c._pad2 + p.betaLin * abs(cReg.z), p.kMaxT);
+-                c._pad0 = length(cReg.yz) < 1.0e-5 ? 1.0 : 0.0;
+-            }
+-            // The dual changes forces/penalties, not geometry. Avoid writing the
+-            // full 128-byte record for every contact on every solver iteration.
++        }
++    }
++    if (i < gCounters[0].jointCount) dualJoint(i, p);
++}
++
+ #if defined(ENGINE_COMPACT_SOLVE)
+-            gSolverPoints[solverPointIndex(i)].lambda = float3(c.lambdaN, c.lambdaT1, c.lambdaT2);
+-            gSolverPoints[solverPointIndex(i)].penalty = float3(c.kN, c.kT, c._pad2);
+-            gSolverPoints[solverPointIndex(i)].pairAndStick = solverPointTag(pairIndex, c._pad0 != 0.0);
+-#endif
+-#if !defined(ENGINE_PERSISTENT_CONTACTS)
+-#if defined(ENGINE_COMPACT_SOLVE)
+-            // The final iteration publishes the canonical warm-start/debug state.
+-            // Earlier iterations touch only the compact hot records.
+-            if (PASS_U != 0u)
+-#endif
++// three-avbd dualManifold shape: one thread per solver pair loads the pair and
++// both bodies once, then updates its contiguous points. Joints keep index i.
++// Dispatch slot 70 = max(manifolds, joints) (opt-in via HOST_S(15)).
++[shader("compute")]
++[numthreads(64, 1, 1)]
++void solve_dual_pairs(uint3 tid : SV_DispatchThreadID)
++{
++    uint i = dispatchIndex(tid);
++    AvbdParams p = PARAMS;
++    if (i < min(ALOAD(gCounters[0].manifoldCount), HOST_S(10)))
++    {
++        SolverPair pair = gSolverPairs[i];
++        uint count = min(pair.countAndSphere & ~SOLVER_SPHERE, 8u);
++        BodyState bA = gBodies[pair.bodyA];
++        BodyState bB = gBodies[pair.bodyB];
++        bool sleepA = !bodyIsDynamic(bA) || bodyIsSleeping(bA);
++        bool sleepB = !bodyIsDynamic(bB) || bodyIsSleeping(bB);
++        if (count != 0u && !(sleepA && sleepB))
++        {
++            bool anySphere = (pair.countAndSphere & SOLVER_SPHERE) != 0u;
++            uint first = pair.contactStart - HOST_S(11);
++            for (uint k = 0u; k < count; k++)
+             {
+-            gContacts[curOff + i].penetration = c.penetration;
+-            gContacts[curOff + i].lambdaN = c.lambdaN;
+-            gContacts[curOff + i].lambdaT1 = c.lambdaT1;
+-            gContacts[curOff + i].lambdaT2 = c.lambdaT2;
+-            gContacts[curOff + i].kN = c.kN;
+-            gContacts[curOff + i].kT = c.kT;
+-            gContacts[curOff + i]._pad0 = c._pad0;
+-            gContacts[curOff + i]._pad2 = c._pad2;
++                SolverPoint pt = loadSolverPoint(first + k);
++                // Dead holes and foreign tags keep their state, as per-contact does.
++                if ((pt.pairAndStick & SOLVER_DEAD) != i) continue;
++                Contact c = solverContactFromPoint(pt, pair.normal, pair.friction);
++                storeDualContact(first + k, i, dualContactUpdate(c, bA, bB, anySphere, p));
+             }
+-#endif
+-            }
+         }
+-    }
+-    uint nJ = gCounters[0].jointCount;
+-    if (i < nJ)
+-    {
+-        Joint j = gJoints[i];
+-        BodyState a = gBodies[j.bodyA];
+-        BodyState b = gBodies[j.bodyB];
+-        float3 wa = transformPoint(a.position, a.orientation, j.localAnchorA);
+-        float3 wb = transformPoint(b.position, b.orientation, j.localAnchorB);
+-        float3 C = wa - wb; // shared with primal
+-        float k = max(j.k0, p.kStart);
+-        float3 lam = float3(j.lambda0, j.lambda1, j.lambda2);
+-        // demo3d dual: C_hat = C - alpha * C0
+-        float3 Creg = C - p.alpha * j.c0;
+-        lam = k * Creg + lam;
+-        j.lambda0 = lam.x; j.lambda1 = lam.y; j.lambda2 = lam.z;
+-        j.k0 = min(k + p.betaLin * length(Creg), min(j.stiffness, p.kMaxN));
+-        j.k1 = j.k0; j.k2 = j.k0;
+-        gJoints[i] = j;
+     }
++    if (i < gCounters[0].jointCount) dualJoint(i, p);
+ }
++#endif
+ 
+ 
+ // gCcdFlags reused pre-CCD: 1 = sleep candidate (slow + timer elapsed) after extract_velocity.

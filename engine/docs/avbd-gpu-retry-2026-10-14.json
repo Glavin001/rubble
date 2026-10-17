@@ -1,0 +1,35 @@
+{
+  "measuredAt": "2026-10-14T12:55:19.814Z",
+  "purpose": "Fresh serial retry requested after Mac restart; no native ring_hold, gables_hold or cargo process found before measurement.",
+  "adapter": {"vendor": "apple", "architecture": "metal-3"},
+  "dispatchDiagnostic": {
+    "measuredAt": "2026-10-14T12:55:02.081Z",
+    "visibleAndFocusedThroughout": true,
+    "allOutputChecksPassed": true,
+    "tiny128DispatchMs": 0.21,
+    "tiny128SeparatePassMs": 0.23,
+    "stream32MiBSingleDispatchMs": 0.24,
+    "stream32MiB4DispatchMs": 0.93,
+    "stream32MiB4SeparatePassMs": 0.92,
+    "verifiedStreamingLanes": 8388608
+  },
+  "ring": {
+    "url": "http://127.0.0.1:8765/demo.html?scene=ring110k&bench=only",
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contactLayout": "persistent64+32",
+    "protocol": "60 lead steps, then 2 rounds of 3 untimed steps and 5 batches of 10 timed steps; minimum round median",
+    "batchMeansMs": [[12.64, 12.78, 12.83, 12.82, 12.78], [12.69, 12.63, 12.66, 12.92, 12.73]],
+    "roundMediansMs": [12.78, 12.69],
+    "wallMs": 12.69,
+    "physicsStepsPerSecond": 78.8022064618,
+    "allBatchesWithin120Hz": false,
+    "start": {"contacts": 1184245, "candidates": 230244, "awake": 110441, "colors": 15, "manifolds": 227155, "overflow": 0},
+    "end": {"contacts": 1174316, "candidates": 256703, "awake": 110441, "colors": 11, "manifolds": 246481, "overflow": 0},
+    "separateProfilePhasesMs": {"aabbs": 0.131072, "grid": 1.6384, "narrowphase": 2.555904, "warm": 1.048576, "graph": 1.31072, "primal": 4.063232, "dual": 1.703936, "sleep": 0.065536},
+    "profileCaveat": "Later split-pass timestamps and per-step readback perturb execution; these are separate from throughput timing."
+  },
+  "interpretation": "The approximately 200 ms slowdown is absent. This does not identify its original cause. The current implementation differs from the old pre-reboot baseline, so the total improvement cannot be attributed to reboot alone. Full-ring 120 FPS and three-avbd parity remain open; no fresh reference benchmark was run in this retry."
+}

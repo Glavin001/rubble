@@ -1,0 +1,16 @@
+{
+  "decision": "8eb",
+  "change": "Broadphase grid head table sized by the host via HOST_S(16): nextPow2(max(2*colliders, 131072)), capped at the gConstraintIds pre-CSR region; 0 keeps the fixed 131072 table (Metal). broadphase_clear covers the same count. Browser grid=fixed / native ENGINE_GRID=fixed keep the control.",
+  "gables_ms": {"fixed": [36.92, 36.34], "scaled": [35.00, 34.50], "contaminatedScaledRunDiscarded": 46.59, "gridPhase": {"fixed": 3.28, "scaled": 1.90}},
+  "ring_ms": {"scaled": 11.73, "gridPhase": {"fixed": 1.18, "scaled": 1.11}, "note": "neutral within noise; table 262144 vs 131072"},
+  "contention": "Slack/Chrome/WindowServer were active during measurements; one scaled run (46.59 ms, all phases inflated) was discarded after a clean repeat; ABAB pairs interleaved",
+  "gates": {
+    "gpuLib": "44/44; brute-force lattice test now runs 131072/1024/65536-head tables; ignoring HOST_S(16) fails the aliased case",
+    "browserUnit": "235/235 (sizing formula and clear coverage)",
+    "nativeRing480Columns": "PASS bit-identical (mean 1.1497; 100k drift 0.1017)",
+    "nativeCanonicalGables240": "PASS bit-identical 0.118626/0.330369",
+    "metal": "18/18",
+    "browserRing480": "PASS bit-identical mean 1.1817874610691919",
+    "browserGables240": "PASS bit-identical 0.11725153092827116/0.32761669158935547"
+  }
+}

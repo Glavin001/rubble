@@ -1,0 +1,106 @@
+{
+  "experiment": "Manifold-scheduled compact dual vs per-contact dual",
+  "status": "Rejected; per-contact path retained. This trial was not promoted to full accuracy validation.",
+  "protocol": {
+    "scene": "ring110k",
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "wallStatistic": "minimum round median",
+    "samplePrecisionMs": 0.01
+  },
+  "conditions": "Serial Chrome 155 in-app browser runs on Apple M3 Max; no concurrent native GPU tests or compilation.",
+  "implementation": "Load body poses/displacements and tangent basis once per manifold, loop over compact points, preserve final-only canonical publication. The trial reused the contact/joint indirect slot, so excess invocations exited after comparing against manifold count. No default change.",
+  "runs": [
+    {
+      "variant": "manifold A",
+      "measuredAt": "2026-10-14T12:00:22.972Z",
+      "wallMs": 15.32,
+      "batchesMs": [
+        [
+          15.25,
+          15.32,
+          15.33,
+          15.7,
+          15.29
+        ],
+        [
+          15.27,
+          15.44,
+          15.43,
+          15.09,
+          15.41
+        ]
+      ],
+      "dualMs": 2.752512,
+      "primalMs": 5.439488,
+      "contacts": 1174486,
+      "manifolds": 247676,
+      "awake": 110441,
+      "colors": 13,
+      "overflow": 0
+    },
+    {
+      "variant": "point control",
+      "measuredAt": "2026-10-14T12:02:17.754Z",
+      "wallMs": 15.01,
+      "batchesMs": [
+        [
+          15.07,
+          15.37,
+          15.47,
+          15.25,
+          15.25
+        ],
+        [
+          14.97,
+          15.18,
+          15.01,
+          15.11,
+          14.72
+        ]
+      ],
+      "dualMs": 2.62144,
+      "primalMs": 5.24288,
+      "contacts": 1174316,
+      "manifolds": 246481,
+      "awake": 110441,
+      "colors": 11,
+      "overflow": 0
+    },
+    {
+      "variant": "manifold B",
+      "measuredAt": "2026-10-14T12:02:44.258Z",
+      "wallMs": 15.45,
+      "batchesMs": [
+        [
+          15.01,
+          15.49,
+          15.29,
+          15.45,
+          15.6
+        ],
+        [
+          15.56,
+          15.48,
+          15.41,
+          15.51,
+          15.04
+        ]
+      ],
+      "dualMs": 2.818048,
+      "primalMs": 5.373952,
+      "contacts": 1174486,
+      "manifolds": 247676,
+      "awake": 110441,
+      "colors": 13,
+      "overflow": 0
+    }
+  ],
+  "caveat": "Phase medians come from later split-pass timestamp samples and are not throughput batch timings. Small trajectory/color differences prevent treating this as identical work byte-for-byte. No material dual or total improvement was observed; this does not rule out other manifold implementations."
+}

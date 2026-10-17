@@ -1,0 +1,12 @@
+[package]
+name = "engine-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase graph and backend trait"
+
+[dependencies]
+engine-schema.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+serde.workspace = true

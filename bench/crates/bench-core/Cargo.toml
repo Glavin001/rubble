@@ -1,0 +1,13 @@
+[package]
+name = "bench-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scene format, timing protocol and result files shared by every benchmark adapter"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+sha2.workspace = true

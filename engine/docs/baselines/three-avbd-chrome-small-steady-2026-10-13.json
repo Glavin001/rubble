@@ -1,0 +1,15 @@
+{
+  "machine": "M3 Max local",
+  "adapter": "apple · metal-3",
+  "date": "2026-10-13",
+  "source": "Chrome WebGPU bench3d.html (small+steady tiers)",
+  "results": [
+    {"scene": "Wall smash 2k", "iterations": 10, "bodies": 2002, "joints": 0, "contacts": 19675, "colors": 17, "wallMs": 2.86, "gpuTotal": 10.81},
+    {"scene": "Chain mail 1.6k", "iterations": 10, "bodies": 1602, "joints": 3120, "contacts": 9, "colors": 5, "wallMs": 1.13, "gpuTotal": 3.15},
+    {"scene": "Brick ring 9k", "iterations": 4, "bodies": 9132, "joints": 0, "contacts": 45554, "colors": 10, "wallMs": 1.75, "gpuTotal": 5.51},
+    {"scene": "Brick gables 6.7k", "iterations": 3, "bodies": 6723, "joints": 0, "contacts": 38520, "colors": 7, "wallMs": 0.89, "gpuTotal": 4.78},
+    {"scene": "Jointed drop 6k", "iterations": 10, "bodies": 6025, "joints": 12484, "contacts": 17754, "colors": 19, "wallMs": 3.23, "gpuTotal": 10.62},
+    {"scene": "Settled pile 32k", "iterations": 4, "bodies": 32001, "joints": 0, "contacts": 120445, "colors": 11, "wallMs": 3.14, "gpuTotal": 11.8},
+    {"scene": "Box columns 100k", "iterations": 4, "bodies": 100001, "joints": 0, "contacts": 400000, "colors": 3, "wallMs": 3.5, "gpuTotal": 9.57}
+  ]
+}

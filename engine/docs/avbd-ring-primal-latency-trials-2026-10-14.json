@@ -1,0 +1,18 @@
+{
+  "decision": "8dx",
+  "environment": "M3 Max, Claude app Chrome 152.0.7977.130, apple/metal-3; production = HEAD 541e7ed (manifold hash insert, per-contact dual)",
+  "bandwidthProbe": {"streaming32MiB_GBps": [268.4, 288.6, 285.6], "dependentTinyDispatchUs": "~1.6 (128 dispatches 0.20-0.23 ms)", "note": "dispatch-diagnostic.html, verified outputs"},
+  "colorProfile": {
+    "mode": "profile=colors (new diagnostic; one timestamped pass per primal color + tail)",
+    "primalMsSummedOver4Iterations": {"color0": 1.31, "color1": 0.92, "color2": 0.66, "color3": 0.39, "color4": 0.20, "color5": 0.13, "color6": 0.07, "color7": 0.13, "color8": 0.07, "color9": 0.13, "tail": 0.13},
+    "bucketSizesEnd": [36437,33636,20681,10740,4398,2539,1244,548,183,33,2],
+    "interpretation": "Primal time is ~linear in bucket size (~30 ns per body-iteration): throughput/latency bound per body, not per-dispatch bound. Timestamp quantum is 0.0655 ms, so small colors are coarse."
+  },
+  "byteEstimates": "Dual ~120 MB/iteration -> ~0.42 ms at 285 GB/s, matching its measured 0.43 ms (bandwidth bound). Warm pass ~350 MB -> ~1.2 ms vs 1.11 measured (bandwidth bound). Primal ~170 MB/iteration -> ~0.6 ms floor vs ~1.03 ms measured (latency bound).",
+  "trials": {
+    "fieldLevelSolverBodyLoads": {"ABA_ms": [11.79, 11.47, 11.47], "result": "neutral; Metal already eliminates unused struct fields; source restored"},
+    "persistenceWithoutHashProbe_diagnosticOnly": {"warmPhase_ms": "1.11 -> 0.85", "caveat": "removes warm start, collapses the ring (primal 9.57 ms); only an upper bound showing a carried-forward probe saves <=0.26 ms"},
+    "perEdgeSolverRecords": {"ABA_ms": [11.49, 11.60], "control_earlier_ms": 11.47, "primalPhase_ms": "4.06-4.13 both", "workload": "identical snapshots", "result": "neutral/slightly slower; edge id -> SolverPair hop is not the primal limiter. Patch: docs/avbd-ring-primal-edge-records-trial.patch"}
+  },
+  "disposition": "Keep profile=colors (3 new schedule tests, 232 browser tests pass). Production shaders byte-identical to HEAD (71 modules)."
+}

@@ -13,6 +13,12 @@ use rubble3d::RigidBodyDesc;
 pub struct Scene3D {
     pub name: &'static str,
     pub build: fn() -> Vec<RigidBodyDesc>,
+    /// Upper bound on adaptive substeps for this scene (see
+    /// `rubble3d::World::set_adaptive_substeps`). 1 = single-step (the default
+    /// for calibrated scenes). Deep, high-energy stacks (the dropped grids) set
+    /// this above 1 so the engine subdivides `dt` during the violent compaction
+    /// and never tunnels into the deep overlap that would otherwise explode.
+    pub max_substeps: u32,
 }
 
 /// A named 2D demo scene.
@@ -40,50 +46,65 @@ static SCENES_3D: [Scene3D; 12] = [
     Scene3D {
         name: "Empty",
         build: scenes_3d::scene_empty,
+        max_substeps: 1,
     },
     Scene3D {
         name: "Ground",
         build: scenes_3d::scene_ground,
+        max_substeps: 1,
     },
     Scene3D {
         name: "Dynamic Friction",
         build: scenes_3d::scene_dynamic_friction,
+        max_substeps: 1,
     },
     Scene3D {
         name: "Static Friction",
         build: scenes_3d::scene_static_friction,
+        max_substeps: 1,
     },
     Scene3D {
         name: "Pyramid",
         build: scenes_3d::scene_pyramid,
+        max_substeps: 1,
     },
     Scene3D {
         name: "Stack",
         build: scenes_3d::scene_stack,
+        max_substeps: 1,
     },
     Scene3D {
         name: "Stack Ratio",
         build: scenes_3d::scene_stack_ratio,
+        max_substeps: 1,
     },
     Scene3D {
         name: "Scatter",
         build: scenes_3d::scene_scatter,
+        max_substeps: 1,
     },
     Scene3D {
         name: "Scatter Boxes",
         build: scenes_3d::scene_scatter_boxes,
+        max_substeps: 1,
     },
+    // Deep dropped grids: 24-25 layers with drop slack compact at several m/s.
+    // Adaptive substepping keeps the engine from tunnelling into the deep
+    // overlap that otherwise injects energy and explodes the pile.
     Scene3D {
         name: "Grid Boxes",
         build: scenes_3d::scene_grid_boxes,
+        max_substeps: 8,
     },
     Scene3D {
         name: "Slanted Grid",
         build: scenes_3d::scene_slanted_grid_boxes,
+        max_substeps: 8,
     },
     Scene3D {
         name: "10k Grid",
         build: scenes_3d::scene_grid_10k_boxes,
+        max_substeps: 8,
     },
 ];
 

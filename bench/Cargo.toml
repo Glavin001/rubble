@@ -1,0 +1,34 @@
+# Cross-engine benchmark harness (see README.md). Its own workspace so competitor engines
+# never enter the engine's dependency graph.
+[workspace]
+resolver = "2"
+members = [
+    "crates/bench-core",
+    "crates/bench-judge",
+    "adapters/rapier",
+    "adapters/rubble",
+    "adapters/physx",
+    "adapters/jolt",
+    "tools/fracture-export",
+    "tools/joint-export",
+    "adapters/box3d",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytemuck = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+rayon = "1"
+bench-core = { path = "crates/bench-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = false

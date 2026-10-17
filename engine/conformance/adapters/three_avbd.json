@@ -1,0 +1,11 @@
+{
+  "oracle": "three-avbd",
+  "revision": "2bb1a318e9aad03640b4bce5b5d222484f0925f7",
+  "unsupported": ["soft-body", "cloth", "plastic-yield", "wind"],
+  "frame": "oracle=Z-up; engine=Y-up (x,y,z)->(x,z,y)",
+  "notes": [
+    "Primary 3D GPU AVBD numerical / seeded oracle",
+    "Match iterations, alpha=0.99, gamma=0.999, beta_lin/ang",
+    "Scene catalogue mirrored in crates/engine-scenes"
+  ]
+}
