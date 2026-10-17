@@ -339,6 +339,14 @@ your call; the rest need building.
         overflow rubble's candidate capacity here. Its contact range is one global offset
         (~2.3 m for a 140 m/s meteor), so it needs per-body margins before it can stand
         in for the CCD substeps.
+      - **rubble's iterations** (`STRESS_RUBBLE_ITERATIONS`, measurement only).
+        vibe-land's PhysX runs 4 position iterations; rubble runs 10. At 4 the bombard
+        median falls 20.9 → 15.8 ms, but broken bonds rise 3,157 → 5,655 and fragments
+        887 → 1,668: softer contacts let the impacts go deeper. Not adopted.
+      - **Splits are the spikes (p95 ~155 ms).** Each one downloads the mirror (12–30 ms)
+        and rebuilds the tables of all 52k chunks (~50 ms) for a few changed clusters.
+        The new fragments' first solves come on top. Next: re-lay out only the split
+        islands (phase 6e).
 12c. **Quasi-static frames at scale** (fractured downtown, authored, 34 ms): two full layout builds per frame (~6.5 ms each: pack 1.8, terms 1.5, uploads 2.8), the tail's solves of the 7 fatigue-active buildings, and the write-back; then item 11.
 12b. **Static solves in the tiered coupling:** the budget is a per-frame cost bound
     (Blast's choice); a warm-started multigrid (item 10) would converge within it.

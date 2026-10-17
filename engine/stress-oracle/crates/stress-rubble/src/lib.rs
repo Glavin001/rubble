@@ -447,6 +447,13 @@ impl RubbleEngine {
             sleep_ang: -1.0,
             ..AvbdParams::default()
         };
+        // `STRESS_RUBBLE_ITERATIONS=n`: rubble's solver iterations per step (a PhysX-matched
+        // setting for comparisons: vibe-land's PhysX runs 4 position iterations); default
+        // rubble's own.
+        let mut params = params;
+        if let Some(n) = std::env::var("STRESS_RUBBLE_ITERATIONS").ok().and_then(|v| v.parse().ok()) {
+            params.iterations = n;
+        }
         sim.set_params(params);
         // Small coupling scenes dispatch only the colours in use by default (engine 8ev).
         Ok(RubbleEngine {
