@@ -182,7 +182,7 @@ impl World {
         self.coupling.as_ref().map(|c| c.engine.name())
     }
 
-    fn impactor_radius(imp: &Impactor) -> f64 {
+    pub fn impactor_radius(imp: &Impactor) -> f64 {
         match imp.shape {
             ImpactorShape::Sphere { radius } => radius,
             ImpactorShape::Box { half_extents } => half_extents.iter().copied().fold(f64::INFINITY, f64::min),

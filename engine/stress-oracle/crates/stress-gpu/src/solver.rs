@@ -516,6 +516,8 @@ pub struct GpuSolver {
     /// Load terms besides the scene's (an engine's contact loads, `coupled`), applied
     /// from the next build.
     pub extra_terms: Vec<LoadTerm>,
+    /// Bumped by every new layout (`build`): tables keyed by GPU chunk follow it.
+    pub layout_generation: u64,
     /// Whether the solver resolves contacts itself (standalone world); off under an
     /// engine, which owns them.
     pub own_contacts: bool,
@@ -611,6 +613,7 @@ impl GpuSolver {
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
+            layout_generation: 0,
             own_contacts: true,
             batch_rounds: batch_start(),
             replans: 0,
@@ -631,6 +634,7 @@ impl GpuSolver {
         self.plan_until = self.mirror.time + horizon;
         let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, None, &self.extra_terms, &self.excluded)?;
         self.layout = layout;
+        self.layout_generation += 1;
         self.buffers = buffers;
         Ok(())
     }
@@ -644,6 +648,7 @@ impl GpuSolver {
         let (layout, buffers) =
             Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
         self.layout = layout;
+        self.layout_generation += 1;
         self.buffers = buffers;
         Ok(())
     }
@@ -1248,6 +1253,7 @@ impl GpuSolver {
             let keep = if full { None } else { Some(&self.buffers) };
             let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, start_time, keep, &self.extra_terms, &self.excluded)?;
             self.layout = layout;
+            self.layout_generation += 1;
             self.buffers = buffers;
             self.log_plan();
             self.profile.build += t.elapsed().as_secs_f64();
@@ -1632,6 +1638,7 @@ impl GpuSolver {
             self.plan_until = reached + dt * left_now as f64;
             let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, self.buffers.params.probe_stride, dt * left_now as f64, reached, None, &self.extra_terms, &self.excluded)?;
             self.layout = layout;
+            self.layout_generation += 1;
             self.buffers = buffers;
             self.log_plan();
             self.profile.split += t_split.elapsed().as_secs_f64();
@@ -2295,6 +2302,17 @@ impl GpuSolver {
     }
 
     /// The ids of the clusters left out of the GPU tables as quiet (sorted).
+    /// The GPU chunks' (structure, chunk), by GPU chunk index.
+    pub fn gpu_chunks(&self) -> &[(usize, usize)] {
+        &self.layout.chunks
+    }
+
+    /// The buffers the resident frame's kernels share (`resident.rs`): islands, chunk
+    /// statics, chunk state, scratch; and the static solve's load slots in scratch.
+    pub(crate) fn resident_buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32) {
+        (&self.buffers.islands, &self.buffers.chunk_static, &self.buffers.state, &self.buffers.scratch, self.buffers.params.sload_base)
+    }
+
     pub fn excluded_ids(&self) -> &[u64] {
         &self.excluded
     }
@@ -2341,12 +2359,14 @@ impl GpuSolver {
             let (layout, buffers) =
                 Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, None, &self.extra_terms, &self.excluded)?;
             self.layout = layout;
+            self.layout_generation += 1;
             self.buffers = buffers;
             return Ok(());
         }
         let (layout, buffers) =
             Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
         self.layout = layout;
+        self.layout_generation += 1;
         self.buffers = buffers;
         Ok(())
     }
@@ -2368,11 +2388,19 @@ impl GpuSolver {
     /// update; an unconverged cluster's chunks get their state from before the solve back
     /// on the GPU (`equilibrate_or_keep`). Whether each converged.
     pub fn equilibrate_resident(&mut self, gpu: &Gpu, clusters: &[usize], loads: &ChunkLoads) -> Vec<bool> {
+        self.equilibrate_resident_with(gpu, clusters, Some(loads), &|_, _| {})
+    }
+
+    /// `equilibrate_resident` with the loads from the host (`loads`) or, with `None`,
+    /// formed on the GPU by `pre`, which is encoded after the island records are written
+    /// and before the solve (the resident frame: `resident.rs`).
+    pub fn equilibrate_resident_with(&mut self, gpu: &Gpu, clusters: &[usize], loads: Option<&ChunkLoads>, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder)) -> Vec<bool> {
         if clusters.is_empty() {
             return Vec::new();
         }
         let p = self.buffers.params;
         for &ci in clusters {
+            let Some(loads) = loads else { break };
             let f = crate::statics::static_loads(&self.mirror, ci, loads);
             let first = self.layout.islands[ci].range[0] as usize;
             let staged: Vec<[f32; 4]> = f.iter().flat_map(|(fo, mo)| [v4(*fo, 0.0), v4(*mo, 0.0)]).collect();
@@ -2406,6 +2434,7 @@ impl GpuSolver {
                 encoder.copy_buffer_to_buffer(&self.buffers.state, at, &backup, at, len);
             }
         }
+        pre(self, &mut encoder);
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.kernels.statics.pipeline);

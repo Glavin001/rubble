@@ -239,7 +239,15 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     } else {
         Box::new(stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine"))
     };
-    let mut w = stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world");
+    // STRESS_RESIDENT=1: the resident quasi-static frame (engine and stress loads on the
+    // GPU without read-backs; one device).
+    let mut w = if std::env::var("STRESS_RESIDENT").is_ok_and(|v| v == "1") && !two_devices {
+        drop(engine);
+        let e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine");
+        stress_gpu::world::GpuWorld::with_resident_engine(gpu, scene, e).expect("GPU coupled world")
+    } else {
+        stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world")
+    };
     // rubble's integrated pipeline: routing before the step, no frame rewind.
     w.redo_fractured_frames = !no_redo;
     // STRESS_BENCH_ORACLE_STEP=1: the oracle's own certified step instead of the GPU
@@ -317,7 +325,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
             eprintln!("frame {f} digest {}", digest(&w.solver.mirror, &w.solver.impactors));
         }
     }
-    w.solver.sync(gpu);
+    w.sync(gpu);
     let o = w.observation();
     let ram = w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let p = &w.solver.profile;

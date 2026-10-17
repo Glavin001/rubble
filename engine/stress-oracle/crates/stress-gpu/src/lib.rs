@@ -8,6 +8,7 @@
 
 pub mod gpu;
 pub mod ingest;
+pub mod resident;
 pub mod gate;
 pub mod contacts;
 pub mod coupled;
@@ -86,6 +87,7 @@ pub mod shaders {
         "coupling",
         [("ingest_rows", (64, 1, 1)), ("ingest_clear", (64, 1, 1)), ("ingest_count", (64, 1, 1)), ("ingest_scan", (1024, 1, 1)), ("ingest_scatter", (64, 1, 1)), ("ingest_merge", (64, 1, 1))]
     );
+    pub const RESIDENT: ShaderSet = shader_set!("resident", [("resident_poses", (64, 1, 1)), ("resident_filter", (64, 1, 1)), ("resident_static_loads", (256, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
 }
 

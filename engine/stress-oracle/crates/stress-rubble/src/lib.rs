@@ -46,6 +46,8 @@ pub mod scenes;
 #[cfg(feature = "gpu")]
 pub mod ingest_check;
 #[cfg(feature = "gpu")]
+pub mod resident;
+#[cfg(feature = "gpu")]
 pub mod render;
 
 use std::collections::HashMap;
@@ -373,6 +375,10 @@ pub struct RubbleEngine {
     /// The GPU contact ingest run and checked with every step (`attach_ingest_check`).
     #[cfg(feature = "gpu")]
     ingest_check: Option<ingest_check::IngestCheck>,
+    /// Bumped whenever colliders are added or retired, or the body set is restored.
+    layout_version: u64,
+    /// Resident frames that read bodies back for the CCD bound.
+    pub resident_reads: u64,
 }
 
 /// The default capacity: room for a few thousand bodies (every rebuilt cluster takes
@@ -457,6 +463,8 @@ impl RubbleEngine {
             bodies_read: std::cell::RefCell::new(None),
             #[cfg(feature = "gpu")]
             ingest_check: None,
+            layout_version: 0,
+            resident_reads: 0,
         })
     }
 
@@ -477,6 +485,7 @@ impl RubbleEngine {
 
     fn add_colliders(&mut self, cols: &[Collider], owners: impl Iterator<Item = Owner>) -> Range<u32> {
         let range = self.sim.add_colliders(cols);
+        self.layout_version += 1;
         self.cols.extend_from_slice(cols);
         self.owners.extend(owners);
         debug_assert_eq!(self.owners.len(), self.sim.collider_count() as usize);
@@ -542,6 +551,7 @@ impl RubbleEngine {
             self.owners[id as usize] = Owner::Retired;
         }
         self.sim.set_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
+        self.layout_version += 1;
         self.frozen.retain(|k| *k != key);
     }
 
@@ -849,6 +859,7 @@ impl RigidEngine for RubbleEngine {
         self.bodies_changed();
             self.bodies = saved.bodies;
             self.owners = saved.owners;
+            self.layout_version += 1;
             self.cols = saved.cols;
             self.frozen = saved.frozen;
             self.spare = Some(saved.snapshot);

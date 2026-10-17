@@ -38,6 +38,8 @@ use crate::static_inputs::StaticInputs;
 use crate::loads::WorldLoads;
 use crate::solver::GpuSolver;
 
+mod resident_frame;
+
 /// Probe accumulator (world.rs `ProbeAcc`): envelope since the last sample.
 #[derive(Clone, Debug, Default)]
 struct ProbeAcc {
@@ -121,6 +123,12 @@ pub struct GpuWorld {
     /// against the host path's f64 ones: gated by outcome, not bit for bit.
     pub fast_qs: bool,
     fast_now: bool,
+    /// The resident frame (`with_resident_engine`, `resident_frame.rs`): the engine
+    /// stepped and its contacts turned into static loads on the GPU, no host round trip.
+    resident_engine: Option<std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>>,
+    resident: Option<resident_frame::ResidentState>,
+    /// Frames taken on the resident path.
+    pub resident_frames: u64,
     pub prepare_seconds: f64,
     pub refresh_seconds: f64,
     pub write_back_seconds: f64,
@@ -219,6 +227,9 @@ impl GpuWorld {
             tiered: false,
             fast_qs: std::env::var("STRESS_QS_FAST").is_ok_and(|v| v == "1"),
             fast_now: false,
+            resident_engine: None,
+            resident: None,
+            resident_frames: 0,
             prepare_seconds: 0.0,
             refresh_seconds: 0.0,
             write_back_seconds: 0.0,
@@ -364,6 +375,9 @@ impl GpuWorld {
     /// verification (the frame solved again with more islands when a body the engine
     /// moved fractured), and the write-back to the engine.
     fn step_frame_coupled(&mut self, gpu: &Gpu) -> Result<(), String> {
+        if self.resident_now() {
+            return self.resident_frame(gpu);
+        }
         let fdt = self.scene.sim.frame_dt;
         let mut forced: std::collections::HashSet<BodyKey> = std::collections::HashSet::new();
         // Promotion (no redo): every cluster of a structure that fractured under the
@@ -926,9 +940,14 @@ impl GpuWorld {
 
     /// Whether this frame takes the fast quasi-static path (`fast_qs`).
     fn fast_frame(&self) -> bool {
+        self.fast_qs && self.fast_qs_conditions()
+    }
+
+    /// The scene and coupling conditions of the fast quasi-static frame (and of the
+    /// resident one).
+    fn fast_qs_conditions(&self) -> bool {
         let m = &self.solver.mirror;
-        self.fast_qs
-            && self.frame > 0
+        self.frame > 0
             && self.coupled()
             && !self.tiered
             && !self.redo_fractured_frames

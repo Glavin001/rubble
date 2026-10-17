@@ -162,7 +162,45 @@ measured before the next.
   - Record memory is 2 × rows × substeps × 64 B (8 MB per substep at the default 65,536
     contacts). Phase 2b merges after every substep into running manifolds, so the memory
     stays O(rows).
-- **Next (2b):** the load filter on the GPU, writing into the solver's load slots.
+- **The resident quasi-static frame (done, opt-in): phases 2b, 3 and 4 for the
+  quasi-static coupling.** `GpuWorld::with_resident_engine` (stress_bench:
+  `STRESS_RESIDENT=1`) takes it under the fast frame's conditions.
+  - **Engine.** rubble runs its substeps with `step_submit`. Counts are forwarded on the
+    GPU and nothing is read back. Each substep's rows go into the ingest
+    (`stress_gpu::resident::ResidentEngine`, implemented by `RubbleEngine` and shared with
+    the world's shell through `SharedEngine`).
+  - **Loads.** Three kernels in `shaders/resident.slang`:
+    - `resident_poses` writes driven clusters' poses into the island records from the
+      engine's frame-start bodies.
+    - `resident_filter` is `LoadFilter` with `frame_average_terms`. Sustained loads are
+      summed in the host's key order. Impact pulses are averaged over the frame; those
+      that outlast it are carried in `STRESS_RESIDENT_PULSES` slots per chunk (default 4).
+      Overflow fails the frame rather than dropping a load.
+    - `resident_static_loads` is `static_loads` per solved island.
+  - **Solve and commit.** `equilibrate_resident_with` (loads formed by the kernels above
+    in the same submission), then `commit_resident`.
+  - **Host role.** The host keeps the cascade's control. Its reads are each pass's
+    verdicts and, at the frame's end, the engine's overflow status. A split syncs the
+    mirror, including the engine's motion (`GpuWorld::sync`), splits on the host and
+    rebuilds the tables.
+  - **Same results as the fast frame, bit for bit.** Measured on house_ram (qs and blast
+    configurations, 25 bonds broken), town16_one_ram (qs, 8 broken), the fractured
+    high-rise rammed (qs) and Vibe Town idle. The f32 load path reproduces the host's
+    f64 → f32 loads exactly on these scenes. Covered by `tests/resident_gpu.rs`.
+  - **Vibe Town idle** (281 clusters, authored, qs, budget 2 × 32, interleaved runs on a
+    shared GPU): fast frame median 35–51 ms; **resident 16–21 ms**. Engine preparation
+    falls from 2.6 to 0.6 ms, and the download (2.3–2.8 ms) and host loads are gone. What
+    remains is the static solve on the GPU (~18 ms), which is the next item, and the
+    frame-end wait.
+  - **Not covered yet:**
+    - Quiet-cluster exclusion is off in resident frames. It is chosen from the host's
+      engine loads; the GPU-native replacement is "same loads, same state → skip the
+      solve".
+    - Impact islands (tiered and explicit frames) still take the host path. They need
+      `resident_filter`'s pulses as load terms (`load_range.zw`) and phase 6.
+    - Splits are on the host.
+    - Every dispatch writes small uniforms, and each cascade pass writes the island
+      records from the host. Those are host → GPU writes, not read-backs.
 
 Gate per phase: the opt-in resident frame's outcomes within the GPU solve's run-to-run
 spread and the oracle gates on the realtime, accuracy and pack sets; the default path

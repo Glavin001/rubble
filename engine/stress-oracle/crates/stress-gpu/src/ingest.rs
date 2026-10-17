@@ -137,6 +137,10 @@ impl EngineIngest {
         }
     }
 
+    pub fn chunk_count(&self) -> u32 {
+        self.chunk_count
+    }
+
     /// Replace the collider table (a layout change on either side).
     pub fn set_colliders(&mut self, gpu: &Gpu, colliders: &[ColliderInfo]) {
         self.collider_info = gpu.storage_into("ingest collider info", table(colliders), Some(&self.collider_info));
