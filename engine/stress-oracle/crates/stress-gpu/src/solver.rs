@@ -62,6 +62,22 @@ fn batch_cap() -> usize {
     std::env::var("STRESS_GPU_BATCH_ROUNDS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).map_or(MAX_BATCH_ROUNDS, |n| n.min(MAX_BATCH_ROUNDS))
 }
 
+/// The island kernel with each island's bonds over 512 threads (world.slang `BOND_GROUP`);
+/// `STRESS_GPU_ISLAND_BONDS=256`: over the 256 its chunks use.
+fn wide_island_bonds() -> bool {
+    std::env::var("STRESS_GPU_ISLAND_BONDS").map_or(true, |v| v != "256")
+}
+
+/// Contact islands' bonds outside the island kernel (`STRESS_GPU_INLINE_BONDS=1`: inline).
+fn external_bonds() -> bool {
+    std::env::var("STRESS_GPU_INLINE_BONDS").map_or(true, |v| v != "1")
+}
+
+/// The contact pipeline in two dispatches per substep (`STRESS_GPU_FUSE=0`: three).
+fn fuse_pipeline() -> bool {
+    std::env::var("STRESS_GPU_FUSE").map_or(true, |v| v != "0")
+}
+
 /// The batch length after a split (and at the start), capped by `batch_cap`.
 fn batch_start() -> usize {
     16.min(batch_cap())
@@ -157,6 +173,9 @@ struct Params {
     /// bonds run inline in the island kernel), and their table in `index`.
     contact_bond_groups: u32,
     contact_bond_table: u32,
+    /// Scratch: each chunk's external load for the static solves (2 float4, contiguous
+    /// so a cluster's loads upload in one write).
+    sload_base: u32,
 }
 
 
@@ -248,8 +267,16 @@ const K_SUMS_BONDS: usize = 14;
 /// that with the wide islands' chunks.
 const K_CONTACT_ISLANDS: usize = 15;
 const K_CONTACT_ISLAND_WIDE: usize = 16;
+/// The contact pipeline in two dispatches: the forces with the narrow contact islands'
+/// bonds, then the islands (with their contact sums) with the impactors' integration.
+const K_FORCES_BONDS: usize = 17;
+const K_ISLANDS_SUMS: usize = 18;
+/// Its travel checks before a batch's first substep (later ones run at each substep's end).
+const K_TRAVEL: usize = 19;
+/// `K_ISLANDS_SUMS` able to wake a settled contact island (with its joint law).
+const K_ISLANDS_SUMS_WAKE: usize = 20;
 /// Kernel names by `K_*` index.
-pub const KERNEL_NAMES: [&str; 17] = [
+pub const KERNEL_NAMES: [&str; 21] = [
     "island_frame",
     "contact_forces",
     "impactor_shares",
@@ -267,6 +294,10 @@ pub const KERNEL_NAMES: [&str; 17] = [
     "sums_impactors_bonds",
     "contact_islands",
     "contact_islands_and_wide_chunks",
+    "forces_and_bonds",
+    "islands_sums_impactors",
+    "travel_start",
+    "islands_sums_impactors_wake",
 ];
 /// Contact contributions per segment (`contact_sums`, one thread each).
 const SEGMENT: usize = 8;
@@ -298,6 +329,10 @@ struct Kernels {
     sums_bonds: Kernel,
     contact_islands: Kernel,
     contact_island_wide: Kernel,
+    forces_bonds: Kernel,
+    islands_sums: Kernel,
+    travel: Kernel,
+    islands_sums_wake: Kernel,
     statics: Kernel,
     fatigue: Kernel,
 }
@@ -377,8 +412,14 @@ pub struct Profile {
     pub readback: f64,
     pub download: f64,
     pub split: f64,
+    /// Host time (s) writing a batch's islands and params and encoding its dispatches.
+    pub encode: f64,
     pub batches: u64,
     pub substeps: u64,
+    /// Per-substep rounds encoded, and those some island or impactor ran (the rest
+    /// launch empty after a halt).
+    pub rounds_encoded: u64,
+    pub rounds_used: u64,
     /// Largest contact plan seen: pair candidates, impactor candidates.
     pub max_pairs: usize,
     pub max_impactor_candidates: usize,
@@ -386,8 +427,8 @@ pub struct Profile {
     pub max_chunk_contacts: usize,
     pub max_island_contacts: usize,
     /// GPU time (s) and dispatches per kernel (`KERNEL_NAMES`), with `STRESS_GPU_TIMING=1`.
-    pub kernels: [f64; 17],
-    pub kernel_dispatches: [u64; 17],
+    pub kernels: [f64; 21],
+    pub kernel_dispatches: [u64; 21],
     /// `tangent_statics`: static solves delegated to the mirror (`equilibrate`), and the
     /// host time they took (s).
     pub statics_delegated: u64,
@@ -475,6 +516,8 @@ pub struct GpuSolver {
     /// Load terms besides the scene's (an engine's contact loads, `coupled`), applied
     /// from the next build.
     pub extra_terms: Vec<LoadTerm>,
+    /// Bumped by every new layout (`build`): tables keyed by GPU chunk follow it.
+    pub layout_generation: u64,
     /// Whether the solver resolves contacts itself (standalone world); off under an
     /// engine, which owns them.
     pub own_contacts: bool,
@@ -490,6 +533,15 @@ pub struct GpuSolver {
     /// run under the plan yet, so the caller may pick the step it needs.
     /// `stopped_at_plan` tells whether the last `step` did.
     pub stop_at_plan: bool,
+    /// Engine-coupled quasi-static mode: clusters whose last static solve repeated and
+    /// whose damage commit changed nothing (sorted ids; `GpuWorld::solve_static_all`),
+    /// the only ones it may leave out as quiet.
+    pub static_stable: Vec<u64>,
+    /// Quasi-static mode under an engine (`GpuWorld::with_engine`): quiet clusters (by
+    /// `static_stable`) may be left out.
+    pub quiet_quasi_static: bool,
+    /// `equilibrate_resident`'s copy of the state from before a solve.
+    state_backup: Option<wgpu::Buffer>,
     pub stopped_at_plan: bool,
     pub profile: Profile,
     /// The code paths that ran so far (`coverage`): the device's words OR-ed after every
@@ -500,7 +552,7 @@ pub struct GpuSolver {
 impl GpuSolver {
     pub fn new(gpu: &Gpu, mirror: ReferenceSolver, loads: Option<WorldLoads>, impactors: Vec<Impactor>) -> Result<GpuSolver, String> {
         let kernels = Kernels {
-            island: gpu.compute(&shaders::WORLD, "island_frame", &WORLD_BINDINGS),
+            island: gpu.compute(&shaders::WORLD, if wide_island_bonds() { "island_frame_bonds_wide" } else { "island_frame" }, &WORLD_BINDINGS),
             forces: gpu.compute(&shaders::WORLD, "contact_forces", &WORLD_BINDINGS),
             shares: gpu.compute(&shaders::WORLD, "impactor_shares", &WORLD_BINDINGS),
             crush: gpu.compute(&shaders::WORLD, "impactor_crush", &WORLD_BINDINGS),
@@ -513,6 +565,10 @@ impl GpuSolver {
             sums_bonds: gpu.compute(&shaders::WORLD, "sums_impactors_bonds", &WORLD_BINDINGS),
             contact_islands: gpu.compute(&shaders::WORLD, "contact_islands", &WORLD_BINDINGS),
             contact_island_wide: gpu.compute(&shaders::WORLD, "contact_islands_and_wide_chunks", &WORLD_BINDINGS),
+            forces_bonds: gpu.compute(&shaders::WORLD, "forces_and_bonds", &WORLD_BINDINGS),
+            islands_sums: gpu.compute(&shaders::WORLD, "islands_sums_impactors", &WORLD_BINDINGS),
+            travel: gpu.compute(&shaders::WORLD, "travel_start", &WORLD_BINDINGS),
+            islands_sums_wake: gpu.compute(&shaders::WORLD, "islands_sums_impactors_wake", &WORLD_BINDINGS),
             statics: gpu.compute(&shaders::WORLD, "island_statics", &WORLD_BINDINGS),
             fatigue: gpu.compute(&shaders::WORLD, "settled_fatigue", &WORLD_BINDINGS),
         };
@@ -551,9 +607,13 @@ impl GpuSolver {
             bonds_stale: false,
             plan_log: None,
             stop_at_plan: false,
+            static_stable: Vec::new(),
+            quiet_quasi_static: false,
+            state_backup: None,
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
+            layout_generation: 0,
             own_contacts: true,
             batch_rounds: batch_start(),
             replans: 0,
@@ -574,6 +634,7 @@ impl GpuSolver {
         self.plan_until = self.mirror.time + horizon;
         let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, None, &self.extra_terms, &self.excluded)?;
         self.layout = layout;
+        self.layout_generation += 1;
         self.buffers = buffers;
         Ok(())
     }
@@ -587,6 +648,7 @@ impl GpuSolver {
         let (layout, buffers) =
             Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
         self.layout = layout;
+        self.layout_generation += 1;
         self.buffers = buffers;
         Ok(())
     }
@@ -969,7 +1031,8 @@ impl GpuSolver {
         let statics_base = cframe_base + 2 * n;
         let cplan_base = statics_base + 23 * n + 2 * bonds.len() + islands.len() + 1;
         let iplan_base = cplan_base + 4 * n;
-        let scratch_len = iplan_base + 4 * impactors.len().max(1);
+        let sload_base = iplan_base + 4 * impactors.len().max(1);
+        let scratch_len = sload_base + 2 * n;
 
         let (gravity, ground) = (m.config.gravity, scene.as_ref().and_then(|s| s.ground.clone()));
         let (g_hi, g_lo) = split1(ground.as_ref().map_or(0.0, |g| g.height));
@@ -1019,13 +1082,18 @@ impl GpuSolver {
             // to the mirror); the residual tolerance at f32's reach.
             // (`STRESS_GPU_STATICS_NEWTON=N`, a measurement only: at most N steps, a lossy
             // budget like Blast's per-frame iteration cap.)
-            statics_newton: std::env::var("STRESS_GPU_STATICS_NEWTON").ok().and_then(|v| v.parse().ok()).unwrap_or(StaticOptions::default().secant_steps(m.config.methods.tangent_statics) as u32),
-            statics_cg: 20_000,
+            statics_newton: std::env::var("STRESS_GPU_STATICS_NEWTON")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or(m.config.static_budget.map(|b| b.0))
+                .unwrap_or(StaticOptions::default().secant_steps(m.config.methods.tangent_statics) as u32),
+            statics_cg: m.config.static_budget.map_or(20_000, |b| b.1),
             statics_tol: std::env::var("STRESS_GPU_STATICS_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-5),
             pair_lanes: if gpu.shader_path == crate::gpu::ShaderPath::Wgsl { 1 } else { 32 },
             cplan_base: cplan_base as u32,
             iplan_base: iplan_base as u32,
             contact_bond_table,
+            sload_base: sload_base as u32,
             device_connect: std::env::var("STRESS_GPU_DEVICE_CONNECT").map_or(1, |v| (v != "0") as u32),
             ..Default::default()
         };
@@ -1052,35 +1120,57 @@ impl GpuSolver {
             Some(k) => k.bond_dyn.clone(),
             None => gpu.storage("bond dyn", &bond_dyn),
         };
-        let mut scratch_init = vec![[0f32; 4]; scratch_len];
-        for (k, rows) in chunk_plan.iter().enumerate() {
-            scratch_init[cplan_base + 4 * k..cplan_base + 4 * k + 4].copy_from_slice(rows);
-        }
+        // The scratch is zero but for these regions: cleared on the GPU (a new buffer is
+        // zero-initialised) and the regions written, instead of uploading the whole image.
+        let mut regions: Vec<(usize, Vec<[f32; 4]>)> = Vec::new();
+        regions.push((cplan_base, chunk_plan.iter().flatten().copied().collect()));
         let (t_hi, t_lo) = split1(plan_time);
+        let mut iplan = vec![[0f32; 4]; 4 * plan.impactor_plan.len()];
         for (i, p) in plan.impactor_plan.iter().enumerate() {
             if let Some(p) = p {
                 let (hi, lo) = split(p.position);
                 let q = p.rotation;
-                scratch_init[iplan_base + 4 * i] = [hi[0], hi[1], hi[2], p.budget as f32];
-                scratch_init[iplan_base + 4 * i + 1] = [lo[0], lo[1], lo[2], t_lo];
-                scratch_init[iplan_base + 4 * i + 2] = [q.x as f32, q.y as f32, q.z as f32, q.w as f32];
-                scratch_init[iplan_base + 4 * i + 3] = v4(p.velocity, t_hi as f64);
+                iplan[4 * i] = [hi[0], hi[1], hi[2], p.budget as f32];
+                iplan[4 * i + 1] = [lo[0], lo[1], lo[2], t_lo];
+                iplan[4 * i + 2] = [q.x as f32, q.y as f32, q.z as f32, q.w as f32];
+                iplan[4 * i + 3] = v4(p.velocity, t_hi as f64);
             }
         }
+        regions.push((iplan_base, iplan));
         // Bond loads from the mirror's forces: settled islands keep them (their bonds are
         // not evaluated) for the section probes.
-        for (i, &(s, bi)) in bonds.iter().enumerate() {
+        let mut bond_loads = Vec::with_capacity(3 * bonds.len());
+        for &(s, bi) in bonds.iter() {
             let b = &m.bonds[s][bi];
             let (fa, ma, _, mb) = b.geometry.chunk_loads(&b.force);
-            scratch_init[3 * i] = v4(fa, b.measures.tension.max(b.measures.compression));
-            scratch_init[3 * i + 1] = v4(ma, 0.0);
-            scratch_init[3 * i + 2] = v4(mb, 0.0);
+            bond_loads.extend([v4(fa, b.measures.tension.max(b.measures.compression)), v4(ma, 0.0), v4(mb, 0.0)]);
         }
+        regions.push((0, bond_loads));
         for &i in &remembered {
             // Pair ledger flags (world.slang): overlap state present.
-            scratch_init[ledger_base + i][3] = f32::from_bits(1);
+            regions.push((ledger_base + i, vec![[0.0, 0.0, 0.0, f32::from_bits(1)]]));
         }
-        let scratch = gpu.storage_into("scratch", &scratch_init, keep.map(|k| &k.scratch));
+        let scratch_bytes = (16 * scratch_len).max(16) as u64;
+        let scratch = match keep.map(|k| &k.scratch).filter(|old| old.size() == scratch_bytes) {
+            Some(old) => {
+                // Queued writes run before the next submission: the clear goes first.
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                encoder.clear_buffer(old, 0, None);
+                gpu.queue.submit([encoder.finish()]);
+                old.clone()
+            }
+            None => gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scratch"),
+                size: scratch_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        };
+        for (at, data) in &regions {
+            if !data.is_empty() {
+                gpu.queue.write_buffer(&scratch, 16 * *at as u64, bytemuck::cast_slice(data));
+            }
+        }
         let islands_buf = gpu.storage_into("islands", &islands_gpu, keep.map(|k| &k.islands));
         let loads_buf = gpu.storage_into("loads", &packed, keep.map(|k| &k.loads));
         let cstate_buf = gpu.storage_into("contact state", &cstate, keep.map(|k| &k.contact_state));
@@ -1163,6 +1253,7 @@ impl GpuSolver {
             let keep = if full { None } else { Some(&self.buffers) };
             let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, start_time, keep, &self.extra_terms, &self.excluded)?;
             self.layout = layout;
+            self.layout_generation += 1;
             self.buffers = buffers;
             self.log_plan();
             self.profile.build += t.elapsed().as_secs_f64();
@@ -1238,20 +1329,25 @@ impl GpuSolver {
             if !any && rounds == 0 {
                 break;
             }
+            let t_encode = std::time::Instant::now();
             let mut islands_gpu = self.layout.islands.clone();
             islands_gpu.push(Island { done: [0, seen, 0, 0], ..Default::default() });
             gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&islands_gpu));
             if !self.layout.gpu_impactors.is_empty() {
                 // Impactors count their integrated substeps from where the pipeline is.
                 let at = (start + substeps - pipeline_left) as u32;
-                let mut imps: Vec<GpuImpactor> = gpu.read(&self.buffers.impactors);
-                imps.iter_mut().for_each(|g| g.cand[3] = at);
-                gpu.queue.write_buffer(&self.buffers.impactors, 0, bytemuck::cast_slice(&imps));
+                // Only `cand[3]` changes: written in place, without reading the buffer back
+                // (nothing runs between batches, so the rest is what the GPU holds).
+                let size = std::mem::size_of::<GpuImpactor>() as u64;
+                let field = (std::mem::offset_of!(GpuImpactor, cand) + 3 * std::mem::size_of::<u32>()) as u64;
+                for i in 0..self.buffers.impactors.size() / size {
+                    gpu.queue.write_buffer(&self.buffers.impactors, i * size + field, bytemuck::bytes_of(&at));
+                }
             }
             gpu.queue.write_buffer(&self.buffers.params_segment, 0, bytemuck::bytes_of(&dispatch_params(&self.buffers, false)));
             // Narrow contact islands' bonds in the sums dispatch (they read only the last
             // substep's state), unless one is settled (its wake check comes first).
-            let bonds_external = self.buffers.contact_bond_groups > 0 && !self.buffers.contact_settled && std::env::var("STRESS_GPU_INLINE_BONDS").map_or(true, |v| v != "1");
+            let bonds_external = self.buffers.contact_bond_groups > 0 && !self.buffers.contact_settled && external_bonds();
             let contact_params = Params { contact_bond_groups: if bonds_external { self.buffers.contact_bond_groups } else { 0 }, ..dispatch_params(&self.buffers, true) };
             gpu.queue.write_buffer(&self.buffers.params_contact, 0, bytemuck::bytes_of(&contact_params));
             // The batch's dispatches: (kernel, workgroups, per-substep params).
@@ -1267,12 +1363,31 @@ impl GpuSolver {
             // The wide bond groups join the sums when no wide island is free (no net
             // loads to sum first) or settled (no wake pass first).
             let bonds_with_sums = wide_groups > 0 && !self.buffers.wide_free && !(p.solve_mode != 0 && self.buffers.wide_settled);
+            // The contact pipeline in two dispatches per substep (world.slang STOP_NOW): with
+            // its bonds outside the island kernel and no wide island (whose kernels keep
+            // the three-dispatch order).
+            // Settled contact islands too: one that wakes runs that substep's joint law
+            // in the island kernel.
+            let fused = pipeline_steps > 0 && wide_groups == 0 && self.buffers.contact_bond_groups > 0 && external_bonds() && fuse_pipeline();
+            if fused {
+                ops.push((K_TRAVEL, groups(p.chunk_count + p.impactor_count), true));
+            }
             for r in 0..rounds {
                 let contact = pipeline && r < pipeline_steps;
                 // A round: contact_forces; the sums with the impactors' integration (both
                 // read only its outputs); wide_bonds (its free islands' net loads need the
                 // sums); the narrow islands with the wide islands' chunks (other islands,
                 // both after the sums and wide_bonds); the wide islands' tail.
+                if contact && fused {
+                    if self.buffers.crush {
+                        ops.push((K_SHARES, groups(p.cand_count), true));
+                        ops.push((K_CRUSH, impactors_n, true));
+                    }
+                    let forces = (p.pair_count + p.cand_count) * p.pair_lanes.max(1);
+                    ops.push((K_FORCES_BONDS, forces.div_ceil(256) + self.buffers.contact_bond_groups, true));
+                    ops.push((if self.buffers.contact_settled { K_ISLANDS_SUMS_WAKE } else { K_ISLANDS_SUMS }, islands_n + impactors_n, true));
+                    continue;
+                }
                 if contact {
                     if self.buffers.crush {
                         ops.push((K_SHARES, groups(p.cand_count), true));
@@ -1331,6 +1446,10 @@ impl GpuSolver {
                 &self.kernels.sums_bonds,
                 &self.kernels.contact_islands,
                 &self.kernels.contact_island_wide,
+                &self.kernels.forces_bonds,
+                &self.kernels.islands_sums,
+                &self.kernels.travel,
+                &self.kernels.islands_sums_wake,
             ];
             let bind = |contact: bool| if contact { &self.buffers.bind_contact } else { &self.buffers.bind_segment };
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -1361,15 +1480,17 @@ impl GpuSolver {
                     encoder.resolve_query_set(&timing.queries, 0..2 * ops.len() as u32, &timing.resolve, 0);
                 }
             }
+            let finished = encoder.finish();
+            self.profile.encode += t_encode.elapsed().as_secs_f64();
             let t = std::time::Instant::now();
-            gpu.queue.submit([encoder.finish()]);
+            gpu.queue.submit([finished]);
         self.state_current = false;
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
             self.profile.gpu += t.elapsed().as_secs_f64();
             if let Some(timing) = &self.timing {
                 let stamps: Vec<u64> = gpu.read(&timing.resolve);
                 let period = gpu.queue.get_timestamp_period() as f64 * 1e-9;
-                let mut batch = [(0.0f64, 0.0f64, 0u32); 17];
+                let mut batch = [(0.0f64, 0.0f64, 0u32); 21];
                 for (q, &(k, ..)) in ops.iter().enumerate() {
                     let secs = stamps[2 * q + 1].saturating_sub(stamps[2 * q]) as f64 * period;
                     self.profile.kernels[k] += secs;
@@ -1404,6 +1525,8 @@ impl GpuSolver {
                 ])
                 .into_iter();
             let mut islands: Vec<Island> = bytemuck::pod_collect_to_vec(&read.next().unwrap());
+            self.profile.rounds_encoded += rounds as u64;
+            self.profile.rounds_used += islands.iter().zip(&self.layout.islands).filter(|(_, b)| b.info[0] & (ISLAND_CONTACT | ISLAND_WIDE) != 0).map(|(a, b)| (a.info[3] - b.info[3]) as u64).max().unwrap_or(0);
             let probe_out: Vec<f32> = bytemuck::pod_collect_to_vec(&read.next().unwrap());
             let records: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(&read.next().unwrap());
             let imps_now: Vec<GpuImpactor> = bytemuck::pod_collect_to_vec(&read.next().unwrap());
@@ -1450,7 +1573,14 @@ impl GpuSolver {
                 *remaining.get_mut(&id).unwrap() = isl.info[1] as usize;
             }
             self.layout.islands = islands;
-            let replan = sentinel.info[2] & STOP_NOW != 0;
+            // The two-dispatch pipeline records the substep a travel check stopped at; a stop
+            // after a split's substep is moot (the three-dispatch order never checks it).
+            let replan = if fused {
+                let at = sentinel.range[0];
+                at != 0 && (sentinel.info[1] == 0 || at <= sentinel.info[1])
+            } else {
+                sentinel.info[2] & STOP_NOW != 0
+            };
             if halted.is_empty() && !replan {
                 if remaining.values().all(|&l| l == 0) && pipeline_left == 0 {
                     break;
@@ -1508,6 +1638,7 @@ impl GpuSolver {
             self.plan_until = reached + dt * left_now as f64;
             let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, self.buffers.params.probe_stride, dt * left_now as f64, reached, None, &self.extra_terms, &self.excluded)?;
             self.layout = layout;
+            self.layout_generation += 1;
             self.buffers = buffers;
             self.log_plan();
             self.profile.split += t_split.elapsed().as_secs_f64();
@@ -2120,7 +2251,10 @@ impl GpuSolver {
         let m = &self.mirror;
         let Some(l) = self.loads.as_ref() else { return Vec::new() };
         let sc = &l.scene;
-        if m.config.mode != SolveMode::Adaptive
+        // Adaptive mode, and the engine-coupled quasi-static mode (`static_stable`: a quiet
+        // cluster's static solve repeats bit for bit and its damage commit changes nothing).
+        let tiered_qs = m.config.mode == SolveMode::QuasiStatic && self.quiet_quasi_static;
+        if (m.config.mode != SolveMode::Adaptive && !tiered_qs)
             || !sc.loads.is_empty()
             || !sc.events.is_empty()
             || !sc.probes.is_empty()
@@ -2159,6 +2293,7 @@ impl GpuSolver {
                     && !loaded[*ci]
                     // An excluded cluster's bonds are not read back, so its verdict holds.
                     && (self.excluded.binary_search(&cl.id).is_ok() || cl.bonds.iter().all(|&bi| fatigue_still(cl.structure, bi)))
+                    && (!tiered_qs || self.excluded.binary_search(&cl.id).is_ok() || self.static_stable.binary_search(&cl.id).is_ok())
             })
             .map(|(_, cl)| cl.id)
             .collect();
@@ -2167,6 +2302,17 @@ impl GpuSolver {
     }
 
     /// The ids of the clusters left out of the GPU tables as quiet (sorted).
+    /// The GPU chunks' (structure, chunk), by GPU chunk index.
+    pub fn gpu_chunks(&self) -> &[(usize, usize)] {
+        &self.layout.chunks
+    }
+
+    /// The buffers the resident frame's kernels share (`resident.rs`): islands, chunk
+    /// statics, chunk state, scratch; and the static solve's load slots in scratch.
+    pub(crate) fn resident_buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32) {
+        (&self.buffers.islands, &self.buffers.chunk_static, &self.buffers.state, &self.buffers.scratch, self.buffers.params.sload_base)
+    }
+
     pub fn excluded_ids(&self) -> &[u64] {
         &self.excluded
     }
@@ -2213,12 +2359,14 @@ impl GpuSolver {
             let (layout, buffers) =
                 Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, None, &self.extra_terms, &self.excluded)?;
             self.layout = layout;
+            self.layout_generation += 1;
             self.buffers = buffers;
             return Ok(());
         }
         let (layout, buffers) =
             Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
         self.layout = layout;
+        self.layout_generation += 1;
         self.buffers = buffers;
         Ok(())
     }
@@ -2235,6 +2383,127 @@ impl GpuSolver {
     /// `equilibrate_or_keep` on the mirror (its secant, the globalised tangent re-solve,
     /// the secant's remaining steps), whose outcome, equilibrium or the kept state, is
     /// uploaded: exact delegation (`profile.statics_delegated`).
+    /// `equilibrate` with everything left on the GPU (the fast quasi-static frame,
+    /// `GpuWorld::fast_qs`): no read-back of the state or the bond history and no mirror
+    /// update; an unconverged cluster's chunks get their state from before the solve back
+    /// on the GPU (`equilibrate_or_keep`). Whether each converged.
+    pub fn equilibrate_resident(&mut self, gpu: &Gpu, clusters: &[usize], loads: &ChunkLoads) -> Vec<bool> {
+        self.equilibrate_resident_with(gpu, clusters, Some(loads), &|_, _| {})
+    }
+
+    /// `equilibrate_resident` with the loads from the host (`loads`) or, with `None`,
+    /// formed on the GPU by `pre`, which is encoded after the island records are written
+    /// and before the solve (the resident frame: `resident.rs`).
+    pub fn equilibrate_resident_with(&mut self, gpu: &Gpu, clusters: &[usize], loads: Option<&ChunkLoads>, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder)) -> Vec<bool> {
+        if clusters.is_empty() {
+            return Vec::new();
+        }
+        let p = self.buffers.params;
+        for &ci in clusters {
+            let Some(loads) = loads else { break };
+            let f = crate::statics::static_loads(&self.mirror, ci, loads);
+            let first = self.layout.islands[ci].range[0] as usize;
+            let staged: Vec<[f32; 4]> = f.iter().flat_map(|(fo, mo)| [v4(*fo, 0.0), v4(*mo, 0.0)]).collect();
+            if !staged.is_empty() {
+                gpu.queue.write_buffer(&self.buffers.scratch, 16 * (p.sload_base as usize + 2 * first) as u64, bytemuck::cast_slice(&staged));
+            }
+        }
+        let mut islands = self.layout.islands.clone();
+        for isl in islands.iter_mut() {
+            isl.info[2] &= !ISLAND_SOLVE;
+        }
+        for &ci in clusters {
+            islands[ci].info[2] |= ISLAND_SOLVE;
+        }
+        let mut with_sentinel = islands.clone();
+        with_sentinel.push(Island::default());
+        gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&with_sentinel));
+        let size = self.buffers.state.size();
+        if self.state_backup.as_ref().is_none_or(|b| b.size() != size) {
+            self.state_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("state backup"), size, usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        }
+        let backup = self.state_backup.clone().expect("state backup");
+        let range = |ci: usize| {
+            let isl = self.layout.islands[ci];
+            (64 * isl.range[0] as u64, 64 * (isl.range[1] - isl.range[0]) as u64)
+        };
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for &ci in clusters {
+            let (at, len) = range(ci);
+            if len > 0 {
+                encoder.copy_buffer_to_buffer(&self.buffers.state, at, &backup, at, len);
+            }
+        }
+        pre(self, &mut encoder);
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.kernels.statics.pipeline);
+            pass.set_bind_group(0, &self.buffers.bind_segment, &[]);
+            pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
+        self.bonds_stale = true;
+        let result_at = p.statics_base as usize + 23 * self.layout.chunks.len() + 2 * self.layout.bonds.len();
+        let results: Vec<[f32; 4]> = gpu.read_range(&self.buffers.scratch, result_at, islands.len());
+        let converged: Vec<bool> = clusters.iter().map(|&ci| results[ci][3] != 0.0).collect();
+        // `STRESS_QS_WARM=1` (with a budget, as Blast's solver): an unconverged solve keeps
+        // its iterate, so the next frame's continues from it instead of from the start.
+        let warm = std::env::var("STRESS_QS_WARM").is_ok_and(|v| v == "1");
+        if !warm && converged.iter().any(|&c| !c) {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            for (&ci, &ok) in clusters.iter().zip(&converged) {
+                let (at, len) = range(ci);
+                if !ok && len > 0 {
+                    encoder.copy_buffer_to_buffer(&backup, at, &self.buffers.state, at, len);
+                }
+            }
+            gpu.queue.submit([encoder.finish()]);
+        }
+        if converged.iter().any(|&c| c) {
+            self.coverage |= coverage::STATICS;
+        }
+        converged
+    }
+
+    /// statics.rs `commit_damage` of `clusters` on the GPU (`settled_fatigue` over just
+    /// them, at their equilibrium, with `dt`): (damage grew, a bond disconnected).
+    pub fn commit_resident(&mut self, gpu: &Gpu, clusters: &[usize], dt: f64) -> (Vec<usize>, Vec<usize>) {
+        if clusters.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let p = Params { dt: dt as f32, ..self.buffers.params };
+        gpu.queue.write_buffer(&self.buffers.params_segment, 0, bytemuck::bytes_of(&p));
+        let mut islands = self.layout.islands.clone();
+        for isl in islands.iter_mut() {
+            isl.info[0] &= !ISLAND_SETTLED;
+            isl.info[2] &= !(ISLAND_DAMAGED | ISLAND_DISCONNECTED);
+        }
+        for &ci in clusters {
+            islands[ci].info[0] |= ISLAND_SETTLED;
+        }
+        islands.push(Island::default());
+        gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&islands));
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.kernels.fatigue.pipeline);
+            pass.set_bind_group(0, &self.buffers.bind_segment, &[]);
+            pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
+        self.bonds_stale = true;
+        let mut read: Vec<Island> = gpu.read(&self.buffers.islands);
+        read.pop();
+        self.coverage |= read.iter().fold(0, |a, i| a | i.done[1]) as u64;
+        // The tables' own flags back for the next dispatch.
+        gpu.queue.write_buffer(&self.buffers.params_segment, 0, bytemuck::bytes_of(&self.buffers.params));
+        let damaged = clusters.iter().copied().filter(|&ci| read[ci].info[2] & ISLAND_DAMAGED != 0).collect();
+        let disconnected = clusters.iter().copied().filter(|&ci| read[ci].info[2] & ISLAND_DISCONNECTED != 0).collect();
+        (damaged, disconnected)
+    }
+
     pub fn equilibrate(&mut self, gpu: &Gpu, clusters: &[usize], loads: &ChunkLoads) -> Vec<crate::statics::Equilibrium> {
         if clusters.is_empty() {
             return Vec::new();
@@ -2243,19 +2512,15 @@ impl GpuSolver {
         // oracle's `equilibrate_or_keep` of the same cluster from the same state.
         let oracle = std::env::var("STRESS_GPU_CHECK_STATICS").is_ok_and(|v| v == "1").then(|| self.mirror.clone());
         let p = self.buffers.params;
-        // External loads per chunk (body frame), into each chunk's first two slots: staged
-        // in one upload, then copied into place on the GPU ahead of the solve.
-        let mut staged: Vec<[f32; 4]> = Vec::new();
-        let mut places: Vec<usize> = Vec::new();
+        // External loads per chunk (body frame), contiguous by chunk: one write per cluster.
         for &ci in clusters {
             let f = crate::statics::static_loads(&self.mirror, ci, loads);
             let first = self.layout.islands[ci].range[0] as usize;
-            for (k, (fo, mo)) in f.iter().enumerate() {
-                staged.extend([v4(*fo, 0.0), v4(*mo, 0.0)]);
-                places.push(p.statics_base as usize + 23 * (first + k));
+            let staged: Vec<[f32; 4]> = f.iter().flat_map(|(fo, mo)| [v4(*fo, 0.0), v4(*mo, 0.0)]).collect();
+            if !staged.is_empty() {
+                gpu.queue.write_buffer(&self.buffers.scratch, 16 * (p.sload_base as usize + 2 * first) as u64, bytemuck::cast_slice(&staged));
             }
         }
-        let staging = (!staged.is_empty()).then(|| gpu.storage("statics loads", &staged));
         let mut islands = self.layout.islands.clone();
         for isl in islands.iter_mut() {
             isl.info[2] &= !ISLAND_SOLVE;
@@ -2267,11 +2532,6 @@ impl GpuSolver {
         with_sentinel.push(Island::default());
         gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&with_sentinel));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        if let Some(staging) = &staging {
-            for (i, &at) in places.iter().enumerate() {
-                encoder.copy_buffer_to_buffer(staging, (32 * i) as u64, &self.buffers.scratch, (16 * at) as u64, 32);
-            }
-        }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.kernels.statics.pipeline);

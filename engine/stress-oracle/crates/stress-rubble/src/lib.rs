@@ -44,6 +44,10 @@
 
 pub mod scenes;
 #[cfg(feature = "gpu")]
+pub mod ingest_check;
+#[cfg(feature = "gpu")]
+pub mod resident;
+#[cfg(feature = "gpu")]
 pub mod render;
 
 use std::collections::HashMap;
@@ -368,6 +372,13 @@ pub struct RubbleEngine {
     /// The GPU's body states as last read, while nothing has changed them since (a step,
     /// a body written or added, a restore): `bodies_now` answers from it.
     bodies_read: std::cell::RefCell<Option<Vec<BodyState>>>,
+    /// The GPU contact ingest run and checked with every step (`attach_ingest_check`).
+    #[cfg(feature = "gpu")]
+    ingest_check: Option<ingest_check::IngestCheck>,
+    /// Bumped whenever colliders are added or retired, or the body set is restored.
+    layout_version: u64,
+    /// Resident frames that read bodies back for the CCD bound.
+    pub resident_reads: u64,
 }
 
 /// The default capacity: room for a few thousand bodies (every rebuilt cluster takes
@@ -450,6 +461,10 @@ impl RubbleEngine {
             max_substeps: 256,
             last_substeps: 0,
             bodies_read: std::cell::RefCell::new(None),
+            #[cfg(feature = "gpu")]
+            ingest_check: None,
+            layout_version: 0,
+            resident_reads: 0,
         })
     }
 
@@ -470,6 +485,7 @@ impl RubbleEngine {
 
     fn add_colliders(&mut self, cols: &[Collider], owners: impl Iterator<Item = Owner>) -> Range<u32> {
         let range = self.sim.add_colliders(cols);
+        self.layout_version += 1;
         self.cols.extend_from_slice(cols);
         self.owners.extend(owners);
         debug_assert_eq!(self.owners.len(), self.sim.collider_count() as usize);
@@ -535,6 +551,7 @@ impl RubbleEngine {
             self.owners[id as usize] = Owner::Retired;
         }
         self.sim.set_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
+        self.layout_version += 1;
         self.frozen.retain(|k| *k != key);
     }
 
@@ -758,17 +775,23 @@ impl RigidEngine for RubbleEngine {
         params.contact_offset = offset;
         self.sim.set_params(params);
         let mut out = Vec::new();
-        for _ in 0..n {
+        #[cfg(feature = "gpu")]
+        self.ingest_begin(n);
+        for _s in 0..n {
             let t = std::time::Instant::now();
             self.bodies_changed();
             if let Err(e) = self.sim.step() {
                 panic!("rubble step failed: {e:?} (capacity overflow)");
             }
             profile::add("step.sim", t);
+            #[cfg(feature = "gpu")]
+            self.ingest_substep(_s, h);
             let t = std::time::Instant::now();
             self.contacts_of_step(h, &all, &mut out);
             profile::add("step.contacts", t);
         }
+        #[cfg(feature = "gpu")]
+        self.ingest_end(n, &out);
         out
     }
 
@@ -836,6 +859,7 @@ impl RigidEngine for RubbleEngine {
         self.bodies_changed();
             self.bodies = saved.bodies;
             self.owners = saved.owners;
+            self.layout_version += 1;
             self.cols = saved.cols;
             self.frozen = saved.frozen;
             self.spare = Some(saved.snapshot);

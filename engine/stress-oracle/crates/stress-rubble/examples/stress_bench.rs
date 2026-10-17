@@ -20,6 +20,7 @@
 //!
 //!   cargo run --release -p stress-rubble --features gpu --example stress_bench -- \
 //!       [--solver oracle|rubble-gpu] [--only REGIME] [--seconds 0.25] [--repeats 1]
+//!       [--pack PATH ...]   (any scene packs, idle and rammed, as the packs set)
 
 use std::time::Instant;
 
@@ -39,12 +40,27 @@ use stress_rubble::scenes::{house, realtime as configure, wall_ram};
 ///   softening, weibull, crack_contact, rate_effects, static_fatigue, buckling, rebar,
 ///   damping       + that model feature, in this order
 ///   realtime      the full real-time configuration (= damping, every feature on)
+///   qs            realtime's features, quasi-static everywhere, impacts included
+///                 (no islands), budgeted static solves (`STRESS_QS_BUDGET`)
+///   tiered        realtime's features, quasi-static outside impact islands (the
+///                 tiered coupling, `GpuWorld::set_tiered`)
 pub const LADDER: [&str; 12] = ["blast", "adaptive", "islands", "softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping", "realtime"];
 const LADDER_FEATURES: [&str; 8] = ["softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping"];
 
 /// `scene` (already `configure`d) under ladder configuration `config`; whether islands run.
 fn ladder(mut s: Scene, config: &str) -> (Scene, bool) {
     if config == "realtime" {
+        return (s, true);
+    }
+    if config == "qs" {
+        // Quasi-static impacts: realtime's features, every body the engine's, the frame's
+        // static solve for every structure (Blast's model; STRESS_QS_BUDGET=newton,cg).
+        s.sim.solve_mode = SolveMode::QuasiStatic;
+        return (s, false);
+    }
+    if config == "tiered" {
+        // The tiered coupling: impact islands explicit, everything else quasi-static.
+        s.sim.solve_mode = SolveMode::QuasiStatic;
         return (s, true);
     }
     let rung = LADDER.iter().position(|&c| c == config).unwrap_or_else(|| panic!("unknown --config {config} (known: {})", LADDER.join(", ")));
@@ -104,10 +120,22 @@ fn surface_lo_x(scene: &Scene) -> f64 {
 /// 400 kg box at 12 m/s into the middle of the -x face, its front 0.2 m from the surface
 /// (`blast_ladder_bench bench PACK ram` fires its ball from the same surface).
 pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+    let paths: Vec<_> = ["house-1story", "house-2story", "villa-savoye", "brick-building", "rig-portal", "rig-toppled", "comp-wall-bay"].iter().map(|n| dir.join(format!("{n}.json"))).collect();
+    packs_at(&paths, seconds)
+}
+
+/// `--authored`: packs import with their own (game) bond strengths.
+static AUTHORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Any scene packs (`--pack PATH`, repeatable), each intact (idle) and rammed, as `packs`.
+pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scene)> {
     let mut out = Vec::new();
-    for name in ["house-1story", "house-2story", "villa-savoye", "brick-building", "rig-portal", "rig-toppled", "comp-wall-bay"] {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../packs/{name}.json"));
-        let scene = stress_ref::scene_pack::import(&path, name, "structure").unwrap_or_else(|e| panic!("{name} pack: {e}"));
+    for path in paths {
+        let name = path.file_stem().expect("pack file name").to_string_lossy().to_string();
+        let name = name.as_str();
+        let options = stress_ref::scene_pack::ImportOptions { authored_strengths: AUTHORED.load(std::sync::atomic::Ordering::Relaxed) };
+        let scene = stress_ref::scene_pack::import_with(path, name, "structure", options).unwrap_or_else(|e| panic!("{name} pack: {e}"));
         let mut idle = configure(scene.clone(), seconds);
         idle.name = format!("{name}_idle");
         let (mut lo, hi) = stress_ref::scenes::bounds(&scene);
@@ -211,7 +239,15 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     } else {
         Box::new(stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine"))
     };
-    let mut w = stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world");
+    // STRESS_RESIDENT=1: the resident quasi-static frame (engine and stress loads on the
+    // GPU without read-backs; one device).
+    let mut w = if std::env::var("STRESS_RESIDENT").is_ok_and(|v| v == "1") && !two_devices {
+        drop(engine);
+        let e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine");
+        stress_gpu::world::GpuWorld::with_resident_engine(gpu, scene, e).expect("GPU coupled world")
+    } else {
+        stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world")
+    };
     // rubble's integrated pipeline: routing before the step, no frame rewind.
     w.redo_fractured_frames = !no_redo;
     // STRESS_BENCH_ORACLE_STEP=1: the oracle's own certified step instead of the GPU
@@ -220,6 +256,24 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         w.own_dashpot_step = false;
     }
     w.set_impact_islands(islands);
+    // STRESS_BENCH_STRICT_STEP=s: strict mode, fail when a structure's certified step is below s.
+    if let Some(min) = std::env::var("STRESS_BENCH_STRICT_STEP").ok().and_then(|v| v.parse().ok()) {
+        if let Err(e) = w.set_min_stress_step(min) {
+            panic!("{e}");
+        }
+    }
+    // STRESS_QS_BUDGET=newton,cg: quasi-static solves within a budget after setup.
+    if let Some((n, cg)) = std::env::var("STRESS_QS_BUDGET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
+        w.solver.mirror.config.static_budget = Some((n, cg));
+    }
+    // Quasi-static with impact islands: the tiered coupling (`--config tiered`).
+    if islands && scene.sim.solve_mode == SolveMode::QuasiStatic {
+        w.set_tiered(true).expect("tiered coupling");
+        // STRESS_TIERED_BUDGET=newton,cg: the static solves' budget after setup.
+        if let Some((n, cg)) = std::env::var("STRESS_TIERED_BUDGET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
+            w.solver.mirror.config.static_budget = Some((n, cg));
+        }
+    }
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut frames = Vec::with_capacity(n);
     let trace = std::env::var("STRESS_BENCH_TRACE").is_ok();
@@ -231,20 +285,52 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         r.gravity_prestress();
         eprintln!("cpu prestress digest {}", digest(&r, &[]));
     }
+    // STRESS_BENCH_FRAMES=1: each frame's profile deltas on stderr.
+    let per_frame = std::env::var("STRESS_BENCH_FRAMES").is_ok();
     for f in 0..n {
+        let before = w.solver.profile.clone();
+        let (splits, replans, tail) = (w.solver.host_splits, w.solver.replans, w.tail_seconds);
+        let (prep, refresh, back) = (w.prepare_seconds, w.refresh_seconds, w.write_back_seconds);
         let t = Instant::now();
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
+        if per_frame {
+            let p = &w.solver.profile;
+            let ms = |a: f64, b: f64| (a - b) * 1e3;
+            eprintln!(
+                "frame {f}: {:.1} ms; prepare {:.1}, refresh {:.1}, write-back {:.1}, tail {:.1}, gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans; clusters {} ({} in islands), ram {:.2} m/s",
+                frames[f],
+                ms(w.prepare_seconds, prep),
+                ms(w.refresh_seconds, refresh),
+                ms(w.write_back_seconds, back),
+                ms(w.tail_seconds, tail),
+                ms(p.gpu, before.gpu),
+                ms(p.encode, before.encode),
+                ms(p.readback, before.readback),
+                ms(p.download, before.download),
+                ms(p.split, before.split),
+                ms(p.build, before.build),
+                p.substeps - before.substeps,
+                p.batches - before.batches,
+                p.rounds_used - before.rounds_used,
+                p.rounds_encoded - before.rounds_encoded,
+                w.solver.host_splits - splits,
+                w.solver.replans - replans,
+                w.solver.mirror.clusters.len(),
+                w.solver.mirror.clusters.iter().filter(|c| !c.driven).count(),
+                w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm())
+            );
+        }
         if trace {
             eprintln!("frame {f} digest {}", digest(&w.solver.mirror, &w.solver.impactors));
         }
     }
-    w.solver.sync(gpu);
+    w.sync(gpu);
     let o = w.observation();
     let ram = w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let p = &w.solver.profile;
-    let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split,
-        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
+    let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split, "encode_s": p.encode,
+        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "replans": w.solver.replans, "resumed_halts": w.solver.resumed_halts, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
     let digest = digest(&w.solver.mirror, &w.solver.impactors);
     let metrics = metrics(scene, &o);
@@ -257,6 +343,7 @@ fn main() {
     let mut seconds = 0.25;
     let mut repeats = 1usize;
     let mut set = "realtime".to_string();
+    let mut pack_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut config = "realtime".to_string();
     let mut overrides: Vec<(String, bool)> = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -272,6 +359,11 @@ fn main() {
                 let (n, on) = v.split_once('=').expect("--feature NAME=on|off");
                 overrides.push((n.to_string(), on == "on"));
             }
+            "--authored" => AUTHORED.store(true, std::sync::atomic::Ordering::Relaxed),
+            "--pack" => {
+                pack_paths.push(args.next().expect("--pack PATH").into());
+                set = "packs".into();
+            }
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).expect("--seconds S"),
             "--repeats" => repeats = args.next().and_then(|v| v.parse().ok()).expect("--repeats N"),
             other => panic!("unknown argument {other}"),
@@ -284,6 +376,7 @@ fn main() {
         "accuracy" => named(accuracy(seconds)),
         "towns" => named(towns(seconds)),
         "scale" => named(scale(seconds)),
+        "packs" if !pack_paths.is_empty() => packs_at(&pack_paths, seconds),
         "packs" => packs(seconds),
         _ => named(regimes(seconds)),
     };
@@ -292,6 +385,10 @@ fn main() {
             continue;
         }
         let (mut scene, islands) = ladder(scene, &config);
+        // STRESS_BENCH_STRESS_SAFETY=x: the bond network's step safety (a measurement).
+        if let Some(x) = std::env::var("STRESS_BENCH_STRESS_SAFETY").ok().and_then(|v| v.parse().ok()) {
+            scene.sim.stress_courant_safety = Some(x);
+        }
         for (n, on) in &overrides {
             scene.sim.features.set(n, *on).unwrap_or_else(|e| panic!("--feature: {e}"));
         }

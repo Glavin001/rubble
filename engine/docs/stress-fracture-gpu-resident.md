@@ -89,3 +89,119 @@ would route is missed.
   free-slot list with colliders re-assigned (chunk hulls are already in rubble's hull
   arena, so nothing is re-cooked);
 - the mirror is updated asynchronously (non-blocking map) for observations and tests only.
+
+## Stages 2 and 3: the resident frame (plan of 2026-10-17)
+
+Your direction: the whole coupled frame stays on the GPU; the host configures it,
+submits it and reads one small status record. Built in phases, each landing working and
+measured before the next.
+
+### Where a coupled frame crosses to the host today (measured inventory)
+
+- **rubble** (`RubbleEngine::step`): per engine substep a blocking counter read (80 B),
+  a blocking contact read (`last_contacts`, rows × 128 B) and a blocking body read
+  (bodies × 112 B); `motion`, `set_motion` and `sync_bodies` read bodies again; the
+  collider → (structure, chunk) table exists only on the host (`owners`).
+- **stress-gpu** (`GpuWorld::step_frame_coupled`): a full `download` at frame start and at
+  the write-back (state, islands, impactors, loads, ledgers, the whole `bond_dyn`); two
+  table rebuilds (`refresh` → `build`, re-packing from the f64 mirror); one blocking
+  read-back per substep batch; host splits with a download and a full rebuild each;
+  contact plans on the host; the quasi-static tail's sync and host commit.
+- **Host decisions:** routing (`select_islands`), the load filter (`LoadFilter`), contact
+  planning (`contacts::plan`, `engaged_contact_dt`), splits (`split_cluster`), the quiet
+  set and the frame verification (`fractured_since`).
+
+### Phases
+
+1. **Shared buffers and the collider table.** `WgpuSim` exposes its body, collider and
+   contact buffers and the last step's contact range; the coupling uploads a
+   collider → GPU chunk table (and body → island) whenever either side's layout changes.
+2. **Engine contacts to stress loads on the GPU.** After each rubble substep, an ingest
+   kernel reads that substep's contact rows (GPU → GPU, no host) and accumulates each
+   chunk's impulse, point and closing speed in a fixed order (rows grouped by chunk:
+   deterministic sums, no float atomics); a second kernel applies the load filter's
+   sustained / pulse split (`LoadFilter`) into the stress solver's load slots. Replaces
+   `last_contacts`, the host filter and the per-frame rebuild for loads.
+3. **rubble without readbacks:** `step_submit` (counts forwarded on the GPU) for every
+   engine substep; CCD substep counts from a GPU bound or a conservative host bound.
+4. **Poses and write-back on the GPU:** driven clusters' rigid frames written into the
+   island records from rubble's body buffer; island bodies written back into it
+   (freeze/release by kernel); no `download`/`refresh` per frame.
+5. **One submission per frame:** rubble's substeps, the ingest, the stress substeps (the
+   batch's halt flags already make later dispatches no-ops) and the quasi-static solves
+   and commits (`equilibrate_resident`, `commit_resident`) encoded together; one small
+   status read (halts, splits, unconverged counts) at the end.
+6. **Stage 3, splits on the GPU:** new clusters from the device connectivity labels
+   (`island_connected_*`), mass properties by reductions, new rubble bodies from a
+   free-slot list with colliders re-pointed; then routing (`select_islands` per cluster
+   from GPU bounds) and contact planning in kernels; the f64 mirror synced only on demand
+   (observations, tests).
+
+### Status
+
+- **Phase 1 (done):** `WgpuSim::{body,collider,contact,counters}_buffer`,
+  `last_contact_offset`, `capacity`. The collider table is `stress_gpu::ingest::ColliderInfo`:
+  (GPU chunk, body code, kind, chunk side taken) plus the other side's mass, modulus and
+  radius.
+- **Phase 2a (done): the contact ingest.** `shaders/coupling.slang`,
+  `stress_gpu::ingest::EngineIngest`.
+  - `ingest_rows` runs once per engine substep, one thread per row. It writes two records
+    per row at fixed slots (substep, row, side).
+  - A counting sort groups the frame's records by chunk (`ingest_count`, `ingest_scan`,
+    `ingest_scatter`). Atomics are used on integer counts only.
+  - `ingest_merge` puts each chunk's records back into slot order, then merges them per
+    other body in order of first appearance, the rule of stress-ref `manifolds`. The
+    order and the sums are deterministic.
+  - Checked against the host by `stress-rubble/tests/ingest_gpu.rs`
+    (`RubbleEngine::attach_ingest_check`). The test runs each step through the GPU ingest
+    on rubble's own buffers and compares the result with the host's manifolds from the
+    same rows. On the block-pile scene, 72 manifolds match with relative impulse error
+    ≤ 7e-8, point error ≤ 6e-8 m and closing-speed error ≤ 3e-7 m/s. That is f32
+    accumulation; the host's chain is f32 then f64.
+  - Off by default; the coupled frame does not use it yet.
+  - Record memory is 2 × rows × substeps × 64 B (8 MB per substep at the default 65,536
+    contacts). Phase 2b merges after every substep into running manifolds, so the memory
+    stays O(rows).
+- **The resident quasi-static frame (done, opt-in): phases 2b, 3 and 4 for the
+  quasi-static coupling.** `GpuWorld::with_resident_engine` (stress_bench:
+  `STRESS_RESIDENT=1`) takes it under the fast frame's conditions.
+  - **Engine.** rubble runs its substeps with `step_submit`. Counts are forwarded on the
+    GPU and nothing is read back. Each substep's rows go into the ingest
+    (`stress_gpu::resident::ResidentEngine`, implemented by `RubbleEngine` and shared with
+    the world's shell through `SharedEngine`).
+  - **Loads.** Three kernels in `shaders/resident.slang`:
+    - `resident_poses` writes driven clusters' poses into the island records from the
+      engine's frame-start bodies.
+    - `resident_filter` is `LoadFilter` with `frame_average_terms`. Sustained loads are
+      summed in the host's key order. Impact pulses are averaged over the frame; those
+      that outlast it are carried in `STRESS_RESIDENT_PULSES` slots per chunk (default 4).
+      Overflow fails the frame rather than dropping a load.
+    - `resident_static_loads` is `static_loads` per solved island.
+  - **Solve and commit.** `equilibrate_resident_with` (loads formed by the kernels above
+    in the same submission), then `commit_resident`.
+  - **Host role.** The host keeps the cascade's control. Its reads are each pass's
+    verdicts and, at the frame's end, the engine's overflow status. A split syncs the
+    mirror, including the engine's motion (`GpuWorld::sync`), splits on the host and
+    rebuilds the tables.
+  - **Same results as the fast frame, bit for bit.** Measured on house_ram (qs and blast
+    configurations, 25 bonds broken), town16_one_ram (qs, 8 broken), the fractured
+    high-rise rammed (qs) and Vibe Town idle. The f32 load path reproduces the host's
+    f64 → f32 loads exactly on these scenes. Covered by `tests/resident_gpu.rs`.
+  - **Vibe Town idle** (281 clusters, authored, qs, budget 2 × 32, interleaved runs on a
+    shared GPU): fast frame median 35–51 ms; **resident 16–21 ms**. Engine preparation
+    falls from 2.6 to 0.6 ms, and the download (2.3–2.8 ms) and host loads are gone. What
+    remains is the static solve on the GPU (~18 ms), which is the next item, and the
+    frame-end wait.
+  - **Not covered yet:**
+    - Quiet-cluster exclusion is off in resident frames. It is chosen from the host's
+      engine loads; the GPU-native replacement is "same loads, same state → skip the
+      solve".
+    - Impact islands (tiered and explicit frames) still take the host path. They need
+      `resident_filter`'s pulses as load terms (`load_range.zw`) and phase 6.
+    - Splits are on the host.
+    - Every dispatch writes small uniforms, and each cascade pass writes the island
+      records from the host. Those are host → GPU writes, not read-backs.
+
+Gate per phase: the opt-in resident frame's outcomes within the GPU solve's run-to-run
+spread and the oracle gates on the realtime, accuracy and pack sets; the default path
+bit-identical (`scripts/destruction_peak.py guard`) until the resident frame is adopted.

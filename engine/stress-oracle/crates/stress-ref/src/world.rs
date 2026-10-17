@@ -255,6 +255,10 @@ pub struct World {
     /// the engine drives every body and the stress solve takes its contacts only as
     /// loads (the Blast-style coupling); quasi-static mode always runs it off.
     pub impact_islands: bool,
+    /// Impact islands in quasi-static mode too (the tiered coupling, `stress-gpu`
+    /// `GpuWorld::tiered`): island bodies take the frame's explicit substeps, everything
+    /// else the frame's static solve. Off: quasi-static mode has no islands.
+    pub qs_islands: bool,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -418,6 +422,7 @@ impl World {
             island_body_frames: 0,
             redone_frames: 0,
             impact_islands: true,
+            qs_islands: false,
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,

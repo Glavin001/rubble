@@ -48,6 +48,37 @@ impl WgpuSim {
         self.last_counters
     }
 
+    /// The buffers another pipeline on the same device reads or writes (the stress
+    /// solver's GPU-resident coupling): bodies (binding 0, `BodyState`: current rows at
+    /// `[0, max_bodies)`, previous at `max_bodies + i`), colliders (binding 2,
+    /// `Collider`), contacts (binding 4, `Contact`: the last step's rows from
+    /// `last_contact_offset`, `StepCounters::contact_count` of them, dead rows included)
+    /// and the step counters (binding 7, `StepCounters`, written by the GPU).
+    pub fn body_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[0]
+    }
+
+    pub fn collider_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[2]
+    }
+
+    pub fn contact_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[4]
+    }
+
+    pub fn counters_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[7]
+    }
+
+    /// First row of the last step's contacts in `contact_buffer` (the ping-pong half).
+    pub fn last_contact_offset(&self) -> u32 {
+        self.last_contact_offset
+    }
+
+    pub fn capacity(&self) -> WorldCapacity {
+        self.capacity.clone()
+    }
+
     /// Overwrite the state of bodies `first..first + bodies.len()` (pose, velocity,
     /// mass, flags), current and previous rows alike, as `add_bodies` writes them.
     /// The next step runs even if the last one left no body awake. Writing

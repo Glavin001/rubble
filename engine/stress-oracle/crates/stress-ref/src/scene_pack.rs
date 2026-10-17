@@ -82,6 +82,33 @@ pub(crate) fn material_preset(name: &str) -> Material {
 }
 
 /// Y-up to Z-up.
+/// The calibrated base (density, stiffness, fracture energy) of an asset material in an
+/// authored-strengths import, whose strengths come from the pack: the calibrated mapping
+/// where there is one, else by the name's material class. A name of no known class fails.
+fn map_material_authored(asset: &str) -> Result<(&'static str, &'static str), String> {
+    if let Ok(m) = map_material(asset) {
+        return Ok(m);
+    }
+    let has = |keys: &[&str]| keys.iter().any(|k| asset.contains(k));
+    Ok(if has(&["glass", "glazing"]) {
+        ("glass", "glass")
+    } else if has(&["steel", "metal", "hydrant", "clip", "fastener"]) {
+        ("steel", "steel")
+    } else if has(&["mortar"]) {
+        ("brick", "mortar")
+    } else if has(&["brick"]) {
+        ("brick", "mortar")
+    } else if has(&["stone", "masonry", "slate", "paving", "porcelain", "road"]) {
+        ("stone", "mortar")
+    } else if has(&["concrete", "footing", "asphalt", "slab", "facade", "plaster"]) {
+        ("concrete", "concrete")
+    } else if has(&["wood", "timber", "oak", "joinery", "siding", "trim", "fibre", "poster", "paper", "ink", "upholstery", "bedding", "rubber", "plastic", "appliance", "furniture"]) {
+        ("timber", "timber")
+    } else {
+        return Err(format!("no material class for asset material '{asset}' (authored strengths)"));
+    })
+}
+
 fn zup(v: &Value) -> Vec3 {
     let f = |k: &str| v[k].as_f64().unwrap_or(0.0);
     Vec3::new(f("x"), -f("z"), f("y"))
@@ -104,7 +131,22 @@ fn points(v: &Value) -> Vec<Vec3> {
 
 /// Load the scene pack at `path` as a scene named `name` with one body `body_name`,
 /// on the assets' ground plane.
+/// How a pack is imported.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImportOptions {
+    /// Each asset material's joints take the pack's own elastic limits as their
+    /// strengths (tension, compression, shear: what the pack's Blast stress solver
+    /// breaks against), on the calibrated material's stiffness and fracture energy.
+    /// For like-for-like runs against the game; off: the calibrated strengths.
+    pub authored_strengths: bool,
+}
+
 pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Scene, String> {
+    import_with(path, name, body_name, ImportOptions::default())
+}
+
+/// `import` with options.
+pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options: ImportOptions) -> Result<Scene, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let json: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     // A Shardwright export (`shardwright.rs`) is imported by its own reader.
@@ -126,12 +168,20 @@ pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Sce
         .as_array()
         .map(|a| a.iter().map(|m| m["name"].as_str().unwrap_or("").to_string()).collect())
         .unwrap_or_default();
+    // The pack's own limits by material index (names repeat with different limits), Pa,
+    // scaled by its `materialScale`.
+    let scale = json["defaults"]["solver"]["materialScale"].as_f64().unwrap_or(1.0);
+    let authored: Vec<Option<(f64, f64, f64)>> = json["defaults"]["solver"]["materials"]
+        .as_array()
+        .map(|a| a.iter().map(|m| Some((m["tensionElastic"].as_f64()? * scale, m["compressionElastic"].as_f64()? * scale, m["shearElastic"].as_f64()? * scale))).collect())
+        .unwrap_or_default();
+    let classify = |asset: &str| if options.authored_strengths { map_material_authored(asset) } else { map_material(asset) };
 
     let mut scene = new_scene(name, &format!("Imported from {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()));
     let mut chunks: Vec<ChunkDesc> = Vec::with_capacity(nodes.len());
     let mut hulls: Vec<ConvexHull> = Vec::with_capacity(nodes.len());
     for (i, node) in nodes.iter().enumerate() {
-        let (mat, _) = map_material(&node_materials[i])?;
+        let (mat, _) = classify(&node_materials[i])?;
         let centroid = zup(&node["centroid"]);
         let collider = &colliders[i];
         let collider = if collider["kind"] == "shape" { &library[collider["shape"].as_u64().ok_or("bad shape index")? as usize] } else { collider };
@@ -170,8 +220,26 @@ pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Sce
     for b in sc["bonds"].as_array().ok_or("pack has no bonds")? {
         let (a, bb) = (b["node0"].as_u64().ok_or("bad bond")? as usize, b["node1"].as_u64().ok_or("bad bond")? as usize);
         let asset_material = b["m"].as_u64().and_then(|m| pack_materials.get(m as usize)).cloned().unwrap_or_else(|| node_materials[a].clone());
-        let (_, joint) = map_material(&asset_material)?;
-        scene.materials.entry(joint.to_string()).or_insert_with(|| material_preset(joint));
+        let (_, calibrated) = classify(&asset_material)?;
+        let index = b["m"].as_u64().map(|m| m as usize);
+        let joint = match index.and_then(|m| authored.get(m).copied().flatten()).filter(|_| options.authored_strengths) {
+            Some((tension, compression, shear)) => {
+                let name = format!("{calibrated}@{asset_material}#{}", index.unwrap_or(0));
+                scene.materials.entry(name.clone()).or_insert_with(|| {
+                    let mut m = material_preset(calibrated);
+                    m.tensile_strength = tension;
+                    m.compressive_strength = compression;
+                    m.cohesion = shear;
+                    m.shear_cap = None;
+                    m
+                });
+                name
+            }
+            None => {
+                scene.materials.entry(calibrated.to_string()).or_insert_with(|| material_preset(calibrated));
+                calibrated.to_string()
+            }
+        };
         // Normal from a to b (the asset's may point either way).
         let mut normal = zup(&b["normal"]).normalized();
         let (ca, cb) = (Vec3::from_array(chunks[a].center), Vec3::from_array(chunks[bb].center));
@@ -208,7 +276,7 @@ pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Sce
             tangent: tangent.to_array(),
             area,
             width,
-            material: joint.to_string(),
+            material: joint,
             rebar,
             buckling_length: None,
             level: 0,

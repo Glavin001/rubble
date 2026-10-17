@@ -227,7 +227,7 @@ pub fn pack_with(m: &ReferenceSolver, exclude: &[bool]) -> Result<StructureTable
             // solves; adaptive: the settled ones, until their loads change (world.rs
             // `wake_loaded_clusters`: by more than `wake_threshold` of weight + norm).
             let settled = match m.config.mode {
-                SolveMode::QuasiStatic => true,
+                SolveMode::QuasiStatic => !(m.config.tiered && cl.activity == Activity::Active),
                 SolveMode::Adaptive => cl.activity == Activity::Settled,
                 _ => false,
             };

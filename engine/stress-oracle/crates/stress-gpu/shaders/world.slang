@@ -36,6 +36,13 @@ static const uint SAMPLE_POINTS = 14;
 // re-plans), `info.y` the substep at which a contact island split (that substep
 // completes everywhere, then everything stops).
 static const uint STOP_NOW = 1;
+// The two-dispatch contact pipeline (`forces_and_bonds`, `islands_sums_impactors`) checks
+// travel at the end of each substep instead, for the next one: a failed check records
+// that substep (absolute) in `range.x` ("stop_at"), and every kernel compares it with
+// its own substep. The kernels before the joint law (crush passes, contact forces) still
+// run in the stopped substep, as they do when STOP_NOW lands within `contact_forces`; the
+// joint law, the sums, the islands and the impactors do not, and the first island or
+// impactor to see the stop sets STOP_NOW for every later dispatch.
 
 struct Params
 {
@@ -90,6 +97,7 @@ struct Params
     uint iplan_base;         // scratch: each impactor's contact plan, 4 float4 (zero budget: none)
     uint contact_bond_groups; // narrow contact islands' bond groups in the sums dispatch (0: inline)
     uint contact_bond_table;  // index: those groups (island, begin, end, -)
+    uint sload_base;         // scratch: each chunk's external load for the static solves (2 float4)
 };
 
 static const uint MODE_EXPLICIT = 0;
@@ -279,8 +287,12 @@ void group_sum2<let N : uint>(uint tid, inout float4 a, inout float4 b)
         a = sa;
         b = sb;
     default:
-        g_red_a[tid] = a;
-        g_red_b[tid] = b;
+        // Threads past THREADS (a larger group) only join the barriers.
+        if (tid < THREADS)
+        {
+            g_red_a[tid] = a;
+            g_red_b[tid] = b;
+        }
         GroupMemoryBarrierWithGroupSync();
         for (uint s = THREADS / 2; s > 0; s >>= 1)
         {
@@ -1016,8 +1028,40 @@ void impactor_candidate_forces(uint k, uint lane, uint lanes)
         sentinel_mark(COV_IMPACTOR_CONTACT);
 }
 
+// A failed travel check before `substep` (absolute): the batch stops there.
+void travel_stop(uint substep, bool fused)
+{
+    if (fused)
+    {
+        // Every writer of a dispatch stores the same substep (the next one).
+        islands[params.halt_index].range.x = substep;
+        return;
+    }
+    // Every writer stores the same bit: no atomics needed.
+    islands[params.halt_index].info.z = islands[params.halt_index].info.z | STOP_NOW;
+    sentinel_mark(COV_STOP_NOW);
+}
+
+// A stop recorded for `substep` that takes effect (the two-dispatch pipeline): not one
+// after a split, which the old order never checked (it stops at the split first).
+bool stop_genuine(Island sentinel, uint substep)
+{
+    uint at = sentinel.range.x;
+    return at != 0 && at <= substep && (sentinel.info.y == 0 || at <= sentinel.info.y);
+}
+
+// The first kernel of a substep to see its stop: STOP_NOW for every later dispatch.
+void stop_seen(Island sentinel, uint substep)
+{
+    if (stop_genuine(sentinel, substep))
+    {
+        islands[params.halt_index].info.z = islands[params.halt_index].info.z | STOP_NOW;
+        sentinel_mark(COV_STOP_NOW);
+    }
+}
+
 // A contact chunk outside its candidate budget stops the batch (the host re-plans).
-void travel_check(uint c)
+void travel_check(uint c, bool fused)
 {
     ChunkStatic ch = chunks[c];
     if (ch.cinfo.z == 0)
@@ -1048,16 +1092,12 @@ void travel_check(uint c)
         travel += 2.0 * atan2(length(float3(turn.x, turn.y, turn.z)), abs(turn.w)) * ch.half.w;
     }
     if (travel > start_hi.w)
-    {
-        // Every writer stores the same bit: no atomics needed.
-        islands[params.halt_index].info.z = islands[params.halt_index].info.z | STOP_NOW;
-        sentinel_mark(COV_STOP_NOW);
-    }
+        travel_stop(islands[ch.info.y].info.w + 1, fused);
 }
 
 // An impactor outside its plan's budget stops the batch (the host re-plans): its
 // deviation from its ballistic path plus its turn at its bounding radius, as a chunk's.
-void impactor_travel_check(uint ii)
+void impactor_travel_check(uint ii, bool fused)
 {
     Impactor imp = impactors[ii];
     uint at = params.iplan_base + 4 * ii;
@@ -1074,17 +1114,12 @@ void impactor_travel_check(uint ii)
     Quat turn = quat_mul(start, quat_of(imp.rotation));
     float travel = length(moved - expected) + 2.0 * atan2(length(float3(turn.x, turn.y, turn.z)), abs(turn.w)) * imp.half.w;
     if (travel > start_hi.w)
-    {
-        islands[params.halt_index].info.z = islands[params.halt_index].info.z | STOP_NOW;
-        sentinel_mark(COV_STOP_NOW);
-    }
+        travel_stop(imp.cand.w + 1, fused);
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void contact_forces(uint3 id: SV_DispatchThreadID)
+// `fused`: the two-dispatch pipeline, whose travel checks ran at the last substep's end.
+void contact_forces_at(uint i, bool fused)
 {
-    uint i = id.x;
     uint lanes = pair_lane_count();
     uint pair_threads = params.pair_count * lanes;
     if (i < pair_threads)
@@ -1103,10 +1138,19 @@ void contact_forces(uint3 id: SV_DispatchThreadID)
             impactor_candidate_forces(j / lanes, j % lanes, lanes);
         return;
     }
+    if (fused)
+        return;
     if (j - cand_threads < params.chunk_count && !stopped())
-        travel_check(j - cand_threads);
+        travel_check(j - cand_threads, false);
     else if (j - cand_threads - params.chunk_count < params.impactor_count && !stopped())
-        impactor_travel_check(j - cand_threads - params.chunk_count);
+        impactor_travel_check(j - cand_threads - params.chunk_count, false);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void contact_forces(uint3 id: SV_DispatchThreadID)
+{
+    contact_forces_at(id.x, false);
 }
 
 // Crush cap, first pass: each candidate's share of its impactor's elastic force.
@@ -1181,7 +1225,8 @@ void impactor_crush(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     impactors[ii] = imp;
 }
 
-void impactor_integrate_at(uint ii, uint tid)
+// `fused`: in the two-dispatch pipeline (its stop and travel check, see STOP_NOW).
+void impactor_integrate_at(uint ii, uint tid, bool fused)
 {
     if (ii >= params.impactor_count)
         return;
@@ -1189,7 +1234,14 @@ void impactor_integrate_at(uint ii, uint tid)
     Impactor imp = impactors[ii];
     // cand.w: substeps integrated so far. Integrate through the substep of a split
     // (it completes), not past it; nothing after a re-plan stop.
-    if ((sentinel.info.z & STOP_NOW) != 0 || (sentinel.info.y != 0 && imp.cand.w >= sentinel.info.y))
+    bool stop = (sentinel.info.z & STOP_NOW) != 0 || (sentinel.info.y != 0 && imp.cand.w >= sentinel.info.y);
+    if (fused)
+    {
+        stop = stop || (sentinel.range.x != 0 && sentinel.range.x <= imp.cand.w + 1);
+        if (tid == 0)
+            stop_seen(sentinel, imp.cand.w + 1);
+    }
+    if (stop)
         return;
     // A driven impactor (an engine moves it, world_coupling.rs) is not integrated; it
     // still counts the substep, which is how the host follows the pipeline's progress.
@@ -1286,6 +1338,9 @@ void impactor_integrate_at(uint ii, uint tid)
         scratch[at] = float4(vel + vel_err, 0.0);
         scratch[at + 1] = float4(pos + pos_err, 0.0);
     }
+    // The next substep's travel check (two-dispatch pipeline).
+    if (fused)
+        impactor_travel_check(ii, true);
 }
 
 // ------------------------------------------------------------------ loads
@@ -1482,6 +1537,12 @@ void contact_sum_at(uint g)
 {
     if (g >= params.seg_count || stopped())
         return;
+    contact_segment(g);
+}
+
+// Segment g's sum (`contact_sum_at` without its batch control).
+void contact_segment(uint g)
+{
     uint c = index[params.seg_index + 3 * g];
     uint begin = index[params.seg_index + 3 * g + 1];
     uint end = index[params.seg_index + 3 * g + 2];
@@ -1506,6 +1567,7 @@ void contact_sum_at(uint g)
 
 groupshared uint g_halt;
 groupshared uint g_run;
+groupshared uint g_sums;
 
 float3 to_local(BondStatic b, float3 x)
 {
@@ -1909,7 +1971,8 @@ void drift_rigid(Island isl, inout Rigid rg, float3 tr, float3 phi, float3 dv, f
 bool contact_stopped(Island isl)
 {
     Island sentinel = islands[params.halt_index];
-    return (sentinel.info.z & STOP_NOW) != 0 || (sentinel.info.y != 0 && sentinel.info.y <= isl.info.w);
+    return (sentinel.info.z & STOP_NOW) != 0 || (sentinel.info.y != 0 && sentinel.info.y <= isl.info.w)
+           || (sentinel.range.x != 0 && sentinel.range.x <= isl.info.w + 1);
 }
 
 // A contact island split after substep `at` (absolute): that substep completes in every
@@ -1924,9 +1987,17 @@ void contact_split_at(uint at)
 
 // INLINE_BONDS 0: a contact island whose bonds ran this substep in the sums dispatch
 // (`contact_bonds_at`), a disconnection reported by ISLAND_HALT_PENDING; the joint law
-// then is not compiled into this kernel.
-void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
+// then is not compiled into this kernel. FOLD_SUMS 1 (the two-dispatch pipeline, with
+// INLINE_BONDS 0): the island sums its chunks' contact segments itself, sees its
+// substep's stop (STOP_NOW), and checks its chunks' travel for the next substep; 2: also
+// the joint law of a settled island that wakes (compiled in only for batches that hold a
+// settled contact island: islands settle only on the host, between batches).
+void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : uint>(uint gi, uint tid)
 {
+    // Chunk loops and reductions on the first THREADS threads (a GROUP above THREADS
+    // spreads only the bonds: each bond's law is independent of the others, so the
+    // results are those of a THREADS group, bit for bit). Island ranges are below 2^30.
+    uint ct = tid < THREADS ? tid : 0x40000000u;
     Island isl = islands[gi];
     bool anchored = (isl.info.x & ISLAND_ANCHORED) != 0;
     bool driven = (isl.info.x & ISLAND_DRIVEN) != 0;
@@ -1947,6 +2018,15 @@ void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
             run = 0;
         g_run = run;
         g_halt = 0;
+        if (FOLD_SUMS != 0 && contact_island)
+        {
+            Island sentinel = islands[params.halt_index];
+            stop_seen(sentinel, isl.info.w + 1);
+            // The sums as the sums dispatch made them: unless a split in an earlier
+            // substep stopped the batch (one in this substep, by another island of this
+            // dispatch, records this substep).
+            g_sums = (sentinel.info.y != 0 && sentinel.info.y <= isl.info.w) ? 0 : 1;
+        }
     }
     GroupMemoryBarrierWithGroupSync();
     uint steps = ((isl.info.z & ISLAND_HALTED) != 0 || g_run == 0) ? 0 : min(isl.info.y, params.max_steps);
@@ -1966,13 +2046,22 @@ void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
         // than repeat the tail): the per-substep kernel carries its code once
         // (instruction-cache budget).
         bool quiet = (isl.info.x & ISLAND_QUIET) != 0;
+        // The contact sums of the island's chunks (segments in chunk order, so the
+        // island's are contiguous), when no earlier dispatch made them.
+        if (FOLD_SUMS != 0 && contact_island && g_sums != 0)
+        {
+            uint g1 = chunks[isl.range.y - 1].cinfo.y;
+            for (uint g = chunks[isl.range.x].cinfo.x + ct; g < g1; g += THREADS)
+                contact_segment(g);
+            AllMemoryBarrierWithGroupSync();
+        }
         // 0. A settled island (world.rs `wake_loaded_clusters`): its loads recorded;
         // it wakes, and takes this substep explicitly, when they changed.
         if (settled && !quiet)
         {
             float3 norm = float3(0.0);
             float3 unused0 = float3(0.0);
-            for (uint c = isl.range.x + tid; c < isl.range.y; c += THREADS)
+            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
                 norm.x += settled_chunk_load(c, rg.rot, k, dt, contact_island);
             group_sum3<THREADS>(tid, norm, unused0);
             if (params.solve_mode == MODE_ADAPTIVE && abs(norm.x - isl.energy.z) > isl.energy.w)
@@ -1986,7 +2075,7 @@ void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
         {
             float3 f = float3(0.0);
             float3 t = float3(0.0);
-            for (uint c = isl.range.x + tid; c < isl.range.y; c += THREADS)
+            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
                 net_load(c, isl, rg, k, dt, contact_island, f, t);
             group_sum3<THREADS>(tid, f, t);
             rigid_acceleration(isl, rg, f, t);
@@ -1995,10 +2084,12 @@ void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
         bool explicit_step = !settled && !quiet;
         if (explicit_step)
         {
-            // 2. Bonds.
-            if (INLINE_BONDS != 0)
+            // 2. Bonds. The two-dispatch pipeline ran them with the contact forces, except
+            // a settled island's (`bond_group_at` skips it): one that wakes this substep
+            // takes its joint law here.
+            if (INLINE_BONDS != 0 || (FOLD_SUMS == 2 && woke))
             {
-                for (uint i = isl.range.z + tid; i < isl.range.w; i += THREADS)
+                for (uint i = isl.range.z + tid; i < isl.range.w; i += GROUP)
                     if (bond_update(i, dt, fracture, abs_step, false))
                         g_halt = 1;
             }
@@ -2006,7 +2097,7 @@ void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
                 g_halt = 1;
             AllMemoryBarrierWithGroupSync();
             // 3. Chunks.
-            for (uint c = isl.range.x + tid; c < isl.range.y; c += THREADS)
+            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
                 chunk_update(c, isl, rg, dt, rml, k, contact_island, work, work_err);
             AllMemoryBarrierWithGroupSync();
         }
@@ -2019,19 +2110,19 @@ void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
             float3 wcom = isl.wcom.xyz;
             float3 tu = float3(0.0);
             float3 pv = float3(0.0);
-            for (uint c = isl.range.x + tid; c < isl.range.y; c += THREADS)
+            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
                 drift_moments(c, tu, pv);
             group_sum3<THREADS>(tid, tu, pv);
             float3 tr = tu / isl.wcom.w;
             float3 dv = pv / isl.wcom.w;
             float3 lu = float3(0.0);
             float3 lv = float3(0.0);
-            for (uint c = isl.range.x + tid; c < isl.range.y; c += THREADS)
+            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
                 drift_angular(c, wcom, tr, dv, lu, lv);
             group_sum3<THREADS>(tid, lu, lv);
             float3 phi = rows_mul(isl.winv0, isl.winv1, isl.winv2, lu);
             float3 dw = rows_mul(isl.winv0, isl.winv1, isl.winv2, lv);
-            for (uint c = isl.range.x + tid; c < isl.range.y; c += THREADS)
+            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
                 drift_apply(c, wcom, tr, phi, dv, dw);
             if (!driven)
                 drift_rigid(isl, rg, tr, phi, dv, dw);
@@ -2043,7 +2134,7 @@ void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
         done = s + 1;
         // A disconnection that leaves the island in one piece changes nothing (the host's
         // resumed halt, without the round trip).
-        if (g_halt != 0 && island_connected_narrow(tid, isl))
+        if (g_halt != 0 && island_connected_narrow(tid, ct, isl))
         {
             resumed = true;
             if (tid == 0)
@@ -2097,6 +2188,14 @@ void island_frame_at<let INLINE_BONDS : uint>(uint gi, uint tid)
             isl.info.z |= ISLAND_WOKE;
         }
         islands[gi] = isl;
+    }
+    // The next substep's travel check, from the state this one reached.
+    if (FOLD_SUMS != 0 && contact_island)
+    {
+        AllMemoryBarrierWithGroupSync();
+        if (done > 0)
+            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
+                travel_check(c, true);
     }
 }
 
@@ -2459,13 +2558,14 @@ static const uint CONNECT_NARROW = 512;
 groupshared uint g_label_narrow[CONNECT_NARROW];
 groupshared uint g_changed_narrow;
 
-bool island_connected_narrow(uint tid, Island isl)
+// `ct`: the thread's chunk index (past every island for threads beyond THREADS).
+bool island_connected_narrow(uint tid, uint ct, Island isl)
 {
     uint first = isl.range.x;
     uint n = isl.range.y - isl.range.x;
     if (n > CONNECT_NARROW || params.device_connect == 0)
         return false;
-    for (uint c = tid; c < n; c += THREADS)
+    for (uint c = ct; c < n; c += THREADS)
         g_label_narrow[c] = c;
     GroupMemoryBarrierWithGroupSync();
     bool converged = false;
@@ -2474,7 +2574,7 @@ bool island_connected_narrow(uint tid, Island isl)
         if (tid == 0)
             g_changed_narrow = 0;
         GroupMemoryBarrierWithGroupSync();
-        for (uint c = tid; c < n; c += THREADS)
+        for (uint c = ct; c < n; c += THREADS)
         {
             uint l = g_label_narrow[c];
             uint gc = first + c;
@@ -2506,7 +2606,7 @@ bool island_connected_narrow(uint tid, Island isl)
     if (tid == 0)
         g_changed_narrow = 0;
     GroupMemoryBarrierWithGroupSync();
-    for (uint c = tid; c < n; c += THREADS)
+    for (uint c = ct; c < n; c += THREADS)
         if (g_label_narrow[c] != 0)
             g_changed_narrow = 1;
     GroupMemoryBarrierWithGroupSync();
@@ -2917,6 +3017,9 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     uint b1 = isl.range.w;
     for (uint c = c0 + tid; c < c1; c += THREADS)
     {
+        // The external loads, uploaded contiguously (`sload_base`), into their slots.
+        scratch[sv(c, 0)] = scratch[params.sload_base + 2 * c];
+        scratch[sv(c, 1)] = scratch[params.sload_base + 2 * c + 1];
         scratch[sv(c, 21)] = float4(0.0);
         scratch[sv(c, 22)] = float4(0.0);
     }
@@ -3205,7 +3308,7 @@ void settled_fatigue(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 [numthreads(256, 1, 1)]
 void impactor_integrate(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
-    impactor_integrate_at(group.x, thread.x);
+    impactor_integrate_at(group.x, thread.x, false);
 }
 
 [shader("compute")]
@@ -3219,7 +3322,20 @@ void contact_sums(uint3 id: SV_DispatchThreadID)
 [numthreads(256, 1, 1)]
 void island_frame(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
-    island_frame_at<1>(group.x, thread.x);
+    island_frame_at<1, 0, THREADS>(group.x, thread.x);
+}
+
+// `island_frame` with each island's bonds over BOND_GROUP threads (fewer joint laws in
+// series per thread), the rest as in `island_frame`: the same results bit for bit. 512,
+// not 1024: a 1024-thread group of this kernel spills (house-1story 24.5k -> 21.0k
+// substeps/s), 512 gains 3-5 %.
+static const uint BOND_GROUP = 512;
+
+[shader("compute")]
+[numthreads(512, 1, 1)]
+void island_frame_bonds_wide(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    island_frame_at<1, 0, BOND_GROUP>(group.x, thread.x);
 }
 
 // The contact path's narrow islands with their bonds run in the sums dispatch.
@@ -3227,7 +3343,7 @@ void island_frame(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 [numthreads(256, 1, 1)]
 void contact_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
-    island_frame_at<0>(group.x, thread.x);
+    island_frame_at<0, 0, THREADS>(group.x, thread.x);
 }
 
 [shader("compute")]
@@ -3250,7 +3366,7 @@ void sums_and_impactors(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     if (group.x < sums_groups)
         contact_sum_at(group.x * 256u + thread.x);
     else
-        impactor_integrate_at(group.x - sums_groups, thread.x);
+        impactor_integrate_at(group.x - sums_groups, thread.x, false);
 }
 
 // After wide_bonds: the narrow islands' substep (one group each, `halt_index` of them)
@@ -3260,7 +3376,7 @@ void sums_and_impactors(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 void islands_and_wide_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     if (group.x < params.halt_index)
-        island_frame_at<1>(group.x, thread.x);
+        island_frame_at<1, 0, THREADS>(group.x, thread.x);
     else
         wide_chunks_at(group.x - params.halt_index, thread.x);
 }
@@ -3271,7 +3387,7 @@ void islands_and_wide_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThre
 void contact_islands_and_wide_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     if (group.x < params.halt_index)
-        island_frame_at<0>(group.x, thread.x);
+        island_frame_at<0, 0, THREADS>(group.x, thread.x);
     else
         wide_chunks_at(group.x - params.halt_index, thread.x);
 }
@@ -3295,7 +3411,7 @@ void sums_impactors_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadI
     if (group.x < sums_groups)
         contact_sum_at(group.x * 256u + thread.x);
     else if (group.x < sums_groups + imp_groups)
-        impactor_integrate_at(group.x - sums_groups, thread.x);
+        impactor_integrate_at(group.x - sums_groups, thread.x, false);
     else
     {
         // One joint-law call site for both kinds of bond group (code size).
@@ -3317,4 +3433,52 @@ void bond_group_at(uint table, uint gx, uint tid)
     uint i = wg.begin + tid;
     if (i < wg.end && bond_update(i, params.dt, params.fracture != 0, isl.info.w + 1, true))
         islands[wg.island].info.z = isl.info.z | ISLAND_HALT_PENDING;
+}
+
+// A substep's contact pipeline in two dispatches (see STOP_NOW): the contact forces with
+// the narrow contact islands' bonds (both read only the last substep's state) ...
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void forces_and_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint force_groups = ((params.pair_count + params.cand_count) * pair_lane_count() + 255u) / 256u;
+    if (group.x < force_groups)
+        contact_forces_at(group.x * 256u + thread.x, true);
+    else
+        bond_group_at(params.contact_bond_table, group.x - force_groups, thread.x);
+}
+
+// ... then the contact islands, each summing its chunks' contact segments first, with the
+// impactors' integration (other groups: both read only the forces' outputs).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void islands_sums_impactors(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    if (group.x < params.halt_index)
+        island_frame_at<0, 1, THREADS>(group.x, thread.x);
+    else
+        impactor_integrate_at(group.x - params.halt_index, thread.x, true);
+}
+
+// `islands_sums_impactors` for a batch with a settled contact island (it may wake).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void islands_sums_impactors_wake(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    if (group.x < params.halt_index)
+        island_frame_at<0, 2, THREADS>(group.x, thread.x);
+    else
+        impactor_integrate_at(group.x - params.halt_index, thread.x, true);
+}
+
+// The two-dispatch pipeline's travel checks before a batch's first substep.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void travel_start(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i < params.chunk_count)
+        travel_check(i, true);
+    else if (i - params.chunk_count < params.impactor_count)
+        impactor_travel_check(i - params.chunk_count, true);
 }

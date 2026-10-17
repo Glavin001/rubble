@@ -58,6 +58,14 @@ pub struct SolverConfig {
     pub refine_utilization: Option<f64>,
     /// Adaptive mode: time a cluster stays explicit after its last dynamic load.
     pub active_time: f64,
+    /// Quasi-static mode: active clusters integrate explicitly (the tiered coupling's
+    /// impact islands, `stress-gpu` `GpuWorld::set_tiered`); off, every cluster moves
+    /// rigidly between the frame's static solves.
+    pub tiered: bool,
+    /// The GPU's static solves within a fixed budget, (Newton steps, conjugate-gradient
+    /// iterations per step), as Blast's solver runs a fixed iteration count: an
+    /// unconverged solve keeps its start state. `None`: to convergence (the default).
+    pub static_budget: Option<(u32, u32)>,
     /// Adaptive mode: relative load change that wakes a settled cluster.
     pub wake_threshold: f64,
     pub features: Features,
@@ -76,6 +84,8 @@ impl SolverConfig {
             courant_safety: scene.sim.stress_courant_safety.unwrap_or(scene.sim.courant_safety),
             refine_utilization: scene.sim.refine_utilization,
             active_time: 0.5,
+            tiered: false,
+            static_budget: None,
             wake_threshold: 0.02,
             features: scene.sim.features,
             methods: scene.sim.methods,
