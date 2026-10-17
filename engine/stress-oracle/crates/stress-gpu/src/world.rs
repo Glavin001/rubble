@@ -105,6 +105,8 @@ pub struct GpuWorld {
     /// Island segments solved again at a smaller contact step (a plan made within the
     /// segment needed it): local retries of the stress solve, not frame rewinds.
     pub segment_retries: u64,
+    /// Host seconds setting up island segments (snapshot, contact plan, its bound).
+    pub segment_setup_seconds: f64,
     /// The tiered coupling (`set_tiered`, quasi-static mode only): impact islands take
     /// the frame's explicit substeps; every other cluster is settled and takes the
     /// frame's static solve with its cascade (Blast's model outside impacts). A
@@ -224,6 +226,7 @@ impl GpuWorld {
             promoted: std::collections::HashMap::new(),
             unchanged_next: std::collections::HashSet::new(),
             segment_retries: 0,
+            segment_setup_seconds: 0.0,
             tiered: false,
             fast_qs: std::env::var("STRESS_QS_FAST").is_ok_and(|v| v == "1"),
             fast_now: false,
@@ -534,6 +537,7 @@ impl GpuWorld {
                     let view = self.solver.plan_view();
                     let mut contact = self.plan_contact_dt(&view).min(cap);
                     let setup = t_setup.elapsed().as_secs_f64();
+                    self.segment_setup_seconds += setup;
                     let seg_end = self.solver.mirror.time + horizon;
                     self.cost_segment.0 += setup;
                     self.cost_segment.1 += 1;

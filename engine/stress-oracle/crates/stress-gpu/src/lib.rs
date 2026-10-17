@@ -7,6 +7,7 @@
 //! Everything on the GPU is f32; accuracy against the reference is measured, not assumed.
 
 pub mod gpu;
+pub mod gpu_plan;
 pub mod ingest;
 pub mod resident;
 pub mod gate;
@@ -89,6 +90,7 @@ pub mod shaders {
     );
     pub const RESIDENT: ShaderSet = shader_set!("resident", [("resident_poses", (64, 1, 1)), ("resident_filter", (64, 1, 1)), ("resident_static_loads", (256, 1, 1))]);
     pub const CASCADE: ShaderSet = shader_set!("cascade", [("cascade_begin", (64, 1, 1)), ("cascade_restore", (64, 1, 1)), ("cascade_settle", (64, 1, 1)), ("cascade_end", (256, 1, 1))]);
+    pub const PLAN: ShaderSet = shader_set!("plan", [("plan_motion", (64, 1, 1)), ("plan_reach", (64, 1, 1)), ("plan_pair_count", (64, 1, 1)), ("plan_scan", (1024, 1, 1)), ("plan_pair_write", (64, 1, 1)), ("plan_side", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
 }
 

@@ -545,6 +545,9 @@ pub struct GpuSolver {
     /// The resident cascade's kernels, status record and the layout's island records
     /// (by layout generation), made on first use (`resident_cascade`).
     cascade: Option<crate::resident::CascadeKernels>,
+    /// The GPU contact planner (`gpu_plan.rs`) and how its plans compared with the host's.
+    planner: Option<crate::gpu_plan::GpuPlanner>,
+    pub plan_check: crate::gpu_plan::PlanCheck,
     cascade_islands: Option<(u64, wgpu::Buffer)>,
     cascade_status: Option<wgpu::Buffer>,
     pub stopped_at_plan: bool,
@@ -616,6 +619,8 @@ impl GpuSolver {
             quiet_quasi_static: false,
             state_backup: None,
             cascade: None,
+            planner: None,
+            plan_check: Default::default(),
             cascade_islands: None,
             cascade_status: None,
             stopped_at_plan: false,
@@ -653,12 +658,92 @@ impl GpuSolver {
         let stride = self.buffers.params.probe_stride;
         let horizon = if self.contacts_possible() { horizon } else { 0.0 };
         self.plan_until = self.mirror.time + horizon;
+        // `STRESS_GPU_PLAN_CHECK=1`: the GPU's plan from the same state, to compare.
+        let gpu_plan = (horizon > 0.0 && std::env::var("STRESS_GPU_PLAN_CHECK").is_ok_and(|v| v == "1")).then(|| (self.gpu_plan(gpu, horizon), self.layout.chunks.clone()));
         let (layout, buffers) =
             Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded)?;
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
+        if let Some((out, chunks)) = gpu_plan {
+            self.compare_plans(&out, &chunks);
+        }
         Ok(())
+    }
+
+    /// The contact plan over `horizon` made on the GPU from its current state
+    /// (`gpu_plan.rs`), read back.
+    pub fn gpu_plan(&mut self, gpu: &Gpu, horizon: f64) -> crate::gpu_plan::GpuPlanOut {
+        if self.planner.is_none() {
+            self.planner = Some(crate::gpu_plan::GpuPlanner::new(gpu));
+        }
+        let m = &self.mirror;
+        let owned: Vec<bool> = m.clusters.iter().map(|c| !c.driven).collect();
+        let anchored: Vec<bool> = m.clusters.iter().map(|c| c.anchored).collect();
+        let sorted: Vec<Vec<u32>> = self
+            .layout
+            .islands
+            .iter()
+            .map(|isl| {
+                let mut ks: Vec<u32> = (isl.range[0]..isl.range[1]).collect();
+                ks.sort_by_key(|&k| self.layout.chunks[k as usize]);
+                ks
+            })
+            .collect();
+        let g = m.config.gravity;
+        let ground = self.scene().and_then(|s| s.ground.as_ref().map(|g| g.height));
+        self.planner.as_ref().expect("planner").plan(
+            gpu,
+            (&self.buffers.chunk_static, &self.buffers.islands, &self.buffers.state, &self.buffers.impactors),
+            self.layout.chunks.len(),
+            &owned,
+            &anchored,
+            &sorted,
+            self.impactors.len(),
+            horizon,
+            [g.x, g.y, g.z],
+            ground,
+        )
+    }
+
+    fn compare_plans(&mut self, out: &crate::gpu_plan::GpuPlanOut, chunks: &[(usize, usize)]) {
+        use std::collections::HashSet;
+        let plan = &self.layout.plan;
+        let key = |k: u32| chunks[k as usize];
+        let nkey = |k: u32| self.layout.chunks[k as usize];
+        let c = &mut self.plan_check;
+        c.plans += 1;
+        let host: HashSet<((usize, usize), (usize, usize))> = plan.pairs.iter().map(|p| (nkey(p.1), nkey(p.2))).collect();
+        let gpu: HashSet<((usize, usize), (usize, usize))> = out.pairs.iter().map(|&(a, b)| (key(a), key(b))).collect();
+        c.host_pairs += host.len() as u64;
+        c.missed_pairs += host.difference(&gpu).count() as u64;
+        let host_seq: Vec<((usize, usize), (usize, usize))> = plan.pairs.iter().map(|p| (nkey(p.1), nkey(p.2))).collect();
+        let gpu_seq: Vec<((usize, usize), (usize, usize))> = out.pairs.iter().map(|&(a, b)| (key(a), key(b))).collect();
+        if host == gpu && host_seq != gpu_seq {
+            c.order_mismatch += 1;
+        }
+        c.extra_pairs += gpu.difference(&host).count() as u64;
+        let hg: HashSet<(usize, usize)> = plan.ground.iter().map(|&k| nkey(k)).collect();
+        let gg: HashSet<(usize, usize)> = (0..out.ground.len()).filter(|&k| out.ground[k]).map(|k| key(k as u32)).collect();
+        c.missed_ground += hg.difference(&gg).count() as u64;
+        c.extra_ground += gg.difference(&hg).count() as u64;
+        for (i, list) in plan.impactor_chunks.iter().enumerate() {
+            let hi: HashSet<(usize, usize)> = list.iter().map(|&k| nkey(k)).collect();
+            let gi: HashSet<(usize, usize)> = out.impactor.get(i).map(|f| (0..f.len()).filter(|&k| f[k]).map(|k| key(k as u32)).collect()).unwrap_or_default();
+            c.missed_impactor += hi.difference(&gi).count() as u64;
+            c.extra_impactor += gi.difference(&hi).count() as u64;
+        }
+        let host_rot: HashMap<(usize, usize), bool> = plan.rotation_checked.iter().enumerate().map(|(k, &r)| (nkey(k as u32), r)).collect();
+        let host_budget: HashMap<(usize, usize), f64> = plan.budget.iter().enumerate().map(|(k, &b)| (nkey(k as u32), b)).collect();
+        for k in 0..out.budget.len() {
+            let sc = key(k as u32);
+            if host_rot.get(&sc).copied().unwrap_or(false) != out.rotation_checked[k] {
+                c.rotation_mismatch += 1;
+            }
+            if let Some(&b) = host_budget.get(&sc) {
+                c.budget = c.budget.max((out.budget[k] as f64 - b).abs() / b.abs().max(1e-12));
+            }
+        }
     }
 
     /// The contact plan `plan_for(horizon)` would make, on the host only (nothing is

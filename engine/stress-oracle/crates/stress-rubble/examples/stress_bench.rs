@@ -290,7 +290,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     for f in 0..n {
         let before = w.solver.profile.clone();
         let (splits, replans, tail) = (w.solver.host_splits, w.solver.replans, w.tail_seconds);
-        let (prep, refresh, back) = (w.prepare_seconds, w.refresh_seconds, w.write_back_seconds);
+        let (prep, refresh, back, seg) = (w.prepare_seconds, w.refresh_seconds, w.write_back_seconds, w.segment_setup_seconds);
         let t = Instant::now();
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
@@ -298,11 +298,12 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
             let p = &w.solver.profile;
             let ms = |a: f64, b: f64| (a - b) * 1e3;
             eprintln!(
-                "frame {f}: {:.1} ms; prepare {:.1}, refresh {:.1}, write-back {:.1}, tail {:.1}, gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans; clusters {} ({} in islands), ram {:.2} m/s",
+                "frame {f}: {:.1} ms; prepare {:.1}, refresh {:.1}, write-back {:.1}, segment setup {:.1}, tail {:.1}, gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans; clusters {} ({} in islands), ram {:.2} m/s",
                 frames[f],
                 ms(w.prepare_seconds, prep),
                 ms(w.refresh_seconds, refresh),
                 ms(w.write_back_seconds, back),
+                ms(w.segment_setup_seconds, seg),
                 ms(w.tail_seconds, tail),
                 ms(p.gpu, before.gpu),
                 ms(p.encode, before.encode),
@@ -330,7 +331,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let ram = w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let p = &w.solver.profile;
     let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split, "encode_s": p.encode,
-        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "replans": w.solver.replans, "resumed_halts": w.solver.resumed_halts, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
+        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "replans": w.solver.replans, "resumed_halts": w.solver.resumed_halts, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries, "plan_check": format!("{:?}", w.solver.plan_check),
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
     let digest = digest(&w.solver.mirror, &w.solver.impactors);
     let metrics = metrics(scene, &o);

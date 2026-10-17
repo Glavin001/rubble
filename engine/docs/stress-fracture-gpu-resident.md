@@ -216,6 +216,46 @@ measured before the next.
     - Splits are on the host.
     - Every dispatch writes small uniforms. Those are host → GPU writes, not read-backs.
 
+### Island frames: what is left on the host (measured 2026-10-17)
+
+Fractured high-rise 10F rammed, tiered, authored, island frames (M3 Max). A frame is
+~100 ms:
+- **GPU substeps: ~80 ms** (1,188 substeps).
+- **Host: ~20 ms.**
+  - Segment set-up: 9.5 ms. Four segments per frame, each with a snapshot of 1.2–1.7 ms
+    (a full download plus a mirror clone), a full table `build` of 1.0–1.3 ms for the
+    segment's contact plan, and 0.4 ms of preview.
+  - Read-backs per batch: 1.5–4 ms.
+  - Encode: 1.6 ms.
+  - Download at the write-back: 2 ms.
+  - Write-back: 1.5 ms.
+  - Refresh: 0.8 ms.
+
+The download exists because the host contact plan (`contacts::plan`) reads chunk
+positions and velocities. Residency here therefore needs the plan on the GPU. Phases:
+
+- **6a. Contact plan on the GPU.** Per-chunk motion and budgets; cluster-pair culling;
+  chunk-pair sweeps with `may_overlap`; impactor and ground candidates. Compacted in the
+  host plan's order. Checked against `contacts::plan` (the same candidate sets; f32
+  rounding may add borderline candidates, which is conservative).
+  **Done (2026-10-17):** `shaders/plan.slang`, `stress_gpu::gpu_plan::GpuPlanner`,
+  checked by `STRESS_GPU_PLAN_CHECK=1` beside every host plan
+  (`tests/gpu_plan.rs`). Measured on house_ram, wall_ram, b5_v20 and house_car:
+  - 90k host pairs, none missed, in the host's order;
+  - 2 borderline extra pairs on house_car;
+  - ground and impactor candidates and rotation checks identical;
+  - budgets within 1.6e-6.
+- **6b. Plan to tables on the GPU.** The contact index, chunk contact ranges, budgets and
+  planned poses. Pair memory moves into a GPU hash keyed by chunk pair. No `build` per
+  segment.
+- **6c. Segment snapshots as GPU copies.** The step bound (`plan_contact_dt`) becomes a
+  GPU reduction read with the batch status.
+- **6d. Routing on the GPU.** `select_islands` from engine contacts and bounds. Island
+  bodies are frozen and released in rubble's body buffer by kernel. The write-back is
+  done by kernel.
+- **6e. Splits on the GPU.** From the connectivity labels; new rubble bodies from a
+  free-slot list. The f64 mirror is synced only on demand.
+
 Gate per phase: the opt-in resident frame's outcomes within the GPU solve's run-to-run
 spread and the oracle gates on the realtime, accuracy and pack sets; the default path
 bit-identical (`scripts/destruction_peak.py guard`) until the resident frame is adopted.
