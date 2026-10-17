@@ -1,0 +1,292 @@
+diff --git a/engine/crates/engine-webgpu/build.rs b/engine/crates/engine-webgpu/build.rs
+index 4e947a0..4d7bf92 100644
+--- a/engine/crates/engine-webgpu/build.rs
++++ b/engine/crates/engine-webgpu/build.rs
+@@ -11,6 +11,7 @@ const WORLD_ENTRIES: &[&str] = &[
+     "solve_primal_sparse_persistent",
+     "narrowphase_copy_persistent",
+     "narrowphase_defer_copy_persistent",
++    "narrowphase_defer_lazy_copy_persistent",
+     "narrowphase_fresh_copy_persistent",
+     "csr_degree_contacts_persistent",
+     "persist_list_copy_persistent",
+diff --git a/engine/crates/engine-webgpu/demo.html b/engine/crates/engine-webgpu/demo.html
+index 5cbc95e..6d3f83b 100644
+--- a/engine/crates/engine-webgpu/demo.html
++++ b/engine/crates/engine-webgpu/demo.html
+@@ -134,9 +134,11 @@
+     // Ring fused/split 11.04/10.70/11.01/10.67 ms; gables 29.57/27.48,
+     // 29.11/27.25 ms (narrowphase 7.60->4.92), identical workload snapshots.
+     const npMode = qs.get('np') || (reuseCopy ? 'split' : 'fused');
+-    if (!['fused', 'split'].includes(npMode)) throw new Error('np must be fused or split');
+-    if (npMode === 'split' && !reuseCopy) throw new Error('np=split requires reuse=copy');
+-    const npSplit = npMode === 'split';
++    if (!['fused', 'split', 'lazy'].includes(npMode)) throw new Error('np must be fused, split or lazy');
++    if (npMode !== 'fused' && !reuseCopy) throw new Error(`np=${npMode} requires reuse=copy`);
++    const npSplit = npMode !== 'fused';
++    // np=lazy: the defer pass loads bodies only for pairs that reuse (record hash).
++    const npDeferKernel = npMode === 'lazy' ? 'narrowphase_defer_lazy_copy_persistent' : 'narrowphase_defer_copy_persistent';
+     // rest=carry (8ep): pairs whose bodies are both at rest (static or asleep)
+     // are re-emitted from last step's manifolds, so their warm start survives
+     // sleep and a woken body does not restart its resting contacts cold.
+@@ -450,7 +452,7 @@
+       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
+       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
+       ...(reuseCopy ? ['narrowphase_copy_persistent', 'persist_contacts_copy_persistent'] : []),
+-      ...(npSplit ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
++      ...(npSplit ? [npDeferKernel, 'narrowphase_fresh_copy_persistent'] : []),
+       ...(persistList ? ['persist_list_copy_persistent'] : []),
+       ...(localRepair ? ['color_bodies_local'] : []),
+       ...(carryRest ? ['carry_rest_pairs'] : []),
+@@ -1178,7 +1180,7 @@ struct VsOut {
+       if (!reuse && manifoldHashInsert)
+         throw new Error('hashInsert=manifold requires contact reuse (insert before narrowphase)');
+       if (npSplit) {
+-        dispWork(pass, 'narrowphase_defer_copy_persistent', 64);
++        dispWork(pass, npDeferKernel, 64);
+         dispWork(pass, 'narrowphase_fresh_copy_persistent', 64);
+       } else dispWork(pass, reuseCopy ? 'narrowphase_copy_persistent' : 'narrowphase', 64);
+       disp(pass, 'write_work_args', 64);
+diff --git a/engine/crates/engine-webgpu/src/gpu.rs b/engine/crates/engine-webgpu/src/gpu.rs
+index 96dc806..bb564ba 100644
+--- a/engine/crates/engine-webgpu/src/gpu.rs
++++ b/engine/crates/engine-webgpu/src/gpu.rs
+@@ -28,6 +28,8 @@ pub struct WgpuSim {
+     pub(crate) reuse_copy: bool,
+     /// Two-pass narrowphase (8ek): reuse, then shape tests over compacted pairs.
+     pub(crate) np_split: bool,
++    /// np=lazy (`ENGINE_NP=lazy`): the defer pass loads bodies only for reusing pairs.
++    pub(crate) np_lazy: bool,
+     /// Persist work list (8em, HOST_S(22)); requires reuse copy.
+     pub(crate) persist_list: bool,
+     /// Carry resting pairs across sleep (8ep, HOST_S(28)).
+@@ -391,7 +393,8 @@ impl WgpuSim {
+                 && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy"),
+             np_split: persistent_contacts
+                 && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
+-                && std::env::var("ENGINE_NP").as_deref() == Ok("split"),
++                && matches!(std::env::var("ENGINE_NP").as_deref(), Ok("split") | Ok("lazy")),
++            np_lazy: std::env::var("ENGINE_NP").as_deref() == Ok("lazy"),
+             np_defer_limit: 0,
+             persist_list_limit: 0,
+             local_repair: std::env::var("ENGINE_REPAIR").as_deref() == Ok("local"),
+@@ -785,7 +788,12 @@ impl WgpuSim {
+             "ENGINE_HASH_INSERT=manifold requires contact reuse"
+         );
+         if self.np_split {
+-            self.disp_work(&mut pass, "narrowphase_defer_copy_persistent", 64, None);
++            let defer = if self.np_lazy {
++                "narrowphase_defer_lazy_copy_persistent"
++            } else {
++                "narrowphase_defer_copy_persistent"
++            };
++            self.disp_work(&mut pass, defer, 64, None);
+             self.disp_work(&mut pass, "narrowphase_fresh_copy_persistent", 64, None);
+         } else {
+             self.disp_work(
+diff --git a/engine/crates/engine-webgpu/src/gpu_tests.rs b/engine/crates/engine-webgpu/src/gpu_tests.rs
+index 16bebb5..c4583cb 100644
+--- a/engine/crates/engine-webgpu/src/gpu_tests.rs
++++ b/engine/crates/engine-webgpu/src/gpu_tests.rs
+@@ -4671,3 +4671,105 @@ fn waking_a_sleeping_stack_does_not_jolt_or_cascade() {
+             "{nx}x{nz}: dropping resting pairs ({cold_disp} m) no longer exceeds the limit {limit} m; this test no longer discriminates");
+     }
+ }
++
++/// Steps a jostled 8x8x6 box stack with the browser defaults (record warm hash,
++/// reuse=copy, split narrowphase); returns every step's bodies and counters.
++fn lazy_defer_stack_run(lazy: bool) -> Vec<(Vec<BodyState>, StepCounters)> {
++    let mut sim = WgpuSim::new_with_persistent_contacts(WorldCapacity {
++        max_bodies: 4096,
++        max_colliders: 4096,
++        max_contacts: 1 << 16,
++        max_joints: 64,
++        max_candidates: 1 << 16,
++        max_colors: 32,
++        max_commands: 64,
++        max_hull_vertices: 64,
++    })
++    .expect("GPU adapter required for lazy narrowphase equivalence");
++    sim.reuse_copy = true;
++    sim.np_split = true;
++    sim.np_lazy = lazy;
++    sim.persist_list = true;
++    sim.manifold_hash_insert = true;
++    sim.warm_record_hash = true;
++    sim.local_repair = true;
++    sim.carry_rest = true;
++    let mut params = AvbdParams::default();
++    params.iterations = 4;
++    params.flags |= 1; // reuse contacts
++    params.sleep_time = 1.0e6;
++    sim.set_params(params);
++    sim.add_body(BodyState {
++        position: [0.0, -24.5, 0.0],
++        orientation: [0.0, 0.0, 0.0, 1.0],
++        ..BodyState::zeroed()
++    });
++    sim.add_collider(Collider {
++        body: 0,
++        shape: ShapeType::Box as u32,
++        local_rot: [0.0, 0.0, 0.0, 1.0],
++        params: [50.0, 25.0, 50.0, 50.0],
++        ..Collider::zeroed()
++    });
++    for c in 0..64u32 {
++        for y in 0..6u32 {
++            // Every fourth column leans and twists so its pairs keep moving (fresh
++            // SAT); the rest settle and reuse their history.
++            let lean = if c % 4 == 1 { 0.04 * (y as f32) } else { 0.0 };
++            let pos = [(c % 8) as f32 * 1.5 + lean, 1.0 + y as f32 * 1.001, (c / 8) as f32 * 1.5]; // ground top is y = 0.5
++            let h = if c % 4 == 1 { 0.02 * y as f32 } else { 0.0 };
++            let rot = [0.0, h.sin(), 0.0, h.cos()];
++            let id = sim.add_body(BodyState {
++                position: pos,
++                orientation: rot,
++                inv_mass: 1.0,
++                inv_inertia: [6.0; 3],
++                flags: 9,
++                linear_vel: if c == 13 { [0.3, 0.0, 0.0] } else { [0.0; 3] },
++                initial_pos: pos,
++                initial_rot: rot,
++                ..BodyState::zeroed()
++            });
++            sim.add_collider(Collider {
++                body: id,
++                shape: if (c + y) % 7 == 3 { ShapeType::Sphere as u32 } else { ShapeType::Box as u32 },
++                local_rot: [0.0, 0.0, 0.0, 1.0],
++                params: if (c + y) % 7 == 3 { [0.5, 0.0, 0.0, 0.5] } else { [0.5, 0.5, 0.5, 0.8660254] },
++                ..Collider::zeroed()
++            });
++        }
++    }
++    (0..48)
++        .map(|_| {
++            let c = sim.step().expect("step");
++            (sim.download_bodies(), c)
++        })
++        .collect()
++}
++
++/// np=lazy defers pairs without loading their colliders or bodies; every
++/// decision and write must match the full-load defer pass exactly.
++#[test]
++fn lazy_narrowphase_defer_matches_full_loads() {
++    let control = lazy_defer_stack_run(false);
++    let lazy = lazy_defer_stack_run(true);
++    let (mut deferred, mut reused) = (0u64, 0u64);
++    for (step, ((cb, cc), (lb, lc))) in control.iter().zip(&lazy).enumerate() {
++        assert_eq!(cc.overflow_flags, 0, "step {step}: control overflowed");
++        assert_eq!(bytemuck::bytes_of(cc), bytemuck::bytes_of(lc),
++            "step {step}: counters differ (control {cc:?}, lazy {lc:?})");
++        for (i, (a, b)) in cb.iter().zip(lb).enumerate() {
++            assert_eq!(bytemuck::bytes_of(a), bytemuck::bytes_of(b),
++                "step {step}, body {i}: control {a:?} vs lazy {b:?}");
++        }
++        if step > 0 {
++            deferred += u64::from(cc._pad1);
++            reused += u64::from(cc.candidate_count - cc._pad1.min(cc.candidate_count));
++        }
++    }
++    let last = &control.last().unwrap().1;
++    eprintln!("lazy defer: {deferred} deferred / {reused} reused pairs over 47 steps; last contacts {} manifolds {}",
++        last.contact_count, last.manifold_count);
++    assert!(deferred > 1000 && reused > 1000,
++        "fixture must exercise both deferral ({deferred}) and reuse ({reused})");
++}
+diff --git a/engine/slang/kernels/reuse_copy.slang b/engine/slang/kernels/reuse_copy.slang
+index 3f81139..a90544e 100644
+--- a/engine/slang/kernels/reuse_copy.slang
++++ b/engine/slang/kernels/reuse_copy.slang
+@@ -5,6 +5,7 @@
+ #define ENGINE_REUSE_COPY 1
+ #define narrowphase narrowphase_copy_persistent
+ #define narrowphase_defer narrowphase_defer_copy_persistent
++#define narrowphase_defer_lazy narrowphase_defer_lazy_copy_persistent
+ #define narrowphase_fresh narrowphase_fresh_copy_persistent
+ #define persist_contacts persist_contacts_copy_persistent
+ #define persist_list persist_list_copy_persistent
+diff --git a/engine/slang/kernels/world_step.slang b/engine/slang/kernels/world_step.slang
+index 0dda641..7527fbc 100644
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -1196,7 +1196,14 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
+     }
+     }
+     if (count == 0u) return false;
++    return commitReusedContacts(pair, ba, bb, startJ, count);
++}
+ 
++// Emit a reused manifold from history run [startJ, startJ + count).
++[ForceInline]
++bool commitReusedContacts(CandidatePair pair, BodyState ba, BodyState bb, uint startJ, uint count)
++{
++    uint prevOff = HOST_S(8);
+     uint maxC = HOST_S(3);
+     uint maxM = HOST_S(10);
+     uint mslot;
+@@ -1260,6 +1267,22 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
+     return true;
+ }
+ 
++// Record-hash reuse that loads bodies only once the pair is known to reuse:
++// the record lookup needs only collider ids and the generation test only each
++// body's generation word. Same decisions and writes as tryReuseContacts.
++bool tryReuseContactsLazy(CandidatePair pair)
++{
++    uint startJ;
++    uint count;
++    if (!findWarmRecord(pair.colliderA, pair.colliderB, startJ, count)) return false;
++    uint bodyA = gColliders[pair.colliderA].body;
++    uint bodyB = gColliders[pair.colliderB].body;
++    uint generated = asuint(READ_CONTACT(HOST_S(8) + startJ)._pad1);
++    if (generated < max(gBodies[bodyA].generation, gBodies[bodyB].generation)) return false;
++    if (count == 0u) return false;
++    return commitReusedContacts(pair, gBodies[bodyA], gBodies[bodyB], startJ, count);
++}
++
+ // Shape tests and emission for one candidate that did not reuse contacts.
+ [ForceInline]
+ void narrowphaseShapes(CandidatePair pair, Collider ca, Collider cb, BodyState ba, BodyState bb)
+@@ -1525,6 +1548,41 @@ void narrowphase_defer(uint3 tid : SV_DispatchThreadID)
+     narrowphaseShapes(pair, ca, cb, ba, bb);
+ }
+ 
++// Opt-in (np=lazy): narrowphase_defer without loading colliders and bodies for
++// pairs that defer. Requires record warm hash; otherwise the full loads remain.
++[shader("compute")]
++[numthreads(64, 1, 1)]
++void narrowphase_defer_lazy(uint3 tid : SV_DispatchThreadID)
++{
++    uint i = dispatchIndex(tid);
++    uint n = ALOAD(gCounters[0].candidateCount);
++    if (i >= n) return;
++    CandidatePair pair = gCandidates[i];
++    if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u)
++    {
++        if (warmRecords())
++        {
++            if (tryReuseContactsLazy(pair)) return;
++        }
++        else
++        {
++            Collider ra = gColliders[pair.colliderA];
++            Collider rb = gColliders[pair.colliderB];
++            if (tryReuseContacts(pair, gBodies[ra.body], gBodies[rb.body], PARAMS.contactOffset)) return;
++        }
++    }
++    uint k;
++    AADD3(gCounters[0]._pad1, 1u, k);
++    if (k < narrowphaseDeferCapacity(n))
++    {
++        gCandidates[HOST_S(2) - 1u - k] = pair;
++        return;
++    }
++    Collider ca = gColliders[pair.colliderA];
++    Collider cb = gColliders[pair.colliderB];
++    narrowphaseShapes(pair, ca, cb, gBodies[ca.body], gBodies[cb.body]);
++}
++
+ [shader("compute")]
+ [numthreads(64, 1, 1)]
+ void narrowphase_fresh(uint3 tid : SV_DispatchThreadID)

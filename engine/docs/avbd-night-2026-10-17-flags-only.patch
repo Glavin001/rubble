@@ -1,0 +1,44 @@
+diff --git a/engine/slang/kernels/world_step.slang b/engine/slang/kernels/world_step.slang
+index 0dda641..8869227 100644
+--- a/engine/slang/kernels/world_step.slang
++++ b/engine/slang/kernels/world_step.slang
+@@ -102,6 +102,12 @@ static const uint EVENT_OVERFLOW = 4u;
+ 
+ bool bodyIsDynamic(BodyState b) { return b.invMass > 0.0 && (b.flags & BODY_DYNAMIC) != 0u; }
+ bool bodyIsSleeping(BodyState b) { return (b.flags & BODY_SLEEPING) != 0u; }
++// bodyIsDynamic(gBodies[i]) && !bodyIsSleeping(gBodies[i]), loading only invMass and flags.
++bool bodyActiveAt(uint i)
++{
++    uint flags = gBodies[i].flags;
++    return gBodies[i].invMass > 0.0 && (flags & BODY_DYNAMIC) != 0u && (flags & BODY_SLEEPING) == 0u;
++}
+ 
+ [shader("compute")]
+ [numthreads(64, 1, 1)]
+@@ -2497,7 +2503,7 @@ uint compactPreviousColor(uint body)
+     for (uint e = lo; e < hi; e++)
+     {
+         uint other = csrPartner(body, e);
+-        if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
++        if (!bodyActiveAt(other)) continue;
+         uint op = jpPriority(other);
+         if (op > prio || (op == prio && other > body)) return previous;
+         uint encoded = gColorLists[history + other];
+@@ -2522,7 +2528,7 @@ bool jpTryColor(uint body)
+     for (uint e = lo; e < hi; e++)
+     {
+         uint other = csrPartner(body, e);
+-        if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
++        if (!bodyActiveAt(other)) continue;
+         uint oc = ALOAD(gBodyColor[other]);
+         if (oc == 0xFFFFFFFFu)
+         {
+@@ -2729,7 +2735,7 @@ void init_colors(uint3 tid : SV_DispatchThreadID)
+             for (uint e = lo; e < hi; e++)
+             {
+                 uint other = csrPartner(body, e);
+-                if (!bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])) continue;
++                if (!bodyActiveAt(other)) continue;
+                 // Read immutable history, never this dispatch's partially
+                 // initialized colors. A new conflict clears its lower-priority
+                 // endpoint even if the winner itself is pending elsewhere.

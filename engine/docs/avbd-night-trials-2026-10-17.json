@@ -1,0 +1,65 @@
+{
+  "measuredAt": "2026-10-17T04:00Z-06:30Z",
+  "head": "3af9e75",
+  "harness": {
+    "kind": "headless Chrome 155 via Playwright channel 'chrome' (--enable-unsafe-webgpu), apple metal-3, M3 Max; one fresh page per run",
+    "why": "This session was open in no desktop-app window, so the in-app browser pane was hidden (the page still reported 'visible'). The method forbids timing from a hidden pane.",
+    "inPaneCrossCheck": "One hidden-pane ring run gave 10.55 ms against headless 10.30/10.29 ms, the same regime.",
+    "scripts": "Session scratchpad bench.mjs (demo console BENCH/REGRESSION lines), ref.mjs (bench3d tier checkboxes + #run), ab.sh (swap exported WGSL trees between runs). Playwright left node alive ~10 min after browser.close(); process.exit(0) fixes it."
+  },
+  "contention": [
+    "Unreal Editor (ArenaShooter) ran all session at 10-15% CPU.",
+    "From ~02:00Z another session's work raised absolute times ~1.2 ms on gables; only interleaved comparisons are used from then on.",
+    "From ~03:15 local a second Unreal Editor (vibe-land) and other GPU clients pushed ring to 10.96-17.48 ms; nothing after that point is used for decisions."
+  ],
+  "baseline": {
+    "rubble": {
+      "ring110k": {"wallMs": [10.30, 10.29], "phases": "aabbs 0.09 grid 0.85 narrowphase 1.99 warm 0.66 graph 0.59 primal 3.87 dual 1.75 sleep 0.04", "gpuSpanMs": 9.87},
+      "gables506k": {"wallMs": [27.15, 27.25], "phases": "aabbs 0.48 grid 1.86 narrowphase 5.85 warm 1.48 graph 2.84 primal 8.44 dual 5.56 sleep 0.04", "gpuSpanMs": 26.60},
+      "gables506kGraph": "awake 0.16 csrDegree 0.27 csrPrefix 0.05 csrScatter 0.48 csrSort 0.55 colorInit 0.28 colorRepair 0.17 colorPack 0.34 predict 0.51"
+    },
+    "reference": {
+      "source": "inspiration/pinned/three-avbd bench3d.html, same headless harness, Vite 5317",
+      "ring110k": {"wallMs": 10.16, "gpuMs": 10.04, "collision": 3.55, "adjacency": 0.23, "coloring": 0.53, "solve": 5.72, "contacts": 1172628, "colours": 11},
+      "gables506k": {"wallMs": 26.60, "gpuMs": 26.70, "collision": 9.38, "adjacency": 0.99, "coloring": 1.63, "solve": 14.71, "contacts": 4102693, "colours": 9},
+      "jointedDrop34k": {"wallMs": 6.64}
+    },
+    "gap": {
+      "ring": "+0.14 ms (+1.4%)",
+      "gables": "+0.6 ms (+2.3%)",
+      "gablesByPhase": "collision +0.3 (ours 9.67 vs 9.38), adjacency +0.4 (degree+prefix+scatter+sort 1.38 vs 0.99), coloring -0.7 (0.92 vs 1.63), solve incl. predict -0.15 (14.56 vs 14.71)",
+      "ring120Hz": "8.33 ms target; 1.97 ms to go"
+    }
+  },
+  "trials": {
+    "8eu_npLazy": {
+      "verdict": "rejected (neutral)",
+      "gablesWallMs": {"lazy": [28.34, 28.50, 28.41], "split": [28.40, 28.44, 28.46]},
+      "gablesNarrowphaseMs": {"lazy": [6.05, 6.10, 6.12], "split": [6.08, 6.09, 6.06]},
+      "ringWallMsContaminated": {"lazy": [10.10, 10.32], "split": [10.11, 10.11], "note": "overlapped GPU unit tests; indicative only"},
+      "workloadIdentical": true,
+      "test": "lazy_narrowphase_defer_matches_full_loads: 8x8x6 jostled stack, browser defaults, bit-identical bodies and counters for 48 steps; 6397 deferred / 11154 reused pairs; two mutations fail it",
+      "patch": "docs/avbd-night-2026-10-17-np-lazy.patch",
+      "caveat": "Both arms used a build in which tryReuseContacts' commit half was a [ForceInline] helper, so the control WGSL was not byte-identical to HEAD."
+    },
+    "8ev_overheadMicro": {
+      "verdict": "measurement (no change)",
+      "msPerStep": {"direct100": [0.050, 0.048], "direct200": [0.084, 0.084], "indirect100": [0.050, 0.050], "indirect100Empty": [0.052, 0.050], "direct100Plus32EmptyIndirect": [0.062, 0.062], "direct100WriteBuffer": [0.052, 0.048], "direct100WriteBufferPlus6Copies": [0.052, 0.050], "direct100Plus6Copies": [0.050, 0.048]},
+      "conclusion": "Dispatch count, empty indirect rounds and the host-uniform prologue cost <=0.06 ms per step; they do not explain the 0.4-0.5 ms wall-vs-span gap."
+    },
+    "8ev_packCost": {
+      "verdict": "measurement (lead)",
+      "method": "profile=detail with pack_solver_pairs dispatched twice (idempotent), interleaved",
+      "gablesWarmMs": {"once": [1.50, 1.58], "twice": [1.77, 1.81]},
+      "ringWarmMs": {"once": [0.67, 0.67], "twice": [0.71, 0.72]},
+      "blocker": "narrowphase_defer already binds 10 storage buffers (Chrome's limit); bindings 7,10,2,0,14,27,4,25,24,3"
+    },
+    "8ew_flagsOnlyNeighbourLoads": {
+      "verdict": "rejected (neutral at the phase it targets)",
+      "change": "bodyActiveAt(i) loads only invMass and flags at the three neighbour sites (compactPreviousColor, jpTryColor, local repair)",
+      "gablesGraphA_B_A_B": {"wallMs": [26.91, 26.28, 26.81], "csrSortMs": [null, 0.55, 0.55], "note": "B's lower wall comes with lower primal/dual (8.27/5.41 vs 8.49/5.55), kernels this change does not touch, so it is drift; the fourth run and the ring set were lost to a hung harness and then GPU contention"},
+      "finding": "As in 8dx, Metal already drops unused fields of whole-struct loads; the csr_sort cost is the random neighbour lines themselves."
+    }
+  },
+  "ring120FpsAssessment": "Ring primal 3.87 + dual 1.75 ms are near bandwidth floors (8dx: ~30 ns per body-iteration). Collision 3.6 ms and graph 0.6 ms are at reference parity. Even removing graph entirely and a third of collision leaves ~9 ms. 8.33 ms needs a numerics change (narrower contact records or fewer iterations), which needs the user's approval."
+}
