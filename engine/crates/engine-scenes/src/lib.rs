@@ -11,6 +11,7 @@ use glam::{Quat, Vec3};
 
 pub mod joints;
 pub use joints::*;
+pub mod legacy;
 
 #[derive(Clone, Debug)]
 pub struct SceneInfo {
@@ -1028,6 +1029,114 @@ pub fn all_scenes() -> Vec<SceneDef> {
             },
             build: |b| b.pile_spheres(10_000, 0.3),
         },
+        SceneDef {
+            info: SceneInfo {
+                name: "Empty",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(64),
+            },
+            build: legacy::empty,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Ground",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(64),
+            },
+            build: legacy::ground,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Dynamic Friction",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(64),
+            },
+            build: legacy::dynamic_friction,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Static Friction",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(64),
+            },
+            build: legacy::static_friction,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Legacy Pyramid",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(256),
+            },
+            build: legacy::pyramid,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Legacy Stack",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(64),
+            },
+            build: legacy::stack,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Stack Ratio",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(64),
+            },
+            build: legacy::stack_ratio,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Scatter",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(3001),
+            },
+            build: legacy::scatter,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Scatter Boxes",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(4001),
+            },
+            build: legacy::scatter_boxes,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Grid Boxes",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(1537),
+            },
+            build: legacy::grid_boxes,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "Slanted Grid",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(3169),
+            },
+            build: legacy::slanted_grid_boxes,
+        },
+        SceneDef {
+            info: SceneInfo {
+                name: "10k Grid",
+                group: legacy::LEGACY_GROUP,
+                iterations: legacy::LEGACY_ITERATIONS,
+                capacity: cap(10001),
+            },
+            build: legacy::grid_10k_boxes,
+        },
     ]
 }
 
@@ -1073,6 +1182,9 @@ pub fn scene_setup(name: &str) -> anyhow::Result<SceneSetup> {
     })?;
     let mut params = AvbdParams::default();
     params.iterations = scene.info.iterations;
+    if scene.info.group == legacy::LEGACY_GROUP {
+        params.gravity_y = legacy::LEGACY_GRAVITY_Y;
+    }
     if let Ok(v) = std::env::var("PILE_ITERS") {
         if let Ok(n) = v.parse::<u32>() {
             params.iterations = n;
@@ -1185,6 +1297,11 @@ pub fn scene_setup(name: &str) -> anyhow::Result<SceneSetup> {
 
 /// Adds the scene's ground and bodies to `world`.
 pub fn populate(world: &mut dyn SceneSink, scene: &SceneDef) {
+    if scene.info.group == legacy::LEGACY_GROUP {
+        // Legacy scenes bring their own ground.
+        (scene.build)(&mut SceneBuilder::new(world));
+        return;
+    }
     {
         let mut b = SceneBuilder::new(world);
         // three-avbd `ground(extent)` is a static box slab (top at 0.5), not a plane.
