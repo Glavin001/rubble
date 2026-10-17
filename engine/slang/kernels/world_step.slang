@@ -4298,8 +4298,12 @@ struct SolverPair
 };
 BIND(28) RWStructuredBuffer<SolverPair> gSolverPairs;
 static const uint SOLVER_SPHERE = 0x80000000u;
-static const uint SOLVER_BELT = 0x40000000u; // a collider is a track belt (pairBeltDisp)
-static const uint SOLVER_COUNT_MASK = 0x3FFFFFFFu;
+// A track-belt pair (pairBeltDisp). The solve kernels have no binding to spare for
+// colliders, so its belt travel is packed here, once per step: μ moves to bits
+// 14..29 of countAndSphere as a half, and `friction` holds the travel along
+// (t1, t2) as two halves. Other pairs keep the plain layout.
+static const uint SOLVER_BELT = 0x40000000u;
+static const uint SOLVER_COUNT_MASK = 0x3FFFu;
 
 void packSolverPair(uint mi, Manifold mf)
 {
@@ -4309,10 +4313,33 @@ void packSolverPair(uint mi, Manifold mf)
     pair.bodyA = a.body; pair.bodyB = b.body;
     pair.contactStart = mf.contactStart;
     pair.countAndSphere = mf.contactCount |
-        ((a.shape == SHAPE_SPHERE || b.shape == SHAPE_SPHERE) ? SOLVER_SPHERE : 0u) |
-        ((colliderIsBeltLazy(a) || colliderIsBeltLazy(b)) ? SOLVER_BELT : 0u);
+        ((a.shape == SHAPE_SPHERE || b.shape == SHAPE_SPHERE) ? SOLVER_SPHERE : 0u);
     pair.normal = mf.normal; pair.friction = mf.friction;
+    if (colliderIsBeltLazy(a) || colliderIsBeltLazy(b))
+    {
+        float3 belt = pairBeltDisp(a, b, gBodies[a.body], gBodies[b.body], mf.normal);
+        float3 t1, t2;
+        orthonormalBasis(mf.normal, t1, t2);
+        pair.countAndSphere |= SOLVER_BELT | (f32tof16(mf.friction) << 14u);
+        pair.friction = asfloat(f32tof16(dot(belt, t1)) | (f32tof16(dot(belt, t2)) << 16u));
+    }
     gSolverPairs[mi] = pair;
+}
+
+float solverPairFriction(SolverPair pair)
+{
+    return (pair.countAndSphere & SOLVER_BELT) != 0u
+        ? f16tof32((pair.countAndSphere >> 14u) & 0xFFFFu) : pair.friction;
+}
+
+// World belt travel of a pair this step (pairBeltDisp), from its packed halves.
+float3 solverPairBelt(SolverPair pair)
+{
+    if ((pair.countAndSphere & SOLVER_BELT) == 0u) return float3(0, 0, 0);
+    float3 t1, t2;
+    orthonormalBasis(pair.normal, t1, t2);
+    uint bits = asuint(pair.friction);
+    return t1 * f16tof32(bits & 0xFFFFu) + t2 * f16tof32(bits >> 16u);
 }
 
 Contact solverContact(uint index, float3 normal, float friction)
@@ -4506,11 +4533,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             // Track belt: the pair's tangential target this step (zero off belts).
             float3 belt = float3(0, 0, 0);
 #if defined(ENGINE_COMPACT_SOLVE)
-            if ((pair.countAndSphere & SOLVER_BELT) != 0u)
-            {
-                Manifold bm = gManifolds[id - nJ];
-                belt = pairBeltDisp(gColliders[bm.colliderA], gColliders[bm.colliderB], bA, bB, pair.normal);
-            }
+            belt = solverPairBelt(pair);
 #else
             belt = pairBeltDisp(colA, colB, bA, bB, mf.normal);
 #endif
@@ -4543,7 +4566,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             for (uint ci = 0u; ci < contactCount; ci++)
             {
                 #if defined(ENGINE_COMPACT_SOLVE)
-                Contact c = solverContact(contactStart + ci - HOST_S(11), pair.normal, pair.friction);
+                Contact c = solverContact(contactStart + ci - HOST_S(11), pair.normal, solverPairFriction(pair));
 #else
                 Contact c = READ_CONTACT(contactStart + ci);
 #endif
@@ -4896,7 +4919,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         if (pairIndex != SOLVER_DEAD)
         {
             pair = gSolverPairs[pairIndex];
-            c = solverContact(i, pair.normal, pair.friction);
+            c = solverContact(i, pair.normal, solverPairFriction(pair));
         }
 #else
         Contact c = READ_CONTACT(curOff + i);
@@ -4926,11 +4949,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
 #endif
             float3 belt = float3(0, 0, 0);
 #if defined(ENGINE_COMPACT_SOLVE)
-            if ((pair.countAndSphere & SOLVER_BELT) != 0u)
-            {
-                Manifold bm = gManifolds[pairIndex];
-                belt = pairBeltDisp(gColliders[bm.colliderA], gColliders[bm.colliderB], bA, bB, c.normal);
-            }
+            belt = solverPairBelt(pair);
 #else
             belt = pairBeltDisp(colA, colB, bA, bB, c.normal);
 #endif
