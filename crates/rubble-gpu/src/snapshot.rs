@@ -120,17 +120,17 @@ impl<T: bytemuck::Pod + bytemuck::Zeroable> SnapshotRing<T> {
         let done = Arc::new(AtomicBool::new(false));
         {
             let done_cb = done.clone();
-            self.slots[slot_idx]
-                .staging
-                .slice(..byte_len)
-                .map_async(wgpu::MapMode::Read, move |result| {
+            self.slots[slot_idx].staging.slice(..byte_len).map_async(
+                wgpu::MapMode::Read,
+                move |result| {
                     // A failed map leaves `done` false; the slot is reclaimed on
                     // a later poll only once it eventually resolves. Errors here
                     // are non-fatal (the consumer just keeps the older snapshot).
                     if result.is_ok() {
                         done_cb.store(true, Ordering::SeqCst);
                     }
-                });
+                },
+            );
         }
         self.slots[slot_idx].done = done;
         self.slots[slot_idx].len = len;
