@@ -154,7 +154,8 @@ grid diverge at tick ~296).
 ### Breakable bonds (experimental, opt-in)
 
 “Breakable bonds (experimental)” turns each baked bond of the selected level into
-a `JOINT_BOND` weld (`world_step.slang`):
+a D6 bond joint (`JointDesc::bond`, `JOINT_FLAG_BOND`; rows in
+`slang/physics/joints.slang`, see `engine/docs/JOINTS.md`):
 
 - **Rows.** Six AVBD rows in the bond frame (normal, u, v; bending about u and v;
   torsion) about the baked rest pose. Each row has a fixed penalty and an

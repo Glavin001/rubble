@@ -5,6 +5,11 @@ use engine_exec::rigid_plan::HostUniforms;
 use bytemuck::Zeroable;
 use wgpu::util::DeviceExt;
 
+/// Ball joint record for hand-built kernel fixtures (identity frames).
+fn test_ball_joint() -> Joint {
+    JointDesc::ball(0, 0, glam::Vec3::ZERO, glam::Vec3::ZERO).to_gpu()
+}
+
 fn download<T: bytemuck::Pod>(sim: &WgpuSim, binding: usize, offset: u64, count: usize) -> Vec<T> {
     let size = (count * std::mem::size_of::<T>()) as u64;
     let staging = sim.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1647,10 +1652,10 @@ fn sparse_colors_match_ordered_dispatches_across_dependent_chunks_and_empty_buck
             joints.push(Joint {
                 body_a: i,
                 body_b: other,
-                local_anchor_a: [0.03, 0.04, -0.02],
-                local_anchor_b: [-0.02, 0.01, 0.05],
-                k: [1800. + i as f32 * 13.; 6],
-                ..Joint::zeroed()
+                anchor_a: [0.03, 0.04, -0.02],
+                anchor_b: [-0.02, 0.01, 0.05],
+                penalty: [1800. + i as f32 * 13.; 8],
+                ..test_ball_joint()
             });
         }
         sim.joint_count = joints.len() as u32;
@@ -1810,10 +1815,10 @@ fn primal_reduction_tail_fixture(layout: &str) {
             Joint {
                 body_a: j / 9,
                 body_b: ACTIVE,
-                local_anchor_a: [a, 0.2 - a, 0.3],
-                local_anchor_b: [a + 0.04, 0.15 - a, 0.32],
-                k: [2000.0 + j as f32 * 50.0; 6],
-                ..Joint::zeroed()
+                anchor_a: [a, 0.2 - a, 0.3],
+                anchor_b: [a + 0.04, 0.15 - a, 0.32],
+                penalty: [2000.0 + j as f32 * 50.0; 8],
+                ..test_ball_joint()
             }
         })
         .collect();
@@ -1980,10 +1985,10 @@ fn compact_primal_preserves_mixed_compound_contacts_for_all_lane_widths() {
             joints.push(Joint {
                 body_a: body,
                 body_b: 8,
-                local_anchor_a: [0.02 * row as f32, 0.1, -0.15],
-                local_anchor_b: [-0.1, 0.04 * row as f32, 0.12],
-                k: [2000.0 + row as f32 * 50.0; 6],
-                ..Joint::zeroed()
+                anchor_a: [0.02 * row as f32, 0.1, -0.15],
+                anchor_b: [-0.1, 0.04 * row as f32, 0.12],
+                penalty: [2000.0 + row as f32 * 50.0; 8],
+                ..test_ball_joint()
             });
         }
     }
@@ -2797,16 +2802,28 @@ fn local_color_repair_matches_global_rounds_on_a_lattice() {
         }
         sim.queue.submit([enc.finish()]);
         let pending = download::<StepCounters>(&sim, 7, 0, 1)[0]._pad0;
-        assert_eq!(pending, N, "local={local}: every body must be on the repair list");
+        assert_eq!(
+            pending, N,
+            "local={local}: every body must be on the repair list"
+        );
         let args: Vec<u32> = download(&sim, 23, 69 * 12, 1);
-        assert_eq!(args[0], if local { 0 } else { (N + 63) / 64 },
-            "local={local}: slot 69 must be empty exactly when the local pass owns the repair");
+        assert_eq!(
+            args[0],
+            if local { 0 } else { (N + 63) / 64 },
+            "local={local}: slot 69 must be empty exactly when the local pass owns the repair"
+        );
         let colors: Vec<u32> = download(&sim, 12, 0, N as usize);
         for (body, list) in adjacency.iter().enumerate() {
-            assert!(colors[body] < 64, "local={local}, body {body}: left uncolored");
+            assert!(
+                colors[body] < 64,
+                "local={local}, body {body}: left uncolored"
+            );
             for &other in list {
-                assert_ne!(colors[body], colors[other as usize],
-                    "local={local}: adjacent bodies {body} and {other} share color {}", colors[body]);
+                assert_ne!(
+                    colors[body], colors[other as usize],
+                    "local={local}: adjacent bodies {body} and {other} share color {}",
+                    colors[body]
+                );
             }
         }
         results.push(colors);
@@ -2847,7 +2864,7 @@ fn incremental_coloring_reuses_valid_history_and_repairs_new_conflicts() {
     let joint = Joint {
         body_a: 1,
         body_b: 2,
-        ..Joint::zeroed()
+        ..test_ball_joint()
     };
     sim.queue.write_buffer(&sim.bufs[5], 0, bytes_of(&joint));
     let history_offset = (sim.capacity.max_bodies * sim.capacity.max_colors) as u64 * 4;
@@ -3274,7 +3291,7 @@ fn adjacency_order_uses_physical_neighbors_across_append_permutations_and_high_d
         .map(|i| Joint {
             body_a: 0,
             body_b: i + 1,
-            ..Joint::zeroed()
+            ..test_ball_joint()
         })
         .collect();
     sim.queue
@@ -4116,8 +4133,10 @@ fn mixed_contact_reuse_fixture_mode(
                     .sum();
                 assert_eq!(c._pad2, listed,
                     "{context}: the persist list must hold exactly the points still awaiting persistence");
-                assert!(limit == 0 || listed > limit,
-                    "{context}: the capped case must overflow, or the scan fallback goes untested");
+                assert!(
+                    limit == 0 || listed > limit,
+                    "{context}: the capped case must overflow, or the scan fallback goes untested"
+                );
             }
             if np_split.is_some() {
                 // Every pair the reuse pass rejects is counted once (ABI byte 56),
@@ -4901,7 +4920,13 @@ fn wake_disturbance(nx: u32, nz: u32, height: u32, carry: bool) -> (u32, f32, u3
 }
 
 /// `sleep = false` is the control: the same settle time and window, never asleep.
-fn wake_disturbance_mode(nx: u32, nz: u32, height: u32, carry: bool, sleep: bool) -> (u32, f32, u32) {
+fn wake_disturbance_mode(
+    nx: u32,
+    nz: u32,
+    height: u32,
+    carry: bool,
+    sleep: bool,
+) -> (u32, f32, u32) {
     let columns = nx * nz;
     let bodies = columns * height + 1;
     let mut sim = WgpuSim::new_with_persistent_contacts(WorldCapacity {
@@ -4980,7 +5005,8 @@ fn wake_disturbance_mode(nx: u32, nz: u32, height: u32, carry: bool, sleep: bool
     woke.flags = 9;
     woke.sleep_timer = 0.0;
     let offset = (top * std::mem::size_of::<BodyState>()) as u64;
-    sim.queue.write_buffer(&sim.bufs[0], offset, bytes_of(&woke));
+    sim.queue
+        .write_buffer(&sim.bufs[0], offset, bytes_of(&woke));
     sim.last_counters.awake_count = 1;
     let mut max_awake = 0u32;
     let mut max_disp = 0.0f32;
@@ -5024,7 +5050,10 @@ fn waking_a_sleeping_stack_does_not_jolt_or_cascade() {
         let (_, cold_disp, _) = wake_disturbance(nx, nz, 9, false);
         eprintln!("wake {nx}x{nz}: carry {max_disp} m (awake {max_awake}, others woken {woke_others}), cold restart {cold_disp} m, never-asleep creep {creep} m");
         let limit = 1.5 * creep + 5e-5;
-        assert_eq!(woke_others, 0, "{nx}x{nz}: waking one top box woke {woke_others} sleeping neighbours");
+        assert_eq!(
+            woke_others, 0,
+            "{nx}x{nz}: waking one top box woke {woke_others} sleeping neighbours"
+        );
         assert!(max_disp <= limit,
             "{nx}x{nz}: waking one top box moved bodies {max_disp} m, more than 1.5x the never-asleep creep {creep} m; resting contacts lost their warm start while asleep");
         assert!(cold_disp > limit,

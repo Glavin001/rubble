@@ -12,8 +12,8 @@
 
 use crate::scene::{Body, Collider, Joint, Scene, SceneParams, SHAPE_CONVEX};
 use anyhow::{bail, ensure, Result};
-use bytemuck::{bytes_of, Zeroable};
-use engine_schema::{BodyState, Collider as GpuCollider, Joint as GpuJoint};
+use bytemuck::bytes_of;
+use engine_schema::{BodyState, BondSpec, Collider as GpuCollider, Joint as GpuJoint, JointDesc};
 
 pub const BUFFERS: usize = 31;
 /// Host uniform buffers (params, pass table) and the indirect-args buffer.
@@ -37,7 +37,7 @@ pub const STAB_PASS: u32 = 96;
 pub const COUNTER_BYTES: u32 = 80;
 pub const BODY_BYTES: usize = 112;
 pub const COLLIDER_BYTES: usize = 64;
-pub const JOINT_BYTES: usize = 192;
+pub const JOINT_BYTES: usize = std::mem::size_of::<GpuJoint>();
 const COLOR_COUNT_WORDS: usize = 128;
 /// Host upload layout: scratch words, params block, counters, colour counts.
 pub const UPLOAD_SCRATCH: u32 = 0;
@@ -337,24 +337,34 @@ pub fn collider_record(c: &Collider) -> GpuCollider {
     }
 }
 
-/// Bond joint (JOINT_BOND = 7): anchors, rest rotation in `axis_a` +
-/// `limit_min`, normal in `axis_b`, fixed penalties k0..k5 in the bond frame.
+/// Bond joint: the D6 bond preset (`JointDesc::bond`): a weld in the bond
+/// frame (normal, u, v in A's frame) about the rest pose `conj(qA)·qB`, with
+/// fixed per-row penalties and Shardwright's capacities.
 pub fn joint_record(j: &Joint) -> GpuJoint {
-    let f3 = |v: [f64; 3]| v.map(|x| x as f32);
-    let mut g = GpuJoint::zeroed();
-    g.body_a = j.body_a;
-    g.body_b = j.body_b;
-    g.joint_type = 7;
-    g.local_anchor_a = f3(j.anchor_a);
-    g.stiffness = 1e30;
-    g.local_anchor_b = f3(j.anchor_b);
-    g.axis_a = [j.rest[0] as f32, j.rest[1] as f32, j.rest[2] as f32];
-    g.limit_min = j.rest[3] as f32;
-    g.axis_b = f3(j.normal);
-    g.frame_u = f3(j.frame_u);
-    g.strength = j.strength.map(|x| x as f32);
-    g.k = j.k.map(|x| x as f32);
-    g
+    let v3 = |v: [f64; 3]| glam::Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32);
+    let rest = glam::Quat::from_xyzw(
+        j.rest[0] as f32,
+        j.rest[1] as f32,
+        j.rest[2] as f32,
+        j.rest[3] as f32,
+    );
+    // Scene penalties: normal, u, v, about u, about v, about normal; the D6
+    // bond rows: normal, u, v, about normal, about u, about v.
+    let k = [j.k[0], j.k[1], j.k[2], j.k[5], j.k[3], j.k[4]].map(|x| x as f32);
+    JointDesc::bond(
+        j.body_a,
+        j.body_b,
+        v3(j.anchor_a),
+        v3(j.anchor_b),
+        v3(j.normal),
+        v3(j.frame_u),
+        rest.normalize(),
+        BondSpec {
+            k,
+            strength: j.strength.map(|x| x as f32),
+        },
+    )
+    .to_gpu()
 }
 
 /// Host plan of one simulation (see module docs).
