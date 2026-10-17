@@ -531,6 +531,10 @@ pub struct GpuSolver {
     /// run under the plan yet, so the caller may pick the step it needs.
     /// `stopped_at_plan` tells whether the last `step` did.
     pub stop_at_plan: bool,
+    /// The tiered coupling: clusters whose last static solve repeated and whose damage
+    /// commit changed nothing (sorted ids; `GpuWorld::solve_static_all`), the only ones
+    /// its quasi-static mode may leave out as quiet.
+    pub static_stable: Vec<u64>,
     pub stopped_at_plan: bool,
     pub profile: Profile,
     /// The code paths that ran so far (`coverage`): the device's words OR-ed after every
@@ -596,6 +600,7 @@ impl GpuSolver {
             bonds_stale: false,
             plan_log: None,
             stop_at_plan: false,
+            static_stable: Vec::new(),
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
@@ -2210,7 +2215,10 @@ impl GpuSolver {
         let m = &self.mirror;
         let Some(l) = self.loads.as_ref() else { return Vec::new() };
         let sc = &l.scene;
-        if m.config.mode != SolveMode::Adaptive
+        // Adaptive mode, and the tiered coupling's quasi-static mode (a quiet cluster's
+        // static solve repeats bit for bit and its damage commit changes nothing).
+        let tiered_qs = m.config.mode == SolveMode::QuasiStatic && m.config.tiered;
+        if (m.config.mode != SolveMode::Adaptive && !tiered_qs)
             || !sc.loads.is_empty()
             || !sc.events.is_empty()
             || !sc.probes.is_empty()
@@ -2249,6 +2257,7 @@ impl GpuSolver {
                     && !loaded[*ci]
                     // An excluded cluster's bonds are not read back, so its verdict holds.
                     && (self.excluded.binary_search(&cl.id).is_ok() || cl.bonds.iter().all(|&bi| fatigue_still(cl.structure, bi)))
+                    && (!tiered_qs || self.excluded.binary_search(&cl.id).is_ok() || self.static_stable.binary_search(&cl.id).is_ok())
             })
             .map(|(_, cl)| cl.id)
             .collect();

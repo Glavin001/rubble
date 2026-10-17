@@ -117,13 +117,17 @@ pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
     packs_at(&paths, seconds)
 }
 
+/// `--authored`: packs import with their own (game) bond strengths.
+static AUTHORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Any scene packs (`--pack PATH`, repeatable), each intact (idle) and rammed, as `packs`.
 pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scene)> {
     let mut out = Vec::new();
     for path in paths {
         let name = path.file_stem().expect("pack file name").to_string_lossy().to_string();
         let name = name.as_str();
-        let scene = stress_ref::scene_pack::import(&path, name, "structure").unwrap_or_else(|e| panic!("{name} pack: {e}"));
+        let options = stress_ref::scene_pack::ImportOptions { authored_strengths: AUTHORED.load(std::sync::atomic::Ordering::Relaxed) };
+        let scene = stress_ref::scene_pack::import_with(path, name, "structure", options).unwrap_or_else(|e| panic!("{name} pack: {e}"));
         let mut idle = configure(scene.clone(), seconds);
         idle.name = format!("{name}_idle");
         let (mut lo, hi) = stress_ref::scenes::bounds(&scene);
@@ -325,6 +329,7 @@ fn main() {
                 let (n, on) = v.split_once('=').expect("--feature NAME=on|off");
                 overrides.push((n.to_string(), on == "on"));
             }
+            "--authored" => AUTHORED.store(true, std::sync::atomic::Ordering::Relaxed),
             "--pack" => {
                 pack_paths.push(args.next().expect("--pack PATH").into());
                 set = "packs".into();

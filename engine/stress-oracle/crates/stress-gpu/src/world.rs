@@ -847,6 +847,11 @@ impl GpuWorld {
         // (`STRESS_GPU_QS_EVERY_SOLVE=1`, diagnostic: every solve and rebuild, to check
         // that the shortcuts change nothing.)
         let skip_repeats = self.coupled() && !qs_every_solve();
+        // Pass 0's clusters whose solve repeated (from `static_repeats`), and of those the
+        // ones its damage commit left exactly as they were: their next solve repeats too,
+        // so the tiered coupling may leave them out of the GPU tables (`static_stable`).
+        let mut cached: Vec<usize> = Vec::new();
+        let mut stable: Vec<u64> = Vec::new();
         for pass in 0..StaticOptions::default().max_cascade.max(1) {
             if pass > 0 {
                 self.solver.coverage |= crate::coverage::QS_CASCADE;
@@ -854,7 +859,14 @@ impl GpuWorld {
             // Tiered: island clusters keep their explicit state (they are not in
             // equilibrium); the static solve takes the rest.
             let tiered = self.tiered;
-            let clusters: Vec<usize> = (0..self.solver.mirror.clusters.len()).filter(|&ci| !self.solver.mirror.clusters[ci].bonds.is_empty() && !(tiered && !self.solver.mirror.clusters[ci].driven)).collect();
+            // Quiet clusters (left out of the GPU tables) neither: their solve would repeat.
+            let excluded = self.solver.excluded_ids();
+            let clusters: Vec<usize> = (0..self.solver.mirror.clusters.len())
+                .filter(|&ci| {
+                    let cl = &self.solver.mirror.clusters[ci];
+                    !cl.bonds.is_empty() && !(tiered && (!cl.driven || excluded.binary_search(&cl.id).is_ok()))
+                })
+                .collect();
             if pass == 0 {
                 first = clusters.clone();
             }
@@ -865,6 +877,9 @@ impl GpuWorld {
                 let m = &self.solver.mirror;
                 let inputs: Vec<StaticInputs> = clusters.iter().map(|&ci| StaticInputs::of(m, ci, loads)).collect();
                 let mut results: Vec<Option<bool>> = clusters.iter().zip(&inputs).map(|(&ci, k)| self.static_repeats.get(&m.clusters[ci].id).filter(|(was, _)| was == k).map(|(_, ok)| *ok)).collect();
+                if pass == 0 {
+                    cached = clusters.iter().zip(&results).filter(|(_, r)| r.is_some()).map(|(&ci, _)| ci).collect();
+                }
                 let todo: Vec<usize> = clusters.iter().zip(&results).filter(|(_, r)| r.is_none()).map(|(&ci, _)| ci).collect();
                 let solved = if todo.is_empty() { Vec::new() } else { self.equilibrate(gpu, &todo, loads) };
                 let m = &self.solver.mirror;
@@ -897,6 +912,17 @@ impl GpuWorld {
                     if disconnected {
                         to_split.push(ci);
                     }
+                    if changed || disconnected {
+                        continue;
+                    }
+                }
+                // A repeated solve (converged or not) whose commit left its inputs as they
+                // were: the next one repeats too.
+                if pass == 0 && self.tiered && cached.contains(&ci) {
+                    let id = m.clusters[ci].id;
+                    if self.static_repeats.get(&id).is_some_and(|(was, _)| *was == StaticInputs::of(m, ci, loads)) {
+                        stable.push(id);
+                    }
                 }
             }
             let t_solved = t_pass.elapsed().as_secs_f64() * 1e3;
@@ -910,6 +936,8 @@ impl GpuWorld {
             if !any {
                 break;
             }
+            // A later pass may change any cluster: none is stable.
+            stable.clear();
             structural = true;
             // Damage (and topology) changed on the mirror: the next pass solves from it.
             if let Some(l) = self.solver.loads.as_mut() {
@@ -921,6 +949,8 @@ impl GpuWorld {
                 eprintln!("qs pass {pass}: rebuild {:.1} ms", t_rebuild.elapsed().as_secs_f64() * 1e3);
             }
         }
+        stable.sort_unstable();
+        self.solver.static_stable = stable;
         Ok((converged, structural, first))
     }
 

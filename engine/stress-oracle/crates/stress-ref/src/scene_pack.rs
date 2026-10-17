@@ -104,7 +104,22 @@ fn points(v: &Value) -> Vec<Vec3> {
 
 /// Load the scene pack at `path` as a scene named `name` with one body `body_name`,
 /// on the assets' ground plane.
+/// How a pack is imported.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImportOptions {
+    /// Each asset material's joints take the pack's own elastic limits as their
+    /// strengths (tension, compression, shear: what the pack's Blast stress solver
+    /// breaks against), on the calibrated material's stiffness and fracture energy.
+    /// For like-for-like runs against the game; off: the calibrated strengths.
+    pub authored_strengths: bool,
+}
+
 pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Scene, String> {
+    import_with(path, name, body_name, ImportOptions::default())
+}
+
+/// `import` with options.
+pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options: ImportOptions) -> Result<Scene, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let json: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     // A Shardwright export (`shardwright.rs`) is imported by its own reader.
@@ -125,6 +140,16 @@ pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Sce
     let pack_materials: Vec<String> = json["defaults"]["solver"]["materials"]
         .as_array()
         .map(|a| a.iter().map(|m| m["name"].as_str().unwrap_or("").to_string()).collect())
+        .unwrap_or_default();
+    // The pack's own limits by asset material (Pa), scaled by its `materialScale`.
+    let scale = json["defaults"]["solver"]["materialScale"].as_f64().unwrap_or(1.0);
+    let authored: BTreeMap<String, (f64, f64, f64)> = json["defaults"]["solver"]["materials"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| Some((m["name"].as_str()?.to_string(), (m["tensionElastic"].as_f64()? * scale, m["compressionElastic"].as_f64()? * scale, m["shearElastic"].as_f64()? * scale))))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut scene = new_scene(name, &format!("Imported from {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()));
@@ -170,8 +195,25 @@ pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Sce
     for b in sc["bonds"].as_array().ok_or("pack has no bonds")? {
         let (a, bb) = (b["node0"].as_u64().ok_or("bad bond")? as usize, b["node1"].as_u64().ok_or("bad bond")? as usize);
         let asset_material = b["m"].as_u64().and_then(|m| pack_materials.get(m as usize)).cloned().unwrap_or_else(|| node_materials[a].clone());
-        let (_, joint) = map_material(&asset_material)?;
-        scene.materials.entry(joint.to_string()).or_insert_with(|| material_preset(joint));
+        let (_, calibrated) = map_material(&asset_material)?;
+        let joint = match authored.get(&asset_material).filter(|_| options.authored_strengths) {
+            Some(&(tension, compression, shear)) => {
+                let name = format!("{calibrated}@{asset_material}");
+                scene.materials.entry(name.clone()).or_insert_with(|| {
+                    let mut m = material_preset(calibrated);
+                    m.tensile_strength = tension;
+                    m.compressive_strength = compression;
+                    m.cohesion = shear;
+                    m.shear_cap = None;
+                    m
+                });
+                name
+            }
+            None => {
+                scene.materials.entry(calibrated.to_string()).or_insert_with(|| material_preset(calibrated));
+                calibrated.to_string()
+            }
+        };
         // Normal from a to b (the asset's may point either way).
         let mut normal = zup(&b["normal"]).normalized();
         let (ca, cb) = (Vec3::from_array(chunks[a].center), Vec3::from_array(chunks[bb].center));
@@ -208,7 +250,7 @@ pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Sce
             tangent: tangent.to_array(),
             area,
             width,
-            material: joint.to_string(),
+            material: joint,
             rebar,
             buckling_length: None,
             level: 0,
