@@ -34,8 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
+      - uses: ./.github/actions/lfs-pull
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -70,6 +69,8 @@ jobs:
         working-directory: engine
     steps:
       - uses: actions/checkout@v4
+      # engine-fracture's tests read the fracture GLBs.
+      - uses: ./.github/actions/lfs-pull
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

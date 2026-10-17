@@ -28,3 +28,6 @@ autoresearch-results.tsv
 
 # The WebGPU demo site (engine/scripts/build-web.sh)
 engine/web-dist/
+
+# CI: the LFS object list the cached LFS pull keys on (.github/actions/lfs-pull)
+.lfs-objects.txt
