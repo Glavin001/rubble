@@ -45,9 +45,11 @@ The build fails if Slang's CUDA output reads a buffer element after storing to
 it (a Slang miscompile, DECISIONS 8ez); move the read before the store in the
 `.slang` source.
 
-Modal only runs the GPU part: test binaries are built on CPU elsewhere and run
-in a single-use GPU container that exits as soon as they finish (a correctness
-run is about 6 s of a T4, ~$0.001). The build is free locally:
+Modal only runs the GPU part: nothing is compiled or uploaded there except the
+test archive and the runner script, and the binaries run in a single-use GPU
+container that exits as soon as they finish (a correctness run is about 6 s of
+a T4, ~$0.001). Builds are always free: native on Linux x86_64, the GitHub
+runner in CI, and locally in Docker:
 `engine/tools/cuda/build_tests_in_docker.sh` compiles in an x86_64 Ubuntu 22.04
 container (the CI toolchain; emulated on Apple silicon) with cargo's registry
 and target dir in Docker volumes. The first run builds the image (~2 min) and
@@ -64,8 +66,12 @@ engine/tools/modal/run_cuda_tests.sh                           # local build, T4
 engine/tools/modal/run_cuda_tests.sh --perf --gpu L40S         # timing on the RTX 4090's die
 ```
 
-Without Docker, `modal.sh run engine/tools/modal/cuda_tests.py` builds in a
-Modal CPU container instead (cached in a volume; about a cent per build).
+`run_cuda_tests.sh` skips the GPU run when the same archive (packaged
+byte-reproducibly) already passed with the same arguments and build-time
+`ENGINE_*` variables (`engine/target/cuda-green`); `--force` reruns it. CI
+skips the same way by input hash. On Linux x86_64 with slangc and nvcc,
+`modal.sh run engine/tools/modal/cuda_tests.py` builds natively instead of
+taking `--archive`.
 
 Debugging a GPU failure, cheapest first (each test runs in its own process, so
 one CUDA fault does not fail the rest):

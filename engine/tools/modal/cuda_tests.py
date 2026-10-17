@@ -1,30 +1,28 @@
-"""Run engine-cuda's GPU tests on Modal, paying for as few GPU-seconds as possible.
+"""Run engine-cuda's GPU tests on Modal: only GPU seconds are spent there.
 
-Compilation never happens on a GPU container. Test binaries (PTX embedded) are
-built on free or cheap CPU and shipped to a tiny single-use GPU container that
-only executes them:
+Nothing compiles on Modal. Test binaries (device code embedded) are built for
+free and shipped to a tiny single-use GPU container that only executes them
+and exits:
 
-* Linux x86_64 with slangc + nvcc (CI, the Cursor VM): built locally, for free.
-* macOS with Docker: `run_cuda_tests.sh` builds in a local x86_64 container
-  (free) and passes the archive here with --archive.
-* Otherwise: built in a Modal CPU container with a persistent cargo cache
-  volume (about a cent per build).
+* macOS: `run_cuda_tests.sh` builds in local Docker (x86_64 Ubuntu 22.04) and
+  passes the archive here with --archive.
+* Linux x86_64 with slangc + nvcc (the Cursor VM): built natively here.
+* CI: built on the free GitHub runner (`python3 cuda_tests.py --package OUT`).
 
 Usage from the repo root. `modal.sh` runs the pinned Modal CLI in Docker, so
 nothing is installed on the host; `modal.sh setup` logs in once.
 
-    engine/tools/modal/run_cuda_tests.sh                                          # local build, T4 run
-    engine/tools/modal/modal.sh run engine/tools/modal/cuda_tests.py              # Modal build, T4 run
-    engine/tools/modal/modal.sh run engine/tools/modal/cuda_tests.py --perf --gpu L40S   # AD102 timing
+    engine/tools/modal/run_cuda_tests.sh                       # local build, T4 run
+    engine/tools/modal/run_cuda_tests.sh --perf --gpu L40S     # AD102 timing
     engine/tools/modal/modal.sh run engine/tools/modal/cuda_tests.py --archive cuda-tests.tar.gz
-    engine/tools/modal/modal.sh run engine/tools/modal/cuda_tests.py --build-only --out cuda-tests.tar.gz
 
 Prices (modal.com/pricing, 2026-10): T4 $0.000164/s, L4 $0.000222/s,
-L40S $0.000542/s, CPU $0.0000131/core/s. A correctness run is ~1 cent.
+L40S $0.000542/s. A correctness run is ~6 s of a T4 (~$0.001).
 """
 
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import os
@@ -37,10 +35,9 @@ from pathlib import Path
 
 import modal
 
-# Inside Modal containers this module sits at /root/cuda_tests.py; the engine
-# source (build image only) is mounted at /src/engine.
-ENGINE = Path(__file__).resolve().parents[2] if modal.is_local() else Path("/src/engine")
-TOOLCHAIN_SCRIPT = ENGINE / "tools/cuda/install_linux_toolchain.sh"
+# Only the local side builds; inside Modal containers this module sits alone
+# at /root/cuda_tests.py.
+ENGINE = Path(__file__).resolve().parents[2] if modal.is_local() else Path("/")
 CUDA_PKG = "12.8"
 
 app = modal.App("rubble-engine-cuda")
@@ -62,50 +59,6 @@ gpu_debug_image = gpu_image.apt_install("curl", "ca-certificates", "gnupg").run_
     f" && apt-get install -y --no-install-recommends cuda-sanitizer-{CUDA_PKG.replace('.', '-')}"
 )
 
-# Build image: rustup stable + pinned slangc + nvcc (no driver needed for PTX).
-build_image = (
-    modal.Image.from_registry(BASE, add_python="3.12")
-    .apt_install("build-essential", "curl", "ca-certificates", "pkg-config", "git", "rsync")
-    .add_local_file(TOOLCHAIN_SCRIPT, "/opt/rubble/install_linux_toolchain.sh", copy=True)
-    # apt verifies signatures as _apt, which needs the usual sticky /tmp.
-    .run_commands("chmod 1777 /tmp && bash /opt/rubble/install_linux_toolchain.sh")
-    .run_commands(
-        "curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable",
-        env={"CARGO_HOME": "/opt/cargo", "RUSTUP_HOME": "/opt/rustup"},
-    )
-    .env(
-        {
-            "PATH": "/opt/cargo/bin:/opt/slang/bin:/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin:/bin",
-            "RUSTUP_HOME": "/opt/rustup",
-            # engine/rust-toolchain.toml asks for rustfmt/clippy; tests need neither.
-            "RUSTUP_TOOLCHAIN": "stable",
-            "SLANGC": "/opt/slang/bin/slangc",
-            "NVCC": f"/usr/local/cuda-{CUDA_PKG}/bin/nvcc",
-            "ENGINE_CUDA_REQUIRE_PTX": "1",
-        }
-    )
-    # What `cargo test -p engine-cuda` reads (every workspace manifest, and the
-    # stress-oracle crates engine-fracture depends on); mounted per run.
-    .add_local_dir(
-        ENGINE,
-        "/src/engine",
-        ignore=[
-            "target",
-            "**/target",
-            "docs",
-            "web",
-            "**/node_modules",
-            "crates/engine-webgpu/fracture",
-            "**/*.png",
-            "**/*.mp4",
-            "**/*.jsonl",
-        ],
-    )
-)
-
-cache = modal.Volume.from_name("rubble-engine-cuda-cache", create_if_missing=True)
-
-
 def package_tests(engine_dir: Path, env: dict[str, str] | None = None) -> bytes:
     """`cargo test --no-run` for engine-cuda; returns a tar.gz of its test executables."""
     cmd = [
@@ -124,41 +77,18 @@ def package_tests(engine_dir: Path, env: dict[str, str] | None = None) -> bytes:
             exes.append(Path(msg["executable"]))
     if not exes:
         raise RuntimeError("cargo produced no engine-cuda test executables")
+    # Byte-reproducible (no timestamps or owners), so an unchanged build has the
+    # same hash and run_cuda_tests.sh / CI can skip a GPU run that already passed.
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for exe in exes:
-            # Strip cargo's hash suffix: cudasim-0123abcd -> cudasim
-            tar.add(exe, arcname=exe.name.rsplit("-", 1)[0])
+    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w") as tar:
+            for exe in sorted(exes):
+                # Strip cargo's hash suffix: cudasim-0123abcd -> cudasim
+                info = tar.gettarinfo(exe, arcname=exe.name.rsplit("-", 1)[0])
+                info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+                with open(exe, "rb") as f:
+                    tar.addfile(info, f)
     return buf.getvalue()
-
-
-@app.function(
-    image=build_image,
-    cpu=8,
-    memory=8192,
-    timeout=1800,
-    retries=0,
-    single_use_containers=True,
-    volumes={"/cache": cache},
-)
-def build_remote(env_vars: str = "") -> bytes:
-    """CPU-only build with cargo's registry, target dir and a source copy in a volume."""
-    started = time.time()
-    # Build-time switches (ENGINE_CUDA_LOAD_CACHE, ENGINE_CUDA_SASS, ...) ride on --env.
-    env = {"CARGO_HOME": "/cache/cargo", "CARGO_TARGET_DIR": "/cache/target", **dict(filter_env(env_vars))}
-    # Cargo decides what to rebuild from mtimes, and mounted files do not carry
-    # the edit times cargo needs. Sync by content into the volume instead:
-    # changed files get a fresh mtime, unchanged ones keep theirs.
-    Path("/cache/src/engine").mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["rsync", "-r", "--checksum", "--delete", "/src/engine/", "/cache/src/engine/"],
-        check=True,
-    )
-    try:
-        return package_tests(Path("/cache/src/engine"), env)
-    finally:
-        cache.commit()
-        print(f"remote build: {time.time() - started:.0f}s on 8 cores")
 
 
 def filter_env(spec: str) -> list[tuple[str, str]]:
@@ -264,13 +194,9 @@ def main(
     sync: bool = False,
     sanitize: str = "",
     env: str = "",
-    build: str = "auto",
-    build_only: bool = False,
-    out: str = "",
 ):
-    """Build (unless --archive), then run engine-cuda's tests on one GPU.
+    """Run engine-cuda's tests on one GPU from --archive (or a native Linux build).
 
-    --build auto|local|modal: local needs Linux x86_64 with slangc + nvcc.
     --perf runs only the timed test (`ENGINE_CUDA_PERF=1`); use --gpu L40S
     for the RTX 4090-class die, T4 for the cheapest correctness runs.
     --filter NAME runs the tests whose names contain NAME; --sync waits after
@@ -281,19 +207,15 @@ def main(
     """
     if archive:
         data = Path(archive).read_bytes()
+    elif _linux_builder():
+        print("building engine-cuda tests natively")
+        data = package_tests(ENGINE, {"ENGINE_CUDA_REQUIRE_PTX": "1", **dict(filter_env(env))})
     else:
-        where = build if build != "auto" else ("local" if _linux_builder() else "modal")
-        print(f"building engine-cuda tests ({where})")
-        if where == "local":
-            data = package_tests(ENGINE, {"ENGINE_CUDA_REQUIRE_PTX": "1", **dict(filter_env(env))})
-        else:
-            data = build_remote.remote(env)
-        print(f"archive: {len(data) / 1e6:.1f} MB")
-    if out:
-        Path(out).write_bytes(data)
-        print(f"wrote {out}")
-    if build_only:
-        return
+        raise SystemExit(
+            "no --archive: build for free with engine/tools/modal/run_cuda_tests.sh "
+            "(local Docker), or pass an archive from engine/tools/cuda/build_tests_in_docker.sh"
+        )
+    print(f"archive: {len(data) / 1e6:.1f} MB")
     fn = gpu_tests_sanitized if sanitize else gpu_tests
     if gpu != "T4":
         fn = fn.with_options(gpu=gpu)
