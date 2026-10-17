@@ -26,6 +26,15 @@ BENCH = os.path.join(ROOT, "target", "release", "examples", "stress_bench")
 # (set, regime): the destruction scenes the metric covers.
 METRIC_SCENES = [("realtime", "house_ram"), ("towns", "town16_one_ram")]
 GUARD_SETS = ["realtime", "accuracy", "towns"]
+# Quasi-static runs (the Blast-equivalent rung and the tiered coupling): (label, args, env).
+VIBE = "/Users/glavin/Development/vibe-land/destruction/assets/scenes"
+QS_RUNS = [
+    ("blast/house_ram", ["--set", "realtime", "--only", "house_ram", "--config", "blast"], {}),
+    ("blast/town16_one_ram", ["--set", "towns", "--only", "town16_one_ram", "--config", "blast"], {}),
+    ("tiered/house_ram", ["--set", "realtime", "--only", "house_ram", "--config", "tiered"], {"STRESS_TIERED_BUDGET": "4,64"}),
+    ("tiered/highrise_ram", ["--pack", f"{VIBE}/fractured-highrise-10f.json", "--only", "fractured-highrise-10f_ram", "--config", "tiered", "--seconds", "0.2"], {"STRESS_TIERED_BUDGET": "4,64"}),
+    ("tiered/downtown_idle", ["--pack", f"{VIBE}/fractured-downtown.json", "--only", "fractured-downtown_idle", "--config", "tiered", "--seconds", "0.05"], {"STRESS_TIERED_BUDGET": "4,64"}),
+]
 DIGESTS = os.path.join(ROOT, "scripts", "destruction_digests.json")
 
 
@@ -33,9 +42,9 @@ def build():
     subprocess.run(["cargo", "build", "--release", "-q", "-p", "stress-rubble", "--features", "gpu", "--example", "stress_bench"], cwd=ROOT, check=True)
 
 
-def run(set_name, only=None, bench=None):
-    args = [bench or BENCH, "--solver", "rubble-gpu", "--set", set_name] + (["--only", only] if only else [])
-    env = dict(os.environ, STRESS_GPU_FIXED_HORIZON="1")
+def run(set_name, only=None, bench=None, args=None, extra_env=None):
+    args = [bench or BENCH, "--solver", "rubble-gpu"] + (args or (["--set", set_name] + (["--only", only] if only else [])))
+    env = dict(os.environ, STRESS_GPU_FIXED_HORIZON="1", **(extra_env or {}))
     out = subprocess.run(args, cwd=ROOT, env=env, check=True, capture_output=True, text=True).stdout
     return [json.loads(line) for line in out.splitlines() if line.startswith("{")]
 
@@ -71,7 +80,13 @@ def ab(a, b, repeats):
 
 
 def digests():
-    return {f"{s}/{r['regime']}": r.get("digest", "failed: " + str(r.get("failed"))) for s in GUARD_SETS for r in run(s)}
+    out = {f"{s}/{r['regime']}": r.get("digest", "failed: " + str(r.get("failed"))) for s in GUARD_SETS for r in run(s)}
+    for label, args, env in QS_RUNS:
+        if args[0] == "--pack" and not os.path.exists(args[1]):
+            continue
+        rows = run(None, args=args, extra_env=env)
+        out[label] = rows[0].get("digest", "failed: " + str(rows[0].get("failed"))) if rows else "no result"
+    return out
 
 
 def guard(record):

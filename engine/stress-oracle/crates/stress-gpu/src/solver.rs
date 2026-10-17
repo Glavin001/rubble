@@ -173,6 +173,9 @@ struct Params {
     /// bonds run inline in the island kernel), and their table in `index`.
     contact_bond_groups: u32,
     contact_bond_table: u32,
+    /// Scratch: each chunk's external load for the static solves (2 float4, contiguous
+    /// so a cluster's loads upload in one write).
+    sload_base: u32,
 }
 
 
@@ -1011,7 +1014,8 @@ impl GpuSolver {
         let statics_base = cframe_base + 2 * n;
         let cplan_base = statics_base + 23 * n + 2 * bonds.len() + islands.len() + 1;
         let iplan_base = cplan_base + 4 * n;
-        let scratch_len = iplan_base + 4 * impactors.len().max(1);
+        let sload_base = iplan_base + 4 * impactors.len().max(1);
+        let scratch_len = sload_base + 2 * n;
 
         let (gravity, ground) = (m.config.gravity, scene.as_ref().and_then(|s| s.ground.clone()));
         let (g_hi, g_lo) = split1(ground.as_ref().map_or(0.0, |g| g.height));
@@ -1072,6 +1076,7 @@ impl GpuSolver {
             cplan_base: cplan_base as u32,
             iplan_base: iplan_base as u32,
             contact_bond_table,
+            sload_base: sload_base as u32,
             device_connect: std::env::var("STRESS_GPU_DEVICE_CONNECT").map_or(1, |v| (v != "0") as u32),
             ..Default::default()
         };
@@ -2328,19 +2333,15 @@ impl GpuSolver {
         // oracle's `equilibrate_or_keep` of the same cluster from the same state.
         let oracle = std::env::var("STRESS_GPU_CHECK_STATICS").is_ok_and(|v| v == "1").then(|| self.mirror.clone());
         let p = self.buffers.params;
-        // External loads per chunk (body frame), into each chunk's first two slots: staged
-        // in one upload, then copied into place on the GPU ahead of the solve.
-        let mut staged: Vec<[f32; 4]> = Vec::new();
-        let mut places: Vec<usize> = Vec::new();
+        // External loads per chunk (body frame), contiguous by chunk: one write per cluster.
         for &ci in clusters {
             let f = crate::statics::static_loads(&self.mirror, ci, loads);
             let first = self.layout.islands[ci].range[0] as usize;
-            for (k, (fo, mo)) in f.iter().enumerate() {
-                staged.extend([v4(*fo, 0.0), v4(*mo, 0.0)]);
-                places.push(p.statics_base as usize + 23 * (first + k));
+            let staged: Vec<[f32; 4]> = f.iter().flat_map(|(fo, mo)| [v4(*fo, 0.0), v4(*mo, 0.0)]).collect();
+            if !staged.is_empty() {
+                gpu.queue.write_buffer(&self.buffers.scratch, 16 * (p.sload_base as usize + 2 * first) as u64, bytemuck::cast_slice(&staged));
             }
         }
-        let staging = (!staged.is_empty()).then(|| gpu.storage("statics loads", &staged));
         let mut islands = self.layout.islands.clone();
         for isl in islands.iter_mut() {
             isl.info[2] &= !ISLAND_SOLVE;
@@ -2352,11 +2353,6 @@ impl GpuSolver {
         with_sentinel.push(Island::default());
         gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&with_sentinel));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        if let Some(staging) = &staging {
-            for (i, &at) in places.iter().enumerate() {
-                encoder.copy_buffer_to_buffer(staging, (32 * i) as u64, &self.buffers.scratch, (16 * at) as u64, 32);
-            }
-        }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.kernels.statics.pipeline);

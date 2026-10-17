@@ -97,6 +97,7 @@ struct Params
     uint iplan_base;         // scratch: each impactor's contact plan, 4 float4 (zero budget: none)
     uint contact_bond_groups; // narrow contact islands' bond groups in the sums dispatch (0: inline)
     uint contact_bond_table;  // index: those groups (island, begin, end, -)
+    uint sload_base;         // scratch: each chunk's external load for the static solves (2 float4)
 };
 
 static const uint MODE_EXPLICIT = 0;
@@ -3016,6 +3017,9 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     uint b1 = isl.range.w;
     for (uint c = c0 + tid; c < c1; c += THREADS)
     {
+        // The external loads, uploaded contiguously (`sload_base`), into their slots.
+        scratch[sv(c, 0)] = scratch[params.sload_base + 2 * c];
+        scratch[sv(c, 1)] = scratch[params.sload_base + 2 * c + 1];
         scratch[sv(c, 21)] = float4(0.0);
         scratch[sv(c, 22)] = float4(0.0);
     }
