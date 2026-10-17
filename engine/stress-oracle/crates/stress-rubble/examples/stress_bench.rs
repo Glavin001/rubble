@@ -243,7 +243,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
             let p = &w.solver.profile;
             let ms = |a: f64, b: f64| (a - b) * 1e3;
             eprintln!(
-                "frame {f}: {:.1} ms; gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches, {} host splits, {} replans",
+                "frame {f}: {:.1} ms; gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans",
                 frames[f],
                 ms(p.gpu, before.gpu),
                 ms(p.encode, before.encode),
@@ -253,6 +253,8 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
                 ms(p.build, before.build),
                 p.substeps - before.substeps,
                 p.batches - before.batches,
+                p.rounds_used - before.rounds_used,
+                p.rounds_encoded - before.rounds_encoded,
                 w.solver.host_splits - splits,
                 w.solver.replans - replans
             );

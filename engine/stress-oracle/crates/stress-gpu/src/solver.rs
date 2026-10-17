@@ -409,6 +409,10 @@ pub struct Profile {
     pub encode: f64,
     pub batches: u64,
     pub substeps: u64,
+    /// Per-substep rounds encoded, and those some island or impactor ran (the rest
+    /// launch empty after a halt).
+    pub rounds_encoded: u64,
+    pub rounds_used: u64,
     /// Largest contact plan seen: pair candidates, impactor candidates.
     pub max_pairs: usize,
     pub max_impactor_candidates: usize,
@@ -1466,6 +1470,8 @@ impl GpuSolver {
                 ])
                 .into_iter();
             let mut islands: Vec<Island> = bytemuck::pod_collect_to_vec(&read.next().unwrap());
+            self.profile.rounds_encoded += rounds as u64;
+            self.profile.rounds_used += islands.iter().zip(&self.layout.islands).filter(|(_, b)| b.info[0] & (ISLAND_CONTACT | ISLAND_WIDE) != 0).map(|(a, b)| (a.info[3] - b.info[3]) as u64).max().unwrap_or(0);
             let probe_out: Vec<f32> = bytemuck::pod_collect_to_vec(&read.next().unwrap());
             let records: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(&read.next().unwrap());
             let imps_now: Vec<GpuImpactor> = bytemuck::pod_collect_to_vec(&read.next().unwrap());
