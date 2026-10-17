@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH = os.path.join(ROOT, "target", "release", "examples", "stress_bench")
 # (set, regime): the destruction scenes the metric covers.
 METRIC_SCENES = [("realtime", "house_ram"), ("towns", "town16_one_ram")]
-GUARD_SETS = ["realtime", "accuracy"]
+GUARD_SETS = ["realtime", "accuracy", "towns"]
 DIGESTS = os.path.join(ROOT, "scripts", "destruction_digests.json")
 
 

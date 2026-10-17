@@ -68,6 +68,11 @@ fn wide_island_bonds() -> bool {
     std::env::var("STRESS_GPU_ISLAND_BONDS").map_or(true, |v| v != "256")
 }
 
+/// Contact islands' bonds outside the island kernel (`STRESS_GPU_INLINE_BONDS=1`: inline).
+fn external_bonds() -> bool {
+    std::env::var("STRESS_GPU_INLINE_BONDS").map_or(true, |v| v != "1")
+}
+
 /// The contact pipeline in two dispatches per substep (`STRESS_GPU_FUSE=0`: three).
 fn fuse_pipeline() -> bool {
     std::env::var("STRESS_GPU_FUSE").map_or(true, |v| v != "0")
@@ -1280,7 +1285,7 @@ impl GpuSolver {
             gpu.queue.write_buffer(&self.buffers.params_segment, 0, bytemuck::bytes_of(&dispatch_params(&self.buffers, false)));
             // Narrow contact islands' bonds in the sums dispatch (they read only the last
             // substep's state), unless one is settled (its wake check comes first).
-            let bonds_external = self.buffers.contact_bond_groups > 0 && !self.buffers.contact_settled && std::env::var("STRESS_GPU_INLINE_BONDS").map_or(true, |v| v != "1");
+            let bonds_external = self.buffers.contact_bond_groups > 0 && !self.buffers.contact_settled && external_bonds();
             let contact_params = Params { contact_bond_groups: if bonds_external { self.buffers.contact_bond_groups } else { 0 }, ..dispatch_params(&self.buffers, true) };
             gpu.queue.write_buffer(&self.buffers.params_contact, 0, bytemuck::bytes_of(&contact_params));
             // The batch's dispatches: (kernel, workgroups, per-substep params).
@@ -1299,7 +1304,9 @@ impl GpuSolver {
             // The contact pipeline in two dispatches per substep (world.slang STOP_NOW): with
             // its bonds outside the island kernel and no wide island (whose kernels keep
             // the three-dispatch order).
-            let fused = pipeline_steps > 0 && wide_groups == 0 && bonds_external && fuse_pipeline();
+            // Settled contact islands too: one that wakes runs that substep's joint law
+            // in the island kernel.
+            let fused = pipeline_steps > 0 && wide_groups == 0 && self.buffers.contact_bond_groups > 0 && external_bonds() && fuse_pipeline();
             if fused {
                 ops.push((K_TRAVEL, groups(p.chunk_count + p.impactor_count), true));
             }

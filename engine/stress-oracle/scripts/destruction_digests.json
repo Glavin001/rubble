@@ -14,5 +14,8 @@
  "realtime/b5_v20": "cc08e84820ec97e7",
  "realtime/house_idle": "4380443f8abf9479",
  "realtime/house_ram": "a3401e779ca41730",
- "realtime/wall_ram": "cc3428393fd83a27"
+ "realtime/wall_ram": "cc3428393fd83a27",
+ "towns/town16_idle": "44913f157f8c56cb",
+ "towns/town16_one_ram": "84adabc82e623159",
+ "towns/town64_idle": "845040235265a2bb"
 }

@@ -2081,8 +2081,10 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
         bool explicit_step = !settled && !quiet;
         if (explicit_step)
         {
-            // 2. Bonds.
-            if (INLINE_BONDS != 0)
+            // 2. Bonds. The two-dispatch pipeline ran them with the contact forces, except
+            // a settled island's (`bond_group_at` skips it): one that wakes this substep
+            // takes its joint law here.
+            if (INLINE_BONDS != 0 || (FOLD_SUMS != 0 && woke))
             {
                 for (uint i = isl.range.z + tid; i < isl.range.w; i += GROUP)
                     if (bond_update(i, dt, fracture, abs_step, false))
