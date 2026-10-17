@@ -1,0 +1,17 @@
+[package]
+name = "engine-oracles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin scene adapters for three-avbd, avbd-demo3d, Newton, and Jolt oracles"
+
+[dependencies]
+engine-schema.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+glam.workspace = true
+
+[dev-dependencies]
+bytemuck.workspace = true
+engine-slang-build.workspace = true

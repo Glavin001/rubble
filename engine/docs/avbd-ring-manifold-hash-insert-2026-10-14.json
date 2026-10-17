@@ -1,0 +1,24 @@
+{
+  "decision": "8dv",
+  "change": "three-avbd hashInsert shape: contact_hash_insert_manifolds dispatches one thread per previous manifold (HOST_S(13) = previous GPU manifoldCount copied from counter byte 48; HOST_S(14)=1 selects slot 68) and publishes the first live point of each block, the same value the per-contact kernel publishes. Requires contact reuse so it runs before narrowphase overwrites gManifolds.",
+  "defaults": "Browser ring110k and gables506k default hashInsert=manifold; hashInsert=contact is the control. Native opt-in ENGINE_HASH_INSERT=manifold.",
+  "environment": "M3 Max, Claude app Chrome 152.0.7977.130, apple/metal-3, 71 exported WGSL modules",
+  "ringABA_ms": {
+    "control1": 11.85, "candidate": 11.64, "control2": 11.87, "candidateRepeat": 11.68, "defaultAfterAdoption": 11.46,
+    "candidateRoundSamples": [[11.69,11.83,11.78,11.68,11.78],[11.75,11.61,11.58,11.64,11.64]],
+    "phaseHashInsert": {"control": 0.39, "candidate": 0.13}
+  },
+  "gables_ms": {"candidate": 47.56, "control": 48.09, "earlierControl": 47.15, "note": "within run-to-run noise; no measurable gables gain claimed"},
+  "workload": "ring start/end snapshots identical to control: contacts 1184245/1174316, manifolds 227155/246481, colors 15/11, awake 110441, overflow 0",
+  "gates": {
+    "gpuLib": "44/44 (hash regression extended: per-manifold mode, dead heads, zero-count overflow manifold, poisoned manifold past count; slot-68 dispatch for both modes)",
+    "mutation": "ignoring point liveness in the manifold kernel fails: per_manifold=true hash must publish exactly one head per live pair",
+    "browserUnit": "229/229 (mode parsing, encoder ordering before narrowphase, rejection without reuse, manifold-count copy before counter reset)",
+    "nativeRing480": "PASS bit-identical: mean flank 1.1497, ball [-0.035727184,8.4884205,105.45146]",
+    "nativeColumns": "4/4 PASS identical",
+    "nativeCanonicalGables240": "PASS bit-identical 0.118626/0.330369",
+    "metal": "18/18 PASS",
+    "browserRing480": "PASS bit-identical mean 1.1817874610691919",
+    "browserGables240": "PASS bit-identical 0.11721765612202996/0.32660675048828125"
+  }
+}

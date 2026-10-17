@@ -4,6 +4,8 @@ mod buffer;
 mod context;
 mod kernel;
 mod multi_gpu;
+#[cfg(target_arch = "wasm32")]
+mod snapshot;
 
 pub use buffer::{GpuAtomicCounter, GpuBuffer, PingPongBuffer};
 #[cfg(test)]
@@ -11,6 +13,8 @@ pub use context::test_gpu;
 pub use context::GpuContext;
 pub use kernel::{round_up_workgroups, ComputeKernel};
 pub use multi_gpu::{GpuDevice, GpuDevicePool, MultiGpuBuffer, MultiGpuContext, WorkDistribution};
+#[cfg(target_arch = "wasm32")]
+pub use snapshot::SnapshotRing;
 pub use web_time;
 
 /// Broadphase substage wall times (milliseconds), measured around GPU submits and host readbacks.

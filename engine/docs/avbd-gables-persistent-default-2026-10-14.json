@@ -1,0 +1,17 @@
+{
+  "decision": "8ea",
+  "change": "Browser gables506k defaults to persistent 64+32-byte contacts (contacts=canonical keeps the control). Native default unchanged (canonical).",
+  "environment": "M3 Max, Claude app Chrome 152.0.7977.130, apple/metal-3",
+  "gablesThroughput_ms": {"persistent": [35.87, 35.34], "canonical": [47.47, 48.09, 47.15], "reference_three_avbd": 26.66},
+  "persistentPhases_ms": {"grid": 3.28, "narrowphase": 8.52, "warm": 4.13, "graph": 3.74, "primal": 10.22, "dual": 5.51},
+  "canonicalPhases_ms": {"grid": 3.15, "narrowphase": 7.73, "warm": 4.65, "graph": 3.80, "primal": 16.45, "dual": 10.81},
+  "browserGables240Default": {"passed": true, "unhitMean": 0.11725153092827116, "unhitMax": 0.32761669158935547, "balls": [[-48.0686, 4.7770, -73.7557], [48.0318, 4.7769, -73.7557]], "overflow": 0, "awake": 505922},
+  "nativePersistentGables240": {
+    "result": "FAIL unchanged thresholds: mean 0.118642, max 3.001130, 5 bricks > 0.6 m",
+    "offenders": "all column 10, wall rows 5-6 (the rows the column-9 ball crossed ~step 70), courses 2-6, 4.2-13.3 m from column 9's base edge, displaced ~2-4 m along +z",
+    "nearestDisplacedSmashedColumnBrick_m": {"row6": [0.63, 1.31], "row5": [4.73, 5.05]},
+    "interpretation": "Debris from smashed column 9 striking column 10, a chaotic outcome of slightly different trajectories (Naga vs Tint compilation; contact counts already differ by ~200 at step 10 in both layouts), not a structural/scheduling defect: no failures elsewhere among 14 unhit columns, mean matches reference 0.118. Threshold left unchanged; native default stays canonical (passes 0.118626/0.330369).",
+    "diagnosticAdded": "gables_hold failure message now lists every offender with column/row/course, distance to the smashed walls and the nearest displaced smashed-column brick"
+  },
+  "gap": "Gables 35.9 vs reference 26.7 ms (1.34x). Collision (grid+narrowphase+warm+hash) ~16.5 ms vs reference 9.6; graph 3.7 vs 2.5; solve 15.7 vs 14.6."
+}

@@ -1,0 +1,204 @@
+{
+  "classification": "contended diagnostic; no overall speedup or 120 FPS/parity claim",
+  "caveat": "No native tests or compiler work during these three runs. Other GPU work was not isolated. Batch means rounded to 0.01 ms; phase medians are separately profiled and do not sum to wall time. Stable result differs from controls by less than the run variability.",
+  "protocol": "three-avbd-2x5x10",
+  "leadSteps": 60,
+  "untimedStepsPerRound": 3,
+  "stepsPerBatch": 10,
+  "scene": "ring110k",
+  "totalBodies": 110442,
+  "dynamicBodies": 110441,
+  "awake": 110441,
+  "iterations": 4,
+  "dt": 0.016666666666666666,
+  "coloring": "reuse",
+  "overflow": 0,
+  "budgetMs": 8.333333333333334,
+  "allBatchesWithin120Hz": false,
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "hardware": "Apple M3 Max, Mac15,9, 128 GB",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+  "runs": [
+    {
+      "packing": "atomic",
+      "measuredAt": "2026-10-14T08:29:22.644Z",
+      "wallMs": 227.2,
+      "roundMediansMs": [
+        227.2,
+        245.58
+      ],
+      "batchesMs": [
+        [
+          222.42,
+          218.39,
+          227.2,
+          237.6,
+          245.51
+        ],
+        [
+          243.2,
+          248.8,
+          245.58,
+          243.11,
+          248.02
+        ]
+      ],
+      "phases": "aabbs 8.00 \u00b7 grid 1.70 \u00b7 narrowphase 264.70 \u00b7 warm 8.59 \u00b7 graph 32.05 \u00b7 primal 164.89 \u00b7 dual 25.69 \u00b7 sleep 0.07",
+      "colors": 11,
+      "contacts": 1172073
+    },
+    {
+      "packing": "stable",
+      "measuredAt": "2026-10-14T08:30:25.726Z",
+      "wallMs": 225.7,
+      "roundMediansMs": [
+        225.7,
+        250.32
+      ],
+      "batchesMs": [
+        [
+          211.21,
+          225.7,
+          241.5,
+          214.51,
+          239.9
+        ],
+        [
+          241.57,
+          250.4,
+          248.8,
+          250.32,
+          256.88
+        ]
+      ],
+      "phases": "aabbs 8.06 \u00b7 grid 1.64 \u00b7 narrowphase 185.47 \u00b7 warm 1.77 \u00b7 graph 32.11 \u00b7 primal 181.08 \u00b7 dual 27.79 \u00b7 sleep 0.07",
+      "colors": 12,
+      "contacts": 1167418
+    },
+    {
+      "packing": "atomic",
+      "measuredAt": "2026-10-14T08:31:42.462Z",
+      "wallMs": 229.61,
+      "roundMediansMs": [
+        229.61,
+        250.4
+      ],
+      "batchesMs": [
+        [
+          216.7,
+          224.8,
+          229.61,
+          248.8,
+          270.37
+        ],
+        [
+          249.5,
+          251.99,
+          239.21,
+          257.68,
+          250.4
+        ]
+      ],
+      "phases": "aabbs 8.00 \u00b7 grid 1.64 \u00b7 narrowphase 91.42 \u00b7 warm 1.70 \u00b7 graph 32.11 \u00b7 primal 172.95 \u00b7 dual 33.82 \u00b7 sleep 0.07",
+      "colors": 11,
+      "contacts": 1173417
+    }
+  ],
+  "sourceSha256": {
+    "slang/kernels/world_step.slang": "e69f245eb1ab7d45adc48a38134b18f202912edc19625fc477317e16cb508caf",
+    "crates/engine-webgpu/demo.html": "13c01da3dd68740250857381f60cfa61295bd3239b8bcd06c29ce8d1790e2720",
+    "crates/engine-webgpu/physics-benchmark.mjs": "1219ed00d6d7216b20f2494be937e3cc457627340bf5dc22407ac517a3e724a0",
+    "crates/engine-webgpu/generated/wgsl/abi_roundtrip.wgsl": "fdf1f0de5661778a12d251be46b38db3b66935aa04a64b764ed5782b4f496233",
+    "crates/engine-webgpu/generated/wgsl/apply_commands.wgsl": "81af3a18e4f9a15d080848f1e1a4062caf601be8df226bcb14bfd229c7d8c79c",
+    "crates/engine-webgpu/generated/wgsl/broadphase_clear.wgsl": "7cf8980dac205758d2b82251ecf0a5c59b55c10344a8503e77670a130ab85c7f",
+    "crates/engine-webgpu/generated/wgsl/broadphase_grid.wgsl": "f77cad5e44086fb7fe3b6a1a14c01b20d6e1c208063f005e3d33d4ee1dec2f40",
+    "crates/engine-webgpu/generated/wgsl/broadphase_insert.wgsl": "1b31c52f3a1756b8e7c667459dfae54080daa4a330cc10d92d7fcf46e807ce05",
+    "crates/engine-webgpu/generated/wgsl/broadphase_query.wgsl": "41e815de9e008609d539419457a552f6580ce0bfb978fad798f856d043559b9c",
+    "crates/engine-webgpu/generated/wgsl/build_aabbs.wgsl": "4f840b8510c204faf98e3d9cea861b8c2b68653b1d5d4acad6ca3a7851e856fa",
+    "crates/engine-webgpu/generated/wgsl/build_awake_list.wgsl": "23aad7a6a0948945571c2b4807bee5eec675575dd02e609035e44c4afb57e26f",
+    "crates/engine-webgpu/generated/wgsl/ccd_classify.wgsl": "ce785bec5367e5c76e9ae737ebd499166cae82c5bd574d3a1113f870c9b6cc54",
+    "crates/engine-webgpu/generated/wgsl/ccd_sweep.wgsl": "8dfc43afd28e1894addb92a4ac5675bde917a30ff1f9160a783570f62a5b3be4",
+    "crates/engine-webgpu/generated/wgsl/color_bodies.wgsl": "339043f1319b8dbe6219e822f58221896f29cd2ead632180e829e7fd5ccf1271",
+    "crates/engine-webgpu/generated/wgsl/color_fill.wgsl": "2e259d26b65da52814e30e87775456d36f3beaf69f130efda0907176e8188fad",
+    "crates/engine-webgpu/generated/wgsl/color_hist.wgsl": "7f11f9989e2c678b1b856d379f9ee26fd3c99877fb9ff01c3c5dbb592b8e0f72",
+    "crates/engine-webgpu/generated/wgsl/color_prefix.wgsl": "c82b095b4d972738240b28c44d12500989a1f171b9c446191f2d148a5650d0b9",
+    "crates/engine-webgpu/generated/wgsl/contact_hash_clear.wgsl": "cfc5a45286a9c9fa1f64d91cd3698998d86ac76fa9b6f8637e2c99e65777088a",
+    "crates/engine-webgpu/generated/wgsl/contact_hash_insert.wgsl": "87ed13c1dd1b1b03a43806c65dd3d45888134e161a38bbb7a8284565e4a61bf8",
+    "crates/engine-webgpu/generated/wgsl/count_color_tiles.wgsl": "532f2bea481ea5d095e0a1820f7188de52c737847d1db54a27833a837c52c9ba",
+    "crates/engine-webgpu/generated/wgsl/csr_clear.wgsl": "e8761385e7b58282d960f28970658a156c27fa4a126e6a79695b08c4c1ccc42b",
+    "crates/engine-webgpu/generated/wgsl/csr_degree_contacts.wgsl": "a260ba0a0a6db8d71d62ea3e886cabde13631d75ebcf598a804439cb361435ce",
+    "crates/engine-webgpu/generated/wgsl/csr_degree_joints.wgsl": "b1b6e340aa856a47f907a81b06c7e114e221b6ef68576716e61de0d65678cd09",
+    "crates/engine-webgpu/generated/wgsl/csr_prefix.wgsl": "042f8f74c41aa718c50d30427eec45cd7f2fc1e288766ab818f5d08a88e6c8ff",
+    "crates/engine-webgpu/generated/wgsl/csr_prefix_add.wgsl": "6638793de8cfbc19563d54a84149fccf0d4b7b5e63cd086b6667f98eaa1d37f3",
+    "crates/engine-webgpu/generated/wgsl/csr_prefix_block_sums.wgsl": "e46f652db54814b7590369913bec1ffa7fb73e6c0d1c24469db4354c8dd1988f",
+    "crates/engine-webgpu/generated/wgsl/csr_prefix_blocks.wgsl": "1e3d48457bd8a79ce3c8d2f39c301e8698ab0cbb25684fbf75fc514da8cf9c86",
+    "crates/engine-webgpu/generated/wgsl/csr_prefix_finalize.wgsl": "8058f957ecea4beb66bcd3c50cd56b55cb21af87e11874d405797d2fc05e6aa1",
+    "crates/engine-webgpu/generated/wgsl/csr_prefix_init.wgsl": "71511f98edce5ebc211a6be5e83c03a36626d566a7e1c94d2a45ebe12e13fbab",
+    "crates/engine-webgpu/generated/wgsl/csr_prefix_scan.wgsl": "b08b68a1f2c5f789c719267bc221651a026f723b2a062d3b3a0942eb0a30c252",
+    "crates/engine-webgpu/generated/wgsl/csr_prefix_swap.wgsl": "12c419b69d8a8eecc6c621e3cdc80bd46a28cff3c47ee34c24b9355113a0cdf4",
+    "crates/engine-webgpu/generated/wgsl/csr_scan_apply.wgsl": "87e660e70a8f49799dabef1879f54626f7f88e1c5dff3c3e998049f2ff3d9452",
+    "crates/engine-webgpu/generated/wgsl/csr_scan_block.wgsl": "668133f85b49d70d8b3bfe28610dd256336f44872a6bf4a797d02cc2be30c099",
+    "crates/engine-webgpu/generated/wgsl/csr_scan_sums.wgsl": "e5e10b75a25d9e1a8dc3e01a2e42d67286a26029f05cb546123cbd582dd9e379",
+    "crates/engine-webgpu/generated/wgsl/csr_scatter_contacts.wgsl": "65ad5ce47df1d32469249d727ebda5a9180e5d88fc04f1ed703aefb90aa98738",
+    "crates/engine-webgpu/generated/wgsl/csr_scatter_joints.wgsl": "c24a6fd237039a3d01006d618b3c5bf3a3ae1a545ffb1cd08cb8b68f79736679",
+    "crates/engine-webgpu/generated/wgsl/csr_sort.wgsl": "146dcb70f3189d7ab2e84e58eb2153a2312a55e9ad06d6713607d10b4170ae38",
+    "crates/engine-webgpu/generated/wgsl/extract_velocity_sleep.wgsl": "39b7767e41f817062ac3a0fb0ffa60f96b5d2ed34a5a248c2815b347e4208b54",
+    "crates/engine-webgpu/generated/wgsl/fracture_broadphase_insert.wgsl": "5e55cd6c0b548c97949f4c1df812f0f5b4dedd9a86cadc42882c38752fd347c4",
+    "crates/engine-webgpu/generated/wgsl/fracture_broadphase_query.wgsl": "c887d01eb37b5a63fb2eaa946e85a8f3776f6b6483c688a5f683d3f7c183d8c8",
+    "crates/engine-webgpu/generated/wgsl/fracture_build_aabbs.wgsl": "be0a14d74386ab450a45be0bfa0ebd6c89468c4c57034b825a1ebe40aad1398f",
+    "crates/engine-webgpu/generated/wgsl/fracture_narrowphase.wgsl": "dd5e5d246d7930305f26e833cd369d45084e85e800c905b4ff2e56f0e1627980",
+    "crates/engine-webgpu/generated/wgsl/fracture_prepare_candidates.wgsl": "7344849d7021cedf3d6a897d8092c5d21b18399b364da2d3a08f4656d58ed202",
+    "crates/engine-webgpu/generated/wgsl/fracture_sat.wgsl": "fe7d05d023ffae2d92c0ad1bc88e486b1d48be3532605d7c7a7a233084784687",
+    "crates/engine-webgpu/generated/wgsl/fracture_write_sat_args.wgsl": "e53510dbaac1f74e5bb61150772c8eed052aaee31976b48deb0bea5a530ff8f7",
+    "crates/engine-webgpu/generated/wgsl/init_colors.wgsl": "81854dfdc80f2c0eb11c9d772d483be0abc3e3b17f37f1339bc6c8e9b384b646",
+    "crates/engine-webgpu/generated/wgsl/joint_hash_clear.wgsl": "9306a42a343d7c7969a2c3d8a78a3104d73b6a22fcb114019a22c68909933d7b",
+    "crates/engine-webgpu/generated/wgsl/joint_hash_insert.wgsl": "a1b3552c41f142ead42677dcdef5d13230fa8c45c2c12cf81c6e08afbfa45755",
+    "crates/engine-webgpu/generated/wgsl/narrowphase.wgsl": "51cbca6722247fc71c7bfc8b2fab41319cec68cf964f83f6688e757682d40e79",
+    "crates/engine-webgpu/generated/wgsl/pack_color_lists.wgsl": "2e202dc22c1207043b387d1002797d15f3d284aefc9593bc4ecf6692cdb21ae4",
+    "crates/engine-webgpu/generated/wgsl/persist_contacts.wgsl": "16b67c8064c4db0a7ae0c2ffa6abc64eb38904c54a951f0c8544107fb048bbd7",
+    "crates/engine-webgpu/generated/wgsl/predict_bodies.wgsl": "adf4cbdf49d8dcedd1ecc225cea0f6b4d47eaea69e8c627d73ad7c569ecbc855",
+    "crates/engine-webgpu/generated/wgsl/prefix_color_tiles.wgsl": "0d034305fb97fb13d7556da8f2144655ce7075c599d60bf6cae2eb6a5b25ae52",
+    "crates/engine-webgpu/generated/wgsl/recompute_inertia.wgsl": "3dcf575cdf1d95461144dd4ba3ff4670b000ce2a98b72ec1db261f628abe76e6",
+    "crates/engine-webgpu/generated/wgsl/scatter_color_tiles.wgsl": "f4c19c6c2a615c0fd573db851acb00b4654b2df61caa64fa5ff8fa34cfabb2f5",
+    "crates/engine-webgpu/generated/wgsl/sleep_island_commit.wgsl": "808ec5af05fe5f637c1668cf8faf2a068d306b323fd76dc4e3faff15f3719a82",
+    "crates/engine-webgpu/generated/wgsl/sleep_island_gate.wgsl": "5d7cc370a46fd6eaf219e665413e57322c2c3ce84ecf511e85d8e76c4681faff",
+    "crates/engine-webgpu/generated/wgsl/solve_dual.wgsl": "8ca2bad697cd50c8ce999036b9cbb73fa2eb9ac85e92f2a2177e1272a92d5c64",
+    "crates/engine-webgpu/generated/wgsl/solve_primal_all.wgsl": "7e541e3f2e4134fe2cf8066f3ad03ea7a36206353935c001baccb61a20e59989",
+    "crates/engine-webgpu/generated/wgsl/solve_primal_color.wgsl": "174f2b3d206e34a292275b90718cace63a9d01e0bfc5cf4b5da946a4361c6c95",
+    "crates/engine-webgpu/generated/wgsl/solve_primal_one.wgsl": "d9a09f155e710d3fdddc291bd524078ed00502b32380d27d50c9e13f43bc353d",
+    "crates/engine-webgpu/generated/wgsl/update_refs.wgsl": "2cd94c8eee1141f574b111f6904408f890ace8bbbcec654f01a63416f2ad44cf",
+    "crates/engine-webgpu/generated/wgsl/warmstart_joints.wgsl": "a85e3bd28bd99ddc7abde95783fffc74aa7961594217d33322d045cf2058fa1c",
+    "crates/engine-webgpu/generated/wgsl/write_color_args.wgsl": "4efa2d0ed942519cb25810615d8b117ff98ca86551b40bd6b7a15d559c86609d",
+    "crates/engine-webgpu/generated/wgsl/write_sleep_args.wgsl": "4a06f52c4f4e7c0cbab41d428894f7efdf54cbbb25345d53b5bfd9ac5f615d06",
+    "crates/engine-webgpu/generated/wgsl/write_work_args.wgsl": "ad5ba2b2e1f48afdfc57953f39b41f1a7e5da367a8a4e2637ed276c7f0851f37"
+  },
+  "browserCorrectness": {
+    "passed": true,
+    "resetPassed": true,
+    "steps": 480,
+    "bodies": 110441,
+    "batchSize": 10,
+    "packing": "stable",
+    "coloring": "reuse",
+    "initialContacts": 1284737,
+    "final": {
+      "maxFlankDrift": 19.68046200275421,
+      "meanFlankDrift": 1.253235691062944,
+      "ball": [
+        0.15976375341415405,
+        8.49544906616211,
+        105.4155502319336
+      ],
+      "contacts": 1034579,
+      "candidate": 274764,
+      "awake": 110441,
+      "colors": 12,
+      "manifold": 260499,
+      "overflow": 0
+    },
+    "completedAt": "2026-10-14T08:34:15.856Z"
+  }
+}

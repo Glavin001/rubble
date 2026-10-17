@@ -1,0 +1,14 @@
+[package]
+name = "engine-fracture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SHARDWRIGHT_fracture v1 GLB reader and AVBD scene builder (host-agnostic; no GPU)"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+# The stress oracle (engine/stress-oracle): the cooker runs the asset through it.
+stress-ref = { path = "../../stress-oracle/crates/stress-ref" }
+stress-layout = { path = "../../stress-oracle/crates/stress-layout" }

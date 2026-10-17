@@ -1,0 +1,182 @@
+{
+  "experiment": "Cache body IDs and sphere flag in 32-byte solver pairs once per step",
+  "finding": "Small repeatable gain: cached/control/cached 14.78/14.97/14.78 ms. Ring remains below 120 physics FPS; reference parity is not established.",
+  "implementation": "Binding 28 holds bodyA/bodyB, absolute point start, count with sphere flag, normal and friction. Both standalone packing and fused persistence refresh it. Compact primal/dual no longer read colliders or canonical manifolds. Canonical persistence retains collider identity and full feature IDs.",
+  "memoryTradeoff": "32 bytes per candidate capacity; 64 MiB extra allocation for ring110k. Canonical scenes allocate a 32-byte placeholder. This is temporary solver metadata, not persistent compact contacts.",
+  "conditions": "Serial Chrome 155 in-app browser on Apple M3 Max/Metal-3. No native GPU tests or compilation overlap the timed runs. Control retains the same host allocations but does not read or write the pair cache.",
+  "protocol": {
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "wallStatistic": "minimum round median",
+    "recordedBatchPrecisionMs": 0.01,
+    "dynamicBodies": 110441,
+    "totalBodies": 110442,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "layout": "compact64",
+    "packing": "stable",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact"
+  },
+  "runs": [
+    {
+      "variant": "cached A",
+      "measuredAt": "2026-10-14T12:17:53.624Z",
+      "wallMs": 14.78,
+      "batchesMs": [
+        [
+          14.55,
+          15.03,
+          14.97,
+          14.94,
+          14.72
+        ],
+        [
+          14.86,
+          14.53,
+          14.78,
+          14.8,
+          14.39
+        ]
+      ],
+      "primalMs": 5.046272,
+      "dualMs": 2.490368
+    },
+    {
+      "variant": "uncached control",
+      "measuredAt": "2026-10-14T12:20:44.709Z",
+      "wallMs": 14.97,
+      "batchesMs": [
+        [
+          15.04,
+          15.16,
+          15.42,
+          15.42,
+          14.98
+        ],
+        [
+          14.97,
+          14.88,
+          15.1,
+          15.08,
+          14.78
+        ]
+      ],
+      "primalMs": 5.24288,
+      "dualMs": 2.62144
+    },
+    {
+      "variant": "cached B",
+      "measuredAt": "2026-10-14T12:21:53.490Z",
+      "wallMs": 14.78,
+      "batchesMs": [
+        [
+          14.58,
+          15.0,
+          15.1,
+          15.07,
+          14.63
+        ],
+        [
+          14.78,
+          14.83,
+          14.87,
+          14.56,
+          14.44
+        ]
+      ],
+      "primalMs": 5.046272,
+      "dualMs": 2.490368
+    }
+  ],
+  "identicalWorkloadCountersInAllRuns": {
+    "contactsStartEnd": [
+      1184245,
+      1174316
+    ],
+    "manifoldsStartEnd": [
+      227155,
+      246481
+    ],
+    "candidatesStartEnd": [
+      230244,
+      256703
+    ],
+    "colorsStartEnd": [
+      15,
+      11
+    ],
+    "awake": 110441,
+    "overflow": 0
+  },
+  "profilingCaveat": "Phase medians come from later split-pass timestamp samples with readback. They perturb execution and are separate from throughput batches.",
+  "browserAccuracy": {
+    "measuredAt": "2026-10-14T12:22:21.778Z",
+    "check": "ring480/reset",
+    "passed": true,
+    "initialContacts": 1284737,
+    "finalMeanFlankDrift": 1.1817874610691919,
+    "finalBall": [
+      -0.03025226481258869,
+      8.46918773651123,
+      105.19124603271484
+    ],
+    "awake": 110441,
+    "overflow": 0,
+    "comparison": "Checkpoint results exactly match the prior browser baseline."
+  },
+  "nativeAccuracy": {
+    "gpuCompilerUnitTests": "32 passed, including independent dense Newton, mixed compound contacts/all lane widths and reversed sphere dual publication",
+    "compactColumns": "4 passed, including 100k awake for 180 steps; final maxY 9.8998, drift 0.1017, KE 1.0531",
+    "compactRing480": {
+      "passed": true,
+      "finalMeanFlankDrift": 1.1957,
+      "finalBall": [
+        0.086993225,
+        8.487746,
+        105.37984
+      ]
+    },
+    "jsProfilingSchedulingTimingOrdering": "42 passed",
+    "metalOracles": "Metal library 3, avbd_slice 7, oracle_accuracy 5 and columns_wgpu_parity 3 passed; maximum columns position delta 0.000213 m.",
+    "fusedPairCachePoisonCheck": "Passed for separate/fused preparation, 67 ragged manifolds, sleeping/awake endpoints, both history halves, every cached word and tail canary.",
+    "openIssue": "Native compact gables previously exceeds the unchanged 0.60 m drift gate at one brick. Not claimed fixed by this optimization."
+  },
+  "rejectedPrecursor": {
+    "variant": "Direct compact-point primal helper with row-wise accumulation",
+    "measuredAt": "2026-10-14T12:15:58.025Z",
+    "wallMs": 15.14,
+    "batchesMs": [
+      [
+        15.14,
+        15.34,
+        15.48,
+        15.03,
+        15.1
+      ],
+      [
+        15.17,
+        15.07,
+        15.18,
+        15.18,
+        14.84
+      ]
+    ],
+    "primalMs": 5.308416,
+    "finding": "No material gain versus 15.05 ms baseline; reverted before the cached-pair experiment. No full accuracy claim for the rejected variant."
+  },
+  "sourceSha256": {
+    "engine/slang/kernels/world_step.slang": "6e7d59ffa7950af29f8d6749d5d2aa3fdef52d0a498bd8de5fe914d03df44d8a",
+    "engine/slang/physics/common.slang": "907de39b6bd36af53d049624c7a068da10a510e2ea6d396ab1141fb45c97e36f",
+    "engine/crates/engine-webgpu/demo.html": "706756e3757dc4d727e0f995583f183ecc858b0b0ddc02e5f8d5389f6010a5bb",
+    "engine/crates/engine-webgpu/src/gpu.rs": "1526ce36ed14e0ef19b940aa9dd77eed18c8f6e626dc84f6d5ef9b52293a6310",
+    "engine/crates/engine-webgpu/src/gpu_tests.rs": "fbb1b502c512c845e197537e0663143f69f9ff1dd5ce0da1965fbde6b206c00a",
+    "engine/crates/engine-webgpu/src/lib.rs": "74a07f2e06670bfbfd2b6aaeb08cd75e2387f950a469d2b9b3abef0c4f826b91",
+    "engine/crates/engine-webgpu/generated/wgsl/solve_primal_color_compact.wgsl": "41735a027d57a3f84b35fdca9f47c6b9253cc1af19b26c65980950e350e16c18",
+    "engine/crates/engine-webgpu/generated/wgsl/solve_dual_compact.wgsl": "2a6b847bb2604089fdf9f46abc078f63e4c6191c231a0cc33d58e4377e0925f8"
+  }
+}

@@ -1,5 +1,6 @@
 .DS_Store
 /target
+engine/target/
 Cargo.lock
 *.spv
 .claude/
@@ -12,3 +13,6 @@ web/dist*/
 web/src/wasm/
 web/test-results/
 web/playwright-report/
+
+# Shardwright checkouts and bakes (engine/scripts/bake-fracture-assets.sh)
+engine/.tools/

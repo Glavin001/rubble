@@ -1,0 +1,8 @@
+# Pinned OpenSeesPy oracle environment (CPython 3.12, Linux x86_64). Installed with
+# hash checking by install.sh (`uv pip install --require-hashes`). See PINNED.md.
+openseespy==3.8.0.0 \
+    --hash=sha256:ce6a43503b737025f763a87bebacb1cc2fbd82a156982647e9e014a11b85fdbd
+openseespylinux==3.8.0.0 \
+    --hash=sha256:2307e40213f1d7128a5a5151d5c8beee8244b8b988528a58f5e44394a045ba64
+numpy==2.5.3 \
+    --hash=sha256:b7e18c623bb5c95acb3b3328861272816ba199fb531921c5d6d0b675f1fde9e3

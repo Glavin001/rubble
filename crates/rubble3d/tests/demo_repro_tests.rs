@@ -228,9 +228,18 @@ fn demo_stack_ratio_settles_without_persistent_vertical_oscillation_3d() {
 
 #[test]
 fn demo_pyramid_stays_supported_by_floor_without_exploding_3d() {
+    // M3 status: the energy PUMP is fixed (SAT hysteresis + line-pair clip
+    // feature ids; see contact_stability_tests, which gate on key survival
+    // and settle-tail KE). What remains here is marginal: tail_max_speed
+    // ~11 vs limit 10, measured in frames 120..360 — a window that still
+    // contains the legitimate drop-collapse transient (the scene drops rows
+    // with 0.35 m gaps and sheds boxes off the flanks). The settled tail
+    // decays to ~0.001 J. Either the residual collapse dynamics or the
+    // window/threshold needs revisiting; contact_stability_tests carry the
+    // energy-injection regression coverage in the meantime.
     if should_skip_known_failure(
         "demo_pyramid_stays_supported_by_floor_without_exploding_3d",
-        "AVBD solver injects energy into large 3D pyramid stacks; max_speed diverges over time",
+        "drop-collapse transient peaks ~11 vs limit 10 in the 120..360 window; energy pump itself is fixed and gated by contact_stability_tests",
     ) {
         return;
     }

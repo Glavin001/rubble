@@ -3,10 +3,16 @@ import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-// Three.js WebGPURenderer stores per-instance transforms in a uniform buffer.
-// A 4x4 matrix is 64 bytes, so 1024 instances lands exactly on a 64 KiB limit;
-// keep real headroom here to avoid context/device loss on Chrome SwiftShader.
-const MAX_INSTANCES = 768;
+// Three.js r172's WebGPURenderer stores per-instance transforms in a 64 KiB
+// uniform buffer ONLY when the instance count at shader-build time is <= 1000
+// (see InstanceNode.setup). Above 1000 it falls back to instanced vertex
+// attributes, which have no such limit. We force that attribute path via a
+// warm-up compile (see forceInstanceAttributePath), so this cap is bounded by
+// physics/render cost, not the uniform buffer. At 10240 the per-mesh instance
+// data is ~640 KiB of matrices + ~120 KiB of colors, well within vertex-buffer
+// territory. The device-loss issue that motivated the old 768 cap only occurs
+// on the <=1000 uniform path, which the warm-up compile rules out.
+const MAX_INSTANCES = 10240;
 const DEMO_SEED = 0x3d5eed;
 
 const SPHERE_COLORS = [0xff6b35, 0xf7c948, 0x4ecdc4, 0x45b7d1, 0x96ceb4];
@@ -139,6 +145,7 @@ const sphereInstances = new THREE.InstancedMesh(
 sphereInstances.castShadow = true;
 sphereInstances.receiveShadow = true;
 sphereInstances.count = 0;
+sphereInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 scene.add(sphereInstances);
 
 // Per-instance colors
@@ -158,6 +165,7 @@ const boxInstances = new THREE.InstancedMesh(boxGeo, boxMat, MAX_INSTANCES);
 boxInstances.castShadow = true;
 boxInstances.receiveShadow = true;
 boxInstances.count = 0;
+boxInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 boxInstances.instanceColor = new THREE.InstancedBufferAttribute(boxColorAttr, 3);
 scene.add(boxInstances);
 
@@ -173,6 +181,7 @@ let capsuleInstances: THREE.InstancedMesh = new THREE.InstancedMesh(
 capsuleInstances.castShadow = true;
 capsuleInstances.receiveShadow = true;
 capsuleInstances.count = 0;
+capsuleInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 scene.add(capsuleInstances);
 
 sphereInstances.instanceColor = sphereInstanceColor;
@@ -204,6 +213,7 @@ function rebuildCapsuleGeometry(halfHeight: number, radius: number) {
   capsuleInstances.castShadow = true;
   capsuleInstances.receiveShadow = true;
   capsuleInstances.count = 0;
+  capsuleInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   capsuleInstances.instanceColor = capsuleInstanceColor;
   scene.add(capsuleInstances);
 }
@@ -367,15 +377,35 @@ let frameCount = 0;
 let lastFpsTime = performance.now();
 let stepCount = 0;
 let lastRenderMs = 0;
+
+// Fixed-timestep accumulator: the world advances a fixed dt (1/60 s) per step,
+// so stepping once per animation frame would tie simulation speed to the
+// display refresh rate (2x real time on a 120 Hz panel). We instead accumulate
+// real elapsed time and consume it in fixed dt slices, clamped so a stall
+// (minimized tab, GC) can't trigger a catch-up spiral.
+const FIXED_DT = 1 / 60;
+const MAX_CATCHUP_STEPS = 4;
+let simAccumulator = 0;
+let lastFrameTime = performance.now();
 const fpsEl = document.getElementById("fps")!;
 const bodiesEl = document.getElementById("bodies")!;
 const timingsEl = document.getElementById("timings")!;
+const qualitySelect = document.getElementById("quality-select") as HTMLSelectElement;
+
+function qualityIsStability(): boolean {
+  return qualitySelect.value === "stability";
+}
+
+function applyQualityMode() {
+  world.set_accuracy_mode(qualityIsStability());
+  updateTimingsOverlay();
+}
 
 function updateTimingsOverlay() {
-  timingsEl.textContent = world.last_step_overlay_text(
-    renderBackendLabel,
-    lastRenderMs,
-  );
+  const mode = world.accuracy_mode() ? "Stability" : "Speed";
+  const substeps = world.last_substeps();
+  const overlay = world.last_step_overlay_text(renderBackendLabel, lastRenderMs);
+  timingsEl.textContent = `Quality: ${mode} (${substeps} substeps/step)\n${overlay}`;
 }
 
 // Cached data for test hooks (avoids borrow conflicts during async step)
@@ -389,6 +419,37 @@ async function renderScene() {
   renderer.render(scene, camera);
 }
 
+// Three's WebGPU/WebGL node renderers pick the instancing path the first time
+// a mesh's shader is built, based on `mesh.count` at that moment (<=1000 =>
+// 64 KiB uniform buffer; >1000 => unbounded instanced attributes). We compile
+// every instanced mesh with count = MAX_INSTANCES up front so they permanently
+// take the attribute path, then restore the real counts. Zero-filled extra
+// matrices are degenerate (scale 0) and invisible. Safe no-op before the
+// renderer exists (the initial loadScene runs before initRenderer).
+async function forceInstanceAttributePath() {
+  if (!renderer) {
+    return;
+  }
+  const meshes = [sphereInstances, boxInstances, capsuleInstances];
+  const savedCounts = meshes.map((m) => m.count);
+  for (const m of meshes) {
+    m.count = MAX_INSTANCES;
+  }
+  try {
+    if ("isWebGPURenderer" in renderer && renderer.isWebGPURenderer) {
+      await (renderer as WebGPURenderer).compileAsync(scene, camera);
+    } else {
+      renderer.render(scene, camera);
+    }
+  } catch (e) {
+    console.warn("forceInstanceAttributePath compile failed", e);
+  } finally {
+    for (let i = 0; i < meshes.length; i++) {
+      meshes[i].count = savedCounts[i];
+    }
+  }
+}
+
 async function loop_() {
   if (frameInFlight || sceneLoading) {
     return;
@@ -396,21 +457,39 @@ async function loop_() {
   frameInFlight = true;
 
   try {
-  const stepStart = performance.now();
-  await world.step();
-  if (firstStepLoggedFor) {
-    const elapsed = performance.now() - stepStart;
-    console.log(
-      `[scene] "${firstStepLoggedFor}" first step: ${elapsed.toFixed(0)}ms`,
-    );
-    firstStepLoggedFor = null;
-    // Hide the overlay once the first step finishes — proves GPU is alive.
-    const loadingEl = document.getElementById("loading");
-    if (loadingEl) loadingEl.style.display = "none";
-  }
-  stepCount++;
+  // Advance simulation by real elapsed wall-clock time in fixed dt slices, so
+  // the sim runs at real time regardless of the animation-frame rate.
+  const now = performance.now();
+  let elapsed = (now - lastFrameTime) / 1000;
+  lastFrameTime = now;
+  if (elapsed > 0.25) elapsed = 0.25; // clamp after a stall (avoid catch-up spiral)
+  simAccumulator += elapsed;
 
-  // Cache data after step completes (world is no longer borrowed)
+  let steps = 0;
+  while (simAccumulator >= FIXED_DT && steps < MAX_CATCHUP_STEPS) {
+    const stepStart = performance.now();
+    await world.step();
+    simAccumulator -= FIXED_DT;
+    steps++;
+    stepCount++;
+    if (firstStepLoggedFor) {
+      const elapsedMs = performance.now() - stepStart;
+      console.log(
+        `[scene] "${firstStepLoggedFor}" first step: ${elapsedMs.toFixed(0)}ms`,
+      );
+      firstStepLoggedFor = null;
+      // Hide the overlay once the first step finishes — proves GPU is alive.
+      const loadingEl = document.getElementById("loading");
+      if (loadingEl) loadingEl.style.display = "none";
+    }
+  }
+  // If we saturated the catch-up budget, drop the backlog so we never run
+  // faster than real time to "make up" for a long stall.
+  if (steps === MAX_CATCHUP_STEPS) {
+    simAccumulator = 0;
+  }
+
+  // Cache data after the step(s) complete (world is no longer borrowed)
   syncTransformCache();
 
   const t0 = performance.now();
@@ -423,12 +502,12 @@ async function loop_() {
   // Step timings reflect the last `world.step()`; refresh every frame so the overlay
   // is never up to ~1s stale (FPS is still averaged once per second).
   updateTimingsOverlay();
-  const now = performance.now();
-  if (now - lastFpsTime >= 1000) {
+  const nowFps = performance.now();
+  if (nowFps - lastFpsTime >= 1000) {
     fpsEl.textContent = `FPS: ${frameCount}`;
     bodiesEl.textContent = `Bodies: ${world.body_count()}`;
     frameCount = 0;
-    lastFpsTime = now;
+    lastFpsTime = nowFps;
   }
 
   // Update test hooks
@@ -560,6 +639,12 @@ async function loadScene(name: string) {
   updateTransforms();
   updateTimingsOverlay();
 
+  // Lock every instanced mesh (including any capsule mesh rebuilt above) onto
+  // the instanced-attribute path before the animation loop renders them at the
+  // real, possibly <=1000, count. sceneLoading is still true here so the loop
+  // is paused. No-op until the renderer is initialized (initial load path).
+  await forceInstanceAttributePath();
+
   const totalBodies = world.body_count();
   const dropped =
     (bodies.filter((b) => b.type === 0).length - sphereCount) +
@@ -643,8 +728,16 @@ async function main() {
     void loadScene(sceneSelect.value);
   });
 
+  qualitySelect.addEventListener("change", () => {
+    applyQualityMode();
+  });
+
   // Init renderer
   await initRenderer();
+
+  // The initial scene was built before the renderer existed, so its meshes have
+  // not been compiled yet. Force the attribute path now, before the first frame.
+  await forceInstanceAttributePath();
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 3, 0);

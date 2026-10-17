@@ -1,5 +1,26 @@
 # AGENTS.md
 
+- Assume our target is 10,000+ active rigid bodies when calculating performance at scale
+- Node: the repo pins its version in `.nvmrc`. Run `nvm use` (or rely on an
+  nvm `cd` hook) before any `node`/`npm` command.
+- Never make tests, builds or runtime code depend on `inspiration/`: it is
+  gitignored and absent in CI, fresh clones and worktrees. Read it to
+  understand an algorithm, then write our own tests from its definition and
+  physical invariants (see `engine/crates/engine-webgpu/tests/spatial_order.test.mjs`
+  and `scene_builders.test.mjs`); do not import or record its outputs.
+- Performance work must not trade away physics quality or accuracy. Never make
+  lossy changes on our own initiative: simplifying or decimating collision
+  shapes, dropping contacts or solver iterations, coarsening timesteps,
+  loosening tolerances, or skipping work whose result could differ. Prefer
+  lossless optimizations (same results, less work). When a limit or trade-off
+  is genuinely wanted:
+  - make it an explicit, engine-wide configuration that fails with a clear
+    error when input exceeds it, never something that silently degrades input;
+  - or fix it at the source (for example, re-export assets from Shardwright with
+    the desired settings) rather than altering data at load time.
+  Measuring a lossy option to report its effect is fine; adopting it needs the
+  user's decision.
+
 ## Cursor Cloud specific instructions
 
 > All standard build/test/lint/web commands and prerequisites are in `README.md`.

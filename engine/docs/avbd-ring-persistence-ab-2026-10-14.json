@@ -1,0 +1,291 @@
+{
+  "classification": "Manifold scheduling alone did not improve full ring throughput; default unchanged. Fused packing experiment follows separately.",
+  "conditions": {
+    "adapter": "Apple M3 Max / apple metal-3",
+    "browser": "Codex in-app Chrome 155",
+    "serialFreshScenes": true,
+    "overlappingNativeGpuOrCompilerWork": false
+  },
+  "protocol": {
+    "name": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contactLayout": "compact64",
+    "adjacency": "physical",
+    "packing": "stable",
+    "awakeAtStartAndEnd": 110441,
+    "overflowAtStartAndEnd": 0
+  },
+  "runs": [
+    {
+      "mode": "manifold",
+      "time": "2026-10-14T11:09:05.830Z",
+      "wallMs": 17.98,
+      "roundMediansMs": [
+        17.98,
+        18.06
+      ],
+      "batchMeansMs": [
+        [
+          17.88,
+          17.91,
+          18.16,
+          18.43,
+          17.98
+        ],
+        [
+          18.33,
+          17.82,
+          18.17,
+          18.06,
+          17.93
+        ]
+      ],
+      "warmPhaseMs": 1.572864
+    },
+    {
+      "mode": "contact",
+      "time": "2026-10-14T11:09:20.917Z",
+      "wallMs": 17.8,
+      "roundMediansMs": [
+        17.91,
+        17.8
+      ],
+      "batchMeansMs": [
+        [
+          17.33,
+          17.89,
+          17.91,
+          18.15,
+          18.24
+        ],
+        [
+          17.8,
+          17.87,
+          17.91,
+          17.72,
+          17.41
+        ]
+      ],
+      "warmPhaseMs": 1.31072
+    },
+    {
+      "mode": "manifold",
+      "time": "2026-10-14T11:09:41.670Z",
+      "wallMs": 17.93,
+      "roundMediansMs": [
+        18.39,
+        17.93
+      ],
+      "batchMeansMs": [
+        [
+          18.27,
+          17.99,
+          18.39,
+          18.58,
+          18.51
+        ],
+        [
+          18.29,
+          17.98,
+          17.89,
+          17.93,
+          17.7
+        ]
+      ],
+      "warmPhaseMs": 1.572864
+    }
+  ],
+  "precision": "CPU batch values rounded to 0.01 ms; warm phase uses later split-pass samples and is not the batched window.",
+  "generatedSha256": {
+    "engine/crates/engine-webgpu/generated/wgsl/persist_contacts.wgsl": "5000157dce11c855ac2de7cb5ad913877e28aa624bb0abab0ad440ee458ce1cf",
+    "engine/crates/engine-webgpu/generated/wgsl/persist_manifolds.wgsl": "6bcbaa2d0a9c616cb27df89c43b90bee2fe711c67c7466d413e3fcf38391c4a1"
+  },
+  "budgetMs": 8.333333333333334,
+  "allBatchesWithin120Hz": false,
+  "fusedComparison": {
+    "classification": "No repeatable total-wall advantage over point scheduling; do not enable by default.",
+    "runs": [
+      {
+        "mode": "fused",
+        "time": "2026-10-14T11:12:47.129Z",
+        "wallMs": 17.53,
+        "roundMediansMs": [
+          17.73,
+          17.53
+        ],
+        "batchMeansMs": [
+          [
+            17.65,
+            17.73,
+            18.18,
+            18.18,
+            17.73
+          ],
+          [
+            17.53,
+            17.64,
+            17.58,
+            17.38,
+            17.12
+          ]
+        ],
+        "warmPhaseMs": 2.031616,
+        "primalIncludingPreparationMs": 4.25984
+      },
+      {
+        "mode": "contact",
+        "time": "2026-10-14T11:13:00.731Z",
+        "wallMs": 17.52,
+        "roundMediansMs": [
+          17.86,
+          17.52
+        ],
+        "batchMeansMs": [
+          [
+            17.5,
+            17.86,
+            17.92,
+            17.84,
+            18.07
+          ],
+          [
+            17.76,
+            17.66,
+            17.46,
+            17.38,
+            17.52
+          ]
+        ],
+        "warmPhaseMs": 1.31072,
+        "primalIncludingPreparationMs": 5.177344
+      },
+      {
+        "mode": "fused",
+        "time": "2026-10-14T11:13:36.451Z",
+        "wallMs": 17.49,
+        "roundMediansMs": [
+          17.93,
+          17.49
+        ],
+        "batchMeansMs": [
+          [
+            17.77,
+            18.0,
+            17.6,
+            17.93,
+            18.09
+          ],
+          [
+            17.79,
+            17.75,
+            17.49,
+            17.39,
+            17.21
+          ]
+        ],
+        "warmPhaseMs": 2.097152,
+        "primalIncludingPreparationMs": 4.325376
+      }
+    ],
+    "phaseCaveat": "Fusing moves compact preparation from the primal phase to the warm phase. The lower primal number is not a standalone solver improvement.",
+    "workload": {
+      "fusedStart": {
+        "contact": 1184346,
+        "manifold": 227354,
+        "awake": 110441,
+        "overflow": 0,
+        "color": 16
+      },
+      "fusedEnd": {
+        "contact": 1166107,
+        "manifold": 244672,
+        "awake": 110441,
+        "overflow": 0,
+        "color": 11
+      },
+      "controlStart": {
+        "contact": 1181436,
+        "manifold": 226701,
+        "awake": 110441,
+        "overflow": 0,
+        "color": 16
+      },
+      "controlEnd": {
+        "contact": 1169450,
+        "manifold": 245632,
+        "awake": 110441,
+        "overflow": 0,
+        "color": 11
+      }
+    },
+    "sourceSha256": {
+      "engine/slang/kernels/world_step.slang": "67a581e96185a1393ff3e5e99aacecdab249f550d1c35b678ae805820bbb79c8",
+      "engine/slang/kernels/compact_solve.slang": "0cca39051dd873aea957df27f12ffe6745bf7d58d08057704d90bf2db91480d4",
+      "engine/crates/engine-webgpu/demo.html": "0705515b1c36375ae6b1d9de9e7c0442d433ae34540c23d4343038b27e13f609",
+      "engine/crates/engine-webgpu/generated/wgsl/persist_manifolds_compact.wgsl": "9ce0848de7b7cb2b0654e8c86e7398608c111e204e5d93ebf553b153e32e2797"
+    }
+  },
+  "validation": {
+    "focusedGpuAndCompilerTests": 28,
+    "browserFusedRing480AndReset": {
+      "passed": true,
+      "awake": 110441,
+      "initialContacts": 1284737,
+      "finalMeanFlankDrift": 1.2417343879892706,
+      "finalBall": [
+        -0.17175260186195374,
+        8.493505477905273,
+        105.28073120117188
+      ],
+      "overflow": 0
+    },
+    "nativeFused": {
+      "columnsTests": 4,
+      "gables240": {
+        "passed": true,
+        "awake": 505922,
+        "unhitMeanDrift": 0.118659,
+        "unhitMaxDrift": 0.330453
+      },
+      "ring480": {
+        "passed": true,
+        "awake": 110441,
+        "meanFlankDrift": 1.1669,
+        "ball": [
+          -0.03354791,
+          8.493122,
+          105.44467
+        ]
+      }
+    },
+    "testContract": "67 ragged manifolds spanning multiple workgroups, 0..8 points, dead points and reserved holes, both buffer halves and sleeping endpoints. Canonical and compact metadata/canaries exact; computed float values allow 1e-6 relative/absolute reassociation. Separate duplicate-feature fixture checks expected corner identity and once-only decay.",
+    "metal": {
+      "libraryTests": 3,
+      "sliceTests": 7,
+      "columnsParityTests": 3,
+      "accuracyOracles": 5,
+      "maxColumnsPositionDelta": 0.000213
+    },
+    "canonicalDefaultPath": {
+      "gables240": {
+        "passed": true,
+        "unhitMeanDrift": 0.118626,
+        "unhitMaxDrift": 0.330369
+      },
+      "ring480": {
+        "passed": true,
+        "meanFlankDrift": 1.1635,
+        "ball": [
+          0.06553558,
+          8.492919,
+          105.73839
+        ]
+      }
+    },
+    "encoderOrchestrationTests": 8,
+    "rangeFixturePairs": "two distinct collider pairs with different endpoint transforms; all cold fields, inactive contacts and tail canaries exact"
+  }
+}

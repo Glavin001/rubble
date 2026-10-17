@@ -4,6 +4,7 @@
 //! The pipeline: predict → AABB → broadphase → narrowphase → AVBD solver → velocity extraction.
 
 pub mod gpu;
+pub mod mirror;
 
 use glam::{Mat3, Quat, Vec3, Vec4};
 use rubble_math::{
@@ -44,6 +45,56 @@ pub struct SimConfig {
     /// Allowable penetration depth before solver correction kicks in.
     /// Small positive value reduces jitter for resting contacts.
     pub penetration_slop: f32,
+    /// AVBD alpha-stabilization factor in [0, 1). Each step the solver only
+    /// corrects `(1 - contact_stabilization)` of the initial constraint
+    /// violation, bleeding penetration out gradually instead of snapping it to
+    /// zero (which injects energy).
+    ///
+    /// Note: the paper runs α=0.95 on its *history* formulation
+    /// (`C = C*(x) − α·C*(x_prev)`). Rubble uses a recovery-clamp formulation
+    /// (`C = (1−α)·C0 + J·Δx`, rate-limited), where high α parks resting
+    /// contacts ~20× deeper at equilibrium and the deep manifolds churn.
+    /// Measured on the pyramid/stack ladder, 0.3 is the stable optimum for
+    /// this formulation.
+    pub contact_stabilization: f32,
+    /// Cap on the normal-direction penalty stiffness ramp. High values (1e8-1e10)
+    /// give paper-faithful hard contacts; the preconditioned LDL^T solve keeps the
+    /// system well-conditioned at these magnitudes.
+    pub k_max_normal: f32,
+    /// Cap on the tangential (friction) penalty stiffness ramp. Kept well below
+    /// `k_max_normal` (references use 1e6): overly stiff friction rows fight the
+    /// normal rows and cause tangential buzzing.
+    pub k_max_tangential: f32,
+    /// Post-solve linear speed clamp in m/s (0 disables). A position-space solver
+    /// cannot produce unbounded velocities from a single good step, but a bad
+    /// frame (deep spawn overlap) must not launch bodies across the world.
+    pub max_speed: f32,
+    /// Post-solve angular speed clamp in rad/s (0 disables).
+    pub max_ang_speed: f32,
+    /// Dynamic (kinetic) friction as a fraction of static friction, in (0, 1].
+    /// 1.0 = single-coefficient Coulomb model (previous behavior).
+    pub dynamic_friction_ratio: f32,
+    /// Number of substeps per `step()`. Each substep runs the full detection +
+    /// solve at `dt / substeps`. 1 (default) matches the paper's single-step
+    /// regime; raise for very high-energy scenes. This is the *floor*: when
+    /// adaptive substepping is enabled (see `max_substeps`) the engine may run
+    /// more.
+    pub substeps: u32,
+    /// Upper bound on adaptive substepping. When `max_substeps > substeps`, each
+    /// `step()` measures the fastest body and subdivides `dt` so no body travels
+    /// more than `max_substep_travel` per substep, clamped to
+    /// `[substeps, max_substeps]`. This prevents fast bodies (e.g. a deep stack
+    /// compacting at several m/s) from tunnelling past the speculative contact
+    /// margin into deep overlap, which the penalty solver would otherwise
+    /// convert into an explosion. Resting scenes stay at `substeps` (no cost).
+    /// Set equal to `substeps` to disable adaptivity.
+    pub max_substeps: u32,
+    /// Target maximum linear travel (metres) for the fastest body within a single
+    /// substep when adaptive substepping is active. Smaller = more substeps under
+    /// motion = deeper stacks stay stable, at higher cost during impacts. Chosen
+    /// well below typical body thickness so contacts are found before deep
+    /// penetration forms.
+    pub max_substep_travel: f32,
 }
 
 impl Default for SimConfig {
@@ -51,7 +102,7 @@ impl Default for SimConfig {
         Self {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             dt: 1.0 / 60.0,
-            solver_iterations: 20,
+            solver_iterations: 12,
             max_bodies: 65536,
             beta: 1.0e4,
             k_start: 1e4,
@@ -60,7 +111,38 @@ impl Default for SimConfig {
             contact_offset: 0.02,
             restitution_threshold: 0.5,
             penetration_slop: 0.005,
+            contact_stabilization: 0.3,
+            k_max_normal: 1.0e9,
+            k_max_tangential: 1.0e6,
+            max_speed: 100.0,
+            max_ang_speed: 64.0,
+            dynamic_friction_ratio: 1.0,
+            substeps: 1,
+            max_substeps: 1,
+            max_substep_travel: 0.01,
         }
+    }
+}
+
+impl SimConfig {
+    /// Number of substeps to run this step given the fastest dynamic body's
+    /// linear speed. Returns `substeps` (the floor) for resting/slow scenes and
+    /// ramps up to `max_substeps` so the fastest body travels no more than
+    /// `max_substep_travel` per substep. Deterministic in `max_speed_mps`.
+    pub(crate) fn adaptive_substeps(&self, max_speed_mps: f32) -> u32 {
+        let floor = self.substeps.max(1);
+        let cap = self.max_substeps.max(floor);
+        if cap == floor || self.max_substep_travel <= 0.0 || !max_speed_mps.is_finite() {
+            return floor;
+        }
+        let travel = max_speed_mps * self.dt;
+        let needed = (travel / self.max_substep_travel).ceil();
+        let needed = if needed.is_finite() && needed >= 1.0 {
+            needed as u32
+        } else {
+            1
+        };
+        needed.clamp(floor, cap)
     }
 }
 
@@ -111,6 +193,9 @@ pub struct RigidBodyDesc {
     /// Mass of the body. Use 0 for static bodies.
     pub mass: f32,
     pub friction: f32,
+    /// Coefficient of restitution in [0, 1]. Contacts use the max of the two
+    /// bodies' coefficients; 0 (default) = perfectly inelastic (no bounce).
+    pub restitution: f32,
     pub shape: ShapeDesc,
 }
 
@@ -123,6 +208,7 @@ impl Default for RigidBodyDesc {
             angular_velocity: Vec3::ZERO,
             mass: 1.0,
             friction: 0.5,
+            restitution: 0.0,
             shape: ShapeDesc::Sphere { radius: 0.5 },
         }
     }
@@ -532,6 +618,19 @@ pub struct World {
     /// narrowphase validation tests.
     last_contacts: Vec<Contact3D>,
     last_step_timings: rubble_gpu::StepTimingsMs,
+    /// Number of substeps the most recent `step()` ran (adaptive substepping).
+    last_substeps: u32,
+    /// True when CPU-side body/shape state changed since the last GPU upload
+    /// (add/remove/set_* mutations). Clean frames skip the full re-upload:
+    /// the GPU buffers already hold bit-identical state from the last step.
+    gpu_dirty: bool,
+    /// When true, `step` downloads solved contacts each frame to compute
+    /// collision events and populate `last_contacts`. Off by default (W4a-2):
+    /// the contact download is a hot-path GPU->CPU readback that most callers
+    /// (the demos, the solver itself) don't need. Enable via
+    /// [`World::set_events_enabled`] before relying on
+    /// [`World::drain_collision_events`].
+    events_enabled: bool,
 }
 
 impl World {
@@ -563,6 +662,9 @@ impl World {
             collision_events: Vec::new(),
             last_contacts: Vec::new(),
             last_step_timings: rubble_gpu::StepTimingsMs::default(),
+            last_substeps: 1,
+            gpu_dirty: true,
+            events_enabled: false,
         })
     }
 
@@ -768,8 +870,12 @@ impl World {
             }
         };
 
-        let prop =
+        let mut prop =
             RigidBodyProps3D::new(inv_inertia, desc.friction, shape_type, shape_index, flags);
+        // Coefficient of restitution rides in inertia-row padding (the GPU-side
+        // struct has no spare scalar slot); row0.w is reserved for the kinematic
+        // inv_mass save, row2.w is ours.
+        prop.inv_inertia_row2.w = desc.restitution.clamp(0.0, 1.0);
 
         if idx >= self.states.len() {
             self.states.resize(idx + 1, bytemuck::Zeroable::zeroed());
@@ -786,6 +892,7 @@ impl World {
         self.props[idx] = prop;
         self.shapes[idx] = desc.shape.clone();
         self.alive[idx] = true;
+        self.gpu_dirty = true;
 
         handle
     }
@@ -801,6 +908,7 @@ impl World {
         self.prev_warmstart_states[idx] = bytemuck::Zeroable::zeroed();
         self.props[idx] = bytemuck::Zeroable::zeroed();
         self.allocator.dealloc(handle);
+        self.gpu_dirty = true;
         true
     }
 
@@ -839,6 +947,7 @@ impl World {
             return;
         }
         let idx = handle.index as usize;
+        self.gpu_dirty = true;
         let im = self.states[idx].inv_mass();
         self.states[idx].position_inv_mass = Vec4::new(pos.x, pos.y, pos.z, im);
         self.prev_warmstart_states[idx].position_inv_mass = self.states[idx].position_inv_mass;
@@ -850,6 +959,7 @@ impl World {
             return;
         }
         let idx = handle.index as usize;
+        self.gpu_dirty = true;
         self.states[idx].lin_vel = vel.extend(0.0);
         self.prev_warmstart_states[idx].lin_vel = self.states[idx].lin_vel;
     }
@@ -868,6 +978,7 @@ impl World {
             return;
         }
         let idx = handle.index as usize;
+        self.gpu_dirty = true;
         self.states[idx].ang_vel = omega.extend(0.0);
         self.prev_warmstart_states[idx].ang_vel = self.states[idx].ang_vel;
     }
@@ -885,16 +996,108 @@ impl World {
         Some(self.props[handle.index as usize].inv_inertia())
     }
 
-    /// Contacts generated by the most recent [`step`](Self::step) (the
-    /// narrowphase output). Body indices are in compacted/alive order, so for a
-    /// world with two alive bodies they are 0 and 1 in insertion order. Empty
-    /// before the first step. Exposed for narrowphase-validation tests.
+    /// Contacts cached by the most recent [`step`](Self::step) when events are
+    /// enabled, or by the most recent [`fetch_last_contacts`](Self::fetch_last_contacts).
+    ///
+    /// Body indices are in compacted/alive order, so for a world with two alive
+    /// bodies they are 0 and 1 in insertion order. Empty when events are
+    /// disabled (the default) and no explicit fetch has run since the last
+    /// mutation — call [`fetch_last_contacts`](Self::fetch_last_contacts) first.
     pub fn last_contacts(&self) -> &[Contact3D] {
         &self.last_contacts
     }
 
+    /// Download the solved contacts from the most recent step and cache them
+    /// for [`last_contacts`](Self::last_contacts) (W4a-2).
+    ///
+    /// This performs a blocking GPU->CPU readback and is intended for tests and
+    /// debug/query use, NOT the hot path — `step` no longer downloads contacts
+    /// unless events are enabled. Returns an empty slice if no step has run.
+    pub fn fetch_last_contacts(&mut self) -> &[Contact3D] {
+        self.last_contacts = self.gpu_pipeline.download_contacts();
+        &self.last_contacts
+    }
+
+    /// Enable or disable collision-event tracking (default: disabled).
+    ///
+    /// When enabled, each `step` downloads the solved contacts to diff against
+    /// the previous frame's set (for [`drain_collision_events`](Self::drain_collision_events))
+    /// and to populate [`last_contacts`](Self::last_contacts). This adds a
+    /// The current simulation configuration.
+    pub fn config(&self) -> &SimConfig {
+        &self.config
+    }
+
+    /// Enable (or disable) adaptive substepping by setting the upper bound on
+    /// substeps per `step()`. `max_substeps <= substeps` disables adaptivity.
+    /// Deep stacks / high-energy scenes need this to avoid tunnelling into deep
+    /// overlap; resting scenes stay at the `substeps` floor (no added cost).
+    /// Does not require a GPU re-upload — it only affects orchestration.
+    pub fn set_adaptive_substeps(&mut self, max_substeps: u32) {
+        self.config.max_substeps = max_substeps;
+    }
+
+    /// per-frame GPU->CPU readback, so it is off by default (W4a-2).
+    pub fn set_events_enabled(&mut self, enabled: bool) {
+        self.events_enabled = enabled;
+    }
+
+    /// Whether collision-event tracking is currently enabled.
+    pub fn events_enabled(&self) -> bool {
+        self.events_enabled
+    }
+
+    /// Warm-start source for a step (W4a-1).
+    ///
+    /// Returns `None` on clean frames so the pipeline reuses its GPU-resident
+    /// `prev_contacts` buffer (no CPU re-upload), and an empty slice on dirty
+    /// frames to force the pipeline to drop warm-start for one frame (the body
+    /// compaction changed, so the resident contacts' indices are stale).
+    fn warm_contacts_for_step(&self, was_dirty: bool) -> Option<&'static [Contact3D]> {
+        if was_dirty {
+            Some(&[])
+        } else {
+            None
+        }
+    }
+
     /// Advance the simulation by one time step on the GPU.
+    ///
+    /// Runs `config.substeps` full detection+solve substeps at `dt / substeps`
+    /// (default 1 — the paper's single-step regime).
     pub fn step(&mut self) {
+        let substeps = self.config.adaptive_substeps(self.max_dynamic_speed());
+        self.last_substeps = substeps;
+        let sub_dt = self.config.dt / substeps as f32;
+        for _ in 0..substeps {
+            self.step_once(sub_dt);
+        }
+    }
+
+    /// Number of substeps the most recent `step()` ran. 1 unless adaptive
+    /// substepping escalated (fast bodies) or `substeps` was raised.
+    pub fn last_substeps(&self) -> u32 {
+        self.last_substeps
+    }
+
+    /// Fastest dynamic body's linear speed (m/s), read from the CPU-resident
+    /// state downloaded after the previous step. Free (no GPU readback) and
+    /// deterministic; drives adaptive substepping.
+    fn max_dynamic_speed(&self) -> f32 {
+        let mut max_sq = 0.0f32;
+        for (i, state) in self.states.iter().enumerate() {
+            if !self.alive[i] || state.position_inv_mass.w <= 0.0 {
+                continue;
+            }
+            let v = state.lin_vel.truncate().length_squared();
+            if v > max_sq {
+                max_sq = v;
+            }
+        }
+        max_sq.sqrt()
+    }
+
+    fn step_once(&mut self, dt: f32) {
         use std::time::Instant;
 
         let mut timings = rubble_gpu::StepTimingsMs::default();
@@ -922,45 +1125,80 @@ impl World {
         let num_bodies = compact_states.len() as u32;
 
         let t_upload = Instant::now();
-        self.gpu_pipeline.upload(
-            &compact_states,
-            &compact_prev_states,
-            &compact_props,
-            &self.spheres,
-            &self.boxes,
-            &self.capsules,
-            &self.convex_hulls,
-            &self.convex_vertices,
-            &self.planes,
-            &self.compound_shapes,
-            &self.compound_children,
-            &self.compound_shapes_cpu,
-            self.config.gravity,
-            self.config.dt,
-            self.config.solver_iterations,
-            self.config.beta,
-            self.config.k_start,
-            self.config.warmstart_decay,
-        );
         self.gpu_pipeline.set_quality_params(
             self.config.contact_offset,
             self.config.restitution_threshold,
             self.config.penetration_slop,
+            self.config.contact_stabilization,
         );
+        self.gpu_pipeline.set_solver_extras(
+            self.config.k_max_normal,
+            self.config.k_max_tangential,
+            self.config.max_speed,
+            self.config.max_ang_speed,
+            self.config.dynamic_friction_ratio.clamp(0.0, 1.0),
+        );
+        let was_dirty = self.gpu_dirty;
+        if self.gpu_dirty {
+            self.gpu_pipeline.upload(
+                &compact_states,
+                &compact_prev_states,
+                &compact_props,
+                &self.spheres,
+                &self.boxes,
+                &self.capsules,
+                &self.convex_hulls,
+                &self.convex_vertices,
+                &self.planes,
+                &self.compound_shapes,
+                &self.compound_children,
+                &self.compound_shapes_cpu,
+                self.config.gravity,
+                dt,
+                self.config.solver_iterations,
+                self.config.beta,
+                self.config.k_start,
+                self.config.warmstart_decay,
+            );
+            self.gpu_dirty = false;
+        } else {
+            // Clean frame: GPU buffers already hold this exact state (the
+            // step outputs we downloaded last frame). Refresh parameters only.
+            self.gpu_pipeline.refresh_frame_params(
+                self.config.gravity,
+                dt,
+                self.config.solver_iterations,
+                self.config.beta,
+                self.config.k_start,
+                self.config.warmstart_decay,
+                num_bodies,
+            );
+        }
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
-        let prev = self.contact_persistence.prev_contacts();
-        let warm = if prev.is_empty() { None } else { Some(prev) };
+        // W4a-1: warm-start from the GPU-resident `prev_contacts` buffer
+        // (maintained on-device by `swap_contact_buffers` every step) rather
+        // than re-uploading last frame's downloaded contacts — the CPU copy was
+        // bit-identical to what the GPU already held. On dirty frames the body
+        // compaction changed, so the resident contacts' body indices are stale;
+        // invalidate warm-start for that one frame (self-heals next frame).
+        let warm = self.warm_contacts_for_step(was_dirty);
         let (results, new_contacts) = self.gpu_pipeline.step_with_contacts_timed(
             num_bodies,
             self.config.solver_iterations,
             warm,
+            self.events_enabled,
             &mut timings,
         );
 
-        let events = self.contact_persistence.update(&new_contacts);
-        self.collision_events.extend(events);
-        self.last_contacts = new_contacts.clone();
+        // Contacts are only downloaded (and thus non-empty) when events are
+        // enabled (W4a-2). `last_contacts` is otherwise fetched on demand via
+        // `fetch_last_contacts`.
+        if self.events_enabled {
+            let events = self.contact_persistence.update(&new_contacts);
+            self.collision_events.extend(events);
+            self.last_contacts = new_contacts;
+        }
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
@@ -973,8 +1211,21 @@ impl World {
     }
 
     /// Advance the simulation by one time step (async, for WASM/WebGPU).
+    ///
+    /// Runs `config.substeps` full detection+solve substeps at `dt / substeps`
+    /// (default 1 — the paper's single-step regime).
     #[cfg(target_arch = "wasm32")]
     pub async fn step_async(&mut self) {
+        let substeps = self.config.adaptive_substeps(self.max_dynamic_speed());
+        self.last_substeps = substeps;
+        let sub_dt = self.config.dt / substeps as f32;
+        for _ in 0..substeps {
+            self.step_once_async(sub_dt).await;
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn step_once_async(&mut self, dt: f32) {
         use rubble_gpu::web_time::Instant;
 
         let mut timings = rubble_gpu::StepTimingsMs::default();
@@ -1002,48 +1253,79 @@ impl World {
         let num_bodies = compact_states.len() as u32;
 
         let t_upload = Instant::now();
-        self.gpu_pipeline.upload(
-            &compact_states,
-            &compact_prev_states,
-            &compact_props,
-            &self.spheres,
-            &self.boxes,
-            &self.capsules,
-            &self.convex_hulls,
-            &self.convex_vertices,
-            &self.planes,
-            &self.compound_shapes,
-            &self.compound_children,
-            &self.compound_shapes_cpu,
-            self.config.gravity,
-            self.config.dt,
-            self.config.solver_iterations,
-            self.config.beta,
-            self.config.k_start,
-            self.config.warmstart_decay,
-        );
         self.gpu_pipeline.set_quality_params(
             self.config.contact_offset,
             self.config.restitution_threshold,
             self.config.penetration_slop,
+            self.config.contact_stabilization,
         );
+        self.gpu_pipeline.set_solver_extras(
+            self.config.k_max_normal,
+            self.config.k_max_tangential,
+            self.config.max_speed,
+            self.config.max_ang_speed,
+            self.config.dynamic_friction_ratio.clamp(0.0, 1.0),
+        );
+        let was_dirty = self.gpu_dirty;
+        if self.gpu_dirty {
+            self.gpu_pipeline.upload(
+                &compact_states,
+                &compact_prev_states,
+                &compact_props,
+                &self.spheres,
+                &self.boxes,
+                &self.capsules,
+                &self.convex_hulls,
+                &self.convex_vertices,
+                &self.planes,
+                &self.compound_shapes,
+                &self.compound_children,
+                &self.compound_shapes_cpu,
+                self.config.gravity,
+                dt,
+                self.config.solver_iterations,
+                self.config.beta,
+                self.config.k_start,
+                self.config.warmstart_decay,
+            );
+            self.gpu_dirty = false;
+        } else {
+            // Clean frame: GPU buffers already hold this exact state (the
+            // step outputs we downloaded last frame). Refresh parameters only.
+            self.gpu_pipeline.refresh_frame_params(
+                self.config.gravity,
+                dt,
+                self.config.solver_iterations,
+                self.config.beta,
+                self.config.k_start,
+                self.config.warmstart_decay,
+                num_bodies,
+            );
+        }
         timings.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
-        let prev = self.contact_persistence.prev_contacts();
-        let warm = if prev.is_empty() { None } else { Some(prev) };
+        // W4a-1: warm-start from the GPU-resident `prev_contacts` buffer
+        // (maintained on-device by `swap_contact_buffers` every step) rather
+        // than re-uploading last frame's downloaded contacts. See `step_once`.
+        let warm = self.warm_contacts_for_step(was_dirty);
         let (results, new_contacts) = self
             .gpu_pipeline
             .step_with_contacts_async(
                 num_bodies,
                 self.config.solver_iterations,
                 warm,
+                self.events_enabled,
                 &mut timings,
             )
             .await;
 
-        let events = self.contact_persistence.update(&new_contacts);
-        self.collision_events.extend(events);
-        self.last_contacts = new_contacts.clone();
+        // Contacts are only downloaded (and thus non-empty) when events are
+        // enabled (W4a-2).
+        if self.events_enabled {
+            let events = self.contact_persistence.update(&new_contacts);
+            self.collision_events.extend(events);
+            self.last_contacts = new_contacts;
+        }
 
         for (slot, &orig) in alive_indices.iter().enumerate() {
             if slot < results.len() {
@@ -1066,6 +1348,7 @@ impl World {
             return;
         }
         let idx = handle.index as usize;
+        self.gpu_dirty = true;
         if kinematic {
             self.props[idx].flags |= rubble_math::FLAG_KINEMATIC;
             // Save original inv_mass and zero it out so GPU skips this body.
@@ -1803,6 +2086,7 @@ mod tests {
             gravity: Vec3::ZERO,
             ..Default::default()
         });
+        world.set_events_enabled(true);
 
         world.add_body(&RigidBodyDesc {
             position: Vec3::new(-0.5, 0.0, 0.0),

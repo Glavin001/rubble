@@ -1,0 +1,302 @@
+{
+  "objectiveStatus": "Open; no speedup adopted in this experiment.",
+  "experiment": "Use delta=(dLinB-dLinA)-cross(dAngA,rA)+cross(dAngB,rB), then project onto normal and tangents in primal and dual.",
+  "decision": "Reverted. Two-cross-product factorization did not improve full-ring throughput. Retain independent moving-endpoint regression.",
+  "protocol": {
+    "name": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "measuredSteps": 100,
+    "statistic": "minimum round median"
+  },
+  "scene": {
+    "name": "ring110k",
+    "totalBodies": 110442,
+    "activeDynamics": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contactLayout": "persistent64+32",
+    "packing": "stable",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact"
+  },
+  "browser": {
+    "name": "Codex in-app browser",
+    "version": "Chrome 155",
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "runs": [
+    {
+      "name": "factored displacement",
+      "measuredAt": "2026-10-14T17:35:59.713Z",
+      "wallMs": 12.23,
+      "rounds": [
+        [
+          12.22,
+          12.26,
+          12.5,
+          12.35,
+          12.25
+        ],
+        [
+          12.26,
+          12.32,
+          12.21,
+          12.23,
+          12.17
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184513,
+          "candidate": 230468,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227408,
+          "overflow": 0,
+          "colorBuckets": [
+            38175,
+            36653,
+            21444,
+            9796,
+            2739,
+            1075,
+            330,
+            127,
+            58,
+            22,
+            8,
+            6,
+            5,
+            2,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1176464,
+          "candidate": 257726,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 247827,
+          "overflow": 0,
+          "colorBuckets": [
+            36334,
+            33647,
+            20605,
+            10741,
+            4442,
+            2530,
+            1272,
+            589,
+            226,
+            50,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.114112,
+        "narrowphase": 2.490368,
+        "warm": 1.048576,
+        "graph": 1.31072,
+        "primal": 4.25984,
+        "dual": 1.703936,
+        "sleep": 0.065536
+      }
+    },
+    {
+      "name": "restored production control",
+      "measuredAt": "2026-10-14T17:39:21.349Z",
+      "wallMs": 12.19,
+      "rounds": [
+        [
+          12.33,
+          12.47,
+          12.57,
+          12.32,
+          12.25
+        ],
+        [
+          12.34,
+          12.21,
+          12.15,
+          12.19,
+          12.19
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.179648,
+        "narrowphase": 2.490368,
+        "warm": 1.048576,
+        "graph": 1.31072,
+        "primal": 4.194304,
+        "dual": 1.703936,
+        "sleep": 0.065536
+      }
+    }
+  ],
+  "validation": {
+    "baselineMovingPrimalOraclePassed": true,
+    "experimentalFocusedTestsPassed": 40,
+    "experimentalIndependentDualOraclePassed": true,
+    "restoredFocusedTestsPassed": 40,
+    "newOracle": "144 moving primal cases across canonical/compact/persistent and serial/cooperative kernels; 72 independent dual-force cases. A/B endpoints, both friction configurations, static/sleeping/awake neighbor, box-only/sphere contacts, nonzero linear/angular displacement and negative quaternion hemisphere. f64 row-wise J*dq plus Gaussian elimination; independent matrix-based lever-arm rotation.",
+    "mutation": {
+      "change": "omit angular motion from primal residual",
+      "expectedFailure": true,
+      "actualFailure": true,
+      "layout": "canonical",
+      "endpoint": "A",
+      "neighborFlags": 0,
+      "sphere": false,
+      "component": 0,
+      "actual": -0.011316458,
+      "expected": -0.013110273291534094,
+      "tolerance": 3e-06
+    },
+    "longSceneGates": "Not run on discarded factorization. Production shader restored exactly to previously validated source; columns and Metal physics changes are not retained."
+  },
+  "caveats": [
+    "Floating-point regrouping changes trajectories and counters; no exact trajectory equivalence is claimed.",
+    "Phase medians are separate later split-pass timestamp samples; extra passes/readback perturb execution.",
+    "No overlap with native GPU tests or shader compilation during browser timing.",
+    "Batches rounded to 0.01 ms; individual-step deadline is not established.",
+    "No new pinned-reference timing in this experiment."
+  ],
+  "sourceSha256": {
+    "production": "c0203e8dccfb0c0f59d579bf16d7d2c2c7b3a6f0a62fad0f666c3a5200ec8405",
+    "trial": "01f10fc40ff5fade7d39a2b1f009a900247ade795da8d3f474bdb44bae486f2c"
+  },
+  "nextHypothesis": "Measure a body-displacement cache refreshed by predict and each primal pose update. Preserve static/sleeping/wake handling and avoid repurposing public velocity/history fields. It is unimplemented and unmeasured."
+}

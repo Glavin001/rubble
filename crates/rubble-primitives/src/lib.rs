@@ -7,8 +7,8 @@ mod radix_sort;
 
 pub use compaction::GpuStreamCompaction;
 pub use gpu_lbvh::{BroadPair, BvhNodeGpu, GpuLbvh};
-pub use prefix_scan::GpuPrefixScan;
-pub use radix_sort::{GpuRadixSort, RadixSortEntry};
+pub use prefix_scan::{GpuPrefixScan, ScanRecordTemps};
+pub use radix_sort::{GpuRadixSort, RadixRecordTemps, RadixSortEntry};
 
 // Re-export the internal PrefixScan used by other modules in this crate.
 pub(crate) use prefix_scan::InternalPrefixScan;

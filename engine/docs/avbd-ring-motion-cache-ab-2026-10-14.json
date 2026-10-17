@@ -1,0 +1,288 @@
+{
+  "objectiveStatus": "Open: 120 physics FPS and pinned-reference parity are not achieved.",
+  "experiment": "Cache each body linear and hemisphere-corrected angular displacement in a separate 32-byte record; publish in prediction and every successful primal update; read in primal and dual. Persistent-contact mode only, no additional production dispatch.",
+  "decision": "Reverted: cached motion was slower than direct computation in this paired full-ring measurement. Removed cache allocation, shader variants, host routing and cache-specific tests; retained the pre-existing independent moving-contact oracle.",
+  "protocol": {
+    "name": "three-avbd-2x5x10",
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "measuredSteps": 100,
+    "statistic": "minimum round median"
+  },
+  "scene": {
+    "name": "ring110k",
+    "totalBodies": 110442,
+    "activeDynamics": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "contactLayout": "persistent64+32",
+    "packing": "stable",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact"
+  },
+  "browser": {
+    "name": "Codex in-app browser",
+    "version": "Chrome 155",
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "runs": [
+    {
+      "name": "experimental cached body displacement",
+      "measuredAt": "2026-10-14T17:45:36.012Z",
+      "wallMs": 12.47,
+      "rounds": [
+        [
+          12.33,
+          12.43,
+          12.58,
+          12.57,
+          12.58
+        ],
+        [
+          12.56,
+          12.47,
+          12.47,
+          12.39,
+          12.31
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1182757,
+          "candidate": 230213,
+          "awake": 110441,
+          "color": 16,
+          "manifold": 227116,
+          "overflow": 0,
+          "colorBuckets": [
+            38201,
+            36611,
+            21462,
+            9855,
+            2745,
+            1044,
+            288,
+            126,
+            61,
+            30,
+            6,
+            3,
+            4,
+            3,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1172384,
+          "candidate": 256686,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246659,
+          "overflow": 0,
+          "colorBuckets": [
+            36357,
+            33710,
+            20656,
+            10751,
+            4494,
+            2484,
+            1241,
+            515,
+            188,
+            41,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.179648,
+        "narrowphase": 2.490368,
+        "warm": 1.048576,
+        "graph": 1.31072,
+        "primal": 4.25984,
+        "dual": 1.769472,
+        "sleep": 0.065536
+      }
+    },
+    {
+      "name": "direct displacement control",
+      "measuredAt": "2026-10-14T17:45:49.954Z",
+      "wallMs": 12.19,
+      "rounds": [
+        [
+          12.2,
+          12.31,
+          12.34,
+          12.25,
+          12.21
+        ],
+        [
+          12.31,
+          12.18,
+          12.24,
+          12.19,
+          12.01
+        ]
+      ],
+      "workload": {
+        "start": {
+          "contact": 1184245,
+          "candidate": 230244,
+          "awake": 110441,
+          "color": 15,
+          "manifold": 227155,
+          "overflow": 0,
+          "colorBuckets": [
+            38216,
+            36641,
+            21457,
+            9780,
+            2747,
+            1068,
+            297,
+            121,
+            63,
+            28,
+            9,
+            6,
+            4,
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "end": {
+          "contact": 1174316,
+          "candidate": 256703,
+          "awake": 110441,
+          "color": 11,
+          "manifold": 246481,
+          "overflow": 0,
+          "colorBuckets": [
+            36437,
+            33636,
+            20681,
+            10740,
+            4398,
+            2539,
+            1244,
+            548,
+            183,
+            33,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "phasesMs": {
+        "aabbs": 0.065536,
+        "grid": 1.114112,
+        "narrowphase": 2.490368,
+        "warm": 1.114112,
+        "graph": 1.31072,
+        "primal": 4.128768,
+        "dual": 1.703936,
+        "sleep": 0.065536
+      }
+    }
+  ],
+  "validation": {
+    "experiment": "Independent f64 contact primal/dual oracle passed for cached serial/cooperative variants, including displacement checks after primal publication. Full cache lifecycle and long-scene gates were not run because the timing rejected adoption.",
+    "restoration": "Production world_step.slang byte-identical to previously validated baseline; columns and Metal fixes retained.",
+    "restoredFocusedTestsPassed": 40,
+    "browserUnitTestsPassed": 57
+  },
+  "caveats": [
+    "Floating-point regrouping changes trajectories and counters; no exact trajectory equivalence is claimed.",
+    "Phase medians are separate later split-pass timestamp samples; extra passes/readback perturb execution.",
+    "No overlap with native GPU tests or shader compilation during browser timing.",
+    "Batches rounded to 0.01 ms; individual-step deadline is not established.",
+    "No new pinned-reference timing in this experiment.",
+    "Cached arithmetic materialization changed trajectories slightly; workload counters are recorded for both runs. A single pair supports rejecting this implementation, not a general claim that motion caching can never help."
+  ],
+  "sourceSha256": {
+    "trial": "ec6227eaa004616af12badc8e674536ed63ed0af3e6318fc502b944952e47966",
+    "restored": "c0203e8dccfb0c0f59d579bf16d7d2c2c7b3a6f0a62fad0f666c3a5200ec8405"
+  },
+  "nextHypothesis": "Inspect generated primal body/pair loading and live values against the pinned shader before introducing another layout or specialization. Primal remains the largest measured phase."
+}

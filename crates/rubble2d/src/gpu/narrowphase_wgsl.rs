@@ -120,7 +120,10 @@ fn emit_contact_2d(
         ca_b * (world_b.x - pos_b.x) + sa_b * (world_b.y - pos_b.y),
         -sa_b * (world_b.x - pos_b.x) + ca_b * (world_b.y - pos_b.y),
     );
-    contacts[slot].point  = vec4<f32>(point.x, point.y, depth, 0.0);
+    // point.w stores the frozen solve-start normal separation C0 (AVBD
+    // alpha-stabilization). point.z is the live depth, refreshed each dual pass;
+    // point.w is written once here and preserved by the dual pass.
+    contacts[slot].point  = vec4<f32>(point.x, point.y, depth, depth);
     contacts[slot].normal = vec4<f32>(normal.x, normal.y, tangent.x, tangent.y);
     contacts[slot].local_anchors = vec4<f32>(local_a.x, local_a.y, local_b.x, local_b.y);
     let k_start = params.solver.z;
@@ -356,10 +359,17 @@ fn convex_convex_manifold_2d(
         }
     }
 
+    // `normal_ab` is the SAT separating axis oriented from A to B (reference-face
+    // outward). The solver convention is normals from body_b to body_a (matching
+    // the circle paths), so contacts are emitted with `-normal_ab`. Without this
+    // flip the contact pushes the wrong way and the incident anchor lands on the
+    // far face, making even a single flat rect on the floor explode.
+    let emit_normal = -normal_ab;
+
     if !found_axis {
         // Deep overlap / degenerate case fallback.
         let point = (pos_a + pos_b) * 0.5 + normal_ab * best_sep * 0.5;
-        emit_contact_2d(point, normal_ab, best_sep, body_a, body_b, 1u, max_contacts);
+        emit_contact_2d(point, emit_normal, best_sep, body_a, body_b, 1u, max_contacts);
         return;
     }
 
@@ -418,7 +428,7 @@ fn convex_convex_manifold_2d(
                 ((ref_edge & 0xFFu) << 16u) |
                 ((incident.edge_index & 0xFFu) << 8u) |
                 (i & 0xFFu);
-            emit_contact_2d(point, normal_ab, separation, body_a, body_b, feature, max_contacts);
+            emit_contact_2d(point, emit_normal, separation, body_a, body_b, feature, max_contacts);
             emitted = emitted + 1u;
         }
     }
@@ -429,7 +439,7 @@ fn convex_convex_manifold_2d(
             ((ref_shape & 0xFFu) << 24u) |
             ((ref_edge & 0xFFu) << 16u) |
             ((incident.edge_index & 0xFFu) << 8u);
-        emit_contact_2d(point, normal_ab, best_sep, body_a, body_b, feature, max_contacts);
+        emit_contact_2d(point, emit_normal, best_sep, body_a, body_b, feature, max_contacts);
     }
 }
 

@@ -44,6 +44,7 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         if self.len == 0 {
             return Vec::new();
         }
+        ctx.note_readback();
 
         let byte_len = (self.len as usize * std::mem::size_of::<T>()) as u64;
 
@@ -185,6 +186,7 @@ impl<T: bytemuck::Pod> GpuBuffer<T> {
         if self.len == 0 {
             return Vec::new();
         }
+        ctx.note_readback();
 
         let byte_len = (self.len as usize * std::mem::size_of::<T>()) as u64;
 
@@ -536,6 +538,7 @@ impl GpuAtomicCounter {
 
     /// Read the counter value back from the GPU.
     pub fn read(&self, ctx: &GpuContext) -> u32 {
+        ctx.note_readback();
         let staging = ctx.acquire_staging_buffer(4, "GpuAtomicCounter staging");
 
         let mut encoder = ctx
@@ -561,6 +564,7 @@ impl GpuAtomicCounter {
     /// Read the counter value asynchronously (required for WASM/WebGPU).
     #[cfg(target_arch = "wasm32")]
     pub async fn read_async(&self, ctx: &GpuContext) -> u32 {
+        ctx.note_readback();
         let staging = ctx.acquire_staging_buffer(4, "GpuAtomicCounter staging (async)");
 
         let mut encoder = ctx

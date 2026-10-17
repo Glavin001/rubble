@@ -1,0 +1,136 @@
+{
+  "classification": "Post-Mac-reboot serial browser performance retry. Slowdown recovered; 120 FPS and parity objectives remain open.",
+  "measuredAt": "2026-10-14T10:55:59.497Z",
+  "conditions": {
+    "hardware": "Apple M3 Max, 128 GB",
+    "browser": "Codex in-app browser, Chrome 155, apple metal-3",
+    "order": [
+      "three-avbd paper suite",
+      "Rubble append control",
+      "Rubble physical adjacency default"
+    ],
+    "overlappingNativeGpuTests": false,
+    "overlappingCompilerWork": false,
+    "externalGpuIsolation": "No specific external heavy GPU workload established; system reboot performed by user."
+  },
+  "protocol": {
+    "leadSteps": 60,
+    "rounds": 2,
+    "untimedStepsPerRound": 3,
+    "batchesPerRound": 5,
+    "stepsPerBatch": 10,
+    "wallStatistic": "minimum of the two round medians",
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666
+  },
+  "beforeRebootWallMs": {
+    "reference": 216.77,
+    "rubbleAppend": 227.2
+  },
+  "reference": {
+    "wallMs": 10.22,
+    "gpuTotalMs": 10.09,
+    "contacts": 1166865,
+    "colors": 11,
+    "gpuMB": 279,
+    "phasesMs": {
+      "collision": 3.6,
+      "adjacency": 0.2,
+      "coloring": 0.52,
+      "solve": 5.64
+    },
+    "precision": "Displayed values, rounded to 0.01 ms; raw reference batches unavailable."
+  },
+  "rubbleAppend": {
+    "wallMs": 19.99,
+    "roundMediansMs": [
+      20.12,
+      19.99
+    ],
+    "batchMeansMs": [
+      [
+        19.3,
+        20.17,
+        20.12,
+        20.03,
+        20.34
+      ],
+      [
+        19.99,
+        20.38,
+        19.74,
+        20.02,
+        19.74
+      ]
+    ],
+    "contacts": 1168067,
+    "colors": 11,
+    "awake": 110441,
+    "overflow": 0,
+    "phasesMs": {
+      "aabbs": 0.065536,
+      "grid": 1.703936,
+      "narrowphase": 4.849664,
+      "warm": 1.31072,
+      "graph": 1.245184,
+      "primal": 6.488064,
+      "dual": 3.538944,
+      "sleep": 0.065536
+    },
+    "gpuSpanMs": 19.267584,
+    "profiledCompletionMs": 25.1
+  },
+  "rubblePhysicalDefault": {
+    "wallMs": 20.29,
+    "roundMediansMs": [
+      20.47,
+      20.29
+    ],
+    "batchMeansMs": [
+      [
+        19.37,
+        20.61,
+        19.89,
+        20.53,
+        20.47
+      ],
+      [
+        20.39,
+        20.29,
+        20.22,
+        20.44,
+        19.63
+      ]
+    ],
+    "contacts": 1169639,
+    "colors": 13,
+    "awake": 110441,
+    "overflow": 0,
+    "phasesMs": {
+      "aabbs": 0.065536,
+      "grid": 1.6384,
+      "narrowphase": 4.849664,
+      "warm": 1.376256,
+      "graph": 1.31072,
+      "primal": 6.422528,
+      "dual": 3.60448,
+      "sleep": 0.065536
+    },
+    "gpuSpanMs": 19.726336,
+    "profiledCompletionMs": 23.8
+  },
+  "profilingCaveat": "Phase medians use ten later steps with split passes and per-step readback; these perturb execution and are separate from throughput batches. Phase categories differ between implementations.",
+  "budgetMs": 8.333333333333334,
+  "allBatchesWithin120Hz": false,
+  "finding": "Both implementations recovered after the whole Mac reboot. This does not identify the original cause. Full-ring throughput is approximately 50 physics steps/sec for Rubble versus 98 for reference. No scene or iteration count reduction.",
+  "sourceSha256": {
+    "engine/crates/engine-webgpu/demo.html": "4d017264ea754b360373217ee400fe9c1e0af604d58301b68d6af0de8c54d5d8",
+    "engine/slang/kernels/world_step.slang": "330f7274a4ce43a08980a81b85182e803fd4ad17554dff8373e866e03dfbb55a",
+    "engine/crates/engine-webgpu/generated/wgsl/csr_sort_append.wgsl": "06a9f916b2c4ab7cbed49d8a36fec8c828e4d57f4e00cfa3b1d3fbd30f34df2e",
+    "engine/crates/engine-webgpu/generated/wgsl/csr_sort.wgsl": "5991294831932a311e2d936ce67652557ebf6297db6654827ddb1e1bb2230c31",
+    "inspiration/pinned/three-avbd/src/avbd3d/bench-cases.ts": "ec9b2f929306f7d2116f3eae8f19f774c53c1aca5c1d4ac74e0d7700d5832f0b",
+    "inspiration/pinned/three-avbd/src/avbd3d/gpu/solver.ts": "964e56bf86efa8599d6133e3d43c5ceb6f671a3dd2b57e99a3b79d08fbdd6b84"
+  }
+}

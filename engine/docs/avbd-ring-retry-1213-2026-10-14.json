@@ -1,0 +1,53 @@
+{
+  "purpose": "Confirm full-ring throughput and dispatch diagnostic after the reported Mac restart; broader parity and 120 FPS goals remain open.",
+  "conditions": "Apple M3 Max, Chrome 155 in-app browser, Apple Metal-3. Serial runs; no native ring/gables tests or compiler work during timing. No claim of complete external GPU isolation or identified slowdown cause.",
+  "ring": {
+    "measuredAt": "2026-10-14T12:13:18.163Z",
+    "wallMs": 15.05,
+    "roundsMs": [[15.00,15.42,15.25,15.05,15.31],[15.23,15.04,15.05,15.05,14.76]],
+    "roundMediansMs": [15.25,15.05],
+    "protocol": "60 lead steps; two rounds of 3 untimed steps plus five batches of 10 steps; minimum round median. Batches rounded to 0.01 ms here.",
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "awake": 110441,
+    "iterations": 4,
+    "dt": 0.016666666666666666,
+    "packing": "stable",
+    "contactLayout": "compact64",
+    "adjacency": "physical",
+    "order": "construction",
+    "persistence": "contact",
+    "contactsStartEnd": [1184245,1174316],
+    "manifoldsStartEnd": [227155,246481],
+    "colorsStartEnd": [15,11],
+    "overflow": 0,
+    "phasesMs": {"aabbs":0.065536,"grid":1.6384,"refs":0,"hashClear":0.065536,"hashInsert":0.262144,"narrowphase":2.031616,"warm":1.31072,"graph":1.31072,"primal":5.308416,"dual":2.62144,"sleep":0.065536},
+    "phaseCaveat": "Later split-pass timestamp samples perturb execution and are separate from throughput batches.",
+    "budgetMs": 8.333333333333334,
+    "allBatchesWithin120Hz": false
+  },
+  "dispatchDiagnostic": {
+    "measuredAt": "2026-10-14T12:13:41.507Z",
+    "pageVisibleAndFocused": true,
+    "groupSize": 64,
+    "submittedStepsPerCase": 116,
+    "allOutputLanesVerified": true,
+    "cases": [
+      {"dispatches":0,"splitPasses":false,"bytes":256,"wallMs":0.02},
+      {"dispatches":1,"splitPasses":false,"bytes":256,"wallMs":0.09},
+      {"dispatches":32,"splitPasses":false,"bytes":256,"wallMs":0.20},
+      {"dispatches":128,"splitPasses":false,"bytes":256,"wallMs":0.25},
+      {"dispatches":128,"splitPasses":true,"bytes":256,"wallMs":0.23},
+      {"dispatches":1,"splitPasses":false,"bytes":33554432,"wallMs":0.25},
+      {"dispatches":4,"splitPasses":false,"bytes":33554432,"wallMs":0.92},
+      {"dispatches":4,"splitPasses":true,"bytes":33554432,"wallMs":0.92}
+    ],
+    "comparison": "The earlier slow-state browser 32 MiB single-dispatch measurement was 11.71 ms; now 0.25 ms. This is a synthetic diagnostic, not physics FPS."
+  },
+  "rejectedExperiments": [
+    {"variant":"manifold-scheduled compact dual","wallMs":[15.32,15.45],"controlWallMs":15.01,"detailReport":"avbd-ring-dual-ab-2026-10-14.json"},
+    {"variant":"by-reference primal arguments","wallMs":15.09,"primalMs":5.308416,"finding":"No material gain; reverted."},
+    {"variant":"flat primal point traversal","measuredAt":"2026-10-14T12:08:46.586Z","wallMs":15.68,"primalMs":6.029312,"finding":"Slower; restored nested traversal and regenerated all 56 WGSL modules before this retry."}
+  ],
+  "validationScope": "This retry measures performance and workload/overflow counters, not a new long-horizon correctness run. Rejected variants were not promoted to full correctness validation. Existing prior baseline accuracy evidence and open compact-gables issue remain unchanged. Reference three-avbd was not remeasured in this retry."
+}

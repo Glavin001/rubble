@@ -1,0 +1,83 @@
+{
+  "experiment": "Remove unused contact-reuse diagnostic atomic counters",
+  "isolationVerified": false,
+  "claim": "No overall speedup established. Controls drift, and both implementations were much slower than earlier isolated runs.",
+  "runs": [
+    {
+      "variant": "statistics on, control A",
+      "wallMs": 216.1,
+      "roundsMs": [
+        [
+          213.510000000149,
+          215.27999999970197,
+          218.31000000014902,
+          216.1,
+          220.8
+        ],
+        [
+          239.110000000149,
+          244.089999999851,
+          259.179999999702,
+          243.110000000149,
+          247.31999999955298
+        ]
+      ],
+      "narrowphaseProfileMs": 270.79
+    },
+    {
+      "variant": "statistics removed",
+      "wallMs": 237.52999999970197,
+      "roundsMs": [
+        [
+          237.52999999970197,
+          208.07000000029802,
+          220.71999999955295,
+          243.28000000044705,
+          244.71000000014902
+        ],
+        [
+          240.7,
+          249.61999999955296,
+          243.18999999985098,
+          253.59000000059604,
+          241.68999999985098
+        ]
+      ],
+      "narrowphaseProfileMs": 126.48
+    },
+    {
+      "variant": "statistics on, control A2",
+      "wallMs": 228.78999999985098,
+      "roundsMs": [
+        [
+          219.2,
+          227.2,
+          229.6,
+          228.78999999985098,
+          235.12000000029803
+        ],
+        [
+          235.9,
+          239.21000000014902,
+          232.78000000044705,
+          244.1,
+          244.71000000014902
+        ]
+      ],
+      "narrowphaseProfileMs": 271.52
+    }
+  ],
+  "scene": {
+    "name": "ring110k",
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "leadSteps": 60,
+    "timing": "two rounds: three untimed steps, then five ten-step timed batches"
+  },
+  "shaderSha256": {
+    "engine/crates/engine-webgpu/generated/reuse-statistics/narrowphase.wgsl": "9d59687b039b821b55041c950dcde834804493c185e71d3680467e172eb26de2",
+    "engine/crates/engine-webgpu/generated/reuse-statistics/update_refs.wgsl": "e74449d88de90f4bf16cffd3f9b94d4ae9c886bdef57d9a0d6d3284f50b8662f",
+    "engine/crates/engine-webgpu/generated/wgsl/narrowphase.wgsl": "51cbca6722247fc71c7bfc8b2fab41319cec68cf964f83f6688e757682d40e79",
+    "engine/crates/engine-webgpu/generated/wgsl/update_refs.wgsl": "2cd94c8eee1141f574b111f6904408f890ace8bbbcec654f01a63416f2ad44cf"
+  }
+}

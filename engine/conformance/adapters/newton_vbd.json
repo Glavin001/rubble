@@ -1,0 +1,10 @@
+{
+  "oracle": "newton",
+  "revision": "fb92f6d84e4a72796d95cefbb378ba6b6be72f04",
+  "unsupported": ["distance-joint-in-vbd", "compare-stiffness-across-formulations"],
+  "frame": "engine=Y-up",
+  "notes": [
+    "Joint semantics oracle (BALL/FIXED/REVOLUTE/PRISMATIC/D6)",
+    "Record compliant-ALM versus legacy when comparing"
+  ]
+}

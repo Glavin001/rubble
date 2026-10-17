@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "seed": 1,
+  "params": {
+    "dt": 0.016666667,
+    "gravity_y": -10.0,
+    "iterations": 10,
+    "alpha": 0.99,
+    "gamma": 0.999
+  },
+  "bodies": [
+    { "id": 0, "static": true, "position": [0, 0, 0] },
+    { "id": 1, "mass": 1.0, "position": [0, 1.0, 0], "shape": "sphere", "radius": 0.5 },
+    { "id": 2, "mass": 1.0, "position": [0, 2.0, 0], "shape": "sphere", "radius": 0.5 },
+    { "id": 3, "mass": 1.0, "position": [0, 3.0, 0], "shape": "sphere", "radius": 0.5 }
+  ],
+  "colliders": [],
+  "joints": [],
+  "acceptance": {
+    "max_penetration": 0.05,
+    "steps": 120
+  }
+}

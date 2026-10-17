@@ -1,0 +1,181 @@
+{
+  "status": "In progress; NOT adopted; no full-ring browser candidate timing or full-scene correctness validation yet",
+  "createdAt": "2026-10-14T20:15:09.114605+00:00",
+  "tests": {
+    "gpuAndShader": {
+      "passed": 45,
+      "failed": 0,
+      "testSeconds": 10.26
+    },
+    "browserUnit": {
+      "passed": 252,
+      "failed": 0
+    },
+    "exportedWgslModules": 70
+  },
+  "files": {
+    "engine/slang/kernels/world_step.slang": {
+      "before": "a675d19f08cda15fb0c84f445389a55ac032289d7f2c997b43796f76097157f4",
+      "candidate": "e54051dd301963d9c230d98b0383102b98733b5f455551fedb906a693b8e61c3"
+    },
+    "engine/crates/engine-webgpu/build.rs": {
+      "before": "41be555da50ddd63ef7be02d0a1846b9d5770107bd1255571ad37e9e23be4fb1",
+      "candidate": "75658077ba223db1d85b1d81857f8d96a085365ffc857db3c4b57156e1955b27"
+    },
+    "engine/crates/engine-webgpu/src/gpu.rs": {
+      "before": "a11f70eba5b17378a6a4f622e9bbeb5b883424d2da76873c61fac06523ac1c6e",
+      "candidate": "a40667ced2bfe321db574e4b18453b84b1c6955b9efa8b48d7489b6ddf7dfe11"
+    },
+    "engine/crates/engine-webgpu/src/gpu_tests.rs": {
+      "before": "1519a3fbafb7f086c5274f4f95773c6a1e6e7e128951d0eb6fc59e1ce67e7e68",
+      "candidate": "8d867105ea2352e2b8816b707c6f814edfbec164befe5f66486b83356a246e9d"
+    },
+    "engine/crates/engine-webgpu/demo.html": {
+      "before": "d9e0354e99755f65a1e1a5b9f58b2d0e93c39bb8760ffae995a0d4b74ec78a0a",
+      "candidate": "2a404b92a889c3107da23f2bb0146c7af19540afd27d08f435d3a56bdb05f3a9"
+    },
+    "engine/crates/engine-webgpu/tests/demo_profiling.test.mjs": {
+      "before": "6fae76ee72150966a7366b4b7a3397ec1e893a9e9e3c37efac61ddf750206b1a",
+      "candidate": "ac50c565e0abd99eaaef3cec34c3f6d8f17a366e1aaf4925771870cbafd4af8f"
+    },
+    "engine/crates/engine-webgpu/tests/persistence_schedule.test.mjs": {
+      "before": "f34c91b722699d7458b51d5c451e23b1b92690b06b017586acfc0038c655f92d",
+      "candidate": "48b29e7cd9e20db06a30f01f185928401805ea7b995cbd454b909d7693ad102a"
+    },
+    "engine/slang/kernels/initialized_narrowphase.slang": {
+      "candidate": "55822b47f89941543137a4ea8304398838cddc0e82360ac3f5e526b098e481e1"
+    }
+  },
+  "productionControl": {
+    "measuredAt": "2026-10-14T20:13:42.822Z",
+    "wallMs": 11.890000000037253,
+    "roundsMs": [
+      [
+        11.819999999925495,
+        12,
+        12.070000000111758,
+        12.2,
+        12.339999999850988
+      ],
+      [
+        12.090000000037254,
+        11.969999999925495,
+        11.890000000037253,
+        11.879999999888241,
+        11.790000000037253
+      ]
+    ],
+    "roundMediansMs": [
+      12.070000000111758,
+      11.890000000037253
+    ],
+    "totalBodies": 110442,
+    "dynamicBodies": 110441,
+    "iterations": 4,
+    "leadSteps": 60,
+    "dt": 0.016666666666666666,
+    "workload": {
+      "start": {
+        "contact": 1184245,
+        "candidate": 230244,
+        "awake": 110441,
+        "color": 15,
+        "manifold": 227155,
+        "overflow": 0,
+        "colorBuckets": [
+          38216,
+          36641,
+          21457,
+          9780,
+          2747,
+          1068,
+          297,
+          121,
+          63,
+          28,
+          9,
+          6,
+          4,
+          2,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "end": {
+        "contact": 1174316,
+        "candidate": 256703,
+        "awake": 110441,
+        "color": 11,
+        "manifold": 246481,
+        "overflow": 0,
+        "colorBuckets": [
+          36437,
+          33636,
+          20681,
+          10740,
+          4398,
+          2539,
+          1244,
+          548,
+          183,
+          33,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "phaseMediansMs": {
+      "aabbs": 0.196608,
+      "grid": 1.179648,
+      "refs": 0.065536,
+      "hashClear": 0.065536,
+      "hashInsert": 0.393216,
+      "narrowphase": 2.031616,
+      "warm": 1.114112,
+      "graph": 0.851968,
+      "primal": 4.063232,
+      "dual": 1.703936,
+      "sleep": 0.065536
+    },
+    "profiledGpuSpanMs": 11.730944,
+    "profiledCompletionMs": 15.099999999627471,
+    "caveat": "Phase profiling is ten later split-pass steps with readback, not the throughput window. This production control ran before the 70-module candidate export; persistence=contact selects unchanged default entry."
+  },
+  "next": "Benchmark persistence=narrowphase serially against fresh controls; validate all-awake eligibility and full-scene gates before adoption."
+}

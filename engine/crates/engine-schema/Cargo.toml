@@ -1,0 +1,12 @@
+[package]
+name = "engine-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Units, handles, GPU layouts, commands, and scene ABI"
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true
+serde.workspace = true
+thiserror.workspace = true

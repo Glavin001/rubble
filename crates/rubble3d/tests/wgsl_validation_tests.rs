@@ -22,6 +22,10 @@ fn validate_wgsl(name: &str, source: &str) {
 #[test]
 fn validate_narrowphase_wgsl() {
     validate_wgsl("NARROWPHASE_WGSL", rubble3d::gpu::NARROWPHASE_WGSL);
+    validate_wgsl(
+        "NARROWPHASE_ARGS_WGSL",
+        rubble3d::gpu::NARROWPHASE_ARGS_WGSL,
+    );
 }
 
 #[test]
@@ -47,9 +51,41 @@ fn validate_avbd_dual_wgsl() {
     validate_wgsl("AVBD_DUAL_WGSL", rubble3d::gpu::AVBD_DUAL_WGSL);
 }
 
+/// The persistent solve kernel is composed at runtime from the primal's
+/// shared source and the dual's marked update function — validating the
+/// composition also proves the extraction markers are intact.
+#[test]
+fn validate_avbd_persistent_wgsl() {
+    validate_wgsl(
+        "avbd_persistent_wgsl()",
+        &rubble3d::gpu::avbd_persistent_wgsl(),
+    );
+}
+
 #[test]
 fn validate_warmstart_match_wgsl() {
-    validate_wgsl("WARMSTART_MATCH_WGSL", rubble3d::gpu::WARMSTART_MATCH_WGSL);
+    validate_wgsl(
+        "warmstart_match_wgsl()",
+        &rubble3d::gpu::warmstart_match_wgsl(),
+    );
+}
+
+#[test]
+fn validate_warmstart_map_insert_wgsl() {
+    validate_wgsl(
+        "warmstart_map_insert_wgsl()",
+        &rubble3d::gpu::warmstart_map_insert_wgsl(),
+    );
+}
+
+#[test]
+fn validate_contact_prep_wgsl() {
+    validate_wgsl("CONTACT_PREP_WGSL", rubble3d::gpu::CONTACT_PREP_WGSL);
+}
+
+#[test]
+fn validate_restitution_wgsl() {
+    validate_wgsl("RESTITUTION_WGSL", rubble3d::gpu::RESTITUTION_WGSL);
 }
 
 #[test]
@@ -60,4 +96,30 @@ fn validate_coloring_reset_wgsl() {
 #[test]
 fn validate_coloring_step_wgsl() {
     validate_wgsl("COLORING_STEP_WGSL", rubble3d::gpu::COLORING_STEP_WGSL);
+}
+
+#[test]
+fn validate_coloring_apply_wgsl() {
+    validate_wgsl("COLORING_APPLY_WGSL", rubble3d::gpu::COLORING_APPLY_WGSL);
+}
+
+#[test]
+fn validate_color_compaction_wgsl() {
+    validate_wgsl("COLOR_COUNT_WGSL", rubble3d::gpu::COLOR_COUNT_WGSL);
+    validate_wgsl("COLOR_SCAN_ARGS_WGSL", rubble3d::gpu::COLOR_SCAN_ARGS_WGSL);
+    validate_wgsl("COLOR_SCATTER_WGSL", rubble3d::gpu::COLOR_SCATTER_WGSL);
+}
+
+#[test]
+fn validate_contact_stream_wgsl() {
+    validate_wgsl(
+        "SORT_KEY_EXTRACT_WGSL",
+        rubble3d::gpu::SORT_KEY_EXTRACT_WGSL,
+    );
+    validate_wgsl("SORT_IOTA_WGSL", rubble3d::gpu::SORT_IOTA_WGSL);
+    validate_wgsl("SORT_GATHER_WGSL", rubble3d::gpu::SORT_GATHER_WGSL);
+    validate_wgsl("ADJ_CLEAR_WGSL", rubble3d::gpu::ADJ_CLEAR_WGSL);
+    validate_wgsl("ADJ_COUNT_WGSL", rubble3d::gpu::ADJ_COUNT_WGSL);
+    validate_wgsl("ADJ_RANGES_WGSL", rubble3d::gpu::ADJ_RANGES_WGSL);
+    validate_wgsl("ADJ_INCIDENCE_WGSL", rubble3d::gpu::ADJ_INCIDENCE_WGSL);
 }
