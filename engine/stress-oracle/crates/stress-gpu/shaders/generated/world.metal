@@ -10749,7 +10749,6 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
                 *((&kernelContext_99)->scratch_0+_S1562) = packed_float4(ap_ang_0) ;
                 c_49 = c_49 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             float _S1563 = island_dot_0(tid_22, c0_1, c1_1, 8U, 10U, &kernelContext_99);
             uint _S1564 = cg_total_1 + 1U;
             if(_S1563 <= 0.0f)
@@ -10791,7 +10790,6 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
                 *_S1580 = packed_float4(float4(_S1581 - _S1570 * (float4(*((&kernelContext_99)->scratch_0+_S1582)) ).xyz, 0.0f)) ;
                 c_54 = c_54 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             float _S1583 = island_dot_0(tid_22, c0_1, c1_1, 4U, 4U, &kernelContext_99);
             if((sqrt(_S1583)) <= (0.00009999999747379f * _S1547))
             {
@@ -10811,9 +10809,9 @@ void bond_kinematics_0(uint _S1490, float3 _S1491, float3 _S1492, float3 _S1493,
                 precondition_0(c_55, &kernelContext_99);
                 c_55 = c_55 + 256U;
             }
-            threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             if(free_0)
             {
+                threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
                 project_displacement_slot_0(tid_22, &_S1501, 6U, &kernelContext_99);
             }
             float _S1584 = island_dot_0(tid_22, c0_1, c1_1, 4U, 6U, &kernelContext_99);

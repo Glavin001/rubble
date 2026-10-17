@@ -12422,7 +12422,6 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
                 scratch_0[sv_0(c_55, u32(11))] = ap_ang_0;
                 c_55 = c_55 + u32(256);
             }
-            device_group_barrier_0();
             var pap_0 : f32 = island_dot_0(tid_29, c0_1, c1_1, u32(8), u32(10));
             var _S1061 : u32 = cg_total_1 + u32(1);
             if(pap_0 <= 0.0f)
@@ -12452,7 +12451,6 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
                 scratch_0[_S1067] = vec4<f32>(scratch_0[_S1067].xyz - _S1064 * scratch_0[sv_0(c_60, u32(11))].xyz, 0.0f);
                 c_60 = c_60 + u32(256);
             }
-            device_group_barrier_0();
             var _S1068 : f32 = island_dot_0(tid_29, c0_1, c1_1, u32(4), u32(4));
             if((sqrt(_S1068)) <= (0.00009999999747379f * _S1059))
             {
@@ -12472,9 +12470,9 @@ fn island_statics(@builtin(workgroup_id) group_5 : vec3<u32>, @builtin(local_inv
                 precondition_0(c_61);
                 c_61 = c_61 + u32(256);
             }
-            device_group_barrier_0();
             if(free_0)
             {
+                device_group_barrier_0();
                 project_displacement_slot_0(tid_29, &(_S1036), u32(6));
             }
             var rz_new_0 : f32 = island_dot_0(tid_29, c0_1, c1_1, u32(4), u32(6));

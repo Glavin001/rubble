@@ -3151,7 +3151,8 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
                 scratch[sv(c, 10)] = ap_lin;
                 scratch[sv(c, 11)] = ap_ang;
             }
-            device_group_barrier();
+            // No device barrier until the next bond pass: each thread reads back only the
+            // chunks it wrote (every loop and `island_dot` take chunks c0 + tid + k THREADS).
             float pap = island_dot(tid, c0, c1, 8, 10);
             cg_total++;
             if (pap <= 0.0)
@@ -3164,14 +3165,15 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
                 scratch[sv(c, 4)] = float4(scratch[sv(c, 4)].xyz - alpha * scratch[sv(c, 10)].xyz, 0.0);
                 scratch[sv(c, 5)] = float4(scratch[sv(c, 5)].xyz - alpha * scratch[sv(c, 11)].xyz, 0.0);
             }
-            device_group_barrier();
             if (sqrt(island_dot(tid, c0, c1, 4, 4)) <= cg_tol * norm0)
                 break;
             for (uint c = c0 + tid; c < c1; c += THREADS)
                 precondition(c);
-            device_group_barrier();
             if (free)
+            {
+                device_group_barrier();
                 project_displacement_slot(tid, isl, 6);
+            }
             float rz_new = island_dot(tid, c0, c1, 4, 6);
             float beta = rz_new / rz;
             rz = rz_new;
