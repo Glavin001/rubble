@@ -92,6 +92,13 @@ Math notes:
   - Breaking sets `JOINT_FLAG_BROKEN`. From the next step the joint leaves the CSR and the
     joint hash, so the pair collides again.
   - Hosts find breaks by scanning flags (`drain_broken_joints`), which also frees the slots for reuse.
+  - The final pass also appends `[EVENT_BREAK, joint, force, torque]` to the event ring in the
+    scratch atomics (binding 21, words 96..; `poll_joint_breaks`, `world.pollJointBreaks()` in JS).
+- **Sleep.** A joint whose bodies both rest holds its λ and k (stasis). A woken body wakes its
+  jointed sleepers in `warmstart_joints`, and `JOINT_FLAG_UNSETTLED` (λ still moving more than
+  0.01% per final pass) or a running drive keeps the island awake in `sleep_island_gate`.
+- **Vehicle tyre joints** (`JOINT_FLAG_TYRE`) only add the chassis–ground graph edge for
+  `vehicle_step.slang`; warm start, the dual and the pair hash skip them.
 - **Plastic yield.** Only for all-angular-locked joints. Past `yieldTorque`, the angular force
   is clamped and frame B is re-based on the current pose. The joint breaks once the bend from
   `rest_start` exceeds `breakBend`.

@@ -16,6 +16,9 @@ For single-file Shardwright asset import, see the
 Convex hulls and compound bodies (packed hull ABI, broadphase, cooperative SAT,
 CPU/GPU verification) are described in [docs/convex-hulls.md](docs/convex-hulls.md).
 
+Vehicles (raycast wheels solved inside AVBD, drivetrain, tanks and motorcycles, severable parts, drivable
+WebGPU demo `vehicle.html`): see [docs/vehicles.md](docs/vehicles.md).
+
 ## Quick start (Metal)
 
 ```bash
@@ -80,7 +83,8 @@ Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
 | `crates/engine-metal` | M3 proof backend + benches |
 | `crates/engine-scenes` | Demo/benchmark scene builders + `demo_viewer` |
 | `crates/engine-oracles` | three-avbd / Newton / Jolt / demo3d adapters |
-| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke` |
+| `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke`; `vehicle.html` |
+| `crates/engine-vehicle` | Vehicle descriptors, presets, GPU record packing, host bookkeeping |
 | `crates/engine-cuda` | CUDA source emission |
 | `crates/engine-viewer` | Buffer-shared draw |
 | `conformance/` | Oracle scene schema + adapter JSON |

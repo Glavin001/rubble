@@ -2,9 +2,18 @@ use crate::device::MetalDevice;
 use crate::pipelines::Pipelines;
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend, PHASE_GRAPH};
 use engine_schema::*;
+use engine_vehicle::{
+    FunctionalState, Ray, RayHit, VehicleBackend, VehicleCapacity, VehicleDesc, VehicleHandle, VehicleHost,
+    VehicleInput, VehicleState, WheelDesc,
+};
 use glam::{Quat, Vec3};
 use metal::*;
 use std::mem;
+
+/// Metal `[[buffer(N)]]` of `gVehicleData` in vehicle_step.slang (declaration order
+/// after world_step.slang). Shares the slot with the compact solver's points, so
+/// vehicle dispatches rebind it; `vehicle_kernels_bind_vehicle_data_at_27` guards it.
+pub const VEHICLE_DATA_SLOT: u64 = 27;
 
 pub struct MetalWorld {
     pub device: MetalDevice,
@@ -46,6 +55,10 @@ pub struct MetalWorld {
     pass_table: Buffer,
     /// Metal MTLDispatchThreadgroupsIndirectArguments × max_colors.
     indirect_args: Buffer,
+    /// gVehicleData (float4 records, see slang/physics/vehicle_layout.slang).
+    vehicle_data: Buffer,
+    vehicle_slots: usize,
+    vehicles: Option<VehicleHost>,
 
     body_count: u32,
     collider_count: u32,
@@ -54,6 +67,9 @@ pub struct MetalWorld {
     free_joints: Vec<u32>,
     /// Per-body bounding radius of its largest dynamic collider (torque arm default).
     body_radius: Vec<f32>,
+    /// Event ring read cursors (`poll_joint_breaks`), one per scratch buffer:
+    /// the step alternates between the two.
+    events_seen: [u32; 2],
     /// Island-gate BFS rounds (8 for stacks; 2 for random piles so one rocker cannot pin all).
     sleep_island_rounds: u32,
     material_count: u32,
@@ -92,6 +108,12 @@ pub struct MetalWorld {
 
 impl MetalWorld {
     pub fn new(capacity: WorldCapacity) -> anyhow::Result<Self> {
+        Self::new_with_vehicles(capacity, VehicleCapacity::default())
+    }
+
+    pub fn new_with_vehicles(mut capacity: WorldCapacity, vehicle_capacity: VehicleCapacity) -> anyhow::Result<Self> {
+        // One tyre joint per vehicle wheel slot rides on top of the user joints.
+        capacity.max_joints += vehicle_capacity.max_wheels;
         let device = MetalDevice::new()?;
         let chip = device.chip.clone();
         let pipelines = Pipelines::new(&device.device)?;
@@ -114,7 +136,14 @@ impl MetalWorld {
         let params_buf = alloc::<AvbdParams>(d, 1);
         let counters = [alloc::<StepCounters>(d, 1), alloc::<StepCounters>(d, 1)];
         let commands = alloc::<GpuCommand>(d, capacity.max_commands);
-        let aabbs = alloc::<AabbGpu>(d, capacity.max_bodies + capacity.max_colliders);
+        let aabb_tail = capacity.max_bodies + capacity.max_colliders;
+        // Collider AABBs, then a 4-entry wheel-row block per vehicle and a
+        // 4-entry ground block per wheel slot (two-body tyre rows).
+        let aabbs = alloc::<AabbGpu>(d, aabb_tail + 4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels));
+        let vehicle_data = alloc::<[u32; 4]>(d, vehicle_capacity.layout().total_slots);
+        unsafe {
+            std::ptr::write_bytes(vehicle_data.contents() as *mut u8, 0, vehicle_capacity.bytes() as usize);
+        }
         let candidates = alloc::<CandidatePair>(d, capacity.max_candidates);
         let awake_list = alloc_u32(d, capacity.max_bodies);
         let body_color = alloc_u32(d, capacity.max_bodies);
@@ -167,7 +196,14 @@ impl MetalWorld {
             std::ptr::write_bytes(ref_poses.contents() as *mut u8, 0, n * 4);
         }
         // 0..63 host words and per-step counters; 64..79 the uniform grid's large list.
-        let scratch = [alloc_u32(d, 96), alloc_u32(d, 96)];
+        // Host words, lists, then the event ring and the oversized-static ids
+        // (engine-schema SCRATCH_WORDS); the ring cursor starts at zero.
+        let scratch = [alloc_u32(d, engine_schema::SCRATCH_WORDS), alloc_u32(d, engine_schema::SCRATCH_WORDS)];
+        for b in &scratch {
+            unsafe {
+                std::ptr::write_bytes(b.contents() as *mut u32, 0, engine_schema::SCRATCH_WORDS as usize);
+            }
+        }
         // 96 slots: 0..47 identity (colour rounds / misc), 48..67 = 2^0..2^19 for CSR scan
         // (must cover max_bodies=524288; the old 16-slot table broke adjacency above 65k).
         let pass_table = alloc_u32(d, 96);
@@ -253,11 +289,15 @@ impl MetalWorld {
             scratch,
             pass_table,
             indirect_args,
+            vehicle_data,
+            vehicle_slots: vehicle_capacity.layout().total_slots as usize,
+            vehicles: Some(VehicleHost::new(vehicle_capacity, aabb_tail)),
             body_count: 0,
             collider_count: 0,
             joint_count: 0,
             free_joints: Vec::new(),
             body_radius: Vec::new(),
+            events_seen: [0; 2],
             sleep_island_rounds: 8,
             material_count: 1,
             command_count: 0,
@@ -669,6 +709,19 @@ impl MetalWorld {
         );
     }
 
+    /// Vehicle kernels read gVehicleData at buffer 27 (see VEHICLE_DATA_SLOT).
+    /// `per_group` dispatches one 64-lane workgroup per item (ray / wheel casts).
+    fn dispatch_vehicle(&self, encoder: &ComputeCommandEncoderRef, name: &str, items: u64, per_group: bool) {
+        encoder.set_buffer(VEHICLE_DATA_SLOT, Some(&self.vehicle_data), 0);
+        if per_group {
+            encoder.set_compute_pipeline_state(self.pipelines.get(name).expect("pipeline"));
+            encoder.dispatch_thread_groups(MTLSize::new(items.max(1), 1, 1), MTLSize::new(64, 1, 1));
+        } else {
+            self.dispatch(encoder, name, items);
+        }
+        encoder.set_buffer(VEHICLE_DATA_SLOT, Some(&self.solver_points), 0);
+    }
+
     fn dispatch_color_indirect(&self, encoder: &ComputeCommandEncoderRef, color: u32) {
         let pso = self
             .pipelines
@@ -749,7 +802,10 @@ impl MetalWorld {
         s[22] = 0; // update_refs linMove
         s[23] = 0; // update_refs angMove
         s[29] = u32::from(self.has_convex); // degree-aware primal lanes for convex/compound scenes
-        s[30] = u32::from(self.has_filters); // collision filters present
+        // Collision filters present (bit 0); vehicle sever grace by collider
+        // generation when the scene has none (bit 1).
+        s[30] = u32::from(self.has_filters)
+            | (u32::from(!self.has_filters && self.vehicles.as_ref().is_some_and(|v| v.vehicle_count() > 0)) << 1);
     }
 
     fn sync_counters_host_to_gpu(&self, clear_transient: bool) {
@@ -877,10 +933,12 @@ impl MetalWorld {
         let cpu_t0 = std::time::Instant::now();
         // Fully asleep world: skip the GPU step (sleeper BP was ~180 ms on 100k columns).
         // Require a prior step so the initial awake_count==0 default does not no-op frame 0.
+        let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
         if self.steps_done > 0
             && self.last_counters.awake_count == 0
             && self.command_count == 0
             && self.body_count > 0
+            && !vehicles_dirty
         {
             let gpu_ms = wall_t0.elapsed().as_secs_f64() * 1000.0;
             self.last_timings = PhaseTimingsMs {
@@ -923,6 +981,13 @@ impl MetalWorld {
         if dirty != 0 || self.command_count > 0 {
             self.dispatch(&encoder, "recompute_inertia", n_bodies);
         }
+        let (n_veh, n_wheels) = self
+            .vehicles
+            .as_ref()
+            .map_or((0, 0), |v| (u64::from(v.vehicle_count()), u64::from(v.wheel_count())));
+        if n_veh > 0 {
+            self.dispatch_vehicle(&encoder, "vehicle_input", n_veh, false);
+        }
         // three-avbd order: collide at x⁻ → topology → warm-start bodies → solve.
         // C0 must be sampled before predict; NP-after-predict made impact C0 huge
         // negative and blew spaced Stack.
@@ -938,6 +1003,11 @@ impl MetalWorld {
         self.dispatch(&encoder, "broadphase_clear", 131072);
         self.dispatch(&encoder, "broadphase_insert", n_cols);
         self.dispatch(&encoder, "broadphase_query", n_cols);
+        if n_veh > 0 {
+            self.dispatch_vehicle(&encoder, "wheel_query", n_wheels, true);
+            // Before the constraint graph: link wheels on dynamic bodies.
+            self.dispatch_vehicle(&encoder, "vehicle_link", n_wheels, false);
+        }
         }
         self.dispatch(&encoder, "write_work_args", 64);
         // Pair hash before NP when reuseContacts is on (three-avbd order); otherwise
@@ -1035,6 +1105,9 @@ impl MetalWorld {
 
         // Body warm-start AFTER NP (three-avbd warmStartBodies): stash inertial, advance pose.
         self.dispatch(&encoder, "predict_bodies", n_bodies);
+        if n_veh > 0 {
+            self.dispatch_vehicle(&encoder, "vehicle_prepare", n_veh, false);
+        }
 
         // three-avbd argsColors: indirect per colour (0 threadgroups ⇒ free). Same encoder so
         // Metal tracks the write→dispatch dependency without a CPU mid-step sync.
@@ -1062,9 +1135,15 @@ impl MetalWorld {
                 65,
                 u32::from(iter + 1 == self.params.iterations),
             );
+            if n_veh > 0 {
+                self.dispatch_vehicle(&encoder, "vehicle_iterate", n_veh, false);
+            }
         }
 
         self.dispatch(&encoder, "extract_velocity_sleep", n_bodies);
+        if n_veh > 0 {
+            self.dispatch_vehicle(&encoder, "vehicle_post", n_veh, false);
+        }
         self.dispatch(&encoder, "write_sleep_args", 64);
         // Island sleep gate: a body may sleep only if every dynamic contact neighbour is
         // also a candidate (or already asleep). Skipping this lets upper boxes freeze while
@@ -1091,6 +1170,9 @@ impl MetalWorld {
         self.host_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         self.command_count = 0;
+        if let Some(v) = self.vehicles.as_mut() {
+            v.dirty = false;
+        }
         if !wait {
             self.last_timings = PhaseTimingsMs {
                 total_gpu: wall_t0.elapsed().as_secs_f64() * 1000.0,
@@ -1206,6 +1288,25 @@ impl MetalWorld {
         }
     }
 
+    /// One joint record after the last completed step (multipliers, broken flag).
+
+    /// Joints that broke since the previous call (event rings after the last
+    /// completed step). Steps alternate between the two scratch buffers, so
+    /// each has its own ring and cursor.
+    pub fn poll_joint_breaks(&mut self) -> Vec<engine_schema::JointBreak> {
+        let base = engine_schema::EVENT_RING_BASE as usize;
+        let len = (4 + 4 * engine_schema::EVENT_RING_CAPACITY) as usize;
+        let mut out = Vec::new();
+        for (k, buf) in self.scratch.iter().enumerate() {
+            let words = unsafe { std::slice::from_raw_parts((buf.contents() as *const u32).add(base), len) };
+            let lost = engine_schema::decode_joint_breaks(words, &mut self.events_seen[k], &mut out);
+            if lost > 0 {
+                eprintln!("event ring overflow: {lost} events lost");
+            }
+        }
+        out
+    }
+
     /// Manifold records for the last step (diagnostics).
     pub fn download_manifolds(&self) -> Vec<Manifold> {
         let n = self.last_counters.manifold_count as usize;
@@ -1215,6 +1316,161 @@ impl MetalWorld {
         unsafe {
             std::slice::from_raw_parts(self.manifolds.contents() as *const Manifold, n).to_vec()
         }
+    }
+}
+
+impl MetalWorld {
+    fn with_vehicles<R>(&mut self, f: impl FnOnce(&mut VehicleHost, &mut Self) -> R) -> R {
+        let mut host = self.vehicles.take().expect("vehicle host");
+        let r = f(&mut host, self);
+        self.vehicles = Some(host);
+        r
+    }
+
+    pub fn vehicle_host(&self) -> &VehicleHost {
+        self.vehicles.as_ref().expect("vehicle host")
+    }
+
+    pub fn add_vehicle(
+        &mut self,
+        desc: &VehicleDesc,
+        position: [f32; 3],
+        rotation: [f32; 4],
+    ) -> Result<VehicleHandle, String> {
+        self.with_vehicles(|h, w| h.add_vehicle(w, desc, position, rotation))
+    }
+
+    pub fn set_vehicle_input(&mut self, v: VehicleHandle, input: VehicleInput) {
+        self.with_vehicles(|h, w| h.set_input(w, v, input));
+    }
+
+    pub fn set_functional_state(&mut self, v: VehicleHandle, state: FunctionalState) {
+        self.with_vehicles(|h, w| h.set_functional_state(w, v, state));
+    }
+
+    pub fn detach_wheel(&mut self, v: VehicleHandle, wheel: u32) {
+        self.with_vehicles(|h, w| h.detach_wheel(w, v, wheel));
+    }
+
+    pub fn disable_wheel(&mut self, v: VehicleHandle, wheel: u32) {
+        self.with_vehicles(|h, w| h.disable_wheel(w, v, wheel));
+    }
+
+    pub fn detach_part(&mut self, v: VehicleHandle, part: u32) {
+        self.with_vehicles(|h, w| h.detach_part(w, v, part));
+    }
+
+    pub fn disable_part(&mut self, v: VehicleHandle, part: u32) {
+        self.with_vehicles(|h, w| h.disable_part(w, v, part));
+    }
+
+    pub fn add_wheel(&mut self, v: VehicleHandle, wheel: &WheelDesc) -> Result<u32, String> {
+        self.with_vehicles(|h, w| h.add_wheel(w, v, wheel))
+    }
+
+    pub fn set_wheel_params(&mut self, v: VehicleHandle, wheel: u32, desc: &WheelDesc) {
+        self.with_vehicles(|h, w| h.set_wheel_params(w, v, wheel, desc));
+    }
+
+    pub fn wake_vehicle(&mut self, v: VehicleHandle) {
+        self.with_vehicles(|h, w| h.wake(w, v));
+    }
+
+    /// Reads GPU outputs; call after a waited step (`step_gpu`).
+    pub fn vehicle_state(&self, v: VehicleHandle) -> VehicleState {
+        self.vehicle_host().read_state(self, v)
+    }
+
+    /// Batched ray casts against the current poses (synchronous).
+    pub fn raycast_batch(&mut self, rays: &[Ray]) -> Vec<Option<RayHit>> {
+        if rays.is_empty() {
+            return Vec::new();
+        }
+        self.with_vehicles(|h, w| h.write_rays(w, rays));
+        self.write_scratch();
+        self.sync_counters_host_to_gpu(false);
+        let cb = self.device.queue.new_command_buffer();
+        let encoder = cb.new_compute_command_encoder();
+        self.bind_all(encoder);
+        self.dispatch(encoder, "build_aabbs", u64::from(self.collider_count.max(1)));
+        self.dispatch_vehicle(encoder, "raycast_batch", rays.len() as u64, true);
+        encoder.end_encoding();
+        cb.commit();
+        cb.wait_until_completed();
+        self.vehicle_host().read_ray_hits(self)
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn vehicle_slots_mut(&self) -> &mut [[u32; 4]] {
+        // Not via vehicle_host(): the host is taken while it drives this backend.
+        unsafe { std::slice::from_raw_parts_mut(self.vehicle_data.contents() as *mut [u32; 4], self.vehicle_slots) }
+    }
+}
+
+impl VehicleBackend for MetalWorld {
+    fn body_count(&self) -> u32 {
+        self.body_count
+    }
+
+    fn joint_count(&self) -> u32 {
+        self.joint_count
+    }
+
+    fn append_joints(&mut self, joints: &[Joint]) {
+        for j in joints {
+            self.add_joint(*j);
+        }
+    }
+
+    fn collider_count(&self) -> u32 {
+        self.collider_count
+    }
+
+    fn append_bodies(&mut self, bodies: &[BodyState]) {
+        for b in bodies {
+            self.add_body(*b);
+        }
+    }
+
+    fn append_colliders(&mut self, colliders: &[Collider]) {
+        for c in colliders {
+            self.add_collider(*c);
+        }
+    }
+
+    fn write_body(&mut self, index: u32, body: &BodyState) {
+        self.set_body(index, *body);
+    }
+
+    fn write_collider(&mut self, index: u32, collider: &Collider) {
+        let cols = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.colliders.contents() as *mut Collider,
+                self.capacity.max_colliders as usize,
+            )
+        };
+        cols[index as usize] = *collider;
+    }
+
+    fn write_slots(&mut self, slot: u32, data: &[[u32; 4]]) {
+        let s = slot as usize;
+        self.vehicle_slots_mut()[s..s + data.len()].copy_from_slice(data);
+    }
+
+    fn write_curve_points(&mut self, byte_offset: u64, points: &[[f32; 2]]) {
+        let bytes: &[u8] = bytemuck::cast_slice(points);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                (self.vehicle_data.contents() as *mut u8).add(byte_offset as usize),
+                bytes.len(),
+            );
+        }
+    }
+
+    fn read_slots(&self, slot: u32, count: u32) -> Vec<[u32; 4]> {
+        let s = slot as usize;
+        self.vehicle_slots_mut()[s..s + count as usize].to_vec()
     }
 }
 

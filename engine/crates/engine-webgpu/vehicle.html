@@ -1,0 +1,931 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Rubble vehicles — WebGPU AVBD</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #10131a; color: #dfe4ee; font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: fixed; background: rgba(16, 19, 26, 0.78); border: 1px solid #2c3346; border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
+    #hud { top: 12px; left: 12px; width: 21rem; max-width: calc(100vw - 48px); }
+    #hud h1 { font-size: 15px; margin: 0 0 6px; font-weight: 650; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+    .muted { color: #8d96aa; }
+    select, button { background: #1d2333; color: #dfe4ee; border: 1px solid #3a4360; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+    button:hover { border-color: #6c7aa6; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #err { color: #ff8e8e; white-space: pre-wrap; }
+    #dash { right: 12px; bottom: 12px; width: 15rem; font-variant-numeric: tabular-nums; }
+    #speed { font-size: 34px; font-weight: 700; line-height: 1; }
+    #speed small { font-size: 13px; font-weight: 500; color: #8d96aa; }
+    #gear { font-size: 26px; font-weight: 700; float: right; }
+    .bar { height: 6px; background: #252c3d; border-radius: 3px; overflow: hidden; margin: 6px 0; }
+    .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, #4fb0ff, #ffb04f 75%, #ff5050); }
+    #wheels { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px; }
+    .wheel { border: 1px solid #333c55; border-radius: 4px; padding: 2px 6px; font-size: 11px; }
+    .wheel.contact { border-color: #4fb06a; }
+    .wheel.slide { border-color: #ffb04f; }
+    .wheel.gone { opacity: 0.35; text-decoration: line-through; }
+    #parts { right: 12px; top: 12px; width: 15rem; max-height: 50vh; overflow: auto; }
+    .part { display: flex; justify-content: space-between; align-items: center; margin: 3px 0; gap: 6px; }
+    .part.lost span { opacity: 0.4; text-decoration: line-through; }
+    kbd { background: #252c3d; border: 1px solid #3a4360; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+    @media (max-width: 700px) { #parts { display: none; } #dash { width: 11rem; } }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud" class="panel">
+    <h1>Rubble vehicles · Slang AVBD on WebGPU</h1>
+    <div class="row">
+      <label class="muted" for="sceneSel">Scene</label><select id="sceneSel"></select>
+      <label class="muted" for="presetSel">Car</label><select id="presetSel"></select>
+    </div>
+    <div class="row muted" id="help">
+      <span><kbd>W</kbd><kbd>S</kbd> drive/brake · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>Space</kbd> handbrake</span>
+      <span><kbd>X</kbd> sever a wheel · <kbd>P</kbd> sever a part · <kbd>B</kbd> cannonball · <kbd>R</kbd> reset · <kbd>C</kbd> camera · <kbd>Tab</kbd> switch vehicle</span>
+    </div>
+    <div id="status" class="muted">starting…</div>
+    <div id="err"></div>
+  </div>
+  <div id="parts" class="panel" hidden>
+    <div class="row" style="justify-content: space-between"><strong>Parts &amp; wheels</strong><span class="muted">sever / disable</span></div>
+    <div id="partList"></div>
+  </div>
+  <div id="dash" class="panel">
+    <span id="gear">N</span>
+    <div id="speed">0 <small>km/h</small></div>
+    <div class="bar"><div id="rpm"></div></div>
+    <div class="muted" id="rpmText">— rpm</div>
+    <div id="wheels"></div>
+  </div>
+  <script type="module">
+    import { createWorld, sceneCapacity } from './world-host.mjs';
+    import { L, WHEEL_RIM_MATERIAL, bitsf } from './vehicle.mjs';
+
+    const statusEl = document.getElementById('status');
+    const errEl = document.getElementById('err');
+    const fail = (e) => { errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; };
+    addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
+    addEventListener('error', (e) => fail(e.error || e.message));
+
+    const qs = new URLSearchParams(location.search);
+    const SCENES = {
+      playground: 'Playground: ramps, stacks, wall',
+      destruction: 'Destruction yard: sever parts',
+      traffic: 'Traffic: many AI vehicles',
+      slab: 'Lab: car on a slab sliding on ice',
+      seesaw: 'Lab: seesaw plank',
+      carry: 'Lab: kart riding on a truck',
+      sidewall: 'Lab: crates beside the tyres',
+      bridge: 'Lab: plank bridge with breakable bolts',
+    };
+    const scene = qs.get('scene') || 'playground';
+    if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
+    const presets = await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json();
+    const byName = Object.fromEntries(presets.map((p) => [p.name, p]));
+    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' ? 'monster_truck' : 'sedan');
+    if (!byName[presetName]) throw new Error(`unknown preset ${presetName}; have ${Object.keys(byName).join(', ')}`);
+
+    const sceneSel = document.getElementById('sceneSel');
+    const presetSel = document.getElementById('presetSel');
+    for (const [id, t] of Object.entries(SCENES)) sceneSel.add(new Option(t, id, false, id === scene));
+    for (const p of presets) presetSel.add(new Option(p.name.replaceAll('_', ' '), p.name, false, p.name === presetName));
+    const go = (k, v) => { const u = new URL(location.href); u.searchParams.set(k, v); if (k === 'scene') u.searchParams.delete('preset'); location.href = u.href; };
+    sceneSel.onchange = () => go('scene', sceneSel.value);
+    presetSel.onchange = () => go('preset', presetSel.value);
+
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error('no WebGPU adapter');
+    const device = await adapter.requestDevice({
+      requiredLimits: {
+        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize,
+      },
+    });
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const canvas = document.getElementById('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
+
+    // ---------------------------------------------------------------- scene
+    const nTraffic = scene === 'traffic' ? Math.max(1, Math.min(60, Number(qs.get('vehicles')) || 48)) : 0;
+    const est = scene === 'traffic' ? 4000 + nTraffic * 40 : 6000;
+    const cap = sceneCapacity(est, est * 2);
+    const vehicleCap = { maxVehicles: 64, maxWheels: 1024, maxCurvePoints: 8192, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 64 };
+    const world = await createWorld(device, { cap, vehicleCap, status: (s) => { statusEl.textContent = s; } });
+    // The bridge needs 20 iterations to converge its bending within a fast crossing
+    // (tests/vehicle.rs BRIDGE_ITERATIONS).
+    world.params.iterations = scene === 'bridge' ? 20 : 8;
+    const sleepQ = qs.get('sleep');
+    if (sleepQ === 'off') world.params.sleepTime = 1e6;
+    const MAT_GROUND = 0, MAT_PROP = 1, MAT_ICE = 2;
+    world.setMaterial(MAT_GROUND, 1.0);
+    world.setMaterial(MAT_PROP, 0.6);
+    world.setMaterial(MAT_ICE, 0.08);
+    world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
+
+    const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
+    const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
+    const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => {
+      const body = world.addBody({ p, q, flags: 0 });
+      world.addCollider({ body, shape: 2, material, params: [...half, Math.hypot(...half)] });
+      return body;
+    };
+    const dynBox = (p, half, mass, q = [0, 0, 0, 1]) => {
+      const body = world.addBody({ p, q, invMass: 1 / mass, invI: boxInv(mass, ...half), flags: 1 | 8 });
+      world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...half, Math.hypot(...half)] });
+      return body;
+    };
+    const dynBall = (p, r, mass, v = [0, 0, 0]) => {
+      const i = 2.5 / (mass * r * r);
+      const body = world.addBody({ p, invMass: 1 / mass, invI: [i, i, i], flags: 1 | 8, v });
+      world.addCollider({ body, shape: 0, material: MAT_PROP, params: [r, 0, 0, r] });
+      return body;
+    };
+    // Ground slab (collider 0; the renderer draws it as a plane).
+    staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
+
+    const vehicles = []; // {h, preset, ai}
+    const addVehicle = (name, p, yaw = 0, ai = null) => {
+      const h = world.vehicles.addVehicle(world.backend, byName[name], p, qAxis([0, 1, 0], yaw));
+      vehicles.push({ h, name, ai });
+      return h;
+    };
+
+    let rng = 7;
+    let bridgeBolts = 0; // breakable joints in the scene (bridge)
+    // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
+    const spawnAt = (qs.get('spawn') || '').split(',').filter(Boolean).map(Number);
+    const rand = () => { rng = (Math.imul(rng, 1103515245) + 12345) >>> 0; return rng / 2 ** 32; };
+    if (scene === 'playground' || scene === 'destruction') {
+      addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
+      // Ramps (static, rotated about X), a long hill and a kicker.
+      staticBox([0, 0.6, 30], [4, 0.4, 6], qAxis([1, 0, 0], -0.22));
+      staticBox([0, 1.95, 41], [4, 0.4, 5.5], [0, 0, 0, 1]);
+      staticBox([0, 0.6, 52], [4, 0.4, 6], qAxis([1, 0, 0], 0.22));
+      staticBox([-22, 0.9, 10], [3, 0.3, 4], qAxis([1, 0, 0], -0.32));
+      staticBox([24, 0.0, -20], [10, 1.5, 14], qAxis([0, 0, 1], 0.18));
+      // Ice patch.
+      staticBox([-30, -0.02, -25], [12, 0.05, 12], [0, 0, 0, 1], MAT_ICE);
+      // Bollards (small statics).
+      for (let i = 0; i < 8; i++) staticBox([-12 + i * 3.4, 0.6, 18], [0.25, 0.6, 0.25]);
+      // Box stacks.
+      for (const [x, z] of [[8, 26], [-10, 32], [14, 40]]) {
+        for (let y = 0; y < 5; y++) for (let i = 0; i < 4 - (y >> 1); i++) dynBox([x + (i - 1.5) * 1.05, 0.5 + y * 1.0, z], [0.5, 0.5, 0.5], 40);
+      }
+      // Brick wall.
+      for (let c = 0; c < 8; c++) for (let i = 0; i < 14; i++) dynBox([-20 + i * 1.02 + (c & 1) * 0.5, 0.25 + c * 0.5, 60], [0.5, 0.25, 0.25], 12);
+      // Balls.
+      for (let i = 0; i < 6; i++) dynBall([20 + i * 2.2, 0.8, 6], 0.8, 60);
+      if (scene === 'destruction') {
+        addVehicle('destructible_sedan', [8, 2.5, -10], 1.2);
+        addVehicle('destructible_sedan', [-8, 2.5, -12], -0.6);
+        for (let c = 0; c < 6; c++) for (let i = 0; i < 10; i++) dynBox([12 + i * 1.02 + (c & 1) * 0.5, 0.25 + c * 0.5, -30], [0.5, 0.25, 0.25], 12);
+      } else {
+        addVehicle('monster_truck', [-14, 3.5, -12], 0.4);
+        addVehicle('kart', [6, 1.5, -6], 2.0);
+        addVehicle('six_wheel_truck', [18, 3, 22], -1.2);
+      }
+    } else if (scene !== 'traffic') {
+      // Two-way coupling labs: each mirrors a test in tests/vehicle.rs.
+      const MAT_SKID = 3;
+      world.setMaterial(MAT_SKID, 0.0);
+      const boxBody = (p, half, mass, extra = {}) => {
+        const body = world.addBody({ p, q: extra.q, invMass: 1 / mass, invI: boxInv(mass, ...half), flags: 1 | 8 });
+        return body;
+      };
+      const boxCol = (body, half, material, localPos = [0, 0, 0]) =>
+        world.addCollider({ body, shape: 2, material, localPos, params: [...half, Math.hypot(...half)] });
+      if (scene === 'slab') {
+        // Heavy slab: grippy deck on frictionless skids. The car's tyres push it back.
+        const m = 2500, half = [6, 0.15, 30];
+        const body = boxBody([0, 0.25, 0], [6, 0.25, 30], m);
+        boxCol(body, half, MAT_GROUND, [0, 0.1, 0]);
+        boxCol(body, half, MAT_SKID, [0, -0.1, 0]);
+        // Cones along the world so the slab's motion reads on camera.
+        for (let z = -40; z <= 40; z += 8) staticBox([8.5, 0.5, z], [0.25, 0.5, 0.25]);
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? -20], spawnAt[2] ?? 0);
+      } else if (scene === 'seesaw') {
+        // Low pivot, long plank resting on its near (-Z) end; the car's weight tips it.
+        staticBox([0, 0.25, 0], [2.6, 0.25, 0.2]);
+        // Centre 1 m on the near side so the plank rests on its near end until the car's
+        // weight crosses the pivot.
+        const tilt = -Math.atan(0.5 / 8);
+        const body = boxBody([0, 0.58 - Math.tan(-tilt), -1], [2.2, 0.08, 7], 250, { q: qAxis([1, 0, 0], tilt) });
+        boxCol(body, [2.2, 0.08, 7], MAT_GROUND);
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? -16], spawnAt[2] ?? 0);
+      } else if (scene === 'carry') {
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
+        // Parked kart (handbrake on) riding on the truck's roof.
+        addVehicle('kart', [spawnAt[0] ?? 0, 4.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0, { forward: 0, steer: 0, handbrake: 1 });
+      } else if (scene === 'bridge') {
+        // Mirrors bridge() in tests/vehicle.rs: five 2.6 m timber planks (200 kg/m)
+        // span a 12 m gap 3 m up, resting on the abutment seats. Each seam has four
+        // ball-joint bolts (top and bottom corners) rated 255 kN, so the deck carries
+        // bending as a bolt couple: ~100 kN at rest, ~205 kN under the sedan, ~320 kN
+        // under the monster truck, which snaps them. Below ~9 m/s it falls through;
+        // faster, the deck folds behind it and it makes it over.
+        const Y = 3.0, N = 5, LEN = 2.6, GAP = 0.005, HX = 2.2, HY = 0.1, HZ = LEN / 2;
+        const MASS = 200 * LEN, BOLT_K = 1e8, BOLT_BREAK = 255e3;
+        const pitch = LEN + GAP, endZ = N * pitch - GAP, seat = 0.5, roadHalf = 30, roadX = HX + 0.3;
+        const seatTop = Y - 2 * HY;
+        staticBox([0, Y / 2, -GAP - roadHalf], [roadX, Y / 2, roadHalf]);
+        staticBox([0, Y / 2, endZ + GAP + roadHalf], [roadX, Y / 2, roadHalf]);
+        staticBox([0, seatTop / 2, (seat - GAP) / 2], [roadX, seatTop / 2, (seat + GAP) / 2]);
+        staticBox([0, seatTop / 2, endZ - (seat - GAP) / 2], [roadX, seatTop / 2, (seat + GAP) / 2]);
+        const planks = [];
+        for (let i = 0; i < N; i++) {
+          const body = boxBody([0, Y - HY, i * pitch + HZ], [HX, HY, HZ], MASS);
+          boxCol(body, [HX, HY, HZ], MAT_GROUND);
+          planks.push(body);
+        }
+        for (let i = 0; i + 1 < N; i++) {
+          for (const [bx, by] of [[-0.8 * HX, -0.8 * HY], [0.8 * HX, -0.8 * HY], [-0.8 * HX, 0.8 * HY], [0.8 * HX, 0.8 * HY]]) {
+            // D6 ball bolt; its rows start at BOLT_K (the default kStart lets the span sag).
+            world.addBallJoint({
+              bodyA: planks[i], bodyB: planks[i + 1],
+              anchorA: [bx, by, HZ + GAP / 2], anchorB: [bx, by, -HZ - GAP / 2],
+              penalty: BOLT_K, breakForce: BOLT_BREAK,
+            });
+          }
+        }
+        bridgeBolts = (N - 1) * 4;
+        // The light car first; the heavy vehicle waits behind it (Tab to drive it).
+        addVehicle(presetName, [spawnAt[0] ?? 0, Y + 1.5, spawnAt[1] ?? -2.5], spawnAt[2] ?? 0);
+        // ?heavy=none leaves the player alone (e.g. preset=monster_truck&spawn=0,-27).
+        const heavy = qs.get('heavy') || 'monster_truck';
+        if (heavy !== 'none') {
+          if (!byName[heavy]) throw new Error(`unknown heavy preset ${heavy}`);
+          addVehicle(heavy, [0, Y + 2, -11], 0, { forward: 0, steer: 0, handbrake: 1 });
+        }
+      } else if (scene === 'sidewall') {
+        // Light crates in two rows that only the tyre outlines reach (outside the body,
+        // off the ray lines): the wheel shells shove them.
+        for (let i = 0; i < 8; i++) for (const x of [-1.15, 1.15]) {
+          const body = boxBody([x, 0.2, 6 + i * 2.5], [0.3, 0.2, 0.3], 15);
+          boxCol(body, [0.3, 0.2, 0.3], MAT_PROP);
+        }
+        addVehicle(presetName, [spawnAt[0] ?? 0, 2.0, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
+      }
+    } else {
+      addVehicle(presetName, [spawnAt[0] ?? 0, 2.5, spawnAt[1] ?? -60], spawnAt[2] ?? 0);
+      const kinds = ['sedan', 'sports', 'kart', 'jolt_default', 'destructible_sedan', 'monster_truck'];
+      const cols = Math.ceil(Math.sqrt(nTraffic));
+      for (let i = 0; i < nTraffic; i++) {
+        const x = ((i % cols) - cols / 2) * 14, z = (Math.floor(i / cols) - cols / 2) * 14;
+        const kind = kinds[i % kinds.length];
+        addVehicle(kind, [x, kind === 'monster_truck' ? 3.5 : 2.2, z], rand() * 6.28,
+          { forward: 0.2 + 0.25 * rand(), steer: (rand() < 0.5 ? -1 : 1) * (0.15 + 0.35 * rand()) });
+      }
+      for (let i = 0; i < 400; i++) dynBox([(rand() - 0.5) * 120, 0.5 + rand() * 6, (rand() - 0.5) * 120], [0.5, 0.5, 0.5], 30);
+    }
+    // Cannonballs: parked static spheres, launched by writing their body records.
+    const cannon = [];
+    for (let i = 0; i < 12; i++) {
+      const body = world.addBody({ p: [-4000 - i * 5, -4000, -4000], flags: 0, invMass: 1 / 400, invI: [2.5 / (400 * 0.36), 2.5 / (400 * 0.36), 2.5 / (400 * 0.36)] });
+      world.addCollider({ body, shape: 0, material: MAT_PROP, params: [0.6, 0, 0, 0.6] });
+      cannon.push(body);
+    }
+    for (const v of vehicles) if (v.ai) world.vehicles.setInput(world.backend, v.h, v.ai);
+    const initial = world.snapshot();
+    // The controlled vehicle (Tab cycles; __record act 'player:<i>').
+    let player = 0;
+    statusEl.textContent = `scene ready · ${world.bodyCount} bodies · ${world.vehicles.vehicleCount} vehicles`;
+
+    // ---------------------------------------------------------------- renderer
+    const SHADER = /* wgsl */`
+struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
+  linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
+struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
+struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
+@group(0) @binding(0) var<storage, read> bodies: array<Body>;
+@group(0) @binding(1) var<uniform> frame: Frame;
+@group(0) @binding(2) var<storage, read> cols: array<Collider>;
+@group(0) @binding(3) var<storage, read> vdata: array<vec4u>;
+
+fn qrot(q: vec4f, v: vec3f) -> vec3f {
+  let u = q.xyz;
+  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
+}
+fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
+fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
+  let l = normalize(frame.light.xyz);
+  let diff = max(dot(n, l), 0.0);
+  let v = normalize(frame.eye.xyz - w);
+  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.25;
+  let sky = 0.5 + 0.5 * n.y;
+  let fog = clamp(length(frame.eye.xyz - w) / 260.0, 0.0, 1.0);
+  return mix(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, vec3f(0.55, 0.62, 0.72), fog * fog);
+}
+
+struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) c: vec3f, @location(2) w: vec3f, @location(3) center: vec3f, @location(4) r: f32, @location(5) m: vec3f };
+
+@vertex fn vsCol(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
+  let ci = inst + 1u;
+  let col = cols[ci];
+  let b = bodies[col.body];
+  var o: Out;
+  o.r = 0.0; o.m = corner;
+  let hidden = col.material == ${WHEEL_RIM_MATERIAL}u || b.position.y < -1000.0;
+  var half = col.params.xyz;
+  if (col.shape == 0u) { half = vec3f(col.params.x); o.r = col.params.x; }
+  let q = vec4f(b.orientation);
+  let lq = col.localRot;
+  let local = col.localPos + qrot(lq, corner * half * 2.0);
+  let w = b.position + qrot(q, local);
+  o.w = w;
+  o.center = b.position + qrot(q, col.localPos);
+  o.n = qrot(q, qrot(lq, normal));
+  o.clip = select(frame.viewProj * vec4f(w, 1.0), vec4f(0.0, 0.0, 2.0, 1.0), hidden);
+  let dyn = b.invMass > 0.0 && (b.flags & 1u) != 0u;
+  if ((b.flags & 32u) != 0u) { // BODY_VEHICLE
+    let hue = hash(col.body * 3u + 1u);
+    o.c = mix(vec3f(0.85, 0.12, 0.10), vec3f(0.10, 0.35, 0.85), step(0.5, hue));
+    if (col.localPos.y > 0.15) { o.c = o.c * 1.15; }
+  } else if (!dyn) {
+    o.c = select(vec3f(0.55, 0.56, 0.6), vec3f(0.62, 0.8, 0.95), col.material == 2u);
+  } else if (col.shape == 0u) {
+    o.c = vec3f(0.2, 0.22, 0.25);
+  } else {
+    let h = hash(col.body);
+    o.c = mix(vec3f(0.85, 0.55, 0.25), vec3f(0.9, 0.78, 0.4), h);
+    if ((b.flags & 4u) != 0u) { o.c = o.c * 0.7; }
+  }
+  return o;
+}
+
+@fragment fn fsCol(i: Out) -> @location(0) vec4f {
+  var n = normalize(i.n);
+  if (i.r > 0.0) {
+    let rd = normalize(i.w - frame.eye.xyz);
+    let oc = frame.eye.xyz - i.center;
+    let b = dot(oc, rd);
+    let h = b * b - (dot(oc, oc) - i.r * i.r);
+    if (h < 0.0) { discard; }
+    n = normalize(frame.eye.xyz + rd * (-b - sqrt(h)) - i.center);
+  }
+  return vec4f(shade(i.c, n, i.w), 1.0);
+}
+
+fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
+
+@vertex fn vsWheel(@location(0) mesh: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
+  let bases = vdata[1u];
+  let wr = bases.y + inst * ${L.WHEEL_STRIDE}u;
+  let cfg = vdata[wr];
+  let dynFlags = vdata[wr + ${L.W_C0}u].z;
+  let vr = bases.x + cfg.x * ${L.VEH_STRIDE}u;
+  let up = normalize(vf(vr + ${L.V_UP}u).xyz);
+  let fwd = normalize(vf(vr + ${L.V_FWD}u).xyz);
+  let axle = normalize(cross(up, fwd));
+  let radius = vf(wr + ${L.W_HP}u).w;
+  let width = vf(wr + ${L.W_DIR}u).w;
+  var pos = vf(wr + ${L.W_O_POS}u).xyz;
+  var q = vf(wr + ${L.W_O_ROT}u);
+  if ((dynFlags & ${L.WD_DETACHED}u) != 0u) {
+    let pb = bodies[vdata[wr + ${L.W_PARK}u].x];
+    pos = pb.position; q = pb.orientation;
+  }
+  let hidden = (cfg.y & ${L.WF_ENABLED}u) == 0u || (dynFlags & ${L.WD_DISABLED}u) != 0u || inst >= vdata[0u].w;
+  let local = axle * mesh.x * width * 0.5 + up * mesh.y * radius + fwd * mesh.z * radius;
+  let lnorm = axle * normal.x + up * normal.y + fwd * normal.z;
+  var o: Out;
+  o.w = pos + qrot(q, local);
+  o.n = qrot(q, lnorm);
+  o.center = pos; o.r = 0.0; o.m = mesh;
+  o.clip = select(frame.viewProj * vec4f(o.w, 1.0), vec4f(0.0, 0.0, 2.0, 1.0), hidden);
+  let rr = length(mesh.yz);
+  let spoke = step(0.5, fract(atan2(mesh.z, mesh.y) * 0.954930));
+  o.c = select(vec3f(0.08, 0.08, 0.09), mix(vec3f(0.55, 0.57, 0.62), vec3f(0.3, 0.31, 0.34), spoke), abs(mesh.x) > 0.98 && rr < 0.62);
+  if ((dynFlags & ${L.WD_SLIDE}u) != 0u && (dynFlags & ${L.WD_CONTACT}u) != 0u && rr > 0.95) { o.c = vec3f(0.6, 0.25, 0.1); }
+  return o;
+}
+
+@fragment fn fsWheel(i: Out) -> @location(0) vec4f { return vec4f(shade(i.c, normalize(i.n), i.w), 1.0); }
+
+@vertex fn vsGround(@location(0) p: vec3f) -> Out {
+  var o: Out;
+  o.w = p; o.n = vec3f(0.0, 1.0, 0.0); o.c = vec3f(0.3); o.center = p; o.r = 0.0; o.m = p;
+  o.clip = frame.viewProj * vec4f(p, 1.0) + vec4f(0.0) * bodies[0].position.x;
+  return o;
+}
+@fragment fn fsGround(i: Out) -> @location(0) vec4f {
+  let g = abs(fract(i.w.xz / 4.0) - 0.5);
+  let line = smoothstep(0.47, 0.5, max(g.x, g.y));
+  let checker = step(0.0, sin(i.w.x * 0.3927) * sin(i.w.z * 0.3927));
+  let base = mix(vec3f(0.26, 0.29, 0.27), vec3f(0.3, 0.33, 0.31), checker);
+  return vec4f(shade(mix(base, vec3f(0.45, 0.48, 0.46), line * 0.6), vec3f(0.0, 1.0, 0.0), i.w), 1.0);
+}
+`;
+    const mod = device.createShaderModule({ label: 'vehicle-render', code: SHADER });
+    const info = await mod.getCompilationInfo();
+    const err = info.messages.find((m) => m.type === 'error');
+    if (err) throw new Error(`render shader: ${err.message} @${err.lineNum}`);
+
+    // Meshes: unit cube (corners ±0.5), cylinder along x (radius 1, half-length 1), ground quad.
+    const cube = [];
+    for (const [u, v, w] of [[0, 1, 2], [1, 2, 0], [2, 0, 1]]) for (const s of [-1, 1]) {
+      const n = [0, 0, 0]; n[w] = s;
+      const cs = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => { const p = [0, 0, 0]; p[u] = a * 0.5; p[v] = b * 0.5; p[w] = s * 0.5; return p; });
+      const tris = s > 0 ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]];
+      for (const t of tris) for (const k of t) cube.push(...cs[k], ...n);
+    }
+    const cyl = [];
+    const SEG = 28;
+    for (let k = 0; k < SEG; k++) {
+      const a0 = (k / SEG) * Math.PI * 2, a1 = ((k + 1) / SEG) * Math.PI * 2;
+      const p = (x, a, r = 1) => [x, Math.cos(a) * r, Math.sin(a) * r];
+      const nr = (a) => [0, Math.cos(a), Math.sin(a)];
+      // side
+      for (const [pp, nn] of [[p(-1, a0), nr(a0)], [p(1, a0), nr(a0)], [p(1, a1), nr(a1)], [p(-1, a0), nr(a0)], [p(1, a1), nr(a1)], [p(-1, a1), nr(a1)]]) cyl.push(...pp, ...nn);
+      // caps
+      for (const s of [-1, 1]) {
+        const tri = s > 0 ? [p(1, 0, 0), p(1, a1), p(1, a0)] : [p(-1, 0, 0), p(-1, a0), p(-1, a1)];
+        for (const v of tri) cyl.push(...v, s, 0, 0);
+      }
+    }
+    const G = 400;
+    const ground = [[-G, -G], [G, -G], [G, G], [-G, -G], [G, G], [-G, G]].flatMap(([x, z]) => [x, 0.001, z]);
+    const vbo = (arr) => { const b = device.createBuffer({ size: arr.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, new Float32Array(arr)); return b; };
+    const cubeVbo = vbo(cube), cylVbo = vbo(cyl), groundVbo = vbo(ground);
+    const frameBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const vtx6 = [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }];
+    const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
+    const pipe = (vs, fs, buffers, cull = 'back') => device.createRenderPipeline({
+      layout: 'auto', vertex: { module: mod, entryPoint: vs, buffers }, fragment: { module: mod, entryPoint: fs, targets: [{ format }] },
+      primitive: { cullMode: cull }, depthStencil,
+    });
+    const colPipe = pipe('vsCol', 'fsCol', vtx6);
+    const wheelPipe = pipe('vsWheel', 'fsWheel', vtx6, 'none');
+    const groundPipe = pipe('vsGround', 'fsGround', [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'none');
+    const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
+    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
+    const wheelBind = bind(wheelPipe, [[0, world.bufs[0]], [1, frameBuf], [3, world.bufs[31]]]);
+    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf]]);
+    let depth = null;
+
+    // ---------------------------------------------------------------- camera
+    let camMode = 'chase';
+    let orbit = { yaw: 0.6, pitch: 0.35, dist: 16 };
+    let camEye = [0, 6, -14], camTarget = [0, 1, 0];
+    let drag = null;
+    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
+    addEventListener('pointerup', () => { drag = null; });
+    addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      orbit.yaw -= (e.clientX - drag.x) * 0.005;
+      orbit.pitch = Math.max(-0.2, Math.min(1.4, orbit.pitch + (e.clientY - drag.y) * 0.005));
+      drag = { x: e.clientX, y: e.clientY };
+      if (camMode === 'chase') camMode = 'orbit';
+    });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = Math.max(4, Math.min(120, orbit.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+    const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const qrot = (q, v) => {
+      const [x, y, z, w] = q; const u = [x, y, z];
+      const d = 2 * (x * v[0] + y * v[1] + z * v[2]); const s = w * w - (x * x + y * y + z * z); const c = cross3(u, v);
+      return [u[0] * d + v[0] * s + c[0] * 2 * w, u[1] * d + v[1] * s + c[1] * 2 * w, u[2] * d + v[2] * s + c[2] * 2 * w];
+    };
+    function viewProj(eye, at, aspect) {
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const view = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
+      const f = 1 / Math.tan(Math.PI / 6), near = 0.1, far = 900;
+      const proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far / (near - far), -1, 0, 0, (near * far) / (near - far), 0];
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = proj[r] * view[c * 4] + proj[4 + r] * view[c * 4 + 1] + proj[8 + r] * view[c * 4 + 2] + proj[12 + r] * view[c * 4 + 3];
+      return o;
+    }
+
+    // ---------------------------------------------------------------- input
+    const keys = new Set();
+    addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'SELECT') return;
+      keys.add(e.code);
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+      if (e.repeat) return;
+      if (e.code === 'KeyR') resetScene();
+      else if (e.code === 'KeyC') camMode = camMode === 'chase' ? 'orbit' : 'chase';
+      else if (e.code === 'Tab') { e.preventDefault(); world.vehicles.setInput(world.backend, player, { forward: 0, steer: 0, brake: 1 }); selectPlayer((player + 1) % vehicles.length); }
+      else if (e.code === 'KeyX') severWheel(true);
+      else if (e.code === 'KeyZ') severWheel(false);
+      else if (e.code === 'KeyP') severPart();
+      else if (e.code === 'KeyB') fireCannon();
+    });
+    addEventListener('keyup', (e) => keys.delete(e.code));
+    addEventListener('blur', () => keys.clear());
+    const key = (...c) => c.some((k) => keys.has(k));
+
+    let steer = 0;
+    function readInput(dt) {
+      let fwd = (key('KeyW', 'ArrowUp') ? 1 : 0) - (key('KeyS', 'ArrowDown') ? 1 : 0);
+      let target = (key('KeyD', 'ArrowRight') ? 1 : 0) - (key('KeyA', 'ArrowLeft') ? 1 : 0);
+      let hand = key('Space') ? 1 : 0;
+      let brake = 0;
+      for (const pad of navigator.getGamepads ? navigator.getGamepads() : []) {
+        if (!pad) continue;
+        const ax = pad.axes[0] || 0;
+        if (Math.abs(ax) > 0.12) target = ax;
+        const rt = pad.buttons[7]?.value || 0, lt = pad.buttons[6]?.value || 0;
+        if (rt > 0.05 || lt > 0.05) fwd = rt - lt;
+        if (pad.buttons[0]?.pressed) hand = 1;
+        if (pad.buttons[1]?.pressed) brake = 1;
+      }
+      steer = target;
+      return { forward: fwd, steer, brake, handbrake: hand };
+    }
+
+    // ---------------------------------------------------------------- severing / tools
+    const severed = new Set();
+    function severWheel(spawn) {
+      const st = lastState;
+      if (!st) return;
+      const alive = st.wheels.map((w, i) => (!w.detached && !w.disabled ? i : -1)).filter((i) => i >= 0);
+      if (!alive.length) return;
+      const w = alive[Math.floor(Math.random() * alive.length)];
+      if (spawn) world.vehicles.detachWheel(world.backend, player, w); else world.vehicles.disableWheel(world.backend, player, w);
+    }
+    function severPart() {
+      const desc = world.vehicles.entries[player].desc;
+      for (let i = 0; i < desc.parts.length; i++) {
+        if (desc.parts.length > 1 && i === 0) continue; // keep the main body
+        if (severed.has(i)) continue;
+        severed.add(i);
+        world.vehicles.detachPart(world.backend, player, i);
+        renderParts();
+        return;
+      }
+    }
+    let cannonNext = 0;
+    function fireCannon() {
+      if (!cannon.length) return;
+      const body = cannon[cannonNext++ % cannon.length];
+      const dir = norm3(sub3(camTarget, camEye));
+      const p = [camEye[0] + dir[0] * 3, camEye[1] + dir[1] * 3, camEye[2] + dir[2] * 3];
+      const v = dir.map((d) => d * 45);
+      const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
+      const f = new Float32Array(words.buffer);
+      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8; f.set(v, 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
+      f.set(p, 20); f.set([0, 0, 0, 1], 24);
+      world.backend.writeBody(body, words);
+    }
+    function resetScene() {
+      world.restore(initial);
+      bolts = { broken: 0, lastForce: 0 };
+      boltPollStep = -1;
+      severed.clear();
+      renderParts();
+    }
+
+    // Parts panel (destructible presets).
+    const partsPanel = document.getElementById('parts');
+    const partList = document.getElementById('partList');
+    function renderParts() {
+      const e = world.vehicles.entries[player];
+      partsPanel.hidden = false;
+      partList.textContent = '';
+      const lost = lastState ? lastState.partsLost : 0;
+      e.desc.parts.forEach((p, i) => {
+        const row = document.createElement('div');
+        row.className = 'part' + ((lost >> i) & 1 ? ' lost' : '');
+        const role = p.role.type.replace('_', ' ');
+        row.innerHTML = `<span>${p.name} <span class="muted">(${role})</span></span>`;
+        const btns = document.createElement('span');
+        for (const [label, fn] of [['sever', () => world.vehicles.detachPart(world.backend, player, i)], ['disable', () => world.vehicles.disablePart(world.backend, player, i)]]) {
+          const b = document.createElement('button'); b.textContent = label; b.onclick = () => { fn(); b.blur(); };
+          b.disabled = !!((lost >> i) & 1);
+          btns.append(b, ' ');
+        }
+        row.append(btns);
+        partList.append(row);
+      });
+      const names = e.desc.wheels.length === 4 ? ['FL', 'FR', 'RL', 'RR'] : e.desc.wheels.map((_, i) => 'W' + i);
+      names.forEach((n, i) => {
+        const row = document.createElement('div');
+        const gone = lastState && (lastState.wheels[i]?.detached || lastState.wheels[i]?.disabled);
+        row.className = 'part' + (gone ? ' lost' : '');
+        row.innerHTML = `<span>wheel ${n}</span>`;
+        const btns = document.createElement('span');
+        for (const [label, fn] of [['sever', () => world.vehicles.detachWheel(world.backend, player, i)], ['remove', () => world.vehicles.disableWheel(world.backend, player, i)]]) {
+          const b = document.createElement('button'); b.textContent = label; b.onclick = () => { fn(); b.blur(); }; b.disabled = !!gone;
+          btns.append(b, ' ');
+        }
+        row.append(btns);
+        partList.append(row);
+      });
+      const eng = document.createElement('div');
+      eng.className = 'part';
+      eng.innerHTML = '<span>engine override</span>';
+      const t = document.createElement('button');
+      t.textContent = engineOn ? 'cut' : 'restore';
+      t.onclick = () => { engineOn = !engineOn; world.vehicles.setFunctionalState(world.backend, player, { engineConnected: engineOn }); renderParts(); };
+      eng.append(t);
+      partList.append(eng);
+    }
+    let engineOn = true;
+
+    // ---------------------------------------------------------------- readback (pipelined)
+    const l = world.vlayout;
+    let vehOff = 0, wheelOff = 0, wheelBytes = 0;
+    const maxWheelBytes = Math.max(...world.vehicles.entries.map((e) => e.wheelSlots)) * L.WHEEL_STRIDE * 16;
+    const RB = 3;
+    const rbFree = Array.from({ length: RB }, () => device.createBuffer({ size: 112 + L.VEH_STRIDE * 16 + maxWheelBytes + 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    let lastState = null, lastChassis = null, lastCounters = null;
+    const shadow = new Uint32Array(l.totalSlots * 4);
+    // Chassis body, vehicle record, wheel records and counters of the player.
+    function encodeReadback(enc, rb) {
+      rb.player = player;
+      enc.copyBufferToBuffer(world.bufs[0], world.vehicles.chassisBody(player) * 112, rb, 0, 112);
+      enc.copyBufferToBuffer(world.bufs[31], vehOff, rb, 112, L.VEH_STRIDE * 16);
+      enc.copyBufferToBuffer(world.bufs[31], wheelOff, rb, 112 + L.VEH_STRIDE * 16, wheelBytes);
+      enc.copyBufferToBuffer(world.bufs[7], 0, rb, 112 + L.VEH_STRIDE * 16 + wheelBytes, 80);
+    }
+    function decode(buf) {
+      const all = new Uint32Array(buf.getMappedRange().slice(0));
+      buf.unmap();
+      if (buf.player !== player) return; // read before a player switch
+      const body = new Float32Array(all.buffer, 0, 28);
+      lastChassis = { p: [body[0], body[1], body[2]], q: [body[4], body[5], body[6], body[7]], v: [body[12], body[13], body[14]], flags: all[11] };
+      shadow.set(all.subarray(28, 28 + L.VEH_STRIDE * 4), vehOff / 4);
+      shadow.set(all.subarray(28 + L.VEH_STRIDE * 4, 28 + L.VEH_STRIDE * 4 + wheelBytes / 4), wheelOff / 4);
+      lastState = world.vehicles.readState(shadow, player);
+      const c = all.subarray(28 + L.VEH_STRIDE * 4 + wheelBytes / 4);
+      lastCounters = { contact: c[2], awake: c[5], overflow: c[7] };
+      world.setLastCounters(c);
+    }
+
+    // ---------------------------------------------------------------- HUD
+    const speedEl = document.getElementById('speed'), gearEl = document.getElementById('gear');
+    const rpmEl = document.getElementById('rpm'), rpmText = document.getElementById('rpmText');
+    const wheelsEl = document.getElementById('wheels');
+    let playerDesc = null, maxRpm = 0, chaseDist = 0;
+    function selectPlayer(i) {
+      player = i;
+      const pe = world.vehicles.entries[player];
+      vehOff = (l.vehicleBase + player * L.VEH_STRIDE) * 16;
+      wheelOff = (l.wheelBase + pe.slots.wheelBase * L.WHEEL_STRIDE) * 16;
+      wheelBytes = pe.wheelSlots * L.WHEEL_STRIDE * 16;
+      playerDesc = pe.desc;
+      maxRpm = playerDesc.drive.type === 'drivetrain' ? playerDesc.drive.engine.max_rpm : 0;
+      // Chase distance scales with the vehicle's size (a motorcycle vs a tank).
+      const vehicleExtent = Math.max(
+        ...playerDesc.wheels.map((w) => Math.hypot(w.position[0], w.position[2]) + w.radius),
+        ...playerDesc.parts.flatMap((p) => p.colliders.map((k) => Math.hypot(k.position[0], k.position[2])
+          + (k.shape.type === 'box' ? Math.hypot(k.shape.half[0], k.shape.half[2]) : k.shape.radius))),
+      );
+      chaseDist = Math.max(4.5, Math.min(16, 2.5 + 2.6 * vehicleExtent));
+      lastState = null;
+      lastPartsKey = '';
+      severed.clear();
+      renderParts();
+    }
+    let lastPartsKey = '';
+    selectPlayer(0);
+    // Broken bolts (EVENT_BREAK ring), polled a few times a second.
+    let bolts = { broken: 0, lastForce: 0 };
+    let boltPollStep = -1;
+    function pollBolts() {
+      if (!bridgeBolts || world.steps - boltPollStep < 15) return;
+      boltPollStep = world.steps;
+      world.pollJointBreaks().then((list) => {
+        for (const b of list) { bolts.broken++; bolts.lastForce = b.force; }
+      }).catch(fail);
+    }
+    const boltText = () => bridgeBolts ? ` · bolts broken ${bolts.broken}/${bridgeBolts}${bolts.broken ? ` (last at ${(bolts.lastForce / 1000).toFixed(0)} kN)` : ''}` : '';
+    function updateHud() {
+      pollBolts();
+      const st = lastState;
+      if (!st) return;
+      speedEl.innerHTML = `${Math.abs(st.forwardSpeed * 3.6).toFixed(0)} <small>km/h</small>`;
+      gearEl.textContent = maxRpm ? (st.gear < 0 ? 'R' : st.gear === 0 ? 'N' : String(st.gear)) : 'D';
+      rpmEl.style.width = maxRpm ? `${Math.min(100, (100 * st.engineRpm) / maxRpm)}%` : '0';
+      rpmText.textContent = maxRpm ? `${st.engineRpm.toFixed(0)} rpm · clutch ${(st.clutch * 100).toFixed(0)}%${st.engineConnected ? '' : ' · ENGINE LOST'}` : `direct drive${st.engineConnected ? '' : ' · ENGINE LOST'}`;
+      wheelsEl.innerHTML = st.wheels.map((w, i) => {
+        const cls = w.detached || w.disabled ? 'gone' : w.sliding ? 'slide' : w.inContact ? 'contact' : '';
+        return `<div class="wheel ${cls}">#${i} ${w.detached ? 'severed' : w.disabled ? 'removed' : `${(w.suspensionForce / 1000).toFixed(1)}kN · κ${w.slipRatio.toFixed(2)}`}</div>`;
+      }).join('');
+      const k = `${st.partsLost}/${st.wheels.map((w) => +w.detached + 2 * +w.disabled).join('')}`;
+      if (k !== lastPartsKey) { lastPartsKey = k; renderParts(); }
+    }
+
+    function updateCamera(dt, snap) {
+      if (lastChassis) {
+        const pos = lastChassis.p;
+        const f = qrot(lastChassis.q, [0, 0, 1]);
+        const flat = norm3([f[0], 0, f[2]]);
+        const desiredT = [pos[0], pos[1] + 1.0, pos[2]];
+        let desiredE;
+        if (camMode === 'chase') {
+          const d = chaseDist;
+          desiredE = [pos[0] - flat[0] * d, pos[1] + d * 0.38, pos[2] - flat[2] * d];
+        } else {
+          const cp = Math.cos(orbit.pitch);
+          desiredE = [pos[0] + orbit.dist * cp * Math.sin(orbit.yaw), pos[1] + orbit.dist * Math.sin(orbit.pitch), pos[2] + orbit.dist * cp * Math.cos(orbit.yaw)];
+        }
+        // Smooth the eye's offset from the target (not its world position) so a fast
+        // vehicle stays the same size on screen instead of pulling away from the camera.
+        const k = snap ? 1 : 1 - Math.pow(0.0015, dt);
+        const off = sub3(camEye, camTarget), wantOff = sub3(desiredE, desiredT);
+        camTarget = camTarget.map((x, i) => x + (desiredT[i] - x) * Math.min(1, k * 4));
+        camEye = camTarget.map((x, i) => x + off[i] + (wantOff[i] - off[i]) * k);
+      }
+      if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
+        depth?.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      }
+      frameF.set(viewProj(camEye, camTarget, canvas.width / canvas.height), 0);
+      frameF.set([...camEye, 0], 16);
+      frameF.set([0.4, 0.85, 0.3, 0], 20);
+      device.queue.writeBuffer(frameBuf, 0, frameF);
+    }
+    function drawScene(enc) {
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
+      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
+      rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount);
+      rp.end();
+    }
+
+    // ---------------------------------------------------------------- loop
+    const stopAt = Number(qs.get('stopAt')) || 0;
+    let inFlight = 0;
+    let lastT = performance.now();
+    let fpsAcc = 0, fpsN = 0, fpsShow = 0;
+    const frameF = new Float32Array(24);
+    function frame(now) {
+      const dt = Math.min(0.05, (now - lastT) / 1000);
+      lastT = now;
+      fpsAcc += dt; fpsN++;
+      if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
+      if (rbFree.length === 0) { requestAnimationFrame(frame); return; }
+      if (manual) {
+        // Scripted via __step(): render only, never overwrite the scripted input.
+        updateCamera(dt, false);
+        const enc = device.createCommandEncoder();
+        drawScene(enc);
+        device.queue.submit([enc.finish()]);
+        requestAnimationFrame(frame);
+        return;
+      }
+      const input = readInput(dt);
+      world.vehicles.setInput(world.backend, player, input);
+
+      updateCamera(dt, false);
+      const enc = device.createCommandEncoder();
+      const frozen = stopAt > 0 && world.steps >= stopAt;
+      if (!frozen) world.encodeStep(enc);
+      drawScene(enc);
+      const rb = rbFree.pop();
+      encodeReadback(enc, rb);
+      device.queue.submit([enc.finish()]);
+      inFlight++;
+      rb.mapAsync(GPUMapMode.READ).then(() => { decode(rb); rbFree.push(rb); inFlight--; updateHud(); }).catch(fail);
+      statusEl.textContent = `${world.bodyCount} bodies · ${world.vehicles.vehicleCount} vehicles · step ${world.steps}${frozen ? ' (stopAt)' : ''} · ${fpsShow.toFixed(0)} fps`
+        + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '') + ` · ${camMode} cam` + boltText();
+      requestAnimationFrame(frame);
+    }
+
+    // Debug / automation hooks. __step(n, input) advances n physics steps without
+    // rendering (rAF is throttled in background tabs) and returns the player state.
+    let manual = false;
+    window.__step = async (n = 1, input = null) => {
+      manual = true;
+      if (input) world.vehicles.setInput(world.backend, player, input);
+      for (let i = 0; i < n; i++) {
+        const enc = device.createCommandEncoder();
+        world.encodeStep(enc);
+        device.queue.submit([enc.finish()]);
+        if (i % 30 === 29) await device.queue.onSubmittedWorkDone();
+      }
+      while (rbFree.length === 0) await new Promise((r) => setTimeout(r, 5));
+      const rb = rbFree.pop();
+      const enc = device.createCommandEncoder();
+      encodeReadback(enc, rb);
+      device.queue.submit([enc.finish()]);
+      await rb.mapAsync(GPUMapMode.READ);
+      decode(rb);
+      rbFree.push(rb);
+      updateHud();
+      updateCamera(0, true);
+      const renc = device.createCommandEncoder();
+      drawScene(renc);
+      device.queue.submit([renc.finish()]);
+      return { steps: world.steps, chassis: lastChassis, state: lastState, counters: lastCounters };
+    };
+    // __record(script, {name, every, width, upload}) plays a scripted drive frame-locked
+    // (one physics step per video frame at 60 Hz, independent of rAF timing) and PUTs
+    // each composited frame (canvas + caption) as JPEG to `${upload}/${name}/f00000.jpg`.
+    // Script items: {n, input?, act?: 'wheel:<i>'|'remove:<i>'|'part'|'cannon'|'reset',
+    // cam?: 'chase' | {orbit: [yaw, pitch, dist], spin?}, caption?}.
+    window.__record = async (script, opts = {}) => {
+      manual = true;
+      const name = opts.name || 'take';
+      const every = opts.every || 1;
+      const upload = opts.upload || '/rec';
+      const W = Math.min(opts.width || 1280, canvas.width);
+      const H = Math.round((W * canvas.height) / canvas.width / 2) * 2;
+      const out = new OffscreenCanvas(W, H);
+      const g = out.getContext('2d');
+      let frameNo = 0, caption = '', spin = 0;
+      const pending = new Set();
+      const t0 = performance.now();
+      for (const seg of script) {
+        if (seg.input) world.vehicles.setInput(world.backend, player, seg.input);
+        if (seg.caption !== undefined) caption = seg.caption;
+        if (seg.cam === 'chase') { camMode = 'chase'; spin = 0; }
+        else if (seg.cam && seg.cam.orbit) { camMode = 'orbit'; [orbit.yaw, orbit.pitch, orbit.dist] = seg.cam.orbit; spin = seg.cam.spin || 0; }
+        if (seg.act) {
+          const [a, arg] = seg.act.split(':');
+          if (a === 'wheel') world.vehicles.detachWheel(world.backend, player, Number(arg));
+          else if (a === 'remove') world.vehicles.disableWheel(world.backend, player, Number(arg));
+          else if (a === 'part') severPart();
+          else if (a === 'cannon') fireCannon();
+          else if (a === 'reset') resetScene();
+          else if (a === 'player') { world.vehicles.setInput(world.backend, player, { forward: 0, steer: 0, brake: 1 }); selectPlayer(Number(arg)); }
+        }
+        for (let i = 0; i < (seg.n || 0); i++) {
+          orbit.yaw += spin;
+          if (seg.cruise !== undefined && lastState) {
+            // Hold a target forward speed (m/s) with throttle / brake.
+            const e = seg.cruise - lastState.forwardSpeed;
+            world.vehicles.setInput(world.backend, player, { ...(seg.input || {}), forward: Math.max(0, Math.min(1, e * 0.4)), brake: e < -1 ? Math.min(1, -e * 0.2) : 0 });
+          }
+          const enc = device.createCommandEncoder();
+          world.encodeStep(enc);
+          const rb = rbFree.pop();
+          encodeReadback(enc, rb);
+          device.queue.submit([enc.finish()]);
+          await rb.mapAsync(GPUMapMode.READ);
+          decode(rb);
+          rbFree.push(rb);
+          if (world.steps % every !== 0) continue;
+          updateHud();
+          updateCamera(1 / 60, frameNo === 0);
+          const renc = device.createCommandEncoder();
+          drawScene(renc);
+          device.queue.submit([renc.finish()]);
+          g.drawImage(canvas, 0, 0, W, H);
+          const st = lastState;
+          g.fillStyle = 'rgba(10,14,22,0.62)';
+          g.fillRect(12, H - 74, Math.min(W - 24, 720), 62);
+          g.fillStyle = '#fff';
+          g.font = '600 22px system-ui, sans-serif';
+          g.fillText(caption || playerDesc.name.replaceAll('_', ' '), 24, H - 46);
+          g.font = '16px ui-monospace, monospace';
+          if (st) {
+            const gear = maxRpm ? (st.gear < 0 ? 'R' : st.gear === 0 ? 'N' : String(st.gear)) : 'D';
+            g.fillText(bridgeBolts
+              ? `${playerDesc.name.replaceAll('_', ' ')}  ${Math.abs(st.forwardSpeed * 3.6).toFixed(0).padStart(3)} km/h  bolts broken ${bolts.broken}/${bridgeBolts}  step ${world.steps}`
+              : `${Math.abs(st.forwardSpeed * 3.6).toFixed(0).padStart(3)} km/h  gear ${gear}  ${maxRpm ? st.engineRpm.toFixed(0) + ' rpm' : ''}  yaw ${st.yawRate.toFixed(2)}  contacts ${st.contacts}  step ${world.steps}`, 24, H - 22);
+          }
+          const blob = await out.convertToBlob({ type: 'image/jpeg', quality: 0.88 });
+          const p = fetch(`${upload}/${name}/f${String(frameNo++).padStart(5, '0')}.jpg`, { method: 'PUT', body: blob }).then(() => pending.delete(p));
+          pending.add(p);
+          if (pending.size > 16) await Promise.race(pending);
+        }
+      }
+      await Promise.all(pending);
+      return { name, frames: frameNo, width: W, height: H, seconds: (performance.now() - t0) / 1000, state: lastState, chassis: lastChassis };
+    };
+    // Chassis poses of every vehicle: [{name, p, up, speed}] (one GPU readback).
+    window.__chassisPoses = async () => {
+      const n = world.bodyCount * 112;
+      const buf = device.createBuffer({ size: n, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(world.bufs[0], 0, buf, 0, n);
+      device.queue.submit([enc.finish()]);
+      await buf.mapAsync(GPUMapMode.READ);
+      const f = new Float32Array(buf.getMappedRange().slice(0));
+      buf.destroy();
+      return vehicles.map((v) => {
+        const o = world.vehicles.chassisBody(v.h) * 28;
+        const q = [f[o + 4], f[o + 5], f[o + 6], f[o + 7]];
+        return { name: v.name, p: [f[o], f[o + 1], f[o + 2]], up: qrot(q, [0, 1, 0]), speed: Math.hypot(f[o + 12], f[o + 13], f[o + 14]) };
+      });
+    };
+    window.__vehicleState = () => lastState;
+    window.__setVehicleInput = (h, input) => world.vehicles.setInput(world.backend, h, input);
+    window.__world = world;
+    renderParts();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

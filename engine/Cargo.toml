@@ -12,6 +12,8 @@ members = [
     "crates/engine-slang-build",
     "crates/engine-scenes",
     "crates/engine-oracles",
+    "crates/engine-vehicle",
+    "crates/engine-vehicle-wasm",
 ]
 # The stress oracle is its own workspace (wgpu 30); engine-fracture depends on its crates by path.
 exclude = ["stress-oracle"]
@@ -44,6 +46,7 @@ engine-metal = { path = "crates/engine-metal" }
 engine-scenes = { path = "crates/engine-scenes" }
 engine-oracles = { path = "crates/engine-oracles" }
 engine-fracture = { path = "crates/engine-fracture" }
+engine-vehicle = { path = "crates/engine-vehicle" }
 
 [profile.release]
 lto = "thin"

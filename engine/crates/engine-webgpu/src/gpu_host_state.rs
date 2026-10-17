@@ -25,6 +25,9 @@ pub struct SimSnapshot {
     manifolds_valid: bool,
     params: AvbdParams,
     last_contact_offset: u32,
+    vehicles: Option<engine_vehicle::VehicleHost>,
+    events_seen: u32,
+    free_joints: Vec<u32>,
 }
 
 impl WgpuSim {
@@ -156,6 +159,9 @@ impl WgpuSim {
             manifolds_valid: self.manifolds_valid,
             params: self.params,
             last_contact_offset: self.last_contact_offset,
+            vehicles: self.vehicles.clone(),
+            events_seen: self.events_seen,
+            free_joints: self.free_joints.clone(),
         }
     }
 
@@ -188,6 +194,12 @@ impl WgpuSim {
         self.manifolds_valid = s.manifolds_valid;
         self.params = s.params;
         self.last_contact_offset = s.last_contact_offset;
+        self.vehicles.clone_from(&s.vehicles);
+        if let Some(v) = self.vehicles.as_mut() {
+            v.dirty = true;
+        }
+        self.events_seen = s.events_seen;
+        self.free_joints.clone_from(&s.free_joints);
         // The restored state may have bodies awake that the last step did not.
         self.wake_pending = true;
     }

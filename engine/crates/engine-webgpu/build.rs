@@ -111,11 +111,32 @@ const WORLD_ENTRIES: &[&str] = &[
     "convex_sat_large",
     "convex_manifold",
     "convex_manifold_persistent",
+    // Vehicle controller (slang/kernels/vehicle_step.slang).
+    "vehicle_input",
+    "wheel_query",
+    "vehicle_link",
+    "vehicle_prepare",
+    "vehicle_iterate",
+    "vehicle_post",
+    "raycast_batch",
+];
+
+const VEHICLE_ENTRIES: &[&str] = &[
+    "vehicle_input",
+    "wheel_query",
+    "vehicle_link",
+    "vehicle_prepare",
+    "vehicle_iterate",
+    "vehicle_post",
+    "raycast_batch",
 ];
 
 /// Slang source that defines `entry`.
 fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     let kernels = root.join("kernels");
+    if VEHICLE_ENTRIES.contains(&entry) {
+        return kernels.join("vehicle_step.slang");
+    }
     if entry.starts_with("convex_") {
         return kernels.join(if entry.ends_with("_persistent") {
             "convex_persistent.slang"

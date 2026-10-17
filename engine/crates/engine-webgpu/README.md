@@ -54,6 +54,32 @@ check every brick before impact. The fixture uses
 `add_bodies`/`add_colliders` to avoid exhausting staging resources with more than
 a million tiny uploads before the first GPU submission.
 
+## Vehicle demo
+
+`vehicle.html` drives the same WGSL kernels through `world-host.mjs` (a port of
+`WgpuSim::step`) and `vehicle.mjs` (a thin wrapper over `engine-vehicle`'s packer and
+`VehicleHost`, compiled to wasm from `../engine-vehicle-wasm`). Run
+`cargo run -p engine-webgpu --release --bin wgsl_export` first: it also writes
+`generated/vehicle_presets.json` and builds `generated/vehicle_wasm/` with `wasm-pack`
+(needs the `wasm32-unknown-unknown` target). `node --test tests/vehicle_layout.test.mjs`
+checks the wrapper.
+
+- `?scene=playground|destruction|traffic`, `?preset=<name>`, `?spawn=x,z,yaw` (player
+  pose), `?vehicles=N` (traffic), `?sleep=off`, `?stopAt=N`
+- Keys: WASD / arrows, Space handbrake, X sever a wheel, Z remove a wheel, P sever a part,
+  B cannonball, R reset, C camera. Gamepads work (triggers, left stick, A handbrake).
+- Hooks: `__step(n, input)` (advance without rAF, returns state), `__vehicleState()`,
+  `__setVehicleInput(h, input)`, `__chassisPoses()` (every vehicle's pose/up/speed),
+  `__record(script, opts)` (frame-locked scripted drive uploading JPEG frames), `__world`.
+
+Demo videos: `node --experimental-websocket record-vehicle-demos.mjs [take ...] [--reel]`
+serves this directory, drives headless Chrome through the scripted takes (sedan ramps,
+motorcycle slalom, tank wall breach, monster truck vs crates, kart on ice, destruction,
+traffic) one physics step per 60 fps frame, and writes `recordings/<take>.mp4` plus a
+one-frame-per-second `<take>_sheet.jpg` for review (needs Chrome and ffmpeg).
+
+See [../../docs/vehicles.md](../../docs/vehicles.md).
+
 ## Browser verification
 
 After changing Slang, regenerate the ignored WGSL assets:

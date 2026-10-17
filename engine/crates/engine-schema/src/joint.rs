@@ -31,6 +31,14 @@ pub const JOINT_FLAG_DRIVE: u32 = 1 << 4;
 /// per-row penalties, breaking by Shardwright's utilization against
 /// `JointDesc::bond` capacities (stored in `lin_lo` and `twist_lo`).
 pub const JOINT_FLAG_BOND: u32 = 1 << 5;
+/// Vehicle wheel standing on a dynamic body (`vehicle_link` writes it): links
+/// chassis and ground in the constraint graph, and the ground body's primal adds
+/// the wheel's ground block, whose `gAabbs` index is stored in `Joint::motion`.
+/// Skipped by the pair hash, warm start and dual (the vehicle kernels own it).
+pub const JOINT_FLAG_TYRE: u32 = 1 << 6;
+/// Set by `solve_dual` on the final iteration while the multipliers are still
+/// changing; the joint's bodies may not fall asleep until it clears.
+pub const JOINT_FLAG_UNSETTLED: u32 = 1 << 7;
 pub const JOINT_DRIVE_DOF_SHIFT: u32 = 8;
 pub const JOINT_PRESET_SHIFT: u32 = 24;
 
@@ -124,6 +132,12 @@ pub struct Joint {
     pub penalty: [f32; 8],
     /// Row coordinate at the start of the step (C0 / x⁻ for damping and motors).
     pub c0: [f32; 8],
+}
+
+impl Default for Joint {
+    fn default() -> Self {
+        Self::zeroed()
+    }
 }
 
 impl Joint {
