@@ -343,6 +343,36 @@ your call; the rest need building.
         vibe-land's PhysX runs 4 position iterations; rubble runs 10. At 4 the bombard
         median falls 20.9 → 15.8 ms, but broken bonds rise 3,157 → 5,655 and fragments
         887 → 1,668: softer contacts let the impacts go deeper. Not adopted.
+      - **Accuracy at a matched iteration budget** (2026-10-17, your request: match
+        Blast's configuration, then its accuracy).
+        - **Configuration.** Blast's CPU `ExtStressSolver` defaults to
+          `maxSolverIterationsPerFrame` = 25; vibe-land's native GPU stage runs 16. Our
+          equivalent is a budget of one Newton step (the matched model is linear until a
+          bond breaks) × N CG iterations, from rest.
+        - **Measure.** Each solver's cold-start answer against its own converged answer,
+          stressed with Blast's formula: peak-fibre and shear Pearson, median ratio,
+          share within 2×.
+        - **Tools.** Ours: `stress-gpu/examples/blast_forces_gpu --blast-inputs
+          --blast-model --budget 1,N`, the GPU iterate kept. Blast:
+          `blast_ladder_bench forces PACK 3000 N`, first frame against the converged
+          one.
+
+        | pack | Blast 16 it | Blast 25 it | ours 1 × 10 | ours 1 × 16 | ours 1 × 25 |
+        |---|---|---|---|---|---|
+        | house-1story (peak fibre: Pearson / median ratio) | 0.83 / 0.37 | 0.90 / 0.70 | 0.88 / 0.92 | 0.93 / 0.95 | 0.99 / 0.95 |
+        | brick-building | 0.94 / 0.39 | 0.96 / 0.73 | 0.90 / 0.71 | 0.94 / 0.85 | 0.97 / 1.02 |
+
+        At the same iteration count our answer is closer to its converged one than
+        Blast's is: the block-Jacobi PCG on the elastic network against Blast's CGNR.
+        Ours at 10 iterations is about Blast's at 25. So a 1 × 16 budget already exceeds
+        Blast's per-frame accuracy, and 1 × 25 is well above it.
+        - **The converged answers still differ** (house-1story, `blast_model` and Blast's
+          inputs: Pearson 0.14, median ratio 0.44, 41 % within 2×; brick-building agreed
+          at 0.98 already with the inputs alone). On the hull packs Blast's CPU answer is
+          not in equilibrium: the 2026-10-16 support check bounds its support load at
+          0.6–10× the weight. So it is not a reference ours can match there. vibe-land's
+          native GPU stage solves the same equations with another scheme; its captured
+          forces are the reference to try next.
       - **Splits are the spikes (p95 ~155 ms).** Each one downloads the mirror (12–30 ms)
         and rebuilds the tables of all 52k chunks (~50 ms) for a few changed clusters.
         The new fragments' first solves come on top. Next: re-lay out only the split

@@ -8,32 +8,20 @@
 //! of the import's calibrated densities and supports at grade, so the two solvers see the
 //! same loads and boundary conditions and differ only in how they solve.
 //!
-//!   cargo run --release -p stress-ref --example blast_forces -- packs/house-1story.json [--blast-inputs]
+//!   cargo run --release -p stress-ref --example blast_forces -- packs/house-1story.json [--blast-inputs] [--blast-model]
 
 fn main() {
     let path = std::env::args().nth(1).expect("pack path");
     let p = std::path::Path::new(&path);
     let name = p.file_stem().unwrap().to_string_lossy().to_string();
-    let mut scene = stress_ref::scene_pack::import(p, &name, "structure").expect("pack");
-    if std::env::args().any(|a| a == "--blast-inputs") {
-        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
-        let nodes = json["scenario"]["nodes"].as_array().unwrap().clone();
-        let solver = stress_ref::solver::ReferenceSolver::new(&scene);
-        let volumes: Vec<f64> = solver.structures[0].chunks.iter().map(|c| c.volume()).collect();
-        let body = &mut scene.bodies[0];
-        for (i, c) in body.chunks.iter_mut().enumerate() {
-            let mass = nodes[i]["mass"].as_f64().unwrap_or(0.0);
-            c.support = if mass <= 0.0 { stress_ref::scene::Support::Fixed } else { stress_ref::scene::Support::None };
-            if mass > 0.0 {
-                // A chunk material of its own whose density gives the pack's mass.
-                let mut m = scene.materials[&c.material].clone();
-                m.density = mass / volumes[i];
-                let key = format!("{}#{i}", c.material);
-                scene.materials.insert(key.clone(), m);
-                c.material = key;
-            }
-        }
-    }
+    let has = |flag: &str| std::env::args().any(|a| a == flag);
+    // `--blast-inputs`: the pack's masses and supports (mass-0 nodes); `--blast-model`:
+    // Blast's isotropic stiffness and capped stress gain (`Methods::blast_model`) with the
+    // pack's own moduli and strengths.
+    let blast_model = has("--blast-model");
+    let options = stress_ref::scene_pack::ImportOptions { authored_strengths: blast_model, authored_fatal: blast_model, pack_masses: has("--blast-inputs"), pack_modulus: blast_model };
+    let mut scene = stress_ref::scene_pack::import_with(p, &name, "structure", options).expect("pack");
+    scene.sim.methods.blast_model = blast_model;
     scene.sim.fracture = false;
     scene.sim.gravity_prestress = true;
     let t = std::time::Instant::now();

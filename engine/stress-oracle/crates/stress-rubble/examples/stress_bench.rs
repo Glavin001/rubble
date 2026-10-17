@@ -136,7 +136,7 @@ pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scen
     for path in paths {
         let name = path.file_stem().expect("pack file name").to_string_lossy().to_string();
         let name = name.as_str();
-        let options = stress_ref::scene_pack::ImportOptions { authored_strengths: AUTHORED.load(std::sync::atomic::Ordering::Relaxed), authored_fatal: AUTHORED_FATAL.load(std::sync::atomic::Ordering::Relaxed), pack_masses: PACK_MASSES.load(std::sync::atomic::Ordering::Relaxed) };
+        let options = stress_ref::scene_pack::ImportOptions { authored_strengths: AUTHORED.load(std::sync::atomic::Ordering::Relaxed), authored_fatal: AUTHORED_FATAL.load(std::sync::atomic::Ordering::Relaxed), pack_masses: PACK_MASSES.load(std::sync::atomic::Ordering::Relaxed), pack_modulus: PACK_MASSES.load(std::sync::atomic::Ordering::Relaxed) };
         let scene = stress_ref::scene_pack::import_with(path, name, "structure", options).unwrap_or_else(|e| panic!("{name} pack: {e}"));
         let mut idle = configure(scene.clone(), seconds);
         idle.name = format!("{name}_idle");

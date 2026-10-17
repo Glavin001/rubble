@@ -148,6 +148,10 @@ pub struct ImportOptions {
     /// supports (nodes of mass 0 only), as its Blast solver sees them, instead of the
     /// calibrated densities and supports at grade. For the like-for-like comparison.
     pub pack_masses: bool,
+    /// With `authored_strengths`: each joint material's Young's modulus is the pack's own
+    /// (`elasticModulus`, scaled), the one its Blast solver weights bonds by, instead of
+    /// the calibrated material's. For the like-for-like comparison.
+    pub pack_modulus: bool,
 }
 
 pub fn import(path: &std::path::Path, name: &str, body_name: &str) -> Result<Scene, String> {
@@ -189,6 +193,7 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
             a.iter().map(|m| Some((m[t].as_f64()? * scale, m[c].as_f64()? * scale, m[sh].as_f64()? * scale))).collect()
         })
         .unwrap_or_default();
+    let pack_moduli: Vec<Option<f64>> = json["defaults"]["solver"]["materials"].as_array().map(|a| a.iter().map(|m| Some(m["elasticModulus"].as_f64()? * scale)).collect()).unwrap_or_default();
     let classify = |asset: &str| if options.authored_strengths { map_material_authored(asset) } else { map_material(asset) };
 
     let mut scene = new_scene(name, &format!("Imported from {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()));
@@ -258,6 +263,9 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
                     m.compressive_strength = compression;
                     m.cohesion = shear;
                     m.shear_cap = None;
+                    if let Some(e) = index.and_then(|i| pack_moduli.get(i).copied().flatten()).filter(|_| options.pack_modulus) {
+                        m.youngs_modulus = e;
+                    }
                     m
                 });
                 name
