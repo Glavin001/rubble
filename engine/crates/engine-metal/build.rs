@@ -25,6 +25,16 @@ fn main() -> Result<()> {
 
     let world = slang_root.join("kernels/world_step.slang");
     let compact = slang_root.join("kernels/compact_solve.slang");
+    let vehicle = slang_root.join("kernels/vehicle_step.slang");
+    let vehicle_entries = [
+        "vehicle_input",
+        "wheel_query",
+        "vehicle_link",
+        "vehicle_prepare",
+        "vehicle_iterate",
+        "vehicle_post",
+        "raycast_batch",
+    ];
     let entries = [
         "apply_commands",
         "predict_bodies",
@@ -90,11 +100,20 @@ fn main() -> Result<()> {
         "convex_sat_small",
         "convex_sat_large",
         "convex_manifold",
+        "vehicle_input",
+        "wheel_query",
+        "vehicle_link",
+        "vehicle_prepare",
+        "vehicle_iterate",
+        "vehicle_post",
+        "raycast_batch",
     ];
     let convex = slang_root.join("kernels/convex_step.slang");
     for entry in entries {
         compile(
-            if entry.starts_with("convex_") {
+            if vehicle_entries.contains(&entry) {
+                &vehicle
+            } else if entry.starts_with("convex_") {
                 &convex
             } else if entry.ends_with("_compact")
                 || (entry == "pack_solver_contacts" || entry == "clear_solver_contacts")
@@ -118,6 +137,8 @@ fn main() -> Result<()> {
     for entry in entries.iter().chain(["abi_roundtrip"].iter()) {
         let src = if *entry == "abi_roundtrip" {
             &abi
+        } else if vehicle_entries.contains(entry) {
+            &vehicle
         } else if entry.starts_with("convex_") {
             &convex
         } else if entry.ends_with("_compact")
@@ -162,6 +183,7 @@ fn rigid_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<()
     let slots = bind_slots(&[
         kernels.join("world_step.slang"),
         kernels.join("convex_step.slang"),
+        kernels.join("vehicle_step.slang"),
         root.join("physics/contact_storage.slang"),
     ])?;
     // The world_step entries are large: compile them in parallel.

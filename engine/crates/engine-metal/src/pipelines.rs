@@ -81,6 +81,13 @@ impl Pipelines {
             ("convex_sat_small", msl!("convex_sat_small")),
             ("convex_sat_large", msl!("convex_sat_large")),
             ("convex_manifold", msl!("convex_manifold")),
+            ("vehicle_input", msl!("vehicle_input")),
+            ("wheel_query", msl!("wheel_query")),
+            ("vehicle_link", msl!("vehicle_link")),
+            ("vehicle_prepare", msl!("vehicle_prepare")),
+            ("vehicle_iterate", msl!("vehicle_iterate")),
+            ("vehicle_post", msl!("vehicle_post")),
+            ("raycast_batch", msl!("raycast_batch")),
         ];
         let mut map = HashMap::new();
         let opts = CompileOptions::new();

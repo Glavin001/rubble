@@ -327,6 +327,8 @@ impl MetalSim {
             )) * if self.record_hash() { 4 } else { 1 },
             steps_done: self.steps_done,
             last: self.last_counters,
+            vehicle_count: 0,
+            wheel_count: 0,
         }
     }
 

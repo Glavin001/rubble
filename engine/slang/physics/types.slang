@@ -20,6 +20,7 @@ public static const uint BODY_DYNAMIC = 1u;
 public static const uint BODY_KINEMATIC = 2u;
 public static const uint BODY_SLEEPING = 4u;
 public static const uint BODY_AWAKE = 8u;
+public static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
 
 public struct Collider
 {
@@ -144,6 +145,13 @@ public static const float JOINT_BIG = 3.0e38;
 // the host, breaking by Shardwright's utilization against the capacities
 // stored in linLo (tension, compression, shear) and twistLo (bending).
 public static const uint JOINT_FLAG_BOND = 32u;
+// Vehicle wheel standing on a dynamic body (vehicle_link): links chassis and
+// ground in the graph; the ground body's primal adds the wheel's ground block,
+// whose gAabbs index is in Joint.motion. Pair hash, warm start and dual skip it.
+public static const uint JOINT_FLAG_TYRE = 64u;
+// Set by solve_dual on the final iteration while the multipliers still move:
+// the joint's bodies may not fall asleep with unconverged forces.
+public static const uint JOINT_FLAG_UNSETTLED = 128u;
 
 public struct AvbdParams
 {
@@ -198,6 +206,7 @@ public static const uint CCD_BUDGET_EXHAUSTED = 16u;
 public static const uint CCD_CANDIDATE_MISS = 32u;
 public static const uint OVERFLOW_BP_CHAIN = 128u; // linked-list BP hit per-slot walk cap
 public static const uint OVERFLOW_WARM_HASH = 256u; // record warm hash probe limit exhausted
+public static const uint OVERFLOW_LARGE_STATICS = 512u; // more oversized statics than LARGE_STATIC_CAP
 
 public struct GpuCommand
 {

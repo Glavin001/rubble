@@ -597,11 +597,15 @@ bool jointBondOverloaded(Joint j)
     return u > 1.0;
 }
 
-// `bondMayBreak`: bonds break on the final iteration only, and never while a
-// host preloads a structure (FLAG_BOND_PRELOAD).
+// `mayBreak`: joints break on the final iteration only (the converged
+// force), and bonds never while a host preloads a structure
+// (FLAG_BOND_PRELOAD). `force` / `torque` return the magnitudes it tested.
 bool jointDual(inout Joint j, BodyState a, BodyState b, float alpha, float dt,
-               float kStart, float kMax, float betaLin, float betaAng, bool bondMayBreak)
+               float kStart, float kMax, float betaLin, float betaAng, bool mayBreak,
+               out float force, out float torque)
 {
+    force = 0.0;
+    torque = 0.0;
     JointCtx c = jointContext(j, a, b);
     [unroll]
     for (uint slot = 0u; slot < 7u; slot++)
@@ -645,7 +649,9 @@ bool jointDual(inout Joint j, BodyState a, BodyState b, float alpha, float dt,
 
     if (jointIsBond(j))
     {
-        bool overloaded = bondMayBreak && jointBondOverloaded(j);
+        force = length(float3(jointGetLambda(j, 0u), jointGetLambda(j, 1u), jointGetLambda(j, 2u)));
+        torque = length(float3(jointGetLambda(j, 3u), jointGetLambda(j, 4u), jointGetLambda(j, 5u)));
+        bool overloaded = mayBreak && jointBondOverloaded(j);
         if (overloaded)
         {
             j.flags |= JOINT_FLAG_BROKEN;
@@ -656,8 +662,9 @@ bool jointDual(inout Joint j, BodyState a, BodyState b, float alpha, float dt,
     }
     float3 lamLin = float3(jointGetLambda(j, 0), jointGetLambda(j, 1), jointGetLambda(j, 2));
     float3 lamAng = float3(jointGetLambda(j, 3), jointGetLambda(j, 4), jointGetLambda(j, 5));
-    float torque = length(lamAng) * j.torqueArm;
-    bool broken = length(lamLin) > j.breakForce || torque > j.breakTorque;
+    torque = length(lamAng) * j.torqueArm;
+    force = length(lamLin);
+    bool broken = mayBreak && (force > j.breakForce || torque > j.breakTorque);
     if (!broken && jointAngAllLocked(j) && j.yieldTorque < JOINT_BIG && torque > j.yieldTorque)
     {
         // three-avbd plastic yield: clamp the angular force to the yield value
@@ -668,7 +675,7 @@ bool jointDual(inout Joint j, BodyState a, BodyState b, float alpha, float dt,
         jointSetC0(j, 3, 0.0); jointSetC0(j, 4, 0.0); jointSetC0(j, 5, 0.0);
         float4 d = quatMul(quatConjugate(j.restStart), j.frameB);
         float bend = 2.0 * atan2(length(d.xyz), abs(d.w));
-        broken = bend > j.breakBend;
+        broken = mayBreak && bend > j.breakBend;
     }
     if (broken)
     {
