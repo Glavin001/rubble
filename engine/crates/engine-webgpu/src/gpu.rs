@@ -1382,6 +1382,18 @@ impl WgpuSim {
             .write_buffer(&self.bufs[17], 0, bytemuck::cast_slice(&zeros));
     }
 
+    /// Broadphase grid mode. `Some(true)`: hierarchical levels sized from
+    /// every collider, for mixed scales such as a city of large static chunks
+    /// beside small projectiles (a uniform grid sizes its cell from the largest
+    /// small dynamic radius and lists every larger static separately, up to
+    /// `LARGE_STATIC_CAP`). `Some(false)`: the uniform grid. `None`: the
+    /// default, hierarchical when the scene has convex hulls. Overrides
+    /// `ENGINE_GRID_LEVELS`.
+    pub fn set_grid_levels(&mut self, mode: Option<bool>) {
+        self.grid_levels_mode = mode;
+        self.grid_cache = None;
+    }
+
     fn refresh_cell(&mut self) {
         let hier = self.grid_levels_mode.unwrap_or(self.has_convex);
         let (cell, levels) = match self.grid_cache {
