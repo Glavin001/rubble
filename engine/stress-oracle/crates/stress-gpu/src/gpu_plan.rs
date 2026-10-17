@@ -48,6 +48,11 @@ pub struct GpuPlanOut {
     pub impactor: Vec<Vec<bool>>,
     pub rotation_checked: Vec<bool>,
     pub budget: Vec<f32>,
+    /// Per chunk: (position, radius), (velocity, budget), (spin, falls), start rotation
+    /// (x, y, z, w).
+    pub motion: Vec<[[f32; 4]; 4]>,
+    /// Per chunk: its position at the plan's start as a compensated pair (hi, lo).
+    pub start: Vec<([f32; 4], [f32; 4])>,
 }
 
 /// How GPU plans compared with the host's (`STRESS_GPU_PLAN_CHECK=1`).
@@ -121,7 +126,7 @@ impl GpuPlanner {
             }
         }
         let n = chunk_count;
-        let reach_base = 3 * n as u32;
+        let reach_base = 5 * n as u32;
         let cp_base = 0u32;
         let job_base = cp_base + 2 * pairs.len() as u32;
         let count_base = job_base + 2 * jobs.len() as u32;
@@ -142,7 +147,7 @@ impl GpuPlanner {
         for i in 0..islands {
             pu[owned_base as usize + i] = owned[i] as u32;
         }
-        let pm = gpu.storage("plan pm", &vec![[0f32; 4]; 3 * n + 2 * islands + 1]);
+        let pm = gpu.storage("plan pm", &vec![[0f32; 4]; 5 * n + 2 * islands + n + 1]);
         let pu_buf = gpu.storage("plan pu", &pu);
         let g = (gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2]).sqrt();
         let params = PlanParams {
@@ -182,7 +187,8 @@ impl GpuPlanner {
         }
         gpu.queue.submit([encoder.finish()]);
         let u: Vec<u32> = gpu.read(&pu_buf);
-        let m: Vec<[f32; 4]> = gpu.read_range(&pm, 0, 3 * n);
+        let m: Vec<[f32; 4]> = gpu.read_range(&pm, 0, 5 * n + 2 * islands + n);
+        let lo_at = 5 * n + 2 * islands;
         let total = u[count_base as usize + jobs.len()] as usize;
         let flags = &u[flag_base as usize..flag_base as usize + n];
         GpuPlanOut {
@@ -190,7 +196,9 @@ impl GpuPlanner {
             ground: flags.iter().map(|f| f & 2 != 0).collect(),
             impactor: (0..impactor_count).map(|i| flags.iter().map(|f| f & (4 << i) != 0).collect()).collect(),
             rotation_checked: flags.iter().map(|f| f & 1 != 0).collect(),
-            budget: (0..n).map(|k| m[3 * k + 1][3]).collect(),
+            budget: (0..n).map(|k| m[5 * k + 1][3]).collect(),
+            motion: (0..n).map(|k| [m[5 * k], m[5 * k + 1], m[5 * k + 2], m[5 * k + 3]]).collect(),
+            start: (0..n).map(|k| (m[5 * k + 4], m[lo_at + k])).collect(),
         }
     }
 }

@@ -2,7 +2,7 @@
 // `plan` from the GPU's own state, so an island segment needs no download to plan.
 //
 //   plan_motion      one thread per chunk: position, velocity and spin, bounding radius,
-//                    travel budget over the horizon, whether it falls;
+//                    travel budget over the horizon, whether it falls, start orientation;
 //   plan_reach       one group per island: the whole-cluster test's centre, spread,
 //                    largest radius + budget and largest speed;
 //   plan_pair_count  one thread per job (an owned cluster pair and a chunk of the first):
@@ -129,7 +129,16 @@ void plan_motion(uint3 id: SV_DispatchThreadID)
     Island isl = islands[ch.info.y];
     Quat q = quat_of(isl.rotation);
     float3 local = ch.center.xyz + state[4 * k].xyz;
-    float3 pos = (isl.position.xyz + isl.position_err.xyz) + rotate(q, local);
+    float3 rel = rotate(q, local);
+    float3 pos = (isl.position.xyz + isl.position_err.xyz) + rel;
+    // The same position as a compensated pair (hi + lo; contacts.rs `chunk_plan`'s
+    // `split(chunk_position)`): two-sums of position + error + offset.
+    float3 a = isl.position.xyz;
+    float3 s1 = a + rel;
+    float3 bb = s1 - a;
+    float3 e1 = (a - (s1 - bb)) + (rel - bb);
+    float3 hi = s1 + (e1 + isl.position_err.xyz);
+    float3 lo = (e1 + isl.position_err.xyz) - (hi - s1);
     float3 r = rotate(q, local - isl.com.xyz);
     float3 v = (isl.velocity.xyz + isl.velocity_err.xyz) + cross(isl.angular_velocity.xyz, r) + rotate(q, state[4 * k + 2].xyz);
     float3 w = isl.angular_velocity.xyz + rotate(q, state[4 * k + 3].xyz);
@@ -139,9 +148,15 @@ void plan_motion(uint3 id: SV_DispatchThreadID)
     float d = params.duration;
     float budget = 2.0 * length(w) * (arm + radius) * d + params.g * d * d + 0.05 * radius + 1e-3;
     bool falls = (isl.info.x & ISLAND_ANCHORED) == 0;
-    pm[3 * k] = float4(pos, radius);
-    pm[3 * k + 1] = float4(v, budget);
-    pm[3 * k + 2] = float4(w, falls ? 1.0 : 0.0);
+    pm[5 * k] = float4(pos, radius);
+    pm[5 * k + 1] = float4(v, budget);
+    pm[5 * k + 2] = float4(w, falls ? 1.0 : 0.0);
+    // The chunk's orientation at the plan's start (cluster rotation x hidden rotation;
+    // contacts.rs `chunk_plan`'s `start_rot`).
+    float3 th = state[4 * k + 1].xyz;
+    pm[5 * k + 3] = quat_vec(quat_mul(q, from_axis_angle(th, length(th))));
+    pm[5 * k + 4] = float4(hi, 0.0);
+    pm[params.reach_base + 2 * params.island_count + k] = float4(lo, 0.0);
 }
 
 groupshared float g_spread[64];
@@ -157,14 +172,14 @@ void plan_reach(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     if (i >= params.island_count)
         return;
     Island isl = islands[i];
-    float3 center = isl.range.y > isl.range.x ? pm[3 * isl.range.x].xyz : float3(0.0);
+    float3 center = isl.range.y > isl.range.x ? pm[5 * isl.range.x].xyz : float3(0.0);
     float spread = 0.0;
     float rb = 0.0;
     float vmax = 0.0;
     for (uint k = isl.range.x + tid; k < isl.range.y; k += 64)
     {
-        float4 p = pm[3 * k];
-        float4 v = pm[3 * k + 1];
+        float4 p = pm[5 * k];
+        float4 v = pm[5 * k + 1];
         spread = max(spread, length(p.xyz - center));
         rb = max(rb, p.w + v.w);
         vmax = max(vmax, length(v.xyz));
@@ -210,13 +225,13 @@ bool clusters_may_touch(uint ia, uint ib)
 // Whether chunks a and b pass the sweep test, and (when they do) the box test.
 bool pair_passes(uint a, uint b, out bool swept)
 {
-    float4 pa = pm[3 * a];
-    float4 va = pm[3 * a + 1];
-    float4 pb = pm[3 * b];
-    float4 vb = pm[3 * b + 1];
+    float4 pa = pm[5 * a];
+    float4 va = pm[5 * a + 1];
+    float4 pb = pm[5 * b];
+    float4 vb = pm[5 * b + 1];
     float d = params.duration;
     float3 dv = vb.xyz - va.xyz;
-    float dg = pm[3 * a + 2].w == pm[3 * b + 2].w ? 0.0 : params.g;
+    float dg = pm[5 * a + 2].w == pm[5 * b + 2].w ? 0.0 : params.g;
     float3 middle = pb.xyz - pa.xyz + dv * (0.5 * d);
     float sweep = 0.5 * length(dv) * d + 0.5 * dg * d * d;
     swept = length(middle) <= pa.w + pb.w + va.w + vb.w + sweep;
@@ -327,9 +342,9 @@ void plan_side(uint3 id: SV_DispatchThreadID)
     bool anchored = (isl.info.x & ISLAND_ANCHORED) != 0;
     if (pu[params.owned_base + ch.info.y] == 0)
         return;
-    float4 p = pm[3 * k];
-    float4 v = pm[3 * k + 1];
-    bool falls = pm[3 * k + 2].w != 0.0;
+    float4 p = pm[5 * k];
+    float4 v = pm[5 * k + 1];
+    bool falls = pm[5 * k + 2].w != 0.0;
     float d = params.duration;
     uint flags = 0;
     if (params.has_ground != 0 && !anchored)

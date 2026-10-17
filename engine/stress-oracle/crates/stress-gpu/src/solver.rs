@@ -492,6 +492,8 @@ pub struct HostSnapshot {
     last_loads: ChunkLoads,
     frame_load_sum: ChunkLoads,
     pair_memory: HashMap<PairKey, PairState>,
+    /// Resident segments: the chunk state and bond records, copied on the GPU.
+    gpu_state: Option<(wgpu::Buffer, wgpu::Buffer)>,
 }
 
 impl HostSnapshot {
@@ -548,6 +550,10 @@ pub struct GpuSolver {
     /// Settled islands' chunk state changes on the GPU too (their static solves run
     /// there: the resident frame), so a sync reads it back.
     pub state_on_gpu: bool,
+    /// Island segments resident (opt-in): re-plans from the GPU's own plan
+    /// (`resident_plan`), segment snapshots without the chunk state or bond download
+    /// (their buffers copied on the GPU instead).
+    pub resident_contacts: bool,
     /// The layout was changed in place (`split_resident`): its order is not a fresh
     /// pack's, so a refresh syncs and rebuilds.
     layout_in_place: bool,
@@ -628,7 +634,7 @@ impl GpuSolver {
         let step_times = vec![mirror.time];
         let mut loads = loads;
         let pair_memory = HashMap::new();
-        let (layout, buffers) = Self::build(gpu, &kernels, &mirror, loads.as_mut(), &impactors, &pair_memory, 4, 0.0, mirror.time, None, &[], &[], 0)?;
+        let (layout, buffers) = Self::build(gpu, &kernels, &mirror, loads.as_mut(), &impactors, &pair_memory, 4, 0.0, mirror.time, None, &[], &[], 0, None)?;
         Ok(GpuSolver {
             mirror,
             loads,
@@ -667,6 +673,7 @@ impl GpuSolver {
             layout_generation: 0,
             island_headroom: 0,
             state_on_gpu: false,
+            resident_contacts: false,
             layout_in_place: false,
             own_contacts: true,
             batch_rounds: batch_start(),
@@ -686,7 +693,7 @@ impl GpuSolver {
         }
         let stride = self.buffers.params.probe_stride;
         self.plan_until = self.mirror.time + horizon;
-        let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, None, &self.extra_terms, &self.excluded, self.island_headroom)?;
+        let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, None, &self.extra_terms, &self.excluded, self.island_headroom, None)?;
         self.layout_in_place = false;
         self.layout = layout;
         self.layout_generation += 1;
@@ -702,8 +709,9 @@ impl GpuSolver {
         self.plan_until = self.mirror.time + horizon;
         // `STRESS_GPU_PLAN_CHECK=1`: the GPU's plan from the same state, to compare.
         let gpu_plan = (horizon > 0.0 && std::env::var("STRESS_GPU_PLAN_CHECK").is_ok_and(|v| v == "1")).then(|| (self.gpu_plan(gpu, horizon), self.layout.chunks.clone()));
+        let resident = (self.resident_contacts && horizon > 0.0).then(|| self.resident_plan(gpu, horizon));
         let (layout, buffers) =
-            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded, self.island_headroom)?;
+            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded, self.island_headroom, resident.as_ref())?;
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
@@ -831,6 +839,7 @@ impl GpuSolver {
         extra_terms: &[LoadTerm],
         excluded: &[u64],
         island_headroom: usize,
+        resident: Option<&ResidentPlan>,
     ) -> Result<(Layout, Buffers), String> {
         if m.config.mode == SolveMode::Implicit {
             return Err("the implicit solve mode is not on the GPU yet".into());
@@ -936,8 +945,10 @@ impl GpuSolver {
 
         mark("loads+probes+hulls");
         // ---------------------------------------------------------------- contacts
-        let plan = match &scene {
-            Some(scene) if horizon > 0.0 && (m.clusters.len() > 1 || !impactors.is_empty() || scene.ground.is_some()) => plan(scene, m, impactors, &chunks, horizon),
+        let plan = match (&scene, resident) {
+            // A plan made on the GPU from its own state (a resident segment).
+            (_, Some(r)) => r.plan.clone(),
+            (Some(scene), None) if horizon > 0.0 && (m.clusters.len() > 1 || !impactors.is_empty() || scene.ground.is_some()) => plan(scene, m, impactors, &chunks, horizon),
             _ => Plan { contact_clusters: vec![false; m.clusters.len()], budget: vec![0.0; n], ..Default::default() },
         };
         // With any contact or impactor, every island advances in lockstep through the
@@ -1009,7 +1020,10 @@ impl GpuSolver {
                 Some(scene) => *contact_material.entry(data.material.as_str()).or_insert_with(|| (modulus(scene, &data.material), scene.material(&data.material).friction)),
                 None => (1.0, 0.0),
             };
-            let (start_hi, start_lo) = split(m.chunk_position(s, c));
+            let (start_hi, start_lo) = match resident {
+                Some(r) => (r.starts[k].0, r.starts[k].1),
+                None => split(m.chunk_position(s, c)),
+            };
             let cs = &mut chunk_static[k];
             cs.half = v4(data.half_extents, data.half_extents.norm());
             cs.crot = rows(&data.rotation);
@@ -1026,12 +1040,15 @@ impl GpuSolver {
             let st = &m.chunks[s][c];
             let q = m.clusters[ci].pose.rotation;
             let h = stress_ref::math::Quat::from_axis_angle(st.th, st.th.norm());
-            let start_rot = [
-                (q.w * h.x + q.x * h.w + q.y * h.z - q.z * h.y) as f32,
-                (q.w * h.y - q.x * h.z + q.y * h.w + q.z * h.x) as f32,
-                (q.w * h.z + q.x * h.y - q.y * h.x + q.z * h.w) as f32,
-                (q.w * h.w - q.x * h.x - q.y * h.y - q.z * h.z) as f32,
-            ];
+            let start_rot = match resident {
+                Some(r) => r.starts[k].2,
+                None => [
+                    (q.w * h.x + q.x * h.w + q.y * h.z - q.z * h.y) as f32,
+                    (q.w * h.y - q.x * h.z + q.y * h.w + q.z * h.x) as f32,
+                    (q.w * h.z + q.x * h.y - q.y * h.x + q.z * h.w) as f32,
+                    (q.w * h.w - q.x * h.x - q.y * h.y - q.z * h.z) as f32,
+                ],
+            };
             chunk_plan[k] = [[start_hi[0], start_hi[1], start_hi[2], plan.budget[k] as f32], start_lo, start_rot, start_vel];
         }
         if std::env::var("STRESS_GPU_CONTACT_STATS").is_ok() {
@@ -1397,11 +1414,17 @@ impl GpuSolver {
             let horizon = if self.contacts_possible() { horizon * plan_steps() } else { 0.0 };
             self.plan_until = start_time + horizon;
             if full {
-                self.sync(gpu);
+                // (Resident segments leave the mirror's chunk state behind: all of it.)
+                if self.resident_contacts {
+                    self.download(gpu);
+                } else {
+                    self.sync(gpu);
+                }
             }
             let stride = stride.max(self.buffers.params.probe_stride);
+            let resident = (self.resident_contacts && !full && horizon > 0.0).then(|| self.resident_plan(gpu, horizon));
             let keep = if full { None } else { Some(&self.buffers) };
-            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, start_time, keep, &self.extra_terms, &self.excluded, self.island_headroom)?;
+            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, horizon, start_time, keep, &self.extra_terms, &self.excluded, self.island_headroom, resident.as_ref())?;
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
@@ -1786,7 +1809,7 @@ impl GpuSolver {
             let left_now = self.mirror.clusters.iter().filter_map(|c| remaining.get(&c.id).copied()).max().unwrap_or(0).max(pipeline_left);
             let reached = self.step_times[start + substeps - left_now];
             self.plan_until = reached + dt * left_now as f64;
-            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, self.buffers.params.probe_stride, dt * left_now as f64, reached, None, &self.extra_terms, &self.excluded, self.island_headroom)?;
+            let (layout, buffers) = Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, self.buffers.params.probe_stride, dt * left_now as f64, reached, None, &self.extra_terms, &self.excluded, self.island_headroom, None)?;
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
@@ -2019,7 +2042,24 @@ impl GpuSolver {
     }
 
     fn snapshot_omitting(&mut self, gpu: &Gpu, omit_quiet: bool) -> HostSnapshot {
-        self.download(gpu);
+        // Resident segments: the mirror's motion and contacts only; the chunk state and
+        // bond records stay on the GPU, copied there for a restore.
+        let gpu_state = if self.resident_contacts {
+            self.sync_motion_light(gpu);
+            let copy = |b: &wgpu::Buffer, label: &str| {
+                let c = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: b.size(), usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                c
+            };
+            let (st, bd) = (copy(&self.buffers.state, "snapshot state"), copy(&self.buffers.bond_dyn, "snapshot bonds"));
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(&self.buffers.state, 0, &st, 0, st.size());
+            encoder.copy_buffer_to_buffer(&self.buffers.bond_dyn, 0, &bd, 0, bd.size());
+            gpu.queue.submit([encoder.finish()]);
+            Some((st, bd))
+        } else {
+            self.download(gpu);
+            None
+        };
         let m = &mut self.mirror;
         let mut on_gpu = vec![!omit_quiet; m.structures.len()];
         for cl in &m.clusters {
@@ -2042,6 +2082,7 @@ impl GpuSolver {
             last_loads: self.last_loads.clone(),
             frame_load_sum: self.frame_load_sum.clone(),
             pair_memory: self.pair_memory.clone(),
+            gpu_state,
         }
     }
 
@@ -2061,7 +2102,20 @@ impl GpuSolver {
         self.frame_load_sum = s.frame_load_sum;
         self.pair_memory = s.pair_memory;
         self.bonds_stale = false;
-        self.rebuild(gpu, 0.0)
+        self.rebuild(gpu, 0.0)?;
+        if let Some((st, bd)) = s.gpu_state {
+            // The chunk state and bond records as the GPU had them (the mirror's lag).
+            if st.size() != self.buffers.state.size() || bd.size() != self.buffers.bond_dyn.size() {
+                return Err("restore: the snapshot's tables do not match the rebuilt ones".into());
+            }
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(&st, 0, &self.buffers.state, 0, st.size());
+            encoder.copy_buffer_to_buffer(&bd, 0, &self.buffers.bond_dyn, 0, bd.size());
+            gpu.queue.submit([encoder.finish()]);
+            self.state_current = false;
+            self.bonds_stale = true;
+        }
+        Ok(())
     }
 
     /// Copy the GPU state into the mirror: hidden state, reactions, bond history and
@@ -2089,10 +2143,21 @@ impl GpuSolver {
 
     /// `sync_motion`, its reads (and the bonds' with `bonds`, returned) in one round trip.
     fn sync_motion_and(&mut self, gpu: &Gpu, bonds: bool) -> Option<Vec<BondDyn>> {
+        self.sync_motion_with(gpu, bonds, true)
+    }
+
+    /// `sync_motion` without the chunk state (a resident segment's snapshot: the
+    /// mirror's cluster motion, impactors, loads and contact memory).
+    fn sync_motion_light(&mut self, gpu: &Gpu) {
+        self.sync_motion_with(gpu, false, false);
+        self.state_current = false;
+    }
+
+    fn sync_motion_with(&mut self, gpu: &Gpu, bonds: bool, chunk_state: bool) -> Option<Vec<BondDyn>> {
         // Settled islands' chunk state is frozen: read the rest only (in runs).
         let mut state: Vec<[f32; 4]> = vec![[0.0; 4]; 4 * self.layout.chunks.len()];
         let mut runs: Vec<(usize, usize)> = Vec::new();
-        for isl in &self.layout.islands {
+        for isl in self.layout.islands.iter().filter(|_| chunk_state) {
             let (c0, c1) = (isl.range[0] as usize, isl.range[1] as usize);
             if (isl.info[0] & ISLAND_SETTLED != 0 && !self.state_on_gpu) || c0 == c1 {
                 continue;
@@ -2137,7 +2202,7 @@ impl GpuSolver {
         // own (f64) equilibrium for them, which the next static solve starts from.
         let frozen: Vec<bool> = self.layout.islands.iter().map(|isl| isl.info[0] & ISLAND_SETTLED != 0 && !self.state_on_gpu).collect();
         for (k, &(s, c)) in self.layout.chunks.iter().enumerate() {
-            if frozen[m.chunks[s][c].cluster] {
+            if !chunk_state || frozen[m.chunks[s][c].cluster] {
                 continue;
             }
             let cs = &mut m.chunks[s][c];
@@ -2525,14 +2590,14 @@ impl GpuSolver {
             self.sync(gpu);
             self.excluded = quiet;
             let (layout, buffers) =
-                Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, None, &self.extra_terms, &self.excluded, self.island_headroom)?;
+                Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, None, &self.extra_terms, &self.excluded, self.island_headroom, None)?;
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
             return Ok(());
         }
         let (layout, buffers) =
-            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded, self.island_headroom)?;
+            Self::build(gpu, &self.kernels, &self.mirror, self.loads.as_mut(), &self.impactors, &self.pair_memory, stride, 0.0, self.mirror.time, Some(&self.buffers), &self.extra_terms, &self.excluded, self.island_headroom, None)?;
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
@@ -3243,7 +3308,9 @@ impl GpuSolver {
             }
             Ok(false)
         };
-        let Some(host) = self.layout.host.as_ref() else { return why("no host tables") };
+        if self.layout.host.is_none() {
+            return why("no host tables");
+        }
         let plan = &self.layout.plan;
         if !self.excluded.is_empty() || !plan.pairs.is_empty() || !plan.ground.is_empty() || self.buffers.params.cand_count > 0 || !self.layout.items.is_empty() {
             return why("contacts planned, probes or quiet clusters");
@@ -3570,5 +3637,82 @@ impl GpuSolver {
             l.topology_version += 1;
         }
         Ok(true)
+    }
+}
+
+/// What a plan made on the GPU gives a rebuild (`build`'s `resident`): the plan, and each
+/// chunk's position (compensated pair) and orientation at its start, for the travel
+/// check's records (instead of the mirror's, which a resident segment does not sync).
+pub(crate) struct ResidentPlan {
+    plan: Plan,
+    starts: Vec<([f32; 4], [f32; 4], [f32; 4])>,
+}
+
+impl GpuSolver {
+    /// `contacts::plan` over `horizon`, made on the GPU from its own state
+    /// (`gpu_plan.rs`), as the host's `Plan`, with the chunks' starts.
+    fn resident_plan(&mut self, gpu: &Gpu, horizon: f64) -> ResidentPlan {
+        let out = self.gpu_plan(gpu, horizon);
+        let m = &self.mirror;
+        let chunks = &self.layout.chunks;
+        let n = chunks.len();
+        let scene = self.loads.as_ref().map(|l| &l.scene);
+        let g = m.config.gravity.norm();
+        let mut plan = Plan {
+            contact_clusters: vec![false; m.clusters.len()],
+            budget: out.budget.iter().map(|&b| b as f64).collect(),
+            rotation_checked: out.rotation_checked.clone(),
+            velocity: out.motion.iter().map(|mo| vec3(mo[1])).collect(),
+            falls: out.motion.iter().map(|mo| mo[2][3] != 0.0).collect(),
+            horizon,
+            ..Default::default()
+        };
+        let cluster_of = |k: usize| m.chunks[chunks[k].0][chunks[k].1].cluster;
+        // The box rotation of a chunk in a pair (cluster x hidden x chunk rotation).
+        let box_rotation = |k: usize| {
+            let q = out.motion[k][3];
+            let q = Quat { x: q[0] as f64, y: q[1] as f64, z: q[2] as f64, w: q[3] as f64 };
+            let (s, c) = chunks[k];
+            q.to_mat3() * m.structures[s].chunks[c].rotation
+        };
+        let mu_of = |s: usize, c: usize| scene.map_or(0.0, |sc| sc.material(&m.structures[s].chunks[c].material).friction);
+        for &(ka, kb) in &out.pairs {
+            let (a, b) = (ka as usize, kb as usize);
+            let ((sa, ca), (sb, cb)) = (chunks[a], chunks[b]);
+            let (ma, mb) = (m.structures[sa].chunks[ca].mass, m.structures[sb].chunks[cb].mass);
+            let mu = scene.and_then(|sc| sc.sim.contact_friction).unwrap_or(mu_of(sa, ca).min(mu_of(sb, cb)));
+            plan.pairs.push(((sa, ca, sb, cb), ka, kb, ma * mb / (ma + mb), mu));
+            plan.poses.insert(ka, (vec3(out.motion[a][0]), box_rotation(a)));
+            plan.poses.insert(kb, (vec3(out.motion[b][0]), box_rotation(b)));
+            plan.contact_clusters[cluster_of(a)] = true;
+            plan.contact_clusters[cluster_of(b)] = true;
+        }
+        // Impactor and ground candidates in active order (by structure, chunk).
+        let mut active: Vec<u32> = (0..n as u32).collect();
+        active.sort_by_key(|&k| chunks[k as usize]);
+        for (i, imp) in self.impactors.iter().enumerate() {
+            if imp.driven {
+                plan.impactor_plan.push(None);
+                plan.impactor_chunks.push(Vec::new());
+                continue;
+            }
+            let reach = match imp.shape {
+                ImpactorShape::Sphere { radius } => radius * 3f64.sqrt(),
+                ImpactorShape::Box { half_extents } => Vec3::from_array(half_extents).norm(),
+            };
+            let budget = 2.0 * (imp.velocity.norm() + imp.angular_velocity.norm() * reach) * horizon + g * horizon * horizon + 1e-3;
+            plan.impactor_plan.push(Some(crate::contacts::ImpactorPlan { position: imp.pose.position, velocity: Vec3::ZERO, rotation: imp.pose.rotation, budget }));
+            let list: Vec<u32> = active.iter().copied().filter(|&k| out.impactor.get(i).is_some_and(|f| f[k as usize])).collect();
+            for &k in &list {
+                plan.contact_clusters[cluster_of(k as usize)] = true;
+            }
+            plan.impactor_chunks.push(list);
+        }
+        plan.ground = active.iter().copied().filter(|&k| out.ground[k as usize]).collect();
+        for &k in &plan.ground {
+            plan.contact_clusters[cluster_of(k as usize)] = true;
+        }
+        let starts = (0..n).map(|k| (out.start[k].0, out.start[k].1, out.motion[k][3])).collect();
+        ResidentPlan { plan, starts }
     }
 }

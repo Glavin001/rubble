@@ -256,6 +256,19 @@ positions and velocities. Residency here therefore needs the plan on the GPU. Ph
   - 2 borderline extra pairs on house_car;
   - ground and impactor candidates and rotation checks identical;
   - budgets within 1.6e-6.
+- **6a+, built and measured (opt-in `STRESS_RESIDENT_ISLANDS=1`; not a win yet).**
+  - What it does:
+    - Island segments re-plan from the GPU's own plan (`GpuSolver::resident_plan` feeds
+      `build` the plan and each chunk's compensated start position and rotation).
+    - Segment snapshots sync only motion, impactors and contacts (`sync_motion_light`);
+      the chunk-state and bond buffers are copied on the GPU, and restore puts the
+      copies back after its rebuild.
+    - The outcome is unchanged (high-rise rammed: same digest).
+  - Measured (high-rise rammed, tiered, island frames, 3 interleaved runs each):
+    segment set-up 7.9 → 9.7 ms. With the host plan this cheap (0.2 ms), the GPU plan's
+    launch and read-back add sync points rather than remove them. It pays only once the
+    tables are built on the GPU too (6b), with no read-back at all.
+  - Island frames are ~89 ms: GPU 74, host ~15. The substeps are most of it.
 - **6b. Plan to tables on the GPU.** The contact index, chunk contact ranges, budgets and
   planned poses. Pair memory moves into a GPU hash keyed by chunk pair. No `build` per
   segment.

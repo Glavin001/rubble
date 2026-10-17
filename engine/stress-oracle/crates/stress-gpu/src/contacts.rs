@@ -31,7 +31,7 @@ pub fn sample_count(chunk: &stress_ref::structure::ChunkData) -> usize {
 pub const NAN_STATE: [f32; 4] = [f32::NAN, 0.0, 0.0, 0.0];
 
 /// The contact plan of a segment.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Plan {
     /// Candidate pairs (key, gpu chunk a, gpu chunk b, reduced mass, friction).
     pub pairs: Vec<(PairKey, u32, u32, f64, f64)>,

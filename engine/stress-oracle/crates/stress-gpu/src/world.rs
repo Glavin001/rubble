@@ -264,6 +264,9 @@ impl GpuWorld {
         }
         let mut w = GpuWorld::new(gpu, scene)?;
         w.solver.quiet_quasi_static = scene.sim.solve_mode == SolveMode::QuasiStatic;
+        // `STRESS_RESIDENT_ISLANDS=1` (opt-in): island segments planned on the GPU, their
+        // snapshots without the chunk state or bond download (`GpuSolver::resident_contacts`).
+        w.solver.resident_contacts = std::env::var("STRESS_RESIDENT_ISLANDS").is_ok_and(|v| v == "1");
         w.solver.sync(gpu);
         if scene.sim.methods.true_step {
             let m = &w.solver.mirror;
