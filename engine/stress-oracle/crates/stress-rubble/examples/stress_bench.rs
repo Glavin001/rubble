@@ -243,8 +243,8 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let o = w.observation();
     let ram = w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let p = &w.solver.profile;
-    let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split,
-        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
+    let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split, "encode_s": p.encode,
+        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "replans": w.solver.replans, "resumed_halts": w.solver.resumed_halts, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
     let digest = digest(&w.solver.mirror, &w.solver.impactors);
     let metrics = metrics(scene, &o);

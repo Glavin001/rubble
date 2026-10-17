@@ -62,6 +62,17 @@ fn batch_cap() -> usize {
     std::env::var("STRESS_GPU_BATCH_ROUNDS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).map_or(MAX_BATCH_ROUNDS, |n| n.min(MAX_BATCH_ROUNDS))
 }
 
+/// The island kernel with each island's bonds over 512 threads (world.slang `BOND_GROUP`);
+/// `STRESS_GPU_ISLAND_BONDS=256`: over the 256 its chunks use.
+fn wide_island_bonds() -> bool {
+    std::env::var("STRESS_GPU_ISLAND_BONDS").map_or(true, |v| v != "256")
+}
+
+/// The contact pipeline in two dispatches per substep (`STRESS_GPU_FUSE=0`: three).
+fn fuse_pipeline() -> bool {
+    std::env::var("STRESS_GPU_FUSE").map_or(true, |v| v != "0")
+}
+
 /// The batch length after a split (and at the start), capped by `batch_cap`.
 fn batch_start() -> usize {
     16.min(batch_cap())
@@ -248,8 +259,14 @@ const K_SUMS_BONDS: usize = 14;
 /// that with the wide islands' chunks.
 const K_CONTACT_ISLANDS: usize = 15;
 const K_CONTACT_ISLAND_WIDE: usize = 16;
+/// The contact pipeline in two dispatches: the forces with the narrow contact islands'
+/// bonds, then the islands (with their contact sums) with the impactors' integration.
+const K_FORCES_BONDS: usize = 17;
+const K_ISLANDS_SUMS: usize = 18;
+/// Its travel checks before a batch's first substep (later ones run at each substep's end).
+const K_TRAVEL: usize = 19;
 /// Kernel names by `K_*` index.
-pub const KERNEL_NAMES: [&str; 17] = [
+pub const KERNEL_NAMES: [&str; 20] = [
     "island_frame",
     "contact_forces",
     "impactor_shares",
@@ -267,6 +284,9 @@ pub const KERNEL_NAMES: [&str; 17] = [
     "sums_impactors_bonds",
     "contact_islands",
     "contact_islands_and_wide_chunks",
+    "forces_and_bonds",
+    "islands_sums_impactors",
+    "travel_start",
 ];
 /// Contact contributions per segment (`contact_sums`, one thread each).
 const SEGMENT: usize = 8;
@@ -298,6 +318,9 @@ struct Kernels {
     sums_bonds: Kernel,
     contact_islands: Kernel,
     contact_island_wide: Kernel,
+    forces_bonds: Kernel,
+    islands_sums: Kernel,
+    travel: Kernel,
     statics: Kernel,
     fatigue: Kernel,
 }
@@ -377,6 +400,8 @@ pub struct Profile {
     pub readback: f64,
     pub download: f64,
     pub split: f64,
+    /// Host time (s) writing a batch's islands and params and encoding its dispatches.
+    pub encode: f64,
     pub batches: u64,
     pub substeps: u64,
     /// Largest contact plan seen: pair candidates, impactor candidates.
@@ -386,8 +411,8 @@ pub struct Profile {
     pub max_chunk_contacts: usize,
     pub max_island_contacts: usize,
     /// GPU time (s) and dispatches per kernel (`KERNEL_NAMES`), with `STRESS_GPU_TIMING=1`.
-    pub kernels: [f64; 17],
-    pub kernel_dispatches: [u64; 17],
+    pub kernels: [f64; 20],
+    pub kernel_dispatches: [u64; 20],
     /// `tangent_statics`: static solves delegated to the mirror (`equilibrate`), and the
     /// host time they took (s).
     pub statics_delegated: u64,
@@ -500,7 +525,7 @@ pub struct GpuSolver {
 impl GpuSolver {
     pub fn new(gpu: &Gpu, mirror: ReferenceSolver, loads: Option<WorldLoads>, impactors: Vec<Impactor>) -> Result<GpuSolver, String> {
         let kernels = Kernels {
-            island: gpu.compute(&shaders::WORLD, "island_frame", &WORLD_BINDINGS),
+            island: gpu.compute(&shaders::WORLD, if wide_island_bonds() { "island_frame_bonds_wide" } else { "island_frame" }, &WORLD_BINDINGS),
             forces: gpu.compute(&shaders::WORLD, "contact_forces", &WORLD_BINDINGS),
             shares: gpu.compute(&shaders::WORLD, "impactor_shares", &WORLD_BINDINGS),
             crush: gpu.compute(&shaders::WORLD, "impactor_crush", &WORLD_BINDINGS),
@@ -513,6 +538,9 @@ impl GpuSolver {
             sums_bonds: gpu.compute(&shaders::WORLD, "sums_impactors_bonds", &WORLD_BINDINGS),
             contact_islands: gpu.compute(&shaders::WORLD, "contact_islands", &WORLD_BINDINGS),
             contact_island_wide: gpu.compute(&shaders::WORLD, "contact_islands_and_wide_chunks", &WORLD_BINDINGS),
+            forces_bonds: gpu.compute(&shaders::WORLD, "forces_and_bonds", &WORLD_BINDINGS),
+            islands_sums: gpu.compute(&shaders::WORLD, "islands_sums_impactors", &WORLD_BINDINGS),
+            travel: gpu.compute(&shaders::WORLD, "travel_start", &WORLD_BINDINGS),
             statics: gpu.compute(&shaders::WORLD, "island_statics", &WORLD_BINDINGS),
             fatigue: gpu.compute(&shaders::WORLD, "settled_fatigue", &WORLD_BINDINGS),
         };
@@ -1238,6 +1266,7 @@ impl GpuSolver {
             if !any && rounds == 0 {
                 break;
             }
+            let t_encode = std::time::Instant::now();
             let mut islands_gpu = self.layout.islands.clone();
             islands_gpu.push(Island { done: [0, seen, 0, 0], ..Default::default() });
             gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&islands_gpu));
@@ -1267,12 +1296,29 @@ impl GpuSolver {
             // The wide bond groups join the sums when no wide island is free (no net
             // loads to sum first) or settled (no wake pass first).
             let bonds_with_sums = wide_groups > 0 && !self.buffers.wide_free && !(p.solve_mode != 0 && self.buffers.wide_settled);
+            // The contact pipeline in two dispatches per substep (world.slang STOP_NOW): with
+            // its bonds outside the island kernel and no wide island (whose kernels keep
+            // the three-dispatch order).
+            let fused = pipeline_steps > 0 && wide_groups == 0 && bonds_external && fuse_pipeline();
+            if fused {
+                ops.push((K_TRAVEL, groups(p.chunk_count + p.impactor_count), true));
+            }
             for r in 0..rounds {
                 let contact = pipeline && r < pipeline_steps;
                 // A round: contact_forces; the sums with the impactors' integration (both
                 // read only its outputs); wide_bonds (its free islands' net loads need the
                 // sums); the narrow islands with the wide islands' chunks (other islands,
                 // both after the sums and wide_bonds); the wide islands' tail.
+                if contact && fused {
+                    if self.buffers.crush {
+                        ops.push((K_SHARES, groups(p.cand_count), true));
+                        ops.push((K_CRUSH, impactors_n, true));
+                    }
+                    let forces = (p.pair_count + p.cand_count) * p.pair_lanes.max(1);
+                    ops.push((K_FORCES_BONDS, forces.div_ceil(256) + self.buffers.contact_bond_groups, true));
+                    ops.push((K_ISLANDS_SUMS, islands_n + impactors_n, true));
+                    continue;
+                }
                 if contact {
                     if self.buffers.crush {
                         ops.push((K_SHARES, groups(p.cand_count), true));
@@ -1331,6 +1377,9 @@ impl GpuSolver {
                 &self.kernels.sums_bonds,
                 &self.kernels.contact_islands,
                 &self.kernels.contact_island_wide,
+                &self.kernels.forces_bonds,
+                &self.kernels.islands_sums,
+                &self.kernels.travel,
             ];
             let bind = |contact: bool| if contact { &self.buffers.bind_contact } else { &self.buffers.bind_segment };
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -1361,15 +1410,17 @@ impl GpuSolver {
                     encoder.resolve_query_set(&timing.queries, 0..2 * ops.len() as u32, &timing.resolve, 0);
                 }
             }
+            let finished = encoder.finish();
+            self.profile.encode += t_encode.elapsed().as_secs_f64();
             let t = std::time::Instant::now();
-            gpu.queue.submit([encoder.finish()]);
+            gpu.queue.submit([finished]);
         self.state_current = false;
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
             self.profile.gpu += t.elapsed().as_secs_f64();
             if let Some(timing) = &self.timing {
                 let stamps: Vec<u64> = gpu.read(&timing.resolve);
                 let period = gpu.queue.get_timestamp_period() as f64 * 1e-9;
-                let mut batch = [(0.0f64, 0.0f64, 0u32); 17];
+                let mut batch = [(0.0f64, 0.0f64, 0u32); 20];
                 for (q, &(k, ..)) in ops.iter().enumerate() {
                     let secs = stamps[2 * q + 1].saturating_sub(stamps[2 * q]) as f64 * period;
                     self.profile.kernels[k] += secs;
@@ -1450,7 +1501,14 @@ impl GpuSolver {
                 *remaining.get_mut(&id).unwrap() = isl.info[1] as usize;
             }
             self.layout.islands = islands;
-            let replan = sentinel.info[2] & STOP_NOW != 0;
+            // The two-dispatch pipeline records the substep a travel check stopped at; a stop
+            // after a split's substep is moot (the three-dispatch order never checks it).
+            let replan = if fused {
+                let at = sentinel.range[0];
+                at != 0 && (sentinel.info[1] == 0 || at <= sentinel.info[1])
+            } else {
+                sentinel.info[2] & STOP_NOW != 0
+            };
             if halted.is_empty() && !replan {
                 if remaining.values().all(|&l| l == 0) && pipeline_left == 0 {
                     break;

@@ -56,6 +56,7 @@ pub mod shaders {
             ("impactor_shares", (64, 1, 1)),
             ("impactor_crush", (256, 1, 1)),
             ("island_frame", (256, 1, 1)),
+            ("island_frame_bonds_wide", (512, 1, 1)),
             ("impactor_integrate", (256, 1, 1)),
             ("wide_bonds", (256, 1, 1)),
             ("wide_chunks", (256, 1, 1)),
@@ -70,6 +71,9 @@ pub mod shaders {
             ("sums_impactors_bonds", (256, 1, 1)),
             ("contact_islands", (256, 1, 1)),
             ("contact_islands_and_wide_chunks", (256, 1, 1)),
+            ("forces_and_bonds", (256, 1, 1)),
+            ("islands_sums_impactors", (256, 1, 1)),
+            ("travel_start", (64, 1, 1)),
         ]);
     pub const STRESS_RENDER: ShaderSet = shader_set!("stress_render", [("stress_vs", (1, 1, 1)), ("stress_fs", (1, 1, 1))]);
     pub const DESTRUCTION_RENDER: ShaderSet = shader_set!(
