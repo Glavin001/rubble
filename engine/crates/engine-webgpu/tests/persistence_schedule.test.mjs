@@ -102,7 +102,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         return p;
       };
       const context = {...DISPATCH,
-        detailedProfile, graphProfile, colorProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
+        detailedProfile, graphProfile, colorProfile:false, bodyCount:110442, colliderCount:110442, jointCount:0, last:{contact:1_170_000},
         cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
@@ -242,7 +242,7 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=
   const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
     dispatchWorkgroupsIndirect() { trace.push({name:'primal'}); }, end() {}}; passes.push(p); return p; };
   const context = {...DISPATCH,
-    detailedProfile, graphProfile:false, colorProfile:false, bodyCount:110442, colliderCount:110442, last:{contact:1_170_000},
+    detailedProfile, graphProfile:false, colorProfile:false, bodyCount:110442, colliderCount:110442, jointCount:0, last:{contact:1_170_000},
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
@@ -401,7 +401,7 @@ test('host upload publishes the previous GPU manifold count before counters rese
     const context = {...DISPATCH,
       manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152), steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
-      last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
+      last:{contact:100}, jointCount:0, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
       hostScratchView:new Uint32Array(64), hostParamsView:new Uint8Array(208),
       hostCountersView:new Uint32Array(16), hostColorsView:new Uint32Array(32),
@@ -443,7 +443,7 @@ for (const sparseStart of [10, 32, 0]) {
     const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
       dispatchWorkgroupsIndirect() { trace.push({name:'primal', phase:p.id}); }, end() {}}; passes.push(p); return p; };
     const context = {...DISPATCH,
-      detailedProfile:false, graphProfile:false, colorProfile:true, bodyCount:110442, colliderCount:110442,
+      detailedProfile:false, graphProfile:false, colorProfile:true, bodyCount:110442, colliderCount:110442, jointCount:0,
       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
@@ -492,7 +492,7 @@ test('broadphase grid table scales with colliders and clears every head', () => 
   const trace = [];
   const pass = () => ({id:0, setPipeline() {}, setBindGroup() {}, dispatchWorkgroupsIndirect() {}, end() {}});
   runInNewContext(`${clearSource}\n${source}\nencodeStep(encoder, false)`, {...DISPATCH,
-    detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
+    detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923, jointCount:0,
     last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
     nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
     manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576, gridSplit, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
