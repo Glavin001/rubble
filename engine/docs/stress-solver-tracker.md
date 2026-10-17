@@ -99,6 +99,7 @@ Optional switches are listed under "Built, off by default" below.
 | The same with settled contact islands (a waking island runs its joint law inline; a law-free kernel variant when none is settled) | GPU | town16_one_ram worst frame 346 → 254 ms; house_ram 46.6 → 44.8 µs per substep |
 | Segment-mode bonds over 512 threads (`island_frame_bonds_wide`; chunks and reductions on the first 256) | GPU | house-1story segment +4.5 %, brick-building +2.7 %; bit-identical |
 | Impactors' substep counter written in place (no blocking read-back per batch) | GPU | Fracture frames' host time; A/B under load: house_ram worst 854 → 746 ms |
+| Static-solve loads uploaded contiguously; the scratch cleared on the GPU with only its non-zero regions written; quiet clusters left out in the tiered quasi-static mode (`static_stable`) | GPU, coupling | Fractured downtown (24k chunks) idle, tiered: 24.0 → 20.1 s per 6 frames (calibrated), median 72 → 34.5 ms (authored); bit-identical (guard 24/24 with the quasi-static runs) |
 
 ### Accuracy and model
 
@@ -134,6 +135,9 @@ Optional switches are listed under "Built, off by default" below.
 | Stress safety 0.9 instead of 0.5 | GPU | About 45 % fewer substeps | Measured accuracy cost (house ram 2.62 vs 3.04): keep 0.5 |
 | `true_step` in the oracle | Oracle | −9 % CPU | s_arch fragments 8 → 14 |
 | **Tiered coupling** (`--config tiered`, `GpuWorld::set_tiered`): quasi-static mode with explicit impact islands; only a scene impactor's contact closing faster than `STRESS_TIERED_SPEED` (5 m/s) seeds an island; promotion renews only on fractures under the engine's loads | Coupling | Fractured high-rise 10F (vibe-land, 1,096 chunks): idle median 39 → 4 ms, rammed median 84 → 8 ms, peak 172 → 94 ms. house_ram 1 s: explicit frames until the island ends (0.73 s), then 10–13 ms frames | A model change (Blast's model outside impacts). Island frames keep the explicit cost (140–250 ms on house_ram). The router's impact speed is uncalibrated |
+| **Quasi-static impacts** (`--config qs`, your choice 2026-10-17): realtime's features, quasi-static everywhere, impacts included (Blast's model) with budgeted static solves (`STRESS_QS_BUDGET`) | Coupling | house_ram median 7.5 ms, worst 54 ms (4 × 64); fractured high-rise rammed median 6.9 ms, worst after setup 17 ms (2 × 32); town16_one_ram median 20.8 ms; fractured downtown (authored) rammed median 69 ms | No punch-through: the 400 kg ram leaves at 4.91 m/s and breaks no bond (explicit: 3.10 m/s, 188 bonds) |
+| **Authored pack strengths** (`scene_pack::ImportOptions::authored_strengths`, `stress_bench --authored`) | Import | The vibe-land packs collapse at rest with the calibrated materials (downtown: 100+ cascade passes per frame, 14 s frames); with the packs' own elastic limits they stand | Like-for-like with vibe-land's Blast; the calibrated import stays the default |
+| **Strict step mode** (`GpuWorld::set_min_stress_step`, `STRESS_BENCH_STRICT_STEP=s`) | Coupling | Fails setup when a structure's certified step is below s, naming the chunks that set it: house-1story 7.55 µs (2.5 m timber posts of 16 kg), fractured high-rise 14.1 µs (thin concrete walls) | Your choice over sliver elimination: fix assets at the source |
 | Static-solve budget (`SolverConfig::static_budget`, `STRESS_TIERED_BUDGET=newton,cg`), applied after setup | GPU | Tiered house_ram aftermath frames 425 → 13 ms (4 × 64) or 10 ms (2 × 32), broken bonds unchanged (198). Blast-equivalent rung: peak 238 → 43 ms at 4 Newton steps, same outcome | Unconverged solves keep their start state: lossy against converged statics |
 
 ## Rejected (tried and measured)
@@ -217,6 +221,7 @@ your call; the rest need building.
     island membership (any overlap joins a component) are uncalibrated. On house_ram the
     island lasts 0.73 s because fragments touching the ram close at 5–9 m/s. Item 8's
     critical-speed router is the principled version.
+12c. **Quasi-static frames at scale** (fractured downtown, authored, 34 ms): two full layout builds per frame (~6.5 ms each: pack 1.8, terms 1.5, uploads 2.8), the tail's solves of the 7 fatigue-active buildings, and the write-back; then item 11.
 12b. **Static solves in the tiered coupling:** the budget is a per-frame cost bound
     (Blast's choice); a warm-started multigrid (item 10) would converge within it.
 12. Stage 2: one submission per frame with shared buffers. About 5 % on destruction

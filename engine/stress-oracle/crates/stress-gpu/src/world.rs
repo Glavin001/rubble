@@ -238,6 +238,7 @@ impl GpuWorld {
             return Err("the engine-coupled world runs the explicit, adaptive or quasi-static solve".into());
         }
         let mut w = GpuWorld::new(gpu, scene)?;
+        w.solver.quiet_quasi_static = scene.sim.solve_mode == SolveMode::QuasiStatic;
         w.solver.sync(gpu);
         if scene.sim.methods.true_step {
             let m = &w.solver.mirror;
@@ -637,7 +638,12 @@ impl GpuWorld {
             w.coupled_write_back(&frozen);
         });
         self.solver.mirror_check("after write-back");
-        self.solver.refresh(gpu)?;
+        // Quasi-static with no island and every cluster anchored: the write-back moved
+        // nothing the tables hold, and the next frame refreshes them anyway.
+        let unmoved = self.scene.sim.solve_mode == SolveMode::QuasiStatic && frozen.is_empty() && self.solver.mirror.clusters.iter().all(|c| c.anchored);
+        if !unmoved {
+            self.solver.refresh(gpu)?;
+        }
         self.unchanged_next = self.solver.excluded_ids().iter().copied().filter(|id| excluded_mid.contains(id)).collect();
         self.write_back_seconds += t_back.elapsed().as_secs_f64();
         self.solver.mirror.unchanged.clear();
@@ -936,7 +942,7 @@ impl GpuWorld {
             let clusters: Vec<usize> = (0..self.solver.mirror.clusters.len())
                 .filter(|&ci| {
                     let cl = &self.solver.mirror.clusters[ci];
-                    !cl.bonds.is_empty() && !(tiered && (!cl.driven || excluded.binary_search(&cl.id).is_ok()))
+                    !cl.bonds.is_empty() && !(tiered && !cl.driven) && !(skip_repeats && excluded.binary_search(&cl.id).is_ok())
                 })
                 .collect();
             if pass == 0 {
@@ -990,7 +996,7 @@ impl GpuWorld {
                 }
                 // A repeated solve (converged or not) whose commit left its inputs as they
                 // were: the next one repeats too.
-                if pass == 0 && self.tiered && cached.contains(&ci) {
+                if pass == 0 && skip_repeats && cached.contains(&ci) {
                     let id = m.clusters[ci].id;
                     if self.static_repeats.get(&id).is_some_and(|(was, _)| *was == StaticInputs::of(m, ci, loads)) {
                         stable.push(id);

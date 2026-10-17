@@ -531,10 +531,13 @@ pub struct GpuSolver {
     /// run under the plan yet, so the caller may pick the step it needs.
     /// `stopped_at_plan` tells whether the last `step` did.
     pub stop_at_plan: bool,
-    /// The tiered coupling: clusters whose last static solve repeated and whose damage
-    /// commit changed nothing (sorted ids; `GpuWorld::solve_static_all`), the only ones
-    /// its quasi-static mode may leave out as quiet.
+    /// Engine-coupled quasi-static mode: clusters whose last static solve repeated and
+    /// whose damage commit changed nothing (sorted ids; `GpuWorld::solve_static_all`),
+    /// the only ones it may leave out as quiet.
     pub static_stable: Vec<u64>,
+    /// Quasi-static mode under an engine (`GpuWorld::with_engine`): quiet clusters (by
+    /// `static_stable`) may be left out.
+    pub quiet_quasi_static: bool,
     pub stopped_at_plan: bool,
     pub profile: Profile,
     /// The code paths that ran so far (`coverage`): the device's words OR-ed after every
@@ -601,6 +604,7 @@ impl GpuSolver {
             plan_log: None,
             stop_at_plan: false,
             static_stable: Vec::new(),
+            quiet_quasi_static: false,
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
@@ -2237,9 +2241,9 @@ impl GpuSolver {
         let m = &self.mirror;
         let Some(l) = self.loads.as_ref() else { return Vec::new() };
         let sc = &l.scene;
-        // Adaptive mode, and the tiered coupling's quasi-static mode (a quiet cluster's
-        // static solve repeats bit for bit and its damage commit changes nothing).
-        let tiered_qs = m.config.mode == SolveMode::QuasiStatic && m.config.tiered;
+        // Adaptive mode, and the engine-coupled quasi-static mode (`static_stable`: a quiet
+        // cluster's static solve repeats bit for bit and its damage commit changes nothing).
+        let tiered_qs = m.config.mode == SolveMode::QuasiStatic && self.quiet_quasi_static;
         if (m.config.mode != SolveMode::Adaptive && !tiered_qs)
             || !sc.loads.is_empty()
             || !sc.events.is_empty()
