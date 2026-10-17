@@ -18,6 +18,8 @@
 > and its `--solver-mode`), with `scripts/render_videos.sh`; its `physx` feature became
 > `rubble` (`--engine rubble`: `stress_rubble::RubbleEngine` through `World::with_engine`).
 
+Improvement history and plan (adopted, rejected with rationale, off by default, open): [`../docs/stress-solver-tracker.md`](../docs/stress-solver-tracker.md).
+
 This workspace is the ground truth for the destruction stress solver described in
 the spec (rigid clusters of chunks, a small-strain elastodynamic bond network per
 cluster, fracture by dynamic stress). It has three layers, validated in order:
