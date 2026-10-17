@@ -605,7 +605,7 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[2] = b(c.max_colliders, 64);
     s[3] = b(64, 16);
     s[4] = b(c.max_contacts.saturating_mul(2), 128);
-    s[5] = b(c.max_joints, 256);
+    s[5] = b(c.max_joints, std::mem::size_of::<engine_schema::Joint>() as u64);
     s[6] = 256;
     s[7] = 256;
     s[8] = b(c.max_commands, 64);

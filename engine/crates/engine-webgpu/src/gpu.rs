@@ -107,6 +107,10 @@ pub struct WgpuSim {
     contacts_parity: u32,
     host_bodies: Vec<BodyState>,
     host_cols: Vec<Collider>,
+    /// Released joint slots, reused by `add_joint`.
+    free_joints: Vec<u32>,
+    /// Per-body collider reach (torque arm default).
+    body_reach: Vec<f32>,
     chip: String,
     /// Any convex hull collider: schedules the convex_* narrowphase entries.
     has_convex: bool,
@@ -524,6 +528,8 @@ impl WgpuSim {
             contacts_parity: 0,
             host_bodies: Vec::new(),
             host_cols: Vec::new(),
+            free_joints: Vec::new(),
+            body_reach: Vec::new(),
             chip: format!("{} / {}", info.name, info.backend),
             has_convex: false,
             grid_levels: 0,
@@ -575,7 +581,8 @@ impl WgpuSim {
     /// friction 0.5 until set).
     pub fn set_materials(&mut self, mats: &[Material]) {
         assert!(mats.len() <= 64, "the material table holds 64 entries");
-        self.queue.write_buffer(&self.bufs[3], 0, bytemuck::cast_slice(mats));
+        self.queue
+            .write_buffer(&self.bufs[3], 0, bytemuck::cast_slice(mats));
     }
 
     pub fn add_body(&mut self, body: BodyState) -> u32 {
@@ -639,6 +646,15 @@ impl WgpuSim {
             );
             self.host_cols.extend_from_slice(colliders);
             self.collider_count += count;
+            for col in colliders {
+                if let Some(r) = engine_schema::collider_reach(col) {
+                    let b = col.body as usize;
+                    if self.body_reach.len() <= b {
+                        self.body_reach.resize(b + 1, 0.0);
+                    }
+                    self.body_reach[b] = self.body_reach[b].max(r);
+                }
+            }
         }
         start..self.collider_count
     }
@@ -766,6 +782,130 @@ impl WgpuSim {
         self.add_colliders(&colliders);
         self.sync_hulls(arena);
         body
+    }
+
+    pub fn joint_count(&self) -> u32 {
+        self.joint_count
+    }
+
+    /// Replay a scene built elsewhere (e.g. `MetalWorld::snapshot`).
+    pub fn load_snapshot(&mut self, snap: &WorldSnapshot) {
+        if let Some(p) = snap.params {
+            self.set_params(p);
+        }
+        if !snap.materials.is_empty() {
+            self.set_materials(&snap.materials[..snap.materials.len().min(64)]);
+        }
+        self.add_bodies(&snap.bodies);
+        self.add_colliders(&snap.colliders);
+        self.add_joints(&snap.joints);
+    }
+
+    fn joint_offset(id: u32) -> u64 {
+        u64::from(id) * std::mem::size_of::<Joint>() as u64
+    }
+
+    /// Write a raw GPU joint, reusing a released slot when one is free.
+    pub fn add_joint(&mut self, joint: Joint) -> u32 {
+        let id = match self.free_joints.pop() {
+            Some(id) => id,
+            None => {
+                let id = self.joint_count;
+                assert!(id < self.capacity.max_joints, "joint capacity exceeded");
+                self.joint_count += 1;
+                id
+            }
+        };
+        self.queue.write_buffer(
+            &self.bufs[5],
+            Self::joint_offset(id),
+            bytemuck::bytes_of(&joint),
+        );
+        id
+    }
+
+    /// Batch upload (scene import); slots follow the current count.
+    pub fn add_joints(&mut self, joints: &[Joint]) -> std::ops::Range<u32> {
+        let start = self.joint_count;
+        let count = joints.len() as u32;
+        assert!(
+            count <= self.capacity.max_joints.saturating_sub(start),
+            "joint capacity exceeded"
+        );
+        if count > 0 {
+            self.queue.write_buffer(
+                &self.bufs[5],
+                Self::joint_offset(start),
+                bytemuck::cast_slice(joints),
+            );
+            self.joint_count += count;
+        }
+        start..self.joint_count
+    }
+
+    pub fn add_joint_desc(&mut self, desc: &JointDesc) -> u32 {
+        let mut j = desc.to_gpu();
+        if desc.torque_arm <= 0.0 {
+            let reach = |id: u32| {
+                let dynamic = self
+                    .host_bodies
+                    .get(id as usize)
+                    .is_some_and(|b| b.inv_mass > 0.0);
+                if dynamic {
+                    self.body_reach.get(id as usize).copied().unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            };
+            j.torque_arm =
+                engine_schema::default_torque_arm(reach(desc.body_a), reach(desc.body_b));
+        }
+        self.add_joint(j)
+    }
+
+    pub fn download_joints(&self) -> Vec<Joint> {
+        self.read_buffer_range(5, 0, self.joint_count as usize)
+    }
+
+    pub fn read_joint(&self, id: u32) -> Joint {
+        self.read_buffer_range(5, Self::joint_offset(id), 1)[0]
+    }
+
+    /// Release a joint: the pair collides again and the slot is reused.
+    pub fn remove_joint(&mut self, id: u32) {
+        // Released = broken with both ends on body 0 (matches MetalWorld).
+        let head = [0u32, 0, engine_schema::JOINT_FLAG_BROKEN];
+        self.queue.write_buffer(
+            &self.bufs[5],
+            Self::joint_offset(id),
+            bytemuck::cast_slice(&head),
+        );
+        self.free_joints.push(id);
+    }
+
+    /// Joints the GPU broke since the last call (one readback). Slots are released.
+    pub fn drain_broken_joints(&mut self) -> Vec<u32> {
+        let broken: Vec<u32> = self
+            .download_joints()
+            .iter()
+            .enumerate()
+            .filter(|(_, j)| j.is_broken() && j.body_a != j.body_b)
+            .map(|(i, _)| i as u32)
+            .collect();
+        for &id in &broken {
+            self.remove_joint(id);
+        }
+        broken
+    }
+
+    /// Update a drive's targets in place without touching solver state.
+    pub fn set_joint_drive(&mut self, id: u32, velocity: f32, target: f32) {
+        let off = Self::joint_offset(id) + std::mem::offset_of!(Joint, drive_target) as u64;
+        self.queue.write_buffer(
+            &self.bufs[5],
+            off,
+            bytemuck::cast_slice(&[target, velocity]),
+        );
     }
 
     pub fn body_y(&self, id: u32) -> f32 {

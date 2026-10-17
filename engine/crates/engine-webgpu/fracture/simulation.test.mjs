@@ -122,7 +122,7 @@ test('bond joints schedule the joint hash, wake, warm start and CSR kernels agai
   for(const k of ['joint_hash_clear','joint_hash_insert','bond_wake','warmstart_joints','csr_degree_joints','csr_scatter_joints'])assert.ok(names.has(k),`missing ${k}`);
   for(const d of log.dispatches)for(const e of d.bound.g.entries)assert.ok(e.resource.buffer&&!e.resource.buffer.destroyed,`${d.name} binding ${e.binding}`);
   const events=log.buffers.find(b=>b.label==='AVBD 19'),joints=log.buffers.find(b=>b.label==='AVBD 5');
-  assert.ok(events.size>=65536*3*4,'joint hash: three words per slot');assert.ok(joints.size>=4*192,'Joint is 192 bytes');
+  assert.ok(events.size>=65536*3*4,'joint hash: three words per slot');assert.ok(joints.size>=4*288,'Joint is 288 bytes');
   sim.dispose();
 });
 

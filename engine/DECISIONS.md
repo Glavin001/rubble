@@ -259,3 +259,22 @@ The same native ring now settles to zero awake bodies by step ~210, with no re-w
 8ew. **MetalSim: fast math except collision, binding cache.** Metal's default fast math (wgpu's Metal backend uses it) is ~30% faster on the solve; with it in the narrowphase a wall-smash brick tunnelled through the ground slab, so `narrowphase*`/`convex_*` stay strict IEEE (`ENGINE_STRICT_KERNELS`, `ENGINE_FAST_MATH=off`). Rebinding every buffer per dispatch cost ~7 ms/step of objc calls on wall smash (GPU 2.1 ms); an encoder binding cache removed it. Bench (M3 Max, load ~12, `bench/results/p0-final`), MetalSim vs three-avbd (Dawn): gables 6.7k 0.62/0.84, ring 9k 1.16/1.61, pyramid 12 0.98/1.38, pyramid 30 1.60/2.42, settled pile 32k 2.20/fail, columns 100k 2.80/2.90, ring110k 9.59/9.68 ms. Native wgpu (naga MSL) stays 1.3–1.9× slower than three-avbd; `create_shader_module_trusted` (no naga bounds checks) is untested pending approval.
 
 8ex. **Open: gables506k unhit gate and wall-smash pen_p99 on MetalSim.** Gables matches three-avbd's speed (26.4–27.6 vs 26.3–27.6 ms) but 0–3 bricks of a wall adjacent to a smashed column exceed the 0.6 m unhit bound in most MetalSim runs (different bricks each run; mean drift 0.118 m identical to wgpu/three-avbd; speed distributions identical, so no energy injection) — the 8ea debris strike. Wall smash batch failed pen_p99 at 30.7 mm (sync passed at 24.2): rubble's p99 penetration is 22–24 mm on every host versus three-avbd's 17.6 mm, near the gate. Do not loosen either gate; speculative contacts for fast debris (audit P2 #20) and the penetration gap are the leads.
+
+8ey. **D6 joints replace the per-type joint switch (`docs/JOINTS.md`).** The old shader solved only Ball correctly:
+- Fixed/D6 left twist free.
+- Hinge skipped world X instead of its axis.
+- Slider kept the ball rows.
+- Distance/MaxDistance ran as balls.
+- The angular dual never updated.
+- wgpu never put joints in the CSR.
+
+Joints are now a 288 B D6 record with seven rows (three-avbd ball/fixed/soft/spring/break/yield + PhysX D6 motions, twist/cone/pyramid/linear limits, motors, servos) shared by Metal, wgpu and the browser. Joints stay in one buffer because Chrome's primal kernels already use 9–10 of 10 storage bindings.
+
+Fixes found with the ragdoll probe:
+- exact swing-twist gradient (bX alone blew up free-swing twist limits);
+- wrap-aware angle limits (knees flipped at ±π);
+- slack limits restart at kStart (pops).
+
+The ball fast path loads only `JointBall` fields: chain mail 1.13 ms vs 1.40 ms for the generic path (interleaved A/B).
+
+Bench `bench/results/joints-all` (format v3 D6 scenes; PhysX as `PxD6Joint`) was taken under load average 30–60 from other sessions, so treat the absolute ms as noisy. In it rubble-metal passes every scene and beats three-avbd on chain mail and jointed drop. PhysX GPU fails joint-gap gates at its default 4 iterations on chain mail, jointed drop and hinge chains, and is slower on motor field (19.3 vs 1.18 ms) and ragdolls (7.37 vs 3.28 ms). Re-run in a quiet window before quoting.
