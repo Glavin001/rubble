@@ -538,6 +538,8 @@ pub struct GpuSolver {
     /// Quasi-static mode under an engine (`GpuWorld::with_engine`): quiet clusters (by
     /// `static_stable`) may be left out.
     pub quiet_quasi_static: bool,
+    /// `equilibrate_resident`'s copy of the state from before a solve.
+    state_backup: Option<wgpu::Buffer>,
     pub stopped_at_plan: bool,
     pub profile: Profile,
     /// The code paths that ran so far (`coverage`): the device's words OR-ed after every
@@ -605,6 +607,7 @@ impl GpuSolver {
             stop_at_plan: false,
             static_stable: Vec::new(),
             quiet_quasi_static: false,
+            state_backup: None,
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
             extra_terms: Vec::new(),
@@ -2360,6 +2363,118 @@ impl GpuSolver {
     /// `equilibrate_or_keep` on the mirror (its secant, the globalised tangent re-solve,
     /// the secant's remaining steps), whose outcome, equilibrium or the kept state, is
     /// uploaded: exact delegation (`profile.statics_delegated`).
+    /// `equilibrate` with everything left on the GPU (the fast quasi-static frame,
+    /// `GpuWorld::fast_qs`): no read-back of the state or the bond history and no mirror
+    /// update; an unconverged cluster's chunks get their state from before the solve back
+    /// on the GPU (`equilibrate_or_keep`). Whether each converged.
+    pub fn equilibrate_resident(&mut self, gpu: &Gpu, clusters: &[usize], loads: &ChunkLoads) -> Vec<bool> {
+        if clusters.is_empty() {
+            return Vec::new();
+        }
+        let p = self.buffers.params;
+        for &ci in clusters {
+            let f = crate::statics::static_loads(&self.mirror, ci, loads);
+            let first = self.layout.islands[ci].range[0] as usize;
+            let staged: Vec<[f32; 4]> = f.iter().flat_map(|(fo, mo)| [v4(*fo, 0.0), v4(*mo, 0.0)]).collect();
+            if !staged.is_empty() {
+                gpu.queue.write_buffer(&self.buffers.scratch, 16 * (p.sload_base as usize + 2 * first) as u64, bytemuck::cast_slice(&staged));
+            }
+        }
+        let mut islands = self.layout.islands.clone();
+        for isl in islands.iter_mut() {
+            isl.info[2] &= !ISLAND_SOLVE;
+        }
+        for &ci in clusters {
+            islands[ci].info[2] |= ISLAND_SOLVE;
+        }
+        let mut with_sentinel = islands.clone();
+        with_sentinel.push(Island::default());
+        gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&with_sentinel));
+        let size = self.buffers.state.size();
+        if self.state_backup.as_ref().is_none_or(|b| b.size() != size) {
+            self.state_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("state backup"), size, usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        }
+        let backup = self.state_backup.clone().expect("state backup");
+        let range = |ci: usize| {
+            let isl = self.layout.islands[ci];
+            (64 * isl.range[0] as u64, 64 * (isl.range[1] - isl.range[0]) as u64)
+        };
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for &ci in clusters {
+            let (at, len) = range(ci);
+            if len > 0 {
+                encoder.copy_buffer_to_buffer(&self.buffers.state, at, &backup, at, len);
+            }
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.kernels.statics.pipeline);
+            pass.set_bind_group(0, &self.buffers.bind_segment, &[]);
+            pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
+        self.bonds_stale = true;
+        let result_at = p.statics_base as usize + 23 * self.layout.chunks.len() + 2 * self.layout.bonds.len();
+        let results: Vec<[f32; 4]> = gpu.read_range(&self.buffers.scratch, result_at, islands.len());
+        let converged: Vec<bool> = clusters.iter().map(|&ci| results[ci][3] != 0.0).collect();
+        // `STRESS_QS_WARM=1` (with a budget, as Blast's solver): an unconverged solve keeps
+        // its iterate, so the next frame's continues from it instead of from the start.
+        let warm = std::env::var("STRESS_QS_WARM").is_ok_and(|v| v == "1");
+        if !warm && converged.iter().any(|&c| !c) {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            for (&ci, &ok) in clusters.iter().zip(&converged) {
+                let (at, len) = range(ci);
+                if !ok && len > 0 {
+                    encoder.copy_buffer_to_buffer(&backup, at, &self.buffers.state, at, len);
+                }
+            }
+            gpu.queue.submit([encoder.finish()]);
+        }
+        if converged.iter().any(|&c| c) {
+            self.coverage |= coverage::STATICS;
+        }
+        converged
+    }
+
+    /// statics.rs `commit_damage` of `clusters` on the GPU (`settled_fatigue` over just
+    /// them, at their equilibrium, with `dt`): (damage grew, a bond disconnected).
+    pub fn commit_resident(&mut self, gpu: &Gpu, clusters: &[usize], dt: f64) -> (Vec<usize>, Vec<usize>) {
+        if clusters.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let p = Params { dt: dt as f32, ..self.buffers.params };
+        gpu.queue.write_buffer(&self.buffers.params_segment, 0, bytemuck::bytes_of(&p));
+        let mut islands = self.layout.islands.clone();
+        for isl in islands.iter_mut() {
+            isl.info[0] &= !ISLAND_SETTLED;
+            isl.info[2] &= !(ISLAND_DAMAGED | ISLAND_DISCONNECTED);
+        }
+        for &ci in clusters {
+            islands[ci].info[0] |= ISLAND_SETTLED;
+        }
+        islands.push(Island::default());
+        gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&islands));
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.kernels.fatigue.pipeline);
+            pass.set_bind_group(0, &self.buffers.bind_segment, &[]);
+            pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        self.state_current = false;
+        self.bonds_stale = true;
+        let mut read: Vec<Island> = gpu.read(&self.buffers.islands);
+        read.pop();
+        self.coverage |= read.iter().fold(0, |a, i| a | i.done[1]) as u64;
+        // The tables' own flags back for the next dispatch.
+        gpu.queue.write_buffer(&self.buffers.params_segment, 0, bytemuck::bytes_of(&self.buffers.params));
+        let damaged = clusters.iter().copied().filter(|&ci| read[ci].info[2] & ISLAND_DAMAGED != 0).collect();
+        let disconnected = clusters.iter().copied().filter(|&ci| read[ci].info[2] & ISLAND_DISCONNECTED != 0).collect();
+        (damaged, disconnected)
+    }
+
     pub fn equilibrate(&mut self, gpu: &Gpu, clusters: &[usize], loads: &ChunkLoads) -> Vec<crate::statics::Equilibrium> {
         if clusters.is_empty() {
             return Vec::new();

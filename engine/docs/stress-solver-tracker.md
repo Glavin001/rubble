@@ -221,6 +221,19 @@ your call; the rest need building.
     island membership (any overlap joins a component) are uncalibrated. On house_ram the
     island lasts 0.73 s because fragments touching the ram close at 5–9 m/s. Item 8's
     critical-speed router is the principled version.
+12d. **Quasi-static parity with Blast** (your priority, 2026-10-17). PhysX GPU + Blast on
+    this M3 Max (vibe-land perf suite, quick, runtime profile): Vibe Town idle median
+    10.2 ms, p95 15.3 ms; bombard median 11.4, p95 15.3, worst 35.5 ms. rubble, Vibe Town
+    (52k chunks, 281 clusters, `--authored --config qs`, budget 2 × 32): 141 ms per frame
+    before this work; 119 ms after the lossless cuts; **34–45 ms with the fast
+    quasi-static frame** (`STRESS_QS_FAST=1`: solves and damage commit stay on the GPU, no
+    rebuild, download or sync per frame; f32 commit, opt-in). What remains is the static
+    solve itself, ~18–22 ms: one threadgroup per island of Newton + PCG, so the
+    thousand-chunk terrain and building islands run long serial chains, and only ~82 of
+    278 clusters converge within 2 × 32 (warm start, `STRESS_QS_WARM=1`, does not change
+    that). Next: a wide (multi-group) static solve or multigrid (item 10), then the
+    engine's per-frame `prepare` (2–20 ms). Smaller scenes are already real time in `qs`:
+    house_ram median 2.8 ms, p95 7.8; fractured high-rise rammed median 4.4–7.5, p95 11–14.
 12c. **Quasi-static frames at scale** (fractured downtown, authored, 34 ms): two full layout builds per frame (~6.5 ms each: pack 1.8, terms 1.5, uploads 2.8), the tail's solves of the 7 fatigue-active buildings, and the write-back; then item 11.
 12b. **Static solves in the tiered coupling:** the budget is a per-frame cost bound
     (Blast's choice); a warm-started multigrid (item 10) would converge within it.

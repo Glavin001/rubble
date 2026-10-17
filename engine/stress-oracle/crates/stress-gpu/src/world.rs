@@ -112,6 +112,15 @@ pub struct GpuWorld {
     pub tiered: bool,
     /// Host seconds in the coupled frame's phases: the engine's step and the islands
     /// (`coupled_prepare`), the solver refresh, and the write-back with its refresh.
+    /// The fast quasi-static frame (`STRESS_QS_FAST`, opt-in): in an engine-coupled
+    /// quasi-static frame with no islands and no scripted loads (the solve works in each
+    /// cluster's body frame, its loads from the poses the engine wrote back),
+    /// the static solves and their damage commit stay on the GPU (`equilibrate_resident`,
+    /// `commit_resident`) with the frame-average engine loads computed on the host; the
+    /// tables are rebuilt and the mirror synced only when a cluster splits. f32 commits
+    /// against the host path's f64 ones: gated by outcome, not bit for bit.
+    pub fast_qs: bool,
+    fast_now: bool,
     pub prepare_seconds: f64,
     pub refresh_seconds: f64,
     pub write_back_seconds: f64,
@@ -208,6 +217,8 @@ impl GpuWorld {
             unchanged_next: std::collections::HashSet::new(),
             segment_retries: 0,
             tiered: false,
+            fast_qs: std::env::var("STRESS_QS_FAST").is_ok_and(|v| v == "1"),
+            fast_now: false,
             prepare_seconds: 0.0,
             refresh_seconds: 0.0,
             write_back_seconds: 0.0,
@@ -388,10 +399,13 @@ impl GpuWorld {
         let frozen = loop {
             // The rewind's snapshot only with the redo on; without it, the frame-start
             // cluster of every chunk (for counting fractures of driven bodies) suffices.
+            self.fast_now = self.fast_frame();
             let saved = if self.redo_fractured_frames {
                 Some(self.solver.snapshot(gpu))
             } else {
-                self.solver.download(gpu);
+                if !self.fast_now {
+                    self.solver.download(gpu);
+                }
                 None
             };
             let events_at_start = self.solver.mirror.events.len();
@@ -434,7 +448,9 @@ impl GpuWorld {
                 }
             }
             let t_refresh = std::time::Instant::now();
-            self.solver.refresh(gpu)?;
+            if !self.fast_now {
+                self.solver.refresh(gpu)?;
+            }
             self.refresh_seconds += t_refresh.elapsed().as_secs_f64();
             excluded_mid = self.solver.excluded_ids().iter().copied().collect();
             let (mut n, mut h) = (f.n, f.h);
@@ -632,16 +648,19 @@ impl GpuWorld {
         };
         // Driven bodies at the engine's end of the frame; island bodies back to the engine.
         let t_back = std::time::Instant::now();
-        self.solver.download(gpu);
+        if !self.fast_now {
+            self.solver.download(gpu);
+        }
         self.with_shell_mut(|w| {
             w.set_driven_motion(1.0);
             w.coupled_write_back(&frozen);
         });
         self.solver.mirror_check("after write-back");
         // Quasi-static with no island and every cluster anchored: the write-back moved
-        // nothing the tables hold, and the next frame refreshes them anyway.
+        // nothing the tables hold, and the next frame refreshes them anyway (or, fast,
+        // keeps them).
         let unmoved = self.scene.sim.solve_mode == SolveMode::QuasiStatic && frozen.is_empty() && self.solver.mirror.clusters.iter().all(|c| c.anchored);
-        if !unmoved {
+        if !unmoved && !self.fast_now {
             self.solver.refresh(gpu)?;
         }
         self.unchanged_next = self.solver.excluded_ids().iter().copied().filter(|id| excluded_mid.contains(id)).collect();
@@ -856,11 +875,16 @@ impl GpuWorld {
         let host_statics = std::env::var("STRESS_GPU_HOST_STATICS").is_ok_and(|v| v == "1");
         let may_settle = self.solver.mirror.clusters.iter().any(|c| c.activity == Activity::Active && !c.bonds.is_empty() && c.active_timer - fdt <= 0.0);
         match self.scene.sim.solve_mode {
+            SolveMode::QuasiStatic if self.fast_now => {}
             SolveMode::QuasiStatic => self.solver.sync(gpu),
             SolveMode::Adaptive if may_settle || host_statics => self.solver.sync(gpu),
             _ => {}
         }
         let changed = match self.scene.sim.solve_mode {
+            SolveMode::QuasiStatic if self.fast_now => {
+                self.fast_static_tail(gpu)?;
+                false
+            }
             SolveMode::QuasiStatic => {
                 // world.rs: the frame's average loads, equilibrium with same-step cascade.
                 let mut fl = self.solver.frame_load_sum.clone();
@@ -897,6 +921,93 @@ impl GpuWorld {
             self.solver.rebuild(gpu, 0.0)?;
         }
         self.tail_seconds += tail.elapsed().as_secs_f64();
+        Ok(())
+    }
+
+    /// Whether this frame takes the fast quasi-static path (`fast_qs`).
+    fn fast_frame(&self) -> bool {
+        let m = &self.solver.mirror;
+        self.fast_qs
+            && self.frame > 0
+            && self.coupled()
+            && !self.tiered
+            && !self.redo_fractured_frames
+            && self.scene.sim.solve_mode == SolveMode::QuasiStatic
+            && self.scene.loads.is_empty()
+            && self.scene.events.is_empty()
+            && self.scene.probes.is_empty()
+            && !m.config.methods.tangent_statics
+    }
+
+    /// The frame-average engine loads (`extra_terms`, constant point loads in a
+    /// quasi-static one-step frame) as chunk loads, as the GPU's `chunk_loads` records
+    /// them: the force, and its moment about the chunk's displaced centre.
+    fn host_frame_loads(&self) -> ChunkLoads {
+        let m = &self.solver.mirror;
+        let mut l = ChunkLoads::new(m);
+        for t in &self.solver.extra_terms {
+            let crate::loads::Function::Constant(v) = t.function else { continue };
+            if t.kind != crate::loads::LOAD_POINT {
+                continue;
+            }
+            let cl = &m.clusters[m.chunks[t.structure][t.chunk].cluster];
+            let f = t.dir * v;
+            let lever = cl.pose.transform_vector(t.arm - m.chunks[t.structure][t.chunk].u);
+            l.force[t.structure][t.chunk] += f;
+            l.torque[t.structure][t.chunk] += lever.cross(f);
+        }
+        l
+    }
+
+    /// The fast quasi-static frame's tail (`fast_qs`): solves and commits on the GPU, the
+    /// cascade until no damage grows; a split syncs the mirror, splits and rebuilds.
+    fn fast_static_tail(&mut self, gpu: &Gpu) -> Result<(), String> {
+        let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
+        let t0 = std::time::Instant::now();
+        let loads = self.host_frame_loads();
+        if trace {
+            eprintln!("fast qs: loads {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+        }
+        let dt = self.scene.sim.frame_dt;
+        let max = StaticOptions::default().max_cascade.max(1);
+        let mut unconverged = false;
+        for pass in 0..max {
+            let excluded = self.solver.excluded_ids().to_vec();
+            let m = &self.solver.mirror;
+            let clusters: Vec<usize> = (0..m.clusters.len()).filter(|&ci| !m.clusters[ci].bonds.is_empty() && excluded.binary_search(&m.clusters[ci].id).is_err()).collect();
+            let t_pass = std::time::Instant::now();
+            let converged = self.solver.equilibrate_resident(gpu, &clusters, &loads);
+            let t_solve = t_pass.elapsed().as_secs_f64() * 1e3;
+            unconverged |= converged.iter().any(|&c| !c);
+            let solved: Vec<usize> = clusters.iter().zip(&converged).filter(|(_, &c)| c).map(|(&ci, _)| ci).collect();
+            for &ci in &clusters {
+                self.solver.mirror.clusters[ci].activity = Activity::Settled;
+            }
+            let (damaged, disconnected) = self.solver.commit_resident(gpu, &solved, if pass == 0 { dt } else { 0.0 });
+            if trace {
+                eprintln!("fast qs pass {pass}: {} clusters ({} converged), solve {t_solve:.1} ms, commit {:.1} ms, {} damaged, {} disconnected", clusters.len(), solved.len(), t_pass.elapsed().as_secs_f64() * 1e3 - t_solve, damaged.len(), disconnected.len());
+            }
+            if !disconnected.is_empty() {
+                // A split: the host's mirror, split and tables.
+                self.solver.sync(gpu);
+                let mut pending = disconnected.clone();
+                pending.sort_unstable();
+                for &ci in pending.iter().rev() {
+                    self.solver.mirror.split_cluster(ci);
+                }
+                if let Some(l) = self.solver.loads.as_mut() {
+                    l.topology_version += 1;
+                }
+                self.solver.rebuild(gpu, 0.0)?;
+                continue;
+            }
+            if damaged.is_empty() {
+                break;
+            }
+        }
+        if unconverged {
+            self.shell.static_unconverged_frames += 1;
+        }
         Ok(())
     }
 
