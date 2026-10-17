@@ -103,6 +103,13 @@ pub struct GpuWorld {
     /// Island segments solved again at a smaller contact step (a plan made within the
     /// segment needed it): local retries of the stress solve, not frame rewinds.
     pub segment_retries: u64,
+    /// The tiered coupling (`set_tiered`, quasi-static mode only): impact islands take
+    /// the frame's explicit substeps; every other cluster is settled and takes the
+    /// frame's static solve with its cascade (Blast's model outside impacts). A
+    /// structure's island promotion lasts `PROMOTE_FRAMES` after a fracture under the
+    /// engine's loads only, not after its own island's fractures, so islands end with
+    /// their impacts. A model change against the explicit coupling (measured, opt-in).
+    pub tiered: bool,
     /// Coupled quasi-static frames: each cluster's (by id) last solve inputs that left its
     /// state unchanged (`static_inputs`), and whether that solve converged.
     static_repeats: std::collections::HashMap<u64, (StaticInputs, bool)>,
@@ -195,6 +202,7 @@ impl GpuWorld {
             promoted: std::collections::HashMap::new(),
             unchanged_next: std::collections::HashSet::new(),
             segment_retries: 0,
+            tiered: false,
             static_repeats: std::collections::HashMap::new(),
         };
         let values: Vec<f64> = (0..scene.probes.len()).map(|p| w.probe_value(p)).collect();
@@ -244,6 +252,17 @@ impl GpuWorld {
     /// body and its contacts reach the stress solve only as loads; `World::impact_islands`).
     pub fn set_impact_islands(&mut self, on: bool) {
         self.shell.impact_islands = on;
+    }
+
+    /// The tiered coupling (`tiered`); quasi-static mode only.
+    pub fn set_tiered(&mut self, on: bool) -> Result<(), String> {
+        if on && self.scene.sim.solve_mode != SolveMode::QuasiStatic {
+            return Err("the tiered coupling runs in quasi-static mode".into());
+        }
+        self.tiered = on;
+        self.shell.qs_islands = on;
+        self.solver.mirror.config.tiered = on;
+        Ok(())
     }
 
     /// Whether the world is coupled to an engine.
@@ -326,6 +345,25 @@ impl GpuWorld {
             // times), one substep gives that average exactly.
             let qs_one_step = self.scene.sim.solve_mode == SolveMode::QuasiStatic && f.frozen.is_empty() && self.scene.loads.is_empty() && self.scene.events.is_empty();
             self.solver.extra_terms = if qs_one_step { self.filter.frame_average_terms(&self.solver.mirror, f.t0, fdt) } else { self.filter.terms(&self.solver.mirror) };
+            if self.tiered {
+                // Island clusters integrate explicitly; the rest keep the state of their
+                // last static solve (one released from an island this frame, its own
+                // state: the frame's static solve takes it over).
+                let active_time = self.solver.mirror.config.active_time;
+                for cl in &mut self.solver.mirror.clusters {
+                    if cl.bonds.is_empty() {
+                        continue;
+                    }
+                    if !cl.driven {
+                        if cl.activity != Activity::Active {
+                            cl.activity = Activity::Active;
+                            cl.active_timer = active_time;
+                        }
+                    } else {
+                        cl.activity = Activity::Settled;
+                    }
+                }
+            }
             self.solver.refresh(gpu)?;
             excluded_mid = self.solver.excluded_ids().iter().copied().collect();
             let (mut n, mut h) = (f.n, f.h);
@@ -501,7 +539,7 @@ impl GpuWorld {
                         if let stress_ref::solver::SolverEvent::Broken { structure, bond, .. } = e {
                             let chunk = self.solver.mirror.bonds[*structure][*bond].geometry.a;
                             let key = BodyKey::Cluster(start_cluster.get(*structure).and_then(|c| c.get(chunk)).copied().unwrap_or(u64::MAX));
-                            if f.driven.contains(&key) || self.promoted.contains_key(structure) {
+                            if f.driven.contains(&key) || (self.promoted.contains_key(structure) && !self.tiered) {
                                 self.promoted.insert(*structure, PROMOTE_FRAMES);
                             }
                         }
@@ -545,7 +583,7 @@ impl GpuWorld {
         let mut dt = f64::INFINITY;
         for ci in 0..m.clusters.len() {
             let cl = &m.clusters[ci];
-            let settled = m.config.mode == SolveMode::Adaptive && cl.activity != stress_ref::solver::Activity::Active;
+            let settled = (m.config.mode == SolveMode::Adaptive || self.tiered) && cl.activity != stress_ref::solver::Activity::Active;
             if cl.bonds.is_empty() || settled {
                 continue;
             }
@@ -813,7 +851,10 @@ impl GpuWorld {
             if pass > 0 {
                 self.solver.coverage |= crate::coverage::QS_CASCADE;
             }
-            let clusters: Vec<usize> = (0..self.solver.mirror.clusters.len()).filter(|&ci| !self.solver.mirror.clusters[ci].bonds.is_empty()).collect();
+            // Tiered: island clusters keep their explicit state (they are not in
+            // equilibrium); the static solve takes the rest.
+            let tiered = self.tiered;
+            let clusters: Vec<usize> = (0..self.solver.mirror.clusters.len()).filter(|&ci| !self.solver.mirror.clusters[ci].bonds.is_empty() && !(tiered && !self.solver.mirror.clusters[ci].driven)).collect();
             if pass == 0 {
                 first = clusters.clone();
             }

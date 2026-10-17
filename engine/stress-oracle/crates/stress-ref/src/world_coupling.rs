@@ -46,7 +46,7 @@ struct Struck {
 /// `b`, so only part of `b` takes part, or its peak force (elastic impulse over a
 /// half-sine of that duration) exceeds `b`'s weakest bond, so `b` breaks during the
 /// contact. Both follow from the bodies' masses, moduli, sizes and strengths.
-fn rigid_assumption_fails(a: &Part, b: &Part) -> bool {
+fn rigid_assumption_fails(a: &Part, b: &Part, breaking_only: bool) -> bool {
     let Some(struck) = b.struck else { return false };
     let speed = closing_speed(a, b);
     let m = match (a.mass.is_finite(), b.mass.is_finite()) {
@@ -61,7 +61,7 @@ fn rigid_assumption_fails(a: &Part, b: &Part) -> bool {
     let modulus = 1.0 / (1.0 / a.modulus + 1.0 / b.modulus);
     let duration = hertz_duration(m, a.contact_radius.min(b.contact_radius), modulus, speed);
     let peak_force = std::f64::consts::PI * (2.0 * m * speed) / (2.0 * duration);
-    duration < struck.round_trip || peak_force > struck.capacity
+    (duration < struck.round_trip && !breaking_only) || peak_force > struck.capacity
 }
 
 /// Speed at which `a` and `b` approach. The contact normal is estimated from each
@@ -89,6 +89,12 @@ fn closing_speed(a: &Part, b: &Part) -> f64 {
         return rel.norm() + spin;
     }
     normals.iter().flatten().map(|n| rel.dot(*n)).fold(f64::NEG_INFINITY, f64::max) + spin
+}
+
+/// The tiered coupling's impact speed (m/s): an impactor contact closing slower is a
+/// load (`STRESS_TIERED_SPEED`, default 5; a measurement knob until calibrated).
+fn tiered_impact_speed() -> f64 {
+    std::env::var("STRESS_TIERED_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0)
 }
 
 fn overlaps(a: &Part, b: &Part) -> bool {
@@ -436,7 +442,12 @@ impl World {
         pairs.sort_unstable();
         for (i, j) in pairs {
             {
-                let owned = rigid_assumption_fails(&parts[i], &parts[j]) || rigid_assumption_fails(&parts[j], &parts[i]);
+                // Tiered: only an impactor's contact is an impact (debris and resting
+                // contacts reach the static solve as the engine's loads).
+                let tiered = self.qs_islands && self.scene.sim.solve_mode == SolveMode::QuasiStatic;
+                let impactor = matches!(parts[i].key, Some(BodyKey::Impactor(_))) || matches!(parts[j].key, Some(BodyKey::Impactor(_)));
+                let fast = !tiered || closing_speed(&parts[i], &parts[j]).max(closing_speed(&parts[j], &parts[i])) > tiered_impact_speed();
+                let owned = (!tiered || impactor) && fast && (rigid_assumption_fails(&parts[i], &parts[j], false) || rigid_assumption_fails(&parts[j], &parts[i], false));
                 let both_immovable = !parts[i].mass.is_finite() && !parts[j].mass.is_finite();
                 if parts[i].key.is_none() || parts[j].key.is_none() {
                     // Against the ground: a breaking landing makes the body an island seed.
@@ -822,7 +833,7 @@ impl World {
         let t0 = self.solver.time;
         // Without impact islands (and always in quasi-static mode, which has no explicit
         // dynamics to resolve one) the engine drives every body.
-        let island_bodies = if self.impact_islands && self.scene.sim.solve_mode != SolveMode::QuasiStatic {
+        let island_bodies = if self.impact_islands && (self.scene.sim.solve_mode != SolveMode::QuasiStatic || self.qs_islands) {
             self.select_islands(fdt, forced)
         } else {
             for cl in &mut self.solver.clusters {

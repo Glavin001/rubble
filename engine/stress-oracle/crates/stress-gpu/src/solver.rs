@@ -1061,8 +1061,12 @@ impl GpuSolver {
             // to the mirror); the residual tolerance at f32's reach.
             // (`STRESS_GPU_STATICS_NEWTON=N`, a measurement only: at most N steps, a lossy
             // budget like Blast's per-frame iteration cap.)
-            statics_newton: std::env::var("STRESS_GPU_STATICS_NEWTON").ok().and_then(|v| v.parse().ok()).unwrap_or(StaticOptions::default().secant_steps(m.config.methods.tangent_statics) as u32),
-            statics_cg: 20_000,
+            statics_newton: std::env::var("STRESS_GPU_STATICS_NEWTON")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or(m.config.static_budget.map(|b| b.0))
+                .unwrap_or(StaticOptions::default().secant_steps(m.config.methods.tangent_statics) as u32),
+            statics_cg: m.config.static_budget.map_or(20_000, |b| b.1),
             statics_tol: std::env::var("STRESS_GPU_STATICS_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-5),
             pair_lanes: if gpu.shader_path == crate::gpu::ShaderPath::Wgsl { 1 } else { 32 },
             cplan_base: cplan_base as u32,

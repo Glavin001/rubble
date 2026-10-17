@@ -39,12 +39,19 @@ use stress_rubble::scenes::{house, realtime as configure, wall_ram};
 ///   softening, weibull, crack_contact, rate_effects, static_fatigue, buckling, rebar,
 ///   damping       + that model feature, in this order
 ///   realtime      the full real-time configuration (= damping, every feature on)
+///   tiered        realtime's features, quasi-static outside impact islands (the
+///                 tiered coupling, `GpuWorld::set_tiered`)
 pub const LADDER: [&str; 12] = ["blast", "adaptive", "islands", "softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping", "realtime"];
 const LADDER_FEATURES: [&str; 8] = ["softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping"];
 
 /// `scene` (already `configure`d) under ladder configuration `config`; whether islands run.
 fn ladder(mut s: Scene, config: &str) -> (Scene, bool) {
     if config == "realtime" {
+        return (s, true);
+    }
+    if config == "tiered" {
+        // The tiered coupling: impact islands explicit, everything else quasi-static.
+        s.sim.solve_mode = SolveMode::QuasiStatic;
         return (s, true);
     }
     let rung = LADDER.iter().position(|&c| c == config).unwrap_or_else(|| panic!("unknown --config {config} (known: {})", LADDER.join(", ")));
@@ -220,6 +227,14 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         w.own_dashpot_step = false;
     }
     w.set_impact_islands(islands);
+    // Quasi-static with impact islands: the tiered coupling (`--config tiered`).
+    if islands && scene.sim.solve_mode == SolveMode::QuasiStatic {
+        w.set_tiered(true).expect("tiered coupling");
+        // STRESS_TIERED_BUDGET=newton,cg: the static solves' budget after setup.
+        if let Some((n, cg)) = std::env::var("STRESS_TIERED_BUDGET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
+            w.solver.mirror.config.static_budget = Some((n, cg));
+        }
+    }
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut frames = Vec::with_capacity(n);
     let trace = std::env::var("STRESS_BENCH_TRACE").is_ok();
@@ -235,7 +250,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let per_frame = std::env::var("STRESS_BENCH_FRAMES").is_ok();
     for f in 0..n {
         let before = w.solver.profile.clone();
-        let (splits, replans) = (w.solver.host_splits, w.solver.replans);
+        let (splits, replans, tail) = (w.solver.host_splits, w.solver.replans, w.tail_seconds);
         let t = Instant::now();
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
@@ -243,8 +258,9 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
             let p = &w.solver.profile;
             let ms = |a: f64, b: f64| (a - b) * 1e3;
             eprintln!(
-                "frame {f}: {:.1} ms; gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans",
+                "frame {f}: {:.1} ms; tail {:.1}, gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans; clusters {} ({} in islands), ram {:.2} m/s",
                 frames[f],
+                ms(w.tail_seconds, tail),
                 ms(p.gpu, before.gpu),
                 ms(p.encode, before.encode),
                 ms(p.readback, before.readback),
@@ -256,7 +272,10 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
                 p.rounds_used - before.rounds_used,
                 p.rounds_encoded - before.rounds_encoded,
                 w.solver.host_splits - splits,
-                w.solver.replans - replans
+                w.solver.replans - replans,
+                w.solver.mirror.clusters.len(),
+                w.solver.mirror.clusters.iter().filter(|c| !c.driven).count(),
+                w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm())
             );
         }
         if trace {
