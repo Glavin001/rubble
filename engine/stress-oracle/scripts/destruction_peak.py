@@ -2,12 +2,15 @@
 """Peak destruction frame time of rubble's integrated pipeline (rubble rigid bodies and
 the GPU stress solver on one device), and a bit-identity guard.
 
+Each scene's worst frame is the minimum over --repeats runs: other GPU work (a shared
+machine) only ever adds time, so the minimum estimates the uncontended peak.
+
     destruction_peak.py metric   one number: the worst frame (ms) over the destruction
-                                 scenes, each scene's worst frame taken as the median
-                                 over --repeats runs (GPU contention makes single
-                                 frames noisy)
+                                 scenes
     destruction_peak.py guard    exit 0 when every scene's end-state digest equals the
                                  recorded one (`--record` writes them)
+    destruction_peak.py ab A B   interleaved runs of two stress_bench binaries (the
+                                 metric of each; for judging a change under load)
 
 Runs the release `stress_bench` example (built first unless --no-build) with
 STRESS_GPU_FIXED_HORIZON=1, so outcomes are deterministic and only timing varies.
@@ -15,7 +18,6 @@ STRESS_GPU_FIXED_HORIZON=1, so outcomes are deterministic and only timing varies
 import argparse
 import json
 import os
-import statistics
 import subprocess
 import sys
 
@@ -31,26 +33,41 @@ def build():
     subprocess.run(["cargo", "build", "--release", "-q", "-p", "stress-rubble", "--features", "gpu", "--example", "stress_bench"], cwd=ROOT, check=True)
 
 
-def run(set_name, only=None):
-    args = [BENCH, "--solver", "rubble-gpu", "--set", set_name] + (["--only", only] if only else [])
+def run(set_name, only=None, bench=None):
+    args = [bench or BENCH, "--solver", "rubble-gpu", "--set", set_name] + (["--only", only] if only else [])
     env = dict(os.environ, STRESS_GPU_FIXED_HORIZON="1")
     out = subprocess.run(args, cwd=ROOT, env=env, check=True, capture_output=True, text=True).stdout
     return [json.loads(line) for line in out.splitlines() if line.startswith("{")]
 
 
+def peak(set_name, regime, bench=None):
+    rows = run(set_name, regime, bench)
+    if len(rows) != 1 or "frame_ms" not in rows[0]:
+        sys.exit(f"{regime}: no result")
+    return max(rows[0]["frame_ms"])
+
+
 def metric(repeats):
     worst = 0.0
     for set_name, regime in METRIC_SCENES:
-        peaks = []
-        for _ in range(repeats):
-            rows = run(set_name, regime)
-            if len(rows) != 1 or "frame_ms" not in rows[0]:
-                sys.exit(f"{regime}: no result")
-            peaks.append(max(rows[0]["frame_ms"]))
-        peak = statistics.median(peaks)
-        print(f"{regime}: worst frame {peak:.1f} ms (runs {', '.join(f'{p:.1f}' for p in peaks)})", file=sys.stderr)
-        worst = max(worst, peak)
+        peaks = [peak(set_name, regime) for _ in range(repeats)]
+        best = min(peaks)
+        print(f"{regime}: worst frame {best:.1f} ms (runs {', '.join(f'{p:.1f}' for p in peaks)})", file=sys.stderr)
+        worst = max(worst, best)
     print(f"{worst:.1f}")
+
+
+def ab(a, b, repeats):
+    out = {a: 0.0, b: 0.0}
+    for set_name, regime in METRIC_SCENES:
+        runs = {a: [], b: []}
+        for _ in range(repeats):
+            for x in (a, b):
+                runs[x].append(peak(set_name, regime, x))
+        for x in (a, b):
+            print(f"{regime} {x}: min {min(runs[x]):.1f} ms (runs {', '.join(f'{p:.1f}' for p in runs[x])})", file=sys.stderr)
+            out[x] = max(out[x], min(runs[x]))
+    print(f"{out[a]:.1f} {out[b]:.1f}")
 
 
 def digests():
@@ -76,14 +93,20 @@ def guard(record):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["metric", "guard"])
+    p.add_argument("mode", choices=["metric", "guard", "ab"])
+    p.add_argument("bins", nargs="*")
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--record", action="store_true")
     p.add_argument("--no-build", action="store_true")
     a = p.parse_args()
     if not a.no_build:
         build()
-    metric(a.repeats) if a.mode == "metric" else guard(a.record)
+    if a.mode == "metric":
+        metric(a.repeats)
+    elif a.mode == "ab":
+        ab(a.bins[0], a.bins[1], a.repeats)
+    else:
+        guard(a.record)
 
 
 if __name__ == "__main__":

@@ -231,10 +231,32 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         r.gravity_prestress();
         eprintln!("cpu prestress digest {}", digest(&r, &[]));
     }
+    // STRESS_BENCH_FRAMES=1: each frame's profile deltas on stderr.
+    let per_frame = std::env::var("STRESS_BENCH_FRAMES").is_ok();
     for f in 0..n {
+        let before = w.solver.profile.clone();
+        let (splits, replans) = (w.solver.host_splits, w.solver.replans);
         let t = Instant::now();
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
+        if per_frame {
+            let p = &w.solver.profile;
+            let ms = |a: f64, b: f64| (a - b) * 1e3;
+            eprintln!(
+                "frame {f}: {:.1} ms; gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches, {} host splits, {} replans",
+                frames[f],
+                ms(p.gpu, before.gpu),
+                ms(p.encode, before.encode),
+                ms(p.readback, before.readback),
+                ms(p.download, before.download),
+                ms(p.split, before.split),
+                ms(p.build, before.build),
+                p.substeps - before.substeps,
+                p.batches - before.batches,
+                w.solver.host_splits - splits,
+                w.solver.replans - replans
+            );
+        }
         if trace {
             eprintln!("frame {f} digest {}", digest(&w.solver.mirror, &w.solver.impactors));
         }

@@ -1278,9 +1278,13 @@ impl GpuSolver {
             if !self.layout.gpu_impactors.is_empty() {
                 // Impactors count their integrated substeps from where the pipeline is.
                 let at = (start + substeps - pipeline_left) as u32;
-                let mut imps: Vec<GpuImpactor> = gpu.read(&self.buffers.impactors);
-                imps.iter_mut().for_each(|g| g.cand[3] = at);
-                gpu.queue.write_buffer(&self.buffers.impactors, 0, bytemuck::cast_slice(&imps));
+                // Only `cand[3]` changes: written in place, without reading the buffer back
+                // (nothing runs between batches, so the rest is what the GPU holds).
+                let size = std::mem::size_of::<GpuImpactor>() as u64;
+                let field = (std::mem::offset_of!(GpuImpactor, cand) + 3 * std::mem::size_of::<u32>()) as u64;
+                for i in 0..self.buffers.impactors.size() / size {
+                    gpu.queue.write_buffer(&self.buffers.impactors, i * size + field, bytemuck::bytes_of(&at));
+                }
             }
             gpu.queue.write_buffer(&self.buffers.params_segment, 0, bytemuck::bytes_of(&dispatch_params(&self.buffers, false)));
             // Narrow contact islands' bonds in the sums dispatch (they read only the last
