@@ -148,6 +148,8 @@ pub struct WgpuSim {
     grid_levels: u32,
     /// (collider count, base cell, levels): recomputed only when colliders change.
     grid_cache: Option<(u32, f32, u32)>,
+    /// Colliders were added after step 0; see `build_all_bounds`.
+    bounds_dirty: bool,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
     /// The last step's manifolds still describe the scene (whole-step reuse).
@@ -689,6 +691,7 @@ impl WgpuSim {
             has_convex: false,
             grid_levels: 0,
             grid_cache: None,
+            bounds_dirty: false,
             has_filters: false,
             manifolds_valid: false,
             hull_records_capacity: hull_records,
@@ -794,6 +797,7 @@ impl WgpuSim {
 
     /// Append collider records in one contiguous upload, preserving body indices.
     pub fn add_colliders(&mut self, colliders: &[Collider]) -> std::ops::Range<u32> {
+        self.bounds_dirty |= self.steps_done > 0 && !colliders.is_empty();
         let start = self.collider_count;
         let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
         assert!(
@@ -1523,6 +1527,7 @@ impl WgpuSim {
     }
 
     fn step_core(&mut self, reuse_manifolds: bool, read: bool) -> Result<StepCounters, ExecError> {
+        self.build_all_bounds_if_dirty();
         let wall = web_time::Instant::now();
         // Skip only when the counters describe the latest step: pipelined steps
         // leave them stale until `drain`.
@@ -1737,6 +1742,8 @@ impl WgpuSim {
     /// once. The step's host writes (its uniforms) take effect at that submission, before
     /// its commands, as they would at its own.
     pub fn step_encode(&mut self, enc: &mut wgpu::CommandEncoder) -> Result<(), ExecError> {
+        // Its own submission, ahead of the caller's encoder.
+        self.build_all_bounds_if_dirty();
         let wall = web_time::Instant::now();
         let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
         if self.steps_done > 0
@@ -2004,6 +2011,49 @@ impl WgpuSim {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
+    /// Bounds for every collider, sleeping ones included: the full
+    /// `build_aabbs` pass step 0 runs. After step 0 the kernel keeps a
+    /// sleeping body's previous AABB/OBB, and a collider added to a running
+    /// world while its body sleeps has none, so rays and the broadphase never
+    /// see it (a pre-fractured structure rebuilt into a running world). Run
+    /// once after colliders are added past step 0; a sleeping body that
+    /// already had bounds gets the same bounds again from the same pose.
+    fn build_all_bounds_if_dirty(&mut self) {
+        if !self.bounds_dirty {
+            return;
+        }
+        self.bounds_dirty = false;
+        let inputs = self.step_inputs();
+        let mut s = rigid_plan::host_words(
+            &self.capacity,
+            &self.step_modes(),
+            &inputs,
+            &rigid_plan::HostState {
+                contacts_parity: self.contacts_parity,
+                grid_levels: self.grid_levels,
+                has_filters: self.has_filters,
+                record_hash: self.record_hash(),
+                np_defer_limit: self.np_defer_limit,
+                persist_list_limit: self.persist_list_limit,
+            },
+        );
+        // The step-0 full pass: every collider, asleep or not.
+        s[17] = 0;
+        s[19] = 0;
+        self.queue.write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
+        let host = rigid_plan::host_uniforms(&self.params, &s);
+        self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
+        // build_aabbs reads the collider count from the counter block, which
+        // only a step would otherwise refresh (raycast_batch writes it too).
+        self.queue.write_buffer(&self.bufs[7], 0, bytes_of(&rigid_plan::step_counters(&inputs)));
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bounds") });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("bounds"), timestamp_writes: None });
+            self.disp(&mut pass, "build_aabbs", u64::from(self.collider_count.max(1)), None);
+        }
+        self.queue.submit([enc.finish()]);
+    }
+
     fn write_host_uniforms(&self) {
         self.write_host_uniforms_ex(false);
     }
@@ -2485,6 +2535,7 @@ impl WgpuSim {
             "{} ray queries exceed VehicleCapacity::max_rays ({max})",
             rays.len()
         );
+        self.build_all_bounds_if_dirty();
         self.with_vehicles(|h, sim| h.write_rays(sim, rays));
         // The next step runs even if everything sleeps, so its frame carries
         // the hits (a step with nothing awake changes nothing).
@@ -2526,6 +2577,7 @@ impl WgpuSim {
         if rays.is_empty() {
             return Vec::new();
         }
+        self.build_all_bounds_if_dirty();
         self.with_vehicles(|h, sim| h.write_rays(sim, rays));
         self.write_host_uniforms();
         let mut enc = self
