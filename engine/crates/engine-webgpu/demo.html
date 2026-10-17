@@ -1370,8 +1370,9 @@ struct VsOut {
       }
       await readCounters();
       const workloadStart = { ...last, colorBuckets: await readColorBuckets() };
+      const sleepOn = params.sleepTime < SLEEP_OFF_TIME;
       const validateWorkload = stage => assertBenchmarkWorkload({
-        scene, totalBodies: bodyCount, iterations: params.iterations, dt: params.dt, counters: last, stage,
+        scene, totalBodies: bodyCount, iterations: params.iterations, dt: params.dt, counters: last, stage, allowSleep: sleepOn,
       });
       validateWorkload('after lead-in');
       timingSamples = await measurePhysicsBatches({
@@ -1384,6 +1385,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
+        sleep: sleepOn,
         sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
@@ -1853,7 +1855,9 @@ struct VsOut {
         const settleLabel = cfg.settled && settle.sampleStep
           ? ` · sleep ${settle.sleeping}/${dyn} · KE ${settle.ke.toFixed(1)} · max|v| ${settle.maxV.toFixed(3)} · h ${settle.maxY.toFixed(2)}/${initialMaxY.toFixed(2)}`
           : '';
-        const timingLabel = wallMs > 0 ? `wall ${wallMs.toFixed(2)} ms ${phases}`
+        // Sleep on: the production configuration, not the all-awake three-avbd comparison.
+        const sleepLabel = params.sleepTime < SLEEP_OFF_TIME ? ' (sleep on, not comparable to three-avbd)' : '';
+        const timingLabel = wallMs > 0 ? `wall ${wallMs.toFixed(2)} ms${sleepLabel} ${phases}`
           : benchmarkEnabled ? (cfg.settled ? 'timing after settle…' : 'timing after impact…')
           : 'live playback';
         statusEl.textContent = `${info.vendor || 'gpu'} · ${scene} · ${dyn} bodies · ${params.iterations} iters · ${timingLabel} · step ${steps} · contacts ${last.contact} · awake ${last.awake}${settleLabel} · ov 0x${last.overflow.toString(16)}`;

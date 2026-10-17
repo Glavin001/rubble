@@ -2,7 +2,10 @@
 // warmup:0). The caller builds the scene and completes its 60-step lead-in.
 // Keep every sample: the best round alone hides throttling and competing work.
 // Validate outside timed batches: a fast result with missing work is not a result.
-export function assertBenchmarkWorkload({ scene, totalBodies, iterations, dt, counters, stage }) {
+// allowSleep: the run measures the production configuration with sleeping on, so
+// fewer awake bodies is expected; the result is labelled, not compared with
+// three-avbd (whose benchmark keeps every body awake).
+export function assertBenchmarkWorkload({ scene, totalBodies, iterations, dt, counters, stage, allowSleep = false }) {
   const reject = reason => { throw new Error(`Physics benchmark ${scene} ${stage}: ${reason}; timing comparison rejected.`); };
   if (!Number.isInteger(counters.overflow) || counters.overflow !== 0) {
     reject(`overflow=${counters.overflow}; constraints may have been discarded`);
@@ -12,7 +15,7 @@ export function assertBenchmarkWorkload({ scene, totalBodies, iterations, dt, co
   if (totalBodies !== expected[0] || iterations !== expected[1] || Math.abs(dt - 1 / 60) > 1e-8 || !Number.isFinite(dt)) {
     reject(`expected ${expected[0]} total bodies, ${expected[1]} iterations and dt=1/60; got ${totalBodies}, ${iterations}, ${dt}`);
   }
-  if (counters.awake !== totalBodies - 1) {
+  if (!allowSleep && counters.awake !== totalBodies - 1) {
     reject(`expected all ${totalBodies - 1} dynamic bodies awake, got ${counters.awake}; sleeping or omitted bodies reduce measured work`);
   }
   for (const key of ['contact', 'manifold', 'color']) {
