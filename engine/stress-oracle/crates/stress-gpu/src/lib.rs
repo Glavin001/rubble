@@ -7,6 +7,7 @@
 //! Everything on the GPU is f32; accuracy against the reference is measured, not assumed.
 
 pub mod gpu;
+pub mod ingest;
 pub mod gate;
 pub mod contacts;
 pub mod coupled;
@@ -80,6 +81,10 @@ pub mod shaders {
     pub const DESTRUCTION_RENDER: ShaderSet = shader_set!(
         "destruction_render",
         [("chunk_vs", (1, 1, 1)), ("chunk_hull_vs", (1, 1, 1)), ("host_chunk_vs", (1, 1, 1)), ("host_hull_vs", (1, 1, 1)), ("impactor_vs", (1, 1, 1)), ("ground_vs", (1, 1, 1)), ("lit_fs", (1, 1, 1)), ("ground_fs", (1, 1, 1))]
+    );
+    pub const COUPLING: ShaderSet = shader_set!(
+        "coupling",
+        [("ingest_rows", (64, 1, 1)), ("ingest_clear", (64, 1, 1)), ("ingest_count", (64, 1, 1)), ("ingest_scan", (1024, 1, 1)), ("ingest_scatter", (64, 1, 1)), ("ingest_merge", (64, 1, 1))]
     );
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
 }

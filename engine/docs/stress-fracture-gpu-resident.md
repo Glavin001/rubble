@@ -137,6 +137,33 @@ measured before the next.
    from GPU bounds) and contact planning in kernels; the f64 mirror synced only on demand
    (observations, tests).
 
+### Status
+
+- **Phase 1 (done):** `WgpuSim::{body,collider,contact,counters}_buffer`,
+  `last_contact_offset`, `capacity`. The collider table is `stress_gpu::ingest::ColliderInfo`:
+  (GPU chunk, body code, kind, chunk side taken) plus the other side's mass, modulus and
+  radius.
+- **Phase 2a (done): the contact ingest.** `shaders/coupling.slang`,
+  `stress_gpu::ingest::EngineIngest`.
+  - `ingest_rows` runs once per engine substep, one thread per row. It writes two records
+    per row at fixed slots (substep, row, side).
+  - A counting sort groups the frame's records by chunk (`ingest_count`, `ingest_scan`,
+    `ingest_scatter`). Atomics are used on integer counts only.
+  - `ingest_merge` puts each chunk's records back into slot order, then merges them per
+    other body in order of first appearance, the rule of stress-ref `manifolds`. The
+    order and the sums are deterministic.
+  - Checked against the host by `stress-rubble/tests/ingest_gpu.rs`
+    (`RubbleEngine::attach_ingest_check`). The test runs each step through the GPU ingest
+    on rubble's own buffers and compares the result with the host's manifolds from the
+    same rows. On the block-pile scene, 72 manifolds match with relative impulse error
+    ≤ 7e-8, point error ≤ 6e-8 m and closing-speed error ≤ 3e-7 m/s. That is f32
+    accumulation; the host's chain is f32 then f64.
+  - Off by default; the coupled frame does not use it yet.
+  - Record memory is 2 × rows × substeps × 64 B (8 MB per substep at the default 65,536
+    contacts). Phase 2b merges after every substep into running manifolds, so the memory
+    stays O(rows).
+- **Next (2b):** the load filter on the GPU, writing into the solver's load slots.
+
 Gate per phase: the opt-in resident frame's outcomes within the GPU solve's run-to-run
 spread and the oracle gates on the realtime, accuracy and pack sets; the default path
 bit-identical (`scripts/destruction_peak.py guard`) until the resident frame is adopted.

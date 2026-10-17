@@ -217,6 +217,12 @@ your call; the rest need building.
     2. halts that need no host work resume in the same submission (indirect dispatch
        sizes zeroed per halted island instead of ending the batch);
     3. contact planning per segment on the GPU (swept boxes through rubble's broadphase).
+
+    **Stages 2–3 under way (2026-10-17)**, phases in `stress-fracture-gpu-resident.md`.
+    Phases 1 and 2a are done: shared rubble buffers, the collider table, and the contact
+    ingest on the GPU (`coupling.slang`). The ingest matches the host's manifolds to f32
+    rounding (`stress-rubble/tests/ingest_gpu.rs`). It is off by default and the guard is
+    bit-identical. Next is 2b, the load filter on the GPU.
 12a. **Tiered router calibration.** The tiered coupling's impact speed (5 m/s) and its
     island membership (any overlap joins a component) are uncalibrated. On house_ram the
     island lasts 0.73 s because fragments touching the ram close at 5–9 m/s. Item 8's
