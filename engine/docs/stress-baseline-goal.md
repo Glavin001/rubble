@@ -256,6 +256,10 @@ the tiered coupling. The pieces:
    host-coupled (log, "M5 done"). No measured kernel brings them near real time on the
    M3 Max, so fast island frames move to "After the baseline".
 
+**Plan 5d (one command buffer, one read, backend-neutral):** `engine/docs/stress-5d-one-command-buffer.md`
+holds the work items and the only acceptance that counts for M5's step 1 and the Goal's
+"one submission and one status read per tick".
+
 ### M6. Speed to the targets
 
 - **Steps, lossless first:**
