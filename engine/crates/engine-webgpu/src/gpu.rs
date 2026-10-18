@@ -1201,8 +1201,13 @@ impl WgpuSim {
             self.last_timings.total_gpu = 0.0;
             return Ok(self.last_counters);
         }
+        let host_t = std::env::var("RUBBLE_HOST_TIMING").is_ok().then(std::time::Instant::now);
         self.refresh_cell();
+        let t_cell = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
         self.write_host_uniforms_ex(!read);
+        if let (Some(t), Some(c)) = (host_t, t_cell) {
+            eprintln!("rubble host: grid cell {c:.2} ms, uniforms {:.2} ms", t.elapsed().as_secs_f64() * 1e3 - c);
+        }
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
             0
@@ -1312,7 +1317,13 @@ impl WgpuSim {
             }
         }
         drop(pass);
+        let t_enc = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
         self.queue.submit([enc.finish()]);
+        if let (Some(t), Some(e)) = (host_t, t_enc) {
+            let submitted = t.elapsed().as_secs_f64() * 1e3;
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            eprintln!("rubble host: encoded {e:.2} ms, submitted {submitted:.2} ms, done {:.2} ms ({} commands)", t.elapsed().as_secs_f64() * 1e3, cmds.len());
+        }
         self.finish_step(read, wall)
     }
 

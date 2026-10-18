@@ -223,7 +223,11 @@ impl GpuWorld {
                 r.layout_generation = generation;
             }
             None => {
-                let cap = substeps.max(1).next_power_of_two();
+                // Room for a few substeps from the start (`STRESS_INGEST_SUBSTEPS`, 4): growing
+                // the ingest's buffers later costs their zero fill on the frame that needs
+                // them, a shot's.
+                let first = std::env::var("STRESS_INGEST_SUBSTEPS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(4);
+                let cap = substeps.max(first).max(1).next_power_of_two();
                 self.resident = Some(ResidentState {
                     ingest: EngineIngest::new(gpu, rows, cap, bodies, chunks, &table),
                     substeps: cap,

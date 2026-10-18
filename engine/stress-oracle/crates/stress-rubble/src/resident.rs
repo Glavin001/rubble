@@ -123,7 +123,12 @@ impl ResidentEngine for RubbleEngine {
                 }
                 let mut encoder = gpu.device.create_command_encoder(&Default::default());
                 ingest.substep(gpu, &mut encoder, &self.engine_buffers(), self.sim.last_contact_offset(), s, h);
+                let t_ingest = std::time::Instant::now();
                 gpu.queue.submit([encoder.finish()]);
+                if std::env::var("RUBBLE_HOST_TIMING").is_ok() {
+                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                    eprintln!("ingest substep {s}: {:.2} ms", t_ingest.elapsed().as_secs_f64() * 1e3);
+                }
             }
             self.bodies_changed();
         }
