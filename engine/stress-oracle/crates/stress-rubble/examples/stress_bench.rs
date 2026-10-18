@@ -305,6 +305,125 @@ pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("wall_ram_late", configure(wall_ram_late(), seconds)), ("wall_row2_late", configure(wall_row_late(2), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
 }
 
+/// `STRESS_BENCH_VIDEO`: the bench run rendered on the GPU and encoded by ffmpeg
+/// (`STRESS_VIDEO_CODEC=videotoolbox`: the hardware encoder), from a copy of the world's
+/// state (`GpuWorld::view_state`, reads), so the run steps as a plain one: its digest is
+/// the plain run's. The reads move host work a plain run defers, so the overlay shows a
+/// plain run's frame times (`STRESS_BENCH_VIDEO_TIMES`: its JSON line). Camera: `STRESS_BENCH_VIDEO_CAMERA=x,y,z,distance,yaw,pitch`
+/// (degrees; default the scene's bounds from the south-east).
+struct BenchVideo {
+    renderer: Option<(stress_rubble::render::Renderer, usize)>,
+    sink: stress_rubble::render::FfmpegSink,
+    cam: stress_rubble::render::CameraPose,
+    times: Vec<f64>,
+    title: String,
+    width: u32,
+    height: u32,
+    clusters0: usize,
+    ids0: std::collections::HashSet<u64>,
+}
+
+impl BenchVideo {
+    fn new(gpu: &stress_gpu::gpu::Gpu, w: &stress_gpu::world::GpuWorld, out: &std::path::Path, name: &str) -> BenchVideo {
+        let (width, height) = (1920, 1080);
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        let m = &w.solver.mirror;
+        let (mut lo, mut hi) = (stress_ref::math::Vec3::splat(f64::INFINITY), stress_ref::math::Vec3::splat(f64::NEG_INFINITY));
+        for (s, st) in m.structures.iter().enumerate() {
+            for c in 0..st.chunks.len() {
+                let p = m.chunk_position(s, c);
+                lo = lo.component_min(p);
+                hi = hi.component_max(p);
+            }
+        }
+        let mut cam = stress_rubble::render::CameraPose { target: (lo + hi) * 0.5, distance: 0.9 * (hi - lo).norm(), yaw: (-55f64).to_radians(), pitch: 30f64.to_radians(), fov: 40f64.to_radians() };
+        if let Ok(v) = std::env::var("STRESS_BENCH_VIDEO_CAMERA") {
+            let x: Vec<f64> = v.split(',').map(|t| t.trim().parse().expect("STRESS_BENCH_VIDEO_CAMERA=x,y,z,distance,yaw,pitch")).collect();
+            cam = stress_rubble::render::CameraPose { target: stress_ref::math::Vec3::new(x[0], x[1], x[2]), distance: x[3], yaw: x[4].to_radians(), pitch: x[5].to_radians(), fov: 40f64.to_radians() };
+        }
+        let times = std::env::var("STRESS_BENCH_VIDEO_TIMES")
+            .ok()
+            .map(|p| {
+                let text = std::fs::read_to_string(&p).expect("STRESS_BENCH_VIDEO_TIMES file");
+                let line = text.lines().find(|l| l.starts_with('{')).unwrap_or(&text);
+                let v: serde_json::Value = serde_json::from_str(line).expect("bench JSON");
+                v["frame_ms"].as_array().expect("frame_ms").iter().map(|x| x.as_f64().unwrap()).collect()
+            })
+            .unwrap_or_default();
+        let profile = PROFILE.get().map_or("default".to_string(), |p| p.name().to_string());
+        let title = format!("RUBBLE GPU RIGIDS + GPU STRESS SOLVER ({}), {}, PROFILE {}", gpu.adapter_info.name.to_uppercase(), name.to_uppercase(), profile.to_uppercase());
+        BenchVideo { renderer: None, sink: stress_rubble::render::FfmpegSink::new(out, width, height, 60).expect("ffmpeg"), cam, times, title, width, height, clusters0: w.solver.mirror.clusters.len(), ids0: w.solver.mirror.clusters.iter().map(|c| c.id).collect() }
+    }
+
+    fn frame(&mut self, gpu: &stress_gpu::gpu::Gpu, w: &mut stress_gpu::world::GpuWorld, f: usize, n: usize) {
+        use stress_rubble::render::{Overlay, Renderer};
+        let (view, view_imps) = w.view_state(gpu);
+        // The damage the shots do: clusters made after the settle (vibe-land's 30 frames).
+        if f == 29 {
+            self.ids0 = view.clusters.iter().map(|c| c.id).collect();
+        }
+        let imps = view_imps.len();
+        // The renderer's meshes include the impactors: made again when a shot is added.
+        if self.renderer.as_ref().is_none_or(|(_, k)| *k != imps) {
+            let mut r = Renderer::new(gpu, &view, &view_imps, self.width, self.height);
+            r.ground = w.scene.ground.is_some();
+            self.renderer = Some((r, imps));
+        }
+        let (r, _) = self.renderer.as_ref().expect("renderer");
+        let mut rgba = r.render(gpu, &view, &view_imps, &self.cam);
+        let m = &view;
+        let broken = m.events.iter().filter(|e| matches!(e, stress_ref::solver::SolverEvent::Broken { .. })).count();
+        let pieces = m.clusters.len().saturating_sub(self.clusters0);
+        // Where pieces broke off (chunks of clusters made after the settle): printed at the
+        // end, to aim a close-up camera.
+        if f + 1 == n {
+            let pts: Vec<stress_ref::math::Vec3> = m.clusters.iter().filter(|cl| !self.ids0.contains(&cl.id)).flat_map(|cl| cl.chunks.iter().map(move |&c| (cl.structure, c))).map(|(s, c)| m.chunk_position(s, c)).collect();
+            if !pts.is_empty() {
+                let c = pts.iter().fold(stress_ref::math::Vec3::ZERO, |a, &p| a + p) * (1.0 / pts.len() as f64);
+                let (lo, hi) = pts.iter().fold((stress_ref::math::Vec3::splat(f64::INFINITY), stress_ref::math::Vec3::splat(f64::NEG_INFINITY)), |(l, h), &p| (l.component_min(p), h.component_max(p)));
+                eprintln!("video: {} chunks broken off, centred at {:?}, bounds {:?} to {:?}", pts.len(), c.to_array(), lo.to_array(), hi.to_array());
+            }
+        }
+        let mut o = Overlay { rgba: &mut rgba, width: self.width, height: self.height };
+        let s = 3;
+        let tick = self.times.get(f).map_or(String::new(), |ms| format!("   TICK {ms:5.1} MS"));
+        let lines = [
+            self.title.clone(),
+            format!("FRAME {:3}/{n}{tick}   (FIRST 30: SETTLE)   REAL TIME, 60 FPS", f + 1),
+            format!("BONDS BROKEN {broken}   PIECES BROKEN OFF {pieces}   SHOTS {imps}"),
+        ];
+        let wmax = lines.iter().map(|l| Overlay::text_width(l, s)).max().unwrap_or(0);
+        o.rect(12, 12, wmax + 24, lines.len() as i32 * 10 * s + 18, [10, 12, 16], 0.6);
+        for (i, l) in lines.iter().enumerate() {
+            o.text(24, 24 + i as i32 * 10 * s, s, [245, 245, 245], l);
+        }
+        // The tick-time strip: a bar per frame so far, the 16.7 ms (60 Hz) line.
+        if !self.times.is_empty() {
+            let (x0, y1, hpx) = (24, self.height as i32 - 24, 160);
+            let bw = ((self.width as i32 - 48) / self.times.len() as i32).max(1);
+            let scale = hpx as f64 / 50.0;
+            o.rect(x0 - 8, y1 - hpx - 40, bw * self.times.len() as i32 + 16, hpx + 48, [10, 12, 16], 0.6);
+            for (k, &ms) in self.times.iter().enumerate().take(f + 1) {
+                let bh = ((ms * scale) as i32).min(hpx).max(1);
+                let col = if k < 30 { [130, 130, 130] } else if ms <= 1000.0 / 60.0 { [90, 220, 120] } else { [240, 170, 60] };
+                o.rect(x0 + k as i32 * bw, y1 - bh, (bw - 1).max(1), bh, col, 1.0);
+            }
+            let ly = y1 - (1000.0 / 60.0 * scale) as i32;
+            o.rect(x0, ly, bw * self.times.len() as i32, 2, [255, 255, 255], 0.85);
+            let after: Vec<f64> = self.times.iter().copied().skip(30).take((f + 1).saturating_sub(30)).collect();
+            let worst = after.iter().copied().fold(0.0, f64::max);
+            o.text(x0, y1 - hpx - 32, 2, [245, 245, 245], &format!("TICK TIME PER FRAME (0-50 MS; LINE 16.7 MS = 60 HZ)   WORST SO FAR AFTER SETTLE {worst:.1} MS"));
+        }
+        self.sink.write(&rgba).expect("ffmpeg frame");
+    }
+
+    fn finish(self) {
+        self.sink.finish().expect("ffmpeg");
+    }
+}
+
 struct Run {
     frames: Vec<f64>,
     /// Per frame, the time spent waiting on the GPU in reads (the rest is the host's).
@@ -454,6 +573,9 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     if !shots.is_empty() {
         w.scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     }
+    // STRESS_BENCH_VIDEO=out.mp4: the run rendered on the GPU (`stress_rubble::render`), one
+    // video frame per simulated frame at 60 fps (real time), outside the timed frames.
+    let mut video = std::env::var("STRESS_BENCH_VIDEO").ok().map(|out| BenchVideo::new(gpu, &w, std::path::Path::new(&out), &scene.name));
     for f in 0..n {
         for (_, desc) in shots.iter().filter(|(at, _)| *at == f) {
             let imp = stress_ref::world::Impactor::from_desc(desc, &w.scene);
@@ -467,6 +589,9 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
         waits.push((stress_gpu::gpu::WAIT_NS.load(std::sync::atomic::Ordering::Relaxed) - w0) as f64 * 1e-6);
+        if let Some(v) = video.as_mut() {
+            v.frame(gpu, &mut w, f, n);
+        }
         if per_frame {
             let p = &w.solver.profile;
             let ms = |a: f64, b: f64| (a - b) * 1e3;
@@ -499,6 +624,9 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
             w.sync(gpu);
             eprintln!("frame {f} digest {}", digest(&w.solver.mirror, &w.solver.impactors));
         }
+    }
+    if let Some(v) = video.take() {
+        v.finish();
     }
     w.sync(gpu);
     let o = w.observation();

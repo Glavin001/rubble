@@ -336,6 +336,31 @@ impl GpuWorld {
         }
     }
 
+    /// A copy of the mirror and the impactors with every body at the engine's pose now, for
+    /// a view (a renderer): the world's own mirror keeps its state, so a viewed run steps as
+    /// an unviewed one does. Follows the frame's pending GPU splits first (lossless: their
+    /// deferral is).
+    pub fn view_state(&mut self, gpu: &Gpu) -> (stress_ref::solver::ReferenceSolver, Vec<stress_ref::world::Impactor>) {
+        self.flush_pending(gpu).expect("the frame's GPU splits followed");
+        self.solver.sync(gpu);
+        let mut m = self.solver.mirror.clone();
+        let mut imps = self.solver.impactors.clone();
+        if let Some(engine) = self.resident_engine.clone() {
+            let motion: HashMap<BodyKey, stress_ref::engine::BodyMotion> = engine.borrow().motion().into_iter().map(|m| (m.key, m)).collect();
+            for cl in m.clusters.iter_mut().filter(|c| !c.anchored) {
+                if let Some(mm) = motion.get(&BodyKey::Cluster(cl.id)) {
+                    (cl.pose, cl.velocity, cl.angular_velocity) = (mm.pose, mm.velocity, mm.angular_velocity);
+                }
+            }
+            for (i, imp) in imps.iter_mut().enumerate() {
+                if let Some(mm) = motion.get(&BodyKey::Impactor(i)) {
+                    (imp.pose, imp.velocity, imp.angular_velocity) = (mm.pose, mm.velocity, mm.angular_velocity);
+                }
+            }
+        }
+        (m, imps)
+    }
+
     /// The engine's motion of the driven bodies into the mirror (before a split, and
     /// whenever the mirror is wanted current).
     fn resident_sync_motion(&mut self) {
