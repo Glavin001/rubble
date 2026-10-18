@@ -443,6 +443,18 @@ pub fn capacity_for(scene: &stress_ref::scene::Scene) -> WorldCapacity {
     c.max_contacts = c.max_contacts.max(c.max_colliders);
     c.max_candidates = c.max_candidates.max(4 * c.max_colliders);
     c.max_hull_vertices = c.max_hull_vertices.max((32 * chunks).next_power_of_two() as u32);
+    // Bodies and colliders are append-only (retired ones keep their slots): a long run with
+    // much fracture sets its own room (`STRESS_RUBBLE_MAX_BODIES`, `STRESS_RUBBLE_MAX_COLLIDERS`);
+    // past it an upload fails, naming the capacity.
+    let env = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u32>().ok());
+    if let Some(n) = env("STRESS_RUBBLE_MAX_BODIES") {
+        c.max_bodies = c.max_bodies.max(n);
+    }
+    if let Some(n) = env("STRESS_RUBBLE_MAX_COLLIDERS") {
+        c.max_colliders = c.max_colliders.max(n);
+        c.max_contacts = c.max_contacts.max(n);
+        c.max_candidates = c.max_candidates.max(4 * n);
+    }
     c
 }
 

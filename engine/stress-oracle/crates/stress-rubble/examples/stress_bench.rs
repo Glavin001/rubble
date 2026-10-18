@@ -170,6 +170,25 @@ pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scen
                 SUITE_SHOTS.lock().unwrap().insert(s.name.clone(), shots);
                 out.push((s.name.clone(), s));
             }
+            // A barrage (a demonstration, not vibe-land's suite): 36 of the suite's shots, one
+            // every 15 frames (0.25 s), cannonballs and meteors in turn, spread over every
+            // building the layout names, for 10 s after the settle.
+            let buildings: Vec<String> = meta["places"].as_array().expect("meta places").iter().filter(|p| p["pavement"].is_array() && p["min"].is_array() && p["max"].is_array()).filter_map(|p| p["id"].as_str()).filter(|id| !id.starts_with("car-")).map(String::from).collect();
+            if !buildings.is_empty() {
+                let count = 36;
+                let events: Vec<(usize, &str, &str, f64)> = (0..count)
+                    .map(|k| {
+                        let place = buildings[(k * buildings.len() / count + (k * 7) % 3) % buildings.len()].as_str();
+                        let meteor = k % 2 == 1;
+                        (15 * k, if meteor { "meteor" } else { "cannonball" }, place, if meteor { 2.0 } else { 1.5 })
+                    })
+                    .collect();
+                let mut s = configure(scene.clone(), (SUITE_SETTLE + 600) as f64 / 60.0);
+                s.name = format!("{name}_barrage");
+                let shots = suite_shots(&meta, &events, -s.gravity[2]);
+                SUITE_SHOTS.lock().unwrap().insert(s.name.clone(), shots);
+                out.push((s.name.clone(), s));
+            }
         }
     }
     out

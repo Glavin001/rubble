@@ -651,6 +651,13 @@ impl GpuWorld {
                 frame_fallback = true;
                 // The status over the islands as the GPU's splits left them.
                 out = crate::resident::CascadeOutcome::from_status(bytemuck::cast_slice(&read[0]), self.solver.mirror.clusters.len());
+                // A split the GPU could not make (it aborted: no room) leaves disconnected
+                // islands to the host's split and later windows, which work on the host's
+                // layout: it follows this frame's GPU splits first (their deferral is lossless).
+                if !out.disconnected.is_empty() && !self.pending_splits.is_empty() {
+                    self.flush_pending(gpu)?;
+                    out = crate::resident::CascadeOutcome::from_status(bytemuck::cast_slice(&read[0]), self.solver.mirror.clusters.len());
+                }
             }
             unconverged += out.unconverged;
             for cl in self.solver.mirror.clusters.iter_mut().filter(|c| !c.bonds.is_empty()) {
@@ -843,6 +850,11 @@ impl GpuWorld {
         self.write_back_seconds += t_back.elapsed().as_secs_f64();
         if trace {
             let speeds: Vec<String> = engine.borrow().motion().iter().filter(|m| matches!(m.key, BodyKey::Impactor(_))).map(|m| format!("{:.3}", m.velocity.norm())).collect();
+            if std::env::var("STRESS_GPU_IMPACTOR_TRACE").is_ok() {
+                for m in engine.borrow().motion().iter().filter(|m| matches!(m.key, BodyKey::Impactor(_))) {
+                    eprintln!("impactor frame {} {:?}: position {:.2?}, velocity {:.2?}", self.frame, m.key, m.pose.position.to_array(), m.velocity.to_array());
+                }
+            }
             eprintln!("resident frame {}: {n} engine substeps, impactor speeds {speeds:?}", self.frame);
         }
         self.solver.mirror.time += fdt;

@@ -836,11 +836,18 @@ impl GpuSplitter {
         let new_bodies: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(&read[6]);
         let new_cols: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(&read[7]);
         let aborted = control_words.first().copied().unwrap_or(0) != 0;
+        // An aborted split's child records are not written (the host splits instead).
         let children: Vec<Vec<GpuChild>> = parents
             .iter()
             .enumerate()
+            .filter(|_| !aborted)
             .map(|(p, &(_, r))| {
                 let base = table_read[p][1] as usize;
+                if std::env::var("STRESS_GPU_SPLIT_DEBUG").is_ok() {
+                    let next = table_read[p + 1][1] as usize;
+                    let recs: Vec<(u32, u32)> = (0..table_read[p][2] as usize).filter(|k| CHILD_WORDS * (base + k + 1) <= out_words.len()).map(|k| (out_words[CHILD_WORDS * (base + k)][1].to_bits(), out_words[CHILD_WORDS * (base + k)][2].to_bits())).collect();
+                    eprintln!("split debug: parent {p} of {}: row {:?}, next base {next}, range {:?}, members {}, children (offset, count) {:?}", parents.len(), table_read[p], r, members.len(), recs);
+                }
                 (0..table_read[p][2] as usize)
                     .map(|k| {
                         let rec = &out_words[CHILD_WORDS * (base + k)..CHILD_WORDS * (base + k + 1)];
