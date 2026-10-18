@@ -1093,13 +1093,13 @@ struct VsOut {
         csr_scatter_contacts: 'csr_scatter_contacts_persistent'} : {}),
     };
     const shaderEntry = name => persistentContacts ? (persistentEntries[name] || name) : name;
-    const status = (text) => { statusEl.textContent = text; };
-    const modules = await loadShaderModules(device, K.map((name) => ({ name, file: shaderEntry(name) })),
-      { urlOf: (file) => `./generated/wgsl/${file}.wgsl`, status });
-    const sources = Object.fromEntries(K.map((name, i) => [name, modules[i]]));
+    // Keep `const sources =` right after the routing block: tests slice demo.html up to it.
+    const sources = await loadShaderModules(device, K.map((name) => ({ name, file: shaderEntry(name) })), {
+      urlOf: (file) => `./generated/wgsl/${file}.wgsl`, status: (text) => { statusEl.textContent = text; },
+    }).then((modules) => Object.fromEntries(K.map((name, i) => [name, modules[i]])));
 
     console.log('SHADER_BYTES', JSON.stringify(Object.fromEntries(Object.entries(sources).map(([name, source]) => [name, source.src.length]))));
-    const builder = pipelineBuilder(device, K.length, status);
+    const builder = pipelineBuilder(device, K.length, (text) => { statusEl.textContent = text; });
     const pipes = {};
     for (const name of K) {
       const binds = bindingsOf(sources[name].src);
