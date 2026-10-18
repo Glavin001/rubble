@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use stress_ref::scene::{Scene, SolveMode};
 
-use stress_rubble::scenes::{house, realtime as configure, wall_ram, wall_ram_late};
+use stress_rubble::scenes::{house, realtime as configure, wall_ram, wall_ram_late, wall_row_late};
 
 /// The fidelity ladder (`--config`): from the Blast-equivalent configuration to the full
 /// real-time one, one switch per rung (each rung keeps every switch of the rungs before).
@@ -302,7 +302,7 @@ pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut house_ram = configure(stress_ref::scenes::rammed(house()), seconds);
     house_ram.name = "house_ram".into();
     let b5 = configure(stress_ref::builders::wall_impact(20.0, "b5_v20"), seconds);
-    vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("wall_ram_late", configure(wall_ram_late(), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
+    vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("wall_ram_late", configure(wall_ram_late(), seconds)), ("wall_row2_late", configure(wall_row_late(2), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
 }
 
 struct Run {
@@ -505,7 +505,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let ram = w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let p = &w.solver.profile;
     let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split, "encode_s": p.encode,
-        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "replans": w.solver.replans, "resumed_halts": w.solver.resumed_halts, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries, "plan_check": format!("{:?}", w.solver.plan_check), "split_check": format!("{:?}", w.solver.split_check), "spawn_check": format!("{:?}", w.solver.spawn_check), "layout_check": format!("{:?}", w.solver.split_layout_check), "collider_check": format!("{:?}", w.solver.collider_check), "island_check": format!("{:?}", w.solver.island_check),
+        "batches": p.batches, "substeps": p.substeps, "resident_frames": w.resident_frames, "coupled_frames": w.coupled_frames, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "replans": w.solver.replans, "resumed_halts": w.solver.resumed_halts, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries, "plan_check": format!("{:?}", w.solver.plan_check), "split_check": format!("{:?}", w.solver.split_check), "spawn_check": format!("{:?}", w.solver.spawn_check), "layout_check": format!("{:?}", w.solver.split_layout_check), "collider_check": format!("{:?}", w.solver.collider_check), "island_check": format!("{:?}", w.solver.island_check),
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
     let digest = digest(&w.solver.mirror, &w.solver.impactors);
     // STRESS_BENCH_DUMP=path: the end state (chunk displacements, cluster and impactor

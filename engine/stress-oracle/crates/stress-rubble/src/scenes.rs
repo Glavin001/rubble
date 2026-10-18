@@ -58,6 +58,24 @@ pub fn wall_ram_late() -> Scene {
     s
 }
 
+/// `n` free walls of `wall_ram`'s, 0.1 m apart along the ram's path (the wall row of
+/// findings/rewind-scaling.md, `wall_row(n, 40, 0.1)`), with `wall_ram_late`'s ram: it
+/// strikes in the second frame.
+pub fn wall_row_late(n: usize) -> Scene {
+    use stress_ref::builders::*;
+    use stress_ref::math::Vec3;
+    let mut s = wall_ram_late();
+    s.name = format!("wall_row{n}_late");
+    s.bodies.clear();
+    for k in 0..n {
+        let y = k as f64 * (0.2 + 0.1);
+        let chunks = grid(Vec3::new(-0.5, y, -0.1), [10, 2, 11], Vec3::splat(0.1), "concrete");
+        let bonds = auto_bonds(&chunks, |_, _| "concrete".into());
+        s.bodies.push(body(&format!("wall{k}"), chunks, bonds));
+    }
+    s
+}
+
 /// The house-1story pack.
 pub fn house() -> Scene {
     stress_ref::scene_pack::import(&packs_dir().join("house-1story.json"), "house-1story", "structure").expect("house-1story pack")

@@ -199,6 +199,40 @@ What still needs the host on a split frame (2026-10-18), and how each piece move
     pass (ram speed, fragment count);
   - deterministic.
 
+#### M5: the design, by your decision of 2026-10-18 (routing on the GPU)
+
+Forward quasi-static splits cannot reach the fidelity bar under `blast_parity` in any form
+measured (log, "M5 investigation"). Rubble's rigid contact exchanges the ram's whole momentum
+with the intact wall in the substep of contact. The coupled frame's routing reaches the oracle
+in one forward pass: it puts the struck structure in an impact island before the engine steps.
+The profile is `blast_parity_routed`: `blast_parity` plus routing and impact islands, under
+the tiered coupling. The pieces:
+
+1. **Promotion is its own flag** (`promote_fractures`, `Profile::promote_fractures`,
+   `STRESS_PROMOTE`). Promotion turns every cluster of a structure that fractured under the
+   engine's loads into an island seed for six frames. It is off in the routed profile: only an
+   impactor's contact routes. With promotion on, the town settle put every cluster in islands
+   for six frames of 65–121 s each.
+2. **The routing check on the GPU** (`shaders/routing.slang`, `src/routing.rs`). At the end of
+   every resident frame, in the same submission and the same read, the check asks whether the
+   next frame may route an island. It uses the engine's bodies where the frame left them, and
+   a superset of the host's seed test:
+   - an impactor's swept sphere against each bonded island's swept bounds (its chunks at its
+     pose);
+   - a closing-speed bound above the tiered impact speed.
+3. **Frames switch between the resident and the coupled path.** A frame runs resident unless
+   the last frame's check is set, or a host prediction is set after a coupled frame
+   (`World::predict_islands`, exact). The coupled frame takes the engine's motion first
+   (`World::take_engine_motion`), then routes exactly on the host. Because the check is a
+   superset, every frame the host's routing would give an island takes the coupled path.
+   `STRESS_ROUTED_RESIDENT=0` makes every routed frame coupled.
+4. **Island frames in the resident submission.** Today an island frame is the coupled path:
+   host-orchestrated substeps at the explicit stress step, several submissions and reads.
+   M5's acceptance counts them (`coupled_frames`). Moving them into one submission, and
+   making them fast, is next:
+   - the island's substeps as a GPU loop over many substeps;
+   - the island bounded to the impact region.
+
 ### M6. Speed to the targets
 
 - **Steps, lossless first:**
@@ -217,6 +251,7 @@ each when it keeps the profile's targets. They stay on the same resident, forwar
 
 | Date | Milestone | Result |
 |---|---|---|
+| 2026-10-18 | **M5, part 1: routed frames run resident between impacts** | **Design** (above, "M5: the design"). Promotion is a flag of its own, off in `blast_parity_routed`. A GPU check at the end of each resident frame, in its submission and its read (`routing.slang`), asks whether the next frame may route an island. Its test is a superset of the host's seed test: an impactor's swept sphere against each bonded island's swept bounds, with a closing-speed bound. A flagged frame takes the coupled path and routes exactly on the host; after it, the host predicts the next frame exactly (`predict_islands`). **Fidelity** (ram exit speed / fragments; oracle; correction-limit-1): free wall (`wall_ram_late`) 34.999 m/s / 3 (35.0 / 6; 10.9 / 23); wall row of two walls at 40 m/s (`wall_row2_late`, new) 31.65 / 41 (23.6 / 133; 4.9 / 240). Both are closer to the oracle than correction-limit-1 on both measures. `blast_parity` on the wall row: 10.17 / 43, also closer. Same ram, fragments and bonds as every routed frame coupled (`STRESS_ROUTED_RESIDENT=0`); the digests differ, as a resident frame's f32 solve does from a coupled one. **Deterministic:** two runs each, identical digests (7e6ced7f, 5f69613e). **Cost:** quiet routed frames 2.5–6 ms (the town's were about 220 ms coupled). Island frames stay host-coupled: free wall 277, 108, 54 ms; wall row 291, 610, 317 ms. **Town:** frames 1–30 now run resident. The first shot (frame 31) routes 321 clusters into one island, since routing joins every cluster whose swept bounds touch it, and a dispatch then exceeds wgpu's 65,535 groups. The town's assets set its stress step: 159 structures certify below 1 µs (2 mm road markings 3e-7 s, mailbox flags 1e-7 s, timber posts 7e-7 s), so any island there needs 20k–100k substeps per frame. **Left for M5:** island frames in one submission and fast; the town needs a decision on its assets (re-export from Shardwright) and on the island's extent |
 | 2026-10-18 | **M6 done** | **Your decision of 2026-10-18:** `blast_parity` runs vibe-land's PhysX policy, one engine step a frame (no CCD substeps) and 4 solver iterations (`Profile::engine_policy`, `RubbleEngine::set_policy`). The profile also turns on the GPU's split path by itself, with no flags needed (`GPU_FRAME_PROFILE`; `STRESS_GPU_LAYOUT` and `STRESS_GPU_FRAME` still override, 1 on, 0 off). **Lossless:** the ingest's merge runs over only the substeps run, and in each only over its rows (`row_counts`, `record_live`). It had cleared and scanned every slot for every substep it had room for, which is four now. Digests unchanged. **Results**, two runs each, deterministic: standard tier median 10.4, p95 15.9–16.7, worst 17.6–18.8 ms (targets 11.46 / 37.88 / 48.24), digest 37cd230c, 6,289 bonds (vibe-land 6,707). Quick tier 7.8 / 11.0–11.1 / 14.7–15.3 ms (targets 11.38 / 15.32 / 35.5), digest 46728bf1, 1,329 bonds. Every target is met. A per-island backup kernel instead of the whole-table copies was measured 0.8 ms slower and stays opt-in (`STRESS_QS_ISLAND_BACKUP=1`). Guard 26/26; all 39 suites pass. **Next:** M5, by your decision: impact-island routing in the GPU-resident frame. `blast_parity_routed` (routing plus impact islands on the host-coupled path) already gives the free-wall ram 34.99 m/s and 3 fragments (oracle 35.0 and 6), but costs 270 ms on its impact frame |
 | 2026-10-18 | **M6: more impact-spike work** | (a) An empty `set_motion` no longer reads the bodies: the deferred flush's write-back had been waiting on the engine's queued substeps (8–12 ms), which undid the overlap. Digests unchanged. (b) The ingest starts with room for 4 substeps. Its growth on the first 3-substep frame (the first shot) had zero-filled its buffers in that frame's ingest, 12 ms; quick worst 32 → 21 ms, digests unchanged. (c) `split_children_group` and `spawn_bodies_group` (`STRESS_GPU_SPLIT_TREE`, on in the frame's split pass and the M3 check): one group per child slot, with the sums in a fixed tree instead of one thread per child. `split_children` 1.0 → under 0.05 ms per pass, digests unchanged. `spawn_bodies` 1.3 ms → under 0.05; f32 rounding changes, so the digests move: standard tier a69ab23b (2,988 bonds), quick d0b1d964 (572), deterministic. Against the host's `create_body` the bodies are as close or closer (position 2.2e-5 m against 5.3e-5 for the one-thread sums). **Results:** standard tier median 17.1–17.2, p95 22.3–22.8, worst 29.8–31.5 ms; quick tier 16.0 / 18.7 / 20.9 ms. Guard 26/26; all 39 suites pass. The worst frame is now GPU-bound: rubble's three substeps 17.5 ms, two split passes about 3 ms each, the cascade 3.8 |
 | 2026-10-18 | **M6: impact spikes, the split pass made parallel** (lossless: identical digests) | `STRESS_GPU_TIMING=1` now times each step of a frame-mode split pass. On the worst standard-tier frame (109) two passes took 10.5 ms of GPU each, against rubble's three substeps at 5.8 ms. Now parallel, with the same integer results: (a) `layout_parent` (4.0 → 1.5 ms, 256 threads): the new chunk positions (each child's start in island order, then every member), the bonds' new indices (ranks by class in blocks), and the incidence offsets (a scan). (b) `spawn_offsets` is one group of scans over the members' collider counts and the valid child slots, instead of one thread. The colliders go to `spawn_colliders` (per member), and `spawn_retire` runs one group per parent. (c) `collider_keys` runs per member. (d) `pass_snapshot` uses 256 threads. The child bodies' float sums in `spawn_bodies` keep their order. **Check fix:** a frame log's collider check now runs after its last split, or after the deferred flush. Every integer word is identical in both modes. **Results**, two runs each with the digests unchanged (66c9e746 and 0ea38b6f): standard tier median 17.2–17.3, p95 25.1–25.7, worst 34.5–35.2 ms (from 45.5–46.8); quick tier 16.2–16.3 / 18.6–18.7 / 32.0–32.9 ms (from 36.6–37.2). Quick worst now meets 35.5. Guard 26/26; all 39 suites pass. Still short under today's policy: the medians, and quick p95 (18.6 against 15.32), which rubble's CCD substeps set (see the policy row) |

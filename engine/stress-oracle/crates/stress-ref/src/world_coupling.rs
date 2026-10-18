@@ -101,7 +101,7 @@ pub fn cluster_signature(cl: &crate::solver::Cluster) -> u64 {
     hasher.finish()
 }
 
-fn tiered_impact_speed() -> f64 {
+pub fn tiered_impact_speed() -> f64 {
     std::env::var("STRESS_TIERED_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0)
 }
 
@@ -501,6 +501,36 @@ impl World {
             count += usize::from(in_island);
         }
         count
+    }
+
+    /// The number of bodies the next frame's routing would put in islands (`select_islands`
+    /// over `dt` with `forced`), with every body left driven: a prediction made at the end of
+    /// a frame, from the state the next one starts with.
+    pub fn predict_islands(&mut self, dt: f64, forced: &HashSet<BodyKey>) -> usize {
+        let n = self.select_islands(dt, forced);
+        for cl in &mut self.solver.clusters {
+            cl.driven = true;
+        }
+        for imp in &mut self.impactors {
+            imp.driven = true;
+        }
+        n
+    }
+
+    /// Every body's motion taken from the engine as it is (after frames the engine stepped
+    /// without the world following it, such as a resident engine's).
+    pub fn take_engine_motion(&mut self) {
+        let coupling = self.coupling.as_mut().expect("coupled");
+        let end: HashMap<BodyKey, BodyMotion> = coupling.engine.motion().into_iter().map(|m| (m.key, m)).collect();
+        coupling.start = end.clone();
+        coupling.end = end;
+        for cl in &mut self.solver.clusters {
+            cl.driven = true;
+        }
+        for imp in &mut self.impactors {
+            imp.driven = true;
+        }
+        self.set_driven_motion(1.0);
     }
 
     /// Impulse of the scripted loads (and removal ramps) over the frame on each driven

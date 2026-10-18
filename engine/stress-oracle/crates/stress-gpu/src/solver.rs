@@ -2674,14 +2674,14 @@ impl GpuSolver {
     /// `equilibrate_resident` and `commit_resident` per pass (bit for bit), with the
     /// unconverged solves' states restored on the GPU.
     pub fn resident_cascade(&mut self, gpu: &Gpu, frame_dt: f64, first: usize, passes: usize, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder, usize)) -> crate::resident::CascadeRun {
-        self.resident_cascade_with(gpu, frame_dt, first, passes, pre, None)
+        self.resident_cascade_with(gpu, frame_dt, first, passes, pre, None, None)
     }
 
     /// `resident_cascade`; with `splits` (`STRESS_GPU_FRAME=1`), a split pass with GPU-made
     /// inputs after every cascade pass (a no-op unless the pass disconnected an island),
     /// which lays the split out, logs it for the host (`GpuPass::log`) and lets the
     /// cascade run on: a frame's passes and splits in one submission.
-    pub fn resident_cascade_with(&mut self, gpu: &Gpu, frame_dt: f64, first: usize, passes: usize, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder, usize), splits: Option<&FrameSplits>) -> crate::resident::CascadeRun {
+    pub fn resident_cascade_with(&mut self, gpu: &Gpu, frame_dt: f64, first: usize, passes: usize, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder, usize), splits: Option<&FrameSplits>, post: Option<&dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder)>) -> crate::resident::CascadeRun {
         let live = self.layout.islands.len();
         // Dispatched over the island capacity (`capacity_dispatch`): a split the GPU makes
         // within the frame adds islands the host has not counted; records past the live
@@ -2934,6 +2934,10 @@ impl GpuSolver {
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
             std::time::Instant::now()
         });
+        // After the passes, in the same submission (the routed frame's check).
+        if let Some(post) = post {
+            post(self, &mut encoder);
+        }
         gpu.queue.submit([encoder.finish()]);
         if let Some(t) = wall {
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
@@ -3799,6 +3803,20 @@ impl GpuSolver {
         // The GPU laid out the cascade's island copy and gate too.
         self.tables_on_gpu = !result.aborted && !parents.is_empty();
         Some((result, parents))
+    }
+
+    /// The tables the routed frame's check reads (`routing.rs`), as the frame's cascade
+    /// leaves them: islands, chunk statics and state, and the dispatch over the live islands.
+    pub fn routing_inputs(&self) -> crate::routing::RouteInputs<'_> {
+        let live = self.layout.islands.len();
+        let indirect = capacity_dispatch() && self.island_args.is_some();
+        crate::routing::RouteInputs {
+            islands: &self.buffers.islands,
+            chunks: &self.buffers.chunk_static,
+            state: &self.buffers.state,
+            island_args: if indirect { self.island_args.as_ref() } else { None },
+            island_count: if capacity_dispatch() { self.layout.island_cap.max(live) as u32 } else { live as u32 },
+        }
     }
 
     /// The island capacity of the tables (`island_headroom` past the islands).

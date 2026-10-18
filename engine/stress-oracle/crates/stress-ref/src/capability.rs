@@ -83,6 +83,18 @@ impl Profile {
         }
     }
 
+    /// Whether a fracture under the engine's loads makes its whole structure island seeds
+    /// for the next frames (the GPU world's `promote_fractures`; no effect without impact
+    /// islands). `BlastParityRouted`: off, only an impactor's contact routes. Measured
+    /// 2026-10-18 on the quick tier: with it, the settle's fractures put every cluster in
+    /// islands for six frames of 65–121 s each.
+    pub fn promote_fractures(self) -> bool {
+        match self {
+            Profile::BlastParity => true,
+            Profile::BlastParityRouted => false,
+        }
+    }
+
     /// Whether the profile runs the GPU-resident frame.
     pub fn resident(self) -> bool {
         match self {

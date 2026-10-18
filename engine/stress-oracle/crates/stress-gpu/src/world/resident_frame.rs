@@ -71,7 +71,42 @@ impl GpuWorld {
     }
 
     pub(super) fn resident_now(&self) -> bool {
-        self.resident_engine.is_some() && self.fast_qs_conditions() && !self.shell.qs_islands
+        if self.resident_engine.is_none() || !self.qs_frame_conditions() {
+            return false;
+        }
+        if !self.tiered {
+            return !self.shell.qs_islands;
+        }
+        // Routed (M5): unless the last frame's check found a possible island seed.
+        self.routed_resident && !self.route_next && self.promoted.is_empty()
+    }
+
+    /// The routed frame's check, made and given this frame's impactors (engine body and
+    /// bounding radius each) when the tiered coupling runs.
+    fn prepare_routing(&mut self, gpu: &Gpu) {
+        if !self.tiered {
+            return;
+        }
+        let engine = self.resident_engine.clone().expect("resident engine");
+        let e = engine.borrow();
+        let list: Vec<(u32, f32)> = self
+            .solver
+            .impactors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, imp)| {
+                let slot = e.body_slot(BodyKey::Impactor(i))?;
+                let r = match imp.shape {
+                    stress_ref::scene::ImpactorShape::Box { half_extents } => stress_ref::math::Vec3::from_array(half_extents).norm(),
+                    stress_ref::scene::ImpactorShape::Sphere { radius } => radius,
+                };
+                // The engine's centre may sit off the shape's (its cooked centre of mass).
+                Some((slot, (1.01 * r + 1e-3) as f32))
+            })
+            .collect();
+        drop(e);
+        let routing = self.routing.get_or_insert_with(|| crate::routing::Routing::new(gpu));
+        routing.set_impactors(gpu, &list);
     }
 
     /// The engine's collider table as the coupling sees it (`ColliderInfo`), against the
@@ -333,6 +368,7 @@ impl GpuWorld {
         }
         let t_tables = std::time::Instant::now();
         self.resident_tables(gpu, n);
+        self.prepare_routing(gpu);
         if phases {
             eprintln!("resident phases: tables {:.2} ms", t_tables.elapsed().as_secs_f64() * 1e3);
         }
@@ -460,6 +496,17 @@ impl GpuWorld {
             let frame_mode = frame_mode && part_table.is_some();
             let r = self.resident.take().expect("resident tables");
             let window = if frame_mode { max - first } else { CASCADE_WINDOW.min(max - first) };
+            // The routed frame's check (M5), after the window's passes in its submission.
+            let routing = if self.tiered { self.routing.as_ref() } else { None };
+            let engine_base = r.qs.layout().engine_base;
+            let ctab = r.qs.layout().ctab.clone();
+            let route_post = |s: &crate::solver::GpuSolver, enc: &mut wgpu::CommandEncoder| {
+                if let Some(rt) = routing {
+                    let e = engine.borrow();
+                    rt.encode(gpu, enc, &s.routing_inputs(), &ctab, engine_base, e.engine_buffers().bodies, fdt, stress_ref::world::tiered_impact_speed());
+                }
+            };
+            let post: Option<&dyn Fn(&crate::solver::GpuSolver, &mut wgpu::CommandEncoder)> = if routing.is_some() { Some(&route_post) } else { None };
             let pre = |s: &crate::solver::GpuSolver, enc: &mut wgpu::CommandEncoder, pass: usize| {
                 r.qs.encode_poses(gpu, enc, &r.ingest, s);
                 if pass == 0 {
@@ -479,9 +526,9 @@ impl GpuWorld {
                     colliders: r.colliders.as_ref().filter(|c| c.capacity() >= max_colliders).map(|c| (c, &r.ingest.collider_info)),
                     layout_params: self.solver.frame_layout_params(),
                 };
-                self.solver.resident_cascade_with(gpu, fdt, first, window, &pre, Some(&fs))
+                self.solver.resident_cascade_with(gpu, fdt, first, window, &pre, Some(&fs), post)
             } else {
-                self.solver.resident_cascade(gpu, fdt, first, window, &pre)
+                self.solver.resident_cascade_with(gpu, fdt, first, window, &pre, None, post)
             };
             if phases {
                 let encode = t_pass.elapsed().as_secs_f64() * 1e3;
@@ -499,6 +546,10 @@ impl GpuWorld {
             let mut parts = vec![run.range()];
             parts.extend(status);
             parts.push(r.qs.status_range());
+            let route_part = parts.len();
+            if let Some(rt) = routing {
+                parts.push(rt.range());
+            }
             // `STRESS_GPU_DET_END=1`: the frame's ingest output and the engine's bodies in
             // this same read (no sync of their own), hashed below.
             let det_end = std::env::var("STRESS_GPU_DET_END").is_ok() && first == 0;
@@ -551,6 +602,10 @@ impl GpuWorld {
             }
             engine.borrow_mut().resident_finish(&read[1..1 + engine_parts])?;
             self.resident.as_ref().expect("resident tables").qs.check(&read[1 + engine_parts])?;
+            if routing.is_some() {
+                // The last window's check stands (each runs after its own splits).
+                self.route_next = crate::routing::Routing::flagged(&read[route_part]);
+            }
             if frame_mode {
                 // The frame's GPU splits, followed in order (an aborted one ends the log: the
                 // cascade stopped there, and the code below splits on the host).

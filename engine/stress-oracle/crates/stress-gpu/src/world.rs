@@ -98,6 +98,23 @@ pub struct GpuWorld {
     pub unverified_fractures: u64,
     /// Promoted structures (no redo) and the quiet frames they have left.
     promoted: std::collections::HashMap<usize, u32>,
+    /// Whether a fracture under the engine's loads promotes its structure (no redo; on by
+    /// default, `Profile::promote_fractures`, `STRESS_PROMOTE=0|1`).
+    pub promote_fractures: bool,
+    /// Routed resident frames (`routing.slang`, M5): with the tiered coupling and a
+    /// resident engine, a frame runs resident unless the last frame's routing check found
+    /// an impactor that may seed an island (`route_next`); such a frame takes the coupled
+    /// path, whose host routing decides exactly. On by default (`STRESS_ROUTED_RESIDENT=0`:
+    /// every tiered frame coupled).
+    pub routed_resident: bool,
+    /// The next frame may have an island seed (the last frame's routing check).
+    pub(crate) route_next: bool,
+    /// The last frame ran resident (the next coupled frame takes the engine's motion first).
+    pub(crate) last_resident: bool,
+    /// Frames that ran coupled (not resident).
+    pub coupled_frames: u64,
+    /// The routing check's kernel and buffers (`routing.slang`).
+    pub(crate) routing: Option<crate::routing::Routing>,
     /// Clusters left out of the GPU tables at both refreshes of the last frame (so their
     /// mirror state did not change during it): the next frame's
     /// `ReferenceSolver::unchanged`.
@@ -236,6 +253,12 @@ impl GpuWorld {
             redo_fractured_frames: true,
             unverified_fractures: 0,
             promoted: std::collections::HashMap::new(),
+            promote_fractures: std::env::var("STRESS_PROMOTE").map_or(true, |v| v != "0"),
+            routed_resident: std::env::var("STRESS_ROUTED_RESIDENT").map_or(true, |v| v != "0"),
+            route_next: true,
+            last_resident: false,
+            coupled_frames: 0,
+            routing: None,
             unchanged_next: std::collections::HashSet::new(),
             segment_retries: 0,
             segment_setup_seconds: 0.0,
@@ -319,6 +342,9 @@ impl GpuWorld {
     pub fn apply_profile(&mut self, profile: stress_ref::capability::Profile) {
         profile.apply_config(&mut self.solver.mirror.config);
         self.set_impact_islands(profile.impact_islands());
+        if std::env::var("STRESS_PROMOTE").is_err() {
+            self.promote_fractures = profile.promote_fractures();
+        }
         // The profile's resident frame runs the GPU's split path.
         if profile.resident() {
             crate::GPU_FRAME_PROFILE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -420,8 +446,30 @@ impl GpuWorld {
     /// moved fractured), and the write-back to the engine.
     fn step_frame_coupled(&mut self, gpu: &Gpu) -> Result<(), String> {
         if self.resident_now() {
+            self.last_resident = true;
             return self.resident_frame(gpu);
         }
+        self.coupled_frames += 1;
+        if std::mem::take(&mut self.last_resident) {
+            // After resident frames the mirror's motion is the GPU islands' at the last
+            // frame's start: every body's taken from the engine (a read), into the tables.
+            self.solver.download(gpu);
+            self.with_shell_mut(|w| w.take_engine_motion());
+            self.solver.refresh(gpu)?;
+        }
+        self.step_frame_tiered(gpu)?;
+        // The routed resident frame (M5): the next frame's routing predicted exactly now,
+        // from the state it starts with.
+        if self.tiered && self.routed_resident && self.resident_engine.is_some() {
+            let fdt = self.scene.sim.frame_dt;
+            let none = std::collections::HashSet::new();
+            self.route_next = !self.promoted.is_empty() || self.with_shell_mut(|w| w.predict_islands(fdt, &none)) > 0;
+        }
+        Ok(())
+    }
+
+    /// The coupled frame on the host's routing (`step_frame_coupled` without a resident one).
+    fn step_frame_tiered(&mut self, gpu: &Gpu) -> Result<(), String> {
         if self.impactors_stale {
             self.impactors_stale = false;
             self.solver.refresh(gpu)?;
@@ -689,7 +737,7 @@ impl GpuWorld {
                         if let stress_ref::solver::SolverEvent::Broken { structure, bond, .. } = e {
                             let chunk = self.solver.mirror.bonds[*structure][*bond].geometry.a;
                             let key = BodyKey::Cluster(start_cluster.get(*structure).and_then(|c| c.get(chunk)).copied().unwrap_or(u64::MAX));
-                            if f.driven.contains(&key) || (self.promoted.contains_key(structure) && !self.tiered) {
+                            if self.promote_fractures && (f.driven.contains(&key) || (self.promoted.contains_key(structure) && !self.tiered)) {
                                 self.promoted.insert(*structure, PROMOTE_FRAMES);
                             }
                         }
@@ -999,10 +1047,14 @@ impl GpuWorld {
     /// The scene and coupling conditions of the fast quasi-static frame (and of the
     /// resident one).
     fn fast_qs_conditions(&self) -> bool {
+        self.qs_frame_conditions() && !self.tiered
+    }
+
+    /// `fast_qs_conditions` but the tiered coupling (a routed resident frame's).
+    pub(crate) fn qs_frame_conditions(&self) -> bool {
         let m = &self.solver.mirror;
         self.frame > 0
             && self.coupled()
-            && !self.tiered
             && !self.redo_fractured_frames
             && self.scene.sim.solve_mode == SolveMode::QuasiStatic
             && self.scene.loads.is_empty()

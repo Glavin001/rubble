@@ -1,0 +1,115 @@
+//! The routed resident frame's check (`shaders/routing.slang`, engine/docs/stress-baseline-goal.md
+//! M5): at the end of a resident frame, whether the next frame may route an island, read
+//! with the frame's status. Under the tiered coupling only an impactor's contact seeds an
+//! island; the check is a superset of the host's test (`World::select_islands`), so a frame
+//! it lets run resident is one the host's routing would have given no island.
+
+use crate::gpu::{Binding, Gpu, Kernel};
+use crate::shaders;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct RouteParams {
+    island_count: u32,
+    impactor_count: u32,
+    engine_base: u32,
+    pad0: u32,
+    dt: f32,
+    speed: f32,
+    margin: f32,
+    pad1: f32,
+}
+
+const BINDINGS: [Binding; 8] = [
+    Binding::Uniform,   // params
+    Binding::Storage,   // islands
+    Binding::Storage,   // chunk statics
+    Binding::Storage,   // chunk state
+    Binding::Storage,   // ctab
+    Binding::Storage,   // engine bodies
+    Binding::Storage,   // impactors
+    Binding::StorageRw, // route
+];
+
+/// The solver's tables the check reads (`GpuSolver::routing_inputs`).
+pub struct RouteInputs<'a> {
+    pub islands: &'a wgpu::Buffer,
+    pub chunks: &'a wgpu::Buffer,
+    pub state: &'a wgpu::Buffer,
+    /// Indirect arguments over the live islands (one group each), when the GPU may add
+    /// islands within the frame; otherwise `island_count` groups.
+    pub island_args: Option<&'a wgpu::Buffer>,
+    pub island_count: u32,
+}
+
+pub struct Routing {
+    kernel: Kernel,
+    route: wgpu::Buffer,
+    impactors: wgpu::Buffer,
+    /// Per impactor: its engine body and bounding radius, as uploaded.
+    list: Vec<(u32, f32)>,
+}
+
+impl Routing {
+    pub fn new(gpu: &Gpu) -> Routing {
+        Routing {
+            kernel: gpu.compute(&shaders::ROUTING, "route_islands", &BINDINGS),
+            route: gpu.storage("routing flag", &[0u32; 4]),
+            impactors: gpu.storage("routing impactors", &[[0f32; 4]]),
+            list: Vec::new(),
+        }
+    }
+
+    /// The impactors: (engine body, bounding radius about the body's centre) each.
+    pub fn set_impactors(&mut self, gpu: &Gpu, list: &[(u32, f32)]) {
+        if list == self.list.as_slice() {
+            return;
+        }
+        let words: Vec<[f32; 4]> = list.iter().map(|&(b, r)| [f32::from_bits(b), r, 0.0, 0.0]).collect();
+        self.impactors = if words.is_empty() { gpu.storage("routing impactors", &[[0f32; 4]]) } else { gpu.storage("routing impactors", &words) };
+        self.list = list.to_vec();
+    }
+
+    /// The check, after everything else in the frame's submission: the flag cleared, then
+    /// set by any island an impactor may strike within `dt`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, inputs: &RouteInputs, ctab: &wgpu::Buffer, engine_base: u32, bodies: &wgpu::Buffer, dt: f64, speed: f64) {
+        encoder.clear_buffer(&self.route, 0, None);
+        if self.list.is_empty() {
+            return;
+        }
+        let params = gpu.uniform(
+            "routing params",
+            &RouteParams {
+                island_count: inputs.island_count,
+                impactor_count: self.list.len() as u32,
+                engine_base,
+                pad0: 0,
+                dt: dt as f32,
+                // f32 against the host's f64: a pair within a part in a thousand of the
+                // speed or a millimetre of the bounds counts.
+                speed: (speed * (1.0 - 1e-3)) as f32,
+                margin: 1e-3,
+                pad1: 0.0,
+            },
+        );
+        let group = gpu.bind(&self.kernel.group, &[&params, inputs.islands, inputs.chunks, inputs.state, ctab, bodies, &self.impactors, &self.route]);
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.kernel.pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        match inputs.island_args {
+            Some(a) => pass.dispatch_workgroups_indirect(a, 0),
+            None => pass.dispatch_workgroups(inputs.island_count.max(1), 1, 1),
+        }
+    }
+
+    /// The flag's range (for the frame's one read).
+    pub fn range(&self) -> (&wgpu::Buffer, u64, u64) {
+        (&self.route, 0, 16)
+    }
+
+    /// Whether the read flag says the next frame may route an island.
+    pub fn flagged(bytes: &[u8]) -> bool {
+        bytemuck::cast_slice::<u8, u32>(&bytes[..4])[0] != 0
+    }
+}
