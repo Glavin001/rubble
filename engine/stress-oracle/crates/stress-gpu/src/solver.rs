@@ -587,6 +587,9 @@ pub struct GpuSolver {
     /// The GPU contact planner (`gpu_plan.rs`) and how its plans compared with the host's.
     planner: Option<crate::gpu_plan::GpuPlanner>,
     pub plan_check: crate::gpu_plan::PlanCheck,
+    splitter: Option<crate::gpu_split::GpuSplitter>,
+    /// GPU splits against the host's (`STRESS_GPU_SPLIT_CHECK=1`).
+    pub split_check: crate::gpu_split::SplitCheck,
     cascade_islands: Option<(u64, wgpu::Buffer)>,
     cascade_status: Option<wgpu::Buffer>,
     /// The repeat gate's loads and flags, by layout generation (cascade.slang).
@@ -662,6 +665,8 @@ impl GpuSolver {
             state_backup: None,
             cascade: None,
             planner: None,
+            splitter: None,
+            split_check: Default::default(),
             plan_check: Default::default(),
             cascade_islands: None,
             cascade_status: None,
@@ -3323,6 +3328,54 @@ impl GpuSolver {
             let _ = std::fs::write(format!("{dir}/islands_{n}.json"), format!("{:?}", isl));
         }
         (hash(bytemuck::cast_slice(&st)), hash(&bd))
+    }
+
+    /// The chunk states of `clusters` from the GPU into the mirror (`sync`'s conversion),
+    /// before a host split: `split_cluster` takes its children's motion from them, and the
+    /// resident frame leaves the mirror's chunk states as they were at its last download.
+    pub fn sync_chunk_state(&mut self, gpu: &Gpu, clusters: &[usize]) {
+        let f4 = 16u64;
+        let parts: Vec<(&wgpu::Buffer, u64, u64)> = clusters
+            .iter()
+            .map(|&ci| {
+                let r = self.layout.islands[ci].range;
+                (&self.buffers.state, 4 * r[0] as u64 * f4, 4 * (r[1] - r[0]) as u64 * f4)
+            })
+            .collect();
+        let read = gpu.read_ranges(&parts);
+        for (&ci, bytes) in clusters.iter().zip(&read) {
+            let st: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(bytes);
+            let r = self.layout.islands[ci].range;
+            for k in r[0] as usize..r[1] as usize {
+                let (s, c) = self.layout.chunks[k];
+                let j = k - r[0] as usize;
+                let m = &mut self.mirror;
+                let cs = &mut m.chunks[s][c];
+                cs.u = vec3(st[4 * j]);
+                cs.th = vec3(st[4 * j + 1]);
+                cs.v = vec3(st[4 * j + 2]);
+                cs.w = vec3(st[4 * j + 3]);
+                if m.structures[s].chunks[c].support != Support::None {
+                    cs.reaction = (Vec3::new(st[4 * j + 1][3] as f64, st[4 * j + 2][3] as f64, st[4 * j + 3][3] as f64), Vec3::ZERO);
+                }
+            }
+        }
+    }
+
+    /// The children of the islands `parents` as the GPU splits them (`gpu_split`), from
+    /// its current tables and chunk state, with each parent's rigid frame from the mirror.
+    pub fn gpu_split_children(&mut self, gpu: &Gpu, parents: &[usize]) -> Vec<Vec<crate::gpu_split::GpuChild>> {
+        let splitter = self.splitter.get_or_insert_with(|| crate::gpu_split::GpuSplitter::new(gpu));
+        // Each parent's rigid frame as the mirror holds it (the engine's motion, synced).
+        let frame = |ci: usize| {
+            let cl = &self.mirror.clusters[ci];
+            let q = cl.pose.rotation;
+            let (v, w, c) = (cl.velocity, cl.angular_velocity, cl.com);
+            [[q.x as f32, q.y as f32, q.z as f32, q.w as f32], [v.x as f32, v.y as f32, v.z as f32, 0.0], [w.x as f32, w.y as f32, w.z as f32, 0.0], [c.x as f32, c.y as f32, c.z as f32, 0.0]]
+        };
+        let ps: Vec<(usize, [u32; 2], [[f32; 4]; 4])> = parents.iter().map(|&ci| (ci, [self.layout.islands[ci].range[0], self.layout.islands[ci].range[1]], frame(ci))).collect();
+        let b = &self.buffers;
+        splitter.split(gpu, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &ps)
     }
 
     pub fn split_resident(&mut self, gpu: &Gpu, parents: &[usize]) -> Result<bool, String> {

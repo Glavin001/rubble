@@ -23,6 +23,7 @@
 
 import joint;
 import common;
+import bonds;
 
 static const uint THREADS = 256;
 
@@ -108,30 +109,7 @@ struct MaterialTable
     JointMaterial m[64];
 };
 
-// Static data of a bond (body frame of its cluster).
-struct BondStatic
-{
-    float4 t1;
-    float4 t2;
-    float4 normal;
-    float4 ra;       // centroid - centre of a
-    float4 rb;       // centroid - centre of b
-    float4 centroid; // body frame
-    float4 c_lin;    // dashpots
-    float4 c_ang;
-    JointBond law;   // ids: x material, y chunk a, z chunk b, w island
-};
-
-// Dynamic data of a bond.
-struct BondDyn
-{
-    JointState js;
-    float4 force_lin;  // last force incl. dashpots; w: stored energy
-    float4 force_ang;  // w: largest utilization seen
-    float4 sums;       // dissipated, overshoot, damped (compensated with `comps`)
-    float4 comps;
-    uint4 events;      // absolute substep of: crack, creak, break (0: none); w: mode at crack
-};
+// BondStatic and BondDyn: bonds.slang.
 
 struct Impactor
 {

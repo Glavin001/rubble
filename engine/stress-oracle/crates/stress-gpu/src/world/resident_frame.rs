@@ -264,6 +264,14 @@ impl GpuWorld {
             // cascade goes on from the next pass.
             let t_split = std::time::Instant::now();
             self.resident_sync_motion();
+            // `STRESS_GPU_SPLIT_CHECK=1`: the GPU's split of these islands, compared with
+            // the host's below (M2).
+            let split_check = std::env::var("STRESS_GPU_SPLIT_CHECK").is_ok_and(|v| v == "1");
+            let gpu_children = split_check.then(|| {
+                let parents: Vec<usize> = out.disconnected.clone();
+                let ids: Vec<u64> = parents.iter().map(|&ci| self.solver.mirror.clusters[ci].id).collect();
+                (ids, self.solver.gpu_chunks().to_vec(), self.solver.gpu_split_children(gpu, &parents))
+            });
             // In place when the tables can take it, opt-in (`STRESS_QS_SPLIT_IN_PLACE=1`):
             // off by default since it makes the bombard nondeterministic run to run and
             // differ from the rebuild (a GPU race after it, not yet found; the tables it
@@ -275,6 +283,9 @@ impl GpuWorld {
                 }
             } else {
                 self.solver.sync(gpu);
+                // The parents' chunk states as the GPU left them (the children's motion
+                // comes from them; `sync` brings the bonds only).
+                self.solver.sync_chunk_state(gpu, &out.disconnected);
                 let t_synced = t_split.elapsed().as_secs_f64() * 1e3;
                 for &ci in out.disconnected.iter().rev() {
                     self.solver.mirror.split_cluster(ci);
@@ -287,6 +298,9 @@ impl GpuWorld {
                 if trace {
                     eprintln!("resident split: {} clusters split, sync {t_synced:.1} ms, split {:.1} ms, rebuild {:.1} ms", out.disconnected.len(), t_splits - t_synced, t_split.elapsed().as_secs_f64() * 1e3 - t_splits);
                 }
+            }
+            if let Some((ids, layout_chunks, gpu_children)) = gpu_children {
+                self.check_split(&ids, &layout_chunks, &gpu_children);
             }
             split = true;
             first = at + 1;
@@ -319,6 +333,74 @@ impl GpuWorld {
         self.frame += 1;
         self.resident_frames += 1;
         Ok(())
+    }
+}
+
+impl GpuWorld {
+    /// M2's check: the GPU's children of the parents `ids` (layout chunk indices into
+    /// `layout_chunks`, the layout before the split) against the mirror's, which the host
+    /// split made.
+    fn check_split(&mut self, ids: &[u64], layout_chunks: &[(usize, usize)], gpu: &[Vec<crate::gpu_split::GpuChild>]) {
+        let rel = |a: f64, b: f64, scale: f64| (a - b).abs() / scale.max(1e-30);
+        let m = &self.solver.mirror;
+        let mut c = self.solver.split_check;
+        for (&id, children) in ids.iter().zip(gpu) {
+            c.splits += 1;
+            // The host's children in creation order (its split event; later splits of the
+            // same batch move clusters between slots).
+            let made: Vec<u64> = m
+                .events
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    stress_ref::solver::SolverEvent::Split { parent, children, .. } if *parent == id => Some(children.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let host: Vec<&stress_ref::solver::Cluster> = made.iter().filter_map(|cid| m.clusters.iter().find(|cl| cl.id == *cid)).collect();
+            // A disconnection that left the island whole: no split on the host, one child
+            // on the GPU.
+            if host.is_empty() && children.len() == 1 {
+                continue;
+            }
+            let same = host.len() == children.len()
+                && host.iter().zip(children).all(|(h, g)| {
+                    g.chunks.len() == h.chunks.len() && g.chunks.iter().zip(&h.chunks).all(|(&k, &hc)| layout_chunks[k as usize] == (h.structure, hc))
+                });
+            if !same {
+                c.topology_mismatch += 1;
+                if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
+                    let gs: Vec<usize> = children.iter().map(|g| g.chunks.len()).collect();
+                    let hs: Vec<usize> = host.iter().map(|h| h.chunks.len()).collect();
+                    eprintln!("split check: parent {id}: GPU children {gs:?}, host {hs:?}");
+                }
+                continue;
+            }
+            for (h, g) in host.iter().zip(children) {
+                c.children += 1;
+                if h.anchored != g.anchored {
+                    c.anchored_mismatch += 1;
+                }
+                c.mass = c.mass.max(rel(g.mass as f64, h.mass, h.mass));
+                let size = h.inertia.m.iter().flatten().fold(0.0f64, |a, &b| a.max(b.abs()));
+                for k in 0..3 {
+                    c.com = c.com.max((g.com[k] as f64 - h.com.to_array()[k]).abs());
+                    for j in 0..3 {
+                        c.inertia = c.inertia.max(rel(g.inertia[k][j] as f64, h.inertia.m[k][j], size));
+                    }
+                }
+                let (hv, hw) = (h.velocity.to_array(), h.angular_velocity.to_array());
+                let (sv, sw) = (h.velocity.norm().max(1e-3), h.angular_velocity.norm().max(1e-3));
+                if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
+                    eprintln!("split check child of {id} (exact_frame_transfer {}): {} chunks, anchored {}, v gpu {:?} host {:?}, w gpu {:?} host {:?}", m.config.methods.exact_frame_transfer, g.chunks.len(), h.anchored, g.velocity, hv, g.angular_velocity, hw);
+                }
+                for k in 0..3 {
+                    c.velocity = c.velocity.max(rel(g.velocity[k] as f64, hv[k], sv));
+                    c.angular_velocity = c.angular_velocity.max(rel(g.angular_velocity[k] as f64, hw[k], sw));
+                }
+            }
+        }
+        self.solver.split_check = c;
     }
 }
 
