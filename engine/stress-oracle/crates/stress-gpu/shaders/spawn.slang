@@ -23,7 +23,7 @@ struct SpawnParams
                          // bodies in both regions, the second at `max_bodies`); 0: a copy from slot 0
     uint max_bodies;
     uint max_colliders;  // the engine's collider capacity
-    uint island_free;    // islands the stress tables can still take
+    uint island_cap;     // islands the stress tables can take (`CTL_ISLANDS` of them live)
     uint pad2;
 };
 
@@ -65,7 +65,7 @@ uint4 part_range(uint layout_chunk)
 
 uint total_slots()
 {
-    return parents[params.parent_count].y;
+    return parents[control[CTL_PARENTS]].y;
 }
 
 // The child records' member list of child slot `slot` of parent `p`: (offset, count).
@@ -78,7 +78,7 @@ uint2 child_members(uint slot)
 uint parent_of(uint slot)
 {
     uint p = 0;
-    while (p + 1 < params.parent_count && parents[p + 1].y <= slot)
+    while (p + 1 < control[CTL_PARENTS] && parents[p + 1].y <= slot)
         p++;
     return p;
 }
@@ -87,14 +87,14 @@ uint parent_of(uint slot)
 [numthreads(1, 1, 1)]
 void spawn_offsets(uint3 id: SV_DispatchThreadID)
 {
-    uint body = params.first_body;
-    uint collider = params.first_collider;
+    uint body = control[CTL_FIRST_BODY];
+    uint collider = control[CTL_FIRST_COLLIDER];
     uint total = total_slots();
     // Room first: islands (one more per child past the first), bodies, colliders.
     uint islands_needed = 0;
     uint bodies_needed = 0;
     uint colliders_needed = 0;
-    for (uint p = 0; p < params.parent_count; p++)
+    for (uint p = 0; p < control[CTL_PARENTS]; p++)
     {
         uint4 parent = parents[p];
         if (parent.z < 2)
@@ -109,11 +109,13 @@ void spawn_offsets(uint3 id: SV_DispatchThreadID)
                 colliders_needed += part_range(first + work[total + parent.y + m.x + j]).y;
         }
     }
-    bool fits = islands_needed <= params.island_free && (params.live == 0 || (body + bodies_needed <= params.max_bodies && collider + colliders_needed <= params.max_colliders));
-    control[0] = fits ? 0u : 1u;
+    bool fits = islands_needed <= params.island_cap - min(params.island_cap, control[CTL_ISLANDS]) && (params.live == 0 || (body + bodies_needed <= params.max_bodies && collider + colliders_needed <= params.max_colliders));
+    control[CTL_ABORT] = fits ? 0u : 1u;
+    control[CTL_BODIES_AFTER] = body;
+    control[CTL_COLLIDERS_AFTER] = collider;
     if (!fits)
         return;
-    for (uint p = 0; p < params.parent_count; p++)
+    for (uint p = 0; p < control[CTL_PARENTS]; p++)
     {
         uint4 parent = parents[p];
         uint first = islands_of[p].x;
@@ -132,6 +134,8 @@ void spawn_offsets(uint3 id: SV_DispatchThreadID)
             collider += count;
         }
     }
+    control[CTL_BODIES_AFTER] = body;
+    control[CTL_COLLIDERS_AFTER] = collider;
 }
 
 // Quaternion of a rotation matrix given by columns (glam `Quat::from_rotation_axes`).
@@ -338,7 +342,7 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
         float4(0.0),
         float4(0.0, 0.0, 0.0, 1.0),
     };
-    uint b = BODY_WORDS * (params.live != 0 ? at.x : at.x - params.first_body);
+    uint b = BODY_WORDS * (params.live != 0 ? at.x : at.x - control[CTL_FIRST_BODY]);
     for (uint w = 0; w < BODY_WORDS; w++)
         bodies[b + w] = record[w];
     // The previous-pose region (`add_bodies` writes both).
@@ -358,7 +362,7 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
             Quat rot = quat_of(parts[PART_WORDS * k + 5]);
             float4 ids = parts[PART_WORDS * k + 6];
             float4 shape_params = parts[PART_WORDS * k + 7];
-            uint cw = 4 * (params.live != 0 ? col : col - params.first_collider);
+            uint cw = 4 * (params.live != 0 ? col : col - control[CTL_FIRST_COLLIDER]);
             colliders[cw] = float4(asfloat(at.x), ids.x, ids.y, ids.z);
             colliders[cw + 1] = float4(rotate(to_body, o.xyz - com), o.w);
             colliders[cw + 2] = quat_vec(normalized(quat_mul(to_body, rot)));
@@ -376,7 +380,7 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
 void spawn_retire(uint3 id: SV_DispatchThreadID)
 {
     uint p = id.x;
-    if (p >= params.parent_count || params.live == 0 || parents[p].z < 2 || control[0] != 0)
+    if (p >= control[CTL_PARENTS] || params.live == 0 || parents[p].z < 2 || control[0] != 0)
         return;
     uint4 e = islands_of[p];
     // The current record, modified, into both regions (`write_bodies` writes one record twice).

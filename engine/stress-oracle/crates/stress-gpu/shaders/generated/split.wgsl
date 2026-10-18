@@ -1,12 +1,5 @@
-struct SplitParams_std140_0
-{
-    @align(16) parent_count_0 : u32,
-    @align(4) out_base_0 : u32,
-    @align(8) anchored_pose_0 : u32,
-    @align(4) pad1_0 : u32,
-};
+@binding(13) @group(0) var<storage, read_write> control_0 : array<u32>;
 
-@binding(0) @group(0) var<uniform> params_0 : SplitParams_std140_0;
 @binding(7) @group(0) var<storage, read_write> parents_0 : array<vec4<u32>>;
 
 struct Island_std430_0
@@ -109,6 +102,15 @@ struct BondStatic_std430_0
 
 @binding(3) @group(0) var<storage, read> bonds_0 : array<BondStatic_std430_0>;
 
+struct SplitParams_std140_0
+{
+    @align(16) parent_count_0 : u32,
+    @align(4) out_base_0 : u32,
+    @align(8) anchored_pose_0 : u32,
+    @align(4) pad1_0 : u32,
+};
+
+@binding(0) @group(0) var<uniform> params_0 : SplitParams_std140_0;
 @binding(9) @group(0) var<storage, read_write> out_0 : array<vec4<f32>>;
 
 @binding(10) @group(0) var<storage, read_write> frames_0 : array<vec4<f32>>;
@@ -143,7 +145,7 @@ struct ChunkStatic_std430_0
 
 fn total_chunks_0() -> u32
 {
-    return parents_0[params_0.parent_count_0].y;
+    return parents_0[control_0[u32(1)]].y;
 }
 
 fn device_group_barrier_0()
@@ -184,7 +186,7 @@ fn split_components(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_i
     var at_0 : u32;
     var tid_0 : u32 = thread_0.x;
     var p_0 : u32 = group_0.x;
-    if(p_0 >= (params_0.parent_count_0))
+    if(p_0 >= control_0[u32(1)])
     {
         return;
     }
@@ -492,7 +494,7 @@ fn split_children(@builtin(global_invocation_id) id_0 : vec3<u32>)
     loop
     {
         var _S19 : u32 = p_1 + u32(1);
-        if(_S19 < (params_0.parent_count_0))
+        if(_S19 < control_0[u32(1)])
         {
             anchored_0 = (parents_0[_S19].y) <= slot_0;
         }
@@ -675,7 +677,7 @@ fn quat_vec_0( q_6 : Quat_0) -> vec4<f32>
 fn split_frames(@builtin(global_invocation_id) id_1 : vec3<u32>)
 {
     var p_2 : u32 = id_1.x;
-    if(p_2 >= (params_0.parent_count_0))
+    if(p_2 >= control_0[u32(1)])
     {
         return;
     }

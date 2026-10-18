@@ -51,13 +51,13 @@ static const uint ISLAND_FLAG_ANCHORED = 1;
 
 uint total_slots()
 {
-    return parents[params.parent_count].y;
+    return parents[control[CTL_PARENTS]].y;
 }
 
 uint parent_of(uint slot)
 {
     uint p = 0;
-    while (p + 1 < params.parent_count && parents[p + 1].y <= slot)
+    while (p + 1 < control[CTL_PARENTS] && parents[p + 1].y <= slot)
         p++;
     return p;
 }
@@ -75,7 +75,7 @@ void collider_keys(uint3 id: SV_DispatchThreadID)
         return;
     uint t = id.x;
     // A split parent's colliders, retired with its body (spawn.slang `spawn_retire`).
-    if (t < params.parent_count && parents[t].z >= 2)
+    if (t < control[CTL_PARENTS] && parents[t].z >= 2)
     {
         uint4 e = islands_of[t];
         for (uint c = e.z; c < e.w; c++)

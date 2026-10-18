@@ -2,18 +2,6 @@
 #include <metal_math>
 #include <metal_texture>
 using namespace metal;
-struct SpawnParams_0
-{
-    uint parent_count_0;
-    uint first_body_0;
-    uint first_collider_0;
-    uint live_0;
-    uint max_bodies_0;
-    uint max_colliders_0;
-    uint island_free_0;
-    uint pad2_0;
-};
-
 struct ChunkStatic_natural_0
 {
     packed_float4 center_0;
@@ -34,9 +22,21 @@ struct ChunkStatic_natural_0
     packed_uint4 cinfo_0;
 };
 
+struct SpawnParams_0
+{
+    uint parent_count_0;
+    uint first_body_0;
+    uint first_collider_0;
+    uint live_0;
+    uint max_bodies_0;
+    uint max_colliders_0;
+    uint island_cap_0;
+    uint pad2_0;
+};
+
 struct KernelContext_0
 {
-    SpawnParams_0 constant* params_0;
+    uint device* control_0;
     packed_uint4 device* parents_0;
     packed_uint4 device* islands_of_0;
     packed_float4 device* children_0;
@@ -44,7 +44,7 @@ struct KernelContext_0
     ChunkStatic_natural_0 device* chunks_0;
     uint device* structure_base_0;
     packed_uint4 device* part_ranges_0;
-    uint device* control_0;
+    SpawnParams_0 constant* params_0;
     packed_uint4 device* slots_0;
     packed_float4 device* parts_0;
     packed_float4 device* frames_0;
@@ -56,7 +56,7 @@ struct KernelContext_0
 
 uint total_slots_0(KernelContext_0 thread* kernelContext_0)
 {
-    return (uint4(*(kernelContext_0->parents_0+kernelContext_0->params_0->parent_count_0)) ).y;
+    return (uint4(*(kernelContext_0->parents_0+*(kernelContext_0->control_0+1U))) ).y;
 }
 
 uint2 child_members_0(uint slot_0, KernelContext_0 thread* kernelContext_1)
@@ -71,13 +71,13 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
     return uint4(*(kernelContext_2->part_ranges_0+(kernelContext_2->structure_base_0[_S2.z] + _S2.w))) ;
 }
 
-[[kernel]] void spawn_offsets(uint3 id_0 [[thread_position_in_grid]], SpawnParams_0 constant* params_1 [[buffer(0)]], packed_uint4 device* parents_1 [[buffer(1)]], packed_uint4 device* islands_of_1 [[buffer(12)]], packed_float4 device* children_1 [[buffer(3)]], uint device* work_1 [[buffer(2)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(7)]], uint device* structure_base_1 [[buffer(14)]], packed_uint4 device* part_ranges_1 [[buffer(5)]], uint device* control_1 [[buffer(15)]], packed_uint4 device* slots_1 [[buffer(9)]], packed_float4 device* parts_1 [[buffer(6)]], packed_float4 device* frames_1 [[buffer(4)]], packed_float4 device* state_1 [[buffer(8)]], packed_float4 device* bodies_1 [[buffer(10)]], packed_float4 device* extras_1 [[buffer(13)]], packed_float4 device* colliders_1 [[buffer(11)]])
+[[kernel]] void spawn_offsets(uint3 id_0 [[thread_position_in_grid]], uint device* control_1 [[buffer(15)]], packed_uint4 device* parents_1 [[buffer(1)]], packed_uint4 device* islands_of_1 [[buffer(12)]], packed_float4 device* children_1 [[buffer(3)]], uint device* work_1 [[buffer(2)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(7)]], uint device* structure_base_1 [[buffer(14)]], packed_uint4 device* part_ranges_1 [[buffer(5)]], SpawnParams_0 constant* params_1 [[buffer(0)]], packed_uint4 device* slots_1 [[buffer(9)]], packed_float4 device* parts_1 [[buffer(6)]], packed_float4 device* frames_1 [[buffer(4)]], packed_float4 device* state_1 [[buffer(8)]], packed_float4 device* bodies_1 [[buffer(10)]], packed_float4 device* extras_1 [[buffer(13)]], packed_float4 device* colliders_1 [[buffer(11)]])
 {
     uint colliders_needed_0;
     uint k_0;
     uint j_0;
     thread KernelContext_0 kernelContext_3;
-    (&kernelContext_3)->params_0 = params_1;
+    (&kernelContext_3)->control_0 = control_1;
     (&kernelContext_3)->parents_0 = parents_1;
     (&kernelContext_3)->islands_of_0 = islands_of_1;
     (&kernelContext_3)->children_0 = children_1;
@@ -85,7 +85,7 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
     (&kernelContext_3)->chunks_0 = chunks_1;
     (&kernelContext_3)->structure_base_0 = structure_base_1;
     (&kernelContext_3)->part_ranges_0 = part_ranges_1;
-    (&kernelContext_3)->control_0 = control_1;
+    (&kernelContext_3)->params_0 = params_1;
     (&kernelContext_3)->slots_0 = slots_1;
     (&kernelContext_3)->parts_0 = parts_1;
     (&kernelContext_3)->frames_0 = frames_1;
@@ -93,8 +93,8 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
     (&kernelContext_3)->bodies_0 = bodies_1;
     (&kernelContext_3)->extras_0 = extras_1;
     (&kernelContext_3)->colliders_0 = colliders_1;
-    uint body_0 = params_1->first_body_0;
-    uint collider_0 = params_1->first_collider_0;
+    uint body_0 = *(control_1+4U);
+    uint collider_0 = *(control_1+5U);
     uint _S3 = total_slots_0(&kernelContext_3);
     uint p_0 = 0U;
     uint islands_needed_0 = 0U;
@@ -102,7 +102,7 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
     uint colliders_needed_1 = 0U;
     for(;;)
     {
-        if(p_0 < ((&kernelContext_3)->params_0->parent_count_0))
+        if(p_0 < (*((&kernelContext_3)->control_0+1U)))
         {
         }
         else
@@ -157,7 +157,7 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
         colliders_needed_1 = colliders_needed_0;
     }
     bool fits_0;
-    if(islands_needed_0 <= ((&kernelContext_3)->params_0->island_free_0))
+    if(islands_needed_0 <= ((&kernelContext_3)->params_0->island_cap_0 - min((&kernelContext_3)->params_0->island_cap_0, *((&kernelContext_3)->control_0+2U))))
     {
         if(((&kernelContext_3)->params_0->live_0) == 0U)
         {
@@ -179,7 +179,7 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
     {
         fits_0 = false;
     }
-    uint device* _S10 = (&kernelContext_3)->control_0+int(0);
+    uint device* _S10 = (&kernelContext_3)->control_0+0U;
     if(fits_0)
     {
         p_0 = 0U;
@@ -189,6 +189,8 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
         p_0 = 1U;
     }
     *_S10 = p_0;
+    *((&kernelContext_3)->control_0+8U) = body_0;
+    *((&kernelContext_3)->control_0+9U) = collider_0;
     if(!fits_0)
     {
         return;
@@ -198,7 +200,7 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
     uint collider_1 = collider_0;
     for(;;)
     {
-        if(p_0 < ((&kernelContext_3)->params_0->parent_count_0))
+        if(p_0 < (*((&kernelContext_3)->control_0+1U)))
         {
         }
         else
@@ -255,6 +257,8 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
         collider_1 = collider_2;
         p_0 = p_0 + 1U;
     }
+    *((&kernelContext_3)->control_0+8U) = colliders_needed_0;
+    *((&kernelContext_3)->control_0+9U) = collider_1;
     return;
 }
 
@@ -265,7 +269,7 @@ uint parent_of_0(uint slot_2, KernelContext_0 thread* kernelContext_4)
     {
         uint _S18 = p_1 + 1U;
         bool _S19;
-        if(_S18 < (kernelContext_4->params_0->parent_count_0))
+        if(_S18 < (*(kernelContext_4->control_0+1U)))
         {
             _S19 = ((uint4(*(kernelContext_4->parents_0+_S18)) ).y) <= slot_2;
         }
@@ -559,12 +563,12 @@ float4 quat_vec_0(const Quat_0 thread* q_8)
     return float4(q_8->x_0, q_8->y_0, q_8->z_0, q_8->w_0);
 }
 
-[[kernel]] void spawn_bodies(uint3 id_1 [[thread_position_in_grid]], SpawnParams_0 constant* params_2 [[buffer(0)]], packed_uint4 device* parents_2 [[buffer(1)]], packed_uint4 device* islands_of_2 [[buffer(12)]], packed_float4 device* children_2 [[buffer(3)]], uint device* work_2 [[buffer(2)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(7)]], uint device* structure_base_2 [[buffer(14)]], packed_uint4 device* part_ranges_2 [[buffer(5)]], uint device* control_2 [[buffer(15)]], packed_uint4 device* slots_2 [[buffer(9)]], packed_float4 device* parts_2 [[buffer(6)]], packed_float4 device* frames_2 [[buffer(4)]], packed_float4 device* state_2 [[buffer(8)]], packed_float4 device* bodies_2 [[buffer(10)]], packed_float4 device* extras_2 [[buffer(13)]], packed_float4 device* colliders_2 [[buffer(11)]])
+[[kernel]] void spawn_bodies(uint3 id_1 [[thread_position_in_grid]], uint device* control_2 [[buffer(15)]], packed_uint4 device* parents_2 [[buffer(1)]], packed_uint4 device* islands_of_2 [[buffer(12)]], packed_float4 device* children_2 [[buffer(3)]], uint device* work_2 [[buffer(2)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(7)]], uint device* structure_base_2 [[buffer(14)]], packed_uint4 device* part_ranges_2 [[buffer(5)]], SpawnParams_0 constant* params_2 [[buffer(0)]], packed_uint4 device* slots_2 [[buffer(9)]], packed_float4 device* parts_2 [[buffer(6)]], packed_float4 device* frames_2 [[buffer(4)]], packed_float4 device* state_2 [[buffer(8)]], packed_float4 device* bodies_2 [[buffer(10)]], packed_float4 device* extras_2 [[buffer(13)]], packed_float4 device* colliders_2 [[buffer(11)]])
 {
     uint _S38;
     uint k_2;
     thread KernelContext_0 kernelContext_5;
-    (&kernelContext_5)->params_0 = params_2;
+    (&kernelContext_5)->control_0 = control_2;
     (&kernelContext_5)->parents_0 = parents_2;
     (&kernelContext_5)->islands_of_0 = islands_of_2;
     (&kernelContext_5)->children_0 = children_2;
@@ -572,7 +576,7 @@ float4 quat_vec_0(const Quat_0 thread* q_8)
     (&kernelContext_5)->chunks_0 = chunks_2;
     (&kernelContext_5)->structure_base_0 = structure_base_2;
     (&kernelContext_5)->part_ranges_0 = part_ranges_2;
-    (&kernelContext_5)->control_0 = control_2;
+    (&kernelContext_5)->params_0 = params_2;
     (&kernelContext_5)->slots_0 = slots_2;
     (&kernelContext_5)->parts_0 = parts_2;
     (&kernelContext_5)->frames_0 = frames_2;
@@ -825,7 +829,7 @@ float4 quat_vec_0(const Quat_0 thread* q_8)
     }
     else
     {
-        j_1 = _S65.x - (&kernelContext_5)->params_0->first_body_0;
+        j_1 = _S65.x - *((&kernelContext_5)->control_0+4U);
     }
     uint _S82 = 7U * j_1;
     uint w_1 = 0U;
@@ -899,7 +903,7 @@ float4 quat_vec_0(const Quat_0 thread* q_8)
             }
             else
             {
-                flags_0 = col_1 - (&kernelContext_5)->params_0->first_collider_0;
+                flags_0 = col_1 - *((&kernelContext_5)->control_0+5U);
             }
             uint cw_0 = 4U * flags_0;
             *((&kernelContext_5)->colliders_0+cw_0) = packed_float4(float4((as_type<float>((_S65.x))), _S92.x, _S92.y, _S92.z)) ;
@@ -928,10 +932,10 @@ float4 quat_vec_0(const Quat_0 thread* q_8)
     return;
 }
 
-[[kernel]] void spawn_retire(uint3 id_2 [[thread_position_in_grid]], SpawnParams_0 constant* params_3 [[buffer(0)]], packed_uint4 device* parents_3 [[buffer(1)]], packed_uint4 device* islands_of_3 [[buffer(12)]], packed_float4 device* children_3 [[buffer(3)]], uint device* work_3 [[buffer(2)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(7)]], uint device* structure_base_3 [[buffer(14)]], packed_uint4 device* part_ranges_3 [[buffer(5)]], uint device* control_3 [[buffer(15)]], packed_uint4 device* slots_3 [[buffer(9)]], packed_float4 device* parts_3 [[buffer(6)]], packed_float4 device* frames_3 [[buffer(4)]], packed_float4 device* state_3 [[buffer(8)]], packed_float4 device* bodies_3 [[buffer(10)]], packed_float4 device* extras_3 [[buffer(13)]], packed_float4 device* colliders_3 [[buffer(11)]])
+[[kernel]] void spawn_retire(uint3 id_2 [[thread_position_in_grid]], uint device* control_3 [[buffer(15)]], packed_uint4 device* parents_3 [[buffer(1)]], packed_uint4 device* islands_of_3 [[buffer(12)]], packed_float4 device* children_3 [[buffer(3)]], uint device* work_3 [[buffer(2)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(7)]], uint device* structure_base_3 [[buffer(14)]], packed_uint4 device* part_ranges_3 [[buffer(5)]], SpawnParams_0 constant* params_3 [[buffer(0)]], packed_uint4 device* slots_3 [[buffer(9)]], packed_float4 device* parts_3 [[buffer(6)]], packed_float4 device* frames_3 [[buffer(4)]], packed_float4 device* state_3 [[buffer(8)]], packed_float4 device* bodies_3 [[buffer(10)]], packed_float4 device* extras_3 [[buffer(13)]], packed_float4 device* colliders_3 [[buffer(11)]])
 {
     thread KernelContext_0 kernelContext_6;
-    (&kernelContext_6)->params_0 = params_3;
+    (&kernelContext_6)->control_0 = control_3;
     (&kernelContext_6)->parents_0 = parents_3;
     (&kernelContext_6)->islands_of_0 = islands_of_3;
     (&kernelContext_6)->children_0 = children_3;
@@ -939,7 +943,7 @@ float4 quat_vec_0(const Quat_0 thread* q_8)
     (&kernelContext_6)->chunks_0 = chunks_3;
     (&kernelContext_6)->structure_base_0 = structure_base_3;
     (&kernelContext_6)->part_ranges_0 = part_ranges_3;
-    (&kernelContext_6)->control_0 = control_3;
+    (&kernelContext_6)->params_0 = params_3;
     (&kernelContext_6)->slots_0 = slots_3;
     (&kernelContext_6)->parts_0 = parts_3;
     (&kernelContext_6)->frames_0 = frames_3;
@@ -949,7 +953,7 @@ float4 quat_vec_0(const Quat_0 thread* q_8)
     (&kernelContext_6)->colliders_0 = colliders_3;
     uint p_3 = id_2.x;
     bool _S107;
-    if(p_3 >= (params_3->parent_count_0))
+    if(p_3 >= (*(control_3+1U)))
     {
         _S107 = true;
     }

@@ -17,7 +17,7 @@ struct SplitParams {
     pad: u32,
 }
 
-const BINDINGS: [Binding; 13] = [
+const BINDINGS: [Binding; 14] = [
     Binding::Uniform,   // params
     Binding::Storage,   // chunk statics
     Binding::Storage,   // index (incidence)
@@ -31,6 +31,7 @@ const BINDINGS: [Binding; 13] = [
     Binding::StorageRw, // frames (each parent's rigid frame)
     Binding::Storage,   // engine bodies (split_frames)
     Binding::Storage,   // parent bodies (split_frames)
+    Binding::StorageRw, // control (the split pass's control words)
 ];
 
 const CHILD_WORDS: usize = 8;
@@ -100,7 +101,7 @@ struct SpawnParams {
     live: u32,
     max_bodies: u32,
     max_colliders: u32,
-    island_free: u32,
+    island_cap: u32,
     pad: u32,
 }
 
@@ -218,9 +219,10 @@ impl GpuSplitter {
         let [chunks, index, bonds, bond_dyn, islands, state] = buffers;
         let none_bodies = gpu.storage("split no engine bodies", &[[0f32; 4]; 7]);
         let none_parents = gpu.storage("split no parent bodies", &[[0f32; 4]; 2]);
+        let control = gpu.storage("split control", &control_words(parents.len() as u32, 0, 0, 0, 0, total as u32));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for (k, size) in [(&self.components, parents.len().max(1) as u32), (&self.children, groups(total, 64))] {
-            let bind = gpu.bind(&k.group, &[&params, chunks, index, bonds, bond_dyn, islands, state, &parents_buf, &work_buf, &out, &frames, &none_bodies, &none_parents]);
+            let bind = gpu.bind(&k.group, &[&params, chunks, index, bonds, bond_dyn, islands, state, &parents_buf, &work_buf, &out, &frames, &none_bodies, &none_parents, &control]);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &bind, &[]);
@@ -301,8 +303,8 @@ impl GpuSplitter {
             })
             .collect();
         let islands_of = gpu.storage("spawn parents", if islands_of.is_empty() { &[[0u32; 4]][..] } else { &islands_of });
-        let params = gpu.uniform("spawn params", &SpawnParams { parent_count: run.parent_count as u32, first_body, first_collider, live: live as u32, max_bodies, max_colliders: u32::MAX, island_free: u32::MAX, pad: 0 });
-        let control = gpu.storage("spawn control", &[0u32; 4]);
+        let params = gpu.uniform("spawn params", &SpawnParams { parent_count: run.parent_count as u32, first_body, first_collider, live: live as u32, max_bodies, max_colliders: u32::MAX, island_cap: u32::MAX, pad: 0 });
+        let control = gpu.storage("spawn control", &control_words(run.parent_count as u32, 0, 0, first_body, first_collider, total as u32));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for (k, size) in [(&self.offsets, 1u32), (&self.spawn, groups(total, 64)), (&self.retire, groups(run.parent_count, 64))] {
             let bind = gpu.bind(&k.group, &[&params, &run.parents, &run.work, &run.out, &run.frames, &table.ranges, &table.parts, chunks, state, &slots_buf, bodies, colliders, &islands_of, &extras_buf, &table.structure_base, &control]);
@@ -548,6 +550,9 @@ impl GpuLayout {
         let words = 16 + cap + 6 * run.total + params.island_count as usize + params.bond_count as usize + 1;
         let plan = gpu.storage("layout plan", &vec![0u32; words]);
         let uniform = gpu.uniform("layout params", &params);
+        // The control words the layout reads (the spawn's buffer keeps its own).
+        gpu.queue.write_buffer(tables.spawn.2, 4 * CTL_PARENTS, bytemuck::cast_slice(&[params.parent_count, params.island_count, params.next_id]));
+        gpu.queue.write_buffer(tables.spawn.2, 4 * CTL_TOTAL, bytemuck::cast_slice(&[params.total]));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let no_copy = gpu.storage("layout no island copy", &[[0f32; 4]; 1]);
         let no_copy_out = gpu.storage("layout no island copy out", &[[0f32; 4]; 1]);
@@ -645,13 +650,13 @@ impl GpuSplitter {
         // The spawn's.
         let slots = gpu.storage("pass slots", &vec![[0u32; 4]; total.max(1)]);
         let extras = gpu.storage("pass extras", &vec![[0f32; 4]; 2 * total.max(1)]);
-        let control = gpu.storage("pass control", &[0u32; 4]);
+        let control = gpu.storage("pass control", &control_words(parents.len() as u32, layout_params.island_count, layout_params.next_id, engine.first_body, engine.first_collider, total as u32));
         let firsts: Vec<[u32; 4]> = parents.iter().zip(&engine.retire).map(|(p, r)| [p.1[0], r[0], r[1], r[2]]).collect();
         let firsts = gpu.storage("pass parents' records", if firsts.is_empty() { &[[0u32; 4]][..] } else { &firsts });
-        let island_free = (island_cap as u32).saturating_sub(layout_params.island_count);
+
         let spawn_params = gpu.uniform(
             "pass spawn params",
-            &SpawnParams { parent_count: parents.len() as u32, first_body: engine.first_body, first_collider: engine.first_collider, live: 1, max_bodies: engine.target.max_bodies, max_colliders: engine.max_colliders, island_free, pad: 0 },
+            &SpawnParams { parent_count: parents.len() as u32, first_body: engine.first_body, first_collider: engine.first_collider, live: 1, max_bodies: engine.target.max_bodies, max_colliders: engine.max_colliders, island_cap: island_cap as u32, pad: 0 },
         );
         // The layout's: copies of the tables as they are, its plan.
         let mut params = layout_params;
@@ -727,7 +732,7 @@ impl GpuSplitter {
             (Some(o), Some((c, _))) => (o, c),
             _ => (&dummy, &dummy_out),
         };
-        let split_bind = |k: &Kernel| gpu.bind(&k.group, &[&split_params, chunks, index, bonds, bond_dyn, islands, state, &parents_buf, &work, &out, &frames, engine.target.bodies, &parent_bodies]);
+        let split_bind = |k: &Kernel| gpu.bind(&k.group, &[&split_params, chunks, index, bonds, bond_dyn, islands, state, &parents_buf, &work, &out, &frames, engine.target.bodies, &parent_bodies, &control]);
         let spawn_bind = |k: &Kernel| {
             gpu.bind(&k.group, &[&spawn_params, &parents_buf, &work, &out, &frames, &table.ranges, &table.parts, chunks, state, &slots, engine.target.bodies, engine.target.colliders, &firsts, &extras, &table.structure_base, &control])
         };
@@ -799,7 +804,7 @@ impl GpuSplitter {
             (&out, 0, 16 * (CHILD_WORDS * total) as u64),
             (&slots, 0, 16 * total as u64),
             (&extras, 0, 32 * total as u64),
-            (&control, 0, 16),
+            (&control, 0, 4 * CTL_WORDS as u64),
             (engine.target.bodies, body_words * engine.first_body as u64, body_words * bodies_max),
             (engine.target.colliders, col_words * engine.first_collider as u64, col_words * cols_max),
         ]);
@@ -874,4 +879,23 @@ impl GpuSplitter {
 /// `STRESS_GPU_ANCHORED_ENGINE_FRAME=1`.
 fn anchored_pose() -> u32 {
     std::env::var("STRESS_GPU_ANCHORED_ENGINE_FRAME").map_or(1, |v| (v != "1") as u32)
+}
+
+/// The split pass's control words (common.slang `CTL_*`).
+pub const CTL_PARENTS: u64 = 1;
+pub const CTL_TOTAL: u64 = 6;
+pub const CTL_NEW_ISLANDS: usize = 7;
+pub const CTL_WORDS: usize = 16;
+
+/// A split pass's control words as the host sets them: parents, live islands, the next
+/// cluster id, the engine's bodies and colliders, child slots.
+fn control_words(parents: u32, islands: u32, next_id: u32, first_body: u32, first_collider: u32, total: u32) -> [u32; CTL_WORDS] {
+    let mut w = [0u32; CTL_WORDS];
+    w[1] = parents;
+    w[2] = islands;
+    w[3] = next_id;
+    w[4] = first_body;
+    w[5] = first_collider;
+    w[6] = total;
+    w
 }

@@ -74,7 +74,7 @@ struct LayoutParams
 [[vk::binding(22, 0)]] StructuredBuffer<uint4> spawn_slots;
 [[vk::binding(23, 0)]] StructuredBuffer<float4> spawn_extras;
 // spawn.slang `control`: [0] 1 when the split does not fit (nothing laid out).
-[[vk::binding(24, 0)]] StructuredBuffer<uint> control;
+[[vk::binding(24, 0)]] RWStructuredBuffer<uint> control;
 // The cascade's copy of the island records (solver.rs `cascade_islands`, restored into the
 // live records by every cascade pass): as it was, and to write (`layout_copy`).
 [[vk::binding(25, 0)]] StructuredBuffer<float4> old_copy;
@@ -88,22 +88,22 @@ static const uint ISLAND_FLAG_DRIVEN = 2;
 static const uint ISLAND_FLAG_SETTLED = 16;
 
 // plan: [0] the new island count; from 16 the regions below (`*_at`).
-uint cap() { return params.island_count + params.total; }
+uint cap() { return control[CTL_ISLANDS] + control[CTL_TOTAL]; }
 // The new order: per island an element, an old island or `island_count + child slot`.
 uint order_at(uint i) { return 16 + i; }
 // Per child slot: its island, its cluster id.
 uint child_island_at(uint slot) { return 16 + cap() + slot; }
-uint child_id_at(uint slot) { return 16 + cap() + params.total + slot; }
+uint child_id_at(uint slot) { return 16 + cap() + control[CTL_TOTAL] + slot; }
 // Per old island: its new index (NONE: split).
-uint old_new_at(uint j) { return 16 + cap() + 2 * params.total + j; }
+uint old_new_at(uint j) { return 16 + cap() + 2 * control[CTL_TOTAL] + j; }
 // Per parent chunk (at its parent's base): its new position in the parent's range.
-uint new_chunk_at(uint slot) { return 16 + cap() + 2 * params.total + params.island_count + slot; }
+uint new_chunk_at(uint slot) { return 16 + cap() + 2 * control[CTL_TOTAL] + control[CTL_ISLANDS] + slot; }
 // Per child slot: its bond range (first, end).
-uint child_bonds_at(uint slot) { return 16 + cap() + 3 * params.total + params.island_count + 2 * slot; }
+uint child_bonds_at(uint slot) { return 16 + cap() + 3 * control[CTL_TOTAL] + control[CTL_ISLANDS] + 2 * slot; }
 // Per bond (by its old index): its new index (NONE: cut).
-uint bond_new_at(uint b) { return 16 + cap() + 5 * params.total + params.island_count + b; }
+uint bond_new_at(uint b) { return 16 + cap() + 5 * control[CTL_TOTAL] + control[CTL_ISLANDS] + b; }
 // Per parent (at its base): its children in the order of their islands (child numbers).
-uint child_order_at(uint slot) { return 16 + cap() + 5 * params.total + params.island_count + params.bond_count + slot; }
+uint child_order_at(uint slot) { return 16 + cap() + 5 * control[CTL_TOTAL] + control[CTL_ISLANDS] + params.bond_count + slot; }
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
@@ -111,13 +111,13 @@ void layout_plan(uint3 id: SV_DispatchThreadID)
 {
     if (control[0] != 0)
         return;
-    uint n = params.island_count;
+    uint n = control[CTL_ISLANDS];
     for (uint i = 0; i < n; i++)
         plan[order_at(i)] = i;
     uint len = n;
-    uint next = params.next_id;
+    uint next = control[CTL_NEXT_ID];
     // The host splits from the last parent (`out.disconnected` is ascending).
-    for (uint q = params.parent_count; q > 0; q--)
+    for (uint q = control[CTL_PARENTS]; q > 0; q--)
     {
         uint p = q - 1;
         uint4 parent = parents[p];
@@ -136,6 +136,8 @@ void layout_plan(uint3 id: SV_DispatchThreadID)
         }
     }
     plan[0] = len;
+    control[CTL_NEW_ISLANDS] = len;
+    control[CTL_NEXT_ID_AFTER] = next;
     for (uint j = 0; j < n; j++)
         plan[old_new_at(j)] = NONE;
     for (uint i = 0; i < len; i++)
@@ -205,7 +207,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
     uint p = group.x;
-    if (p >= params.parent_count || control[0] != 0)
+    if (p >= control[CTL_PARENTS] || control[0] != 0)
         return;
     uint4 parent = parents[p];
     if (parent.z < 2)
@@ -215,7 +217,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     uint c0 = asuint(r.x), c1 = asuint(r.y), b0 = asuint(r.z), b1 = asuint(r.w);
     uint n = c1 - c0;
     uint base = parent.y;
-    uint total = params.total;
+    uint total = control[CTL_TOTAL];
     // 1. New chunk positions (thread 0: a fixed order), the children's chunk ranges.
     if (tid == 0)
     {
@@ -525,7 +527,7 @@ void layout_moved(uint3 id: SV_DispatchThreadID)
     if (i >= plan[0])
         return;
     uint e = plan[order_at(i)];
-    if (e >= params.island_count || e == i)
+    if (e >= control[CTL_ISLANDS] || e == i)
         return;
     for (uint t = 0; t < params.island_words; t++)
         islands[island_word(i, t)] = old_islands[island_word(e, t)];
@@ -565,7 +567,7 @@ void layout_copy(uint3 id: SV_DispatchThreadID)
         return;
     }
     uint e = plan[order_at(i)];
-    if (e < params.island_count)
+    if (e < control[CTL_ISLANDS])
     {
         for (uint t = 0; t < params.island_words; t++)
             island_copy[island_word(i, t)] = old_copy[island_word(e, t)];

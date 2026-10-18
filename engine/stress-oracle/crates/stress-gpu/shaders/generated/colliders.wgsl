@@ -1,5 +1,17 @@
 @binding(11) @group(0) var<storage, read> control_0 : array<u32>;
 
+@binding(1) @group(0) var<storage, read> parents_0 : array<vec4<u32>>;
+
+@binding(9) @group(0) var<storage, read> islands_of_0 : array<vec4<u32>>;
+
+@binding(14) @group(0) var<storage, read_write> collider_key_0 : array<u32>;
+
+@binding(4) @group(0) var<storage, read> slots_0 : array<vec4<u32>>;
+
+@binding(3) @group(0) var<storage, read> children_0 : array<vec4<f32>>;
+
+@binding(2) @group(0) var<storage, read> work_0 : array<u32>;
+
 struct ColliderParams_std140_0
 {
     @align(16) parent_count_0 : u32,
@@ -13,18 +25,6 @@ struct ColliderParams_std140_0
 };
 
 @binding(0) @group(0) var<uniform> params_0 : ColliderParams_std140_0;
-@binding(1) @group(0) var<storage, read> parents_0 : array<vec4<u32>>;
-
-@binding(9) @group(0) var<storage, read> islands_of_0 : array<vec4<u32>>;
-
-@binding(14) @group(0) var<storage, read_write> collider_key_0 : array<u32>;
-
-@binding(4) @group(0) var<storage, read> slots_0 : array<vec4<u32>>;
-
-@binding(3) @group(0) var<storage, read> children_0 : array<vec4<f32>>;
-
-@binding(2) @group(0) var<storage, read> work_0 : array<u32>;
-
 @binding(6) @group(0) var<storage, read> old_chunks_0 : array<vec4<f32>>;
 
 @binding(10) @group(0) var<storage, read> structure_base_0 : array<u32>;
@@ -43,7 +43,7 @@ struct ColliderParams_std140_0
 
 fn total_slots_0() -> u32
 {
-    return parents_0[params_0.parent_count_0].y;
+    return parents_0[control_0[u32(1)]].y;
 }
 
 fn parent_of_0( slot_0 : u32) -> u32
@@ -53,7 +53,7 @@ fn parent_of_0( slot_0 : u32) -> u32
     {
         var _S1 : u32 = p_0 + u32(1);
         var _S2 : bool;
-        if(_S1 < (params_0.parent_count_0))
+        if(_S1 < control_0[u32(1)])
         {
             _S2 = (parents_0[_S1].y) <= slot_0;
         }
@@ -88,7 +88,7 @@ fn collider_keys(@builtin(global_invocation_id) id_0 : vec3<u32>)
     }
     var t_0 : u32 = id_0.x;
     var _S3 : bool;
-    if(t_0 < (params_0.parent_count_0))
+    if(t_0 < control_0[u32(1)])
     {
         _S3 = (parents_0[t_0].z) >= u32(2);
     }

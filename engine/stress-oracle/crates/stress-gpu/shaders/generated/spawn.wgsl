@@ -1,16 +1,5 @@
-struct SpawnParams_std140_0
-{
-    @align(16) parent_count_0 : u32,
-    @align(4) first_body_0 : u32,
-    @align(8) first_collider_0 : u32,
-    @align(4) live_0 : u32,
-    @align(16) max_bodies_0 : u32,
-    @align(4) max_colliders_0 : u32,
-    @align(8) island_free_0 : u32,
-    @align(4) pad2_0 : u32,
-};
+@binding(15) @group(0) var<storage, read_write> control_0 : array<u32>;
 
-@binding(0) @group(0) var<uniform> params_0 : SpawnParams_std140_0;
 @binding(1) @group(0) var<storage, read> parents_0 : array<vec4<u32>>;
 
 @binding(12) @group(0) var<storage, read> islands_of_0 : array<vec4<u32>>;
@@ -45,8 +34,19 @@ struct ChunkStatic_std430_0
 
 @binding(5) @group(0) var<storage, read> part_ranges_0 : array<vec4<u32>>;
 
-@binding(15) @group(0) var<storage, read_write> control_0 : array<u32>;
+struct SpawnParams_std140_0
+{
+    @align(16) parent_count_0 : u32,
+    @align(4) first_body_0 : u32,
+    @align(8) first_collider_0 : u32,
+    @align(4) live_0 : u32,
+    @align(16) max_bodies_0 : u32,
+    @align(4) max_colliders_0 : u32,
+    @align(8) island_cap_0 : u32,
+    @align(4) pad2_0 : u32,
+};
 
+@binding(0) @group(0) var<uniform> params_0 : SpawnParams_std140_0;
 @binding(9) @group(0) var<storage, read_write> slots_0 : array<vec4<u32>>;
 
 @binding(6) @group(0) var<storage, read> parts_0 : array<vec4<f32>>;
@@ -63,7 +63,7 @@ struct ChunkStatic_std430_0
 
 fn total_slots_0() -> u32
 {
-    return parents_0[params_0.parent_count_0].y;
+    return parents_0[control_0[u32(1)]].y;
 }
 
 fn child_members_0( slot_0 : u32) -> vec2<u32>
@@ -84,8 +84,8 @@ fn spawn_offsets(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var colliders_needed_0 : u32;
     var k_0 : u32;
     var j_0 : u32;
-    var body_0 : u32 = params_0.first_body_0;
-    var collider_0 : u32 = params_0.first_collider_0;
+    var body_0 : u32 = control_0[u32(4)];
+    var collider_0 : u32 = control_0[u32(5)];
     var _S1 : u32 = total_slots_0();
     var p_0 : u32 = u32(0);
     var islands_needed_0 : u32 = u32(0);
@@ -93,7 +93,7 @@ fn spawn_offsets(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var colliders_needed_1 : u32 = u32(0);
     loop
     {
-        if(p_0 < (params_0.parent_count_0))
+        if(p_0 < control_0[u32(1)])
         {
         }
         else
@@ -147,7 +147,7 @@ fn spawn_offsets(@builtin(global_invocation_id) id_0 : vec3<u32>)
         colliders_needed_1 = colliders_needed_0;
     }
     var fits_0 : bool;
-    if(islands_needed_0 <= (params_0.island_free_0))
+    if(islands_needed_0 <= (params_0.island_cap_0 - min(params_0.island_cap_0, control_0[u32(2)])))
     {
         if((params_0.live_0) == u32(0))
         {
@@ -177,7 +177,9 @@ fn spawn_offsets(@builtin(global_invocation_id) id_0 : vec3<u32>)
     {
         p_0 = u32(1);
     }
-    control_0[i32(0)] = p_0;
+    control_0[u32(0)] = p_0;
+    control_0[u32(8)] = body_0;
+    control_0[u32(9)] = collider_0;
     if(!fits_0)
     {
         return;
@@ -187,7 +189,7 @@ fn spawn_offsets(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var collider_1 : u32 = collider_0;
     loop
     {
-        if(p_0 < (params_0.parent_count_0))
+        if(p_0 < control_0[u32(1)])
         {
         }
         else
@@ -243,6 +245,8 @@ fn spawn_offsets(@builtin(global_invocation_id) id_0 : vec3<u32>)
         collider_1 = collider_2;
         p_0 = p_0 + u32(1);
     }
+    control_0[u32(8)] = colliders_needed_0;
+    control_0[u32(9)] = collider_1;
     return;
 }
 
@@ -253,7 +257,7 @@ fn parent_of_0( slot_2 : u32) -> u32
     {
         var _S11 : u32 = p_1 + u32(1);
         var _S12 : bool;
-        if(_S11 < (params_0.parent_count_0))
+        if(_S11 < control_0[u32(1)])
         {
             _S12 = (parents_0[_S11].y) <= slot_2;
         }
@@ -781,7 +785,7 @@ fn spawn_bodies(@builtin(global_invocation_id) id_1 : vec3<u32>)
     }
     else
     {
-        j_1 = at_0.x - params_0.first_body_0;
+        j_1 = at_0.x - control_0[u32(4)];
     }
     var _S49 : u32 = u32(7) * j_1;
     var w_1 : u32 = u32(0);
@@ -852,7 +856,7 @@ fn spawn_bodies(@builtin(global_invocation_id) id_1 : vec3<u32>)
             }
             else
             {
-                flags_0 = col_1 - params_0.first_collider_0;
+                flags_0 = col_1 - control_0[u32(5)];
             }
             var cw_0 : u32 = u32(4) * flags_0;
             colliders_0[cw_0] = vec4<f32>((bitcast<f32>((at_0.x))), ids_0.x, ids_0.y, ids_0.z);
@@ -875,7 +879,7 @@ fn spawn_retire(@builtin(global_invocation_id) id_2 : vec3<u32>)
 {
     var p_4 : u32 = id_2.x;
     var _S55 : bool;
-    if(p_4 >= (params_0.parent_count_0))
+    if(p_4 >= control_0[u32(1)])
     {
         _S55 = true;
     }

@@ -2,14 +2,6 @@
 #include <metal_math>
 #include <metal_texture>
 using namespace metal;
-struct SplitParams_0
-{
-    uint parent_count_0;
-    uint out_base_0;
-    uint anchored_pose_0;
-    uint pad1_0;
-};
-
 struct Island_natural_0
 {
     packed_uint4 range_0;
@@ -100,6 +92,14 @@ struct BondStatic_natural_0
     JointBond_natural_0 law_0;
 };
 
+struct SplitParams_0
+{
+    uint parent_count_0;
+    uint out_base_0;
+    uint anchored_pose_0;
+    uint pad1_0;
+};
+
 struct ChunkStatic_natural_0
 {
     packed_float4 center_0;
@@ -122,13 +122,14 @@ struct ChunkStatic_natural_0
 
 struct KernelContext_0
 {
-    SplitParams_0 constant* params_0;
+    uint device* control_0;
     packed_uint4 device* parents_0;
     Island_natural_0 device* islands_0;
     uint device* work_0;
     uint device* index_0;
     BondDyn_natural_0 device* bond_dyn_0;
     BondStatic_natural_0 device* bonds_0;
+    SplitParams_0 constant* params_0;
     packed_float4 device* out_0;
     packed_float4 device* frames_0;
     ChunkStatic_natural_0 device* chunks_0;
@@ -140,7 +141,7 @@ struct KernelContext_0
 
 uint total_chunks_0(KernelContext_0 thread* kernelContext_0)
 {
-    return (uint4(*(kernelContext_0->parents_0+kernelContext_0->params_0->parent_count_0)) ).y;
+    return (uint4(*(kernelContext_0->parents_0+*(kernelContext_0->control_0+1U))) ).y;
 }
 
 bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
@@ -164,19 +165,20 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     return _S1;
 }
 
-[[kernel]] void split_components(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], SplitParams_0 constant* params_1 [[buffer(0)]], packed_uint4 device* parents_1 [[buffer(7)]], Island_natural_0 device* islands_1 [[buffer(5)]], uint device* work_1 [[buffer(8)]], uint device* index_1 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(4)]], BondStatic_natural_0 device* bonds_1 [[buffer(3)]], packed_float4 device* out_1 [[buffer(9)]], packed_float4 device* frames_1 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(1)]], packed_float4 device* state_1 [[buffer(6)]], packed_float4 device* parent_bodies_1 [[buffer(12)]], packed_float4 device* engine_bodies_1 [[buffer(11)]])
+[[kernel]] void split_components(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], uint device* control_1 [[buffer(13)]], packed_uint4 device* parents_1 [[buffer(7)]], Island_natural_0 device* islands_1 [[buffer(5)]], uint device* work_1 [[buffer(8)]], uint device* index_1 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(4)]], BondStatic_natural_0 device* bonds_1 [[buffer(3)]], SplitParams_0 constant* params_1 [[buffer(0)]], packed_float4 device* out_1 [[buffer(9)]], packed_float4 device* frames_1 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(1)]], packed_float4 device* state_1 [[buffer(6)]], packed_float4 device* parent_bodies_1 [[buffer(12)]], packed_float4 device* engine_bodies_1 [[buffer(11)]])
 {
     uint children_0;
     uint k_0;
     uint at_0;
     thread KernelContext_0 kernelContext_1;
-    (&kernelContext_1)->params_0 = params_1;
+    (&kernelContext_1)->control_0 = control_1;
     (&kernelContext_1)->parents_0 = parents_1;
     (&kernelContext_1)->islands_0 = islands_1;
     (&kernelContext_1)->work_0 = work_1;
     (&kernelContext_1)->index_0 = index_1;
     (&kernelContext_1)->bond_dyn_0 = bond_dyn_1;
     (&kernelContext_1)->bonds_0 = bonds_1;
+    (&kernelContext_1)->params_0 = params_1;
     (&kernelContext_1)->out_0 = out_1;
     (&kernelContext_1)->frames_0 = frames_1;
     (&kernelContext_1)->chunks_0 = chunks_1;
@@ -187,7 +189,7 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     (&kernelContext_1)->g_changed_0 = &g_changed_1;
     uint tid_0 = thread_0.x;
     uint p_0 = group_0.x;
-    if(p_0 >= (params_1->parent_count_0))
+    if(p_0 >= (*(control_1+1U)))
     {
         return;
     }
@@ -497,17 +499,18 @@ void inverse3_0(float3 r0_1, float3 r1_1, float3 r2_1, float3 thread* i0_0, floa
     return;
 }
 
-[[kernel]] void split_children(uint3 id_0 [[thread_position_in_grid]], SplitParams_0 constant* params_2 [[buffer(0)]], packed_uint4 device* parents_2 [[buffer(7)]], Island_natural_0 device* islands_2 [[buffer(5)]], uint device* work_2 [[buffer(8)]], uint device* index_2 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(4)]], BondStatic_natural_0 device* bonds_2 [[buffer(3)]], packed_float4 device* out_2 [[buffer(9)]], packed_float4 device* frames_2 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(1)]], packed_float4 device* state_2 [[buffer(6)]], packed_float4 device* parent_bodies_2 [[buffer(12)]], packed_float4 device* engine_bodies_2 [[buffer(11)]])
+[[kernel]] void split_children(uint3 id_0 [[thread_position_in_grid]], uint device* control_2 [[buffer(13)]], packed_uint4 device* parents_2 [[buffer(7)]], Island_natural_0 device* islands_2 [[buffer(5)]], uint device* work_2 [[buffer(8)]], uint device* index_2 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(4)]], BondStatic_natural_0 device* bonds_2 [[buffer(3)]], SplitParams_0 constant* params_2 [[buffer(0)]], packed_float4 device* out_2 [[buffer(9)]], packed_float4 device* frames_2 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(1)]], packed_float4 device* state_2 [[buffer(6)]], packed_float4 device* parent_bodies_2 [[buffer(12)]], packed_float4 device* engine_bodies_2 [[buffer(11)]])
 {
     bool anchored_0;
     thread KernelContext_0 kernelContext_2;
-    (&kernelContext_2)->params_0 = params_2;
+    (&kernelContext_2)->control_0 = control_2;
     (&kernelContext_2)->parents_0 = parents_2;
     (&kernelContext_2)->islands_0 = islands_2;
     (&kernelContext_2)->work_0 = work_2;
     (&kernelContext_2)->index_0 = index_2;
     (&kernelContext_2)->bond_dyn_0 = bond_dyn_2;
     (&kernelContext_2)->bonds_0 = bonds_2;
+    (&kernelContext_2)->params_0 = params_2;
     (&kernelContext_2)->out_0 = out_2;
     (&kernelContext_2)->frames_0 = frames_2;
     (&kernelContext_2)->chunks_0 = chunks_2;
@@ -526,7 +529,7 @@ void inverse3_0(float3 r0_1, float3 r1_1, float3 r2_1, float3 thread* i0_0, floa
     for(;;)
     {
         uint _S33 = p_1 + 1U;
-        if(_S33 < ((&kernelContext_2)->params_0->parent_count_0))
+        if(_S33 < (*((&kernelContext_2)->control_0+1U)))
         {
             anchored_0 = ((uint4(*((&kernelContext_2)->parents_0+_S33)) ).y) <= slot_0;
         }
@@ -719,16 +722,17 @@ float4 quat_vec_0(const Quat_0 thread* q_7)
     return float4(q_7->x_0, q_7->y_0, q_7->z_0, q_7->w_0);
 }
 
-[[kernel]] void split_frames(uint3 id_1 [[thread_position_in_grid]], SplitParams_0 constant* params_3 [[buffer(0)]], packed_uint4 device* parents_3 [[buffer(7)]], Island_natural_0 device* islands_3 [[buffer(5)]], uint device* work_3 [[buffer(8)]], uint device* index_3 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(4)]], BondStatic_natural_0 device* bonds_3 [[buffer(3)]], packed_float4 device* out_3 [[buffer(9)]], packed_float4 device* frames_3 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(1)]], packed_float4 device* state_3 [[buffer(6)]], packed_float4 device* parent_bodies_3 [[buffer(12)]], packed_float4 device* engine_bodies_3 [[buffer(11)]])
+[[kernel]] void split_frames(uint3 id_1 [[thread_position_in_grid]], uint device* control_3 [[buffer(13)]], packed_uint4 device* parents_3 [[buffer(7)]], Island_natural_0 device* islands_3 [[buffer(5)]], uint device* work_3 [[buffer(8)]], uint device* index_3 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(4)]], BondStatic_natural_0 device* bonds_3 [[buffer(3)]], SplitParams_0 constant* params_3 [[buffer(0)]], packed_float4 device* out_3 [[buffer(9)]], packed_float4 device* frames_3 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(1)]], packed_float4 device* state_3 [[buffer(6)]], packed_float4 device* parent_bodies_3 [[buffer(12)]], packed_float4 device* engine_bodies_3 [[buffer(11)]])
 {
     thread KernelContext_0 kernelContext_3;
-    (&kernelContext_3)->params_0 = params_3;
+    (&kernelContext_3)->control_0 = control_3;
     (&kernelContext_3)->parents_0 = parents_3;
     (&kernelContext_3)->islands_0 = islands_3;
     (&kernelContext_3)->work_0 = work_3;
     (&kernelContext_3)->index_0 = index_3;
     (&kernelContext_3)->bond_dyn_0 = bond_dyn_3;
     (&kernelContext_3)->bonds_0 = bonds_3;
+    (&kernelContext_3)->params_0 = params_3;
     (&kernelContext_3)->out_0 = out_3;
     (&kernelContext_3)->frames_0 = frames_3;
     (&kernelContext_3)->chunks_0 = chunks_3;
@@ -738,7 +742,7 @@ float4 quat_vec_0(const Quat_0 thread* q_7)
     threadgroup uint g_changed_3;
     (&kernelContext_3)->g_changed_0 = &g_changed_3;
     uint p_2 = id_1.x;
-    if(p_2 >= (params_3->parent_count_0))
+    if(p_2 >= (*(control_3+1U)))
     {
         return;
     }

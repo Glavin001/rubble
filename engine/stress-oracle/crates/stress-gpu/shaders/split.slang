@@ -52,6 +52,8 @@ struct SplitParams
 // principal rotation (the next float4): for `split_frames`.
 [[vk::binding(11, 0)]] StructuredBuffer<float4> engine_bodies;
 [[vk::binding(12, 0)]] StructuredBuffer<float4> parent_bodies;
+// The split pass's control words (common.slang `CTL_*`).
+[[vk::binding(13, 0)]] RWStructuredBuffer<uint> control;
 
 static const uint THREADS = 256;
 static const uint CHILD_WORDS = 8;
@@ -61,7 +63,7 @@ groupshared uint g_changed;
 uint total_chunks()
 {
     // The last parent's base plus its chunk count (`parents[n].y`, written by the host).
-    return parents[params.parent_count].y;
+    return parents[control[CTL_PARENTS]].y;
 }
 
 [shader("compute")]
@@ -70,7 +72,7 @@ void split_components(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
     uint p = group.x;
-    if (p >= params.parent_count)
+    if (p >= control[CTL_PARENTS])
         return;
     uint4 parent = parents[p];
     Island isl = islands[parent.x];
@@ -211,7 +213,7 @@ void split_children(uint3 id: SV_DispatchThreadID)
         return;
     // Which parent this slot is in (parents are few: a scan).
     uint p = 0;
-    while (p + 1 < params.parent_count && parents[p + 1].y <= slot)
+    while (p + 1 < control[CTL_PARENTS] && parents[p + 1].y <= slot)
         p++;
     uint4 parent = parents[p];
     uint k = slot - parent.y;
@@ -295,7 +297,7 @@ void split_children(uint3 id: SV_DispatchThreadID)
 void split_frames(uint3 id: SV_DispatchThreadID)
 {
     uint p = id.x;
-    if (p >= params.parent_count)
+    if (p >= control[CTL_PARENTS])
         return;
     float4 head = parent_bodies[2 * p];
     uint body = asuint(head.x);
