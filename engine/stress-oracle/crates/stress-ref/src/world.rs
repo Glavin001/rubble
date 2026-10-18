@@ -29,6 +29,7 @@ use crate::statics::StaticOptions;
 
 #[path = "world_coupling.rs"]
 mod coupling;
+pub use coupling::cluster_signature;
 /// The modal pre-window for impacts (prototype, `modal` feature): a child module so it
 /// drives the world's own contact and substep without widening their visibility.
 #[cfg(feature = "modal")]

@@ -590,6 +590,8 @@ pub struct GpuSolver {
     splitter: Option<crate::gpu_split::GpuSplitter>,
     /// GPU splits against the host's (`STRESS_GPU_SPLIT_CHECK=1`).
     pub split_check: crate::gpu_split::SplitCheck,
+    /// GPU-made bodies against the host's (`STRESS_GPU_SPLIT_CHECK=1`).
+    pub spawn_check: crate::gpu_split::SpawnCheck,
     cascade_islands: Option<(u64, wgpu::Buffer)>,
     cascade_status: Option<wgpu::Buffer>,
     /// The repeat gate's loads and flags, by layout generation (cascade.slang).
@@ -667,6 +669,7 @@ impl GpuSolver {
             planner: None,
             splitter: None,
             split_check: Default::default(),
+            spawn_check: Default::default(),
             plan_check: Default::default(),
             cascade_islands: None,
             cascade_status: None,
@@ -3330,6 +3333,13 @@ impl GpuSolver {
         (hash(bytemuck::cast_slice(&st)), hash(&bd))
     }
 
+    /// The rubble bodies of `run`'s children as the GPU makes them (`spawn.slang`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_spawn_bodies(&mut self, gpu: &Gpu, run: &crate::gpu_split::SplitRun, table: &crate::gpu_split::PartTable, first_body: u32, first_collider: u32, target: Option<crate::gpu_split::SpawnTarget>, retire: &[[u32; 3]]) -> Vec<crate::gpu_split::GpuBody> {
+        let splitter = self.splitter.get_or_insert_with(|| crate::gpu_split::GpuSplitter::new(gpu));
+        splitter.spawn(gpu, run, table, &self.buffers.chunk_static, &self.buffers.state, first_body, first_collider, target, retire)
+    }
+
     /// The chunk states of `clusters` from the GPU into the mirror (`sync`'s conversion),
     /// before a host split: `split_cluster` takes its children's motion from them, and the
     /// resident frame leaves the mirror's chunk states as they were at its last download.
@@ -3364,16 +3374,16 @@ impl GpuSolver {
 
     /// The children of the islands `parents` as the GPU splits them (`gpu_split`), from
     /// its current tables and chunk state, with each parent's rigid frame from the mirror.
-    pub fn gpu_split_children(&mut self, gpu: &Gpu, parents: &[usize]) -> Vec<Vec<crate::gpu_split::GpuChild>> {
+    pub fn gpu_split_children(&mut self, gpu: &Gpu, parents: &[usize]) -> crate::gpu_split::SplitRun {
         let splitter = self.splitter.get_or_insert_with(|| crate::gpu_split::GpuSplitter::new(gpu));
         // Each parent's rigid frame as the mirror holds it (the engine's motion, synced).
         let frame = |ci: usize| {
             let cl = &self.mirror.clusters[ci];
             let q = cl.pose.rotation;
-            let (v, w, c) = (cl.velocity, cl.angular_velocity, cl.com);
-            [[q.x as f32, q.y as f32, q.z as f32, q.w as f32], [v.x as f32, v.y as f32, v.z as f32, 0.0], [w.x as f32, w.y as f32, w.z as f32, 0.0], [c.x as f32, c.y as f32, c.z as f32, 0.0]]
+            let (v, w, c, x) = (cl.velocity, cl.angular_velocity, cl.com, cl.pose.position);
+            [[q.x as f32, q.y as f32, q.z as f32, q.w as f32], [v.x as f32, v.y as f32, v.z as f32, 0.0], [w.x as f32, w.y as f32, w.z as f32, 0.0], [c.x as f32, c.y as f32, c.z as f32, 0.0], [x.x as f32, x.y as f32, x.z as f32, 0.0]]
         };
-        let ps: Vec<(usize, [u32; 2], [[f32; 4]; 4])> = parents.iter().map(|&ci| (ci, [self.layout.islands[ci].range[0], self.layout.islands[ci].range[1]], frame(ci))).collect();
+        let ps: Vec<(usize, [u32; 2], [[f32; 4]; 5])> = parents.iter().map(|&ci| (ci, [self.layout.islands[ci].range[0], self.layout.islands[ci].range[1]], frame(ci))).collect();
         let b = &self.buffers;
         splitter.split(gpu, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &ps)
     }

@@ -44,7 +44,7 @@ struct SplitParams
 [[vk::binding(9, 0)]] RWStructuredBuffer<float4> out;
 // Per parent, its rigid frame at the split: rotation (x, y, z, w), centre-of-mass
 // velocity, angular velocity (world), centre of mass (body frame; the cluster's own, not
-// the island record's mass-scaled one). The engine's motion at the moment of the split,
+// the island record's mass-scaled one), pose position (world; spawn.slang). The engine's motion at the moment of the split,
 // which an island record (its frame-start pose) does not hold.
 [[vk::binding(10, 0)]] StructuredBuffer<float4> frames;
 
@@ -219,10 +219,10 @@ void split_children(uint3 id: SV_DispatchThreadID)
     Island isl = islands[parent.x];
     uint first = isl.range.x;
     uint members = total;
-    Quat q = quat_of(frames[4 * p]);
-    float3 vel = frames[4 * p + 1].xyz;
-    float3 omega = frames[4 * p + 2].xyz;
-    float3 parent_com = frames[4 * p + 3].xyz;
+    Quat q = quat_of(frames[5 * p]);
+    float3 vel = frames[5 * p + 1].xyz;
+    float3 omega = frames[5 * p + 2].xyz;
+    float3 parent_com = frames[5 * p + 3].xyz;
     // Mass and centre of mass (`add_cluster`), in member order.
     float mass = 0.0;
     float3 moment = float3(0.0);

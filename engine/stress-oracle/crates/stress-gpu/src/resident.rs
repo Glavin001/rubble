@@ -251,6 +251,57 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     /// The frame's end, with the status read (`resident_status`'s ranges, in order): the
     /// engine's overflow, if any.
     fn resident_finish(&mut self, status: &[Vec<u8>]) -> Result<(), String>;
+    /// The part records of every chunk of every structure (`sizes[s]` chunks each) for
+    /// the GPU's body creation (`spawn.slang`), 8 float4 per part. None when a chunk was
+    /// never cooked.
+    fn part_records(&self, _sizes: &[usize]) -> Option<Vec<Vec<Vec<[[f32; 4]; 8]>>>> {
+        None
+    }
+    /// A body's `BodyState` and its colliders' records, as raw words (for checks).
+    fn body_words(&self, _key: stress_ref::engine::BodyKey) -> Option<([[f32; 4]; 7], Vec<[[f32; 4]; 4]>)> {
+        None
+    }
+    /// A body's slot.
+    fn body_slot(&self, _key: stress_ref::engine::BodyKey) -> Option<u32> {
+        None
+    }
+    /// The engine's body and collider buffers and body capacity, for bodies made on the
+    /// GPU (`spawn.slang`): bodies in two regions, the second at the capacity.
+    fn spawn_buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)> {
+        None
+    }
+    /// A body's slot and collider range, for the GPU to retire it (`spawn_retire`).
+    fn retire_record(&self, _key: stress_ref::engine::BodyKey) -> Option<[u32; 3]> {
+        None
+    }
+    /// Bodies the GPU made (`adopted`, at the engine's next slots, in order) and retired
+    /// (`retired`): the engine's own bookkeeping follows, with no upload.
+    fn adopt_spawned(&mut self, _adopted: Vec<AdoptedBody>, _retired: &[stress_ref::engine::BodyKey]) -> Result<(), String> {
+        Err("this engine makes no bodies on the GPU".into())
+    }
+    /// The engine's body and collider counts (the next slots).
+    fn body_counts(&self) -> (u32, u32) {
+        (0, 0)
+    }
+}
+
+/// A body the GPU made for an engine (`spawn.slang`), for the engine's bookkeeping.
+#[derive(Clone, Debug)]
+pub struct AdoptedBody {
+    pub key: stress_ref::engine::BodyKey,
+    pub signature: u64,
+    pub fixed: bool,
+    pub slot: u32,
+    pub first_collider: u32,
+    /// Raw `BodyState` and `Collider` words, as written.
+    pub body: [[f32; 4]; 7],
+    pub colliders: Vec<[[f32; 4]; 4]>,
+    /// Each collider's chunk (structure, chunk).
+    pub chunks: Vec<(usize, usize)>,
+    /// Centre of mass in the body's oracle frame, and the principal rotation (oracle body
+    /// frame to the engine body's), as `cook_with` reports them.
+    pub com: [f64; 3],
+    pub principal: [f64; 4],
 }
 
 /// A resident engine shared between the world's shell (as its `RigidEngine`) and the

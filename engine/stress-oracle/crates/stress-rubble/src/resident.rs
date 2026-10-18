@@ -7,6 +7,7 @@ use stress_gpu::gpu::Gpu;
 use stress_gpu::ingest::{ColliderInfo, EngineBuffers, EngineIngest, KIND_BODY, KIND_STATIC, NONE};
 use stress_gpu::resident::{EngineFrame, OtherProps, ResidentEngine};
 use stress_ref::engine::BodyKey;
+use stress_ref::math::Vec3;
 
 use crate::ingest_check::body_code;
 use crate::{Owner, RubbleEngine};
@@ -124,6 +125,92 @@ impl ResidentEngine for RubbleEngine {
         parts
     }
 
+    fn part_records(&self, sizes: &[usize]) -> Option<Vec<Vec<Vec<[[f32; 4]; 8]>>>> {
+        sizes
+            .iter()
+            .enumerate()
+            .map(|(s, &n)| (0..n).map(|c| self.chunk_parts.get(&(s, c)).map(|list| list.iter().map(Self::part_words).collect())).collect())
+            .collect()
+    }
+
+    fn body_words(&self, key: BodyKey) -> Option<([[f32; 4]; 7], Vec<[[f32; 4]; 4]>)> {
+        let e = self.bodies.get(&key)?;
+        let s = self.bodies_now()[e.id as usize];
+        let body: [[f32; 4]; 7] = bytemuck::cast(s);
+        let cols = (e.colliders.start..e.colliders.end).map(|i| bytemuck::cast::<_, [[f32; 4]; 4]>(self.cols[i as usize])).collect();
+        Some((body, cols))
+    }
+
+    fn body_slot(&self, key: BodyKey) -> Option<u32> {
+        self.bodies.get(&key).map(|e| e.id)
+    }
+
+    fn spawn_buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)> {
+        Some((self.sim.body_buffer(), self.sim.collider_buffer(), self.sim.capacity().max_bodies))
+    }
+
+    fn retire_record(&self, key: BodyKey) -> Option<[u32; 3]> {
+        self.bodies.get(&key).map(|e| [e.id, e.colliders.start, e.colliders.end])
+    }
+
+    fn adopt_spawned(&mut self, adopted: Vec<stress_gpu::resident::AdoptedBody>, retired: &[BodyKey]) -> Result<(), String> {
+        use engine_schema::convex::CollisionFilter;
+        // The parents, retired on the GPU (`remove_body`'s bookkeeping, no upload).
+        for key in retired {
+            let Some(e) = self.bodies.remove(key) else { continue };
+            self.sim.mirror_retire(e.id);
+            let never = CollisionFilter { categories: 0x8000, mask: 0, group: 0 };
+            for id in e.colliders.clone() {
+                never.apply(&mut self.cols[id as usize]);
+                self.owners[id as usize] = Owner::Retired;
+            }
+            self.sim.mirror_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
+            self.layout_version += 1;
+            self.frozen.retain(|k| k != key);
+        }
+        // The children, made at the next slots in order (`create_body`'s bookkeeping).
+        let bodies: Vec<engine_schema::BodyState> = adopted.iter().map(|a| bytemuck::cast(a.body)).collect();
+        let cols: Vec<engine_schema::Collider> = adopted.iter().flat_map(|a| a.colliders.iter().map(|c| bytemuck::cast::<_, engine_schema::Collider>(*c))).collect();
+        if let Some(first) = adopted.first() {
+            if first.slot != self.sim.body_count() || first.first_collider != self.sim.collider_count() {
+                return Err(format!("GPU bodies at {}/{} but the engine's next slots are {}/{}", first.slot, first.first_collider, self.sim.body_count(), self.sim.collider_count()));
+            }
+        }
+        let (body_range, col_range) = self.sim.adopt_appended(&bodies, &cols);
+        let mut col = col_range.start;
+        for (a, state) in adopted.iter().zip(&bodies) {
+            let range = col..col + a.colliders.len() as u32;
+            col = range.end;
+            self.cols.extend(a.colliders.iter().map(|c| bytemuck::cast::<_, engine_schema::Collider>(*c)));
+            self.owners.extend(a.chunks.iter().map(|&chunk| Owner::Body { key: a.key, chunk: Some(chunk) }));
+            self.bodies.insert(
+                a.key,
+                crate::Entry {
+                    id: a.slot,
+                    signature: a.signature,
+                    fixed: a.fixed,
+                    colliders: range,
+                    com: Vec3::new(a.com[0], a.com[1], a.com[2]),
+                    principal: stress_ref::math::Quat { w: a.principal[3], x: a.principal[0], y: a.principal[1], z: a.principal[2] },
+                    inv_mass: state.inv_mass,
+                    inv_inertia: state.inv_inertia,
+                    ccd: false,
+                    // Only CCD bodies' substep bound reads it.
+                    thin: 0.0,
+                },
+            );
+        }
+        debug_assert_eq!(body_range.end, self.sim.body_count());
+        debug_assert_eq!(self.owners.len(), self.sim.collider_count() as usize);
+        self.bodies_changed();
+        self.layout_version += 1;
+        Ok(())
+    }
+
+    fn body_counts(&self) -> (u32, u32) {
+        (self.sim.body_count(), self.sim.collider_count())
+    }
+
     fn resident_finish(&mut self, status: &[Vec<u8>]) -> Result<(), String> {
         let counters: engine_schema::StepCounters = bytemuck::pod_read_unaligned(&status[0][..std::mem::size_of::<engine_schema::StepCounters>()]);
         if std::env::var("STRESS_RESIDENT_PHASES").is_ok() {
@@ -145,6 +232,25 @@ impl ResidentEngine for RubbleEngine {
 }
 
 impl RubbleEngine {
+    /// One part as `spawn.slang` reads it (8 float4).
+    fn part_words(p: &crate::Part) -> [[f32; 4]; 8] {
+        let f = |v: Vec3| [v.x as f32, v.y as f32, v.z as f32];
+        let row = |r: usize| [p.inertia.m[r][0] as f32, p.inertia.m[r][1] as f32, p.inertia.m[r][2] as f32, 0.0];
+        let (c, o) = (f(p.center), f(p.origin));
+        let q = p.rotation;
+        let col = &p.collider;
+        [
+            [c[0], c[1], c[2], p.mass as f32],
+            row(0),
+            row(1),
+            row(2),
+            [o[0], o[1], o[2], col.density],
+            [q.x as f32, q.y as f32, q.z as f32, q.w as f32],
+            [f32::from_bits(col.shape), f32::from_bits(col.material), f32::from_bits(col.generation), 0.0],
+            col.params,
+        ]
+    }
+
     /// Whether the frame's substep count reads CCD bodies' speeds (`resident_substeps`).
     fn needs_ccd_bodies(&self) -> bool {
         !self.speculative_ccd && self.bodies.iter().any(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k))

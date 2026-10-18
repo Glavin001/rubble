@@ -548,7 +548,7 @@ void inverse3_0(float3 r0_1, float3 r1_1, float3 r2_1, float3 thread* i0_0, floa
     uint offset_0 = (as_type<uint>((_S36.y)));
     uint count_0 = (as_type<uint>((_S36.z)));
     uint _S37 = (uint4(((&kernelContext_2)->islands_0+_S34.x)->range_0) ).x;
-    uint _S38 = 4U * p_1;
+    uint _S38 = 5U * p_1;
     Quat_0 q_5 = quat_of_0(float4(*((&kernelContext_2)->frames_0+_S38)) );
     float3 _S39 = (float4(*((&kernelContext_2)->frames_0+(_S38 + 1U))) ).xyz;
     float3 _S40 = (float4(*((&kernelContext_2)->frames_0+(_S38 + 2U))) ).xyz;

@@ -93,6 +93,14 @@ fn closing_speed(a: &Part, b: &Part) -> f64 {
 
 /// The tiered coupling's impact speed (m/s): an impactor contact closing slower is a
 /// load (`STRESS_TIERED_SPEED`, default 5; a measurement knob until calibrated).
+/// A cluster's engine-body signature: its structure, chunks and anchoring (the body
+/// changes when any of them does).
+pub fn cluster_signature(cl: &crate::solver::Cluster) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (cl.structure, &cl.chunks, cl.anchored).hash(&mut hasher);
+    hasher.finish()
+}
+
 fn tiered_impact_speed() -> f64 {
     std::env::var("STRESS_TIERED_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0)
 }
@@ -197,9 +205,7 @@ impl World {
         let mut live = std::collections::HashSet::with_capacity(self.solver.clusters.len());
         for cl in &self.solver.clusters {
             let st = &self.solver.structures[cl.structure];
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (cl.structure, &cl.chunks, cl.anchored).hash(&mut hasher);
-            let signature = hasher.finish();
+            let signature = cluster_signature(cl);
             live.insert(cl.id);
             if let Some((sig, shapes)) = cache.get(&cl.id) {
                 if *sig == signature {

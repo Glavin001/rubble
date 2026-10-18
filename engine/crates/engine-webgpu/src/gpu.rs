@@ -779,6 +779,88 @@ impl WgpuSim {
         self.set_colliders(id, std::slice::from_ref(&col));
     }
 
+    /// Bodies and colliders a GPU kernel already wrote at the next slots (bodies in both
+    /// regions, as `add_bodies` writes them; colliders as `add_colliders`): the host's
+    /// counts and mirrors follow, with no upload. For bodies made on the GPU (a split's
+    /// children, stress-gpu `spawn.slang`).
+    pub fn adopt_appended(&mut self, bodies: &[BodyState], colliders: &[Collider]) -> (std::ops::Range<u32>, std::ops::Range<u32>) {
+        let body_start = self.body_count;
+        let count = u32::try_from(bodies.len()).expect("body batch exceeds u32 index space");
+        assert!(count <= self.capacity.max_bodies.saturating_sub(body_start), "adopted bodies exceed capacity");
+        if count > 0 {
+            self.host_bodies.extend_from_slice(bodies);
+            self.body_count += count;
+            self.manifolds_valid = false;
+        }
+        let col_start = self.collider_count;
+        let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
+        assert!(count <= self.capacity.max_colliders.saturating_sub(col_start), "adopted colliders exceed capacity");
+        if count > 0 {
+            self.has_convex |= colliders.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+            self.has_filters |= colliders.iter().any(engine_schema::convex::CollisionFilter::is_set);
+            self.manifolds_valid = false;
+            self.host_cols.extend_from_slice(colliders);
+            self.collider_count += count;
+            for col in colliders {
+                if let Some(r) = engine_schema::collider_reach(col) {
+                    let b = col.body as usize;
+                    if self.body_reach.len() <= b {
+                        self.body_reach.resize(b + 1, 0.0);
+                    }
+                    self.body_reach[b] = self.body_reach[b].max(r);
+                }
+            }
+        }
+        (body_start..self.body_count, col_start..self.collider_count)
+    }
+
+    /// Bodies a GPU kernel already rewrote in place, in both regions (as `write_bodies`):
+    /// the host's mirror follows, with no upload.
+    pub fn mirror_bodies(&mut self, first: u32, bodies: &[BodyState]) {
+        let count = bodies.len() as u32;
+        assert!(first <= self.body_count && count <= self.body_count - first, "mirror_bodies outside the bodies");
+        if count == 0 {
+            return;
+        }
+        self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
+        self.manifolds_valid = false;
+        self.wake_pending = true;
+    }
+
+    /// A body a GPU kernel retired in place (no mass, motion or flags; stress-gpu
+    /// `spawn_retire`): the host's mirror follows, with no upload.
+    pub fn mirror_retire(&mut self, id: u32) {
+        let b = &mut self.host_bodies[id as usize];
+        b.inv_mass = 0.0;
+        b.inv_inertia = [0.0; 3];
+        b.linear_vel = [0.0; 3];
+        b.angular_vel = [0.0; 3];
+        b.flags = 0;
+        self.manifolds_valid = false;
+        self.wake_pending = true;
+    }
+
+    /// Colliders a GPU kernel already rewrote in place (as `set_colliders`): the host's
+    /// mirror and flags follow, with no upload.
+    pub fn mirror_colliders(&mut self, first: u32, cols: &[Collider]) {
+        let end = first as usize + cols.len();
+        assert!(end <= self.collider_count as usize, "colliders {first}..{end} out of range");
+        if cols.is_empty() {
+            return;
+        }
+        use engine_schema::convex::CollisionFilter;
+        let cleared = self.host_cols[first as usize..end].iter().any(CollisionFilter::is_set);
+        self.host_cols[first as usize..end].copy_from_slice(cols);
+        self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        if cols.iter().any(CollisionFilter::is_set) {
+            self.has_filters = true;
+        } else if cleared {
+            self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
+        }
+        self.grid_cache = None;
+        self.manifolds_valid = false;
+    }
+
     /// Replace the contiguous colliders `first..first + cols.len()` in one upload.
     pub fn set_colliders(&mut self, first: u32, cols: &[Collider]) {
         let end = first as usize + cols.len();

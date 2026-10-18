@@ -515,7 +515,7 @@ fn split_children(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var offset_0 : u32 = (bitcast<u32>((out_0[at_2].y)));
     var count_0 : u32 = (bitcast<u32>((out_0[at_2].z)));
     var _S21 : u32 = islands_0[parent_0.x].range_0.x;
-    var _S22 : u32 = u32(4) * p_1;
+    var _S22 : u32 = u32(5) * p_1;
     var q_4 : Quat_0 = quat_of_0(frames_0[_S22]);
     var _S23 : vec3<f32> = frames_0[_S22 + u32(1)].xyz;
     var _S24 : vec3<f32> = frames_0[_S22 + u32(2)].xyz;

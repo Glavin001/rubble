@@ -117,7 +117,7 @@ enum Owner {
 }
 
 #[derive(Clone, Debug)]
-struct Entry {
+pub(crate) struct Entry {
     id: u32,
     signature: u64,
     fixed: bool,
@@ -142,6 +142,26 @@ struct Cooked {
     colliders: Vec<Collider>,
     chunks: Vec<Option<(usize, usize)>>,
     thin: f64,
+    /// Each collider's shape in the body's frame before the principal axes (for a
+    /// cluster, the structure's frame), as the GPU needs it to make bodies of a split's
+    /// children itself (`Part`).
+    parts: Vec<Part>,
+}
+
+/// One collider's shape in the frame its body's shapes are given in (a cluster's: the
+/// structure's): its mass, centre and inertia about the centre, its collider's origin and
+/// rotation there, and the collider's shape record. A body of any set of a structure's
+/// chunks is these combined: mass and centre summed, inertia shifted to the common
+/// centre, principal axes, then each collider at `to_body (origin - com)` turned by
+/// `to_body rotation` (`cook_with`).
+#[derive(Clone, Copy, Debug)]
+pub struct Part {
+    pub mass: f64,
+    pub center: Vec3,
+    pub inertia: Mat3,
+    pub origin: Vec3,
+    pub rotation: Quat,
+    pub collider: Collider,
 }
 
 /// Inertia of a solid box of half extents `h` about its centre.
@@ -228,6 +248,7 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
             }],
             chunks: vec![None],
             thin: *radius,
+            parts: Vec::new(),
         },
         BodyGeometry::Boxes(shapes) => {
             // Each shape's mass properties in the body frame: (mass, centre, inertia
@@ -279,7 +300,9 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
             let principal = Quat { w: rot.w, x: rot.x, y: rot.y, z: rot.z }.normalized();
             let to_body = principal.conjugate();
             let mut colliders = Vec::new();
-            for s in shapes.iter() {
+            let mut cooked_parts = Vec::with_capacity(shapes.len());
+            for (k, s) in shapes.iter().enumerate() {
+                let before = colliders.len();
                 let volume = 8.0 * s.half_extents.x * s.half_extents.y * s.half_extents.z;
                 let density = (s.mass / volume.max(1e-300)) as f32;
                 match &s.hull {
@@ -327,6 +350,17 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
                         }
                     }
                 }
+                // The part: this collider's shape in the shapes' frame.
+                let col = colliders[before];
+                let origin = match &s.hull {
+                    Some(_) if col.shape == ShapeType::ConvexHull as u32 => {
+                        let h = hull_entry(s.hull.as_ref().expect("hull"), s.chunk, arena, hulls).expect("cooked above");
+                        s.local.position + s.local.rotation.rotate(Vec3::new(h.offset.x as f64, h.offset.y as f64, h.offset.z as f64))
+                    }
+                    _ => s.local.position,
+                };
+                let (mass, center, inertia) = parts[k];
+                cooked_parts.push(Part { mass, center, inertia, origin, rotation: s.local.rotation, collider: col });
             }
             Cooked {
                 mass,
@@ -336,6 +370,7 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
                 colliders,
                 chunks: shapes.iter().map(|s| s.chunk).collect(),
                 thin,
+                parts: cooked_parts,
             }
         }
     }
@@ -356,6 +391,9 @@ pub struct RubbleEngine {
     arena: HullArena,
     /// Chunk hulls cooked so far (`HullCache`).
     hulls: HullCache,
+    /// Each cooked chunk's parts (`Part`, the structure's frame), for the GPU's body
+    /// creation (`ResidentEngine::part_table`).
+    pub(crate) chunk_parts: HashMap<(usize, usize), Vec<Part>>,
     bodies: HashMap<BodyKey, Entry>,
     /// What each collider stands for, by collider id.
     owners: Vec<Owner>,
@@ -475,6 +513,7 @@ impl RubbleEngine {
             sim,
             arena: HullArena::new(),
             hulls: HullCache::new(),
+            chunk_parts: HashMap::new(),
             bodies: HashMap::new(),
             owners: Vec::new(),
             cols: Vec::new(),
@@ -520,6 +559,19 @@ impl RubbleEngine {
 
     fn create_body(&mut self, b: &EngineBody) {
         let c = cook_with(b, &mut self.arena, &mut self.hulls);
+        // Each chunk's parts, once (they depend on the chunk only).
+        let mut k = 0;
+        while k < c.parts.len() {
+            let chunk = c.chunks[k];
+            let mut end = k + 1;
+            while end < c.parts.len() && c.chunks[end] == chunk {
+                end += 1;
+            }
+            if let Some(chunk) = chunk {
+                self.chunk_parts.entry(chunk).or_insert_with(|| c.parts[k..end].to_vec());
+            }
+            k = end;
+        }
         let position = b.pose.position + b.pose.rotation.rotate(c.com);
         let rotation = (b.pose.rotation * c.principal).normalized();
         let inv = |m: f64| if m > 0.0 && !b.fixed { (1.0 / m) as f32 } else { 0.0 };

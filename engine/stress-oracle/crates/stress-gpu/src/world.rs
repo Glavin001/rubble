@@ -128,6 +128,8 @@ pub struct GpuWorld {
     /// The resident frame (`with_resident_engine`, `resident_frame.rs`): the engine
     /// stepped and its contacts turned into static loads on the GPU, no host round trip.
     resident_engine: Option<std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>>,
+    /// The engine's part table on the GPU (M3's body creation), built at the first split.
+    part_table: Option<std::rc::Rc<crate::gpu_split::PartTable>>,
     resident: Option<resident_frame::ResidentState>,
     /// Frames taken on the resident path.
     pub resident_frames: u64,
@@ -231,6 +233,7 @@ impl GpuWorld {
             fast_qs: std::env::var("STRESS_QS_FAST").is_ok_and(|v| v == "1"),
             fast_now: false,
             resident_engine: None,
+            part_table: None,
             resident: None,
             resident_frames: 0,
             prepare_seconds: 0.0,

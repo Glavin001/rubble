@@ -187,6 +187,8 @@ impl GpuWorld {
         let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
         let max = self.solver.mirror.config.static_passes.unwrap_or(StaticOptions::default().max_cascade).max(1);
         let mut split = false;
+        // M3's check: GPU-made bodies of this frame's splits, compared after the host makes its own.
+        let mut pending_spawn: Vec<(Vec<u64>, Vec<usize>, Option<Vec<crate::gpu_split::GpuBody>>)> = Vec::new();
         let mut first = 0;
         let mut unconverged = 0;
         loop {
@@ -264,13 +266,23 @@ impl GpuWorld {
             // cascade goes on from the next pass.
             let t_split = std::time::Instant::now();
             self.resident_sync_motion();
+            // `STRESS_GPU_SPAWN=1` (M3): the children's engine bodies made on the GPU, in the
+            // engine's own buffers, and the parents' retired there; the engine adopts them
+            // once the host's split names the children.
+            let live = std::env::var("STRESS_GPU_SPAWN").is_ok_and(|v| v == "1");
+            let spawned = if live { self.spawn_live(gpu, &engine, &out.disconnected) } else { None };
             // `STRESS_GPU_SPLIT_CHECK=1`: the GPU's split of these islands, compared with
             // the host's below (M2).
             let split_check = std::env::var("STRESS_GPU_SPLIT_CHECK").is_ok_and(|v| v == "1");
             let gpu_children = split_check.then(|| {
                 let parents: Vec<usize> = out.disconnected.clone();
                 let ids: Vec<u64> = parents.iter().map(|&ci| self.solver.mirror.clusters[ci].id).collect();
-                (ids, self.solver.gpu_chunks().to_vec(), self.solver.gpu_split_children(gpu, &parents))
+                let run = self.solver.gpu_split_children(gpu, &parents);
+                // M3: the children's rubble bodies as the GPU makes them, at the slots the
+                // engine would give them next.
+                let (first_body, first_collider) = engine.borrow().body_counts();
+                let bodies = self.part_table(gpu, &engine).map(|table| self.solver.gpu_spawn_bodies(gpu, &run, &table, first_body, first_collider, None, &[]));
+                (ids, self.solver.gpu_chunks().to_vec(), run.children, bodies)
             });
             // In place when the tables can take it, opt-in (`STRESS_QS_SPLIT_IN_PLACE=1`):
             // off by default since it makes the bombard nondeterministic run to run and
@@ -299,8 +311,12 @@ impl GpuWorld {
                     eprintln!("resident split: {} clusters split, sync {t_synced:.1} ms, split {:.1} ms, rebuild {:.1} ms", out.disconnected.len(), t_splits - t_synced, t_split.elapsed().as_secs_f64() * 1e3 - t_splits);
                 }
             }
-            if let Some((ids, layout_chunks, gpu_children)) = gpu_children {
+            if let Some(spawned) = spawned {
+                self.adopt_live(&engine, spawned)?;
+            }
+            if let Some((ids, layout_chunks, gpu_children, bodies)) = gpu_children {
                 self.check_split(&ids, &layout_chunks, &gpu_children);
+                pending_spawn.push((ids, gpu_children.iter().map(|c| c.len()).collect::<Vec<_>>(), bodies));
             }
             split = true;
             first = at + 1;
@@ -320,6 +336,11 @@ impl GpuWorld {
             }
             let t_wb = std::time::Instant::now();
             self.with_shell_mut(|w| w.coupled_write_back(&[]));
+            for (ids, counts, bodies) in pending_spawn.drain(..) {
+                if let Some(bodies) = bodies {
+                    self.check_spawn(&engine, &ids, &counts, &bodies);
+                }
+            }
             if trace {
                 eprintln!("resident split: engine bodies {:.1} ms", t_wb.elapsed().as_secs_f64() * 1e3);
             }
@@ -401,6 +422,136 @@ impl GpuWorld {
             }
         }
         self.solver.split_check = c;
+    }
+}
+
+impl GpuWorld {
+    /// M3's check: the GPU-made bodies (`bodies`, by parent `ids` in order, `counts`
+    /// children each) against those the engine made for the host's children.
+    fn check_spawn(&mut self, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>, ids: &[u64], counts: &[usize], bodies: &[crate::gpu_split::GpuBody]) {
+        let m = &self.solver.mirror;
+        let e = engine.borrow();
+        let mut c = self.solver.spawn_check;
+        let mut at = 0;
+        // The engine's slots for new bodies in key order (`sync_bodies`).
+        for (&id, &n) in ids.iter().zip(counts) {
+            // A disconnection that left the island whole made no body.
+            if n < 2 {
+                continue;
+            }
+            let made: Vec<u64> = m
+                .events
+                .iter()
+                .rev()
+                .find_map(|ev| match ev {
+                    stress_ref::solver::SolverEvent::Split { parent, children, .. } if *parent == id => Some(children.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if made.len() == n {
+                for (k, cid) in made.iter().enumerate() {
+                    if let Some(host) = e.body_words(stress_ref::engine::BodyKey::Cluster(*cid)) {
+                        let slot = e.body_slot(stress_ref::engine::BodyKey::Cluster(*cid)).unwrap_or(u32::MAX);
+                        c.compare(&bodies[at + k], slot, &host);
+                    }
+                }
+            }
+            at += n;
+        }
+        self.solver.spawn_check = c;
+    }
+}
+
+impl GpuWorld {
+    /// The engine's part table on the GPU, built once (`gpu_split::PartTable`).
+    fn part_table(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>) -> Option<std::rc::Rc<crate::gpu_split::PartTable>> {
+        if self.part_table.is_none() {
+            let sizes: Vec<usize> = self.solver.mirror.structures.iter().map(|s| s.chunks.len()).collect();
+            let records = engine.borrow().part_records(&sizes)?;
+            self.part_table = Some(std::rc::Rc::new(crate::gpu_split::PartTable::new(gpu, &records)));
+        }
+        self.part_table.clone()
+    }
+}
+
+/// A live GPU spawn waiting for the host's split to name its children (`spawn_live`).
+struct LiveSpawn {
+    ids: Vec<u64>,
+    /// Per parent: each child's chunks (structure, chunk) and collider chunks.
+    children: Vec<Vec<Vec<(usize, usize)>>>,
+    bodies: Vec<crate::gpu_split::GpuBody>,
+}
+
+impl GpuWorld {
+    /// M3, live: the children of `parents` split on the GPU and their engine bodies made
+    /// there, in the engine's buffers, the parents retired. None (the host makes them) when
+    /// the engine cannot, or a parent has no body.
+    fn spawn_live(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>, parents: &[usize]) -> Option<LiveSpawn> {
+        let ids: Vec<u64> = parents.iter().map(|&ci| self.solver.mirror.clusters[ci].id).collect();
+        let layout_chunks = self.solver.gpu_chunks().to_vec();
+        let table = self.part_table(gpu, engine)?;
+        let e = engine.borrow();
+        let retire: Option<Vec<[u32; 3]>> = ids.iter().map(|&id| e.retire_record(BodyKey::Cluster(id))).collect();
+        let retire = retire?;
+        let (bodies_buf, cols_buf, max_bodies) = e.spawn_buffers()?;
+        let (first_body, first_collider) = e.body_counts();
+        let run = self.solver.gpu_split_children(gpu, parents);
+        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
+        let bodies = self.solver.gpu_spawn_bodies(gpu, &run, &table, first_body, first_collider, Some(target), &retire);
+        let children = run
+            .children
+            .iter()
+            .map(|list| {
+                list.iter()
+                    .map(|c| c.chunks.iter().flat_map(|&k| { let sc = layout_chunks[k as usize]; std::iter::repeat(sc).take(table.counts[sc.0][sc.1] as usize) }).collect())
+                    .collect()
+            })
+            .collect();
+        Some(LiveSpawn { ids, children, bodies })
+    }
+
+    /// The engine adopts a live spawn's bodies, named by the host's split (its events).
+    fn adopt_live(&mut self, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>, s: LiveSpawn) -> Result<(), String> {
+        let m = &self.solver.mirror;
+        let mut adopted = Vec::new();
+        let mut retired = Vec::new();
+        let mut at = 0;
+        for (&id, children) in s.ids.iter().zip(&s.children) {
+            if children.len() < 2 {
+                continue;
+            }
+            let made: Vec<u64> = m
+                .events
+                .iter()
+                .rev()
+                .find_map(|ev| match ev {
+                    stress_ref::solver::SolverEvent::Split { parent, children, .. } if *parent == id => Some(children.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if made.len() != children.len() {
+                return Err(format!("GPU split of cluster {id}: {} children, the host's {}", children.len(), made.len()));
+            }
+            retired.push(BodyKey::Cluster(id));
+            for (cid, chunks) in made.iter().zip(children) {
+                let g = &s.bodies[at];
+                at += 1;
+                let cl = m.clusters.iter().find(|c| c.id == *cid).ok_or("adopted child not in the mirror")?;
+                adopted.push(crate::resident::AdoptedBody {
+                    key: BodyKey::Cluster(*cid),
+                    signature: stress_ref::world::cluster_signature(cl),
+                    fixed: cl.anchored,
+                    slot: g.slot,
+                    first_collider: g.first_collider,
+                    body: g.body,
+                    colliders: g.colliders.clone(),
+                    chunks: chunks.clone(),
+                    com: [g.com[0] as f64, g.com[1] as f64, g.com[2] as f64],
+                    principal: [g.principal[0] as f64, g.principal[1] as f64, g.principal[2] as f64, g.principal[3] as f64],
+                });
+            }
+        }
+        engine.borrow_mut().adopt_spawned(adopted, &retired)
     }
 }
 
