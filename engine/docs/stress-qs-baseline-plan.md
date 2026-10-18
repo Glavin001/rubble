@@ -6,6 +6,9 @@ between runs. Numbers marked "quiet" were taken without it.
 
 ## The goal
 
+> The charter (goal, rules, milestones and acceptance criteria) is `stress-baseline-goal.md`.
+
+
 **Goal.** Make rubble capable of replacing PhysX GPU and its native destruction stage as
 vibe-land's destruction physics engine. Integrating it into vibe-land is out of scope; the
 work is rubble's.
