@@ -11,7 +11,10 @@ use crate::shaders;
 struct SplitParams {
     parent_count: u32,
     out_base: u32,
-    pad: [u32; 2],
+    /// 1: an anchored parent's frame from its island record (`split_frames`;
+    /// `STRESS_GPU_ANCHORED_ENGINE_FRAME=1`: from its fixed engine body, as before).
+    anchored_pose: u32,
+    pad: u32,
 }
 
 const BINDINGS: [Binding; 13] = [
@@ -190,7 +193,7 @@ impl GpuSplitter {
     pub fn new(gpu: &Gpu) -> GpuSplitter {
         let k = |e: &str| gpu.compute(&shaders::SPLIT, e, &BINDINGS);
         let s = |e: &str| gpu.compute(&shaders::SPAWN, e, &SPAWN_BINDINGS);
-        GpuSplitter { components: k("split_components"), children: k("split_children"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire"), old: std::cell::RefCell::new(vec![None; 7]) }
+        GpuSplitter { components: k("split_components"), children: k("split_children"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire"), old: std::cell::RefCell::new(vec![None; 8]) }
     }
 
     /// The children of the islands `parents` (island, chunk range, rigid frame: rotation
@@ -211,7 +214,7 @@ impl GpuSplitter {
         let parents_buf = gpu.storage("split parents", &table);
         let work_buf = gpu.storage("split work", &vec![0u32; 2 * total.max(1)]);
         let out = gpu.storage("split out", &vec![[0f32; 4]; CHILD_WORDS * total.max(1)]);
-        let params = gpu.uniform("split params", &SplitParams { parent_count: parents.len() as u32, out_base: 0, pad: [0; 2] });
+        let params = gpu.uniform("split params", &SplitParams { parent_count: parents.len() as u32, out_base: 0, anchored_pose: anchored_pose(), pad: 0 });
         let [chunks, index, bonds, bond_dyn, islands, state] = buffers;
         let none_bodies = gpu.storage("split no engine bodies", &[[0f32; 4]; 7]);
         let none_parents = gpu.storage("split no parent bodies", &[[0f32; 4]; 2]);
@@ -472,7 +475,7 @@ pub struct LayoutParams {
     pub pad: [u32; 2],
 }
 
-const LAYOUT_BINDINGS: [Binding; 25] = [
+const LAYOUT_BINDINGS: [Binding; 27] = [
     Binding::Uniform,   // params
     Binding::Storage,   // parents
     Binding::Storage,   // work
@@ -498,6 +501,8 @@ const LAYOUT_BINDINGS: [Binding; 25] = [
     Binding::Storage,   // spawn slots
     Binding::Storage,   // spawn extras
     Binding::Storage,   // control
+    Binding::Storage,   // the cascade's island copy as it was
+    Binding::StorageRw, // the cascade's island copy
 ];
 
 /// The tables a split re-lays out (`layout.slang`): each as (as it was, to write).
@@ -521,12 +526,13 @@ pub struct GpuLayout {
     pub(crate) plan: std::rc::Rc<Kernel>,
     pub(crate) moved: std::rc::Rc<Kernel>,
     pub(crate) parent: std::rc::Rc<Kernel>,
+    pub(crate) copy: std::rc::Rc<Kernel>,
 }
 
 impl GpuLayout {
     pub fn new(gpu: &Gpu) -> GpuLayout {
         let k = |e: &str| std::rc::Rc::new(gpu.compute(&shaders::LAYOUT, e, &LAYOUT_BINDINGS));
-        GpuLayout { plan: k("layout_plan"), moved: k("layout_moved"), parent: k("layout_parent") }
+        GpuLayout { plan: k("layout_plan"), moved: k("layout_moved"), parent: k("layout_parent"), copy: k("layout_copy") }
     }
 
     pub fn clone_kernels(&self) -> GpuLayout {
@@ -543,11 +549,13 @@ impl GpuLayout {
         let plan = gpu.storage("layout plan", &vec![0u32; words]);
         let uniform = gpu.uniform("layout params", &params);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let no_copy = gpu.storage("layout no island copy", &[[0f32; 4]; 1]);
+        let no_copy_out = gpu.storage("layout no island copy out", &[[0f32; 4]; 1]);
         for (k, size) in [(&*self.plan, 1u32), (&*self.moved, groups(island_cap + 1, 64)), (&*self.parent, run.parent_count.max(1) as u32)] {
             let t = tables;
             let bind = gpu.bind(
                 &k.group,
-                &[&uniform, &run.parents, &run.work, &run.out, &run.frames, &plan, t.chunks.0, t.chunks.1, t.state.0, t.state.1, t.bonds.0, t.bonds.1, t.bond_dyn.0, t.bond_dyn.1, t.index.0, t.index.1, t.islands.0, t.islands.1, t.scratch, t.ctab.0, t.ctab.1, t.gate, t.spawn.0, t.spawn.1, t.spawn.2],
+                &[&uniform, &run.parents, &run.work, &run.out, &run.frames, &plan, t.chunks.0, t.chunks.1, t.state.0, t.state.1, t.bonds.0, t.bonds.1, t.bond_dyn.0, t.bond_dyn.1, t.index.0, t.index.1, t.islands.0, t.islands.1, t.scratch, t.ctab.0, t.ctab.1, t.gate, t.spawn.0, t.spawn.1, t.spawn.2, &no_copy, &no_copy_out],
             );
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
@@ -615,6 +623,7 @@ impl GpuSplitter {
         gate: &wgpu::Buffer,
         parts_max: usize,
         colliders: Option<(&crate::colliders::ColliderRefresh, &wgpu::Buffer)>,
+        island_copy: Option<&wgpu::Buffer>,
     ) -> PassResult {
         let [chunks, index, bonds, bond_dyn, islands, state] = buffers;
         // The split's buffers (as `split`).
@@ -632,7 +641,7 @@ impl GpuSplitter {
         let frames = gpu.storage("pass frames", &vec![[0f32; 4]; 5 * parents.len().max(1)]);
         let pb: Vec<[f32; 4]> = engine.parent_bodies.iter().flatten().copied().collect();
         let parent_bodies = gpu.storage("pass parent bodies", if pb.is_empty() { &[[0f32; 4]; 2][..] } else { &pb });
-        let split_params = gpu.uniform("pass split params", &SplitParams { parent_count: parents.len() as u32, out_base: 0, pad: [0; 2] });
+        let split_params = gpu.uniform("pass split params", &SplitParams { parent_count: parents.len() as u32, out_base: 0, anchored_pose: anchored_pose(), pad: 0 });
         // The spawn's.
         let slots = gpu.storage("pass slots", &vec![[0u32; 4]; total.max(1)]);
         let extras = gpu.storage("pass extras", &vec![[0f32; 4]; 2 * total.max(1)]);
@@ -706,7 +715,14 @@ impl GpuSplitter {
             ranges.push((f4 * params.engine_base as u64, (f4 * 3 * (params.island_count as u64 + 1)).min(c.size().saturating_sub(f4 * params.engine_base as u64))));
             copy(6, c, "old ctab", Some(&ranges), &mut encoder)
         });
+        let old_copy = island_copy.map(|c| copy(7, c, "old island copy", None, &mut encoder));
         drop(cache);
+        let no_copy = gpu.storage("pass no island copy", &[[0f32; 4]; 1]);
+        let no_copy_out = gpu.storage("pass no island copy out", &[[0f32; 4]; 1]);
+        let (copy_old, copy_new): (&wgpu::Buffer, &wgpu::Buffer) = match (&old_copy, island_copy) {
+            (Some(o), Some(c)) => (o, c),
+            _ => (&no_copy, &no_copy_out),
+        };
         let (ctab_old, ctab_new): (&wgpu::Buffer, &wgpu::Buffer) = match (&old_ctab, &resident) {
             (Some(o), Some((c, _))) => (o, c),
             _ => (&dummy, &dummy_out),
@@ -718,11 +734,11 @@ impl GpuSplitter {
         let layout_bind = |k: &Kernel| {
             gpu.bind(
                 &k.group,
-                &[&layout_uniform, &parents_buf, &work, &out, &frames, &plan, &old[0], chunks, &old[1], state, &old[2], bonds, &old[3], bond_dyn, &old[4], index, &old[5], islands, scratch, ctab_old, ctab_new, gate, &slots, &extras, &control],
+                &[&layout_uniform, &parents_buf, &work, &out, &frames, &plan, &old[0], chunks, &old[1], state, &old[2], bonds, &old[3], bond_dyn, &old[4], index, &old[5], islands, scratch, ctab_old, ctab_new, gate, &slots, &extras, &control, copy_old, copy_new],
             )
         };
         let n = parents.len().max(1) as u32;
-        let steps: Vec<(&Kernel, wgpu::BindGroup, u32)> = vec![
+        let mut steps: Vec<(&Kernel, wgpu::BindGroup, u32)> = vec![
             (&self.frames, split_bind(&self.frames), groups(parents.len(), 64)),
             (&self.components, split_bind(&self.components), n),
             (&self.children, split_bind(&self.children), groups(total, 64)),
@@ -733,6 +749,9 @@ impl GpuSplitter {
             (&layout.moved, layout_bind(&layout.moved), groups(island_cap + 1, 64)),
             (&layout.parent, layout_bind(&layout.parent), n),
         ];
+        if island_copy.is_some() {
+            steps.push((&layout.copy, layout_bind(&layout.copy), groups(island_cap + 1, 64)));
+        }
         // `STRESS_GPU_TIMING=1`: each step's GPU time (a diagnostic read).
         let timing = (std::env::var("STRESS_GPU_TIMING").is_ok_and(|v| v == "1") && gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY))
             .then(|| gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("split pass timestamps"), ty: wgpu::QueryType::Timestamp, count: 2 * steps.len() as u32 }));
@@ -790,7 +809,7 @@ impl GpuSplitter {
         if let Some(b) = timing_resolve {
             let t: Vec<u64> = gpu.read(&b);
             let period = gpu.queue.get_timestamp_period() as f64 * 1e-6;
-            let names = ["frames", "components", "children", "offsets", "spawn", "retire", "plan", "moved", "parent"];
+            let names = ["frames", "components", "children", "offsets", "spawn", "retire", "plan", "moved", "parent", "copy"];
             let ms: Vec<String> = (0..t.len() / 2).map(|q| format!("{} {:.2}", names.get(q).unwrap_or(&"?"), t[2 * q + 1].saturating_sub(t[2 * q]) as f64 * period)).collect();
             eprintln!("split pass GPU ms: {}", ms.join(", "));
         }
@@ -849,4 +868,10 @@ impl GpuSplitter {
         }
         PassResult { aborted, children, bodies }
     }
+}
+
+/// `SplitParams::anchored_pose`: an anchored parent's frame from its island record, unless
+/// `STRESS_GPU_ANCHORED_ENGINE_FRAME=1`.
+fn anchored_pose() -> u32 {
+    std::env::var("STRESS_GPU_ANCHORED_ENGINE_FRAME").map_or(1, |v| (v != "1") as u32)
 }

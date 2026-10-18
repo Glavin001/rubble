@@ -62,6 +62,8 @@ struct KernelContext_0
     packed_uint4 device* spawn_slots_0;
     packed_float4 device* spawn_extras_0;
     packed_float4 device* gate_0;
+    packed_float4 device* island_copy_0;
+    packed_float4 device* old_copy_0;
     uint threadgroup* g_cut_first_0;
 };
 
@@ -93,7 +95,7 @@ uint child_island_at_0(uint slot_1, KernelContext_0 thread* kernelContext_4)
     return 16U + _S3 + slot_1;
 }
 
-[[kernel]] void layout_plan(uint3 id_0 [[thread_position_in_grid]], uint device* control_1 [[buffer(24)]], LayoutParams_0 constant* params_1 [[buffer(0)]], uint device* plan_1 [[buffer(5)]], packed_uint4 device* parents_1 [[buffer(1)]], packed_float4 device* old_islands_1 [[buffer(16)]], packed_float4 device* children_1 [[buffer(3)]], uint device* work_1 [[buffer(2)]], packed_float4 device* chunks_1 [[buffer(7)]], packed_float4 device* old_chunks_1 [[buffer(6)]], packed_float4 device* state_1 [[buffer(9)]], packed_float4 device* old_state_1 [[buffer(8)]], packed_float4 device* scratch_1 [[buffer(18)]], packed_float4 device* ctab_1 [[buffer(20)]], packed_float4 device* old_ctab_1 [[buffer(19)]], packed_float4 device* old_bonds_1 [[buffer(10)]], packed_float4 device* bonds_1 [[buffer(11)]], packed_float4 device* dyn_1 [[buffer(13)]], packed_float4 device* old_dyn_1 [[buffer(12)]], uint device* old_index_1 [[buffer(14)]], uint device* index_1 [[buffer(15)]], packed_float4 device* frames_1 [[buffer(4)]], packed_float4 device* islands_1 [[buffer(17)]], packed_uint4 device* spawn_slots_1 [[buffer(22)]], packed_float4 device* spawn_extras_1 [[buffer(23)]], packed_float4 device* gate_1 [[buffer(21)]])
+[[kernel]] void layout_plan(uint3 id_0 [[thread_position_in_grid]], uint device* control_1 [[buffer(24)]], LayoutParams_0 constant* params_1 [[buffer(0)]], uint device* plan_1 [[buffer(5)]], packed_uint4 device* parents_1 [[buffer(1)]], packed_float4 device* old_islands_1 [[buffer(16)]], packed_float4 device* children_1 [[buffer(3)]], uint device* work_1 [[buffer(2)]], packed_float4 device* chunks_1 [[buffer(7)]], packed_float4 device* old_chunks_1 [[buffer(6)]], packed_float4 device* state_1 [[buffer(9)]], packed_float4 device* old_state_1 [[buffer(8)]], packed_float4 device* scratch_1 [[buffer(18)]], packed_float4 device* ctab_1 [[buffer(20)]], packed_float4 device* old_ctab_1 [[buffer(19)]], packed_float4 device* old_bonds_1 [[buffer(10)]], packed_float4 device* bonds_1 [[buffer(11)]], packed_float4 device* dyn_1 [[buffer(13)]], packed_float4 device* old_dyn_1 [[buffer(12)]], uint device* old_index_1 [[buffer(14)]], uint device* index_1 [[buffer(15)]], packed_float4 device* frames_1 [[buffer(4)]], packed_float4 device* islands_1 [[buffer(17)]], packed_uint4 device* spawn_slots_1 [[buffer(22)]], packed_float4 device* spawn_extras_1 [[buffer(23)]], packed_float4 device* gate_1 [[buffer(21)]], packed_float4 device* island_copy_1 [[buffer(26)]], packed_float4 device* old_copy_1 [[buffer(25)]])
 {
     uint k_0;
     thread KernelContext_0 kernelContext_5;
@@ -122,6 +124,8 @@ uint child_island_at_0(uint slot_1, KernelContext_0 thread* kernelContext_4)
     (&kernelContext_5)->spawn_slots_0 = spawn_slots_1;
     (&kernelContext_5)->spawn_extras_0 = spawn_extras_1;
     (&kernelContext_5)->gate_0 = gate_1;
+    (&kernelContext_5)->island_copy_0 = island_copy_1;
+    (&kernelContext_5)->old_copy_0 = old_copy_1;
     threadgroup uint g_cut_first_1;
     (&kernelContext_5)->g_cut_first_0 = &g_cut_first_1;
     if(control_1[int(0)] != 0U)
@@ -404,7 +408,7 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     return float4(q_4->x_0, q_4->y_0, q_4->z_0, q_4->w_3);
 }
 
-[[kernel]] void layout_parent(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], uint device* control_2 [[buffer(24)]], LayoutParams_0 constant* params_2 [[buffer(0)]], uint device* plan_2 [[buffer(5)]], packed_uint4 device* parents_2 [[buffer(1)]], packed_float4 device* old_islands_2 [[buffer(16)]], packed_float4 device* children_2 [[buffer(3)]], uint device* work_2 [[buffer(2)]], packed_float4 device* chunks_2 [[buffer(7)]], packed_float4 device* old_chunks_2 [[buffer(6)]], packed_float4 device* state_2 [[buffer(9)]], packed_float4 device* old_state_2 [[buffer(8)]], packed_float4 device* scratch_2 [[buffer(18)]], packed_float4 device* ctab_2 [[buffer(20)]], packed_float4 device* old_ctab_2 [[buffer(19)]], packed_float4 device* old_bonds_2 [[buffer(10)]], packed_float4 device* bonds_2 [[buffer(11)]], packed_float4 device* dyn_2 [[buffer(13)]], packed_float4 device* old_dyn_2 [[buffer(12)]], uint device* old_index_2 [[buffer(14)]], uint device* index_2 [[buffer(15)]], packed_float4 device* frames_2 [[buffer(4)]], packed_float4 device* islands_2 [[buffer(17)]], packed_uint4 device* spawn_slots_2 [[buffer(22)]], packed_float4 device* spawn_extras_2 [[buffer(23)]], packed_float4 device* gate_2 [[buffer(21)]])
+[[kernel]] void layout_parent(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], uint device* control_2 [[buffer(24)]], LayoutParams_0 constant* params_2 [[buffer(0)]], uint device* plan_2 [[buffer(5)]], packed_uint4 device* parents_2 [[buffer(1)]], packed_float4 device* old_islands_2 [[buffer(16)]], packed_float4 device* children_2 [[buffer(3)]], uint device* work_2 [[buffer(2)]], packed_float4 device* chunks_2 [[buffer(7)]], packed_float4 device* old_chunks_2 [[buffer(6)]], packed_float4 device* state_2 [[buffer(9)]], packed_float4 device* old_state_2 [[buffer(8)]], packed_float4 device* scratch_2 [[buffer(18)]], packed_float4 device* ctab_2 [[buffer(20)]], packed_float4 device* old_ctab_2 [[buffer(19)]], packed_float4 device* old_bonds_2 [[buffer(10)]], packed_float4 device* bonds_2 [[buffer(11)]], packed_float4 device* dyn_2 [[buffer(13)]], packed_float4 device* old_dyn_2 [[buffer(12)]], uint device* old_index_2 [[buffer(14)]], uint device* index_2 [[buffer(15)]], packed_float4 device* frames_2 [[buffer(4)]], packed_float4 device* islands_2 [[buffer(17)]], packed_uint4 device* spawn_slots_2 [[buffer(22)]], packed_float4 device* spawn_extras_2 [[buffer(23)]], packed_float4 device* gate_2 [[buffer(21)]], packed_float4 device* island_copy_2 [[buffer(26)]], packed_float4 device* old_copy_2 [[buffer(25)]])
 {
     uint w_4;
     uint w_5;
@@ -434,6 +438,8 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     (&kernelContext_16)->spawn_slots_0 = spawn_slots_2;
     (&kernelContext_16)->spawn_extras_0 = spawn_extras_2;
     (&kernelContext_16)->gate_0 = gate_2;
+    (&kernelContext_16)->island_copy_0 = island_copy_2;
+    (&kernelContext_16)->old_copy_0 = old_copy_2;
     threadgroup uint g_cut_first_2;
     (&kernelContext_16)->g_cut_first_0 = &g_cut_first_2;
     uint tid_0 = thread_0.x;
@@ -1232,7 +1238,7 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     return;
 }
 
-[[kernel]] void layout_moved(uint3 id_1 [[thread_position_in_grid]], uint device* control_3 [[buffer(24)]], LayoutParams_0 constant* params_3 [[buffer(0)]], uint device* plan_3 [[buffer(5)]], packed_uint4 device* parents_3 [[buffer(1)]], packed_float4 device* old_islands_3 [[buffer(16)]], packed_float4 device* children_3 [[buffer(3)]], uint device* work_3 [[buffer(2)]], packed_float4 device* chunks_3 [[buffer(7)]], packed_float4 device* old_chunks_3 [[buffer(6)]], packed_float4 device* state_3 [[buffer(9)]], packed_float4 device* old_state_3 [[buffer(8)]], packed_float4 device* scratch_3 [[buffer(18)]], packed_float4 device* ctab_3 [[buffer(20)]], packed_float4 device* old_ctab_3 [[buffer(19)]], packed_float4 device* old_bonds_3 [[buffer(10)]], packed_float4 device* bonds_3 [[buffer(11)]], packed_float4 device* dyn_3 [[buffer(13)]], packed_float4 device* old_dyn_3 [[buffer(12)]], uint device* old_index_3 [[buffer(14)]], uint device* index_3 [[buffer(15)]], packed_float4 device* frames_3 [[buffer(4)]], packed_float4 device* islands_3 [[buffer(17)]], packed_uint4 device* spawn_slots_3 [[buffer(22)]], packed_float4 device* spawn_extras_3 [[buffer(23)]], packed_float4 device* gate_3 [[buffer(21)]])
+[[kernel]] void layout_moved(uint3 id_1 [[thread_position_in_grid]], uint device* control_3 [[buffer(24)]], LayoutParams_0 constant* params_3 [[buffer(0)]], uint device* plan_3 [[buffer(5)]], packed_uint4 device* parents_3 [[buffer(1)]], packed_float4 device* old_islands_3 [[buffer(16)]], packed_float4 device* children_3 [[buffer(3)]], uint device* work_3 [[buffer(2)]], packed_float4 device* chunks_3 [[buffer(7)]], packed_float4 device* old_chunks_3 [[buffer(6)]], packed_float4 device* state_3 [[buffer(9)]], packed_float4 device* old_state_3 [[buffer(8)]], packed_float4 device* scratch_3 [[buffer(18)]], packed_float4 device* ctab_3 [[buffer(20)]], packed_float4 device* old_ctab_3 [[buffer(19)]], packed_float4 device* old_bonds_3 [[buffer(10)]], packed_float4 device* bonds_3 [[buffer(11)]], packed_float4 device* dyn_3 [[buffer(13)]], packed_float4 device* old_dyn_3 [[buffer(12)]], uint device* old_index_3 [[buffer(14)]], uint device* index_3 [[buffer(15)]], packed_float4 device* frames_3 [[buffer(4)]], packed_float4 device* islands_3 [[buffer(17)]], packed_uint4 device* spawn_slots_3 [[buffer(22)]], packed_float4 device* spawn_extras_3 [[buffer(23)]], packed_float4 device* gate_3 [[buffer(21)]], packed_float4 device* island_copy_3 [[buffer(26)]], packed_float4 device* old_copy_3 [[buffer(25)]])
 {
     thread KernelContext_0 kernelContext_17;
     (&kernelContext_17)->control_0 = control_3;
@@ -1260,6 +1266,8 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     (&kernelContext_17)->spawn_slots_0 = spawn_slots_3;
     (&kernelContext_17)->spawn_extras_0 = spawn_extras_3;
     (&kernelContext_17)->gate_0 = gate_3;
+    (&kernelContext_17)->island_copy_0 = island_copy_3;
+    (&kernelContext_17)->old_copy_0 = old_copy_3;
     threadgroup uint g_cut_first_3;
     (&kernelContext_17)->g_cut_first_0 = &g_cut_first_3;
     if(control_3[int(0)] != 0U)
@@ -1372,6 +1380,109 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         }
     }
     *((&kernelContext_17)->gate_0+((&kernelContext_17)->params_0->gate_flag_base_0 + i_3)) = packed_float4(float4(*((&kernelContext_17)->gate_0+((&kernelContext_17)->params_0->gate_flag_base_0 + e_1))) ) ;
+    return;
+}
+
+[[kernel]] void layout_copy(uint3 id_2 [[thread_position_in_grid]], uint device* control_4 [[buffer(24)]], LayoutParams_0 constant* params_4 [[buffer(0)]], uint device* plan_4 [[buffer(5)]], packed_uint4 device* parents_4 [[buffer(1)]], packed_float4 device* old_islands_4 [[buffer(16)]], packed_float4 device* children_4 [[buffer(3)]], uint device* work_4 [[buffer(2)]], packed_float4 device* chunks_4 [[buffer(7)]], packed_float4 device* old_chunks_4 [[buffer(6)]], packed_float4 device* state_4 [[buffer(9)]], packed_float4 device* old_state_4 [[buffer(8)]], packed_float4 device* scratch_4 [[buffer(18)]], packed_float4 device* ctab_4 [[buffer(20)]], packed_float4 device* old_ctab_4 [[buffer(19)]], packed_float4 device* old_bonds_4 [[buffer(10)]], packed_float4 device* bonds_4 [[buffer(11)]], packed_float4 device* dyn_4 [[buffer(13)]], packed_float4 device* old_dyn_4 [[buffer(12)]], uint device* old_index_4 [[buffer(14)]], uint device* index_4 [[buffer(15)]], packed_float4 device* frames_4 [[buffer(4)]], packed_float4 device* islands_4 [[buffer(17)]], packed_uint4 device* spawn_slots_4 [[buffer(22)]], packed_float4 device* spawn_extras_4 [[buffer(23)]], packed_float4 device* gate_4 [[buffer(21)]], packed_float4 device* island_copy_4 [[buffer(26)]], packed_float4 device* old_copy_4 [[buffer(25)]])
+{
+    thread KernelContext_0 kernelContext_18;
+    (&kernelContext_18)->control_0 = control_4;
+    (&kernelContext_18)->params_0 = params_4;
+    (&kernelContext_18)->plan_0 = plan_4;
+    (&kernelContext_18)->parents_0 = parents_4;
+    (&kernelContext_18)->old_islands_0 = old_islands_4;
+    (&kernelContext_18)->children_0 = children_4;
+    (&kernelContext_18)->work_0 = work_4;
+    (&kernelContext_18)->chunks_0 = chunks_4;
+    (&kernelContext_18)->old_chunks_0 = old_chunks_4;
+    (&kernelContext_18)->state_0 = state_4;
+    (&kernelContext_18)->old_state_0 = old_state_4;
+    (&kernelContext_18)->scratch_0 = scratch_4;
+    (&kernelContext_18)->ctab_0 = ctab_4;
+    (&kernelContext_18)->old_ctab_0 = old_ctab_4;
+    (&kernelContext_18)->old_bonds_0 = old_bonds_4;
+    (&kernelContext_18)->bonds_0 = bonds_4;
+    (&kernelContext_18)->dyn_0 = dyn_4;
+    (&kernelContext_18)->old_dyn_0 = old_dyn_4;
+    (&kernelContext_18)->old_index_0 = old_index_4;
+    (&kernelContext_18)->index_0 = index_4;
+    (&kernelContext_18)->frames_0 = frames_4;
+    (&kernelContext_18)->islands_0 = islands_4;
+    (&kernelContext_18)->spawn_slots_0 = spawn_slots_4;
+    (&kernelContext_18)->spawn_extras_0 = spawn_extras_4;
+    (&kernelContext_18)->gate_0 = gate_4;
+    (&kernelContext_18)->island_copy_0 = island_copy_4;
+    (&kernelContext_18)->old_copy_0 = old_copy_4;
+    threadgroup uint g_cut_first_4;
+    (&kernelContext_18)->g_cut_first_0 = &g_cut_first_4;
+    if(control_4[int(0)] != 0U)
+    {
+        return;
+    }
+    uint i_4 = id_2.x;
+    uint device* _S167 = (&kernelContext_18)->plan_0+int(0);
+    uint n_1 = *_S167;
+    if(i_4 > (*_S167))
+    {
+        return;
+    }
+    uint t_4;
+    if(i_4 == n_1)
+    {
+        t_4 = 0U;
+        for(;;)
+        {
+            if(t_4 < ((&kernelContext_18)->params_0->island_words_0))
+            {
+            }
+            else
+            {
+                break;
+            }
+            uint _S168 = island_word_0(i_4, t_4, &kernelContext_18);
+            *((&kernelContext_18)->island_copy_0+_S168) = packed_float4(float4(0.0f) ) ;
+            t_4 = t_4 + 1U;
+        }
+        return;
+    }
+    uint device* _S169 = (&kernelContext_18)->plan_0+order_at_0(i_4);
+    uint e_2 = *_S169;
+    if((*_S169) < ((&kernelContext_18)->params_0->island_count_0))
+    {
+        t_4 = 0U;
+        for(;;)
+        {
+            if(t_4 < ((&kernelContext_18)->params_0->island_words_0))
+            {
+            }
+            else
+            {
+                break;
+            }
+            uint _S170 = island_word_0(i_4, t_4, &kernelContext_18);
+            packed_float4 device* _S171 = (&kernelContext_18)->island_copy_0+_S170;
+            uint _S172 = island_word_0(e_2, t_4, &kernelContext_18);
+            *_S171 = packed_float4(float4(*((&kernelContext_18)->old_copy_0+_S172)) ) ;
+            t_4 = t_4 + 1U;
+        }
+    }
+    else
+    {
+        t_4 = 0U;
+        for(;;)
+        {
+            if(t_4 < ((&kernelContext_18)->params_0->island_words_0))
+            {
+            }
+            else
+            {
+                break;
+            }
+            uint _S173 = island_word_0(i_4, t_4, &kernelContext_18);
+            *((&kernelContext_18)->island_copy_0+_S173) = packed_float4(float4(*((&kernelContext_18)->islands_0+_S173)) ) ;
+            t_4 = t_4 + 1U;
+        }
+    }
     return;
 }
 

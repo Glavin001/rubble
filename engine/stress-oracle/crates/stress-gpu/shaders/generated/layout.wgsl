@@ -75,6 +75,10 @@ struct LayoutParams_std140_0
 
 @binding(21) @group(0) var<storage, read_write> gate_0 : array<vec4<f32>>;
 
+@binding(26) @group(0) var<storage, read_write> island_copy_0 : array<vec4<f32>>;
+
+@binding(25) @group(0) var<storage, read> old_copy_0 : array<vec4<f32>>;
+
 fn order_at_0( i_0 : u32) -> u32
 {
     return u32(16) + i_0;
@@ -1226,6 +1230,75 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
         }
     }
     gate_0[params_0.gate_flag_base_0 + i_3] = gate_0[params_0.gate_flag_base_0 + e_1];
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn layout_copy(@builtin(global_invocation_id) id_2 : vec3<u32>)
+{
+    if(control_0[i32(0)] != u32(0))
+    {
+        return;
+    }
+    var i_4 : u32 = id_2.x;
+    var n_1 : u32 = plan_0[i32(0)];
+    if(i_4 > plan_0[i32(0)])
+    {
+        return;
+    }
+    var t_4 : u32;
+    if(i_4 == n_1)
+    {
+        t_4 = u32(0);
+        loop
+        {
+            if(t_4 < (params_0.island_words_0))
+            {
+            }
+            else
+            {
+                break;
+            }
+            island_copy_0[island_word_0(i_4, t_4)] = vec4<f32>(0.0f);
+            t_4 = t_4 + u32(1);
+        }
+        return;
+    }
+    var e_2 : u32 = plan_0[order_at_0(i_4)];
+    if(plan_0[order_at_0(i_4)] < (params_0.island_count_0))
+    {
+        t_4 = u32(0);
+        loop
+        {
+            if(t_4 < (params_0.island_words_0))
+            {
+            }
+            else
+            {
+                break;
+            }
+            island_copy_0[island_word_0(i_4, t_4)] = old_copy_0[island_word_0(e_2, t_4)];
+            t_4 = t_4 + u32(1);
+        }
+    }
+    else
+    {
+        t_4 = u32(0);
+        loop
+        {
+            if(t_4 < (params_0.island_words_0))
+            {
+            }
+            else
+            {
+                break;
+            }
+            var _S69 : u32 = island_word_0(i_4, t_4);
+            island_copy_0[_S69] = islands_0[_S69];
+            t_4 = t_4 + u32(1);
+        }
+    }
     return;
 }
 

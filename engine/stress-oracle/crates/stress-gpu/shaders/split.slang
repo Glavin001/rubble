@@ -22,7 +22,7 @@ struct SplitParams
 {
     uint parent_count;
     uint out_base;   // float4 `out` index of the first child record
-    uint pad0;
+    uint anchored_pose; // 1: an anchored parent's frame from its island record (`split_frames`)
     uint pad1;
 };
 
@@ -301,6 +301,18 @@ void split_frames(uint3 id: SV_DispatchThreadID)
     uint body = asuint(head.x);
     if (body == 0xffffffffu)
         return;
+    // An anchored parent's frame is its own pose, as `split_cluster` takes it (its engine
+    // body is a fixed one, placed in f32 world coordinates); it does not move.
+    Island isl = islands[parents[p].x];
+    if ((isl.info.x & ISLAND_ANCHORED) != 0 && params.anchored_pose != 0)
+    {
+        frames[5 * p] = isl.rotation;
+        frames[5 * p + 1] = float4(0.0);
+        frames[5 * p + 2] = float4(0.0);
+        frames[5 * p + 3] = float4(isl.com.xyz, 0.0);
+        frames[5 * p + 4] = float4(isl.position.xyz + isl.position_err.xyz, 0.0);
+        return;
+    }
     float3 com = head.yzw;
     Quat principal = quat_of(parent_bodies[2 * p + 1]);
     float4 b0 = engine_bodies[7 * body];

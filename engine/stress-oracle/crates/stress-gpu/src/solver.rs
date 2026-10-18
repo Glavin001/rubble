@@ -593,6 +593,8 @@ pub struct GpuSolver {
     pub split_layout_check: crate::gpu_split::LayoutCheck,
     /// `STRESS_GPU_COLLIDER_CHECK=1`: the GPU's collider table after its splits against the host's.
     pub collider_check: crate::colliders::ColliderCheck,
+    /// `STRESS_GPU_ISLAND_CHECK=1`: the GPU's island copy after its splits against the host's.
+    pub island_check: IslandCheck,
     /// GPU splits against the host's (`STRESS_GPU_SPLIT_CHECK=1`).
     pub split_check: crate::gpu_split::SplitCheck,
     /// GPU-made bodies against the host's (`STRESS_GPU_SPLIT_CHECK=1`).
@@ -601,6 +603,12 @@ pub struct GpuSolver {
     cascade_status: Option<wgpu::Buffer>,
     /// The repeat gate's loads and flags, by layout generation (cascade.slang).
     cascade_gate: Option<CascadeGate>,
+    /// Indirect dispatch arguments over the live islands (`capacity_dispatch`): groups of
+    /// one per island at 0, groups of 64 islands at 16 bytes.
+    island_args: Option<wgpu::Buffer>,
+    /// The last split's layout was the GPU's, the cascade's island copy and gate included
+    /// (`gpu_split_pass`): the next generation keeps them.
+    tables_on_gpu: bool,
     bond_backup: Option<wgpu::Buffer>,
     pub stopped_at_plan: bool,
     pub profile: Profile,
@@ -676,12 +684,15 @@ impl GpuSolver {
             layouter: None,
             split_layout_check: Default::default(),
             collider_check: Default::default(),
+            island_check: Default::default(),
             split_check: Default::default(),
             spawn_check: Default::default(),
             plan_check: Default::default(),
             cascade_islands: None,
             cascade_status: None,
             cascade_gate: None,
+            island_args: None,
+            tables_on_gpu: false,
             bond_backup: None,
             stopped_at_plan: false,
             plan_until: f64::NEG_INFINITY,
@@ -2660,14 +2671,80 @@ impl GpuSolver {
     /// `equilibrate_resident` and `commit_resident` per pass (bit for bit), with the
     /// unconverged solves' states restored on the GPU.
     pub fn resident_cascade(&mut self, gpu: &Gpu, frame_dt: f64, first: usize, passes: usize, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder, usize)) -> crate::resident::CascadeRun {
-        let n_islands = self.layout.islands.len();
+        let live = self.layout.islands.len();
+        // Dispatched over the island capacity (`capacity_dispatch`): a split the GPU makes
+        // within the frame adds islands the host has not counted; records past the live
+        // ones are blank, and every kernel passes over a blank one.
+        let n_islands = if capacity_dispatch() { self.layout.island_cap.max(live) } else { live };
+        let indirect = capacity_dispatch();
+        if indirect {
+            let args = self.island_args.get_or_insert_with(|| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("island dispatch args"), size: 32, usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+            });
+            let n = live.max(1) as u32;
+            gpu.queue.write_buffer(args, 0, bytemuck::cast_slice(&[n, 1, 1, 0, n.div_ceil(64), 1, 1, 0]));
+        }
+        let args = self.island_args.clone();
         if self.cascade.is_none() {
             self.cascade = Some(crate::resident::CascadeKernels::new(gpu));
         }
         let generation = self.layout_generation;
+        // A split the GPU laid out: its island copy and gate stand for the new generation.
+        if self.tables_on_gpu {
+            self.tables_on_gpu = false;
+            // `STRESS_GPU_ISLAND_CHECK=1`: the GPU's island copy against the host's layout.
+            if let (true, Some((_, copy))) = (std::env::var("STRESS_GPU_ISLAND_CHECK").is_ok_and(|v| v == "1"), self.cascade_islands.as_ref()) {
+                let gpu_islands: Vec<Island> = gpu.read_range(copy, 0, live + 1);
+                let mut c = self.island_check;
+                c.tables += 1;
+                for (i, (g, h)) in gpu_islands.iter().zip(self.layout.islands.iter().chain([&Island::default()])).enumerate() {
+                    let (gw, hw): (&[u32], &[u32]) = (bytemuck::cast_slice(std::slice::from_ref(g)), bytemuck::cast_slice(std::slice::from_ref(h)));
+                    for w in 0..gw.len() {
+                        let field = w / 4;
+                        // Integers: range, info, done, probes.
+                        if field < 2 || field == 19 || field == 20 {
+                            if gw[w] != hw[w] {
+                                c.int_words += 1;
+                                if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
+                                    eprintln!("island check: island {i} word {w}: host {:#x} gpu {:#x}", hw[w], gw[w]);
+                                }
+                            }
+                        } else {
+                            // A driven island's motion (rotation, position, velocities,
+                            // momentum, their errors): every pass takes it from the engine.
+                            let driven = hw[4] & 2 != 0 && hw[4] & 1 == 0;
+                            if driven && matches!(field, 13..=18 | 22..=24) {
+                                continue;
+                            }
+                            let (a, b) = (f32::from_bits(gw[w]) as f64, f32::from_bits(hw[w]) as f64);
+                            let scale = (0..4).map(|k| f32::from_bits(hw[4 * field + k]).abs() as f64).fold(0f64, f64::max).max(1e-6);
+                            let d = if a.is_finite() && b.is_finite() { (a - b).abs() / scale } else if gw[w] == hw[w] { 0.0 } else { f64::INFINITY };
+                            if d > 1e-3 && std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
+                                eprintln!("island check: island {i} field {field}.{}: host {b} gpu {a}", w % 4);
+                            }
+                            if field == 18 {
+                                c.angular = c.angular.max(d);
+                            } else {
+                                c.floats = c.floats.max(d);
+                            }
+                        }
+                    }
+                }
+                self.island_check = c;
+            }
+            if let Some((g, _)) = self.cascade_islands.as_mut() {
+                *g = generation;
+            }
+            if let Some(gate) = self.cascade_gate.as_mut() {
+                gate.generation = generation;
+                gate.ids = self.mirror.clusters.iter().map(|c| c.id).collect();
+                gate.ranges = self.layout.islands.iter().map(|i| i.range).collect();
+                gate.chunks = self.layout.chunks.clone();
+            }
+        }
         if self.cascade_islands.as_ref().is_none_or(|(g, _)| *g != generation) {
             let mut with_sentinel = self.layout.islands.clone();
-            with_sentinel.push(Island::default());
+            with_sentinel.resize(n_islands + 1, Island::default());
             self.cascade_islands = Some((generation, gpu.storage("cascade layout islands", &with_sentinel)));
         }
         let words = crate::resident::CASCADE_ST_ISLANDS + n_islands + 1;
@@ -2756,18 +2833,26 @@ impl GpuSolver {
                 },
             );
             let bind = gpu.bind(&kernels.begin.group, &[&cp, &self.buffers.islands, &self.buffers.scratch, &self.buffers.state, &backup, &status, &gate, &self.buffers.bond_dyn, &bond_backup]);
+            // Over the live islands: indirect (`island_args`: one group per island, or of 64)
+            // when the GPU may add islands within the frame.
             let run = |encoder: &mut wgpu::CommandEncoder, k: &crate::gpu::Kernel, groups: u32| {
                 let mut c = encoder.begin_compute_pass(&Default::default());
                 c.set_pipeline(&k.pipeline);
                 c.set_bind_group(0, &bind, &[]);
-                c.dispatch_workgroups(groups, 1, 1);
+                match &args {
+                    Some(a) if groups > 1 => c.dispatch_workgroups_indirect(a, if groups == n_islands.max(1) as u32 { 0 } else { 16 }),
+                    _ => c.dispatch_workgroups(groups, 1, 1),
+                }
             };
             let world = |encoder: &mut wgpu::CommandEncoder, k: &Kernel, slot: u32| {
                 let stamps = timing.as_ref().map(|q| wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(2 * slot), end_of_pass_write_index: Some(2 * slot + 1) });
                 let mut c = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: stamps });
                 c.set_pipeline(&k.pipeline);
                 c.set_bind_group(0, &self.buffers.bind_segment, &[]);
-                c.dispatch_workgroups(n_islands.max(1) as u32, 1, 1);
+                match &args {
+                    Some(a) => c.dispatch_workgroups_indirect(a, 0),
+                    None => c.dispatch_workgroups(n_islands.max(1) as u32, 1, 1),
+                }
             };
             // equilibrate_resident: the islands flagged, the states backed up, the loads,
             // the solves, the unconverged ones restored.
@@ -2810,7 +2895,7 @@ impl GpuSolver {
         self.state_current = false;
         self.bonds_stale = true;
         self.coverage |= coverage::STATICS | coverage::SETTLED_FATIGUE;
-        crate::resident::CascadeRun { status, words, islands: n_islands }
+        crate::resident::CascadeRun { status, words, islands: live }
     }
 
     /// `equilibrate_resident` with the loads from the host (`loads`) or, with `None`,
@@ -3492,13 +3577,24 @@ impl GpuSolver {
             }
         };
         let resident = resident.map(|r| (r.ctab, [r.props_base, r.eload_base, r.pulse_base, r.pulse_count_base, r.pulse_cap, r.engine_base]));
+        // The cascade's island copy laid out too, when it spans the capacity.
+        let island_copy = self.cascade_islands.as_ref().map(|(_, b)| b).filter(|b| b.size() >= (std::mem::size_of::<Island>() * (self.layout.island_cap + 1)) as u64 && capacity_dispatch());
         let b = &self.buffers;
-        self.splitter.as_ref().expect("splitter").pass(gpu, &layout, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &b.scratch, &ps, &bond_ranges, engine, table, params, self.layout.island_cap, resident, gate, parts_max, colliders)
+        let result = self.splitter.as_ref().expect("splitter").pass(gpu, &layout, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &b.scratch, &ps, &bond_ranges, engine, table, params, self.layout.island_cap, resident, gate, parts_max, colliders, island_copy);
+        // The GPU laid out the tables the cascade keeps (its island copy, its gate): the
+        // layout's next generation takes them as they are.
+        self.tables_on_gpu = island_copy.is_some() && !result.aborted;
+        result
     }
 
     /// The island capacity of the tables (`island_headroom` past the islands).
     pub fn island_cap(&self) -> usize {
         self.layout.island_cap
+    }
+
+    /// `island_args` (Some while `capacity_dispatch`).
+    pub(crate) fn island_args(&self) -> Option<&wgpu::Buffer> {
+        self.island_args.as_ref()
     }
 
     /// M4's check: `run`'s split laid out by the GPU (`layout.slang`) into copies of the
@@ -4232,4 +4328,24 @@ impl GpuSolver {
         let starts = (0..n).map(|k| (out.start[k].0, out.start[k].1, out.motion[k][3])).collect();
         ResidentPlan { plan, starts }
     }
+}
+
+/// The resident frame's kernels dispatched over the island capacity rather than the
+/// host's island count: with the GPU's split layout (`STRESS_GPU_LAYOUT=1`), unless
+/// `STRESS_QS_CAPACITY=0`.
+pub(crate) fn capacity_dispatch() -> bool {
+    std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1") && std::env::var("STRESS_QS_CAPACITY").map_or(true, |v| v != "0")
+}
+
+/// What `STRESS_GPU_ISLAND_CHECK=1` has compared: the GPU's island copy after a split it
+/// laid out against the host's layout islands (records of the live islands and the sentinel).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IslandCheck {
+    pub tables: u64,
+    /// Integer words differing (ranges, flags, counters, cluster id, probes).
+    pub int_words: u64,
+    /// Largest relative difference of the float fields (to each field's size), but for
+    /// the angular velocity, which every cascade pass takes from the engine's body.
+    pub floats: f64,
+    pub angular: f64,
 }

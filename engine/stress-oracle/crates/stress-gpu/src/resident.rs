@@ -127,6 +127,10 @@ impl ResidentQs {
                 None => t[at] = [f32::from_bits(NONE), 0.0, 0.0, 0.0],
             }
         }
+        // The capacity past the islands: no body (a blank island takes no pose).
+        for ci in islands..islands.max(solver.island_cap()) {
+            t[engine_base as usize + 3 * ci] = [f32::from_bits(NONE), 0.0, 0.0, 0.0];
+        }
         // Carried pulses and this frame's filtered loads (a rebuild within the frame's
         // cascade keeps them: the filter runs once a frame), by (structure, chunk).
         if self.params.chunk_count > 0 && self.params.pulse_cap == cap {
@@ -152,7 +156,7 @@ impl ResidentQs {
         let (_, _, _, _, sload_base) = solver.resident_buffers();
         self.params = ResidentParams {
             chunk_count: n as u32,
-            island_count: islands as u32,
+            island_count: if crate::solver::capacity_dispatch() { islands.max(solver.island_cap()) as u32 } else { islands as u32 },
             sload_base,
             rml: m.config.features.rigid_motion_loads as u32,
             gravity: f4(g, (g.norm() * dt) as f32),
@@ -178,7 +182,8 @@ impl ResidentQs {
     /// After a split laid out on the GPU (which moved the tables' chunk and island entries
     /// itself): the tables' island count follows, nothing rebuilt.
     pub fn adopt_layout(&mut self, solver: &GpuSolver) {
-        self.params.island_count = solver.mirror.clusters.len() as u32;
+        let islands = solver.mirror.clusters.len();
+        self.params.island_count = if crate::solver::capacity_dispatch() { islands.max(solver.island_cap()) as u32 } else { islands as u32 };
         self.chunks = solver.gpu_chunks().to_vec();
     }
 
@@ -188,18 +193,26 @@ impl ResidentQs {
     }
 
     fn dispatch(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, k: &Kernel, size: u32, ingest: &EngineIngest, solver: &GpuSolver) {
+        self.dispatch_with(gpu, encoder, k, size, None, ingest, solver);
+    }
+
+    /// `dispatch`, or indirect from `args` at `offset` (the live islands: `island_args`).
+    fn dispatch_with(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, k: &Kernel, size: u32, indirect: Option<u64>, ingest: &EngineIngest, solver: &GpuSolver) {
         let params = gpu.uniform("resident params", &self.params);
         let bind = self.bind(gpu, k, &params, ingest, solver);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&k.pipeline);
         pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(size, 1, 1);
+        match (indirect, solver.island_args()) {
+            (Some(offset), Some(args)) => pass.dispatch_workgroups_indirect(args, offset),
+            _ => pass.dispatch_workgroups(size, 1, 1),
+        }
     }
 
     /// Driven clusters' poses from the engine's frame-start bodies (after any write of
     /// the island records from the host).
     pub fn encode_poses(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, ingest: &EngineIngest, solver: &GpuSolver) {
-        self.dispatch(gpu, encoder, &self.poses, groups(self.params.island_count as usize, 64), ingest, solver);
+        self.dispatch_with(gpu, encoder, &self.poses, groups(self.params.island_count as usize, 64), Some(16), ingest, solver);
     }
 
     /// The frame's load filter (once per frame: it advances the carried pulses).
@@ -209,7 +222,7 @@ impl ResidentQs {
 
     /// The static loads of the islands flagged for a solve.
     pub fn encode_static_loads(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, ingest: &EngineIngest, solver: &GpuSolver) {
-        self.dispatch(gpu, encoder, &self.static_loads, self.params.island_count.max(1), ingest, solver);
+        self.dispatch_with(gpu, encoder, &self.static_loads, self.params.island_count.max(1), Some(0), ingest, solver);
     }
 
     /// Diagnostic read-back: each GPU chunk's frame loads (world force, moment about its

@@ -75,6 +75,10 @@ struct LayoutParams
 [[vk::binding(23, 0)]] StructuredBuffer<float4> spawn_extras;
 // spawn.slang `control`: [0] 1 when the split does not fit (nothing laid out).
 [[vk::binding(24, 0)]] StructuredBuffer<uint> control;
+// The cascade's copy of the island records (solver.rs `cascade_islands`, restored into the
+// live records by every cascade pass): as it was, and to write (`layout_copy`).
+[[vk::binding(25, 0)]] StructuredBuffer<float4> old_copy;
+[[vk::binding(26, 0)]] RWStructuredBuffer<float4> island_copy;
 
 static const uint NONE = 0xffffffffu;
 static const uint CHILD_WORDS = 8;
@@ -539,4 +543,36 @@ void layout_moved(uint3 id: SV_DispatchThreadID)
         for (uint t = 0; t < 3; t++)
             ctab[params.engine_base + 3 * i + t] = old_ctab[params.engine_base + 3 * e + t];
     gate[params.gate_flag_base + i] = gate[params.gate_flag_base + e];
+}
+
+// After `layout_parent`: the cascade's copy of the island records in the new order (as the
+// host's `split_resident` leaves its layout's islands): a kept or moved island's record from
+// the copy as it was, a child's as `layout_parent` wrote it; the sentinel blank.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void layout_copy(uint3 id: SV_DispatchThreadID)
+{
+    if (control[0] != 0)
+        return;
+    uint i = id.x;
+    uint n = plan[0];
+    if (i > n)
+        return;
+    if (i == n)
+    {
+        for (uint t = 0; t < params.island_words; t++)
+            island_copy[island_word(i, t)] = float4(0.0);
+        return;
+    }
+    uint e = plan[order_at(i)];
+    if (e < params.island_count)
+    {
+        for (uint t = 0; t < params.island_words; t++)
+            island_copy[island_word(i, t)] = old_copy[island_word(e, t)];
+    }
+    else
+    {
+        for (uint t = 0; t < params.island_words; t++)
+            island_copy[island_word(i, t)] = islands[island_word(i, t)];
+    }
 }

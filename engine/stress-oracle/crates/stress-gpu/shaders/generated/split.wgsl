@@ -2,7 +2,7 @@ struct SplitParams_std140_0
 {
     @align(16) parent_count_0 : u32,
     @align(4) out_base_0 : u32,
-    @align(8) pad0_0 : u32,
+    @align(8) anchored_pose_0 : u32,
     @align(4) pad1_0 : u32,
 };
 
@@ -686,13 +686,33 @@ fn split_frames(@builtin(global_invocation_id) id_1 : vec3<u32>)
     {
         return;
     }
+    var _S43 : bool;
+    if((((islands_0[parents_0[p_2].x].info_0.x) & (u32(1)))) != u32(0))
+    {
+        _S43 = (params_0.anchored_pose_0) != u32(0);
+    }
+    else
+    {
+        _S43 = false;
+    }
+    if(_S43)
+    {
+        var _S44 : u32 = u32(5) * p_2;
+        frames_0[_S44] = islands_0[parents_0[p_2].x].rotation_0;
+        var _S45 : vec4<f32> = vec4<f32>(0.0f);
+        frames_0[_S44 + u32(1)] = _S45;
+        frames_0[_S44 + u32(2)] = _S45;
+        frames_0[_S44 + u32(3)] = vec4<f32>(islands_0[parents_0[p_2].x].com_0.xyz, 0.0f);
+        frames_0[_S44 + u32(4)] = vec4<f32>(islands_0[parents_0[p_2].x].position_0.xyz + islands_0[parents_0[p_2].x].position_err_0.xyz, 0.0f);
+        return;
+    }
     var com_2 : vec3<f32> = head_0.yzw;
     var principal_0 : Quat_0 = quat_of_0(parent_bodies_0[_S42 + u32(1)]);
-    var _S43 : u32 = u32(7) * body_0;
-    var b0_0 : vec4<f32> = engine_bodies_0[_S43];
-    var orientation_0 : Quat_0 = quat_of_0(engine_bodies_0[_S43 + u32(1)]);
-    var lin_0 : vec3<f32> = engine_bodies_0[_S43 + u32(3)].xyz;
-    var ang_0 : vec3<f32> = engine_bodies_0[_S43 + u32(4)].xyz;
+    var _S46 : u32 = u32(7) * body_0;
+    var b0_0 : vec4<f32> = engine_bodies_0[_S46];
+    var orientation_0 : Quat_0 = quat_of_0(engine_bodies_0[_S46 + u32(1)]);
+    var lin_0 : vec3<f32> = engine_bodies_0[_S46 + u32(3)].xyz;
+    var ang_0 : vec3<f32> = engine_bodies_0[_S46 + u32(4)].xyz;
     var axes_inv_0 : Quat_0;
     axes_inv_0.w_0 = 0.70710676908493042f;
     axes_inv_0.x_0 = 0.70710676908493042f;
@@ -705,12 +725,12 @@ fn split_frames(@builtin(global_invocation_id) id_1 : vec3<u32>)
     p_inv_0.z_0 = - principal_0.z_0;
     var rot_0 : Quat_0 = normalized_0(quat_mul_0(normalized_0(quat_mul_0(axes_inv_0, orientation_0)), p_inv_0));
     var com_world_0 : vec3<f32> = vec3<f32>(b0_0.x, - b0_0.z, b0_0.y);
-    var _S44 : u32 = u32(5) * p_2;
-    frames_0[_S44] = quat_vec_0(rot_0);
-    frames_0[_S44 + u32(1)] = vec4<f32>(lin_0.x, - lin_0.z, lin_0.y, 0.0f);
-    frames_0[_S44 + u32(2)] = vec4<f32>(ang_0.x, - ang_0.z, ang_0.y, 0.0f);
-    frames_0[_S44 + u32(3)] = vec4<f32>(com_2, 0.0f);
-    frames_0[_S44 + u32(4)] = vec4<f32>(com_world_0 - rotate_0(rot_0, com_2), 0.0f);
+    var _S47 : u32 = u32(5) * p_2;
+    frames_0[_S47] = quat_vec_0(rot_0);
+    frames_0[_S47 + u32(1)] = vec4<f32>(lin_0.x, - lin_0.z, lin_0.y, 0.0f);
+    frames_0[_S47 + u32(2)] = vec4<f32>(ang_0.x, - ang_0.z, ang_0.y, 0.0f);
+    frames_0[_S47 + u32(3)] = vec4<f32>(com_2, 0.0f);
+    frames_0[_S47 + u32(4)] = vec4<f32>(com_world_0 - rotate_0(rot_0, com_2), 0.0f);
     return;
 }
 
