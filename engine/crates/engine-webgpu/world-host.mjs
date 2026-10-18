@@ -2,6 +2,7 @@
 // engine_exec::rigid_plan (wasm RigidStep), the graph WgpuSim runs, on the canonical
 // contact path, including the vehicle passes. Used by vehicle.html; demo.html keeps
 // its own benchmark host.
+import { loadShaderModules, pipelineBuilder } from './shader-loader.mjs';
 import { VehicleHost, DEFAULT_VEHICLE_CAPACITY, vehicleLayout, capWords, fbits, L, RigidStep, ballJointWords } from './vehicle.mjs';
 
 // ---- record encoding (BodyState 112 B, Collider 64 B) for scene objects ----
@@ -91,16 +92,12 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
   const bufs = sizes.map((size, i) => device.createBuffer({ label: 'b' + i, size, usage: usage(i) }));
   device.queue.writeBuffer(bufs[22], 0, plan.pass_table());
 
+  const modules = await loadShaderModules(device, kernels.map((name) => ({ name, file: name })),
+    { urlOf: (file) => `${wgslBase}${file}.wgsl`, status });
+  const builder = pipelineBuilder(device, kernels.length, status);
   const pipes = [];
-  for (const name of kernels) {
-    status(`compiling ${name}`);
-    const src = await (await fetch(`${wgslBase}${name}.wgsl`, { cache: 'no-store' })).text();
-    const module = device.createShaderModule({ label: name, code: src });
-    if (module.getCompilationInfo) {
-      const info = await module.getCompilationInfo();
-      const err = info.messages.find((m) => m.type === 'error');
-      if (err) throw new Error(`${name}: ${err.message}`);
-    }
+  for (const [i, name] of kernels.entries()) {
+    const { src, module } = modules[i];
     const binds = bindingsOf(src);
     const layout = device.createBindGroupLayout({
       label: name,
@@ -109,17 +106,14 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
         buffer: b.uniform ? { type: 'uniform', hasDynamicOffset: b.index === 22, minBindingSize: b.index === 22 ? 16 : undefined } : { type: 'storage' },
       })),
     });
-    device.pushErrorScope('validation');
-    const pipeline = device.createComputePipeline({ label: name, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: name } });
-    const e = await device.popErrorScope();
-    if (e) throw new Error(`${name}: ${e.message}`);
+    const pipeline = await builder.create(name, { label: name, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: name } });
     const bind = device.createBindGroup({
       label: name, layout,
       entries: binds.map((b) => ({ binding: b.index, resource: b.index === 22 ? { buffer: bufs[22], size: 16 } : { buffer: bufs[b.index] } })),
     });
     pipes.push({ pipeline, bind, dynamic: binds.some((b) => b.index === 22) });
-    await new Promise((r) => setTimeout(r, 0));
   }
+  await builder.finish();
 
   const params = { ...DEFAULT_PARAMS };
   const jointWords32 = JOINT_BYTES / 4;

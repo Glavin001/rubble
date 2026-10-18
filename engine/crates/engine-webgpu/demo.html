@@ -74,6 +74,7 @@
     import { runGablesRegression } from "./gables-regression.mjs";
     import { measurePhysicsBatches, assertBenchmarkWorkload } from "./physics-benchmark.mjs?v=2";
     import { installJointControls } from "./joint-interaction.mjs";
+    import { loadShaderModules, pipelineBuilder } from "./shader-loader.mjs";
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
@@ -427,10 +428,10 @@
     // Snapshot scenes size the world from the exported counts.
     async function loadSnapshot(id) {
       const base = `./generated/scenes/${id}`;
-      const metaRes = await fetch(`${base}.json`, { cache: 'no-store' });
+      const metaRes = await fetch(`${base}.json`);
       if (!metaRes.ok) throw new Error(`missing ${base}.json; run: cargo run -p engine-scenes --release --bin scene_export`);
       const meta = await metaRes.json();
-      const bin = await (await fetch(`${base}.bin`, { cache: 'no-store' })).arrayBuffer();
+      const bin = await (await fetch(`${base}.bin`)).arrayBuffer();
       const magic = new TextDecoder().decode(new Uint8Array(bin, 0, 8));
       if (magic !== 'RUBSNAP1') throw new Error(`${base}.bin is not a WorldSnapshot`);
       const [nb, nc, nm, nj] = new Uint32Array(bin, 8, 4);
@@ -1092,23 +1093,13 @@ struct VsOut {
         csr_scatter_contacts: 'csr_scatter_contacts_persistent'} : {}),
     };
     const shaderEntry = name => persistentContacts ? (persistentEntries[name] || name) : name;
-    const sources = {};
-    for (const name of K) {
-      statusEl.textContent = 'compiling ' + name;
-      const src = await (await fetch(`./generated/wgsl/${shaderEntry(name)}.wgsl`, { cache: 'no-store' })).text();
-      const module = device.createShaderModule({ label: name, code: src });
-      // Force frontend validation now so createComputePipeline cannot hang forever
-      // on a deferred compile error (Chrome async path has been wedging here).
-      if (module.getCompilationInfo) {
-        const info = await module.getCompilationInfo();
-        const err = info.messages.find((m) => m.type === 'error');
-        if (err) throw new Error(`${name}: ${err.message}`);
-      }
-      sources[name] = { src, module };
-    }
+    const status = (text) => { statusEl.textContent = text; };
+    const modules = await loadShaderModules(device, K.map((name) => ({ name, file: shaderEntry(name) })),
+      { urlOf: (file) => `./generated/wgsl/${file}.wgsl`, status });
+    const sources = Object.fromEntries(K.map((name, i) => [name, modules[i]]));
 
     console.log('SHADER_BYTES', JSON.stringify(Object.fromEntries(Object.entries(sources).map(([name, source]) => [name, source.src.length]))));
-    statusEl.textContent = 'creating pipelines…';
+    const builder = pipelineBuilder(device, K.length, status);
     const pipes = {};
     for (const name of K) {
       const binds = bindingsOf(sources[name].src);
@@ -1122,18 +1113,11 @@ struct VsOut {
             : { type: 'storage' },
         })),
       });
-      statusEl.textContent = 'pipeline ' + name;
-      const tPipe = performance.now();
-      // Sync create: createComputePipelineAsync was hanging on sleep_island_commit
-      // after the large narrowphase / solve_primal modules on Chrome Metal.
-      device.pushErrorScope('validation');
-      const pipeline = device.createComputePipeline({
+      const pipeline = await builder.create(name, {
         label: name,
         layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
         compute: { module: sources[name].module, entryPoint: shaderEntry(name) },
       });
-      const pipeErr = await device.popErrorScope();
-      if (pipeErr) throw new Error(`${name}: ${pipeErr.message}`);
       const bind = device.createBindGroup({
         label: name,
         layout,
@@ -1143,10 +1127,8 @@ struct VsOut {
         })),
       });
       pipes[name] = { pipeline, bind, dynamic: binds.some((b) => b.index === 22) };
-      statusEl.textContent = `pipeline ${name} ${(performance.now() - tPipe).toFixed(0)}ms`;
-      // setTimeout — not rAF: background tabs throttle rAF and freeze load between kernels.
-      await new Promise((r) => setTimeout(r, 0));
     }
+    await builder.finish();
 
     statusEl.textContent = 'pipelines ready · building renderer…';
     await new Promise((r) => setTimeout(r, 0));
