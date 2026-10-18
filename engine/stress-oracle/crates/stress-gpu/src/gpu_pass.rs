@@ -85,6 +85,7 @@ const ARGS_PARENTS: u64 = 0;
 const ARGS_SLOTS: u64 = 16;
 const ARGS_PARENTS_64: u64 = 32;
 const ARGS_WHOLE: u64 = 48;
+const ARGS_SLOT_GROUPS: u64 = 64;
 
 /// The tables a split pass works on (the solver's), and the engine's.
 pub struct PassTables<'a> {
@@ -230,7 +231,7 @@ impl GpuPass {
             control: buf("gpu pass control", 4 * CTL_WORDS as u64, none),
             member_offsets: buf("gpu pass member offsets", 4 * n, none),
             firsts: buf("gpu pass parents' records", 16 * cap, none),
-            args: buf("gpu pass arguments", 64, wgpu::BufferUsages::INDIRECT),
+            args: buf("gpu pass arguments", 80, wgpu::BufferUsages::INDIRECT),
             plan: buf("gpu pass plan", 4 * plan_words, none),
             old: sizes.iter().map(|&b| buf("gpu pass old", b, none)).collect(),
             counters: buf("gpu pass counters", 16, none),
@@ -284,7 +285,7 @@ impl GpuPass {
         let pass_params = gpu.uniform("gpu pass params", &pp);
         let o = &self.old;
         // Only `pass_parents` writes the arguments; the others dispatch from them.
-        let no_args = gpu.storage("gpu pass no arguments", &[[0u32; 4]; 4]);
+        let no_args = gpu.storage("gpu pass no arguments", &[[0u32; 4]; 5]);
         let pass_bind_with = |k: &Kernel, args: &wgpu::Buffer| {
             gpu.bind(
                 &k.group,
@@ -314,9 +315,17 @@ impl GpuPass {
             (&self.whole_k, pass_bind(&self.whole_k), Size::Indirect(ARGS_WHOLE)),
             (&splitter.frames, split_bind(&splitter.frames), Size::Indirect(ARGS_PARENTS_64)),
             (&splitter.components, split_bind(&splitter.components), Size::Indirect(ARGS_PARENTS)),
-            (&splitter.children, split_bind(&splitter.children), Size::Indirect(ARGS_SLOTS)),
+            if crate::gpu_split::split_tree() {
+                (&splitter.children_group, split_bind(&splitter.children_group), Size::Indirect(ARGS_SLOT_GROUPS))
+            } else {
+                (&splitter.children, split_bind(&splitter.children), Size::Indirect(ARGS_SLOTS))
+            },
             (&splitter.offsets, spawn_bind(&splitter.offsets), Size::Direct(1)),
-            (&splitter.spawn, spawn_bind(&splitter.spawn), Size::Indirect(ARGS_SLOTS)),
+            if crate::gpu_split::split_tree() {
+                (&splitter.spawn_group, spawn_bind(&splitter.spawn_group), Size::Indirect(ARGS_SLOT_GROUPS))
+            } else {
+                (&splitter.spawn, spawn_bind(&splitter.spawn), Size::Indirect(ARGS_SLOTS))
+            },
             (&splitter.spawn_colliders, spawn_bind(&splitter.spawn_colliders), Size::Indirect(ARGS_SLOTS)),
             (&splitter.retire, spawn_bind(&splitter.retire), Size::Indirect(ARGS_PARENTS)),
             (&layout.plan, layout_bind(&layout.plan), Size::Direct(1)),

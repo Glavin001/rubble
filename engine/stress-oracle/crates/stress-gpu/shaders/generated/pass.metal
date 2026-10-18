@@ -236,6 +236,7 @@ uint4 island_range_0(uint i_0, KernelContext_0 thread* kernelContext_0)
         base_0 = 0U;
     }
     *_S10 = packed_uint4(uint4(base_0, 1U, 1U, 0U)) ;
+    *((&kernelContext_1)->args_0+int(4)) = packed_uint4(uint4(carry_c_0, 1U, 1U, 0U)) ;
     return;
 }
 

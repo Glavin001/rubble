@@ -341,3 +341,141 @@ void split_frames(uint3 id: SV_DispatchThreadID)
     frames[5 * p + 3] = float4(com, 0.0);
     frames[5 * p + 4] = float4(com_world - rotate(rot, com), 0.0);
 }
+
+// `split_children` with one group per child slot (`STRESS_GPU_SPLIT_TREE`, on by default
+// in the frame's split pass): the same sums, each thread over every 64th member, then
+// combined in a fixed tree, so a large child costs its members over 64 threads. The same
+// results to within f32 rounding (another fixed order, run to run identical).
+groupshared float4 g_a[64];
+groupshared float4 g_b[64];
+groupshared float4 g_c[64];
+groupshared float4 g_d[64];
+groupshared float4 g_e[64];
+groupshared uint g_anchor;
+
+void tree5(uint tid)
+{
+    GroupMemoryBarrierWithGroupSync();
+    for (uint s = 32; s > 0; s >>= 1)
+    {
+        if (tid < s)
+        {
+            g_a[tid] += g_a[tid + s];
+            g_b[tid] += g_b[tid + s];
+            g_c[tid] += g_c[tid + s];
+            g_d[tid] += g_d[tid + s];
+            g_e[tid] += g_e[tid + s];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void split_children_group(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint slot = group.x;
+    uint tid = thread.x;
+    uint total = total_chunks();
+    if (slot >= total || control[CTL_PARENTS] == 0)
+        return;
+    uint p = 0, hi = control[CTL_PARENTS] - 1;
+    while (p < hi)
+    {
+        uint mid = (p + hi + 1) / 2;
+        if (parents[mid].y <= slot)
+            p = mid;
+        else
+            hi = mid - 1;
+    }
+    uint4 parent = parents[p];
+    uint k = slot - parent.y;
+    if (k >= parent.z)
+        return;
+    uint at = params.out_base + CHILD_WORDS * slot;
+    float4 head = out[at];
+    uint offset = asuint(head.y);
+    uint count = asuint(head.z);
+    Island isl = islands[parent.x];
+    uint first = isl.range.x;
+    uint members = total;
+    Quat q = quat_of(frames[5 * p]);
+    float3 vel = frames[5 * p + 1].xyz;
+    float3 omega = frames[5 * p + 2].xyz;
+    float3 parent_com = frames[5 * p + 3].xyz;
+    if (tid == 0)
+        g_anchor = 0;
+    float4 mm = float4(0.0);
+    uint anchored = 0;
+    for (uint j = tid; j < count; j += 64)
+    {
+        uint c = first + work[members + parent.y + offset + j];
+        ChunkStatic ch = chunks[c];
+        mm += float4(ch.center.xyz * ch.center.w, ch.center.w);
+        if (ch.info.x != SUPPORT_NONE)
+            anchored = 1;
+    }
+    g_a[tid] = mm;
+    g_b[tid] = float4(0.0);
+    g_c[tid] = float4(0.0);
+    g_d[tid] = float4(0.0);
+    g_e[tid] = float4(0.0);
+    tree5(tid);
+    if (anchored != 0)
+        g_anchor = 1;
+    float mass = g_a[0].w;
+    float3 com = g_a[0].xyz / mass;
+    GroupMemoryBarrierWithGroupSync();
+    float3 i0 = float3(0.0), i1 = float3(0.0), i2 = float3(0.0);
+    float3 pm = float3(0.0);
+    float3 l = float3(0.0);
+    for (uint j = tid; j < count; j += 64)
+    {
+        uint c = first + work[members + parent.y + offset + j];
+        ChunkStatic ch = chunks[c];
+        float m = ch.center.w;
+        float3 r = ch.center.xyz - com;
+        float rr = dot(r, r);
+        i0 += ch.inertia0.xyz + (float3(rr, 0, 0) - r.x * r) * m;
+        i1 += ch.inertia1.xyz + (float3(0, rr, 0) - r.y * r) * m;
+        i2 += ch.inertia2.xyz + (float3(0, 0, rr) - r.z * r) * m;
+        float3 u = state[4 * c].xyz;
+        float3 v = vel + cross(omega, rotate(q, ch.center.xyz + u - parent_com)) + rotate(q, state[4 * c + 2].xyz);
+        float3 w = omega + rotate(q, state[4 * c + 3].xyz);
+        pm += v * m;
+        float3 rw = rotate(q, r);
+        float3 ci0, ci1, ci2;
+        rotate_matrix(q, ch.inertia0.xyz, ch.inertia1.xyz, ch.inertia2.xyz, ci0, ci1, ci2);
+        l += cross(rw, v) * m + mat_mul(ci0, ci1, ci2, w);
+    }
+    g_a[tid] = float4(i0, 0.0);
+    g_b[tid] = float4(i1, 0.0);
+    g_c[tid] = float4(i2, 0.0);
+    g_d[tid] = float4(pm, 0.0);
+    g_e[tid] = float4(l, 0.0);
+    tree5(tid);
+    if (tid != 0)
+        return;
+    i0 = g_a[0].xyz; i1 = g_b[0].xyz; i2 = g_c[0].xyz;
+    pm = g_d[0].xyz; l = g_e[0].xyz;
+    bool anch = g_anchor != 0;
+    float3 cv = float3(0.0);
+    float3 cw = float3(0.0);
+    if (!anch)
+    {
+        float3 w0, w1, w2;
+        rotate_matrix(q, i0, i1, i2, w0, w1, w2);
+        float3 v0, v1, v2;
+        inverse3(w0, w1, w2, v0, v1, v2);
+        cv = pm / mass;
+        cw = mat_mul(v0, v1, v2, l);
+    }
+    out[at] = float4(asfloat(p), asfloat(offset), asfloat(count), asfloat(anch ? 1u : 0u));
+    out[at + 1] = float4(com, mass);
+    out[at + 2] = float4(i0, 0.0);
+    out[at + 3] = float4(i1, 0.0);
+    out[at + 4] = float4(i2, 0.0);
+    out[at + 5] = float4(cv, 0.0);
+    out[at + 6] = float4(cw, 0.0);
+    out[at + 7] = float4(0.0);
+}

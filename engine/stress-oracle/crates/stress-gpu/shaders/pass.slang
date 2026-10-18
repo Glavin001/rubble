@@ -147,6 +147,8 @@ void pass_parents(uint3 thread: SV_GroupThreadID)
     args[2] = uint4((carry_p + 63) / 64, 1, 1, 0);
     // `pass_whole`: only when something splits.
     args[3] = uint4(carry_p > 0 ? WHOLE_GROUPS : 0u, 1, 1, 0);
+    // One group per child slot (split.slang `split_children_group`).
+    args[4] = uint4(carry_c, 1, 1, 0);
 }
 
 // The tables the layout reads whole (any island may move): the islands, the incidence,

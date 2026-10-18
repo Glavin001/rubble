@@ -450,6 +450,136 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
     extras[2 * slot + 1] = quat_vec(principal);
 }
 
+
+// `spawn_bodies` with one group per child slot (`STRESS_GPU_SPLIT_TREE`): each thread over
+// every 64th member, the sums combined in a fixed tree (f32 rounding apart, the same body).
+groupshared float4 g_s0[64];
+groupshared float4 g_s1[64];
+groupshared float4 g_s2[64];
+groupshared float4 g_s3[64];
+groupshared float4 g_s4[64];
+
+void spawn_tree(uint tid)
+{
+    GroupMemoryBarrierWithGroupSync();
+    for (uint s = 32; s > 0; s >>= 1)
+    {
+        if (tid < s)
+        {
+            g_s0[tid] += g_s0[tid + s];
+            g_s1[tid] += g_s1[tid + s];
+            g_s2[tid] += g_s2[tid + s];
+            g_s3[tid] += g_s3[tid + s];
+            g_s4[tid] += g_s4[tid + s];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_bodies_group(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint slot = group.x;
+    uint tid = thread.x;
+    uint total = total_slots();
+    if (slot >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0)
+        return;
+    uint p = parent_at(slot);
+    uint4 parent = parents[p];
+    if (slot - parent.y >= parent.z || slots[slot].w == 0)
+        return;
+    uint first = islands_of[p].x;
+    uint2 m = child_members(slot);
+    float4 rec0 = children[CHILD_WORDS * slot];
+    bool anchored = asuint(rec0.w) != 0;
+    float4 mm = float4(0.0);
+    float4 su = float4(0.0);
+    for (uint j = tid; j < m.y; j += 64)
+    {
+        uint c = first + work[total + parent.y + m.x + j];
+        uint4 r = part_range(c);
+        for (uint k = r.x; k < r.x + r.y; k++)
+        {
+            float4 pc = parts[PART_WORDS * k];
+            mm += float4(pc.xyz * pc.w, pc.w);
+        }
+        float cm = chunks[c].center.w;
+        su += float4(state[4 * c].xyz * cm, cm);
+    }
+    g_s0[tid] = mm;
+    g_s1[tid] = float4(0.0);
+    g_s2[tid] = float4(0.0);
+    g_s3[tid] = float4(0.0);
+    g_s4[tid] = su;
+    spawn_tree(tid);
+    float mass = g_s0[0].w;
+    float3 com = g_s0[0].xyz / max(mass, 1e-30);
+    float4 su_total = g_s4[0];
+    GroupMemoryBarrierWithGroupSync();
+    float3 i0 = float3(0.0), i1 = float3(0.0), i2 = float3(0.0);
+    for (uint j = tid; j < m.y; j += 64)
+    {
+        uint4 r = part_range(first + work[total + parent.y + m.x + j]);
+        for (uint k = r.x; k < r.x + r.y; k++)
+        {
+            float4 c = parts[PART_WORDS * k];
+            float3 d = c.xyz - com;
+            float dd = dot(d, d);
+            i0 += parts[PART_WORDS * k + 1].xyz + (float3(dd, 0, 0) - d.x * d) * c.w;
+            i1 += parts[PART_WORDS * k + 2].xyz + (float3(0, dd, 0) - d.y * d) * c.w;
+            i2 += parts[PART_WORDS * k + 3].xyz + (float3(0, 0, dd) - d.z * d) * c.w;
+        }
+    }
+    g_s0[tid] = float4(0.0);
+    g_s1[tid] = float4(i0, 0.0);
+    g_s2[tid] = float4(i1, 0.0);
+    g_s3[tid] = float4(i2, 0.0);
+    g_s4[tid] = tid == 0 ? su_total : float4(0.0);
+    spawn_tree(tid);
+    if (tid != 0)
+        return;
+    i0 = g_s1[0].xyz; i1 = g_s2[0].xyz; i2 = g_s3[0].xyz;
+    Quat principal;
+    float3 moments;
+    principal_axes(i0, i1, i2, principal, moments);
+    Quat to_body = conj(principal);
+    // The child's pose (`split_cluster`): the parent's, a free child's moved by its
+    // chunks' mean hidden displacement (stress masses).
+    Quat pose_rot = quat_of(frames[5 * p]);
+    float3 pose_pos = frames[5 * p + 4].xyz;
+    if (!anchored)
+        pose_pos += rotate(pose_rot, g_s4[0].xyz / g_s4[0].w);
+    // The body (`create_body`).
+    uint4 at = slots[slot];
+    Quat orientation = rot_to_rubble(normalized(quat_mul(pose_rot, principal)));
+    float inv_mass = anchored || !(mass > 0.0) ? 0.0 : 1.0 / mass;
+    float3 inv_inertia = float3(0.0);
+    if (!anchored)
+        inv_inertia = float3(moments.x > 0.0 ? 1.0 / moments.x : 0.0, moments.y > 0.0 ? 1.0 / moments.y : 0.0, moments.z > 0.0 ? 1.0 / moments.z : 0.0);
+    float3 velocity = anchored ? float3(0.0) : to_rubble(children[CHILD_WORDS * slot + 5].xyz);
+    float3 spin = anchored ? float3(0.0) : to_rubble(children[CHILD_WORDS * slot + 6].xyz);
+    uint flags = anchored ? 0u : (FLAG_DYNAMIC | FLAG_AWAKE);
+    float4 record[BODY_WORDS] = {
+        float4(to_rubble(pose_pos + rotate(pose_rot, com)), inv_mass),
+        quat_vec(orientation),
+        float4(inv_inertia, asfloat(flags)),
+        float4(velocity, 0.0),
+        float4(spin, 0.0),
+        float4(0.0),
+        float4(0.0, 0.0, 0.0, 1.0),
+    };
+    uint b = BODY_WORDS * (params.live != 0 ? at.x : at.x - control[CTL_FIRST_BODY]);
+    for (uint w = 0; w < BODY_WORDS; w++)
+        bodies[b + w] = record[w];
+    // The previous-pose region (`add_bodies` writes both).
+    if (params.live != 0)
+        for (uint w = 0; w < BODY_WORDS; w++)
+            bodies[BODY_WORDS * (params.max_bodies + at.x) + w] = record[w];
+    extras[2 * slot] = float4(com, mass);
+    extras[2 * slot + 1] = quat_vec(principal);
+}
+
 // Per member: its chunk's colliders for its child's body (`create_body`), in part order:
 // at `to_body (origin - com)`, turned `to_body rotation` (the child's centre of mass and
 // principal rotation from `spawn_bodies`), at the member's slots (`spawn_offsets`).

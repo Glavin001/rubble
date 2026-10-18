@@ -226,6 +226,7 @@ fn pass_parents(@builtin(local_invocation_id) thread_0 : vec3<u32>)
         base_0 = u32(0);
     }
     args_0[i32(3)] = vec4<u32>(base_0, u32(1), u32(1), u32(0));
+    args_0[i32(4)] = vec4<u32>(carry_c_0, u32(1), u32(1), u32(0));
     return;
 }
 

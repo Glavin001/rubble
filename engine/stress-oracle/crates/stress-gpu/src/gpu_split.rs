@@ -71,11 +71,13 @@ pub struct SplitCheck {
 pub struct GpuSplitter {
     pub(crate) components: Kernel,
     pub(crate) children: Kernel,
+    pub(crate) children_group: Kernel,
     pub(crate) frames: Kernel,
     pub(crate) offsets: Kernel,
     pub(crate) spawn: Kernel,
     pub(crate) retire: Kernel,
     pub(crate) spawn_colliders: Kernel,
+    pub(crate) spawn_group: Kernel,
     /// The split pass's copies of the tables as they were (`pass`), kept between splits:
     /// a new buffer per split costs its allocation and zero fill.
     old: std::cell::RefCell<Vec<Option<wgpu::Buffer>>>,
@@ -196,7 +198,7 @@ impl GpuSplitter {
     pub fn new(gpu: &Gpu) -> GpuSplitter {
         let k = |e: &str| gpu.compute(&shaders::SPLIT, e, &BINDINGS);
         let s = |e: &str| gpu.compute(&shaders::SPAWN, e, &SPAWN_BINDINGS);
-        GpuSplitter { components: k("split_components"), children: k("split_children"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire"), spawn_colliders: s("spawn_colliders"), old: std::cell::RefCell::new(vec![None; 8]) }
+        GpuSplitter { components: k("split_components"), children: k("split_children"), children_group: k("split_children_group"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire"), spawn_colliders: s("spawn_colliders"), spawn_group: s("spawn_bodies_group"), old: std::cell::RefCell::new(vec![None; 8]) }
     }
 
     /// The children of the islands `parents` (island, chunk range, rigid frame: rotation
@@ -309,7 +311,8 @@ impl GpuSplitter {
         let control = gpu.storage("spawn control", &control_words(run.parent_count as u32, 0, 0, first_body, first_collider, total as u32));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let member_offsets = gpu.storage("spawn member offsets", &vec![0u32; total.max(1)]);
-        for (k, size) in [(&self.offsets, 1u32), (&self.spawn, groups(total, 64)), (&self.spawn_colliders, groups(total, 64)), (&self.retire, run.parent_count.max(1) as u32)] {
+        let bodies_step = if split_tree() { (&self.spawn_group, total.max(1) as u32) } else { (&self.spawn, groups(total, 64)) };
+        for (k, size) in [(&self.offsets, 1u32), bodies_step, (&self.spawn_colliders, groups(total, 64)), (&self.retire, run.parent_count.max(1) as u32)] {
             let bind = gpu.bind(&k.group, &[&params, &run.parents, &run.work, &run.out, &run.frames, &table.ranges, &table.parts, chunks, state, &slots_buf, bodies, colliders, &islands_of, &extras_buf, &table.structure_base, &control, &member_offsets]);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
@@ -904,4 +907,10 @@ fn control_words(parents: u32, islands: u32, next_id: u32, first_body: u32, firs
     w[5] = first_collider;
     w[6] = total;
     w
+}
+
+/// `split_children_group` (a group per child slot) in the GPU split pass, unless
+/// `STRESS_GPU_SPLIT_TREE=0` (one thread per child, as the per-split path runs it).
+pub(crate) fn split_tree() -> bool {
+    std::env::var("STRESS_GPU_SPLIT_TREE").map_or(true, |v| v != "0")
 }
