@@ -79,6 +79,11 @@ impl ResidentEngine for RubbleEngine {
         if !self.bodies.iter().any(|(k, e)| e.inv_mass > 0.0 && !self.frozen.contains(k)) {
             return 0;
         }
+        // `STRESS_RUBBLE_MAX_SUBSTEPS=n` (a measurement of the CCD policy, not adopted):
+        // at most n substeps a frame (1: no CCD, as vibe-land's PhysX runs).
+        if let Some(m) = std::env::var("STRESS_RUBBLE_MAX_SUBSTEPS").ok().and_then(|v| v.parse::<u32>().ok()) {
+            n = n.min(m.max(1));
+        }
         // `STRESS_RUBBLE_SPECULATIVE=1` (as `RigidEngine::step`; measured, not adopted):
         // one step whose speculative contact range covers the farthest a CCD body travels.
         self.resident_offset = 0.01;
