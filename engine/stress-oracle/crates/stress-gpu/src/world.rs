@@ -490,7 +490,11 @@ impl GpuWorld {
                 lead = first;
                 self.set_frame_dt(lead);
                 self.last_resident = true;
+                let t_lead = std::time::Instant::now();
                 let r = self.resident_frame(gpu);
+                if std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
+                    eprintln!("impact window frame {}: lead (resident) {:.1} ms", self.frame - 1, t_lead.elapsed().as_secs_f64() * 1e3);
+                }
                 self.frame -= 1;
                 if let Err(e) = r {
                     self.set_frame_dt(fdt);
@@ -517,17 +521,25 @@ impl GpuWorld {
                 window = false;
             }
         }
+        let t_window = std::time::Instant::now();
         let r = self.step_frame_tiered(gpu);
+        if window && std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
+            eprintln!("impact window frame {}: explicit part {:.1} ms", self.frame - 1, t_window.elapsed().as_secs_f64() * 1e3);
+        }
         if !window && lead > 0.0 {
             self.set_frame_dt(fdt);
         }
         if window {
             let w = self.scene.sim.frame_dt;
             self.set_frame_dt(fdt - lead - w);
+            let t_rest = std::time::Instant::now();
             let rest = r.and_then(|_| {
                 self.last_resident = true;
                 self.resident_frame(gpu)
             });
+            if std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
+                eprintln!("impact window frame {}: rest (resident) {:.1} ms", self.frame - 1, t_rest.elapsed().as_secs_f64() * 1e3);
+            }
             self.set_frame_dt(fdt);
             // One tick: the window and the rest are one frame.
             self.frame -= 1;
