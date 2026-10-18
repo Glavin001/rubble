@@ -10,6 +10,7 @@ use stress_ref::engine::BodyKey;
 
 use crate::ingest_check::body_code;
 use crate::{Owner, RubbleEngine};
+use engine_schema::BodyState;
 
 impl ResidentEngine for RubbleEngine {
     fn engine_buffers(&self) -> EngineBuffers<'_> {
@@ -49,8 +50,7 @@ impl ResidentEngine for RubbleEngine {
 
     fn resident_substeps(&mut self, dt: f64) -> u32 {
         let mut n = self.substeps.max(1);
-        let ccd: Vec<u32> = self.bodies.iter().filter(|(k, e)| !self.speculative_ccd && e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)).map(|(_, e)| e.id).collect();
-        if !ccd.is_empty() {
+        if self.needs_ccd_bodies() {
             // The CCD bound needs the fast bodies' speeds: read back (counted).
             self.resident_reads += 1;
             let all = self.bodies_now();
@@ -114,15 +114,33 @@ impl ResidentEngine for RubbleEngine {
         Ok(())
     }
 
-    fn resident_status(&self) -> (&wgpu::Buffer, u64, u64) {
-        (self.sim.counters_buffer(), 0, std::mem::size_of::<engine_schema::StepCounters>() as u64)
+    fn resident_status(&self) -> Vec<(&wgpu::Buffer, u64, u64)> {
+        let mut parts = vec![(self.sim.counters_buffer(), 0, std::mem::size_of::<engine_schema::StepCounters>() as u64)];
+        // The next frame's CCD bound reads the fast bodies' speeds: the bodies as this
+        // frame leaves them, in this read (`bodies_now` then has them).
+        if self.needs_ccd_bodies() {
+            parts.push((self.sim.body_buffer(), 0, self.sim.body_count() as u64 * std::mem::size_of::<BodyState>() as u64));
+        }
+        parts
     }
 
-    fn resident_finish(&mut self, status: &[u8]) -> Result<(), String> {
-        let counters: engine_schema::StepCounters = bytemuck::pod_read_unaligned(status);
+    fn resident_finish(&mut self, status: &[Vec<u8>]) -> Result<(), String> {
+        let counters: engine_schema::StepCounters = bytemuck::pod_read_unaligned(&status[0][..std::mem::size_of::<engine_schema::StepCounters>()]);
         if std::env::var("STRESS_RESIDENT_PHASES").is_ok() {
             eprintln!("resident phases: rubble counters: {} bodies, {} colliders, {} contacts, {} candidates, {} awake, {} colours", counters.body_count, counters.collider_count, counters.contact_count, counters.candidate_count, counters.awake_count, counters.color_count);
         }
+        if let Some(bytes) = status.get(1) {
+            let n = self.sim.body_count() as usize;
+            let bodies: Vec<BodyState> = (0..n).map(|i| bytemuck::pod_read_unaligned(&bytes[i * std::mem::size_of::<BodyState>()..(i + 1) * std::mem::size_of::<BodyState>()])).collect();
+            *self.bodies_read.borrow_mut() = Some(bodies);
+        }
         self.sim.drained(counters).map(|_| ()).map_err(|e| format!("rubble step failed: {e:?} (capacity overflow)"))
+    }
+}
+
+impl RubbleEngine {
+    /// Whether the frame's substep count reads CCD bodies' speeds (`resident_substeps`).
+    fn needs_ccd_bodies(&self) -> bool {
+        !self.speculative_ccd && self.bodies.iter().any(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k))
     }
 }

@@ -209,12 +209,17 @@ impl GpuWorld {
                 eprintln!("resident phases: cascade encode {encode:.1} ms, done {:.1} ms", t_pass.elapsed().as_secs_f64() * 1e3);
             }
             let e = engine.borrow();
-            let read = gpu.read_ranges(&[run.range(), e.resident_status(), r.qs.status_range()]);
+            let status = e.resident_status();
+            let engine_parts = status.len();
+            let mut parts = vec![run.range()];
+            parts.extend(status);
+            parts.push(r.qs.status_range());
+            let read = gpu.read_ranges(&parts);
             drop(e);
             self.resident = Some(r);
             let out = run.outcome(&read[0]);
-            engine.borrow_mut().resident_finish(&read[1])?;
-            self.resident.as_ref().expect("resident tables").qs.check(&read[2])?;
+            engine.borrow_mut().resident_finish(&read[1..1 + engine_parts])?;
+            self.resident.as_ref().expect("resident tables").qs.check(&read[1 + engine_parts])?;
             unconverged += out.unconverged;
             for cl in self.solver.mirror.clusters.iter_mut().filter(|c| !c.bonds.is_empty()) {
                 cl.activity = Activity::Settled;

@@ -244,10 +244,13 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     /// One frame of `dt` in `n` substeps (nothing frozen, no impulses), each substep's
     /// contact rows into `ingest`, then merged; no read-back.
     fn step_resident(&mut self, gpu: &Gpu, dt: f64, n: u32, ingest: &EngineIngest) -> Result<(), String>;
-    /// The engine's status (its step counters) for the frame's one read.
-    fn resident_status(&self) -> (&wgpu::Buffer, u64, u64);
-    /// The frame's end, with the status read: the engine's overflow, if any.
-    fn resident_finish(&mut self, status: &[u8]) -> Result<(), String>;
+    /// The engine's status for the frame's one read: its step counters first, then
+    /// anything the next frame needs from the device (the CCD bodies' state), so that
+    /// costs no read of its own.
+    fn resident_status(&self) -> Vec<(&wgpu::Buffer, u64, u64)>;
+    /// The frame's end, with the status read (`resident_status`'s ranges, in order): the
+    /// engine's overflow, if any.
+    fn resident_finish(&mut self, status: &[Vec<u8>]) -> Result<(), String>;
 }
 
 /// A resident engine shared between the world's shell (as its `RigidEngine`) and the

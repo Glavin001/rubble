@@ -412,9 +412,13 @@ your call; the rest need building.
           - 10 primal iterations of about 0.28 ms, each 7 colours plus 4 headroom
             dispatches (about 25 µs per dispatch).
         - The stress cascade, about 3 ms.
-        - The CCD substep count's body read-back, 0.2–0.4 ms. It is the last per-frame
-          host read outside the frame's status read; it could ride on the previous
-          frame's status read.
+        - The CCD substep count's body read-back (0.2–0.4 ms) now rides on the frame's
+          one status read (`ResidentEngine::resident_status` returns ranges); the next
+          frame's `bodies_now` uses it. Resident tests pass and the guard is 24/24.
+        - **Found: the bombard is not deterministic run to run.** Identical runs give
+          different digests at 1 s (both 2,650 broken bonds), and at 3 s 3,343 against
+          6,317 broken bonds. Bombard digests cannot gate a change until this is found:
+          a GPU race in rubble or in the resident frame.
         - Under Unreal Editor's GPU load, the same runs measure 20–42 ms.
         - **The decision that remains is yours:** match vibe-land's PhysX (one-step CCD,
           4 iterations; about 9 ms, but 2× the breakage), or stay lossless. Lossless
