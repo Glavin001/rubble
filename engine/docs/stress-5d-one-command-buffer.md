@@ -51,7 +51,7 @@ On every tick of a resident frame, the stress stage and rubble's step run as:
 | One status read per resident tick | **Met** on the common path (frame-mode GPU splits included) |
 | One submission per resident tick | **Not met.** Before 08efa0c: 5 (ingest start, rubble step, substep ingest, ingest merge, cascade). After 08efa0c: 1 on frames with one engine substep and no fallback; more on the paths in 3. Not yet counted by instrumentation |
 | Backend-neutral plan | **Not met.** Stress dispatches are hand-recorded in wgpu: `solver.rs`, `ingest.rs`, `resident.rs`, `routing.rs`, `gpu_pass.rs`, `gpu_split.rs` |
-| Second host replays it | **Not met.** `engine-metal` replays `rigid_plan` (rubble only); `engine-cuda` is a source-emitting stub with no runtime |
+| Apple Metal, web WebGPU, Linux CUDA (your requirement) | **Not met.** The stress stage runs only on native wgpu. `engine-metal` replays `rigid_plan` (rubble only); the web host runs rubble only; `engine-cuda` is a source-emitting stub with no runtime |
 | Lossless | WIP checked on the quick tier only (46728bf1, both modes) |
 | Determinism | Suites repeat; the 36-shot barrage has a latent GPU race (charter log, "Barrage nondeterminism") |
 | Speed | WIP single-buffer mode is slower on the quick tier: median 8.1 against 7.3 ms, p95 14.5 against 12.0. The host's follow of the last frame's splits no longer overlaps the engine's GPU work |
@@ -153,18 +153,48 @@ Remove every item in section 3 that is on the resident path:
   - every recorded digest is unchanged (guard all identical);
   - W2's counts still hold.
 
-### W5. A second host replays the same plan
+### W5. Three platforms build and run the same plan: Apple Metal, web WebGPU, Linux CUDA
 
-- `engine-metal` replays the tick's list (rubble already replays `rigid_plan` there),
-  with the stress kernels from the same Slang sources.
-- **Done when:** `wall_ram_late2` and the vibe-town quick tier run on the Metal host with
-  one command buffer and one read per tick, and the results agree with wgpu's. Either the
-  same digests, or a stated tolerance agreed with the user if bit identity across backends
-  is not achievable.
-- CUDA: `engine-cuda` has no runtime (it emits and validates sources). Replaying on CUDA
-  needs that runtime first. **This is a decision for the user:** in scope for 5d, or a
-  follow-up. Until decided, W5's acceptance is Metal, plus Slang emitting CUDA source for
-  every stress kernel without errors.
+Your requirement of 2026-10-18. Each platform replays the **same** tick command list (W4), with
+kernels compiled from the **same** Slang sources (Slang to MSL, WGSL and CUDA C++; nothing
+hand-written per backend). Today: rubble's own step has a Metal host (`engine-metal`, replays
+`rigid_plan`) and a browser host (wasm, `web/`). `engine-cuda` is a stub that emits and
+validates CUDA sources with no runtime. The stress stage runs only on native wgpu.
+
+- **Apple Metal** (macOS, M3 Max): a host that replays the tick's list on Metal directly
+  (`engine-metal`), not through wgpu.
+  - Builds: `cargo build --release` of the Metal host with the stress stage.
+  - Runs: `wall_ram_late2`, `wall_row2_late2` (`blast_parity_routed`, GPU punch) and
+    vibe-town quick and standard (`blast_parity`), each tick one command buffer
+    (`commit`) and one read, by W1's counter.
+  - Agrees: the same digests as native wgpu on Metal (both drive the same Apple GPU), or
+    else the first differing stage found and the cause fixed.
+  - Speed: M6 targets met.
+- **Web WebGPU** (browser, wasm): the stress stage built to wasm, its kernels from the
+  Slang-generated WGSL, replaying the tick's list through the browser's WebGPU.
+  - Builds: `wasm-pack`/`cargo build --target wasm32-unknown-unknown` of the stress stage
+    plus rubble's web host, and `npm run build` in `web/`.
+  - Runs: `wall_ram_late2` and vibe-town quick in Chrome on the M3 Max, each tick one
+    `queue.submit` and one read (counter exposed to the page and logged).
+  - Agrees: ram speed and fragments within 1 % and 1 fragment of native, broken bonds
+    within 1 %. Bit identity is not required: the browser's WGSL compiler is not Metal's
+    MSL path.
+  - Speed: frame times reported (no target until measured; the user decides it).
+- **Linux CUDA** (NVIDIA GPU, Linux): a real CUDA runtime host in `engine-cuda` (driver
+  binding, buffers, module loading, launches, one stream per tick, one device-to-host copy
+  for the status), replaying rubble's step plan and the stress list, kernels from Slang's
+  CUDA target.
+  - Builds: on Linux, with the CUDA toolkit, `cargo build --release -p engine-cuda` with
+    its runtime feature. On machines without CUDA, the source-emitting build still
+    passes, as today.
+  - Runs: the same scenes as Metal on an NVIDIA GPU, each tick one stream submission and
+    one read, by W1's counter (the CUDA host counts its own).
+  - Agrees: ram speed and fragments within 1 % and 1 fragment of native, broken bonds
+    within 1 %; deterministic run to run on that GPU (identical digests).
+  - **Needs an NVIDIA Linux machine to verify.** If none is available to this work, W5's
+    CUDA part is reported as **built, not run**, and is not done.
+- **Done when:** all three platforms meet their Builds, Runs and Agrees above, with the
+  commands and numbers logged in the charter.
 
 ### W6. Determinism
 
@@ -182,7 +212,9 @@ numbers, commit):
 3. **W3:** speed within 3 % of the many-submission mode, and all M6 targets met.
 4. **W4:** no hand-recorded stress dispatch on the resident path, and the guard all
    identical.
-5. **W5:** Metal replays the plan with agreeing results (CUDA as decided by the user).
+5. **W5:** Apple Metal, web WebGPU and Linux CUDA each build, run the acceptance scenes at
+   one submission and one read per tick, and agree with native as W5 states. CUDA verified
+   on an NVIDIA Linux GPU: built but not run is **not done**.
 6. **W6:** the barrage is deterministic over six runs.
 7. All stress-gpu and stress-rubble test suites pass.
 
