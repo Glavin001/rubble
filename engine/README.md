@@ -89,7 +89,7 @@ Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
 | `crates/engine-fracture` | Fracture-lab host logic shared by the browser and Metal hosts: Shardwright GLB reader, scene builders, tick plan; stress cooking |
 | `crates/engine-fracture-wasm` | wasm-bindgen bindings of `engine-fracture` for the browser fracture lab |
 | `crates/engine-slang-build` | Runs `slangc` offline and embeds the Metal / SPIR-V / CUDA artifacts |
-| `crates/engine-cuda` | CUDA source emission |
+| `crates/engine-cuda` | `CudaSim` replays `rigid_plan` on NVIDIA (Slang → CUDA → PTX, driver API); GPU tests run on Modal, see [TOOLCHAIN.md](TOOLCHAIN.md#cuda-tests-on-modal) |
 | `crates/engine-viewer` | Buffer-shared draw; native Metal `fracture_viewer` |
 | `conformance/` | Oracle scene schema + adapter JSON |
 | `stress-oracle/` | Destruction stress solver (own workspace): CPU reference, GPU solver, rubble coupling, `destruction-view`; see its README and [docs/stress-solver-tracker.md](docs/stress-solver-tracker.md) |

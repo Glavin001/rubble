@@ -5,7 +5,7 @@
 use crate::desc::*;
 use engine_schema::vehicle::*;
 use engine_schema::{BodyFlags, BodyState, Collider, Joint, ShapeType, JOINT_FLAG_TYRE};
-use glam::{Quat, Vec3};
+use glam::{Mat3, Quat, Vec3};
 
 pub type Slot = [u32; 4];
 
@@ -113,7 +113,102 @@ pub fn requirements(desc: &VehicleDesc) -> Requirements {
         colliders: desc.parts.iter().map(|p| p.colliders.len() as u32).sum::<u32>()
             + desc.wheels.iter().map(rim_count).sum::<u32>()
             + spare_rims
-            + wheel_slots * SHELL_SPHERES,
+            + wheel_slots * SHELL_SPHERES
+            + track_pods(desc, 0).iter().map(|c| c.len() as u32).sum::<u32>(),
+    }
+}
+
+/// Belt boxes of a track pod (see [`TrackPodDesc`]) on `body`, chassis space.
+/// Each box's local +X is the axle: world_step runs the belt around it.
+///
+/// Side view (fwd →): an upper run over every wheel from the end wheels' axle
+/// height to `top`; a lower run between the first and last road-wheel axles down
+/// to the road wheels' tread line; and a ramp at each end from that tread line up
+/// to the end wheel's axle height at its rim (the sloped run up to a raised
+/// sprocket/idler, or a chamfer when the ends are not raised). An edge met on a
+/// ramp pushes the nose up even with the track stalled.
+pub fn track_pod_colliders(desc: &VehicleDesc, tr: &TrackDesc, pod: &TrackPodDesc, body: u32) -> Vec<Collider> {
+    let up = v3(desc.up).normalize();
+    let fwd = v3(desc.forward).normalize();
+    let axle = up.cross(fwd).normalize();
+    let mut ws: Vec<&WheelDesc> = tr.wheels.iter().filter_map(|&i| desc.wheels.get(i as usize)).collect();
+    if ws.is_empty() {
+        return Vec::new();
+    }
+    ws.sort_by(|a, b| v3(a.position).dot(fwd).total_cmp(&v3(b.position).dot(fwd)));
+    // Bottomed-out axle height and fore/aft position (chassis up / fwd).
+    let axle_h = |w: &WheelDesc| {
+        let down = w.suspension_dir.map(v3).unwrap_or(-up).normalize();
+        (v3(w.position) + down * w.suspension_min).dot(up)
+    };
+    let along = |w: &WheelDesc| v3(w.position).dot(fwd);
+    let width = if pod.width > 0.0 { pod.width } else { ws.iter().map(|w| w.width).fold(0.0, f32::max) };
+    let lat = ws.iter().map(|w| v3(w.position).dot(axle)).sum::<f32>() / ws.len() as f32;
+    let top = ws.iter().map(|w| v3(w.position).dot(up)).fold(f32::MIN, f32::max) + pod.top;
+    let low = ws.iter().map(|w| axle_h(w) - w.radius).fold(f32::MAX, f32::min) + pod.clearance;
+    let road: Vec<&WheelDesc> = ws.iter().copied().filter(|w| axle_h(w) - w.radius + pod.clearance < low + 1e-3).collect();
+    let (rear, front) = (ws[0], ws[ws.len() - 1]);
+    let (road_rear, road_front) = (along(road[0]), along(road[road.len() - 1]));
+    let run_h = ws.iter().map(|w| axle_h(w)).fold(f32::MIN, f32::max) + pod.clearance;
+    let boxed = |center: glam::Vec2, half: Vec3, pitch: f32| {
+        // center/half in (fwd, up); pitch rotates local fwd toward up about the axle.
+        let (s, c) = pitch.sin_cos();
+        let (bf, bu) = (fwd * c + up * s, up * c - fwd * s);
+        Collider {
+            body,
+            shape: ShapeType::Box as u32,
+            material: pod.material,
+            generation: 0,
+            local_pos: (axle * lat + fwd * center.x + up * center.y).to_array(),
+            density: 0.0,
+            local_rot: Quat::from_mat3(&Mat3::from_cols(axle, bu, bf)).normalize().to_array(),
+            params: [half.x, half.y, half.z, half.length()],
+        }
+    };
+    let hw = 0.5 * width;
+    let mut out = Vec::new();
+    // Upper run.
+    let (lo, hi) = (along(rear) - rear.radius, along(front) + front.radius);
+    out.push(boxed(
+        glam::Vec2::new(0.5 * (lo + hi), 0.5 * (run_h + top)),
+        Vec3::new(hw, 0.5 * (top - run_h), 0.5 * (hi - lo)),
+        0.0,
+    ));
+    // Lower run between the end road-wheel axles.
+    if road_front - road_rear > 1e-3 {
+        out.push(boxed(
+            glam::Vec2::new(0.5 * (road_rear + road_front), 0.5 * (low + top)),
+            Vec3::new(hw, 0.5 * (top - low), 0.5 * (road_front - road_rear)),
+            0.0,
+        ));
+    }
+    // Ramps: bottom face from (end road axle, low) to (end wheel rim, run_h).
+    let depth = run_h - low + 0.1;
+    for (from, to) in [
+        (glam::Vec2::new(road_front, low), glam::Vec2::new(along(front) + front.radius, run_h)),
+        (glam::Vec2::new(road_rear, low), glam::Vec2::new(along(rear) - rear.radius, run_h)),
+    ] {
+        let d = to - from;
+        let len = d.length();
+        if len < 1e-3 {
+            continue;
+        }
+        let dir = d / len * d.x.signum();
+        let pitch = dir.y.atan2(dir.x);
+        let inward = glam::Vec2::new(-dir.y, dir.x);
+        out.push(boxed(0.5 * (from + to) + inward * (0.5 * depth), Vec3::new(hw, 0.5 * depth, 0.5 * len), pitch));
+    }
+    out
+}
+
+/// Pod colliders of the left and right tracks (empty where a track has none).
+fn track_pods(desc: &VehicleDesc, body: u32) -> [Vec<Collider>; 2] {
+    match &desc.tracks {
+        Some(t) => [&t.left, &t.right].map(|tr| match &tr.pod {
+            Some(pod) => track_pod_colliders(desc, tr, pod, body),
+            None => Vec::new(),
+        }),
+        None => [Vec::new(), Vec::new()],
     }
 }
 
@@ -399,14 +494,27 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
     }
     // Wheel shells on the chassis (spare slots park theirs on the static anchor);
     // vehicle_post moves them with the suspension and steering every step.
+    // A track pod replaces its wheels' shells: they stay parked (no W_TJ.y).
+    let podded: Vec<u32> = match &desc.tracks {
+        Some(t) => [&t.left, &t.right].iter().filter(|tr| tr.pod.is_some()).flat_map(|tr| tr.wheels.clone()).collect(),
+        None => Vec::new(),
+    };
     let mut shell_starts = Vec::new();
     for i in 0..wheel_slots {
-        let real = (i as usize) < desc.wheels.len();
+        let real = (i as usize) < desc.wheels.len() && !podded.contains(&i);
         let w = desc.wheels.get(i as usize).unwrap_or(&spare);
         let down = w.suspension_dir.map(v3).unwrap_or(-up).normalize();
         let center = v3(w.position) + down * w.suspension_max;
-        shell_starts.push(slots.collider_base + out.colliders.len() as u32);
+        shell_starts.push(if podded.contains(&i) { NO_INDEX } else { slots.collider_base + out.colliders.len() as u32 });
         out.colliders.extend(shell_colliders(w, center, down, fwd, if real { chassis } else { anchor }));
+    }
+    // Track pods (vehicle_post runs their belts): V_QUERY.zw.
+    let mut pod_slots = [NO_INDEX; 2];
+    for (k, cols) in track_pods(desc, chassis).into_iter().enumerate() {
+        if !cols.is_empty() {
+            pod_slots[k] = (slots.collider_base + out.colliders.len() as u32) | ((cols.len() as u32) << POD_COUNT_SHIFT);
+            out.colliders.extend(cols);
+        }
     }
 
     // ---- wheels ----
@@ -565,7 +673,7 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
         t.turn_grip_g * 9.81 * (lateral(&t.left) - lateral(&t.right)).abs()
     });
     v[V_TRACK_D as usize] = [f(1.0), f(1.0), f(0.0), f(turn_aw)];
-    v[V_QUERY as usize] = [desc.query_interval, 0, 0, 0];
+    v[V_QUERY as usize] = [desc.query_interval, 0, pod_slots[0], pod_slots[1]];
     v[V_IN0 as usize] = [f(0.0); 4];
     v[V_IN1 as usize] = [GEAR_AUTO, 0, 0, 0];
     v[V_IN2 as usize] = [!0, !0, !0, !0];
@@ -674,5 +782,57 @@ impl VehicleCapacity {
             [l.diff_base, l.anti_roll_base, l.part_base, l.ray_base],
             [rays, self.max_rays, parts, 0],
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn corners(c: &Collider) -> Vec<Vec3> {
+        let q = Quat::from_array(c.local_rot);
+        let h = Vec3::from_slice(&c.params[..3]);
+        (0..8)
+            .map(|i| {
+                let s = Vec3::new(if i & 1 == 0 { -1.0 } else { 1.0 }, if i & 2 == 0 { -1.0 } else { 1.0 }, if i & 4 == 0 { -1.0 } else { 1.0 });
+                v3(c.local_pos) + q * (h * s)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tank_pods_close_the_track_and_ramp_up_to_the_end_wheels() {
+        let d = crate::presets::tank();
+        let t = d.tracks.as_ref().unwrap();
+        let cols = track_pod_colliders(&d, &t.left, t.left.pod.as_ref().unwrap(), 0);
+        assert_eq!(cols.len(), 4, "upper run, lower run, two ramps");
+        let ys: Vec<f32> = cols.iter().flat_map(corners).map(|p| p.y).collect();
+        let zs: Vec<f32> = cols.iter().flat_map(corners).map(|p| p.z).collect();
+        let lowest = ys.iter().cloned().fold(f32::MAX, f32::min);
+        // Road wheels bottom out with their tread at -0.9; the pod floats 5 cm above.
+        assert!((lowest - -0.85).abs() < 1e-4, "lowest {lowest}");
+        // Spans the idler and sprocket rims.
+        assert!(zs.iter().cloned().fold(f32::MIN, f32::max) > 3.24 && zs.iter().cloned().fold(f32::MAX, f32::min) < -3.04);
+        // Ramps pitch the nose up at the front and the tail up at the rear.
+        let pitch = |c: &Collider| (Quat::from_array(c.local_rot) * Vec3::Z).y;
+        assert!(pitch(&cols[2]) > 0.3 && pitch(&cols[3]) < -0.3, "{} {}", pitch(&cols[2]), pitch(&cols[3]));
+        // Local +X is the axle (the belt runs around it).
+        for c in &cols {
+            assert!((Quat::from_array(c.local_rot) * Vec3::X - Vec3::X).length() < 1e-5);
+        }
+        for c in &cols {
+            eprintln!("pod box at {:?} half {:?} pitch {:.1}°", c.local_pos, &c.params[..3], pitch(c).asin().to_degrees());
+        }
+    }
+
+    #[test]
+    fn pod_counts_match_requirements() {
+        let d = crate::presets::tank();
+        let req = requirements(&d);
+        let p = pack(&d, Vec3::ZERO, Quat::IDENTITY, VehicleSlots::default());
+        assert_eq!(req.colliders as usize, p.colliders.len());
+        let q = p.vehicle[V_QUERY as usize];
+        assert_eq!(q[2] >> POD_COUNT_SHIFT, 4);
+        assert_eq!(q[3] >> POD_COUNT_SHIFT, 4);
     }
 }

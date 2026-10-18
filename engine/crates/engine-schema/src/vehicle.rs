@@ -44,7 +44,7 @@ pub const V_BIKE1: u32 = 33; // integrationDecay (1/s), smoothing [0,1), leanSte
 pub const V_BIKE_D: u32 = 34; // target lean.xyz (world), integrated lean angle
 pub const V_TRACK: u32 = 35; // uint4(leftTrackLeader, rightTrackLeader, asfloat(turnRatio), asfloat(pivotSpeed))
 pub const V_TRACK_D: u32 = 36; // leftRatio, rightRatio, effective forward, pad
-pub const V_QUERY: u32 = 37; // uint4(stepsBetweenQueries (0/1 = every step), pad, pad, pad)
+pub const V_QUERY: u32 = 37; // uint4(stepsBetweenQueries (0/1 = every step), asfloat(tractionCut), left pod, right pod: firstCollider | count << POD_COUNT_SHIFT)
 pub const V_ASSIST: u32 = 31; // airPitch, airYaw (rad/s² per input), uprightStiffness (1/s²), uprightDamping (1/s)
 pub const V_O3: u32 = 30; // uint4(engineConnected, partsLost) , pitch/roll λ, pitch/roll k
 pub const VF_ENABLED: u32 = 1;
@@ -134,6 +134,8 @@ pub const RAY_STRIDE: u32 = 4; // in: origin.xyz,maxDist | dir.xyz,asfloat(exclu
 pub const NO_INDEX: u32 = 0x7F7FFFFF;
 pub const MAX_VEHICLE_WHEELS: u32 = 16;
 pub const SHELL_SPHERES: u32 = 5;
+/// V_QUERY.zw track pod: first collider | (collider count << POD_COUNT_SHIFT).
+pub const POD_COUNT_SHIFT: u32 = 28;
 pub const MAX_DRIVEN_WHEELS: u32 = 8;
 
 /// `BodyState::flags` bit for a vehicle chassis (`initial_pad` = asfloat(block index)).
@@ -272,6 +274,7 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("NO_INDEX", NO_INDEX),
     ("MAX_VEHICLE_WHEELS", MAX_VEHICLE_WHEELS),
     ("SHELL_SPHERES", SHELL_SPHERES),
+    ("POD_COUNT_SHIFT", POD_COUNT_SHIFT),
     ("MAX_DRIVEN_WHEELS", MAX_DRIVEN_WHEELS),
 ];
 

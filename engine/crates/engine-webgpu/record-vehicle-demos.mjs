@@ -158,6 +158,17 @@ const TAKES = {
       { n: 150, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Made it. The deck is gone', cam: { orbit: [2.2, 0.35, 22], spin: 0.004 } },
     ],
   },
+  // Track pods (tests/vehicle.rs tank tests): the same drive with and without them.
+  ...Object.fromEntries([['tank_course', ''], ['tank_course_shells', '&tracks=shells']].map(([name, q]) => [name, {
+    query: `scene=tanklab${q}`,
+    script: [
+      { n: 45, input: { forward: 0, steer: 0 }, caption: q ? 'Before: rays + wheel-shell spheres, 0.3 m tracks, belly 1 m up' : 'After: solid 0.6 m track pods with a belt, belly 0.5 m up', cam: { orbit: [2.3, 0.3, 15] } },
+      { n: 300, cruise: 4, input: { steer: 0 }, caption: 'Rubble in the track paths at 4 m/s', cam: { orbit: [1.35, 0.22, 13] } },
+      { n: 240, cruise: 4, input: { steer: 0 }, caption: 'Two 250 kg logs across the lane', cam: { orbit: [1.45, 0.2, 13] } },
+      { n: 420, cruise: 4, input: { steer: 0 }, caption: 'A 0.6 m ledge: twice the road wheels\u2019 reach', cam: { orbit: [1.5, 0.15, 14] } },
+      { n: 120, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Brake', cam: { orbit: [2.2, 0.3, 16] } },
+    ],
+  }])),
   sidewall: {
     query: 'scene=sidewall',
     script: [

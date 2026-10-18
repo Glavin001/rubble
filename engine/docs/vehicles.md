@@ -78,6 +78,25 @@ ground speed:
 Tracks use `FrictionModel::Box`, so full drive force does not eat the sideways scrub
 budget a pivot needs.
 
+Track pods (`TrackDesc::pod`) make the track a solid belt instead of a row of rays.
+The ground probes still carry the tank on terrain, but each track also gets up to four
+belt boxes on the chassis, built by `pack::track_pod_colliders`:
+* an upper run over every wheel, from the end wheels' axles up to `top`;
+* a lower run between the first and last road-wheel axles, down to the road wheels'
+  bottomed-out tread line plus `clearance`, so on flat ground only the rays touch;
+* a ramp at each end, from that tread line up to the sprocket's or idler's rim. An
+  edge met on the ramp pushes the nose up even when the track is stalled.
+
+The pod closes the gaps between road wheels and replaces their shells. Its belt runs
+at the sprocket's rim speed: `vehicle_post` writes ω·R into each pod collider's
+`density`, and world_step's friction rows target the surface velocity speed·(axle ×
+n_out). The surface moves backwards along the bottom, down the nose and forwards
+along the top. So debris under a moving track stays put on the ground while the tank
+rolls over it, and a step against the nose is pulled under. At rest the belt is
+plain friction. Contacts that don't involve a belt cost one flag test. The tank preset
+uses 0.6 m pods, twice its road-wheel width, and a belly plate giving about 0.5 m
+ground clearance.
+
 Motorcycles (`motorcycle: Some(MotorcycleDesc)`, a port of Jolt `MotorcycleController`):
 * The target lean follows the direction of last step's ground force (normal plus
   lateral). It is smoothed, sideways only, and clamped to `max_lean_deg`.
@@ -240,7 +259,7 @@ controller).
 | Aero | drag, downforce, aero centre |
 | Assists (opt-in) | air control (pitch/yaw per input while airborne), upright stiffness/damping, traction control |
 | Queries | ray / sphere cast, query interval (probe every N steps, extrapolate between) |
-| Tracks | per track: wheels, driven wheel, inertia, damping, brake torque, differential ratio; steer strength, turn grip (g) |
+| Tracks | per track: wheels, driven wheel, inertia, damping, brake torque, differential ratio, pod (width, clearance, top, material); steer strength, turn grip (g) |
 | Motorcycle | max lean, lean spring/damping/integral + decay, target smoothing, lean-limited steering |
 
 ## Limits and next steps
@@ -255,5 +274,7 @@ controller).
 * A ground block holds one wheel's rows. When both ends of an anti-roll bar stand on the
   same dynamic body, the cross term between the two blocks is dropped (the gradient stays
   exact; the Hessian is block-diagonal).
+* A track belt's speed is set by the sprocket (one-way). Friction the pod meets acts on
+  the hull but not back on the track spin, so climbing does not load the engine.
 * Not yet: cylinder casts, an inactive (sleeping) query rate, and automatic load-based
   fracture (its inputs already exist via `step_loads`).

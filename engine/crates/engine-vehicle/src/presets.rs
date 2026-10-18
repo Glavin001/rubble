@@ -338,7 +338,12 @@ pub fn tank() -> VehicleDesc {
                 ..Default::default()
             });
         }
-        let track = TrackDesc { driven_wheel: *ids.last().unwrap(), wheels: ids, ..Default::default() };
+        // A solid belt run over the wheels: nothing wedges between road wheels, and
+        // what the track touches is driven at track speed (climbs logs and kerbs).
+        // MBT-wide (0.6 m, twice the road wheels) so debris cannot slip past
+        // the wheel line under the track's edge.
+        let pod = Some(TrackPodDesc { width: 0.6, ..Default::default() });
+        let track = TrackDesc { driven_wheel: *ids.last().unwrap(), wheels: ids, pod, ..Default::default() };
         if t == 0 {
             tracks.left = track;
         } else {
@@ -349,6 +354,12 @@ pub fn tank() -> VehicleDesc {
         name: "tank".into(),
         parts: vec![
             box_part("hull", PartRole::Body, 3200.0, [1.4, 0.5, 3.2], [0.0, 0.5, 0.0]),
+            // Belly plate between the road wheels: ~0.5 m ground clearance (an MBT's),
+            // so what fits between the tracks meets the hull. It stops short of the
+            // track ramps, as a sloped glacis would, so a ledge meets the ramps first.
+            // Nearly massless: the drivetrain and steering are tuned at the hull's
+            // centre of mass, and 5 cm lower changed how hard turns end.
+            box_part("belly", PartRole::Body, 1.0, [1.4, 0.25, 2.0], [0.0, -0.25, 0.0]),
             box_part("turret", PartRole::Body, 800.0, [1.0, 0.35, 1.4], [0.0, 1.35, -0.3]),
         ],
         wheels,

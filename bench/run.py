@@ -118,10 +118,10 @@ ENGINES = {
     "rubble-cuda": {
         "cmd": lambda: [],
         "gpu": True,
-        # engine/crates/engine-cuda emits CUDA source only; once it has a host it runs here on
-        # NVIDIA, and on macOS through CuMetal like PhysX's GPU module
+        # engine/crates/engine-cuda has a host (CudaSim, tested on Modal); a bench-rubble
+        # adapter for it is next. It runs on NVIDIA, and on macOS through CuMetal like PhysX
         "available": lambda: False,
-        "why": "pending: engine-cuda has no host runtime yet",
+        "why": "pending: no bench adapter for engine-cuda's CudaSim yet",
     },
     "three-avbd": {
         "cmd": lambda: [NODE, *TS, str(BENCH / "adapters" / "three-avbd" / "run.ts")],
