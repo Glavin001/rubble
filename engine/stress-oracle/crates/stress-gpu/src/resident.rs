@@ -186,10 +186,11 @@ impl ResidentQs {
 
     /// The tables' layout, for a split the GPU lays out (`GpuSolver::split_resident_with`).
     /// The frame's duration (a frame cut short by an impact window, `GpuWorld::impact_window`).
-    pub fn set_frame_dt(&mut self, dt: f64) {
-        let g = (self.params.gravity[0] as f64).hypot(self.params.gravity[1] as f64).hypot(self.params.gravity[2] as f64);
+    /// `gravity`: the solver's (|g| dt as `rebuild` makes it, so a frame of the usual
+    /// length keeps the same bits).
+    pub fn set_frame_dt(&mut self, dt: f64, gravity: f64) {
         self.params.dt = dt as f32;
-        self.params.gravity[3] = (g * dt) as f32;
+        self.params.gravity[3] = (gravity * dt) as f32;
     }
 
     pub fn layout(&self) -> crate::solver::ResidentLayout<'_> {

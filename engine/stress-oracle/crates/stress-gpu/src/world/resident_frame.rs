@@ -416,7 +416,7 @@ impl GpuWorld {
         let t_tables = std::time::Instant::now();
         self.resident_tables(gpu, n);
         if let Some(r) = self.resident.as_mut() {
-            r.qs.set_frame_dt(fdt);
+            r.qs.set_frame_dt(fdt, self.solver.mirror.config.gravity.norm());
         }
         self.prepare_routing(gpu);
         if phases {
