@@ -413,6 +413,8 @@ impl GpuWorld {
         let mut pending_spawn: Vec<(Vec<u64>, Vec<usize>, Option<Vec<crate::gpu_split::GpuBody>>)> = Vec::new();
         let mut first = 0;
         let mut unconverged = 0;
+        // After a frame-mode window, any later windows (an aborted GPU split) run as before.
+        let mut frame_fallback = false;
         loop {
             // The cascade from pass `first` on, under GPU control; then the frame's one
             // read: the cascade's status, the engine's counters, the pulse slots' status.
@@ -424,15 +426,36 @@ impl GpuWorld {
             if first == 0 && std::env::var("STRESS_GPU_DET_REPLAY").ok().and_then(|v| v.parse::<u64>().ok()) == Some(self.frame as u64) {
                 self.det_replay(gpu, fdt, max);
             }
+            // `STRESS_GPU_FRAME=1` (M4): the frame's passes, and the splits between them, in
+            // one submission; the host follows the splits from the frame's one read.
+            let frame_mode = first == 0 && !frame_fallback && std::env::var("STRESS_GPU_FRAME").is_ok_and(|v| v == "1") && self.frame_splits_ready(gpu, &engine);
+            let part_table = if frame_mode { self.part_table(gpu, &engine) } else { None };
+            let frame_mode = frame_mode && part_table.is_some();
             let r = self.resident.take().expect("resident tables");
-            let window = CASCADE_WINDOW.min(max - first);
-            let run = self.solver.resident_cascade(gpu, fdt, first, window, &|s, enc, pass| {
+            let window = if frame_mode { max - first } else { CASCADE_WINDOW.min(max - first) };
+            let pre = |s: &crate::solver::GpuSolver, enc: &mut wgpu::CommandEncoder, pass: usize| {
                 r.qs.encode_poses(gpu, enc, &r.ingest, s);
                 if pass == 0 {
                     r.qs.encode_filter(gpu, enc, &r.ingest, s);
                 }
                 r.qs.encode_static_loads(gpu, enc, &r.ingest, s);
-            });
+            };
+            let run = if frame_mode {
+                let e = engine.borrow();
+                let (bodies, colliders, max_bodies) = e.spawn_buffers().expect("spawn buffers");
+                let max_colliders = e.collider_capacity();
+                let fs = crate::solver::FrameSplits {
+                    target: crate::gpu_split::SpawnTarget { bodies, colliders, max_bodies },
+                    max_colliders,
+                    table: part_table.as_ref().expect("part table"),
+                    resident: r.qs.layout(),
+                    colliders: r.colliders.as_ref().filter(|c| c.capacity() >= max_colliders).map(|c| (c, &r.ingest.collider_info)),
+                    layout_params: self.solver.frame_layout_params(),
+                };
+                self.solver.resident_cascade_with(gpu, fdt, first, window, &pre, Some(&fs))
+            } else {
+                self.solver.resident_cascade(gpu, fdt, first, window, &pre)
+            };
             if phases {
                 let encode = t_pass.elapsed().as_secs_f64() * 1e3;
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
@@ -459,6 +482,10 @@ impl GpuWorld {
                 parts.push((&r.ingest.manifolds, 0, r.ingest.manifolds.size()));
                 parts.push((e.engine_buffers().bodies, 0, e.engine_buffers().bodies.size()));
             }
+            let log_part = parts.len();
+            if frame_mode {
+                parts.extend(self.solver.frame_log_range());
+            }
             let read = gpu.read_ranges(&parts);
             if det_end {
                 use std::hash::{Hash, Hasher};
@@ -483,7 +510,7 @@ impl GpuWorld {
             }
             drop(e);
             self.resident = Some(r);
-            let out = run.outcome(&read[0]);
+            let mut out = run.outcome(&read[0]);
             if std::env::var("STRESS_GPU_SPLIT_HASH").is_ok() {
                 use std::hash::{Hash, Hasher};
                 let (hs, hb) = self.solver.state_hashes(gpu);
@@ -491,6 +518,25 @@ impl GpuWorld {
             }
             engine.borrow_mut().resident_finish(&read[1..1 + engine_parts])?;
             self.resident.as_ref().expect("resident tables").qs.check(&read[1 + engine_parts])?;
+            if frame_mode {
+                // The frame's GPU splits, followed in order (an aborted one ends the log: the
+                // cascade stopped there, and the code below splits on the host).
+                let log = self.solver.frame_log(gpu, &read[log_part]);
+                let applied = self.apply_frame_log(gpu, &engine, &log, part_table.as_ref().expect("part table"))?;
+                if applied > 0 {
+                    split = true;
+                    self.solver.adopt_gpu_tables();
+                }
+                if trace {
+                    eprintln!("resident frame splits: {applied} on the GPU, log {} words", log.len());
+                }
+                if log.get(2).copied().unwrap_or(0) != 0 {
+                    return Err("frame split log overflowed".into());
+                }
+                frame_fallback = true;
+                // The status over the islands as the GPU's splits left them.
+                out = crate::resident::CascadeOutcome::from_status(bytemuck::cast_slice(&read[0]), self.solver.mirror.clusters.len());
+            }
             unconverged += out.unconverged;
             for cl in self.solver.mirror.clusters.iter_mut().filter(|c| !c.bonds.is_empty()) {
                 cl.activity = Activity::Settled;
@@ -670,6 +716,108 @@ impl GpuWorld {
 }
 
 impl GpuWorld {
+    /// Whether a frame's GPU split passes can run (`STRESS_GPU_FRAME=1`): made ready, with
+    /// the counters as the host has them.
+    fn frame_splits_ready(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>) -> bool {
+        if !self.solver.can_split_in_place(0) {
+            return false;
+        }
+        let e = engine.borrow();
+        if e.spawn_buffers().is_none() {
+            return false;
+        }
+        let (bodies, colliders) = e.body_counts();
+        let Some(r) = self.resident.as_ref() else { return false };
+        self.solver.prepare_frame_splits(gpu, r.qs.layout().ctab, bodies, colliders)
+    }
+
+    /// The frame's GPU splits, followed by the host in order (`passlog.slang`): the
+    /// mirror's split into the GPU's components, the layout's bookkeeping, the engine's
+    /// adoption of the GPU-made bodies. Returns how many it followed; it stops at an aborted
+    /// one (nothing of it was made, and the cascade stopped there).
+    fn apply_frame_log(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>, log: &[u32], table: &crate::gpu_split::PartTable) -> Result<usize, String> {
+        let mut at = 16usize;
+        let mut applied = 0;
+        while at < log.len() {
+            let size = log[at] as usize;
+            if size == 0 {
+                break;
+            }
+            let (n, c, aborted) = (log[at + 1] as usize, log[at + 2] as usize, log[at + 3] != 0);
+            if aborted {
+                break;
+            }
+            let (first_body, first_collider) = (log[at + 5], log[at + 6]);
+            let nb = (log[at + 7] - first_body) as usize;
+            let total = log[at + 11] as usize;
+            let h0 = at + 16 + 2 * n;
+            let m0 = h0 + 14 * c;
+            let b0 = m0 + total;
+            let k0 = b0 + 28 * nb;
+            let parents: Vec<usize> = (0..n).map(|p| log[at + 16 + 2 * p] as usize).collect();
+            let ids: Vec<u64> = parents.iter().map(|&ci| self.solver.mirror.clusters[ci].id).collect();
+            let layout_chunks = self.solver.gpu_chunks().to_vec();
+            let f = |w: u32| f32::from_bits(w);
+            let mut children_out: Vec<Vec<Vec<(usize, usize)>>> = Vec::with_capacity(n);
+            let mut comps: Vec<Vec<Vec<usize>>> = Vec::with_capacity(n);
+            let mut bodies = Vec::new();
+            let (mut h, mut mc) = (h0, 0usize);
+            for (p, &ci) in parents.iter().enumerate() {
+                let z = log[at + 16 + 2 * p + 1] as usize;
+                let first = self.solver.island_range(ci)[0] as usize;
+                let mut kids = Vec::with_capacity(z);
+                let mut comp = Vec::with_capacity(z);
+                for _ in 0..z {
+                    let head = &log[h..h + 14];
+                    h += 14;
+                    let count = head[0] as usize;
+                    let chunks: Vec<(usize, usize)> = (0..count).map(|j| layout_chunks[first + log[m0 + mc + j] as usize]).collect();
+                    mc += count;
+                    let mut v: Vec<usize> = chunks.iter().map(|&(_, ch)| ch).collect();
+                    v.sort_unstable();
+                    comp.push(v);
+                    kids.push(chunks.iter().flat_map(|&sc| std::iter::repeat(sc).take(table.counts[sc.0][sc.1] as usize)).collect());
+                    if head[5] != 0 {
+                        let (slot, fc, ncols) = (head[2], head[3], head[4] as usize);
+                        let bb = b0 + 28 * (slot - first_body) as usize;
+                        let mut body = [[0f32; 4]; 7];
+                        for (w, v) in body.iter_mut().enumerate() {
+                            *v = [f(log[bb + 4 * w]), f(log[bb + 4 * w + 1]), f(log[bb + 4 * w + 2]), f(log[bb + 4 * w + 3])];
+                        }
+                        let colliders = (0..ncols)
+                            .map(|j| {
+                                let cc = k0 + 16 * ((fc - first_collider) as usize + j);
+                                let mut r = [[0f32; 4]; 4];
+                                for (w, v) in r.iter_mut().enumerate() {
+                                    *v = [f(log[cc + 4 * w]), f(log[cc + 4 * w + 1]), f(log[cc + 4 * w + 2]), f(log[cc + 4 * w + 3])];
+                                }
+                                r
+                            })
+                            .collect();
+                        bodies.push(crate::gpu_split::GpuBody { slot, first_collider: fc, body, colliders, com: [f(head[6]), f(head[7]), f(head[8]), f(head[9])], principal: [f(head[10]), f(head[11]), f(head[12]), f(head[13])] });
+                    }
+                }
+                children_out.push(kids);
+                comps.push(comp);
+            }
+            let spawned = LiveSpawn { ids, children: children_out, bodies, comps: comps.clone() };
+            let resident = self.resident.as_ref().map(|r| r.qs.layout());
+            let l = crate::solver::LiveSplit { comps, run: None, resident };
+            self.solver.split_resident_with(gpu, &parents, Some(l))?;
+            if let Some(r) = self.resident.as_mut() {
+                r.qs.adopt_layout(&self.solver);
+                r.layout_generation = self.solver.layout_generation;
+                r.gpu_laid_out = true;
+                r.colliders_refreshed = r.colliders.is_some();
+            }
+            self.adopt_live(engine, spawned)?;
+            self.colliders_adopted(gpu);
+            applied += 1;
+            at += size;
+        }
+        Ok(applied)
+    }
+
     fn det_replay(&mut self, gpu: &Gpu, fdt: f64, max: usize) {
         use std::hash::{Hash, Hasher};
         let hash = |bytes: &[u8]| {

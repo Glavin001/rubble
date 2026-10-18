@@ -140,6 +140,16 @@ impl ColliderRefresh {
     /// The refresh, after the split pass's layout, into `collider_info` (room for
     /// `capacity` colliders).
     pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, inputs: &RefreshInputs, total_slots: usize, collider_info: &wgpu::Buffer) {
+        for (pipeline, group, size) in self.steps(gpu, inputs, total_slots, collider_info) {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(size, 1, 1);
+        }
+    }
+
+    /// The refresh's dispatches (pipeline, bind group, groups), for a caller's own pass.
+    pub fn steps(&self, gpu: &Gpu, inputs: &RefreshInputs, total_slots: usize, collider_info: &wgpu::Buffer) -> Vec<(wgpu::ComputePipeline, wgpu::BindGroup, u32)> {
         let params = gpu.uniform(
             "collider params",
             &ColliderParams {
@@ -180,13 +190,7 @@ impl ColliderRefresh {
             (&self.slots_kernel, groups(inputs.chunk_count as usize, 64)),
             (&self.refresh_kernel, groups(self.capacity as usize, 64)),
         ];
-        for (k, size) in steps {
-            let group = bind(k);
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&k.pipeline);
-            pass.set_bind_group(0, &group, &[]);
-            pass.dispatch_workgroups(size.max(1), 1, 1);
-        }
+        steps.into_iter().map(|(k, size)| (k.pipeline.clone(), bind(k), size.max(1))).collect()
     }
 }
 

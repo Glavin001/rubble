@@ -2674,6 +2674,14 @@ impl GpuSolver {
     /// `equilibrate_resident` and `commit_resident` per pass (bit for bit), with the
     /// unconverged solves' states restored on the GPU.
     pub fn resident_cascade(&mut self, gpu: &Gpu, frame_dt: f64, first: usize, passes: usize, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder, usize)) -> crate::resident::CascadeRun {
+        self.resident_cascade_with(gpu, frame_dt, first, passes, pre, None)
+    }
+
+    /// `resident_cascade`; with `splits` (`STRESS_GPU_FRAME=1`), a split pass with GPU-made
+    /// inputs after every cascade pass (a no-op unless the pass disconnected an island),
+    /// which lays the split out, logs it for the host (`GpuPass::log`) and lets the
+    /// cascade run on: a frame's passes and splits in one submission.
+    pub fn resident_cascade_with(&mut self, gpu: &Gpu, frame_dt: f64, first: usize, passes: usize, pre: &dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder, usize), splits: Option<&FrameSplits>) -> crate::resident::CascadeRun {
         let live = self.layout.islands.len();
         // Dispatched over the island capacity (`capacity_dispatch`): a split the GPU makes
         // within the frame adds islands the host has not counted; records past the live
@@ -2817,6 +2825,28 @@ impl GpuSolver {
         let timing = (std::env::var("STRESS_GPU_TIMING").is_ok_and(|v| v == "1") && gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY))
             .then(|| gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("cascade timestamps"), ty: wgpu::QueryType::Timestamp, count: 4 * passes as u32 }));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        // The frame's split pass, made once for every cascade pass (`splits`).
+        let prepared = match (splits, self.gpu_pass.as_ref()) {
+            (Some(f), Some(gp)) => {
+                let b = &self.buffers;
+                let r = &f.resident;
+                let tables = crate::gpu_pass::PassTables {
+                    buffers: [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state],
+                    scratch: &b.scratch,
+                    gate: &gate,
+                    resident: (r.ctab, [r.props_base, r.eload_base, r.pulse_base, r.pulse_count_base, r.pulse_cap, r.engine_base]),
+                    status: &status,
+                    island_copy: &layout_islands,
+                    island_args: args.as_ref().expect("island args"),
+                    target: crate::gpu_split::SpawnTarget { bodies: f.target.bodies, colliders: f.target.colliders, max_bodies: f.target.max_bodies },
+                    max_colliders: f.max_colliders,
+                    table: f.table,
+                    colliders: f.colliders,
+                };
+                Some(gp.prepare(gpu, self.splitter.as_ref().expect("splitter"), self.layouter.as_ref().expect("layouter"), &tables, f.layout_params, true, true))
+            }
+            _ => None,
+        };
         for pass in first..first + passes {
             let cp = gpu.uniform(
                 "cascade pass",
@@ -2882,6 +2912,9 @@ impl GpuSolver {
                 run(&mut encoder, &kernels.fixed, n_islands.max(1) as u32);
             }
             run(&mut encoder, &kernels.end, 1);
+            if let Some(p) = &prepared {
+                p.record(&mut encoder);
+            }
         }
         let resolve = timing.as_ref().map(|q| {
             let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("cascade timestamps"), size: 8 * 4 * passes as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
@@ -3657,8 +3690,65 @@ impl GpuSolver {
             colliders,
         };
         let pass = self.gpu_pass.as_ref().expect("gpu pass");
-        pass.encode(gpu, encoder, self.splitter.as_ref().expect("splitter"), &layout, &tables, lp, resume);
+        pass.encode(gpu, encoder, self.splitter.as_ref().expect("splitter"), &layout, &tables, lp, resume, false);
         Some(())
+    }
+
+    /// A frame's GPU split passes made ready (`resident_cascade_with`): their kernels and
+    /// buffers, the counters from the host as they stand (live islands, the engine's bodies
+    /// and colliders, the next cluster id), the log emptied. False when they cannot run
+    /// (no capacity dispatch, no cascade tables yet).
+    pub fn prepare_frame_splits(&mut self, gpu: &Gpu, ctab: &wgpu::Buffer, bodies: u32, colliders: u32) -> bool {
+        if !capacity_dispatch() || self.cascade_islands.is_none() || self.cascade_status.is_none() || self.island_args.is_none() || self.cascade_gate.is_none() {
+            return false;
+        }
+        if self.splitter.is_none() {
+            self.splitter = Some(crate::gpu_split::GpuSplitter::new(gpu));
+        }
+        if self.layouter.is_none() {
+            self.layouter = Some(crate::gpu_split::GpuLayout::new(gpu));
+        }
+        let b = &self.buffers;
+        let copy = &self.cascade_islands.as_ref().expect("cascade islands").1;
+        let sizes = [b.chunk_static.size(), b.state.size(), b.bonds_static.size(), b.bond_dyn.size(), b.index.size(), b.islands.size(), ctab.size(), copy.size()];
+        let (cap, chunks) = (self.layout.island_cap, self.layout.chunks.len());
+        if self.gpu_pass.as_ref().is_none_or(|g| !g.fits(cap, chunks, sizes)) {
+            self.gpu_pass = Some(crate::gpu_pass::GpuPass::new(gpu, cap, chunks, self.layout.bonds.len(), sizes));
+        }
+        self.set_gpu_pass_counters(gpu, bodies, colliders);
+        self.gpu_pass.as_ref().expect("gpu pass").reset_log(gpu);
+        true
+    }
+
+    /// The frame's split log as read (`GpuPass::log`): the first `LOG_READ_WORDS` words with
+    /// the frame's read; the rest, if the log ran longer, read now.
+    pub fn frame_log(&self, gpu: &Gpu, head: &[u8]) -> Vec<u32> {
+        let mut words: Vec<u32> = bytemuck::pod_collect_to_vec(head);
+        let used = words.first().copied().unwrap_or(16) as usize;
+        if used > words.len() {
+            if let Some(p) = &self.gpu_pass {
+                let rest: Vec<u32> = gpu.read_range(&p.log, words.len(), used - words.len());
+                words.extend(rest);
+            }
+        }
+        words.truncate(used.max(16));
+        words
+    }
+
+    /// The frame's split log's head, for the frame's read.
+    pub fn frame_log_range(&self) -> Option<(&wgpu::Buffer, u64, u64)> {
+        self.gpu_pass.as_ref().map(|p| (&p.log, 0, 4 * crate::gpu_pass::LOG_READ_WORDS as u64))
+    }
+
+    /// The layout parameters of a frame's split passes (their static part).
+    pub fn frame_layout_params(&self) -> crate::gpu_split::LayoutParams {
+        self.pass_layout_params()
+    }
+
+    /// After the host followed a frame's GPU splits: the cascade's island copy and gate
+    /// stand for the layout's new generation (`resident_cascade_with`).
+    pub fn adopt_gpu_tables(&mut self) {
+        self.tables_on_gpu = true;
     }
 
     /// The GPU split pass's counters set from the host (live islands, engine bodies and
@@ -3689,6 +3779,11 @@ impl GpuSolver {
     /// The island capacity of the tables (`island_headroom` past the islands).
     pub fn island_cap(&self) -> usize {
         self.layout.island_cap
+    }
+
+    /// Island `ci`'s ranges in the layout: chunks [x, y), bonds [z, w).
+    pub fn island_range(&self, ci: usize) -> [u32; 4] {
+        self.layout.islands[ci].range
     }
 
     /// `island_args` (Some while `capacity_dispatch`).
@@ -4447,4 +4542,14 @@ pub struct IslandCheck {
     /// the angular velocity, which every cascade pass takes from the engine's body.
     pub floats: f64,
     pub angular: f64,
+}
+
+/// What a frame's split passes take from outside the solver (`resident_cascade_with`).
+pub struct FrameSplits<'a> {
+    pub target: crate::gpu_split::SpawnTarget<'a>,
+    pub max_colliders: u32,
+    pub table: &'a crate::gpu_split::PartTable,
+    pub resident: ResidentLayout<'a>,
+    pub colliders: Option<(&'a crate::colliders::ColliderRefresh, &'a wgpu::Buffer)>,
+    pub layout_params: crate::gpu_split::LayoutParams,
 }

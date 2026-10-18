@@ -58,6 +58,25 @@ const PASS_BINDINGS: [Binding; 25] = [
     Binding::StorageRw, // old island copy
 ];
 
+const LOG_BINDINGS: [Binding; 11] = [
+    Binding::Uniform,   // params
+    Binding::Storage,   // control
+    Binding::Storage,   // parents
+    Binding::Storage,   // work
+    Binding::Storage,   // children
+    Binding::Storage,   // slots
+    Binding::Storage,   // extras
+    Binding::Storage,   // engine bodies
+    Binding::Storage,   // engine colliders
+    Binding::StorageRw, // log
+    Binding::Storage,   // cascade status
+];
+
+/// The frame's split log (`passlog.slang`): its capacity in words, and how much of it the
+/// frame's one read takes (the rest, if any, costs a read of its own).
+pub const LOG_WORDS: usize = 1 << 20;
+pub const LOG_READ_WORDS: usize = 1 << 16;
+
 /// Offsets (bytes) of `args`: one group per parent; per child slot in groups of 64; per
 /// parent in groups of 64; `pass_whole`.
 const ARGS_PARENTS: u64 = 0;
@@ -84,11 +103,41 @@ pub struct PassTables<'a> {
     pub colliders: Option<(&'a crate::colliders::ColliderRefresh, &'a wgpu::Buffer)>,
 }
 
+/// A dispatch's size: direct, or from the pass's arguments at a byte offset.
+enum Size {
+    Direct(u32),
+    Indirect(u64),
+}
+
+/// A split pass made ready (`GpuPass::prepare`): its dispatches, recorded in one compute
+/// pass per cascade pass of a frame.
+pub struct PreparedPass {
+    steps: Vec<(wgpu::ComputePipeline, wgpu::BindGroup, Size)>,
+    args: wgpu::Buffer,
+}
+
+impl PreparedPass {
+    pub fn record(&self, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        for (pipeline, bind, size) in &self.steps {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            match size {
+                Size::Direct(n) => pass.dispatch_workgroups(*n, 1, 1),
+                Size::Indirect(at) => pass.dispatch_workgroups_indirect(&self.args, *at),
+            }
+        }
+    }
+}
+
 pub struct GpuPass {
     parents_k: Kernel,
     snapshot_k: Kernel,
     whole_k: Kernel,
     finish_k: Kernel,
+    log_k: Kernel,
+    /// The frame's split log (`passlog.slang`).
+    pub log: wgpu::Buffer,
     pub parents: wgpu::Buffer,
     pub work: wgpu::Buffer,
     pub out: wgpu::Buffer,
@@ -125,6 +174,8 @@ impl GpuPass {
             snapshot_k: k("pass_snapshot"),
             whole_k: k("pass_whole"),
             finish_k: k("pass_finish"),
+            log_k: gpu.compute(&shaders::PASSLOG, "pass_log", &LOG_BINDINGS),
+            log: buf("gpu pass log", 4 * LOG_WORDS as u64, none),
             parents: buf("gpu pass parents", 16 * (cap + 1), none),
             work: buf("gpu pass work", 4 * 2 * n, none),
             out: buf("gpu pass out", 16 * CHILD_WORDS as u64 * n, none),
@@ -149,7 +200,19 @@ impl GpuPass {
 
     /// The split pass after a cascade pass, into `encoder`: a no-op unless that pass
     /// disconnected an island. `resume`: the cascade's next pass runs after the split.
-    pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, splitter: &GpuSplitter, layout: &GpuLayout, t: &PassTables, mut lp: LayoutParams, resume: bool) {
+    /// The log emptied, for a frame's splits (before its submission).
+    pub fn reset_log(&self, gpu: &Gpu) {
+        gpu.queue.write_buffer(&self.log, 0, bytemuck::cast_slice(&[16u32, 0, 0, 0]));
+    }
+
+    /// `log`: the split appended to the frame's log (`passlog.slang`).
+    pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, splitter: &GpuSplitter, layout: &GpuLayout, t: &PassTables, lp: LayoutParams, resume: bool, log: bool) {
+        self.prepare(gpu, splitter, layout, t, lp, resume, log).record(encoder);
+    }
+
+    /// The split pass's dispatches and bind groups, made once for a frame's passes
+    /// (`PreparedPass::record` records them, in one compute pass).
+    pub fn prepare(&self, gpu: &Gpu, splitter: &GpuSplitter, layout: &GpuLayout, t: &PassTables, mut lp: LayoutParams, resume: bool, log: bool) -> PreparedPass {
         let [chunks, index, bonds, bond_dyn, islands, state] = t.buffers;
         let (ctab, bases) = t.resident;
         lp.resident = 1;
@@ -200,10 +263,6 @@ impl GpuPass {
                 &[&layout_uniform, &self.parents, &self.work, &self.out, &self.frames, &self.plan, &o[0], chunks, &o[1], state, &o[2], bonds, &o[3], bond_dyn, &o[4], index, &o[5], islands, t.scratch, &o[6], ctab, t.gate, &self.slots, &self.extras, &self.control, &o[7], t.island_copy],
             )
         };
-        enum Size {
-            Direct(u32),
-            Indirect(u64),
-        }
         let steps: Vec<(&Kernel, wgpu::BindGroup, Size)> = vec![
             (&self.parents_k, pass_bind_with(&self.parents_k, &self.args), Size::Direct(1)),
             (&self.snapshot_k, pass_bind(&self.snapshot_k), Size::Indirect(ARGS_PARENTS)),
@@ -219,15 +278,7 @@ impl GpuPass {
             (&layout.parent, layout_bind(&layout.parent), Size::Indirect(ARGS_PARENTS)),
             (&layout.copy, layout_bind(&layout.copy), Size::Direct(groups(self.island_cap + 1, 64))),
         ];
-        for (k, bind, size) in &steps {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&k.pipeline);
-            pass.set_bind_group(0, bind, &[]);
-            match size {
-                Size::Direct(n) => pass.dispatch_workgroups(*n, 1, 1),
-                Size::Indirect(at) => pass.dispatch_workgroups_indirect(&self.args, *at),
-            }
-        }
+        let mut prepared: Vec<(wgpu::ComputePipeline, wgpu::BindGroup, Size)> = steps.into_iter().map(|(k, b, size)| (k.pipeline.clone(), b, size)).collect();
         if let Some((refresh, collider_info)) = t.colliders {
             let inputs = crate::colliders::RefreshInputs {
                 parent_count: 0,
@@ -244,13 +295,15 @@ impl GpuPass {
                 structure_base: &t.table.structure_base,
                 control: &self.control,
             };
-            refresh.encode(gpu, encoder, &inputs, self.chunk_cap.max(self.island_cap), collider_info);
+            prepared.extend(refresh.steps(gpu, &inputs, self.chunk_cap.max(self.island_cap), collider_info).into_iter().map(|(p, b, n)| (p, b, Size::Direct(n))));
         }
-        let bind = pass_bind(&self.finish_k);
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&self.finish_k.pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
+        if log {
+            let lp = gpu.uniform("gpu pass log params", &[LOG_WORDS as u32, 0, 0, 0]);
+            let bind = gpu.bind(&self.log_k.group, &[&lp, &self.control, &self.parents, &self.work, &self.out, &self.slots, &self.extras, t.target.bodies, t.target.colliders, &self.log, t.status]);
+            prepared.push((self.log_k.pipeline.clone(), bind, Size::Direct(1)));
+        }
+        prepared.push((self.finish_k.pipeline.clone(), pass_bind(&self.finish_k), Size::Direct(1)));
+        PreparedPass { steps: prepared, args: self.args.clone() }
     }
 
     /// What the pass did, read back (two reads: its control words, then what they size):
