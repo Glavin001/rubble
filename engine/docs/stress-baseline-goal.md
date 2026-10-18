@@ -233,6 +233,25 @@ the tiered coupling. The pieces:
    - the island's substeps as a GPU loop over many substeps;
    - the island bounded to the impact region.
 
+   **Reopened by your decision of 2026-10-18 (research the island kernel):** the impact
+   window (log) brings the free-wall impact to one frame of about 50 ms; its floor is the
+   window's explicit substeps at about 46 µs each (two dispatches; latency spread over
+   every phase, measured). The design for a faster window, an **on-chip impact island**
+   (`STRESS_ISLAND_ONCHIP`, off by default):
+   - one threadgroup per narrow impact island (at most 256 chunks) runs all of a
+     segment's substeps in one dispatch, as `stress_step.slang` `island_shared_substeps`
+     does for intact anchored islands (measured 2.4–10 µs per substep, A6);
+   - chunk state (displacement, rotation, velocities: 64 B a chunk) and the bond loads
+     live in threadgroup memory across substeps; bond history (80 B a bond, more than
+     threadgroup memory holds) stays in device memory, read and written once per
+     substep by its own thread (one parallel round trip, not a dependent chain);
+   - in the loop: the joint law with damage (`joint.slang`), chunk integration, rigid
+     motion and drift removal, the struck island's impactor contact (implicit penalty)
+     with the impactor integrated in the group; a disconnection stops the loop for the
+     split, as today;
+   - checked against the current kernels on the free wall and the wall row (ram speed,
+     fragments, bonds), not bit for bit: the order of operations changes.
+
    **Closed by your decision of 2026-10-18:** M5 is accepted with island frames
    host-coupled (log, "M5 done"). No measured kernel brings them near real time on the
    M3 Max, so fast island frames move to "After the baseline".
