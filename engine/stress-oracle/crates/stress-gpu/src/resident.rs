@@ -39,6 +39,10 @@ struct ResidentParams {
     pulse_count_base: u32,
     pulse_cap: u32,
     status_base: u32,
+    /// 1: an impact loads its frame with its Hertz peak force, not its mean over the frame
+    /// (`STRESS_QS_IMPACT_PEAK=1`, a measurement).
+    impact_peak: u32,
+    pad: [u32; 2],
 }
 
 /// An engine body standing for a cluster: its index, its principal frame and centre of
@@ -173,6 +177,8 @@ impl ResidentQs {
             pulse_count_base,
             pulse_cap: cap,
             status_base,
+            impact_peak: std::env::var("STRESS_QS_IMPACT_PEAK").is_ok_and(|v| v == "1") as u32,
+            pad: [0; 2],
         };
         self.ctab = gpu.storage("resident ctab", &t);
         self.chunks = chunks;

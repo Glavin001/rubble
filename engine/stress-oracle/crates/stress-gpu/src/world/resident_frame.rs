@@ -551,6 +551,23 @@ impl GpuWorld {
             for cl in self.solver.mirror.clusters.iter_mut().filter(|c| !c.bonds.is_empty()) {
                 cl.activity = Activity::Settled;
             }
+            if std::env::var("STRESS_GPU_QS_LOADS").is_ok() {
+                let loads = self.resident.as_ref().expect("resident tables").qs.read_frame_loads(gpu);
+                let total: f64 = loads.iter().map(|(f, _)| f.norm()).sum();
+                let peak = loads.iter().map(|(f, _)| f.norm()).fold(0.0f64, f64::max);
+                let loaded = loads.iter().filter(|(f, _)| f.norm() > 0.0).count();
+                eprintln!("frame {} loads: {loaded} chunks loaded, sum |f| {total:.4e} N, largest {peak:.4e} N", self.frame);
+                let (islands_buf, _, _, _, _) = self.solver.resident_buffers();
+                let isl: Vec<[f32; 4]> = gpu.read_range(islands_buf, 0, 25);
+                eprintln!("  island 0: range {:?}, info {:?}, com {:?}", bytemuck::cast::<[f32; 4], [u32; 4]>(isl[0]), bytemuck::cast::<[f32; 4], [u32; 4]>(isl[1]), isl[2]);
+                let man = self.resident.as_ref().expect("resident tables").ingest.read_manifolds(gpu);
+                for (k, list) in man.iter().enumerate().filter(|(_, l)| !l.is_empty()).take(6) {
+                    for r in list {
+                        let j = (r.impulse[0].powi(2) + r.impulse[1].powi(2) + r.impulse[2].powi(2)).sqrt();
+                        eprintln!("  chunk {k}: other {:#x}, |j| {j:.3e}, closing {:.3}, other mass {:.1}", r.ids[1], r.impulse[3], r.other[0]);
+                    }
+                }
+            }
             if std::env::var("STRESS_GPU_QS_RESULTS").is_ok() {
                 for (i, r) in self.solver.statics_results(gpu).iter().enumerate() {
                     if out.solved.contains(&i) || r.0 != 0.0 {

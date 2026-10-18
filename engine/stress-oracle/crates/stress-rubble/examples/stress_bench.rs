@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use stress_ref::scene::{Scene, SolveMode};
 
-use stress_rubble::scenes::{house, realtime as configure, wall_ram};
+use stress_rubble::scenes::{house, realtime as configure, wall_ram, wall_ram_late};
 
 /// The fidelity ladder (`--config`): from the Blast-equivalent configuration to the full
 /// real-time one, one switch per rung (each rung keeps every switch of the rungs before).
@@ -302,7 +302,7 @@ pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut house_ram = configure(stress_ref::scenes::rammed(house()), seconds);
     house_ram.name = "house_ram".into();
     let b5 = configure(stress_ref::builders::wall_impact(20.0, "b5_v20"), seconds);
-    vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
+    vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("wall_ram_late", configure(wall_ram_late(), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
 }
 
 struct Run {
@@ -591,6 +591,11 @@ fn main() {
             continue;
         }
         let (mut scene, islands) = ladder(scene, &config);
+        // STRESS_BENCH_FRAME_DT=s: the frame's duration (a measurement: how the quasi-static
+        // loads' averaging window bears on an impact).
+        if let Some(dt) = std::env::var("STRESS_BENCH_FRAME_DT").ok().and_then(|v| v.parse().ok()) {
+            scene.sim.frame_dt = dt;
+        }
         // STRESS_BENCH_STRESS_SAFETY=x: the bond network's step safety (a measurement).
         if let Some(x) = std::env::var("STRESS_BENCH_STRESS_SAFETY").ok().and_then(|v| v.parse().ok()) {
             scene.sim.stress_courant_safety = Some(x);

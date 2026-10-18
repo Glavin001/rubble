@@ -13,6 +13,9 @@ struct ResidentParams_std140_0
     @align(4) pulse_count_base_0 : u32,
     @align(8) pulse_cap_0 : u32,
     @align(4) status_base_0 : u32,
+    @align(16) impact_peak_0 : u32,
+    @align(4) pad0_0 : u32,
+    @align(8) pad1_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : ResidentParams_std140_0;
@@ -613,7 +616,15 @@ fn resident_filter(@builtin(global_invocation_id) id_1 : vec3<u32>)
         var duration_1 : f32 = hertz_duration_0(m_1, min(r_5.other_0.z, _S18.z), 1.0f / ((1.0f - _S36 * _S36) / _S18.x + 1.0f / r_5.other_0.y), _S34);
         var peak_1 : f32 = 3.14159274101257324f * _S35 / (2.0f * duration_1);
         var dir_0 : vec3<f32> = _S32 / vec3<f32>(j_1);
-        var mean_1 : f32 = pulse_mean_0(0.0f, 0.0f, 0.0f, peak_1, duration_1, _S20);
+        var mean_1 : f32;
+        if((params_0.impact_peak_0) != u32(0))
+        {
+            mean_1 = peak_1;
+        }
+        else
+        {
+            mean_1 = pulse_mean_0(0.0f, 0.0f, 0.0f, peak_1, duration_1, _S20);
+        }
         if(mean_1 != 0.0f)
         {
             var f_2 : vec3<f32> = dir_0 * vec3<f32>(mean_1);

@@ -33,6 +33,9 @@ struct ResidentParams
     uint pulse_count_base;// ctab: per chunk its pulse count (x, as bits)
     uint pulse_cap;
     uint status_base;     // ctab: x = chunks whose carried pulses overflowed (bits)
+    uint impact_peak;     // 1: this frame's impacts at their Hertz peak force (a measurement)
+    uint pad0;
+    uint pad1;
 };
 
 struct Record
@@ -247,7 +250,7 @@ void resident_filter(uint3 id: SV_DispatchThreadID)
         float duration = hertz_duration(m, radius, e_star, r.impulse.w);
         float peak = PI * j_impact / (2.0 * duration);
         float3 dir = r.impulse.xyz / j;
-        float mean = pulse_mean(0.0, 0.0, 0.0, peak, duration, dt);
+        float mean = params.impact_peak != 0 ? peak : pulse_mean(0.0, 0.0, 0.0, peak, duration, dt);
         if (mean != 0.0)
         {
             float3 f = dir * mean;

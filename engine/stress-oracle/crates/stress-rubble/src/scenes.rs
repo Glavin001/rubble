@@ -49,6 +49,15 @@ pub fn wall_ram() -> Scene {
     s
 }
 
+/// `wall_ram` with the ram 1.1 m further back: it strikes in the second frame (the first a
+/// resident frame can take, `GpuWorld::fast_qs_conditions`).
+pub fn wall_ram_late() -> Scene {
+    let mut s = wall_ram();
+    s.name = "wall_ram_late".into();
+    s.impactors[0].position[1] -= 1.1;
+    s
+}
+
 /// The house-1story pack.
 pub fn house() -> Scene {
     stress_ref::scene_pack::import(&packs_dir().join("house-1story.json"), "house-1story", "structure").expect("house-1story pack")

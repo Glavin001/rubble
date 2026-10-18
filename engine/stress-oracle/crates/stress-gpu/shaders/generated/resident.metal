@@ -116,6 +116,9 @@ struct ResidentParams_0
     uint pulse_count_base_0;
     uint pulse_cap_0;
     uint status_base_0;
+    uint impact_peak_0;
+    uint pad0_0;
+    uint pad1_0;
 };
 
 struct EngineBody_natural_0
@@ -693,7 +696,15 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
         float duration_1 = hertz_duration_0(m_1, min(_S85.z, _S64.z), 1.0f / ((1.0f - _S88 * _S88) / _S64.x + 1.0f / _S85.y), _S86);
         float peak_1 = 3.14159274101257324f * _S87 / (2.0f * duration_1);
         float3 dir_0 = _S83 / float3(j_1) ;
-        float mean_1 = pulse_mean_0(0.0f, 0.0f, 0.0f, peak_1, duration_1, _S66);
+        float mean_1;
+        if(((&kernelContext_2)->params_0->impact_peak_0) != 0U)
+        {
+            mean_1 = peak_1;
+        }
+        else
+        {
+            mean_1 = pulse_mean_0(0.0f, 0.0f, 0.0f, peak_1, duration_1, _S66);
+        }
         if(mean_1 != 0.0f)
         {
             float3 f_2 = dir_0 * float3(mean_1) ;
