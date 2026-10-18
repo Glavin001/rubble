@@ -71,6 +71,9 @@ pub struct GpuSplitter {
     offsets: Kernel,
     spawn: Kernel,
     retire: Kernel,
+    /// The split pass's copies of the tables as they were (`pass`), kept between splits:
+    /// a new buffer per split costs its allocation and zero fill.
+    old: std::cell::RefCell<Vec<Option<wgpu::Buffer>>>,
 }
 
 /// A split's GPU buffers (for the spawn that follows) and its children read back.
@@ -187,7 +190,7 @@ impl GpuSplitter {
     pub fn new(gpu: &Gpu) -> GpuSplitter {
         let k = |e: &str| gpu.compute(&shaders::SPLIT, e, &BINDINGS);
         let s = |e: &str| gpu.compute(&shaders::SPAWN, e, &SPAWN_BINDINGS);
-        GpuSplitter { components: k("split_components"), children: k("split_children"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire") }
+        GpuSplitter { components: k("split_components"), children: k("split_children"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire"), old: std::cell::RefCell::new(vec![None; 7]) }
     }
 
     /// The children of the islands `parents` (island, chunk range, rigid frame: rotation
@@ -603,6 +606,7 @@ impl GpuSplitter {
         buffers: [&wgpu::Buffer; 6],
         scratch: &wgpu::Buffer,
         parents: &[(usize, [u32; 2])],
+        bond_ranges: &[[u32; 2]],
         engine: &PassEngine,
         table: &PartTable,
         layout_params: LayoutParams,
@@ -652,15 +656,57 @@ impl GpuSplitter {
         let plan = gpu.storage("pass plan", &vec![0u32; 16 + cap + 6 * total + params.island_count as usize + params.bond_count as usize + 1]);
         let layout_uniform = gpu.uniform("pass layout params", &params);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        let mut copy = |src: &wgpu::Buffer, label: &str, encoder: &mut wgpu::CommandEncoder| {
-            let dst = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: src.size(), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-            encoder.copy_buffer_to_buffer(src, 0, &dst, 0, src.size());
+        // Copies of the tables as they were, of only what the layout reads: each parent's
+        // chunk and bond ranges (chunk statics, state, bond statics and records, the
+        // resident tables' per-chunk entries) and, whole, the incidence, the islands and the
+        // resident tables' island entries (a moved island is any island). Into buffers kept
+        // between splits; the rest of them is never read.
+        let mut cache = self.old.borrow_mut();
+        let mut copy = |slot: usize, src: &wgpu::Buffer, label: &str, ranges: Option<&[(u64, u64)]>, encoder: &mut wgpu::CommandEncoder| {
+            let dst = match &cache[slot] {
+                Some(b) if b.size() >= src.size() => b.clone(),
+                _ => {
+                    let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: src.size(), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                    cache[slot] = Some(b.clone());
+                    b
+                }
+            };
+            match ranges {
+                Some(ranges) => {
+                    for &(at, len) in ranges.iter().filter(|r| r.1 > 0) {
+                        encoder.copy_buffer_to_buffer(src, at, &dst, at, len);
+                    }
+                }
+                None => encoder.copy_buffer_to_buffer(src, 0, &dst, 0, src.size()),
+            }
             dst
         };
-        let old: Vec<wgpu::Buffer> = [(chunks, "old chunks"), (state, "old state"), (bonds, "old bonds"), (bond_dyn, "old bond records"), (index, "old index"), (islands, "old islands")].iter().map(|(b, l)| copy(b, l, &mut encoder)).collect();
+        let f4 = 16u64;
+        let per_chunk = |words: u64| -> Vec<(u64, u64)> { parents.iter().map(|&(_, r)| (f4 * words * r[0] as u64, f4 * words * (r[1] - r[0]) as u64)).collect() };
+        let per_bond = |words: u64| -> Vec<(u64, u64)> { bond_ranges.iter().map(|r| (f4 * words * r[0] as u64, f4 * words * (r[1] - r[0]) as u64)).collect() };
+        let old: Vec<wgpu::Buffer> = vec![
+            copy(0, chunks, "old chunks", Some(&per_chunk(params.chunk_words as u64)), &mut encoder),
+            copy(1, state, "old state", Some(&per_chunk(4)), &mut encoder),
+            copy(2, bonds, "old bonds", Some(&per_bond(params.bond_words as u64)), &mut encoder),
+            copy(3, bond_dyn, "old bond records", Some(&per_bond(params.dyn_words as u64)), &mut encoder),
+            copy(4, index, "old index", None, &mut encoder),
+            copy(5, islands, "old islands", None, &mut encoder),
+        ];
         let dummy = gpu.storage("pass no ctab", &[[0f32; 4]; 1]);
         let dummy_out = gpu.storage("pass no ctab out", &[[0f32; 4]; 1]);
-        let old_ctab = resident.as_ref().map(|(c, _)| copy(c, "old ctab", &mut encoder));
+        let old_ctab = resident.as_ref().map(|(c, _)| {
+            let mut ranges: Vec<(u64, u64)> = Vec::new();
+            for &(_, r) in parents {
+                let (c0, n) = (r[0] as u64, (r[1] - r[0]) as u64);
+                ranges.push((f4 * (params.props_base as u64 + c0), f4 * n));
+                ranges.push((f4 * (params.eload_base as u64 + 2 * c0), f4 * 2 * n));
+                ranges.push((f4 * (params.pulse_count_base as u64 + c0), f4 * n));
+                ranges.push((f4 * (params.pulse_base as u64 + 3 * params.pulse_cap as u64 * c0), f4 * 3 * params.pulse_cap as u64 * n));
+            }
+            ranges.push((f4 * params.engine_base as u64, (f4 * 3 * (params.island_count as u64 + 1)).min(c.size().saturating_sub(f4 * params.engine_base as u64))));
+            copy(6, c, "old ctab", Some(&ranges), &mut encoder)
+        });
+        drop(cache);
         let (ctab_old, ctab_new): (&wgpu::Buffer, &wgpu::Buffer) = match (&old_ctab, &resident) {
             (Some(o), Some((c, _))) => (o, c),
             _ => (&dummy, &dummy_out),
@@ -687,12 +733,21 @@ impl GpuSplitter {
             (&layout.moved, layout_bind(&layout.moved), groups(island_cap + 1, 64)),
             (&layout.parent, layout_bind(&layout.parent), n),
         ];
-        for (k, bind, size) in &steps {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+        // `STRESS_GPU_TIMING=1`: each step's GPU time (a diagnostic read).
+        let timing = (std::env::var("STRESS_GPU_TIMING").is_ok_and(|v| v == "1") && gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY))
+            .then(|| gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("split pass timestamps"), ty: wgpu::QueryType::Timestamp, count: 2 * steps.len() as u32 }));
+        for (i, (k, bind, size)) in steps.iter().enumerate() {
+            let stamps = timing.as_ref().map(|q| wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(2 * i as u32), end_of_pass_write_index: Some(2 * i as u32 + 1) });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: stamps });
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, bind, &[]);
             pass.dispatch_workgroups((*size).max(1), 1, 1);
         }
+        let timing_resolve = timing.as_ref().map(|q| {
+            let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("split pass timestamps"), size: 8 * 2 * steps.len() as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+            encoder.resolve_query_set(q, 0..2 * steps.len() as u32, &b, 0);
+            b
+        });
         // The coupling's collider table after the layout (colliders.slang).
         if let Some((refresh, collider_info)) = colliders {
             let inputs = crate::colliders::RefreshInputs {
@@ -731,6 +786,13 @@ impl GpuSplitter {
         ]);
         if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
             eprintln!("split pass: {} parents, {} chunks: GPU and read {:.1} ms", parents.len(), total, t_submit.elapsed().as_secs_f64() * 1e3);
+        }
+        if let Some(b) = timing_resolve {
+            let t: Vec<u64> = gpu.read(&b);
+            let period = gpu.queue.get_timestamp_period() as f64 * 1e-6;
+            let names = ["frames", "components", "children", "offsets", "spawn", "retire", "plan", "moved", "parent"];
+            let ms: Vec<String> = (0..t.len() / 2).map(|q| format!("{} {:.2}", names.get(q).unwrap_or(&"?"), t[2 * q + 1].saturating_sub(t[2 * q]) as f64 * period)).collect();
+            eprintln!("split pass GPU ms: {}", ms.join(", "));
         }
         let table_read: Vec<[u32; 4]> = bytemuck::pod_collect_to_vec(&read[0]);
         let members: Vec<u32> = bytemuck::pod_collect_to_vec(&read[1]);

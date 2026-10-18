@@ -3452,6 +3452,7 @@ impl GpuSolver {
         }
         let layout = self.layouter.get_or_insert_with(|| crate::gpu_split::GpuLayout::new(gpu)).clone_kernels();
         let ps: Vec<(usize, [u32; 2])> = parents.iter().map(|&ci| (ci, [self.layout.islands[ci].range[0], self.layout.islands[ci].range[1]])).collect();
+        let bond_ranges: Vec<[u32; 2]> = parents.iter().map(|&ci| [self.layout.islands[ci].range[2], self.layout.islands[ci].range[3]]).collect();
         let parts_max: usize = ps.iter().map(|&(_, r)| (r[0] as usize..r[1] as usize).map(|k| { let (s, c) = self.layout.chunks[k]; table.counts[s][c] as usize }).sum::<usize>()).sum();
         let p = self.buffers.params;
         let params = crate::gpu_split::LayoutParams {
@@ -3480,7 +3481,7 @@ impl GpuSolver {
         };
         let resident = resident.map(|r| (r.ctab, [r.props_base, r.eload_base, r.pulse_base, r.pulse_count_base, r.pulse_cap, r.engine_base]));
         let b = &self.buffers;
-        self.splitter.as_ref().expect("splitter").pass(gpu, &layout, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &b.scratch, &ps, engine, table, params, self.layout.island_cap, resident, gate, parts_max, colliders)
+        self.splitter.as_ref().expect("splitter").pass(gpu, &layout, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &b.scratch, &ps, &bond_ranges, engine, table, params, self.layout.island_cap, resident, gate, parts_max, colliders)
     }
 
     /// The island capacity of the tables (`island_headroom` past the islands).

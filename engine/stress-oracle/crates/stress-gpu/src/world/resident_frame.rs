@@ -320,6 +320,17 @@ impl GpuWorld {
                     out.disconnected.len()
                 );
             }
+            // `STRESS_GPU_DET_TRACE=1`: what the frame's status read says, per window (no
+            // read of its own), to find where two runs part.
+            if std::env::var("STRESS_GPU_DET_TRACE").is_ok() {
+                let ids: Vec<u64> = out.disconnected.iter().map(|&ci| self.solver.mirror.clusters[ci].id).collect();
+                eprintln!("det frame {} pass {first}: {} run, {} solved, {} converged, {} unconverged, at {:?}, disconnected {ids:?}, clusters {}, read {:x}", self.frame, out.passes, out.solved.len(), out.converged.len(), out.unconverged, out.disconnected_at, self.solver.mirror.clusters.len(), {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    read.hash(&mut h);
+                    h.finish()
+                });
+            }
             let Some(at) = out.disconnected_at else {
                 // The window ran out with damage still growing: the next window.
                 if out.passes == window && out.damaged && first + window < max {
