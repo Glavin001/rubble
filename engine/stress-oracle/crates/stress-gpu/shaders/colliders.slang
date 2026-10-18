@@ -128,7 +128,7 @@ void collider_refresh(uint3 id: SV_DispatchThreadID)
     uint key = collider_key[c];
     if (key == NONE)
         return;
-    float inf = asfloat(0x7f800000u);
+    float inf = float_bits(0x7f800000u);
     if (key == RETIRED)
     {
         // `Owner::Retired`: static geometry, as the other side sees it.

@@ -1529,9 +1529,14 @@ fn fatigue_factor_0( mat_2 : ptr<function, JointMaterial_std140_0>,  life_1 : f3
     return fpow_0(clamp(life_1, 0.0f, 1.0f), fdiv_0(1.0f, (*mat_2).misc_0.y - 2.0f));
 }
 
+fn float_bits_0( bits_3 : u32) -> f32
+{
+    return (bitcast<f32>((bits_3)));
+}
+
 fn infinity_0() -> f32
 {
-    return (bitcast<f32>((u32(2139095040))));
+    return float_bits_0(u32(2139095040));
 }
 
 fn failure_indices_0( mat_3 : ptr<function, JointMaterial_std140_0>,  b_14 : ptr<function, JointBond_std430_0>,  m_2 : Measures_0,  multiplier_0 : f32) -> vec4<f32>
@@ -7521,7 +7526,7 @@ fn pair_contact_0( i_9 : u32,  lane_1 : u32,  lanes_5 : u32)
                 {
                     break;
                 }
-                contact_state_0[_S557 + e_5] = vec4<f32>((bitcast<f32>((u32(2143289344)))), 0.0f, 0.0f, 0.0f);
+                contact_state_0[_S557 + e_5] = vec4<f32>(float_bits_0(u32(2143289344)), 0.0f, 0.0f, 0.0f);
                 e_5 = e_5 + lanes_5;
             }
         }
@@ -7604,7 +7609,7 @@ fn pair_contact_0( i_9 : u32,  lane_1 : u32,  lanes_5 : u32)
                 var _S565 : u32 = _S557 + e_5;
                 if(!is_nan_0(contact_state_0[_S565].x))
                 {
-                    contact_state_0[_S565] = vec4<f32>((bitcast<f32>((u32(2143289344)))), 0.0f, 0.0f, 0.0f);
+                    contact_state_0[_S565] = vec4<f32>(float_bits_0(u32(2143289344)), 0.0f, 0.0f, 0.0f);
                 }
                 e_5 = e_5 + lanes_5;
                 continue;
@@ -7755,7 +7760,7 @@ fn pair_contact_0( i_9 : u32,  lane_1 : u32,  lanes_5 : u32)
             {
                 break;
             }
-            contact_state_0[_S557 + e_5] = vec4<f32>((bitcast<f32>((u32(2143289344)))), 0.0f, 0.0f, 0.0f);
+            contact_state_0[_S557 + e_5] = vec4<f32>(float_bits_0(u32(2143289344)), 0.0f, 0.0f, 0.0f);
             e_5 = e_5 + lanes_5;
         }
     }

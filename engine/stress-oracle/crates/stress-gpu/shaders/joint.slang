@@ -6,6 +6,8 @@
 // patch (6 x 6 springs or exact) with Coulomb sliding and torsional friction, and
 // elastic-plastic rebar. Imported by the step kernels.
 
+import common;
+
 module joint;
 
 public static const uint KIND_BRITTLE = 0;
@@ -103,7 +105,7 @@ float signum(float x)
 
 float infinity()
 {
-    return asfloat(0x7f800000u);
+    return float_bits(0x7f800000u);
 }
 
 float sq(float x)

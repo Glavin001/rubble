@@ -994,7 +994,7 @@ impl World {
     /// The end of a coupled frame: island bodies that still exist go back to the engine
     /// with the world's state; new fragments are created by the sync with theirs.
     pub fn coupled_write_back(&mut self, frozen: &[BodyKey]) {
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         self.take_rest_overlaps_from_engine();
         let t1 = t.elapsed().as_secs_f64() * 1e3;
         let motion = self.world_motion();

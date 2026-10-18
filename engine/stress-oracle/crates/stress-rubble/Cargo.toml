@@ -7,6 +7,8 @@ publish.workspace = true
 description = "Couples the stress-ref destruction stress solver to rubble's AVBD GPU rigid-body engine (engine-webgpu)"
 
 [dependencies]
+engine-gpu-wait = { path = "../../../crates/engine-gpu-wait" }
+web-time = "1.1"
 stress-ref = { path = "../stress-ref" }
 # rubble's own engine (wgpu 24; the oracle's GPU solver is on wgpu 30: both majors
 # coexist in the lock, each crate on its own device).

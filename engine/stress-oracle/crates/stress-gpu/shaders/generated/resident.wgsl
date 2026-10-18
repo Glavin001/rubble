@@ -331,6 +331,11 @@ fn resident_poses(@builtin(global_invocation_id) id_0 : vec3<u32>)
     return;
 }
 
+fn float_bits_0( bits_0 : u32) -> f32
+{
+    return (bitcast<f32>((bits_0)));
+}
+
 fn pulse_mean_0( start_0 : f32,  plateau_0 : f32,  plateau_time_0 : f32,  peak_0 : f32,  duration_0 : f32,  dt_1 : f32) -> f32
 {
     var _S10 : f32 = start_0 + plateau_time_0;
@@ -395,7 +400,7 @@ fn resident_filter(@builtin(global_invocation_id) id_1 : vec3<u32>)
     var _S19 : f32;
     if((((islands_0[_S15].info_0.x) & (u32(1)))) != u32(0))
     {
-        _S19 = (bitcast<f32>((u32(2139095040))));
+        _S19 = float_bits_0(u32(2139095040));
     }
     else
     {

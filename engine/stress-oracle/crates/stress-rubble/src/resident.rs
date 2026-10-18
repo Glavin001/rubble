@@ -320,7 +320,7 @@ impl RubbleEngine {
             self.sim.set_params(params);
             let phases = std::env::var("STRESS_RESIDENT_PHASES").is_ok();
             for s in 0..n {
-                let t = std::time::Instant::now();
+                let t = web_time::Instant::now();
                 self.sim.step_submit().map_err(|e| format!("rubble step failed: {e:?}"))?;
                 if phases {
                     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
@@ -328,7 +328,7 @@ impl RubbleEngine {
                 }
                 let mut encoder = gpu.device.create_command_encoder(&Default::default());
                 ingest.substep(gpu, &mut encoder, &self.engine_buffers(), self.sim.last_contact_offset(), s, h);
-                let t_ingest = std::time::Instant::now();
+                let t_ingest = web_time::Instant::now();
                 gpu.queue.submit([encoder.finish()]);
                 if std::env::var("RUBBLE_HOST_TIMING").is_ok() {
                     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());

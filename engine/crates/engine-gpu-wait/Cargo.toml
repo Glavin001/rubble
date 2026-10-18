@@ -1,0 +1,8 @@
+[package]
+name = "engine-gpu-wait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Waiting for a GPU map from synchronous code: a no-op natively (the device poll already blocked), a JSPI suspension in the browser"
+
+[dependencies]

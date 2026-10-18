@@ -229,6 +229,11 @@ fn rotate_0( q_2 : Quat_0,  v_1 : vec3<f32>) -> vec3<f32>
     return v_1 + t_0 * vec3<f32>(q_2.w_0) + cross(qv_0, t_0);
 }
 
+fn float_bits_0( bits_0 : u32) -> f32
+{
+    return (bitcast<f32>((bits_0)));
+}
+
 var<workgroup> g_lo_0 : array<vec3<f32>, i32(256)>;
 
 var<workgroup> g_hi_0 : array<vec3<f32>, i32(256)>;
@@ -406,7 +411,7 @@ fn punch_islands(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         q_3 = _S11;
         v_2 = _S13;
     }
-    var inf_0 : f32 = (bitcast<f32>((u32(2139095040))));
+    var inf_0 : f32 = float_bits_0(u32(2139095040));
     var _S15 : vec3<f32> = vec3<f32>(- inf_0);
     var lo_0 : vec3<f32> = vec3<f32>(inf_0);
     var hi_0 : vec3<f32> = _S15;

@@ -570,6 +570,11 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     return float4(q_4->x_0, q_4->y_0, q_4->z_0, q_4->w_3);
 }
 
+float float_bits_0(uint bits_0)
+{
+    return (as_type<float>((bits_0)));
+}
+
 [[kernel]] void layout_parent(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], uint device* control_2 [[buffer(24)]], uint device* plan_2 [[buffer(5)]], packed_uint4 device* parents_2 [[buffer(1)]], LayoutParams_0 constant* params_2 [[buffer(0)]], packed_float4 device* old_islands_2 [[buffer(16)]], packed_float4 device* children_2 [[buffer(3)]], uint device* work_2 [[buffer(2)]], packed_float4 device* chunks_2 [[buffer(7)]], packed_float4 device* old_chunks_2 [[buffer(6)]], packed_float4 device* state_2 [[buffer(9)]], packed_float4 device* old_state_2 [[buffer(8)]], packed_float4 device* scratch_2 [[buffer(18)]], packed_float4 device* ctab_2 [[buffer(20)]], packed_float4 device* old_ctab_2 [[buffer(19)]], packed_float4 device* old_bonds_2 [[buffer(10)]], packed_float4 device* bonds_2 [[buffer(11)]], packed_float4 device* dyn_2 [[buffer(13)]], packed_float4 device* old_dyn_2 [[buffer(12)]], uint device* old_index_2 [[buffer(14)]], uint device* index_2 [[buffer(15)]], packed_float4 device* frames_2 [[buffer(4)]], packed_float4 device* islands_2 [[buffer(17)]], packed_uint4 device* spawn_slots_2 [[buffer(22)]], packed_float4 device* spawn_extras_2 [[buffer(23)]], packed_float4 device* gate_2 [[buffer(21)]], packed_float4 device* island_copy_2 [[buffer(26)]], packed_float4 device* old_copy_2 [[buffer(25)]])
 {
     uint hi_0;
@@ -1364,7 +1369,7 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         rec_0[int(18)] = float4(_S157, 0.0f);
         uint _S158 = child_id_at_0(slot_7, &kernelContext_19);
         rec_0[int(19)] = (as_type<float4>((uint4(0U, 0U, 0U, *((&kernelContext_19)->plan_0+_S158)))));
-        rec_0[int(21)] = float4(0.0f, 0.0f, 0.0f, (as_type<float>((2139095040U))));
+        rec_0[int(21)] = float4(0.0f, 0.0f, 0.0f, float_bits_0(2139095040U));
         float3 _S159;
         if(anchored_0)
         {
@@ -1404,7 +1409,7 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             }
             else
             {
-                body_range_0 = (as_type<float3>((uint3(4294967295U, 0U, 0U))));
+                body_range_0 = float3(float_bits_0(4294967295U), 0.0f, 0.0f);
             }
             if(anchored_0)
             {
@@ -1416,7 +1421,7 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             }
             if(_S102)
             {
-                *((&kernelContext_19)->ctab_0+at_2) = packed_float4(float4((as_type<float>((4294967295U))), body_range_0)) ;
+                *((&kernelContext_19)->ctab_0+at_2) = packed_float4(float4(float_bits_0(4294967295U), body_range_0)) ;
                 packed_float4 _S166 = packed_float4(float4(0.0f) ) ;
                 *((&kernelContext_19)->ctab_0+(at_2 + 1U)) = _S166;
                 *((&kernelContext_19)->ctab_0+(at_2 + 2U)) = _S166;

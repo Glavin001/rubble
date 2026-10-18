@@ -99,7 +99,7 @@ fn apply_overrides(scene: &mut Scene, args: &[String]) -> Result<(), String> {
 }
 
 fn run_scene(make: &WorldFactory, scene: &Scene) -> Observation {
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
     let mut world = make(scene);
     let mut obs = world.run();
     obs.values.insert("wall_seconds".into(), start.elapsed().as_secs_f64());

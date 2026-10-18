@@ -691,7 +691,6 @@ uint impactor_contact_count(Impactor imp, float crush_depth, Box shrunk, Box b)
 
 // ------------------------------------------------------------------ contacts
 
-static const float NAN_OFFSET = asfloat(0x7fc00000u);
 
 // NaN by its bits: holds under fast math, which may assume no NaN.
 bool is_nan(float x)
@@ -814,7 +813,7 @@ void pair_contact(uint i, uint lane, uint lanes)
         // and write nothing when there is nothing to clear.
         if ((flags & 1) != 0)
             for (uint e = lane; e < entries; e += lanes)
-                contact_state[st + e] = float4(NAN_OFFSET, 0.0, 0.0, 0.0);
+                contact_state[st + e] = float4(float_bits(0x7fc00000u), 0.0, 0.0, 0.0);
         if (lane == 0)
         {
             if ((flags & 2) != 0)
@@ -852,7 +851,7 @@ void pair_contact(uint i, uint lane, uint lanes)
             if (!pair_point(ba, bb, na, e, p, n, d))
             {
                 if (!is_nan(contact_state[st + e].x))
-                    contact_state[st + e] = float4(NAN_OFFSET, 0.0, 0.0, 0.0);
+                    contact_state[st + e] = float4(float_bits(0x7fc00000u), 0.0, 0.0, 0.0);
                 continue;
             }
             count++;
@@ -910,7 +909,7 @@ void pair_contact(uint i, uint lane, uint lanes)
     }
     if (!has_state && (flags & 1) != 0)
         for (uint e = lane; e < entries; e += lanes)
-            contact_state[st + e] = float4(NAN_OFFSET, 0.0, 0.0, 0.0);
+            contact_state[st + e] = float4(float_bits(0x7fc00000u), 0.0, 0.0, 0.0);
     if (lane != 0)
         return;
     if (has_state)

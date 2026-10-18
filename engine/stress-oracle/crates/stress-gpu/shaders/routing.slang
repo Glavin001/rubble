@@ -102,7 +102,7 @@ void route_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     }
     // The bounds (`select_islands`: chunk centres +- bounding radius) and the reach
     // about the centre, as a box whose corner distance bounds it.
-    float inf = asfloat(0x7f800000u);
+    float inf = float_bits(0x7f800000u);
     float3 lo = float3(inf);
     float3 hi = float3(-inf);
     for (uint c = isl.range.x + t; c < isl.range.y; c += 64)

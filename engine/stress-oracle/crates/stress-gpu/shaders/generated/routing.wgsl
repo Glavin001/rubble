@@ -143,6 +143,11 @@ fn to_zup_0( v_1 : vec3<f32>) -> vec3<f32>
     return vec3<f32>(v_1.x, - v_1.z, v_1.y);
 }
 
+fn float_bits_0( bits_0 : u32) -> f32
+{
+    return (bitcast<f32>((bits_0)));
+}
+
 var<workgroup> g_lo_0 : array<vec3<f32>, i32(64)>;
 
 var<workgroup> g_hi_0 : array<vec3<f32>, i32(64)>;
@@ -211,7 +216,7 @@ fn route_islands(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         v_2 = _S8;
         w_1 = _S9;
     }
-    var inf_0 : f32 = (bitcast<f32>((u32(2139095040))));
+    var inf_0 : f32 = float_bits_0(u32(2139095040));
     var _S12 : vec3<f32> = vec3<f32>(- inf_0);
     var _S13 : u32 = _S5.x + t_1;
     var lo_0 : vec3<f32> = vec3<f32>(inf_0);

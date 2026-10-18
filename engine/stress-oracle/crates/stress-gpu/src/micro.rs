@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Instant;
+use web_time::Instant;
 
 use stress_ref::api::{ChildBody, ClusterMotion, ContactImpulse, EngineCoupledSolver, FrameInput, StressSolverApi};
 use stress_ref::builders::{auto_bonds, body, bond_pull, chunk, grid, new_scene, probe};

@@ -54,7 +54,7 @@
 //! linearised in the dynamics (the onset check uses the co-rotational kinematics). The
 //! certificate is offered for anchored clusters only.
 
-use std::time::Instant;
+use web_time::Instant;
 
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::evd;

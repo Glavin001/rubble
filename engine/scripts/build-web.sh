@@ -85,6 +85,9 @@ cargo run --release -p engine-webgpu --bin wgsl_export
 echo "==> Fracture lab wasm"
 wasm-pack build crates/engine-fracture-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
+echo "==> Stress-solver wasm (the Fracture lab's stress bond mode)"
+CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
+  --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
 echo "==> Scene snapshots (scene_export, host build)"
 cargo run --release -p engine-scenes --no-default-features --bin scene_export
 

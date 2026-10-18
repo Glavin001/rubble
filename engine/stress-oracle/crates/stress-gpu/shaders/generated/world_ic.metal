@@ -1475,9 +1475,14 @@ float fatigue_factor_0(const JointMaterial_0 constant* mat_2, float life_1)
     return _S206;
 }
 
+float float_bits_0(uint bits_3)
+{
+    return (as_type<float>((bits_3)));
+}
+
 float infinity_0()
 {
-    return (as_type<float>((2139095040U)));
+    return float_bits_0(2139095040U);
 }
 
 float4 failure_indices_0(const JointMaterial_0 constant* mat_3, const JointBond_natural_0 thread* b_10, const Measures_0 thread* m_2, float multiplier_0)
@@ -2685,9 +2690,9 @@ float3 to_body_0(uint _S357, float3 _S358, KernelContext_0 thread* kernelContext
     return (float4(_S359->t1_0) ).xyz * float3(_S358.x)  + (float4(_S359->t2_0) ).xyz * float3(_S358.y)  + (float4(_S359->normal_0) ).xyz * float3(_S358.z) ;
 }
 
-void cov_or_1(uint island_2, uint bits_3, KernelContext_0 thread* kernelContext_26)
+void cov_or_1(uint island_2, uint bits_4, KernelContext_0 thread* kernelContext_26)
 {
-    uint _S360 = atomic_fetch_or_explicit(((atomic_uint device*)(&(kernelContext_26->islands_0+island_2)->coverage_0)), bits_3, memory_order_relaxed);
+    uint _S360 = atomic_fetch_or_explicit(((atomic_uint device*)(&(kernelContext_26->islands_0+island_2)->coverage_0)), bits_4, memory_order_relaxed);
     return;
 }
 
@@ -7065,7 +7070,7 @@ void pair_contact_0(uint i_9, uint lane_1, uint lanes_5, KernelContext_0 thread*
                 {
                     break;
                 }
-                *(kernelContext_49->contact_state_0+(_S941 + e_4)) = packed_float4(float4((as_type<float>((2143289344U))), 0.0f, 0.0f, 0.0f)) ;
+                *(kernelContext_49->contact_state_0+(_S941 + e_4)) = packed_float4(float4(float_bits_0(2143289344U), 0.0f, 0.0f, 0.0f)) ;
                 e_4 = e_4 + lanes_5;
             }
         }
@@ -7156,7 +7161,7 @@ void pair_contact_0(uint i_9, uint lane_1, uint lanes_5, KernelContext_0 thread*
                 uint _S968 = _S941 + e_4;
                 if(!is_nan_0((float4(*(kernelContext_49->contact_state_0+_S968)) ).x))
                 {
-                    *(kernelContext_49->contact_state_0+_S968) = packed_float4(float4((as_type<float>((2143289344U))), 0.0f, 0.0f, 0.0f)) ;
+                    *(kernelContext_49->contact_state_0+_S968) = packed_float4(float4(float_bits_0(2143289344U), 0.0f, 0.0f, 0.0f)) ;
                 }
                 e_4 = e_4 + lanes_5;
                 continue;
@@ -7317,7 +7322,7 @@ void pair_contact_0(uint i_9, uint lane_1, uint lanes_5, KernelContext_0 thread*
             {
                 break;
             }
-            *(kernelContext_49->contact_state_0+(_S941 + e_4)) = packed_float4(float4((as_type<float>((2143289344U))), 0.0f, 0.0f, 0.0f)) ;
+            *(kernelContext_49->contact_state_0+(_S941 + e_4)) = packed_float4(float4(float_bits_0(2143289344U), 0.0f, 0.0f, 0.0f)) ;
             e_4 = e_4 + lanes_5;
         }
     }

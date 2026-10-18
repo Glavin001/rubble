@@ -166,7 +166,7 @@ void resident_filter(uint3 id: SV_DispatchThreadID)
     Quat q = island_rotation(isl);
     float3 centre = isl.position.xyz + rotate(q, ch.center.xyz + state[4 * k].xyz);
     float4 props = ctab[params.props_base + k];
-    float m_body = anchored ? asfloat(0x7f800000u) : isl.com.w;
+    float m_body = anchored ? float_bits(0x7f800000u) : isl.com.w;
     float dt = params.dt;
     float3 f_total = float3(0.0);
     float3 t_total = float3(0.0);

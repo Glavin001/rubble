@@ -154,9 +154,40 @@ overlapped; the hull grid, GPU-bound at ~28 ms per tick, goes from 28.9 to
 engine's own run-to-run nondeterminism appears (two plain runs of the cuboid
 grid diverge at tick ~296).
 
-### Breakable bonds (experimental, opt-in)
+### Bond modes
 
-“Breakable bonds (experimental)” turns each baked bond of the selected level into
+The **Bonds** menu picks how the baked bonds hold the fragments, on the same asset,
+level, camera and shot rule, so the three can be compared:
+
+| Mode | What holds the fragments | Where it runs |
+|---|---|---|
+| **None** (default) | Nothing: pieces start asleep and wake when hit | rubble (this page's WGSL host) |
+| **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
+| **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
+
+**Stress solver mode.**
+- It runs the same Rust as the native reference (`stress-rubble` example
+  `fracture_glb`): the level's Shardwright stress export, stress-ref's import, the
+  resident GPU frame, and `stress_rubble::render`.
+- It uses the lab's orbit camera and shot rule (`engine-fracture` `view.rs`,
+  `plan::shot_velocity`).
+- It runs one copy of the structure; the samples' layouts of copies are the other modes'.
+- **JSPI.** The solver reads the GPU synchronously, so in the browser each read
+  suspends the wasm stack to the event loop through JavaScript Promise Integration
+  (`engine-gpu-wait`, `gpu-wait.mjs`, the page's import map). It needs Chrome 137 or later.
+- **Build:**
+  ```sh
+  CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build engine/stress-oracle/crates/stress-web --release --target web \
+    --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
+  ```
+  `engine/scripts/build-web.sh` includes this step.
+
+**Native reference** (house, level 0, one cannonball, 120 frames, M3 Max): 15 fragments,
+151 of 453 bonds broken, median frame 4.2 ms.
+
+### Breakable D6 joints (experimental)
+
+“Breakable D6 joints” turns each baked bond of the selected level into
 a D6 bond joint (`JointDesc::bond`, `JOINT_FLAG_BOND`; rows in
 `slang/physics/joints.slang`, see `engine/docs/JOINTS.md`):
 

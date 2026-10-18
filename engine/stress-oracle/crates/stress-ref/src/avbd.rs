@@ -44,7 +44,7 @@
 //! constraints (`Hard`: AVBD's ramped penalty and multiplier, `alpha` stabilisation).
 
 use std::collections::HashMap;
-use std::time::Instant;
+use web_time::Instant;
 
 use crate::bond::{ChunkTurn, CoRotation, Mat6};
 use crate::contact::OBox;

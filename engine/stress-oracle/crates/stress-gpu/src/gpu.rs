@@ -24,7 +24,7 @@ pub enum ShaderPath {
 pub static WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn wait(device: &wgpu::Device) {
-    let t = std::time::Instant::now();
+    let t = web_time::Instant::now();
     device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
     WAIT_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 }
@@ -265,8 +265,14 @@ impl Gpu {
             at += size;
         }
         self.queue.submit([encoder.finish()]);
-        staging.map_async(wgpu::MapMode::Read, .., |r| r.expect("map readback"));
+        let mapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = mapped.clone();
+        staging.map_async(wgpu::MapMode::Read, .., move |r| {
+            r.expect("map readback");
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        });
         wait(&self.device);
+        engine_gpu_wait::until(|| mapped.load(std::sync::atomic::Ordering::Acquire));
         let view = staging.get_mapped_range(..).expect("mapped readback");
         let mut out = Vec::with_capacity(parts.len());
         let mut at = 0usize;
@@ -295,8 +301,14 @@ impl Gpu {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(buffer, offset, &staging, 0, size);
         self.queue.submit([encoder.finish()]);
-        staging.map_async(wgpu::MapMode::Read, .., |r| r.expect("map readback"));
+        let mapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = mapped.clone();
+        staging.map_async(wgpu::MapMode::Read, .., move |r| {
+            r.expect("map readback");
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        });
         wait(&self.device);
+        engine_gpu_wait::until(|| mapped.load(std::sync::atomic::Ordering::Acquire));
         let view = staging.get_mapped_range(..).expect("mapped readback");
         // Copied out element by element: the mapping need not be aligned for `T`.
         let out = bytemuck::pod_collect_to_vec(&view);

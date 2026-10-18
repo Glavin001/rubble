@@ -527,6 +527,11 @@ fn quat_vec_0( q_4 : Quat_0) -> vec4<f32>
     return vec4<f32>(q_4.x_0, q_4.y_0, q_4.z_0, q_4.w_3);
 }
 
+fn float_bits_0( bits_0 : u32) -> f32
+{
+    return (bitcast<f32>((bits_0)));
+}
+
 @compute
 @workgroup_size(256, 1, 1)
 fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invocation_id) thread_0 : vec3<u32>)
@@ -1230,7 +1235,7 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         }
         rec_0[i32(18)] = vec4<f32>(_S62, 0.0f);
         rec_0[i32(19)] = (bitcast<vec4<f32>>((vec4<u32>(u32(0), u32(0), u32(0), plan_0[child_id_at_0(slot_7)]))));
-        rec_0[i32(21)] = vec4<f32>(0.0f, 0.0f, 0.0f, (bitcast<f32>((u32(2139095040)))));
+        rec_0[i32(21)] = vec4<f32>(0.0f, 0.0f, 0.0f, float_bits_0(u32(2139095040)));
         var _S63 : vec3<f32>;
         if(anchored_0)
         {
@@ -1269,7 +1274,7 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             }
             else
             {
-                body_range_0 = (bitcast<vec3<f32>>((vec3<u32>(u32(4294967295), u32(0), u32(0)))));
+                body_range_0 = vec3<f32>(float_bits_0(u32(4294967295)), 0.0f, 0.0f);
             }
             if(anchored_0)
             {
@@ -1281,7 +1286,7 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             }
             if(_S37)
             {
-                ctab_0[at_2] = vec4<f32>((bitcast<f32>((u32(4294967295)))), body_range_0);
+                ctab_0[at_2] = vec4<f32>(float_bits_0(u32(4294967295)), body_range_0);
                 var _S67 : vec4<f32> = vec4<f32>(0.0f);
                 ctab_0[at_2 + u32(1)] = _S67;
                 ctab_0[at_2 + u32(2)] = _S67;

@@ -57,7 +57,7 @@ impl GpuWorld {
     /// (`with_engine` otherwise): the engine shares the stress solver's device.
     pub fn with_resident_engine<T: ResidentEngine + 'static>(gpu: &Gpu, scene: &Scene, engine: T) -> Result<GpuWorld, String> {
         let shared = Rc::new(RefCell::new(engine));
-        let mut w = GpuWorld::with_engine(gpu, scene, Box::new(SharedEngine(shared.clone())))?;
+        let mut w = GpuWorld::with_engine_contact(gpu, scene, Box::new(SharedEngine(shared.clone())), true)?;
         w.solver.quiet_quasi_static = false;
         w.resident_engine = Some(shared);
         // Room for splits laid out in place (`GpuSolver::split_resident`).
@@ -401,19 +401,19 @@ impl GpuWorld {
     }
 
     pub(super) fn resident_frame(&mut self, gpu: &Gpu) -> Result<(), String> {
-        let t_prepare = std::time::Instant::now();
+        let t_prepare = web_time::Instant::now();
         let fdt = self.scene.sim.frame_dt;
         let engine = self.resident_engine.clone().expect("resident engine");
         for cl in &mut self.solver.mirror.clusters {
             cl.driven = true;
         }
-        let t_substeps = std::time::Instant::now();
+        let t_substeps = web_time::Instant::now();
         let n = engine.borrow_mut().resident_substeps(fdt);
         let phases = std::env::var("STRESS_RESIDENT_PHASES").is_ok();
         if phases {
             eprintln!("resident phases: substep count {n}: {:.2} ms", t_substeps.elapsed().as_secs_f64() * 1e3);
         }
-        let t_tables = std::time::Instant::now();
+        let t_tables = web_time::Instant::now();
         self.resident_tables(gpu, n);
         if let Some(r) = self.resident.as_mut() {
             r.qs.set_frame_dt(fdt, self.solver.mirror.config.gravity.norm());
@@ -422,7 +422,7 @@ impl GpuWorld {
         if phases {
             eprintln!("resident phases: tables {:.2} ms", t_tables.elapsed().as_secs_f64() * 1e3);
         }
-        let t_engine = std::time::Instant::now();
+        let t_engine = web_time::Instant::now();
         {
             let r = self.resident.as_ref().expect("resident tables");
             // `STRESS_FRAME_SUBMITS=one` (plan 5d, work in progress): the engine's substeps
@@ -438,7 +438,7 @@ impl GpuWorld {
             }
         }
         // The last frame's GPU splits, followed by the host while the engine's substeps run.
-        let t_flush = std::time::Instant::now();
+        let t_flush = web_time::Instant::now();
         let flushed = self.pending_splits.len();
         self.flush_pending(gpu)?;
         if flushed > 0 && std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
@@ -528,7 +528,7 @@ impl GpuWorld {
             }
         }
         self.prepare_seconds += t_prepare.elapsed().as_secs_f64();
-        let tail = std::time::Instant::now();
+        let tail = web_time::Instant::now();
         let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
         let max = self.solver.mirror.config.static_passes.unwrap_or(StaticOptions::default().max_cascade).max(1);
         let mut split = false;
@@ -542,7 +542,7 @@ impl GpuWorld {
             // The cascade from pass `first` on, under GPU control; then the frame's one
             // read: the cascade's status, the engine's counters, the pulse slots' status.
             self.resident_tables(gpu, n);
-            let t_pass = std::time::Instant::now();
+            let t_pass = web_time::Instant::now();
             // `STRESS_GPU_DET_REPLAY=<frame>`: that frame's first window run again and again
             // from the same buffers (saved, restored), each run's status and state hashed:
             // whether the stress side alone repeats.
@@ -635,7 +635,7 @@ impl GpuWorld {
             if frame_mode {
                 parts.extend(self.solver.frame_log_range());
             }
-            let t_read = std::time::Instant::now();
+            let t_read = web_time::Instant::now();
             let host_before_read = t_prepare.elapsed().as_secs_f64() * 1e3;
             let read = gpu.read_ranges(&parts);
             let read_ms = t_read.elapsed().as_secs_f64() * 1e3;
@@ -680,7 +680,7 @@ impl GpuWorld {
             if frame_mode {
                 // The frame's GPU splits, followed in order (an aborted one ends the log: the
                 // cascade stopped there, and the code below splits on the host).
-                let t_apply = std::time::Instant::now();
+                let t_apply = web_time::Instant::now();
                 let log = self.solver.frame_log(gpu, &read[log_part]);
                 let applied = self.apply_frame_log(gpu, &engine, &log, part_table.as_ref().expect("part table"))?;
                 let apply_ms = t_apply.elapsed().as_secs_f64() * 1e3;
@@ -770,7 +770,7 @@ impl GpuWorld {
             };
             // A split: the mirror (state and the engine's motion), split and tables; the
             // cascade goes on from the next pass.
-            let t_split = std::time::Instant::now();
+            let t_split = web_time::Instant::now();
             // The engine's motion into the mirror (a host split takes the parents' frames
             // from it; the GPU's takes them from the engine's buffer).
             if !crate::gpu_layout() {
@@ -871,13 +871,13 @@ impl GpuWorld {
             self.shell.static_unconverged_frames += 1;
         }
         self.tail_seconds += tail.elapsed().as_secs_f64();
-        let t_back = std::time::Instant::now();
+        let t_back = web_time::Instant::now();
         if split {
             // New clusters get their engine bodies (at the engine's end of the frame).
             for cl in &mut self.solver.mirror.clusters {
                 cl.driven = true;
             }
-            let t_wb = std::time::Instant::now();
+            let t_wb = web_time::Instant::now();
             if self.pending_splits.is_empty() {
                 self.with_shell_mut(|w| w.coupled_write_back(&[]));
             } else {
@@ -1007,7 +1007,7 @@ impl GpuWorld {
             // the engine's substeps run (`flush_pending`).
             if std::env::var("STRESS_GPU_FRAME_DEFER").map_or(true, |v| v != "0") {
                 let next_id = log[at + 10] as u64;
-                let t1 = std::time::Instant::now();
+                let t1 = web_time::Instant::now();
                 let child_ids = self.adopt_from_log(engine, &structures, &spawned, next_id)?;
                 if let Some(r) = self.resident.as_mut() {
                     r.colliders_refreshed = r.colliders.is_some();
@@ -1023,7 +1023,7 @@ impl GpuWorld {
             }
             let resident = self.resident.as_ref().map(|r| r.qs.layout());
             let l = crate::solver::LiveSplit { comps, run: None, resident };
-            let t0 = std::time::Instant::now();
+            let t0 = web_time::Instant::now();
             self.solver.split_resident_with(gpu, &parents, Some(l))?;
             let t_split = t0.elapsed().as_secs_f64() * 1e3;
             if let Some(r) = self.resident.as_mut() {
@@ -1032,7 +1032,7 @@ impl GpuWorld {
                 r.gpu_laid_out = true;
                 r.colliders_refreshed = r.colliders.is_some();
             }
-            let t1 = std::time::Instant::now();
+            let t1 = web_time::Instant::now();
             self.adopt_live(engine, spawned)?;
             self.colliders_adopted(gpu, false);
             if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
@@ -1441,7 +1441,7 @@ impl GpuWorld {
             return Ok(());
         }
         let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         for p in std::mem::take(&mut self.pending_splits) {
             let resident = self.resident.as_ref().map(|r| r.qs.layout());
             let l = crate::solver::LiveSplit { comps: p.comps, run: None, resident };
@@ -1459,7 +1459,7 @@ impl GpuWorld {
             }
             self.solver.adopt_gpu_tables();
         }
-        let t1 = std::time::Instant::now();
+        let t1 = web_time::Instant::now();
         if std::mem::take(&mut self.pending_write_back) {
             for cl in &mut self.solver.mirror.clusters {
                 cl.driven = true;

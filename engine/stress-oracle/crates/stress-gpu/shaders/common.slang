@@ -3,6 +3,14 @@
 
 module common;
 
+// A float from its bits. WGSL forbids a constant infinity or NaN (a WebGPU compiler
+// rejects the whole module), so the bits pass through this function's parameter, which
+// WGSL never folds into a constant; the value is the same on every target.
+public float float_bits(uint bits)
+{
+    return asfloat(bits);
+}
+
 public static const uint SUPPORT_NONE = 0;
 public static const uint SUPPORT_FIXED = 1;
 public static const uint SUPPORT_PINNED = 2;

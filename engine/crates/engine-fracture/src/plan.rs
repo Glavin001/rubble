@@ -1309,18 +1309,15 @@ impl Planner {
         );
         let id = self.projectile_start + self.shots;
         let (m, r) = (self.projectile_mass, self.projectile_radius);
-        let speed = speed
-            .or(self.projectile_speed)
-            .unwrap_or_else(|| (self.extent * 3.0).clamp(5.0, 18.0));
-        let distance = r.max(
-            (0..3)
-                .map(|i| (self.center[i] - origin[i]) * direction[i])
-                .sum(),
+        let v = shot_velocity(
+            self.center,
+            self.extent,
+            r,
+            origin,
+            direction,
+            speed.or(self.projectile_speed),
+            arc.unwrap_or(self.projectile_arc),
         );
-        let mut v = direction.map(|x| x * speed);
-        if arc.unwrap_or(self.projectile_arc) {
-            v[1] += 0.5 * 9.81 * distance / speed;
-        }
         let body = Body {
             p: origin,
             q: [0.0, 0.0, 0.0, 1.0],
@@ -1372,4 +1369,31 @@ pub fn snapshot_pose(snapshot: &[f32], i: usize) -> ([f32; 3], [f32; 4]) {
             snapshot[o + 7],
         ],
     )
+}
+
+/// A shot's launch velocity (asset frame, +Y up) along `direction` from `origin`: at
+/// `speed`, or by default three times the scene's extent per second (5 to 18 m/s), and
+/// with `arc` lifted to cancel the gravity drop over the distance to the scene centre's
+/// depth. The lab's every bond mode fires by this rule (`Planner::launch` and the stress
+/// mode's `stress-web`).
+pub fn shot_velocity(
+    center: [f64; 3],
+    extent: f64,
+    radius: f64,
+    origin: [f64; 3],
+    direction: [f64; 3],
+    speed: Option<f64>,
+    arc: bool,
+) -> [f64; 3] {
+    let speed = speed.unwrap_or_else(|| (extent * 3.0).clamp(5.0, 18.0));
+    let distance = radius.max(
+        (0..3)
+            .map(|i| (center[i] - origin[i]) * direction[i])
+            .sum(),
+    );
+    let mut v = direction.map(|x| x * speed);
+    if arc {
+        v[1] += 0.5 * 9.81 * distance / speed;
+    }
+    v
 }

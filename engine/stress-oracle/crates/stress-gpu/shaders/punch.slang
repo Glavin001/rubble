@@ -137,7 +137,7 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         v = to_zup(b.vel_sleep.xyz);
     }
     // The island's bounds (chunk centres +- bounding radius).
-    float inf = asfloat(0x7f800000u);
+    float inf = float_bits(0x7f800000u);
     float3 lo = float3(inf);
     float3 hi = float3(-inf);
     for (uint c = t; c < n; c += G)

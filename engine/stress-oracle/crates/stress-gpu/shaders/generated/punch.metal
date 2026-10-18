@@ -53,6 +53,11 @@ float3 rotate_0(const Quat_0 thread* q_2, float3 v_1)
     return v_1 + t_0 * float3(q_2->w_0)  + cross(qv_0, t_0);
 }
 
+float float_bits_0(uint bits_0)
+{
+    return (as_type<float>((bits_0)));
+}
+
 struct JointState_0
 {
     float damage_0;
@@ -387,7 +392,7 @@ struct BondDyn_0
         q_3 = _S10;
         v_2 = _S12;
     }
-    float inf_0 = (as_type<float>((2139095040U)));
+    float inf_0 = float_bits_0(2139095040U);
     float3 _S26 = float3(- inf_0) ;
     float3 lo_0 = float3(inf_0) ;
     float3 hi_0 = _S26;

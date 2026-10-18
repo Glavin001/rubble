@@ -212,9 +212,17 @@ fn hull_triangles(vertices: &[Vec3], faces: &[(Vec<usize>, Vec3)], object: u32, 
     }
 }
 
-/// One chunk's flat-shaded triangles in its own frame (centred, chunk axes): its convex
-/// hull, or its box when it has none.
+/// One chunk's flat-shaded triangles in its own frame (centred, chunk axes): each hull of
+/// a compound chunk at its offset, its convex hull, or its box when it has none.
 fn chunk_mesh(ch: &stress_ref::structure::ChunkData, object: u32, out: &mut Vec<Vertex>) {
+    if let Some(parts) = &ch.parts {
+        for p in parts.iter() {
+            let vertices: Vec<Vec3> = p.hull.vertices.iter().map(|v| *v + p.offset).collect();
+            let faces: Vec<(Vec<usize>, Vec3)> = p.hull.faces.iter().map(|f| (f.vertices.clone(), f.normal)).collect();
+            hull_triangles(&vertices, &faces, object, out);
+        }
+        return;
+    }
     match &ch.hull {
         Some(h) => {
             let faces: Vec<(Vec<usize>, Vec3)> = h.faces.iter().map(|f| (f.vertices.clone(), f.normal)).collect();
@@ -270,7 +278,8 @@ fn rows(r: Mat3, t: Vec3) -> [[f32; 4]; 3] {
     std::array::from_fn(|i| [r.m[i][0] as f32, r.m[i][1] as f32, r.m[i][2] as f32, t[i] as f32])
 }
 
-/// Renders the mirror of a solver (and its impactors) offscreen at a fixed size.
+/// Renders the mirror of a solver (and its impactors) offscreen at a fixed size, or into a
+/// target of the caller's (`for_target`, `draw`: a canvas in the browser).
 pub struct Renderer {
     pub width: u32,
     pub height: u32,
@@ -281,9 +290,10 @@ pub struct Renderer {
     vertices: wgpu::Buffer,
     vertex_count: u32,
     msaa: wgpu::TextureView,
-    resolve: wgpu::Texture,
+    /// Offscreen (`new`): the resolved image and its readback, for `render`.
+    resolve: Option<wgpu::Texture>,
     depth: wgpu::TextureView,
-    readback: wgpu::Buffer,
+    readback: Option<wgpu::Buffer>,
     row: u32,
     /// Object index of each chunk, by structure.
     chunk_object: Vec<Vec<u32>>,
@@ -302,6 +312,16 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 impl Renderer {
     /// Meshes for every chunk of `solver` (their hulls, or boxes) and every impactor.
     pub fn new(gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], width: u32, height: u32) -> Renderer {
+        Self::with_format(gpu, solver, impactors, width, height, FORMAT, true)
+    }
+
+    /// A renderer that draws into the caller's `format` target (`draw`), without the
+    /// offscreen image.
+    pub fn for_target(gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], width: u32, height: u32, format: wgpu::TextureFormat) -> Renderer {
+        Self::with_format(gpu, solver, impactors, width, height, format, false)
+    }
+
+    fn with_format(gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], width: u32, height: u32, format: wgpu::TextureFormat, offscreen: bool) -> Renderer {
         let device = &gpu.device;
         let mut verts: Vec<Vertex> = Vec::new();
         let mut chunk_object = Vec::new();
@@ -393,7 +413,7 @@ impl Renderer {
                 bias: Default::default(),
             }),
             multisample: wgpu::MultisampleState { count: SAMPLES, ..Default::default() },
-            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(FORMAT.into())] }),
+            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(format.into())] }),
             multiview_mask: None,
             cache: None,
         });
@@ -409,15 +429,17 @@ impl Renderer {
                 view_formats: &[],
             })
         };
-        let msaa = texture("render msaa", FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
-        let resolve = texture("render resolve", FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let msaa = texture("render msaa", format, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
+        let resolve = offscreen.then(|| texture("render resolve", format, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC));
         let depth = texture("render depth", wgpu::TextureFormat::Depth32Float, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
         let row = (width * 4).div_ceil(256) * 256;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("render readback"),
-            size: (row * height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+        let readback = offscreen.then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("render readback"),
+                size: (row * height) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
         });
         Renderer {
             width,
@@ -449,6 +471,34 @@ impl Renderer {
 
     /// Render the solver's current state from `cam`; returns tightly packed RGBA (sRGB).
     pub fn render(&self, gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], cam: &CameraPose) -> Vec<u8> {
+        let (resolve, readback) = (self.resolve.as_ref().expect("an offscreen renderer (`new`)"), self.readback.as_ref().expect("an offscreen renderer"));
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let view = resolve.create_view(&Default::default());
+        self.draw(gpu, &mut encoder, &view, solver, impactors, cam.view_proj(self.width as f64 / self.height as f64), cam.eye());
+        encoder.copy_texture_to_buffer(
+            resolve.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.row), rows_per_image: Some(self.height) } },
+            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        readback.map_async(wgpu::MapMode::Read, .., |r| r.expect("map the frame"));
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        let mut out = vec![0u8; (self.width * self.height * 4) as usize];
+        {
+            let data = readback.get_mapped_range(..).expect("mapped frame");
+            let w = (self.width * 4) as usize;
+            for y in 0..self.height as usize {
+                out[y * w..(y + 1) * w].copy_from_slice(&data[y * self.row as usize..][..w]);
+            }
+        }
+        readback.unmap();
+        out
+    }
+
+    /// Record the solver's current state, seen through `view_proj` from `eye` (Z up),
+    /// into `target` (resolved from the multisampled image; the renderer's size and format).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, solver: &ReferenceSolver, impactors: &[Impactor], view_proj: [[f32; 4]; 4], eye: Vec3) {
         let mut objs = vec![Object { rows: rows(Mat3::IDENTITY, Vec3::ZERO), color: [0.56, 0.58, 0.55, 2.0] }; self.object_count];
         if !self.ground {
             objs[0] = Object { rows: [[0.0; 4]; 3], color: [0.0; 4] };
@@ -481,25 +531,23 @@ impl Renderer {
             }
         }
         gpu.queue.write_buffer(&self.objects, 0, bytemuck::cast_slice(&objs));
-        let eye = cam.eye();
         let light = Vec3::new(-0.45, -0.55, 0.70).normalized();
         let uniform = CameraUniform {
-            view_proj: cam.view_proj(self.width as f64 / self.height as f64),
+            view_proj,
             eye: [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
             light: [light.x as f32, light.y as f32, light.z as f32, self.fade as f32],
         };
         gpu.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
 
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
         {
-            let view = self.resolve.create_view(&Default::default());
+            let view = target;
             let bg = self.background;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.msaa,
                     depth_slice: None,
-                    resolve_target: Some(&view),
+                    resolve_target: Some(view),
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg[0], g: bg[1], b: bg[2], a: 1.0 }), store: wgpu::StoreOp::Discard },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -516,24 +564,6 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.draw(0..self.vertex_count, 0..1);
         }
-        encoder.copy_texture_to_buffer(
-            self.resolve.as_image_copy(),
-            wgpu::TexelCopyBufferInfo { buffer: &self.readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.row), rows_per_image: Some(self.height) } },
-            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
-        );
-        gpu.queue.submit([encoder.finish()]);
-        self.readback.map_async(wgpu::MapMode::Read, .., |r| r.expect("map the frame"));
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-        let mut out = vec![0u8; (self.width * self.height * 4) as usize];
-        {
-            let data = self.readback.get_mapped_range(..).expect("mapped frame");
-            let w = (self.width * 4) as usize;
-            for y in 0..self.height as usize {
-                out[y * w..(y + 1) * w].copy_from_slice(&data[y * self.row as usize..][..w]);
-            }
-        }
-        self.readback.unmap();
-        out
     }
 }
 

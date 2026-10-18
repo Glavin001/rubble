@@ -537,7 +537,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         rec[16] = float4(anchored ? float3(0.0) : v, 0.0);
         rec[18] = float4(anchored ? float3(0.0) : w, 0.0);
         rec[19] = asfloat(uint4(0, 0, 0, plan[child_id_at(slot)])); // done_pad: the cluster id
-        rec[21] = float4(0.0, 0.0, 0.0, asfloat(0x7f800000u)); // settled: load norm 0, never wakes
+        rec[21] = float4(0.0, 0.0, 0.0, float_bits(0x7f800000u)); // settled: load norm 0, never wakes
         rec[23] = float4(anchored ? float3(0.0) : iw, 0.0);
         for (uint t = 0; t < 25; t++)
             islands[island_word(island, t)] = rec[t];
@@ -547,10 +547,10 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             float4 pr = spawn_extras[2 * slot + 1];
             uint at = params.engine_base + 3 * island;
             // y-w: its engine body (a fixed one too) and collider range (pass.slang retires it).
-            float3 body_range = sl.w != 0 ? asfloat(uint3(sl.x, sl.y, sl.y + sl.z)) : asfloat(uint3(NONE, 0, 0));
+            float3 body_range = sl.w != 0 ? asfloat(uint3(sl.x, sl.y, sl.y + sl.z)) : float3(float_bits(NONE), 0.0, 0.0);
             if (anchored || sl.w == 0)
             {
-                ctab[at] = float4(asfloat(NONE), body_range);
+                ctab[at] = float4(float_bits(NONE), body_range);
                 ctab[at + 1] = float4(0.0);
                 ctab[at + 2] = float4(0.0);
             }

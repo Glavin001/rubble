@@ -387,6 +387,11 @@ struct Island_0
     return;
 }
 
+float float_bits_0(uint bits_0)
+{
+    return (as_type<float>((bits_0)));
+}
+
 float pulse_mean_0(float start_0, float plateau_0, float plateau_time_0, float peak_0, float duration_0, float dt_1)
 {
     float _S49 = start_0 + plateau_time_0;
@@ -471,7 +476,7 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
     float _S65;
     if(anchored_0)
     {
-        _S65 = (as_type<float>((2139095040U)));
+        _S65 = float_bits_0(2139095040U);
     }
     else
     {
