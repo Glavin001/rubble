@@ -344,7 +344,9 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         float modulus = 1.0 / (1.0 / e_imp + 1.0 / chunks[entry_k].cmat.x);
         // api.rs `hertz_duration`.
         float tau = 2.87 * pow(m_eff * m_eff / (face * modulus * modulus * max(speed, 1e-3)), 0.2);
-        bool out = plugged < float(n) && impulse / tau > g_b[0];
+        // A plug held in by no intact bond is no break: nothing to split (a split that
+        // makes one child would only remake the island's body).
+        bool out = plugged < float(n) && g_b[0] > 0.0 && impulse / tau > g_b[0];
         g_go = out ? 1u : 0u;
         if (out)
         {

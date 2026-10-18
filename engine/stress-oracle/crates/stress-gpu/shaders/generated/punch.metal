@@ -865,6 +865,14 @@ struct BondDyn_0
         float tau_0 = 2.86999988555908203f * pow(m_eff_0 * m_eff_0 / (face_0 * modulus_0 * modulus_0 * max(speed_1, 0.00100000004749745f)), 0.20000000298023224f);
         if(((*(&kernelContext_0)->g_lo_0)[int(0)].x) < float(n_1))
         {
+            out_0 = ((*(&kernelContext_0)->g_b_0)[int(0)]) > 0.0f;
+        }
+        else
+        {
+            out_0 = false;
+        }
+        if(out_0)
+        {
             out_0 = (impulse_0 / tau_0) > (*(&kernelContext_0)->g_b_0)[int(0)];
         }
         else

@@ -408,9 +408,18 @@ impl BenchVideo {
         let mut o = Overlay { rgba: &mut rgba, width: self.width, height: self.height };
         let s = 3;
         let tick = self.times.get(f).map_or(String::new(), |ms| format!("   TICK {ms:5.1} MS"));
+        // The FPS the simulation sustains: this frame's (1000 / its tick) and the last
+        // second's (60 frames) average, from the plain run's ticks.
+        let fps = self.times.get(f).map_or(String::new(), |ms| {
+            let from = (f + 1).saturating_sub(60);
+            let window: f64 = self.times[from..=f.min(self.times.len() - 1)].iter().sum();
+            let avg = (f + 1 - from) as f64 * 1000.0 / window.max(1e-9);
+            format!("SIM FPS {:4.0}   1 S AVERAGE {avg:4.0}", 1000.0 / ms.max(1e-9))
+        });
         let lines = [
             self.title.clone(),
-            format!("FRAME {:3}/{n}{tick}   (FIRST 30: SETTLE)   REAL TIME, 60 FPS", f + 1),
+            format!("FRAME {:3}/{n}{tick}   (FIRST 30: SETTLE)   REAL TIME, 60 FPS PLAYBACK", f + 1),
+            fps,
             format!("BONDS BROKEN {broken}   PIECES BROKEN OFF {pieces}   SHOTS {imps}"),
         ];
         let wmax = lines.iter().map(|l| Overlay::text_width(l, s)).max().unwrap_or(0);
