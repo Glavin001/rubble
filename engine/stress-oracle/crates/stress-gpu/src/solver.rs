@@ -3602,6 +3602,29 @@ impl GpuSolver {
                 gpu.queue.write_buffer(&self.buffers.index, 4 * e0 as u64, bytemuck::cast_slice(&csr[e0..e1]));
             }
         }
+        if std::env::var("STRESS_GPU_SPLIT_HASH").is_ok() {
+            use std::hash::{Hash, Hasher};
+            let hash = |bytes: &[u8]| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut h);
+                h.finish()
+            };
+            let mut ks: Vec<(usize, [u32; 4])> = new_state.iter().map(|(k, v)| (*k, bytemuck::cast::<[f32; 4], [u32; 4]>(*v))).collect();
+            ks.sort();
+            let mut kb: Vec<(usize, Vec<u8>)> = new_bond_dyn.iter().map(|(k, v)| (*k, bytemuck::bytes_of(v).to_vec())).collect();
+            kb.sort();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            ks.hash(&mut h);
+            kb.hash(&mut h);
+            eprintln!(
+                "split hash: chunks {:x} bonds {:x} csr {:x} islands {:x} state {:x} parents {parents:?}",
+                hash(bytemuck::cast_slice(&chunk_static)),
+                hash(bytemuck::cast_slice(&bond_static)),
+                hash(bytemuck::cast_slice(&csr)),
+                hash(bytemuck::cast_slice(&islands)),
+                h.finish()
+            );
+        }
         let mut with_sentinel = islands.clone();
         with_sentinel.push(Island::default());
         gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&with_sentinel));

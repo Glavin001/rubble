@@ -415,10 +415,26 @@ your call; the rest need building.
         - The CCD substep count's body read-back (0.2–0.4 ms) now rides on the frame's
           one status read (`ResidentEngine::resident_status` returns ranges); the next
           frame's `bodies_now` uses it. Resident tests pass and the guard is 24/24.
-        - **Found: the bombard is not deterministic run to run.** Identical runs give
-          different digests at 1 s (both 2,650 broken bonds), and at 3 s 3,343 against
-          6,317 broken bonds. Bombard digests cannot gate a change until this is found:
-          a GPU race in rubble or in the resident frame.
+        - **Found and contained: in-place splits made the bombard nondeterministic.**
+          - Identical runs gave different digests (at 3 s: 3,343 against 6,317 broken
+            bonds), on Metal and on WGSL alike.
+          - With `STRESS_QS_SPLIT_IN_PLACE=0` the runs repeat exactly, and they differ
+            from in-place (1,827 against 1,859 broken bonds at 0.5 s).
+          - Tables uploaded by a split hash identically across runs
+            (`STRESS_GPU_SPLIT_HASH=1`). The GPU state diverges in the frame after: a race
+            that the in-place layout exposes, not yet found.
+          - **In-place splits are now opt-in** (`=1`). Bombard over 3 s with them off
+            repeats bit for bit: median 14.8–15.0 ms, but rebuild-split spikes give a p95
+            of 107–336 ms and a worst of 181–414 ms.
+          - Fixing the race is the route to the p95.
+        - **The Blast reference is vibe-land's standard tier, not the quick one.** The
+          11.4 / 15.3 / 35.5 ms figures come from the quick tier: 2 events, one breaking.
+          The standard bombard tier has 5 events, 6,707 broken bonds and 1,569 awake
+          bodies: median 11.5, p95 37.9, worst 48.2 ms.
+          - vibe-land runs PhysX with no sweep CCD (its destruction stage refuses scene
+            CCD; speculative CCD is off), one 60 Hz step, PGS at 4 position / 1 velocity
+            iterations, stabilization and damping. Thin walls tunnel at 60 m/s.
+          - Audit: side-session note `physx-blast-techniques-audit.md`.
         - Under Unreal Editor's GPU load, the same runs measure 20–42 ms.
         - **The decision that remains is yours:** match vibe-land's PhysX (one-step CCD,
           4 iterations; about 9 ms, but 2× the breakage), or stay lossless. Lossless

@@ -259,8 +259,11 @@ impl GpuWorld {
             // cascade goes on from the next pass.
             let t_split = std::time::Instant::now();
             self.resident_sync_motion();
-            // In place when the tables can take it (`STRESS_QS_SPLIT_IN_PLACE=0`: never).
-            let in_place = std::env::var("STRESS_QS_SPLIT_IN_PLACE").map_or(true, |v| v != "0") && self.solver.split_resident(gpu, &out.disconnected)?;
+            // In place when the tables can take it, opt-in (`STRESS_QS_SPLIT_IN_PLACE=1`):
+            // off by default since it makes the bombard nondeterministic run to run and
+            // differ from the rebuild (a GPU race after it, not yet found; the tables it
+            // uploads are identical across runs, `STRESS_GPU_SPLIT_HASH=1`).
+            let in_place = std::env::var("STRESS_QS_SPLIT_IN_PLACE").is_ok_and(|v| v == "1") && self.solver.split_resident(gpu, &out.disconnected)?;
             if in_place {
                 if trace {
                     eprintln!("resident split: {} clusters split in place, {:.1} ms", out.disconnected.len(), t_split.elapsed().as_secs_f64() * 1e3);
