@@ -500,6 +500,10 @@ struct Run {
     /// FNV-1a of the end state (cluster motion and membership, chunk hidden states,
     /// impactors), so a lossless change is checked bit for bit.
     digest: String,
+    /// Per frame, the submissions, reads and waits it made and whether it was resident
+    /// (`GpuWorld::last_tick_io`, plan 5d W1), with the maxima over resident frames after
+    /// frame 0 and the call sites of the frame with the most submissions.
+    io: serde_json::Value,
 }
 
 fn digest(m: &stress_ref::solver::ReferenceSolver, impactors: &[stress_ref::world::Impactor]) -> String {
@@ -531,6 +535,44 @@ fn metrics(scene: &Scene, o: &stress_ref::observation::Observation) -> serde_jso
     serde_json::Value::Object(out)
 }
 
+/// Per-frame submission and read counts (plan 5d W1). `STRESS_BENCH_IO=1` prints each
+/// resident frame's call sites on stderr.
+#[derive(Default)]
+struct FrameIo {
+    submits: Vec<usize>,
+    reads: Vec<usize>,
+    waits: Vec<usize>,
+    resident: Vec<bool>,
+    worst: Option<(usize, usize, Vec<String>, Vec<String>)>,
+}
+
+impl FrameIo {
+    fn push(&mut self, f: usize, w: &stress_gpu::world::GpuWorld) {
+        use engine_gpu_io::Io;
+        let t = w.last_tick_io();
+        let resident = w.last_tick_resident();
+        self.submits.push(t.submits());
+        self.reads.push(t.reads());
+        self.waits.push(t.waits());
+        self.resident.push(resident);
+        if std::env::var("STRESS_BENCH_IO").is_ok() {
+            eprintln!("frame {f} io: resident {resident}, {} submits {:?}, {} reads {:?}, {} waits {:?}", t.submits(), t.sites(Io::Submit), t.reads(), t.sites(Io::Read), t.waits(), t.sites(Io::Wait));
+        }
+        if f > 0 && resident && self.worst.as_ref().is_none_or(|w| t.submits() > w.1) {
+            self.worst = Some((f, t.submits(), t.sites(Io::Submit), t.sites(Io::Read)));
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        let max = |v: &[usize]| v.iter().zip(&self.resident).skip(1).filter(|(_, r)| **r).map(|(x, _)| *x).max();
+        serde_json::json!({
+            "submits": self.submits, "reads": self.reads, "waits": self.waits, "resident": self.resident,
+            "max_resident_submits": max(&self.submits), "max_resident_reads": max(&self.reads), "max_resident_waits": max(&self.waits),
+            "worst": self.worst.as_ref().map(|(f, n, s, r)| serde_json::json!({"frame": f, "submits": n, "submit_sites": s, "read_sites": r})),
+        })
+    }
+}
+
 fn run_oracle(scene: &Scene) -> Run {
     let mut w = stress_ref::world::World::new(scene);
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
@@ -544,7 +586,7 @@ fn run_oracle(scene: &Scene) -> Run {
     let ram = w.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let digest = digest(&w.solver, &w.impactors);
     let metrics = metrics(scene, &o);
-    Run { frames, waits: Vec::new(), ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, metrics, digest }
+    Run { frames, waits: Vec::new(), ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, metrics, digest, io: serde_json::Value::Null }
 }
 
 #[cfg(feature = "gpu")]
@@ -641,6 +683,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     // STRESS_BENCH_VIDEO=out.mp4: the run rendered on the GPU (`stress_rubble::render`), one
     // video frame per simulated frame at 60 fps (real time), outside the timed frames.
     let mut video = std::env::var("STRESS_BENCH_VIDEO").ok().map(|out| BenchVideo::new(gpu, &w, std::path::Path::new(&out), &scene.name));
+    let mut io = FrameIo::default();
     for f in 0..n {
         for (_, desc) in shots.iter().filter(|(at, _)| *at == f) {
             let imp = stress_ref::world::Impactor::from_desc(desc, &w.scene);
@@ -653,6 +696,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         let w0 = stress_gpu::gpu::WAIT_NS.load(std::sync::atomic::Ordering::Relaxed);
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
+        io.push(f, &w);
         waits.push((stress_gpu::gpu::WAIT_NS.load(std::sync::atomic::Ordering::Relaxed) - w0) as f64 * 1e-6);
         if let Some(v) = video.as_mut() {
             v.frame(gpu, &mut w, f, n);
@@ -719,7 +763,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         std::fs::write(path, serde_json::json!({"u": u, "th": th, "v": v, "w": wv, "clusters": clusters, "cluster_v": cv, "cluster_w": cw, "cluster_rot": cr, "impactors": imps, "imp_v": iv, "imp_w": iw}).to_string()).expect("dump");
     }
     let metrics = metrics(scene, &o);
-    Run { frames, waits, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, metrics, digest }
+    Run { frames, waits, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, metrics, digest, io: io.json() }
 }
 
 fn main() {
@@ -828,7 +872,7 @@ fn main() {
             println!(
                 "{}",
                 serde_json::json!({"solver": solver, "config": config, "features": overrides.iter().map(|(n, on)| format!("{n}={}", if *on { "on" } else { "off" })).collect::<Vec<_>>(), "regime": name, "repeat": repeat, "seconds": seconds, "frame_dt": scene.sim.frame_dt,
-                    "frame_ms": run.frames, "frame_wait_ms": run.waits, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "metrics": run.metrics, "digest": run.digest})
+                    "frame_ms": run.frames, "frame_wait_ms": run.waits, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "metrics": run.metrics, "digest": run.digest, "io": run.io})
             );
         }
     }

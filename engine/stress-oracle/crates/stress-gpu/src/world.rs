@@ -159,6 +159,14 @@ pub struct GpuWorld {
     /// Impactors added that the solver's tables do not hold yet (`add_impactor` in a
     /// resident frame).
     impactors_stale: bool,
+    /// The last `step_frame`'s submissions, reads and waits (`engine_gpu_io`, plan 5d W1).
+    last_io: engine_gpu_io::Tick,
+    /// The tick being run took the resident path (`resident_frame`).
+    io_resident: bool,
+    /// Ticks run, and whether the next one follows a deliberate body change (`add_impactor`):
+    /// the first tick and such ticks are exempt from `STRESS_STRICT_IO`.
+    io_ticks: u64,
+    io_edited: bool,
     resident: Option<resident_frame::ResidentState>,
     /// The collider table's lookups of the current layout (resident_frame.rs).
     table_lookup: Option<resident_frame::TableLookup>,
@@ -280,6 +288,10 @@ impl GpuWorld {
             resident_engine: None,
             part_table: None,
             impactors_stale: false,
+            last_io: engine_gpu_io::Tick::default(),
+            io_resident: false,
+            io_ticks: 0,
+            io_edited: false,
             resident: None,
             table_lookup: None,
             pending_splits: Vec::new(),
@@ -334,6 +346,7 @@ impl GpuWorld {
     pub fn add_impactor(&mut self, gpu: &Gpu, imp: stress_ref::world::Impactor) -> Result<usize, String> {
         self.flush_pending(gpu)?;
         let i = self.with_shell_mut(|w| w.add_impactor(imp));
+        self.io_edited = true;
         // The resident quasi-static frame takes impactors as the engine's bodies (and their
         // properties from the host's list): the solver's tables need no refresh for one.
         // Any other frame refreshes first (`impactors_stale`).
@@ -1041,7 +1054,46 @@ impl GpuWorld {
         self.shell.redone_frames
     }
 
+    /// Advance one frame, counting its submissions and reads (`last_tick_io`). With
+    /// `STRESS_STRICT_IO=1`, a resident tick other than the first or one after `add_impactor`
+    /// that makes more than one submission or one read returns an error naming the call sites
+    /// (plan 5d, `engine/docs/stress-5d-one-command-buffer.md`).
     pub fn step_frame(&mut self, gpu: &Gpu) -> Result<(), String> {
+        engine_gpu_io::begin();
+        self.io_resident = false;
+        let r = self.step_frame_counted(gpu);
+        self.last_io = engine_gpu_io::end();
+        let exempt = self.io_ticks == 0 || self.io_edited;
+        self.io_ticks += 1;
+        self.io_edited = false;
+        r?;
+        if self.io_resident && !exempt && strict_io() {
+            let t = &self.last_io;
+            if t.submits() > 1 || t.reads() > 1 {
+                return Err(format!(
+                    "STRESS_STRICT_IO: resident tick {} made {} submissions {:?} and {} reads {:?}",
+                    self.io_ticks - 1,
+                    t.submits(),
+                    t.sites(engine_gpu_io::Io::Submit),
+                    t.reads(),
+                    t.sites(engine_gpu_io::Io::Read)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The last `step_frame`'s submissions, reads and waits, with their call sites.
+    pub fn last_tick_io(&self) -> &engine_gpu_io::Tick {
+        &self.last_io
+    }
+
+    /// The last `step_frame` took the resident path.
+    pub fn last_tick_resident(&self) -> bool {
+        self.io_resident
+    }
+
+    fn step_frame_counted(&mut self, gpu: &Gpu) -> Result<(), String> {
         // A frame other than a resident one follows any GPU splits first.
         if !(self.coupled() && self.resident_now()) {
             self.flush_pending(gpu)?;
@@ -1587,4 +1639,8 @@ fn select_with_descendants(sel: &stress_ref::scene::ChunkSelector, scene: &Scene
         i += 1;
     }
     out
+}
+
+fn strict_io() -> bool {
+    std::env::var("STRESS_STRICT_IO").is_ok_and(|v| v == "1")
 }

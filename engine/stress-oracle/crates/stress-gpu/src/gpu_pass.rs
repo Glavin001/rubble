@@ -126,6 +126,11 @@ pub struct PreparedPass {
 const TIMED_PASSES: u32 = 8;
 
 impl PreparedPass {
+    /// The pass records GPU timestamps (`timings` reads them after its submission).
+    pub fn has_timing(&self) -> bool {
+        self.timing.is_some()
+    }
+
     /// The timed steps' GPU ms, per recorded pass (after the submission finished).
     pub fn timings(&self, gpu: &Gpu) -> Option<Vec<Vec<f64>>> {
         let (q, resolve, used) = self.timing.as_ref()?;
@@ -136,6 +141,7 @@ impl PreparedPass {
         }
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         enc.resolve_query_set(q, 0..2 * n * passes, resolve, 0);
+        engine_gpu_io::submit();
         gpu.queue.submit([enc.finish()]);
         let t: Vec<u64> = gpu.read(resolve);
         let period = gpu.queue.get_timestamp_period() as f64 * 1e-6;

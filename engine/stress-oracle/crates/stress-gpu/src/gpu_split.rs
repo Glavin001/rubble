@@ -232,6 +232,7 @@ impl GpuSplitter {
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(size.max(1), 1, 1);
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         let table: Vec<[u32; 4]> = gpu.read(&parents_buf);
         let work: Vec<u32> = gpu.read(&work_buf);
@@ -319,6 +320,7 @@ impl GpuSplitter {
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(size.max(1), 1, 1);
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         let slots: Vec<[u32; 4]> = gpu.read(&slots_buf);
         let extras: Vec<[f32; 4]> = gpu.read(&extras_buf);
@@ -573,6 +575,7 @@ impl GpuLayout {
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(size.max(1), 1, 1);
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         plan
     }
@@ -801,6 +804,7 @@ impl GpuSplitter {
             refresh.encode(gpu, &mut encoder, &inputs, total, collider_info);
         }
         let t_submit = std::time::Instant::now();
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         // The one read.
         let body_words = 112u64;

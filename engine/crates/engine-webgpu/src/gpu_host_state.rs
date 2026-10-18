@@ -171,6 +171,7 @@ impl WgpuSim {
                 (copy, size)
             })
             .collect();
+        engine_gpu_io::submit();
         self.queue.submit([enc.finish()]);
         SimSnapshot {
             bufs,
@@ -208,6 +209,7 @@ impl WgpuSim {
             }
             enc.copy_buffer_to_buffer(copy, 0, &self.bufs[i], 0, (*size).min(self.bufs[i].size()));
         }
+        engine_gpu_io::submit();
         self.queue.submit([enc.finish()]);
         self.body_count = s.body_count;
         self.collider_count = s.collider_count;

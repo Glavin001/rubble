@@ -614,6 +614,11 @@ pub struct GpuSolver {
     /// The frame's command encoder with the engine's work already in it (plan 5d): the next
     /// `resident_cascade_with` encodes after it and submits the frame once.
     pub frame_encoder: Option<wgpu::CommandEncoder>,
+    /// With `frame_encoder` (plan 5d, `STRESS_FRAME_SUBMITS=one`): `resident_cascade_with`
+    /// leaves its encoder in `frame_encoder`, unsubmitted, for the frame's read to record its
+    /// copy into and submit once (`Gpu::read_ranges_in`). Set by the resident frame around
+    /// its cascade; diagnostics that time the cascade submit it themselves.
+    pub defer_submit: bool,
     /// The last split's layout was the GPU's, the cascade's island copy and gate included
     /// (`gpu_split_pass`): the next generation keeps them.
     tables_on_gpu: bool,
@@ -705,6 +710,7 @@ impl GpuSolver {
             island_args: None,
             punch_split: false,
             frame_encoder: None,
+            defer_submit: false,
             tables_on_gpu: false,
             bond_backup: None,
             stopped_at_plan: false,
@@ -1367,6 +1373,7 @@ impl GpuSolver {
                 // Queued writes run before the next submission: the clear goes first.
                 let mut encoder = gpu.device.create_command_encoder(&Default::default());
                 encoder.clear_buffer(old, 0, None);
+                engine_gpu_io::submit();
                 gpu.queue.submit([encoder.finish()]);
                 old.clone()
             }
@@ -1710,8 +1717,10 @@ impl GpuSolver {
             let finished = encoder.finish();
             self.profile.encode += t_encode.elapsed().as_secs_f64();
             let t = std::time::Instant::now();
+            engine_gpu_io::submit();
             gpu.queue.submit([finished]);
         self.state_current = false;
+            engine_gpu_io::wait();
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
             self.profile.gpu += t.elapsed().as_secs_f64();
             if let Some(timing) = &self.timing {
@@ -2110,6 +2119,7 @@ impl GpuSolver {
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             encoder.copy_buffer_to_buffer(&self.buffers.state, 0, &st, 0, st.size());
             encoder.copy_buffer_to_buffer(&self.buffers.bond_dyn, 0, &bd, 0, bd.size());
+            engine_gpu_io::submit();
             gpu.queue.submit([encoder.finish()]);
             Some((st, bd))
         } else {
@@ -2167,6 +2177,7 @@ impl GpuSolver {
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             encoder.copy_buffer_to_buffer(&st, 0, &self.buffers.state, 0, st.size());
             encoder.copy_buffer_to_buffer(&bd, 0, &self.buffers.bond_dyn, 0, bd.size());
+            engine_gpu_io::submit();
             gpu.queue.submit([encoder.finish()]);
             self.state_current = false;
             self.bonds_stale = true;
@@ -2495,6 +2506,7 @@ impl GpuSolver {
             }
             islands.push(Island::default());
             gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&islands));
+            engine_gpu_io::wait();
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
             let t = std::time::Instant::now();
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -2506,8 +2518,10 @@ impl GpuSolver {
                     pass.dispatch_workgroups(count, 1, 1);
                 }
             }
+            engine_gpu_io::submit();
             gpu.queue.submit([encoder.finish()]);
         self.state_current = false;
+            engine_gpu_io::wait();
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
             out.push((name, t.elapsed().as_secs_f64() / reps as f64));
         }
@@ -2825,6 +2839,7 @@ impl GpuSolver {
                     }
                     encoder.copy_buffer_to_buffer(&old.buffer, 16 * (2 * old.chunks.len() + j) as u64, &buffer, 16 * (2 * n_chunks + i) as u64, 16);
                 }
+                engine_gpu_io::submit();
                 gpu.queue.submit([encoder.finish()]);
             }
             self.cascade_gate = Some(CascadeGate { generation, buffer, ids, ranges: self.layout.islands.iter().map(|i| i.range).collect(), chunks: self.layout.chunks.clone() });
@@ -2962,6 +2977,7 @@ impl GpuSolver {
         // `STRESS_CASCADE_WALL=1`: the cascade's submission timed alone (the queue drained
         // first; a diagnostic that serialises the frame).
         let wall = std::env::var("STRESS_CASCADE_WALL").is_ok().then(|| {
+            engine_gpu_io::wait();
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
             std::time::Instant::now()
         });
@@ -2975,8 +2991,15 @@ impl GpuSolver {
                 }
             }
         }
-        gpu.queue.submit([encoder.finish()]);
+        let timed = wall.is_some() || resolve.is_some() || prepared.as_ref().is_some_and(|p| p.has_timing());
+        if self.defer_submit && !timed {
+            self.frame_encoder = Some(encoder);
+        } else {
+            engine_gpu_io::submit();
+            gpu.queue.submit([encoder.finish()]);
+        }
         if let Some(t) = wall {
+            engine_gpu_io::wait();
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
             eprintln!("cascade submission: {} passes, {:.2} ms", passes, t.elapsed().as_secs_f64() * 1e3);
         }
@@ -3051,6 +3074,7 @@ impl GpuSolver {
             pass.set_bind_group(0, &self.buffers.bind_segment, &[]);
             pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         self.state_current = false;
         self.bonds_stale = true;
@@ -3068,6 +3092,7 @@ impl GpuSolver {
                     encoder.copy_buffer_to_buffer(&backup, at, &self.buffers.state, at, len);
                 }
             }
+            engine_gpu_io::submit();
             gpu.queue.submit([encoder.finish()]);
         }
         if converged.iter().any(|&c| c) {
@@ -3101,6 +3126,7 @@ impl GpuSolver {
             pass.set_bind_group(0, &self.buffers.bind_segment, &[]);
             pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         self.state_current = false;
         self.bonds_stale = true;
@@ -3148,8 +3174,10 @@ impl GpuSolver {
             pass.set_bind_group(0, &self.buffers.bind_segment, &[]);
             pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         self.state_current = false;
+        engine_gpu_io::wait();
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
         let result_at = p.statics_base as usize + 23 * self.layout.chunks.len() + 2 * self.layout.bonds.len();
         let results: Vec<[f32; 4]> = gpu.read_range(&self.buffers.scratch, result_at, islands.len());
@@ -3441,6 +3469,7 @@ impl GpuSolver {
             pass.set_bind_group(0, &self.buffers.bind_segment, &[]);
             pass.dispatch_workgroups(islands.len().max(1) as u32, 1, 1);
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         self.state_current = false;
         self.bonds_stale = true;
@@ -3572,6 +3601,7 @@ impl GpuSolver {
         let dummy = gpu.storage("layout no ctab", &[[0f32; 4]; 1]);
         let dummy_out = gpu.storage("layout no ctab out", &[[0f32; 4]; 1]);
         let old_ctab = l.resident.as_ref().map(|r| copy(r.ctab, "old ctab"));
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         let gate_dummy;
         let gate = match &self.cascade_gate {
@@ -3893,6 +3923,7 @@ impl GpuSolver {
             let dst = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: src.size(), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             let mut e = gpu.device.create_command_encoder(&Default::default());
             e.copy_buffer_to_buffer(src, 0, &dst, 0, src.size());
+            engine_gpu_io::submit();
             gpu.queue.submit([e.finish()]);
             dst
         };

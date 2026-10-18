@@ -259,6 +259,7 @@ impl GpuStress {
     pub fn run(&self, gpu: &Gpu, substeps: usize) {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         self.record(&mut encoder, substeps);
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
     }
 
@@ -279,6 +280,7 @@ impl GpuStress {
                 }
             }
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
     }
 

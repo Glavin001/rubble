@@ -1,6 +1,6 @@
 //! The GPU's predictive punch (`STRESS_IMPACT_PUNCH=gpu`, `shaders/punch.slang`) under
-//! `blast_parity_routed`: every frame after the first resident (one submission, one status
-//! read), the ram's plug broken out at the end of the frame before its strike. M5's fidelity
+//! `blast_parity_routed`: every frame after the first resident (one status read; the
+//! submissions are counted in `tests/frame_io.rs`), the ram's plug broken out at the end of the frame before its strike. M5's fidelity
 //! bar (engine/docs/stress-baseline-goal.md): closer to the reference than the native stage's
 //! correction pass, on the free wall's ram speed and fragments (reference 35.1 m/s and 6;
 //! correction 10.9 and 23). A file of its own: the switch is read once per process.

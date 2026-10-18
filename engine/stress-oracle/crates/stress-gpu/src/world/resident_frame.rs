@@ -401,6 +401,7 @@ impl GpuWorld {
     }
 
     pub(super) fn resident_frame(&mut self, gpu: &Gpu) -> Result<(), String> {
+        self.io_resident = true;
         let t_prepare = std::time::Instant::now();
         let fdt = self.scene.sim.frame_dt;
         let engine = self.resident_engine.clone().expect("resident engine");
@@ -434,6 +435,7 @@ impl GpuWorld {
             if crate::one_command_buffer() {
                 self.solver.frame_encoder = Some(enc);
             } else {
+                engine_gpu_io::submit();
                 gpu.queue.submit([enc.finish()]);
             }
         }
@@ -446,6 +448,7 @@ impl GpuWorld {
         }
         if phases {
             let encode = t_engine.elapsed().as_secs_f64() * 1e3;
+            engine_gpu_io::wait();
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
             eprintln!("resident phases: engine {n} substeps + ingest: encode {encode:.1} ms, done {:.1} ms", t_engine.elapsed().as_secs_f64() * 1e3);
         }
@@ -514,6 +517,7 @@ impl GpuWorld {
                 let mut enc = gpu.device.create_command_encoder(&Default::default());
                 r.ingest.substep(gpu, &mut enc, &e.engine_buffers(), offset, 0, fdt);
                 r.ingest.merge(gpu, &mut enc, &e.engine_buffers(), 1);
+                engine_gpu_io::submit();
                 gpu.queue.submit([enc.finish()]);
                 let per_chunk = r.ingest.read_manifolds(gpu);
                 let mut flat: Vec<u32> = Vec::new();
@@ -585,6 +589,8 @@ impl GpuWorld {
                 }
                 r.qs.encode_static_loads(gpu, enc, &r.ingest, s);
             };
+            // `STRESS_FRAME_SUBMITS=one`: the cascade leaves the frame's encoder for the read.
+            self.solver.defer_submit = crate::one_command_buffer();
             let run = if frame_mode {
                 let e = engine.borrow();
                 let (bodies, colliders, max_bodies) = e.spawn_buffers().expect("spawn buffers");
@@ -601,8 +607,17 @@ impl GpuWorld {
             } else {
                 self.solver.resident_cascade_with(gpu, fdt, first, window, &pre, None, post)
             };
+            self.solver.defer_submit = false;
+            // Diagnostics that wait on or read the cascade's output submit it first.
+            if phases || (det_stage && first == 0) {
+                if let Some(enc) = self.solver.frame_encoder.take() {
+                    engine_gpu_io::submit();
+                    gpu.queue.submit([enc.finish()]);
+                }
+            }
             if phases {
                 let encode = t_pass.elapsed().as_secs_f64() * 1e3;
+                engine_gpu_io::wait();
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
                 eprintln!("resident phases: cascade encode {encode:.1} ms, done {:.1} ms", t_pass.elapsed().as_secs_f64() * 1e3);
             }
@@ -611,6 +626,8 @@ impl GpuWorld {
                 let ctab: Vec<u8> = gpu.read(r.qs.layout().ctab);
                 eprintln!("det stage frame {} cascade: state {hs:x}, bonds {hb:x}, ctab {:x}", self.frame, hash(&ctab));
             }
+            // The frame's unsubmitted work (`STRESS_FRAME_SUBMITS=one`), submitted with the read.
+            let frame_encoder = self.solver.frame_encoder.take();
             let e = engine.borrow();
             let status = e.resident_status();
             let engine_parts = status.len();
@@ -637,7 +654,7 @@ impl GpuWorld {
             }
             let t_read = std::time::Instant::now();
             let host_before_read = t_prepare.elapsed().as_secs_f64() * 1e3;
-            let read = gpu.read_ranges(&parts);
+            let read = gpu.read_ranges_in(frame_encoder, &parts);
             let read_ms = t_read.elapsed().as_secs_f64() * 1e3;
             if std::env::var("STRESS_FRAME_HOST_TRACE").is_ok() {
                 eprintln!("frame {} host: to the read {host_before_read:.2} ms (substeps {:.2}, tables {:.2}, engine {:.2}, cascade {:.2}), read {read_ms:.2}", self.frame, (t_tables - t_substeps).as_secs_f64() * 1e3, (t_engine - t_tables).as_secs_f64() * 1e3, (t_pass - t_engine).as_secs_f64() * 1e3, (t_read - t_pass).as_secs_f64() * 1e3);
@@ -1062,6 +1079,7 @@ impl GpuWorld {
             for (a, b) in from.iter().zip(to) {
                 enc.copy_buffer_to_buffer(a, 0, b, 0, a.size());
             }
+            engine_gpu_io::submit();
             gpu.queue.submit([enc.finish()]);
         };
         let saved: Vec<wgpu::Buffer> = bufs
@@ -1365,6 +1383,7 @@ impl GpuWorld {
         let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
         self.solver.encode_gpu_split_pass(gpu, &mut encoder, target, max_colliders, &table, r.qs.layout(), colliders, false)?;
         self.solver.set_gpu_pass_counters(gpu, first_body, first_collider);
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
         let (result, gpu_parents) = self.solver.read_gpu_split_pass(gpu, &target)?;

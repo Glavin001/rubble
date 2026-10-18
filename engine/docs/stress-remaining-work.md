@@ -31,6 +31,18 @@ The Goal's "resident" requirement and M5's first step. Plan, work items W1–W6 
 **Started:** the WIP single-encoder path, opt-in as `STRESS_FRAME_SUBMITS=one` (lossless on the
 quick tier, slower: median 8.1 against 7.3 ms).
 
+**W1 done** (the counter):
+- 7 submissions and 1 read per resident tick by default;
+- 2 and 1 in the opt-in mode.
+
+**W2 started:** with `STRESS_FRAME_SUBMITS=one`, the read's copy is recorded into the
+frame's command buffer (`Gpu::read_ranges_in`). `wall_ram_late2` now makes 1 submission
+and 1 read per resident tick (digest c55cf1b5, unchanged).
+
+Next:
+- count the other frame kinds and the paths in the 5d plan's section 3;
+- the speed comparison (W3).
+
 ## R2. The barrage's GPU race (determinism)
 
 The 36-shot barrage (`vibe-town_barrage`, `blast_parity`) does not repeat run to run.

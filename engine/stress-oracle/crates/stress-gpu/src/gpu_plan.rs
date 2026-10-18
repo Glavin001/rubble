@@ -185,6 +185,7 @@ impl GpuPlanner {
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(size.max(1), 1, 1);
         }
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         let u: Vec<u32> = gpu.read(&pu_buf);
         let m: Vec<[f32; 4]> = gpu.read_range(&pm, 0, 5 * n + 2 * islands + n);

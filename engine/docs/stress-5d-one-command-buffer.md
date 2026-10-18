@@ -49,7 +49,7 @@ On every tick of a resident frame, the stress stage and rubble's step run as:
 |---|---|
 | Kernels in Slang | **Met** (`stress-gpu/shaders/*.slang`, generated MSL and WGSL checked in) |
 | One status read per resident tick | **Met** on the common path (frame-mode GPU splits included) |
-| One submission per resident tick | **Not met.** Before 08efa0c: 5 (ingest start, rubble step, substep ingest, ingest merge, cascade). After 08efa0c: 1 on frames with one engine substep and no fallback; more on the paths in 3. Not yet counted by instrumentation |
+| One submission per resident tick | **Not met. Counted (W1):** 7 per tick by default, 2 with `STRESS_FRAME_SUBMITS=one` (`wall_ram_late2`, `blast_parity_routed`, GPU punch; section 3) |
 | Backend-neutral plan | **Not met.** Stress dispatches are hand-recorded in wgpu: `solver.rs`, `ingest.rs`, `resident.rs`, `routing.rs`, `gpu_pass.rs`, `gpu_split.rs` |
 | Apple Metal, web WebGPU, Linux CUDA (your requirement) | **Not met.** The stress stage runs only on native wgpu. `engine-metal` replays `rigid_plan` (rubble only); the web host runs rubble only; `engine-cuda` is a source-emitting stub with no runtime |
 | Lossless | WIP checked on the quick tier only (46728bf1, both modes) |
@@ -58,7 +58,21 @@ On every tick of a resident frame, the stress stage and rubble's step run as:
 
 ## 3. Known extra submissions and reads on the resident path (to remove)
 
-Found by reading the code at 08efa0c; work item W1 must confirm the list by counting.
+**Counted by W1** (`engine_gpu_io`, `GpuWorld::last_tick_io`, `STRESS_BENCH_IO=1`) on
+`wall_ram_late2` under `blast_parity_routed` with `STRESS_IMPACT_PUNCH=gpu`, one engine
+substep, every frame after the first (digest c55cf1b5 in both modes):
+
+| Mode | Submissions per tick | Reads | Waits |
+|---|---|---|---|
+| Default | 7: `stress-rubble` `resident.rs` ingest start; rubble's step (`engine-webgpu` `gpu.rs`); `resident.rs` substep ingest and merge; `resident_frame.rs` the frame encoder; `solver.rs` the cascade; `resident_frame.rs` the read's own copy (`read_ranges`) | 1 | 0 |
+| `STRESS_FRAME_SUBMITS=one` | 2: `solver.rs` the cascade (holding everything before it); the read's own copy | 1 | 0 |
+
+So the "5 submissions" stated before W1 was a hand count, and it missed two: the frame
+encoder and the read's copy. The read helper submits its copy: W2 must record the copy into
+the frame's command buffer and map it after that one submission.
+
+The list below was found by reading the code at 08efa0c. These paths are not on the frames
+above. W2 must count each one on a scene that takes it.
 
 1. `stress-rubble` `step_resident`: a submission between engine substeps when `n > 1`.
    rubble writes its host uniforms with `queue.write_buffer` once per step, and those
@@ -95,6 +109,18 @@ item with the previous one's test failing.
 - **Done when:** the counter matches a hand count on `wall_ram_late2` (one engine substep).
   The bench prints per-frame counts. The full list in section 3 is confirmed or corrected
   in this file.
+- **Status: done.**
+  - The counter is the crate `engine-gpu-io`: every `queue.submit`, `map_async` and blocking
+    poll in `engine-webgpu`, `stress-gpu` and `stress-rubble` records its call site. It is a
+    shared crate, not a counter on `Gpu` and on `WgpuSim`, so both engines' calls land in
+    one tick.
+  - `GpuWorld::last_tick_io()` returns the counts and sites, and `last_tick_resident()`
+    says whether the tick was resident.
+  - Bench JSON `io`: per-frame `submits`, `reads`, `waits`, `resident`, the resident maxima
+    after frame 0, and the sites of the worst frame.
+  - `STRESS_STRICT_IO=1` exempts frame 0 and the tick after `add_impactor`.
+  - Test: `stress-rubble/tests/frame_io.rs`.
+  - Section 3 is corrected with the measured counts.
 
 ### W2. One submission and one read on every resident tick
 

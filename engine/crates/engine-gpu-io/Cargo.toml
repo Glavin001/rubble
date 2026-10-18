@@ -1,0 +1,8 @@
+[package]
+name = "engine-gpu-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Counts GPU queue submissions and host reads by call site, per tick (stress plan 5d, W1)"
+
+[dependencies]

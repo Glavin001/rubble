@@ -9,6 +9,7 @@ description = "Single-precision GPU stress solver (Slang kernels, wgpu: Metal na
 [dependencies]
 stress-ref = { path = "../stress-ref" }
 stress-layout = { path = "../stress-layout" }
+engine-gpu-io = { path = "../../../crates/engine-gpu-io" }
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"

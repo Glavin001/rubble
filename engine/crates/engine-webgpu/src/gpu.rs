@@ -752,6 +752,7 @@ impl WgpuSim {
                 0,
                 u64::from(self.hull_records_capacity) * 16,
             );
+            engine_gpu_io::submit();
             self.queue.submit([enc.finish()]);
             self.bufs[18] = grown;
             self.hull_records_capacity = records;
@@ -1118,9 +1119,11 @@ impl WgpuSim {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         enc.copy_buffer_to_buffer(&self.bufs[binding], offset, &staging, 0, size);
+        engine_gpu_io::submit();
         self.queue.submit([enc.finish()]);
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
+        engine_gpu_io::read();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
@@ -1287,8 +1290,10 @@ impl WgpuSim {
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("step phases read"), size: 16 * names.len() as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             enc.resolve_query_set(&queries, 0..2 * names.len() as u32, &resolve, 0);
             enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, 16 * names.len() as u64);
+            engine_gpu_io::submit();
             self.queue.submit([enc.finish()]);
             let slice = staging.slice(..);
+            engine_gpu_io::read();
             slice.map_async(wgpu::MapMode::Read, |_| {});
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
             let t: Vec<u64> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
@@ -1299,9 +1304,11 @@ impl WgpuSim {
         }
         self.encode_dispatches(&mut enc, &cmds);
         let t_enc = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
+        engine_gpu_io::submit();
         self.queue.submit([enc.finish()]);
         if let (Some(t), Some(e)) = (host_t, t_enc) {
             let submitted = t.elapsed().as_secs_f64() * 1e3;
+            engine_gpu_io::wait();
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
             eprintln!("rubble host: encoded {e:.2} ms, submitted {submitted:.2} ms, done {:.2} ms ({} commands)", t.elapsed().as_secs_f64() * 1e3, cmds.len());
         }
@@ -1626,9 +1633,11 @@ impl WgpuSim {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         enc.copy_buffer_to_buffer(&self.bufs[7], 0, &staging, 0, n);
+        engine_gpu_io::submit();
         self.queue.submit([enc.finish()]);
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
+        engine_gpu_io::read();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
@@ -1754,6 +1763,7 @@ impl WgpuSim {
             self.disp(&mut pass, "build_aabbs", u64::from(self.collider_count.max(1)), None);
             self.disp(&mut pass, "raycast_batch", rays.len() as u64 * 64, None);
         }
+        engine_gpu_io::submit();
         self.queue.submit([enc.finish()]);
         self.vehicle_host().read_ray_hits(self)
     }

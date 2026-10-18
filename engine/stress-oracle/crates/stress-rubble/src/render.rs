@@ -521,6 +521,7 @@ impl Renderer {
             wgpu::TexelCopyBufferInfo { buffer: &self.readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.row), rows_per_image: Some(self.height) } },
             wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
         );
+        engine_gpu_io::submit();
         gpu.queue.submit([encoder.finish()]);
         self.readback.map_async(wgpu::MapMode::Read, .., |r| r.expect("map the frame"));
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
