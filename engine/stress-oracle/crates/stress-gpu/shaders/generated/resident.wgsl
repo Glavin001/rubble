@@ -97,6 +97,7 @@ struct Record_std430_0
     @align(16) point_0 : vec4<f32>,
     @align(16) impulse_0 : vec4<f32>,
     @align(16) other_0 : vec4<f32>,
+    @align(16) key_0 : vec4<u32>,
 };
 
 @binding(1) @group(0) var<storage, read> manifolds_0 : array<Record_std430_0>;
@@ -427,14 +428,14 @@ fn resident_filter(@builtin(global_invocation_id) id_1 : vec3<u32>)
             {
                 break;
             }
-            var key_0 : u32 = manifolds_0[_S22 + q3_0].ids_0.y + u32(1);
+            var key_1 : u32 = manifolds_0[_S22 + q3_0].ids_0.y + u32(1);
             if(first_0)
             {
                 overflow_0 = true;
             }
             else
             {
-                overflow_0 = key_0 > last_0;
+                overflow_0 = key_1 > last_0;
             }
             if(overflow_0)
             {
@@ -444,7 +445,7 @@ fn resident_filter(@builtin(global_invocation_id) id_1 : vec3<u32>)
                 }
                 else
                 {
-                    overflow_1 = key_0 < kept_0;
+                    overflow_1 = key_1 < kept_0;
                 }
             }
             else
@@ -454,7 +455,7 @@ fn resident_filter(@builtin(global_invocation_id) id_1 : vec3<u32>)
             if(overflow_1)
             {
                 p_0 = q3_0;
-                kept_0 = key_0;
+                kept_0 = key_1;
             }
             q3_0 = q3_0 + u32(1);
         }

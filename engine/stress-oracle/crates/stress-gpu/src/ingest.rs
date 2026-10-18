@@ -34,6 +34,9 @@ pub struct Record {
     pub point: [f32; 4],
     pub impulse: [f32; 4],
     pub other: [f32; 4],
+    /// The contact's identity (coupling.slang `Record::key`): substep, this side's
+    /// collider, the other's, feature id * 2 + side.
+    pub key: [u32; 4],
 }
 
 #[repr(C)]
@@ -130,9 +133,9 @@ impl EngineIngest {
             chunk_count,
             start_bodies: storage("ingest start bodies", BODY_BYTES * max_bodies as u64),
             collider_info: gpu.storage("ingest collider info", table(colliders)),
-            records: storage("ingest records", 64 * records),
+            records: storage("ingest records", std::mem::size_of::<Record>() as u64 * records),
             sort: storage("ingest sort", 4 * (2 * n + 1 + records)),
-            manifolds: storage("ingest manifolds", 64 * records),
+            manifolds: storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records),
             counts: storage("ingest counts", 4 * 2 * n),
         }
     }
@@ -184,8 +187,8 @@ impl EngineIngest {
     /// The frame's manifolds, from the records of `substeps` substeps (the rest of the
     /// slots cleared).
     pub fn merge(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32) {
-        let used = 64 * 2 * self.max_rows as u64 * substeps as u64;
-        let total = 64 * 2 * self.max_rows as u64 * self.max_substeps as u64;
+        let used = std::mem::size_of::<Record>() as u64 * 2 * self.max_rows as u64 * substeps as u64;
+        let total = std::mem::size_of::<Record>() as u64 * 2 * self.max_rows as u64 * self.max_substeps as u64;
         if used < total {
             encoder.clear_buffer(&self.records, used, Some(total - used));
         }

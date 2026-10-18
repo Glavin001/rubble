@@ -29,7 +29,7 @@ pub struct IngestStats {
     pub substeps: u32,
     /// Manifolds compared.
     pub manifolds: u64,
-    /// Steps whose manifold sets differ (chunk, count, other body or order).
+    /// Steps whose manifold sets differ (chunk, count or other bodies).
     pub mismatched_steps: u64,
     /// Worst impulse error relative to the manifold's impulse (or 1 N s).
     pub impulse: f64,
@@ -155,6 +155,17 @@ impl RubbleEngine {
         stats.steps += 1;
         stats.substeps = stats.substeps.max(substeps);
         let mut same = true;
+        // Each chunk's manifolds by other body: their order is the contacts' (the GPU's
+        // by contact identity, the host's by engine row, which the engine's atomic
+        // appends order differently from run to run), not part of what is compared.
+        let mut gpu_manifolds = gpu_manifolds;
+        let mut want = want;
+        for g in gpu_manifolds.iter_mut() {
+            g.sort_by_key(|g| g.ids[1]);
+        }
+        for w in want.iter_mut() {
+            w.sort_by_key(|w| w.other);
+        }
         for (got, want) in gpu_manifolds.iter().zip(&want) {
             if got.len() != want.len() || got.iter().zip(want).any(|(g, w)| g.ids[1] != w.other) {
                 same = false;

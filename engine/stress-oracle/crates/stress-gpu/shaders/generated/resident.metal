@@ -187,6 +187,7 @@ struct Record_natural_0
     packed_float4 point_0;
     packed_float4 impulse_0;
     packed_float4 other_0;
+    packed_uint4 key_0;
 };
 
 struct KernelContext_0
@@ -503,14 +504,14 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
             {
                 break;
             }
-            uint key_0 = (uint4((&kernelContext_2)->manifolds_0[_S68 + q3_0].ids_0) ).y + 1U;
+            uint key_1 = (uint4((&kernelContext_2)->manifolds_0[_S68 + q3_0].ids_0) ).y + 1U;
             if(first_0)
             {
                 overflow_0 = true;
             }
             else
             {
-                overflow_0 = key_0 > last_0;
+                overflow_0 = key_1 > last_0;
             }
             if(overflow_0)
             {
@@ -520,7 +521,7 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
                 }
                 else
                 {
-                    overflow_1 = key_0 < kept_0;
+                    overflow_1 = key_1 < kept_0;
                 }
             }
             else
@@ -530,7 +531,7 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
             if(overflow_1)
             {
                 p_0 = q3_0;
-                kept_0 = key_0;
+                kept_0 = key_1;
             }
             q3_0 = q3_0 + 1U;
         }

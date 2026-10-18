@@ -41,6 +41,7 @@ struct Record
     float4 point;
     float4 impulse;
     float4 other;
+    uint4 key; // coupling.slang `Record::key`
 };
 
 struct EngineBody

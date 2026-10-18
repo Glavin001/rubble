@@ -86,7 +86,13 @@ struct Record
     float4 point;
     float4 impulse;
     float4 other;
+    // The contact's identity, for an order that does not depend on where the engine's
+    // atomic appends put its row: substep, this side's collider, the other side's, and
+    // the engine's feature id * 2 + side.
+    uint4 key;
 };
+
+
 
 [[vk::binding(0, 0)]] ConstantBuffer<IngestParams> params;
 [[vk::binding(1, 0)]] StructuredBuffer<EngineContactRow> contacts;
@@ -104,6 +110,19 @@ struct Record
 [[vk::binding(9, 0)]] RWStructuredBuffer<Record> manifolds;
 // Per chunk: [0, n) record counts, [n, 2n) fill cursors.
 [[vk::binding(10, 0)]] RWStructuredBuffer<Atomic<uint>> counts;
+
+// Whether record a comes before record b in a chunk's merge order: by key, then by slot.
+bool record_before(uint a, uint b)
+{
+    uint4 ka = records[a].key;
+    uint4 kb = records[b].key;
+    for (uint q = 0; q < 4; q++)
+    {
+        if (ka[q] != kb[q])
+            return ka[q] < kb[q];
+    }
+    return a < b;
+}
 
 float3 rotate_q(float4 q, float3 v)
 {
@@ -139,6 +158,7 @@ void ingest_rows(uint3 id: SV_DispatchThreadID)
     none.point = float4(0.0);
     none.impulse = float4(0.0);
     none.other = float4(0.0);
+    none.key = uint4(0);
     records[base] = none;
     none.ids.z = base + 1;
     records[base + 1] = none;
@@ -179,6 +199,7 @@ void ingest_rows(uint3 id: SV_DispatchThreadID)
         r.point = float4(to_zup(point), length(jz));
         r.impulse = float4(jz, closing);
         r.other = other.b;
+        r.key = uint4(params.substep, side == 0 ? c.ids.x : c.ids.y, side == 0 ? c.ids.y : c.ids.x, 2 * c.ids.z + side);
         records[base + side] = r;
     }
 }
@@ -260,13 +281,14 @@ void ingest_merge(uint3 id: SV_DispatchThreadID)
     uint begin = sort[k];
     uint end = sort[k + 1];
     uint slots = 2 * n + 1;
-    // The chunk's records in slot order (the scatter's order is the GPU's): insertion
-    // sort, the segments are short.
+    // The chunk's records in contact order (`record_before`: by substep and contact
+    // identity, not by the slot the engine's atomic append gave the row, nor by the
+    // scatter's order): insertion sort, the segments are short.
     for (uint a = begin + 1; a < end; a++)
     {
         uint v = sort[slots + a];
         uint b = a;
-        while (b > begin && sort[slots + b - 1] > v)
+        while (b > begin && record_before(v, sort[slots + b - 1]))
         {
             sort[slots + b] = sort[slots + b - 1];
             b--;
