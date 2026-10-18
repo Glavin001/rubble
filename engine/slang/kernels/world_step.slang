@@ -961,6 +961,34 @@ void persistListAppend(uint first, uint count)
 }
 #endif
 
+#if defined(ENGINE_NP_PAIRS)
+// Opt-in (pairs=np): narrowphase writes each manifold's solver pair next to
+// the manifold, exactly as pack_solver_pairs would, so the pack pass is skipped.
+// Manifolds are written only in narrowphase, so the two always agree.
+struct SolverPair
+{
+    uint bodyA; uint bodyB; uint contactStart; uint countAndSphere;
+    float3 normal; float friction;
+};
+BIND(28) RWStructuredBuffer<SolverPair> gSolverPairs;
+static const uint SOLVER_SPHERE = 0x80000000u;
+
+void storeManifold(uint mslot, Manifold mf, Collider ca, Collider cb)
+{
+    gManifolds[mslot] = mf;
+    SolverPair pair;
+    pair.bodyA = ca.body; pair.bodyB = cb.body;
+    pair.contactStart = mf.contactStart;
+    pair.countAndSphere = mf.contactCount |
+        ((ca.shape == SHAPE_SPHERE || cb.shape == SHAPE_SPHERE) ? SOLVER_SPHERE : 0u);
+    pair.normal = mf.normal; pair.friction = mf.friction;
+    gSolverPairs[mslot] = pair;
+}
+#define STORE_MANIFOLD(mslot, mf, ca, cb) storeManifold(mslot, mf, ca, cb)
+#else
+#define STORE_MANIFOLD(mslot, mf, ca, cb) gManifolds[mslot] = mf
+#endif
+
 void emitContactManifold(
     CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
     BoxManifold points, float margin)
@@ -1004,7 +1032,7 @@ void emitContactManifold(
         dead.contactCount = 0;
         dead.normal = nrm;
         dead.friction = 0.0;
-        gManifolds[mslot] = dead;
+        STORE_MANIFOLD(mslot, dead, ca, cb);
         return;
     }
 
@@ -1028,7 +1056,7 @@ void emitContactManifold(
     mf.contactCount = (uint)count;
     mf.normal = nrm;
     mf.friction = mu;
-    gManifolds[mslot] = mf;
+    STORE_MANIFOLD(mslot, mf, ca, cb);
     wakeFromContact(ba, bb, ca, cb);
 }
 
@@ -1219,7 +1247,11 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
         dead.contactCount = 0;
         dead.normal = float3(0, 1, 0);
         dead.friction = 0.0;
+#if defined(ENGINE_NP_PAIRS)
+        storeManifold(mslot, dead, gColliders[pair.colliderA], gColliders[pair.colliderB]);
+#else
         gManifolds[mslot] = dead;
+#endif
         return true;
     }
 
@@ -1255,8 +1287,15 @@ bool tryReuseContacts(CandidatePair pair, BodyState ba, BodyState bb, float marg
     mf.contactCount = count;
     mf.normal = head.normal;
     mf.friction = head.friction;
+#if defined(ENGINE_NP_PAIRS)
+    Collider ca = gColliders[pair.colliderA];
+    Collider cb = gColliders[pair.colliderB];
+    storeManifold(mslot, mf, ca, cb);
+    wakeFromContact(ba, bb, ca, cb);
+#else
     gManifolds[mslot] = mf;
     wakeFromContact(ba, bb, gColliders[pair.colliderA], gColliders[pair.colliderB]);
+#endif
     return true;
 }
 
@@ -1493,6 +1532,8 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
 // Deferred pairs are copied to the unused tail of gCandidates (counted in
 // gCounters._pad1); when the tail is full a pair is tested inline instead.
 // HOST_S(21) != 0 caps the tail (tests exercise the inline fallback).
+static const uint NP_SPILLED = 1u; // CandidatePair._pad (emitCandidate writes 0)
+
 uint narrowphaseDeferCapacity(uint n)
 {
     uint cap = HOST_S(2);
@@ -1522,7 +1563,13 @@ void narrowphase_defer(uint3 tid : SV_DispatchThreadID)
         gCandidates[HOST_S(2) - 1u - k] = pair;
         return;
     }
+#if defined(ENGINE_NP_PAIRS)
+    // Tail full: mark the pair in place; narrowphase_fresh tests it. Keeping
+    // shape tests out of this pass frees the material/OBB bindings for pairs.
+    gCandidates[i]._pad = NP_SPILLED;
+#else
     narrowphaseShapes(pair, ca, cb, ba, bb);
+#endif
 }
 
 [shader("compute")]
@@ -1531,7 +1578,22 @@ void narrowphase_fresh(uint3 tid : SV_DispatchThreadID)
 {
     uint k = dispatchIndex(tid);
     uint n = ALOAD(gCounters[0].candidateCount);
+#if defined(ENGINE_NP_PAIRS)
+    // Dispatched over every candidate (slot 64): thread k also tests candidate k
+    // when the reuse pass spilled it past a full tail.
+    uint deferred = ALOAD(gCounters[0]._pad1);
+    uint capacity = narrowphaseDeferCapacity(n);
+    if (deferred > capacity && k < n && gCandidates[k]._pad == NP_SPILLED)
+    {
+        CandidatePair spilled = gCandidates[k];
+        Collider sa = gColliders[spilled.colliderA];
+        Collider sb = gColliders[spilled.colliderB];
+        narrowphaseShapes(spilled, sa, sb, gBodies[sa.body], gBodies[sb.body]);
+    }
+    if (k >= min(deferred, capacity)) return;
+#else
     if (k >= min(ALOAD(gCounters[0]._pad1), narrowphaseDeferCapacity(n))) return;
+#endif
     CandidatePair pair = gCandidates[HOST_S(2) - 1u - k];
     Collider ca = gColliders[pair.colliderA];
     Collider cb = gColliders[pair.colliderB];
@@ -2905,6 +2967,8 @@ void scatter_color_tiles(uint3 tid : SV_DispatchThreadID)
 #if defined(ENGINE_COMPACT_SOLVE)
 // Compact solver pairs cache collider-to-body indirection once per step.
 // Canonical manifolds retain collider identity for compound shapes/persistence.
+// ENGINE_NP_PAIRS declares them ahead of narrowphase instead.
+#if !defined(ENGINE_NP_PAIRS)
 struct SolverPair
 {
     uint bodyA; uint bodyB; uint contactStart; uint countAndSphere;
@@ -2912,6 +2976,7 @@ struct SolverPair
 };
 BIND(28) RWStructuredBuffer<SolverPair> gSolverPairs;
 static const uint SOLVER_SPHERE = 0x80000000u;
+#endif
 
 void packSolverPair(uint mi, Manifold mf)
 {

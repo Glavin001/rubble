@@ -3678,7 +3678,7 @@ fn persistent_fused_warmstart_preserves_history_and_refreshes_pair_cache() {
 /// tags as the separate persistence pass.
 #[test]
 fn reuse_copy_matches_separate_persistence_semantics() {
-    mixed_contact_reuse_fixture_mode(true, false, true, None, None);
+    mixed_contact_reuse_fixture_mode(true, false, true, None, None, false);
 }
 
 /// Two-pass narrowphase (`np=split`): the reuse pass defers fresh pairs to the
@@ -3692,14 +3692,26 @@ fn reuse_copy_matches_separate_persistence_semantics() {
 #[test]
 fn persist_list_matches_full_scan_and_falls_back_on_overflow() {
     for limit in [0u32, 5] {
-        mixed_contact_reuse_fixture_mode(true, false, true, Some(0), Some(limit));
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(0), Some(limit), false);
     }
 }
 
 #[test]
 fn two_pass_narrowphase_matches_fused_reuse_copy() {
     for limit in [0u32, 3, 1] {
-        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit), None);
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit), None, false);
+    }
+}
+
+/// `pairs=np`: the two-pass narrowphase writes each manifold's solver pair, so
+/// the pack pass is skipped. The pairs must equal what pack_solver_pairs writes
+/// from the same manifolds, with no writes past the manifold count. Limits 3 and
+/// 1 spill most fresh pairs past the tail, which narrowphase_fresh then tests
+/// in place, so every manifold-producing path is covered.
+#[test]
+fn narrowphase_pairs_match_pack_pass() {
+    for limit in [0u32, 3, 1] {
+        mixed_contact_reuse_fixture_mode(true, false, true, Some(limit), Some(0), true);
     }
 }
 
@@ -3911,7 +3923,7 @@ fn persistent_dual_updates_hot_state_without_corrupting_metadata_or_history() {
 }
 
 fn mixed_contact_reuse_fixture(persistent: bool, fused: bool) {
-    mixed_contact_reuse_fixture_mode(persistent, fused, false, None, None);
+    mixed_contact_reuse_fixture_mode(persistent, fused, false, None, None, false);
 }
 
 fn mixed_contact_reuse_fixture_mode(
@@ -3920,7 +3932,9 @@ fn mixed_contact_reuse_fixture_mode(
     copy: bool,
     np_split: Option<u32>,
     persist_list: Option<u32>,
+    np_pairs: bool,
 ) {
+    assert!(!np_pairs || np_split.is_some(), "pairs=np runs only in the two-pass narrowphase");
     let mut sim = if persistent {
         WgpuSim::new_with_persistent_contacts(WorldCapacity::small())
     } else {
@@ -4025,7 +4039,7 @@ fn mixed_contact_reuse_fixture_mode(
     for parity in 0..2 {
         for reuse in [false, true] {
             let context = format!(
-                "persistent={persistent}, fused={fused}, copy={copy}, np_split={np_split:?}, persist_list={persist_list:?}, parity={parity}, reuse={reuse}"
+                "persistent={persistent}, fused={fused}, copy={copy}, np_split={np_split:?}, persist_list={persist_list:?}, np_pairs={np_pairs}, parity={parity}, reuse={reuse}"
             );
             sim.contacts_parity = parity;
             sim.np_defer_limit = np_split.unwrap_or(0);
@@ -4038,7 +4052,7 @@ fn mixed_contact_reuse_fixture_mode(
             write_contact_fixture(&sim, prev, &previous, &vec![0; previous.len()]);
             let history_before = contact_storage_words(&sim, prev, previous.len());
             const PAIR_CANARY: u32 = 0xdeadbeef;
-            if fused {
+            if fused || np_pairs {
                 // A stale pair cache can otherwise make a missing fused prepare
                 // look correct on the second half/reuse pass of this fixture.
                 sim.queue.write_buffer(
@@ -4071,7 +4085,20 @@ fn mixed_contact_reuse_fixture_mode(
                     previous.len() as u64,
                     None,
                 );
-                if np_split.is_some() {
+                if np_pairs {
+                    sim.disp(
+                        &mut pass,
+                        "narrowphase_defer_pairs_copy_persistent",
+                        count as u64,
+                        None,
+                    );
+                    sim.disp(
+                        &mut pass,
+                        "narrowphase_fresh_pairs_copy_persistent",
+                        count as u64,
+                        None,
+                    );
+                } else if np_split.is_some() {
                     sim.disp(
                         &mut pass,
                         "narrowphase_defer_copy_persistent",
@@ -4149,6 +4176,23 @@ fn mixed_contact_reuse_fixture_mode(
                 count - 1,
                 "{context}: separated final pair must disappear, every other pair must appear once"
             );
+            if np_pairs {
+                let m = c.manifold_count as usize;
+                let written: Vec<u32> = download(&sim, 28, 0, (m + 1) * 8);
+                assert_eq!(&written[m * 8..], &[PAIR_CANARY; 8],
+                    "{context}: narrowphase wrote a solver pair past the manifold count");
+                let mut enc = sim.device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = enc.begin_compute_pass(&Default::default());
+                    sim.disp(&mut pass, "pack_solver_contacts", m as u64, None);
+                }
+                sim.queue.submit([enc.finish()]);
+                let packed: Vec<u32> = download(&sim, 28, 0, m * 8);
+                for owner in 0..m {
+                    assert_eq!(&written[owner * 8..owner * 8 + 8], &packed[owner * 8..owner * 8 + 8],
+                        "{context}, manifold={owner}: narrowphase solver pair differs from pack_solver_pairs (bodies, range, sphere flag, normal or friction)");
+                }
+            }
             let actual: Vec<Contact> = read_contact_fixture(&sim, cur, c.contact_count as usize);
             if persistent {
                 let manifolds: Vec<Manifold> = download(&sim, 25, 0, c.manifold_count as usize);

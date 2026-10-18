@@ -98,7 +98,7 @@ for (const mode of ['canonical', 'compact', 'manifold', 'fused', 'persistent', '
         nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
         persistentContacts, params:{flags:reuse?1:0,iterations:4}, compactContacts:mode !== 'canonical',
         manifoldPersistence:mode === 'manifold', fusedPersistence:fused,
-        manifoldHashInsert:false, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
+        manifoldHashInsert:false, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, npPairs:false, jointCount:0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
         physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix,
         sleepRounds:8, PASS_ALIGN:256, bufs:[],
         pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
@@ -228,7 +228,7 @@ test('np=split without reuse=copy fails before allocating GPU work', () => {
     /np must be fused or split/);
 });
 
-function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=false, earlyPairPack=false, persistList=false, localRepair=false, carryRest=false}) {
+function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=false, earlyPairPack=false, persistList=false, localRepair=false, carryRest=false, npPairs=false}) {
   const trace = [], passes = [];
   const pass = () => { const p = {id:passes.length, setPipeline() {}, setBindGroup() {},
     dispatchWorkgroupsIndirect() { trace.push({name:'primal'}); }, end() {}}; passes.push(p); return p; };
@@ -237,7 +237,7 @@ function encodeTrace({reuse, manifoldHashInsert, detailedProfile=false, npSplit=
     cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
     nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
     persistentContacts:true, params:{flags:reuse?1:0,iterations:4}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:npSplit, npSplit, earlyPairPack, persistList, localRepair, carryRest, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:npSplit, npSplit, earlyPairPack, persistList, localRepair, carryRest, npPairs, jointCount:0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:10, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads,phase:p.id}); },
@@ -380,6 +380,24 @@ for (const carryRest of [false, true]) {
   });
 }
 
+for (const npPairs of [false, true]) {
+  test(`narrowphase-written solver pairs replace the pack pass and precede the graph (pairs=${npPairs ? 'np' : 'pack'})`, () => {
+    const trace = encodeTrace({reuse:true, manifoldHashInsert:true, npSplit:true, earlyPairPack:true, persistList:true, localRepair:true, carryRest:true, npPairs});
+    const at = name => trace.flatMap((c,i)=>c.name===name?[i]:[]);
+    const defer = at(npPairs ? 'narrowphase_defer_pairs_copy_persistent' : 'narrowphase_defer_copy_persistent');
+    const fresh = at(npPairs ? 'narrowphase_fresh_pairs_copy_persistent' : 'narrowphase_fresh_copy_persistent');
+    assert.equal(defer.length, 1); assert.equal(fresh.length, 1);
+    assert.equal(at(npPairs ? 'narrowphase_defer_copy_persistent' : 'narrowphase_defer_pairs_copy_persistent').length, 0,
+      'Exactly one narrowphase variant may write manifolds.');
+    assert.equal(trace[fresh[0]].slot, 64,
+      'The fresh pass covers every candidate (slot 64) so it can test pairs spilled past a full tail.');
+    assert.equal(at('pack_solver_contacts').length, npPairs ? 0 : 1,
+      'pairs=np writes pairs in narrowphase; a second writer would be redundant work, a missing one leaves the graph stale.');
+    assert.ok(defer[0] < fresh[0] && fresh[0] < at('csr_degree_contacts')[0],
+      'CSR degree reads solver pairs, so every pair writer must finish first.');
+  });
+}
+
 test('per-manifold hash insert is rejected when reuse would place it after narrowphase', () => {
   assert.throws(()=>encodeTrace({reuse:false, manifoldHashInsert:true}),/requires contact reuse/);
   assert.doesNotThrow(()=>encodeTrace({reuse:false, manifoldHashInsert:false}));
@@ -390,7 +408,7 @@ test('host upload publishes the previous GPU manifold count before counters rese
   for (const [manifoldHashInsert, steps] of [[true,5],[true,0],[false,5]]) {
     const copies = [];
     const context = {
-      manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152), steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
+      manifoldHashInsert, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, npPairs:false, jointCount:0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152), steps, parity:1, bodyCount:10, colliderCount:10, incrementalColors:true,
       csrBase:32768, MAX_WARM_HASH:2097152, nextPow2:n => 2 ** Math.ceil(Math.log2(n)),
       last:{contact:100}, cap:{maxBodies:64,maxCandidates:128,maxContacts:256,maxColors:32},
       scratchU32:new Uint32Array(64), packHost() {}, packHostU8:new Uint8Array(208),
@@ -438,7 +456,7 @@ for (const sparseStart of [10, 32, 0]) {
       last:{contact:1_170_000}, cap:{maxContacts:2097152,maxJoints:64,maxColors:32},
       nextPow2:n => 2 ** Math.ceil(Math.log2(n)), MAX_WARM_HASH:2097152,
       persistentContacts:true, params:{flags:1,iterations:4}, compactContacts:true,
-      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
+      manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 0, gridSplit:false, gridClearWords:() => 131072, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, npPairs:false, jointCount:0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
       physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart, parallelColorPrefix:true,
       sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
       writeHost() {}, disp(p,name) { trace.push({name, phase:p.id}); },
@@ -486,7 +504,7 @@ test('broadphase grid table scales with colliders and clears every head', () => 
     detailedProfile:false, graphProfile:false, colorProfile:false, bodyCount:505923, colliderCount:505923,
     last:{contact:4_000_000}, cap:{maxContacts:6291456,maxJoints:64,maxColors:32},
     nextPow2, MAX_WARM_HASH:2097152, persistentContacts:true, params:{flags:1,iterations:3}, compactContacts:true,
-    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576, gridSplit, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
+    manifoldPersistence:false, fusedPersistence:false, manifoldHashInsert:true, gridHashWords:() => 1048576, gridSplit, reuseCopy:false, npSplit:false, earlyPairPack:false, persistList:false, localRepair:false, carryRest:false, npPairs:false, jointCount:0, warmRecordHash:false, warmHashSlots:n => Math.min(2 ** Math.ceil(Math.log2(Math.max(n * 4, 1024))), 2097152),
     physicalAdjacency:true, incrementalColors:true, stablePacking:true, sparseStart:32, parallelColorPrefix:true,
     sleepRounds:8, PASS_ALIGN:256, bufs:[], pipes:{solve_primal_color:{},solve_primal_color_compact:{}},
     writeHost() {}, disp(p,name,threads) { trace.push({name,threads}); }, dispWork() {}, encoder:{beginComputePass:pass},

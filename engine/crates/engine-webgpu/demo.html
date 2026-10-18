@@ -167,6 +167,15 @@
     if (endpointsMode === 'pairs' && !persistentContacts) throw new Error('endpoints=pairs requires persistent contacts');
     const pairEndpoints = endpointsMode === 'pairs';
     const earlyPairPack = pairEndpoints && !fusedPersistence && !manifoldPersistence;
+    // pairs=np (8ex): the two-pass narrowphase writes each manifold's solver
+    // pair as it writes the manifold, so the separate pack pass is skipped.
+    // Gables pack/np 27.22/26.91/27.34/27.00 ms (warm 1.50->1.15), ring
+    // 10.64/10.38/10.54/10.38 ms (warm 0.69->0.62), bit-identical checks.
+    // pairs=pack keeps the pack pass as control.
+    const pairsMode = qs.get('pairs') || (npSplit && earlyPairPack ? 'np' : 'pack');
+    if (!['pack', 'np'].includes(pairsMode)) throw new Error('pairs must be pack or np');
+    if (pairsMode === 'np' && !(npSplit && earlyPairPack)) throw new Error('pairs=np requires np=split and endpoints=pairs');
+    const npPairs = pairsMode === 'np';
     // Broadphase grid table scaled to >=2x colliders (three-avbd sizes its grid
     // at 2x body capacity); scenes up to 65536 colliders keep 131072 heads.
     // Gables fixed/scaled: 36.92/35.00/36.34/34.50 ms, grid 3.28->1.90 ms, with
@@ -450,7 +459,8 @@
       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
       ...(manifoldHashInsert ? ['contact_hash_insert_manifolds'] : []),
       ...(reuseCopy ? ['narrowphase_copy_persistent', 'persist_contacts_copy_persistent'] : []),
-      ...(npSplit ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
+      ...(npSplit && !npPairs ? ['narrowphase_defer_copy_persistent', 'narrowphase_fresh_copy_persistent'] : []),
+      ...(npPairs ? ['narrowphase_defer_pairs_copy_persistent', 'narrowphase_fresh_pairs_copy_persistent'] : []),
       ...(persistList ? ['persist_list_copy_persistent'] : []),
       ...(localRepair ? ['color_bodies_local'] : []),
       ...(carryRest ? ['carry_rest_pairs'] : []),
@@ -1177,7 +1187,10 @@ struct VsOut {
       // Narrowphase overwrites gManifolds, so the manifold insert must precede it.
       if (!reuse && manifoldHashInsert)
         throw new Error('hashInsert=manifold requires contact reuse (insert before narrowphase)');
-      if (npSplit) {
+      if (npPairs) {
+        dispWork(pass, 'narrowphase_defer_pairs_copy_persistent', 64);
+        dispWork(pass, 'narrowphase_fresh_pairs_copy_persistent', 64);
+      } else if (npSplit) {
         dispWork(pass, 'narrowphase_defer_copy_persistent', 64);
         dispWork(pass, 'narrowphase_fresh_copy_persistent', 64);
       } else dispWork(pass, reuseCopy ? 'narrowphase_copy_persistent' : 'narrowphase', 64);
@@ -1196,7 +1209,7 @@ struct VsOut {
         dispWork(pass, 'persist_list_copy_persistent', 70);
         dispWork(pass, 'persist_contacts_copy_persistent', 71);
       } else dispWork(pass, fusedPersistence ? 'persist_manifolds_compact' : manifoldPersistence ? 'persist_manifolds' : reuseCopy ? 'persist_contacts_copy_persistent' : 'persist_contacts', (fusedPersistence || manifoldPersistence) ? 66 : 65);
-      if (earlyPairPack) dispWork(pass, 'pack_solver_contacts', 66);
+      if (earlyPairPack && !npPairs) dispWork(pass, 'pack_solver_contacts', 66);
       nextPhase();
       if (jointCount > 0) disp(pass, 'warmstart_joints', jointCount);
       disp(pass, 'build_awake_list', nBodies);
@@ -1349,7 +1362,7 @@ struct VsOut {
         totalBodies: bodyCount,
         dynamicBodies: bodyCount - 1,
         iterations: params.iterations,
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, pairs: pairsMode, grid: gridMode,
         dt: params.dt,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description },
         userAgent: navigator.userAgent,
@@ -1804,7 +1817,7 @@ struct VsOut {
             const report = {
               scene, bodies: dyn, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
               coloring: incrementalColors ? "reuse" : "rebuild",
-              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+              sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, pairs: pairsMode, grid: gridMode, colors: last.color,
               contacts: last.contact, awake: last.awake, overflow: last.overflow,
               settle: pre, initialMaxY,
             };
@@ -1884,7 +1897,7 @@ struct VsOut {
       const report = {
         scene, bodies: bodies.length - 1, iterations: params.iterations, wallMs, phases, timingSamples, phaseSamples,
         coloring: incrementalColors ? "reuse" : "rebuild",
-        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, grid: gridMode, colors: last.color,
+        sparseStart, colorPrefix: parallelColorPrefix ? "parallel" : "serial", packing: stablePacking ? "stable" : "atomic", contactLayout: persistentContacts ? "persistent64+32" : compactContacts ? "compact64" : "canonical128", adjacency: physicalAdjacency ? "physical" : "append", order: spatialOrder ? "morton" : "construction", persistence: fusedPersistence ? "fused" : manifoldPersistence ? "manifold" : "contact", hashInsert: hashInsertMode, reuse: reuseMode, np: npMode, persist: persistMode, repair: repairMode, rest: restMode, endpoints: endpointsMode, pairs: pairsMode, grid: gridMode, colors: last.color,
         contacts: last.contact, awake: last.awake, overflow: last.overflow,
       };
       console.log('BENCH', JSON.stringify(report));

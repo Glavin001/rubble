@@ -79,7 +79,7 @@ for (const spatialOrder of [false,true]) {
     const bodies=[{p:[0,0,0],invMass:0},{p:[8,2,-9],invMass:1},{p:[-9,1,8],invMass:2},{p:[0,3,-4],invMass:3}];
     const colliders=bodies.map((_,body)=>({body,shape:body===3?0:2,params:[body+1,body+2,body+3],density:body+4}));
     const bodyWrites=new Map(), colliderWrites=new Map();
-    const context={spatialOrder,mortonSceneOrder,bodies,colliders,cap:{maxBodies:64},bodyBytes:{},colBytes:{},
+    const context={spatialOrder,mortonSceneOrder,bodies,colliders,snap:null,cap:{maxBodies:64},bodyBytes:{},colBytes:{},
       writeBody(_bytes,id,b){bodyWrites.set(id,b);},writeCollider(_bytes,id,c){colliderWrites.set(id,c);}};
     runInNewContext(demo.slice(uploadStart,uploadEnd),context);
     const map=spatialOrder?mortonSceneOrder(bodies,colliders).sceneToGpu:bodies.map((_,i)=>i);

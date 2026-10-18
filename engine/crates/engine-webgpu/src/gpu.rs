@@ -28,6 +28,9 @@ pub struct WgpuSim {
     pub(crate) reuse_copy: bool,
     /// Two-pass narrowphase (8ek): reuse, then shape tests over compacted pairs.
     pub(crate) np_split: bool,
+    /// `ENGINE_PAIRS=np`: the two-pass narrowphase writes solver pairs itself,
+    /// so the separate pack pass is skipped (requires `np_split`).
+    pub(crate) np_pairs: bool,
     /// Persist work list (8em, HOST_S(22)); requires reuse copy.
     pub(crate) persist_list: bool,
     /// Carry resting pairs across sleep (8ep, HOST_S(28)).
@@ -392,6 +395,10 @@ impl WgpuSim {
             np_split: persistent_contacts
                 && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
                 && std::env::var("ENGINE_NP").as_deref() == Ok("split"),
+            np_pairs: persistent_contacts
+                && std::env::var("ENGINE_REUSE").as_deref() == Ok("copy")
+                && std::env::var("ENGINE_NP").as_deref() == Ok("split")
+                && std::env::var("ENGINE_PAIRS").as_deref() == Ok("np"),
             np_defer_limit: 0,
             persist_list_limit: 0,
             local_repair: std::env::var("ENGINE_REPAIR").as_deref() == Ok("local"),
@@ -784,7 +791,10 @@ impl WgpuSim {
             reuse || !self.manifold_hash_insert,
             "ENGINE_HASH_INSERT=manifold requires contact reuse"
         );
-        if self.np_split {
+        if self.np_pairs {
+            self.disp_work(&mut pass, "narrowphase_defer_pairs_copy_persistent", 64, None);
+            self.disp_work(&mut pass, "narrowphase_fresh_pairs_copy_persistent", 64, None);
+        } else if self.np_split {
             self.disp_work(&mut pass, "narrowphase_defer_copy_persistent", 64, None);
             self.disp_work(&mut pass, "narrowphase_fresh_copy_persistent", 64, None);
         } else {
@@ -836,7 +846,7 @@ impl WgpuSim {
         // manifold persistence already did.
         let early_pair_pack =
             self.persistent_contacts && !self.fused_persistence && !self.manifold_persistence;
-        if early_pair_pack {
+        if early_pair_pack && !self.np_pairs {
             self.disp_work(&mut pass, "pack_solver_contacts", 66, None);
         }
         if self.joint_count > 0 {

@@ -1,0 +1,37 @@
+{
+  "decision": "8ex",
+  "date": "2026-10-18",
+  "change": "pairs=np: narrowphase_defer/fresh write each manifold's SolverPair next to the manifold; pack_solver_pairs is skipped. Defer marks pairs past a full tail in place (CandidatePair._pad = 1) and narrowphase_fresh (already dispatched over slot 64) tests them, so defer drops the material/OBB bindings (9 storage) and fresh binds pairs (10 storage).",
+  "harness": "tools/headless-bench.mjs (headless Chrome, Metal adapter), one fresh page per run, interleaved",
+  "environment_warning": "Two to three Unreal Editor instances from another session kept GPU Device Utilization at 97-100% even while idle; the pinned reference measured ring 18.12 then 10.49 ms in consecutive runs. Absolute numbers are inflated and noisy; only interleaved same-session comparisons are meaningful.",
+  "wgsl": "control modules byte-identical to HEAD 859a4b9; two new modules narrowphase_defer_pairs_copy_persistent / narrowphase_fresh_pairs_copy_persistent",
+  "gables506k_bench_only": {
+    "order": ["pack", "np", "pack", "np"],
+    "wallMs": [27.22, 26.91, 27.34, 27.00],
+    "warmMs": [1.52, 1.15, 1.47, 1.16],
+    "narrowphaseMs": [6.02, 5.84, 5.97, 5.81],
+    "workloadEnd": {"contact": 4059393, "manifold": 977719, "identical": true},
+    "later_pair_discarded_load_rising": {"order": ["np", "pack", "np", "pack"], "wallMs": [31.57, 29.9, 32.5, 27.72], "warmMs": [1.60, 1.69, 1.20, 1.64]}
+  },
+  "ring110k_bench_only": {
+    "order": ["pack", "np", "pack", "np", "pack", "np"],
+    "wallMs": [10.64, 10.38, 10.54, 10.38, 10.65, 10.71],
+    "warmMs": [0.69, 0.62, 0.69, 0.62, 0.76, 0.66],
+    "workloadEnd": {"contact": 1173483, "manifold": 247294, "identical": true}
+  },
+  "same_session_baseline_and_reference": {
+    "ours_head": {"ring": 10.55, "gables": 28.05},
+    "reference_bench3d": {"ring_runs": [18.12, 10.49], "gables": 27.18},
+    "note": "reference ring 18.12 was taken under the heaviest contention; 10.49 is the usable value"
+  },
+  "gates": {
+    "cargo_test_engine_webgpu_lib": "52/52 (new narrowphase_pairs_match_pack_pass; mutants without the sphere flag or without spill testing fail it)",
+    "node_tests": "296/296 (after restoring jointCount/npPairs/snap/pairsMode stubs; HEAD had 198/289 failing since the D6-joints commit)",
+    "browser_ring480": "PASS, every sample bit-identical to pairs=pack",
+    "browser_gables240": "PASS, bit-identical to pairs=pack",
+    "native_ring480_columns": "PASS with and without ENGINE_PAIRS=np, ring mean 1.1753 both",
+    "native_gables240_canonical": "PASS 0.118635/0.328483 (unchanged)",
+    "native_gables240_persistent": "PASS 0.118657/0.330531 with and without ENGINE_PAIRS=np",
+    "metal": "18/18"
+  }
+}

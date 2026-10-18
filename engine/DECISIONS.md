@@ -275,4 +275,22 @@ Bench `bench/results/joints-all` (format v3 D6 scenes; PhysX as `PxD6Joint`) was
 
 8ew. **Reject flags-only neighbour loads in the graph kernels.** `compactPreviousColor` (inside `csr_sort`), `jpTryColor` and the local repair tested `bodyIsDynamic(gBodies[other]) || bodyIsSleeping(gBodies[other])`, which the WGSL emits as two whole 112-byte body loads per neighbour. A `bodyActiveAt(i)` helper loading only `invMass` and `flags` changed only the five graph modules. Interleaved gables `profile=graph` runs (A/B/A) gave csrSort 0.55 ms in both arms. The wall times (26.91/26.28/26.81 ms) moved with primal/dual, which the change does not touch, so that difference is drift. As in 8dx, Metal already drops the unused fields of a whole-struct load, and the csr_sort cost is the random neighbour lines themselves. The fourth run and the ring set were lost first to a harness hang (fixed: Playwright keeps node alive after `browser.close()`, so `tools/headless-bench.mjs` exits explicitly). Then a second Unreal Editor and other GPU clients pushed ring to 11–63 ms for the rest of the night. Reverted; patch `docs/avbd-night-2026-10-17-flags-only.patch`. Evidence for 8eu–8ew: `docs/avbd-night-trials-2026-10-17.json`.
 
-Ring 120 FPS: primal 3.87 + dual 1.75 ms are near bandwidth floors (8dx), and collision 3.6 / graph 0.6 ms are at reference parity. Removing all of graph and a third of collision would still leave ~9 ms. 8.33 ms is not reachable without a numerics change (e.g. narrower contact records, or fewer iterations), which needs the user's approval. The next free id is 8ex.
+Ring 120 FPS: primal 3.87 + dual 1.75 ms are near bandwidth floors (8dx), and collision 3.6 / graph 0.6 ms are at reference parity. Removing all of graph and a third of collision would still leave ~9 ms. 8.33 ms is not reachable without a numerics change (e.g. narrower contact records, or fewer iterations), which needs the user's approval.
+
+8ex. **Write solver pairs in narrowphase; skip the pack pass.** 8ev put `pack_solver_pairs` at ~0.25 ms on gables, and found that folding it into narrowphase was blocked: `narrowphase_defer` already bound Chrome's 10 storage buffers. Materials and world OBBs served only its inline fallback for pairs past a full candidate tail.
+
+Changes (`pairs=np`):
+- Defer now marks such pairs in place (`CandidatePair._pad = 1`; `emitCandidate` always writes 0).
+- `narrowphase_fresh`, already dispatched over every candidate (slot 64), also tests candidate k when it is marked. Defer drops to 9 storage buffers, fresh binds 10.
+- Every manifold store, reused, fresh or dead, also writes its `SolverPair` from the colliders narrowphase already holds.
+- Manifolds are written nowhere else, so pairs equal what pack would write.
+
+Timing was measured while other sessions' Unreal Editors held the GPU at 97–100%, so only interleaved comparisons are meaningful. Gables pack/np/pack/np: 27.22/26.91/27.34/27.00 ms, warm 1.52/1.15/1.47/1.16 ms, narrowphase about 0.15 ms lower. Ring: 10.64/10.38/10.54/10.38/10.65/10.71 ms, warm 0.69→0.62 ms in every pair. Workload snapshots are identical.
+
+Gates:
+- Browser ring480 and gables240 are bit-identical to `pairs=pack`.
+- Native ring480 (1.1753), columns and persistent gables240 (0.118657/0.330531) are bit-identical with `ENGINE_PAIRS=np`. Canonical gables is unchanged. Metal 18/18.
+- Control WGSL is byte-identical to HEAD.
+- A new GPU test runs the mixed reuse fixture at defer limits 0/3/1, so most fresh pairs spill. It requires narrowphase pairs to equal a following pack pass word for word, with no writes past the manifold count. Dropping the sphere flag or the spill test fails it.
+
+Browser default is `pairs=np` wherever `np=split` and `endpoints=pairs` run (`pairs=pack` keeps the control); native uses `ENGINE_PAIRS=np`. The JS suite had been failing 198 of 289 tests since the D6-joints commit, because its eval stubs lacked `jointCount` and `snap`. Those stubs, plus `npPairs`/`pairsMode`, are restored, and 296/296 pass, including a new schedule test. Evidence: `docs/avbd-np-pairs-2026-10-18.json`. The next free id is 8ey.
