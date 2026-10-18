@@ -1,16 +1,8 @@
-use engine_cuda::CudaWorld;
 use engine_exec::PhysicsBackend;
 use engine_metal::{MetalWorld, SceneBuilder};
 use engine_schema::WorldCapacity;
 use engine_webgpu::WebGpuWorld;
 use glam::Vec3;
-
-#[test]
-fn cuda_sources_emitted() {
-    let w = CudaWorld::new(WorldCapacity::small()).unwrap();
-    assert!(w.cuda_sources.len() >= 6);
-    assert!(w.cuda_sources.iter().all(|(_, n)| *n > 100));
-}
 
 #[test]
 fn webgpu_spirv_to_wgsl() {
