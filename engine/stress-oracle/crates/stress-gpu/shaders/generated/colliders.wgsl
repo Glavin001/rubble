@@ -82,12 +82,20 @@ fn key_of_0( info_0 : vec4<u32>) -> u32
 @workgroup_size(64, 1, 1)
 fn collider_keys(@builtin(global_invocation_id) id_0 : vec3<u32>)
 {
+    var _S3 : bool;
     if(control_0[i32(0)] != u32(0))
+    {
+        _S3 = true;
+    }
+    else
+    {
+        _S3 = control_0[u32(1)] == u32(0);
+    }
+    if(_S3)
     {
         return;
     }
     var t_0 : u32 = id_0.x;
-    var _S3 : bool;
     if(t_0 < control_0[u32(1)])
     {
         _S3 = (parents_0[t_0].z) >= u32(2);
@@ -183,6 +191,14 @@ fn collider_slots(@builtin(global_invocation_id) id_1 : vec3<u32>)
     }
     else
     {
+        _S11 = control_0[u32(1)] == u32(0);
+    }
+    if(_S11)
+    {
+        _S11 = true;
+    }
+    else
+    {
         _S11 = (id_1.x) >= (params_0.chunk_count_0);
     }
     if(_S11)
@@ -201,6 +217,14 @@ fn collider_refresh(@builtin(global_invocation_id) id_2 : vec3<u32>)
     var c_0 : u32 = id_2.x;
     var _S13 : bool;
     if(control_0[i32(0)] != u32(0))
+    {
+        _S13 = true;
+    }
+    else
+    {
+        _S13 = control_0[u32(1)] == u32(0);
+    }
+    if(_S13)
     {
         _S13 = true;
     }

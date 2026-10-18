@@ -109,7 +109,16 @@ fn child_island_at_0( slot_1 : u32) -> u32
 fn layout_plan(@builtin(global_invocation_id) id_0 : vec3<u32>)
 {
     var k_0 : u32;
+    var _S1 : bool;
     if(control_0[i32(0)] != u32(0))
+    {
+        _S1 = true;
+    }
+    else
+    {
+        _S1 = control_0[u32(1)] == u32(0);
+    }
+    if(_S1)
     {
         return;
     }
@@ -141,38 +150,38 @@ fn layout_plan(@builtin(global_invocation_id) id_0 : vec3<u32>)
         }
         var p_0 : u32 = q_0 - u32(1);
         var parent_0 : vec4<u32> = parents_0[p_0];
-        var _S1 : u32 = parent_0.z;
-        if(_S1 < u32(2))
+        var _S2 : u32 = parent_0.z;
+        if(_S2 < u32(2))
         {
             q_0 = p_0;
             continue;
         }
         var len_1 : u32 = len_0 - u32(1);
-        var _S2 : u32 = parent_0.x;
-        if(_S2 < len_1)
+        var _S3 : u32 = parent_0.x;
+        if(_S3 < len_1)
         {
-            plan_0[order_at_0(_S2)] = plan_0[order_at_0(len_1)];
+            plan_0[order_at_0(_S3)] = plan_0[order_at_0(len_1)];
         }
         k_0 = u32(0);
         var len_2 : u32 = len_1;
         var next_1 : u32 = next_0;
         loop
         {
-            if(k_0 < _S1)
+            if(k_0 < _S2)
             {
             }
             else
             {
                 break;
             }
-            var _S3 : u32 = parent_0.y;
-            plan_0[order_at_0(len_2)] = n_0 + _S3 + k_0;
-            var _S4 : u32 = len_2 + u32(1);
-            plan_0[child_id_at_0(_S3 + k_0)] = next_1;
-            var _S5 : u32 = next_1 + u32(1);
+            var _S4 : u32 = parent_0.y;
+            plan_0[order_at_0(len_2)] = n_0 + _S4 + k_0;
+            var _S5 : u32 = len_2 + u32(1);
+            plan_0[child_id_at_0(_S4 + k_0)] = next_1;
+            var _S6 : u32 = next_1 + u32(1);
             k_0 = k_0 + u32(1);
-            len_2 = _S4;
-            next_1 = _S5;
+            len_2 = _S5;
+            next_1 = _S6;
         }
         len_0 = len_2;
         next_0 = next_1;
@@ -240,32 +249,32 @@ fn sort_children_0( parent_1 : vec4<u32>)
         {
             break;
         }
-        var _S6 : u32 = parent_1.y;
-        var _S7 : u32 = plan_0[child_island_at_0(_S6 + k_1)];
+        var _S7 : u32 = parent_1.y;
+        var _S8 : u32 = plan_0[child_island_at_0(_S7 + k_1)];
         var j_1 : u32 = k_1;
         loop
         {
-            var _S8 : bool;
+            var _S9 : bool;
             if(j_1 > u32(0))
             {
-                _S8 = plan_0[child_island_at_0(_S6 + plan_0[child_order_at_0(_S6 + j_1 - u32(1))])] > _S7;
+                _S9 = plan_0[child_island_at_0(_S7 + plan_0[child_order_at_0(_S7 + j_1 - u32(1))])] > _S8;
             }
             else
             {
-                _S8 = false;
+                _S9 = false;
             }
-            if(_S8)
+            if(_S9)
             {
             }
             else
             {
                 break;
             }
-            var _S9 : u32 = _S6 + j_1;
-            plan_0[child_order_at_0(_S9)] = plan_0[child_order_at_0(_S9 - u32(1))];
+            var _S10 : u32 = _S7 + j_1;
+            plan_0[child_order_at_0(_S10)] = plan_0[child_order_at_0(_S10 - u32(1))];
             j_1 = j_1 - u32(1);
         }
-        plan_0[child_order_at_0(_S6 + j_1)] = k_1;
+        plan_0[child_order_at_0(_S7 + j_1)] = k_1;
         k_1 = k_1 + u32(1);
     }
     return;
@@ -294,10 +303,10 @@ fn chunk_word_0( c_0 : u32,  w_1 : u32) -> u32
 
 fn set_chunk_island_0( c_1 : u32,  island_0 : u32)
 {
-    var _S10 : u32 = chunk_word_0(c_1, u32(8));
-    var info_0 : vec4<f32> = chunks_0[_S10];
+    var _S11 : u32 = chunk_word_0(c_1, u32(8));
+    var info_0 : vec4<f32> = chunks_0[_S11];
     info_0[i32(1)] = (bitcast<f32>((island_0)));
-    chunks_0[_S10] = info_0;
+    chunks_0[_S11] = info_0;
     return;
 }
 
@@ -401,8 +410,8 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         return;
     }
     var parent_3 : vec4<u32> = parents_0[p_1];
-    var _S11 : u32 = parent_3.z;
-    if(_S11 < u32(2))
+    var _S12 : u32 = parent_3.z;
+    if(_S12 < u32(2))
     {
         return;
     }
@@ -411,44 +420,44 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     var c1_1 : u32 = (bitcast<u32>((r_2.y)));
     var b0_0 : u32 = (bitcast<u32>((r_2.z)));
     var b1_0 : u32 = (bitcast<u32>((r_2.w)));
-    var _S12 : u32 = c1_1 - c0_1;
-    var _S13 : u32 = parent_3.y;
-    var _S14 : u32 = control_0[u32(6)];
-    var _S15 : bool = tid_0 == u32(0);
+    var _S13 : u32 = c1_1 - c0_1;
+    var _S14 : u32 = parent_3.y;
+    var _S15 : u32 = control_0[u32(6)];
+    var _S16 : bool = tid_0 == u32(0);
     var m_0 : u32;
     var w_6 : u32;
     var w_7 : u32;
-    if(_S15)
+    if(_S16)
     {
         sort_children_0(parent_3);
         m_0 = u32(0);
         w_6 = u32(0);
         loop
         {
-            if(m_0 < _S11)
+            if(m_0 < _S12)
             {
             }
             else
             {
                 break;
             }
-            var head_0 : vec4<f32> = children_0[u32(8) * (_S13 + child_by_island_0(parent_3, m_0))];
-            var _S16 : u32 = (bitcast<u32>((head_0.y)));
-            var _S17 : u32 = (bitcast<u32>((head_0.z)));
+            var head_0 : vec4<f32> = children_0[u32(8) * (_S14 + child_by_island_0(parent_3, m_0))];
+            var _S17 : u32 = (bitcast<u32>((head_0.y)));
+            var _S18 : u32 = (bitcast<u32>((head_0.z)));
             w_7 = u32(0);
             loop
             {
-                if(w_7 < _S17)
+                if(w_7 < _S18)
                 {
                 }
                 else
                 {
                     break;
                 }
-                plan_0[new_chunk_at_0(_S13 + work_0[_S14 + _S13 + _S16 + w_7])] = w_6;
-                var _S18 : u32 = w_6 + u32(1);
+                plan_0[new_chunk_at_0(_S14 + work_0[_S15 + _S14 + _S17 + w_7])] = w_6;
+                var _S19 : u32 = w_6 + u32(1);
                 w_7 = w_7 + u32(1);
-                w_6 = _S18;
+                w_6 = _S19;
             }
             m_0 = m_0 + u32(1);
         }
@@ -457,16 +466,16 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     m_0 = tid_0;
     loop
     {
-        if(m_0 < _S12)
+        if(m_0 < _S13)
         {
         }
         else
         {
             break;
         }
-        var _S19 : u32 = _S13 + m_0;
-        var nk_0 : u32 = plan_0[new_chunk_at_0(_S19)];
-        var island_1 : u32 = plan_0[child_island_at_0(_S13 + work_0[_S19])];
+        var _S20 : u32 = _S14 + m_0;
+        var nk_0 : u32 = plan_0[new_chunk_at_0(_S20)];
+        var island_1 : u32 = plan_0[child_island_at_0(_S14 + work_0[_S20])];
         w_6 = u32(0);
         loop
         {
@@ -480,8 +489,8 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             chunks_0[chunk_word_0(c0_1 + nk_0, w_6)] = old_chunks_0[chunk_word_0(c0_1 + m_0, w_6)];
             w_6 = w_6 + u32(1);
         }
-        var _S20 : u32 = c0_1 + nk_0;
-        set_chunk_island_0(_S20, island_1);
+        var _S21 : u32 = c0_1 + nk_0;
+        set_chunk_island_0(_S21, island_1);
         w_4 = u32(0);
         loop
         {
@@ -492,7 +501,7 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             {
                 break;
             }
-            state_0[u32(4) * _S20 + w_4] = old_state_0[u32(4) * (c0_1 + m_0) + w_4];
+            state_0[u32(4) * _S21 + w_4] = old_state_0[u32(4) * (c0_1 + m_0) + w_4];
             w_4 = w_4 + u32(1);
         }
         w_5 = u32(0);
@@ -505,18 +514,18 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             {
                 break;
             }
-            scratch_0[params_0.statics_base_0 + u32(23) * _S20 + w_5] = vec4<f32>(0.0f);
+            scratch_0[params_0.statics_base_0 + u32(23) * _S21 + w_5] = vec4<f32>(0.0f);
             w_5 = w_5 + u32(1);
         }
         if((params_0.resident_0) != u32(0))
         {
             var o_0 : u32 = c0_1 + m_0;
-            ctab_0[params_0.props_base_0 + _S20] = old_ctab_0[params_0.props_base_0 + o_0];
-            var _S21 : u32 = u32(2) * _S20;
-            var _S22 : u32 = u32(2) * o_0;
-            ctab_0[params_0.eload_base_0 + _S21] = old_ctab_0[params_0.eload_base_0 + _S22];
-            ctab_0[params_0.eload_base_0 + _S21 + u32(1)] = old_ctab_0[params_0.eload_base_0 + _S22 + u32(1)];
-            ctab_0[params_0.pulse_count_base_0 + _S20] = old_ctab_0[params_0.pulse_count_base_0 + o_0];
+            ctab_0[params_0.props_base_0 + _S21] = old_ctab_0[params_0.props_base_0 + o_0];
+            var _S22 : u32 = u32(2) * _S21;
+            var _S23 : u32 = u32(2) * o_0;
+            ctab_0[params_0.eload_base_0 + _S22] = old_ctab_0[params_0.eload_base_0 + _S23];
+            ctab_0[params_0.eload_base_0 + _S22 + u32(1)] = old_ctab_0[params_0.eload_base_0 + _S23 + u32(1)];
+            ctab_0[params_0.pulse_count_base_0 + _S21] = old_ctab_0[params_0.pulse_count_base_0 + o_0];
             w_7 = u32(0);
             loop
             {
@@ -527,7 +536,7 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
                 {
                     break;
                 }
-                ctab_0[params_0.pulse_base_0 + u32(3) * params_0.pulse_cap_0 * _S20 + w_7] = old_ctab_0[params_0.pulse_base_0 + u32(3) * params_0.pulse_cap_0 * o_0 + w_7];
+                ctab_0[params_0.pulse_base_0 + u32(3) * params_0.pulse_cap_0 * _S21 + w_7] = old_ctab_0[params_0.pulse_base_0 + u32(3) * params_0.pulse_cap_0 * o_0 + w_7];
                 w_7 = w_7 + u32(1);
             }
         }
@@ -536,19 +545,19 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     device_group_barrier_0();
     var q_5 : u32;
     var t_1 : u32;
-    if(_S15)
+    if(_S16)
     {
         w_6 = u32(0);
         loop
         {
-            if(w_6 < _S11)
+            if(w_6 < _S12)
             {
             }
             else
             {
                 break;
             }
-            plan_0[child_bonds_at_0(_S13 + w_6)] = u32(0);
+            plan_0[child_bonds_at_0(_S14 + w_6)] = u32(0);
             w_6 = w_6 + u32(1);
         }
         w_7 = b0_0;
@@ -563,10 +572,10 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
                 break;
             }
             var ids_0 : vec4<u32> = (bitcast<vec4<u32>>((old_bonds_0[bond_word_0(w_7, u32(14))])));
-            var ka_0 : u32 = work_0[_S13 + ids_0.y - c0_1];
-            if(ka_0 == work_0[_S13 + ids_0.z - c0_1])
+            var ka_0 : u32 = work_0[_S14 + ids_0.y - c0_1];
+            if(ka_0 == work_0[_S14 + ids_0.z - c0_1])
             {
-                plan_0[child_bonds_at_0(_S13 + ka_0)] = plan_0[child_bonds_at_0(_S13 + ka_0)] + u32(1);
+                plan_0[child_bonds_at_0(_S14 + ka_0)] = plan_0[child_bonds_at_0(_S14 + ka_0)] + u32(1);
             }
             else
             {
@@ -578,18 +587,18 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         q_5 = u32(0);
         loop
         {
-            if(w_5 < _S11)
+            if(w_5 < _S12)
             {
             }
             else
             {
                 break;
             }
-            var _S23 : u32 = _S13 + child_by_island_0(parent_3, w_5);
-            var count_0 : u32 = plan_0[child_bonds_at_0(_S23)];
-            var _S24 : u32 = b0_0 + q_5;
-            plan_0[child_bonds_at_0(_S23)] = _S24;
-            plan_0[child_bonds_at_0(_S23) + u32(1)] = _S24;
+            var _S24 : u32 = _S14 + child_by_island_0(parent_3, w_5);
+            var count_0 : u32 = plan_0[child_bonds_at_0(_S24)];
+            var _S25 : u32 = b0_0 + q_5;
+            plan_0[child_bonds_at_0(_S24)] = _S25;
+            plan_0[child_bonds_at_0(_S24) + u32(1)] = _S25;
             var at_0 : u32 = q_5 + count_0;
             w_5 = w_5 + u32(1);
             q_5 = at_0;
@@ -607,12 +616,12 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
                 break;
             }
             var ids_1 : vec4<u32> = (bitcast<vec4<u32>>((old_bonds_0[bond_word_0(w_7, u32(14))])));
-            var ka_1 : u32 = work_0[_S13 + ids_1.y - c0_1];
-            if(ka_1 == work_0[_S13 + ids_1.z - c0_1])
+            var ka_1 : u32 = work_0[_S14 + ids_1.y - c0_1];
+            if(ka_1 == work_0[_S14 + ids_1.z - c0_1])
             {
-                var _S25 : u32 = _S13 + ka_1;
-                var nb_0 : u32 = plan_0[child_bonds_at_0(_S25) + u32(1)];
-                plan_0[child_bonds_at_0(_S25) + u32(1)] = plan_0[child_bonds_at_0(_S25) + u32(1)] + u32(1);
+                var _S26 : u32 = _S14 + ka_1;
+                var nb_0 : u32 = plan_0[child_bonds_at_0(_S26) + u32(1)];
+                plan_0[child_bonds_at_0(_S26) + u32(1)] = plan_0[child_bonds_at_0(_S26) + u32(1)] + u32(1);
                 plan_0[bond_new_at_0(w_7)] = nb_0;
             }
             else
@@ -635,22 +644,22 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             break;
         }
         var ids_2 : vec4<u32> = (bitcast<vec4<u32>>((old_bonds_0[bond_word_0(w_7, u32(14))])));
-        var _S26 : u32 = ids_2.y;
-        var _S27 : u32 = _S13 + _S26 - c0_1;
-        var ka_2 : u32 = work_0[_S27];
-        var _S28 : u32 = ids_2.z;
-        var _S29 : u32 = _S13 + _S28 - c0_1;
+        var _S27 : u32 = ids_2.y;
+        var _S28 : u32 = _S14 + _S27 - c0_1;
+        var ka_2 : u32 = work_0[_S28];
+        var _S29 : u32 = ids_2.z;
+        var _S30 : u32 = _S14 + _S29 - c0_1;
         var new_ids_0 : vec4<u32>;
-        if(ka_2 == work_0[_S29])
+        if(ka_2 == work_0[_S30])
         {
-            var _S30 : vec4<u32> = vec4<u32>(ids_2.x, c0_1 + plan_0[new_chunk_at_0(_S27)], c0_1 + plan_0[new_chunk_at_0(_S29)], plan_0[child_island_at_0(_S13 + ka_2)]);
+            var _S31 : vec4<u32> = vec4<u32>(ids_2.x, c0_1 + plan_0[new_chunk_at_0(_S28)], c0_1 + plan_0[new_chunk_at_0(_S30)], plan_0[child_island_at_0(_S14 + ka_2)]);
             w_6 = plan_0[bond_new_at_0(w_7)];
-            new_ids_0 = _S30;
+            new_ids_0 = _S31;
         }
         else
         {
             var nb_1 : u32 = plan_0[bond_new_at_0(w_7)];
-            var _S31 : vec4<u32> = vec4<u32>(ids_2.x, _S26, _S28, u32(4294967295));
+            var _S32 : vec4<u32> = vec4<u32>(ids_2.x, _S27, _S29, u32(4294967295));
             w_6 = u32(0);
             loop
             {
@@ -664,12 +673,12 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
                 scratch_0[u32(3) * nb_1 + w_6] = vec4<f32>(0.0f);
                 w_6 = w_6 + u32(1);
             }
-            var _S32 : u32 = u32(2) * nb_1;
-            var _S33 : vec4<f32> = vec4<f32>(0.0f);
-            scratch_0[params_0.statics_base_0 + u32(23) * params_0.chunk_count_0 + _S32] = _S33;
-            scratch_0[params_0.statics_base_0 + u32(23) * params_0.chunk_count_0 + _S32 + u32(1)] = _S33;
+            var _S33 : u32 = u32(2) * nb_1;
+            var _S34 : vec4<f32> = vec4<f32>(0.0f);
+            scratch_0[params_0.statics_base_0 + u32(23) * params_0.chunk_count_0 + _S33] = _S34;
+            scratch_0[params_0.statics_base_0 + u32(23) * params_0.chunk_count_0 + _S33 + u32(1)] = _S34;
             w_6 = nb_1;
-            new_ids_0 = _S31;
+            new_ids_0 = _S32;
         }
         w_4 = u32(0);
         loop
@@ -701,16 +710,16 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         w_7 = w_7 + u32(64);
     }
     device_group_barrier_0();
-    var _S34 : bool;
+    var _S35 : bool;
     if(g_cut_first_0 < b1_0)
     {
         w_6 = u32(2) * g_cut_first_0;
     }
     else
     {
-        var _S35 : u32 = old_index_0[c0_1];
+        var _S36 : u32 = old_index_0[c0_1];
         w_6 = u32(4294967295);
-        w_4 = _S35;
+        w_4 = _S36;
         loop
         {
             if(w_4 < old_index_0[c1_1])
@@ -732,50 +741,50 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             var bond_0 : u32 = (entry_0 >> (u32(1)));
             if(bond_0 < b0_0)
             {
-                _S34 = true;
+                _S35 = true;
             }
             else
             {
-                _S34 = bond_0 >= b1_0;
+                _S35 = bond_0 >= b1_0;
             }
-            if(_S34)
+            if(_S35)
             {
                 w_6 = entry_0;
             }
             w_4 = w_4 + u32(1);
         }
     }
-    if(_S15)
+    if(_S16)
     {
-        var _S36 : u32 = old_index_0[c0_1];
+        var _S37 : u32 = old_index_0[c0_1];
         w_5 = u32(0);
-        q_5 = _S36;
+        q_5 = _S37;
         loop
         {
-            if(w_5 < _S11)
+            if(w_5 < _S12)
             {
             }
             else
             {
                 break;
             }
-            var head_1 : vec4<f32> = children_0[u32(8) * (_S13 + child_by_island_0(parent_3, w_5))];
-            var _S37 : u32 = (bitcast<u32>((head_1.y)));
-            var _S38 : u32 = (bitcast<u32>((head_1.z)));
+            var head_1 : vec4<f32> = children_0[u32(8) * (_S14 + child_by_island_0(parent_3, w_5))];
+            var _S38 : u32 = (bitcast<u32>((head_1.y)));
+            var _S39 : u32 = (bitcast<u32>((head_1.z)));
             w_4 = u32(0);
             loop
             {
-                if(w_4 < _S38)
+                if(w_4 < _S39)
                 {
                 }
                 else
                 {
                     break;
                 }
-                var m_1 : u32 = work_0[_S14 + _S13 + _S37 + w_4];
-                index_0[c0_1 + plan_0[new_chunk_at_0(_S13 + m_1)]] = q_5;
-                var _S39 : u32 = c0_1 + m_1;
-                var at_1 : u32 = q_5 + (old_index_0[_S39 + u32(1)] - old_index_0[_S39]);
+                var m_1 : u32 = work_0[_S15 + _S14 + _S38 + w_4];
+                index_0[c0_1 + plan_0[new_chunk_at_0(_S14 + m_1)]] = q_5;
+                var _S40 : u32 = c0_1 + m_1;
+                var at_1 : u32 = q_5 + (old_index_0[_S40 + u32(1)] - old_index_0[_S40]);
                 w_4 = w_4 + u32(1);
                 q_5 = at_1;
             }
@@ -786,22 +795,22 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     m_0 = tid_0;
     loop
     {
-        if(m_0 < _S12)
+        if(m_0 < _S13)
         {
         }
         else
         {
             break;
         }
-        var _S40 : u32 = index_0[c0_1 + plan_0[new_chunk_at_0(_S13 + m_0)]];
-        var _S41 : u32 = c0_1 + m_0;
-        var _S42 : u32 = _S41 + u32(1);
-        var _S43 : u32 = old_index_0[_S42] - old_index_0[_S41];
-        w_4 = old_index_0[_S41];
+        var _S41 : u32 = index_0[c0_1 + plan_0[new_chunk_at_0(_S14 + m_0)]];
+        var _S42 : u32 = c0_1 + m_0;
+        var _S43 : u32 = _S42 + u32(1);
+        var _S44 : u32 = old_index_0[_S43] - old_index_0[_S42];
+        w_4 = old_index_0[_S42];
         w_5 = u32(0);
         loop
         {
-            if(w_4 < old_index_0[_S42])
+            if(w_4 < old_index_0[_S43])
             {
             }
             else
@@ -829,21 +838,21 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
                 w_4 = w_4 + u32(1);
                 continue;
             }
-            index_0[_S40 + w_5] = u32(2) * nb_2 + ((entry_1 & (u32(1))));
+            index_0[_S41 + w_5] = u32(2) * nb_2 + ((entry_1 & (u32(1))));
             w_5 = w_5 + u32(1);
             w_4 = w_4 + u32(1);
         }
         q_5 = w_5;
         loop
         {
-            if(q_5 < _S43)
+            if(q_5 < _S44)
             {
             }
             else
             {
                 break;
             }
-            index_0[_S40 + q_5] = w_6;
+            index_0[_S41 + q_5] = w_6;
             q_5 = q_5 + u32(1);
         }
         m_0 = m_0 + u32(64);
@@ -852,34 +861,34 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     w_4 = tid_0;
     loop
     {
-        if(w_4 < _S11)
+        if(w_4 < _S12)
         {
         }
         else
         {
             break;
         }
-        var slot_5 : u32 = _S13 + w_4;
+        var slot_5 : u32 = _S14 + w_4;
         var island_2 : u32 = plan_0[child_island_at_0(slot_5)];
-        var _S44 : u32 = u32(8) * slot_5;
-        var head_2 : vec4<f32> = children_0[_S44];
-        var _S45 : u32 = (bitcast<u32>((head_2.y)));
+        var _S45 : u32 = u32(8) * slot_5;
+        var head_2 : vec4<f32> = children_0[_S45];
+        var _S46 : u32 = (bitcast<u32>((head_2.y)));
         var count_1 : u32 = (bitcast<u32>((head_2.z)));
         var anchored_0 : bool = (bitcast<u32>((head_2.w))) != u32(0);
-        var com_0 : vec4<f32> = children_0[_S44 + u32(1)];
-        var i0_1 : vec3<f32> = children_0[_S44 + u32(2)].xyz;
-        var i1_1 : vec3<f32> = children_0[_S44 + u32(3)].xyz;
-        var i2_1 : vec3<f32> = children_0[_S44 + u32(4)].xyz;
-        var v_2 : vec3<f32> = children_0[_S44 + u32(5)].xyz;
-        var w_8 : vec3<f32> = children_0[_S44 + u32(6)].xyz;
-        var _S46 : vec3<f32> = vec3<f32>(0.0f);
+        var com_0 : vec4<f32> = children_0[_S45 + u32(1)];
+        var i0_1 : vec3<f32> = children_0[_S45 + u32(2)].xyz;
+        var i1_1 : vec3<f32> = children_0[_S45 + u32(3)].xyz;
+        var i2_1 : vec3<f32> = children_0[_S45 + u32(4)].xyz;
+        var v_2 : vec3<f32> = children_0[_S45 + u32(5)].xyz;
+        var w_8 : vec3<f32> = children_0[_S45 + u32(6)].xyz;
+        var _S47 : vec3<f32> = vec3<f32>(0.0f);
         w_5 = u32(4294967295);
         scaled_0 = false;
         q_5 = u32(0);
         var wmass_0 : f32 = 0.0f;
-        var wmoment_0 : vec3<f32> = _S46;
+        var wmoment_0 : vec3<f32> = _S47;
         var su_mass_0 : f32 = 0.0f;
-        var su_0 : vec3<f32> = _S46;
+        var su_0 : vec3<f32> = _S47;
         loop
         {
             if(q_5 < count_1)
@@ -889,11 +898,11 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             {
                 break;
             }
-            var m_2 : u32 = work_0[_S14 + _S13 + _S45 + q_5];
-            var _S47 : u32 = min(w_5, plan_0[new_chunk_at_0(_S13 + m_2)]);
-            var _S48 : u32 = c0_1 + m_2;
-            var ctr_0 : vec4<f32> = old_chunks_0[chunk_word_0(_S48, u32(0))];
-            var mu_0 : f32 = old_chunks_0[chunk_word_0(_S48, u32(7))].x;
+            var m_2 : u32 = work_0[_S15 + _S14 + _S46 + q_5];
+            var _S48 : u32 = min(w_5, plan_0[new_chunk_at_0(_S14 + m_2)]);
+            var _S49 : u32 = c0_1 + m_2;
+            var ctr_0 : vec4<f32> = old_chunks_0[chunk_word_0(_S49, u32(0))];
+            var mu_0 : f32 = old_chunks_0[chunk_word_0(_S49, u32(7))].x;
             if(scaled_0)
             {
                 scaled_0 = true;
@@ -902,15 +911,15 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             {
                 scaled_0 = mu_0 != 1.0f;
             }
-            var _S49 : f32 = ctr_0.w;
-            var wmass_1 : f32 = wmass_0 + _S49 * mu_0;
-            var _S50 : vec3<f32> = vec3<f32>(_S49);
-            var wmoment_1 : vec3<f32> = wmoment_0 + ctr_0.xyz * _S50 * vec3<f32>(mu_0);
-            var su_mass_1 : f32 = su_mass_0 + _S49;
-            var su_1 : vec3<f32> = su_0 + old_state_0[u32(4) * _S48].xyz * _S50;
-            var _S51 : u32 = q_5 + u32(1);
-            w_5 = _S47;
-            q_5 = _S51;
+            var _S50 : f32 = ctr_0.w;
+            var wmass_1 : f32 = wmass_0 + _S50 * mu_0;
+            var _S51 : vec3<f32> = vec3<f32>(_S50);
+            var wmoment_1 : vec3<f32> = wmoment_0 + ctr_0.xyz * _S51 * vec3<f32>(mu_0);
+            var su_mass_1 : f32 = su_mass_0 + _S50;
+            var su_1 : vec3<f32> = su_0 + old_state_0[u32(4) * _S49].xyz * _S51;
+            var _S52 : u32 = q_5 + u32(1);
+            w_5 = _S48;
+            q_5 = _S52;
             wmass_0 = wmass_1;
             wmoment_0 = wmoment_1;
             su_mass_0 = su_mass_1;
@@ -931,9 +940,9 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         if(scaled_0)
         {
             t_1 = u32(0);
-            w0_0 = _S46;
-            w1_0 = _S46;
-            w2_0 = _S46;
+            w0_0 = _S47;
+            w1_0 = _S47;
+            w2_0 = _S47;
             loop
             {
                 if(t_1 < count_1)
@@ -943,15 +952,15 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
                 {
                     break;
                 }
-                var _S52 : u32 = c0_1 + work_0[_S14 + _S13 + _S45 + t_1];
-                var ctr_1 : vec4<f32> = old_chunks_0[chunk_word_0(_S52, u32(0))];
+                var _S53 : u32 = c0_1 + work_0[_S15 + _S14 + _S46 + t_1];
+                var ctr_1 : vec4<f32> = old_chunks_0[chunk_word_0(_S53, u32(0))];
                 var rr_0 : vec3<f32> = ctr_1.xyz - wcom_0;
                 var dd_0 : f32 = dot(rr_0, rr_0);
-                var _S53 : vec3<f32> = vec3<f32>(ctr_1.w);
-                var _S54 : vec3<f32> = vec3<f32>(old_chunks_0[chunk_word_0(_S52, u32(7))].x);
-                var w0_1 : vec3<f32> = w0_0 + (old_chunks_0[chunk_word_0(_S52, u32(1))].xyz + (vec3<f32>(dd_0, 0.0f, 0.0f) - vec3<f32>(rr_0.x) * rr_0) * _S53) * _S54;
-                var w1_1 : vec3<f32> = w1_0 + (old_chunks_0[chunk_word_0(_S52, u32(2))].xyz + (vec3<f32>(0.0f, dd_0, 0.0f) - vec3<f32>(rr_0.y) * rr_0) * _S53) * _S54;
-                var w2_1 : vec3<f32> = w2_0 + (old_chunks_0[chunk_word_0(_S52, u32(3))].xyz + (vec3<f32>(0.0f, 0.0f, dd_0) - vec3<f32>(rr_0.z) * rr_0) * _S53) * _S54;
+                var _S54 : vec3<f32> = vec3<f32>(ctr_1.w);
+                var _S55 : vec3<f32> = vec3<f32>(old_chunks_0[chunk_word_0(_S53, u32(7))].x);
+                var w0_1 : vec3<f32> = w0_0 + (old_chunks_0[chunk_word_0(_S53, u32(1))].xyz + (vec3<f32>(dd_0, 0.0f, 0.0f) - vec3<f32>(rr_0.x) * rr_0) * _S54) * _S55;
+                var w1_1 : vec3<f32> = w1_0 + (old_chunks_0[chunk_word_0(_S53, u32(2))].xyz + (vec3<f32>(0.0f, dd_0, 0.0f) - vec3<f32>(rr_0.y) * rr_0) * _S54) * _S55;
+                var w2_1 : vec3<f32> = w2_0 + (old_chunks_0[chunk_word_0(_S53, u32(3))].xyz + (vec3<f32>(0.0f, 0.0f, dd_0) - vec3<f32>(rr_0.z) * rr_0) * _S54) * _S55;
                 t_1 = t_1 + u32(1);
                 w0_0 = w0_1;
                 w1_0 = w1_1;
@@ -972,9 +981,9 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         var x1_0 : vec3<f32>;
         var x2_0 : vec3<f32>;
         inverse3_0(w0_0, w1_0, w2_0, &(x0_0), &(x1_0), &(x2_0));
-        var _S55 : u32 = u32(5) * p_1;
-        var q_6 : Quat_0 = quat_of_0(frames_0[_S55]);
-        var pos_0 : vec3<f32> = frames_0[_S55 + u32(4)].xyz;
+        var _S56 : u32 = u32(5) * p_1;
+        var q_6 : Quat_0 = quat_of_0(frames_0[_S56]);
+        var pos_0 : vec3<f32> = frames_0[_S56 + u32(4)].xyz;
         var pos_1 : vec3<f32>;
         if(!anchored_0)
         {
@@ -984,8 +993,8 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         {
             pos_1 = pos_0;
         }
-        var _S56 : vec3<f32> = inverse_rotate_0(q_6, w_8);
-        var iw_0 : vec3<f32> = rotate_0(q_6, vec3<f32>(dot(i0_1, _S56), dot(i1_1, _S56), dot(i2_1, _S56)));
+        var _S57 : vec3<f32> = inverse_rotate_0(q_6, w_8);
+        var iw_0 : vec3<f32> = rotate_0(q_6, vec3<f32>(dot(i0_1, _S57), dot(i1_1, _S57), dot(i2_1, _S57)));
         if(anchored_0)
         {
             m_0 = u32(1);
@@ -1019,8 +1028,8 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             rec_0[t_1] = vec4<f32>(0.0f);
             t_1 = t_1 + u32(1);
         }
-        var _S57 : u32 = c0_1 + w_5;
-        rec_0[i32(0)] = (bitcast<vec4<f32>>((vec4<u32>(_S57, _S57 + count_1, bfirst_0, bend_0))));
+        var _S58 : u32 = c0_1 + w_5;
+        rec_0[i32(0)] = (bitcast<vec4<f32>>((vec4<u32>(_S58, _S58 + count_1, bfirst_0, bend_0))));
         rec_0[i32(1)] = (bitcast<vec4<f32>>((vec4<u32>(flags_0, u32(0), u32(0), params_0.substeps_0))));
         rec_0[i32(2)] = com_0;
         rec_0[i32(3)] = vec4<f32>(i0_1, 0.0f);
@@ -1029,53 +1038,53 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         rec_0[i32(6)] = vec4<f32>(v0_0, 0.0f);
         rec_0[i32(7)] = vec4<f32>(v1_0, 0.0f);
         rec_0[i32(8)] = vec4<f32>(v2_0, 0.0f);
-        var _S58 : f32;
+        var _S59 : f32;
         if(scaled_0)
         {
-            _S58 = wmass_0;
+            _S59 = wmass_0;
         }
         else
         {
-            _S58 = com_0.w;
+            _S59 = com_0.w;
         }
-        rec_0[i32(9)] = vec4<f32>(wcom_0, _S58);
+        rec_0[i32(9)] = vec4<f32>(wcom_0, _S59);
         rec_0[i32(10)] = vec4<f32>(x0_0, 0.0f);
         rec_0[i32(11)] = vec4<f32>(x1_0, 0.0f);
         rec_0[i32(12)] = vec4<f32>(x2_0, 0.0f);
         rec_0[i32(13)] = quat_vec_0(q_6);
         rec_0[i32(14)] = vec4<f32>(pos_1, 0.0f);
-        var _S59 : vec3<f32>;
-        if(anchored_0)
-        {
-            _S59 = _S46;
-        }
-        else
-        {
-            _S59 = v_2;
-        }
-        rec_0[i32(16)] = vec4<f32>(_S59, 0.0f);
         var _S60 : vec3<f32>;
         if(anchored_0)
         {
-            _S60 = _S46;
+            _S60 = _S47;
         }
         else
         {
-            _S60 = w_8;
+            _S60 = v_2;
         }
-        rec_0[i32(18)] = vec4<f32>(_S60, 0.0f);
-        rec_0[i32(19)] = (bitcast<vec4<f32>>((vec4<u32>(u32(0), u32(0), u32(0), plan_0[child_id_at_0(slot_5)]))));
-        rec_0[i32(21)] = vec4<f32>(0.0f, 0.0f, 0.0f, (bitcast<f32>((u32(2139095040)))));
+        rec_0[i32(16)] = vec4<f32>(_S60, 0.0f);
         var _S61 : vec3<f32>;
         if(anchored_0)
         {
-            _S61 = _S46;
+            _S61 = _S47;
         }
         else
         {
-            _S61 = iw_0;
+            _S61 = w_8;
         }
-        rec_0[i32(23)] = vec4<f32>(_S61, 0.0f);
+        rec_0[i32(18)] = vec4<f32>(_S61, 0.0f);
+        rec_0[i32(19)] = (bitcast<vec4<f32>>((vec4<u32>(u32(0), u32(0), u32(0), plan_0[child_id_at_0(slot_5)]))));
+        rec_0[i32(21)] = vec4<f32>(0.0f, 0.0f, 0.0f, (bitcast<f32>((u32(2139095040)))));
+        var _S62 : vec3<f32>;
+        if(anchored_0)
+        {
+            _S62 = _S47;
+        }
+        else
+        {
+            _S62 = iw_0;
+        }
+        rec_0[i32(23)] = vec4<f32>(_S62, 0.0f);
         var t_2 : u32 = u32(0);
         loop
         {
@@ -1092,29 +1101,40 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         if((params_0.resident_0) != u32(0))
         {
             var sl_0 : vec4<u32> = spawn_slots_0[slot_5];
-            var _S62 : u32 = u32(2) * slot_5;
-            var pr_0 : vec4<f32> = spawn_extras_0[_S62 + u32(1)];
+            var _S63 : u32 = u32(2) * slot_5;
+            var pr_0 : vec4<f32> = spawn_extras_0[_S63 + u32(1)];
             var at_2 : u32 = params_0.engine_base_0 + u32(3) * island_2;
+            var _S64 : u32 = sl_0.w;
+            var body_range_0 : vec3<f32>;
+            if(_S64 != u32(0))
+            {
+                var _S65 : u32 = sl_0.y;
+                body_range_0 = (bitcast<vec3<f32>>((vec3<u32>(sl_0.x, _S65, _S65 + sl_0.z))));
+            }
+            else
+            {
+                body_range_0 = (bitcast<vec3<f32>>((vec3<u32>(u32(4294967295), u32(0), u32(0)))));
+            }
             if(anchored_0)
             {
-                _S34 = true;
+                _S35 = true;
             }
             else
             {
-                _S34 = (sl_0.w) == u32(0);
+                _S35 = _S64 == u32(0);
             }
-            if(_S34)
+            if(_S35)
             {
-                ctab_0[at_2] = vec4<f32>((bitcast<f32>((u32(4294967295)))), 0.0f, 0.0f, 0.0f);
-                var _S63 : vec4<f32> = vec4<f32>(0.0f);
-                ctab_0[at_2 + u32(1)] = _S63;
-                ctab_0[at_2 + u32(2)] = _S63;
+                ctab_0[at_2] = vec4<f32>((bitcast<f32>((u32(4294967295)))), body_range_0);
+                var _S66 : vec4<f32> = vec4<f32>(0.0f);
+                ctab_0[at_2 + u32(1)] = _S66;
+                ctab_0[at_2 + u32(2)] = _S66;
             }
             else
             {
-                ctab_0[at_2] = vec4<f32>((bitcast<f32>((sl_0.x))), 0.0f, 0.0f, 0.0f);
+                ctab_0[at_2] = vec4<f32>((bitcast<f32>((sl_0.x))), body_range_0);
                 ctab_0[at_2 + u32(1)] = vec4<f32>(- pr_0.x, - pr_0.y, - pr_0.z, pr_0.w);
-                ctab_0[at_2 + u32(2)] = vec4<f32>(spawn_extras_0[_S62].xyz, 0.0f);
+                ctab_0[at_2 + u32(2)] = vec4<f32>(spawn_extras_0[_S63].xyz, 0.0f);
             }
         }
         gate_0[params_0.gate_flag_base_0 + island_2] = vec4<f32>(0.0f);
@@ -1127,7 +1147,16 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
 @workgroup_size(64, 1, 1)
 fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
 {
+    var _S67 : bool;
     if(control_0[i32(0)] != u32(0))
+    {
+        _S67 = true;
+    }
+    else
+    {
+        _S67 = control_0[u32(1)] == u32(0);
+    }
+    if(_S67)
     {
         return;
     }
@@ -1155,16 +1184,15 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
         return;
     }
     var e_1 : u32 = plan_0[order_at_0(i_3)];
-    var _S64 : bool;
     if(plan_0[order_at_0(i_3)] >= control_0[u32(2)])
     {
-        _S64 = true;
+        _S67 = true;
     }
     else
     {
-        _S64 = e_1 == i_3;
+        _S67 = e_1 == i_3;
     }
-    if(_S64)
+    if(_S67)
     {
         return;
     }
@@ -1182,13 +1210,13 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
         t_3 = t_3 + u32(1);
     }
     var r_3 : vec4<f32> = old_islands_0[island_word_0(e_1, u32(0))];
-    var _S65 : u32 = (bitcast<u32>((r_3.y)));
+    var _S68 : u32 = (bitcast<u32>((r_3.y)));
     var b0_1 : u32 = (bitcast<u32>((r_3.z)));
-    var _S66 : u32 = (bitcast<u32>((r_3.w)));
+    var _S69 : u32 = (bitcast<u32>((r_3.w)));
     var c_3 : u32 = (bitcast<u32>((r_3.x)));
     loop
     {
-        if(c_3 < _S65)
+        if(c_3 < _S68)
         {
         }
         else
@@ -1201,17 +1229,17 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
     var b_2 : u32 = b0_1;
     loop
     {
-        if(b_2 < _S66)
+        if(b_2 < _S69)
         {
         }
         else
         {
             break;
         }
-        var _S67 : u32 = bond_word_0(b_2, u32(14));
-        var ids_3 : vec4<f32> = bonds_0[_S67];
+        var _S70 : u32 = bond_word_0(b_2, u32(14));
+        var ids_3 : vec4<f32> = bonds_0[_S70];
         ids_3[i32(3)] = (bitcast<f32>((i_3)));
-        bonds_0[_S67] = ids_3;
+        bonds_0[_S70] = ids_3;
         b_2 = b_2 + u32(1);
     }
     if((params_0.resident_0) != u32(0))
@@ -1238,7 +1266,16 @@ fn layout_moved(@builtin(global_invocation_id) id_1 : vec3<u32>)
 @workgroup_size(64, 1, 1)
 fn layout_copy(@builtin(global_invocation_id) id_2 : vec3<u32>)
 {
+    var _S71 : bool;
     if(control_0[i32(0)] != u32(0))
+    {
+        _S71 = true;
+    }
+    else
+    {
+        _S71 = control_0[u32(1)] == u32(0);
+    }
+    if(_S71)
     {
         return;
     }
@@ -1295,8 +1332,8 @@ fn layout_copy(@builtin(global_invocation_id) id_2 : vec3<u32>)
             {
                 break;
             }
-            var _S68 : u32 = island_word_0(i_4, t_4);
-            island_copy_0[_S68] = islands_0[_S68];
+            var _S72 : u32 = island_word_0(i_4, t_4);
+            island_copy_0[_S72] = islands_0[_S72];
             t_4 = t_4 + u32(1);
         }
     }

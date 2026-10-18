@@ -191,6 +191,7 @@ impl GpuWorld {
         let gpu_colliders = std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1");
         let collider_cap = e.collider_capacity();
         let frames: Vec<Option<EngineFrame>> = m.clusters.iter().map(|cl| if cl.anchored { None } else { e.engine_frame(BodyKey::Cluster(cl.id)) }).collect();
+        let body_records: Vec<Option<[u32; 3]>> = m.clusters.iter().map(|cl| e.retire_record(BodyKey::Cluster(cl.id))).collect();
         let chunks = self.solver.gpu_chunks().len().max(1) as u32;
         let dt = self.scene.sim.frame_dt;
         match self.resident.as_mut() {
@@ -209,7 +210,7 @@ impl GpuWorld {
             }
             Some(r) if r.substeps >= substeps && r.ingest_chunks() == chunks => {
                 r.ingest.set_colliders(gpu, &table);
-                r.qs.rebuild(gpu, &self.solver, &frames, dt);
+                r.qs.rebuild(gpu, &self.solver, &frames, &body_records, dt);
                 r.engine_version = version;
                 r.layout_generation = generation;
             }
@@ -217,7 +218,7 @@ impl GpuWorld {
                 let cap = substeps.max(r.substeps).max(1).next_power_of_two();
                 r.ingest = EngineIngest::new(gpu, rows, cap, bodies, chunks, &table);
                 r.substeps = cap;
-                r.qs.rebuild(gpu, &self.solver, &frames, dt);
+                r.qs.rebuild(gpu, &self.solver, &frames, &body_records, dt);
                 r.engine_version = version;
                 r.layout_generation = generation;
             }
@@ -226,7 +227,7 @@ impl GpuWorld {
                 self.resident = Some(ResidentState {
                     ingest: EngineIngest::new(gpu, rows, cap, bodies, chunks, &table),
                     substeps: cap,
-                    qs: ResidentQs::new(gpu, &self.solver, &frames, dt),
+                    qs: ResidentQs::new(gpu, &self.solver, &frames, &body_records, dt),
                     engine_version: version,
                     layout_generation: generation,
                     gpu_laid_out: false,
@@ -550,7 +551,9 @@ impl GpuWorld {
             // `STRESS_GPU_LAYOUT=1` (M4, with the spawn): the tables laid out on the GPU too.
             let layout_live = std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1");
             let live = layout_live || std::env::var("STRESS_GPU_SPAWN").is_ok_and(|v| v == "1");
-            let spawned = if layout_live {
+            let spawned = if layout_live && std::env::var("STRESS_GPU_PASS").is_ok_and(|v| v == "1") {
+                self.split_pass_gpu(gpu, &engine, &out.disconnected)
+            } else if layout_live {
                 self.split_pass_live(gpu, &engine, &out.disconnected)
             } else if live {
                 self.spawn_live(gpu, &engine, &out.disconnected, false)
@@ -924,6 +927,11 @@ impl GpuWorld {
         if let Some(r) = self.resident.as_mut() {
             r.colliders_refreshed = refreshed;
         }
+        Some(Self::live_spawn(ids, &layout_chunks, &table, result))
+    }
+
+    /// A live spawn from a split pass's result (`split_pass_live`, `split_pass_gpu`).
+    fn live_spawn(ids: Vec<u64>, layout_chunks: &[(usize, usize)], table: &crate::gpu_split::PartTable, result: crate::gpu_split::PassResult) -> LiveSpawn {
         let children = result
             .children
             .iter()
@@ -946,7 +954,45 @@ impl GpuWorld {
                     .collect()
             })
             .collect();
-        Some(LiveSpawn { ids, children, bodies: result.bodies, comps })
+        LiveSpawn { ids, children, bodies: result.bodies, comps }
+    }
+
+    /// M4, `STRESS_GPU_PASS=1`: the split pass with GPU-made inputs (`gpu_pass.rs`): its
+    /// parents from the cascade's status, its counts from the GPU's counters (set from the
+    /// host here), checked against the host's parents.
+    fn split_pass_gpu(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>, parents: &[usize]) -> Option<LiveSpawn> {
+        if !self.solver.can_split_in_place(0) {
+            return None;
+        }
+        let ids: Vec<u64> = parents.iter().map(|&ci| self.solver.mirror.clusters[ci].id).collect();
+        let layout_chunks = self.solver.gpu_chunks().to_vec();
+        let table = self.part_table(gpu, engine)?;
+        let e = engine.borrow();
+        let (bodies_buf, cols_buf, max_bodies) = e.spawn_buffers()?;
+        let max_colliders = e.collider_capacity();
+        let (first_body, first_collider) = e.body_counts();
+        let r = self.resident.as_ref()?;
+        let colliders = r.colliders.as_ref().filter(|c| c.capacity() >= max_colliders).map(|c| (c, &r.ingest.collider_info));
+        let refreshed = colliders.is_some();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
+        self.solver.encode_gpu_split_pass(gpu, &mut encoder, target, max_colliders, &table, r.qs.layout(), colliders, false)?;
+        self.solver.set_gpu_pass_counters(gpu, first_body, first_collider);
+        gpu.queue.submit([encoder.finish()]);
+        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
+        let (result, gpu_parents) = self.solver.read_gpu_split_pass(gpu, &target)?;
+        drop(e);
+        if gpu_parents != parents {
+            eprintln!("gpu split pass: parents {gpu_parents:?}, the host's {parents:?}");
+            return None;
+        }
+        if result.aborted {
+            return None;
+        }
+        if let Some(r) = self.resident.as_mut() {
+            r.colliders_refreshed = refreshed;
+        }
+        Some(Self::live_spawn(ids, &layout_chunks, &table, result))
     }
 
     /// The engine adopts a live spawn's bodies, named by the host's split (its events).

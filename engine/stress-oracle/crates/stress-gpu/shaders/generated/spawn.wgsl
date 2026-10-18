@@ -84,6 +84,13 @@ fn spawn_offsets(@builtin(global_invocation_id) id_0 : vec3<u32>)
     var colliders_needed_0 : u32;
     var k_0 : u32;
     var j_0 : u32;
+    if(control_0[u32(1)] == u32(0))
+    {
+        control_0[u32(0)] = u32(0);
+        control_0[u32(8)] = control_0[u32(4)];
+        control_0[u32(9)] = control_0[u32(5)];
+        return;
+    }
     var body_0 : u32 = control_0[u32(4)];
     var collider_0 : u32 = control_0[u32(5)];
     var _S1 : u32 = total_slots_0();
@@ -201,6 +208,19 @@ fn spawn_offsets(@builtin(global_invocation_id) id_0 : vec3<u32>)
         var _S7 : u32 = parent_1.z;
         if(_S7 < u32(2))
         {
+            k_0 = u32(0);
+            loop
+            {
+                if(k_0 < _S7)
+                {
+                }
+                else
+                {
+                    break;
+                }
+                slots_0[parent_1.y + k_0] = vec4<u32>(vec4<i32>(i32(0)));
+                k_0 = k_0 + u32(1);
+            }
             p_0 = p_0 + u32(1);
             continue;
         }
@@ -572,6 +592,14 @@ fn spawn_bodies(@builtin(global_invocation_id) id_1 : vec3<u32>)
     else
     {
         _S31 = (slots_0[slot_3].w) == u32(0);
+    }
+    if(_S31)
+    {
+        _S31 = true;
+    }
+    else
+    {
+        _S31 = control_0[u32(0)] != u32(0);
     }
     if(_S31)
     {

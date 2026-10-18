@@ -93,8 +93,15 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
     (&kernelContext_3)->bodies_0 = bodies_1;
     (&kernelContext_3)->extras_0 = extras_1;
     (&kernelContext_3)->colliders_0 = colliders_1;
-    uint body_0 = *(control_1+4U);
-    uint collider_0 = *(control_1+5U);
+    if((*(control_1+1U)) == 0U)
+    {
+        *((&kernelContext_3)->control_0+0U) = 0U;
+        *((&kernelContext_3)->control_0+8U) = *((&kernelContext_3)->control_0+4U);
+        *((&kernelContext_3)->control_0+9U) = *((&kernelContext_3)->control_0+5U);
+        return;
+    }
+    uint body_0 = *((&kernelContext_3)->control_0+4U);
+    uint collider_0 = *((&kernelContext_3)->control_0+5U);
     uint _S3 = total_slots_0(&kernelContext_3);
     uint p_0 = 0U;
     uint islands_needed_0 = 0U;
@@ -212,6 +219,19 @@ uint4 part_range_0(uint layout_chunk_0, KernelContext_0 thread* kernelContext_2)
         uint _S13 = _S11.z;
         if(_S13 < 2U)
         {
+            k_0 = 0U;
+            for(;;)
+            {
+                if(k_0 < _S13)
+                {
+                }
+                else
+                {
+                    break;
+                }
+                *((&kernelContext_3)->slots_0+(_S11.y + k_0)) = packed_uint4(uint4(int4(int(0)) )) ;
+                k_0 = k_0 + 1U;
+            }
             p_0 = p_0 + 1U;
             continue;
         }
@@ -601,6 +621,14 @@ float4 quat_vec_0(const Quat_0 thread* q_8)
     else
     {
         _S43 = ((uint4(*((&kernelContext_5)->slots_0+slot_3)) ).w) == 0U;
+    }
+    if(_S43)
+    {
+        _S43 = true;
+    }
+    else
+    {
+        _S43 = (*((&kernelContext_5)->control_0+0U)) != 0U;
     }
     if(_S43)
     {

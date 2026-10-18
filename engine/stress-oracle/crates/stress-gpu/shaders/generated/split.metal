@@ -746,36 +746,36 @@ float4 quat_vec_0(const Quat_0 thread* q_7)
     {
         return;
     }
-    uint _S73 = 2U * p_2;
-    float4 _S74 = float4(*((&kernelContext_3)->parent_bodies_0+_S73)) ;
-    uint body_0 = (as_type<uint>((_S74.x)));
+    Island_natural_0 device* _S73 = (&kernelContext_3)->islands_0+(uint4(*((&kernelContext_3)->parents_0+p_2)) ).x;
+    bool _S74;
+    if((((uint4(_S73->info_0) ).x) & 1U) != 0U)
+    {
+        _S74 = ((&kernelContext_3)->params_0->anchored_pose_0) != 0U;
+    }
+    else
+    {
+        _S74 = false;
+    }
+    if(_S74)
+    {
+        uint _S75 = 5U * p_2;
+        *((&kernelContext_3)->frames_0+_S75) = packed_float4(float4(_S73->rotation_0) ) ;
+        packed_float4 _S76 = packed_float4(float4(0.0f) ) ;
+        *((&kernelContext_3)->frames_0+(_S75 + 1U)) = _S76;
+        *((&kernelContext_3)->frames_0+(_S75 + 2U)) = _S76;
+        *((&kernelContext_3)->frames_0+(_S75 + 3U)) = packed_float4(float4((float4(_S73->com_0) ).xyz, 0.0f)) ;
+        *((&kernelContext_3)->frames_0+(_S75 + 4U)) = packed_float4(float4((float4(_S73->position_0) ).xyz + (float4(_S73->position_err_0) ).xyz, 0.0f)) ;
+        return;
+    }
+    uint _S77 = 2U * p_2;
+    float4 _S78 = float4(*((&kernelContext_3)->parent_bodies_0+_S77)) ;
+    uint body_0 = (as_type<uint>((_S78.x)));
     if(body_0 == 4294967295U)
     {
         return;
     }
-    Island_natural_0 device* _S75 = (&kernelContext_3)->islands_0+(uint4(*((&kernelContext_3)->parents_0+p_2)) ).x;
-    bool _S76;
-    if((((uint4(_S75->info_0) ).x) & 1U) != 0U)
-    {
-        _S76 = ((&kernelContext_3)->params_0->anchored_pose_0) != 0U;
-    }
-    else
-    {
-        _S76 = false;
-    }
-    if(_S76)
-    {
-        uint _S77 = 5U * p_2;
-        *((&kernelContext_3)->frames_0+_S77) = packed_float4(float4(_S75->rotation_0) ) ;
-        packed_float4 _S78 = packed_float4(float4(0.0f) ) ;
-        *((&kernelContext_3)->frames_0+(_S77 + 1U)) = _S78;
-        *((&kernelContext_3)->frames_0+(_S77 + 2U)) = _S78;
-        *((&kernelContext_3)->frames_0+(_S77 + 3U)) = packed_float4(float4((float4(_S75->com_0) ).xyz, 0.0f)) ;
-        *((&kernelContext_3)->frames_0+(_S77 + 4U)) = packed_float4(float4((float4(_S75->position_0) ).xyz + (float4(_S75->position_err_0) ).xyz, 0.0f)) ;
-        return;
-    }
-    float3 com_2 = _S74.yzw;
-    Quat_0 principal_0 = quat_of_0(float4(*((&kernelContext_3)->parent_bodies_0+(_S73 + 1U))) );
+    float3 com_2 = _S78.yzw;
+    Quat_0 principal_0 = quat_of_0(float4(*((&kernelContext_3)->parent_bodies_0+(_S77 + 1U))) );
     uint _S79 = 7U * body_0;
     float4 _S80 = float4(*((&kernelContext_3)->engine_bodies_0+_S79)) ;
     Quat_0 orientation_0 = quat_of_0(float4(*((&kernelContext_3)->engine_bodies_0+(_S79 + 1U))) );

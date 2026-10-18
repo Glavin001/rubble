@@ -90,12 +90,20 @@ uint key_of_0(uint4 info_0, KernelContext_0 thread* kernelContext_2)
     (&kernelContext_3)->collider_info_0 = collider_info_1;
     (&kernelContext_3)->islands_0 = islands_1;
     (&kernelContext_3)->chunk_props_0 = chunk_props_1;
+    bool _S3;
     if(control_1[int(0)] != 0U)
+    {
+        _S3 = true;
+    }
+    else
+    {
+        _S3 = (&kernelContext_3)->control_0[1U] == 0U;
+    }
+    if(_S3)
     {
         return;
     }
     uint t_0 = id_0.x;
-    bool _S3;
     if(t_0 < ((&kernelContext_3)->control_0)[1U])
     {
         _S3 = ((uint4(*((&kernelContext_3)->parents_0+t_0)) ).z) >= 2U;
@@ -206,6 +214,14 @@ uint key_of_0(uint4 info_0, KernelContext_0 thread* kernelContext_2)
     }
     else
     {
+        _S17 = (&kernelContext_4)->control_0[1U] == 0U;
+    }
+    if(_S17)
+    {
+        _S17 = true;
+    }
+    else
+    {
         _S17 = (id_1.x) >= ((&kernelContext_4)->params_0->chunk_count_0);
     }
     if(_S17)
@@ -240,6 +256,14 @@ uint key_of_0(uint4 info_0, KernelContext_0 thread* kernelContext_2)
     uint c_0 = id_2.x;
     bool _S20;
     if(control_3[int(0)] != 0U)
+    {
+        _S20 = true;
+    }
+    else
+    {
+        _S20 = (&kernelContext_5)->control_0[1U] == 0U;
+    }
+    if(_S20)
     {
         _S20 = true;
     }

@@ -109,7 +109,7 @@ uint child_order_at(uint slot) { return 16 + cap() + 5 * control[CTL_TOTAL] + co
 [numthreads(1, 1, 1)]
 void layout_plan(uint3 id: SV_DispatchThreadID)
 {
-    if (control[0] != 0)
+    if (control[0] != 0 || control[CTL_PARENTS] == 0)
         return;
     uint n = control[CTL_ISLANDS];
     for (uint i = 0; i < n; i++)
@@ -493,15 +493,17 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             uint4 sl = spawn_slots[slot];
             float4 pr = spawn_extras[2 * slot + 1];
             uint at = params.engine_base + 3 * island;
+            // y-w: its engine body (a fixed one too) and collider range (pass.slang retires it).
+            float3 body_range = sl.w != 0 ? asfloat(uint3(sl.x, sl.y, sl.y + sl.z)) : asfloat(uint3(NONE, 0, 0));
             if (anchored || sl.w == 0)
             {
-                ctab[at] = float4(asfloat(NONE), 0.0, 0.0, 0.0);
+                ctab[at] = float4(asfloat(NONE), body_range);
                 ctab[at + 1] = float4(0.0);
                 ctab[at + 2] = float4(0.0);
             }
             else
             {
-                ctab[at] = float4(asfloat(sl.x), 0.0, 0.0, 0.0);
+                ctab[at] = float4(asfloat(sl.x), body_range);
                 ctab[at + 1] = float4(-pr.x, -pr.y, -pr.z, pr.w);
                 ctab[at + 2] = float4(spawn_extras[2 * slot].xyz, 0.0);
             }
@@ -514,7 +516,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 [numthreads(64, 1, 1)]
 void layout_moved(uint3 id: SV_DispatchThreadID)
 {
-    if (control[0] != 0)
+    if (control[0] != 0 || control[CTL_PARENTS] == 0)
         return;
     uint i = id.x;
     // The sentinel island after the islands (batch control): a blank record.
@@ -554,7 +556,7 @@ void layout_moved(uint3 id: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void layout_copy(uint3 id: SV_DispatchThreadID)
 {
-    if (control[0] != 0)
+    if (control[0] != 0 || control[CTL_PARENTS] == 0)
         return;
     uint i = id.x;
     uint n = plan[0];

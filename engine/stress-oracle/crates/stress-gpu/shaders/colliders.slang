@@ -71,7 +71,7 @@ uint key_of(uint4 info)
 [numthreads(64, 1, 1)]
 void collider_keys(uint3 id: SV_DispatchThreadID)
 {
-    if (control[0] != 0)
+    if (control[0] != 0 || control[CTL_PARENTS] == 0)
         return;
     uint t = id.x;
     // A split parent's colliders, retired with its body (spawn.slang `spawn_retire`).
@@ -110,7 +110,7 @@ void collider_keys(uint3 id: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void collider_slots(uint3 id: SV_DispatchThreadID)
 {
-    if (control[0] != 0 || id.x >= params.chunk_count)
+    if (control[0] != 0 || control[CTL_PARENTS] == 0 || id.x >= params.chunk_count)
         return;
     chunk_slot[key_of(asuint(chunks[params.chunk_words * id.x + 8]))] = id.x;
 }
@@ -120,7 +120,7 @@ void collider_slots(uint3 id: SV_DispatchThreadID)
 void collider_refresh(uint3 id: SV_DispatchThreadID)
 {
     uint c = id.x;
-    if (control[0] != 0 || c >= params.collider_count)
+    if (control[0] != 0 || control[CTL_PARENTS] == 0 || c >= params.collider_count)
         return;
     uint key = collider_key[c];
     if (key == NONE)

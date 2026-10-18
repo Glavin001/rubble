@@ -589,6 +589,8 @@ pub struct GpuSolver {
     pub plan_check: crate::gpu_plan::PlanCheck,
     splitter: Option<crate::gpu_split::GpuSplitter>,
     layouter: Option<crate::gpu_split::GpuLayout>,
+    /// The split pass with GPU-made inputs (`gpu_pass.rs`), made once for the tables' sizes.
+    gpu_pass: Option<crate::gpu_pass::GpuPass>,
     /// GPU layouts against the host's in-place split (`STRESS_GPU_SPLIT_CHECK=1`).
     pub split_layout_check: crate::gpu_split::LayoutCheck,
     /// `STRESS_GPU_COLLIDER_CHECK=1`: the GPU's collider table after its splits against the host's.
@@ -682,6 +684,7 @@ impl GpuSolver {
             planner: None,
             splitter: None,
             layouter: None,
+            gpu_pass: None,
             split_layout_check: Default::default(),
             collider_check: Default::default(),
             island_check: Default::default(),
@@ -3585,6 +3588,102 @@ impl GpuSolver {
         // layout's next generation takes them as they are.
         self.tables_on_gpu = island_copy.is_some() && !result.aborted;
         result
+    }
+
+    /// The static layout parameters a GPU split pass takes (its counts are the GPU's).
+    fn pass_layout_params(&self) -> crate::gpu_split::LayoutParams {
+        let p = self.buffers.params;
+        crate::gpu_split::LayoutParams {
+            island_count: self.layout.islands.len() as u32,
+            next_id: self.mirror.next_cluster_id() as u32,
+            substeps: self.mirror.substeps as u32,
+            chunk_words: (std::mem::size_of::<stress_layout::ChunkStatic>() / 16) as u32,
+            bond_words: (std::mem::size_of::<stress_layout::BondStatic>() / 16) as u32,
+            dyn_words: (std::mem::size_of::<BondDyn>() / 16) as u32,
+            island_words: (std::mem::size_of::<Island>() / 16) as u32,
+            chunk_count: self.layout.chunks.len() as u32,
+            statics_base: p.statics_base,
+            statics_bonds: p.statics_bonds,
+            gate_flag_base: 2 * self.layout.chunks.len() as u32,
+            bond_count: self.layout.bonds.len() as u32,
+            driven: (!self.mirror.config.integrate_rigid) as u32,
+            ..Default::default()
+        }
+    }
+
+    /// The split pass with GPU-made inputs (`STRESS_GPU_PASS=1`, `gpu_pass.rs`), encoded into
+    /// `encoder` after a cascade window: the parents from the cascade's status, the counts
+    /// from the GPU's counters. None when the tables it needs are not there.
+    pub fn encode_gpu_split_pass(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        target: crate::gpu_split::SpawnTarget,
+        max_colliders: u32,
+        table: &crate::gpu_split::PartTable,
+        resident: ResidentLayout,
+        colliders: Option<(&crate::colliders::ColliderRefresh, &wgpu::Buffer)>,
+        resume: bool,
+    ) -> Option<()> {
+        if !capacity_dispatch() {
+            return None;
+        }
+        if self.splitter.is_none() {
+            self.splitter = Some(crate::gpu_split::GpuSplitter::new(gpu));
+        }
+        let layout = self.layouter.get_or_insert_with(|| crate::gpu_split::GpuLayout::new(gpu)).clone_kernels();
+        let b = &self.buffers;
+        let copy = &self.cascade_islands.as_ref()?.1;
+        let status = self.cascade_status.as_ref()?;
+        let args = self.island_args.as_ref()?;
+        let gate = &self.cascade_gate.as_ref()?.buffer;
+        let sizes = [b.chunk_static.size(), b.state.size(), b.bonds_static.size(), b.bond_dyn.size(), b.index.size(), b.islands.size(), resident.ctab.size(), copy.size()];
+        let (cap, chunks) = (self.layout.island_cap, self.layout.chunks.len());
+        if self.gpu_pass.as_ref().is_none_or(|g| !g.fits(cap, chunks, sizes)) {
+            self.gpu_pass = Some(crate::gpu_pass::GpuPass::new(gpu, cap, chunks, self.layout.bonds.len(), sizes));
+        }
+        let lp = self.pass_layout_params();
+        let tables = crate::gpu_pass::PassTables {
+            buffers: [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state],
+            scratch: &b.scratch,
+            gate,
+            resident: (resident.ctab, [resident.props_base, resident.eload_base, resident.pulse_base, resident.pulse_count_base, resident.pulse_cap, resident.engine_base]),
+            status,
+            island_copy: copy,
+            island_args: args,
+            target,
+            max_colliders,
+            table,
+            colliders,
+        };
+        let pass = self.gpu_pass.as_ref().expect("gpu pass");
+        pass.encode(gpu, encoder, self.splitter.as_ref().expect("splitter"), &layout, &tables, lp, resume);
+        Some(())
+    }
+
+    /// The GPU split pass's counters set from the host (live islands, engine bodies and
+    /// colliders, the next cluster id), as they stand.
+    pub fn set_gpu_pass_counters(&self, gpu: &Gpu, bodies: u32, colliders: u32) {
+        if let Some(p) = &self.gpu_pass {
+            gpu.queue.write_buffer(&p.counters, 0, bytemuck::cast_slice(&[self.layout.islands.len() as u32, bodies, colliders, self.mirror.next_cluster_id() as u32]));
+        }
+    }
+
+    /// The last GPU split pass's result (`GpuPass::read_result`): with each child's chunks as
+    /// layout chunk indices (its parent's first chunk added), and the parents split.
+    pub fn read_gpu_split_pass(&mut self, gpu: &Gpu, target: &crate::gpu_split::SpawnTarget) -> Option<(crate::gpu_split::PassResult, Vec<usize>)> {
+        let (mut result, parents) = self.gpu_pass.as_ref()?.read_result(gpu, target);
+        for (list, &ci) in result.children.iter_mut().zip(&parents) {
+            let first = self.layout.islands[ci].range[0];
+            for c in list.iter_mut() {
+                for k in c.chunks.iter_mut() {
+                    *k += first;
+                }
+            }
+        }
+        // The GPU laid out the cascade's island copy and gate too.
+        self.tables_on_gpu = !result.aborted && !parents.is_empty();
+        Some((result, parents))
     }
 
     /// The island capacity of the tables (`island_headroom` past the islands).

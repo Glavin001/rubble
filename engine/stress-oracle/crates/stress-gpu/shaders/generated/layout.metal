@@ -128,7 +128,16 @@ uint child_island_at_0(uint slot_1, KernelContext_0 thread* kernelContext_4)
     (&kernelContext_5)->old_copy_0 = old_copy_1;
     threadgroup uint g_cut_first_1;
     (&kernelContext_5)->g_cut_first_0 = &g_cut_first_1;
+    bool _S4;
     if((*(control_1+int(0))) != 0U)
+    {
+        _S4 = true;
+    }
+    else
+    {
+        _S4 = (*((&kernelContext_5)->control_0+1U)) == 0U;
+    }
+    if(_S4)
     {
         return;
     }
@@ -146,10 +155,10 @@ uint child_island_at_0(uint slot_1, KernelContext_0 thread* kernelContext_4)
         *((&kernelContext_5)->plan_0+order_at_0(i_1)) = i_1;
         i_1 = i_1 + 1U;
     }
-    uint device* _S4 = (&kernelContext_5)->control_0+3U;
+    uint device* _S5 = (&kernelContext_5)->control_0+3U;
     uint q_0 = *((&kernelContext_5)->control_0+1U);
     uint len_0 = n_0;
-    uint next_0 = *_S4;
+    uint next_0 = *_S5;
     for(;;)
     {
         if(q_0 > 0U)
@@ -160,40 +169,40 @@ uint child_island_at_0(uint slot_1, KernelContext_0 thread* kernelContext_4)
             break;
         }
         uint p_0 = q_0 - 1U;
-        uint4 _S5 = uint4(*((&kernelContext_5)->parents_0+p_0)) ;
-        uint _S6 = _S5.z;
-        if(_S6 < 2U)
+        uint4 _S6 = uint4(*((&kernelContext_5)->parents_0+p_0)) ;
+        uint _S7 = _S6.z;
+        if(_S7 < 2U)
         {
             q_0 = p_0;
             continue;
         }
         uint len_1 = len_0 - 1U;
-        uint _S7 = _S5.x;
-        if(_S7 < len_1)
+        uint _S8 = _S6.x;
+        if(_S8 < len_1)
         {
-            *((&kernelContext_5)->plan_0+order_at_0(_S7)) = *((&kernelContext_5)->plan_0+order_at_0(len_1));
+            *((&kernelContext_5)->plan_0+order_at_0(_S8)) = *((&kernelContext_5)->plan_0+order_at_0(len_1));
         }
         k_0 = 0U;
         uint len_2 = len_1;
         uint next_1 = next_0;
         for(;;)
         {
-            if(k_0 < _S6)
+            if(k_0 < _S7)
             {
             }
             else
             {
                 break;
             }
-            uint _S8 = _S5.y;
-            *((&kernelContext_5)->plan_0+order_at_0(len_2)) = n_0 + _S8 + k_0;
-            uint _S9 = len_2 + 1U;
-            uint _S10 = child_id_at_0(_S8 + k_0, &kernelContext_5);
-            *((&kernelContext_5)->plan_0+_S10) = next_1;
-            uint _S11 = next_1 + 1U;
+            uint _S9 = _S6.y;
+            *((&kernelContext_5)->plan_0+order_at_0(len_2)) = n_0 + _S9 + k_0;
+            uint _S10 = len_2 + 1U;
+            uint _S11 = child_id_at_0(_S9 + k_0, &kernelContext_5);
+            *((&kernelContext_5)->plan_0+_S11) = next_1;
+            uint _S12 = next_1 + 1U;
             k_0 = k_0 + 1U;
-            len_2 = _S9;
-            next_1 = _S11;
+            len_2 = _S10;
+            next_1 = _S12;
         }
         len_0 = len_2;
         next_0 = next_1;
@@ -212,8 +221,8 @@ uint child_island_at_0(uint slot_1, KernelContext_0 thread* kernelContext_4)
         {
             break;
         }
-        uint _S12 = old_new_at_0(k_0, &kernelContext_5);
-        *((&kernelContext_5)->plan_0+_S12) = 4294967295U;
+        uint _S13 = old_new_at_0(k_0, &kernelContext_5);
+        *((&kernelContext_5)->plan_0+_S13) = 4294967295U;
         k_0 = k_0 + 1U;
     }
     i_1 = 0U;
@@ -226,17 +235,17 @@ uint child_island_at_0(uint slot_1, KernelContext_0 thread* kernelContext_4)
         {
             break;
         }
-        uint device* _S13 = (&kernelContext_5)->plan_0+order_at_0(i_1);
-        uint e_0 = *_S13;
-        if((*_S13) < n_0)
+        uint device* _S14 = (&kernelContext_5)->plan_0+order_at_0(i_1);
+        uint e_0 = *_S14;
+        if((*_S14) < n_0)
         {
-            uint _S14 = old_new_at_0(e_0, &kernelContext_5);
-            *((&kernelContext_5)->plan_0+_S14) = i_1;
+            uint _S15 = old_new_at_0(e_0, &kernelContext_5);
+            *((&kernelContext_5)->plan_0+_S15) = i_1;
         }
         else
         {
-            uint _S15 = child_island_at_0(e_0 - n_0, &kernelContext_5);
-            *((&kernelContext_5)->plan_0+_S15) = i_1;
+            uint _S16 = child_island_at_0(e_0 - n_0, &kernelContext_5);
+            *((&kernelContext_5)->plan_0+_S16) = i_1;
         }
         i_1 = i_1 + 1U;
     }
@@ -250,8 +259,8 @@ uint island_word_0(uint i_2, uint w_0, KernelContext_0 thread* kernelContext_6)
 
 uint child_order_at_0(uint slot_2, KernelContext_0 thread* kernelContext_7)
 {
-    uint _S16 = cap_0(kernelContext_7);
-    return 16U + _S16 + 5U * *(kernelContext_7->control_0+6U) + *(kernelContext_7->control_0+2U) + kernelContext_7->params_0->bond_count_0 + slot_2;
+    uint _S17 = cap_0(kernelContext_7);
+    return 16U + _S17 + 5U * *(kernelContext_7->control_0+6U) + *(kernelContext_7->control_0+2U) + kernelContext_7->params_0->bond_count_0 + slot_2;
 }
 
 void sort_children_0(uint4 parent_0, KernelContext_0 thread* kernelContext_8)
@@ -266,39 +275,39 @@ void sort_children_0(uint4 parent_0, KernelContext_0 thread* kernelContext_8)
         {
             break;
         }
-        uint _S17 = parent_0.y;
-        uint _S18 = child_island_at_0(_S17 + k_1, kernelContext_8);
-        uint _S19 = *(kernelContext_8->plan_0+_S18);
+        uint _S18 = parent_0.y;
+        uint _S19 = child_island_at_0(_S18 + k_1, kernelContext_8);
+        uint _S20 = *(kernelContext_8->plan_0+_S19);
         uint j_1 = k_1;
         for(;;)
         {
-            bool _S20;
+            bool _S21;
             if(j_1 > 0U)
             {
-                uint _S21 = child_order_at_0(_S17 + j_1 - 1U, kernelContext_8);
-                uint _S22 = child_island_at_0(_S17 + *(kernelContext_8->plan_0+_S21), kernelContext_8);
-                _S20 = (*(kernelContext_8->plan_0+_S22)) > _S19;
+                uint _S22 = child_order_at_0(_S18 + j_1 - 1U, kernelContext_8);
+                uint _S23 = child_island_at_0(_S18 + *(kernelContext_8->plan_0+_S22), kernelContext_8);
+                _S21 = (*(kernelContext_8->plan_0+_S23)) > _S20;
             }
             else
             {
-                _S20 = false;
+                _S21 = false;
             }
-            if(_S20)
+            if(_S21)
             {
             }
             else
             {
                 break;
             }
-            uint _S23 = _S17 + j_1;
-            uint _S24 = child_order_at_0(_S23, kernelContext_8);
-            uint device* _S25 = kernelContext_8->plan_0+_S24;
-            uint _S26 = child_order_at_0(_S23 - 1U, kernelContext_8);
-            *_S25 = *(kernelContext_8->plan_0+_S26);
+            uint _S24 = _S18 + j_1;
+            uint _S25 = child_order_at_0(_S24, kernelContext_8);
+            uint device* _S26 = kernelContext_8->plan_0+_S25;
+            uint _S27 = child_order_at_0(_S24 - 1U, kernelContext_8);
+            *_S26 = *(kernelContext_8->plan_0+_S27);
             j_1 = j_1 - 1U;
         }
-        uint _S27 = child_order_at_0(_S17 + j_1, kernelContext_8);
-        *(kernelContext_8->plan_0+_S27) = k_1;
+        uint _S28 = child_order_at_0(_S18 + j_1, kernelContext_8);
+        *(kernelContext_8->plan_0+_S28) = k_1;
         k_1 = k_1 + 1U;
     }
     return;
@@ -306,14 +315,14 @@ void sort_children_0(uint4 parent_0, KernelContext_0 thread* kernelContext_8)
 
 uint child_by_island_0(uint4 parent_1, uint r_0, KernelContext_0 thread* kernelContext_9)
 {
-    uint _S28 = child_order_at_0(parent_1.y + r_0, kernelContext_9);
-    return *(kernelContext_9->plan_0+_S28);
+    uint _S29 = child_order_at_0(parent_1.y + r_0, kernelContext_9);
+    return *(kernelContext_9->plan_0+_S29);
 }
 
 uint new_chunk_at_0(uint slot_3, KernelContext_0 thread* kernelContext_10)
 {
-    uint _S29 = cap_0(kernelContext_10);
-    return 16U + _S29 + 2U * *(kernelContext_10->control_0+6U) + *(kernelContext_10->control_0+2U) + slot_3;
+    uint _S30 = cap_0(kernelContext_10);
+    return 16U + _S30 + 2U * *(kernelContext_10->control_0+6U) + *(kernelContext_10->control_0+2U) + slot_3;
 }
 
 uint chunk_word_0(uint c_0, uint w_1, KernelContext_0 thread* kernelContext_11)
@@ -323,17 +332,17 @@ uint chunk_word_0(uint c_0, uint w_1, KernelContext_0 thread* kernelContext_11)
 
 void set_chunk_island_0(uint c_1, uint island_0, KernelContext_0 thread* kernelContext_12)
 {
-    uint _S30 = chunk_word_0(c_1, 8U, kernelContext_12);
-    thread float4 info_0 = float4(*(kernelContext_12->chunks_0+_S30)) ;
+    uint _S31 = chunk_word_0(c_1, 8U, kernelContext_12);
+    thread float4 info_0 = float4(*(kernelContext_12->chunks_0+_S31)) ;
     info_0.y = (as_type<float>((island_0)));
-    *(kernelContext_12->chunks_0+_S30) = packed_float4(info_0) ;
+    *(kernelContext_12->chunks_0+_S31) = packed_float4(info_0) ;
     return;
 }
 
 uint child_bonds_at_0(uint slot_4, KernelContext_0 thread* kernelContext_13)
 {
-    uint _S31 = cap_0(kernelContext_13);
-    return 16U + _S31 + 3U * *(kernelContext_13->control_0+6U) + *(kernelContext_13->control_0+2U) + 2U * slot_4;
+    uint _S32 = cap_0(kernelContext_13);
+    return 16U + _S32 + 3U * *(kernelContext_13->control_0+6U) + *(kernelContext_13->control_0+2U) + 2U * slot_4;
 }
 
 uint bond_word_0(uint b_0, uint w_2, KernelContext_0 thread* kernelContext_14)
@@ -343,8 +352,8 @@ uint bond_word_0(uint b_0, uint w_2, KernelContext_0 thread* kernelContext_14)
 
 uint bond_new_at_0(uint b_1, KernelContext_0 thread* kernelContext_15)
 {
-    uint _S32 = cap_0(kernelContext_15);
-    return 16U + _S32 + 5U * *(kernelContext_15->control_0+6U) + *(kernelContext_15->control_0+2U) + b_1;
+    uint _S33 = cap_0(kernelContext_15);
+    return 16U + _S33 + 5U * *(kernelContext_15->control_0+6U) + *(kernelContext_15->control_0+2U) + b_1;
 }
 
 void inverse3_0(float3 r0_0, float3 r1_0, float3 r2_0, float3 thread* i0_0, float3 thread* i1_0, float3 thread* i2_0)
@@ -400,9 +409,9 @@ float3 inverse_rotate_0(const Quat_0 thread* q_3, float3 v_1)
     (&c_2)->x_0 = - q_3->x_0;
     (&c_2)->y_0 = - q_3->y_0;
     (&c_2)->z_0 = - q_3->z_0;
-    thread Quat_0 _S33 = c_2;
-    float3 _S34 = rotate_0(&_S33, v_1);
-    return _S34;
+    thread Quat_0 _S34 = c_2;
+    float3 _S35 = rotate_0(&_S34, v_1);
+    return _S35;
 }
 
 float4 quat_vec_0(const Quat_0 thread* q_4)
@@ -459,58 +468,58 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     {
         return;
     }
-    uint4 _S35 = uint4(*((&kernelContext_16)->parents_0+p_1)) ;
-    uint _S36 = _S35.z;
-    if(_S36 < 2U)
+    uint4 _S36 = uint4(*((&kernelContext_16)->parents_0+p_1)) ;
+    uint _S37 = _S36.z;
+    if(_S37 < 2U)
     {
         return;
     }
-    uint _S37 = island_word_0(_S35.x, 0U, &kernelContext_16);
-    float4 _S38 = float4(*((&kernelContext_16)->old_islands_0+_S37)) ;
-    uint c0_1 = (as_type<uint>((_S38.x)));
-    uint c1_1 = (as_type<uint>((_S38.y)));
-    uint b0_0 = (as_type<uint>((_S38.z)));
-    uint b1_0 = (as_type<uint>((_S38.w)));
-    uint _S39 = c1_1 - c0_1;
-    uint _S40 = _S35.y;
-    uint _S41 = *((&kernelContext_16)->control_0+6U);
-    bool _S42 = tid_0 == 0U;
+    uint _S38 = island_word_0(_S36.x, 0U, &kernelContext_16);
+    float4 _S39 = float4(*((&kernelContext_16)->old_islands_0+_S38)) ;
+    uint c0_1 = (as_type<uint>((_S39.x)));
+    uint c1_1 = (as_type<uint>((_S39.y)));
+    uint b0_0 = (as_type<uint>((_S39.z)));
+    uint b1_0 = (as_type<uint>((_S39.w)));
+    uint _S40 = c1_1 - c0_1;
+    uint _S41 = _S36.y;
+    uint _S42 = *((&kernelContext_16)->control_0+6U);
+    bool _S43 = tid_0 == 0U;
     uint m_0;
     uint w_6;
     uint w_7;
-    if(_S42)
+    if(_S43)
     {
-        sort_children_0(_S35, &kernelContext_16);
+        sort_children_0(_S36, &kernelContext_16);
         m_0 = 0U;
         w_6 = 0U;
         for(;;)
         {
-            if(m_0 < _S36)
+            if(m_0 < _S37)
             {
             }
             else
             {
                 break;
             }
-            uint _S43 = child_by_island_0(_S35, m_0, &kernelContext_16);
-            float4 _S44 = float4(*((&kernelContext_16)->children_0+8U * (_S40 + _S43))) ;
-            uint _S45 = (as_type<uint>((_S44.y)));
-            uint _S46 = (as_type<uint>((_S44.z)));
+            uint _S44 = child_by_island_0(_S36, m_0, &kernelContext_16);
+            float4 _S45 = float4(*((&kernelContext_16)->children_0+8U * (_S41 + _S44))) ;
+            uint _S46 = (as_type<uint>((_S45.y)));
+            uint _S47 = (as_type<uint>((_S45.z)));
             w_7 = 0U;
             for(;;)
             {
-                if(w_7 < _S46)
+                if(w_7 < _S47)
                 {
                 }
                 else
                 {
                     break;
                 }
-                uint _S47 = new_chunk_at_0(_S40 + (&kernelContext_16)->work_0[_S41 + _S40 + _S45 + w_7], &kernelContext_16);
-                *((&kernelContext_16)->plan_0+_S47) = w_6;
-                uint _S48 = w_6 + 1U;
+                uint _S48 = new_chunk_at_0(_S41 + (&kernelContext_16)->work_0[_S42 + _S41 + _S46 + w_7], &kernelContext_16);
+                *((&kernelContext_16)->plan_0+_S48) = w_6;
+                uint _S49 = w_6 + 1U;
                 w_7 = w_7 + 1U;
-                w_6 = _S48;
+                w_6 = _S49;
             }
             m_0 = m_0 + 1U;
         }
@@ -519,18 +528,18 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     m_0 = tid_0;
     for(;;)
     {
-        if(m_0 < _S39)
+        if(m_0 < _S40)
         {
         }
         else
         {
             break;
         }
-        uint _S49 = _S40 + m_0;
-        uint _S50 = new_chunk_at_0(_S49, &kernelContext_16);
-        uint nk_0 = *((&kernelContext_16)->plan_0+_S50);
-        uint _S51 = child_island_at_0(_S40 + (&kernelContext_16)->work_0[_S49], &kernelContext_16);
-        uint island_1 = *((&kernelContext_16)->plan_0+_S51);
+        uint _S50 = _S41 + m_0;
+        uint _S51 = new_chunk_at_0(_S50, &kernelContext_16);
+        uint nk_0 = *((&kernelContext_16)->plan_0+_S51);
+        uint _S52 = child_island_at_0(_S41 + (&kernelContext_16)->work_0[_S50], &kernelContext_16);
+        uint island_1 = *((&kernelContext_16)->plan_0+_S52);
         w_6 = 0U;
         for(;;)
         {
@@ -541,14 +550,14 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S52 = chunk_word_0(c0_1 + nk_0, w_6, &kernelContext_16);
-            packed_float4 device* _S53 = (&kernelContext_16)->chunks_0+_S52;
-            uint _S54 = chunk_word_0(c0_1 + m_0, w_6, &kernelContext_16);
-            *_S53 = packed_float4(float4(*((&kernelContext_16)->old_chunks_0+_S54)) ) ;
+            uint _S53 = chunk_word_0(c0_1 + nk_0, w_6, &kernelContext_16);
+            packed_float4 device* _S54 = (&kernelContext_16)->chunks_0+_S53;
+            uint _S55 = chunk_word_0(c0_1 + m_0, w_6, &kernelContext_16);
+            *_S54 = packed_float4(float4(*((&kernelContext_16)->old_chunks_0+_S55)) ) ;
             w_6 = w_6 + 1U;
         }
-        uint _S55 = c0_1 + nk_0;
-        set_chunk_island_0(_S55, island_1, &kernelContext_16);
+        uint _S56 = c0_1 + nk_0;
+        set_chunk_island_0(_S56, island_1, &kernelContext_16);
         w_4 = 0U;
         for(;;)
         {
@@ -559,7 +568,7 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            *((&kernelContext_16)->state_0+(4U * _S55 + w_4)) = packed_float4(float4(*((&kernelContext_16)->old_state_0+(4U * (c0_1 + m_0) + w_4))) ) ;
+            *((&kernelContext_16)->state_0+(4U * _S56 + w_4)) = packed_float4(float4(*((&kernelContext_16)->old_state_0+(4U * (c0_1 + m_0) + w_4))) ) ;
             w_4 = w_4 + 1U;
         }
         w_5 = 0U;
@@ -572,18 +581,18 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            *((&kernelContext_16)->scratch_0+((&kernelContext_16)->params_0->statics_base_0 + 23U * _S55 + w_5)) = packed_float4(float4(0.0f) ) ;
+            *((&kernelContext_16)->scratch_0+((&kernelContext_16)->params_0->statics_base_0 + 23U * _S56 + w_5)) = packed_float4(float4(0.0f) ) ;
             w_5 = w_5 + 1U;
         }
         if(((&kernelContext_16)->params_0->resident_0) != 0U)
         {
             uint o_0 = c0_1 + m_0;
-            *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->props_base_0 + _S55)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->props_base_0 + o_0))) ) ;
-            uint _S56 = 2U * _S55;
-            uint _S57 = 2U * o_0;
-            *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->eload_base_0 + _S56)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->eload_base_0 + _S57))) ) ;
-            *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->eload_base_0 + _S56 + 1U)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->eload_base_0 + _S57 + 1U))) ) ;
-            *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->pulse_count_base_0 + _S55)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->pulse_count_base_0 + o_0))) ) ;
+            *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->props_base_0 + _S56)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->props_base_0 + o_0))) ) ;
+            uint _S57 = 2U * _S56;
+            uint _S58 = 2U * o_0;
+            *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->eload_base_0 + _S57)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->eload_base_0 + _S58))) ) ;
+            *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->eload_base_0 + _S57 + 1U)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->eload_base_0 + _S58 + 1U))) ) ;
+            *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->pulse_count_base_0 + _S56)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->pulse_count_base_0 + o_0))) ) ;
             w_7 = 0U;
             for(;;)
             {
@@ -594,7 +603,7 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
                 {
                     break;
                 }
-                *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->pulse_base_0 + 3U * (&kernelContext_16)->params_0->pulse_cap_0 * _S55 + w_7)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->pulse_base_0 + 3U * (&kernelContext_16)->params_0->pulse_cap_0 * o_0 + w_7))) ) ;
+                *((&kernelContext_16)->ctab_0+((&kernelContext_16)->params_0->pulse_base_0 + 3U * (&kernelContext_16)->params_0->pulse_cap_0 * _S56 + w_7)) = packed_float4(float4(*((&kernelContext_16)->old_ctab_0+((&kernelContext_16)->params_0->pulse_base_0 + 3U * (&kernelContext_16)->params_0->pulse_cap_0 * o_0 + w_7))) ) ;
                 w_7 = w_7 + 1U;
             }
         }
@@ -603,20 +612,20 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     uint q_5;
     uint t_1;
-    if(_S42)
+    if(_S43)
     {
         w_6 = 0U;
         for(;;)
         {
-            if(w_6 < _S36)
+            if(w_6 < _S37)
             {
             }
             else
             {
                 break;
             }
-            uint _S58 = child_bonds_at_0(_S40 + w_6, &kernelContext_16);
-            *((&kernelContext_16)->plan_0+_S58) = 0U;
+            uint _S59 = child_bonds_at_0(_S41 + w_6, &kernelContext_16);
+            *((&kernelContext_16)->plan_0+_S59) = 0U;
             w_6 = w_6 + 1U;
         }
         w_7 = b0_0;
@@ -630,14 +639,14 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S59 = bond_word_0(w_7, 14U, &kernelContext_16);
-            uint4 ids_0 = (as_type<uint4>((float4(*((&kernelContext_16)->old_bonds_0+_S59)) )));
-            uint ka_0 = (&kernelContext_16)->work_0[_S40 + ids_0.y - c0_1];
-            if(ka_0 == ((&kernelContext_16)->work_0)[_S40 + ids_0.z - c0_1])
+            uint _S60 = bond_word_0(w_7, 14U, &kernelContext_16);
+            uint4 ids_0 = (as_type<uint4>((float4(*((&kernelContext_16)->old_bonds_0+_S60)) )));
+            uint ka_0 = (&kernelContext_16)->work_0[_S41 + ids_0.y - c0_1];
+            if(ka_0 == ((&kernelContext_16)->work_0)[_S41 + ids_0.z - c0_1])
             {
-                uint _S60 = child_bonds_at_0(_S40 + ka_0, &kernelContext_16);
-                uint device* _S61 = (&kernelContext_16)->plan_0+_S60;
-                *_S61 = *_S61 + 1U;
+                uint _S61 = child_bonds_at_0(_S41 + ka_0, &kernelContext_16);
+                uint device* _S62 = (&kernelContext_16)->plan_0+_S61;
+                *_S62 = *_S62 + 1U;
             }
             else
             {
@@ -649,22 +658,22 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         q_5 = 0U;
         for(;;)
         {
-            if(w_5 < _S36)
+            if(w_5 < _S37)
             {
             }
             else
             {
                 break;
             }
-            uint _S62 = child_by_island_0(_S35, w_5, &kernelContext_16);
-            uint _S63 = _S40 + _S62;
-            uint _S64 = child_bonds_at_0(_S63, &kernelContext_16);
-            uint count_0 = *((&kernelContext_16)->plan_0+_S64);
-            uint _S65 = child_bonds_at_0(_S63, &kernelContext_16);
-            uint _S66 = b0_0 + q_5;
-            *((&kernelContext_16)->plan_0+_S65) = _S66;
-            uint _S67 = child_bonds_at_0(_S63, &kernelContext_16);
-            *((&kernelContext_16)->plan_0+(_S67 + 1U)) = _S66;
+            uint _S63 = child_by_island_0(_S36, w_5, &kernelContext_16);
+            uint _S64 = _S41 + _S63;
+            uint _S65 = child_bonds_at_0(_S64, &kernelContext_16);
+            uint count_0 = *((&kernelContext_16)->plan_0+_S65);
+            uint _S66 = child_bonds_at_0(_S64, &kernelContext_16);
+            uint _S67 = b0_0 + q_5;
+            *((&kernelContext_16)->plan_0+_S66) = _S67;
+            uint _S68 = child_bonds_at_0(_S64, &kernelContext_16);
+            *((&kernelContext_16)->plan_0+(_S68 + 1U)) = _S67;
             uint at_0 = q_5 + count_0;
             w_5 = w_5 + 1U;
             q_5 = at_0;
@@ -681,24 +690,24 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S68 = bond_word_0(w_7, 14U, &kernelContext_16);
-            uint4 ids_1 = (as_type<uint4>((float4(*((&kernelContext_16)->old_bonds_0+_S68)) )));
-            uint ka_1 = (&kernelContext_16)->work_0[_S40 + ids_1.y - c0_1];
-            if(ka_1 == ((&kernelContext_16)->work_0)[_S40 + ids_1.z - c0_1])
+            uint _S69 = bond_word_0(w_7, 14U, &kernelContext_16);
+            uint4 ids_1 = (as_type<uint4>((float4(*((&kernelContext_16)->old_bonds_0+_S69)) )));
+            uint ka_1 = (&kernelContext_16)->work_0[_S41 + ids_1.y - c0_1];
+            if(ka_1 == ((&kernelContext_16)->work_0)[_S41 + ids_1.z - c0_1])
             {
-                uint _S69 = _S40 + ka_1;
-                uint _S70 = child_bonds_at_0(_S69, &kernelContext_16);
-                uint device* _S71 = (&kernelContext_16)->plan_0+(_S70 + 1U);
-                uint nb_0 = *_S71;
-                uint _S72 = child_bonds_at_0(_S69, &kernelContext_16);
-                *((&kernelContext_16)->plan_0+(_S72 + 1U)) = *_S71 + 1U;
-                uint _S73 = bond_new_at_0(w_7, &kernelContext_16);
-                *((&kernelContext_16)->plan_0+_S73) = nb_0;
+                uint _S70 = _S41 + ka_1;
+                uint _S71 = child_bonds_at_0(_S70, &kernelContext_16);
+                uint device* _S72 = (&kernelContext_16)->plan_0+(_S71 + 1U);
+                uint nb_0 = *_S72;
+                uint _S73 = child_bonds_at_0(_S70, &kernelContext_16);
+                *((&kernelContext_16)->plan_0+(_S73 + 1U)) = *_S72 + 1U;
+                uint _S74 = bond_new_at_0(w_7, &kernelContext_16);
+                *((&kernelContext_16)->plan_0+_S74) = nb_0;
             }
             else
             {
-                uint _S74 = bond_new_at_0(w_7, &kernelContext_16);
-                *((&kernelContext_16)->plan_0+_S74) = b0_0 + t_1;
+                uint _S75 = bond_new_at_0(w_7, &kernelContext_16);
+                *((&kernelContext_16)->plan_0+_S75) = b0_0 + t_1;
                 t_1 = t_1 + 1U;
             }
             w_7 = w_7 + 1U;
@@ -715,33 +724,33 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         {
             break;
         }
-        uint _S75 = bond_word_0(w_7, 14U, &kernelContext_16);
-        uint4 ids_2 = (as_type<uint4>((float4(*((&kernelContext_16)->old_bonds_0+_S75)) )));
-        uint _S76 = ids_2.y;
-        uint _S77 = _S40 + _S76 - c0_1;
-        uint ka_2 = (&kernelContext_16)->work_0[_S77];
-        uint _S78 = ids_2.z;
-        uint _S79 = _S40 + _S78 - c0_1;
+        uint _S76 = bond_word_0(w_7, 14U, &kernelContext_16);
+        uint4 ids_2 = (as_type<uint4>((float4(*((&kernelContext_16)->old_bonds_0+_S76)) )));
+        uint _S77 = ids_2.y;
+        uint _S78 = _S41 + _S77 - c0_1;
+        uint ka_2 = (&kernelContext_16)->work_0[_S78];
+        uint _S79 = ids_2.z;
+        uint _S80 = _S41 + _S79 - c0_1;
         uint4 new_ids_0;
-        if(ka_2 == ((&kernelContext_16)->work_0)[_S79])
+        if(ka_2 == ((&kernelContext_16)->work_0)[_S80])
         {
-            uint _S80 = bond_new_at_0(w_7, &kernelContext_16);
-            uint device* _S81 = (&kernelContext_16)->plan_0+_S80;
-            uint _S82 = ids_2.x;
-            uint _S83 = new_chunk_at_0(_S77, &kernelContext_16);
-            uint _S84 = c0_1 + *((&kernelContext_16)->plan_0+_S83);
-            uint _S85 = new_chunk_at_0(_S79, &kernelContext_16);
-            uint _S86 = c0_1 + *((&kernelContext_16)->plan_0+_S85);
-            uint _S87 = child_island_at_0(_S40 + ka_2, &kernelContext_16);
-            uint4 _S88 = uint4(_S82, _S84, _S86, *((&kernelContext_16)->plan_0+_S87));
-            w_6 = *_S81;
-            new_ids_0 = _S88;
+            uint _S81 = bond_new_at_0(w_7, &kernelContext_16);
+            uint device* _S82 = (&kernelContext_16)->plan_0+_S81;
+            uint _S83 = ids_2.x;
+            uint _S84 = new_chunk_at_0(_S78, &kernelContext_16);
+            uint _S85 = c0_1 + *((&kernelContext_16)->plan_0+_S84);
+            uint _S86 = new_chunk_at_0(_S80, &kernelContext_16);
+            uint _S87 = c0_1 + *((&kernelContext_16)->plan_0+_S86);
+            uint _S88 = child_island_at_0(_S41 + ka_2, &kernelContext_16);
+            uint4 _S89 = uint4(_S83, _S85, _S87, *((&kernelContext_16)->plan_0+_S88));
+            w_6 = *_S82;
+            new_ids_0 = _S89;
         }
         else
         {
-            uint _S89 = bond_new_at_0(w_7, &kernelContext_16);
-            uint nb_1 = *((&kernelContext_16)->plan_0+_S89);
-            uint4 _S90 = uint4(ids_2.x, _S76, _S78, 4294967295U);
+            uint _S90 = bond_new_at_0(w_7, &kernelContext_16);
+            uint nb_1 = *((&kernelContext_16)->plan_0+_S90);
+            uint4 _S91 = uint4(ids_2.x, _S77, _S79, 4294967295U);
             w_6 = 0U;
             for(;;)
             {
@@ -755,12 +764,12 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
                 *((&kernelContext_16)->scratch_0+(3U * nb_1 + w_6)) = packed_float4(float4(0.0f) ) ;
                 w_6 = w_6 + 1U;
             }
-            uint _S91 = 2U * nb_1;
-            packed_float4 _S92 = packed_float4(float4(0.0f) ) ;
-            *((&kernelContext_16)->scratch_0+((&kernelContext_16)->params_0->statics_base_0 + 23U * (&kernelContext_16)->params_0->chunk_count_0 + _S91)) = _S92;
-            *((&kernelContext_16)->scratch_0+((&kernelContext_16)->params_0->statics_base_0 + 23U * (&kernelContext_16)->params_0->chunk_count_0 + _S91 + 1U)) = _S92;
+            uint _S92 = 2U * nb_1;
+            packed_float4 _S93 = packed_float4(float4(0.0f) ) ;
+            *((&kernelContext_16)->scratch_0+((&kernelContext_16)->params_0->statics_base_0 + 23U * (&kernelContext_16)->params_0->chunk_count_0 + _S92)) = _S93;
+            *((&kernelContext_16)->scratch_0+((&kernelContext_16)->params_0->statics_base_0 + 23U * (&kernelContext_16)->params_0->chunk_count_0 + _S92 + 1U)) = _S93;
             w_6 = nb_1;
-            new_ids_0 = _S90;
+            new_ids_0 = _S91;
         }
         w_4 = 0U;
         for(;;)
@@ -772,14 +781,14 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S93 = bond_word_0(w_6, w_4, &kernelContext_16);
-            packed_float4 device* _S94 = (&kernelContext_16)->bonds_0+_S93;
-            uint _S95 = bond_word_0(w_7, w_4, &kernelContext_16);
-            *_S94 = packed_float4(float4(*((&kernelContext_16)->old_bonds_0+_S95)) ) ;
+            uint _S94 = bond_word_0(w_6, w_4, &kernelContext_16);
+            packed_float4 device* _S95 = (&kernelContext_16)->bonds_0+_S94;
+            uint _S96 = bond_word_0(w_7, w_4, &kernelContext_16);
+            *_S95 = packed_float4(float4(*((&kernelContext_16)->old_bonds_0+_S96)) ) ;
             w_4 = w_4 + 1U;
         }
-        uint _S96 = bond_word_0(w_6, 14U, &kernelContext_16);
-        *((&kernelContext_16)->bonds_0+_S96) = packed_float4((as_type<float4>((new_ids_0)))) ;
+        uint _S97 = bond_word_0(w_6, 14U, &kernelContext_16);
+        *((&kernelContext_16)->bonds_0+_S97) = packed_float4((as_type<float4>((new_ids_0)))) ;
         w_5 = 0U;
         for(;;)
         {
@@ -796,16 +805,16 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         w_7 = w_7 + 64U;
     }
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-    bool _S97;
+    bool _S98;
     if((*(&kernelContext_16)->g_cut_first_0) < b1_0)
     {
         w_6 = 2U * *(&kernelContext_16)->g_cut_first_0;
     }
     else
     {
-        uint _S98 = (&kernelContext_16)->old_index_0[c0_1];
+        uint _S99 = (&kernelContext_16)->old_index_0[c0_1];
         w_6 = 4294967295U;
-        w_4 = _S98;
+        w_4 = _S99;
         for(;;)
         {
             if(w_4 < ((&kernelContext_16)->old_index_0)[c1_1])
@@ -827,52 +836,52 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             uint bond_0 = entry_0 >> 1U;
             if(bond_0 < b0_0)
             {
-                _S97 = true;
+                _S98 = true;
             }
             else
             {
-                _S97 = bond_0 >= b1_0;
+                _S98 = bond_0 >= b1_0;
             }
-            if(_S97)
+            if(_S98)
             {
                 w_6 = entry_0;
             }
             w_4 = w_4 + 1U;
         }
     }
-    if(_S42)
+    if(_S43)
     {
-        uint _S99 = (&kernelContext_16)->old_index_0[c0_1];
+        uint _S100 = (&kernelContext_16)->old_index_0[c0_1];
         w_5 = 0U;
-        q_5 = _S99;
+        q_5 = _S100;
         for(;;)
         {
-            if(w_5 < _S36)
+            if(w_5 < _S37)
             {
             }
             else
             {
                 break;
             }
-            uint _S100 = child_by_island_0(_S35, w_5, &kernelContext_16);
-            float4 _S101 = float4(*((&kernelContext_16)->children_0+8U * (_S40 + _S100))) ;
-            uint _S102 = (as_type<uint>((_S101.y)));
-            uint _S103 = (as_type<uint>((_S101.z)));
+            uint _S101 = child_by_island_0(_S36, w_5, &kernelContext_16);
+            float4 _S102 = float4(*((&kernelContext_16)->children_0+8U * (_S41 + _S101))) ;
+            uint _S103 = (as_type<uint>((_S102.y)));
+            uint _S104 = (as_type<uint>((_S102.z)));
             w_4 = 0U;
             for(;;)
             {
-                if(w_4 < _S103)
+                if(w_4 < _S104)
                 {
                 }
                 else
                 {
                     break;
                 }
-                uint m_1 = (&kernelContext_16)->work_0[_S41 + _S40 + _S102 + w_4];
-                uint _S104 = new_chunk_at_0(_S40 + m_1, &kernelContext_16);
-                *((&kernelContext_16)->index_0+(c0_1 + *((&kernelContext_16)->plan_0+_S104))) = q_5;
-                uint _S105 = c0_1 + m_1;
-                uint at_1 = q_5 + ((&kernelContext_16)->old_index_0[_S105 + 1U] - (&kernelContext_16)->old_index_0[_S105]);
+                uint m_1 = (&kernelContext_16)->work_0[_S42 + _S41 + _S103 + w_4];
+                uint _S105 = new_chunk_at_0(_S41 + m_1, &kernelContext_16);
+                *((&kernelContext_16)->index_0+(c0_1 + *((&kernelContext_16)->plan_0+_S105))) = q_5;
+                uint _S106 = c0_1 + m_1;
+                uint at_1 = q_5 + ((&kernelContext_16)->old_index_0[_S106 + 1U] - (&kernelContext_16)->old_index_0[_S106]);
                 w_4 = w_4 + 1U;
                 q_5 = at_1;
             }
@@ -883,23 +892,23 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     m_0 = tid_0;
     for(;;)
     {
-        if(m_0 < _S39)
+        if(m_0 < _S40)
         {
         }
         else
         {
             break;
         }
-        uint _S106 = new_chunk_at_0(_S40 + m_0, &kernelContext_16);
-        uint _S107 = *((&kernelContext_16)->index_0+(c0_1 + *((&kernelContext_16)->plan_0+_S106)));
-        uint _S108 = c0_1 + m_0;
-        uint _S109 = _S108 + 1U;
-        uint _S110 = (&kernelContext_16)->old_index_0[_S109] - (&kernelContext_16)->old_index_0[_S108];
-        w_4 = (&kernelContext_16)->old_index_0[_S108];
+        uint _S107 = new_chunk_at_0(_S41 + m_0, &kernelContext_16);
+        uint _S108 = *((&kernelContext_16)->index_0+(c0_1 + *((&kernelContext_16)->plan_0+_S107)));
+        uint _S109 = c0_1 + m_0;
+        uint _S110 = _S109 + 1U;
+        uint _S111 = (&kernelContext_16)->old_index_0[_S110] - (&kernelContext_16)->old_index_0[_S109];
+        w_4 = (&kernelContext_16)->old_index_0[_S109];
         w_5 = 0U;
         for(;;)
         {
-            if(w_4 < ((&kernelContext_16)->old_index_0)[_S109])
+            if(w_4 < ((&kernelContext_16)->old_index_0)[_S110])
             {
             }
             else
@@ -921,29 +930,29 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
                 w_4 = w_4 + 1U;
                 continue;
             }
-            uint _S111 = bond_new_at_0(bond_1, &kernelContext_16);
-            uint device* _S112 = (&kernelContext_16)->plan_0+_S111;
-            uint nb_2 = *_S112;
-            if((*_S112) >= (*(&kernelContext_16)->g_cut_first_0))
+            uint _S112 = bond_new_at_0(bond_1, &kernelContext_16);
+            uint device* _S113 = (&kernelContext_16)->plan_0+_S112;
+            uint nb_2 = *_S113;
+            if((*_S113) >= (*(&kernelContext_16)->g_cut_first_0))
             {
                 w_4 = w_4 + 1U;
                 continue;
             }
-            *((&kernelContext_16)->index_0+(_S107 + w_5)) = 2U * nb_2 + (entry_1 & 1U);
+            *((&kernelContext_16)->index_0+(_S108 + w_5)) = 2U * nb_2 + (entry_1 & 1U);
             w_5 = w_5 + 1U;
             w_4 = w_4 + 1U;
         }
         q_5 = w_5;
         for(;;)
         {
-            if(q_5 < _S110)
+            if(q_5 < _S111)
             {
             }
             else
             {
                 break;
             }
-            *((&kernelContext_16)->index_0+(_S107 + q_5)) = w_6;
+            *((&kernelContext_16)->index_0+(_S108 + q_5)) = w_6;
             q_5 = q_5 + 1U;
         }
         m_0 = m_0 + 64U;
@@ -952,35 +961,35 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     w_4 = tid_0;
     for(;;)
     {
-        if(w_4 < _S36)
+        if(w_4 < _S37)
         {
         }
         else
         {
             break;
         }
-        uint slot_5 = _S40 + w_4;
-        uint _S113 = child_island_at_0(slot_5, &kernelContext_16);
-        uint island_2 = *((&kernelContext_16)->plan_0+_S113);
-        uint _S114 = 8U * slot_5;
-        float4 _S115 = float4(*((&kernelContext_16)->children_0+_S114)) ;
-        uint _S116 = (as_type<uint>((_S115.y)));
-        uint count_1 = (as_type<uint>((_S115.z)));
-        bool anchored_0 = (as_type<uint>((_S115.w))) != 0U;
-        float4 _S117 = float4(*((&kernelContext_16)->children_0+(_S114 + 1U))) ;
-        float3 i0_1 = (float4(*((&kernelContext_16)->children_0+(_S114 + 2U))) ).xyz;
-        float3 i1_1 = (float4(*((&kernelContext_16)->children_0+(_S114 + 3U))) ).xyz;
-        float3 i2_1 = (float4(*((&kernelContext_16)->children_0+(_S114 + 4U))) ).xyz;
-        float3 v_2 = (float4(*((&kernelContext_16)->children_0+(_S114 + 5U))) ).xyz;
-        float3 w_8 = (float4(*((&kernelContext_16)->children_0+(_S114 + 6U))) ).xyz;
-        float3 _S118 = float3(0.0f) ;
+        uint slot_5 = _S41 + w_4;
+        uint _S114 = child_island_at_0(slot_5, &kernelContext_16);
+        uint island_2 = *((&kernelContext_16)->plan_0+_S114);
+        uint _S115 = 8U * slot_5;
+        float4 _S116 = float4(*((&kernelContext_16)->children_0+_S115)) ;
+        uint _S117 = (as_type<uint>((_S116.y)));
+        uint count_1 = (as_type<uint>((_S116.z)));
+        bool anchored_0 = (as_type<uint>((_S116.w))) != 0U;
+        float4 _S118 = float4(*((&kernelContext_16)->children_0+(_S115 + 1U))) ;
+        float3 i0_1 = (float4(*((&kernelContext_16)->children_0+(_S115 + 2U))) ).xyz;
+        float3 i1_1 = (float4(*((&kernelContext_16)->children_0+(_S115 + 3U))) ).xyz;
+        float3 i2_1 = (float4(*((&kernelContext_16)->children_0+(_S115 + 4U))) ).xyz;
+        float3 v_2 = (float4(*((&kernelContext_16)->children_0+(_S115 + 5U))) ).xyz;
+        float3 w_8 = (float4(*((&kernelContext_16)->children_0+(_S115 + 6U))) ).xyz;
+        float3 _S119 = float3(0.0f) ;
         w_5 = 4294967295U;
         scaled_0 = false;
         q_5 = 0U;
         float wmass_0 = 0.0f;
-        float3 wmoment_0 = _S118;
+        float3 wmoment_0 = _S119;
         float su_mass_0 = 0.0f;
-        float3 su_0 = _S118;
+        float3 su_0 = _S119;
         for(;;)
         {
             if(q_5 < count_1)
@@ -990,14 +999,14 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint m_2 = (&kernelContext_16)->work_0[_S41 + _S40 + _S116 + q_5];
-            uint _S119 = new_chunk_at_0(_S40 + m_2, &kernelContext_16);
-            uint _S120 = min(w_5, *((&kernelContext_16)->plan_0+_S119));
-            uint _S121 = c0_1 + m_2;
-            uint _S122 = chunk_word_0(_S121, 0U, &kernelContext_16);
-            float4 _S123 = float4(*((&kernelContext_16)->old_chunks_0+_S122)) ;
-            uint _S124 = chunk_word_0(_S121, 7U, &kernelContext_16);
-            float mu_0 = (float4(*((&kernelContext_16)->old_chunks_0+_S124)) ).x;
+            uint m_2 = (&kernelContext_16)->work_0[_S42 + _S41 + _S117 + q_5];
+            uint _S120 = new_chunk_at_0(_S41 + m_2, &kernelContext_16);
+            uint _S121 = min(w_5, *((&kernelContext_16)->plan_0+_S120));
+            uint _S122 = c0_1 + m_2;
+            uint _S123 = chunk_word_0(_S122, 0U, &kernelContext_16);
+            float4 _S124 = float4(*((&kernelContext_16)->old_chunks_0+_S123)) ;
+            uint _S125 = chunk_word_0(_S122, 7U, &kernelContext_16);
+            float mu_0 = (float4(*((&kernelContext_16)->old_chunks_0+_S125)) ).x;
             if(scaled_0)
             {
                 scaled_0 = true;
@@ -1006,15 +1015,15 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 scaled_0 = mu_0 != 1.0f;
             }
-            float _S125 = _S123.w;
-            float wmass_1 = wmass_0 + _S125 * mu_0;
-            float3 _S126 = float3(_S125) ;
-            float3 wmoment_1 = wmoment_0 + _S123.xyz * _S126 * float3(mu_0) ;
-            float su_mass_1 = su_mass_0 + _S125;
-            float3 su_1 = su_0 + (float4(*((&kernelContext_16)->old_state_0+4U * _S121)) ).xyz * _S126;
-            uint _S127 = q_5 + 1U;
-            w_5 = _S120;
-            q_5 = _S127;
+            float _S126 = _S124.w;
+            float wmass_1 = wmass_0 + _S126 * mu_0;
+            float3 _S127 = float3(_S126) ;
+            float3 wmoment_1 = wmoment_0 + _S124.xyz * _S127 * float3(mu_0) ;
+            float su_mass_1 = su_mass_0 + _S126;
+            float3 su_1 = su_0 + (float4(*((&kernelContext_16)->old_state_0+4U * _S122)) ).xyz * _S127;
+            uint _S128 = q_5 + 1U;
+            w_5 = _S121;
+            q_5 = _S128;
             wmass_0 = wmass_1;
             wmoment_0 = wmoment_1;
             su_mass_0 = su_mass_1;
@@ -1027,7 +1036,7 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         }
         else
         {
-            wcom_0 = _S117.xyz;
+            wcom_0 = _S118.xyz;
         }
         float3 w0_0;
         float3 w1_0;
@@ -1035,9 +1044,9 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         if(scaled_0)
         {
             t_1 = 0U;
-            w0_0 = _S118;
-            w1_0 = _S118;
-            w2_0 = _S118;
+            w0_0 = _S119;
+            w1_0 = _S119;
+            w2_0 = _S119;
             for(;;)
             {
                 if(t_1 < count_1)
@@ -1047,21 +1056,21 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
                 {
                     break;
                 }
-                uint _S128 = c0_1 + (&kernelContext_16)->work_0[_S41 + _S40 + _S116 + t_1];
-                uint _S129 = chunk_word_0(_S128, 0U, &kernelContext_16);
-                float4 _S130 = float4(*((&kernelContext_16)->old_chunks_0+_S129)) ;
-                uint _S131 = chunk_word_0(_S128, 7U, &kernelContext_16);
-                float mu_1 = (float4(*((&kernelContext_16)->old_chunks_0+_S131)) ).x;
-                float3 rr_0 = _S130.xyz - wcom_0;
+                uint _S129 = c0_1 + (&kernelContext_16)->work_0[_S42 + _S41 + _S117 + t_1];
+                uint _S130 = chunk_word_0(_S129, 0U, &kernelContext_16);
+                float4 _S131 = float4(*((&kernelContext_16)->old_chunks_0+_S130)) ;
+                uint _S132 = chunk_word_0(_S129, 7U, &kernelContext_16);
+                float mu_1 = (float4(*((&kernelContext_16)->old_chunks_0+_S132)) ).x;
+                float3 rr_0 = _S131.xyz - wcom_0;
                 float dd_0 = dot(rr_0, rr_0);
-                uint _S132 = chunk_word_0(_S128, 1U, &kernelContext_16);
-                float3 _S133 = float3(_S130.w) ;
-                float3 _S134 = float3(mu_1) ;
-                float3 w0_1 = w0_0 + ((float4(*((&kernelContext_16)->old_chunks_0+_S132)) ).xyz + (float3(dd_0, 0.0f, 0.0f) - float3(rr_0.x)  * rr_0) * _S133) * _S134;
-                uint _S135 = chunk_word_0(_S128, 2U, &kernelContext_16);
-                float3 w1_1 = w1_0 + ((float4(*((&kernelContext_16)->old_chunks_0+_S135)) ).xyz + (float3(0.0f, dd_0, 0.0f) - float3(rr_0.y)  * rr_0) * _S133) * _S134;
-                uint _S136 = chunk_word_0(_S128, 3U, &kernelContext_16);
-                float3 w2_1 = w2_0 + ((float4(*((&kernelContext_16)->old_chunks_0+_S136)) ).xyz + (float3(0.0f, 0.0f, dd_0) - float3(rr_0.z)  * rr_0) * _S133) * _S134;
+                uint _S133 = chunk_word_0(_S129, 1U, &kernelContext_16);
+                float3 _S134 = float3(_S131.w) ;
+                float3 _S135 = float3(mu_1) ;
+                float3 w0_1 = w0_0 + ((float4(*((&kernelContext_16)->old_chunks_0+_S133)) ).xyz + (float3(dd_0, 0.0f, 0.0f) - float3(rr_0.x)  * rr_0) * _S134) * _S135;
+                uint _S136 = chunk_word_0(_S129, 2U, &kernelContext_16);
+                float3 w1_1 = w1_0 + ((float4(*((&kernelContext_16)->old_chunks_0+_S136)) ).xyz + (float3(0.0f, dd_0, 0.0f) - float3(rr_0.y)  * rr_0) * _S134) * _S135;
+                uint _S137 = chunk_word_0(_S129, 3U, &kernelContext_16);
+                float3 w2_1 = w2_0 + ((float4(*((&kernelContext_16)->old_chunks_0+_S137)) ).xyz + (float3(0.0f, 0.0f, dd_0) - float3(rr_0.z)  * rr_0) * _S134) * _S135;
                 t_1 = t_1 + 1U;
                 w0_0 = w0_1;
                 w1_0 = w1_1;
@@ -1082,26 +1091,26 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         thread float3 x1_0;
         thread float3 x2_0;
         inverse3_0(w0_0, w1_0, w2_0, &x0_0, &x1_0, &x2_0);
-        uint _S137 = 5U * p_1;
-        Quat_0 q_6 = quat_of_0(float4(*((&kernelContext_16)->frames_0+_S137)) );
-        float3 pos_0 = (float4(*((&kernelContext_16)->frames_0+(_S137 + 4U))) ).xyz;
+        uint _S138 = 5U * p_1;
+        Quat_0 q_6 = quat_of_0(float4(*((&kernelContext_16)->frames_0+_S138)) );
+        float3 pos_0 = (float4(*((&kernelContext_16)->frames_0+(_S138 + 4U))) ).xyz;
         float3 pos_1;
         if(!anchored_0)
         {
-            float3 _S138 = su_0 / float3(su_mass_0) ;
-            thread Quat_0 _S139 = q_6;
-            float3 _S140 = rotate_0(&_S139, _S138);
-            pos_1 = pos_0 + _S140;
+            float3 _S139 = su_0 / float3(su_mass_0) ;
+            thread Quat_0 _S140 = q_6;
+            float3 _S141 = rotate_0(&_S140, _S139);
+            pos_1 = pos_0 + _S141;
         }
         else
         {
             pos_1 = pos_0;
         }
-        thread Quat_0 _S141 = q_6;
-        float3 _S142 = inverse_rotate_0(&_S141, w_8);
-        float3 _S143 = float3(dot(i0_1, _S142), dot(i1_1, _S142), dot(i2_1, _S142));
-        thread Quat_0 _S144 = q_6;
-        float3 _S145 = rotate_0(&_S144, _S143);
+        thread Quat_0 _S142 = q_6;
+        float3 _S143 = inverse_rotate_0(&_S142, w_8);
+        float3 _S144 = float3(dot(i0_1, _S143), dot(i1_1, _S143), dot(i2_1, _S143));
+        thread Quat_0 _S145 = q_6;
+        float3 _S146 = rotate_0(&_S145, _S144);
         if(anchored_0)
         {
             m_0 = 1U;
@@ -1119,10 +1128,10 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             w_6 = 0U;
         }
         uint flags_0 = (m_0 | w_6) | 16U;
-        uint _S146 = child_bonds_at_0(slot_5, &kernelContext_16);
-        uint bfirst_0 = *((&kernelContext_16)->plan_0+_S146);
         uint _S147 = child_bonds_at_0(slot_5, &kernelContext_16);
-        uint bend_0 = *((&kernelContext_16)->plan_0+(_S147 + 1U));
+        uint bfirst_0 = *((&kernelContext_16)->plan_0+_S147);
+        uint _S148 = child_bonds_at_0(slot_5, &kernelContext_16);
+        uint bend_0 = *((&kernelContext_16)->plan_0+(_S148 + 1U));
         thread array<float4, int(25)> rec_0;
         t_1 = 0U;
         for(;;)
@@ -1137,66 +1146,66 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             rec_0[t_1] = float4(0.0f) ;
             t_1 = t_1 + 1U;
         }
-        uint _S148 = c0_1 + w_5;
-        rec_0[int(0)] = (as_type<float4>((uint4(_S148, _S148 + count_1, bfirst_0, bend_0))));
+        uint _S149 = c0_1 + w_5;
+        rec_0[int(0)] = (as_type<float4>((uint4(_S149, _S149 + count_1, bfirst_0, bend_0))));
         rec_0[int(1)] = (as_type<float4>((uint4(flags_0, 0U, 0U, (&kernelContext_16)->params_0->substeps_0))));
-        rec_0[int(2)] = _S117;
+        rec_0[int(2)] = _S118;
         rec_0[int(3)] = float4(i0_1, 0.0f);
         rec_0[int(4)] = float4(i1_1, 0.0f);
         rec_0[int(5)] = float4(i2_1, 0.0f);
         rec_0[int(6)] = float4(v0_0, 0.0f);
         rec_0[int(7)] = float4(v1_0, 0.0f);
         rec_0[int(8)] = float4(v2_0, 0.0f);
-        float _S149;
+        float _S150;
         if(scaled_0)
         {
-            _S149 = wmass_0;
+            _S150 = wmass_0;
         }
         else
         {
-            _S149 = _S117.w;
+            _S150 = _S118.w;
         }
-        rec_0[int(9)] = float4(wcom_0, _S149);
+        rec_0[int(9)] = float4(wcom_0, _S150);
         rec_0[int(10)] = float4(x0_0, 0.0f);
         rec_0[int(11)] = float4(x1_0, 0.0f);
         rec_0[int(12)] = float4(x2_0, 0.0f);
-        thread Quat_0 _S150 = q_6;
-        float4 _S151 = quat_vec_0(&_S150);
-        rec_0[int(13)] = _S151;
+        thread Quat_0 _S151 = q_6;
+        float4 _S152 = quat_vec_0(&_S151);
+        rec_0[int(13)] = _S152;
         rec_0[int(14)] = float4(pos_1, 0.0f);
-        float3 _S152;
-        if(anchored_0)
-        {
-            _S152 = _S118;
-        }
-        else
-        {
-            _S152 = v_2;
-        }
-        rec_0[int(16)] = float4(_S152, 0.0f);
         float3 _S153;
         if(anchored_0)
         {
-            _S153 = _S118;
+            _S153 = _S119;
         }
         else
         {
-            _S153 = w_8;
+            _S153 = v_2;
         }
-        rec_0[int(18)] = float4(_S153, 0.0f);
-        uint _S154 = child_id_at_0(slot_5, &kernelContext_16);
-        rec_0[int(19)] = (as_type<float4>((uint4(0U, 0U, 0U, *((&kernelContext_16)->plan_0+_S154)))));
-        rec_0[int(21)] = float4(0.0f, 0.0f, 0.0f, (as_type<float>((2139095040U))));
-        float3 _S155;
+        rec_0[int(16)] = float4(_S153, 0.0f);
+        float3 _S154;
         if(anchored_0)
         {
-            _S155 = _S118;
+            _S154 = _S119;
         }
         else
         {
-            _S155 = _S145;
+            _S154 = w_8;
         }
-        rec_0[int(23)] = float4(_S155, 0.0f);
+        rec_0[int(18)] = float4(_S154, 0.0f);
+        uint _S155 = child_id_at_0(slot_5, &kernelContext_16);
+        rec_0[int(19)] = (as_type<float4>((uint4(0U, 0U, 0U, *((&kernelContext_16)->plan_0+_S155)))));
+        rec_0[int(21)] = float4(0.0f, 0.0f, 0.0f, (as_type<float>((2139095040U))));
+        float3 _S156;
+        if(anchored_0)
+        {
+            _S156 = _S119;
+        }
+        else
+        {
+            _S156 = _S146;
+        }
+        rec_0[int(23)] = float4(_S156, 0.0f);
         uint t_2 = 0U;
         for(;;)
         {
@@ -1207,36 +1216,47 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S156 = island_word_0(island_2, t_2, &kernelContext_16);
-            *((&kernelContext_16)->islands_0+_S156) = packed_float4(rec_0[t_2]) ;
+            uint _S157 = island_word_0(island_2, t_2, &kernelContext_16);
+            *((&kernelContext_16)->islands_0+_S157) = packed_float4(rec_0[t_2]) ;
             t_2 = t_2 + 1U;
         }
         if(((&kernelContext_16)->params_0->resident_0) != 0U)
         {
-            uint4 _S157 = uint4(*((&kernelContext_16)->spawn_slots_0+slot_5)) ;
-            uint _S158 = 2U * slot_5;
-            float4 _S159 = float4(*((&kernelContext_16)->spawn_extras_0+(_S158 + 1U))) ;
+            uint4 _S158 = uint4(*((&kernelContext_16)->spawn_slots_0+slot_5)) ;
+            uint _S159 = 2U * slot_5;
+            float4 _S160 = float4(*((&kernelContext_16)->spawn_extras_0+(_S159 + 1U))) ;
             uint at_2 = (&kernelContext_16)->params_0->engine_base_0 + 3U * island_2;
+            uint _S161 = _S158.w;
+            float3 body_range_0;
+            if(_S161 != 0U)
+            {
+                uint _S162 = _S158.y;
+                body_range_0 = (as_type<float3>((uint3(_S158.x, _S162, _S162 + _S158.z))));
+            }
+            else
+            {
+                body_range_0 = (as_type<float3>((uint3(4294967295U, 0U, 0U))));
+            }
             if(anchored_0)
             {
-                _S97 = true;
+                _S98 = true;
             }
             else
             {
-                _S97 = (_S157.w) == 0U;
+                _S98 = _S161 == 0U;
             }
-            if(_S97)
+            if(_S98)
             {
-                *((&kernelContext_16)->ctab_0+at_2) = packed_float4(float4((as_type<float>((4294967295U))), 0.0f, 0.0f, 0.0f)) ;
-                packed_float4 _S160 = packed_float4(float4(0.0f) ) ;
-                *((&kernelContext_16)->ctab_0+(at_2 + 1U)) = _S160;
-                *((&kernelContext_16)->ctab_0+(at_2 + 2U)) = _S160;
+                *((&kernelContext_16)->ctab_0+at_2) = packed_float4(float4((as_type<float>((4294967295U))), body_range_0)) ;
+                packed_float4 _S163 = packed_float4(float4(0.0f) ) ;
+                *((&kernelContext_16)->ctab_0+(at_2 + 1U)) = _S163;
+                *((&kernelContext_16)->ctab_0+(at_2 + 2U)) = _S163;
             }
             else
             {
-                *((&kernelContext_16)->ctab_0+at_2) = packed_float4(float4((as_type<float>((_S157.x))), 0.0f, 0.0f, 0.0f)) ;
-                *((&kernelContext_16)->ctab_0+(at_2 + 1U)) = packed_float4(float4(- _S159.x, - _S159.y, - _S159.z, _S159.w)) ;
-                *((&kernelContext_16)->ctab_0+(at_2 + 2U)) = packed_float4(float4((float4(*((&kernelContext_16)->spawn_extras_0+_S158)) ).xyz, 0.0f)) ;
+                *((&kernelContext_16)->ctab_0+at_2) = packed_float4(float4((as_type<float>((_S158.x))), body_range_0)) ;
+                *((&kernelContext_16)->ctab_0+(at_2 + 1U)) = packed_float4(float4(- _S160.x, - _S160.y, - _S160.z, _S160.w)) ;
+                *((&kernelContext_16)->ctab_0+(at_2 + 2U)) = packed_float4(float4((float4(*((&kernelContext_16)->spawn_extras_0+_S159)) ).xyz, 0.0f)) ;
             }
         }
         *((&kernelContext_16)->gate_0+((&kernelContext_16)->params_0->gate_flag_base_0 + island_2)) = packed_float4(float4(0.0f) ) ;
@@ -1277,7 +1297,16 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     (&kernelContext_17)->old_copy_0 = old_copy_3;
     threadgroup uint g_cut_first_3;
     (&kernelContext_17)->g_cut_first_0 = &g_cut_first_3;
+    bool _S164;
     if((*(control_3+int(0))) != 0U)
+    {
+        _S164 = true;
+    }
+    else
+    {
+        _S164 = (*((&kernelContext_17)->control_0+1U)) == 0U;
+    }
+    if(_S164)
     {
         return;
     }
@@ -1295,8 +1324,8 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S161 = island_word_0(i_3, t_3, &kernelContext_17);
-            *((&kernelContext_17)->islands_0+_S161) = packed_float4(float4(0.0f) ) ;
+            uint _S165 = island_word_0(i_3, t_3, &kernelContext_17);
+            *((&kernelContext_17)->islands_0+_S165) = packed_float4(float4(0.0f) ) ;
             t_3 = t_3 + 1U;
         }
         return;
@@ -1305,18 +1334,17 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     {
         return;
     }
-    uint device* _S162 = (&kernelContext_17)->plan_0+order_at_0(i_3);
-    uint e_1 = *_S162;
-    bool _S163;
-    if((*_S162) >= (*((&kernelContext_17)->control_0+2U)))
+    uint device* _S166 = (&kernelContext_17)->plan_0+order_at_0(i_3);
+    uint e_1 = *_S166;
+    if((*_S166) >= (*((&kernelContext_17)->control_0+2U)))
     {
-        _S163 = true;
+        _S164 = true;
     }
     else
     {
-        _S163 = e_1 == i_3;
+        _S164 = e_1 == i_3;
     }
-    if(_S163)
+    if(_S164)
     {
         return;
     }
@@ -1330,21 +1358,21 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
         {
             break;
         }
-        uint _S164 = island_word_0(i_3, t_3, &kernelContext_17);
-        packed_float4 device* _S165 = (&kernelContext_17)->islands_0+_S164;
-        uint _S166 = island_word_0(e_1, t_3, &kernelContext_17);
-        *_S165 = packed_float4(float4(*((&kernelContext_17)->old_islands_0+_S166)) ) ;
+        uint _S167 = island_word_0(i_3, t_3, &kernelContext_17);
+        packed_float4 device* _S168 = (&kernelContext_17)->islands_0+_S167;
+        uint _S169 = island_word_0(e_1, t_3, &kernelContext_17);
+        *_S168 = packed_float4(float4(*((&kernelContext_17)->old_islands_0+_S169)) ) ;
         t_3 = t_3 + 1U;
     }
-    uint _S167 = island_word_0(e_1, 0U, &kernelContext_17);
-    float4 _S168 = float4(*((&kernelContext_17)->old_islands_0+_S167)) ;
-    uint _S169 = (as_type<uint>((_S168.y)));
-    uint b0_1 = (as_type<uint>((_S168.z)));
-    uint _S170 = (as_type<uint>((_S168.w)));
-    uint c_3 = (as_type<uint>((_S168.x)));
+    uint _S170 = island_word_0(e_1, 0U, &kernelContext_17);
+    float4 _S171 = float4(*((&kernelContext_17)->old_islands_0+_S170)) ;
+    uint _S172 = (as_type<uint>((_S171.y)));
+    uint b0_1 = (as_type<uint>((_S171.z)));
+    uint _S173 = (as_type<uint>((_S171.w)));
+    uint c_3 = (as_type<uint>((_S171.x)));
     for(;;)
     {
-        if(c_3 < _S169)
+        if(c_3 < _S172)
         {
         }
         else
@@ -1357,17 +1385,17 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     uint b_2 = b0_1;
     for(;;)
     {
-        if(b_2 < _S170)
+        if(b_2 < _S173)
         {
         }
         else
         {
             break;
         }
-        uint _S171 = bond_word_0(b_2, 14U, &kernelContext_17);
-        thread float4 ids_3 = float4(*((&kernelContext_17)->bonds_0+_S171)) ;
+        uint _S174 = bond_word_0(b_2, 14U, &kernelContext_17);
+        thread float4 ids_3 = float4(*((&kernelContext_17)->bonds_0+_S174)) ;
         ids_3.w = (as_type<float>((i_3)));
-        *((&kernelContext_17)->bonds_0+_S171) = packed_float4(ids_3) ;
+        *((&kernelContext_17)->bonds_0+_S174) = packed_float4(ids_3) ;
         b_2 = b_2 + 1U;
     }
     if(((&kernelContext_17)->params_0->resident_0) != 0U)
@@ -1422,14 +1450,23 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
     (&kernelContext_18)->old_copy_0 = old_copy_4;
     threadgroup uint g_cut_first_4;
     (&kernelContext_18)->g_cut_first_0 = &g_cut_first_4;
+    bool _S175;
     if((*(control_4+int(0))) != 0U)
+    {
+        _S175 = true;
+    }
+    else
+    {
+        _S175 = (*((&kernelContext_18)->control_0+1U)) == 0U;
+    }
+    if(_S175)
     {
         return;
     }
     uint i_4 = id_2.x;
-    uint device* _S172 = (&kernelContext_18)->plan_0+int(0);
-    uint n_1 = *_S172;
-    if(i_4 > (*_S172))
+    uint device* _S176 = (&kernelContext_18)->plan_0+int(0);
+    uint n_1 = *_S176;
+    if(i_4 > (*_S176))
     {
         return;
     }
@@ -1446,15 +1483,15 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S173 = island_word_0(i_4, t_4, &kernelContext_18);
-            *((&kernelContext_18)->island_copy_0+_S173) = packed_float4(float4(0.0f) ) ;
+            uint _S177 = island_word_0(i_4, t_4, &kernelContext_18);
+            *((&kernelContext_18)->island_copy_0+_S177) = packed_float4(float4(0.0f) ) ;
             t_4 = t_4 + 1U;
         }
         return;
     }
-    uint device* _S174 = (&kernelContext_18)->plan_0+order_at_0(i_4);
-    uint e_2 = *_S174;
-    if((*_S174) < (*((&kernelContext_18)->control_0+2U)))
+    uint device* _S178 = (&kernelContext_18)->plan_0+order_at_0(i_4);
+    uint e_2 = *_S178;
+    if((*_S178) < (*((&kernelContext_18)->control_0+2U)))
     {
         t_4 = 0U;
         for(;;)
@@ -1466,10 +1503,10 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S175 = island_word_0(i_4, t_4, &kernelContext_18);
-            packed_float4 device* _S176 = (&kernelContext_18)->island_copy_0+_S175;
-            uint _S177 = island_word_0(e_2, t_4, &kernelContext_18);
-            *_S176 = packed_float4(float4(*((&kernelContext_18)->old_copy_0+_S177)) ) ;
+            uint _S179 = island_word_0(i_4, t_4, &kernelContext_18);
+            packed_float4 device* _S180 = (&kernelContext_18)->island_copy_0+_S179;
+            uint _S181 = island_word_0(e_2, t_4, &kernelContext_18);
+            *_S180 = packed_float4(float4(*((&kernelContext_18)->old_copy_0+_S181)) ) ;
             t_4 = t_4 + 1U;
         }
     }
@@ -1485,8 +1522,8 @@ float4 quat_vec_0(const Quat_0 thread* q_4)
             {
                 break;
             }
-            uint _S178 = island_word_0(i_4, t_4, &kernelContext_18);
-            *((&kernelContext_18)->island_copy_0+_S178) = packed_float4(float4(*((&kernelContext_18)->islands_0+_S178)) ) ;
+            uint _S182 = island_word_0(i_4, t_4, &kernelContext_18);
+            *((&kernelContext_18)->island_copy_0+_S182) = packed_float4(float4(*((&kernelContext_18)->islands_0+_S182)) ) ;
             t_4 = t_4 + 1U;
         }
     }

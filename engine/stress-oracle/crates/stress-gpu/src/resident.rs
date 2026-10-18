@@ -80,7 +80,7 @@ fn f4(v: Vec3, w: f32) -> [f32; 4] {
 impl ResidentQs {
     /// The tables of the solver's current layout; `frames[ci]`: cluster ci's engine body
     /// (None: anchored, or not the engine's). `dt` is the frame.
-    pub fn new(gpu: &Gpu, solver: &GpuSolver, frames: &[Option<EngineFrame>], dt: f64) -> ResidentQs {
+    pub fn new(gpu: &Gpu, solver: &GpuSolver, frames: &[Option<EngineFrame>], bodies: &[Option<[u32; 3]>], dt: f64) -> ResidentQs {
         let k = |e: &str| gpu.compute(&shaders::RESIDENT, e, &BINDINGS);
         let mut r = ResidentQs {
             poses: k("resident_poses"),
@@ -90,13 +90,15 @@ impl ResidentQs {
             ctab: gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("resident ctab"), size: 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }),
             chunks: Vec::new(),
         };
-        r.rebuild(gpu, solver, frames, dt);
+        r.rebuild(gpu, solver, frames, bodies, dt);
         r
     }
 
     /// New tables after the solver's layout changed (a split, a rebuild): the carried
     /// pulses move with their chunks.
-    pub fn rebuild(&mut self, gpu: &Gpu, solver: &GpuSolver, frames: &[Option<EngineFrame>], dt: f64) {
+    /// `bodies[ci]`: cluster ci's engine body and collider range, fixed bodies included
+    /// (`ResidentEngine::retire_record`), which the GPU's split retires.
+    pub fn rebuild(&mut self, gpu: &Gpu, solver: &GpuSolver, frames: &[Option<EngineFrame>], bodies: &[Option<[u32; 3]>], dt: f64) {
         let m: &ReferenceSolver = &solver.mirror;
         let chunks = solver.gpu_chunks().to_vec();
         let n = chunks.len();
@@ -117,19 +119,22 @@ impl ResidentQs {
         }
         for ci in 0..islands {
             let at = engine_base as usize + 3 * ci;
+            // y-w: its engine body (fixed ones too) and collider range, for the GPU's split.
+            let b = bodies.get(ci).copied().flatten().unwrap_or([NONE, 0, 0]);
+            let (by, bz, bw) = (f32::from_bits(b[0]), f32::from_bits(b[1]), f32::from_bits(b[2]));
             match frames.get(ci).copied().flatten() {
                 Some(f) => {
                     let p = f.principal.conjugate();
-                    t[at] = [f32::from_bits(f.body), 0.0, 0.0, 0.0];
+                    t[at] = [f32::from_bits(f.body), by, bz, bw];
                     t[at + 1] = [p.x as f32, p.y as f32, p.z as f32, p.w as f32];
                     t[at + 2] = f4(f.com, 0.0);
                 }
-                None => t[at] = [f32::from_bits(NONE), 0.0, 0.0, 0.0],
+                None => t[at] = [f32::from_bits(NONE), by, bz, bw],
             }
         }
         // The capacity past the islands: no body (a blank island takes no pose).
         for ci in islands..islands.max(solver.island_cap()) {
-            t[engine_base as usize + 3 * ci] = [f32::from_bits(NONE), 0.0, 0.0, 0.0];
+            t[engine_base as usize + 3 * ci] = [f32::from_bits(NONE), f32::from_bits(NONE), 0.0, 0.0];
         }
         // Carried pulses and this frame's filtered loads (a rebuild within the frame's
         // cascade keeps them: the filter runs once a frame), by (structure, chunk).

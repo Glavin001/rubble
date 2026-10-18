@@ -8,13 +8,13 @@ use crate::shaders;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-struct SplitParams {
-    parent_count: u32,
-    out_base: u32,
+pub(crate) struct SplitParams {
+    pub(crate) parent_count: u32,
+    pub(crate) out_base: u32,
     /// 1: an anchored parent's frame from its island record (`split_frames`;
     /// `STRESS_GPU_ANCHORED_ENGINE_FRAME=1`: from its fixed engine body, as before).
-    anchored_pose: u32,
-    pad: u32,
+    pub(crate) anchored_pose: u32,
+    pub(crate) pad: u32,
 }
 
 const BINDINGS: [Binding; 14] = [
@@ -34,7 +34,7 @@ const BINDINGS: [Binding; 14] = [
     Binding::StorageRw, // control (the split pass's control words)
 ];
 
-const CHILD_WORDS: usize = 8;
+pub(crate) const CHILD_WORDS: usize = 8;
 
 /// One child of a split, as the GPU computed it.
 #[derive(Clone, Debug, Default)]
@@ -69,12 +69,12 @@ pub struct SplitCheck {
 }
 
 pub struct GpuSplitter {
-    components: Kernel,
-    children: Kernel,
-    frames: Kernel,
-    offsets: Kernel,
-    spawn: Kernel,
-    retire: Kernel,
+    pub(crate) components: Kernel,
+    pub(crate) children: Kernel,
+    pub(crate) frames: Kernel,
+    pub(crate) offsets: Kernel,
+    pub(crate) spawn: Kernel,
+    pub(crate) retire: Kernel,
     /// The split pass's copies of the tables as they were (`pass`), kept between splits:
     /// a new buffer per split costs its allocation and zero fill.
     old: std::cell::RefCell<Vec<Option<wgpu::Buffer>>>,
@@ -94,15 +94,15 @@ pub struct SplitRun {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-struct SpawnParams {
-    parent_count: u32,
-    first_body: u32,
-    first_collider: u32,
-    live: u32,
-    max_bodies: u32,
-    max_colliders: u32,
-    island_cap: u32,
-    pad: u32,
+pub(crate) struct SpawnParams {
+    pub(crate) parent_count: u32,
+    pub(crate) first_body: u32,
+    pub(crate) first_collider: u32,
+    pub(crate) live: u32,
+    pub(crate) max_bodies: u32,
+    pub(crate) max_colliders: u32,
+    pub(crate) island_cap: u32,
+    pub(crate) pad: u32,
 }
 
 /// The engine's own body and collider buffers, for a live spawn (bodies in two regions,
@@ -877,7 +877,7 @@ impl GpuSplitter {
 
 /// `SplitParams::anchored_pose`: an anchored parent's frame from its island record, unless
 /// `STRESS_GPU_ANCHORED_ENGINE_FRAME=1`.
-fn anchored_pose() -> u32 {
+pub(crate) fn anchored_pose() -> u32 {
     std::env::var("STRESS_GPU_ANCHORED_ENGINE_FRAME").map_or(1, |v| (v != "1") as u32)
 }
 

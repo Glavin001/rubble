@@ -681,35 +681,35 @@ fn split_frames(@builtin(global_invocation_id) id_1 : vec3<u32>)
     {
         return;
     }
-    var _S42 : u32 = u32(2) * p_2;
-    var head_0 : vec4<f32> = parent_bodies_0[_S42];
+    var _S42 : bool;
+    if((((islands_0[parents_0[p_2].x].info_0.x) & (u32(1)))) != u32(0))
+    {
+        _S42 = (params_0.anchored_pose_0) != u32(0);
+    }
+    else
+    {
+        _S42 = false;
+    }
+    if(_S42)
+    {
+        var _S43 : u32 = u32(5) * p_2;
+        frames_0[_S43] = islands_0[parents_0[p_2].x].rotation_0;
+        var _S44 : vec4<f32> = vec4<f32>(0.0f);
+        frames_0[_S43 + u32(1)] = _S44;
+        frames_0[_S43 + u32(2)] = _S44;
+        frames_0[_S43 + u32(3)] = vec4<f32>(islands_0[parents_0[p_2].x].com_0.xyz, 0.0f);
+        frames_0[_S43 + u32(4)] = vec4<f32>(islands_0[parents_0[p_2].x].position_0.xyz + islands_0[parents_0[p_2].x].position_err_0.xyz, 0.0f);
+        return;
+    }
+    var _S45 : u32 = u32(2) * p_2;
+    var head_0 : vec4<f32> = parent_bodies_0[_S45];
     var body_0 : u32 = (bitcast<u32>((head_0.x)));
     if(body_0 == u32(4294967295))
     {
         return;
     }
-    var _S43 : bool;
-    if((((islands_0[parents_0[p_2].x].info_0.x) & (u32(1)))) != u32(0))
-    {
-        _S43 = (params_0.anchored_pose_0) != u32(0);
-    }
-    else
-    {
-        _S43 = false;
-    }
-    if(_S43)
-    {
-        var _S44 : u32 = u32(5) * p_2;
-        frames_0[_S44] = islands_0[parents_0[p_2].x].rotation_0;
-        var _S45 : vec4<f32> = vec4<f32>(0.0f);
-        frames_0[_S44 + u32(1)] = _S45;
-        frames_0[_S44 + u32(2)] = _S45;
-        frames_0[_S44 + u32(3)] = vec4<f32>(islands_0[parents_0[p_2].x].com_0.xyz, 0.0f);
-        frames_0[_S44 + u32(4)] = vec4<f32>(islands_0[parents_0[p_2].x].position_0.xyz + islands_0[parents_0[p_2].x].position_err_0.xyz, 0.0f);
-        return;
-    }
     var com_2 : vec3<f32> = head_0.yzw;
-    var principal_0 : Quat_0 = quat_of_0(parent_bodies_0[_S42 + u32(1)]);
+    var principal_0 : Quat_0 = quat_of_0(parent_bodies_0[_S45 + u32(1)]);
     var _S46 : u32 = u32(7) * body_0;
     var b0_0 : vec4<f32> = engine_bodies_0[_S46];
     var orientation_0 : Quat_0 = quat_of_0(engine_bodies_0[_S46 + u32(1)]);

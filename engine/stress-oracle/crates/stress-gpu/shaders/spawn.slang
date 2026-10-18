@@ -87,6 +87,13 @@ uint parent_of(uint slot)
 [numthreads(1, 1, 1)]
 void spawn_offsets(uint3 id: SV_DispatchThreadID)
 {
+    if (control[CTL_PARENTS] == 0)
+    {
+        control[CTL_ABORT] = 0;
+        control[CTL_BODIES_AFTER] = control[CTL_FIRST_BODY];
+        control[CTL_COLLIDERS_AFTER] = control[CTL_FIRST_COLLIDER];
+        return;
+    }
     uint body = control[CTL_FIRST_BODY];
     uint collider = control[CTL_FIRST_COLLIDER];
     uint total = total_slots();
@@ -119,9 +126,14 @@ void spawn_offsets(uint3 id: SV_DispatchThreadID)
     {
         uint4 parent = parents[p];
         uint first = islands_of[p].x;
-        // A disconnection that left the island whole makes no body.
+        // A disconnection that left the island whole makes no body (its slot cleared: the
+        // slots are kept between split passes).
         if (parent.z < 2)
+        {
+            for (uint k = 0; k < parent.z; k++)
+                slots[parent.y + k] = uint4(0);
             continue;
+        }
         for (uint k = 0; k < parent.z; k++)
         {
             uint slot = parent.y + k;
@@ -268,7 +280,7 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
         return;
     uint p = parent_of(slot);
     uint4 parent = parents[p];
-    if (slot - parent.y >= parent.z || slots[slot].w == 0)
+    if (slot - parent.y >= parent.z || slots[slot].w == 0 || control[CTL_ABORT] != 0)
         return;
     uint first = islands_of[p].x;
     uint2 m = child_members(slot);
