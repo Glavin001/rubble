@@ -919,6 +919,11 @@ impl RigidEngine for RubbleEngine {
 
     fn set_motion(&mut self, states: &[BodyMotion]) {
         let _timer = Timer(std::time::Instant::now(), "set_motion");
+        // Nothing to write and nothing frozen: no read of the bodies (it would wait on the
+        // device for whatever it runs).
+        if states.is_empty() && self.frozen.is_empty() {
+            return;
+        }
         let all = self.bodies_now();
         for st in states {
             let Some(e) = self.bodies.get(&st.key) else { continue };

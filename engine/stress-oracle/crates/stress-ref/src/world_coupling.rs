@@ -788,11 +788,18 @@ impl World {
     /// The end of a coupled frame: island bodies that still exist go back to the engine
     /// with the world's state; new fragments are created by the sync with theirs.
     pub fn coupled_write_back(&mut self, frozen: &[BodyKey]) {
+        let t = std::time::Instant::now();
         self.take_rest_overlaps_from_engine();
+        let t1 = t.elapsed().as_secs_f64() * 1e3;
         let motion = self.world_motion();
+        let t2 = t.elapsed().as_secs_f64() * 1e3;
         let back: Vec<BodyMotion> = frozen.iter().filter_map(|k| motion.get(k).copied()).collect();
         self.coupling.as_mut().expect("coupled").engine.set_motion(&back);
+        let t3 = t.elapsed().as_secs_f64() * 1e3;
         self.sync_engine_bodies();
+        if std::env::var("STRESS_WRITE_BACK_TRACE").is_ok() {
+            eprintln!("write-back: overlaps {t1:.2}, motion {:.2}, set {:.2}, sync bodies {:.2} ms", t2 - t1, t3 - t2, t.elapsed().as_secs_f64() * 1e3 - t3);
+        }
     }
 
     /// Bodies (by their key at the start of the frame, in `driven`) with a bond broken

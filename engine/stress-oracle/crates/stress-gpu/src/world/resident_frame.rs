@@ -1288,6 +1288,8 @@ impl GpuWorld {
         if self.pending_splits.is_empty() && !self.pending_write_back {
             return Ok(());
         }
+        let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
+        let t0 = std::time::Instant::now();
         for p in std::mem::take(&mut self.pending_splits) {
             let resident = self.resident.as_ref().map(|r| r.qs.layout());
             let l = crate::solver::LiveSplit { comps: p.comps, run: None, resident };
@@ -1305,11 +1307,15 @@ impl GpuWorld {
             }
             self.solver.adopt_gpu_tables();
         }
+        let t1 = std::time::Instant::now();
         if std::mem::take(&mut self.pending_write_back) {
             for cl in &mut self.solver.mirror.clusters {
                 cl.driven = true;
             }
             self.with_shell_mut(|w| w.coupled_write_back(&[]));
+        }
+        if trace {
+            eprintln!("flush: splits {:.1} ms, write-back {:.1} ms", (t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3);
         }
         self.check_colliders(gpu);
         Ok(())
