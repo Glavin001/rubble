@@ -218,6 +218,11 @@ impl GpuWorld {
             drop(e);
             self.resident = Some(r);
             let out = run.outcome(&read[0]);
+            if std::env::var("STRESS_GPU_SPLIT_HASH").is_ok() {
+                use std::hash::{Hash, Hasher};
+                let (hs, hb) = self.solver.state_hashes(gpu);
+                eprintln!("frame hash: pass {first} stress state {hs:x} bonds {hb:x} ingest {:x}", { let mut h = std::collections::hash_map::DefaultHasher::new(); read[1].hash(&mut h); h.finish() });
+            }
             engine.borrow_mut().resident_finish(&read[1..1 + engine_parts])?;
             self.resident.as_ref().expect("resident tables").qs.check(&read[1 + engine_parts])?;
             unconverged += out.unconverged;

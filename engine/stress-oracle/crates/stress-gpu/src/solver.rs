@@ -3289,6 +3289,9 @@ impl GpuSolver {
     }
 }
 
+/// Scratch float4 per chunk of a static solve (world.slang `STATICS_PER_CHUNK`).
+const STATICS_PER_CHUNK: u64 = 23;
+
 impl GpuSolver {
     /// `ReferenceSolver::split_cluster` of `parents` (cluster indices) laid out in place
     /// (docs/stress-fracture-gpu-resident.md phase 6e): only the parents' chunk states
@@ -3301,6 +3304,27 @@ impl GpuSolver {
     /// Returns false, having changed nothing, when the tables cannot take it in place
     /// (no island headroom left, contacts planned, quiet clusters left out, load terms):
     /// the caller syncs, splits and rebuilds.
+    /// Hashes of the GPU chunk state and bond records (`STRESS_GPU_SPLIT_HASH`, a
+    /// determinism diagnostic).
+    pub(crate) fn state_hashes(&self, gpu: &Gpu) -> (u64, u64) {
+        use std::hash::{Hash, Hasher};
+        let hash = |bytes: &[u8]| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            h.finish()
+        };
+        let st: Vec<[f32; 4]> = gpu.read(&self.buffers.state);
+        let bd: Vec<u8> = gpu.read(&self.buffers.bond_dyn);
+        if let Ok(dir) = std::env::var("STRESS_GPU_STATE_DUMP") {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::fs::write(format!("{dir}/state_{n}.bin"), bytemuck::cast_slice::<_, u8>(&st));
+            let isl: Vec<[u32; 4]> = self.layout.islands.iter().map(|i| i.range).collect();
+            let _ = std::fs::write(format!("{dir}/islands_{n}.json"), format!("{:?}", isl));
+        }
+        (hash(bytemuck::cast_slice(&st)), hash(&bd))
+    }
+
     pub fn split_resident(&mut self, gpu: &Gpu, parents: &[usize]) -> Result<bool, String> {
         let why = |reason: &str| {
             if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
@@ -3590,10 +3614,16 @@ impl GpuSolver {
             }
             // The children's static-solve slots cleared (a rebuild's cleared scratch: the
             // compensated displacement parts with them), and the cut bonds' loads.
-            gpu.queue.write_buffer(&self.buffers.scratch, (p.statics_base as u64 + 23 * c0 as u64) * f4, bytemuck::cast_slice(&vec![[0f32; 4]; 23 * (c1 - c0)]));
+            gpu.queue.write_buffer(&self.buffers.scratch, (p.statics_base as u64 + STATICS_PER_CHUNK * c0 as u64) * f4, bytemuck::cast_slice(&vec![[0f32; 4]; STATICS_PER_CHUNK as usize * (c1 - c0)]));
             let cut = cursor[&ci].1 as usize;
             if b1 > cut {
                 gpu.queue.write_buffer(&self.buffers.scratch, 3 * cut as u64 * f4, bytemuck::cast_slice(&vec![[0f32; 4]; 3 * (b1 - cut)]));
+                // And their static-solve secant stiffness (world.slang `statics_bond_slot`):
+                // no island's solve rewrites a cut bond's, and the incidence padding still
+                // reaches it, so a stale one would stiffen the children with a bond that is
+                // gone (and read a chunk another thread is writing).
+                let slot = p.statics_base as u64 + STATICS_PER_CHUNK * p.chunk_count as u64 + 2 * cut as u64;
+                gpu.queue.write_buffer(&self.buffers.scratch, slot * f4, bytemuck::cast_slice(&vec![[0f32; 4]; 2 * (b1 - cut)]));
             }
             // The incidence of its chunks: their offsets and their entries.
             gpu.queue.write_buffer(&self.buffers.index, 4 * c0 as u64, bytemuck::cast_slice(&csr[c0..c1]));

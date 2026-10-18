@@ -129,6 +129,12 @@ impl ResidentEngine for RubbleEngine {
         if std::env::var("STRESS_RESIDENT_PHASES").is_ok() {
             eprintln!("resident phases: rubble counters: {} bodies, {} colliders, {} contacts, {} candidates, {} awake, {} colours", counters.body_count, counters.collider_count, counters.contact_count, counters.candidate_count, counters.awake_count, counters.color_count);
         }
+        if std::env::var("STRESS_GPU_SPLIT_HASH").is_ok() {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytemuck::cast_slice::<_, u8>(&self.sim.download_bodies()).hash(&mut h);
+            eprintln!("frame hash: rubble bodies {:x}", h.finish());
+        }
         if let Some(bytes) = status.get(1) {
             let n = self.sim.body_count() as usize;
             let bodies: Vec<BodyState> = (0..n).map(|i| bytemuck::pod_read_unaligned(&bytes[i * std::mem::size_of::<BodyState>()..(i + 1) * std::mem::size_of::<BodyState>()])).collect();
