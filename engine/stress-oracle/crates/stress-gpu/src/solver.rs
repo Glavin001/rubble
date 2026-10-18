@@ -2891,9 +2891,16 @@ impl GpuSolver {
             // the solves, the unconverged ones restored.
             encoder.copy_buffer_to_buffer(&layout_islands, 0, &self.buffers.islands, 0, islands_bytes);
             run(&mut encoder, &kernels.begin, crate::gpu::groups(n_islands, 64));
-            encoder.copy_buffer_to_buffer(&self.buffers.state, 0, &backup, 0, size);
-            if gate_on {
-                encoder.copy_buffer_to_buffer(&self.buffers.bond_dyn, 0, &bond_backup, 0, bond_bytes);
+            // The states and bond records backed up: the whole tables (a copy at full
+            // bandwidth; `STRESS_QS_ISLAND_BACKUP=1`: only the solved islands', by
+            // `cascade_backup`, measured 0.8 ms slower on the standard tier).
+            if !std::env::var("STRESS_QS_ISLAND_BACKUP").is_ok_and(|v| v == "1") {
+                encoder.copy_buffer_to_buffer(&self.buffers.state, 0, &backup, 0, size);
+                if gate_on {
+                    encoder.copy_buffer_to_buffer(&self.buffers.bond_dyn, 0, &bond_backup, 0, bond_bytes);
+                }
+            } else {
+                run(&mut encoder, &kernels.backup, n_islands.max(1) as u32);
             }
             pre(self, &mut encoder, pass);
             if gate_on {
@@ -2921,7 +2928,17 @@ impl GpuSolver {
             encoder.resolve_query_set(q, 0..4 * passes as u32, &b, 0);
             b
         });
+        // `STRESS_CASCADE_WALL=1`: the cascade's submission timed alone (the queue drained
+        // first; a diagnostic that serialises the frame).
+        let wall = std::env::var("STRESS_CASCADE_WALL").is_ok().then(|| {
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            std::time::Instant::now()
+        });
         gpu.queue.submit([encoder.finish()]);
+        if let Some(t) = wall {
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            eprintln!("cascade submission: {} passes, {:.2} ms", passes, t.elapsed().as_secs_f64() * 1e3);
+        }
         if let Some(t) = prepared.as_ref().and_then(|p| p.timings(gpu)) {
             const NAMES: [&str; 21] = ["parents", "snapshot", "whole", "frames", "components", "children", "offsets", "spawn", "colliders", "retire", "plan", "moved", "parent", "copy", "keys", "slots", "refresh", "log", "finish", "?", "?"];
             for (p, steps) in t.iter().enumerate() {
@@ -4536,7 +4553,7 @@ impl GpuSolver {
 /// host's island count: with the GPU's split layout (`STRESS_GPU_LAYOUT=1`), unless
 /// `STRESS_QS_CAPACITY=0`.
 pub(crate) fn capacity_dispatch() -> bool {
-    std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1") && std::env::var("STRESS_QS_CAPACITY").map_or(true, |v| v != "0")
+    crate::gpu_layout() && std::env::var("STRESS_QS_CAPACITY").map_or(true, |v| v != "0")
 }
 
 /// What `STRESS_GPU_ISLAND_CHECK=1` has compared: the GPU's island copy after a split it

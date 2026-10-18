@@ -381,7 +381,11 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     let profile = PROFILE.get().copied();
     let mut w = if (std::env::var("STRESS_RESIDENT").is_ok_and(|v| v == "1") || profile.is_some_and(|p| p.resident())) && !two_devices {
         drop(engine);
-        let e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine");
+        let mut e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine");
+        if let Some(p) = profile {
+            let (iterations, substeps) = p.engine_policy();
+            e.set_policy(iterations, substeps);
+        }
         stress_gpu::world::GpuWorld::with_resident_engine(gpu, scene, e).expect("GPU coupled world")
     } else {
         stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world")

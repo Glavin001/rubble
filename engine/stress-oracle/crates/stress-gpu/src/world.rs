@@ -319,6 +319,10 @@ impl GpuWorld {
     pub fn apply_profile(&mut self, profile: stress_ref::capability::Profile) {
         profile.apply_config(&mut self.solver.mirror.config);
         self.set_impact_islands(profile.impact_islands());
+        // The profile's resident frame runs the GPU's split path.
+        if profile.resident() {
+            crate::GPU_FRAME_PROFILE.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     pub fn set_impact_islands(&mut self, on: bool) {

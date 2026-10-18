@@ -7,6 +7,28 @@
 //! Everything on the GPU is f32; accuracy against the reference is measured, not assumed.
 
 pub mod colliders;
+
+/// The GPU's split path: splits laid out on the GPU (`STRESS_GPU_LAYOUT`), and a frame's
+/// cascade and splits in one submission (`STRESS_GPU_FRAME`). On when a capability profile
+/// asks for it (`GpuWorld::apply_profile`); either variable overrides it (1 on, 0 off).
+pub static GPU_FRAME_PROFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn switch(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => v == "1",
+        Err(_) => GPU_FRAME_PROFILE.load(std::sync::atomic::Ordering::Relaxed),
+    }
+}
+
+/// Splits laid out on the GPU (`STRESS_GPU_LAYOUT`).
+pub fn gpu_layout() -> bool {
+    switch("STRESS_GPU_LAYOUT")
+}
+
+/// A frame's cascade and splits in one submission (`STRESS_GPU_FRAME`, with the layout).
+pub fn gpu_frame() -> bool {
+    gpu_layout() && switch("STRESS_GPU_FRAME")
+}
 pub mod gpu;
 pub mod gpu_plan;
 pub mod gpu_pass;
@@ -92,7 +114,7 @@ pub mod shaders {
         [("ingest_rows", (64, 1, 1)), ("ingest_clear", (64, 1, 1)), ("ingest_count", (64, 1, 1)), ("ingest_scan", (1024, 1, 1)), ("ingest_scatter", (64, 1, 1)), ("ingest_merge", (64, 1, 1))]
     );
     pub const RESIDENT: ShaderSet = shader_set!("resident", [("resident_poses", (64, 1, 1)), ("resident_filter", (64, 1, 1)), ("resident_static_loads", (256, 1, 1))]);
-    pub const CASCADE: ShaderSet = shader_set!("cascade", [("cascade_begin", (64, 1, 1)), ("cascade_gate", (64, 1, 1)), ("cascade_fixed", (64, 1, 1)), ("cascade_restore", (64, 1, 1)), ("cascade_settle", (64, 1, 1)), ("cascade_end", (256, 1, 1))]);
+    pub const CASCADE: ShaderSet = shader_set!("cascade", [("cascade_begin", (64, 1, 1)), ("cascade_gate", (64, 1, 1)), ("cascade_fixed", (64, 1, 1)), ("cascade_restore", (64, 1, 1)), ("cascade_settle", (64, 1, 1)), ("cascade_end", (256, 1, 1)), ("cascade_backup", (64, 1, 1))]);
     pub const PLAN: ShaderSet = shader_set!("plan", [("plan_motion", (64, 1, 1)), ("plan_reach", (64, 1, 1)), ("plan_pair_count", (64, 1, 1)), ("plan_scan", (1024, 1, 1)), ("plan_pair_write", (64, 1, 1)), ("plan_side", (64, 1, 1))]);
     pub const LAYOUT: ShaderSet = shader_set!("layout", [("layout_plan", (1, 1, 1)), ("layout_moved", (64, 1, 1)), ("layout_parent", (256, 1, 1)), ("layout_copy", (64, 1, 1))]);
     pub const SPAWN: ShaderSet = shader_set!("spawn", [("spawn_offsets", (1024, 1, 1)), ("spawn_bodies", (64, 1, 1)), ("spawn_colliders", (64, 1, 1)), ("spawn_bodies_group", (64, 1, 1)), ("spawn_retire", (64, 1, 1))]);

@@ -188,7 +188,7 @@ impl GpuWorld {
         }
         let (table, ground_modulus) = self.host_collider_table(&*e, None);
         let m = &self.solver.mirror;
-        let gpu_colliders = std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1");
+        let gpu_colliders = crate::gpu_layout();
         let collider_cap = e.collider_capacity();
         let frames: Vec<Option<EngineFrame>> = m.clusters.iter().map(|cl| if cl.anchored { None } else { e.engine_frame(BodyKey::Cluster(cl.id)) }).collect();
         let body_records: Vec<Option<[u32; 3]>> = m.clusters.iter().map(|cl| e.retire_record(BodyKey::Cluster(cl.id))).collect();
@@ -455,7 +455,7 @@ impl GpuWorld {
             }
             // `STRESS_GPU_FRAME=1` (M4): the frame's passes, and the splits between them, in
             // one submission; the host follows the splits from the frame's one read.
-            let frame_mode = first == 0 && !frame_fallback && std::env::var("STRESS_GPU_FRAME").is_ok_and(|v| v == "1") && self.frame_splits_ready(gpu, &engine);
+            let frame_mode = first == 0 && !frame_fallback && crate::gpu_frame() && self.frame_splits_ready(gpu, &engine);
             let part_table = if frame_mode { self.part_table(gpu, &engine) } else { None };
             let frame_mode = frame_mode && part_table.is_some();
             let r = self.resident.take().expect("resident tables");
@@ -513,7 +513,13 @@ impl GpuWorld {
             if frame_mode {
                 parts.extend(self.solver.frame_log_range());
             }
+            let t_read = std::time::Instant::now();
+            let host_before_read = t_prepare.elapsed().as_secs_f64() * 1e3;
             let read = gpu.read_ranges(&parts);
+            let read_ms = t_read.elapsed().as_secs_f64() * 1e3;
+            if std::env::var("STRESS_FRAME_HOST_TRACE").is_ok() {
+                eprintln!("frame {} host: to the read {host_before_read:.2} ms (substeps {:.2}, tables {:.2}, engine {:.2}, cascade {:.2}), read {read_ms:.2}", self.frame, (t_tables - t_substeps).as_secs_f64() * 1e3, (t_engine - t_tables).as_secs_f64() * 1e3, (t_pass - t_engine).as_secs_f64() * 1e3, (t_read - t_pass).as_secs_f64() * 1e3);
+            }
             if det_end {
                 use std::hash::{Hash, Hasher};
                 let h = |b: &[u8]| {
@@ -634,14 +640,14 @@ impl GpuWorld {
             let t_split = std::time::Instant::now();
             // The engine's motion into the mirror (a host split takes the parents' frames
             // from it; the GPU's takes them from the engine's buffer).
-            if !std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1") {
+            if !crate::gpu_layout() {
                 self.resident_sync_motion();
             }
             // `STRESS_GPU_SPAWN=1` (M3): the children's engine bodies made on the GPU, in the
             // engine's own buffers, and the parents' retired there; the engine adopts them
             // once the host's split names the children.
             // `STRESS_GPU_LAYOUT=1` (M4, with the spawn): the tables laid out on the GPU too.
-            let layout_live = std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1");
+            let layout_live = crate::gpu_layout();
             let live = layout_live || std::env::var("STRESS_GPU_SPAWN").is_ok_and(|v| v == "1");
             let spawned = if layout_live && std::env::var("STRESS_GPU_PASS").is_ok_and(|v| v == "1") {
                 self.split_pass_gpu(gpu, &engine, &out.disconnected)
@@ -760,6 +766,9 @@ impl GpuWorld {
             eprintln!("resident frame {}: {n} engine substeps, impactor speeds {speeds:?}", self.frame);
         }
         self.solver.mirror.time += fdt;
+        if std::env::var("STRESS_FRAME_HOST_TRACE").is_ok() {
+            eprintln!("frame {} host: whole {:.2} ms", self.frame, t_prepare.elapsed().as_secs_f64() * 1e3);
+        }
         self.frame += 1;
         self.resident_frames += 1;
         Ok(())

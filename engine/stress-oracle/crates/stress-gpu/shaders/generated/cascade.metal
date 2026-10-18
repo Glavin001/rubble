@@ -905,3 +905,75 @@ struct Island_0
     return;
 }
 
+[[kernel]] void cascade_backup(uint3 group_3 [[threadgroup_position_in_grid]], uint3 thread_4 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_7 [[buffer(0)]], uint device* status_7 [[buffer(5)]], Island_natural_0 device* islands_7 [[buffer(1)]], packed_float4 device* scratch_7 [[buffer(2)]], packed_float4 device* gate_7 [[buffer(6)]], packed_float4 device* state_7 [[buffer(3)]], packed_float4 device* backup_7 [[buffer(4)]], packed_float4 device* bond_dyn_7 [[buffer(7)]], packed_float4 device* bond_backup_7 [[buffer(8)]])
+{
+    thread KernelContext_0 kernelContext_6;
+    (&kernelContext_6)->params_0 = params_7;
+    (&kernelContext_6)->status_0 = status_7;
+    (&kernelContext_6)->islands_0 = islands_7;
+    (&kernelContext_6)->scratch_0 = scratch_7;
+    (&kernelContext_6)->gate_0 = gate_7;
+    (&kernelContext_6)->state_0 = state_7;
+    (&kernelContext_6)->backup_0 = backup_7;
+    (&kernelContext_6)->bond_dyn_0 = bond_dyn_7;
+    (&kernelContext_6)->bond_backup_0 = bond_backup_7;
+    threadgroup uint g_moved_7;
+    (&kernelContext_6)->g_moved_0 = &g_moved_7;
+    threadgroup uint g_differs_7;
+    (&kernelContext_6)->g_differs_0 = &g_differs_7;
+    threadgroup array<uint, int(256)> g_damaged_7;
+    (&kernelContext_6)->g_damaged_0 = &g_damaged_7;
+    threadgroup array<uint, int(256)> g_disconnected_7;
+    (&kernelContext_6)->g_disconnected_0 = &g_disconnected_7;
+    threadgroup array<uint, int(256)> g_unconverged_7;
+    (&kernelContext_6)->g_unconverged_0 = &g_unconverged_7;
+    uint i_6 = group_3.x;
+    bool _S81;
+    if(i_6 >= (params_7->island_count_0))
+    {
+        _S81 = true;
+    }
+    else
+    {
+        _S81 = (*((&kernelContext_6)->status_0+0U)) == 0U;
+    }
+    if(_S81)
+    {
+        return;
+    }
+    Island_natural_0 device* _S82 = (&kernelContext_6)->islands_0+i_6;
+    if((((uint4(_S82->info_0) ).z) & 8U) == 0U)
+    {
+        return;
+    }
+    uint4 _S83 = uint4(_S82->range_0) ;
+    uint _S84 = thread_4.x;
+    uint k_3 = 4U * _S83.x + _S84;
+    for(;;)
+    {
+        if(k_3 < (4U * _S83.y))
+        {
+        }
+        else
+        {
+            break;
+        }
+        *((&kernelContext_6)->backup_0+k_3) = packed_float4(float4(*((&kernelContext_6)->state_0+k_3)) ) ;
+        k_3 = k_3 + 64U;
+    }
+    k_3 = (&kernelContext_6)->params_0->bond_words_0 * _S83.z + _S84;
+    for(;;)
+    {
+        if(k_3 < ((&kernelContext_6)->params_0->bond_words_0 * _S83.w))
+        {
+        }
+        else
+        {
+            break;
+        }
+        *((&kernelContext_6)->bond_backup_0+k_3) = packed_float4(float4(*((&kernelContext_6)->bond_dyn_0+k_3)) ) ;
+        k_3 = k_3 + 64U;
+    }
+    return;
+}
+

@@ -61,13 +61,13 @@ static const uint ISLAND_SOLVE = 8;
 [[vk::binding(1, 0)]] RWStructuredBuffer<Island> islands;
 [[vk::binding(2, 0)]] StructuredBuffer<float4> scratch;
 [[vk::binding(3, 0)]] RWStructuredBuffer<float4> state;
-[[vk::binding(4, 0)]] StructuredBuffer<float4> backup;
+[[vk::binding(4, 0)]] RWStructuredBuffer<float4> backup;
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint> status;
 // The loads of each island's last unconverged solve (2 float4 per chunk), then per island
 // its flag (`gate_flag_base`).
 [[vk::binding(6, 0)]] RWStructuredBuffer<float4> gate;
 [[vk::binding(7, 0)]] StructuredBuffer<float4> bond_dyn;
-[[vk::binding(8, 0)]] StructuredBuffer<float4> bond_backup;
+[[vk::binding(8, 0)]] RWStructuredBuffer<float4> bond_backup;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -288,4 +288,23 @@ void cascade_end(uint3 thread: SV_GroupThreadID)
     if (g_disconnected[0] != 0)
         status[ST_DISCONNECTED] = params.pass_index + 1;
     status[ST_RUN] = (g_damaged[0] != 0 && g_disconnected[0] == 0) ? 1u : 0u;
+}
+
+// One group per island flagged for a solve this pass: its chunk states and bond records
+// backed up (`cascade_restore` and `cascade_fixed` read the backup only for islands
+// solved), in place of a copy of the whole tables every pass.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cascade_backup(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint i = group.x;
+    if (i >= params.island_count || status[ST_RUN] == 0)
+        return;
+    Island isl = islands[i];
+    if ((isl.info.z & ISLAND_SOLVE) == 0)
+        return;
+    for (uint k = 4 * isl.range.x + thread.x; k < 4 * isl.range.y; k += 64)
+        backup[k] = state[k];
+    for (uint k = params.bond_words * isl.range.z + thread.x; k < params.bond_words * isl.range.w; k += 64)
+        bond_backup[k] = bond_dyn[k];
 }

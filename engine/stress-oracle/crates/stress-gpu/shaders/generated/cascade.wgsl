@@ -53,11 +53,11 @@ struct Island_std430_0
 
 @binding(3) @group(0) var<storage, read_write> state_0 : array<vec4<f32>>;
 
-@binding(4) @group(0) var<storage, read> backup_0 : array<vec4<f32>>;
+@binding(4) @group(0) var<storage, read_write> backup_0 : array<vec4<f32>>;
 
 @binding(7) @group(0) var<storage, read> bond_dyn_0 : array<vec4<f32>>;
 
-@binding(8) @group(0) var<storage, read> bond_backup_0 : array<vec4<f32>>;
+@binding(8) @group(0) var<storage, read_write> bond_backup_0 : array<vec4<f32>>;
 
 struct Island_0
 {
@@ -742,6 +742,59 @@ fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
         damaged_0 = u32(0);
     }
     status_0[u32(0)] = damaged_0;
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn cascade_backup(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_invocation_id) thread_4 : vec3<u32>)
+{
+    var i_6 : u32 = group_3.x;
+    var _S24 : bool;
+    if(i_6 >= (params_0.island_count_0))
+    {
+        _S24 = true;
+    }
+    else
+    {
+        _S24 = status_0[u32(0)] == u32(0);
+    }
+    if(_S24)
+    {
+        return;
+    }
+    if((((islands_0[i_6].info_0.z) & (u32(8)))) == u32(0))
+    {
+        return;
+    }
+    var _S25 : vec4<u32> = islands_0[i_6].range_0;
+    var _S26 : u32 = thread_4.x;
+    var k_3 : u32 = u32(4) * islands_0[i_6].range_0.x + _S26;
+    loop
+    {
+        if(k_3 < (u32(4) * _S25.y))
+        {
+        }
+        else
+        {
+            break;
+        }
+        backup_0[k_3] = state_0[k_3];
+        k_3 = k_3 + u32(64);
+    }
+    k_3 = params_0.bond_words_0 * _S25.z + _S26;
+    loop
+    {
+        if(k_3 < (params_0.bond_words_0 * _S25.w))
+        {
+        }
+        else
+        {
+            break;
+        }
+        bond_backup_0[k_3] = bond_dyn_0[k_3];
+        k_3 = k_3 + u32(64);
+    }
     return;
 }
 

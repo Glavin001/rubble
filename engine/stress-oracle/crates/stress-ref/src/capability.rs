@@ -27,6 +27,11 @@ pub enum Profile {
     ///   unconverged answers committed, at most 2 cascade passes;
     /// - the GPU-resident frame.
     BlastParity,
+    /// `BlastParity` with routing and impact islands (the tiered coupling): the struck
+    /// structure's impact region simulated before and through the engine's step, so a
+    /// fracture separates the piece that breaks free within the frame, forward, with no
+    /// rewind (findings/rewind-scaling.md, design C). Everything else is `BlastParity`'s.
+    BlastParityRouted,
 }
 
 /// The model features `BlastParity` turns off (`SimFeatures` names).
@@ -36,6 +41,7 @@ impl Profile {
     pub fn parse(name: &str) -> Option<Profile> {
         match name {
             "blast_parity" | "blast-parity" => Some(Profile::BlastParity),
+            "blast_parity_routed" | "blast-parity-routed" => Some(Profile::BlastParityRouted),
             _ => None,
         }
     }
@@ -43,20 +49,21 @@ impl Profile {
     pub fn name(self) -> &'static str {
         match self {
             Profile::BlastParity => "blast_parity",
+            Profile::BlastParityRouted => "blast_parity_routed",
         }
     }
 
     /// How packs import under the profile.
     pub fn import_options(self) -> ImportOptions {
         match self {
-            Profile::BlastParity => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true },
+            Profile::BlastParity | Profile::BlastParityRouted => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true },
         }
     }
 
     /// The scene's switches: solve mode, model features and methods.
     pub fn apply_scene(self, scene: &mut Scene) {
         match self {
-            Profile::BlastParity => {
+            Profile::BlastParity | Profile::BlastParityRouted => {
                 scene.sim.solve_mode = SolveMode::QuasiStatic;
                 for f in BLAST_PARITY_FEATURES_OFF {
                     scene.sim.features.set(f, false).expect("a SimFeatures name");
@@ -72,20 +79,31 @@ impl Profile {
     pub fn impact_islands(self) -> bool {
         match self {
             Profile::BlastParity => false,
+            Profile::BlastParityRouted => true,
         }
     }
 
     /// Whether the profile runs the GPU-resident frame.
     pub fn resident(self) -> bool {
         match self {
-            Profile::BlastParity => true,
+            Profile::BlastParity | Profile::BlastParityRouted => true,
+        }
+    }
+
+    /// The rigid engine's policy: solver iterations per step and substeps a frame at most
+    /// (`None`: the engine's own). `BlastParity`: vibe-land's PhysX, 4 iterations and one
+    /// step a frame, no CCD substeps (your decision of 2026-10-18; fast thin pieces can
+    /// tunnel).
+    pub fn engine_policy(self) -> (Option<u32>, Option<u32>) {
+        match self {
+            Profile::BlastParity | Profile::BlastParityRouted => (Some(4), Some(1)),
         }
     }
 
     /// The solver's per-tick behaviour.
     pub fn apply_config(self, config: &mut SolverConfig) {
         match self {
-            Profile::BlastParity => {
+            Profile::BlastParity | Profile::BlastParityRouted => {
                 config.static_budget = Some((1, 16));
                 config.static_unconverged = UnconvergedSolve::CommitIterate;
                 config.static_passes = Some(2);

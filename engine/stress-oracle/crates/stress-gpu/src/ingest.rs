@@ -60,7 +60,7 @@ pub struct EngineBuffers<'a> {
     pub counters: &'a wgpu::Buffer,
 }
 
-const BINDINGS: [Binding; 11] = [
+const BINDINGS: [Binding; 12] = [
     Binding::Uniform,   // params
     Binding::Storage,   // contacts
     Binding::Storage,   // colliders
@@ -72,6 +72,7 @@ const BINDINGS: [Binding; 11] = [
     Binding::StorageRw, // sort
     Binding::StorageRw, // manifolds
     Binding::StorageRw, // counts
+    Binding::StorageRw, // row counts (per substep)
 ];
 
 const BODY_BYTES: u64 = 112;
@@ -102,6 +103,8 @@ pub struct EngineIngest {
     pub sort: wgpu::Buffer,
     pub manifolds: wgpu::Buffer,
     counts: wgpu::Buffer,
+    /// Per substep, the engine's contact rows (`ingest_rows`; `record_live`).
+    row_counts: wgpu::Buffer,
 }
 
 impl EngineIngest {
@@ -137,6 +140,7 @@ impl EngineIngest {
             sort: storage("ingest sort", 4 * (2 * n + 1 + records)),
             manifolds: storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records),
             counts: storage("ingest counts", 4 * 2 * n),
+            row_counts: storage("ingest row counts", 4 * 1024),
         }
     }
 
@@ -192,7 +196,7 @@ impl EngineIngest {
     }
 
     fn bind(&self, gpu: &Gpu, kernel: &Kernel, params: &wgpu::Buffer, e: &EngineBuffers) -> wgpu::BindGroup {
-        gpu.bind(&kernel.group, &[params, e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts])
+        gpu.bind(&kernel.group, &[params, e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts, &self.row_counts])
     }
 
     /// The frame's start: the engine's bodies as they are now (closing speeds use them).
@@ -229,13 +233,23 @@ impl EngineIngest {
     /// The frame's manifolds, from the records of `substeps` substeps (the rest of the
     /// slots cleared).
     pub fn merge(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32) {
-        let used = std::mem::size_of::<Record>() as u64 * 2 * self.max_rows as u64 * substeps as u64;
-        let total = std::mem::size_of::<Record>() as u64 * 2 * self.max_rows as u64 * self.max_substeps as u64;
-        if used < total {
-            encoder.clear_buffer(&self.records, used, Some(total - used));
+        // Only the substeps run are merged, and in each only its rows (`record_live`): the
+        // rest of the records is never read, so nothing is cleared.
+        let mut params = IngestParams {
+            row_offset: 0,
+            max_rows: self.max_rows,
+            substep: 0,
+            chunk_count: self.chunk_count,
+            record_count: 2 * self.max_rows * substeps.max(1),
+            max_bodies: self.max_bodies,
+            h: 0.0,
+            pad: 0,
+        };
+        if substeps == 0 {
+            params.record_count = 0;
         }
-        let params = self.params(gpu, 0, 0, 0.0);
-        let records = (2 * self.max_rows * self.max_substeps) as usize;
+        let params = gpu.uniform("ingest params", &params);
+        let records = (2 * self.max_rows * substeps.max(1)) as usize;
         let n = self.chunk_count as usize;
         for (k, size) in [(&self.clear, groups(2 * n, 64)), (&self.count, groups(records, 64)), (&self.scan, 1), (&self.scatter, groups(records, 64)), (&self.merge, groups(n, 64))] {
             let bind = self.bind(gpu, k, &params, e);

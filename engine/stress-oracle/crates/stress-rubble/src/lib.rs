@@ -544,6 +544,19 @@ impl RubbleEngine {
         RubbleEngine::new(gravity).ok().map(|e| Box::new(e) as Box<dyn RigidEngine>)
     }
 
+    /// A capability profile's engine policy (`Profile::engine_policy`): solver iterations
+    /// per step and substeps a frame at most (`None`: as they are).
+    pub fn set_policy(&mut self, iterations: Option<u32>, max_substeps: Option<u32>) {
+        if let Some(n) = iterations {
+            let mut params = self.sim.params();
+            params.iterations = n;
+            self.sim.set_params(params);
+        }
+        if let Some(n) = max_substeps {
+            self.max_substeps = n.max(1);
+        }
+    }
+
     /// Number of live bodies (ground and retired bodies excluded).
     pub fn body_count(&self) -> usize {
         self.bodies.len()

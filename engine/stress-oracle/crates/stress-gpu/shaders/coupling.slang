@@ -110,6 +110,17 @@ struct Record
 [[vk::binding(9, 0)]] RWStructuredBuffer<Record> manifolds;
 // Per chunk: [0, n) record counts, [n, 2n) fill cursors.
 [[vk::binding(10, 0)]] RWStructuredBuffer<Atomic<uint>> counts;
+// Per substep: the engine's contact rows it had (`ingest_rows`); the records of rows past
+// them are stale and not read (`record_live`).
+[[vk::binding(11, 0)]] RWStructuredBuffer<uint> row_counts;
+
+// Whether record `slot` belongs to a row of its substep (rows past the substep's count are
+// neither written nor read).
+bool record_live(uint slot)
+{
+    uint per = 2 * params.max_rows;
+    return (slot % per) / 2 < row_counts[slot / per];
+}
 
 // Whether record a comes before record b in a chunk's merge order: by key, then by slot.
 bool record_before(uint a, uint b)
@@ -153,6 +164,10 @@ void ingest_rows(uint3 id: SV_DispatchThreadID)
     if (i >= params.max_rows)
         return;
     uint base = 2 * (params.substep * params.max_rows + i);
+    if (i == 0)
+        row_counts[params.substep] = counters[2];
+    if (i >= counters[2])
+        return;
     Record none;
     none.ids = uint4(NONE, NONE, base, 0);
     none.point = float4(0.0);
@@ -162,8 +177,6 @@ void ingest_rows(uint3 id: SV_DispatchThreadID)
     records[base] = none;
     none.ids.z = base + 1;
     records[base + 1] = none;
-    if (i >= counters[2])
-        return;
     EngineContactRow c = contacts[params.row_offset + i];
     if (c.ids.w == 0)
         return;
@@ -216,7 +229,7 @@ void ingest_clear(uint3 id: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void ingest_count(uint3 id: SV_DispatchThreadID)
 {
-    if (id.x >= params.record_count)
+    if (id.x >= params.record_count || !record_live(id.x))
         return;
     Record r = records[id.x];
     if (r.ids.w != 0)
@@ -260,7 +273,7 @@ void ingest_scan(uint3 thread: SV_GroupThreadID)
 [numthreads(64, 1, 1)]
 void ingest_scatter(uint3 id: SV_DispatchThreadID)
 {
-    if (id.x >= params.record_count)
+    if (id.x >= params.record_count || !record_live(id.x))
         return;
     Record r = records[id.x];
     if (r.ids.w == 0)

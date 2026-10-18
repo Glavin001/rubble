@@ -412,6 +412,7 @@ pub struct CascadeKernels {
     pub restore: Kernel,
     pub settle: Kernel,
     pub end: Kernel,
+    pub backup: Kernel,
 }
 
 const CASCADE_BINDINGS: [Binding; 9] = [
@@ -419,17 +420,17 @@ const CASCADE_BINDINGS: [Binding; 9] = [
     Binding::StorageRw, // islands
     Binding::Storage,   // scratch
     Binding::StorageRw, // state
-    Binding::Storage,   // state backup
+    Binding::StorageRw, // state backup
     Binding::StorageRw, // status
     Binding::StorageRw, // repeat gate
     Binding::Storage,   // bond records
-    Binding::Storage,   // bond records backup
+    Binding::StorageRw, // bond records backup
 ];
 
 impl CascadeKernels {
     pub fn new(gpu: &Gpu) -> CascadeKernels {
         let k = |e: &str| gpu.compute(&shaders::CASCADE, e, &CASCADE_BINDINGS);
-        CascadeKernels { begin: k("cascade_begin"), gate: k("cascade_gate"), fixed: k("cascade_fixed"), restore: k("cascade_restore"), settle: k("cascade_settle"), end: k("cascade_end") }
+        CascadeKernels { begin: k("cascade_begin"), gate: k("cascade_gate"), fixed: k("cascade_fixed"), restore: k("cascade_restore"), settle: k("cascade_settle"), end: k("cascade_end"), backup: k("cascade_backup") }
     }
 }
 
