@@ -124,3 +124,87 @@ bonds and so run the same composition:
 - Running none of the stopped substep's contact work would be more correct, but it
   changes results on re-planning scenes. That is a fidelity decision (tracker item 31's
   family).
+
+## 2026-10-18: the wide-island contact round, and a Metal miscompile
+
+The fractured high-rise rammed (tiered, `STRESS_TIERED_BUDGET=4,64`) runs as one anchored
+*wide* island (1,095 chunks, 3,446 bonds, 5 chunk groups) plus a one-chunk debris
+island. A wide island keeps the four-dispatch round per substep. The fused two-dispatch
+pipeline requires no wide island. The four dispatches are `contact_forces`,
+`sums_impactors_bonds`, `islands_and_wide_chunks` and `wide_end`. The impact frames run
+about 1,190 substeps each, at about 57 µs per substep.
+
+### Per-kernel timestamps at substep 7,020
+
+`STRESS_GPU_TIMING=1`, with 6 chunk pairs and 4 impactor candidates.
+
+| Dispatch | Time |
+|---|---|
+| `contact_forces` | 26 µs |
+| `sums_impactors_bonds` | 20 µs |
+| `islands_and_wide_chunks` | 30 µs (9–13 µs while the wide island is alone) |
+| `wide_end` | 7 µs |
+
+Ablations of `contact_forces` (measurement only):
+
+| Ablation | `contact_forces` |
+|---|---|
+| Production | 26.2 µs |
+| Kernel returns at once (launch floor) | 3.6 µs |
+| No travel checks | 26.6 µs |
+| No chunk pairs | 13.7 µs |
+| No pairs and no impactor candidates | 7.9 µs |
+| Pairs' first pass run 3× (idempotent, digest unchanged) | 31.0 µs |
+| Candidates' counting loop run 3× (digest unchanged) | 27.0 µs |
+
+- The 6 pairs cost about 12 µs and the 4 candidates about 10 µs, but re-running their
+  loops costs little.
+- Most of their time is outside the sample loops: setup, the lane reductions and the
+  writes. Not yet located.
+
+### Adopted: `pair_point` with one sample and one penetration call site
+
+It selects its two boxes first and calls `sample_point` and `penetration` once, instead of
+once per branch. The digests are bit-identical: the guard, and the high-rise and house_ram
+digests.
+
+| | Before | After |
+|---|---|---|
+| High-rise ram, µs per substep (min of 3, interleaved) | 57.0 | 55.4 |
+| house_ram, µs per substep | 41.6 | 41.2 |
+
+### Rejected: the same rewrite of `impactor_contact` (a miscompile in the default build)
+
+The identical rewrite of `impactor_contact` looked like a large win: `contact_forces` 26
+→ 15.5 µs, high-rise 55.7 → 48.7 µs per substep. It was a wrong result.
+
+- In the default Metal build (`-fno-fast-math`, contraction on) the catalogue gate fails
+  badly: b6_spall breaks 0 bonds against the reference's 288, and the b7, b9 and pack
+  scenes miss too. The high-rise ram's pairs drop from 6 to 5. The speed came from contacts
+  that were not computed.
+- The Slang output is correct line by line: the same selects and the same negation.
+- Built with `STRESS_GPU_METAL_CONTRACT=off` (new, `build.rs`: no floating-point
+  contraction), the rewrite gives:
+  - the parent's digests exactly (24/24 guard digests);
+  - a passing catalogue;
+  - only 3 % less time (57.3 → 54.9 µs).
+- So the default build compiles this shape wrongly, beyond a rounding difference. That
+  points to a Metal compiler fault with by-value struct selects under contraction. It is
+  not root-caused.
+- **Lesson for the gate:** equal digests in a no-contraction build do not prove a
+  restructuring safe. The guard's 24 scenes did not exercise the broken path; the
+  catalogue (`world_vs_reference`) did. A restructured kernel must be bit-identical, or
+  pass the full reference tests, in the default build.
+
+**Also tried, no gain:** merging each two-pass loop (count, then forces) into one loop.
+The compiler probably unrolls a two-trip loop back into two copies, and Slang's `[loop]`
+emits no pragma for Metal.
+
+### Where the rest is
+
+- `islands_and_wide_chunks` costs 30 µs with the one-chunk debris island in it, against
+  9–13 µs for the wide island alone. The debris island's whole-substep path in one group
+  is that dispatch's critical path.
+- `contact_forces`' pair and candidate setup (about 20 µs for 10 items) has no located cause
+  yet. Each item does little work, yet costs about 2 µs. It needs an Xcode GPU capture
+  (per-instruction stalls) before more rewrites.

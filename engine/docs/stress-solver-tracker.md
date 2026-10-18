@@ -98,6 +98,7 @@ Optional switches are listed under "Built, off by default" below.
 | Contact pipeline in two dispatches per substep (`forces_and_bonds`, `islands_sums_impactors`; travel checks at the previous substep's end, stop recorded as a substep) | GPU | house_ram 50.1 → 45.3 µs per substep; bit-identical on every `stress_bench` set (33 scenes, re-plans included). `STRESS_GPU_FUSE=0` restores three |
 | The same with settled contact islands (a waking island runs its joint law inline; a law-free kernel variant when none is settled) | GPU | town16_one_ram worst frame 346 → 254 ms; house_ram 46.6 → 44.8 µs per substep |
 | Segment-mode bonds over 512 threads (`island_frame_bonds_wide`; chunks and reductions on the first 256) | GPU | house-1story segment +4.5 %, brick-building +2.7 %; bit-identical |
+| `pair_point` with one sample and one penetration call site | GPU | Rammed high-rise 57.0 → 55.4 µs per substep, house_ram 41.6 → 41.2; bit-identical. The same rewrite of `impactor_contact` was **rejected**: the default Metal build compiles it wrongly (the catalogue fails; b6_spall breaks 0 of 288 bonds), while the no-contraction build is correct. See `findings/substep-latency.md` |
 | Impactors' substep counter written in place (no blocking read-back per batch) | GPU | Fracture frames' host time; A/B under load: house_ram worst 854 → 746 ms |
 | Static-solve loads uploaded contiguously; the scratch cleared on the GPU with only its non-zero regions written; quiet clusters left out in the tiered quasi-static mode (`static_stable`) | GPU, coupling | Fractured downtown (24k chunks) idle, tiered: 24.0 → 20.1 s per 6 frames (calibrated), median 72 → 34.5 ms (authored); bit-identical (guard 24/24 with the quasi-static runs) |
 
@@ -180,10 +181,19 @@ your call; the rest need building.
 ### Fewer or cheaper substeps
 
 1. **Substep latency: kernel critical paths.** Replay was the wrong lever (see Rejected);
-   the two-dispatch pipeline is done. What remains is the instructions on each kernel's
-   critical path: the island kernel (about 23 µs: barriers, rigid frame, travel checks) and
-   the forces dispatch (about 14 µs). Needs GPU counters (an Xcode capture) to aim; each
-   lossless trial so far gave 0–4 %.
+   the two-dispatch pipeline is done.
+   - **Measured (2026-10-18), rammed high-rise (one wide island and one debris
+     island):**
+     - `contact_forces` 26 µs, of which 6 chunk pairs take about 12 µs and 4 impactor
+       candidates about 10 µs. That cost sits outside their sample loops: re-running a
+       loop adds about 1 µs.
+     - `islands_and_wide_chunks` 30 µs, set by the one-chunk debris island's
+       whole-substep path; the wide island alone takes 9–13 µs.
+     - `pair_point` with one call site per helper: −3 %, bit-identical (adopted).
+   - **Next:** an Xcode GPU capture (per-instruction stalls) for the pair and candidate
+     setup, and the debris island's substep path. A restructured kernel must be
+     bit-identical in the default build: `STRESS_GPU_METAL_CONTRACT=off` only separates
+     fused rounding from semantic change, as the `impactor_contact` miscompile showed.
 2. *(Rejected, see above: the intact-only kernel.)*
 3. **Sliver elimination**, in the assets or as a solver switch. ×1.6–4.5 fewer substeps
    (×4.51 on house-1story). Prove it in the oracle first. With item 2 it brings an awake

@@ -722,15 +722,13 @@ bool is_finite(float x)
 // its point, the normal pushing a out of b, and the depth.
 bool pair_point(Box ba, Box bb, uint na, uint e, out float3 p, out float3 n, out float d)
 {
-    if (e < na)
-    {
-        p = sample_point(ba, e);
-        return penetration(bb, p, d, n);
-    }
-    p = sample_point(bb, e - na);
-    if (!penetration(ba, p, d, n))
+    // One sample and one penetration test in the code (as `impactor_contact`).
+    bool from_a = e < na;
+    p = sample_point(from_a ? ba : bb, from_a ? e : e - na);
+    if (!penetration(from_a ? bb : ba, p, d, n))
         return false;
-    n = -n;
+    if (!from_a)
+        n = -n;
     return true;
 }
 

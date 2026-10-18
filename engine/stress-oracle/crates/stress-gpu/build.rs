@@ -8,6 +8,12 @@
 //! square root, no reassociation), and `<name>.fast.metallib` with it, for production
 //! (`STRESS_GPU_MATH=fast`). The shaders test NaN by its bits, so fast math (which
 //! assumes no NaN) keeps their sentinels.
+//!
+//! `STRESS_GPU_METAL_CONTRACT=off` builds both without floating-point contraction (no
+//! fused multiply-adds the source does not write): a diagnostic. With it, two shapes of
+//! the same arithmetic give the same digests, which separates a fused-rounding difference
+//! from a semantic one. It proves nothing about the default build, which once compiled a
+//! correct rewrite wrongly (findings/substep-latency.md).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +21,7 @@ use std::process::Command;
 fn main() {
     let generated = Path::new("shaders/generated");
     println!("cargo:rerun-if-changed=shaders/generated");
+    println!("cargo:rerun-if-env-changed=STRESS_GPU_METAL_CONTRACT");
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     let mut entries: Vec<_> = std::fs::read_dir(generated).expect("shaders/generated").flatten().map(|e| e.path()).collect();
@@ -45,6 +52,11 @@ fn compile(metal: &Path, air: &Path, lib: &Path, fast: bool) -> bool {
         }
     };
     let math = if fast { "-ffast-math" } else { "-fno-fast-math" };
-    run(&["-sdk".as_ref(), "macosx".as_ref(), "metal".as_ref(), math.as_ref(), "-c".as_ref(), metal.as_os_str(), "-o".as_ref(), air.as_os_str()])
+    let mut args: Vec<&std::ffi::OsStr> = vec!["-sdk".as_ref(), "macosx".as_ref(), "metal".as_ref(), math.as_ref()];
+    if std::env::var("STRESS_GPU_METAL_CONTRACT").as_deref() == Ok("off") {
+        args.push("-ffp-contract=off".as_ref());
+    }
+    args.extend::<[&std::ffi::OsStr; 4]>(["-c".as_ref(), metal.as_os_str(), "-o".as_ref(), air.as_os_str()]);
+    run(&args)
         && run(&["-sdk".as_ref(), "macosx".as_ref(), "metallib".as_ref(), air.as_os_str(), "-o".as_ref(), lib.as_os_str()])
 }
