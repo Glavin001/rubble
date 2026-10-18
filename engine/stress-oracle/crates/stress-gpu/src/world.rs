@@ -111,6 +111,10 @@ pub struct GpuWorld {
     pub(crate) route_next: bool,
     /// The last frame ran resident (the next coupled frame takes the engine's motion first).
     pub(crate) last_resident: bool,
+    /// The impact window (s; 0 off, `STRESS_IMPACT_WINDOW`): a routed frame with an island
+    /// runs the island explicitly for this long only, then the engine steps the rest of the
+    /// frame resident with whatever the impact broke off (forward, one tick).
+    pub impact_window: f64,
     /// Frames that ran coupled (not resident).
     pub coupled_frames: u64,
     /// The routing check's kernel and buffers (`routing.slang`).
@@ -257,6 +261,7 @@ impl GpuWorld {
             routed_resident: std::env::var("STRESS_ROUTED_RESIDENT").map_or(true, |v| v != "0"),
             route_next: true,
             last_resident: false,
+            impact_window: std::env::var("STRESS_IMPACT_WINDOW").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             coupled_frames: 0,
             routing: None,
             unchanged_next: std::collections::HashSet::new(),
@@ -450,6 +455,10 @@ impl GpuWorld {
             return self.resident_frame(gpu);
         }
         self.coupled_frames += 1;
+        let fdt = self.scene.sim.frame_dt;
+        // The impact window: the island's explicit part of the frame cut to the window, the
+        // rest a resident frame (`impact_window`).
+        let mut window = self.tiered && self.routed_resident && self.impact_window > 0.0 && self.resident_engine.is_some() && self.qs_frame_conditions();
         if std::mem::take(&mut self.last_resident) {
             // After resident frames the mirror's motion is the GPU islands' at the last
             // frame's start: every body's taken from the engine (a read), into the tables.
@@ -457,7 +466,33 @@ impl GpuWorld {
             self.with_shell_mut(|w| w.take_engine_motion());
             self.solver.refresh(gpu)?;
         }
-        self.step_frame_tiered(gpu)?;
+        if window {
+            // From the frame's start to the window past the first contact (estimated early).
+            let first = self.with_shell_mut(|w| w.first_contact_time(fdt));
+            let len = first + self.impact_window;
+            if std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
+                eprintln!("impact window frame {}: first contact at {:.2} ms, explicit part {:.2} ms", self.frame, first * 1e3, len.min(fdt) * 1e3);
+            }
+            if len < 0.9 * fdt {
+                self.set_frame_dt(len);
+            } else {
+                window = false;
+            }
+        }
+        let r = self.step_frame_tiered(gpu);
+        if window {
+            let w = self.scene.sim.frame_dt;
+            self.set_frame_dt(fdt - w);
+            let rest = r.and_then(|_| {
+                self.last_resident = true;
+                self.resident_frame(gpu)
+            });
+            self.set_frame_dt(fdt);
+            // One tick: the window and the rest are one frame.
+            self.frame -= 1;
+            return rest;
+        }
+        r?;
         // The routed resident frame (M5): the next frame's routing predicted exactly now,
         // from the state it starts with.
         if self.tiered && self.routed_resident && self.resident_engine.is_some() {
@@ -466,6 +501,12 @@ impl GpuWorld {
             self.route_next = !self.promoted.is_empty() || self.with_shell_mut(|w| w.predict_islands(fdt, &none)) > 0;
         }
         Ok(())
+    }
+
+    /// The frame's duration, in the world and its shell (an impact window's parts).
+    fn set_frame_dt(&mut self, dt: f64) {
+        self.scene.sim.frame_dt = dt;
+        self.shell.scene.sim.frame_dt = dt;
     }
 
     /// The coupled frame on the host's routing (`step_frame_coupled` without a resident one).

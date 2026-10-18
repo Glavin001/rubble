@@ -521,6 +521,45 @@ impl World {
         n
     }
 
+    /// The earliest time within `dt` at which an impactor (its bounding sphere) reaches the
+    /// bounds of a bonded cluster, moving at their relative velocity (0: already inside;
+    /// `dt`: none). Bounds as `select_islands` takes them, so the estimate is early, never
+    /// late, for a cluster that does not spin.
+    pub fn first_contact_time(&self, dt: f64) -> f64 {
+        let mut t_min = dt;
+        for imp in &self.impactors {
+            let r = imp.obox().bounding_radius();
+            let c = imp.pose.position;
+            for cl in self.solver.clusters.iter().filter(|cl| !cl.bonds.is_empty()) {
+                let s = cl.structure;
+                let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
+                for &k in &cl.chunks {
+                    let (p, h) = (self.solver.chunk_position(s, k), self.solver.structures[s].chunks[k].half_extents.norm());
+                    lo = lo.component_min(p - Vec3::splat(h + r));
+                    hi = hi.component_max(p + Vec3::splat(h + r));
+                }
+                let v = imp.velocity - cl.velocity;
+                // Slab test of c + v t against [lo, hi], t in [0, t_min].
+                let (mut t0, mut t1) = (0.0f64, t_min);
+                for a in 0..3 {
+                    if v[a].abs() < 1e-12 {
+                        if c[a] < lo[a] || c[a] > hi[a] {
+                            t0 = f64::INFINITY;
+                        }
+                        continue;
+                    }
+                    let (ta, tb) = ((lo[a] - c[a]) / v[a], (hi[a] - c[a]) / v[a]);
+                    t0 = t0.max(ta.min(tb));
+                    t1 = t1.min(ta.max(tb));
+                }
+                if t0 <= t1 {
+                    t_min = t_min.min(t0);
+                }
+            }
+        }
+        t_min
+    }
+
     /// Every body's motion taken from the engine as it is (after frames the engine stepped
     /// without the world following it, such as a resident engine's).
     pub fn take_engine_motion(&mut self) {

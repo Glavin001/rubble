@@ -393,6 +393,9 @@ impl GpuWorld {
         }
         let t_tables = std::time::Instant::now();
         self.resident_tables(gpu, n);
+        if let Some(r) = self.resident.as_mut() {
+            r.qs.set_frame_dt(fdt);
+        }
         self.prepare_routing(gpu);
         if phases {
             eprintln!("resident phases: tables {:.2} ms", t_tables.elapsed().as_secs_f64() * 1e3);
