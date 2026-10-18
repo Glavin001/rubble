@@ -1655,6 +1655,13 @@ impl GpuSolver {
                 &self.kernels.islands_sums_wake,
             ];
             let bind = |contact: bool| if contact { &self.buffers.bind_contact } else { &self.buffers.bind_segment };
+            // wgpu takes at most 65,535 groups a dimension: past it, say which dispatch.
+            if let Some(&(k, groups, _)) = ops.iter().find(|o| o.1 > 65_535) {
+                panic!(
+                    "substep dispatch {} of {groups} groups exceeds 65,535 (pairs {}, candidates {}, lanes {}, segments {}, chunks {}, impactors {})",
+                    KERNEL_NAMES.get(k).unwrap_or(&"?"), p.pair_count, p.cand_count, p.pair_lanes, p.seg_count, p.chunk_count, p.impactor_count
+                );
+            }
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             match &self.timing {
                 None => {

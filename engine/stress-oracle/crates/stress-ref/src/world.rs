@@ -260,6 +260,11 @@ pub struct World {
     /// `GpuWorld::tiered`): island bodies take the frame's explicit substeps, everything
     /// else the frame's static solve. Off: quasi-static mode has no islands.
     pub qs_islands: bool,
+    /// The tiered coupling's island extent: false (the default), any overlap of swept
+    /// bounds joins two bodies' islands; true, only a pair with an impactor or closing
+    /// faster than the tiered impact speed does (resting contacts stay the engine's).
+    /// `STRESS_TIERED_JOIN=fast` turns it on (a measurement until you decide).
+    pub tiered_fast_joins: bool,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -424,6 +429,7 @@ impl World {
             redone_frames: 0,
             impact_islands: true,
             qs_islands: false,
+            tiered_fast_joins: std::env::var("STRESS_TIERED_JOIN").is_ok_and(|v| v == "fast"),
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,

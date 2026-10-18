@@ -465,6 +465,10 @@ impl World {
                 if both_immovable {
                     continue;
                 }
+                // `tiered_fast_joins`: a slow contact between clusters joins nothing.
+                if tiered && self.tiered_fast_joins && !impactor && !fast {
+                    continue;
+                }
                 let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
                 parent[ri] = rj;
                 if owned {
