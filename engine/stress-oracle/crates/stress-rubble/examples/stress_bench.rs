@@ -340,6 +340,10 @@ struct BenchVideo {
     height: u32,
     clusters0: usize,
     ids0: std::collections::HashSet<u64>,
+    /// `STRESS_BENCH_VIDEO_FOLLOW`: each shot's first impact, and its last velocity.
+    impacts: Vec<Option<stress_ref::math::Vec3>>,
+    last_v: Vec<Option<stress_ref::math::Vec3>>,
+    last_impact: Option<stress_ref::math::Vec3>,
 }
 
 impl BenchVideo {
@@ -373,7 +377,7 @@ impl BenchVideo {
             .unwrap_or_default();
         let profile = PROFILE.get().map_or("default".to_string(), |p| p.name().to_string());
         let title = format!("RUBBLE GPU RIGIDS + GPU STRESS SOLVER ({}), {}, PROFILE {}", gpu.adapter_info.name.to_uppercase(), name.to_uppercase(), profile.to_uppercase());
-        BenchVideo { renderer: None, sink: stress_rubble::render::FfmpegSink::new(out, width, height, 60).expect("ffmpeg"), cam, times, title, width, height, clusters0: w.solver.mirror.clusters.len(), ids0: w.solver.mirror.clusters.iter().map(|c| c.id).collect() }
+        BenchVideo { renderer: None, sink: stress_rubble::render::FfmpegSink::new(out, width, height, 60).expect("ffmpeg"), cam, times, title, width, height, clusters0: w.solver.mirror.clusters.len(), ids0: w.solver.mirror.clusters.iter().map(|c| c.id).collect(), impacts: Vec::new(), last_v: Vec::new(), last_impact: None }
     }
 
     fn frame(&mut self, gpu: &stress_gpu::gpu::Gpu, w: &mut stress_gpu::world::GpuWorld, f: usize, n: usize) {
@@ -389,6 +393,35 @@ impl BenchVideo {
             let mut r = Renderer::new(gpu, &view, &view_imps, self.width, self.height);
             r.ground = w.scene.ground.is_some();
             self.renderer = Some((r, imps));
+        }
+        // `STRESS_BENCH_VIDEO_FOLLOW=1`: the camera follows the action: it eases towards the
+        // newest shot (its position, as it flies in and strikes) at a close distance, slowly
+        // orbiting; before the first shot it holds the overview.
+        if std::env::var("STRESS_BENCH_VIDEO_FOLLOW").is_ok_and(|v| v == "1") {
+            // Each shot's first impact: where its velocity first changes by more than 15 %
+            // between frames (it struck); the camera holds there once a shot struck.
+            self.impacts.resize(view_imps.len(), None);
+            self.last_v.resize(view_imps.len(), None);
+            for (k, imp) in view_imps.iter().enumerate() {
+                if let Some(prev) = self.last_v[k] {
+                    if self.impacts[k].is_none() && (imp.velocity - prev).norm() > 0.15 * prev.norm().max(1.0) {
+                        self.impacts[k] = Some(imp.pose.position);
+                        self.last_impact = Some(imp.pose.position);
+                    }
+                }
+                self.last_v[k] = Some(imp.velocity);
+            }
+            if let Some(newest) = view_imps.last() {
+                let ease = 0.06;
+                // The latest strike anywhere (a shot still in flight is not followed); before
+                // the first one, the newest shot.
+                let p = self.last_impact.unwrap_or(newest.pose.position);
+                let goal = stress_ref::math::Vec3::new(p.x, p.y, p.z.max(2.0));
+                self.cam.target = self.cam.target + (goal - self.cam.target) * ease;
+                self.cam.distance += (35.0 - self.cam.distance) * ease;
+                self.cam.pitch += (25f64.to_radians() - self.cam.pitch) * ease;
+            }
+            self.cam.yaw += 0.25f64.to_radians();
         }
         let (r, _) = self.renderer.as_ref().expect("renderer");
         let mut rgba = r.render(gpu, &view, &view_imps, &self.cam);
