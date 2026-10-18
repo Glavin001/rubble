@@ -2551,6 +2551,18 @@ impl GpuSolver {
     }
 
     /// The GPU chunks' (structure, chunk), by GPU chunk index.
+    /// The buffers a resident cascade writes (`STRESS_GPU_DET_REPLAY`: saved and restored
+    /// around replays of one window).
+    pub(crate) fn cascade_buffers(&self) -> Vec<wgpu::Buffer> {
+        let b = &self.buffers;
+        let mut v = vec![b.state.clone(), b.bond_dyn.clone(), b.scratch.clone(), b.islands.clone(), b.impactors.clone(), b.contact_state.clone(), b.loads.clone(), b.chunk_static.clone()];
+        if let Some(g) = &self.cascade_gate {
+            v.push(g.buffer.clone());
+        }
+        v.extend([&self.state_backup, &self.bond_backup, &self.cascade_status].into_iter().flatten().cloned());
+        v
+    }
+
     pub fn gpu_chunks(&self) -> &[(usize, usize)] {
         &self.layout.chunks
     }
@@ -2702,7 +2714,7 @@ impl GpuSolver {
         let gate = self.cascade_gate.as_ref().expect("cascade gate").buffer.clone();
         let bond_bytes = self.buffers.bond_dyn.size();
         if self.bond_backup.as_ref().is_none_or(|b| b.size() != bond_bytes) {
-            self.bond_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("bond backup"), size: bond_bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            self.bond_backup = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("bond backup"), size: bond_bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
         }
         let bond_backup = self.bond_backup.clone().expect("bond backup");
         let status = self.cascade_status.clone().expect("cascade status");

@@ -30,7 +30,11 @@ impl ResidentEngine for RubbleEngine {
     }
 
     fn collider_table(&self, chunk_of: &dyn Fn(usize, usize) -> Option<u32>, other: OtherProps<'_>) -> Vec<ColliderInfo> {
-        self.owners
+        self.collider_table_range(0..self.owners.len() as u32, chunk_of, other)
+    }
+
+    fn collider_table_range(&self, range: std::ops::Range<u32>, chunk_of: &dyn Fn(usize, usize) -> Option<u32>, other: OtherProps<'_>) -> Vec<ColliderInfo> {
+        self.owners[range.start as usize..range.end as usize]
             .iter()
             .map(|o| match *o {
                 Owner::Body { key, chunk } => {
@@ -44,6 +48,14 @@ impl ResidentEngine for RubbleEngine {
                 }
             })
             .collect()
+    }
+
+    fn collider_changes_since(&self, version: u64) -> Option<Vec<std::ops::Range<u32>>> {
+        self.collider_changes(version)
+    }
+
+    fn last_row_offset(&self) -> u32 {
+        self.sim.last_contact_offset()
     }
 
     fn engine_frame(&self, key: BodyKey) -> Option<EngineFrame> {
@@ -173,7 +185,7 @@ impl ResidentEngine for RubbleEngine {
                 self.owners[id as usize] = Owner::Retired;
             }
             self.sim.mirror_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
-            self.layout_version += 1;
+            self.colliders_changed(e.colliders.clone());
             self.frozen.retain(|k| k != key);
         }
         // The children, made at the next slots in order (`create_body`'s bookkeeping).
@@ -232,7 +244,7 @@ impl ResidentEngine for RubbleEngine {
                 }
             }
         }
-        self.layout_version += 1;
+        self.colliders_changed(col_range);
         Ok(())
     }
 

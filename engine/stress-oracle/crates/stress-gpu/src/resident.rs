@@ -251,6 +251,19 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     /// The collider table: each collider's GPU chunk (`chunk_of`), body and the other
     /// side's properties (`other`).
     fn collider_table(&self, chunk_of: &dyn Fn(usize, usize) -> Option<u32>, other: OtherProps<'_>) -> Vec<crate::ingest::ColliderInfo>;
+    /// The collider table's entries for the colliders `range` only.
+    fn collider_table_range(&self, range: std::ops::Range<u32>, chunk_of: &dyn Fn(usize, usize) -> Option<u32>, other: OtherProps<'_>) -> Vec<crate::ingest::ColliderInfo> {
+        self.collider_table(chunk_of, other)[range.start as usize..range.end as usize].to_vec()
+    }
+    /// The colliders whose table entries changed since `layout_version` was `version`
+    /// (added or retired), when the engine still knows (None: rebuild the whole table).
+    fn collider_changes_since(&self, _version: u64) -> Option<Vec<std::ops::Range<u32>>> {
+        None
+    }
+    /// The contact row offset of the engine's last substep (diagnostic replays).
+    fn last_row_offset(&self) -> u32 {
+        0
+    }
     /// The engine body standing for `key` (None: none, or fixed).
     fn engine_frame(&self, key: stress_ref::engine::BodyKey) -> Option<EngineFrame>;
     /// The substeps a frame of `dt` takes (the engine's CCD bound).

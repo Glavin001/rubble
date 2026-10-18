@@ -118,6 +118,25 @@ impl ColliderRefresh {
         self.capacity = capacity;
     }
 
+    /// The keys of the host's entries `table` for the colliders from `first` on (the rest
+    /// as they are).
+    pub fn set_keys_range(&mut self, gpu: &Gpu, first: u32, table: &[ColliderInfo], layout_chunks: &[(usize, usize)]) {
+        let keys: Vec<u32> = table
+            .iter()
+            .map(|info| {
+                if info.a[2] == KIND_BODY && info.a[3] != 0 && info.a[0] != NONE {
+                    let (s, c) = layout_chunks[info.a[0] as usize];
+                    self.structure_base[s] + c as u32
+                } else {
+                    NONE
+                }
+            })
+            .collect();
+        if !keys.is_empty() {
+            gpu.queue.write_buffer(&self.keys, 4 * first as u64, bytemuck::cast_slice(&keys));
+        }
+    }
+
     /// The refresh, after the split pass's layout, into `collider_info` (room for
     /// `capacity` colliders).
     pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, inputs: &RefreshInputs, total_slots: usize, collider_info: &wgpu::Buffer) {
@@ -176,6 +195,8 @@ impl ColliderRefresh {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ColliderCheck {
     pub tables: u64,
+    /// Of which tables patched in place (an engine change under the same layout).
+    pub patches: u64,
     pub colliders: u64,
     /// Entries whose integer words (chunk, body code, kind, chunk side) differ.
     pub int_mismatch: u64,

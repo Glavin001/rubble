@@ -418,6 +418,10 @@ pub struct RubbleEngine {
     ingest_check: Option<ingest_check::IngestCheck>,
     /// Bumped whenever colliders are added or retired, or the body set is restored.
     layout_version: u64,
+    /// The colliders each bump of `layout_version` changed, (version after, range), from
+    /// `collider_log_floor` on (`collider_changes_since`).
+    collider_log: Vec<(u64, Range<u32>)>,
+    collider_log_floor: u64,
     /// Resident frames that read bodies back for the CCD bound.
     pub resident_reads: u64,
     /// The resident frame's speculative contact range (`resident_substeps`).
@@ -527,6 +531,8 @@ impl RubbleEngine {
             #[cfg(feature = "gpu")]
             ingest_check: None,
             layout_version: 0,
+            collider_log: Vec::new(),
+            collider_log_floor: 0,
             resident_reads: 0,
             resident_offset: 0.01,
             speculative_ccd: std::env::var("STRESS_RUBBLE_SPECULATIVE_CCD").is_ok_and(|v| v == "1"),
@@ -548,9 +554,27 @@ impl RubbleEngine {
         self.sim.body_count()
     }
 
+    /// A bump of `layout_version` for the colliders `range` (`collider_log`).
+    pub(crate) fn colliders_changed(&mut self, range: Range<u32>) {
+        self.layout_version += 1;
+        self.collider_log.push((self.layout_version, range));
+        if self.collider_log.len() > 256 {
+            self.collider_log.drain(..128);
+            self.collider_log_floor = self.collider_log[0].0 - 1;
+        }
+    }
+
+    /// The colliders changed since `layout_version` was `version` (None: not known).
+    pub(crate) fn collider_changes(&self, version: u64) -> Option<Vec<Range<u32>>> {
+        if version < self.collider_log_floor || version > self.layout_version {
+            return None;
+        }
+        Some(self.collider_log.iter().filter(|(v, _)| *v > version).map(|(_, r)| r.clone()).collect())
+    }
+
     fn add_colliders(&mut self, cols: &[Collider], owners: impl Iterator<Item = Owner>) -> Range<u32> {
         let range = self.sim.add_colliders(cols);
-        self.layout_version += 1;
+        self.colliders_changed(range.clone());
         self.cols.extend_from_slice(cols);
         self.owners.extend(owners);
         debug_assert_eq!(self.owners.len(), self.sim.collider_count() as usize);
@@ -637,7 +661,7 @@ impl RubbleEngine {
             self.owners[id as usize] = Owner::Retired;
         }
         self.sim.set_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
-        self.layout_version += 1;
+        self.colliders_changed(e.colliders.clone());
         self.frozen.retain(|k| *k != key);
     }
 
@@ -946,6 +970,9 @@ impl RigidEngine for RubbleEngine {
             self.bodies = saved.bodies;
             self.owners = saved.owners;
             self.layout_version += 1;
+            // Anything may differ: no change before this version is known.
+            self.collider_log.clear();
+            self.collider_log_floor = self.layout_version;
             self.cols = saved.cols;
             self.frozen = saved.frozen;
             self.spare = Some(saved.snapshot);

@@ -134,6 +134,8 @@ pub struct GpuWorld {
     /// resident frame).
     impactors_stale: bool,
     resident: Option<resident_frame::ResidentState>,
+    /// The collider table's lookups of the current layout (resident_frame.rs).
+    table_lookup: Option<resident_frame::TableLookup>,
     /// Frames taken on the resident path.
     pub resident_frames: u64,
     pub prepare_seconds: f64,
@@ -239,6 +241,7 @@ impl GpuWorld {
             part_table: None,
             impactors_stale: false,
             resident: None,
+            table_lookup: None,
             resident_frames: 0,
             prepare_seconds: 0.0,
             refresh_seconds: 0.0,

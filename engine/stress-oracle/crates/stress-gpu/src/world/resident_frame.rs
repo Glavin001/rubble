@@ -45,6 +45,13 @@ pub(super) struct ResidentState {
     colliders_refreshed: bool,
 }
 
+/// The collider table's lookups of a layout (`host_collider_table`), kept while it stands.
+pub(super) struct TableLookup {
+    generation: u64,
+    chunk_index: HashMap<(usize, usize), u32>,
+    by_id: HashMap<u64, usize>,
+}
+
 impl GpuWorld {
     /// The world coupled to `engine` with the resident quasi-static frame available
     /// (`with_engine` otherwise): the engine shares the stress solver's device.
@@ -68,11 +75,21 @@ impl GpuWorld {
     }
 
     /// The engine's collider table as the coupling sees it (`ColliderInfo`), against the
-    /// solver's current layout and mirror; and the static geometry's modulus.
-    fn host_collider_table(&self, e: &dyn ResidentEngine) -> (Vec<crate::ingest::ColliderInfo>, f64) {
+    /// solver's current layout and mirror (only the colliders `range`, if given); and the
+    /// static geometry's modulus.
+    fn host_collider_table(&mut self, e: &dyn ResidentEngine, range: Option<std::ops::Range<u32>>) -> (Vec<crate::ingest::ColliderInfo>, f64) {
+        let generation = self.solver.layout_generation;
+        if self.table_lookup.as_ref().is_none_or(|l| l.generation != generation) {
+            let m = &self.solver.mirror;
+            self.table_lookup = Some(TableLookup {
+                generation,
+                chunk_index: self.solver.gpu_chunks().iter().enumerate().map(|(k, &sc)| (sc, k as u32)).collect(),
+                by_id: m.clusters.iter().enumerate().map(|(ci, cl)| (cl.id, ci)).collect(),
+            });
+        }
+        let lookup = self.table_lookup.as_ref().expect("table lookup");
+        let (chunk_index, by_id) = (&lookup.chunk_index, &lookup.by_id);
         let m = &self.solver.mirror;
-        let chunk_index: HashMap<(usize, usize), u32> = self.solver.gpu_chunks().iter().enumerate().map(|(k, &sc)| (sc, k as u32)).collect();
-        let by_id: HashMap<u64, usize> = m.clusters.iter().enumerate().map(|(ci, cl)| (cl.id, ci)).collect();
         let ground_modulus = self.scene.ground.as_ref().map(|g| self.scene.material(&g.material).youngs_modulus).unwrap_or(3e10);
         let impactors = &self.solver.impactors;
         // world_coupling.rs `engine_contacts_to_impulses`.
@@ -94,7 +111,47 @@ impl GpuWorld {
             };
             [p.0 as f32, p.1 as f32, p.2 as f32]
         };
-        (e.collider_table(&|s, c| chunk_index.get(&(s, c)).copied(), &other), ground_modulus)
+        let chunk_of = |s: usize, c: usize| chunk_index.get(&(s, c)).copied();
+        let table = match range {
+            Some(r) => e.collider_table_range(r, &chunk_of, &other),
+            None => e.collider_table(&chunk_of, &other),
+        };
+        (table, ground_modulus)
+    }
+
+    /// Only some colliders changed since the table was built (an impactor added, a
+    /// body retired), under the same layout: their entries rewritten in place, when the
+    /// engine knows which and the table has room. False: rebuild it.
+    fn patch_collider_table(&mut self, gpu: &Gpu, e: &dyn ResidentEngine, version: u64) -> bool {
+        let Some(r) = self.resident.as_ref() else { return false };
+        if std::env::var("STRESS_COLLIDER_PATCH").is_ok_and(|v| v == "0") {
+            return false;
+        }
+        let Some(changes) = e.collider_changes_since(r.engine_version) else { return false };
+        let count = e.body_counts().1;
+        let entry = std::mem::size_of::<crate::ingest::ColliderInfo>() as u64;
+        if r.ingest.collider_info.size() < entry * count as u64 || r.colliders.as_ref().is_some_and(|c| c.capacity() < count) {
+            return false;
+        }
+        for range in changes {
+            let (part, _) = self.host_collider_table(e, Some(range.clone()));
+            let r = self.resident.as_mut().expect("resident tables");
+            gpu.queue.write_buffer(&r.ingest.collider_info, entry * range.start as u64, bytemuck::cast_slice(&part));
+            if let Some(c) = r.colliders.as_mut() {
+                c.set_keys_range(gpu, range.start, &part, self.solver.gpu_chunks());
+            }
+        }
+        self.resident.as_mut().expect("resident tables").engine_version = version;
+        // `STRESS_GPU_COLLIDER_CHECK=1`: the patched table against the whole one.
+        if std::env::var("STRESS_GPU_COLLIDER_CHECK").is_ok_and(|v| v == "1") {
+            let (table, _) = self.host_collider_table(e, None);
+            let r = self.resident.as_ref().expect("resident tables");
+            let read = gpu.read_ranges(&[(&r.ingest.collider_info, 0, entry * table.len() as u64)]);
+            let gpu_table: Vec<crate::ingest::ColliderInfo> = bytemuck::pod_collect_to_vec(&read[0]);
+            self.solver.collider_check.compare(&gpu_table, &table);
+            self.solver.collider_check.patches += 1;
+        }
+        true
     }
 
     /// The tables of the current layouts (rebuilt when the engine's colliders or the
@@ -109,12 +166,31 @@ impl GpuWorld {
                 return;
             }
         }
+        // More substeps than the ingest has room for, the engine as it was made for: only
+        // its per-substep buffers grow (`STRESS_INGEST_GROW=0`: the whole frame's tables
+        // made anew, as before).
+        let (rows, bodies) = e.engine_capacity();
+        if let Some(r) = self.resident.as_mut() {
+            if r.substeps < substeps && r.ingest.capacity() == (rows, bodies) && std::env::var("STRESS_INGEST_GROW").map_or(true, |v| v != "0") {
+                let cap = substeps.max(1).next_power_of_two();
+                r.ingest.grow_substeps(gpu, cap);
+                r.substeps = cap;
+                if r.engine_version == version && r.layout_generation == generation {
+                    return;
+                }
+            }
+        }
+        // Only the engine's colliders changed, under the same layout: patched in place.
+        if let Some(r) = &self.resident {
+            if r.layout_generation == generation && r.substeps >= substeps && r.ingest_chunks() == self.solver.gpu_chunks().len().max(1) as u32 && !r.gpu_laid_out && self.patch_collider_table(gpu, &*e, version) {
+                return;
+            }
+        }
+        let (table, ground_modulus) = self.host_collider_table(&*e, None);
         let m = &self.solver.mirror;
-        let (table, ground_modulus) = self.host_collider_table(&*e);
         let gpu_colliders = std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1");
         let collider_cap = e.collider_capacity();
         let frames: Vec<Option<EngineFrame>> = m.clusters.iter().map(|cl| if cl.anchored { None } else { e.engine_frame(BodyKey::Cluster(cl.id)) }).collect();
-        let (rows, bodies) = e.engine_capacity();
         let chunks = self.solver.gpu_chunks().len().max(1) as u32;
         let dt = self.scene.sim.frame_dt;
         match self.resident.as_mut() {
@@ -182,8 +258,9 @@ impl GpuWorld {
             return;
         }
         if std::env::var("STRESS_GPU_COLLIDER_CHECK").is_ok_and(|v| v == "1") {
-            let (table, _) = self.host_collider_table(&*e);
+            let (table, _) = self.host_collider_table(&*e, None);
             let n = table.len() as u64 * std::mem::size_of::<crate::ingest::ColliderInfo>() as u64;
+            let r = self.resident.as_ref().expect("resident tables");
             let read = gpu.read_ranges(&[(&r.ingest.collider_info, 0, n)]);
             let gpu_table: Vec<crate::ingest::ColliderInfo> = bytemuck::pod_collect_to_vec(&read[0]);
             self.solver.collider_check.compare(&gpu_table, &table);
@@ -248,6 +325,84 @@ impl GpuWorld {
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
             eprintln!("resident phases: engine {n} substeps + ingest: encode {encode:.1} ms, done {:.1} ms", t_engine.elapsed().as_secs_f64() * 1e3);
         }
+        // `STRESS_GPU_DET_STAGE=<frame>`: that frame's stage outputs hashed (reads of their
+        // own), to find which stage two runs part in.
+        let det_stage = std::env::var("STRESS_GPU_DET_STAGE").ok().and_then(|v| v.parse::<u64>().ok()) == Some(self.frame as u64);
+        let hash = |bytes: &[u8]| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            h.finish()
+        };
+        // `STRESS_GPU_DET_BODIES=1`: the engine's bodies after its substeps, hashed every
+        // frame (a read of their own).
+        if std::env::var("STRESS_GPU_DET_BODIES").is_ok() {
+            let e = engine.borrow();
+            let bodies: Vec<u8> = gpu.read(e.engine_buffers().bodies);
+            // The ingest's output by its physical content: per chunk, each manifold's chunk,
+            // other body, point, impulse and other side (not its slot or key).
+            let r = self.resident.as_ref().expect("resident tables");
+            let per_chunk = r.ingest.read_manifolds(gpu);
+            let mut flat: Vec<u32> = Vec::new();
+            for m in &per_chunk {
+                flat.push(m.len() as u32);
+                for rec in m {
+                    flat.extend([rec.ids[0], rec.ids[1]]);
+                    flat.extend(rec.point.iter().chain(&rec.impulse).chain(&rec.other).map(|v| v.to_bits()));
+                }
+            }
+            eprintln!("det bodies frame {}: {n} substeps, {:x}, ingest {:x}", self.frame, hash(&bodies), hash(bytemuck::cast_slice(&flat)));
+        }
+        if det_stage {
+            let e = engine.borrow();
+            let b = e.engine_buffers();
+            let r = self.resident.as_ref().expect("resident tables");
+            let bodies: Vec<u8> = gpu.read(b.bodies);
+            let counters: Vec<u8> = gpu.read(b.counters);
+            let manifolds: Vec<u8> = gpu.read(&r.ingest.manifolds);
+            let sort: Vec<u8> = gpu.read(&r.ingest.sort);
+            let records: Vec<u8> = gpu.read(&r.ingest.records);
+            eprintln!("det stage frame {} engine: {n} substeps, bodies {:x}, counters {:x}, records {:x}, sort {:x}, manifolds {:x}", self.frame, hash(&bodies), hash(&counters), hash(&records), hash(&sort), hash(&manifolds));
+            // The ingest's output as the stress side reads it: each chunk's manifolds in order.
+            let per_chunk = r.ingest.read_manifolds(gpu);
+            let flat: Vec<u8> = per_chunk.iter().flat_map(|m| bytemuck::cast_slice::<_, u8>(m).to_vec().into_iter().chain((m.len() as u32).to_le_bytes())).collect();
+            eprintln!("det stage frame {} ingest: {} manifolds, content {:x}", self.frame, per_chunk.iter().map(|m| m.len()).sum::<usize>(), hash(&flat));
+            // Records sharing a merge key (`record_before` then falls back to slot order).
+            let words: &[[u32; 4]] = bytemuck::cast_slice(&records[..records.len() / 80 * 80]);
+            let mut keys: HashMap<([u32; 4], u32), u32> = HashMap::new();
+            for rec in words.chunks_exact(5) {
+                if rec[0][3] != 0 {
+                    *keys.entry((rec[4], rec[0][0])).or_insert(0) += 1;
+                }
+            }
+            let dup = keys.values().filter(|&&c| c > 1).count();
+            let worst = keys.values().copied().max().unwrap_or(0);
+            eprintln!("det stage frame {} records: {} valid, {} keys, {dup} keys shared, at most {worst} records per key", self.frame, keys.values().sum::<u32>(), keys.len());
+        }
+        // `STRESS_GPU_DET_INGEST=<frame>` (a one-substep frame): its ingest run again and
+        // again from the engine's buffers as they are, its manifolds' physical content hashed.
+        if n == 1 && std::env::var("STRESS_GPU_DET_INGEST").ok().and_then(|v| v.parse::<u64>().ok()) == Some(self.frame as u64) {
+            let e = engine.borrow();
+            let r = self.resident.as_ref().expect("resident tables");
+            let offset = e.last_row_offset();
+            let runs: usize = std::env::var("STRESS_GPU_DET_REPLAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+            for k in 0..runs {
+                let mut enc = gpu.device.create_command_encoder(&Default::default());
+                r.ingest.substep(gpu, &mut enc, &e.engine_buffers(), offset, 0, fdt);
+                r.ingest.merge(gpu, &mut enc, &e.engine_buffers(), 1);
+                gpu.queue.submit([enc.finish()]);
+                let per_chunk = r.ingest.read_manifolds(gpu);
+                let mut flat: Vec<u32> = Vec::new();
+                for m in &per_chunk {
+                    flat.push(m.len() as u32);
+                    for rec in m {
+                        flat.extend([rec.ids[0], rec.ids[1]]);
+                        flat.extend(rec.point.iter().chain(&rec.impulse).chain(&rec.other).map(|v| v.to_bits()));
+                    }
+                }
+                eprintln!("det ingest frame {} run {k}: {} manifolds, {:x}", self.frame, per_chunk.iter().map(|m| m.len()).sum::<usize>(), hash(bytemuck::cast_slice(&flat)));
+            }
+        }
         self.prepare_seconds += t_prepare.elapsed().as_secs_f64();
         let tail = std::time::Instant::now();
         let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
@@ -262,6 +417,12 @@ impl GpuWorld {
             // read: the cascade's status, the engine's counters, the pulse slots' status.
             self.resident_tables(gpu, n);
             let t_pass = std::time::Instant::now();
+            // `STRESS_GPU_DET_REPLAY=<frame>`: that frame's first window run again and again
+            // from the same buffers (saved, restored), each run's status and state hashed:
+            // whether the stress side alone repeats.
+            if first == 0 && std::env::var("STRESS_GPU_DET_REPLAY").ok().and_then(|v| v.parse::<u64>().ok()) == Some(self.frame as u64) {
+                self.det_replay(gpu, fdt, max);
+            }
             let r = self.resident.take().expect("resident tables");
             let window = CASCADE_WINDOW.min(max - first);
             let run = self.solver.resident_cascade(gpu, fdt, first, window, &|s, enc, pass| {
@@ -276,13 +437,49 @@ impl GpuWorld {
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
                 eprintln!("resident phases: cascade encode {encode:.1} ms, done {:.1} ms", t_pass.elapsed().as_secs_f64() * 1e3);
             }
+            if det_stage && first == 0 {
+                let (hs, hb) = self.solver.state_hashes(gpu);
+                let ctab: Vec<u8> = gpu.read(r.qs.layout().ctab);
+                eprintln!("det stage frame {} cascade: state {hs:x}, bonds {hb:x}, ctab {:x}", self.frame, hash(&ctab));
+            }
             let e = engine.borrow();
             let status = e.resident_status();
             let engine_parts = status.len();
             let mut parts = vec![run.range()];
             parts.extend(status);
             parts.push(r.qs.status_range());
+            // `STRESS_GPU_DET_END=1`: the frame's ingest output and the engine's bodies in
+            // this same read (no sync of their own), hashed below.
+            let det_end = std::env::var("STRESS_GPU_DET_END").is_ok() && first == 0;
+            let base_parts = parts.len();
+            if det_end {
+                let n_chunks = r.ingest.chunk_count() as u64;
+                parts.push((&r.ingest.sort, 0, 4 * (2 * n_chunks + 1)));
+                parts.push((&r.ingest.manifolds, 0, r.ingest.manifolds.size()));
+                parts.push((e.engine_buffers().bodies, 0, e.engine_buffers().bodies.size()));
+            }
             let read = gpu.read_ranges(&parts);
+            if det_end {
+                use std::hash::{Hash, Hasher};
+                let h = |b: &[u8]| {
+                    let mut x = std::collections::hash_map::DefaultHasher::new();
+                    b.hash(&mut x);
+                    x.finish()
+                };
+                let n = r.ingest.chunk_count() as usize;
+                let sort: &[u32] = bytemuck::cast_slice(&read[base_parts]);
+                let man: &[crate::ingest::Record] = bytemuck::cast_slice(&read[base_parts + 1][..read[base_parts + 1].len() / 80 * 80]);
+                let mut flat: Vec<u32> = Vec::new();
+                for k in 0..n {
+                    let (b, c) = (sort[k] as usize, sort[n + 1 + k] as usize);
+                    flat.push(c as u32);
+                    for rec in &man[b..b + c] {
+                        flat.extend([rec.ids[0], rec.ids[1]]);
+                        flat.extend(rec.point.iter().chain(&rec.impulse).chain(&rec.other).map(|v| v.to_bits()));
+                    }
+                }
+                eprintln!("det end frame {}: ingest {:x}, bodies {:x}", self.frame, h(bytemuck::cast_slice(&flat)), h(&read[base_parts + 2]));
+            }
             drop(e);
             self.resident = Some(r);
             let out = run.outcome(&read[0]);
@@ -466,6 +663,50 @@ impl GpuWorld {
         self.frame += 1;
         self.resident_frames += 1;
         Ok(())
+    }
+}
+
+impl GpuWorld {
+    fn det_replay(&mut self, gpu: &Gpu, fdt: f64, max: usize) {
+        use std::hash::{Hash, Hasher};
+        let hash = |bytes: &[u8]| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            h.finish()
+        };
+        let mut bufs = self.solver.cascade_buffers();
+        bufs.push(self.resident.as_ref().expect("resident tables").qs.layout().ctab.clone());
+        let copy_all = |from: &[wgpu::Buffer], to: &[wgpu::Buffer]| {
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            for (a, b) in from.iter().zip(to) {
+                enc.copy_buffer_to_buffer(a, 0, b, 0, a.size());
+            }
+            gpu.queue.submit([enc.finish()]);
+        };
+        let saved: Vec<wgpu::Buffer> = bufs
+            .iter()
+            .map(|b| gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("det replay"), size: b.size(), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }))
+            .collect();
+        copy_all(&bufs, &saved);
+        let runs: usize = std::env::var("STRESS_GPU_DET_REPLAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        for k in 0..runs {
+            copy_all(&saved, &bufs);
+            let r = self.resident.take().expect("resident tables");
+            let window = CASCADE_WINDOW.min(max);
+            let run = self.solver.resident_cascade(gpu, fdt, 0, window, &|s, enc, pass| {
+                r.qs.encode_poses(gpu, enc, &r.ingest, s);
+                if pass == 0 {
+                    r.qs.encode_filter(gpu, enc, &r.ingest, s);
+                }
+                r.qs.encode_static_loads(gpu, enc, &r.ingest, s);
+            });
+            let read = gpu.read_ranges(&[run.range()]);
+            self.resident = Some(r);
+            let after: Vec<u64> = bufs.iter().map(|b| hash(&gpu.read::<u8>(b))).collect();
+            let out = run.outcome(&read[0]);
+            eprintln!("det replay frame {} run {k}: status {:x}, {} passes, {} solved, {} converged, {} unconverged, {} repeats, {} fixed, {} certified, buffers {:x?}", self.frame, hash(&read[0]), out.passes, out.solved.len(), out.converged.len(), out.unconverged, out.skipped_unconverged, out.skipped_fixed, out.certified, after);
+        }
+        copy_all(&saved, &bufs);
     }
 }
 

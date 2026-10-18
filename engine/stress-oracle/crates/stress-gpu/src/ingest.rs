@@ -144,6 +144,33 @@ impl EngineIngest {
         self.chunk_count
     }
 
+    /// The rows and bodies it was made for (`new`).
+    pub fn capacity(&self) -> (u32, u32) {
+        (self.max_rows, self.max_bodies)
+    }
+
+    /// Room for `max_substeps` substeps per frame: only the per-substep buffers are made
+    /// anew (records, their sort and manifolds); the collider table and the rest stay.
+    pub fn grow_substeps(&mut self, gpu: &Gpu, max_substeps: u32) {
+        if max_substeps <= self.max_substeps {
+            return;
+        }
+        let records = (2 * self.max_rows as u64 * max_substeps as u64).max(1);
+        let storage = |label: &str, bytes: u64| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: bytes.max(16),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let n = self.chunk_count as u64;
+        self.records = storage("ingest records", std::mem::size_of::<Record>() as u64 * records);
+        self.sort = storage("ingest sort", 4 * (2 * n + 1 + records));
+        self.manifolds = storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records);
+        self.max_substeps = max_substeps;
+    }
+
     /// Replace the collider table (a layout change on either side).
     pub fn set_colliders(&mut self, gpu: &Gpu, colliders: &[ColliderInfo]) {
         self.collider_info = gpu.storage_into("ingest collider info", table(colliders), Some(&self.collider_info));
