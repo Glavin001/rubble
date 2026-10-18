@@ -293,7 +293,7 @@ fn pass_whole(@builtin(global_invocation_id) id_0 : vec3<u32>)
 }
 
 @compute
-@workgroup_size(64, 1, 1)
+@workgroup_size(256, 1, 1)
 fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invocation_id) thread_1 : vec3<u32>)
 {
     var _S7 : u32;
@@ -319,7 +319,7 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             break;
         }
         old_chunks_0[k_1] = chunks_0[k_1];
-        k_1 = k_1 + u32(64);
+        k_1 = k_1 + u32(256);
     }
     k_1 = u32(4) * _S9 + t_0;
     loop
@@ -332,7 +332,7 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             break;
         }
         old_state_0[k_1] = state_0[k_1];
-        k_1 = k_1 + u32(64);
+        k_1 = k_1 + u32(256);
     }
     var _S11 : u32 = r_1.z;
     k_1 = params_0.bond_words_0 * _S11 + t_0;
@@ -348,7 +348,7 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             break;
         }
         old_bonds_0[k_1] = bonds_0[k_1];
-        k_1 = k_1 + u32(64);
+        k_1 = k_1 + u32(256);
     }
     k_1 = params_0.dyn_words_0 * _S11 + t_0;
     loop
@@ -361,7 +361,7 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             break;
         }
         old_dyn_0[k_1] = bond_dyn_0[k_1];
-        k_1 = k_1 + u32(64);
+        k_1 = k_1 + u32(256);
     }
     if((params_0.resident_0) == u32(0))
     {
@@ -382,7 +382,7 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         old_ctab_0[params_0.eload_base_0 + _S13] = ctab_0[params_0.eload_base_0 + _S13];
         old_ctab_0[params_0.eload_base_0 + _S13 + u32(1)] = ctab_0[params_0.eload_base_0 + _S13 + u32(1)];
         old_ctab_0[params_0.pulse_count_base_0 + c_0] = ctab_0[params_0.pulse_count_base_0 + c_0];
-        c_0 = c_0 + u32(64);
+        c_0 = c_0 + u32(256);
     }
     k_1 = u32(3) * params_0.pulse_cap_0 * _S9 + t_0;
     loop
@@ -395,7 +395,7 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             break;
         }
         old_ctab_0[params_0.pulse_base_0 + k_1] = ctab_0[params_0.pulse_base_0 + k_1];
-        k_1 = k_1 + u32(64);
+        k_1 = k_1 + u32(256);
     }
     return;
 }

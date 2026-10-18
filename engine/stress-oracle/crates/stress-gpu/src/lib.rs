@@ -94,10 +94,10 @@ pub mod shaders {
     pub const RESIDENT: ShaderSet = shader_set!("resident", [("resident_poses", (64, 1, 1)), ("resident_filter", (64, 1, 1)), ("resident_static_loads", (256, 1, 1))]);
     pub const CASCADE: ShaderSet = shader_set!("cascade", [("cascade_begin", (64, 1, 1)), ("cascade_gate", (64, 1, 1)), ("cascade_fixed", (64, 1, 1)), ("cascade_restore", (64, 1, 1)), ("cascade_settle", (64, 1, 1)), ("cascade_end", (256, 1, 1))]);
     pub const PLAN: ShaderSet = shader_set!("plan", [("plan_motion", (64, 1, 1)), ("plan_reach", (64, 1, 1)), ("plan_pair_count", (64, 1, 1)), ("plan_scan", (1024, 1, 1)), ("plan_pair_write", (64, 1, 1)), ("plan_side", (64, 1, 1))]);
-    pub const LAYOUT: ShaderSet = shader_set!("layout", [("layout_plan", (1, 1, 1)), ("layout_moved", (64, 1, 1)), ("layout_parent", (64, 1, 1)), ("layout_copy", (64, 1, 1))]);
-    pub const SPAWN: ShaderSet = shader_set!("spawn", [("spawn_offsets", (1, 1, 1)), ("spawn_bodies", (64, 1, 1)), ("spawn_retire", (64, 1, 1))]);
+    pub const LAYOUT: ShaderSet = shader_set!("layout", [("layout_plan", (1, 1, 1)), ("layout_moved", (64, 1, 1)), ("layout_parent", (256, 1, 1)), ("layout_copy", (64, 1, 1))]);
+    pub const SPAWN: ShaderSet = shader_set!("spawn", [("spawn_offsets", (1024, 1, 1)), ("spawn_bodies", (64, 1, 1)), ("spawn_colliders", (64, 1, 1)), ("spawn_retire", (64, 1, 1))]);
     pub const COLLIDERS: ShaderSet = shader_set!("colliders", [("collider_keys", (64, 1, 1)), ("collider_slots", (64, 1, 1)), ("collider_refresh", (64, 1, 1))]);
-    pub const PASS: ShaderSet = shader_set!("pass", [("pass_parents", (1024, 1, 1)), ("pass_snapshot", (64, 1, 1)), ("pass_whole", (256, 1, 1)), ("pass_finish", (1, 1, 1))]);
+    pub const PASS: ShaderSet = shader_set!("pass", [("pass_parents", (1024, 1, 1)), ("pass_snapshot", (256, 1, 1)), ("pass_whole", (256, 1, 1)), ("pass_finish", (1, 1, 1))]);
     pub const PASSLOG: ShaderSet = shader_set!("passlog", [("pass_log", (256, 1, 1))]);
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);

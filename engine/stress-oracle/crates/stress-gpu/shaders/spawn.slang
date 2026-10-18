@@ -54,6 +54,8 @@ static const uint FLAG_AWAKE = 8;
 // [0]: 1 when the split does not fit (islands, bodies or colliders past a capacity):
 // nothing is made, retired or laid out, and the host splits instead.
 [[vk::binding(15, 0)]] RWStructuredBuffer<uint> control;
+// Per member (split.slang's member order: parent, then child): its first collider slot.
+[[vk::binding(16, 0)]] RWStructuredBuffer<uint> member_offsets;
 
 // A layout chunk's part range: by its structure and chunk, so the table does not change
 // with the layout.
@@ -83,71 +85,154 @@ uint parent_of(uint slot)
     return p;
 }
 
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void spawn_offsets(uint3 id: SV_DispatchThreadID)
+// The parent of member or child slot i: the last parent whose base is at most i.
+uint parent_at(uint i)
 {
+    uint lo = 0, hi = control[CTL_PARENTS] - 1;
+    while (lo < hi)
+    {
+        uint mid = (lo + hi + 1) / 2;
+        if (parents[mid].y <= i)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    return lo;
+}
+
+// A member's collider count: its chunk's parts, when its parent splits into children.
+uint member_parts(uint i, uint total)
+{
+    uint p = parent_at(i);
+    if (parents[p].z < 2)
+        return 0;
+    return part_range(islands_of[p].x + work[total + i]).y;
+}
+
+// Child slot s makes a body: its parent splits, and it is one of the children.
+bool slot_valid(uint s)
+{
+    uint4 parent = parents[parent_at(s)];
+    return parent.z >= 2 && s - parent.y < parent.z;
+}
+
+groupshared uint g_scan[1024];
+
+// An exclusive scan of `v` over the group, in blocks of 1024 (the caller keeps the carry).
+uint block_scan(uint tid, uint v)
+{
+    g_scan[tid] = v;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint step = 1; step < 1024; step <<= 1)
+    {
+        uint add = tid >= step ? g_scan[tid - step] : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        g_scan[tid] += add;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    return g_scan[tid] - v;
+}
+
+groupshared uint g_total;
+groupshared uint g_split_parents;
+
+// One group: each child its first body and collider slot, in child order (bodies and
+// colliders appended in the order the host would add them), by scans over the members'
+// collider counts and the valid child slots; room checked first (nothing is made when it
+// does not fit). The same slots as one thread walking them in that order.
+[shader("compute")]
+[numthreads(1024, 1, 1)]
+void spawn_offsets(uint3 thread: SV_GroupThreadID)
+{
+    uint tid = thread.x;
+    uint body0 = control[CTL_FIRST_BODY];
+    uint collider0 = control[CTL_FIRST_COLLIDER];
     if (control[CTL_PARENTS] == 0)
     {
-        control[CTL_ABORT] = 0;
-        control[CTL_BODIES_AFTER] = control[CTL_FIRST_BODY];
-        control[CTL_COLLIDERS_AFTER] = control[CTL_FIRST_COLLIDER];
+        if (tid == 0)
+        {
+            control[CTL_ABORT] = 0;
+            control[CTL_BODIES_AFTER] = body0;
+            control[CTL_COLLIDERS_AFTER] = collider0;
+        }
         return;
     }
-    uint body = control[CTL_FIRST_BODY];
-    uint collider = control[CTL_FIRST_COLLIDER];
     uint total = total_slots();
-    // Room first: islands (one more per child past the first), bodies, colliders.
-    uint islands_needed = 0;
-    uint bodies_needed = 0;
-    uint colliders_needed = 0;
-    for (uint p = 0; p < control[CTL_PARENTS]; p++)
+    // Members' first colliders.
+    uint carry = 0;
+    for (uint block = 0; block < total; block += 1024)
     {
-        uint4 parent = parents[p];
-        if (parent.z < 2)
-            continue;
-        islands_needed += parent.z - 1;
-        bodies_needed += parent.z;
-        uint first = islands_of[p].x;
-        for (uint k = 0; k < parent.z; k++)
-        {
-            uint2 m = child_members(parent.y + k);
-            for (uint j = 0; j < m.y; j++)
-                colliders_needed += part_range(first + work[total + parent.y + m.x + j]).y;
-        }
+        uint i = block + tid;
+        uint v = i < total ? member_parts(i, total) : 0u;
+        uint at = block_scan(tid, v);
+        if (i < total)
+            member_offsets[i] = collider0 + carry + at;
+        uint t = g_scan[1023];
+        GroupMemoryBarrierWithGroupSync();
+        carry += t;
     }
-    bool fits = islands_needed <= params.island_cap - min(params.island_cap, control[CTL_ISLANDS]) && (params.live == 0 || (body + bodies_needed <= params.max_bodies && collider + colliders_needed <= params.max_colliders));
-    control[CTL_ABORT] = fits ? 0u : 1u;
-    control[CTL_BODIES_AFTER] = body;
-    control[CTL_COLLIDERS_AFTER] = collider;
+    uint colliders_needed = carry;
+    // Valid child slots' bodies (a first pass for the count, the slots after the check).
+    uint bodies_needed = 0;
+    for (uint block = 0; block < total; block += 1024)
+    {
+        uint s2 = block + tid;
+        uint v = s2 < total && slot_valid(s2) ? 1u : 0u;
+        block_scan(tid, v);
+        uint t = g_scan[1023];
+        GroupMemoryBarrierWithGroupSync();
+        bodies_needed += t;
+    }
+    if (tid == 0)
+    {
+        uint split = 0;
+        for (uint p = 0; p < control[CTL_PARENTS]; p++)
+            if (parents[p].z >= 2)
+                split++;
+        g_split_parents = split;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint islands_needed = bodies_needed - g_split_parents;
+    bool fits = islands_needed <= params.island_cap - min(params.island_cap, control[CTL_ISLANDS]) && (params.live == 0 || (body0 + bodies_needed <= params.max_bodies && collider0 + colliders_needed <= params.max_colliders));
+    if (tid == 0)
+    {
+        control[CTL_ABORT] = fits ? 0u : 1u;
+        control[CTL_BODIES_AFTER] = fits ? body0 + bodies_needed : body0;
+        control[CTL_COLLIDERS_AFTER] = fits ? collider0 + colliders_needed : collider0;
+    }
     if (!fits)
         return;
-    for (uint p = 0; p < control[CTL_PARENTS]; p++)
+    // The slots: a valid child its body, first collider and collider count; every other
+    // slot cleared (the slots are kept between split passes).
+    uint bodies = 0;
+    for (uint block = 0; block < total; block += 1024)
     {
-        uint4 parent = parents[p];
-        uint first = islands_of[p].x;
-        // A disconnection that left the island whole makes no body (its slot cleared: the
-        // slots are kept between split passes).
-        if (parent.z < 2)
+        uint s2 = block + tid;
+        bool valid = s2 < total && slot_valid(s2);
+        uint at = block_scan(tid, valid ? 1u : 0u);
+        if (s2 < total)
         {
-            for (uint k = 0; k < parent.z; k++)
-                slots[parent.y + k] = uint4(0);
-            continue;
+            if (valid)
+            {
+                uint4 parent = parents[parent_at(s2)];
+                uint2 m = child_members(s2);
+                uint first = parent.y + m.x;
+                uint end = first + m.y;
+                uint c_first = member_offsets[first];
+                // The members' offsets are a prefix over the pass: a child's colliders end
+                // where the next member's begin (the pass's last at its colliders).
+                uint c_end = end < total ? member_offsets[end] : collider0 + colliders_needed;
+                slots[s2] = uint4(body0 + bodies + at, c_first, c_end - c_first, 1);
+            }
+            else
+            {
+                slots[s2] = uint4(0);
+            }
         }
-        for (uint k = 0; k < parent.z; k++)
-        {
-            uint slot = parent.y + k;
-            uint2 m = child_members(slot);
-            uint count = 0;
-            for (uint j = 0; j < m.y; j++)
-                count += part_range(first + work[total + parent.y + m.x + j]).y;
-            slots[slot] = uint4(body, collider, count, 1);
-            body++;
-            collider += count;
-        }
+        uint t = g_scan[1023];
+        GroupMemoryBarrierWithGroupSync();
+        bodies += t;
     }
-    control[CTL_BODIES_AFTER] = body;
-    control[CTL_COLLIDERS_AFTER] = collider;
 }
 
 // Quaternion of a rotation matrix given by columns (glam `Quat::from_rotation_axes`).
@@ -363,24 +448,54 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
             bodies[BODY_WORDS * (params.max_bodies + at.x) + w] = record[w];
     extras[2 * slot] = float4(com, mass);
     extras[2 * slot + 1] = quat_vec(principal);
-    // Its colliders, in part order: at `to_body (origin - com)`, turned `to_body rotation`.
-    uint col = at.y;
-    for (uint j = 0; j < m.y; j++)
+}
+
+// Per member: its chunk's colliders for its child's body (`create_body`), in part order:
+// at `to_body (origin - com)`, turned `to_body rotation` (the child's centre of mass and
+// principal rotation from `spawn_bodies`), at the member's slots (`spawn_offsets`).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_colliders(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    uint total = total_slots();
+    if (i >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0)
+        return;
+    uint p = parent_at(i);
+    uint4 parent = parents[p];
+    if (parent.z < 2)
+        return;
+    // Its child: the last whose members start at or before it.
+    uint local = i - parent.y;
+    uint lo = 0, hi = parent.z - 1;
+    while (lo < hi)
     {
-        uint4 r = part_range(first + work[total + parent.y + m.x + j]);
-        for (uint k = r.x; k < r.x + r.y; k++)
-        {
-            float4 o = parts[PART_WORDS * k + 4];
-            Quat rot = quat_of(parts[PART_WORDS * k + 5]);
-            float4 ids = parts[PART_WORDS * k + 6];
-            float4 shape_params = parts[PART_WORDS * k + 7];
-            uint cw = 4 * (params.live != 0 ? col : col - control[CTL_FIRST_COLLIDER]);
-            colliders[cw] = float4(asfloat(at.x), ids.x, ids.y, ids.z);
-            colliders[cw + 1] = float4(rotate(to_body, o.xyz - com), o.w);
-            colliders[cw + 2] = quat_vec(normalized(quat_mul(to_body, rot)));
-            colliders[cw + 3] = shape_params;
-            col++;
-        }
+        uint mid = (lo + hi + 1) / 2;
+        if (child_members(parent.y + mid).x <= local)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    uint slot = parent.y + lo;
+    uint4 at = slots[slot];
+    if (at.w == 0)
+        return;
+    float3 com = extras[2 * slot].xyz;
+    Quat to_body = conj(quat_of(extras[2 * slot + 1]));
+    uint4 r = part_range(islands_of[p].x + work[total + i]);
+    uint col = member_offsets[i];
+    for (uint k = r.x; k < r.x + r.y; k++)
+    {
+        float4 o = parts[PART_WORDS * k + 4];
+        Quat rot = quat_of(parts[PART_WORDS * k + 5]);
+        float4 ids = parts[PART_WORDS * k + 6];
+        float4 shape_params = parts[PART_WORDS * k + 7];
+        uint cw = 4 * (params.live != 0 ? col : col - control[CTL_FIRST_COLLIDER]);
+        colliders[cw] = float4(asfloat(at.x), ids.x, ids.y, ids.z);
+        colliders[cw + 1] = float4(rotate(to_body, o.xyz - com), o.w);
+        colliders[cw + 2] = quat_vec(normalized(quat_mul(to_body, rot)));
+        colliders[cw + 3] = shape_params;
+        col++;
     }
 }
 
@@ -389,25 +504,29 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
 // mask includes, a mask that admits none: `CollisionFilter { 0x8000, 0, 0 }`). Live only.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void spawn_retire(uint3 id: SV_DispatchThreadID)
+void spawn_retire(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
-    uint p = id.x;
+    uint p = group.x;
+    uint tid = thread.x;
     if (p >= control[CTL_PARENTS] || params.live == 0 || parents[p].z < 2 || control[0] != 0)
         return;
     uint4 e = islands_of[p];
     // The current record, modified, into both regions (`write_bodies` writes one record twice).
-    uint b = BODY_WORDS * e.y;
-    float4 record[BODY_WORDS];
-    for (uint w = 0; w < BODY_WORDS; w++)
-        record[w] = bodies[b + w];
-    record[0].w = 0.0;
-    record[2] = float4(0.0, 0.0, 0.0, asfloat(0u));
-    record[3].xyz = float3(0.0);
-    record[4].xyz = float3(0.0);
-    for (uint region = 0; region < 2; region++)
+    if (tid == 0)
+    {
+        uint b = BODY_WORDS * e.y;
+        float4 record[BODY_WORDS];
         for (uint w = 0; w < BODY_WORDS; w++)
-            bodies[BODY_WORDS * (e.y + region * params.max_bodies) + w] = record[w];
-    for (uint c = e.z; c < e.w; c++)
+            record[w] = bodies[b + w];
+        record[0].w = 0.0;
+        record[2] = float4(0.0, 0.0, 0.0, asfloat(0u));
+        record[3].xyz = float3(0.0);
+        record[4].xyz = float3(0.0);
+        for (uint region = 0; region < 2; region++)
+            for (uint w = 0; w < BODY_WORDS; w++)
+                bodies[BODY_WORDS * (e.y + region * params.max_bodies) + w] = record[w];
+    }
+    for (uint c = e.z + tid; c < e.w; c += 64)
     {
         float4 head = colliders[4 * c];
         uint material = asuint(head.z) & 0xFFFFu;

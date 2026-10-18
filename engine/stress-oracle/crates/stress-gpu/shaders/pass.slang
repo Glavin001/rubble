@@ -170,7 +170,7 @@ void pass_whole(uint3 id: SV_DispatchThreadID)
 }
 
 [shader("compute")]
-[numthreads(64, 1, 1)]
+[numthreads(256, 1, 1)]
 void pass_snapshot(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint p = group.x;
@@ -178,24 +178,24 @@ void pass_snapshot(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         return;
     uint4 r = island_range(parents[p].x);
     uint t = thread.x;
-    for (uint k = params.chunk_words * r.x + t; k < params.chunk_words * r.y; k += 64)
+    for (uint k = params.chunk_words * r.x + t; k < params.chunk_words * r.y; k += 256)
         old_chunks[k] = chunks[k];
-    for (uint k = 4 * r.x + t; k < 4 * r.y; k += 64)
+    for (uint k = 4 * r.x + t; k < 4 * r.y; k += 256)
         old_state[k] = state[k];
-    for (uint k = params.bond_words * r.z + t; k < params.bond_words * r.w; k += 64)
+    for (uint k = params.bond_words * r.z + t; k < params.bond_words * r.w; k += 256)
         old_bonds[k] = bonds[k];
-    for (uint k = params.dyn_words * r.z + t; k < params.dyn_words * r.w; k += 64)
+    for (uint k = params.dyn_words * r.z + t; k < params.dyn_words * r.w; k += 256)
         old_dyn[k] = bond_dyn[k];
     if (params.resident == 0)
         return;
-    for (uint c = r.x + t; c < r.y; c += 64)
+    for (uint c = r.x + t; c < r.y; c += 256)
     {
         old_ctab[params.props_base + c] = ctab[params.props_base + c];
         old_ctab[params.eload_base + 2 * c] = ctab[params.eload_base + 2 * c];
         old_ctab[params.eload_base + 2 * c + 1] = ctab[params.eload_base + 2 * c + 1];
         old_ctab[params.pulse_count_base + c] = ctab[params.pulse_count_base + c];
     }
-    for (uint k = 3 * params.pulse_cap * r.x + t; k < 3 * params.pulse_cap * r.y; k += 64)
+    for (uint k = 3 * params.pulse_cap * r.x + t; k < 3 * params.pulse_cap * r.y; k += 256)
         old_ctab[params.pulse_base + k] = ctab[params.pulse_base + k];
 }
 

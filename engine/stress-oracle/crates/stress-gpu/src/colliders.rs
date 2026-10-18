@@ -16,10 +16,11 @@ struct ColliderParams {
     chunk_words: u32,
     island_words: u32,
     ground_modulus: f32,
-    pad: [u32; 2],
+    threads: u32,
+    pad: u32,
 }
 
-const BINDINGS: [Binding; 16] = [
+const BINDINGS: [Binding; 17] = [
     Binding::Uniform,   // params
     Binding::Storage,   // parents
     Binding::Storage,   // work
@@ -36,6 +37,7 @@ const BINDINGS: [Binding; 16] = [
     Binding::StorageRw, // chunk slot
     Binding::StorageRw, // collider keys
     Binding::StorageRw, // collider info
+    Binding::Storage,   // member offsets
 ];
 
 /// The split pass's buffers the refresh reads (gpu_split.rs `GpuSplitter::pass`).
@@ -53,6 +55,7 @@ pub struct RefreshInputs<'a> {
     pub islands_of: &'a wgpu::Buffer,
     pub structure_base: &'a wgpu::Buffer,
     pub control: &'a wgpu::Buffer,
+    pub member_offsets: &'a wgpu::Buffer,
 }
 
 /// Per engine collider its stable chunk key (`structure_base[s] + c`, or NONE), per stable
@@ -159,7 +162,8 @@ impl ColliderRefresh {
                 chunk_words: 16,
                 island_words: 25,
                 ground_modulus: self.ground_modulus,
-                pad: [0; 2],
+                threads: 64 * groups(total_slots.max(inputs.parent_count as usize), 64),
+                pad: 0,
             },
         );
         let bind = |k: &Kernel| {
@@ -182,6 +186,7 @@ impl ColliderRefresh {
                     &self.chunk_slot,
                     &self.keys,
                     collider_info,
+                    inputs.member_offsets,
                 ],
             )
         };

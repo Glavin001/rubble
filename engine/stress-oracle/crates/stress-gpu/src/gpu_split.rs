@@ -75,6 +75,7 @@ pub struct GpuSplitter {
     pub(crate) offsets: Kernel,
     pub(crate) spawn: Kernel,
     pub(crate) retire: Kernel,
+    pub(crate) spawn_colliders: Kernel,
     /// The split pass's copies of the tables as they were (`pass`), kept between splits:
     /// a new buffer per split costs its allocation and zero fill.
     old: std::cell::RefCell<Vec<Option<wgpu::Buffer>>>,
@@ -113,7 +114,7 @@ pub struct SpawnTarget<'a> {
     pub max_bodies: u32,
 }
 
-const SPAWN_BINDINGS: [Binding; 16] = [
+const SPAWN_BINDINGS: [Binding; 17] = [
     Binding::Uniform,   // params
     Binding::Storage,   // parents
     Binding::Storage,   // work
@@ -130,6 +131,7 @@ const SPAWN_BINDINGS: [Binding; 16] = [
     Binding::StorageRw, // extras (each child's centre of mass, mass, principal rotation)
     Binding::Storage,   // structure_base
     Binding::StorageRw, // control
+    Binding::StorageRw, // member offsets (each member's first collider)
 ];
 
 /// The engine's per-chunk part table on the GPU (`spawn.slang`), by structure and chunk:
@@ -194,7 +196,7 @@ impl GpuSplitter {
     pub fn new(gpu: &Gpu) -> GpuSplitter {
         let k = |e: &str| gpu.compute(&shaders::SPLIT, e, &BINDINGS);
         let s = |e: &str| gpu.compute(&shaders::SPAWN, e, &SPAWN_BINDINGS);
-        GpuSplitter { components: k("split_components"), children: k("split_children"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire"), old: std::cell::RefCell::new(vec![None; 8]) }
+        GpuSplitter { components: k("split_components"), children: k("split_children"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire"), spawn_colliders: s("spawn_colliders"), old: std::cell::RefCell::new(vec![None; 8]) }
     }
 
     /// The children of the islands `parents` (island, chunk range, rigid frame: rotation
@@ -306,8 +308,9 @@ impl GpuSplitter {
         let params = gpu.uniform("spawn params", &SpawnParams { parent_count: run.parent_count as u32, first_body, first_collider, live: live as u32, max_bodies, max_colliders: u32::MAX, island_cap: u32::MAX, pad: 0 });
         let control = gpu.storage("spawn control", &control_words(run.parent_count as u32, 0, 0, first_body, first_collider, total as u32));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        for (k, size) in [(&self.offsets, 1u32), (&self.spawn, groups(total, 64)), (&self.retire, groups(run.parent_count, 64))] {
-            let bind = gpu.bind(&k.group, &[&params, &run.parents, &run.work, &run.out, &run.frames, &table.ranges, &table.parts, chunks, state, &slots_buf, bodies, colliders, &islands_of, &extras_buf, &table.structure_base, &control]);
+        let member_offsets = gpu.storage("spawn member offsets", &vec![0u32; total.max(1)]);
+        for (k, size) in [(&self.offsets, 1u32), (&self.spawn, groups(total, 64)), (&self.spawn_colliders, groups(total, 64)), (&self.retire, run.parent_count.max(1) as u32)] {
+            let bind = gpu.bind(&k.group, &[&params, &run.parents, &run.work, &run.out, &run.frames, &table.ranges, &table.parts, chunks, state, &slots_buf, bodies, colliders, &islands_of, &extras_buf, &table.structure_base, &control, &member_offsets]);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &bind, &[]);
@@ -547,7 +550,7 @@ impl GpuLayout {
         params.parent_count = run.parent_count as u32;
         params.total = run.total as u32;
         let cap = params.island_count as usize + run.total;
-        let words = 16 + cap + 6 * run.total + params.island_count as usize + params.bond_count as usize + 1;
+        let words = 16 + cap + 8 * run.total + params.island_count as usize + params.bond_count as usize + 1;
         let plan = gpu.storage("layout plan", &vec![0u32; words]);
         let uniform = gpu.uniform("layout params", &params);
         // The control words the layout reads (the spawn's buffer keeps its own).
@@ -667,7 +670,7 @@ impl GpuSplitter {
             [params.props_base, params.eload_base, params.pulse_base, params.pulse_count_base, params.pulse_cap, params.engine_base] = *r;
         }
         let cap = params.island_count as usize + total;
-        let plan = gpu.storage("pass plan", &vec![0u32; 16 + cap + 6 * total + params.island_count as usize + params.bond_count as usize + 1]);
+        let plan = gpu.storage("pass plan", &vec![0u32; 16 + cap + 8 * total + params.island_count as usize + params.bond_count as usize + 1]);
         let layout_uniform = gpu.uniform("pass layout params", &params);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         // Copies of the tables as they were, of only what the layout reads: each parent's
@@ -733,8 +736,9 @@ impl GpuSplitter {
             _ => (&dummy, &dummy_out),
         };
         let split_bind = |k: &Kernel| gpu.bind(&k.group, &[&split_params, chunks, index, bonds, bond_dyn, islands, state, &parents_buf, &work, &out, &frames, engine.target.bodies, &parent_bodies, &control]);
+        let member_offsets = gpu.storage("pass member offsets", &vec![0u32; total.max(1)]);
         let spawn_bind = |k: &Kernel| {
-            gpu.bind(&k.group, &[&spawn_params, &parents_buf, &work, &out, &frames, &table.ranges, &table.parts, chunks, state, &slots, engine.target.bodies, engine.target.colliders, &firsts, &extras, &table.structure_base, &control])
+            gpu.bind(&k.group, &[&spawn_params, &parents_buf, &work, &out, &frames, &table.ranges, &table.parts, chunks, state, &slots, engine.target.bodies, engine.target.colliders, &firsts, &extras, &table.structure_base, &control, &member_offsets])
         };
         let layout_bind = |k: &Kernel| {
             gpu.bind(
@@ -749,7 +753,8 @@ impl GpuSplitter {
             (&self.children, split_bind(&self.children), groups(total, 64)),
             (&self.offsets, spawn_bind(&self.offsets), 1),
             (&self.spawn, spawn_bind(&self.spawn), groups(total, 64)),
-            (&self.retire, spawn_bind(&self.retire), groups(parents.len(), 64)),
+            (&self.spawn_colliders, spawn_bind(&self.spawn_colliders), groups(total, 64)),
+            (&self.retire, spawn_bind(&self.retire), n),
             (&layout.plan, layout_bind(&layout.plan), 1),
             (&layout.moved, layout_bind(&layout.moved), groups(island_cap + 1, 64)),
             (&layout.parent, layout_bind(&layout.parent), n),
@@ -788,6 +793,7 @@ impl GpuSplitter {
                 islands_of: &firsts,
                 structure_base: &table.structure_base,
                 control: &control,
+                member_offsets: &member_offsets,
             };
             refresh.encode(gpu, &mut encoder, &inputs, total, collider_info);
         }
@@ -814,7 +820,7 @@ impl GpuSplitter {
         if let Some(b) = timing_resolve {
             let t: Vec<u64> = gpu.read(&b);
             let period = gpu.queue.get_timestamp_period() as f64 * 1e-6;
-            let names = ["frames", "components", "children", "offsets", "spawn", "retire", "plan", "moved", "parent", "copy"];
+            let names = ["frames", "components", "children", "offsets", "spawn", "colliders", "retire", "plan", "moved", "parent", "copy"];
             let ms: Vec<String> = (0..t.len() / 2).map(|q| format!("{} {:.2}", names.get(q).unwrap_or(&"?"), t[2 * q + 1].saturating_sub(t[2 * q]) as f64 * period)).collect();
             eprintln!("split pass GPU ms: {}", ms.join(", "));
         }

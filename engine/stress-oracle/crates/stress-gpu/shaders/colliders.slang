@@ -21,7 +21,7 @@ struct ColliderParams
     uint chunk_words;     // float4 per chunk static (16)
     uint island_words;    // float4 per island (25)
     float ground_modulus; // static geometry's modulus (the host's `other(None)`)
-    uint pad0;
+    uint threads;         // collider_keys's threads (its dispatch)
     uint pad1;
 };
 
@@ -41,6 +41,7 @@ struct ColliderParams
 [[vk::binding(13, 0)]] RWStructuredBuffer<uint> chunk_slot;  // per stable chunk: its layout index
 [[vk::binding(14, 0)]] RWStructuredBuffer<uint> collider_key; // per engine collider: stable chunk, NONE or RETIRED
 [[vk::binding(15, 0)]] RWStructuredBuffer<uint4> collider_info; // two uint4 per collider (`ColliderInfo` a, b)
+[[vk::binding(16, 0)]] StructuredBuffer<uint> member_offsets;  // spawn.slang: each member's first collider
 
 static const uint NONE = 0xffffffffu;
 static const uint RETIRED = 0xfffffffeu;
@@ -74,36 +75,38 @@ void collider_keys(uint3 id: SV_DispatchThreadID)
     if (control[0] != 0 || control[CTL_PARENTS] == 0)
         return;
     uint t = id.x;
-    // A split parent's colliders, retired with its body (spawn.slang `spawn_retire`).
-    if (t < control[CTL_PARENTS] && parents[t].z >= 2)
+    uint stride = params.threads;
+    // The split parents' colliders, retired with their bodies (spawn.slang `spawn_retire`),
+    // spread over every thread.
+    for (uint p = 0; p < control[CTL_PARENTS]; p++)
     {
-        uint4 e = islands_of[t];
-        for (uint c = e.z; c < e.w; c++)
+        if (parents[p].z < 2)
+            continue;
+        uint4 e = islands_of[p];
+        for (uint c = e.z + t; c < e.w; c += stride)
             collider_key[c] = RETIRED;
     }
+    // Per member (spawn.slang's member order): its chunk's colliders, at its slots.
     uint total = total_slots();
     if (t >= total)
         return;
-    uint p = parent_of(t);
-    uint4 parent = parents[p];
-    if (t - parent.y >= parent.z || slots[t].w == 0)
-        return;
-    // The child's colliders as `spawn_bodies` made them: per member, its parts in order.
-    uint first = islands_of[p].x;
-    float4 head = children[CHILD_WORDS * t];
-    uint2 m = uint2(asuint(head.y), asuint(head.z));
-    uint col = slots[t].y;
-    for (uint j = 0; j < m.y; j++)
+    uint p = 0, hi = control[CTL_PARENTS] - 1;
+    while (p < hi)
     {
-        uint chunk = first + work[total + parent.y + m.x + j];
-        uint key = key_of(asuint(old_chunks[params.chunk_words * chunk + 8]));
-        uint count = part_ranges[key].y;
-        for (uint k = 0; k < count; k++)
-        {
-            collider_key[col] = key;
-            col++;
-        }
+        uint mid = (p + hi + 1) / 2;
+        if (parents[mid].y <= t)
+            p = mid;
+        else
+            hi = mid - 1;
     }
+    if (parents[p].z < 2)
+        return;
+    uint chunk = islands_of[p].x + work[total + t];
+    uint key = key_of(asuint(old_chunks[params.chunk_words * chunk + 8]));
+    uint count = part_ranges[key].y;
+    uint col = member_offsets[t];
+    for (uint k = 0; k < count; k++)
+        collider_key[col + k] = key;
 }
 
 [shader("compute")]

@@ -116,10 +116,50 @@ enum Size {
 pub struct PreparedPass {
     steps: Vec<(wgpu::ComputePipeline, wgpu::BindGroup, Size)>,
     args: wgpu::Buffer,
+    /// `STRESS_GPU_TIMING=1`: each step's GPU time over the frame's passes (a diagnostic):
+    /// timestamps, their resolve buffer, the passes recorded.
+    timing: Option<(wgpu::QuerySet, wgpu::Buffer, std::cell::Cell<u32>)>,
 }
 
+/// Passes per frame `PreparedPass` times at most.
+const TIMED_PASSES: u32 = 8;
+
 impl PreparedPass {
+    /// The timed steps' GPU ms, per recorded pass (after the submission finished).
+    pub fn timings(&self, gpu: &Gpu) -> Option<Vec<Vec<f64>>> {
+        let (q, resolve, used) = self.timing.as_ref()?;
+        let n = self.steps.len() as u32;
+        let passes = used.get();
+        if passes == 0 {
+            return Some(Vec::new());
+        }
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        enc.resolve_query_set(q, 0..2 * n * passes, resolve, 0);
+        gpu.queue.submit([enc.finish()]);
+        let t: Vec<u64> = gpu.read(resolve);
+        let period = gpu.queue.get_timestamp_period() as f64 * 1e-6;
+        Some((0..passes).map(|p| (0..n).map(|i| { let at = (2 * (p * n + i)) as usize; t[at + 1].saturating_sub(t[at]) as f64 * period }).collect()).collect())
+    }
+
     pub fn record(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some((q, _, used)) = &self.timing {
+            let p = used.get();
+            if p < TIMED_PASSES {
+                used.set(p + 1);
+                let n = self.steps.len() as u32;
+                for (i, (pipeline, bind, size)) in self.steps.iter().enumerate() {
+                    let at = 2 * (p * n + i as u32);
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(at), end_of_pass_write_index: Some(at + 1) }) });
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, bind, &[]);
+                    match size {
+                        Size::Direct(n) => pass.dispatch_workgroups(*n, 1, 1),
+                        Size::Indirect(at) => pass.dispatch_workgroups_indirect(&self.args, *at),
+                    }
+                }
+                return;
+            }
+        }
         let mut pass = encoder.begin_compute_pass(&Default::default());
         for (pipeline, bind, size) in &self.steps {
             pass.set_pipeline(pipeline);
@@ -148,6 +188,8 @@ pub struct GpuPass {
     pub slots: wgpu::Buffer,
     pub extras: wgpu::Buffer,
     pub control: wgpu::Buffer,
+    /// Per member its first collider (spawn.slang `member_offsets`).
+    pub member_offsets: wgpu::Buffer,
     firsts: wgpu::Buffer,
     args: wgpu::Buffer,
     plan: wgpu::Buffer,
@@ -170,7 +212,7 @@ impl GpuPass {
         let n = chunks.max(1) as u64;
         let cap = island_cap as u64 + 1;
         let none = wgpu::BufferUsages::empty();
-        let plan_words = 16 + (cap + n) + 6 * n + cap + bonds as u64 + 1;
+        let plan_words = 16 + (cap + n) + 8 * n + cap + bonds as u64 + 1;
         GpuPass {
             parents_k: k("pass_parents"),
             snapshot_k: k("pass_snapshot"),
@@ -186,6 +228,7 @@ impl GpuPass {
             slots: buf("gpu pass slots", 16 * n, none),
             extras: buf("gpu pass extras", 32 * n, none),
             control: buf("gpu pass control", 4 * CTL_WORDS as u64, none),
+            member_offsets: buf("gpu pass member offsets", 4 * n, none),
             firsts: buf("gpu pass parents' records", 16 * cap, none),
             args: buf("gpu pass arguments", 64, wgpu::BufferUsages::INDIRECT),
             plan: buf("gpu pass plan", 4 * plan_words, none),
@@ -256,7 +299,7 @@ impl GpuPass {
             &SpawnParams { parent_count: 0, first_body: 0, first_collider: 0, live: 1, max_bodies: t.target.max_bodies, max_colliders: t.max_colliders, island_cap: cap, pad: 0 },
         );
         let spawn_bind = |k: &Kernel| {
-            gpu.bind(&k.group, &[&spawn_params, &self.parents, &self.work, &self.out, &self.frames, &t.table.ranges, &t.table.parts, chunks, state, &self.slots, t.target.bodies, t.target.colliders, &self.firsts, &self.extras, &t.table.structure_base, &self.control])
+            gpu.bind(&k.group, &[&spawn_params, &self.parents, &self.work, &self.out, &self.frames, &t.table.ranges, &t.table.parts, chunks, state, &self.slots, t.target.bodies, t.target.colliders, &self.firsts, &self.extras, &t.table.structure_base, &self.control, &self.member_offsets])
         };
         let layout_uniform = gpu.uniform("gpu pass layout params", &lp);
         let layout_bind = |k: &Kernel| {
@@ -274,7 +317,8 @@ impl GpuPass {
             (&splitter.children, split_bind(&splitter.children), Size::Indirect(ARGS_SLOTS)),
             (&splitter.offsets, spawn_bind(&splitter.offsets), Size::Direct(1)),
             (&splitter.spawn, spawn_bind(&splitter.spawn), Size::Indirect(ARGS_SLOTS)),
-            (&splitter.retire, spawn_bind(&splitter.retire), Size::Indirect(ARGS_PARENTS_64)),
+            (&splitter.spawn_colliders, spawn_bind(&splitter.spawn_colliders), Size::Indirect(ARGS_SLOTS)),
+            (&splitter.retire, spawn_bind(&splitter.retire), Size::Indirect(ARGS_PARENTS)),
             (&layout.plan, layout_bind(&layout.plan), Size::Direct(1)),
             (&layout.moved, layout_bind(&layout.moved), Size::Direct(groups(self.island_cap + 1, 64))),
             (&layout.parent, layout_bind(&layout.parent), Size::Indirect(ARGS_PARENTS)),
@@ -296,6 +340,7 @@ impl GpuPass {
                 islands_of: &self.firsts,
                 structure_base: &t.table.structure_base,
                 control: &self.control,
+                member_offsets: &self.member_offsets,
             };
             prepared.extend(refresh.steps(gpu, &inputs, self.chunk_cap.max(self.island_cap), collider_info).into_iter().map(|(p, b, n)| (p, b, Size::Direct(n))));
         }
@@ -305,7 +350,13 @@ impl GpuPass {
             prepared.push((self.log_k.pipeline.clone(), bind, Size::Direct(1)));
         }
         prepared.push((self.finish_k.pipeline.clone(), pass_bind(&self.finish_k), Size::Direct(1)));
-        PreparedPass { steps: prepared, args: self.args.clone() }
+        let timing = (std::env::var("STRESS_GPU_TIMING").is_ok_and(|v| v == "1") && gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY)).then(|| {
+            let count = 2 * prepared.len() as u32 * TIMED_PASSES;
+            let q = gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("split pass timestamps"), ty: wgpu::QueryType::Timestamp, count });
+            let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("split pass timestamps"), size: 8 * count as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+            (q, b, std::cell::Cell::new(0))
+        });
+        PreparedPass { steps: prepared, args: self.args.clone(), timing }
     }
 
     /// What the pass did, read back (two reads: its control words, then what they size):

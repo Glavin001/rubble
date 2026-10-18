@@ -251,25 +251,40 @@ impl GpuWorld {
 
     /// After the engine adopted a split whose collider table the GPU refreshed: the table
     /// is current (`STRESS_GPU_COLLIDER_CHECK=1`: compared with the host's).
-    fn colliders_adopted(&mut self, gpu: &Gpu) {
+    /// `check`: compared now (the host's mirror and layout have followed every split the
+    /// GPU's table holds; a frame's log checks once, after its last).
+    fn colliders_adopted(&mut self, gpu: &Gpu, check: bool) {
         let engine = self.resident_engine.clone().expect("resident engine");
         let e = engine.borrow();
         let Some(r) = self.resident.as_ref() else { return };
         if !r.colliders_refreshed {
             return;
         }
-        if std::env::var("STRESS_GPU_COLLIDER_CHECK").is_ok_and(|v| v == "1") {
-            let (table, _) = self.host_collider_table(&*e, None);
-            let n = table.len() as u64 * std::mem::size_of::<crate::ingest::ColliderInfo>() as u64;
-            let r = self.resident.as_ref().expect("resident tables");
-            let read = gpu.read_ranges(&[(&r.ingest.collider_info, 0, n)]);
-            let gpu_table: Vec<crate::ingest::ColliderInfo> = bytemuck::pod_collect_to_vec(&read[0]);
-            self.solver.collider_check.compare(&gpu_table, &table);
+        drop(e);
+        if check {
+            self.check_colliders(gpu);
         }
+        let e = engine.borrow();
         let r = self.resident.as_mut().expect("resident tables");
         r.engine_version = e.layout_version();
         r.gpu_laid_out = false;
         r.colliders_refreshed = false;
+    }
+
+    /// `STRESS_GPU_COLLIDER_CHECK=1`: the GPU's collider table against the host's, as the
+    /// host's mirror and layout stand.
+    fn check_colliders(&mut self, gpu: &Gpu) {
+        if !std::env::var("STRESS_GPU_COLLIDER_CHECK").is_ok_and(|v| v == "1") {
+            return;
+        }
+        let engine = self.resident_engine.clone().expect("resident engine");
+        let e = engine.borrow();
+        let (table, _) = self.host_collider_table(&*e, None);
+        let n = table.len() as u64 * std::mem::size_of::<crate::ingest::ColliderInfo>() as u64;
+        let r = self.resident.as_ref().expect("resident tables");
+        let read = gpu.read_ranges(&[(&r.ingest.collider_info, 0, n)]);
+        let gpu_table: Vec<crate::ingest::ColliderInfo> = bytemuck::pod_collect_to_vec(&read[0]);
+        self.solver.collider_check.compare(&gpu_table, &table);
     }
 
     /// The mirror current: the solver's state and, after resident frames, the engine's
@@ -692,7 +707,7 @@ impl GpuWorld {
             }
             if let Some(spawned) = spawned {
                 self.adopt_live(&engine, spawned)?;
-                self.colliders_adopted(gpu);
+                self.colliders_adopted(gpu, true);
             }
             if let Some((ids, layout_chunks, gpu_children, bodies, shadow)) = gpu_children {
                 self.check_split(&ids, &layout_chunks, &gpu_children);
@@ -845,7 +860,7 @@ impl GpuWorld {
                 if let Some(r) = self.resident.as_mut() {
                     r.colliders_refreshed = r.colliders.is_some();
                 }
-                self.colliders_adopted(gpu);
+                self.colliders_adopted(gpu, false);
                 if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
                     eprintln!("frame split {applied}: {n} parents, {c} children, {total} chunks: engine {:.1} ms (the host's mirror follows later)", t1.elapsed().as_secs_f64() * 1e3);
                 }
@@ -867,12 +882,16 @@ impl GpuWorld {
             }
             let t1 = std::time::Instant::now();
             self.adopt_live(engine, spawned)?;
-            self.colliders_adopted(gpu);
+            self.colliders_adopted(gpu, false);
             if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
                 eprintln!("frame split {applied}: {n} parents, {c} children, {total} chunks: mirror and layout {t_split:.1} ms, engine {:.1} ms", t1.elapsed().as_secs_f64() * 1e3);
             }
             applied += 1;
             at += size;
+        }
+        // Followed at once (not deferred): the table against the host's now.
+        if applied > 0 && self.pending_splits.is_empty() {
+            self.check_colliders(gpu);
         }
         Ok(applied)
     }
@@ -1292,6 +1311,7 @@ impl GpuWorld {
             }
             self.with_shell_mut(|w| w.coupled_write_back(&[]));
         }
+        self.check_colliders(gpu);
         Ok(())
     }
 

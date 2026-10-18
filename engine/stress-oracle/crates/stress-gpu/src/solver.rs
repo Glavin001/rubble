@@ -2922,6 +2922,14 @@ impl GpuSolver {
             b
         });
         gpu.queue.submit([encoder.finish()]);
+        if let Some(t) = prepared.as_ref().and_then(|p| p.timings(gpu)) {
+            const NAMES: [&str; 21] = ["parents", "snapshot", "whole", "frames", "components", "children", "offsets", "spawn", "colliders", "retire", "plan", "moved", "parent", "copy", "keys", "slots", "refresh", "log", "finish", "?", "?"];
+            for (p, steps) in t.iter().enumerate() {
+                let total: f64 = steps.iter().sum();
+                let parts: Vec<String> = steps.iter().enumerate().filter(|(_, ms)| **ms >= 0.05).map(|(i, ms)| format!("{} {ms:.2}", NAMES.get(i).unwrap_or(&"?"))).collect();
+                eprintln!("frame split pass {p} GPU ms: total {total:.2}: {}", parts.join(", "));
+            }
+        }
         if let Some(b) = resolve {
             let t: Vec<u64> = gpu.read(&b);
             let period = gpu.queue.get_timestamp_period() as f64 * 1e-6;

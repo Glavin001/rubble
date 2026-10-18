@@ -104,6 +104,10 @@ uint child_bonds_at(uint slot) { return 16 + cap() + 3 * control[CTL_TOTAL] + co
 uint bond_new_at(uint b) { return 16 + cap() + 5 * control[CTL_TOTAL] + control[CTL_ISLANDS] + b; }
 // Per parent (at its base): its children in the order of their islands (child numbers).
 uint child_order_at(uint slot) { return 16 + cap() + 5 * control[CTL_TOTAL] + control[CTL_ISLANDS] + params.bond_count + slot; }
+// Per child slot: its first new chunk position in its parent's range (island order).
+uint child_start_at(uint slot) { return 16 + cap() + 6 * control[CTL_TOTAL] + control[CTL_ISLANDS] + params.bond_count + slot; }
+// Per parent chunk (at its parent's base, by new position): its degree (incidence entries).
+uint degree_at(uint slot) { return 16 + cap() + 7 * control[CTL_TOTAL] + control[CTL_ISLANDS] + params.bond_count + slot; }
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
@@ -175,6 +179,11 @@ void inverse3(float3 r0, float3 r1, float3 r2, out float3 i0, out float3 i1, out
 }
 
 groupshared uint g_cut_first;
+groupshared uint g_cut_next;
+static const uint LT = 256; // layout_parent's threads
+groupshared uint g_class[LT];
+groupshared uint g_scan64[LT];
+static const uint CUT_CLASS = 0xfffffffeu;
 
 // The parent's children in the order of their islands (the host lays them out as its
 // clusters stand after the split): the child number of the `r`-th (`child_order_at`,
@@ -201,8 +210,58 @@ void sort_children(uint4 parent)
     }
 }
 
+// Bonds of a parent in blocks of the group's threads, in bond order: each one's rank among
+// its child's (or the cut ones) in that order. `place`: its new index, its child's next
+// (`child_bonds_at` + 1) or the cut cursor plus its rank, the cursors advanced past the
+// block; otherwise each child's count advanced (`child_bonds_at`). The whole group calls it.
+void bond_ranks(uint4 parent, uint base, uint c0, uint b0, uint b1, uint tid, bool place)
+{
+    for (uint block = b0; block < b1; block += LT)
+    {
+        uint b = block + tid;
+        uint cls = NONE;
+        if (b < b1)
+        {
+            uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
+            uint ka = work[base + ids.y - c0];
+            uint kb = work[base + ids.z - c0];
+            cls = ka == kb ? ka : CUT_CLASS;
+        }
+        g_class[tid] = cls;
+        GroupMemoryBarrierWithGroupSync();
+        uint rank = 0;
+        bool last = cls != NONE;
+        for (uint t = 0; t < LT; t++)
+        {
+            if (t < tid && g_class[t] == cls)
+                rank++;
+            if (t > tid && g_class[t] == cls)
+                last = false;
+        }
+        if (place && cls != NONE)
+        {
+            uint first = cls == CUT_CLASS ? g_cut_next : plan[child_bonds_at(base + cls) + 1];
+            plan[bond_new_at(b)] = first + rank;
+        }
+        device_group_barrier();
+        if (last)
+        {
+            if (place)
+            {
+                if (cls == CUT_CLASS)
+                    g_cut_next += rank + 1;
+                else
+                    plan[child_bonds_at(base + cls) + 1] += rank + 1;
+            }
+            else if (cls != CUT_CLASS)
+                plan[child_bonds_at(base + cls)] += rank + 1;
+        }
+        device_group_barrier();
+    }
+}
+
 [shader("compute")]
-[numthreads(64, 1, 1)]
+[numthreads(256, 1, 1)]
 void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
@@ -218,7 +277,9 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     uint n = c1 - c0;
     uint base = parent.y;
     uint total = control[CTL_TOTAL];
-    // 1. New chunk positions (thread 0: a fixed order), the children's chunk ranges.
+    // 1. New chunk positions: each child's start in island order (thread 0, over the
+    // children), then every member in parallel: child k's members (`offset`, in child order)
+    // go to its start plus their place among them, as one pass in island order would.
     if (tid == 0)
     {
         sort_children(parent);
@@ -226,20 +287,30 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         for (uint r = 0; r < parent.z; r++)
         {
             uint k = child_by_island(parent, r);
-            float4 head = children[CHILD_WORDS * (base + k)];
-            uint offset = asuint(head.y), count = asuint(head.z);
-            for (uint j = 0; j < count; j++)
-            {
-                uint old_local = work[total + base + offset + j];
-                plan[new_chunk_at(base + old_local)] = at;
-                at++;
-            }
+            plan[child_start_at(base + k)] = at;
+            at += asuint(children[CHILD_WORDS * (base + k)].z);
         }
+    }
+    device_group_barrier();
+    for (uint i = tid; i < n; i += LT)
+    {
+        // The child whose members hold slot i: offsets rise with the child number.
+        uint lo = 0, hi = parent.z - 1;
+        while (lo < hi)
+        {
+            uint mid = (lo + hi + 1) / 2;
+            if (asuint(children[CHILD_WORDS * (base + mid)].y) <= i)
+                lo = mid;
+            else
+                hi = mid - 1;
+        }
+        uint j = i - asuint(children[CHILD_WORDS * (base + lo)].y);
+        plan[new_chunk_at(base + work[total + base + i])] = plan[child_start_at(base + lo)] + j;
     }
     device_group_barrier();
     // Chunk statics, states, the resident tables' chunk entries; the static-solve slots
     // cleared (a new island's solve starts from rest, as after the host's split).
-    for (uint m = tid; m < n; m += 64)
+    for (uint m = tid; m < n; m += LT)
     {
         uint nk = plan[new_chunk_at(base + m)];
         uint k = work[base + m];
@@ -263,26 +334,17 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         }
     }
     device_group_barrier();
-    // 2. Bonds: each child's, in the parent's order, then the cut ones. Thread 0 gives
-    // every bond its new index (one pass to count per child, one to place: a fixed
-    // order); then every thread copies records.
+    // 2. Bonds: each child's, in the parent's order, then the cut ones. Counts per child
+    // (counted as they are ranked below), starts in island order
+    // (thread 0, over the children), then each bond's place among its child's in bond
+    // order, in blocks of the group's threads: as one pass in bond order would give.
+    for (uint k = tid; k < parent.z; k += LT)
+        plan[child_bonds_at(base + k)] = 0;
+    device_group_barrier();
+    bond_ranks(parent, base, c0, b0, b1, tid, false);
+    device_group_barrier();
     if (tid == 0)
     {
-        // Counts per child, in child-slot words (`child_bonds_at`, first word).
-        for (uint k = 0; k < parent.z; k++)
-            plan[child_bonds_at(base + k)] = 0;
-        uint cut = 0;
-        for (uint b = b0; b < b1; b++)
-        {
-            uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
-            uint ka = work[base + ids.y - c0];
-            uint kb = work[base + ids.z - c0];
-            if (ka == kb)
-                plan[child_bonds_at(base + ka)] += 1;
-            else
-                cut++;
-        }
-        // Starts in island order; then each child's (first, end).
         uint at = 0;
         for (uint r = 0; r < parent.z; r++)
         {
@@ -293,30 +355,13 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             at += count;
         }
         g_cut_first = b0 + at;
-        uint cut_at = at;
-        for (uint b = b0; b < b1; b++)
-        {
-            uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
-            uint ka = work[base + ids.y - c0];
-            uint kb = work[base + ids.z - c0];
-            if (ka == kb)
-            {
-                uint nb = plan[child_bonds_at(base + ka) + 1];
-                plan[child_bonds_at(base + ka) + 1] = nb + 1;
-                plan[bond_new_at(b)] = nb;
-            }
-            else
-            {
-                // Its slot after the children's bonds, in order.
-                plan[bond_new_at(b)] = b0 + cut_at;
-                cut_at++;
-            }
-        }
+        g_cut_next = b0 + at;
     }
     device_group_barrier();
+    bond_ranks(parent, base, c0, b0, b1, tid, true);
     // Copies: a child's bond with its chunks renamed and its island; a cut bond to its slot
     // after the children's, in no island, its loads and static stiffness zeroed.
-    for (uint b = b0 + tid; b < b1; b += 64)
+    for (uint b = b0 + tid; b < b1; b += LT)
     {
         uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
         uint ka = work[base + ids.y - c0];
@@ -362,25 +407,33 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
                 pad = entry;
         }
     }
-    if (tid == 0)
+    // Offsets in the new chunk order, each chunk its old degree: the degrees by new
+    // position, then an exclusive scan over them (blocks of the group's threads).
+    for (uint m = tid; m < n; m += LT)
+        plan[degree_at(base + plan[new_chunk_at(base + m)])] = old_index[c0 + m + 1] - old_index[c0 + m];
+    device_group_barrier();
+    uint carry = old_index[c0];
+    for (uint block = 0; block < n; block += LT)
     {
-        // Offsets in the new chunk order, each chunk its old degree.
-        uint at = old_index[c0];
-        for (uint r = 0; r < parent.z; r++)
+        uint i = block + tid;
+        uint v = i < n ? plan[degree_at(base + i)] : 0u;
+        g_scan64[tid] = v;
+        GroupMemoryBarrierWithGroupSync();
+        for (uint step = 1; step < LT; step <<= 1)
         {
-            uint k = child_by_island(parent, r);
-            float4 head = children[CHILD_WORDS * (base + k)];
-            uint offset = asuint(head.y), count = asuint(head.z);
-            for (uint j = 0; j < count; j++)
-            {
-                uint m = work[total + base + offset + j];
-                index[c0 + plan[new_chunk_at(base + m)]] = at;
-                at += old_index[c0 + m + 1] - old_index[c0 + m];
-            }
+            uint add = tid >= step ? g_scan64[tid - step] : 0u;
+            GroupMemoryBarrierWithGroupSync();
+            g_scan64[tid] += add;
+            GroupMemoryBarrierWithGroupSync();
         }
+        if (i < n)
+            index[c0 + i] = carry + g_scan64[tid] - v;
+        uint block_total = g_scan64[LT - 1];
+        GroupMemoryBarrierWithGroupSync();
+        carry += block_total;
     }
     device_group_barrier();
-    for (uint m = tid; m < n; m += 64)
+    for (uint m = tid; m < n; m += LT)
     {
         uint nk = plan[new_chunk_at(base + m)];
         uint at = index[c0 + nk];
@@ -404,7 +457,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     device_group_barrier();
     // 4. The children's island records (`island_record`, a resident quasi-static
     // frame's clusters: driven and settled), with the parent's rigid frame.
-    for (uint k = tid; k < parent.z; k += 64)
+    for (uint k = tid; k < parent.z; k += LT)
     {
         uint slot = base + k;
         uint island = plan[child_island_at(slot)];
