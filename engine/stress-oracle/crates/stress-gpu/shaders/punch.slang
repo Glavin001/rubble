@@ -62,9 +62,12 @@ struct MaterialTable
 [[vk::binding(9, 0)]] ConstantBuffer<MaterialTable> materials;
 // cascade.slang status: [1] the pass that disconnected (0: none), [16 + i] island i's bits.
 [[vk::binding(10, 0)]] RWStructuredBuffer<uint> status;
+// The fast free islands (`punch_fast`): [0].x their count (bits); per island three float4:
+// (centre, bounding radius), (velocity, island as bits), (face radius, mass, modulus, -).
+[[vk::binding(11, 0)]] RWStructuredBuffer<float4> fast;
 // routing.slang's flag of this frame: [0] 1 when an impactor may reach an island (a
 // superset of a punch's conditions); 0: no island to look at.
-[[vk::binding(11, 0)]] StructuredBuffer<uint> route;
+[[vk::binding(12, 0)]] StructuredBuffer<uint> route;
 
 static const uint NONE = 0xffffffffu;
 static const uint ST_DISCONNECTED = 1;
@@ -158,23 +161,48 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     }
     lo = g_lo[0];
     hi = g_hi[0];
-    // The first impactor that reaches it within the frame, closing fast enough (the same
-    // for every thread: uniform data).
+    // The first projectile that reaches it within the frame, closing fast enough (the
+    // same for every thread: uniform data): the impactors, then the fast free islands
+    // (`punch_fast`'s list: debris, a plug punched out), each other island but this one.
     uint hit_k = NONE;
     float3 hit = float3(0.0);
     float3 d = float3(0.0);
     float speed = 0.0;
-    for (uint k = 0; k < params.impactor_count && hit_k == NONE; k++)
+    float p_radius = 0.0;
+    float face = 0.0;
+    float m_imp = 0.0;
+    float e_imp = 0.0;
+    uint fast_count = asuint(fast[0].x);
+    for (uint k = 0; k < params.impactor_count + fast_count && hit_k == NONE; k++)
     {
-        float4 a = impactors[2 * k];
-        EngineBody b = bodies[asuint(a.x)];
-        float3 c = to_zup(b.pos_inv_mass.xyz);
-        float3 rel = to_zup(b.vel_sleep.xyz) - v;
+        float3 c;
+        float3 rel;
+        float4 info;
+        float r;
+        if (k < params.impactor_count)
+        {
+            float4 a = impactors[2 * k];
+            EngineBody b = bodies[asuint(a.x)];
+            c = to_zup(b.pos_inv_mass.xyz);
+            rel = to_zup(b.vel_sleep.xyz) - v;
+            r = a.y;
+            info = float4(a.z, a.w, impactors[2 * k + 1].x, 0.0);
+        }
+        else
+        {
+            uint f = 1 + 3 * (k - params.impactor_count);
+            if (asuint(fast[f + 1].w) == i)
+                continue;
+            c = fast[f].xyz;
+            r = fast[f].w;
+            rel = fast[f + 1].xyz - v;
+            info = fast[f + 2];
+        }
         float sp = length(rel);
         if (!(sp > params.speed))
             continue;
-        float3 elo = lo - float3(a.y);
-        float3 ehi = hi + float3(a.y);
+        float3 elo = lo - float3(r);
+        float3 ehi = hi + float3(r);
         float t0 = 0.0;
         float t1 = params.dt;
         for (uint ax = 0; ax < 3; ax++)
@@ -196,6 +224,10 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             hit = c + rel * t0;
             d = rel / sp;
             speed = sp;
+            p_radius = r;
+            face = info.x;
+            m_imp = info.y;
+            e_imp = info.z;
         }
     }
     if (hit_k == NONE)
@@ -204,9 +236,6 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;
         return;
     }
-    float4 imp_a = impactors[2 * hit_k];
-    float4 imp_b = impactors[2 * hit_k + 1];
-    float face = imp_a.z;
     // The struck chunk: the nearest to the impactor's path (ties: the lower index).
     float best = inf;
     uint best_c = NONE;
@@ -310,10 +339,9 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     {
         float m_plug = g_a[0];
         float plugged = g_lo[0].x;
-        float m_imp = imp_a.w;
         float m_eff = m_plug * m_imp / (m_plug + m_imp);
         float impulse = m_eff * speed;
-        float modulus = 1.0 / (1.0 / imp_b.x + 1.0 / chunks[entry_k].cmat.x);
+        float modulus = 1.0 / (1.0 / e_imp + 1.0 / chunks[entry_k].cmat.x);
         // api.rs `hertz_duration`.
         float tau = 2.87 * pow(m_eff * m_eff / (face * modulus * modulus * max(speed, 1e-3)), 0.2);
         bool out = plugged < float(n) && impulse / tau > g_b[0];
@@ -346,4 +374,87 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             bond_dyn[bi] = dyn;
         }
     }
+}
+
+// The fast free islands as projectiles for `punch_islands`: one group lists, in island
+// order, every free island (not anchored, an engine body, at most FAST_CHUNKS chunks)
+// whose body moves faster than the tiered impact speed, up to MAX_FAST of them: its
+// centre and bounding radius, velocity, its face radius (its cross-section across its
+// motion), mass and its first chunk's modulus.
+static const uint MAX_FAST = 128;
+static const uint FAST_CHUNKS = 64;
+groupshared uint g_scan[1024];
+
+[shader("compute")]
+[numthreads(1024, 1, 1)]
+void punch_fast(uint3 thread: SV_GroupThreadID)
+{
+    uint t = thread.x;
+    uint carry = 0;
+    for (uint base = 0; base < params.island_count; base += 1024)
+    {
+        uint i = base + t;
+        bool fast_i = false;
+        float3 c = float3(0.0);
+        float3 vel = float3(0.0);
+        float radius = 0.0;
+        float face_r = 0.0;
+        Island isl;
+        if (i < params.island_count && route[0] != 0)
+        {
+            isl = islands[i];
+            uint body = asuint(ctab[params.engine_base + 3 * i].x);
+            uint n = isl.range.y - isl.range.x;
+            if (n > 0 && n <= FAST_CHUNKS && body != NONE && (isl.info.x & ISLAND_ANCHORED) == 0)
+            {
+                EngineBody b = bodies[body];
+                vel = to_zup(b.vel_sleep.xyz);
+                if (length(vel) > params.speed)
+                {
+                    fast_i = true;
+                    c = to_zup(b.pos_inv_mass.xyz);
+                    Quat p_inv = quat_of(ctab[params.engine_base + 3 * i + 1]);
+                    float3 com = ctab[params.engine_base + 3 * i + 2].xyz;
+                    float h = 0.70710678118;
+                    Quat a_inv;
+                    a_inv.w = h;
+                    a_inv.x = h;
+                    a_inv.y = 0.0;
+                    a_inv.z = 0.0;
+                    Quat q = normalized(quat_mul(quat_mul(a_inv, quat_of(b.rot)), p_inv));
+                    float3 origin = c - rotate(q, com);
+                    // Its bounding radius, and its face: the radius of its cross-section
+                    // across its motion (chunk spheres projected on that plane).
+                    float3 dir = normalize(vel);
+                    for (uint k = isl.range.x; k < isl.range.y; k++)
+                    {
+                        float3 r = origin + rotate(q, chunks[k].center.xyz + state[4 * k].xyz) - c;
+                        radius = max(radius, length(r) + chunks[k].half.w);
+                        face_r = max(face_r, length(r - dir * dot(r, dir)) + chunks[k].half.w);
+                    }
+                }
+            }
+        }
+        g_scan[t] = fast_i ? 1u : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        for (uint step = 1; step < 1024; step <<= 1)
+        {
+            uint add = t >= step ? g_scan[t - step] : 0;
+            GroupMemoryBarrierWithGroupSync();
+            g_scan[t] += add;
+            GroupMemoryBarrierWithGroupSync();
+        }
+        uint at = carry + g_scan[t] - (fast_i ? 1u : 0u);
+        if (fast_i && at < MAX_FAST)
+        {
+            fast[1 + 3 * at] = float4(c, radius);
+            fast[2 + 3 * at] = float4(vel, asfloat(i));
+            fast[3 + 3 * at] = float4(face_r, isl.com.w, chunks[isl.range.x].cmat.x, 0.0);
+        }
+        uint total = g_scan[1023];
+        GroupMemoryBarrierWithGroupSync();
+        carry += total;
+    }
+    if (t == 0)
+        fast[0] = float4(asfloat(min(carry, MAX_FAST)), 0.0, 0.0, 0.0);
 }

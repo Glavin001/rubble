@@ -139,7 +139,7 @@ struct PunchParams {
     pad2: f32,
 }
 
-const PUNCH_BINDINGS: [Binding; 12] = [
+const PUNCH_BINDINGS: [Binding; 13] = [
     Binding::Uniform,   // params
     Binding::Storage,   // islands
     Binding::Storage,   // chunk statics
@@ -151,11 +151,14 @@ const PUNCH_BINDINGS: [Binding; 12] = [
     Binding::StorageRw, // bond records
     Binding::Uniform,   // materials
     Binding::StorageRw, // cascade status
+    Binding::StorageRw, // the fast free islands (declared before the flag: Metal's order)
     Binding::Storage,   // the routing check's flag
 ];
 
 pub struct Punch {
     kernel: Kernel,
+    fast_kernel: Kernel,
+    fast: wgpu::Buffer,
     impactors: wgpu::Buffer,
     /// Per impactor: engine body, bounding radius, face radius, mass, plane-strain modulus.
     list: Vec<[f32; 8]>,
@@ -163,7 +166,11 @@ pub struct Punch {
 
 impl Punch {
     pub fn new(gpu: &Gpu) -> Punch {
-        Punch { kernel: gpu.compute(&shaders::PUNCH, "punch_islands", &PUNCH_BINDINGS), impactors: gpu.storage("punch impactors", &[[0f32; 4]; 2]), list: Vec::new() }
+        Punch {
+            kernel: gpu.compute(&shaders::PUNCH, "punch_islands", &PUNCH_BINDINGS),
+            fast_kernel: gpu.compute(&shaders::PUNCH, "punch_fast", &PUNCH_BINDINGS),
+            fast: gpu.storage("punch fast islands", &vec![[0f32; 4]; 1 + 3 * 128]),
+            impactors: gpu.storage("punch impactors", &[[0f32; 4]; 2]), list: Vec::new() }
     }
 
     /// (engine body, bounding radius, face radius, mass, plane-strain modulus) per impactor.
@@ -186,7 +193,15 @@ impl Punch {
             "punch params",
             &PunchParams { island_count: inputs.island_count, impactor_count: self.list.len() as u32, engine_base, pad0: 0, dt: dt as f32, speed: speed as f32, pad1: 0.0, pad2: 0.0 },
         );
-        let group = gpu.bind(&self.kernel.group, &[&params, inputs.islands, inputs.chunks, inputs.state, ctab, bodies, &self.impactors, inputs.bonds, inputs.bond_dyn, inputs.materials, status, &route.route]);
+        let buffers: [&wgpu::Buffer; 13] = [&params, inputs.islands, inputs.chunks, inputs.state, ctab, bodies, &self.impactors, inputs.bonds, inputs.bond_dyn, inputs.materials, status, &self.fast, &route.route];
+        let group = gpu.bind(&self.kernel.group, &buffers);
+        let fast_group = gpu.bind(&self.fast_kernel.group, &buffers);
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        // The fast free islands first (one group), then the islands.
+        pass.set_pipeline(&self.fast_kernel.pipeline);
+        pass.set_bind_group(0, &fast_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+        drop(pass);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.kernel.pipeline);
         pass.set_bind_group(0, &group, &[]);
