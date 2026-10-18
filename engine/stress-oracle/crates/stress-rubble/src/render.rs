@@ -644,7 +644,12 @@ impl FfmpegSink {
         let ffmpeg = std::env::var("FFMPEG").unwrap_or_else(|_| if std::path::Path::new("/opt/homebrew/bin/ffmpeg").exists() { "/opt/homebrew/bin/ffmpeg".into() } else { "ffmpeg".into() });
         let child = Command::new(ffmpeg)
             .args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{width}x{height}"), "-r", &fps.to_string(), "-i", "-"])
-            .args(["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+            // `STRESS_VIDEO_CODEC=videotoolbox`: the GPU's hardware H.264 encoder (macOS).
+            .args(if std::env::var("STRESS_VIDEO_CODEC").is_ok_and(|v| v == "videotoolbox") {
+                vec!["-c:v", "h264_videotoolbox", "-b:v", "30M", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+            } else {
+                vec!["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+            })
             .arg(path)
             .stdin(Stdio::piped())
             .spawn()?;

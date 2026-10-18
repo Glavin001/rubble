@@ -47,6 +47,18 @@ use crate::structure::{BondData, Structure};
 /// Residual static-fatigue strength factor at which a bond "creaks" ([`SolverEvent::Creaked`]).
 pub const CREAK_STRENGTH: f64 = 0.99;
 
+/// What an unconverged static solve leaves (`SolverConfig::static_unconverged`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnconvergedSolve {
+    /// Its start state; nothing committed.
+    #[default]
+    Restore,
+    /// Its iterate; nothing committed.
+    KeepIterate,
+    /// Its iterate, its damage committed.
+    CommitIterate,
+}
+
 #[derive(Clone, Debug)]
 pub struct SolverConfig {
     pub gravity: Vec3,
@@ -58,6 +70,27 @@ pub struct SolverConfig {
     pub refine_utilization: Option<f64>,
     /// Adaptive mode: time a cluster stays explicit after its last dynamic load.
     pub active_time: f64,
+    /// Quasi-static mode: active clusters integrate explicitly (the tiered coupling's
+    /// impact islands, `stress-gpu` `GpuWorld::set_tiered`); off, every cluster moves
+    /// rigidly between the frame's static solves.
+    pub tiered: bool,
+    /// The GPU's static solves within a fixed budget, (Newton steps, conjugate-gradient
+    /// iterations per step), as Blast's solver runs a fixed iteration count: an
+    /// unconverged solve keeps its start state. `None`: to convergence (the default).
+    pub static_budget: Option<(u32, u32)>,
+    /// What a static solve that ends unconverged leaves (the GPU's resident cascade):
+    /// its start state (the default: nothing committed), or, as Blast's solver does, its
+    /// iterate (the next frame's solve continues from it; Blast's warm start), and with
+    /// `CommitIterate` its damage committed too (Blast publishes and grades unconverged
+    /// answers, `PX_DESTRUCTION_ALLOW_UNCONVERGED`). For the like-for-like comparison.
+    pub static_unconverged: UnconvergedSolve,
+    /// The same frame's cascade of static solves and commits stops after this many
+    /// passes (Blast evaluates at most twice a tick: the trial and one correction).
+    /// `None`: until no damage grows (up to `StaticOptions::max_cascade`).
+    pub static_passes: Option<usize>,
+    /// The static solves' residual tolerance (the GPU's; `None`: 1e-5, f32's reach).
+    /// Blast's solver stops at 1e-3 (`capability::Profile::BlastParity`).
+    pub static_tolerance: Option<f32>,
     /// Adaptive mode: relative load change that wakes a settled cluster.
     pub wake_threshold: f64,
     pub features: Features,
@@ -76,6 +109,11 @@ impl SolverConfig {
             courant_safety: scene.sim.stress_courant_safety.unwrap_or(scene.sim.courant_safety),
             refine_utilization: scene.sim.refine_utilization,
             active_time: 0.5,
+            tiered: false,
+            static_budget: None,
+            static_unconverged: UnconvergedSolve::Restore,
+            static_passes: None,
+            static_tolerance: scene.sim.static_tolerance,
             wake_threshold: 0.02,
             features: scene.sim.features,
             methods: scene.sim.methods,
@@ -512,7 +550,7 @@ impl ReferenceSolver {
     }
 
     /// Connected components of `chunks` over connected bonds (deterministic order).
-    fn components(&self, s: usize, chunks: &[usize]) -> Vec<Vec<usize>> {
+    pub fn components(&self, s: usize, chunks: &[usize]) -> Vec<Vec<usize>> {
         let n = self.structures[s].chunks.len();
         let mut member = vec![false; n];
         chunks.iter().for_each(|&c| member[c] = true);
@@ -1991,11 +2029,25 @@ impl ReferenceSolver {
     }
 
     /// Recompute the connectivity of cluster `ci` and split it into children.
+    /// The id the next cluster will take (`add_cluster`).
+    pub fn next_cluster_id(&self) -> u64 {
+        self.next_cluster_id
+    }
+
     pub fn split_cluster(&mut self, ci: usize) {
+        let s = self.clusters[ci].structure;
+        let comps = self.components(s, &self.clusters[ci].chunks.clone());
+        self.split_cluster_into(ci, comps);
+    }
+
+    /// `split_cluster` into the given components (each a sorted chunk list, together the
+    /// cluster's chunks, in `components`' order): for a split whose connectivity was
+    /// found elsewhere (the GPU's, stress-gpu `split.slang`), so the mirror's bond states
+    /// need not be current.
+    pub fn split_cluster_into(&mut self, ci: usize, comps: Vec<Vec<usize>>) {
         crate::profile::count(crate::profile::Counter::Splits, 1);
         crate::profile::count(crate::profile::Counter::SplitChunks, self.clusters[ci].chunks.len() as u64);
         let s = self.clusters[ci].structure;
-        let comps = self.components(s, &self.clusters[ci].chunks.clone());
         if comps.len() <= 1 {
             return;
         }
@@ -2033,6 +2085,7 @@ impl ReferenceSolver {
                 comp_of[c] = k;
             }
         }
+        let mut cut = Vec::new();
         for &bi in &parent.bonds {
             let g = &self.bonds[s][bi].geometry;
             if comp_of[g.a] != comp_of[g.b] {
@@ -2052,9 +2105,18 @@ impl ReferenceSolver {
                     self.energy.split_release += b.stored;
                 }
                 self.bonds[s][bi].alive = false;
+                cut.push(bi);
             }
         }
-        self.rebuild_adjacency(s);
+        // `rebuild_adjacency` without rebuilding: the cut bonds leave their two chunks'
+        // lists, every other entry keeps its order (the same lists, for the cost of the
+        // parent's cut bonds rather than the whole structure's).
+        for &bi in &cut {
+            let g = &self.bonds[s][bi].geometry;
+            let (a, b) = (g.a, g.b);
+            self.chunk_bonds[s][a].retain(|&x| x != bi);
+            self.chunk_bonds[s][b].retain(|&x| x != bi);
+        }
         let mut children = Vec::new();
         for comp in comps {
             // Linear and angular momentum of the child from its chunks' exact velocities.

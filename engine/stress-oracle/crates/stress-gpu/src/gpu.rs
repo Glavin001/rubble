@@ -19,6 +19,16 @@ pub enum ShaderPath {
     Wgsl,
 }
 
+/// Time spent blocked on the device in reads (`read_ranges`, `read_range`), in ns: what a
+/// frame waits on the GPU; the rest of its wall time is the host's.
+pub static WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn wait(device: &wgpu::Device) {
+    let t = std::time::Instant::now();
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    WAIT_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A GPU device and its queue (cloning shares the device: wgpu handles).
 #[derive(Clone)]
 pub struct Gpu {
@@ -207,9 +217,13 @@ impl Gpu {
 
     /// A uniform buffer holding `value`.
     pub fn uniform<T: bytemuck::Pod>(&self, label: &str, value: &T) -> wgpu::Buffer {
+        // Padded to 16 bytes: a shader's uniform struct is (Metal checks the binding's
+        // length against it).
+        let bytes = bytemuck::bytes_of(value);
+        let padded = [bytes, &[0u8; 16][..bytes.len().next_multiple_of(16) - bytes.len()]].concat();
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
-            contents: bytemuck::bytes_of(value),
+            contents: &padded,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         })
     }
@@ -252,7 +266,7 @@ impl Gpu {
         }
         self.queue.submit([encoder.finish()]);
         staging.map_async(wgpu::MapMode::Read, .., |r| r.expect("map readback"));
-        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        wait(&self.device);
         let view = staging.get_mapped_range(..).expect("mapped readback");
         let mut out = Vec::with_capacity(parts.len());
         let mut at = 0usize;
@@ -282,7 +296,7 @@ impl Gpu {
         encoder.copy_buffer_to_buffer(buffer, offset, &staging, 0, size);
         self.queue.submit([encoder.finish()]);
         staging.map_async(wgpu::MapMode::Read, .., |r| r.expect("map readback"));
-        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        wait(&self.device);
         let view = staging.get_mapped_range(..).expect("mapped readback");
         // Copied out element by element: the mapping need not be aligned for `T`.
         let out = bytemuck::pod_collect_to_vec(&view);

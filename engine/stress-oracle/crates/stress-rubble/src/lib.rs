@@ -44,6 +44,10 @@
 
 pub mod scenes;
 #[cfg(feature = "gpu")]
+pub mod ingest_check;
+#[cfg(feature = "gpu")]
+pub mod resident;
+#[cfg(feature = "gpu")]
 pub mod render;
 
 use std::collections::HashMap;
@@ -51,6 +55,9 @@ use std::ops::Range;
 
 use engine_schema::convex::{convex_collider_params, principal_axes, CollisionFilter, ConvexHull, HullArena};
 use engine_schema::{AvbdParams, BodyFlags, BodyState, Collider, ShapeType, WorldCapacity, FLAG_CONTACT_GAP, FLAG_WORLD_INERTIA};
+
+/// rubble's look-ahead contacts (world_step.slang `FLAG_SPEC_VELOCITY`).
+const FLAG_SPEC_VELOCITY: u32 = 1 << 14;
 use engine_webgpu::{SimSnapshot, WgpuSim};
 use stress_ref::engine::{BodyGeometry, BodyKey, BodyMotion, EngineBody, EngineContact, RigidEngine};
 use stress_ref::math::{Mat3, Pose, Quat, Vec3};
@@ -110,7 +117,7 @@ enum Owner {
 }
 
 #[derive(Clone, Debug)]
-struct Entry {
+pub(crate) struct Entry {
     id: u32,
     signature: u64,
     fixed: bool,
@@ -135,6 +142,26 @@ struct Cooked {
     colliders: Vec<Collider>,
     chunks: Vec<Option<(usize, usize)>>,
     thin: f64,
+    /// Each collider's shape in the body's frame before the principal axes (for a
+    /// cluster, the structure's frame), as the GPU needs it to make bodies of a split's
+    /// children itself (`Part`).
+    parts: Vec<Part>,
+}
+
+/// One collider's shape in the frame its body's shapes are given in (a cluster's: the
+/// structure's): its mass, centre and inertia about the centre, its collider's origin and
+/// rotation there, and the collider's shape record. A body of any set of a structure's
+/// chunks is these combined: mass and centre summed, inertia shifted to the common
+/// centre, principal axes, then each collider at `to_body (origin - com)` turned by
+/// `to_body rotation` (`cook_with`).
+#[derive(Clone, Copy, Debug)]
+pub struct Part {
+    pub mass: f64,
+    pub center: Vec3,
+    pub inertia: Mat3,
+    pub origin: Vec3,
+    pub rotation: Quat,
+    pub collider: Collider,
 }
 
 /// Inertia of a solid box of half extents `h` about its centre.
@@ -221,6 +248,7 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
             }],
             chunks: vec![None],
             thin: *radius,
+            parts: Vec::new(),
         },
         BodyGeometry::Boxes(shapes) => {
             // Each shape's mass properties in the body frame: (mass, centre, inertia
@@ -272,7 +300,9 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
             let principal = Quat { w: rot.w, x: rot.x, y: rot.y, z: rot.z }.normalized();
             let to_body = principal.conjugate();
             let mut colliders = Vec::new();
-            for s in shapes.iter() {
+            let mut cooked_parts = Vec::with_capacity(shapes.len());
+            for (k, s) in shapes.iter().enumerate() {
+                let before = colliders.len();
                 let volume = 8.0 * s.half_extents.x * s.half_extents.y * s.half_extents.z;
                 let density = (s.mass / volume.max(1e-300)) as f32;
                 match &s.hull {
@@ -320,6 +350,17 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
                         }
                     }
                 }
+                // The part: this collider's shape in the shapes' frame.
+                let col = colliders[before];
+                let origin = match &s.hull {
+                    Some(_) if col.shape == ShapeType::ConvexHull as u32 => {
+                        let h = hull_entry(s.hull.as_ref().expect("hull"), s.chunk, arena, hulls).expect("cooked above");
+                        s.local.position + s.local.rotation.rotate(Vec3::new(h.offset.x as f64, h.offset.y as f64, h.offset.z as f64))
+                    }
+                    _ => s.local.position,
+                };
+                let (mass, center, inertia) = parts[k];
+                cooked_parts.push(Part { mass, center, inertia, origin, rotation: s.local.rotation, collider: col });
             }
             Cooked {
                 mass,
@@ -329,6 +370,7 @@ fn cook_with(b: &EngineBody, arena: &mut HullArena, hulls: &mut HullCache) -> Co
                 colliders,
                 chunks: shapes.iter().map(|s| s.chunk).collect(),
                 thin,
+                parts: cooked_parts,
             }
         }
     }
@@ -349,6 +391,9 @@ pub struct RubbleEngine {
     arena: HullArena,
     /// Chunk hulls cooked so far (`HullCache`).
     hulls: HullCache,
+    /// Each cooked chunk's parts (`Part`, the structure's frame), for the GPU's body
+    /// creation (`ResidentEngine::part_table`).
+    pub(crate) chunk_parts: HashMap<(usize, usize), Vec<Part>>,
     bodies: HashMap<BodyKey, Entry>,
     /// What each collider stands for, by collider id.
     owners: Vec<Owner>,
@@ -368,6 +413,21 @@ pub struct RubbleEngine {
     /// The GPU's body states as last read, while nothing has changed them since (a step,
     /// a body written or added, a restore): `bodies_now` answers from it.
     bodies_read: std::cell::RefCell<Option<Vec<BodyState>>>,
+    /// The GPU contact ingest run and checked with every step (`attach_ingest_check`).
+    #[cfg(feature = "gpu")]
+    ingest_check: Option<ingest_check::IngestCheck>,
+    /// Bumped whenever colliders are added or retired, or the body set is restored.
+    layout_version: u64,
+    /// The colliders each bump of `layout_version` changed, (version after, range), from
+    /// `collider_log_floor` on (`collider_changes_since`).
+    collider_log: Vec<(u64, Range<u32>)>,
+    collider_log_floor: u64,
+    /// Resident frames that read bodies back for the CCD bound.
+    pub resident_reads: u64,
+    /// The resident frame's speculative contact range (`resident_substeps`).
+    resident_offset: f32,
+    /// Look-ahead contacts instead of CCD substeps (`STRESS_RUBBLE_SPECULATIVE_CCD`).
+    pub speculative_ccd: bool,
 }
 
 /// The default capacity: room for a few thousand bodies (every rebuilt cluster takes
@@ -383,6 +443,18 @@ pub fn capacity_for(scene: &stress_ref::scene::Scene) -> WorldCapacity {
     c.max_contacts = c.max_contacts.max(c.max_colliders);
     c.max_candidates = c.max_candidates.max(4 * c.max_colliders);
     c.max_hull_vertices = c.max_hull_vertices.max((32 * chunks).next_power_of_two() as u32);
+    // Bodies and colliders are append-only (retired ones keep their slots): a long run with
+    // much fracture sets its own room (`STRESS_RUBBLE_MAX_BODIES`, `STRESS_RUBBLE_MAX_COLLIDERS`);
+    // past it an upload fails, naming the capacity.
+    let env = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u32>().ok());
+    if let Some(n) = env("STRESS_RUBBLE_MAX_BODIES") {
+        c.max_bodies = c.max_bodies.max(n);
+    }
+    if let Some(n) = env("STRESS_RUBBLE_MAX_COLLIDERS") {
+        c.max_colliders = c.max_colliders.max(n);
+        c.max_contacts = c.max_contacts.max(n);
+        c.max_candidates = c.max_candidates.max(4 * n);
+    }
     c
 }
 
@@ -434,12 +506,38 @@ impl RubbleEngine {
             sleep_ang: -1.0,
             ..AvbdParams::default()
         };
+        // `STRESS_RUBBLE_SLEEP=1` (a measurement, not adopted): rubble's own sleep thresholds,
+        // so resting bodies move to the broadphase's rest table.
+        let params = if std::env::var("STRESS_RUBBLE_SLEEP").is_ok_and(|v| v == "1") {
+            let d = AvbdParams::default();
+            AvbdParams { sleep_lin: d.sleep_lin, sleep_ang: d.sleep_ang, ..params }
+        } else {
+            params
+        };
+        // `STRESS_RUBBLE_ITERATIONS=n`: rubble's solver iterations per step (a PhysX-matched
+        // setting for comparisons: vibe-land's PhysX runs 4 position iterations); default
+        // rubble's own.
+        let mut params = params;
+        if let Some(n) = std::env::var("STRESS_RUBBLE_ITERATIONS").ok().and_then(|v| v.parse().ok()) {
+            params.iterations = n;
+        }
+        // `STRESS_RUBBLE_SPECULATIVE_CCD=1` (opt-in, measured): rubble's look-ahead contacts
+        // (FLAG_SPEC_VELOCITY: each moving collider's contacts found within its step's
+        // motion, PhysX-style speculative CCD) with a reach cap of
+        // `STRESS_RUBBLE_SPEC_REACH` m (default 3) instead of CCD substeps.
+        let speculative_ccd = std::env::var("STRESS_RUBBLE_SPECULATIVE_CCD").is_ok_and(|v| v == "1");
+        if speculative_ccd {
+            params.flags |= FLAG_SPEC_VELOCITY;
+            sim.set_spec_reach_max(std::env::var("STRESS_RUBBLE_SPEC_REACH").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0));
+        }
         sim.set_params(params);
+        let _ = speculative_ccd;
         // Small coupling scenes dispatch only the colours in use by default (engine 8ev).
         Ok(RubbleEngine {
             sim,
             arena: HullArena::new(),
             hulls: HullCache::new(),
+            chunk_parts: HashMap::new(),
             bodies: HashMap::new(),
             owners: Vec::new(),
             cols: Vec::new(),
@@ -450,12 +548,33 @@ impl RubbleEngine {
             max_substeps: 256,
             last_substeps: 0,
             bodies_read: std::cell::RefCell::new(None),
+            #[cfg(feature = "gpu")]
+            ingest_check: None,
+            layout_version: 0,
+            collider_log: Vec::new(),
+            collider_log_floor: 0,
+            resident_reads: 0,
+            resident_offset: 0.01,
+            speculative_ccd: std::env::var("STRESS_RUBBLE_SPECULATIVE_CCD").is_ok_and(|v| v == "1"),
         })
     }
 
     /// The engine boxed for `World::with_engine`; `None` without a GPU adapter.
     pub fn boxed(gravity: Vec3) -> Option<Box<dyn RigidEngine>> {
         RubbleEngine::new(gravity).ok().map(|e| Box::new(e) as Box<dyn RigidEngine>)
+    }
+
+    /// A capability profile's engine policy (`Profile::engine_policy`): solver iterations
+    /// per step and substeps a frame at most (`None`: as they are).
+    pub fn set_policy(&mut self, iterations: Option<u32>, max_substeps: Option<u32>) {
+        if let Some(n) = iterations {
+            let mut params = self.sim.params();
+            params.iterations = n;
+            self.sim.set_params(params);
+        }
+        if let Some(n) = max_substeps {
+            self.max_substeps = n.max(1);
+        }
     }
 
     /// Number of live bodies (ground and retired bodies excluded).
@@ -468,8 +587,27 @@ impl RubbleEngine {
         self.sim.body_count()
     }
 
+    /// A bump of `layout_version` for the colliders `range` (`collider_log`).
+    pub(crate) fn colliders_changed(&mut self, range: Range<u32>) {
+        self.layout_version += 1;
+        self.collider_log.push((self.layout_version, range));
+        if self.collider_log.len() > 256 {
+            self.collider_log.drain(..128);
+            self.collider_log_floor = self.collider_log[0].0 - 1;
+        }
+    }
+
+    /// The colliders changed since `layout_version` was `version` (None: not known).
+    pub(crate) fn collider_changes(&self, version: u64) -> Option<Vec<Range<u32>>> {
+        if version < self.collider_log_floor || version > self.layout_version {
+            return None;
+        }
+        Some(self.collider_log.iter().filter(|(v, _)| *v > version).map(|(_, r)| r.clone()).collect())
+    }
+
     fn add_colliders(&mut self, cols: &[Collider], owners: impl Iterator<Item = Owner>) -> Range<u32> {
         let range = self.sim.add_colliders(cols);
+        self.colliders_changed(range.clone());
         self.cols.extend_from_slice(cols);
         self.owners.extend(owners);
         debug_assert_eq!(self.owners.len(), self.sim.collider_count() as usize);
@@ -478,6 +616,19 @@ impl RubbleEngine {
 
     fn create_body(&mut self, b: &EngineBody) {
         let c = cook_with(b, &mut self.arena, &mut self.hulls);
+        // Each chunk's parts, once (they depend on the chunk only).
+        let mut k = 0;
+        while k < c.parts.len() {
+            let chunk = c.chunks[k];
+            let mut end = k + 1;
+            while end < c.parts.len() && c.chunks[end] == chunk {
+                end += 1;
+            }
+            if let Some(chunk) = chunk {
+                self.chunk_parts.entry(chunk).or_insert_with(|| c.parts[k..end].to_vec());
+            }
+            k = end;
+        }
         let position = b.pose.position + b.pose.rotation.rotate(c.com);
         let rotation = (b.pose.rotation * c.principal).normalized();
         let inv = |m: f64| if m > 0.0 && !b.fixed { (1.0 / m) as f32 } else { 0.0 };
@@ -492,7 +643,15 @@ impl RubbleEngine {
             state.angular_vel = to_rubble(b.angular_velocity);
         }
         let id = self.sim.add_body(state);
-        self.bodies_changed();
+        // The bodies' snapshot (if any) takes the record as uploaded (no download for the
+        // next frame's CCD bound).
+        {
+            let mut read = self.bodies_read.borrow_mut();
+            match read.as_mut() {
+                Some(all) if all.len() == id as usize => all.push(state),
+                _ => *read = None,
+            }
+        }
         let cols: Vec<Collider> = c.colliders.iter().map(|col| Collider { body: id, ..*col }).collect();
         let key = b.key;
         let colliders = self.add_colliders(&cols, c.chunks.iter().map(|&chunk| Owner::Body { key, chunk }));
@@ -535,6 +694,7 @@ impl RubbleEngine {
             self.owners[id as usize] = Owner::Retired;
         }
         self.sim.set_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
+        self.colliders_changed(e.colliders.clone());
         self.frozen.retain(|k| *k != key);
     }
 
@@ -726,7 +886,7 @@ impl RigidEngine for RubbleEngine {
 
         // Substeps: CCD bodies move at most half their thinnest extent per substep.
         let mut n = self.substeps.max(1);
-        for (_, e) in self.bodies.iter().filter(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)) {
+        for (_, e) in self.bodies.iter().filter(|(k, e)| !self.speculative_ccd && e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)) {
             let s = &all[e.id as usize];
             let travel = glam::Vec3::from_array(s.linear_vel).length() as f64 * dt + glam::Vec3::from_array(s.angular_vel).length() as f64 * e.thin * dt;
             let need = (travel / (0.5 * e.thin)).ceil() as u32;
@@ -758,17 +918,23 @@ impl RigidEngine for RubbleEngine {
         params.contact_offset = offset;
         self.sim.set_params(params);
         let mut out = Vec::new();
-        for _ in 0..n {
+        #[cfg(feature = "gpu")]
+        self.ingest_begin(n);
+        for _s in 0..n {
             let t = std::time::Instant::now();
             self.bodies_changed();
             if let Err(e) = self.sim.step() {
                 panic!("rubble step failed: {e:?} (capacity overflow)");
             }
             profile::add("step.sim", t);
+            #[cfg(feature = "gpu")]
+            self.ingest_substep(_s, h);
             let t = std::time::Instant::now();
             self.contacts_of_step(h, &all, &mut out);
             profile::add("step.contacts", t);
         }
+        #[cfg(feature = "gpu")]
+        self.ingest_end(n, &out);
         out
     }
 
@@ -786,6 +952,11 @@ impl RigidEngine for RubbleEngine {
 
     fn set_motion(&mut self, states: &[BodyMotion]) {
         let _timer = Timer(std::time::Instant::now(), "set_motion");
+        // Nothing to write and nothing frozen: no read of the bodies (it would wait on the
+        // device for whatever it runs).
+        if states.is_empty() && self.frozen.is_empty() {
+            return;
+        }
         let all = self.bodies_now();
         for st in states {
             let Some(e) = self.bodies.get(&st.key) else { continue };
@@ -836,6 +1007,10 @@ impl RigidEngine for RubbleEngine {
         self.bodies_changed();
             self.bodies = saved.bodies;
             self.owners = saved.owners;
+            self.layout_version += 1;
+            // Anything may differ: no change before this version is known.
+            self.collider_log.clear();
+            self.collider_log_floor = self.layout_version;
             self.cols = saved.cols;
             self.frozen = saved.frozen;
             self.spare = Some(saved.snapshot);

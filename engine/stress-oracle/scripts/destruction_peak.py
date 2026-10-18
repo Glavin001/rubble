@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Peak destruction frame time of rubble's integrated pipeline (rubble rigid bodies and
+the GPU stress solver on one device), and a bit-identity guard.
+
+Each scene's worst frame is the minimum over --repeats runs: other GPU work (a shared
+machine) only ever adds time, so the minimum estimates the uncontended peak.
+
+    destruction_peak.py metric   one number: the worst frame (ms) over the destruction
+                                 scenes
+    destruction_peak.py guard    exit 0 when every scene's end-state digest equals the
+                                 recorded one (`--record` writes them)
+    destruction_peak.py ab A B   interleaved runs of two stress_bench binaries (the
+                                 metric of each; for judging a change under load)
+
+Runs the release `stress_bench` example (built first unless --no-build) with
+STRESS_GPU_FIXED_HORIZON=1, so outcomes are deterministic and only timing varies.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BENCH = os.path.join(ROOT, "target", "release", "examples", "stress_bench")
+# (set, regime): the destruction scenes the metric covers.
+METRIC_SCENES = [("realtime", "house_ram"), ("towns", "town16_one_ram")]
+GUARD_SETS = ["realtime", "accuracy", "towns"]
+# Quasi-static runs (the Blast-equivalent rung and the tiered coupling): (label, args, env).
+VIBE = "/Users/glavin/Development/vibe-land/destruction/assets/scenes"
+QS_RUNS = [
+    ("blast/house_ram", ["--set", "realtime", "--only", "house_ram", "--config", "blast"], {}),
+    ("blast/town16_one_ram", ["--set", "towns", "--only", "town16_one_ram", "--config", "blast"], {}),
+    ("tiered/house_ram", ["--set", "realtime", "--only", "house_ram", "--config", "tiered"], {"STRESS_TIERED_BUDGET": "4,64"}),
+    ("tiered/highrise_ram", ["--pack", f"{VIBE}/fractured-highrise-10f.json", "--only", "fractured-highrise-10f_ram", "--config", "tiered", "--seconds", "0.2"], {"STRESS_TIERED_BUDGET": "4,64"}),
+    ("tiered/downtown_idle", ["--pack", f"{VIBE}/fractured-downtown.json", "--only", "fractured-downtown_idle", "--config", "tiered", "--seconds", "0.05"], {"STRESS_TIERED_BUDGET": "4,64"}),
+]
+DIGESTS = os.path.join(ROOT, "scripts", "destruction_digests.json")
+
+
+def build():
+    subprocess.run(["cargo", "build", "--release", "-q", "-p", "stress-rubble", "--features", "gpu", "--example", "stress_bench"], cwd=ROOT, check=True)
+
+
+def run(set_name, only=None, bench=None, args=None, extra_env=None):
+    args = [bench or BENCH, "--solver", "rubble-gpu"] + (args or (["--set", set_name] + (["--only", only] if only else [])))
+    env = dict(os.environ, STRESS_GPU_FIXED_HORIZON="1", **(extra_env or {}))
+    out = subprocess.run(args, cwd=ROOT, env=env, check=True, capture_output=True, text=True).stdout
+    return [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+
+
+def peak(set_name, regime, bench=None):
+    rows = run(set_name, regime, bench)
+    if len(rows) != 1 or "frame_ms" not in rows[0]:
+        sys.exit(f"{regime}: no result")
+    return max(rows[0]["frame_ms"])
+
+
+def metric(repeats):
+    worst = 0.0
+    for set_name, regime in METRIC_SCENES:
+        peaks = [peak(set_name, regime) for _ in range(repeats)]
+        best = min(peaks)
+        print(f"{regime}: worst frame {best:.1f} ms (runs {', '.join(f'{p:.1f}' for p in peaks)})", file=sys.stderr)
+        worst = max(worst, best)
+    print(f"{worst:.1f}")
+
+
+def ab(a, b, repeats):
+    out = {a: 0.0, b: 0.0}
+    for set_name, regime in METRIC_SCENES:
+        runs = {a: [], b: []}
+        for _ in range(repeats):
+            for x in (a, b):
+                runs[x].append(peak(set_name, regime, x))
+        for x in (a, b):
+            print(f"{regime} {x}: min {min(runs[x]):.1f} ms (runs {', '.join(f'{p:.1f}' for p in runs[x])})", file=sys.stderr)
+            out[x] = max(out[x], min(runs[x]))
+    print(f"{out[a]:.1f} {out[b]:.1f}")
+
+
+def digests():
+    out = {f"{s}/{r['regime']}": r.get("digest", "failed: " + str(r.get("failed"))) for s in GUARD_SETS for r in run(s)}
+    for label, args, env in QS_RUNS:
+        if args[0] == "--pack" and not os.path.exists(args[1]):
+            continue
+        rows = run(None, args=args, extra_env=env)
+        out[label] = rows[0].get("digest", "failed: " + str(rows[0].get("failed"))) if rows else "no result"
+    return out
+
+
+def guard(record):
+    now = digests()
+    if record:
+        with open(DIGESTS, "w") as f:
+            json.dump(now, f, indent=1, sort_keys=True)
+            f.write("\n")
+        print(f"recorded {len(now)} digests")
+        return
+    with open(DIGESTS) as f:
+        want = json.load(f)
+    bad = [k for k in want if now.get(k) != want[k]] + [k for k in now if k not in want]
+    for k in bad:
+        print(f"{k}: {now.get(k)} != {want.get(k)}", file=sys.stderr)
+    print(f"{len(want) - len(bad)}/{len(want)} digests identical")
+    sys.exit(1 if bad else 0)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("mode", choices=["metric", "guard", "ab"])
+    p.add_argument("bins", nargs="*")
+    p.add_argument("--repeats", type=int, default=3)
+    p.add_argument("--record", action="store_true")
+    p.add_argument("--no-build", action="store_true")
+    a = p.parse_args()
+    if not a.no_build:
+        build()
+    if a.mode == "metric":
+        metric(a.repeats)
+    elif a.mode == "ab":
+        ab(a.bins[0], a.bins[1], a.repeats)
+    else:
+        guard(a.record)
+
+
+if __name__ == "__main__":
+    main()

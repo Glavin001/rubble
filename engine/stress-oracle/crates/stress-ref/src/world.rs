@@ -29,6 +29,7 @@ use crate::statics::StaticOptions;
 
 #[path = "world_coupling.rs"]
 mod coupling;
+pub use coupling::{cluster_signature, tiered_impact_speed};
 /// The modal pre-window for impacts (prototype, `modal` feature): a child module so it
 /// drives the world's own contact and substep without widening their visibility.
 #[cfg(feature = "modal")]
@@ -255,6 +256,15 @@ pub struct World {
     /// the engine drives every body and the stress solve takes its contacts only as
     /// loads (the Blast-style coupling); quasi-static mode always runs it off.
     pub impact_islands: bool,
+    /// Impact islands in quasi-static mode too (the tiered coupling, `stress-gpu`
+    /// `GpuWorld::tiered`): island bodies take the frame's explicit substeps, everything
+    /// else the frame's static solve. Off: quasi-static mode has no islands.
+    pub qs_islands: bool,
+    /// The tiered coupling's island extent: false (the default), any overlap of swept
+    /// bounds joins two bodies' islands; true, only a pair with an impactor or closing
+    /// faster than the tiered impact speed does (resting contacts stay the engine's).
+    /// `STRESS_TIERED_JOIN=fast` turns it on (a measurement until you decide).
+    pub tiered_fast_joins: bool,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -418,6 +428,8 @@ impl World {
             island_body_frames: 0,
             redone_frames: 0,
             impact_islands: true,
+            qs_islands: false,
+            tiered_fast_joins: std::env::var("STRESS_TIERED_JOIN").is_ok_and(|v| v == "fast"),
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,
@@ -540,7 +552,7 @@ impl World {
     /// The contact substep of a squared frequency bound `w2` (with its dashpot and the
     /// safety factor).
     fn contact_dt_of(&self, w2: f64) -> f64 {
-        if w2 <= 0.0 {
+        if w2 <= 0.0 || implicit_contact() {
             f64::INFINITY
         } else if self.scene.sim.methods.layer_contact {
             // The contact dashpots are not capped: the step resolves the damped
@@ -2483,6 +2495,12 @@ pub fn min_stiffness_scale(scene: &Scene, frames: f64) -> f64 {
 /// Penalty contact force at one point, with the energy it stores and dissipates
 /// over `dt`.
 #[allow(clippy::too_many_arguments)]
+/// `STRESS_REF_IMPLICIT_CONTACT=1`: implicit penalty contact (`penalty_force`), a prototype.
+pub fn implicit_contact() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("STRESS_REF_IMPLICIT_CONTACT").is_ok_and(|v| v == "1"))
+}
+
 pub(crate) fn penalty_force(
     k: f64,
     m_red: f64,
@@ -2497,9 +2515,19 @@ pub(crate) fn penalty_force(
     // Explicit integration stays stable only while the viscous coefficients acting on a
     // chunk keep `c dt / m` below 2: the `points` of this set share its budget.
     let c_max = MAX_SET_VISCOSITY / points.max(FACE_PAIR_POINTS) as f64 * m_red / dt;
-    let c = (2.0 * damping_ratio(restitution) * (k * m_red).sqrt()).min(c_max);
     let vn = rel_velocity.dot(normal);
-    let fn_mag = (k * depth - c * vn).max(0.0);
+    // `STRESS_REF_IMPLICIT_CONTACT=1` (a prototype, off): the normal force at the end of the
+    // step (backward Euler on the penalty spring and dashpot against this point's share of
+    // the reduced mass), stable at any step, so the contact sets no substep bound
+    // (`contact_dt_of`).
+    let implicit = implicit_contact();
+    let c = if implicit { 2.0 * damping_ratio(restitution) * (k * m_red).sqrt() } else { (2.0 * damping_ratio(restitution) * (k * m_red).sqrt()).min(c_max) };
+    let fn_mag = if implicit {
+        let m = m_red / points.max(FACE_PAIR_POINTS) as f64;
+        ((k * depth - (k * dt + c) * vn) / (1.0 + (k * dt * dt + c * dt) / m)).max(0.0)
+    } else {
+        (k * depth - c * vn).max(0.0)
+    };
     let vt = rel_velocity - normal * vn;
     let vt_mag = vt.norm();
     // Regularised Coulomb friction: viscous below the sliding speed, with the same cap.

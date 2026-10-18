@@ -46,7 +46,7 @@ struct Struck {
 /// `b`, so only part of `b` takes part, or its peak force (elastic impulse over a
 /// half-sine of that duration) exceeds `b`'s weakest bond, so `b` breaks during the
 /// contact. Both follow from the bodies' masses, moduli, sizes and strengths.
-fn rigid_assumption_fails(a: &Part, b: &Part) -> bool {
+fn rigid_assumption_fails(a: &Part, b: &Part, breaking_only: bool) -> bool {
     let Some(struck) = b.struck else { return false };
     let speed = closing_speed(a, b);
     let m = match (a.mass.is_finite(), b.mass.is_finite()) {
@@ -61,7 +61,7 @@ fn rigid_assumption_fails(a: &Part, b: &Part) -> bool {
     let modulus = 1.0 / (1.0 / a.modulus + 1.0 / b.modulus);
     let duration = hertz_duration(m, a.contact_radius.min(b.contact_radius), modulus, speed);
     let peak_force = std::f64::consts::PI * (2.0 * m * speed) / (2.0 * duration);
-    duration < struck.round_trip || peak_force > struck.capacity
+    (duration < struck.round_trip && !breaking_only) || peak_force > struck.capacity
 }
 
 /// Speed at which `a` and `b` approach. The contact normal is estimated from each
@@ -89,6 +89,20 @@ fn closing_speed(a: &Part, b: &Part) -> f64 {
         return rel.norm() + spin;
     }
     normals.iter().flatten().map(|n| rel.dot(*n)).fold(f64::NEG_INFINITY, f64::max) + spin
+}
+
+/// The tiered coupling's impact speed (m/s): an impactor contact closing slower is a
+/// load (`STRESS_TIERED_SPEED`, default 5; a measurement knob until calibrated).
+/// A cluster's engine-body signature: its structure, chunks and anchoring (the body
+/// changes when any of them does).
+pub fn cluster_signature(cl: &crate::solver::Cluster) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (cl.structure, &cl.chunks, cl.anchored).hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn tiered_impact_speed() -> f64 {
+    std::env::var("STRESS_TIERED_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0)
 }
 
 fn overlaps(a: &Part, b: &Part) -> bool {
@@ -176,7 +190,7 @@ impl World {
         self.coupling.as_ref().map(|c| c.engine.name())
     }
 
-    fn impactor_radius(imp: &Impactor) -> f64 {
+    pub fn impactor_radius(imp: &Impactor) -> f64 {
         match imp.shape {
             ImpactorShape::Sphere { radius } => radius,
             ImpactorShape::Box { half_extents } => half_extents.iter().copied().fold(f64::INFINITY, f64::min),
@@ -191,9 +205,7 @@ impl World {
         let mut live = std::collections::HashSet::with_capacity(self.solver.clusters.len());
         for cl in &self.solver.clusters {
             let st = &self.solver.structures[cl.structure];
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (cl.structure, &cl.chunks, cl.anchored).hash(&mut hasher);
-            let signature = hasher.finish();
+            let signature = cluster_signature(cl);
             live.insert(cl.id);
             if let Some((sig, shapes)) = cache.get(&cl.id) {
                 if *sig == signature {
@@ -436,7 +448,12 @@ impl World {
         pairs.sort_unstable();
         for (i, j) in pairs {
             {
-                let owned = rigid_assumption_fails(&parts[i], &parts[j]) || rigid_assumption_fails(&parts[j], &parts[i]);
+                // Tiered: only an impactor's contact is an impact (debris and resting
+                // contacts reach the static solve as the engine's loads).
+                let tiered = self.qs_islands && self.scene.sim.solve_mode == SolveMode::QuasiStatic;
+                let impactor = matches!(parts[i].key, Some(BodyKey::Impactor(_))) || matches!(parts[j].key, Some(BodyKey::Impactor(_)));
+                let fast = !tiered || closing_speed(&parts[i], &parts[j]).max(closing_speed(&parts[j], &parts[i])) > tiered_impact_speed();
+                let owned = (!tiered || impactor) && fast && (rigid_assumption_fails(&parts[i], &parts[j], false) || rigid_assumption_fails(&parts[j], &parts[i], false));
                 let both_immovable = !parts[i].mass.is_finite() && !parts[j].mass.is_finite();
                 if parts[i].key.is_none() || parts[j].key.is_none() {
                     // Against the ground: a breaking landing makes the body an island seed.
@@ -446,6 +463,10 @@ impl World {
                     continue;
                 }
                 if both_immovable {
+                    continue;
+                }
+                // `tiered_fast_joins`: a slow contact between clusters joins nothing.
+                if tiered && self.tiered_fast_joins && !impactor && !fast {
                     continue;
                 }
                 let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
@@ -484,6 +505,208 @@ impl World {
             count += usize::from(in_island);
         }
         count
+    }
+
+    /// The number of bodies the next frame's routing would put in islands (`select_islands`
+    /// over `dt` with `forced`), with every body left driven: a prediction made at the end of
+    /// a frame, from the state the next one starts with.
+    pub fn predict_islands(&mut self, dt: f64, forced: &HashSet<BodyKey>) -> usize {
+        let n = self.select_islands(dt, forced);
+        for cl in &mut self.solver.clusters {
+            cl.driven = true;
+        }
+        for imp in &mut self.impactors {
+            imp.driven = true;
+        }
+        n
+    }
+
+    /// The earliest time within `dt` at which an impactor (its bounding sphere) reaches the
+    /// bounds of a bonded cluster, moving at their relative velocity (0: already inside;
+    /// `dt`: none). Bounds as `select_islands` takes them, so the estimate is early, never
+    /// late, for a cluster that does not spin.
+    pub fn first_contact_time(&self, dt: f64) -> f64 {
+        self.first_contact_time_with(dt, false)
+    }
+
+    /// `first_contact_time`; with `new_only`, pairs that already overlap (an impact going
+    /// on) are left out: the earliest new approach.
+    pub fn first_contact_time_with(&self, dt: f64, new_only: bool) -> f64 {
+        let mut t_min = dt;
+        for imp in &self.impactors {
+            let r = imp.obox().bounding_radius();
+            let c = imp.pose.position;
+            for cl in self.solver.clusters.iter().filter(|cl| !cl.bonds.is_empty()) {
+                let s = cl.structure;
+                let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
+                for &k in &cl.chunks {
+                    let (p, h) = (self.solver.chunk_position(s, k), self.solver.structures[s].chunks[k].half_extents.norm());
+                    lo = lo.component_min(p - Vec3::splat(h + r));
+                    hi = hi.component_max(p + Vec3::splat(h + r));
+                }
+                let v = imp.velocity - cl.velocity;
+                // Slab test of c + v t against [lo, hi], t in [0, t_min].
+                let (mut t0, mut t1) = (0.0f64, t_min);
+                for a in 0..3 {
+                    if v[a].abs() < 1e-12 {
+                        if c[a] < lo[a] || c[a] > hi[a] {
+                            t0 = f64::INFINITY;
+                        }
+                        continue;
+                    }
+                    let (ta, tb) = ((lo[a] - c[a]) / v[a], (hi[a] - c[a]) / v[a]);
+                    t0 = t0.max(ta.min(tb));
+                    t1 = t1.min(ta.max(tb));
+                }
+                if t0 <= t1 && !(new_only && t0 <= 0.0) {
+                    t_min = t_min.min(t0);
+                }
+            }
+        }
+        t_min
+    }
+
+    /// The predictive punch (`STRESS_IMPACT_PUNCH=1`, a model under measurement): for each
+    /// impactor that reaches a bonded cluster within `dt` closing faster than the tiered
+    /// impact speed, the plug its face would punch out (the cluster's chunks inside a 45°
+    /// cone from the face along the closing velocity, through the cluster, connected by
+    /// bonds to the struck chunk) and the bonds holding it in. The plug breaks out when the
+    /// force of an inelastic hit on it, its impulse over the Hertz contact time, exceeds
+    /// those bonds' summed tensile capacity: then they are returned, to be broken before
+    /// the engine steps, so the engine's rigid contact meets the free plug.
+    pub fn predict_punch(&self, dt: f64) -> Vec<(usize, usize)> {
+        let scale = self.scene.sim.stiffness_scale;
+        let plane_strain = |m: &Material| m.youngs_modulus * scale / (1.0 - m.poisson_ratio * m.poisson_ratio);
+        let mut out = Vec::new();
+        for imp in &self.impactors {
+            let r = imp.obox().bounding_radius();
+            let face = Self::impactor_radius(imp);
+            let c = imp.pose.position;
+            for cl in self.solver.clusters.iter().filter(|cl| !cl.bonds.is_empty()) {
+                let v = imp.velocity - cl.velocity;
+                let speed = v.norm();
+                if speed <= tiered_impact_speed() {
+                    continue;
+                }
+                let s = cl.structure;
+                let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
+                for &k in &cl.chunks {
+                    let (p, h) = (self.solver.chunk_position(s, k), self.solver.structures[s].chunks[k].half_extents.norm());
+                    lo = lo.component_min(p - Vec3::splat(h + r));
+                    hi = hi.component_max(p + Vec3::splat(h + r));
+                }
+                let (mut t0, mut t1) = (0.0f64, dt);
+                for a in 0..3 {
+                    if v[a].abs() < 1e-12 {
+                        if c[a] < lo[a] || c[a] > hi[a] {
+                            t0 = f64::INFINITY;
+                        }
+                        continue;
+                    }
+                    let (ta, tb) = ((lo[a] - c[a]) / v[a], (hi[a] - c[a]) / v[a]);
+                    t0 = t0.max(ta.min(tb));
+                    t1 = t1.min(ta.max(tb));
+                }
+                if t0 > t1 {
+                    continue;
+                }
+                let d = v * (1.0 / speed);
+                let hit = c + v * t0;
+                // The struck chunk: the cluster's nearest to the impactor's path.
+                let entry = cl
+                    .chunks
+                    .iter()
+                    .copied()
+                    .min_by(|&a, &b| {
+                        let dist = |k: usize| {
+                            let q = self.solver.chunk_position(s, k) - hit;
+                            let along = q.dot(d);
+                            (q - d * along).norm() + along.abs() * 1e-3
+                        };
+                        dist(a).total_cmp(&dist(b))
+                    })
+                    .expect("a cluster with bonds has chunks");
+                let entry_depth = (self.solver.chunk_position(s, entry) - hit).dot(d);
+                let in_cone = |k: usize| {
+                    let q = self.solver.chunk_position(s, k) - hit;
+                    let along = q.dot(d);
+                    let h = self.solver.structures[s].chunks[k].half_extents.norm();
+                    let lateral = (q - d * along).norm();
+                    // The chunk's centre inside the cone (punching shear's 45° from the
+                    // face's edge), from the struck chunk's depth on.
+                    along >= entry_depth - h && lateral <= face + (along - entry_depth).max(0.0)
+                };
+                // The cone's chunks connected to the struck one (by the cluster's bonds).
+                let member: std::collections::HashSet<usize> = cl.chunks.iter().copied().collect();
+                let mut plug: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                let mut stack = vec![entry];
+                plug.insert(entry);
+                while let Some(k) = stack.pop() {
+                    for &bi in &self.solver.structures[s].chunks[k].bonds {
+                        let b = &self.solver.bonds[s][bi];
+                        if !b.connected() {
+                            continue;
+                        }
+                        let o = if b.geometry.a == k { b.geometry.b } else { b.geometry.a };
+                        if member.contains(&o) && !plug.contains(&o) && in_cone(o) {
+                            plug.insert(o);
+                            stack.push(o);
+                        }
+                    }
+                }
+                if plug.len() == cl.chunks.len() {
+                    continue;
+                }
+                let interface: Vec<usize> = cl
+                    .bonds
+                    .iter()
+                    .copied()
+                    .filter(|&bi| {
+                        let g = &self.solver.bonds[s][bi].geometry;
+                        self.solver.bonds[s][bi].connected() && (plug.contains(&g.a) != plug.contains(&g.b))
+                    })
+                    .collect();
+                let capacity: f64 = interface.iter().map(|&bi| {
+                    let b = &self.solver.bonds[s][bi];
+                    b.strength.tensile * b.geometry.area * b.weibull
+                }).sum();
+                let m_plug: f64 = plug.iter().map(|&k| self.solver.structures[s].chunks[k].mass).sum();
+                let m_eff = m_plug * imp.mass / (m_plug + imp.mass);
+                let impulse = m_eff * speed;
+                let modulus = 1.0 / (1.0 / plane_strain(&imp.material) + 1.0 / plane_strain(self.chunk_material(s, entry)));
+                let tau = crate::api::hertz_duration(m_eff, face, modulus, speed);
+                let force = impulse / tau;
+                if std::env::var("STRESS_IMPACT_PUNCH_TRACE").is_ok() {
+                    eprintln!(
+                        "punch: cluster {} ({} chunks): plug {} chunks {:.1} kg, {} bonds holding {:.3e} N; hit {:.1} m/s, impulse {:.0} N s over {:.2e} s = {:.3e} N: {}",
+                        cl.id, cl.chunks.len(), plug.len(), m_plug, interface.len(), capacity, speed, impulse, tau, force,
+                        if force > capacity { "breaks out" } else { "holds" }
+                    );
+                }
+                if force > capacity {
+                    out.extend(interface.into_iter().map(|bi| (s, bi)));
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Every body's motion taken from the engine as it is (after frames the engine stepped
+    /// without the world following it, such as a resident engine's).
+    pub fn take_engine_motion(&mut self) {
+        let coupling = self.coupling.as_mut().expect("coupled");
+        let end: HashMap<BodyKey, BodyMotion> = coupling.engine.motion().into_iter().map(|m| (m.key, m)).collect();
+        coupling.start = end.clone();
+        coupling.end = end;
+        for cl in &mut self.solver.clusters {
+            cl.driven = true;
+        }
+        for imp in &mut self.impactors {
+            imp.driven = true;
+        }
+        self.set_driven_motion(1.0);
     }
 
     /// Impulse of the scripted loads (and removal ramps) over the frame on each driven
@@ -771,11 +994,18 @@ impl World {
     /// The end of a coupled frame: island bodies that still exist go back to the engine
     /// with the world's state; new fragments are created by the sync with theirs.
     pub fn coupled_write_back(&mut self, frozen: &[BodyKey]) {
+        let t = std::time::Instant::now();
         self.take_rest_overlaps_from_engine();
+        let t1 = t.elapsed().as_secs_f64() * 1e3;
         let motion = self.world_motion();
+        let t2 = t.elapsed().as_secs_f64() * 1e3;
         let back: Vec<BodyMotion> = frozen.iter().filter_map(|k| motion.get(k).copied()).collect();
         self.coupling.as_mut().expect("coupled").engine.set_motion(&back);
+        let t3 = t.elapsed().as_secs_f64() * 1e3;
         self.sync_engine_bodies();
+        if std::env::var("STRESS_WRITE_BACK_TRACE").is_ok() {
+            eprintln!("write-back: overlaps {t1:.2}, motion {:.2}, set {:.2}, sync bodies {:.2} ms", t2 - t1, t3 - t2, t.elapsed().as_secs_f64() * 1e3 - t3);
+        }
     }
 
     /// Bodies (by their key at the start of the frame, in `driven`) with a bond broken
@@ -822,7 +1052,7 @@ impl World {
         let t0 = self.solver.time;
         // Without impact islands (and always in quasi-static mode, which has no explicit
         // dynamics to resolve one) the engine drives every body.
-        let island_bodies = if self.impact_islands && self.scene.sim.solve_mode != SolveMode::QuasiStatic {
+        let island_bodies = if self.impact_islands && (self.scene.sim.solve_mode != SolveMode::QuasiStatic || self.qs_islands) {
             self.select_islands(fdt, forced)
         } else {
             for cl in &mut self.solver.clusters {

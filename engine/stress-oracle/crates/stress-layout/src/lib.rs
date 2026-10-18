@@ -203,67 +203,7 @@ pub fn pack_with(m: &ReferenceSolver, exclude: &[bool]) -> Result<StructureTable
                 let r = cs.reaction.0;
                 state.extend([v4(cs.u, 0.0), v4(cs.th, r.x), v4(cs.v, r.y), v4(cs.w, r.z)]);
             }
-            // Drift-removal weights (solver.rs `remove_rigid_drift`).
-            let weight = |c: usize| m.chunks[s][c].inertia_scale;
-            let scaled = cl.chunks.iter().any(|&c| weight(c) != 1.0);
-            let (wmass, wcom, winertia) = if scaled {
-                let mass: f64 = cl.chunks.iter().map(|&c| st.chunks[c].mass * weight(c)).sum();
-                let com = cl.chunks.iter().map(|&c| st.chunks[c].center * (st.chunks[c].mass * weight(c))).fold(Vec3::ZERO, |a, b| a + b) / mass;
-                let mut inertia = Mat3::ZERO;
-                for &c in &cl.chunks {
-                    let ch = &st.chunks[c];
-                    let r = ch.center - com;
-                    inertia += (ch.inertia + (Mat3::IDENTITY * r.norm2() - Mat3::outer(r, r)) * ch.mass) * weight(c);
-                }
-                (mass, com, inertia)
-            } else {
-                (cl.mass, cl.com, cl.inertia)
-            };
-            // Under an engine (`integrate_rigid` off) every free cluster's rigid motion is
-            // the engine's: it is driven (solver.rs `integrate_rigid`, `remove_rigid_drift`).
-            let driven = cl.driven || !m.config.integrate_rigid;
-            let mut flags = if cl.anchored { ISLAND_ANCHORED } else { 0 } | if driven { ISLAND_DRIVEN } else { 0 };
-            // Quasi-static mode: every cluster moves rigidly between the frame's static
-            // solves; adaptive: the settled ones, until their loads change (world.rs
-            // `wake_loaded_clusters`: by more than `wake_threshold` of weight + norm).
-            let settled = match m.config.mode {
-                SolveMode::QuasiStatic => true,
-                SolveMode::Adaptive => cl.activity == Activity::Settled,
-                _ => false,
-            };
-            let mut settle = [0.0f32; 2];
-            if settled {
-                flags |= ISLAND_SETTLED;
-                let weight = cl.mass * m.config.gravity.norm();
-                let allowed = if m.config.mode == SolveMode::Adaptive { m.config.wake_threshold * (weight + cl.settled_load_norm) } else { f64::INFINITY };
-                settle = [cl.settled_load_norm as f32, allowed as f32];
-            }
-            let (position, position_err) = split(cl.pose.position);
-            let (velocity, velocity_err) = split(cl.velocity);
-            let (rotation, rotation_err) = split_quat(cl.pose.rotation);
-            let (momentum, momentum_err) = split(cl.world_inertia() * cl.angular_velocity);
-            let inv = cl.inertia.inverse().unwrap_or(Mat3::ZERO);
-            let winv = winertia.inverse().unwrap_or(Mat3::ZERO);
-            islands.push(Island {
-                range: [begin, chunks.len() as u32, 0, 0],
-                info: [flags, 0, 0, m.substeps as u32],
-                com: v4(cl.com, cl.mass),
-                inertia: rows(&cl.inertia),
-                inv: rows(&inv),
-                wcom: v4(wcom, wmass),
-                winv: rows(&winv),
-                rotation,
-                rotation_err,
-                momentum,
-                momentum_err,
-                position,
-                position_err,
-                velocity,
-                velocity_err,
-                angular_velocity: v4(cl.angular_velocity, 0.0),
-                energy: [0.0, 0.0, settle[0], settle[1]],
-                ..Default::default()
-            });
+            islands.push(island_record(m, ci, begin, chunks.len() as u32));
         }
         let mut table = MaterialTable::default();
         let mut bonds = Vec::with_capacity(bond_total);
@@ -332,4 +272,75 @@ pub fn pack_with(m: &ReferenceSolver, exclude: &[bool]) -> Result<StructureTable
             fill[c as usize] += 1;
         }
         Ok(StructureTables { chunk_index, chunks, chunk_static, state, islands, table, bonds, bond_index, bond_static, bond_dyn, csr })
+}
+
+/// A cluster's island record (`pack_with`'s), its chunks at `[begin, end)` of the chunk
+/// table and no bonds yet (`range.z`, `range.w`: set by the caller).
+pub fn island_record(m: &ReferenceSolver, ci: usize, begin: u32, end: u32) -> Island {
+    let cl = &m.clusters[ci];
+    let s = cl.structure;
+    let st = &m.structures[s];
+    // Drift-removal weights (solver.rs `remove_rigid_drift`).
+    let weight = |c: usize| m.chunks[s][c].inertia_scale;
+    let scaled = cl.chunks.iter().any(|&c| weight(c) != 1.0);
+    let (wmass, wcom, winertia) = if scaled {
+        let mass: f64 = cl.chunks.iter().map(|&c| st.chunks[c].mass * weight(c)).sum();
+        let com = cl.chunks.iter().map(|&c| st.chunks[c].center * (st.chunks[c].mass * weight(c))).fold(Vec3::ZERO, |a, b| a + b) / mass;
+        let mut inertia = Mat3::ZERO;
+        for &c in &cl.chunks {
+            let ch = &st.chunks[c];
+            let r = ch.center - com;
+            inertia += (ch.inertia + (Mat3::IDENTITY * r.norm2() - Mat3::outer(r, r)) * ch.mass) * weight(c);
+        }
+        (mass, com, inertia)
+    } else {
+        (cl.mass, cl.com, cl.inertia)
+    };
+    // Under an engine (`integrate_rigid` off) every free cluster's rigid motion is
+    // the engine's: it is driven (solver.rs `integrate_rigid`, `remove_rigid_drift`).
+    let driven = cl.driven || !m.config.integrate_rigid;
+    let mut flags = if cl.anchored { ISLAND_ANCHORED } else { 0 } | if driven { ISLAND_DRIVEN } else { 0 };
+    // Quasi-static mode: every cluster moves rigidly between the frame's static
+    // solves; adaptive: the settled ones, until their loads change (world.rs
+    // `wake_loaded_clusters`: by more than `wake_threshold` of weight + norm).
+    let settled = match m.config.mode {
+        SolveMode::QuasiStatic => !(m.config.tiered && cl.activity == Activity::Active),
+        SolveMode::Adaptive => cl.activity == Activity::Settled,
+        _ => false,
+    };
+    let mut settle = [0.0f32; 2];
+    if settled {
+        flags |= ISLAND_SETTLED;
+        let weight = cl.mass * m.config.gravity.norm();
+        let allowed = if m.config.mode == SolveMode::Adaptive { m.config.wake_threshold * (weight + cl.settled_load_norm) } else { f64::INFINITY };
+        settle = [cl.settled_load_norm as f32, allowed as f32];
+    }
+    let (position, position_err) = split(cl.pose.position);
+    let (velocity, velocity_err) = split(cl.velocity);
+    let (rotation, rotation_err) = split_quat(cl.pose.rotation);
+    let (momentum, momentum_err) = split(cl.world_inertia() * cl.angular_velocity);
+    let inv = cl.inertia.inverse().unwrap_or(Mat3::ZERO);
+    let winv = winertia.inverse().unwrap_or(Mat3::ZERO);
+    Island {
+        range: [begin, end, 0, 0],
+        info: [flags, 0, 0, m.substeps as u32],
+        com: v4(cl.com, cl.mass),
+        inertia: rows(&cl.inertia),
+        inv: rows(&inv),
+        wcom: v4(wcom, wmass),
+        winv: rows(&winv),
+        rotation,
+        rotation_err,
+        momentum,
+        momentum_err,
+        position,
+        position_err,
+        velocity,
+        velocity_err,
+        angular_velocity: v4(cl.angular_velocity, 0.0),
+        energy: [0.0, 0.0, settle[0], settle[1]],
+        // `done_pad`: the cluster id (colliders.slang reads the coupling's body code from it).
+        done: [0, 0, 0, cl.id as u32],
+        ..Default::default()
+    }
 }
