@@ -494,6 +494,14 @@ impl RubbleEngine {
             sleep_ang: -1.0,
             ..AvbdParams::default()
         };
+        // `STRESS_RUBBLE_SLEEP=1` (a measurement, not adopted): rubble's own sleep thresholds,
+        // so resting bodies move to the broadphase's rest table.
+        let params = if std::env::var("STRESS_RUBBLE_SLEEP").is_ok_and(|v| v == "1") {
+            let d = AvbdParams::default();
+            AvbdParams { sleep_lin: d.sleep_lin, sleep_ang: d.sleep_ang, ..params }
+        } else {
+            params
+        };
         // `STRESS_RUBBLE_ITERATIONS=n`: rubble's solver iterations per step (a PhysX-matched
         // setting for comparisons: vibe-land's PhysX runs 4 position iterations); default
         // rubble's own.
