@@ -929,6 +929,9 @@ impl GpuWorld {
     fn combined_dt(&self, stress: f64, contact: f64, fdt: f64) -> f64 {
         // Implicit contact (`STRESS_REF_IMPLICIT_CONTACT=1`) sets no step bound.
         let contact = if stress_ref::world::implicit_contact() { f64::INFINITY } else { contact };
+        // `STRESS_IMPACT_WINDOW_STEP_SCALE=k` (a lossy measurement, off): an island frame's
+        // certified stress step times k (past the certificate: may lose stability).
+        let stress = stress * std::env::var("STRESS_IMPACT_WINDOW_STEP_SCALE").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
         let dt = if self.scene.sim.methods.scaled_step_bound { 1.0 / (stress.powi(-2) + contact.powi(-2)).sqrt() } else { stress.min(contact) };
         let mut dt = dt.min(fdt);
         if let Some(m) = self.scene.sim.max_substep {
