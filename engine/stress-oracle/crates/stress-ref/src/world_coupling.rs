@@ -526,6 +526,12 @@ impl World {
     /// `dt`: none). Bounds as `select_islands` takes them, so the estimate is early, never
     /// late, for a cluster that does not spin.
     pub fn first_contact_time(&self, dt: f64) -> f64 {
+        self.first_contact_time_with(dt, false)
+    }
+
+    /// `first_contact_time`; with `new_only`, pairs that already overlap (an impact going
+    /// on) are left out: the earliest new approach.
+    pub fn first_contact_time_with(&self, dt: f64, new_only: bool) -> f64 {
         let mut t_min = dt;
         for imp in &self.impactors {
             let r = imp.obox().bounding_radius();
@@ -552,7 +558,7 @@ impl World {
                     t0 = t0.max(ta.min(tb));
                     t1 = t1.min(ta.max(tb));
                 }
-                if t0 <= t1 {
+                if t0 <= t1 && !(new_only && t0 <= 0.0) {
                     t_min = t_min.min(t0);
                 }
             }

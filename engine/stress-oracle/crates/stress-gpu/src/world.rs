@@ -474,7 +474,15 @@ impl GpuWorld {
         let mut lead = 0.0;
         if window {
             // From the frame's start to the window past the first contact (estimated early).
-            let first = self.with_shell_mut(|w| w.first_contact_time(fdt));
+            // `STRESS_IMPACT_WINDOW_NEW_ONLY=1` (a measurement): a window only for a new
+            // approach (pairs already overlapping, an impact that went on past its window,
+            // left out); a frame with none runs resident, the engine taking the contact.
+            let new_only = std::env::var("STRESS_IMPACT_WINDOW_NEW_ONLY").is_ok_and(|v| v == "1");
+            let first = self.with_shell_mut(|w| w.first_contact_time_with(fdt, new_only));
+            if new_only && first >= fdt {
+                self.last_resident = true;
+                return self.resident_frame(gpu);
+            }
             // `impact_window_lead`: the frame's time before the estimated contact stepped
             // resident (rigid motion only: nothing touches the island yet), the explicit
             // part starting at the contact.
@@ -489,6 +497,9 @@ impl GpuWorld {
                     return Err(e);
                 }
                 self.last_resident = false;
+                // The lead's GPU splits followed first (their bookkeeping waits for the next
+                // frame otherwise), so the mirror is the GPU's layout.
+                self.flush_pending(gpu)?;
                 self.solver.download(gpu);
                 self.with_shell_mut(|w| w.take_engine_motion());
                 self.solver.refresh(gpu)?;
