@@ -507,6 +507,10 @@ fn run_oracle(scene: &Scene) -> Run {
 
 #[cfg(feature = "gpu")]
 fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, no_redo: bool, islands: bool) -> Run {
+    // STRESS_BENCH_WRITE_SCENE=path: the scene as run, as JSON (for `stress-ref run`).
+    if let Ok(path) = std::env::var("STRESS_BENCH_WRITE_SCENE") {
+        std::fs::write(&path, serde_json::to_string_pretty(scene).expect("scene JSON")).expect("scene file");
+    }
     use stress_ref::math::Vec3;
     // One device for both (`rubble-gpu`), or rubble on its own device (`rubble-gpu-2dev`).
     let engine: Box<dyn stress_ref::engine::RigidEngine> = if two_devices {

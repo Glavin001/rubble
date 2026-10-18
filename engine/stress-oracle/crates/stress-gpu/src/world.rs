@@ -115,6 +115,9 @@ pub struct GpuWorld {
     /// runs the island explicitly for this long only, then the engine steps the rest of the
     /// frame resident with whatever the impact broke off (forward, one tick).
     pub impact_window: f64,
+    /// With the impact window: the frame's time before the estimated first contact runs
+    /// resident, so the explicit part starts at the contact (`STRESS_IMPACT_WINDOW_LEAD=1`).
+    pub impact_window_lead: bool,
     /// Frames that ran coupled (not resident).
     pub coupled_frames: u64,
     /// The routing check's kernel and buffers (`routing.slang`).
@@ -261,6 +264,7 @@ impl GpuWorld {
             routed_resident: std::env::var("STRESS_ROUTED_RESIDENT").map_or(true, |v| v != "0"),
             route_next: true,
             last_resident: false,
+            impact_window_lead: std::env::var("STRESS_IMPACT_WINDOW_LEAD").is_ok_and(|v| v == "1"),
             impact_window: std::env::var("STRESS_IMPACT_WINDOW").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             coupled_frames: 0,
             routing: None,
@@ -466,23 +470,49 @@ impl GpuWorld {
             self.with_shell_mut(|w| w.take_engine_motion());
             self.solver.refresh(gpu)?;
         }
+        // The frame's time before the window (a resident lead, `impact_window_lead`).
+        let mut lead = 0.0;
         if window {
             // From the frame's start to the window past the first contact (estimated early).
             let first = self.with_shell_mut(|w| w.first_contact_time(fdt));
-            let len = first + self.impact_window;
-            if std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
-                eprintln!("impact window frame {}: first contact at {:.2} ms, explicit part {:.2} ms", self.frame, first * 1e3, len.min(fdt) * 1e3);
+            // `impact_window_lead`: the frame's time before the estimated contact stepped
+            // resident (rigid motion only: nothing touches the island yet), the explicit
+            // part starting at the contact.
+            if self.impact_window_lead && first > 1e-4 && first + self.impact_window < 0.9 * fdt {
+                lead = first;
+                self.set_frame_dt(lead);
+                self.last_resident = true;
+                let r = self.resident_frame(gpu);
+                self.frame -= 1;
+                if let Err(e) = r {
+                    self.set_frame_dt(fdt);
+                    return Err(e);
+                }
+                self.last_resident = false;
+                self.solver.download(gpu);
+                self.with_shell_mut(|w| w.take_engine_motion());
+                self.solver.refresh(gpu)?;
             }
-            if len < 0.9 * fdt {
+            let len = first - lead + self.impact_window;
+            if std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
+                eprintln!("impact window frame {}: first contact at {:.2} ms, resident lead {:.2} ms, explicit part {:.2} ms", self.frame, first * 1e3, lead * 1e3, len.min(fdt - lead) * 1e3);
+            }
+            if lead + len < 0.9 * fdt {
                 self.set_frame_dt(len);
+            } else if lead > 0.0 {
+                self.set_frame_dt(fdt - lead);
+                window = false;
             } else {
                 window = false;
             }
         }
         let r = self.step_frame_tiered(gpu);
+        if !window && lead > 0.0 {
+            self.set_frame_dt(fdt);
+        }
         if window {
             let w = self.scene.sim.frame_dt;
-            self.set_frame_dt(fdt - w);
+            self.set_frame_dt(fdt - lead - w);
             let rest = r.and_then(|_| {
                 self.last_resident = true;
                 self.resident_frame(gpu)
