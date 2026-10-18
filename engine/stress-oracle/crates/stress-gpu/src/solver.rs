@@ -591,6 +591,8 @@ pub struct GpuSolver {
     layouter: Option<crate::gpu_split::GpuLayout>,
     /// GPU layouts against the host's in-place split (`STRESS_GPU_SPLIT_CHECK=1`).
     pub split_layout_check: crate::gpu_split::LayoutCheck,
+    /// `STRESS_GPU_COLLIDER_CHECK=1`: the GPU's collider table after its splits against the host's.
+    pub collider_check: crate::colliders::ColliderCheck,
     /// GPU splits against the host's (`STRESS_GPU_SPLIT_CHECK=1`).
     pub split_check: crate::gpu_split::SplitCheck,
     /// GPU-made bodies against the host's (`STRESS_GPU_SPLIT_CHECK=1`).
@@ -673,6 +675,7 @@ impl GpuSolver {
             splitter: None,
             layouter: None,
             split_layout_check: Default::default(),
+            collider_check: Default::default(),
             split_check: Default::default(),
             spawn_check: Default::default(),
             plan_check: Default::default(),
@@ -3435,7 +3438,15 @@ impl GpuSolver {
     /// (`GpuSplitter::pass`): frames from the engine's bodies, topology, the children's
     /// engine bodies, the tables laid out. The host's own layout and mirror follow from
     /// what it reads (`split_resident_with`, already laid out).
-    pub fn gpu_split_pass(&mut self, gpu: &Gpu, parents: &[usize], engine: &crate::gpu_split::PassEngine, table: &crate::gpu_split::PartTable, resident: Option<ResidentLayout>) -> crate::gpu_split::PassResult {
+    pub fn gpu_split_pass(
+        &mut self,
+        gpu: &Gpu,
+        parents: &[usize],
+        engine: &crate::gpu_split::PassEngine,
+        table: &crate::gpu_split::PartTable,
+        resident: Option<ResidentLayout>,
+        colliders: Option<(&crate::colliders::ColliderRefresh, &wgpu::Buffer)>,
+    ) -> crate::gpu_split::PassResult {
         if self.splitter.is_none() {
             self.splitter = Some(crate::gpu_split::GpuSplitter::new(gpu));
         }
@@ -3469,7 +3480,7 @@ impl GpuSolver {
         };
         let resident = resident.map(|r| (r.ctab, [r.props_base, r.eload_base, r.pulse_base, r.pulse_count_base, r.pulse_cap, r.engine_base]));
         let b = &self.buffers;
-        self.splitter.as_ref().expect("splitter").pass(gpu, &layout, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &b.scratch, &ps, engine, table, params, self.layout.island_cap, resident, gate, parts_max)
+        self.splitter.as_ref().expect("splitter").pass(gpu, &layout, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &b.scratch, &ps, engine, table, params, self.layout.island_cap, resident, gate, parts_max, colliders)
     }
 
     /// The island capacity of the tables (`island_headroom` past the islands).

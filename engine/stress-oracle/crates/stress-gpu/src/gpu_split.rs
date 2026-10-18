@@ -610,6 +610,7 @@ impl GpuSplitter {
         resident: Option<(&wgpu::Buffer, [u32; 6])>,
         gate: &wgpu::Buffer,
         parts_max: usize,
+        colliders: Option<(&crate::colliders::ColliderRefresh, &wgpu::Buffer)>,
     ) -> PassResult {
         let [chunks, index, bonds, bond_dyn, islands, state] = buffers;
         // The split's buffers (as `split`).
@@ -691,6 +692,25 @@ impl GpuSplitter {
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, bind, &[]);
             pass.dispatch_workgroups((*size).max(1), 1, 1);
+        }
+        // The coupling's collider table after the layout (colliders.slang).
+        if let Some((refresh, collider_info)) = colliders {
+            let inputs = crate::colliders::RefreshInputs {
+                parent_count: parents.len() as u32,
+                chunk_count: params.chunk_count,
+                parents: &parents_buf,
+                work: &work,
+                children: &out,
+                slots: &slots,
+                part_ranges: &table.ranges,
+                old_chunks: &old[0],
+                chunks,
+                islands,
+                islands_of: &firsts,
+                structure_base: &table.structure_base,
+                control: &control,
+            };
+            refresh.encode(gpu, &mut encoder, &inputs, total, collider_info);
         }
         let t_submit = std::time::Instant::now();
         gpu.queue.submit([encoder.finish()]);

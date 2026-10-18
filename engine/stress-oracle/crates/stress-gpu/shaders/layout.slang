@@ -477,6 +477,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         rec[14] = float4(pos, 0.0);
         rec[16] = float4(anchored ? float3(0.0) : v, 0.0);
         rec[18] = float4(anchored ? float3(0.0) : w, 0.0);
+        rec[19] = asfloat(uint4(0, 0, 0, plan[child_id_at(slot)])); // done_pad: the cluster id
         rec[21] = float4(0.0, 0.0, 0.0, asfloat(0x7f800000u)); // settled: load norm 0, never wakes
         rec[23] = float4(anchored ? float3(0.0) : iw, 0.0);
         for (uint t = 0; t < 25; t++)

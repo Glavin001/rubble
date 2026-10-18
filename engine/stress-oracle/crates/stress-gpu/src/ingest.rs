@@ -149,6 +149,21 @@ impl EngineIngest {
         self.collider_info = gpu.storage_into("ingest collider info", table(colliders), Some(&self.collider_info));
     }
 
+    /// `set_colliders` into a table with room for `capacity` colliders (the GPU keeps the
+    /// rest current: colliders.rs): the entries past the host's are left as they are.
+    pub fn set_colliders_with_room(&mut self, gpu: &Gpu, colliders: &[ColliderInfo], capacity: u32) {
+        let bytes = (std::mem::size_of::<ColliderInfo>() * colliders.len().max(capacity as usize).max(1)) as u64;
+        if self.collider_info.size() < bytes {
+            self.collider_info = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ingest collider info"),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        gpu.queue.write_buffer(&self.collider_info, 0, bytemuck::cast_slice(table(colliders)));
+    }
+
     fn bind(&self, gpu: &Gpu, kernel: &Kernel, params: &wgpu::Buffer, e: &EngineBuffers) -> wgpu::BindGroup {
         gpu.bind(&kernel.group, &[params, e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts])
     }

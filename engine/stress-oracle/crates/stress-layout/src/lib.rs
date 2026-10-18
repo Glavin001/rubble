@@ -339,6 +339,8 @@ pub fn island_record(m: &ReferenceSolver, ci: usize, begin: u32, end: u32) -> Is
         velocity_err,
         angular_velocity: v4(cl.angular_velocity, 0.0),
         energy: [0.0, 0.0, settle[0], settle[1]],
+        // `done_pad`: the cluster id (colliders.slang reads the coupling's body code from it).
+        done: [0, 0, 0, cl.id as u32],
         ..Default::default()
     }
 }

@@ -39,6 +39,10 @@ pub(super) struct ResidentState {
     layout_generation: u64,
     /// The layout's last change was a split the GPU laid out (its entries moved there).
     gpu_laid_out: bool,
+    /// `STRESS_GPU_LAYOUT=1`: the collider table kept on the GPU after its splits
+    /// (colliders.rs), and whether the last split refreshed it.
+    colliders: Option<crate::colliders::ColliderRefresh>,
+    colliders_refreshed: bool,
 }
 
 impl GpuWorld {
@@ -63,18 +67,9 @@ impl GpuWorld {
         self.resident_engine.is_some() && self.fast_qs_conditions() && !self.shell.qs_islands
     }
 
-    /// The tables of the current layouts (rebuilt when the engine's colliders or the
-    /// solver's layout changed, or the frame needs more substeps).
-    fn resident_tables(&mut self, gpu: &Gpu, substeps: u32) {
-        let engine = self.resident_engine.clone().expect("resident engine");
-        let e = engine.borrow();
-        let version = e.layout_version();
-        let generation = self.solver.layout_generation;
-        if let Some(r) = &self.resident {
-            if r.engine_version == version && r.layout_generation == generation && r.substeps >= substeps {
-                return;
-            }
-        }
+    /// The engine's collider table as the coupling sees it (`ColliderInfo`), against the
+    /// solver's current layout and mirror; and the static geometry's modulus.
+    fn host_collider_table(&self, e: &dyn ResidentEngine) -> (Vec<crate::ingest::ColliderInfo>, f64) {
         let m = &self.solver.mirror;
         let chunk_index: HashMap<(usize, usize), u32> = self.solver.gpu_chunks().iter().enumerate().map(|(k, &sc)| (sc, k as u32)).collect();
         let by_id: HashMap<u64, usize> = m.clusters.iter().enumerate().map(|(ci, cl)| (cl.id, ci)).collect();
@@ -99,10 +94,28 @@ impl GpuWorld {
             };
             [p.0 as f32, p.1 as f32, p.2 as f32]
         };
-        let table = e.collider_table(&|s, c| chunk_index.get(&(s, c)).copied(), &other);
+        (e.collider_table(&|s, c| chunk_index.get(&(s, c)).copied(), &other), ground_modulus)
+    }
+
+    /// The tables of the current layouts (rebuilt when the engine's colliders or the
+    /// solver's layout changed, or the frame needs more substeps).
+    fn resident_tables(&mut self, gpu: &Gpu, substeps: u32) {
+        let engine = self.resident_engine.clone().expect("resident engine");
+        let e = engine.borrow();
+        let version = e.layout_version();
+        let generation = self.solver.layout_generation;
+        if let Some(r) = &self.resident {
+            if r.engine_version == version && r.layout_generation == generation && r.substeps >= substeps {
+                return;
+            }
+        }
+        let m = &self.solver.mirror;
+        let (table, ground_modulus) = self.host_collider_table(&*e);
+        let gpu_colliders = std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1");
+        let collider_cap = e.collider_capacity();
         let frames: Vec<Option<EngineFrame>> = m.clusters.iter().map(|cl| if cl.anchored { None } else { e.engine_frame(BodyKey::Cluster(cl.id)) }).collect();
         let (rows, bodies) = e.engine_capacity();
-        let chunks = chunk_index.len().max(1) as u32;
+        let chunks = self.solver.gpu_chunks().len().max(1) as u32;
         let dt = self.scene.sim.frame_dt;
         match self.resident.as_mut() {
             // A split the GPU laid out: the tables' entries already moved; only the
@@ -141,9 +154,44 @@ impl GpuWorld {
                     engine_version: version,
                     layout_generation: generation,
                     gpu_laid_out: false,
+                    colliders: None,
+                    colliders_refreshed: false,
                 });
             }
         }
+        // `STRESS_GPU_LAYOUT=1`: the GPU keeps the table after its splits (colliders.rs):
+        // its keys from this table, room for the engine's colliders.
+        if gpu_colliders {
+            let r = self.resident.as_mut().expect("resident tables");
+            if r.colliders.is_none() {
+                let props: Vec<Vec<[f32; 2]>> = m.structures.iter().map(|st| st.chunks.iter().map(|ch| [ch.youngs_modulus as f32, ch.half_extents.min_elem() as f32]).collect()).collect();
+                r.colliders = Some(crate::colliders::ColliderRefresh::new(gpu, &props, collider_cap, ground_modulus as f32));
+            }
+            r.ingest.set_colliders_with_room(gpu, &table, collider_cap);
+            r.colliders.as_mut().expect("collider refresh").set_keys(gpu, &table, self.solver.gpu_chunks(), collider_cap);
+        }
+    }
+
+    /// After the engine adopted a split whose collider table the GPU refreshed: the table
+    /// is current (`STRESS_GPU_COLLIDER_CHECK=1`: compared with the host's).
+    fn colliders_adopted(&mut self, gpu: &Gpu) {
+        let engine = self.resident_engine.clone().expect("resident engine");
+        let e = engine.borrow();
+        let Some(r) = self.resident.as_ref() else { return };
+        if !r.colliders_refreshed {
+            return;
+        }
+        if std::env::var("STRESS_GPU_COLLIDER_CHECK").is_ok_and(|v| v == "1") {
+            let (table, _) = self.host_collider_table(&*e);
+            let n = table.len() as u64 * std::mem::size_of::<crate::ingest::ColliderInfo>() as u64;
+            let read = gpu.read_ranges(&[(&r.ingest.collider_info, 0, n)]);
+            let gpu_table: Vec<crate::ingest::ColliderInfo> = bytemuck::pod_collect_to_vec(&read[0]);
+            self.solver.collider_check.compare(&gpu_table, &table);
+        }
+        let r = self.resident.as_mut().expect("resident tables");
+        r.engine_version = e.layout_version();
+        r.gpu_laid_out = false;
+        r.colliders_refreshed = false;
     }
 
     /// The mirror current: the solver's state and, after resident frames, the engine's
@@ -360,6 +408,7 @@ impl GpuWorld {
             }
             if let Some(spawned) = spawned {
                 self.adopt_live(&engine, spawned)?;
+                self.colliders_adopted(gpu);
             }
             if let Some((ids, layout_chunks, gpu_children, bodies, shadow)) = gpu_children {
                 self.check_split(&ids, &layout_chunks, &gpu_children);
@@ -612,10 +661,16 @@ impl GpuWorld {
             retire,
         };
         let resident = self.resident.as_ref().map(|r| r.qs.layout());
-        let result = self.solver.gpu_split_pass(gpu, parents, &pass_engine, &table, resident);
+        // The collider table refreshed on the GPU too, when it has room for the engine's.
+        let colliders = self.resident.as_ref().and_then(|r| r.colliders.as_ref().filter(|c| c.capacity() >= max_colliders).map(|c| (c, &r.ingest.collider_info)));
+        let refreshed = colliders.is_some();
+        let result = self.solver.gpu_split_pass(gpu, parents, &pass_engine, &table, resident, colliders);
         drop(e);
         if result.aborted {
             return None;
+        }
+        if let Some(r) = self.resident.as_mut() {
+            r.colliders_refreshed = refreshed;
         }
         let children = result
             .children

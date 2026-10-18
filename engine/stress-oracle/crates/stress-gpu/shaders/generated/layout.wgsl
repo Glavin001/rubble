@@ -1059,6 +1059,7 @@ fn layout_parent(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             _S61 = w_8;
         }
         rec_0[i32(18)] = vec4<f32>(_S61, 0.0f);
+        rec_0[i32(19)] = (bitcast<vec4<f32>>((vec4<u32>(u32(0), u32(0), u32(0), plan_0[child_id_at_0(slot_5)]))));
         rec_0[i32(21)] = vec4<f32>(0.0f, 0.0f, 0.0f, (bitcast<f32>((u32(2139095040)))));
         var _S62 : vec3<f32>;
         if(anchored_0)

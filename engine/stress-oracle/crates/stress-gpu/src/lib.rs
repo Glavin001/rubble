@@ -6,6 +6,7 @@
 //! the driver (`build.rs` builds it with Xcode), in a browser the WGSL goes to WebGPU.
 //! Everything on the GPU is f32; accuracy against the reference is measured, not assumed.
 
+pub mod colliders;
 pub mod gpu;
 pub mod gpu_plan;
 pub mod gpu_split;
@@ -94,6 +95,7 @@ pub mod shaders {
     pub const PLAN: ShaderSet = shader_set!("plan", [("plan_motion", (64, 1, 1)), ("plan_reach", (64, 1, 1)), ("plan_pair_count", (64, 1, 1)), ("plan_scan", (1024, 1, 1)), ("plan_pair_write", (64, 1, 1)), ("plan_side", (64, 1, 1))]);
     pub const LAYOUT: ShaderSet = shader_set!("layout", [("layout_plan", (1, 1, 1)), ("layout_moved", (64, 1, 1)), ("layout_parent", (64, 1, 1))]);
     pub const SPAWN: ShaderSet = shader_set!("spawn", [("spawn_offsets", (1, 1, 1)), ("spawn_bodies", (64, 1, 1)), ("spawn_retire", (64, 1, 1))]);
+    pub const COLLIDERS: ShaderSet = shader_set!("colliders", [("collider_keys", (64, 1, 1)), ("collider_slots", (64, 1, 1)), ("collider_refresh", (64, 1, 1))]);
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
 }
