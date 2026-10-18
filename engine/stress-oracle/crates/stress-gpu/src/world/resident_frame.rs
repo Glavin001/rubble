@@ -161,9 +161,17 @@ impl GpuWorld {
         for cl in &mut self.solver.mirror.clusters {
             cl.driven = true;
         }
+        let t_substeps = std::time::Instant::now();
         let n = engine.borrow_mut().resident_substeps(fdt);
-        self.resident_tables(gpu, n);
         let phases = std::env::var("STRESS_RESIDENT_PHASES").is_ok();
+        if phases {
+            eprintln!("resident phases: substep count {n}: {:.2} ms", t_substeps.elapsed().as_secs_f64() * 1e3);
+        }
+        let t_tables = std::time::Instant::now();
+        self.resident_tables(gpu, n);
+        if phases {
+            eprintln!("resident phases: tables {:.2} ms", t_tables.elapsed().as_secs_f64() * 1e3);
+        }
         let t_engine = std::time::Instant::now();
         {
             let r = self.resident.as_ref().expect("resident tables");

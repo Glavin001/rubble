@@ -405,6 +405,20 @@ your call; the rest need building.
         - The outcome differs: broken bonds 2,650 → 5,071, fragments 865 → 1,668. Each
           impact is resolved in one step instead of 2–3, so it is not adopted.
         - Guard 24/24 with it off.
+      - **Bombard frame on a quiet GPU (2026-10-18, `STRESS_RESIDENT_PHASES=1`,
+        `RUBBLE_GPU_TIMING=1`): about 15 ms.**
+        - 2 rubble substeps of about 5 ms each (CCD for the projectiles). Each is:
+          - broadphase 0.85 ms and narrowphase 0.55 ms;
+          - 10 primal iterations of about 0.28 ms, each 7 colours plus 4 headroom
+            dispatches (about 25 µs per dispatch).
+        - The stress cascade, about 3 ms.
+        - The CCD substep count's body read-back, 0.2–0.4 ms. It is the last per-frame
+          host read outside the frame's status read; it could ride on the previous
+          frame's status read.
+        - Under Unreal Editor's GPU load, the same runs measure 20–42 ms.
+        - **The decision that remains is yours:** match vibe-land's PhysX (one-step CCD,
+          4 iterations; about 9 ms, but 2× the breakage), or stay lossless. Lossless
+          means cheaper rubble substeps, and splits on the GPU (6e) for the spikes.
       - **Splits are the spikes (p95 ~155 ms, now ~55 with splits in place).** Each one downloads the mirror (12–30 ms)
         and rebuilds the tables of all 52k chunks (~50 ms) for a few changed clusters.
         The new fragments' first solves come on top. Next: re-lay out only the split
