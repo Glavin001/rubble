@@ -580,7 +580,7 @@ pub fn build_cuboid_house(o: &CuboidOptions) -> Result<Scene> {
     scene_from_pieces(&cuboid_pieces(o), o.hulls)
 }
 
-const FACES: [([f64; 3], [[f64; 3]; 4]); 6] = [
+pub(crate) const FACES: [([f64; 3], [[f64; 3]; 4]); 6] = [
     (
         [1.0, 0.0, 0.0],
         [
