@@ -502,6 +502,144 @@ fn tank_pivots_in_place_drives_and_turns_by_track_ratio() {
     assert!(st.yaw_rate > 0.2, "left steer yaws left in reverse too: {}", st.yaw_rate);
 }
 
+/// The tank as it was before track pods: wheel shells only, belly 1 m up.
+fn tank_without_pods() -> VehicleDesc {
+    let mut d = presets::tank();
+    let t = d.tracks.as_mut().unwrap();
+    t.left.pod = None;
+    t.right.pod = None;
+    let belly = d.parts.iter().position(|p| p.name == "belly").unwrap();
+    d.parts[0].mass += d.parts.remove(belly).mass; // no belly plate
+    d
+}
+
+/// Chassis-space pod boxes (centre, half extents) of the tank preset's tracks.
+fn tank_pod_boxes() -> Vec<(glam::Vec3, glam::Vec3)> {
+    let d = presets::tank().centered();
+    let t = d.tracks.as_ref().unwrap();
+    [&t.left, &t.right]
+        .iter()
+        .flat_map(|tr| engine_vehicle::pack::track_pod_colliders(&d, tr, tr.pod.as_ref().unwrap(), 0))
+        .map(|c| (glam::Vec3::from_array(c.local_pos), glam::Vec3::from_slice(&c.params[..3])))
+        .collect()
+}
+
+struct DebrisRun {
+    travelled: f32,
+    speed: f32,
+    max_tilt: f32,
+    /// Deepest a crate got into a track run (m): caught between the road wheels.
+    max_depth: f32,
+}
+
+/// Drive a tank at 5 m/s through rows of crates (half size `h`) in its track paths.
+fn debris_run(desc: &VehicleDesc, h: f32) -> DebrisRun {
+    let mut sim = world();
+    let mut crates = Vec::new();
+    for row in 0..8 {
+        let z = 8.0 + 1.4 * row as f32;
+        let jitter = if row % 2 == 0 { 0.12 } else { -0.12 };
+        for x in [1.7f32, -1.7, 0.0] {
+            let m = 1500.0 * 8.0 * h * h * h;
+            crates.push(dyn_body(&mut sim, [x + jitter, h, z], m, [m * 4.0 * h * h / 6.0; 3], &[([0.0; 3], [h; 3], 0)]));
+        }
+    }
+    let v = spawn(&mut sim, desc, 2.5);
+    run(&mut sim, 90);
+    let p0 = chassis(&sim, v).position;
+    let pods = tank_pod_boxes();
+    let (mut max_depth, mut max_tilt) = (0.0f32, 0.0f32);
+    for step in 0..600 {
+        let e = 5.0 - sim.vehicle_state(v).forward_speed;
+        sim.set_vehicle_input(v, throttle((e * 0.5).clamp(0.0, 1.0), 0.0));
+        sim.step().expect("step");
+        if step % 5 != 0 {
+            continue;
+        }
+        let c = chassis(&sim, v);
+        max_tilt = max_tilt.max(roll_pitch(&c).0);
+        let q = glam::Quat::from_array(c.orientation);
+        let o = glam::Vec3::from_array(c.position);
+        for &b in &crates {
+            let local = q.inverse() * (glam::Vec3::from_array(sim.read_body(b).position) - o);
+            for (pc, half) in &pods {
+                max_depth = max_depth.max(h - ((local - *pc).abs() - *half).max_element());
+            }
+        }
+    }
+    let c = chassis(&sim, v);
+    let travelled = c.position[2] - p0[2];
+    let speed = sim.vehicle_state(v).forward_speed;
+    eprintln!("{} {} {:.2} m crates: travelled {travelled:.1} m, speed {speed:.2}, max tilt {max_tilt:.1}°, deepest in a track {max_depth:.2} m",
+        desc.name, if desc.tracks.as_ref().unwrap().left.pod.is_some() { "pods" } else { "shells" }, 2.0 * h);
+    DebrisRun { travelled, speed, max_tilt, max_depth }
+}
+
+#[test]
+fn tank_tracks_roll_over_debris_without_wedging_it_between_wheels() {
+    // Crates in the track paths used to slip between the road-wheel shells and ride
+    // inside the track; the pod is solid and its belt rolls the tank over them.
+    for h in [0.11f32, 0.175] {
+        let old = debris_run(&tank_without_pods(), h);
+        let new = debris_run(&presets::tank(), h);
+        assert!(new.max_depth < 0.08, "no crate inside a track run: {}", new.max_depth);
+        assert!(new.travelled > 25.0, "drives through the crates: {}", new.travelled);
+        assert!(new.speed > 3.0, "keeps moving: {}", new.speed);
+        assert!(new.max_tilt < 25.0, "stays upright: {}", new.max_tilt);
+        eprintln!("shells reached {:.2} m into a track", old.max_depth);
+    }
+}
+
+/// Drive a tank at a step `height` tall; returns (how far past the step face the
+/// chassis got, height gained).
+fn step_climb(desc: &VehicleDesc, height: f32) -> (f32, f32) {
+    let mut sim = world();
+    let face = 9.0f32;
+    static_box(&mut sim, [0.0, 0.5 * height, face + 200.0], [8.0, 0.5 * height, 200.0], [0.0, 0.0, 0.0, 1.0]);
+    let v = spawn(&mut sim, desc, 2.5);
+    run(&mut sim, 90);
+    let y0 = chassis(&sim, v).position[1];
+    drive(&mut sim, v, throttle(1.0, 0.0), 600);
+    let c = chassis(&sim, v);
+    let (past, rise) = (c.position[2] - face, c.position[1] - y0);
+    eprintln!("{} {} {height} m step: past the face {past:.2} m, rise {rise:.2} m, tilt {:.1}°", desc.name,
+        if desc.tracks.as_ref().unwrap().left.pod.is_some() { "pods" } else { "shells" }, roll_pitch(&c).0);
+    (past, rise)
+}
+
+#[test]
+fn tank_belt_climbs_a_step_taller_than_its_wheels() {
+    // The road wheels reach 0.3 m: the old shell tank stalls at the face of
+    // anything taller, while the pod's ramp and belt carry it up.
+    for height in [0.5f32, 0.7] {
+        let (old_past, _) = step_climb(&tank_without_pods(), height);
+        let (past, rise) = step_climb(&presets::tank(), height);
+        assert!(past > 5.0 && rise > 0.8 * height, "{height} m step: past the face {past}, rise {rise}");
+        assert!(old_past < 0.0, "shells alone stall at the face ({old_past})");
+    }
+}
+
+#[test]
+fn idle_tank_belt_does_not_push_a_crate_it_touches() {
+    // Belt speed is the track's rim speed: at rest it is plain friction.
+    let mut sim = world();
+    let v = spawn(&mut sim, &presets::tank(), 2.5);
+    run(&mut sim, 90);
+    let c = chassis(&sim, v);
+    // A crate resting against the front of the left track run.
+    let front = tank_pod_boxes().iter().map(|(pc, h)| pc.z + h.z).fold(f32::MIN, f32::max);
+    let crate_body = dyn_body(&mut sim, [1.7, 0.3, c.position[2] + front + 0.31], 60.0, [60.0 * 0.18 / 3.0; 3], &[([0.0; 3], [0.3; 3], 0)]);
+    run(&mut sim, 30);
+    let c0 = chassis(&sim, v).position;
+    let k0 = sim.read_body(crate_body).position;
+    run(&mut sim, 180);
+    let c1 = chassis(&sim, v).position;
+    let k1 = sim.read_body(crate_body).position;
+    let creep = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    eprintln!("idle: tank creep {:.4} m, crate creep {:.4} m", creep(c0, c1), creep(k0, k1));
+    assert!(creep(c0, c1) < 0.02 && creep(k0, k1) < 0.02, "nothing creeps");
+}
+
 #[test]
 fn motorcycle_balances_and_leans_into_turns() {
     let mut sim = world();
