@@ -310,6 +310,8 @@ return {
  // Solver parameters (dt, iterations, ...), packed every step; setParams merges.
  get params(){return plan.params},
  setParams(partial){plan.setParams(partial)},
+ // The mass (kg) of the projectiles fired from now on.
+ setProjectileMass(kg){plan.setProjectileMass(kg)},
  launch(origin,direction,{speed,arc}={}){
    const {id,bytes,offsets}=plan.launch(Float64Array.from(origin),Float64Array.from(direction),speed,arc),data=Uint8Array.from(bytes);
    for(const o of offsets)device.queue.writeBuffer(bufs[0],o,data);

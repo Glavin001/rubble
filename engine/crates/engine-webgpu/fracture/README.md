@@ -120,7 +120,8 @@ M3 Max 24 of 48 houses collapse (debris still topples unbonded lot neighbours;
 43 of 49 on the grid), ~55k pieces stay awake, and the step settles at ~15 ms
 (~66 ticks/s) by 30 s. 10 m yards still lose 22 houses.
 
-**Cuboid suburb · 48 box-built houses** uses the same layout with a procedural
+**Cuboid suburb · 96 box-built houses** uses the same kind of layout, twice the
+size (6 × 4 blocks of 2 × 2 lots, about 69k pieces), with a procedural
 house made only of box colliders (`engine-fracture` `cuboid.rs`, ~715 pieces): running-bond
 brick walls with interlocking corners, door and windows with lintels, sills and
 glass, stepped brick gables, a ridge beam, rafters and roof boards, an exterior

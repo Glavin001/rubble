@@ -802,6 +802,11 @@ impl Plan {
     pub fn set_collider(&mut self, index: u32, collider: JsValue) -> Result<Vec<u8>, JsError> {
         self.0.set_collider(index, from_js(collider)?).map_err(err)
     }
+    /// The mass (kg) of the projectiles fired from now on.
+    #[wasm_bindgen(js_name = setProjectileMass)]
+    pub fn set_projectile_mass(&mut self, mass: f64) -> Result<(), JsError> {
+        self.0.set_projectile_mass(mass).map_err(err)
+    }
     /// Fire the next projectile: `{id, bytes, offsets}` (write `bytes` at both offsets of buffer 0).
     pub fn launch(
         &mut self,

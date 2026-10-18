@@ -1288,6 +1288,14 @@ impl Planner {
         Ok(bytes)
     }
 
+    /// The mass (kg) of the projectiles fired from now on (the scene's default
+    /// until set; the radius stays).
+    pub fn set_projectile_mass(&mut self, mass: f64) -> Result<()> {
+        ensure!(mass.is_finite() && mass > 0.0, "Projectile mass must be positive");
+        self.projectile_mass = mass;
+        Ok(())
+    }
+
     /// Fire the next projectile along a ray: returns its body id and record
     /// (write it at the id in both body halves). Shots compensate for gravity to
     /// aim near the scene centre's depth unless `arc` is false.

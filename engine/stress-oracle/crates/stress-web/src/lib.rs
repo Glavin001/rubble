@@ -66,6 +66,8 @@ thread_local! {
     static SHOOTING: Cell<Option<Shooting>> = const { Cell::new(None) };
     static PENDING: RefCell<Vec<ImpactorDesc>> = const { RefCell::new(Vec::new()) };
     static FIRED: Cell<usize> = const { Cell::new(0) };
+    /// The shots' mass as a multiple of the lab's default ball (`stress_set_shot_mass_scale`).
+    static MASS_SCALE: Cell<f64> = const { Cell::new(1.0) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
@@ -142,6 +144,15 @@ pub fn stress_resize(width: u32, height: u32) {
     SIZE.set((width.max(1), height.max(1)));
 }
 
+/// The mass of the shots fired from now on, as a multiple of the lab's default ball
+/// (the radius stays, as in the lab's other modes).
+#[wasm_bindgen]
+pub fn stress_set_shot_mass_scale(scale: f64) {
+    if scale.is_finite() && scale > 0.0 {
+        MASS_SCALE.set(scale);
+    }
+}
+
 /// Orbit the camera by a pointer drag (CSS pixels), as the lab's other modes.
 #[wasm_bindgen]
 pub fn stress_drag(dx: f64, dy: f64) {
@@ -180,7 +191,7 @@ pub fn stress_shoot(u: f64, v: f64) -> bool {
         p.push(ImpactorDesc {
             name: format!("shot{k}"),
             shape: ImpactorShape::Sphere { radius: s.radius },
-            mass: s.mass,
+            mass: s.mass * MASS_SCALE.get(),
             position: zup(ray.origin),
             orientation: [1.0, 0.0, 0.0, 0.0],
             velocity: zup(vel),
@@ -327,6 +338,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "hulls": mirror.structures.iter().flat_map(|s| &s.chunks).map(|c| c.parts.as_ref().map_or(1, |p| p.len())).sum::<usize>(),
                         "bonds": mirror.structures.iter().map(|s| s.bonds.len()).sum::<usize>(),
                         "shots": FIRED.get(),
+                        "shotMass": SHOOTING.get().map_or(0.0, |s| s.mass * MASS_SCALE.get()),
                         "frameHz": 1.0 / dt,
                     })
                     .to_string(),

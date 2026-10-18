@@ -37,6 +37,15 @@ impl Layout {
         columns: 1,
         rows: 1,
     };
+    /// A suburb of `blocks_x x blocks_z` blocks (four lots each); the default
+    /// suburb (`SUBURB`) is 4 x 3.
+    pub const fn suburb_blocks(blocks_x: u32, blocks_z: u32) -> Self {
+        Self {
+            suburb: true,
+            columns: blocks_x,
+            rows: blocks_z,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -101,10 +110,10 @@ pub const SAMPLES: &[Sample] = &[
     },
     Sample {
         key: "cuboids",
-        menu: "Cuboid suburb · 48 box-built houses",
-        label: "48 cuboid houses",
+        menu: "Cuboid suburb · 96 box-built houses",
+        label: "96 cuboid houses",
         file: None,
-        layout: Some(Layout::SUBURB),
+        layout: Some(Layout::suburb_blocks(6, 4)),
         level: None,
         max_hull_vertices: None,
     },
@@ -159,6 +168,15 @@ pub fn base_scene(
 pub fn layout_scene(one: Scene, layout: Option<Layout>, procedural: bool) -> Scene {
     let mut s = match layout {
         None => one,
+        // A suburb's columns and rows are its blocks (1 x 1: the default 4 x 3).
+        Some(l) if l.suburb && (l.columns, l.rows) != (1, 1) => build_suburb(
+            &one,
+            &SuburbOptions {
+                blocks_x: l.columns,
+                blocks_z: l.rows,
+                ..SuburbOptions::default()
+            },
+        ),
         Some(l) if l.suburb => build_suburb(&one, &SuburbOptions::default()),
         Some(l) => build_grid(
             &one,

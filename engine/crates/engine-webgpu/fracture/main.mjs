@@ -27,6 +27,13 @@ let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=nul
 // stress-mode.mjs). The stress mode keeps its own frame loop state.
 const bondMode=()=>$('bond-mode').value;
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
+// Ball mass: a power-of-two multiple of the scene's default ball, applied to the next shots.
+const massScale=()=>2**Number($('ball-mass').value);
+function applyBallMass(){
+ const k=massScale(),kg=stressOn?stress?.stats.shotMass:scene?.projectileMass*k;
+ $('ball-mass-value').textContent=`×${k>=1?k:`1/${1/k}`}${kg?` · ${Math.round(kg).toLocaleString()} kg`:''}`;
+ if(stressOn)stress?.setShotMassScale(k);else if(sim&&scene?.projectileMass)sim.setProjectileMass(scene.projectileMass*k);
+}
 // Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
 const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
 const rates=createRates(value=>{
@@ -74,7 +81,7 @@ async function loadLevel(level){
   next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- renderer.colorMode=$('show-sleep').checked?1:0;
+ renderer.colorMode=$('show-sleep').checked?1:0;applyBallMass();
  const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=procedural?scene.pieces*copies:scene.hullCount;$('bonds').textContent=scene.bondCount*copies;$('release').textContent='Start simulation';
  $('fire').hidden=!scene.rowShot;$('awake').textContent='0';$('contacts').textContent='0';
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
@@ -90,7 +97,7 @@ async function loadStress(level){
  $('view').hidden=true;$('stress-view').hidden=false;stressOn=true;
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
  if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}
- await stress.load(assetBytes,level);
+ await stress.load(assetBytes,level);applyBallMass();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
@@ -126,6 +133,7 @@ $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').checked?1:0};
+$('ball-mass').oninput=applyBallMass;
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{if(stressOn){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
