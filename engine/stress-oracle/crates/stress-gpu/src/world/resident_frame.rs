@@ -77,8 +77,9 @@ impl GpuWorld {
         if !self.tiered {
             return !self.shell.qs_islands;
         }
-        // Routed (M5): unless the last frame's check found a possible island seed.
-        self.routed_resident && !self.route_next && self.promoted.is_empty()
+        // Routed (M5): unless the last frame's check found a possible island seed; with the
+        // GPU's punch (`STRESS_IMPACT_PUNCH=gpu`) every frame (no island is run).
+        self.routed_resident && (crate::routing::punch_gpu() || !self.route_next) && self.promoted.is_empty()
     }
 
     /// The routed frame's check, made and given this frame's impactors (engine body and
@@ -104,9 +105,30 @@ impl GpuWorld {
                 Some((slot, (1.01 * r + 1e-3) as f32))
             })
             .collect();
+        let punch_list: Vec<(u32, f32, f32, f32, f32)> = if crate::routing::punch_gpu() {
+            let scale = self.scene.sim.stiffness_scale;
+            self.solver
+                .impactors
+                .iter()
+                .enumerate()
+                .filter_map(|(i, imp)| {
+                    let slot = e.body_slot(BodyKey::Impactor(i))?;
+                    let r = list.iter().find(|(s, _)| *s == slot)?.1;
+                    let m = &imp.material;
+                    let e_plane = m.youngs_modulus * scale / (1.0 - m.poisson_ratio * m.poisson_ratio);
+                    Some((slot, r, World::impactor_radius(imp) as f32, imp.mass as f32, e_plane as f32))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         drop(e);
         let routing = self.routing.get_or_insert_with(|| crate::routing::Routing::new(gpu));
         routing.set_impactors(gpu, &list);
+        if crate::routing::punch_gpu() {
+            let punch = self.punch.get_or_insert_with(|| crate::routing::Punch::new(gpu));
+            punch.set_impactors(gpu, &punch_list);
+        }
     }
 
     /// The engine's collider table as the coupling sees it (`ColliderInfo`), against the
@@ -528,10 +550,14 @@ impl GpuWorld {
             let routing = if self.tiered { self.routing.as_ref() } else { None };
             let engine_base = r.qs.layout().engine_base;
             let ctab = r.qs.layout().ctab.clone();
+            let punch = if self.tiered && frame_mode { self.punch.as_ref() } else { None };
             let route_post = |s: &crate::solver::GpuSolver, enc: &mut wgpu::CommandEncoder| {
                 if let Some(rt) = routing {
                     let e = engine.borrow();
                     rt.encode(gpu, enc, &s.routing_inputs(), &ctab, engine_base, e.engine_buffers().bodies, fdt, stress_ref::world::tiered_impact_speed());
+                    if let Some(p) = punch {
+                        p.encode(gpu, enc, &s.routing_inputs(), &ctab, engine_base, e.engine_buffers().bodies, fdt, stress_ref::world::tiered_impact_speed());
+                    }
                 }
             };
             let post: Option<&dyn Fn(&crate::solver::GpuSolver, &mut wgpu::CommandEncoder)> = if routing.is_some() { Some(&route_post) } else { None };

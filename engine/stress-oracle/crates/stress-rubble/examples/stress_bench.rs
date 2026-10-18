@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use stress_ref::scene::{Scene, SolveMode};
 
-use stress_rubble::scenes::{house, realtime as configure, wall_ram, wall_ram_late, wall_row_late};
+use stress_rubble::scenes::{house, later, realtime as configure, wall_ram, wall_ram_late, wall_row_late};
 
 /// The fidelity ladder (`--config`): from the Blast-equivalent configuration to the full
 /// real-time one, one switch per rung (each rung keeps every switch of the rungs before).
@@ -321,7 +321,7 @@ pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut house_ram = configure(stress_ref::scenes::rammed(house()), seconds);
     house_ram.name = "house_ram".into();
     let b5 = configure(stress_ref::builders::wall_impact(20.0, "b5_v20"), seconds);
-    vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("wall_ram_late", configure(wall_ram_late(), seconds)), ("wall_row2_late", configure(wall_row_late(2), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
+    vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("wall_ram_late", configure(wall_ram_late(), seconds)), ("wall_row2_late", configure(wall_row_late(2), seconds)), ("wall_ram_late2", configure(later(wall_ram_late(), 2), seconds)), ("wall_row2_late2", configure(later(wall_row_late(2), 2), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
 }
 
 /// `STRESS_BENCH_VIDEO`: the bench run rendered on the GPU and encoded by ffmpeg

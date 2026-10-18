@@ -122,6 +122,8 @@ pub struct GpuWorld {
     pub coupled_frames: u64,
     /// The routing check's kernel and buffers (`routing.slang`).
     pub(crate) routing: Option<crate::routing::Routing>,
+    /// The GPU's predictive punch (`punch.slang`, `STRESS_IMPACT_PUNCH=gpu`).
+    pub(crate) punch: Option<crate::routing::Punch>,
     /// Clusters left out of the GPU tables at both refreshes of the last frame (so their
     /// mirror state did not change during it): the next frame's
     /// `ReferenceSolver::unchanged`.
@@ -268,6 +270,7 @@ impl GpuWorld {
             impact_window: std::env::var("STRESS_IMPACT_WINDOW").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             coupled_frames: 0,
             routing: None,
+            punch: None,
             unchanged_next: std::collections::HashSet::new(),
             segment_retries: 0,
             segment_setup_seconds: 0.0,

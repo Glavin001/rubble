@@ -2957,9 +2957,15 @@ impl GpuSolver {
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
             std::time::Instant::now()
         });
-        // After the passes, in the same submission (the routed frame's check).
+        // After the passes, in the same submission (the routed frame's check, and with
+        // `STRESS_IMPACT_PUNCH=gpu` the punch, whose split this pass makes).
         if let Some(post) = post {
             post(self, &mut encoder);
+            if crate::routing::punch_gpu() {
+                if let Some(p) = &prepared {
+                    p.record(&mut encoder);
+                }
+            }
         }
         gpu.queue.submit([encoder.finish()]);
         if let Some(t) = wall {
@@ -3846,6 +3852,10 @@ impl GpuSolver {
             islands: &self.buffers.islands,
             chunks: &self.buffers.chunk_static,
             state: &self.buffers.state,
+            bonds: &self.buffers.bonds_static,
+            bond_dyn: &self.buffers.bond_dyn,
+            materials: &self.buffers.materials,
+            status: self.cascade_status.as_ref(),
             island_args: if indirect { self.island_args.as_ref() } else { None },
             island_count: if capacity_dispatch() { self.layout.island_cap.max(live) as u32 } else { live as u32 },
         }

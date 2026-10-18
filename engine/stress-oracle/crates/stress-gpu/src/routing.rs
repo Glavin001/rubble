@@ -36,6 +36,11 @@ pub struct RouteInputs<'a> {
     pub islands: &'a wgpu::Buffer,
     pub chunks: &'a wgpu::Buffer,
     pub state: &'a wgpu::Buffer,
+    /// The punch's too (`Punch`): bond statics and records, materials, the cascade's status.
+    pub bonds: &'a wgpu::Buffer,
+    pub bond_dyn: &'a wgpu::Buffer,
+    pub materials: &'a wgpu::Buffer,
+    pub status: Option<&'a wgpu::Buffer>,
     /// Indirect arguments over the live islands (one group each), when the GPU may add
     /// islands within the frame; otherwise `island_count` groups.
     pub island_args: Option<&'a wgpu::Buffer>,
@@ -111,5 +116,82 @@ impl Routing {
     /// Whether the read flag says the next frame may route an island.
     pub fn flagged(bytes: &[u8]) -> bool {
         bytemuck::cast_slice::<u8, u32>(&bytes[..4])[0] != 0
+    }
+}
+
+/// `STRESS_IMPACT_PUNCH=gpu` (a model under measurement): the predictive punch on the GPU
+/// (`shaders/punch.slang`), at the end of a resident frame, with a split pass after it.
+pub fn punch_gpu() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("STRESS_IMPACT_PUNCH").is_ok_and(|v| v == "gpu"))
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct PunchParams {
+    island_count: u32,
+    impactor_count: u32,
+    engine_base: u32,
+    pad0: u32,
+    dt: f32,
+    speed: f32,
+    pad1: f32,
+    pad2: f32,
+}
+
+const PUNCH_BINDINGS: [Binding; 11] = [
+    Binding::Uniform,   // params
+    Binding::Storage,   // islands
+    Binding::Storage,   // chunk statics
+    Binding::Storage,   // chunk state
+    Binding::Storage,   // ctab
+    Binding::Storage,   // engine bodies
+    Binding::Storage,   // impactors
+    Binding::Storage,   // bond statics
+    Binding::StorageRw, // bond records
+    Binding::Uniform,   // materials
+    Binding::StorageRw, // cascade status
+];
+
+pub struct Punch {
+    kernel: Kernel,
+    impactors: wgpu::Buffer,
+    /// Per impactor: engine body, bounding radius, face radius, mass, plane-strain modulus.
+    list: Vec<[f32; 8]>,
+}
+
+impl Punch {
+    pub fn new(gpu: &Gpu) -> Punch {
+        Punch { kernel: gpu.compute(&shaders::PUNCH, "punch_islands", &PUNCH_BINDINGS), impactors: gpu.storage("punch impactors", &[[0f32; 4]; 2]), list: Vec::new() }
+    }
+
+    /// (engine body, bounding radius, face radius, mass, plane-strain modulus) per impactor.
+    pub fn set_impactors(&mut self, gpu: &Gpu, list: &[(u32, f32, f32, f32, f32)]) {
+        let words: Vec<[f32; 8]> = list.iter().map(|&(b, r, f, m, e)| [f32::from_bits(b), r, f, m, e, 0.0, 0.0, 0.0]).collect();
+        if words == self.list {
+            return;
+        }
+        self.impactors = if words.is_empty() { gpu.storage("punch impactors", &[[0f32; 4]; 2]) } else { gpu.storage("punch impactors", &words) };
+        self.list = words;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, inputs: &RouteInputs, ctab: &wgpu::Buffer, engine_base: u32, bodies: &wgpu::Buffer, dt: f64, speed: f64) {
+        let Some(status) = inputs.status else { return };
+        if self.list.is_empty() {
+            return;
+        }
+        let params = gpu.uniform(
+            "punch params",
+            &PunchParams { island_count: inputs.island_count, impactor_count: self.list.len() as u32, engine_base, pad0: 0, dt: dt as f32, speed: speed as f32, pad1: 0.0, pad2: 0.0 },
+        );
+        let group = gpu.bind(&self.kernel.group, &[&params, inputs.islands, inputs.chunks, inputs.state, ctab, bodies, &self.impactors, inputs.bonds, inputs.bond_dyn, inputs.materials, status]);
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.kernel.pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        match inputs.island_args {
+            Some(a) => pass.dispatch_workgroups_indirect(a, 0),
+            None => pass.dispatch_workgroups(inputs.island_count.max(1), 1, 1),
+        }
     }
 }

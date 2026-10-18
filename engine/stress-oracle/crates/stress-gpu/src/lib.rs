@@ -132,6 +132,7 @@ pub mod shaders {
     pub const PASS: ShaderSet = shader_set!("pass", [("pass_parents", (1024, 1, 1)), ("pass_snapshot", (256, 1, 1)), ("pass_whole", (256, 1, 1)), ("pass_finish", (1, 1, 1))]);
     pub const PASSLOG: ShaderSet = shader_set!("passlog", [("pass_log", (256, 1, 1))]);
     pub const ROUTING: ShaderSet = shader_set!("routing", [("route_islands", (64, 1, 1))]);
+    pub const PUNCH: ShaderSet = shader_set!("punch", [("punch_islands", (256, 1, 1))]);
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
 }

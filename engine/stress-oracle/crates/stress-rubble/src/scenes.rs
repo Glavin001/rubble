@@ -76,6 +76,19 @@ pub fn wall_row_late(n: usize) -> Scene {
     s
 }
 
+/// `scene` with its impactors `frames` frames (of 1/60 s) further back along their
+/// velocity: they strike that many frames later (a GPU check at the end of a resident frame
+/// then sees the strike coming).
+pub fn later(mut s: Scene, frames: usize) -> Scene {
+    s.name = format!("{}{}", s.name, frames);
+    for imp in &mut s.impactors {
+        for a in 0..3 {
+            imp.position[a] -= imp.velocity[a] * frames as f64 / 60.0;
+        }
+    }
+    s
+}
+
 /// The house-1story pack.
 pub fn house() -> Scene {
     stress_ref::scene_pack::import(&packs_dir().join("house-1story.json"), "house-1story", "structure").expect("house-1story pack")
