@@ -20,6 +20,13 @@ fn switch(name: &str) -> bool {
     }
 }
 
+/// Plan 5d, work in progress (engine/docs/stress-5d-one-command-buffer.md): a resident
+/// frame's engine substeps, ingest and cascade in one command buffer
+/// (`STRESS_FRAME_SUBMITS=one`; off by default until it meets the plan's acceptance).
+pub fn one_command_buffer() -> bool {
+    std::env::var("STRESS_FRAME_SUBMITS").is_ok_and(|v| v == "one")
+}
+
 /// Splits laid out on the GPU (`STRESS_GPU_LAYOUT`).
 pub fn gpu_layout() -> bool {
     switch("STRESS_GPU_LAYOUT")

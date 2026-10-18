@@ -104,9 +104,9 @@ impl ResidentEngine for RubbleEngine {
         if !self.frozen.is_empty() {
             return Err("resident frame: the engine holds frozen bodies".into());
         }
-        // `STRESS_FRAME_SUBMITS=many`: each part its own submission, as before (comparison).
-        let many = std::env::var("STRESS_FRAME_SUBMITS").is_ok_and(|v| v == "many");
-        if many {
+        // Each part its own submission (the default); `STRESS_FRAME_SUBMITS=one` (plan 5d,
+        // in progress): into the frame's encoder.
+        if !stress_gpu::one_command_buffer() {
             return self.step_resident_submitting(gpu, dt, n, ingest);
         }
         ingest.begin_frame(encoder, &self.engine_buffers());
@@ -307,7 +307,7 @@ impl RubbleEngine {
 }
 
 impl RubbleEngine {
-    /// `step_resident` with each part its own submission (`STRESS_FRAME_SUBMITS=many`).
+    /// `step_resident` with each part its own submission (the default).
     fn step_resident_submitting(&mut self, gpu: &Gpu, dt: f64, n: u32, ingest: &EngineIngest) -> Result<(), String> {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         ingest.begin_frame(&mut encoder, &self.engine_buffers());

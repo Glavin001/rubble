@@ -1,6 +1,6 @@
 # Plan 5d: the stress stage in rubble's frame, one command buffer, one read
 
-Status: **in progress** (WIP commit 08efa0c, 2026-10-18). Parent charter:
+Status: **in progress** (WIP commit 08efa0c, opt-in since: `STRESS_FRAME_SUBMITS=one`; the default submits each part on its own, as before). Parent charter:
 `engine/docs/stress-baseline-goal.md` (Goal: "resident: one submission and one status read
 per tick"; M5 step 1). Original plan entry: `engine/docs/stress-qs-baseline-plan.md` 5d.
 
@@ -38,7 +38,7 @@ On every tick of a resident frame, the stress stage and rubble's step run as:
   - a tick in which the host adds or removes bodies on purpose (`add_impactor`, scene
     edits);
   - runs with a diagnostic env switch (`STRESS_GPU_DET_*`, `*_TIMING`, `*_TRACE` that
-    reads, `STRESS_FRAME_SUBMITS=many`).
+    reads). The default build's separate submissions are the state being replaced, not an exception.
 
   Nothing else is an exception. In particular "rare fallback paths" are **not** exceptions:
   they either stay within one submission and one read or are removed.
@@ -127,7 +127,7 @@ Remove every item in section 3 that is on the resident path:
   submission and before its read, as it did with separate submissions. Its writes must not
   be needed by this tick's GPU work: prove it, or move them to the next tick's encoder.
 - **Done when**, on a quiet M3 Max, one job at a time:
-  - vibe-town quick and standard medians and p95s are within 3 % of `STRESS_FRAME_SUBMITS=many`,
+  - vibe-town quick and standard medians and p95s are within 3 % of the default (separate submissions),
     or better;
   - every M6 target still holds (standard 11.46 / 37.88 / 48.24 ms, quick 11.38 / 15.32 /
     35.5 ms).
