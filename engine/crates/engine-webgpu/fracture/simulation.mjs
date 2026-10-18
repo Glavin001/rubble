@@ -1,4 +1,5 @@
 import {Plan,sceneHandle} from './wasm.mjs';
+import {loadShaderModules,pipelineBuilder} from '../shader-loader.mjs';
 // WebGPU executor of the fracture lab's host plan. Rust (engine-fracture
 // plan.rs, through wasm) owns the buffer sizes, the host-uploaded words, the
 // step state and the ordered dispatch schedule; this file creates the
@@ -25,19 +26,8 @@ const hullData=scene.hullData??sceneHandle(scene).hullData();
 device.queue.writeBuffer(bufs[18],0,hullData);
 let hullRecordsCapacity=cap.maxHull;
 
-const sources=[];
-for(const [name,entry] of KERNELS){
-  onProgress('compiling '+name);
-  const response=await fetch(`../generated/wgsl/${entry}.wgsl`);
-  if(!response.ok)throw new Error(`Missing ${entry}; run the shader export commands in fracture/README.md`);
-  const src=await response.text();
-  const module=device.createShaderModule({label:name,code:src});
-  // Force frontend validation now so createComputePipeline cannot hang forever
-  // on a deferred compile error (Chrome async path has been wedging here).
-  if(module.getCompilationInfo){const err=(await module.getCompilationInfo()).messages.find(m=>m.type==='error');if(err)throw new Error(`${name}: ${err.message}`)}
-  sources.push({src,module});
-}
-onProgress('creating pipelines…');
+const sources=await loadShaderModules(device,KERNELS.map(([name,file])=>({name,file})),
+  {urlOf:file=>`../generated/wgsl/${file}.wgsl`,status:onProgress,missing:file=>`Missing ${file}; run the shader export commands in fracture/README.md`});
 const bindingsOf=wgsl=>{
   const out=[];
   for(const line of wgsl.split('\n')){const i=line.indexOf('@binding(');if(i<0)continue;
@@ -46,23 +36,15 @@ const bindingsOf=wgsl=>{
   return out.sort((a,b)=>a.index-b.index);
 };
 const bindGroup=(name,layout,binds)=>device.createBindGroup({label:name,layout,entries:binds.map(b=>({binding:b.index,resource:b.index===22?{buffer:bufs[22],size:16}:{buffer:bufs[b.index]}}))});
-const pipes=[];
+const pipes=[],builder=pipelineBuilder(device,KERNELS.length,onProgress);
 for(const [k,[name,entry]] of KERNELS.entries()){
   const binds=bindingsOf(sources[k].src);
   const layout=device.createBindGroupLayout({label:name,entries:binds.map(b=>({binding:b.index,visibility:GPUShaderStage.COMPUTE,
     buffer:b.uniform?{type:'uniform',hasDynamicOffset:b.index===22,minBindingSize:b.index===22?16:undefined}:{type:'storage'}}))});
-  onProgress('pipeline '+name);
-  const t=performance.now();
-  // Sync create: createComputePipelineAsync was hanging on sleep_island_commit
-  // after the large narrowphase / solve_primal modules on Chrome Metal.
-  device.pushErrorScope('validation');
-  const pipeline=device.createComputePipeline({label:name,layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module:sources[k].module,entryPoint:entry}});
-  const pipeErr=await device.popErrorScope();if(pipeErr)throw new Error(`${name}: ${pipeErr.message}`);
+  const pipeline=await builder.create(name,{label:name,layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module:sources[k].module,entryPoint:entry}});
   pipes.push({name,pipeline,bind:bindGroup(name,layout,binds),dynamic:binds.some(b=>b.index===22),layout,binds});
-  onProgress(`pipeline ${name} ${(performance.now()-t).toFixed(0)}ms`);
-  // setTimeout, not rAF: background tabs throttle rAF and freeze load between kernels.
-  await new Promise(r=>setTimeout(r,0));
 }
+await builder.finish();
 onProgress('pipelines ready · building renderer…');
 await new Promise(r=>setTimeout(r,0));
 
