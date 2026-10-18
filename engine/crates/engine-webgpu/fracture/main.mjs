@@ -88,10 +88,9 @@ const samples=Object.fromEntries(SAMPLES.map(s=>[s.key,{...s,procedural:s.file?n
 $('scene').replaceChildren(...SAMPLES.map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house')),Object.assign(new Option('Custom GLB',''),{disabled:true}));
 // vibe-city /destructible-stress presets, generated into ../generated/vibe-city (optional).
 const VIBE_CITY='../generated/vibe-city/';
-const PACK_PENDING=new Set(['fracturedWall','fracturedWallHut','fracturedTower','fracturedBridge','fracturedGlb']);
 try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
  const group=document.createElement('optgroup');group.label='vibe-city stress presets';
- for(const p of index.presets.filter(p=>!p.failed&&!PACK_PENDING.has(p.id))){
+ for(const p of index.presets.filter(p=>!p.failed&&!p.pending)){
   const key=`vc:${p.id}`;samples[key]={key,label:p.id,pack:`${VIBE_CITY}${p.id}.json`,nodes:p.nodes,bonds:p.bonds};
   group.append(new Option(`${p.id} · ${p.nodes} nodes`,key));
  }

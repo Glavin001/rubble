@@ -6,18 +6,6 @@
 use engine_fracture::pack::{build_pack_scene, BLAST_DT};
 use std::path::PathBuf;
 
-/// three-pinata pieces: their hulls carry sub-millimetre slivers and steps the engine's
-/// cooker rejects (non-planar merged faces, over 64 vertices). Cleaning them up changes the
-/// geometry, which needs a decision (see engine/scenes/vibe-city/README.md); until then they
-/// must fail loudly here rather than load simplified.
-const PENDING_HULLS: &[&str] = &[
-    "fracturedWall",
-    "fracturedWallHut",
-    "fracturedTower",
-    "fracturedBridge",
-    "fracturedGlb",
-];
-
 fn pack_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine-webgpu/generated/vibe-city")
 }
@@ -41,14 +29,8 @@ fn every_vibe_city_pack_builds() {
     for path in files {
         let bytes = std::fs::read(&path).unwrap();
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
-        let (scene, info) = match build_pack_scene(&bytes) {
-            Ok(built) => built,
-            Err(e) if PENDING_HULLS.contains(&name.as_str()) => {
-                eprintln!("{name:18} pending: {e:#}");
-                continue;
-            }
-            Err(e) => panic!("{}: {e:#}", path.display()),
-        };
+        let (scene, info) =
+            build_pack_scene(&bytes).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
         // Ground + one body per node, then the projectile slots.
         assert_eq!(scene.projectile_start as usize, 1 + info.nodes, "{name}");
         let statics = scene.bodies[1..=info.nodes]

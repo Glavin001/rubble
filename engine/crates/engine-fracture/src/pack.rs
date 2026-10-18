@@ -6,7 +6,8 @@
 //! - Nodes with mass become dynamic bodies; mass-0 nodes (supports) become static bodies,
 //!   and bonds to them weld to the world.
 //! - Box nodes keep SHAPE_BOX colliders; convex-hull nodes are cooked from their points
-//!   (`ConvexHull::from_points`; a `compound` node has several exact convex parts) and
+//!   (`ConvexHull::from_faces` when the pack lists faces, else `from_points`; a `compound`
+//!   node has several exact convex parts) and
 //!   placed in their principal inertia frame. A hull over
 //!   the engine's vertex limit is an error.
 //! - Bonds become the same breakable welds as baked bonds (`Joint`, `scale_bond_springs`).
@@ -184,16 +185,43 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         };
         // Convex parts in the node frame: one hull, or the exact parts of a compound. A hull
         // over the engine's vertex limit is an error (re-export the pack), never simplified.
-        let part_points: Vec<Vec<Vec3>> = match (kind, collider) {
-            ("convex_hull", Some(c)) => vec![point_list(&c["points"])],
-            ("compound", Some(c)) => c["parts"].as_array().map_or(vec![], |parts| {
-                parts.iter().map(|p| point_list(&p["points"])).collect()
-            }),
+        // Each part: points, and its faces when the pack lists them (cooked like baked
+        // hulls, `from_faces`); without faces the cooker builds the hull from the points.
+        let part_of = |p: &Value| -> (Vec<Vec3>, Option<(Vec<u32>, Vec<u32>)>) {
+            let faces = p["faces"].as_array().map(|faces| {
+                let lists: Vec<Vec<u32>> = faces
+                    .iter()
+                    .map(|f| {
+                        f.as_array().map_or(vec![], |f| {
+                            f.iter()
+                                .filter_map(|x| x.as_u64().map(|x| x as u32))
+                                .collect()
+                        })
+                    })
+                    .collect();
+                (
+                    lists.iter().map(|f| f.len() as u32).collect(),
+                    lists.into_iter().flatten().collect(),
+                )
+            });
+            (point_list(&p["points"]), faces)
+        };
+        let part_data: Vec<(Vec<Vec3>, Option<(Vec<u32>, Vec<u32>)>)> = match (kind, collider) {
+            ("convex_hull", Some(c)) => vec![part_of(c)],
+            ("compound", Some(c)) => c["parts"]
+                .as_array()
+                .map_or(vec![], |parts| parts.iter().map(part_of).collect()),
             _ => vec![],
         };
-        let parts: Vec<ConvexHull> = part_points
+        let parts: Vec<ConvexHull> = part_data
             .iter()
-            .map(|p| ConvexHull::from_points(p).map_err(|e| anyhow!("node {i}: {e}")))
+            .map(|(p, faces)| {
+                match faces {
+                    Some((sizes, indices)) => ConvexHull::from_faces(p, sizes, indices),
+                    None => ConvexHull::from_points(p),
+                }
+                .map_err(|e| anyhow!("node {i}: {e}"))
+            })
             .collect::<Result<_>>()?;
         let box_half = collider
             .filter(|_| kind == "cuboid")
@@ -282,13 +310,32 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
                 // One collider per part, each cooked once in the body frame (re-validating
                 // rotated faces fails at f32).
                 let mut cooked = Vec::with_capacity(parts.len());
-                for h in &parts {
-                    let body_points: Vec<Vec3> = h
-                        .vertices
-                        .iter()
-                        .map(|v| Vec3::from(f32x3(to_body(f64x3(v.to_array())))))
-                        .collect();
-                    let (body_hull, offset) = ConvexHull::from_points(&body_points)
+                for (h, (points, faces)) in parts.iter().zip(&part_data) {
+                    let body_hull = match faces {
+                        // The listed faces, rotated: the check allows the node frame's f32 rounding.
+                        Some((sizes, indices)) => {
+                            let scale = points
+                                .iter()
+                                .fold(0f32, |m, p| m.max(p.abs().max_element()));
+                            let body_points: Vec<Vec3> = points
+                                .iter()
+                                .map(|v| Vec3::from(f32x3(to_body(f64x3(v.to_array())))))
+                                .collect();
+                            // Same corners either way: if the rotation's f32 rounding fails the
+                            // face check, let the cooker rebuild the faces from the corners.
+                            ConvexHull::from_faces_in_frame(&body_points, sizes, indices, scale)
+                                .or_else(|_| ConvexHull::from_points(&body_points))
+                        }
+                        None => {
+                            let body_points: Vec<Vec3> = h
+                                .vertices
+                                .iter()
+                                .map(|v| Vec3::from(f32x3(to_body(f64x3(v.to_array())))))
+                                .collect();
+                            ConvexHull::from_points(&body_points)
+                        }
+                    };
+                    let (body_hull, offset) = body_hull
                         .map_err(|e| anyhow!("node {i}: {e}"))?
                         .recentered();
                     let base = arena

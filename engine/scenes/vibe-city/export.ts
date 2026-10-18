@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import type * as THREE from "three";
 import type { ScenarioDesc, Vec3 } from "./src/core/types";
 import { ColliderDesc, type ShapeRecord } from "./shims/rapier";
+import { cleanHull } from "./hulls";
 import { buildBeamBridgeScenario } from "./src/scenarios/beamBridgeScenario";
 import { buildBrickWallScenario } from "./src/scenarios/brickWallScenario";
 import { buildFracturedBridgeScenario } from "./src/scenarios/fracturedBridgeScenario";
@@ -50,6 +51,11 @@ const WALL = { span: 6.0, height: 3.0, thickness: 0.32, spanSeg: 12, heightSeg: 
 const PROJECTILE = { radius: 0.5, mass: 15_000, speed: 36 };
 // Blast ext-solver limits the page applies: base value x materialScale (page.tsx ~line 900).
 const MATERIAL_SCALE = 100_000_000;
+// Hull clean-up (hulls.ts): hull triangles within HULL_TOLERANCE of a larger face merge
+// into it; the export fails if a rebuilt hull extends past its piece by more than
+// HULL_MAX_OUTSIDE. Both are recorded in every pack.
+const HULL_TOLERANCE = 1e-4;
+const HULL_MAX_OUTSIDE = 1e-3;
 const BASE_LIMITS = {
   compressionElastic: 0.0009,
   compressionFatal: 0.0027,
@@ -65,6 +71,8 @@ type Preset = {
   label?: string;
   description?: string;
   build: () => ScenarioDesc | Promise<ScenarioDesc>;
+  /** Skipped by a full export (still exported when named on the command line). */
+  pending?: string;
 };
 
 const bonds = { bondsX: true, bondsY: true, bondsZ: true };
@@ -150,6 +158,7 @@ const PRESETS: Preset[] = [
     id: "fracturedGlb",
     source: APRIL,
     build: () => buildFracturedGlbScenario({ url: new URL("./models/lion.glb", import.meta.url).href }),
+    pending: "hull clean-up leaves ~10 lion pieces the engine's cooker rejects, and takes ~3 min",
   },
   {
     id: "reinforcedTower",
@@ -231,6 +240,7 @@ function jsonParameters(p: Record<string, unknown> | undefined) {
 
 async function exportPreset(p: Preset, seed: number) {
   seedRandom(seed);
+  const hullStats = { cleaned: 0, split: 0, outside: 0 };
   const s = await p.build();
   const meta = STRESS_PRESET_METADATA.find((m) => m.id === p.id);
   const geoms = (s.parameters as { fragmentGeometries?: THREE.BufferGeometry[] } | undefined)
@@ -271,16 +281,29 @@ async function exportPreset(p: Preset, seed: number) {
       nodeColliders: s.nodes.map((_, i) => {
         const c = nodeCollider(s, i);
         if (c.kind === "cuboid") return { kind: c.kind, halfExtents: c.halfExtents.map(round) };
-        return { kind: c.kind, points: c.points.map(round) };
+        const pts: [number, number, number][] = [];
+        for (let k = 0; k + 2 < c.points.length; k += 3) pts.push([c.points[k], c.points[k + 1], c.points[k + 2]]);
+        const clean = cleanHull(pts, HULL_TOLERANCE, HULL_MAX_OUTSIDE);
+        if (clean.outside > HULL_MAX_OUTSIDE)
+          throw new Error(`node ${i}: cleaned hull extends ${clean.outside.toExponential(2)} m past the piece (max ${HULL_MAX_OUTSIDE})`);
+        hullStats.cleaned += 1;
+        hullStats.outside = Math.max(hullStats.outside, clean.outside);
+        if (clean.parts.length > 1) hullStats.split += 1;
+        const parts = clean.parts.map((part) => ({ points: part.points.flat(), faces: part.faces }));
+        return parts.length === 1 ? { kind: "convex_hull", ...parts[0] } : { kind: "compound", parts };
       }),
     },
     ...(geoms?.length === s.nodes.length ? { nodeMeshes: geoms.map(meshOf) } : {}),
   };
+  const hullCleanup = hullStats.cleaned
+    ? { tolerance: HULL_TOLERANCE, maxOutside: HULL_MAX_OUTSIDE, hulls: hullStats.cleaned, split: hullStats.split, outside: hullStats.outside }
+    : undefined;
   const file = join(OUT, `${p.id}.json`);
+  if (hullCleanup) Object.assign(pack, { hullCleanup });
   writeFileSync(file, `${JSON.stringify(pack)}\n`);
   const supports = s.nodes.filter((n) => n.mass === 0).length;
   const mass = s.nodes.reduce((m, n) => m + n.mass, 0);
-  return { id: p.id, nodes: s.nodes.length, supports, bonds: s.bonds.length, mass: Math.round(mass) };
+  return { id: p.id, nodes: s.nodes.length, supports, bonds: s.bonds.length, mass: Math.round(mass), ...(hullCleanup ? { hullCleanup } : {}) };
 }
 
 mkdirSync(OUT, { recursive: true });
@@ -288,10 +311,15 @@ const wanted = new Set(process.argv.slice(2));
 const index: unknown[] = [];
 for (const [i, p] of PRESETS.entries()) {
   if (wanted.size && !wanted.has(p.id)) continue;
+  if (!wanted.size && p.pending) {
+    console.log(`${p.id.padEnd(18)} pending: ${p.pending}`);
+    index.push({ id: p.id, pending: p.pending });
+    continue;
+  }
   try {
     const r = await exportPreset(p, 1337 + i);
     index.push(r);
-    console.log(`${r.id.padEnd(18)} nodes ${String(r.nodes).padStart(6)}  supports ${String(r.supports).padStart(5)}  bonds ${String(r.bonds).padStart(6)}  mass ${r.mass} kg`);
+    console.log(`${r.id.padEnd(18)} nodes ${String(r.nodes).padStart(6)}  supports ${String(r.supports).padStart(5)}  bonds ${String(r.bonds).padStart(6)}  mass ${r.mass} kg${r.hullCleanup ? `  hulls cleaned ${r.hullCleanup.hulls}, split ${r.hullCleanup.split}, max outside ${(r.hullCleanup.outside * 1000).toFixed(3)} mm` : ""}`);
   } catch (e) {
     console.error(`${p.id}: FAILED ${(e as Error).message}`);
     index.push({ id: p.id, failed: (e as Error).message });

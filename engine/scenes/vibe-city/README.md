@@ -52,31 +52,47 @@ collider, else a box (supports x0.999).
   (30 GPa) and square-face moments; the lab's scene-wide penalty scale sets the level.
 - Shot: the pack's projectile.
 
+## Hull clean-up (`hulls.ts`)
+
+three-pinata's Voronoi pieces carry float noise from its f32 slicing (sliver triangles,
+near-parallel steps up to ~1 mm). The engine's cooker needs exactly planar faces and at
+most 64 vertices, so the exporter rebuilds each piece as an intersection of half-spaces:
+
+1. Start from the planes of the piece's hull, each offset out to the farthest original
+   point (the shape always contains the piece).
+2. Remove small or near-parallel planes, smallest face first, while the shape stays
+   closed (volume does not drop) and within `HULL_TOLERANCE` (0.1 mm) of the piece.
+3. Remove planes the cooker cannot separate (near-parallel within ~0.08 deg, corners
+   closer than 0.1 mm) while within `HULL_MAX_OUTSIDE` (1 mm).
+4. Cut shapes over 64 vertices into exact convex parts (`compound` colliders).
+
+Each hull is written with its corners and faces; `pack.rs` cooks it with
+`ConvexHull::from_faces`, as baked Shardwright hulls are. The tolerances and the largest
+extension past the original piece are recorded per pack (`hullCleanup`); the export
+fails when a piece would exceed `HULL_MAX_OUTSIDE`.
+
+| Preset | Hulls | Split | Largest extension |
+|---|---|---|---|
+| fracturedWall | 199 | 0 | 0.60 mm |
+| fracturedWallHut | 400 | 0 | 0.09 mm |
+| fracturedTower | 3,675 | 0 | 0.10 mm |
+| fracturedBridge | 280 | 0 | 0.10 mm |
+
 ## Status (2026-10-18)
 
 Done:
-- All 17 presets export (`bun run export.ts`).
-- 12 box presets build as lab scenes with welds and pass `tests/pack.rs`: wall, brickWall,
-  hut, bridge, beamBridge, tower, townhouse, courtyardHouse, vaultedLoft, reinforcedTower,
-  tiltingGantry, kinematicDumbbell. Each one's support welds hold its weight.
+- 16 presets build as lab scenes with welds, pass `tests/pack.rs` and show in the
+  fracture lab: the 12 box presets plus fracturedWall, fracturedWallHut, fracturedTower
+  and fracturedBridge. Each one's support welds hold its weight.
 
-Blocked, needs a decision: the 5 Voronoi presets (fracturedWall, fracturedWallHut,
-fracturedTower, fracturedBridge, fracturedGlb). three-pinata's pieces have ~15 real faces
-plus 0.01 mm² sliver triangles and near-parallel steps up to ~1 mm. The engine's cooker
-needs exactly planar faces and at most 64 vertices, so they fail with "non-convex" or
-"N vertices > 64". Making them load changes the geometry slightly (AGENTS.md: needs the
-user's call). Options:
-1. Bake them with Shardwright instead (same dimensions and piece counts, rubble's normal
-   asset path; pieces differ from vibe-city's).
-2. An explicit, engine-wide hull clean-up tolerance (weld faces within e.g. 0.1 mm, then
-   split hulls over 64 vertices into exact convex parts), reported per asset.
-3. Keep three-pinata's render mesh and use a documented collision approximation.
+Pending: fracturedGlb (lion). After clean-up ~10 of its 120 hull parts still fail the
+cooker, and its clean-up takes ~3 minutes, so a full export skips it
+(`bun run export.ts fracturedGlb` runs it).
+
+Known behaviour: with breakable bonds on, structures sag under their own weight (the
+per-piece weld creep in the fracture lab README). vibe-city held intact islands rigid.
 
 Not done yet:
-- Fracture lab wiring: `Sample` pack entries, a wasm `Scene.fromPack`, loading
-  `generated/vibe-city/*.json` in `fracture/main.mjs`, hub link, and the export step in
-  `engine/scripts/build-web.sh` (Vercel needs bun or npx bun).
-- GPU check that each preset stands and the default shot breaks welds.
 - tiltingGantry / kinematicDumbbell: platform motion is not modelled (supports are static).
 - vibe-city's cutter, push and damage tools.
 - Pack size: Voronoi packs are 10–40 MB of JSON (fine for generated files; compact later).
