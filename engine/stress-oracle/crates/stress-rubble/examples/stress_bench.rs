@@ -142,15 +142,92 @@ pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scen
         idle.name = format!("{name}_idle");
         let (mut lo, hi) = stress_ref::scenes::bounds(&scene);
         lo.x = surface_lo_x(&scene);
-        let mut ram = configure(stress_ref::scenes::ram_at(scene, "ram", lo, hi), seconds);
+        let mut ram = configure(stress_ref::scenes::ram_at(scene.clone(), "ram", lo, hi), seconds);
         ram.name = format!("{name}_ram");
         let mut bombard = idle.clone();
         bombard.name = format!("{name}_bombard");
         out.push((idle.name.clone(), idle));
         out.push((ram.name.clone(), ram));
         out.push((bombard.name.clone(), bombard));
+        // vibe-land's perf-suite town bombard, exactly (`suite_shots`), when the pack has
+        // its city layout beside it (`<pack>.meta.json`): 30 settle frames, then the
+        // standard tier's 90 frames or the quick tier's 60 (its first two events).
+        let meta = path.with_extension("meta.json");
+        if let Ok(text) = std::fs::read_to_string(&meta) {
+            let meta: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", meta.display()));
+            for (tier, frames, events) in [("suite_bombard", 90, 5), ("suite_quick", 60, 2)] {
+                let mut s = configure(scene.clone(), (SUITE_SETTLE + frames) as f64 / 60.0);
+                s.name = format!("{name}_{tier}");
+                let shots = suite_shots(&meta, &SUITE_BOMBARD[..events], -s.gravity[2]);
+                SUITE_SHOTS.lock().unwrap().insert(s.name.clone(), shots);
+                out.push((s.name.clone(), s));
+            }
+        }
     }
     out
+}
+
+/// Frames the town settles before vibe-land's bombard starts (its suite's `settle` phase).
+const SUITE_SETTLE: usize = 30;
+
+/// vibe-land `scripts/perf/suite.json` `town-bombard`: (tick, kind, place, height).
+const SUITE_BOMBARD: [(usize, &str, &str, f64); 5] = [
+    (0, "cannonball", "elm-park/house-16", 1.5),
+    (10, "meteor", "elm-park/house-18", 2.0),
+    (20, "cannonball", "elm-park/house-23", 1.5),
+    (30, "meteor", "market-quarter/cinema-1", 2.0),
+    (40, "cannonball", "elm-park/house-25", 1.5),
+];
+
+/// The suite scenes' shots, by scene name.
+static SUITE_SHOTS: std::sync::Mutex<std::collections::BTreeMap<String, Vec<(usize, stress_ref::scene::ImpactorDesc)>>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The suite's shots as vibe-land fires them (`scripts/perf/suite.py` `shot_from_place`,
+/// `server/src/perf_suite.rs` `Rig::fire`), in the pack's Y-up world mapped to the
+/// scene's Z-up one (`scene_pack`: `(x, y, z) -> (x, -z, y)`):
+/// - target: the place's pavement x, `height` up, on its street-side face;
+/// - from the street: 30 m at slope 0.02 (cannonball), 140 m at slope 0.3 (meteor);
+/// - aimed with a gravity lead over the flight time at 60 m/s (cannonball) or 140 m/s;
+/// - cannonball 10,650 kg of 7,850 kg/m^3 steel (`city.rs`); meteor radius 2 m at
+///   3,300 kg/m^3 (`meteor.rs`).
+/// Each fires before its tick, after the settle frames. `(frame, impactor)`.
+fn suite_shots(meta: &serde_json::Value, events: &[(usize, &str, &str, f64)], g: f64) -> Vec<(usize, stress_ref::scene::ImpactorDesc)> {
+    use stress_ref::scene::{ImpactorDesc, ImpactorShape};
+    let v3 = |v: &serde_json::Value| [v[0].as_f64().unwrap(), v[1].as_f64().unwrap(), v[2].as_f64().unwrap()];
+    let zup = |p: [f64; 3]| [p[0], -p[2], p[1]];
+    let places = meta["places"].as_array().expect("meta places");
+    events
+        .iter()
+        .enumerate()
+        .map(|(k, &(tick, kind, place, height))| {
+            let p = places.iter().find(|p| p["id"] == place).unwrap_or_else(|| panic!("no place {place} in the pack's meta"));
+            let (lo, hi, pave) = (v3(&p["min"]), v3(&p["max"]), v3(&p["pavement"]));
+            let from_south = pave[2] < lo[2];
+            let target = [pave[0], height, if from_south { lo[2] } else { hi[2] }];
+            let meteor = kind == "meteor";
+            let (bearing, slope, distance): (f64, f64, f64) = (if from_south { 180f64 } else { 0.0 }.to_radians(), if meteor { 0.3 } else { 0.02 }, if meteor { 140.0 } else { 30.0 });
+            let origin = [target[0] + bearing.sin() * distance, target[1] + slope * distance, target[2] + bearing.cos() * distance];
+            let speed = if meteor { 140.0 } else { 60.0 };
+            let d = [target[0] - origin[0], target[1] - origin[1], target[2] - origin[2]];
+            let tt = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / speed;
+            let velocity = [d[0] / tt, d[1] / tt + 0.5 * g * tt, d[2] / tt];
+            let (radius, mass) = if meteor { (2.0, 3300.0 * 4.0 / 3.0 * std::f64::consts::PI * 8.0) } else { ((10650.0 / 7850.0 * 3.0 / (4.0 * std::f64::consts::PI)).cbrt(), 10650.0) };
+            (
+                SUITE_SETTLE + tick,
+                ImpactorDesc {
+                    name: format!("{kind}{k}"),
+                    shape: ImpactorShape::Sphere { radius },
+                    mass,
+                    position: zup(origin),
+                    orientation: [1.0, 0.0, 0.0, 0.0],
+                    velocity: zup(velocity),
+                    angular_velocity: [0.0; 3],
+                    material: "projectile".into(),
+                    crush: None,
+                },
+            )
+        })
+        .collect()
 }
 
 /// vibe-land's `town-bombard` (scripts/perf/suite.json), as close as a pack allows:
@@ -348,7 +425,12 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     }
     // STRESS_BENCH_FRAMES=1: each frame's profile deltas on stderr.
     let per_frame = std::env::var("STRESS_BENCH_FRAMES").is_ok();
-    let shots = if scene.name.ends_with("_bombard") { bombard_shots(scene) } else { Vec::new() };
+    let suite = SUITE_SHOTS.lock().unwrap().get(&scene.name).cloned();
+    let shots = match suite {
+        Some(shots) => shots,
+        None if scene.name.ends_with("_bombard") => bombard_shots(scene),
+        None => Vec::new(),
+    };
     if !shots.is_empty() {
         w.scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     }
