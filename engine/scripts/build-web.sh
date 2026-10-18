@@ -88,6 +88,10 @@ wasm-pack build crates/engine-fracture-wasm --release --target web \
 echo "==> Scene snapshots (scene_export, host build)"
 cargo run --release -p engine-scenes --no-default-features --bin scene_export
 
+echo "==> vibe-city scene packs (engine/scenes/vibe-city, bun)"
+if command -v bun >/dev/null 2>&1; then BUN=(bun); else BUN=(npx --yes bun@1.2.4); fi
+(cd "$ENGINE/scenes/vibe-city" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}" run export.ts)
+
 echo "==> Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"

@@ -15,6 +15,7 @@ pub mod bonds;
 pub mod cook;
 pub mod cuboid;
 pub mod math;
+pub mod pack;
 pub mod pairs;
 pub mod plan;
 pub mod samples;

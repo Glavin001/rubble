@@ -1,0 +1,14 @@
+{
+  "name": "rubble-vibe-city-scenes",
+  "private": true,
+  "type": "module",
+  "description": "vibe-city /destructible-stress structure presets, exported as rubble scene packs",
+  "scripts": {
+    "export": "bun run export.ts"
+  },
+  "dependencies": {
+    "@dgreenheck/three-pinata": "2.0.1",
+    "blast-stress-solver": "0.3.1",
+    "three": "0.181.1"
+  }
+}
