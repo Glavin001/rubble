@@ -130,6 +130,9 @@ pub struct GpuWorld {
     resident_engine: Option<std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>>,
     /// The engine's part table on the GPU (M3's body creation), built at the first split.
     part_table: Option<std::rc::Rc<crate::gpu_split::PartTable>>,
+    /// Impactors added that the solver's tables do not hold yet (`add_impactor` in a
+    /// resident frame).
+    impactors_stale: bool,
     resident: Option<resident_frame::ResidentState>,
     /// Frames taken on the resident path.
     pub resident_frames: u64,
@@ -234,6 +237,7 @@ impl GpuWorld {
             fast_now: false,
             resident_engine: None,
             part_table: None,
+            impactors_stale: false,
             resident: None,
             resident_frames: 0,
             prepare_seconds: 0.0,
@@ -284,7 +288,14 @@ impl GpuWorld {
     /// its index.
     pub fn add_impactor(&mut self, gpu: &Gpu, imp: stress_ref::world::Impactor) -> Result<usize, String> {
         let i = self.with_shell_mut(|w| w.add_impactor(imp));
-        self.solver.refresh(gpu)?;
+        // The resident quasi-static frame takes impactors as the engine's bodies (and their
+        // properties from the host's list): the solver's tables need no refresh for one.
+        // Any other frame refreshes first (`impactors_stale`).
+        if self.resident_now() {
+            self.impactors_stale = true;
+        } else {
+            self.solver.refresh(gpu)?;
+        }
         Ok(i)
     }
 
@@ -395,6 +406,10 @@ impl GpuWorld {
     fn step_frame_coupled(&mut self, gpu: &Gpu) -> Result<(), String> {
         if self.resident_now() {
             return self.resident_frame(gpu);
+        }
+        if self.impactors_stale {
+            self.impactors_stale = false;
+            self.solver.refresh(gpu)?;
         }
         let fdt = self.scene.sim.frame_dt;
         let mut forced: std::collections::HashSet<BodyKey> = std::collections::HashSet::new();

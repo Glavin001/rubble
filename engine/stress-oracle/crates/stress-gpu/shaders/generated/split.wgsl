@@ -111,7 +111,7 @@ struct BondStatic_std430_0
 
 @binding(9) @group(0) var<storage, read_write> out_0 : array<vec4<f32>>;
 
-@binding(10) @group(0) var<storage, read> frames_0 : array<vec4<f32>>;
+@binding(10) @group(0) var<storage, read_write> frames_0 : array<vec4<f32>>;
 
 struct ChunkStatic_std430_0
 {
@@ -136,6 +136,10 @@ struct ChunkStatic_std430_0
 @binding(1) @group(0) var<storage, read> chunks_0 : array<ChunkStatic_std430_0>;
 
 @binding(6) @group(0) var<storage, read> state_0 : array<vec4<f32>>;
+
+@binding(12) @group(0) var<storage, read> parent_bodies_0 : array<vec4<f32>>;
+
+@binding(11) @group(0) var<storage, read> engine_bodies_0 : array<vec4<f32>>;
 
 fn total_chunks_0() -> u32
 {
@@ -633,6 +637,80 @@ fn split_children(@builtin(global_invocation_id) id_0 : vec3<u32>)
     out_0[at_2 + u32(5)] = vec4<f32>(cv_0, 0.0f);
     out_0[at_2 + u32(6)] = vec4<f32>(cw_0, 0.0f);
     out_0[at_2 + u32(7)] = vec4<f32>(0.0f);
+    return;
+}
+
+fn quat_mul_0( a_0 : Quat_0,  o_0 : Quat_0) -> Quat_0
+{
+    var r_2 : Quat_0;
+    r_2.w_0 = a_0.w_0 * o_0.w_0 - a_0.x_0 * o_0.x_0 - a_0.y_0 * o_0.y_0 - a_0.z_0 * o_0.z_0;
+    r_2.x_0 = a_0.w_0 * o_0.x_0 + a_0.x_0 * o_0.w_0 + a_0.y_0 * o_0.z_0 - a_0.z_0 * o_0.y_0;
+    r_2.y_0 = a_0.w_0 * o_0.y_0 - a_0.x_0 * o_0.z_0 + a_0.y_0 * o_0.w_0 + a_0.z_0 * o_0.x_0;
+    r_2.z_0 = a_0.w_0 * o_0.z_0 + a_0.x_0 * o_0.y_0 - a_0.y_0 * o_0.x_0 + a_0.z_0 * o_0.w_0;
+    return r_2;
+}
+
+fn normalized_0( q_5 : Quat_0) -> Quat_0
+{
+    var _S38 : f32 = q_5.w_0;
+    var _S39 : f32 = q_5.x_0;
+    var _S40 : f32 = q_5.y_0;
+    var _S41 : f32 = q_5.z_0;
+    var n_0 : f32 = sqrt(_S38 * _S38 + _S39 * _S39 + _S40 * _S40 + _S41 * _S41);
+    var r_3 : Quat_0;
+    r_3.w_0 = q_5.w_0 / n_0;
+    r_3.x_0 = q_5.x_0 / n_0;
+    r_3.y_0 = q_5.y_0 / n_0;
+    r_3.z_0 = q_5.z_0 / n_0;
+    return r_3;
+}
+
+fn quat_vec_0( q_6 : Quat_0) -> vec4<f32>
+{
+    return vec4<f32>(q_6.x_0, q_6.y_0, q_6.z_0, q_6.w_0);
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn split_frames(@builtin(global_invocation_id) id_1 : vec3<u32>)
+{
+    var p_2 : u32 = id_1.x;
+    if(p_2 >= (params_0.parent_count_0))
+    {
+        return;
+    }
+    var _S42 : u32 = u32(2) * p_2;
+    var head_0 : vec4<f32> = parent_bodies_0[_S42];
+    var body_0 : u32 = (bitcast<u32>((head_0.x)));
+    if(body_0 == u32(4294967295))
+    {
+        return;
+    }
+    var com_2 : vec3<f32> = head_0.yzw;
+    var principal_0 : Quat_0 = quat_of_0(parent_bodies_0[_S42 + u32(1)]);
+    var _S43 : u32 = u32(7) * body_0;
+    var b0_0 : vec4<f32> = engine_bodies_0[_S43];
+    var orientation_0 : Quat_0 = quat_of_0(engine_bodies_0[_S43 + u32(1)]);
+    var lin_0 : vec3<f32> = engine_bodies_0[_S43 + u32(3)].xyz;
+    var ang_0 : vec3<f32> = engine_bodies_0[_S43 + u32(4)].xyz;
+    var axes_inv_0 : Quat_0;
+    axes_inv_0.w_0 = 0.70710676908493042f;
+    axes_inv_0.x_0 = 0.70710676908493042f;
+    axes_inv_0.y_0 = 0.0f;
+    axes_inv_0.z_0 = 0.0f;
+    var p_inv_0 : Quat_0;
+    p_inv_0.w_0 = principal_0.w_0;
+    p_inv_0.x_0 = - principal_0.x_0;
+    p_inv_0.y_0 = - principal_0.y_0;
+    p_inv_0.z_0 = - principal_0.z_0;
+    var rot_0 : Quat_0 = normalized_0(quat_mul_0(normalized_0(quat_mul_0(axes_inv_0, orientation_0)), p_inv_0));
+    var com_world_0 : vec3<f32> = vec3<f32>(b0_0.x, - b0_0.z, b0_0.y);
+    var _S44 : u32 = u32(5) * p_2;
+    frames_0[_S44] = quat_vec_0(rot_0);
+    frames_0[_S44 + u32(1)] = vec4<f32>(lin_0.x, - lin_0.z, lin_0.y, 0.0f);
+    frames_0[_S44 + u32(2)] = vec4<f32>(ang_0.x, - ang_0.z, ang_0.y, 0.0f);
+    frames_0[_S44 + u32(3)] = vec4<f32>(com_2, 0.0f);
+    frames_0[_S44 + u32(4)] = vec4<f32>(com_world_0 - rotate_0(rot_0, com_2), 0.0f);
     return;
 }
 

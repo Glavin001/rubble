@@ -133,6 +133,8 @@ struct KernelContext_0
     packed_float4 device* frames_0;
     ChunkStatic_natural_0 device* chunks_0;
     packed_float4 device* state_0;
+    packed_float4 device* parent_bodies_0;
+    packed_float4 device* engine_bodies_0;
     uint threadgroup* g_changed_0;
 };
 
@@ -162,7 +164,7 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     return _S1;
 }
 
-[[kernel]] void split_components(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], SplitParams_0 constant* params_1 [[buffer(0)]], packed_uint4 device* parents_1 [[buffer(7)]], Island_natural_0 device* islands_1 [[buffer(5)]], uint device* work_1 [[buffer(8)]], uint device* index_1 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(4)]], BondStatic_natural_0 device* bonds_1 [[buffer(3)]], packed_float4 device* out_1 [[buffer(9)]], packed_float4 device* frames_1 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(1)]], packed_float4 device* state_1 [[buffer(6)]])
+[[kernel]] void split_components(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], SplitParams_0 constant* params_1 [[buffer(0)]], packed_uint4 device* parents_1 [[buffer(7)]], Island_natural_0 device* islands_1 [[buffer(5)]], uint device* work_1 [[buffer(8)]], uint device* index_1 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(4)]], BondStatic_natural_0 device* bonds_1 [[buffer(3)]], packed_float4 device* out_1 [[buffer(9)]], packed_float4 device* frames_1 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(1)]], packed_float4 device* state_1 [[buffer(6)]], packed_float4 device* parent_bodies_1 [[buffer(12)]], packed_float4 device* engine_bodies_1 [[buffer(11)]])
 {
     uint children_0;
     uint k_0;
@@ -179,6 +181,8 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     (&kernelContext_1)->frames_0 = frames_1;
     (&kernelContext_1)->chunks_0 = chunks_1;
     (&kernelContext_1)->state_0 = state_1;
+    (&kernelContext_1)->parent_bodies_0 = parent_bodies_1;
+    (&kernelContext_1)->engine_bodies_0 = engine_bodies_1;
     threadgroup uint g_changed_1;
     (&kernelContext_1)->g_changed_0 = &g_changed_1;
     uint tid_0 = thread_0.x;
@@ -493,7 +497,7 @@ void inverse3_0(float3 r0_1, float3 r1_1, float3 r2_1, float3 thread* i0_0, floa
     return;
 }
 
-[[kernel]] void split_children(uint3 id_0 [[thread_position_in_grid]], SplitParams_0 constant* params_2 [[buffer(0)]], packed_uint4 device* parents_2 [[buffer(7)]], Island_natural_0 device* islands_2 [[buffer(5)]], uint device* work_2 [[buffer(8)]], uint device* index_2 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(4)]], BondStatic_natural_0 device* bonds_2 [[buffer(3)]], packed_float4 device* out_2 [[buffer(9)]], packed_float4 device* frames_2 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(1)]], packed_float4 device* state_2 [[buffer(6)]])
+[[kernel]] void split_children(uint3 id_0 [[thread_position_in_grid]], SplitParams_0 constant* params_2 [[buffer(0)]], packed_uint4 device* parents_2 [[buffer(7)]], Island_natural_0 device* islands_2 [[buffer(5)]], uint device* work_2 [[buffer(8)]], uint device* index_2 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(4)]], BondStatic_natural_0 device* bonds_2 [[buffer(3)]], packed_float4 device* out_2 [[buffer(9)]], packed_float4 device* frames_2 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(1)]], packed_float4 device* state_2 [[buffer(6)]], packed_float4 device* parent_bodies_2 [[buffer(12)]], packed_float4 device* engine_bodies_2 [[buffer(11)]])
 {
     bool anchored_0;
     thread KernelContext_0 kernelContext_2;
@@ -508,6 +512,8 @@ void inverse3_0(float3 r0_1, float3 r1_1, float3 r2_1, float3 thread* i0_0, floa
     (&kernelContext_2)->frames_0 = frames_2;
     (&kernelContext_2)->chunks_0 = chunks_2;
     (&kernelContext_2)->state_0 = state_2;
+    (&kernelContext_2)->parent_bodies_0 = parent_bodies_2;
+    (&kernelContext_2)->engine_bodies_0 = engine_bodies_2;
     threadgroup uint g_changed_2;
     (&kernelContext_2)->g_changed_0 = &g_changed_2;
     uint slot_0 = id_0.x;
@@ -684,6 +690,105 @@ void inverse3_0(float3 r0_1, float3 r1_1, float3 r2_1, float3 thread* i0_0, floa
     *((&kernelContext_2)->out_0+(at_2 + 5U)) = packed_float4(float4(cv_0, 0.0f)) ;
     *((&kernelContext_2)->out_0+(at_2 + 6U)) = packed_float4(float4(cw_0, 0.0f)) ;
     *((&kernelContext_2)->out_0+(at_2 + 7U)) = packed_float4(float4(0.0f) ) ;
+    return;
+}
+
+Quat_0 quat_mul_0(const Quat_0 thread* a_0, const Quat_0 thread* o_0)
+{
+    thread Quat_0 r_2;
+    (&r_2)->w_0 = a_0->w_0 * o_0->w_0 - a_0->x_0 * o_0->x_0 - a_0->y_0 * o_0->y_0 - a_0->z_0 * o_0->z_0;
+    (&r_2)->x_0 = a_0->w_0 * o_0->x_0 + a_0->x_0 * o_0->w_0 + a_0->y_0 * o_0->z_0 - a_0->z_0 * o_0->y_0;
+    (&r_2)->y_0 = a_0->w_0 * o_0->y_0 - a_0->x_0 * o_0->z_0 + a_0->y_0 * o_0->w_0 + a_0->z_0 * o_0->x_0;
+    (&r_2)->z_0 = a_0->w_0 * o_0->z_0 + a_0->x_0 * o_0->y_0 - a_0->y_0 * o_0->x_0 + a_0->z_0 * o_0->w_0;
+    return r_2;
+}
+
+Quat_0 normalized_0(const Quat_0 thread* q_6)
+{
+    float n_0 = sqrt(q_6->w_0 * q_6->w_0 + q_6->x_0 * q_6->x_0 + q_6->y_0 * q_6->y_0 + q_6->z_0 * q_6->z_0);
+    thread Quat_0 r_3;
+    (&r_3)->w_0 = q_6->w_0 / n_0;
+    (&r_3)->x_0 = q_6->x_0 / n_0;
+    (&r_3)->y_0 = q_6->y_0 / n_0;
+    (&r_3)->z_0 = q_6->z_0 / n_0;
+    return r_3;
+}
+
+float4 quat_vec_0(const Quat_0 thread* q_7)
+{
+    return float4(q_7->x_0, q_7->y_0, q_7->z_0, q_7->w_0);
+}
+
+[[kernel]] void split_frames(uint3 id_1 [[thread_position_in_grid]], SplitParams_0 constant* params_3 [[buffer(0)]], packed_uint4 device* parents_3 [[buffer(7)]], Island_natural_0 device* islands_3 [[buffer(5)]], uint device* work_3 [[buffer(8)]], uint device* index_3 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(4)]], BondStatic_natural_0 device* bonds_3 [[buffer(3)]], packed_float4 device* out_3 [[buffer(9)]], packed_float4 device* frames_3 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(1)]], packed_float4 device* state_3 [[buffer(6)]], packed_float4 device* parent_bodies_3 [[buffer(12)]], packed_float4 device* engine_bodies_3 [[buffer(11)]])
+{
+    thread KernelContext_0 kernelContext_3;
+    (&kernelContext_3)->params_0 = params_3;
+    (&kernelContext_3)->parents_0 = parents_3;
+    (&kernelContext_3)->islands_0 = islands_3;
+    (&kernelContext_3)->work_0 = work_3;
+    (&kernelContext_3)->index_0 = index_3;
+    (&kernelContext_3)->bond_dyn_0 = bond_dyn_3;
+    (&kernelContext_3)->bonds_0 = bonds_3;
+    (&kernelContext_3)->out_0 = out_3;
+    (&kernelContext_3)->frames_0 = frames_3;
+    (&kernelContext_3)->chunks_0 = chunks_3;
+    (&kernelContext_3)->state_0 = state_3;
+    (&kernelContext_3)->parent_bodies_0 = parent_bodies_3;
+    (&kernelContext_3)->engine_bodies_0 = engine_bodies_3;
+    threadgroup uint g_changed_3;
+    (&kernelContext_3)->g_changed_0 = &g_changed_3;
+    uint p_2 = id_1.x;
+    if(p_2 >= (params_3->parent_count_0))
+    {
+        return;
+    }
+    uint _S73 = 2U * p_2;
+    float4 _S74 = float4(*((&kernelContext_3)->parent_bodies_0+_S73)) ;
+    uint body_0 = (as_type<uint>((_S74.x)));
+    if(body_0 == 4294967295U)
+    {
+        return;
+    }
+    float3 com_2 = _S74.yzw;
+    Quat_0 principal_0 = quat_of_0(float4(*((&kernelContext_3)->parent_bodies_0+(_S73 + 1U))) );
+    uint _S75 = 7U * body_0;
+    float4 _S76 = float4(*((&kernelContext_3)->engine_bodies_0+_S75)) ;
+    Quat_0 orientation_0 = quat_of_0(float4(*((&kernelContext_3)->engine_bodies_0+(_S75 + 1U))) );
+    float3 lin_0 = (float4(*((&kernelContext_3)->engine_bodies_0+(_S75 + 3U))) ).xyz;
+    float3 ang_0 = (float4(*((&kernelContext_3)->engine_bodies_0+(_S75 + 4U))) ).xyz;
+    thread Quat_0 axes_inv_0;
+    (&axes_inv_0)->w_0 = 0.70710676908493042f;
+    (&axes_inv_0)->x_0 = 0.70710676908493042f;
+    (&axes_inv_0)->y_0 = 0.0f;
+    (&axes_inv_0)->z_0 = 0.0f;
+    thread Quat_0 p_inv_0;
+    (&p_inv_0)->w_0 = principal_0.w_0;
+    (&p_inv_0)->x_0 = - principal_0.x_0;
+    (&p_inv_0)->y_0 = - principal_0.y_0;
+    (&p_inv_0)->z_0 = - principal_0.z_0;
+    thread Quat_0 _S77 = axes_inv_0;
+    thread Quat_0 _S78 = orientation_0;
+    Quat_0 _S79 = quat_mul_0(&_S77, &_S78);
+    thread Quat_0 _S80 = _S79;
+    Quat_0 _S81 = normalized_0(&_S80);
+    thread Quat_0 _S82 = _S81;
+    thread Quat_0 _S83 = p_inv_0;
+    Quat_0 _S84 = quat_mul_0(&_S82, &_S83);
+    thread Quat_0 _S85 = _S84;
+    Quat_0 _S86 = normalized_0(&_S85);
+    float3 com_world_0 = float3(_S76.x, - _S76.z, _S76.y);
+    uint _S87 = 5U * p_2;
+    packed_float4 device* _S88 = (&kernelContext_3)->frames_0+_S87;
+    thread Quat_0 _S89 = _S86;
+    float4 _S90 = quat_vec_0(&_S89);
+    *_S88 = packed_float4(_S90) ;
+    *((&kernelContext_3)->frames_0+(_S87 + 1U)) = packed_float4(float4(lin_0.x, - lin_0.z, lin_0.y, 0.0f)) ;
+    *((&kernelContext_3)->frames_0+(_S87 + 2U)) = packed_float4(float4(ang_0.x, - ang_0.z, ang_0.y, 0.0f)) ;
+    *((&kernelContext_3)->frames_0+(_S87 + 3U)) = packed_float4(float4(com_2, 0.0f)) ;
+    packed_float4 device* _S91 = (&kernelContext_3)->frames_0+(_S87 + 4U);
+    thread Quat_0 _S92 = _S86;
+    float3 _S93 = rotate_0(&_S92, com_2);
+    *_S91 = packed_float4(float4(com_world_0 - _S93, 0.0f)) ;
     return;
 }
 

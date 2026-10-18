@@ -22,8 +22,8 @@ struct SpawnParams
     uint live;           // 1: `bodies` and `colliders` are the engine's own buffers (absolute slots;
                          // bodies in both regions, the second at `max_bodies`); 0: a copy from slot 0
     uint max_bodies;
-    uint pad0;
-    uint pad1;
+    uint max_colliders;  // the engine's collider capacity
+    uint island_free;    // islands the stress tables can still take
     uint pad2;
 };
 
@@ -51,6 +51,9 @@ static const uint FLAG_AWAKE = 8;
 
 // Per structure: its first chunk's index among every structure's chunks (`part_ranges`).
 [[vk::binding(14, 0)]] StructuredBuffer<uint> structure_base;
+// [0]: 1 when the split does not fit (islands, bodies or colliders past a capacity):
+// nothing is made, retired or laid out, and the host splits instead.
+[[vk::binding(15, 0)]] RWStructuredBuffer<uint> control;
 
 // A layout chunk's part range: by its structure and chunk, so the table does not change
 // with the layout.
@@ -87,6 +90,29 @@ void spawn_offsets(uint3 id: SV_DispatchThreadID)
     uint body = params.first_body;
     uint collider = params.first_collider;
     uint total = total_slots();
+    // Room first: islands (one more per child past the first), bodies, colliders.
+    uint islands_needed = 0;
+    uint bodies_needed = 0;
+    uint colliders_needed = 0;
+    for (uint p = 0; p < params.parent_count; p++)
+    {
+        uint4 parent = parents[p];
+        if (parent.z < 2)
+            continue;
+        islands_needed += parent.z - 1;
+        bodies_needed += parent.z;
+        uint first = islands_of[p].x;
+        for (uint k = 0; k < parent.z; k++)
+        {
+            uint2 m = child_members(parent.y + k);
+            for (uint j = 0; j < m.y; j++)
+                colliders_needed += part_range(first + work[total + parent.y + m.x + j]).y;
+        }
+    }
+    bool fits = islands_needed <= params.island_free && (params.live == 0 || (body + bodies_needed <= params.max_bodies && collider + colliders_needed <= params.max_colliders));
+    control[0] = fits ? 0u : 1u;
+    if (!fits)
+        return;
     for (uint p = 0; p < params.parent_count; p++)
     {
         uint4 parent = parents[p];
@@ -350,7 +376,7 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
 void spawn_retire(uint3 id: SV_DispatchThreadID)
 {
     uint p = id.x;
-    if (p >= params.parent_count || params.live == 0 || parents[p].z < 2)
+    if (p >= params.parent_count || params.live == 0 || parents[p].z < 2 || control[0] != 0)
         return;
     uint4 e = islands_of[p];
     // The current record, modified, into both regions (`write_bodies` writes one record twice).

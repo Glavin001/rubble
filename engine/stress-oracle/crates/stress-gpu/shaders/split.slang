@@ -46,7 +46,12 @@ struct SplitParams
 // velocity, angular velocity (world), centre of mass (body frame; the cluster's own, not
 // the island record's mass-scaled one), pose position (world; spawn.slang). The engine's motion at the moment of the split,
 // which an island record (its frame-start pose) does not hold.
-[[vk::binding(10, 0)]] StructuredBuffer<float4> frames;
+[[vk::binding(10, 0)]] RWStructuredBuffer<float4> frames;
+// The engine's bodies (rubble `BodyState`, 7 float4 each) and, per parent, its body (x as
+// bits; NONE: none), its centre of mass in its body frame (y-w as floats) and its
+// principal rotation (the next float4): for `split_frames`.
+[[vk::binding(11, 0)]] StructuredBuffer<float4> engine_bodies;
+[[vk::binding(12, 0)]] StructuredBuffer<float4> parent_bodies;
 
 static const uint THREADS = 256;
 static const uint CHILD_WORDS = 8;
@@ -280,4 +285,45 @@ void split_children(uint3 id: SV_DispatchThreadID)
     out[at + 5] = float4(cv, 0.0);
     out[at + 6] = float4(cw, 0.0);
     out[at + 7] = float4(0.0);
+}
+
+// Each parent's rigid frame from its engine body (stress-rubble `motion_of`), when the
+// host gives its body (`parent_bodies`): rotation (x, y, z, w), centre-of-mass velocity,
+// angular velocity, centre of mass (body frame), pose position. The engine is Y-up.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void split_frames(uint3 id: SV_DispatchThreadID)
+{
+    uint p = id.x;
+    if (p >= params.parent_count)
+        return;
+    float4 head = parent_bodies[2 * p];
+    uint body = asuint(head.x);
+    if (body == 0xffffffffu)
+        return;
+    float3 com = head.yzw;
+    Quat principal = quat_of(parent_bodies[2 * p + 1]);
+    float4 b0 = engine_bodies[7 * body];
+    Quat orientation = quat_of(engine_bodies[7 * body + 1]);
+    float3 lin = engine_bodies[7 * body + 3].xyz;
+    float3 ang = engine_bodies[7 * body + 4].xyz;
+    // rot_from_rubble: (axes^-1 q); then times the principal's inverse.
+    float h = 0.70710678118654752;
+    Quat axes_inv;
+    axes_inv.w = h;
+    axes_inv.x = h;
+    axes_inv.y = 0.0;
+    axes_inv.z = 0.0;
+    Quat p_inv;
+    p_inv.w = principal.w;
+    p_inv.x = -principal.x;
+    p_inv.y = -principal.y;
+    p_inv.z = -principal.z;
+    Quat rot = normalized(quat_mul(normalized(quat_mul(axes_inv, orientation)), p_inv));
+    float3 com_world = float3(b0.x, -b0.z, b0.y);
+    frames[5 * p] = quat_vec(rot);
+    frames[5 * p + 1] = float4(lin.x, -lin.z, lin.y, 0.0);
+    frames[5 * p + 2] = float4(ang.x, -ang.z, ang.y, 0.0);
+    frames[5 * p + 3] = float4(com, 0.0);
+    frames[5 * p + 4] = float4(com_world - rotate(rot, com), 0.0);
 }

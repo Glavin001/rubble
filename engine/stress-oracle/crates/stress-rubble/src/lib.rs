@@ -586,7 +586,15 @@ impl RubbleEngine {
             state.angular_vel = to_rubble(b.angular_velocity);
         }
         let id = self.sim.add_body(state);
-        self.bodies_changed();
+        // The bodies' snapshot (if any) takes the record as uploaded (no download for the
+        // next frame's CCD bound).
+        {
+            let mut read = self.bodies_read.borrow_mut();
+            match read.as_mut() {
+                Some(all) if all.len() == id as usize => all.push(state),
+                _ => *read = None,
+            }
+        }
         let cols: Vec<Collider> = c.colliders.iter().map(|col| Collider { body: id, ..*col }).collect();
         let key = b.key;
         let colliders = self.add_colliders(&cols, c.chunks.iter().map(|&chunk| Owner::Body { key, chunk }));

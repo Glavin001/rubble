@@ -73,6 +73,8 @@ struct LayoutParams
 // mass and principal rotation (`extras`), for the resident tables' engine entries.
 [[vk::binding(22, 0)]] StructuredBuffer<uint4> spawn_slots;
 [[vk::binding(23, 0)]] StructuredBuffer<float4> spawn_extras;
+// spawn.slang `control`: [0] 1 when the split does not fit (nothing laid out).
+[[vk::binding(24, 0)]] StructuredBuffer<uint> control;
 
 static const uint NONE = 0xffffffffu;
 static const uint CHILD_WORDS = 8;
@@ -96,11 +98,15 @@ uint new_chunk_at(uint slot) { return 16 + cap() + 2 * params.total + params.isl
 uint child_bonds_at(uint slot) { return 16 + cap() + 3 * params.total + params.island_count + 2 * slot; }
 // Per bond (by its old index): its new index (NONE: cut).
 uint bond_new_at(uint b) { return 16 + cap() + 5 * params.total + params.island_count + b; }
+// Per parent (at its base): its children in the order of their islands (child numbers).
+uint child_order_at(uint slot) { return 16 + cap() + 5 * params.total + params.island_count + params.bond_count + slot; }
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void layout_plan(uint3 id: SV_DispatchThreadID)
 {
+    if (control[0] != 0)
+        return;
     uint n = params.island_count;
     for (uint i = 0; i < n; i++)
         plan[order_at(i)] = i;
@@ -165,21 +171,28 @@ void inverse3(float3 r0, float3 r1, float3 r2, out float3 i0, out float3 i1, out
 groupshared uint g_cut_first;
 
 // The parent's children in the order of their islands (the host lays them out as its
-// clusters stand after the split): the child number of the `r`-th.
+// clusters stand after the split): the child number of the `r`-th (`child_order_at`,
+// sorted by `sort_children`).
 uint child_by_island(uint4 parent, uint r)
 {
-    // Small: a parent has few children; count the islands below each.
+    return plan[child_order_at(parent.y + r)];
+}
+
+// Thread 0: a parent's children sorted by island (insertion sort: they are appended in
+// order, so at most a swap-removed one is out of place).
+void sort_children(uint4 parent)
+{
     for (uint k = 0; k < parent.z; k++)
     {
         uint ik = plan[child_island_at(parent.y + k)];
-        uint below = 0;
-        for (uint j = 0; j < parent.z; j++)
-            if (plan[child_island_at(parent.y + j)] < ik)
-                below++;
-        if (below == r)
-            return k;
+        uint j = k;
+        while (j > 0 && plan[child_island_at(parent.y + plan[child_order_at(parent.y + j - 1)])] > ik)
+        {
+            plan[child_order_at(parent.y + j)] = plan[child_order_at(parent.y + j - 1)];
+            j--;
+        }
+        plan[child_order_at(parent.y + j)] = k;
     }
-    return 0;
 }
 
 [shader("compute")]
@@ -188,7 +201,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
     uint p = group.x;
-    if (p >= params.parent_count)
+    if (p >= params.parent_count || control[0] != 0)
         return;
     uint4 parent = parents[p];
     if (parent.z < 2)
@@ -202,6 +215,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     // 1. New chunk positions (thread 0: a fixed order), the children's chunk ranges.
     if (tid == 0)
     {
+        sort_children(parent);
         uint at = 0;
         for (uint r = 0; r < parent.z; r++)
         {
@@ -243,59 +257,88 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         }
     }
     device_group_barrier();
-    // 2. Bonds (thread 0: a fixed order): each child's, in the parent's order, then the
-    // cut ones; their new indices (per parent bond, in `plan` after the chunks).
+    // 2. Bonds: each child's, in the parent's order, then the cut ones. Thread 0 gives
+    // every bond its new index (one pass to count per child, one to place: a fixed
+    // order); then every thread copies records.
     if (tid == 0)
     {
-        uint at = 0;
-        for (uint r = 0; r < parent.z; r++)
-        {
-            uint k = child_by_island(parent, r);
-            uint island = plan[child_island_at(base + k)];
-            uint first = at;
-            for (uint b = b0; b < b1; b++)
-            {
-                uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
-                uint ka = work[base + ids.y - c0];
-                uint kb = work[base + ids.z - c0];
-                if (ka != k || kb != k)
-                    continue;
-                uint nb = b0 + at;
-                for (uint w = 0; w < params.bond_words; w++)
-                    bonds[bond_word(nb, w)] = old_bonds[bond_word(b, w)];
-                bonds[bond_word(nb, 14)] = asfloat(uint4(ids.x, c0 + plan[new_chunk_at(base + ids.y - c0)], c0 + plan[new_chunk_at(base + ids.z - c0)], island));
-                for (uint w = 0; w < params.dyn_words; w++)
-                    dyn[params.dyn_words * nb + w] = old_dyn[params.dyn_words * b + w];
-                plan[bond_new_at(b)] = nb;
-                at++;
-            }
-            // The child's bond range, for its island record.
-            plan[child_bonds_at(base + k)] = b0 + first;
-            plan[child_bonds_at(base + k) + 1] = b0 + at;
-        }
-        g_cut_first = b0 + at;
+        // Counts per child, in child-slot words (`child_bonds_at`, first word).
+        for (uint k = 0; k < parent.z; k++)
+            plan[child_bonds_at(base + k)] = 0;
+        uint cut = 0;
         for (uint b = b0; b < b1; b++)
         {
             uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
             uint ka = work[base + ids.y - c0];
             uint kb = work[base + ids.z - c0];
             if (ka == kb)
-                continue;
-            uint nb = b0 + at;
-            for (uint w = 0; w < params.bond_words; w++)
-                bonds[bond_word(nb, w)] = old_bonds[bond_word(b, w)];
-            bonds[bond_word(nb, 14)] = asfloat(uint4(ids.x, ids.y, ids.z, NONE));
-            for (uint w = 0; w < params.dyn_words; w++)
-                dyn[params.dyn_words * nb + w] = old_dyn[params.dyn_words * b + w];
-            // The cut bonds' loads and static stiffness zeroed (`split_resident`).
+                plan[child_bonds_at(base + ka)] += 1;
+            else
+                cut++;
+        }
+        // Starts in island order; then each child's (first, end).
+        uint at = 0;
+        for (uint r = 0; r < parent.z; r++)
+        {
+            uint k = child_by_island(parent, r);
+            uint count = plan[child_bonds_at(base + k)];
+            plan[child_bonds_at(base + k)] = b0 + at;
+            plan[child_bonds_at(base + k) + 1] = b0 + at;
+            at += count;
+        }
+        g_cut_first = b0 + at;
+        uint cut_at = at;
+        for (uint b = b0; b < b1; b++)
+        {
+            uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
+            uint ka = work[base + ids.y - c0];
+            uint kb = work[base + ids.z - c0];
+            if (ka == kb)
+            {
+                uint nb = plan[child_bonds_at(base + ka) + 1];
+                plan[child_bonds_at(base + ka) + 1] = nb + 1;
+                plan[bond_new_at(b)] = nb;
+            }
+            else
+            {
+                // Its slot after the children's bonds, in order.
+                plan[bond_new_at(b)] = b0 + cut_at;
+                cut_at++;
+            }
+        }
+    }
+    device_group_barrier();
+    // Copies: a child's bond with its chunks renamed and its island; a cut bond to its slot
+    // after the children's, in no island, its loads and static stiffness zeroed.
+    for (uint b = b0 + tid; b < b1; b += 64)
+    {
+        uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
+        uint ka = work[base + ids.y - c0];
+        uint kb = work[base + ids.z - c0];
+        uint nb;
+        uint4 new_ids;
+        if (ka == kb)
+        {
+            nb = plan[bond_new_at(b)];
+            new_ids = uint4(ids.x, c0 + plan[new_chunk_at(base + ids.y - c0)], c0 + plan[new_chunk_at(base + ids.z - c0)], plan[child_island_at(base + ka)]);
+        }
+        else
+        {
+            nb = plan[bond_new_at(b)];
+            new_ids = uint4(ids.x, ids.y, ids.z, NONE);
             for (uint w = 0; w < 3; w++)
                 scratch[3 * nb + w] = float4(0.0);
             scratch[params.statics_base + STATICS_PER_CHUNK * params.chunk_count + 2 * nb] = float4(0.0);
             scratch[params.statics_base + STATICS_PER_CHUNK * params.chunk_count + 2 * nb + 1] = float4(0.0);
-            plan[bond_new_at(b)] = NONE;
-            at++;
         }
+        for (uint w = 0; w < params.bond_words; w++)
+            bonds[bond_word(nb, w)] = old_bonds[bond_word(b, w)];
+        bonds[bond_word(nb, 14)] = asfloat(new_ids);
+        for (uint w = 0; w < params.dyn_words; w++)
+            dyn[params.dyn_words * nb + w] = old_dyn[params.dyn_words * b + w];
     }
+    // The children's bond ranges (first, end): `child_bonds_at` holds (first, next) after
+    // placing, so `next` is the end.
     device_group_barrier();
     // 3. Incidence: each chunk keeps its slots (its old degree), its entries its
     // remaining bonds in the new order, padded with a cut bond of this split (or the
@@ -344,7 +387,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             if (bond < b0 || bond >= b1)
                 continue;
             uint nb = plan[bond_new_at(bond)];
-            if (nb == NONE)
+            if (nb >= g_cut_first)
                 continue;
             index[at + q] = 2 * nb + (entry & 1);
             q++;
@@ -464,6 +507,8 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 [numthreads(64, 1, 1)]
 void layout_moved(uint3 id: SV_DispatchThreadID)
 {
+    if (control[0] != 0)
+        return;
     uint i = id.x;
     // The sentinel island after the islands (batch control): a blank record.
     if (i == plan[0])

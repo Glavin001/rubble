@@ -3,6 +3,8 @@
 //! waiting (`WgpuSim::step_submit`, counts forwarded on the GPU) and its contact rows go
 //! straight into the GPU ingest; nothing is read back.
 
+use std::collections::HashMap;
+
 use stress_gpu::gpu::Gpu;
 use stress_gpu::ingest::{ColliderInfo, EngineBuffers, EngineIngest, KIND_BODY, KIND_STATIC, NONE};
 use stress_gpu::resident::{EngineFrame, OtherProps, ResidentEngine};
@@ -149,6 +151,10 @@ impl ResidentEngine for RubbleEngine {
         Some((self.sim.body_buffer(), self.sim.collider_buffer(), self.sim.capacity().max_bodies))
     }
 
+    fn frame_record(&self, key: BodyKey) -> Option<(u32, [f32; 3], [f32; 4])> {
+        self.bodies.get(&key).map(|e| (e.id, [e.com.x as f32, e.com.y as f32, e.com.z as f32], [e.principal.x as f32, e.principal.y as f32, e.principal.z as f32, e.principal.w as f32]))
+    }
+
     fn retire_record(&self, key: BodyKey) -> Option<[u32; 3]> {
         self.bodies.get(&key).map(|e| [e.id, e.colliders.start, e.colliders.end])
     }
@@ -156,8 +162,10 @@ impl ResidentEngine for RubbleEngine {
     fn adopt_spawned(&mut self, adopted: Vec<stress_gpu::resident::AdoptedBody>, retired: &[BodyKey]) -> Result<(), String> {
         use engine_schema::convex::CollisionFilter;
         // The parents, retired on the GPU (`remove_body`'s bookkeeping, no upload).
+        let mut retired_ids: HashMap<BodyKey, u32> = HashMap::new();
         for key in retired {
             let Some(e) = self.bodies.remove(key) else { continue };
+            retired_ids.insert(*key, e.id);
             self.sim.mirror_retire(e.id);
             let never = CollisionFilter { categories: 0x8000, mask: 0, group: 0 };
             for id in e.colliders.clone() {
@@ -202,9 +210,34 @@ impl ResidentEngine for RubbleEngine {
         }
         debug_assert_eq!(body_range.end, self.sim.body_count());
         debug_assert_eq!(self.owners.len(), self.sim.collider_count() as usize);
-        self.bodies_changed();
+        // The bodies' snapshot (if any) follows the GPU's writes: the retired parents
+        // stilled, the children appended (no download for the next frame's CCD bound).
+        {
+            let mut read = self.bodies_read.borrow_mut();
+            if let Some(all) = read.as_mut() {
+                for key in retired {
+                    if let Some(id) = retired_ids.get(key) {
+                        let b = &mut all[*id as usize];
+                        b.inv_mass = 0.0;
+                        b.inv_inertia = [0.0; 3];
+                        b.linear_vel = [0.0; 3];
+                        b.angular_vel = [0.0; 3];
+                        b.flags = 0;
+                    }
+                }
+                if all.len() == body_range.start as usize {
+                    all.extend_from_slice(&bodies);
+                } else {
+                    *read = None;
+                }
+            }
+        }
         self.layout_version += 1;
         Ok(())
+    }
+
+    fn collider_capacity(&self) -> u32 {
+        self.sim.capacity().max_colliders
     }
 
     fn body_counts(&self) -> (u32, u32) {

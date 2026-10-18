@@ -284,6 +284,11 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     fn spawn_buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)> {
         None
     }
+    /// A body's slot, centre of mass (its oracle frame) and principal rotation (x, y, z,
+    /// w), for the GPU to take its frame from the engine's buffer (`split_frames`).
+    fn frame_record(&self, _key: stress_ref::engine::BodyKey) -> Option<(u32, [f32; 3], [f32; 4])> {
+        None
+    }
     /// A body's slot and collider range, for the GPU to retire it (`spawn_retire`).
     fn retire_record(&self, _key: stress_ref::engine::BodyKey) -> Option<[u32; 3]> {
         None
@@ -292,6 +297,10 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     /// (`retired`): the engine's own bookkeeping follows, with no upload.
     fn adopt_spawned(&mut self, _adopted: Vec<AdoptedBody>, _retired: &[stress_ref::engine::BodyKey]) -> Result<(), String> {
         Err("this engine makes no bodies on the GPU".into())
+    }
+    /// The engine's collider capacity.
+    fn collider_capacity(&self) -> u32 {
+        0
     }
     /// The engine's body and collider counts (the next slots).
     fn body_counts(&self) -> (u32, u32) {

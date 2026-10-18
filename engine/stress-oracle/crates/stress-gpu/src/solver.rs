@@ -3409,9 +3409,12 @@ impl GpuSolver {
                 _ => (&dummy, &dummy_out),
             },
             gate,
-            spawn: (&l.spawn.slots, &l.spawn.extras),
+            spawn: {
+                let sp = l.run.expect("a split to lay out").1;
+                (&sp.slots, &sp.extras, &sp.control)
+            },
         };
-        layout.layout(gpu, l.run, &tables, params, self.layout.island_cap);
+        layout.layout(gpu, l.run.expect("a split to lay out").0, &tables, params, self.layout.island_cap);
     }
 
     /// Whether a split can be laid out in place (`split_resident`'s conditions): host
@@ -3426,6 +3429,47 @@ impl GpuSolver {
             && self.buffers.params.cand_count == 0
             && self.layout.items.is_empty()
             && self.mirror.clusters.len() + added <= self.layout.island_cap
+    }
+
+    /// M4: a whole split on the GPU in one submission and one read
+    /// (`GpuSplitter::pass`): frames from the engine's bodies, topology, the children's
+    /// engine bodies, the tables laid out. The host's own layout and mirror follow from
+    /// what it reads (`split_resident_with`, already laid out).
+    pub fn gpu_split_pass(&mut self, gpu: &Gpu, parents: &[usize], engine: &crate::gpu_split::PassEngine, table: &crate::gpu_split::PartTable, resident: Option<ResidentLayout>) -> crate::gpu_split::PassResult {
+        if self.splitter.is_none() {
+            self.splitter = Some(crate::gpu_split::GpuSplitter::new(gpu));
+        }
+        let layout = self.layouter.get_or_insert_with(|| crate::gpu_split::GpuLayout::new(gpu)).clone_kernels();
+        let ps: Vec<(usize, [u32; 2])> = parents.iter().map(|&ci| (ci, [self.layout.islands[ci].range[0], self.layout.islands[ci].range[1]])).collect();
+        let parts_max: usize = ps.iter().map(|&(_, r)| (r[0] as usize..r[1] as usize).map(|k| { let (s, c) = self.layout.chunks[k]; table.counts[s][c] as usize }).sum::<usize>()).sum();
+        let p = self.buffers.params;
+        let params = crate::gpu_split::LayoutParams {
+            island_count: self.layout.islands.len() as u32,
+            next_id: self.mirror.next_cluster_id() as u32,
+            substeps: self.mirror.substeps as u32,
+            chunk_words: (std::mem::size_of::<stress_layout::ChunkStatic>() / 16) as u32,
+            bond_words: (std::mem::size_of::<stress_layout::BondStatic>() / 16) as u32,
+            dyn_words: (std::mem::size_of::<BondDyn>() / 16) as u32,
+            island_words: (std::mem::size_of::<Island>() / 16) as u32,
+            chunk_count: self.layout.chunks.len() as u32,
+            statics_base: p.statics_base,
+            statics_bonds: p.statics_bonds,
+            gate_flag_base: 2 * self.layout.chunks.len() as u32,
+            bond_count: self.layout.bonds.len() as u32,
+            driven: (!self.mirror.config.integrate_rigid) as u32,
+            ..Default::default()
+        };
+        let gate_dummy;
+        let gate = match &self.cascade_gate {
+            Some(g) => &g.buffer,
+            None => {
+                gate_dummy = gpu.storage("pass no gate", &vec![[0f32; 4]; 2 * self.layout.chunks.len() + self.layout.island_cap + 1]);
+                &gate_dummy
+            }
+        };
+        let resident = resident.map(|r| (r.ctab, [r.props_base, r.eload_base, r.pulse_base, r.pulse_count_base, r.pulse_cap, r.engine_base]));
+        let b = &self.buffers;
+        self.splitter.as_ref().expect("splitter").pass(gpu, &layout, [&b.chunk_static, &b.index, &b.bonds_static, &b.bond_dyn, &b.islands, &b.state], &b.scratch, &ps, engine, table, params, self.layout.island_cap, resident, gate, parts_max)
     }
 
     /// The island capacity of the tables (`island_headroom` past the islands).
@@ -3477,7 +3521,7 @@ impl GpuSolver {
             scratch: &shadow[6],
             ctab: (&dummy, &dummy_out),
             gate: &dummy_gate,
-            spawn: (&spawn.slots, &spawn.extras),
+            spawn: (&spawn.slots, &spawn.extras, &spawn.control),
         };
         let plan = layout.layout(gpu, run, &tables, params, self.layout.island_cap);
         (shadow, plan, params.island_count)
@@ -3695,7 +3739,9 @@ impl GpuSolver {
             if self.mirror.clusters.len() + added > self.layout.island_cap {
                 return Err("split in place: no island headroom for the GPU's layout".into());
             }
-            self.gpu_layout_live(gpu, l);
+            if l.run.is_some() {
+                self.gpu_layout_live(gpu, l);
+            }
         }
         let host = self.layout.host.as_ref().expect("host tables");
         if trace {
@@ -4070,8 +4116,8 @@ impl GpuSolver {
 /// the resident tables the layout keeps in step.
 pub struct LiveSplit<'a> {
     pub comps: Vec<Vec<Vec<usize>>>,
-    pub run: &'a crate::gpu_split::SplitRun,
-    pub spawn: &'a crate::gpu_split::SpawnBuffers,
+    /// The split and spawn to lay out from (None: already laid out, `gpu_split_pass`).
+    pub run: Option<(&'a crate::gpu_split::SplitRun, &'a crate::gpu_split::SpawnBuffers)>,
     pub resident: Option<ResidentLayout<'a>>,
 }
 
