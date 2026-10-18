@@ -68,6 +68,11 @@ jobs:
           path: .engine-cuda-green
           key: ${{ steps.fp.outputs.key }}
           lookup-only: true
+      - name: Skipped (these inputs already passed)
+        if: steps.green.outputs.cache-hit == 'true'
+        run: |
+          echo "::notice title=engine-cuda skipped::The same sources already built and passed the GPU tests (cache key ${{ steps.fp.outputs.key }})."
+          echo "### engine-cuda skipped: these inputs already passed" >> "$GITHUB_STEP_SUMMARY"
       - name: Install slangc and nvcc
         if: steps.green.outputs.cache-hit != 'true'
         run: sudo engine/tools/cuda/install_linux_toolchain.sh
@@ -88,18 +93,25 @@ jobs:
           python3 engine/tools/modal/cuda_tests.py --package cuda-tests.tar.gz
           ls -lh cuda-tests.tar.gz
       # Pushes to main, a PR labelled `cuda`, or a manual run spend GPU time.
+      # The step always runs so a skipped GPU run says why (annotation + summary).
       - name: GPU tests on Modal
-        if: >-
-          steps.green.outputs.cache-hit != 'true' && (
-            github.event_name != 'pull_request' ||
-            contains(github.event.pull_request.labels.*.name, 'cuda'))
+        if: steps.green.outputs.cache-hit != 'true'
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          HAS_CUDA_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'cuda') }}
         run: |
-          if [ -z "$MODAL_TOKEN_ID" ]; then
-            echo "::warning::MODAL_TOKEN_ID/MODAL_TOKEN_SECRET not set; skipping the GPU run"
+          skip() {
+            echo "::notice title=GPU tests skipped::$1"
+            printf '### GPU tests skipped\n\n%s\n\nThe CUDA build (slangc + nvcc, every kernel), the miscompile guard and the CPU tests above ran.\n' "$1" >> "$GITHUB_STEP_SUMMARY"
             exit 0
+          }
+          if [ "$IS_PR" = "true" ] && [ "$HAS_CUDA_LABEL" != "true" ]; then
+            skip "This PR has no 'cuda' label; add it to run the tests on a Modal GPU."
+          fi
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            skip "Repo secrets MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are not set, so Modal cannot be reached."
           fi
           set -o pipefail
           args=(--archive cuda-tests.tar.gz --gpu "${{ inputs.gpu || 'T4' }}")

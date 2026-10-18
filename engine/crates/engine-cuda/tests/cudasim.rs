@@ -50,9 +50,22 @@ fn cuda_sources_emitted() {
             "{entry}: empty thread group"
         );
     }
-    if gpu_required() {
+    // CI (and Modal archives) build with ENGINE_CUDA_REQUIRE_PTX=1: prove every
+    // kernel's fatbin is embedded even where no GPU runs the tests.
+    if gpu_required() || std::env::var("ENGINE_CUDA_REQUIRE_PTX").as_deref() == Ok("1") {
         assert!(CudaSim::has_ptx(), "no device code embedded");
-        eprintln!("fatbin: SASS {SASS_ARCHS:?}, PTX {PTX_ARCH}");
+        for k in CUDA_KERNELS {
+            assert!(
+                k.image.len() > 1024,
+                "{}: fatbin is {} bytes",
+                k.entry,
+                k.image.len()
+            );
+        }
+        eprintln!(
+            "fatbin: {} kernels, SASS {SASS_ARCHS:?}, PTX {PTX_ARCH}",
+            CUDA_KERNELS.len()
+        );
     }
 }
 
