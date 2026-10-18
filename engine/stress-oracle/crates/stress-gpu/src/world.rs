@@ -287,6 +287,15 @@ impl GpuWorld {
 
     /// Coupled mode: impact islands on (the default) or off (the engine drives every
     /// body and its contacts reach the stress solve only as loads; `World::impact_islands`).
+    /// A capability profile's solver switches (`stress_ref::capability`): its per-tick
+    /// static solves and whether impact islands run. The scene's switches (`apply_scene`)
+    /// and the resident engine (`with_resident_engine`) are the caller's, before the world
+    /// is built.
+    pub fn apply_profile(&mut self, profile: stress_ref::capability::Profile) {
+        profile.apply_config(&mut self.solver.mirror.config);
+        self.set_impact_islands(profile.impact_islands());
+    }
+
     pub fn set_impact_islands(&mut self, on: bool) {
         self.shell.impact_islands = on;
     }

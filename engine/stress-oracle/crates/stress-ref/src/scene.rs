@@ -406,6 +406,10 @@ pub struct SimDesc {
     /// bound is a stability limit). None: `courant_safety` for both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stress_courant_safety: Option<f64>,
+    /// The static solves' residual tolerance (`SolverConfig::static_tolerance`; None: the
+    /// solver's own). Set by a capability profile (`capability::Profile::BlastParity`: 1e-3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_tolerance: Option<f32>,
     /// Upper bound on the substep (for timestep-convergence studies).
     #[serde(default)]
     pub max_substep: Option<f64>,
@@ -847,6 +851,7 @@ impl Default for SimDesc {
             gravity_prestress: true,
             courant_safety: default_courant(),
             stress_courant_safety: None,
+            static_tolerance: None,
             max_substep: None,
             fracture: true,
             sample_interval: None,

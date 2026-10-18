@@ -49,6 +49,10 @@ const LADDER_FEATURES: [&str; 8] = ["softening", "weibull", "crack_contact", "ra
 
 /// `scene` (already `configure`d) under ladder configuration `config`; whether islands run.
 fn ladder(mut s: Scene, config: &str) -> (Scene, bool) {
+    if let Some(p) = stress_ref::capability::Profile::parse(config) {
+        p.apply_scene(&mut s);
+        return (s, p.impact_islands());
+    }
     if config == "realtime" {
         return (s, true);
     }
@@ -129,6 +133,9 @@ pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
 static AUTHORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static AUTHORED_FATAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PACK_MASSES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `--config PROFILE`: a capability profile (`stress_ref::capability`), set before the
+/// scenes load.
+static PROFILE: std::sync::OnceLock<stress_ref::capability::Profile> = std::sync::OnceLock::new();
 
 /// Any scene packs (`--pack PATH`, repeatable), each intact (idle) and rammed, as `packs`.
 pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scene)> {
@@ -137,6 +144,7 @@ pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scen
         let name = path.file_stem().expect("pack file name").to_string_lossy().to_string();
         let name = name.as_str();
         let options = stress_ref::scene_pack::ImportOptions { authored_strengths: AUTHORED.load(std::sync::atomic::Ordering::Relaxed), authored_fatal: AUTHORED_FATAL.load(std::sync::atomic::Ordering::Relaxed), pack_masses: PACK_MASSES.load(std::sync::atomic::Ordering::Relaxed), pack_modulus: PACK_MASSES.load(std::sync::atomic::Ordering::Relaxed) };
+        let options = PROFILE.get().map_or(options, |p| p.import_options());
         let scene = stress_ref::scene_pack::import_with(path, name, "structure", options).unwrap_or_else(|e| panic!("{name} pack: {e}"));
         let mut idle = configure(scene.clone(), seconds);
         idle.name = format!("{name}_idle");
@@ -368,7 +376,8 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     };
     // STRESS_RESIDENT=1: the resident quasi-static frame (engine and stress loads on the
     // GPU without read-backs; one device).
-    let mut w = if std::env::var("STRESS_RESIDENT").is_ok_and(|v| v == "1") && !two_devices {
+    let profile = PROFILE.get().copied();
+    let mut w = if (std::env::var("STRESS_RESIDENT").is_ok_and(|v| v == "1") || profile.is_some_and(|p| p.resident())) && !two_devices {
         drop(engine);
         let e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine");
         stress_gpu::world::GpuWorld::with_resident_engine(gpu, scene, e).expect("GPU coupled world")
@@ -383,6 +392,9 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         w.own_dashpot_step = false;
     }
     w.set_impact_islands(islands);
+    if let Some(p) = profile {
+        w.apply_profile(p);
+    }
     // STRESS_BENCH_STRICT_STEP=s: strict mode, fail when a structure's certified step is below s.
     if let Some(min) = std::env::var("STRESS_BENCH_STRICT_STEP").ok().and_then(|v| v.parse().ok()) {
         if let Err(e) = w.set_min_stress_step(min) {
@@ -553,6 +565,9 @@ fn main() {
             "--repeats" => repeats = args.next().and_then(|v| v.parse().ok()).expect("--repeats N"),
             other => panic!("unknown argument {other}"),
         }
+    }
+    if let Some(p) = stress_ref::capability::Profile::parse(&config) {
+        let _ = PROFILE.set(p);
     }
     #[cfg(feature = "gpu")]
     let gpu = (solver != "oracle").then(|| stress_gpu::gpu::Gpu::new().expect("GPU"));

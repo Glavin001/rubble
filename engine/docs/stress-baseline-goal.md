@@ -187,4 +187,5 @@ each when it keeps the profile's targets. They stay on the same resident, forwar
 
 | Date | Milestone | Result |
 |---|---|---|
+| 2026-10-18 | **M0 done** | **`stress_ref::capability::Profile::BlastParity`** (`crates/stress-ref/src/capability.rs`). Applied through `stress_bench --config blast_parity`, `GpuWorld::apply_profile`, and the scene's `sim.static_tolerance` (new; it reaches the setup solves). Bit-identical to the old flags (`--config blast --authored-fatal --pack-masses --method blast_model=on` with `STRESS_RESIDENT=1 STRESS_QS_BUDGET=1,16 STRESS_GPU_STATICS_TOL=1e-3 STRESS_QS_UNCONVERGED=commit STRESS_QS_PASSES=2`): Vibe Town idle digest b8d04bba both ways, and the suite scene's 31 settle-frame digests identical. The old flags and environment overrides still work (the environment overrides the profile); nothing removed |
 | 2026-10-18 | baseline before M0 | quick tier: median 16.6–16.8 ms, p95 120–134, worst 222–277; **not deterministic** (2,920 vs 513 bonds broken) |

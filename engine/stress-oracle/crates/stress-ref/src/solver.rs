@@ -88,6 +88,9 @@ pub struct SolverConfig {
     /// passes (Blast evaluates at most twice a tick: the trial and one correction).
     /// `None`: until no damage grows (up to `StaticOptions::max_cascade`).
     pub static_passes: Option<usize>,
+    /// The static solves' residual tolerance (the GPU's; `None`: 1e-5, f32's reach).
+    /// Blast's solver stops at 1e-3 (`capability::Profile::BlastParity`).
+    pub static_tolerance: Option<f32>,
     /// Adaptive mode: relative load change that wakes a settled cluster.
     pub wake_threshold: f64,
     pub features: Features,
@@ -110,6 +113,7 @@ impl SolverConfig {
             static_budget: None,
             static_unconverged: UnconvergedSolve::Restore,
             static_passes: None,
+            static_tolerance: scene.sim.static_tolerance,
             wake_threshold: 0.02,
             features: scene.sim.features,
             methods: scene.sim.methods,

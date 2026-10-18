@@ -1253,7 +1253,7 @@ impl GpuSolver {
                 .or(m.config.static_budget.map(|b| b.0))
                 .unwrap_or(StaticOptions::default().secant_steps(m.config.methods.tangent_statics) as u32),
             statics_cg: m.config.static_budget.map_or(20_000, |b| b.1),
-            statics_tol: std::env::var("STRESS_GPU_STATICS_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-5),
+            statics_tol: std::env::var("STRESS_GPU_STATICS_TOL").ok().and_then(|v| v.parse().ok()).or(m.config.static_tolerance).unwrap_or(1e-5),
             pair_lanes: if gpu.shader_path == crate::gpu::ShaderPath::Wgsl { 1 } else { 32 },
             cplan_base: cplan_base as u32,
             iplan_base: iplan_base as u32,
