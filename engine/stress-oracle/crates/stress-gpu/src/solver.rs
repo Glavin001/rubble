@@ -609,6 +609,8 @@ pub struct GpuSolver {
     /// Indirect dispatch arguments over the live islands (`capacity_dispatch`): groups of
     /// one per island at 0, groups of 64 islands at 16 bytes.
     island_args: Option<wgpu::Buffer>,
+    /// The world's punch this frame (`routing::Punch`): a split pass after the `post` encoder.
+    pub punch_split: bool,
     /// The last split's layout was the GPU's, the cascade's island copy and gate included
     /// (`gpu_split_pass`): the next generation keeps them.
     tables_on_gpu: bool,
@@ -698,6 +700,7 @@ impl GpuSolver {
             cascade_status: None,
             cascade_gate: None,
             island_args: None,
+            punch_split: false,
             tables_on_gpu: false,
             bond_backup: None,
             stopped_at_plan: false,
@@ -2961,7 +2964,7 @@ impl GpuSolver {
         // `STRESS_IMPACT_PUNCH=gpu` the punch, whose split this pass makes).
         if let Some(post) = post {
             post(self, &mut encoder);
-            if crate::routing::punch_gpu() {
+            if self.punch_split {
                 if let Some(p) = &prepared {
                     p.record(&mut encoder);
                 }

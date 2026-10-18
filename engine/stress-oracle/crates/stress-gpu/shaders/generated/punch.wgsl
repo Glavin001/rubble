@@ -11,6 +11,10 @@ struct PunchParams_std140_0
 };
 
 @binding(0) @group(0) var<uniform> params_0 : PunchParams_std140_0;
+@binding(11) @group(0) var<storage, read> route_0 : array<u32>;
+
+@binding(10) @group(0) var<storage, read_write> status_0 : array<u32>;
+
 struct Island_std430_0
 {
     @align(16) range_0 : vec4<u32>,
@@ -44,8 +48,6 @@ struct Island_std430_0
 };
 
 @binding(1) @group(0) var<storage, read> islands_0 : array<Island_std430_0>;
-
-@binding(10) @group(0) var<storage, read_write> status_0 : array<u32>;
 
 @binding(4) @group(0) var<storage, read> ctab_0 : array<vec4<f32>>;
 
@@ -331,6 +333,14 @@ fn punch_islands(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     var t_1 : u32 = thread_0.x;
     if(i_0 >= (params_0.island_count_0))
     {
+        return;
+    }
+    if(route_0[i32(0)] == u32(0))
+    {
+        if(t_1 == u32(0))
+        {
+            status_0[u32(16) + i_0] = (status_0[u32(16) + i_0] & (u32(4294967287)));
+        }
         return;
     }
     var _S7 : u32 = islands_0[i_0].range_0.x;

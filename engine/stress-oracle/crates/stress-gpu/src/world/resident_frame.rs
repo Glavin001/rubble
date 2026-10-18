@@ -550,13 +550,20 @@ impl GpuWorld {
             let routing = if self.tiered { self.routing.as_ref() } else { None };
             let engine_base = r.qs.layout().engine_base;
             let ctab = r.qs.layout().ctab.clone();
-            let punch = if self.tiered && frame_mode { self.punch.as_ref() } else { None };
+            // The punch and its split pass only when the last frame's check (two frames
+            // ahead in punch mode) saw an impactor near an island: otherwise neither is
+            // recorded (the split pass's dispatches cost even when they exit early).
+            let punch = if self.tiered && frame_mode && self.route_next { self.punch.as_ref() } else { None };
+            self.solver.punch_split = punch.is_some();
             let route_post = |s: &crate::solver::GpuSolver, enc: &mut wgpu::CommandEncoder| {
                 if let Some(rt) = routing {
                     let e = engine.borrow();
-                    rt.encode(gpu, enc, &s.routing_inputs(), &ctab, engine_base, e.engine_buffers().bodies, fdt, stress_ref::world::tiered_impact_speed());
+                    // Punch mode: the check two frames ahead (this frame's punch needs last
+                    // frame's flag to be recorded).
+                    let horizon = if crate::routing::punch_gpu() { 2.0 * fdt } else { fdt };
+                    rt.encode(gpu, enc, &s.routing_inputs(), &ctab, engine_base, e.engine_buffers().bodies, horizon, stress_ref::world::tiered_impact_speed());
                     if let Some(p) = punch {
-                        p.encode(gpu, enc, &s.routing_inputs(), &ctab, engine_base, e.engine_buffers().bodies, fdt, stress_ref::world::tiered_impact_speed());
+                        p.encode(gpu, enc, &s.routing_inputs(), &ctab, engine_base, e.engine_buffers().bodies, fdt, stress_ref::world::tiered_impact_speed(), rt);
                     }
                 }
             };

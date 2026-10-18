@@ -49,7 +49,7 @@ pub struct RouteInputs<'a> {
 
 pub struct Routing {
     kernel: Kernel,
-    route: wgpu::Buffer,
+    pub(crate) route: wgpu::Buffer,
     impactors: wgpu::Buffer,
     /// Per impactor: its engine body and bounding radius, as uploaded.
     list: Vec<(u32, f32)>,
@@ -139,7 +139,7 @@ struct PunchParams {
     pad2: f32,
 }
 
-const PUNCH_BINDINGS: [Binding; 11] = [
+const PUNCH_BINDINGS: [Binding; 12] = [
     Binding::Uniform,   // params
     Binding::Storage,   // islands
     Binding::Storage,   // chunk statics
@@ -151,6 +151,7 @@ const PUNCH_BINDINGS: [Binding; 11] = [
     Binding::StorageRw, // bond records
     Binding::Uniform,   // materials
     Binding::StorageRw, // cascade status
+    Binding::Storage,   // the routing check's flag
 ];
 
 pub struct Punch {
@@ -176,7 +177,7 @@ impl Punch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, inputs: &RouteInputs, ctab: &wgpu::Buffer, engine_base: u32, bodies: &wgpu::Buffer, dt: f64, speed: f64) {
+    pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, inputs: &RouteInputs, ctab: &wgpu::Buffer, engine_base: u32, bodies: &wgpu::Buffer, dt: f64, speed: f64, route: &Routing) {
         let Some(status) = inputs.status else { return };
         if self.list.is_empty() {
             return;
@@ -185,7 +186,7 @@ impl Punch {
             "punch params",
             &PunchParams { island_count: inputs.island_count, impactor_count: self.list.len() as u32, engine_base, pad0: 0, dt: dt as f32, speed: speed as f32, pad1: 0.0, pad2: 0.0 },
         );
-        let group = gpu.bind(&self.kernel.group, &[&params, inputs.islands, inputs.chunks, inputs.state, ctab, bodies, &self.impactors, inputs.bonds, inputs.bond_dyn, inputs.materials, status]);
+        let group = gpu.bind(&self.kernel.group, &[&params, inputs.islands, inputs.chunks, inputs.state, ctab, bodies, &self.impactors, inputs.bonds, inputs.bond_dyn, inputs.materials, status, &route.route]);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.kernel.pipeline);
         pass.set_bind_group(0, &group, &[]);

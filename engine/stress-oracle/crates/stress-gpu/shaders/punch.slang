@@ -62,6 +62,9 @@ struct MaterialTable
 [[vk::binding(9, 0)]] ConstantBuffer<MaterialTable> materials;
 // cascade.slang status: [1] the pass that disconnected (0: none), [16 + i] island i's bits.
 [[vk::binding(10, 0)]] RWStructuredBuffer<uint> status;
+// routing.slang's flag of this frame: [0] 1 when an impactor may reach an island (a
+// superset of a punch's conditions); 0: no island to look at.
+[[vk::binding(11, 0)]] StructuredBuffer<uint> route;
 
 static const uint NONE = 0xffffffffu;
 static const uint ST_DISCONNECTED = 1;
@@ -92,6 +95,14 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     uint t = thread.x;
     if (i >= params.island_count)
         return;
+    // No impactor near anything this frame (the routing check, just before): no punch; an
+    // earlier pass's split bits are left to the split pass (its parents are laid out).
+    if (route[0] == 0)
+    {
+        if (t == 0)
+            status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;
+        return;
+    }
     Island isl = islands[i];
     uint n = isl.range.y - isl.range.x;
     // No bonds (blank records too), or more chunks than the group's labels hold: nothing
