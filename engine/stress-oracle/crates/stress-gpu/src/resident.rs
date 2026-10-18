@@ -302,7 +302,9 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     fn resident_substeps(&mut self, dt: f64) -> u32;
     /// One frame of `dt` in `n` substeps (nothing frozen, no impulses), each substep's
     /// contact rows into `ingest`, then merged; no read-back.
-    fn step_resident(&mut self, gpu: &Gpu, dt: f64, n: u32, ingest: &EngineIngest) -> Result<(), String>;
+    /// Encoded into the frame's `encoder` (the frame submits once); an engine whose steps
+    /// write host state between substeps submits between them.
+    fn step_resident(&mut self, gpu: &Gpu, dt: f64, n: u32, ingest: &EngineIngest, encoder: &mut wgpu::CommandEncoder) -> Result<(), String>;
     /// The engine's status for the frame's one read: its step counters first, then
     /// anything the next frame needs from the device (the CCD bodies' state), so that
     /// costs no read of its own.

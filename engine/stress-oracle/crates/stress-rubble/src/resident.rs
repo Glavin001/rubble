@@ -100,42 +100,36 @@ impl ResidentEngine for RubbleEngine {
         n
     }
 
-    fn step_resident(&mut self, gpu: &Gpu, dt: f64, n: u32, ingest: &EngineIngest) -> Result<(), String> {
+    fn step_resident(&mut self, gpu: &Gpu, dt: f64, n: u32, ingest: &EngineIngest, encoder: &mut wgpu::CommandEncoder) -> Result<(), String> {
         if !self.frozen.is_empty() {
             return Err("resident frame: the engine holds frozen bodies".into());
         }
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        ingest.begin_frame(&mut encoder, &self.engine_buffers());
-        gpu.queue.submit([encoder.finish()]);
+        // `STRESS_FRAME_SUBMITS=many`: each part its own submission, as before (comparison).
+        let many = std::env::var("STRESS_FRAME_SUBMITS").is_ok_and(|v| v == "many");
+        if many {
+            return self.step_resident_submitting(gpu, dt, n, ingest);
+        }
+        ingest.begin_frame(encoder, &self.engine_buffers());
         if n > 0 {
             let h = dt / n as f64;
             let mut params = self.sim.params();
             params.dt = h as f32;
             params.contact_offset = self.resident_offset;
             self.sim.set_params(params);
-            let phases = std::env::var("STRESS_RESIDENT_PHASES").is_ok();
             for s in 0..n {
-                let t = std::time::Instant::now();
-                self.sim.step_submit().map_err(|e| format!("rubble step failed: {e:?}"))?;
-                if phases {
-                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-                    eprintln!("resident phases: rubble substep {s}: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+                // rubble writes its host uniforms per step (they land at the submission):
+                // a second substep's go after a submission of what came before.
+                if s > 0 {
+                    let done = std::mem::replace(encoder, gpu.device.create_command_encoder(&Default::default()));
+                    gpu.queue.submit([done.finish()]);
                 }
-                let mut encoder = gpu.device.create_command_encoder(&Default::default());
-                ingest.substep(gpu, &mut encoder, &self.engine_buffers(), self.sim.last_contact_offset(), s, h);
-                let t_ingest = std::time::Instant::now();
-                gpu.queue.submit([encoder.finish()]);
-                if std::env::var("RUBBLE_HOST_TIMING").is_ok() {
-                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-                    eprintln!("ingest substep {s}: {:.2} ms", t_ingest.elapsed().as_secs_f64() * 1e3);
-                }
+                self.sim.step_encode(encoder).map_err(|e| format!("rubble step failed: {e:?}"))?;
+                ingest.substep(gpu, encoder, &self.engine_buffers(), self.sim.last_contact_offset(), s, h);
             }
             self.bodies_changed();
         }
         self.last_substeps = n;
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        ingest.merge(gpu, &mut encoder, &self.engine_buffers(), n);
-        gpu.queue.submit([encoder.finish()]);
+        ingest.merge(gpu, encoder, &self.engine_buffers(), n);
         Ok(())
     }
 
@@ -309,5 +303,44 @@ impl RubbleEngine {
     /// Whether the frame's substep count reads CCD bodies' speeds (`resident_substeps`).
     fn needs_ccd_bodies(&self) -> bool {
         !self.speculative_ccd && self.bodies.iter().any(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k))
+    }
+}
+
+impl RubbleEngine {
+    /// `step_resident` with each part its own submission (`STRESS_FRAME_SUBMITS=many`).
+    fn step_resident_submitting(&mut self, gpu: &Gpu, dt: f64, n: u32, ingest: &EngineIngest) -> Result<(), String> {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        ingest.begin_frame(&mut encoder, &self.engine_buffers());
+        gpu.queue.submit([encoder.finish()]);
+        if n > 0 {
+            let h = dt / n as f64;
+            let mut params = self.sim.params();
+            params.dt = h as f32;
+            params.contact_offset = self.resident_offset;
+            self.sim.set_params(params);
+            let phases = std::env::var("STRESS_RESIDENT_PHASES").is_ok();
+            for s in 0..n {
+                let t = std::time::Instant::now();
+                self.sim.step_submit().map_err(|e| format!("rubble step failed: {e:?}"))?;
+                if phases {
+                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                    eprintln!("resident phases: rubble substep {s}: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+                }
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                ingest.substep(gpu, &mut encoder, &self.engine_buffers(), self.sim.last_contact_offset(), s, h);
+                let t_ingest = std::time::Instant::now();
+                gpu.queue.submit([encoder.finish()]);
+                if std::env::var("RUBBLE_HOST_TIMING").is_ok() {
+                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                    eprintln!("ingest substep {s}: {:.2} ms", t_ingest.elapsed().as_secs_f64() * 1e3);
+                }
+            }
+            self.bodies_changed();
+        }
+        self.last_substeps = n;
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        ingest.merge(gpu, &mut encoder, &self.engine_buffers(), n);
+        gpu.queue.submit([encoder.finish()]);
+        Ok(())
     }
 }

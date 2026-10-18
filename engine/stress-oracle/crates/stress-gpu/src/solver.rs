@@ -611,6 +611,9 @@ pub struct GpuSolver {
     island_args: Option<wgpu::Buffer>,
     /// The world's punch this frame (`routing::Punch`): a split pass after the `post` encoder.
     pub punch_split: bool,
+    /// The frame's command encoder with the engine's work already in it (plan 5d): the next
+    /// `resident_cascade_with` encodes after it and submits the frame once.
+    pub frame_encoder: Option<wgpu::CommandEncoder>,
     /// The last split's layout was the GPU's, the cascade's island copy and gate included
     /// (`gpu_split_pass`): the next generation keeps them.
     tables_on_gpu: bool,
@@ -701,6 +704,7 @@ impl GpuSolver {
             cascade_gate: None,
             island_args: None,
             punch_split: false,
+            frame_encoder: None,
             tables_on_gpu: false,
             bond_backup: None,
             stopped_at_plan: false,
@@ -2850,7 +2854,8 @@ impl GpuSolver {
         // `STRESS_GPU_TIMING=1`: the solves' and commits' GPU times (a diagnostic read).
         let timing = (std::env::var("STRESS_GPU_TIMING").is_ok_and(|v| v == "1") && gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY))
             .then(|| gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("cascade timestamps"), ty: wgpu::QueryType::Timestamp, count: 4 * passes as u32 }));
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        // After the frame's engine work when it is in the frame's encoder (plan 5d).
+        let mut encoder = self.frame_encoder.take().unwrap_or_else(|| gpu.device.create_command_encoder(&Default::default()));
         // The frame's split pass, made once for every cascade pass (`splits`).
         let prepared = match (splits, self.gpu_pass.as_ref()) {
             (Some(f), Some(gp)) => {

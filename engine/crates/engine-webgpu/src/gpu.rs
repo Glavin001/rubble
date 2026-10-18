@@ -1297,11 +1297,24 @@ impl WgpuSim {
             eprintln!("rubble step GPU ms: {}", parts.join(", "));
             return self.finish_step(read, wall);
         }
+        self.encode_dispatches(&mut enc, &cmds);
+        let t_enc = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
+        self.queue.submit([enc.finish()]);
+        if let (Some(t), Some(e)) = (host_t, t_enc) {
+            let submitted = t.elapsed().as_secs_f64() * 1e3;
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            eprintln!("rubble host: encoded {e:.2} ms, submitted {submitted:.2} ms, done {:.2} ms ({} commands)", t.elapsed().as_secs_f64() * 1e3, cmds.len());
+        }
+        self.finish_step(read, wall)
+    }
+
+    /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
+    fn encode_dispatches(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
         });
-        for c in &cmds {
+        for c in cmds {
             match *c {
                 rigid_plan::Cmd::Copy { .. } | rigid_plan::Cmd::Phase { .. } => {}
                 rigid_plan::Cmd::Dispatch { kernel, threads, pass: p } => {
@@ -1316,15 +1329,43 @@ impl WgpuSim {
                 }
             }
         }
-        drop(pass);
-        let t_enc = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
-        self.queue.submit([enc.finish()]);
-        if let (Some(t), Some(e)) = (host_t, t_enc) {
-            let submitted = t.elapsed().as_secs_f64() * 1e3;
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-            eprintln!("rubble host: encoded {e:.2} ms, submitted {submitted:.2} ms, done {:.2} ms ({} commands)", t.elapsed().as_secs_f64() * 1e3, cmds.len());
+    }
+
+    /// `step_submit` encoded into the caller's `enc` instead of a submission of its own:
+    /// a host that runs other work in the same frame (the stress stage) submits the frame
+    /// once. The step's host writes (its uniforms) take effect at that submission, before
+    /// its commands, as they would at its own.
+    pub fn step_encode(&mut self, enc: &mut wgpu::CommandEncoder) -> Result<(), ExecError> {
+        let wall = std::time::Instant::now();
+        let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
+        if self.steps_done > 0
+            && self.counted_steps == self.steps_done
+            && self.last_counters.awake_count == 0
+            && self.command_count == 0
+            && self.body_count > 0
+            && !self.wake_pending
+            && !vehicles_dirty
+        {
+            self.steps_done += 1;
+            self.counted_steps = self.steps_done;
+            self.last_timings.total_gpu = 0.0;
+            return Ok(());
         }
-        self.finish_step(read, wall)
+        self.refresh_cell();
+        self.write_host_uniforms_ex(true);
+        self.wake_pending = false;
+        self.last_contact_offset = if self.contacts_parity == 0 { 0 } else { self.capacity.max_contacts };
+        let modes = self.step_modes();
+        let inputs = self.step_inputs();
+        let cmds = rigid_plan::encode_step(&modes, &inputs, false, true);
+        for c in &cmds {
+            if let rigid_plan::Cmd::Copy { src, src_offset, dst, dst_offset, size } = *c {
+                let from = if src == rigid_plan::COUNTER_UPLOAD { &self.counter_upload } else { &self.bufs[src as usize] };
+                enc.copy_buffer_to_buffer(from, u64::from(src_offset), &self.bufs[dst as usize], u64::from(dst_offset), u64::from(size));
+            }
+        }
+        self.encode_dispatches(enc, &cmds);
+        self.finish_step(false, wall).map(|_| ())
     }
 
     /// The step's host bookkeeping after its submission (and its counters, `read`).

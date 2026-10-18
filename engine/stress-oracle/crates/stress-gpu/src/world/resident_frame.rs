@@ -425,7 +425,17 @@ impl GpuWorld {
         let t_engine = std::time::Instant::now();
         {
             let r = self.resident.as_ref().expect("resident tables");
-            engine.borrow_mut().step_resident(gpu, fdt, n, &r.ingest)?;
+            // The frame's one command buffer (plan 5d): the engine's substeps and their
+            // ingest, then the cascade (`GpuSolver::frame_encoder`), submitted once before
+            // the frame's one read. `STRESS_FRAME_SUBMITS=many`: each part on its own (the
+            // diagnostics that read between them need it).
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            engine.borrow_mut().step_resident(gpu, fdt, n, &r.ingest, &mut enc)?;
+            if std::env::var("STRESS_FRAME_SUBMITS").is_ok_and(|v| v == "many") {
+                gpu.queue.submit([enc.finish()]);
+            } else {
+                self.solver.frame_encoder = Some(enc);
+            }
         }
         // The last frame's GPU splits, followed by the host while the engine's substeps run.
         let t_flush = std::time::Instant::now();
