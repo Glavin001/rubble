@@ -2100,6 +2100,12 @@ float speculativeMargin()
 // is never scaled down by α (contactC0NReg).
 static const uint FLAG_SPEC_VELOCITY = 16384u;
 static const float SPEC_REACH_MAX = 0.5;
+// The cap a host sets (HOST_S(31), float bits; 0: SPEC_REACH_MAX).
+float specReachMax()
+{
+    uint v = HOST_S(31);
+    return v != 0u ? asfloat(v) : SPEC_REACH_MAX;
+}
 bool contactGapMode() { return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u; }
 
 // How far any point of collider `c` on body `b` moves this step:
@@ -2116,7 +2122,7 @@ float colliderReach(BodyState b, Collider c)
     float linear = length(b.linearVel) * h;
     float motion = linear + length(b.angularVel) * colliderExtent(c) * h;
     if (motion <= PARAMS.contactOffset) return 0.0;
-    return min(motion + abs(PARAMS.gravityY) * h * h, SPEC_REACH_MAX);
+    return min(motion + abs(PARAMS.gravityY) * h * h, specReachMax());
 }
 // Reach of a hull or box collider, cached with its world OBB by build_aabbs.
 // Bounds and early-outs use these per-collider reaches (a conservative sweep).
@@ -2138,7 +2144,7 @@ float pairReach(BodyState ba, Collider ca, BodyState bb, Collider cb)
     float h = PARAMS.dt;
     float motion = (length(vB - vA) + spin) * h;
     if (motion <= PARAMS.contactOffset) return 0.0;
-    return min(motion + abs(PARAMS.gravityY) * h * h, 2.0 * SPEC_REACH_MAX);
+    return min(motion + abs(PARAMS.gravityY) * h * h, 2.0 * specReachMax());
 }
 // Gap under which a pair keeps (speculative) contacts.
 float pairMargin(BodyState ba, Collider ca, BodyState bb, Collider cb)
@@ -4224,9 +4230,10 @@ void prefix_color_tiles(uint3 tid : SV_DispatchThreadID)
     for (uint group = 0u; group < groups; group++)
     {
         uint index = color * groups + group;
-        uint count = gColorOffsets[index];
+        // Read before the store (see prefix_color_tiles_parallel).
+        uint next = sum + gColorOffsets[index];
         gColorOffsets[index] = sum;
-        sum += count;
+        sum = next;
     }
     ASTORE(gColorCounts[color], sum);
 }
@@ -4263,9 +4270,11 @@ void prefix_color_tiles_parallel(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
     for (uint group = start; group < end; group++)
     {
         uint index = color * groups + group;
-        uint count = gColorOffsets[index];
+        // Use the count before overwriting it: Slang's CUDA output otherwise
+        // keeps `count` as a pointer and reads it back after the store.
+        uint next = prefix + gColorOffsets[index];
         gColorOffsets[index] = prefix;
-        prefix += count;
+        prefix = next;
     }
     if (local == 63u) ASTORE(gColorCounts[color], gsPackBlockSums[63]);
 }

@@ -257,13 +257,37 @@ impl Structure {
         }
 
         let mut bonds = Vec::with_capacity(body.bonds.len());
+        // `blast_model`: the structure's mean offset from a chunk centre to a bond
+        // centroid (Blast's one rotational length).
+        let blast_length = methods.blast_model.then(|| {
+            let (mut sum, mut n) = (0.0, 0usize);
+            for desc in &body.bonds {
+                let g = BondGeometry::from_desc(desc, &body.chunks);
+                sum += (g.centroid - chunks[desc.a].center).norm() + (g.centroid - chunks[desc.b].center).norm();
+                n += 2;
+            }
+            if n > 0 { sum / n as f64 } else { 1.0 }
+        });
         for (bi, desc) in body.bonds.iter().enumerate() {
             let m: &Material = scene.material(&desc.material);
-            let geometry = BondGeometry::from_desc(desc, &body.chunks);
+            let mut geometry = BondGeometry::from_desc(desc, &body.chunks);
+            if blast_length.is_some() {
+                // Blast's capped section gains (`bendGainMax` 3) as section moduli.
+                let a = geometry.area.max(1e-12);
+                geometry.s_t1 = a / (6.0 / a.sqrt()).min(3.0);
+                geometry.s_t2 = geometry.s_t1;
+                geometry.torsion_modulus = a / (4.81 / a.sqrt()).min(3.0);
+            }
             let rebar_spec = desc.rebar.as_ref().map(|r| (r.area, scene.material(&r.material).clone()));
             let mred = reduced_mass(&chunks[desc.a], &chunks[desc.b]);
-            let (stiffness, strength, rebar, damping) =
+            let (mut stiffness, strength, rebar, mut damping) =
                 bond_physics(&geometry, m, desc.buckling_length, rebar_spec.as_ref(), scale, mred, &features, &methods);
+            if let Some(l) = blast_length {
+                let k = m.youngs_modulus * scale * geometry.area.max(1e-4) / (chunks[desc.b].center - chunks[desc.a].center).norm().max(0.05);
+                let beta = if stiffness.kn > 0.0 { damping.lin.z / stiffness.kn } else { 0.0 };
+                stiffness = BondStiffness { kn: k, ks: k, kb_t1: k * l * l, kb_t2: k * l * l, kt: k * l * l };
+                damping = stiffness.as_local().scale(beta);
+            }
             let weibull = if features.weibull { bond_strength_factor(m.weibull_modulus, scene.sim.seed, index, bi) } else { 1.0 };
             let face_a = face_index(&chunks[desc.a].faces, geometry.normal);
             let face_b = face_index(&chunks[desc.b].faces, -geometry.normal);

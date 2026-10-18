@@ -8,6 +8,20 @@ public static const uint SUPPORT_FIXED = 1;
 public static const uint SUPPORT_PINNED = 2;
 
 public static const uint ISLAND_ANCHORED = 1;
+// A split pass's control words (`control`, uint): what it splits and with what, as the
+// GPU (or, for now, the host) set them before it, and what it leaves.
+public static const uint CTL_ABORT = 0;          // 1: the split does not fit, nothing made
+public static const uint CTL_PARENTS = 1;        // parents split
+public static const uint CTL_ISLANDS = 2;        // live islands before
+public static const uint CTL_NEXT_ID = 3;        // the next cluster id before
+public static const uint CTL_FIRST_BODY = 4;     // the engine's bodies before
+public static const uint CTL_FIRST_COLLIDER = 5; // the engine's colliders before
+public static const uint CTL_TOTAL = 6;          // child slots (the parents' chunks)
+public static const uint CTL_NEW_ISLANDS = 7;    // live islands after
+public static const uint CTL_BODIES_AFTER = 8;
+public static const uint CTL_COLLIDERS_AFTER = 9;
+public static const uint CTL_NEXT_ID_AFTER = 10;
+public static const uint CTL_WORDS = 16;
 public static const uint ISLAND_DRIVEN = 2;
 // Island status bits.
 public static const uint ISLAND_HALTED = 1;
@@ -308,4 +322,19 @@ public void comp_add1(inout float sum, inout float err, float x)
     else
         err += (x - t) + sum;
     sum = t;
+}
+
+// A group barrier over device and threadgroup memory (`AllMemoryBarrierWithGroupSync`
+// without its texture and imageblock fences, which Metal otherwise adds and these kernels
+// never need: the same ordering of every buffer they use, at about half the cost of the
+// static solve's barriers).
+public void device_group_barrier()
+{
+    __target_switch
+    {
+    case metal:
+        __intrinsic_asm "threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup)";
+    default:
+        AllMemoryBarrierWithGroupSync();
+    }
 }

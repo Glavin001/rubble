@@ -20,12 +20,13 @@
 //!
 //!   cargo run --release -p stress-rubble --features gpu --example stress_bench -- \
 //!       [--solver oracle|rubble-gpu] [--only REGIME] [--seconds 0.25] [--repeats 1]
+//!       [--pack PATH ...]   (any scene packs, idle and rammed, as the packs set)
 
 use std::time::Instant;
 
 use stress_ref::scene::{Scene, SolveMode};
 
-use stress_rubble::scenes::{house, realtime as configure, wall_ram};
+use stress_rubble::scenes::{house, later, realtime as configure, wall_ram, wall_ram_late, wall_row_late};
 
 /// The fidelity ladder (`--config`): from the Blast-equivalent configuration to the full
 /// real-time one, one switch per rung (each rung keeps every switch of the rungs before).
@@ -39,12 +40,31 @@ use stress_rubble::scenes::{house, realtime as configure, wall_ram};
 ///   softening, weibull, crack_contact, rate_effects, static_fatigue, buckling, rebar,
 ///   damping       + that model feature, in this order
 ///   realtime      the full real-time configuration (= damping, every feature on)
+///   qs            realtime's features, quasi-static everywhere, impacts included
+///                 (no islands), budgeted static solves (`STRESS_QS_BUDGET`)
+///   tiered        realtime's features, quasi-static outside impact islands (the
+///                 tiered coupling, `GpuWorld::set_tiered`)
 pub const LADDER: [&str; 12] = ["blast", "adaptive", "islands", "softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping", "realtime"];
 const LADDER_FEATURES: [&str; 8] = ["softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping"];
 
 /// `scene` (already `configure`d) under ladder configuration `config`; whether islands run.
 fn ladder(mut s: Scene, config: &str) -> (Scene, bool) {
+    if let Some(p) = stress_ref::capability::Profile::parse(config) {
+        p.apply_scene(&mut s);
+        return (s, p.impact_islands());
+    }
     if config == "realtime" {
+        return (s, true);
+    }
+    if config == "qs" {
+        // Quasi-static impacts: realtime's features, every body the engine's, the frame's
+        // static solve for every structure (Blast's model; STRESS_QS_BUDGET=newton,cg).
+        s.sim.solve_mode = SolveMode::QuasiStatic;
+        return (s, false);
+    }
+    if config == "tiered" {
+        // The tiered coupling: impact islands explicit, everything else quasi-static.
+        s.sim.solve_mode = SolveMode::QuasiStatic;
         return (s, true);
     }
     let rung = LADDER.iter().position(|&c| c == config).unwrap_or_else(|| panic!("unknown --config {config} (known: {})", LADDER.join(", ")));
@@ -104,20 +124,182 @@ fn surface_lo_x(scene: &Scene) -> f64 {
 /// 400 kg box at 12 m/s into the middle of the -x face, its front 0.2 m from the surface
 /// (`blast_ladder_bench bench PACK ram` fires its ball from the same surface).
 pub fn packs(seconds: f64) -> Vec<(String, Scene)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+    let paths: Vec<_> = ["house-1story", "house-2story", "villa-savoye", "brick-building", "rig-portal", "rig-toppled", "comp-wall-bay"].iter().map(|n| dir.join(format!("{n}.json"))).collect();
+    packs_at(&paths, seconds)
+}
+
+/// `--authored`: packs import with their own (game) bond strengths.
+static AUTHORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AUTHORED_FATAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PACK_MASSES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `--config PROFILE`: a capability profile (`stress_ref::capability`), set before the
+/// scenes load.
+static PROFILE: std::sync::OnceLock<stress_ref::capability::Profile> = std::sync::OnceLock::new();
+
+/// Any scene packs (`--pack PATH`, repeatable), each intact (idle) and rammed, as `packs`.
+pub fn packs_at(paths: &[std::path::PathBuf], seconds: f64) -> Vec<(String, Scene)> {
     let mut out = Vec::new();
-    for name in ["house-1story", "house-2story", "villa-savoye", "brick-building", "rig-portal", "rig-toppled", "comp-wall-bay"] {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../packs/{name}.json"));
-        let scene = stress_ref::scene_pack::import(&path, name, "structure").unwrap_or_else(|e| panic!("{name} pack: {e}"));
+    for path in paths {
+        let name = path.file_stem().expect("pack file name").to_string_lossy().to_string();
+        let name = name.as_str();
+        let options = stress_ref::scene_pack::ImportOptions { authored_strengths: AUTHORED.load(std::sync::atomic::Ordering::Relaxed), authored_fatal: AUTHORED_FATAL.load(std::sync::atomic::Ordering::Relaxed), pack_masses: PACK_MASSES.load(std::sync::atomic::Ordering::Relaxed), pack_modulus: PACK_MASSES.load(std::sync::atomic::Ordering::Relaxed) };
+        let options = PROFILE.get().map_or(options, |p| p.import_options());
+        let scene = stress_ref::scene_pack::import_with(path, name, "structure", options).unwrap_or_else(|e| panic!("{name} pack: {e}"));
         let mut idle = configure(scene.clone(), seconds);
         idle.name = format!("{name}_idle");
         let (mut lo, hi) = stress_ref::scenes::bounds(&scene);
         lo.x = surface_lo_x(&scene);
-        let mut ram = configure(stress_ref::scenes::ram_at(scene, "ram", lo, hi), seconds);
+        let mut ram = configure(stress_ref::scenes::ram_at(scene.clone(), "ram", lo, hi), seconds);
         ram.name = format!("{name}_ram");
+        let mut bombard = idle.clone();
+        bombard.name = format!("{name}_bombard");
         out.push((idle.name.clone(), idle));
         out.push((ram.name.clone(), ram));
+        out.push((bombard.name.clone(), bombard));
+        // vibe-land's perf-suite town bombard, exactly (`suite_shots`), when the pack has
+        // its city layout beside it (`<pack>.meta.json`): 30 settle frames, then the
+        // standard tier's 90 frames or the quick tier's 60 (its first two events).
+        let meta = path.with_extension("meta.json");
+        if let Ok(text) = std::fs::read_to_string(&meta) {
+            let meta: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", meta.display()));
+            for (tier, frames, events) in [("suite_bombard", 90, 5), ("suite_quick", 60, 2)] {
+                let mut s = configure(scene.clone(), (SUITE_SETTLE + frames) as f64 / 60.0);
+                s.name = format!("{name}_{tier}");
+                let shots = suite_shots(&meta, &SUITE_BOMBARD[..events], -s.gravity[2]);
+                SUITE_SHOTS.lock().unwrap().insert(s.name.clone(), shots);
+                out.push((s.name.clone(), s));
+            }
+            // A barrage (a demonstration, not vibe-land's suite): 36 of the suite's shots, one
+            // every 15 frames (0.25 s), cannonballs and meteors in turn, spread over every
+            // building the layout names, for 10 s after the settle.
+            let buildings: Vec<String> = meta["places"].as_array().expect("meta places").iter().filter(|p| p["pavement"].is_array() && p["min"].is_array() && p["max"].is_array()).filter_map(|p| p["id"].as_str()).filter(|id| !id.starts_with("car-")).map(String::from).collect();
+            if !buildings.is_empty() {
+                let count = 36;
+                let events: Vec<(usize, &str, &str, f64)> = (0..count)
+                    .map(|k| {
+                        let place = buildings[(k * buildings.len() / count + (k * 7) % 3) % buildings.len()].as_str();
+                        let meteor = k % 2 == 1;
+                        (15 * k, if meteor { "meteor" } else { "cannonball" }, place, if meteor { 2.0 } else { 1.5 })
+                    })
+                    .collect();
+                let mut s = configure(scene.clone(), (SUITE_SETTLE + 600) as f64 / 60.0);
+                s.name = format!("{name}_barrage");
+                let shots = suite_shots(&meta, &events, -s.gravity[2]);
+                SUITE_SHOTS.lock().unwrap().insert(s.name.clone(), shots);
+                out.push((s.name.clone(), s));
+            }
+        }
     }
     out
+}
+
+/// Frames the town settles before vibe-land's bombard starts (its suite's `settle` phase).
+const SUITE_SETTLE: usize = 30;
+
+/// vibe-land `scripts/perf/suite.json` `town-bombard`: (tick, kind, place, height).
+const SUITE_BOMBARD: [(usize, &str, &str, f64); 5] = [
+    (0, "cannonball", "elm-park/house-16", 1.5),
+    (10, "meteor", "elm-park/house-18", 2.0),
+    (20, "cannonball", "elm-park/house-23", 1.5),
+    (30, "meteor", "market-quarter/cinema-1", 2.0),
+    (40, "cannonball", "elm-park/house-25", 1.5),
+];
+
+/// The suite scenes' shots, by scene name.
+static SUITE_SHOTS: std::sync::Mutex<std::collections::BTreeMap<String, Vec<(usize, stress_ref::scene::ImpactorDesc)>>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The suite's shots as vibe-land fires them (`scripts/perf/suite.py` `shot_from_place`,
+/// `server/src/perf_suite.rs` `Rig::fire`), in the pack's Y-up world mapped to the
+/// scene's Z-up one (`scene_pack`: `(x, y, z) -> (x, -z, y)`):
+/// - target: the place's pavement x, `height` up, on its street-side face;
+/// - from the street: 30 m at slope 0.02 (cannonball), 140 m at slope 0.3 (meteor);
+/// - aimed with a gravity lead over the flight time at 60 m/s (cannonball) or 140 m/s;
+/// - cannonball 10,650 kg of 7,850 kg/m^3 steel (`city.rs`); meteor radius 2 m at
+///   3,300 kg/m^3 (`meteor.rs`).
+/// Each fires before its tick, after the settle frames. `(frame, impactor)`.
+fn suite_shots(meta: &serde_json::Value, events: &[(usize, &str, &str, f64)], g: f64) -> Vec<(usize, stress_ref::scene::ImpactorDesc)> {
+    use stress_ref::scene::{ImpactorDesc, ImpactorShape};
+    let v3 = |v: &serde_json::Value| [v[0].as_f64().unwrap(), v[1].as_f64().unwrap(), v[2].as_f64().unwrap()];
+    let zup = |p: [f64; 3]| [p[0], -p[2], p[1]];
+    let places = meta["places"].as_array().expect("meta places");
+    events
+        .iter()
+        .enumerate()
+        .map(|(k, &(tick, kind, place, height))| {
+            let p = places.iter().find(|p| p["id"] == place).unwrap_or_else(|| panic!("no place {place} in the pack's meta"));
+            let (lo, hi, pave) = (v3(&p["min"]), v3(&p["max"]), v3(&p["pavement"]));
+            let from_south = pave[2] < lo[2];
+            let target = [pave[0], height, if from_south { lo[2] } else { hi[2] }];
+            let meteor = kind == "meteor";
+            let (bearing, slope, distance): (f64, f64, f64) = (if from_south { 180f64 } else { 0.0 }.to_radians(), if meteor { 0.3 } else { 0.02 }, if meteor { 140.0 } else { 30.0 });
+            let origin = [target[0] + bearing.sin() * distance, target[1] + slope * distance, target[2] + bearing.cos() * distance];
+            let speed = if meteor { 140.0 } else { 60.0 };
+            let d = [target[0] - origin[0], target[1] - origin[1], target[2] - origin[2]];
+            let tt = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / speed;
+            let velocity = [d[0] / tt, d[1] / tt + 0.5 * g * tt, d[2] / tt];
+            let (radius, mass) = if meteor { (2.0, 3300.0 * 4.0 / 3.0 * std::f64::consts::PI * 8.0) } else { ((10650.0 / 7850.0 * 3.0 / (4.0 * std::f64::consts::PI)).cbrt(), 10650.0) };
+            (
+                SUITE_SETTLE + tick,
+                ImpactorDesc {
+                    name: format!("{kind}{k}"),
+                    shape: ImpactorShape::Sphere { radius },
+                    mass,
+                    position: zup(origin),
+                    orientation: [1.0, 0.0, 0.0, 0.0],
+                    velocity: zup(velocity),
+                    angular_velocity: [0.0; 3],
+                    material: "projectile".into(),
+                    crush: None,
+                },
+            )
+        })
+        .collect()
+}
+
+/// vibe-land's `town-bombard` (scripts/perf/suite.json), as close as a pack allows:
+/// cannonballs (10,650 kg steel, 60 m/s) and meteors (2 m, 3,300 kg/m^3, 140 m/s) into
+/// four houses and the cinema, one every 10 frames, aimed `height` above each building's
+/// base from 20 m off its -x side. The suite's places are its city layout's names; the
+/// pack's buildings (`nodeGroups`) stand in for them. `(frame, impactor)`.
+fn bombard_shots(scene: &Scene) -> Vec<(usize, stress_ref::scene::ImpactorDesc)> {
+    use stress_ref::scene::{ImpactorDesc, ImpactorShape};
+    let plan = [("house@house-14", "cannonball", 1.5), ("house@house-18", "meteor", 2.0), ("house@house-25", "cannonball", 1.5), ("cinema@cinema-150", "meteor", 2.0), ("house@house-32", "cannonball", 1.5)];
+    let mut shots = Vec::new();
+    for (k, (group, kind, height)) in plan.iter().enumerate() {
+        let chunks: Vec<&stress_ref::scene::ChunkDesc> = scene.bodies.iter().flat_map(|b| &b.chunks).filter(|c| c.groups.iter().any(|g| g == group)).collect();
+        if chunks.is_empty() {
+            continue;
+        }
+        let n = chunks.len() as f64;
+        let (cx, cy) = (chunks.iter().map(|c| c.center[0]).sum::<f64>() / n, chunks.iter().map(|c| c.center[1]).sum::<f64>() / n);
+        let base = chunks.iter().map(|c| c.center[2]).fold(f64::INFINITY, f64::min);
+        let lo_x = chunks.iter().map(|c| c.center[0]).fold(f64::INFINITY, f64::min);
+        let target = [lo_x, cy, base + height];
+        let _ = cx;
+        let (speed, radius, mass) = if *kind == "meteor" { (140.0, 2.0, 3300.0 * 4.0 / 3.0 * std::f64::consts::PI * 8.0) } else { (60.0, (10650.0 / 7850.0 * 3.0 / (4.0 * std::f64::consts::PI)).cbrt(), 10650.0) };
+        let origin = [target[0] - 20.0, target[1], target[2] + 6.0];
+        let d = [target[0] - origin[0], target[1] - origin[1], target[2] - origin[2]];
+        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let t = dist / speed;
+        let g = -scene.gravity[2];
+        let velocity = [d[0] / t, d[1] / t, d[2] / t + 0.5 * g * t];
+        shots.push((
+            10 * k,
+            ImpactorDesc {
+                name: format!("{kind}{k}"),
+                shape: ImpactorShape::Sphere { radius },
+                mass,
+                position: origin,
+                orientation: [1.0, 0.0, 0.0, 0.0],
+                velocity,
+                angular_velocity: [0.0; 3],
+                material: "projectile".into(),
+                crush: None,
+            },
+        ));
+    }
+    shots
 }
 
 /// The scale set: 256 copies of house-1story, intact or with four of them rammed (the
@@ -139,11 +321,174 @@ pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
     let mut house_ram = configure(stress_ref::scenes::rammed(house()), seconds);
     house_ram.name = "house_ram".into();
     let b5 = configure(stress_ref::builders::wall_impact(20.0, "b5_v20"), seconds);
-    vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
+    vec![("house_idle", idle), ("wall_ram", configure(wall_ram(), seconds)), ("wall_ram_late", configure(wall_ram_late(), seconds)), ("wall_row2_late", configure(wall_row_late(2), seconds)), ("wall_ram_late2", configure(later(wall_ram_late(), 2), seconds)), ("wall_row2_late2", configure(later(wall_row_late(2), 2), seconds)), ("house_ram", house_ram), ("b5_v20", b5)]
+}
+
+/// `STRESS_BENCH_VIDEO`: the bench run rendered on the GPU and encoded by ffmpeg
+/// (`STRESS_VIDEO_CODEC=videotoolbox`: the hardware encoder), from a copy of the world's
+/// state (`GpuWorld::view_state`, reads), so the run steps as a plain one: its digest is
+/// the plain run's. The reads move host work a plain run defers, so the overlay shows a
+/// plain run's frame times (`STRESS_BENCH_VIDEO_TIMES`: its JSON line). Camera: `STRESS_BENCH_VIDEO_CAMERA=x,y,z,distance,yaw,pitch`
+/// (degrees; default the scene's bounds from the south-east).
+struct BenchVideo {
+    renderer: Option<(stress_rubble::render::Renderer, usize)>,
+    sink: stress_rubble::render::FfmpegSink,
+    cam: stress_rubble::render::CameraPose,
+    times: Vec<f64>,
+    title: String,
+    width: u32,
+    height: u32,
+    clusters0: usize,
+    ids0: std::collections::HashSet<u64>,
+    /// `STRESS_BENCH_VIDEO_FOLLOW`: each shot's first impact, and its last velocity.
+    impacts: Vec<Option<stress_ref::math::Vec3>>,
+    last_v: Vec<Option<stress_ref::math::Vec3>>,
+    last_impact: Option<stress_ref::math::Vec3>,
+}
+
+impl BenchVideo {
+    fn new(gpu: &stress_gpu::gpu::Gpu, w: &stress_gpu::world::GpuWorld, out: &std::path::Path, name: &str) -> BenchVideo {
+        let (width, height) = (1920, 1080);
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        let m = &w.solver.mirror;
+        let (mut lo, mut hi) = (stress_ref::math::Vec3::splat(f64::INFINITY), stress_ref::math::Vec3::splat(f64::NEG_INFINITY));
+        for (s, st) in m.structures.iter().enumerate() {
+            for c in 0..st.chunks.len() {
+                let p = m.chunk_position(s, c);
+                lo = lo.component_min(p);
+                hi = hi.component_max(p);
+            }
+        }
+        let mut cam = stress_rubble::render::CameraPose { target: (lo + hi) * 0.5, distance: 0.9 * (hi - lo).norm(), yaw: (-55f64).to_radians(), pitch: 30f64.to_radians(), fov: 40f64.to_radians() };
+        if let Ok(v) = std::env::var("STRESS_BENCH_VIDEO_CAMERA") {
+            let x: Vec<f64> = v.split(',').map(|t| t.trim().parse().expect("STRESS_BENCH_VIDEO_CAMERA=x,y,z,distance,yaw,pitch")).collect();
+            cam = stress_rubble::render::CameraPose { target: stress_ref::math::Vec3::new(x[0], x[1], x[2]), distance: x[3], yaw: x[4].to_radians(), pitch: x[5].to_radians(), fov: 40f64.to_radians() };
+        }
+        let times = std::env::var("STRESS_BENCH_VIDEO_TIMES")
+            .ok()
+            .map(|p| {
+                let text = std::fs::read_to_string(&p).expect("STRESS_BENCH_VIDEO_TIMES file");
+                let line = text.lines().find(|l| l.starts_with('{')).unwrap_or(&text);
+                let v: serde_json::Value = serde_json::from_str(line).expect("bench JSON");
+                v["frame_ms"].as_array().expect("frame_ms").iter().map(|x| x.as_f64().unwrap()).collect()
+            })
+            .unwrap_or_default();
+        let profile = PROFILE.get().map_or("default".to_string(), |p| p.name().to_string());
+        let title = format!("RUBBLE GPU RIGIDS + GPU STRESS SOLVER ({}), {}, PROFILE {}", gpu.adapter_info.name.to_uppercase(), name.to_uppercase(), profile.to_uppercase());
+        BenchVideo { renderer: None, sink: stress_rubble::render::FfmpegSink::new(out, width, height, 60).expect("ffmpeg"), cam, times, title, width, height, clusters0: w.solver.mirror.clusters.len(), ids0: w.solver.mirror.clusters.iter().map(|c| c.id).collect(), impacts: Vec::new(), last_v: Vec::new(), last_impact: None }
+    }
+
+    fn frame(&mut self, gpu: &stress_gpu::gpu::Gpu, w: &mut stress_gpu::world::GpuWorld, f: usize, n: usize) {
+        use stress_rubble::render::{Overlay, Renderer};
+        let (view, view_imps) = w.view_state(gpu);
+        // The damage the shots do: clusters made after the settle (vibe-land's 30 frames).
+        if f == 29 {
+            self.ids0 = view.clusters.iter().map(|c| c.id).collect();
+        }
+        let imps = view_imps.len();
+        // The renderer's meshes include the impactors: made again when a shot is added.
+        if self.renderer.as_ref().is_none_or(|(_, k)| *k != imps) {
+            let mut r = Renderer::new(gpu, &view, &view_imps, self.width, self.height);
+            r.ground = w.scene.ground.is_some();
+            self.renderer = Some((r, imps));
+        }
+        // `STRESS_BENCH_VIDEO_FOLLOW=1`: the camera follows the action: it eases towards the
+        // newest shot (its position, as it flies in and strikes) at a close distance, slowly
+        // orbiting; before the first shot it holds the overview.
+        if std::env::var("STRESS_BENCH_VIDEO_FOLLOW").is_ok_and(|v| v == "1") {
+            // Each shot's first impact: where its velocity first changes by more than 15 %
+            // between frames (it struck); the camera holds there once a shot struck.
+            self.impacts.resize(view_imps.len(), None);
+            self.last_v.resize(view_imps.len(), None);
+            for (k, imp) in view_imps.iter().enumerate() {
+                if let Some(prev) = self.last_v[k] {
+                    if self.impacts[k].is_none() && (imp.velocity - prev).norm() > 0.15 * prev.norm().max(1.0) {
+                        self.impacts[k] = Some(imp.pose.position);
+                        self.last_impact = Some(imp.pose.position);
+                    }
+                }
+                self.last_v[k] = Some(imp.velocity);
+            }
+            if let Some(newest) = view_imps.last() {
+                let ease = 0.06;
+                // The latest strike anywhere (a shot still in flight is not followed); before
+                // the first one, the newest shot.
+                let p = self.last_impact.unwrap_or(newest.pose.position);
+                let goal = stress_ref::math::Vec3::new(p.x, p.y, p.z.max(2.0));
+                self.cam.target = self.cam.target + (goal - self.cam.target) * ease;
+                self.cam.distance += (35.0 - self.cam.distance) * ease;
+                self.cam.pitch += (25f64.to_radians() - self.cam.pitch) * ease;
+            }
+            self.cam.yaw += 0.25f64.to_radians();
+        }
+        let (r, _) = self.renderer.as_ref().expect("renderer");
+        let mut rgba = r.render(gpu, &view, &view_imps, &self.cam);
+        let m = &view;
+        let broken = m.events.iter().filter(|e| matches!(e, stress_ref::solver::SolverEvent::Broken { .. })).count();
+        let pieces = m.clusters.len().saturating_sub(self.clusters0);
+        // Where pieces broke off (chunks of clusters made after the settle): printed at the
+        // end, to aim a close-up camera.
+        if f + 1 == n {
+            let pts: Vec<stress_ref::math::Vec3> = m.clusters.iter().filter(|cl| !self.ids0.contains(&cl.id)).flat_map(|cl| cl.chunks.iter().map(move |&c| (cl.structure, c))).map(|(s, c)| m.chunk_position(s, c)).collect();
+            if !pts.is_empty() {
+                let c = pts.iter().fold(stress_ref::math::Vec3::ZERO, |a, &p| a + p) * (1.0 / pts.len() as f64);
+                let (lo, hi) = pts.iter().fold((stress_ref::math::Vec3::splat(f64::INFINITY), stress_ref::math::Vec3::splat(f64::NEG_INFINITY)), |(l, h), &p| (l.component_min(p), h.component_max(p)));
+                eprintln!("video: {} chunks broken off, centred at {:?}, bounds {:?} to {:?}", pts.len(), c.to_array(), lo.to_array(), hi.to_array());
+            }
+        }
+        let mut o = Overlay { rgba: &mut rgba, width: self.width, height: self.height };
+        let s = 3;
+        let tick = self.times.get(f).map_or(String::new(), |ms| format!("   TICK {ms:5.1} MS"));
+        // The FPS the simulation sustains: this frame's (1000 / its tick) and the last
+        // second's (60 frames) average, from the plain run's ticks.
+        let fps = self.times.get(f).map_or(String::new(), |ms| {
+            let from = (f + 1).saturating_sub(60);
+            let window: f64 = self.times[from..=f.min(self.times.len() - 1)].iter().sum();
+            let avg = (f + 1 - from) as f64 * 1000.0 / window.max(1e-9);
+            format!("SIM FPS {:4.0}   1 S AVERAGE {avg:4.0}", 1000.0 / ms.max(1e-9))
+        });
+        let lines = [
+            self.title.clone(),
+            format!("FRAME {:3}/{n}{tick}   (FIRST 30: SETTLE)   REAL TIME, 60 FPS PLAYBACK", f + 1),
+            fps,
+            format!("BONDS BROKEN {broken}   PIECES BROKEN OFF {pieces}   SHOTS {imps}"),
+        ];
+        let wmax = lines.iter().map(|l| Overlay::text_width(l, s)).max().unwrap_or(0);
+        o.rect(12, 12, wmax + 24, lines.len() as i32 * 10 * s + 18, [10, 12, 16], 0.6);
+        for (i, l) in lines.iter().enumerate() {
+            o.text(24, 24 + i as i32 * 10 * s, s, [245, 245, 245], l);
+        }
+        // The tick-time strip: a bar per frame so far, the 16.7 ms (60 Hz) line.
+        if !self.times.is_empty() {
+            let (x0, y1, hpx) = (24, self.height as i32 - 24, 160);
+            let bw = ((self.width as i32 - 48) / self.times.len() as i32).max(1);
+            let scale = hpx as f64 / 50.0;
+            o.rect(x0 - 8, y1 - hpx - 40, bw * self.times.len() as i32 + 16, hpx + 48, [10, 12, 16], 0.6);
+            for (k, &ms) in self.times.iter().enumerate().take(f + 1) {
+                let bh = ((ms * scale) as i32).min(hpx).max(1);
+                let col = if k < 30 { [130, 130, 130] } else if ms <= 1000.0 / 60.0 { [90, 220, 120] } else { [240, 170, 60] };
+                o.rect(x0 + k as i32 * bw, y1 - bh, (bw - 1).max(1), bh, col, 1.0);
+            }
+            let ly = y1 - (1000.0 / 60.0 * scale) as i32;
+            o.rect(x0, ly, bw * self.times.len() as i32, 2, [255, 255, 255], 0.85);
+            let after: Vec<f64> = self.times.iter().copied().skip(30).take((f + 1).saturating_sub(30)).collect();
+            let worst = after.iter().copied().fold(0.0, f64::max);
+            o.text(x0, y1 - hpx - 32, 2, [245, 245, 245], &format!("TICK TIME PER FRAME (0-50 MS; LINE 16.7 MS = 60 HZ)   WORST SO FAR AFTER SETTLE {worst:.1} MS"));
+        }
+        self.sink.write(&rgba).expect("ffmpeg frame");
+    }
+
+    fn finish(self) {
+        self.sink.finish().expect("ffmpeg");
+    }
 }
 
 struct Run {
     frames: Vec<f64>,
+    /// Per frame, the time spent waiting on the GPU in reads (the rest is the host's).
+    waits: Vec<f64>,
     ram: f64,
     fragments: f64,
     broken: f64,
@@ -199,11 +544,15 @@ fn run_oracle(scene: &Scene) -> Run {
     let ram = w.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let digest = digest(&w.solver, &w.impactors);
     let metrics = metrics(scene, &o);
-    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, metrics, digest }
+    Run { frames, waits: Vec::new(), ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, metrics, digest }
 }
 
 #[cfg(feature = "gpu")]
 fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, no_redo: bool, islands: bool) -> Run {
+    // STRESS_BENCH_WRITE_SCENE=path: the scene as run, as JSON (for `stress-ref run`).
+    if let Ok(path) = std::env::var("STRESS_BENCH_WRITE_SCENE") {
+        std::fs::write(&path, serde_json::to_string_pretty(scene).expect("scene JSON")).expect("scene file");
+    }
     use stress_ref::math::Vec3;
     // One device for both (`rubble-gpu`), or rubble on its own device (`rubble-gpu-2dev`).
     let engine: Box<dyn stress_ref::engine::RigidEngine> = if two_devices {
@@ -211,7 +560,20 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     } else {
         Box::new(stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine"))
     };
-    let mut w = stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world");
+    // STRESS_RESIDENT=1: the resident quasi-static frame (engine and stress loads on the
+    // GPU without read-backs; one device).
+    let profile = PROFILE.get().copied();
+    let mut w = if (std::env::var("STRESS_RESIDENT").is_ok_and(|v| v == "1") || profile.is_some_and(|p| p.resident())) && !two_devices {
+        drop(engine);
+        let mut e = stress_rubble::RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble engine");
+        if let Some(p) = profile {
+            let (iterations, substeps) = p.engine_policy();
+            e.set_policy(iterations, substeps);
+        }
+        stress_gpu::world::GpuWorld::with_resident_engine(gpu, scene, e).expect("GPU coupled world")
+    } else {
+        stress_gpu::world::GpuWorld::with_engine(gpu, scene, engine).expect("GPU coupled world")
+    };
     // rubble's integrated pipeline: routing before the step, no frame rewind.
     w.redo_fractured_frames = !no_redo;
     // STRESS_BENCH_ORACLE_STEP=1: the oracle's own certified step instead of the GPU
@@ -220,8 +582,42 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         w.own_dashpot_step = false;
     }
     w.set_impact_islands(islands);
+    if let Some(p) = profile {
+        w.apply_profile(p);
+    }
+    // STRESS_BENCH_STRICT_STEP=s: strict mode, fail when a structure's certified step is below s.
+    if let Some(min) = std::env::var("STRESS_BENCH_STRICT_STEP").ok().and_then(|v| v.parse().ok()) {
+        if let Err(e) = w.set_min_stress_step(min) {
+            panic!("{e}");
+        }
+    }
+    // STRESS_QS_UNCONVERGED=restore|keep|commit: what an unconverged static solve leaves
+    // (Blast: commit). STRESS_QS_PASSES=n: the frame's cascade passes at most (Blast: 2).
+    match std::env::var("STRESS_QS_UNCONVERGED").as_deref() {
+        Ok("keep") => w.solver.mirror.config.static_unconverged = stress_ref::solver::UnconvergedSolve::KeepIterate,
+        Ok("commit") => w.solver.mirror.config.static_unconverged = stress_ref::solver::UnconvergedSolve::CommitIterate,
+        Ok("restore") | Err(_) => {}
+        Ok(other) => panic!("STRESS_QS_UNCONVERGED={other}: restore, keep or commit"),
+    }
+    if let Some(n) = std::env::var("STRESS_QS_PASSES").ok().and_then(|v| v.parse().ok()) {
+        w.solver.mirror.config.static_passes = Some(n);
+    }
+    // STRESS_QS_BUDGET=newton,cg: quasi-static solves within a budget after setup.
+    if let Some((n, cg)) = std::env::var("STRESS_QS_BUDGET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
+        w.solver.mirror.config.static_budget = Some((n, cg));
+    }
+    // Quasi-static with impact islands: the tiered coupling (`--config tiered`).
+    if islands && scene.sim.solve_mode == SolveMode::QuasiStatic {
+        w.set_tiered(true).expect("tiered coupling");
+        // STRESS_TIERED_BUDGET=newton,cg: the static solves' budget after setup.
+        if let Some((n, cg)) = std::env::var("STRESS_TIERED_BUDGET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
+            w.solver.mirror.config.static_budget = Some((n, cg));
+        }
+    }
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut frames = Vec::with_capacity(n);
+    // Per frame: the time it waited on the GPU in reads (gpu.rs `WAIT_NS`).
+    let mut waits = Vec::with_capacity(n);
     let trace = std::env::var("STRESS_BENCH_TRACE").is_ok();
     if trace {
         w.solver.sync(gpu);
@@ -231,24 +627,99 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         r.gravity_prestress();
         eprintln!("cpu prestress digest {}", digest(&r, &[]));
     }
+    // STRESS_BENCH_FRAMES=1: each frame's profile deltas on stderr.
+    let per_frame = std::env::var("STRESS_BENCH_FRAMES").is_ok();
+    let suite = SUITE_SHOTS.lock().unwrap().get(&scene.name).cloned();
+    let shots = match suite {
+        Some(shots) => shots,
+        None if scene.name.ends_with("_bombard") => bombard_shots(scene),
+        None => Vec::new(),
+    };
+    if !shots.is_empty() {
+        w.scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    }
+    // STRESS_BENCH_VIDEO=out.mp4: the run rendered on the GPU (`stress_rubble::render`), one
+    // video frame per simulated frame at 60 fps (real time), outside the timed frames.
+    let mut video = std::env::var("STRESS_BENCH_VIDEO").ok().map(|out| BenchVideo::new(gpu, &w, std::path::Path::new(&out), &scene.name));
     for f in 0..n {
+        for (_, desc) in shots.iter().filter(|(at, _)| *at == f) {
+            let imp = stress_ref::world::Impactor::from_desc(desc, &w.scene);
+            w.add_impactor(gpu, imp).expect("projectile");
+        }
+        let before = w.solver.profile.clone();
+        let (splits, replans, tail) = (w.solver.host_splits, w.solver.replans, w.tail_seconds);
+        let (prep, refresh, back, seg) = (w.prepare_seconds, w.refresh_seconds, w.write_back_seconds, w.segment_setup_seconds);
         let t = Instant::now();
+        let w0 = stress_gpu::gpu::WAIT_NS.load(std::sync::atomic::Ordering::Relaxed);
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
+        waits.push((stress_gpu::gpu::WAIT_NS.load(std::sync::atomic::Ordering::Relaxed) - w0) as f64 * 1e-6);
+        if let Some(v) = video.as_mut() {
+            v.frame(gpu, &mut w, f, n);
+        }
+        if per_frame {
+            let p = &w.solver.profile;
+            let ms = |a: f64, b: f64| (a - b) * 1e3;
+            eprintln!(
+                "frame {f}: {:.1} ms; prepare {:.1}, refresh {:.1}, write-back {:.1}, segment setup {:.1}, tail {:.1}, gpu {:.1}, encode {:.1}, readback {:.1}, download {:.1}, split {:.1}, build {:.1}; {} substeps, {} batches ({} of {} rounds used), {} host splits, {} replans; clusters {} ({} in islands), ram {:.2} m/s",
+                frames[f],
+                ms(w.prepare_seconds, prep),
+                ms(w.refresh_seconds, refresh),
+                ms(w.write_back_seconds, back),
+                ms(w.segment_setup_seconds, seg),
+                ms(w.tail_seconds, tail),
+                ms(p.gpu, before.gpu),
+                ms(p.encode, before.encode),
+                ms(p.readback, before.readback),
+                ms(p.download, before.download),
+                ms(p.split, before.split),
+                ms(p.build, before.build),
+                p.substeps - before.substeps,
+                p.batches - before.batches,
+                p.rounds_used - before.rounds_used,
+                p.rounds_encoded - before.rounds_encoded,
+                w.solver.host_splits - splits,
+                w.solver.replans - replans,
+                w.solver.mirror.clusters.len(),
+                w.solver.mirror.clusters.iter().filter(|c| !c.driven).count(),
+                w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm())
+            );
+        }
         if trace {
+            w.sync(gpu);
             eprintln!("frame {f} digest {}", digest(&w.solver.mirror, &w.solver.impactors));
         }
     }
-    w.solver.sync(gpu);
+    if let Some(v) = video.take() {
+        v.finish();
+    }
+    w.sync(gpu);
     let o = w.observation();
     let ram = w.solver.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let p = &w.solver.profile;
-    let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split,
-        "batches": p.batches, "substeps": p.substeps, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries,
+    let profile = serde_json::json!({"build_s": p.build, "gpu_s": p.gpu, "readback_s": p.readback, "download_s": p.download, "split_s": p.split, "encode_s": p.encode,
+        "batches": p.batches, "substeps": p.substeps, "resident_frames": w.resident_frames, "coupled_frames": w.coupled_frames, "quiet_clusters": w.solver.quiet_count(), "host_splits": w.solver.host_splits, "replans": w.solver.replans, "resumed_halts": w.solver.resumed_halts, "tail_s": w.tail_seconds, "segment_retries": w.segment_retries, "plan_check": format!("{:?}", w.solver.plan_check), "split_check": format!("{:?}", w.solver.split_check), "spawn_check": format!("{:?}", w.solver.spawn_check), "layout_check": format!("{:?}", w.solver.split_layout_check), "collider_check": format!("{:?}", w.solver.collider_check), "island_check": format!("{:?}", w.solver.island_check),
         "kernels": stress_gpu::solver::KERNEL_NAMES.iter().zip(p.kernels.iter().zip(p.kernel_dispatches.iter())).filter(|(_, (t, _))| **t > 0.0).map(|(n, (t, c))| serde_json::json!([n, t, c])).collect::<Vec<_>>()});
     let digest = digest(&w.solver.mirror, &w.solver.impactors);
+    // STRESS_BENCH_DUMP=path: the end state (chunk displacements, cluster and impactor
+    // positions) as JSON, for comparing runs beyond their digests.
+    if let Ok(path) = std::env::var("STRESS_BENCH_DUMP") {
+        let m = &w.solver.mirror;
+        let u: Vec<[f64; 3]> = m.chunks.iter().flatten().map(|st| st.u.to_array()).collect();
+        let clusters: Vec<[f64; 3]> = m.clusters.iter().map(|c| c.pose.position.to_array()).collect();
+        let imps: Vec<[f64; 3]> = w.solver.impactors.iter().map(|i| i.pose.position.to_array()).collect();
+        let th: Vec<[f64; 3]> = m.chunks.iter().flatten().map(|st| st.th.to_array()).collect();
+        let v: Vec<[f64; 3]> = m.chunks.iter().flatten().map(|st| st.v.to_array()).collect();
+        let wv: Vec<[f64; 3]> = m.chunks.iter().flatten().map(|st| st.w.to_array()).collect();
+        let cv: Vec<[f64; 3]> = m.clusters.iter().map(|c| c.velocity.to_array()).collect();
+        let cw: Vec<[f64; 3]> = m.clusters.iter().map(|c| c.angular_velocity.to_array()).collect();
+        let cr: Vec<[f64; 3]> = m.clusters.iter().map(|c| [c.pose.rotation.x, c.pose.rotation.y, c.pose.rotation.z]).collect();
+        let iv: Vec<[f64; 3]> = w.solver.impactors.iter().map(|i| i.velocity.to_array()).collect();
+        let iw: Vec<[f64; 3]> = w.solver.impactors.iter().map(|i| i.angular_velocity.to_array()).collect();
+        std::fs::write(path, serde_json::json!({"u": u, "th": th, "v": v, "w": wv, "clusters": clusters, "cluster_v": cv, "cluster_w": cw, "cluster_rot": cr, "impactors": imps, "imp_v": iv, "imp_w": iw}).to_string()).expect("dump");
+    }
     let metrics = metrics(scene, &o);
-    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, metrics, digest }
+    Run { frames, waits, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, metrics, digest }
 }
 
 fn main() {
@@ -257,8 +728,10 @@ fn main() {
     let mut seconds = 0.25;
     let mut repeats = 1usize;
     let mut set = "realtime".to_string();
+    let mut pack_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut config = "realtime".to_string();
     let mut overrides: Vec<(String, bool)> = Vec::new();
+    let mut methods: Vec<(String, bool)> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -272,10 +745,32 @@ fn main() {
                 let (n, on) = v.split_once('=').expect("--feature NAME=on|off");
                 overrides.push((n.to_string(), on == "on"));
             }
+            // A method switch on top of the configuration (e.g. blast_stiffness=on).
+            "--method" => {
+                let v = args.next().expect("--method NAME=on|off");
+                let (n, on) = v.split_once('=').expect("--method NAME=on|off");
+                methods.push((n.to_string(), on == "on"));
+            }
+            "--authored" => AUTHORED.store(true, std::sync::atomic::Ordering::Relaxed),
+            // The pack's fatal limits as strengths (Blast breaks there; `--authored` uses
+            // the elastic ones).
+            // The pack's node masses and mass-0 supports (Blast's inputs).
+            "--pack-masses" => PACK_MASSES.store(true, std::sync::atomic::Ordering::Relaxed),
+            "--authored-fatal" => {
+                AUTHORED.store(true, std::sync::atomic::Ordering::Relaxed);
+                AUTHORED_FATAL.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            "--pack" => {
+                pack_paths.push(args.next().expect("--pack PATH").into());
+                set = "packs".into();
+            }
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).expect("--seconds S"),
             "--repeats" => repeats = args.next().and_then(|v| v.parse().ok()).expect("--repeats N"),
             other => panic!("unknown argument {other}"),
         }
+    }
+    if let Some(p) = stress_ref::capability::Profile::parse(&config) {
+        let _ = PROFILE.set(p);
     }
     #[cfg(feature = "gpu")]
     let gpu = (solver != "oracle").then(|| stress_gpu::gpu::Gpu::new().expect("GPU"));
@@ -284,6 +779,7 @@ fn main() {
         "accuracy" => named(accuracy(seconds)),
         "towns" => named(towns(seconds)),
         "scale" => named(scale(seconds)),
+        "packs" if !pack_paths.is_empty() => packs_at(&pack_paths, seconds),
         "packs" => packs(seconds),
         _ => named(regimes(seconds)),
     };
@@ -292,8 +788,20 @@ fn main() {
             continue;
         }
         let (mut scene, islands) = ladder(scene, &config);
+        // STRESS_BENCH_FRAME_DT=s: the frame's duration (a measurement: how the quasi-static
+        // loads' averaging window bears on an impact).
+        if let Some(dt) = std::env::var("STRESS_BENCH_FRAME_DT").ok().and_then(|v| v.parse().ok()) {
+            scene.sim.frame_dt = dt;
+        }
+        // STRESS_BENCH_STRESS_SAFETY=x: the bond network's step safety (a measurement).
+        if let Some(x) = std::env::var("STRESS_BENCH_STRESS_SAFETY").ok().and_then(|v| v.parse().ok()) {
+            scene.sim.stress_courant_safety = Some(x);
+        }
         for (n, on) in &overrides {
             scene.sim.features.set(n, *on).unwrap_or_else(|e| panic!("--feature: {e}"));
+        }
+        for (n, on) in &methods {
+            scene.sim.methods.set(n, *on).unwrap_or_else(|e| panic!("--method: {e}"));
         }
         let _ = islands;
         for repeat in 0..repeats.max(1) {
@@ -320,7 +828,7 @@ fn main() {
             println!(
                 "{}",
                 serde_json::json!({"solver": solver, "config": config, "features": overrides.iter().map(|(n, on)| format!("{n}={}", if *on { "on" } else { "off" })).collect::<Vec<_>>(), "regime": name, "repeat": repeat, "seconds": seconds, "frame_dt": scene.sim.frame_dt,
-                    "frame_ms": run.frames, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "metrics": run.metrics, "digest": run.digest})
+                    "frame_ms": run.frames, "frame_wait_ms": run.waits, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "metrics": run.metrics, "digest": run.digest})
             );
         }
     }

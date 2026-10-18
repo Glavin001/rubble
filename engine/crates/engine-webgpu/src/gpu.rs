@@ -59,6 +59,8 @@ pub struct WgpuSim {
     compact_contacts: bool,
     persistent_contacts: bool,
     sparse_start: u32,
+    /// The look-ahead contacts' largest reach per collider (m; 0: the kernels' 0.5).
+    spec_reach_max: f32,
     manifold_persistence: bool,
     /// Opt-in three-avbd shape: warm-hash insert per previous manifold.
     pub(crate) manifold_hash_insert: bool,
@@ -523,6 +525,7 @@ impl WgpuSim {
             counter_upload,
             compact_contacts,
             persistent_contacts,
+            spec_reach_max: 0.0,
             sparse_start: if capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8 {
                 env_str("ENGINE_SPARSE_COLORS")
                     .and_then(|v| v.parse::<u32>().ok())
@@ -774,6 +777,88 @@ impl WgpuSim {
     /// Release the old hull's arena reference yourself once nothing uses it.
     pub fn set_collider(&mut self, id: u32, col: Collider) {
         self.set_colliders(id, std::slice::from_ref(&col));
+    }
+
+    /// Bodies and colliders a GPU kernel already wrote at the next slots (bodies in both
+    /// regions, as `add_bodies` writes them; colliders as `add_colliders`): the host's
+    /// counts and mirrors follow, with no upload. For bodies made on the GPU (a split's
+    /// children, stress-gpu `spawn.slang`).
+    pub fn adopt_appended(&mut self, bodies: &[BodyState], colliders: &[Collider]) -> (std::ops::Range<u32>, std::ops::Range<u32>) {
+        let body_start = self.body_count;
+        let count = u32::try_from(bodies.len()).expect("body batch exceeds u32 index space");
+        assert!(count <= self.capacity.max_bodies.saturating_sub(body_start), "adopted bodies exceed capacity");
+        if count > 0 {
+            self.host_bodies.extend_from_slice(bodies);
+            self.body_count += count;
+            self.manifolds_valid = false;
+        }
+        let col_start = self.collider_count;
+        let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
+        assert!(count <= self.capacity.max_colliders.saturating_sub(col_start), "adopted colliders exceed capacity");
+        if count > 0 {
+            self.has_convex |= colliders.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+            self.has_filters |= colliders.iter().any(engine_schema::convex::CollisionFilter::is_set);
+            self.manifolds_valid = false;
+            self.host_cols.extend_from_slice(colliders);
+            self.collider_count += count;
+            for col in colliders {
+                if let Some(r) = engine_schema::collider_reach(col) {
+                    let b = col.body as usize;
+                    if self.body_reach.len() <= b {
+                        self.body_reach.resize(b + 1, 0.0);
+                    }
+                    self.body_reach[b] = self.body_reach[b].max(r);
+                }
+            }
+        }
+        (body_start..self.body_count, col_start..self.collider_count)
+    }
+
+    /// Bodies a GPU kernel already rewrote in place, in both regions (as `write_bodies`):
+    /// the host's mirror follows, with no upload.
+    pub fn mirror_bodies(&mut self, first: u32, bodies: &[BodyState]) {
+        let count = bodies.len() as u32;
+        assert!(first <= self.body_count && count <= self.body_count - first, "mirror_bodies outside the bodies");
+        if count == 0 {
+            return;
+        }
+        self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
+        self.manifolds_valid = false;
+        self.wake_pending = true;
+    }
+
+    /// A body a GPU kernel retired in place (no mass, motion or flags; stress-gpu
+    /// `spawn_retire`): the host's mirror follows, with no upload.
+    pub fn mirror_retire(&mut self, id: u32) {
+        let b = &mut self.host_bodies[id as usize];
+        b.inv_mass = 0.0;
+        b.inv_inertia = [0.0; 3];
+        b.linear_vel = [0.0; 3];
+        b.angular_vel = [0.0; 3];
+        b.flags = 0;
+        self.manifolds_valid = false;
+        self.wake_pending = true;
+    }
+
+    /// Colliders a GPU kernel already rewrote in place (as `set_colliders`): the host's
+    /// mirror and flags follow, with no upload.
+    pub fn mirror_colliders(&mut self, first: u32, cols: &[Collider]) {
+        let end = first as usize + cols.len();
+        assert!(end <= self.collider_count as usize, "colliders {first}..{end} out of range");
+        if cols.is_empty() {
+            return;
+        }
+        use engine_schema::convex::CollisionFilter;
+        let cleared = self.host_cols[first as usize..end].iter().any(CollisionFilter::is_set);
+        self.host_cols[first as usize..end].copy_from_slice(cols);
+        self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        if cols.iter().any(CollisionFilter::is_set) {
+            self.has_filters = true;
+        } else if cleared {
+            self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
+        }
+        self.grid_cache = None;
+        self.manifolds_valid = false;
     }
 
     /// Replace the contiguous colliders `first..first + cols.len()` in one upload.
@@ -1048,6 +1133,13 @@ impl WgpuSim {
         bodies
     }
 
+    /// The largest reach (m) the look-ahead contacts (`FLAG_SPEC_VELOCITY`) give one
+    /// collider; 0 keeps the kernels' default (0.5 m). A fast body's contacts are found
+    /// within its step's motion up to this, so it needs no substeps to meet what it hits.
+    pub fn set_spec_reach_max(&mut self, reach: f32) {
+        self.spec_reach_max = reach;
+    }
+
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
         self.step_inner(false)
     }
@@ -1062,6 +1154,12 @@ impl WgpuSim {
     /// Wait for every submitted step and refresh the counters (overflow check).
     pub fn drain(&mut self) -> Result<StepCounters, ExecError> {
         let counters = self.read_counters();
+        self.drained(counters)
+    }
+
+    /// `drain` with the counters (`counters_buffer`) read by the host along with other
+    /// reads, after every submitted step finished: one round trip for the host's frame.
+    pub fn drained(&mut self, counters: StepCounters) -> Result<StepCounters, ExecError> {
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
         // Wheel queries walk this step's broadphase grid, so vehicle worlds
@@ -1103,8 +1201,13 @@ impl WgpuSim {
             self.last_timings.total_gpu = 0.0;
             return Ok(self.last_counters);
         }
+        let host_t = std::env::var("RUBBLE_HOST_TIMING").is_ok().then(std::time::Instant::now);
         self.refresh_cell();
+        let t_cell = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
         self.write_host_uniforms_ex(!read);
+        if let (Some(t), Some(c)) = (host_t, t_cell) {
+            eprintln!("rubble host: grid cell {c:.2} ms, uniforms {:.2} ms", t.elapsed().as_secs_f64() * 1e3 - c);
+        }
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
             0
@@ -1135,11 +1238,83 @@ impl WgpuSim {
                 );
             }
         }
+        // `RUBBLE_GPU_TIMING=1` (diagnostic): a timestamped pass per phase of the plan,
+        // each phase's GPU time printed after the step (waits for it).
+        let timing = std::env::var("RUBBLE_GPU_TIMING").is_ok_and(|v| v == "1")
+            && self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        if timing {
+            // A phase marker follows its commands: segment k is the k-th phase.
+            let mut names: Vec<&str> = Vec::new();
+            for c in &cmds {
+                if let rigid_plan::Cmd::Phase { name } = *c {
+                    names.push(name);
+                }
+            }
+            names.push("tail");
+            let queries = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("step phases"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2 * names.len() as u32,
+            });
+            let mut segment = 0u32;
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("step"),
+                timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &queries, beginning_of_pass_write_index: Some(0), end_of_pass_write_index: Some(1) }),
+            });
+            for c in &cmds {
+                match *c {
+                    rigid_plan::Cmd::Copy { .. } => {}
+                    rigid_plan::Cmd::Phase { .. } => {
+                        drop(pass);
+                        segment += 1;
+                        pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("step"),
+                            timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &queries, beginning_of_pass_write_index: Some(2 * segment), end_of_pass_write_index: Some(2 * segment + 1) }),
+                        });
+                    }
+                    rigid_plan::Cmd::Dispatch { kernel, threads, pass: p } => self.disp(&mut pass, kernel, threads, Some(p)),
+                    rigid_plan::Cmd::Indirect { kernel, slot, pass: p } => {
+                        if kernel.starts_with("solve_primal_color") {
+                            self.disp_indirect(&mut pass, slot);
+                        } else {
+                            self.disp_work(&mut pass, kernel, slot, Some(p));
+                        }
+                    }
+                }
+            }
+            drop(pass);
+            let resolve = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("step phases"), size: 16 * names.len() as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("step phases read"), size: 16 * names.len() as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            enc.resolve_query_set(&queries, 0..2 * names.len() as u32, &resolve, 0);
+            enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, 16 * names.len() as u64);
+            self.queue.submit([enc.finish()]);
+            let slice = staging.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            let t: Vec<u64> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
+            let period = self.queue.get_timestamp_period() as f64 * 1e-6;
+            let parts: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("{n} {:.2}", t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period)).collect();
+            eprintln!("rubble step GPU ms: {}", parts.join(", "));
+            return self.finish_step(read, wall);
+        }
+        self.encode_dispatches(&mut enc, &cmds);
+        let t_enc = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
+        self.queue.submit([enc.finish()]);
+        if let (Some(t), Some(e)) = (host_t, t_enc) {
+            let submitted = t.elapsed().as_secs_f64() * 1e3;
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            eprintln!("rubble host: encoded {e:.2} ms, submitted {submitted:.2} ms, done {:.2} ms ({} commands)", t.elapsed().as_secs_f64() * 1e3, cmds.len());
+        }
+        self.finish_step(read, wall)
+    }
+
+    /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
+    fn encode_dispatches(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
         });
-        for c in &cmds {
+        for c in cmds {
             match *c {
                 rigid_plan::Cmd::Copy { .. } | rigid_plan::Cmd::Phase { .. } => {}
                 rigid_plan::Cmd::Dispatch { kernel, threads, pass: p } => {
@@ -1154,9 +1329,47 @@ impl WgpuSim {
                 }
             }
         }
-        drop(pass);
-        self.queue.submit([enc.finish()]);
+    }
 
+    /// `step_submit` encoded into the caller's `enc` instead of a submission of its own:
+    /// a host that runs other work in the same frame (the stress stage) submits the frame
+    /// once. The step's host writes (its uniforms) take effect at that submission, before
+    /// its commands, as they would at its own.
+    pub fn step_encode(&mut self, enc: &mut wgpu::CommandEncoder) -> Result<(), ExecError> {
+        let wall = std::time::Instant::now();
+        let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
+        if self.steps_done > 0
+            && self.counted_steps == self.steps_done
+            && self.last_counters.awake_count == 0
+            && self.command_count == 0
+            && self.body_count > 0
+            && !self.wake_pending
+            && !vehicles_dirty
+        {
+            self.steps_done += 1;
+            self.counted_steps = self.steps_done;
+            self.last_timings.total_gpu = 0.0;
+            return Ok(());
+        }
+        self.refresh_cell();
+        self.write_host_uniforms_ex(true);
+        self.wake_pending = false;
+        self.last_contact_offset = if self.contacts_parity == 0 { 0 } else { self.capacity.max_contacts };
+        let modes = self.step_modes();
+        let inputs = self.step_inputs();
+        let cmds = rigid_plan::encode_step(&modes, &inputs, false, true);
+        for c in &cmds {
+            if let rigid_plan::Cmd::Copy { src, src_offset, dst, dst_offset, size } = *c {
+                let from = if src == rigid_plan::COUNTER_UPLOAD { &self.counter_upload } else { &self.bufs[src as usize] };
+                enc.copy_buffer_to_buffer(from, u64::from(src_offset), &self.bufs[dst as usize], u64::from(dst_offset), u64::from(size));
+            }
+        }
+        self.encode_dispatches(enc, &cmds);
+        self.finish_step(false, wall).map(|_| ())
+    }
+
+    /// The step's host bookkeeping after its submission (and its counters, `read`).
+    fn finish_step(&mut self, read: bool, wall: std::time::Instant) -> Result<StepCounters, ExecError> {
         if let Some(v) = self.vehicles.as_mut() {
             v.dirty = false;
         }
@@ -1353,7 +1566,7 @@ impl WgpuSim {
     /// forwards last step's counts before resetting them (no host readback).
     fn write_host_uniforms_ex(&self, pipelined: bool) {
         let inputs = self.step_inputs();
-        let s = rigid_plan::host_words(
+        let mut s = rigid_plan::host_words(
             &self.capacity,
             &self.step_modes(),
             &inputs,
@@ -1366,6 +1579,9 @@ impl WgpuSim {
                 persist_list_limit: self.persist_list_limit,
             },
         );
+        // Word 31: the look-ahead contacts' reach cap (FLAG_SPEC_VELOCITY), 0: the
+        // kernels' default.
+        s[31] = self.spec_reach_max.to_bits();
         self.queue
             .write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
         let c = rigid_plan::step_counters(&inputs);
