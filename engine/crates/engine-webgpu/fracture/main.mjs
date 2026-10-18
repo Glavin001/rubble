@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,layoutScene,withoutJoints,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -21,7 +21,7 @@ let sliceRate=1,sliceCredit=0,frameEma=FRAME_BUDGET_MS;
 // GPU never idles between frames. Vsync-paced frame times jump between 16.7
 // and 33 ms, too coarse to steer by.
 let workDone=[{done:true},{done:true}];
-let currentRates=null,layout=null,maxHullVertices,procedural=null;
+let currentRates=null,layout=null,maxHullVertices,procedural=null,packBytes=null;
 // Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
 const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
 const rates=createRates(value=>{
@@ -60,7 +60,7 @@ async function loadLevel(level){
   // Settle one house under its own weight first, so every copy starts asleep in
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
-  const built=procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
+  const built=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   if($('solve-bonds').checked)setStatus('Settling bonds under self-weight…');
   const one=$('solve-bonds').checked?await preloadBonds(device,built):withoutJoints(built);
   // Copies laid out as the sample says (procedural houses get a larger contact budget).
@@ -72,7 +72,7 @@ async function loadLevel(level){
  $('fire').hidden=!scene.rowShot;$('awake').textContent='0';$('contacts').textContent='0';
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
  const what=copies>1?`${copies} houses · ${scene.bodyCount-1-scene.projectileCount} bodies · `:'';
- const source=procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials${skipped}`;
+ const source=procedural==='pack'?`scene pack · ${scene.pieces} nodes`:procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials${skipped}`;
  setStatus(`${what}${source} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
@@ -86,8 +86,28 @@ async function importBytes(bytes,name,sampleKey="",entry={}){
 // The Scene menu is the shared catalogue (engine-fracture samples.rs), as in the Metal viewer.
 const samples=Object.fromEntries(SAMPLES.map(s=>[s.key,{...s,procedural:s.file?null:'cuboid'}]));
 $('scene').replaceChildren(...SAMPLES.map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house')),Object.assign(new Option('Custom GLB',''),{disabled:true}));
+// vibe-city /destructible-stress presets, generated into ../generated/vibe-city (optional).
+const VIBE_CITY='../generated/vibe-city/';
+const PACK_PENDING=new Set(['fracturedWall','fracturedWallHut','fracturedTower','fracturedBridge','fracturedGlb']);
+try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
+ const group=document.createElement('optgroup');group.label='vibe-city stress presets';
+ for(const p of index.presets.filter(p=>!p.failed&&!PACK_PENDING.has(p.id))){
+  const key=`vc:${p.id}`;samples[key]={key,label:p.id,pack:`${VIBE_CITY}${p.id}.json`,nodes:p.nodes,bonds:p.bonds};
+  group.append(new Option(`${p.id} · ${p.nodes} nodes`,key));
+ }
+ if(group.children.length)$('scene').append(group);
+}catch{}
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
+ if(entry.pack){
+  // A generated scene pack (engine/scenes/vibe-city, bun run export.ts): one level, bonds from the pack.
+  setStatus(`Fetching ${entry.label}…`);
+  const response=await fetch(entry.pack);
+  if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
+  packBytes=await response.arrayBuffer();layout=null;procedural='pack';asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack.split('/').pop();
+  $('level').replaceChildren(new Option(`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`,0));$('level').value='0';
+  await loadLevel(0);return;
+ }
  if(entry.procedural){
   // Built in code from box colliders: no GLB, one level, no baked bonds.
   layout=entry.layout??null;procedural=entry.procedural;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent='Procedural cuboid house';
