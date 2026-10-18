@@ -75,6 +75,15 @@ macro_rules! shader_set {
 /// Every Slang file's generated shaders.
 pub mod shaders {
     use super::ShaderSet;
+    /// `WORLD` with implicit penalty contact (`world_ic.slang`, `STRESS_REF_IMPLICIT_CONTACT=1`).
+    pub const WORLD_IC: ShaderSet = ShaderSet {
+        name: "world_ic",
+        wgsl: include_str!("../shaders/generated/world_ic.wgsl"),
+        msl: include_str!("../shaders/generated/world_ic.metal"),
+        metallib: include_bytes!(concat!(env!("OUT_DIR"), "/world_ic.metallib")),
+        metallib_fast: include_bytes!(concat!(env!("OUT_DIR"), "/world_ic.fast.metallib")),
+        entries: WORLD.entries,
+    };
     pub const SMOKE: ShaderSet = shader_set!("smoke", [("smoke", (64, 1, 1))]);
     pub const STRESS_STEP: ShaderSet = shader_set!("stress_step", [("bond_forces", (64, 1, 1)), ("chunk_integrate", (64, 1, 1)), ("island_substeps", (256, 1, 1)), ("island_shared_substeps", (256, 1, 1))]);
     pub const JOINT_TEST: ShaderSet = shader_set!("joint_test", [("joint_eval_test", (64, 1, 1))]);

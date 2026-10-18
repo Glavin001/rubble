@@ -622,26 +622,28 @@ pub struct GpuSolver {
 
 impl GpuSolver {
     pub fn new(gpu: &Gpu, mirror: ReferenceSolver, loads: Option<WorldLoads>, impactors: Vec<Impactor>) -> Result<GpuSolver, String> {
+        // `STRESS_REF_IMPLICIT_CONTACT=1`: the world kernels with implicit penalty contact.
+        let world = if stress_ref::world::implicit_contact() { &shaders::WORLD_IC } else { &shaders::WORLD };
         let kernels = Kernels {
-            island: gpu.compute(&shaders::WORLD, if wide_island_bonds() { "island_frame_bonds_wide" } else { "island_frame" }, &WORLD_BINDINGS),
-            forces: gpu.compute(&shaders::WORLD, "contact_forces", &WORLD_BINDINGS),
-            shares: gpu.compute(&shaders::WORLD, "impactor_shares", &WORLD_BINDINGS),
-            crush: gpu.compute(&shaders::WORLD, "impactor_crush", &WORLD_BINDINGS),
-            integrate: gpu.compute(&shaders::WORLD, "impactor_integrate", &WORLD_BINDINGS),
-            wide: ["wide_bonds", "wide_chunks", "wide_drift", "wide_rigid", "wide_end"].map(|e| gpu.compute(&shaders::WORLD, e, &WORLD_BINDINGS)),
-            sums: gpu.compute(&shaders::WORLD, "contact_sums", &WORLD_BINDINGS),
-            wake: gpu.compute(&shaders::WORLD, "wide_wake", &WORLD_BINDINGS),
-            sums_integrate: gpu.compute(&shaders::WORLD, "sums_and_impactors", &WORLD_BINDINGS),
-            island_wide: gpu.compute(&shaders::WORLD, "islands_and_wide_chunks", &WORLD_BINDINGS),
-            sums_bonds: gpu.compute(&shaders::WORLD, "sums_impactors_bonds", &WORLD_BINDINGS),
-            contact_islands: gpu.compute(&shaders::WORLD, "contact_islands", &WORLD_BINDINGS),
-            contact_island_wide: gpu.compute(&shaders::WORLD, "contact_islands_and_wide_chunks", &WORLD_BINDINGS),
-            forces_bonds: gpu.compute(&shaders::WORLD, "forces_and_bonds", &WORLD_BINDINGS),
-            islands_sums: gpu.compute(&shaders::WORLD, "islands_sums_impactors", &WORLD_BINDINGS),
-            travel: gpu.compute(&shaders::WORLD, "travel_start", &WORLD_BINDINGS),
-            islands_sums_wake: gpu.compute(&shaders::WORLD, "islands_sums_impactors_wake", &WORLD_BINDINGS),
-            statics: gpu.compute(&shaders::WORLD, "island_statics", &WORLD_BINDINGS),
-            fatigue: gpu.compute(&shaders::WORLD, "settled_fatigue", &WORLD_BINDINGS),
+            island: gpu.compute(world, if wide_island_bonds() { "island_frame_bonds_wide" } else { "island_frame" }, &WORLD_BINDINGS),
+            forces: gpu.compute(world, "contact_forces", &WORLD_BINDINGS),
+            shares: gpu.compute(world, "impactor_shares", &WORLD_BINDINGS),
+            crush: gpu.compute(world, "impactor_crush", &WORLD_BINDINGS),
+            integrate: gpu.compute(world, "impactor_integrate", &WORLD_BINDINGS),
+            wide: ["wide_bonds", "wide_chunks", "wide_drift", "wide_rigid", "wide_end"].map(|e| gpu.compute(world, e, &WORLD_BINDINGS)),
+            sums: gpu.compute(world, "contact_sums", &WORLD_BINDINGS),
+            wake: gpu.compute(world, "wide_wake", &WORLD_BINDINGS),
+            sums_integrate: gpu.compute(world, "sums_and_impactors", &WORLD_BINDINGS),
+            island_wide: gpu.compute(world, "islands_and_wide_chunks", &WORLD_BINDINGS),
+            sums_bonds: gpu.compute(world, "sums_impactors_bonds", &WORLD_BINDINGS),
+            contact_islands: gpu.compute(world, "contact_islands", &WORLD_BINDINGS),
+            contact_island_wide: gpu.compute(world, "contact_islands_and_wide_chunks", &WORLD_BINDINGS),
+            forces_bonds: gpu.compute(world, "forces_and_bonds", &WORLD_BINDINGS),
+            islands_sums: gpu.compute(world, "islands_sums_impactors", &WORLD_BINDINGS),
+            travel: gpu.compute(world, "travel_start", &WORLD_BINDINGS),
+            islands_sums_wake: gpu.compute(world, "islands_sums_impactors_wake", &WORLD_BINDINGS),
+            statics: gpu.compute(world, "island_statics", &WORLD_BINDINGS),
+            fatigue: gpu.compute(world, "settled_fatigue", &WORLD_BINDINGS),
         };
         let timing = (std::env::var("STRESS_GPU_TIMING").is_ok_and(|v| v == "1") && gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY)).then(|| Timing {
             queries: gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("timestamps"), ty: wgpu::QueryType::Timestamp, count: 2 * TIMED_DISPATCHES as u32 }),
@@ -729,6 +731,8 @@ impl GpuSolver {
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
+        // A host rebuild: the GPU's own tables (a split it laid out) no longer stand.
+        self.tables_on_gpu = false;
         Ok(())
     }
 
@@ -746,6 +750,8 @@ impl GpuSolver {
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
+        // A host rebuild: the GPU's own tables (a split it laid out) no longer stand.
+        self.tables_on_gpu = false;
         if let Some((out, chunks)) = gpu_plan {
             self.compare_plans(&out, &chunks);
         }
@@ -1460,6 +1466,8 @@ impl GpuSolver {
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
+            // A host rebuild: the GPU's own tables (a split it laid out) no longer stand.
+            self.tables_on_gpu = false;
             self.log_plan();
             self.profile.build += t.elapsed().as_secs_f64();
         }
@@ -1852,6 +1860,8 @@ impl GpuSolver {
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
+            // A host rebuild: the GPU's own tables (a split it laid out) no longer stand.
+            self.tables_on_gpu = false;
             self.log_plan();
             self.profile.split += t_split.elapsed().as_secs_f64();
             let lockstep = self.mirror.clusters.iter().all(|c| remaining.get(&c.id).is_none_or(|&l| l == left_now)) && (!owned_impactors || pipeline_left == left_now);
@@ -2645,6 +2655,8 @@ impl GpuSolver {
             self.layout = layout;
             self.layout_generation += 1;
             self.buffers = buffers;
+            // A host rebuild: the GPU's own tables (a split it laid out) no longer stand.
+            self.tables_on_gpu = false;
             return Ok(());
         }
         let (layout, buffers) =
@@ -2652,6 +2664,8 @@ impl GpuSolver {
         self.layout = layout;
         self.layout_generation += 1;
         self.buffers = buffers;
+        // A host rebuild: the GPU's own tables (a split it laid out) no longer stand.
+        self.tables_on_gpu = false;
         Ok(())
     }
 
@@ -3469,6 +3483,15 @@ impl GpuSolver {
 
     pub fn island_count(&self) -> usize {
         self.layout.islands.len()
+    }
+
+    /// The mirror's time moved on without substeps here (a resident frame: the engine
+    /// stepped, the stress solve was static): the next substep starts from it.
+    pub fn time_moved(&mut self) {
+        let n = self.mirror.substeps as usize;
+        self.step_times.truncate(n + 1);
+        self.step_times.resize(n + 1, self.mirror.time);
+        self.step_times[n] = self.mirror.time;
     }
 
     /// Time after `n` substeps since the start.

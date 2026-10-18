@@ -861,6 +861,7 @@ impl GpuWorld {
             eprintln!("resident frame {}: {n} engine substeps, impactor speeds {speeds:?}", self.frame);
         }
         self.solver.mirror.time += fdt;
+        self.solver.time_moved();
         if std::env::var("STRESS_FRAME_HOST_TRACE").is_ok() {
             eprintln!("frame {} host: whole {:.2} ms", self.frame, t_prepare.elapsed().as_secs_f64() * 1e3);
         }

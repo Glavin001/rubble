@@ -545,13 +545,17 @@ float contact_stiffness(float ea, Box a, float eb, Box b, float3 dir)
 float3 penalty_force(float k, float m_red, float friction, float depth, float3 normal, float3 rel_velocity, float dt, uint points, out float stored, out float dissipated)
 {
     float c_max = MAX_SET_VISCOSITY / max(float(points), FACE_PAIR_POINTS) * m_red / dt;
-    bool implicit = params.implicit_contact != 0;
-    float c = implicit ? 2.0 * params.zeta * sqrt(k * m_red) : min(2.0 * params.zeta * sqrt(k * m_red), c_max);
+    float c = min(2.0 * params.zeta * sqrt(k * m_red), c_max);
     float vn = dot(rel_velocity, normal);
-    // world.rs `penalty_force` (`STRESS_REF_IMPLICIT_CONTACT=1`): the normal force at the
-    // step's end against this point's share of the reduced mass.
+    float fn_mag = max(k * depth - c * vn, 0.0);
+#if defined(IMPLICIT_CONTACT)
+    // world.rs `penalty_force` (`STRESS_REF_IMPLICIT_CONTACT=1`, a prototype; the
+    // `world_ic` build): the normal force at the step's end against this point's share of
+    // the reduced mass. Compiled out of the default build, which stays as it was.
+    c = 2.0 * params.zeta * sqrt(k * m_red);
     float m_share = m_red / max(float(points), FACE_PAIR_POINTS);
-    float fn_mag = implicit ? max((k * depth - (k * dt + c) * vn) / (1.0 + (k * dt * dt + c * dt) / m_share), 0.0) : max(k * depth - c * vn, 0.0);
+    fn_mag = max((k * depth - (k * dt + c) * vn) / (1.0 + (k * dt * dt + c * dt) / m_share), 0.0);
+#endif
     float3 vt = rel_velocity - normal * vn;
     float vt_mag = length(vt);
     float ft_mag = min(friction * fn_mag, min(c_max, friction * fn_mag / FRICTION_REGULARIZATION) * vt_mag);

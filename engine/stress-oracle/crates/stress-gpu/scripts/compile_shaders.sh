@@ -30,8 +30,9 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 for src in shaders/*.slang; do
   name=$(basename "$src" .slang)
-  # Modules imported by entry-point files (no [shader(...)] attribute) are not compiled alone.
-  if ! grep -q '\[shader(' "$src"; then
+  # Modules imported by entry-point files (no [shader(...)] attribute) are not compiled alone;
+  # a variant that #includes an entry-point file (world_ic.slang) is.
+  if ! grep -q '\[shader(' "$src" && ! grep -q '^#include' "$src"; then
     continue
   fi
   for target in metal wgsl; do
