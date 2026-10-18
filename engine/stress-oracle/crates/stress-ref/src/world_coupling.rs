@@ -566,6 +566,133 @@ impl World {
         t_min
     }
 
+    /// The predictive punch (`STRESS_IMPACT_PUNCH=1`, a model under measurement): for each
+    /// impactor that reaches a bonded cluster within `dt` closing faster than the tiered
+    /// impact speed, the plug its face would punch out (the cluster's chunks inside a 45°
+    /// cone from the face along the closing velocity, through the cluster, connected by
+    /// bonds to the struck chunk) and the bonds holding it in. The plug breaks out when the
+    /// force of an inelastic hit on it, its impulse over the Hertz contact time, exceeds
+    /// those bonds' summed tensile capacity: then they are returned, to be broken before
+    /// the engine steps, so the engine's rigid contact meets the free plug.
+    pub fn predict_punch(&self, dt: f64) -> Vec<(usize, usize)> {
+        let scale = self.scene.sim.stiffness_scale;
+        let plane_strain = |m: &Material| m.youngs_modulus * scale / (1.0 - m.poisson_ratio * m.poisson_ratio);
+        let mut out = Vec::new();
+        for imp in &self.impactors {
+            let r = imp.obox().bounding_radius();
+            let face = Self::impactor_radius(imp);
+            let c = imp.pose.position;
+            for cl in self.solver.clusters.iter().filter(|cl| !cl.bonds.is_empty()) {
+                let v = imp.velocity - cl.velocity;
+                let speed = v.norm();
+                if speed <= tiered_impact_speed() {
+                    continue;
+                }
+                let s = cl.structure;
+                let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
+                for &k in &cl.chunks {
+                    let (p, h) = (self.solver.chunk_position(s, k), self.solver.structures[s].chunks[k].half_extents.norm());
+                    lo = lo.component_min(p - Vec3::splat(h + r));
+                    hi = hi.component_max(p + Vec3::splat(h + r));
+                }
+                let (mut t0, mut t1) = (0.0f64, dt);
+                for a in 0..3 {
+                    if v[a].abs() < 1e-12 {
+                        if c[a] < lo[a] || c[a] > hi[a] {
+                            t0 = f64::INFINITY;
+                        }
+                        continue;
+                    }
+                    let (ta, tb) = ((lo[a] - c[a]) / v[a], (hi[a] - c[a]) / v[a]);
+                    t0 = t0.max(ta.min(tb));
+                    t1 = t1.min(ta.max(tb));
+                }
+                if t0 > t1 {
+                    continue;
+                }
+                let d = v * (1.0 / speed);
+                let hit = c + v * t0;
+                // The struck chunk: the cluster's nearest to the impactor's path.
+                let entry = cl
+                    .chunks
+                    .iter()
+                    .copied()
+                    .min_by(|&a, &b| {
+                        let dist = |k: usize| {
+                            let q = self.solver.chunk_position(s, k) - hit;
+                            let along = q.dot(d);
+                            (q - d * along).norm() + along.abs() * 1e-3
+                        };
+                        dist(a).total_cmp(&dist(b))
+                    })
+                    .expect("a cluster with bonds has chunks");
+                let entry_depth = (self.solver.chunk_position(s, entry) - hit).dot(d);
+                let in_cone = |k: usize| {
+                    let q = self.solver.chunk_position(s, k) - hit;
+                    let along = q.dot(d);
+                    let h = self.solver.structures[s].chunks[k].half_extents.norm();
+                    let lateral = (q - d * along).norm();
+                    // The chunk's centre inside the cone (punching shear's 45° from the
+                    // face's edge), from the struck chunk's depth on.
+                    along >= entry_depth - h && lateral <= face + (along - entry_depth).max(0.0)
+                };
+                // The cone's chunks connected to the struck one (by the cluster's bonds).
+                let member: std::collections::HashSet<usize> = cl.chunks.iter().copied().collect();
+                let mut plug: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                let mut stack = vec![entry];
+                plug.insert(entry);
+                while let Some(k) = stack.pop() {
+                    for &bi in &self.solver.structures[s].chunks[k].bonds {
+                        let b = &self.solver.bonds[s][bi];
+                        if !b.connected() {
+                            continue;
+                        }
+                        let o = if b.geometry.a == k { b.geometry.b } else { b.geometry.a };
+                        if member.contains(&o) && !plug.contains(&o) && in_cone(o) {
+                            plug.insert(o);
+                            stack.push(o);
+                        }
+                    }
+                }
+                if plug.len() == cl.chunks.len() {
+                    continue;
+                }
+                let interface: Vec<usize> = cl
+                    .bonds
+                    .iter()
+                    .copied()
+                    .filter(|&bi| {
+                        let g = &self.solver.bonds[s][bi].geometry;
+                        self.solver.bonds[s][bi].connected() && (plug.contains(&g.a) != plug.contains(&g.b))
+                    })
+                    .collect();
+                let capacity: f64 = interface.iter().map(|&bi| {
+                    let b = &self.solver.bonds[s][bi];
+                    b.strength.tensile * b.geometry.area * b.weibull
+                }).sum();
+                let m_plug: f64 = plug.iter().map(|&k| self.solver.structures[s].chunks[k].mass).sum();
+                let m_eff = m_plug * imp.mass / (m_plug + imp.mass);
+                let impulse = m_eff * speed;
+                let modulus = 1.0 / (1.0 / plane_strain(&imp.material) + 1.0 / plane_strain(self.chunk_material(s, entry)));
+                let tau = crate::api::hertz_duration(m_eff, face, modulus, speed);
+                let force = impulse / tau;
+                if std::env::var("STRESS_IMPACT_PUNCH_TRACE").is_ok() {
+                    eprintln!(
+                        "punch: cluster {} ({} chunks): plug {} chunks {:.1} kg, {} bonds holding {:.3e} N; hit {:.1} m/s, impulse {:.0} N s over {:.2e} s = {:.3e} N: {}",
+                        cl.id, cl.chunks.len(), plug.len(), m_plug, interface.len(), capacity, speed, impulse, tau, force,
+                        if force > capacity { "breaks out" } else { "holds" }
+                    );
+                }
+                if force > capacity {
+                    out.extend(interface.into_iter().map(|bi| (s, bi)));
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Every body's motion taken from the engine as it is (after frames the engine stepped
     /// without the world following it, such as a resident engine's).
     pub fn take_engine_motion(&mut self) {

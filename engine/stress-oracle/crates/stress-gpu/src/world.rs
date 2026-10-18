@@ -458,8 +458,47 @@ impl GpuWorld {
             self.last_resident = true;
             return self.resident_frame(gpu);
         }
-        self.coupled_frames += 1;
         let fdt = self.scene.sim.frame_dt;
+        // `STRESS_IMPACT_PUNCH=1` (a model under measurement): a routed frame breaks the
+        // impact's plug out before the engine steps when the punch's force beats the bonds
+        // holding it (`World::predict_punch`), then runs resident, the engine's rigid contact
+        // meeting the free plug. The prediction takes the engine's motion for a moment (the
+        // mirror's poses are restored when nothing breaks out).
+        if self.tiered && self.routed_resident && self.resident_engine.is_some() && self.qs_frame_conditions() && std::env::var("STRESS_IMPACT_PUNCH").is_ok_and(|v| v == "1") {
+            let m = &self.solver.mirror;
+            let saved: Vec<_> = m.clusters.iter().map(|c| (c.pose, c.velocity, c.angular_velocity)).collect();
+            let saved_imps: Vec<_> = self.solver.impactors.iter().map(|i| (i.pose, i.velocity, i.angular_velocity)).collect();
+            self.resident_sync_motion();
+            let bonds = self.with_shell_mut(|w| w.predict_punch(fdt));
+            if bonds.is_empty() {
+                for (cl, s) in self.solver.mirror.clusters.iter_mut().zip(saved) {
+                    (cl.pose, cl.velocity, cl.angular_velocity) = s;
+                }
+                for (imp, s) in self.solver.impactors.iter_mut().zip(saved_imps) {
+                    (imp.pose, imp.velocity, imp.angular_velocity) = s;
+                }
+            } else {
+                self.coupled_frames += 1;
+                let t0 = std::time::Instant::now();
+                self.solver.download(gpu);
+                self.resident_sync_motion();
+                let t1 = t0.elapsed().as_secs_f64() * 1e3;
+                self.solver.mirror.break_bonds(&bonds);
+                let t2 = t0.elapsed().as_secs_f64() * 1e3;
+                self.solver.rebuild(gpu, 0.0)?;
+                let t3 = t0.elapsed().as_secs_f64() * 1e3;
+                for cl in &mut self.solver.mirror.clusters {
+                    cl.driven = true;
+                }
+                self.with_shell_mut(|w| w.coupled_write_back(&[]));
+                if std::env::var("STRESS_IMPACT_PUNCH_TRACE").is_ok() {
+                    eprintln!("punch frame {}: {} bonds; download {t1:.1} ms, break {:.1}, rebuild {:.1}, engine bodies {:.1}", self.frame, bonds.len(), t2 - t1, t3 - t2, t0.elapsed().as_secs_f64() * 1e3 - t3);
+                }
+            }
+            self.last_resident = true;
+            return self.resident_frame(gpu);
+        }
+        self.coupled_frames += 1;
         // The impact window: the island's explicit part of the frame cut to the window, the
         // rest a resident frame (`impact_window`).
         let mut window = self.tiered && self.routed_resident && self.impact_window > 0.0 && self.resident_engine.is_some() && self.qs_frame_conditions();

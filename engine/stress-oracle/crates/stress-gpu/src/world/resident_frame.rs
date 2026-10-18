@@ -363,7 +363,7 @@ impl GpuWorld {
 
     /// The engine's motion of the driven bodies into the mirror (before a split, and
     /// whenever the mirror is wanted current).
-    fn resident_sync_motion(&mut self) {
+    pub(super) fn resident_sync_motion(&mut self) {
         let engine = self.resident_engine.clone().expect("resident engine");
         let motion: HashMap<BodyKey, stress_ref::engine::BodyMotion> = engine.borrow().motion().into_iter().map(|m| (m.key, m)).collect();
         for cl in self.solver.mirror.clusters.iter_mut().filter(|c| c.driven && !c.anchored) {
