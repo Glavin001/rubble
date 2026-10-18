@@ -48,7 +48,7 @@ static const uint V_BIKE1 = 33u;   // integrationDecay (1/s), smoothing [0,1), l
 static const uint V_BIKE_D = 34u;  // target lean.xyz (world), integrated lean angle
 static const uint V_TRACK = 35u;   // uint4(leftTrackLeader, rightTrackLeader, asfloat(steerStrength), pad)
 static const uint V_TRACK_D = 36u; // leftRatio, rightRatio, effective forward, turn grip a·W (m²/s², static)
-static const uint V_QUERY = 37u;   // uint4(stepsBetweenQueries (0/1 = every step), asfloat(tractionCut, filtered), pad, pad)
+static const uint V_QUERY = 37u;   // uint4(stepsBetweenQueries (0/1 = every step), asfloat(tractionCut, filtered), left pod, right pod)
 static const uint V_ASSIST = 31u;  // airPitch, airYaw (rad/s² per input), uprightStiffness (1/s²), uprightDamping (1/s)
 static const uint V_O3 = 30u;      // uint4(engineConnected, partsLost) , pitch/roll λ, pitch/roll k
 
@@ -160,6 +160,7 @@ static const uint MAX_VEHICLE_WHEELS = 16u;
 // Wheel shell: spheres on the chassis around each tyre (not the bottom, which the
 // tyre rows own), for sidewall contact with debris, kerb faces and other cars.
 static const uint SHELL_SPHERES = 5u;
+static const uint POD_COUNT_SHIFT = 28u; // V_QUERY.zw: firstCollider | count << 28
 // cos 35°: sphere-cast hits steeper than this belong to the wheel shell.
 static const float SWEEP_CONE_COS = 0.819;
 static const uint MAX_DRIVEN_WHEELS = 8u;
