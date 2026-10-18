@@ -4,24 +4,65 @@ Written 2026-10-18 on `claude/stress-top3-roi-8a4275` (PR Glavin001/rubble#39). 
 an M3 Max, Metal. Unreal Editor sometimes shared the GPU, which moved timings by up to 2×
 between runs. Numbers marked "quiet" were taken without it.
 
-## The goal, as you set it
+## The goal
 
-**First goal: rubble replaces PhysX GPU + Blast in vibe-land.**
-- rubble already supplies the rigid bodies (AVBD).
-- What is missing is the stress solver: a real-time quasi-static stress solver on the GPU.
+**Goal.** Make rubble capable of replacing PhysX GPU and its native destruction stage as
+vibe-land's destruction physics engine. Integrating it into vibe-land is out of scope; the
+work is rubble's.
 
-**The baseline must:**
-- be **functionally as good as Blast's GPU stress solver** as vibe-land runs it;
-- be **at least as fast**, on the same scenes and impacts;
-- run **as a forward pass**: fracture and separation take effect at the right time, never
-  by rewinding or re-solving the frame;
-- be **GPU-resident**: no GPU↔host round trips in a frame. It should be a first-class part
-  of rubble's step, not a second engine talking to it through the host.
+That means a quasi-static stress solver built into rubble as a first-class GPU feature,
+written in Slang:
+- **Resident:** one submission and one status read per tick, and no other host communication.
+- **Forward-only:** fracture and splits take effect between rubble's substeps, the moment
+  bonds fail. No rewind and no correction re-solve.
+- **Deterministic** run to run.
+- **At least feature, accuracy and speed parity** with the PhysX native stage, measured on
+  vibe-land's own town bombard, ported into `stress_bench` as `vibe-town_suite_bombard` and
+  `_suite_quick`.
 
-Dynamic impact handling with higher fidelity (impact islands, explicit microsecond
-substeps) comes **after** this baseline, not before.
+**Targets** (quiet M3 Max), with breakage within vibe-land's variation on the same events:
 
-**The baseline is not done.** Sections 1–4 below explain why. Section 5 is the plan.
+| Tier | Median | p95 | Worst |
+|---|---|---|---|
+| Standard | ≤ 11.46 ms | ≤ 37.88 ms | ≤ 48.24 ms |
+| Quick | ≤ 11.38 ms | ≤ 15.32 ms | ≤ 35.5 ms |
+
+**Fidelity bar:** at least as faithful as the native stage's correction-limit-1 pass on the
+free-wall and wall-row impacts.
+
+Higher-fidelity dynamic impact handling comes after this baseline.
+
+**Milestones: the shortest correct path, in order**
+
+1. **Deterministic baseline.**
+   - Fix the race in the first static solve after a split (rebuild and in-place paths).
+   - **Done when:** both suite scenes repeat bit for bit and the guard is 24/24.
+2. **GPU topology in Slang.**
+   - Port the native stage's labelling and candidate bodies (`PxgDestructionTopology.cu`,
+     `prepareCandidateBodies`): connected components of broken clusters, and each child's
+     mass, centre of mass, inertia, principal frame and velocity.
+   - **Done when:** results equal the host's `split_cluster`.
+   - Can run in parallel with milestone 3.
+3. **GPU bodies in rubble.**
+   - A rubble kernel creates bodies from candidate records and re-points chunk colliders to
+     their new body.
+   - Slots are allocated by scans; the new-body delta rides on the tick's one status read.
+   - **Done when:** a split creates its rubble bodies with no host call, deterministically.
+4. **GPU split layout.**
+   - A split parent's island tables are re-laid out on the GPU (replacing the host in-place
+     split): no mirror sync, no rebuild.
+   - **Done when:** a split frame does zero host work.
+5. **Forward splits inside rubble's step.**
+   - The stress stage joins rubble's step graph. After each substep: ingest contacts, run the
+     cascade, commit and split. The next substep sees the separated bodies.
+   - Every dispatch is sized on the GPU.
+   - **Done when:** one submission and one read per tick, and the fidelity bar above is met.
+6. **Speed to targets.**
+   - Cheaper rubble substep (dispatch count, broadphase).
+   - Cascade only on loaded structures.
+   - The CCD and iteration policy decided with you. Lossless first; anything lossy only with
+     your decision.
+   - **Done when:** both tiers meet the targets, with breakage and fidelity reported.
 
 ---
 
