@@ -176,6 +176,7 @@ struct Params {
     /// Scratch: each chunk's external load for the static solves (2 float4, contiguous
     /// so a cluster's loads upload in one write).
     sload_base: u32,
+    implicit_contact: u32,
 }
 
 
@@ -1289,6 +1290,7 @@ impl GpuSolver {
             iplan_base: iplan_base as u32,
             contact_bond_table,
             sload_base: sload_base as u32,
+            implicit_contact: stress_ref::world::implicit_contact() as u32,
             device_connect: std::env::var("STRESS_GPU_DEVICE_CONNECT").map_or(1, |v| (v != "0") as u32),
             ..Default::default()
         };

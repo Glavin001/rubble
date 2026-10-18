@@ -904,6 +904,8 @@ impl GpuWorld {
     /// The substep from the stress and contact bounds (`scaled_step_bound` combines
     /// them as the reference does), capped by the frame and `sim.max_substep`.
     fn combined_dt(&self, stress: f64, contact: f64, fdt: f64) -> f64 {
+        // Implicit contact (`STRESS_REF_IMPLICIT_CONTACT=1`) sets no step bound.
+        let contact = if stress_ref::world::implicit_contact() { f64::INFINITY } else { contact };
         let dt = if self.scene.sim.methods.scaled_step_bound { 1.0 / (stress.powi(-2) + contact.powi(-2)).sqrt() } else { stress.min(contact) };
         let mut dt = dt.min(fdt);
         if let Some(m) = self.scene.sim.max_substep {

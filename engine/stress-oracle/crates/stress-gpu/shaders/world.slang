@@ -99,6 +99,7 @@ struct Params
     uint contact_bond_groups; // narrow contact islands' bond groups in the sums dispatch (0: inline)
     uint contact_bond_table;  // index: those groups (island, begin, end, -)
     uint sload_base;         // scratch: each chunk's external load for the static solves (2 float4)
+    uint implicit_contact;   // 1: implicit penalty contact (`penalty_force`; a prototype, off)
 };
 
 static const uint MODE_EXPLICIT = 0;
@@ -544,9 +545,13 @@ float contact_stiffness(float ea, Box a, float eb, Box b, float3 dir)
 float3 penalty_force(float k, float m_red, float friction, float depth, float3 normal, float3 rel_velocity, float dt, uint points, out float stored, out float dissipated)
 {
     float c_max = MAX_SET_VISCOSITY / max(float(points), FACE_PAIR_POINTS) * m_red / dt;
-    float c = min(2.0 * params.zeta * sqrt(k * m_red), c_max);
+    bool implicit = params.implicit_contact != 0;
+    float c = implicit ? 2.0 * params.zeta * sqrt(k * m_red) : min(2.0 * params.zeta * sqrt(k * m_red), c_max);
     float vn = dot(rel_velocity, normal);
-    float fn_mag = max(k * depth - c * vn, 0.0);
+    // world.rs `penalty_force` (`STRESS_REF_IMPLICIT_CONTACT=1`): the normal force at the
+    // step's end against this point's share of the reduced mass.
+    float m_share = m_red / max(float(points), FACE_PAIR_POINTS);
+    float fn_mag = implicit ? max((k * depth - (k * dt + c) * vn) / (1.0 + (k * dt * dt + c * dt) / m_share), 0.0) : max(k * depth - c * vn, 0.0);
     float3 vt = rel_velocity - normal * vn;
     float vt_mag = length(vt);
     float ft_mag = min(friction * fn_mag, min(c_max, friction * fn_mag / FRICTION_REGULARIZATION) * vt_mag);
