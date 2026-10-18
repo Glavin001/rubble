@@ -58,7 +58,7 @@ const PASS_BINDINGS: [Binding; 25] = [
     Binding::StorageRw, // old island copy
 ];
 
-const LOG_BINDINGS: [Binding; 11] = [
+const LOG_BINDINGS: [Binding; 13] = [
     Binding::Uniform,   // params
     Binding::Storage,   // control
     Binding::Storage,   // parents
@@ -70,6 +70,8 @@ const LOG_BINDINGS: [Binding; 11] = [
     Binding::Storage,   // engine colliders
     Binding::StorageRw, // log
     Binding::Storage,   // cascade status
+    Binding::Storage,   // old islands
+    Binding::Storage,   // old chunks
 ];
 
 /// The frame's split log (`passlog.slang`): its capacity in words, and how much of it the
@@ -299,7 +301,7 @@ impl GpuPass {
         }
         if log {
             let lp = gpu.uniform("gpu pass log params", &[LOG_WORDS as u32, 0, 0, 0]);
-            let bind = gpu.bind(&self.log_k.group, &[&lp, &self.control, &self.parents, &self.work, &self.out, &self.slots, &self.extras, t.target.bodies, t.target.colliders, &self.log, t.status]);
+            let bind = gpu.bind(&self.log_k.group, &[&lp, &self.control, &self.parents, &self.work, &self.out, &self.slots, &self.extras, t.target.bodies, t.target.colliders, &self.log, t.status, &o[5], &o[0]]);
             prepared.push((self.log_k.pipeline.clone(), bind, Size::Direct(1)));
         }
         prepared.push((self.finish_k.pipeline.clone(), pass_bind(&self.finish_k), Size::Direct(1)));

@@ -15,6 +15,10 @@ struct LogParams_std140_0
 @binding(0) @group(0) var<uniform> params_0 : LogParams_std140_0;
 @binding(10) @group(0) var<storage, read> status_0 : array<u32>;
 
+@binding(11) @group(0) var<storage, read> old_islands_0 : array<vec4<f32>>;
+
+@binding(12) @group(0) var<storage, read> old_chunks_0 : array<vec4<f32>>;
+
 @binding(4) @group(0) var<storage, read> children_0 : array<vec4<f32>>;
 
 @binding(5) @group(0) var<storage, read> slots_0 : array<vec4<u32>>;
@@ -85,7 +89,7 @@ fn pass_log(@builtin(local_invocation_id) thread_0 : vec3<u32>)
             j_0 = j_0 + u32(1);
             p_0 = c_0;
         }
-        var size_0 : u32 = u32(16) + u32(2) * n_0 + u32(14) * p_0 + total_0 + u32(28) * nb_0 + u32(16) * nc_0;
+        var size_0 : u32 = u32(16) + u32(4) * n_0 + u32(14) * p_0 + total_0 + u32(28) * nb_0 + u32(16) * nc_0;
         var _S2 : u32 = max(log_0[i32(0)], u32(16));
         g_children_0 = p_0;
         if((_S2 + size_0) > (params_0.log_words_0))
@@ -143,7 +147,7 @@ fn pass_log(@builtin(local_invocation_id) thread_0 : vec3<u32>)
             j_0 = j_0 + u32(1);
         }
         var _S3 : u32 = at_0 + u32(16);
-        var _S4 : u32 = _S3 + u32(2) * n_0;
+        var _S4 : u32 = _S3 + u32(4) * n_0;
         p_0 = u32(0);
         var h_0 : u32 = _S4;
         loop
@@ -156,14 +160,19 @@ fn pass_log(@builtin(local_invocation_id) thread_0 : vec3<u32>)
                 break;
             }
             var parent_0 : vec4<u32> = parents_0[p_0];
-            var _S5 : u32 = _S3 + u32(2) * p_0;
-            log_0[_S5] = parent_0.x;
-            var _S6 : u32 = parent_0.z;
-            log_0[_S5 + u32(1)] = _S6;
+            var _S5 : u32 = parent_0.x;
+            var _S6 : u32 = u32(25) * _S5;
+            var info_0 : vec4<u32> = (bitcast<vec4<u32>>((old_chunks_0[u32(16) * (bitcast<vec4<u32>>((old_islands_0[_S6]))).x + u32(8)])));
+            var _S7 : u32 = _S3 + u32(4) * p_0;
+            log_0[_S7] = _S5;
+            var _S8 : u32 = parent_0.z;
+            log_0[_S7 + u32(1)] = _S8;
+            log_0[_S7 + u32(2)] = (bitcast<vec4<u32>>((old_islands_0[_S6 + u32(19)]))).w;
+            log_0[_S7 + u32(3)] = info_0.z;
             var k_0 : u32 = u32(0);
             loop
             {
-                if(k_0 < _S6)
+                if(k_0 < _S8)
                 {
                 }
                 else
@@ -181,9 +190,9 @@ fn pass_log(@builtin(local_invocation_id) thread_0 : vec3<u32>)
                 {
                     s_0 = slots_0[slot_0];
                 }
-                var _S7 : u32 = u32(2) * slot_0;
-                var com_0 : vec4<f32> = extras_0[_S7];
-                var rot_0 : vec4<f32> = extras_0[_S7 + u32(1)];
+                var _S9 : u32 = u32(2) * slot_0;
+                var com_0 : vec4<f32> = extras_0[_S9];
+                var rot_0 : vec4<f32> = extras_0[_S9 + u32(1)];
                 log_0[h_0] = (bitcast<u32>((head_0.z)));
                 log_0[h_0 + u32(1)] = (bitcast<u32>((head_0.w)));
                 log_0[h_0 + u32(2)] = s_0.x;
@@ -205,7 +214,7 @@ fn pass_log(@builtin(local_invocation_id) thread_0 : vec3<u32>)
             p_0 = p_0 + u32(1);
         }
     }
-    var m_0 : u32 = at_0 + u32(16) + u32(2) * n_0 + u32(14) * c_1;
+    var m_0 : u32 = at_0 + u32(16) + u32(4) * n_0 + u32(14) * c_1;
     j_0 = tid_0;
     loop
     {
@@ -216,7 +225,29 @@ fn pass_log(@builtin(local_invocation_id) thread_0 : vec3<u32>)
         {
             break;
         }
-        log_0[m_0 + j_0] = work_0[total_0 + j_0];
+        p_0 = u32(0);
+        loop
+        {
+            var _S10 : u32 = p_0 + u32(1);
+            var _S11 : bool;
+            if(_S10 < n_0)
+            {
+                _S11 = (parents_0[_S10].y) <= j_0;
+            }
+            else
+            {
+                _S11 = false;
+            }
+            if(_S11)
+            {
+            }
+            else
+            {
+                break;
+            }
+            p_0 = _S10;
+        }
+        log_0[m_0 + j_0] = (bitcast<vec4<u32>>((old_chunks_0[u32(16) * ((bitcast<vec4<u32>>((old_islands_0[u32(25) * parents_0[p_0].x]))).x + work_0[total_0 + j_0]) + u32(8)]))).w;
         j_0 = j_0 + u32(256);
     }
     var b_0 : u32 = m_0 + total_0;
@@ -231,14 +262,14 @@ fn pass_log(@builtin(local_invocation_id) thread_0 : vec3<u32>)
             break;
         }
         var v_0 : vec4<f32> = bodies_0[u32(7) * first_body_0 + j_0];
-        var _S8 : u32 = b_0 + u32(4) * j_0;
-        log_0[_S8] = (bitcast<u32>((v_0.x)));
-        log_0[_S8 + u32(1)] = (bitcast<u32>((v_0.y)));
-        log_0[_S8 + u32(2)] = (bitcast<u32>((v_0.z)));
-        log_0[_S8 + u32(3)] = (bitcast<u32>((v_0.w)));
+        var _S12 : u32 = b_0 + u32(4) * j_0;
+        log_0[_S12] = (bitcast<u32>((v_0.x)));
+        log_0[_S12 + u32(1)] = (bitcast<u32>((v_0.y)));
+        log_0[_S12 + u32(2)] = (bitcast<u32>((v_0.z)));
+        log_0[_S12 + u32(3)] = (bitcast<u32>((v_0.w)));
         j_0 = j_0 + u32(256);
     }
-    var _S9 : u32 = b_0 + u32(28) * nb_0;
+    var _S13 : u32 = b_0 + u32(28) * nb_0;
     j_0 = tid_0;
     loop
     {
@@ -250,11 +281,11 @@ fn pass_log(@builtin(local_invocation_id) thread_0 : vec3<u32>)
             break;
         }
         var v_1 : vec4<f32> = colliders_0[u32(4) * first_collider_0 + j_0];
-        var _S10 : u32 = _S9 + u32(4) * j_0;
-        log_0[_S10] = (bitcast<u32>((v_1.x)));
-        log_0[_S10 + u32(1)] = (bitcast<u32>((v_1.y)));
-        log_0[_S10 + u32(2)] = (bitcast<u32>((v_1.z)));
-        log_0[_S10 + u32(3)] = (bitcast<u32>((v_1.w)));
+        var _S14 : u32 = _S13 + u32(4) * j_0;
+        log_0[_S14] = (bitcast<u32>((v_1.x)));
+        log_0[_S14 + u32(1)] = (bitcast<u32>((v_1.y)));
+        log_0[_S14 + u32(2)] = (bitcast<u32>((v_1.z)));
+        log_0[_S14 + u32(3)] = (bitcast<u32>((v_1.w)));
         j_0 = j_0 + u32(256);
     }
     workgroupBarrier();

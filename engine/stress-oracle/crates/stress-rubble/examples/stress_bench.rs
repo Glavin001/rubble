@@ -307,6 +307,8 @@ pub fn regimes(seconds: f64) -> Vec<(&'static str, Scene)> {
 
 struct Run {
     frames: Vec<f64>,
+    /// Per frame, the time spent waiting on the GPU in reads (the rest is the host's).
+    waits: Vec<f64>,
     ram: f64,
     fragments: f64,
     broken: f64,
@@ -362,7 +364,7 @@ fn run_oracle(scene: &Scene) -> Run {
     let ram = w.impactors.first().map_or(0.0, |i| i.velocity.norm());
     let digest = digest(&w.solver, &w.impactors);
     let metrics = metrics(scene, &o);
-    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, metrics, digest }
+    Run { frames, waits: Vec::new(), ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames, unverified: 0, profile: serde_json::Value::Null, metrics, digest }
 }
 
 #[cfg(feature = "gpu")]
@@ -426,6 +428,8 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
     }
     let n = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut frames = Vec::with_capacity(n);
+    // Per frame: the time it waited on the GPU in reads (gpu.rs `WAIT_NS`).
+    let mut waits = Vec::with_capacity(n);
     let trace = std::env::var("STRESS_BENCH_TRACE").is_ok();
     if trace {
         w.solver.sync(gpu);
@@ -455,8 +459,10 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         let (splits, replans, tail) = (w.solver.host_splits, w.solver.replans, w.tail_seconds);
         let (prep, refresh, back, seg) = (w.prepare_seconds, w.refresh_seconds, w.write_back_seconds, w.segment_setup_seconds);
         let t = Instant::now();
+        let w0 = stress_gpu::gpu::WAIT_NS.load(std::sync::atomic::Ordering::Relaxed);
         w.step_frame(gpu).expect("frame");
         frames.push(t.elapsed().as_secs_f64() * 1e3);
+        waits.push((stress_gpu::gpu::WAIT_NS.load(std::sync::atomic::Ordering::Relaxed) - w0) as f64 * 1e-6);
         if per_frame {
             let p = &w.solver.profile;
             let ms = |a: f64, b: f64| (a - b) * 1e3;
@@ -516,7 +522,7 @@ fn run_rubble_gpu(gpu: &stress_gpu::gpu::Gpu, scene: &Scene, two_devices: bool, 
         std::fs::write(path, serde_json::json!({"u": u, "th": th, "v": v, "w": wv, "clusters": clusters, "cluster_v": cv, "cluster_w": cw, "cluster_rot": cr, "impactors": imps, "imp_v": iv, "imp_w": iw}).to_string()).expect("dump");
     }
     let metrics = metrics(scene, &o);
-    Run { frames, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, metrics, digest }
+    Run { frames, waits, ram, fragments: o.values["fragments"], broken: o.values["broken_bonds"], redone: w.redone_frames(), unverified: w.unverified_fractures, profile, metrics, digest }
 }
 
 fn main() {
@@ -620,7 +626,7 @@ fn main() {
             println!(
                 "{}",
                 serde_json::json!({"solver": solver, "config": config, "features": overrides.iter().map(|(n, on)| format!("{n}={}", if *on { "on" } else { "off" })).collect::<Vec<_>>(), "regime": name, "repeat": repeat, "seconds": seconds, "frame_dt": scene.sim.frame_dt,
-                    "frame_ms": run.frames, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "metrics": run.metrics, "digest": run.digest})
+                    "frame_ms": run.frames, "frame_wait_ms": run.waits, "engine_ms": stress_rubble::profile::take(), "ram": run.ram, "fragments": run.fragments, "broken_bonds": run.broken, "redone_frames": run.redone, "unverified_fractures": run.unverified, "profile": run.profile, "metrics": run.metrics, "digest": run.digest})
             );
         }
     }

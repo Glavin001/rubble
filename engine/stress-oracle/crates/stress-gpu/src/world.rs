@@ -136,6 +136,11 @@ pub struct GpuWorld {
     resident: Option<resident_frame::ResidentState>,
     /// The collider table's lookups of the current layout (resident_frame.rs).
     table_lookup: Option<resident_frame::TableLookup>,
+    /// A frame's GPU splits the engine has adopted but the host's mirror and layout not yet
+    /// followed (resident_frame.rs `flush_pending`), and whether the engine's write-back waits
+    /// with them.
+    pending_splits: Vec<resident_frame::PendingSplit>,
+    pending_write_back: bool,
     /// Frames taken on the resident path.
     pub resident_frames: u64,
     pub prepare_seconds: f64,
@@ -242,6 +247,8 @@ impl GpuWorld {
             impactors_stale: false,
             resident: None,
             table_lookup: None,
+            pending_splits: Vec::new(),
+            pending_write_back: false,
             resident_frames: 0,
             prepare_seconds: 0.0,
             refresh_seconds: 0.0,
@@ -290,6 +297,7 @@ impl GpuWorld {
     /// the engine at once when there is one (world_coupling.rs `add_impactor`). Returns
     /// its index.
     pub fn add_impactor(&mut self, gpu: &Gpu, imp: stress_ref::world::Impactor) -> Result<usize, String> {
+        self.flush_pending(gpu)?;
         let i = self.with_shell_mut(|w| w.add_impactor(imp));
         // The resident quasi-static frame takes impactors as the engine's bodies (and their
         // properties from the host's list): the solver's tables need no refresh for one.
@@ -841,6 +849,10 @@ impl GpuWorld {
     }
 
     pub fn step_frame(&mut self, gpu: &Gpu) -> Result<(), String> {
+        // A frame other than a resident one follows any GPU splits first.
+        if !(self.coupled() && self.resident_now()) {
+            self.flush_pending(gpu)?;
+        }
         if self.coupled() {
             return self.step_frame_coupled(gpu);
         }

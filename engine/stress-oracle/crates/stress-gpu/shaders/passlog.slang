@@ -12,10 +12,12 @@
 //   at + 7  bodies after        at + 8  colliders after
 //   at + 9  live islands before at + 10 the next cluster id before
 //   at + 11 child slots (the parents' chunks, `total`)
-//   then P x (island, children); then C x CHILD_HEAD (member count, anchored, body,
-//   first collider, colliders, valid, centre of mass and mass (float bits), principal
-//   rotation (float bits)); then the members (`total`, island-local chunks, in parent then
-//   child order); then the new bodies (7 float4 each) and colliders (4 float4 each).
+//   then P x PARENT (island, children, cluster id, structure); then C x CHILD_HEAD (member
+//   count, anchored, body, first collider, colliders, valid, centre of mass and mass (float
+//   bits), principal rotation (float bits)); then the members (`total`, each its chunk
+//   within its structure, in parent then child order); then the new bodies (7 float4 each)
+//   and colliders (4 float4 each). Everything from the tables as they were before the
+//   split, so the host can read an entry without having followed the ones before it.
 
 import common;
 
@@ -38,10 +40,16 @@ struct LogParams
 [[vk::binding(8, 0)]] StructuredBuffer<float4> colliders;
 [[vk::binding(9, 0)]] RWStructuredBuffer<uint> log;
 [[vk::binding(10, 0)]] StructuredBuffer<uint> status;
+// The split pass's copies of the islands and chunk statics as they were (gpu_pass.rs `old`).
+[[vk::binding(11, 0)]] StructuredBuffer<float4> old_islands;
+[[vk::binding(12, 0)]] StructuredBuffer<float4> old_chunks;
 
 static const uint CHILD_WORDS = 8;
 static const uint CHILD_HEAD = 14;
 static const uint HEADER = 16;
+static const uint PARENT = 4;
+static const uint ISLAND_WORDS = 25;
+static const uint CHUNK_WORDS = 16;
 
 groupshared uint g_at;
 groupshared uint g_size;
@@ -66,7 +74,7 @@ void pass_log(uint3 thread: SV_GroupThreadID)
         uint c = 0;
         for (uint p = 0; p < n; p++)
             c += parents[p].z;
-        uint size = HEADER + 2 * n + CHILD_HEAD * c + total + 28 * nb + 16 * nc;
+        uint size = HEADER + PARENT * n + CHILD_HEAD * c + total + 28 * nb + 16 * nc;
         uint at = max(log[0], HEADER);
         g_children = c;
         if (at + size > params.log_words)
@@ -103,12 +111,16 @@ void pass_log(uint3 thread: SV_GroupThreadID)
         log[at + 11] = total;
         for (uint w = 12; w < HEADER; w++)
             log[at + w] = 0;
-        uint h = at + HEADER + 2 * n;
+        uint h = at + HEADER + PARENT * n;
         for (uint p = 0; p < n; p++)
         {
             uint4 parent = parents[p];
-            log[at + HEADER + 2 * p] = parent.x;
-            log[at + HEADER + 2 * p + 1] = parent.z;
+            uint4 range = asuint(old_islands[ISLAND_WORDS * parent.x]);
+            uint4 info = asuint(old_chunks[CHUNK_WORDS * range.x + 8]);
+            log[at + HEADER + PARENT * p] = parent.x;
+            log[at + HEADER + PARENT * p + 1] = parent.z;
+            log[at + HEADER + PARENT * p + 2] = asuint(old_islands[ISLAND_WORDS * parent.x + 19]).w; // done_pad: the cluster id
+            log[at + HEADER + PARENT * p + 3] = info.z;
             for (uint k = 0; k < parent.z; k++)
             {
                 uint slot = parent.y + k;
@@ -136,9 +148,16 @@ void pass_log(uint3 thread: SV_GroupThreadID)
     }
     // The members, already in parent then child order (split.slang), and the new bodies
     // and colliders, contiguous in child order (spawn.slang).
-    uint m = at + HEADER + 2 * n + CHILD_HEAD * c;
+    uint m = at + HEADER + PARENT * n + CHILD_HEAD * c;
     for (uint j = tid; j < total; j += 256)
-        log[m + j] = work[total + j];
+    {
+        // Member j of the parent whose base (`parents[p].y`) holds it: its chunk in its structure.
+        uint p = 0;
+        while (p + 1 < n && parents[p + 1].y <= j)
+            p++;
+        uint first = asuint(old_islands[ISLAND_WORDS * parents[p].x]).x;
+        log[m + j] = asuint(old_chunks[CHUNK_WORDS * (first + work[total + j]) + 8]).w;
+    }
     uint b = m + total;
     for (uint j = tid; j < 7 * nb; j += 256)
     {
