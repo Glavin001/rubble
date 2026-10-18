@@ -4308,11 +4308,18 @@ struct SolverPair
 BIND(28) RWStructuredBuffer<SolverPair> gSolverPairs;
 static const uint SOLVER_SPHERE = 0x80000000u;
 // A track-belt pair (pairBeltDisp). The solve kernels have no binding to spare for
-// colliders, so its belt travel is packed here, once per step: μ moves to bits
-// 14..29 of countAndSphere as a half, and `friction` holds the travel along
-// (t1, t2) as two halves. Other pairs keep the plain layout.
+// colliders, so its belt travel is packed here, once per step, in 16-bit fixed
+// point (no half intrinsics: Slang's CUDA output lacks cuda_fp16): μ moves to bits
+// 14..29 of countAndSphere, and `friction` holds the travel along (t1, t2).
+// Other pairs keep the plain layout.
 static const uint SOLVER_BELT = 0x40000000u;
 static const uint SOLVER_COUNT_MASK = 0x3FFFu;
+static const float BELT_MU_SCALE = 4096.0;   // μ in [0, 16), steps of 2.4e-4
+static const float BELT_TRAVEL_MAX = 2.0;    // m per step, steps of 6e-5 m
+
+uint packUnorm16(float v, float scale) { return (uint)clamp(round(v * scale), 0.0, 65535.0); }
+uint packSnorm16(float v) { return (uint)(clamp(round(v / BELT_TRAVEL_MAX * 32767.0), -32767.0, 32767.0) + 32768.0); }
+float unpackSnorm16(uint q) { return (float(q & 0xFFFFu) - 32768.0) / 32767.0 * BELT_TRAVEL_MAX; }
 
 void packSolverPair(uint mi, Manifold mf)
 {
@@ -4329,8 +4336,8 @@ void packSolverPair(uint mi, Manifold mf)
         float3 belt = pairBeltDisp(a, b, gBodies[a.body], gBodies[b.body], mf.normal);
         float3 t1, t2;
         orthonormalBasis(mf.normal, t1, t2);
-        pair.countAndSphere |= SOLVER_BELT | (f32tof16(mf.friction) << 14u);
-        pair.friction = asfloat(f32tof16(dot(belt, t1)) | (f32tof16(dot(belt, t2)) << 16u));
+        pair.countAndSphere |= SOLVER_BELT | (packUnorm16(mf.friction, BELT_MU_SCALE) << 14u);
+        pair.friction = asfloat(packSnorm16(dot(belt, t1)) | (packSnorm16(dot(belt, t2)) << 16u));
     }
     gSolverPairs[mi] = pair;
 }
@@ -4338,7 +4345,7 @@ void packSolverPair(uint mi, Manifold mf)
 float solverPairFriction(SolverPair pair)
 {
     return (pair.countAndSphere & SOLVER_BELT) != 0u
-        ? f16tof32((pair.countAndSphere >> 14u) & 0xFFFFu) : pair.friction;
+        ? float((pair.countAndSphere >> 14u) & 0xFFFFu) / BELT_MU_SCALE : pair.friction;
 }
 
 // World belt travel of a pair this step (pairBeltDisp), from its packed halves.
@@ -4348,7 +4355,7 @@ float3 solverPairBelt(SolverPair pair)
     float3 t1, t2;
     orthonormalBasis(pair.normal, t1, t2);
     uint bits = asuint(pair.friction);
-    return t1 * f16tof32(bits & 0xFFFFu) + t2 * f16tof32(bits >> 16u);
+    return t1 * unpackSnorm16(bits) + t2 * unpackSnorm16(bits >> 16u);
 }
 
 Contact solverContact(uint index, float3 normal, float friction)
