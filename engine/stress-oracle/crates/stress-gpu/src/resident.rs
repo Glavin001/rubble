@@ -104,7 +104,8 @@ impl ResidentQs {
         let cap = pulse_capacity();
         let props_base = 0u32;
         let engine_base = props_base + n as u32;
-        let eload_base = engine_base + 3 * islands as u32;
+        // Per island up to the capacity (a split laid out on the GPU adds islands).
+        let eload_base = engine_base + 3 * islands.max(solver.island_cap()) as u32;
         let pulse_base = eload_base + 2 * n as u32;
         let pulse_count_base = pulse_base + 3 * cap * n as u32;
         let status_base = pulse_count_base + n as u32;
@@ -166,6 +167,19 @@ impl ResidentQs {
         };
         self.ctab = gpu.storage("resident ctab", &t);
         self.chunks = chunks;
+    }
+
+    /// The tables' layout, for a split the GPU lays out (`GpuSolver::split_resident_with`).
+    pub fn layout(&self) -> crate::solver::ResidentLayout<'_> {
+        let p = &self.params;
+        crate::solver::ResidentLayout { ctab: &self.ctab, props_base: p.props_base, eload_base: p.eload_base, pulse_base: p.pulse_base, pulse_count_base: p.pulse_count_base, pulse_cap: p.pulse_cap, engine_base: p.engine_base }
+    }
+
+    /// After a split laid out on the GPU (which moved the tables' chunk and island entries
+    /// itself): the tables' island count follows, nothing rebuilt.
+    pub fn adopt_layout(&mut self, solver: &GpuSolver) {
+        self.params.island_count = solver.mirror.clusters.len() as u32;
+        self.chunks = solver.gpu_chunks().to_vec();
     }
 
     fn bind(&self, gpu: &Gpu, k: &Kernel, params: &wgpu::Buffer, ingest: &EngineIngest, solver: &GpuSolver) -> wgpu::BindGroup {

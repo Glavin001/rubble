@@ -37,6 +37,8 @@ pub(super) struct ResidentState {
     qs: ResidentQs,
     engine_version: u64,
     layout_generation: u64,
+    /// The layout's last change was a split the GPU laid out (its entries moved there).
+    gpu_laid_out: bool,
 }
 
 impl GpuWorld {
@@ -101,6 +103,13 @@ impl GpuWorld {
         let chunks = chunk_index.len().max(1) as u32;
         let dt = self.scene.sim.frame_dt;
         match self.resident.as_mut() {
+            // A split the GPU laid out: the tables' entries already moved; only the
+            // engine's colliders are new.
+            Some(r) if r.gpu_laid_out && r.layout_generation == generation && r.substeps >= substeps && r.ingest_chunks() == chunks => {
+                r.ingest.set_colliders(gpu, &table);
+                r.engine_version = version;
+                r.gpu_laid_out = false;
+            }
             Some(r) if r.substeps >= substeps && r.ingest_chunks() == chunks => {
                 r.ingest.set_colliders(gpu, &table);
                 r.qs.rebuild(gpu, &self.solver, &frames, dt);
@@ -123,6 +132,7 @@ impl GpuWorld {
                     qs: ResidentQs::new(gpu, &self.solver, &frames, dt),
                     engine_version: version,
                     layout_generation: generation,
+                    gpu_laid_out: false,
                 });
             }
         }
@@ -269,8 +279,10 @@ impl GpuWorld {
             // `STRESS_GPU_SPAWN=1` (M3): the children's engine bodies made on the GPU, in the
             // engine's own buffers, and the parents' retired there; the engine adopts them
             // once the host's split names the children.
-            let live = std::env::var("STRESS_GPU_SPAWN").is_ok_and(|v| v == "1");
-            let spawned = if live { self.spawn_live(gpu, &engine, &out.disconnected) } else { None };
+            // `STRESS_GPU_LAYOUT=1` (M4, with the spawn): the tables laid out on the GPU too.
+            let layout_live = std::env::var("STRESS_GPU_LAYOUT").is_ok_and(|v| v == "1");
+            let live = layout_live || std::env::var("STRESS_GPU_SPAWN").is_ok_and(|v| v == "1");
+            let spawned = if live { self.spawn_live(gpu, &engine, &out.disconnected, layout_live) } else { None };
             // `STRESS_GPU_SPLIT_CHECK=1`: the GPU's split of these islands, compared with
             // the host's below (M2).
             let split_check = std::env::var("STRESS_GPU_SPLIT_CHECK").is_ok_and(|v| v == "1");
@@ -281,14 +293,31 @@ impl GpuWorld {
                 // M3: the children's rubble bodies as the GPU makes them, at the slots the
                 // engine would give them next.
                 let (first_body, first_collider) = engine.borrow().body_counts();
-                let bodies = self.part_table(gpu, &engine).map(|table| self.solver.gpu_spawn_bodies(gpu, &run, &table, first_body, first_collider, None, &[]));
-                (ids, self.solver.gpu_chunks().to_vec(), run.children, bodies)
+                let spawn = self.part_table(gpu, &engine).map(|table| self.solver.gpu_spawn_bodies(gpu, &run, &table, first_body, first_collider, None, &[]));
+                // M4: the GPU's layout of this split into copies of the tables.
+                let shadow = spawn.as_ref().map(|(_, bufs)| self.solver.gpu_layout_shadow(gpu, &run, bufs));
+                (ids, self.solver.gpu_chunks().to_vec(), run.children, spawn.map(|s| s.0), shadow)
             });
             // In place when the tables can take it, opt-in (`STRESS_QS_SPLIT_IN_PLACE=1`):
             // off by default since it makes the bombard nondeterministic run to run and
             // differ from the rebuild (a GPU race after it, not yet found; the tables it
             // uploads are identical across runs, `STRESS_GPU_SPLIT_HASH=1`).
-            let in_place = std::env::var("STRESS_QS_SPLIT_IN_PLACE").is_ok_and(|v| v == "1") && self.solver.split_resident(gpu, &out.disconnected)?;
+            let gpu_layout = layout_live && spawned.is_some();
+            let in_place = if gpu_layout {
+                let s = spawned.as_ref().expect("spawned");
+                let resident = self.resident.as_ref().map(|r| r.qs.layout());
+                let l = crate::solver::LiveSplit { comps: s.comps.clone(), run: &s.run, spawn: &s.spawn, resident };
+                let done = self.solver.split_resident_with(gpu, &out.disconnected, Some(l))?;
+                // The resident tables' entries moved on the GPU: their island count follows.
+                if let Some(r) = self.resident.as_mut() {
+                    r.qs.adopt_layout(&self.solver);
+                    r.layout_generation = self.solver.layout_generation;
+                    r.gpu_laid_out = true;
+                }
+                done
+            } else {
+                std::env::var("STRESS_QS_SPLIT_IN_PLACE").is_ok_and(|v| v == "1") && self.solver.split_resident(gpu, &out.disconnected)?
+            };
             if in_place {
                 if trace {
                     eprintln!("resident split: {} clusters split in place, {:.1} ms", out.disconnected.len(), t_split.elapsed().as_secs_f64() * 1e3);
@@ -314,8 +343,13 @@ impl GpuWorld {
             if let Some(spawned) = spawned {
                 self.adopt_live(&engine, spawned)?;
             }
-            if let Some((ids, layout_chunks, gpu_children, bodies)) = gpu_children {
+            if let Some((ids, layout_chunks, gpu_children, bodies, shadow)) = gpu_children {
                 self.check_split(&ids, &layout_chunks, &gpu_children);
+                if in_place {
+                    if let Some((shadow, plan, old_count)) = shadow {
+                        self.solver.compare_layout(gpu, &shadow, &plan, old_count);
+                    }
+                }
                 pending_spawn.push((ids, gpu_children.iter().map(|c| c.len()).collect::<Vec<_>>(), bodies));
             }
             split = true;
@@ -480,13 +514,18 @@ struct LiveSpawn {
     /// Per parent: each child's chunks (structure, chunk) and collider chunks.
     children: Vec<Vec<Vec<(usize, usize)>>>,
     bodies: Vec<crate::gpu_split::GpuBody>,
+    /// The split (for M4's layout), its spawn's buffers, each parent's children's chunks
+    /// (structure-local, sorted: the mirror's components).
+    run: crate::gpu_split::SplitRun,
+    spawn: crate::gpu_split::SpawnBuffers,
+    comps: Vec<Vec<Vec<usize>>>,
 }
 
 impl GpuWorld {
     /// M3, live: the children of `parents` split on the GPU and their engine bodies made
     /// there, in the engine's buffers, the parents retired. None (the host makes them) when
     /// the engine cannot, or a parent has no body.
-    fn spawn_live(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>, parents: &[usize]) -> Option<LiveSpawn> {
+    fn spawn_live(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>, parents: &[usize], layout: bool) -> Option<LiveSpawn> {
         let ids: Vec<u64> = parents.iter().map(|&ci| self.solver.mirror.clusters[ci].id).collect();
         let layout_chunks = self.solver.gpu_chunks().to_vec();
         let table = self.part_table(gpu, engine)?;
@@ -496,8 +535,28 @@ impl GpuWorld {
         let (bodies_buf, cols_buf, max_bodies) = e.spawn_buffers()?;
         let (first_body, first_collider) = e.body_counts();
         let run = self.solver.gpu_split_children(gpu, parents);
+        // M4: only when the layout can follow on the GPU (checked before anything is made).
+        if layout {
+            let added: usize = run.children.iter().map(|c| c.len().saturating_sub(1)).sum();
+            if !self.solver.can_split_in_place(added) {
+                return None;
+            }
+        }
         let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
-        let bodies = self.solver.gpu_spawn_bodies(gpu, &run, &table, first_body, first_collider, Some(target), &retire);
+        let (bodies, spawn) = self.solver.gpu_spawn_bodies(gpu, &run, &table, first_body, first_collider, Some(target), &retire);
+        let comps: Vec<Vec<Vec<usize>>> = run
+            .children
+            .iter()
+            .map(|list| {
+                list.iter()
+                    .map(|c| {
+                        let mut v: Vec<usize> = c.chunks.iter().map(|&k| layout_chunks[k as usize].1).collect();
+                        v.sort_unstable();
+                        v
+                    })
+                    .collect()
+            })
+            .collect();
         let children = run
             .children
             .iter()
@@ -507,7 +566,7 @@ impl GpuWorld {
                     .collect()
             })
             .collect();
-        Some(LiveSpawn { ids, children, bodies })
+        Some(LiveSpawn { ids, children, bodies, run, spawn, comps })
     }
 
     /// The engine adopts a live spawn's bodies, named by the host's split (its events).

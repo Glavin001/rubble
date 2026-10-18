@@ -154,6 +154,12 @@ impl PartTable {
     }
 }
 
+/// A spawn's child slots and extras, on the GPU (for the layout's resident tables).
+pub struct SpawnBuffers {
+    pub slots: wgpu::Buffer,
+    pub extras: wgpu::Buffer,
+}
+
 /// A child's rubble body and colliders as the GPU made them (`spawn.slang`): raw
 /// `BodyState` and `Collider` words.
 #[derive(Clone, Debug, Default)]
@@ -253,12 +259,12 @@ impl GpuSplitter {
         first_collider: u32,
         target: Option<SpawnTarget>,
         retire: &[[u32; 3]],
-    ) -> Vec<GpuBody> {
+    ) -> (Vec<GpuBody>, SpawnBuffers) {
         let total = run.total.max(1);
         // At most every part of the children's chunks once.
         let n_parts: usize = (table.parts.size() as usize / 128).max(1);
-        let slots = gpu.storage("spawn slots", &vec![[0u32; 4]; total]);
-        let extras = gpu.storage("spawn extras", &vec![[0f32; 4]; 2 * total]);
+        let slots_buf = gpu.storage("spawn slots", &vec![[0u32; 4]; total]);
+        let extras_buf = gpu.storage("spawn extras", &vec![[0f32; 4]; 2 * total]);
         let live = target.is_some();
         let (own_bodies, own_colliders);
         let (bodies, colliders, max_bodies) = match &target {
@@ -282,15 +288,15 @@ impl GpuSplitter {
         let params = gpu.uniform("spawn params", &SpawnParams { parent_count: run.parent_count as u32, first_body, first_collider, live: live as u32, max_bodies, pad: [0; 3] });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for (k, size) in [(&self.offsets, 1u32), (&self.spawn, groups(total, 64)), (&self.retire, groups(run.parent_count, 64))] {
-            let bind = gpu.bind(&k.group, &[&params, &run.parents, &run.work, &run.out, &run.frames, &table.ranges, &table.parts, chunks, state, &slots, bodies, colliders, &islands_of, &extras, &table.structure_base]);
+            let bind = gpu.bind(&k.group, &[&params, &run.parents, &run.work, &run.out, &run.frames, &table.ranges, &table.parts, chunks, state, &slots_buf, bodies, colliders, &islands_of, &extras_buf, &table.structure_base]);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(size.max(1), 1, 1);
         }
         gpu.queue.submit([encoder.finish()]);
-        let slots: Vec<[u32; 4]> = gpu.read(&slots);
-        let extras: Vec<[f32; 4]> = gpu.read(&extras);
+        let slots: Vec<[u32; 4]> = gpu.read(&slots_buf);
+        let extras: Vec<[f32; 4]> = gpu.read(&extras_buf);
         // The records written: all of a copy, or the engine's new range.
         let made: Vec<&[u32; 4]> = (0..run.parent_count).flat_map(|p| (0..parent_table[p][2] as usize).map(move |k| (p, k))).map(|(p, k)| &slots[parent_table[p][1] as usize + k]).filter(|s| s[3] != 0).collect();
         let n_bodies: u32 = made.len() as u32;
@@ -321,7 +327,7 @@ impl GpuSplitter {
                 out.push(GpuBody { slot: s[0], first_collider: s[1], body, colliders: cols, com: extras[2 * slot], principal: extras[2 * slot + 1] });
             }
         }
-        out
+        (out, SpawnBuffers { slots: slots_buf, extras: extras_buf })
     }
 }
 
@@ -422,4 +428,132 @@ impl SpawnCheck {
             }
         }
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LayoutParams {
+    pub parent_count: u32,
+    pub island_count: u32,
+    pub next_id: u32,
+    pub substeps: u32,
+    pub chunk_words: u32,
+    pub bond_words: u32,
+    pub dyn_words: u32,
+    pub island_words: u32,
+    pub chunk_count: u32,
+    pub statics_base: u32,
+    pub statics_bonds: u32,
+    pub resident: u32,
+    pub props_base: u32,
+    pub eload_base: u32,
+    pub pulse_base: u32,
+    pub pulse_count_base: u32,
+    pub pulse_cap: u32,
+    pub engine_base: u32,
+    pub total: u32,
+    pub gate_flag_base: u32,
+    pub bond_count: u32,
+    pub driven: u32,
+    pub pad: [u32; 2],
+}
+
+const LAYOUT_BINDINGS: [Binding; 24] = [
+    Binding::Uniform,   // params
+    Binding::Storage,   // parents
+    Binding::Storage,   // work
+    Binding::Storage,   // children
+    Binding::Storage,   // frames
+    Binding::StorageRw, // plan
+    Binding::Storage,   // old chunks
+    Binding::StorageRw, // chunks
+    Binding::Storage,   // old state
+    Binding::StorageRw, // state
+    Binding::Storage,   // old bonds
+    Binding::StorageRw, // bonds
+    Binding::Storage,   // old bond records
+    Binding::StorageRw, // bond records
+    Binding::Storage,   // old index
+    Binding::StorageRw, // index
+    Binding::Storage,   // old islands
+    Binding::StorageRw, // islands
+    Binding::StorageRw, // scratch
+    Binding::Storage,   // old ctab
+    Binding::StorageRw, // ctab
+    Binding::StorageRw, // gate
+    Binding::Storage,   // spawn slots
+    Binding::Storage,   // spawn extras
+];
+
+/// The tables a split re-lays out (`layout.slang`): each as (as it was, to write).
+pub struct LayoutTables<'a> {
+    pub chunks: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+    pub state: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+    pub bonds: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+    pub bond_dyn: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+    pub index: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+    pub islands: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+    pub scratch: &'a wgpu::Buffer,
+    pub ctab: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+    pub gate: &'a wgpu::Buffer,
+    /// The spawn's child slots and extras (`spawn.slang`), for the resident tables.
+    pub spawn: (&'a wgpu::Buffer, &'a wgpu::Buffer),
+}
+
+#[derive(Clone)]
+pub struct GpuLayout {
+    plan: std::rc::Rc<Kernel>,
+    moved: std::rc::Rc<Kernel>,
+    parent: std::rc::Rc<Kernel>,
+}
+
+impl GpuLayout {
+    pub fn new(gpu: &Gpu) -> GpuLayout {
+        let k = |e: &str| std::rc::Rc::new(gpu.compute(&shaders::LAYOUT, e, &LAYOUT_BINDINGS));
+        GpuLayout { plan: k("layout_plan"), moved: k("layout_moved"), parent: k("layout_parent") }
+    }
+
+    pub fn clone_kernels(&self) -> GpuLayout {
+        self.clone()
+    }
+
+    /// `run`'s split re-laid out in `tables` (`params.total`, `parent_count` from the run);
+    /// `island_cap`: islands the tables hold. Returns the plan buffer (its island order).
+    pub fn layout(&self, gpu: &Gpu, run: &SplitRun, tables: &LayoutTables, mut params: LayoutParams, island_cap: usize) -> wgpu::Buffer {
+        params.parent_count = run.parent_count as u32;
+        params.total = run.total as u32;
+        let cap = params.island_count as usize + run.total;
+        let words = 16 + cap + 5 * run.total + params.island_count as usize + params.bond_count as usize + 1;
+        let plan = gpu.storage("layout plan", &vec![0u32; words]);
+        let uniform = gpu.uniform("layout params", &params);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for (k, size) in [(&*self.plan, 1u32), (&*self.moved, groups(island_cap + 1, 64)), (&*self.parent, run.parent_count.max(1) as u32)] {
+            let t = tables;
+            let bind = gpu.bind(
+                &k.group,
+                &[&uniform, &run.parents, &run.work, &run.out, &run.frames, &plan, t.chunks.0, t.chunks.1, t.state.0, t.state.1, t.bonds.0, t.bonds.1, t.bond_dyn.0, t.bond_dyn.1, t.index.0, t.index.1, t.islands.0, t.islands.1, t.scratch, t.ctab.0, t.ctab.1, t.gate, t.spawn.0, t.spawn.1],
+            );
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&k.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(size.max(1), 1, 1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        plan
+    }
+}
+
+/// How a GPU layout compared with the host's in-place split (`STRESS_GPU_SPLIT_CHECK=1`
+/// with `STRESS_QS_SPLIT_IN_PLACE=1`): words differing per table, and the island records'
+/// largest float difference (relative to each field's size).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LayoutCheck {
+    pub layouts: u64,
+    pub chunk_words: u64,
+    pub state_words: u64,
+    pub bond_words: u64,
+    pub dyn_words: u64,
+    pub index_words: u64,
+    pub island_int_words: u64,
+    pub island_float: f64,
 }

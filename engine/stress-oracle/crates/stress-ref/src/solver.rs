@@ -2029,11 +2029,25 @@ impl ReferenceSolver {
     }
 
     /// Recompute the connectivity of cluster `ci` and split it into children.
+    /// The id the next cluster will take (`add_cluster`).
+    pub fn next_cluster_id(&self) -> u64 {
+        self.next_cluster_id
+    }
+
     pub fn split_cluster(&mut self, ci: usize) {
+        let s = self.clusters[ci].structure;
+        let comps = self.components(s, &self.clusters[ci].chunks.clone());
+        self.split_cluster_into(ci, comps);
+    }
+
+    /// `split_cluster` into the given components (each a sorted chunk list, together the
+    /// cluster's chunks, in `components`' order): for a split whose connectivity was
+    /// found elsewhere (the GPU's, stress-gpu `split.slang`), so the mirror's bond states
+    /// need not be current.
+    pub fn split_cluster_into(&mut self, ci: usize, comps: Vec<Vec<usize>>) {
         crate::profile::count(crate::profile::Counter::Splits, 1);
         crate::profile::count(crate::profile::Counter::SplitChunks, self.clusters[ci].chunks.len() as u64);
         let s = self.clusters[ci].structure;
-        let comps = self.components(s, &self.clusters[ci].chunks.clone());
         if comps.len() <= 1 {
             return;
         }
