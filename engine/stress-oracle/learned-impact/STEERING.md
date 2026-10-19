@@ -608,8 +608,10 @@ User clarified the baseline: advance explicit physical graph state rather than
 depending on latent temporal memory. See `PHYSICAL_STATE_TRANSITION.md` and
 `findings/physical-state-v37-2026-10-19.md` for the contract and measured evidence.
 The whole-world target is ≤5 ms across hundreds of structures, hundreds of
-thousands of bonds and ≥10,000 active rigid bodies. Hardware and simulated
-duration per update remain requested, not answered.
+thousands of bonds and ≥10,000 active rigid bodies. User subsequently specified
+120 Hz to leave GPU headroom alongside likely 60 Hz PhysX: test 8.33 ms physical
+updates under the 5 ms ceiling. Final GPU remains unspecified; local M3 Max
+measurements are provisional. Do not change production timesteps implicitly.
 
 An oracle-assisted inactive-damage intervention is mixed and insufficient.
 Energy projection stabilizes generic explicit-state wave predictions but does
@@ -633,5 +635,22 @@ files byte-for-byte, across 298 phases and 365,379 response rows. These sidecars
 are not yet training inputs or complete World restart state. Do not manufacture
 missing history from old snapshots; collect it through verified native replay.
 
-199 Python and 11 targeted Rust tests pass. No checkpoint promoted; V36 native
+The same fitted coefficients now pass a simple 1-D coupled-impact probe, with
+live unilateral contact and separation/recontact events. The frozen-current-force
+control produces 20–38% energy drift; live contact keeps projectile position RMSE
+≤1.84e-8 m against a converged independent force-law reference. A two-mass test
+matches analytic collision duration/velocity exchange. This has no friction,
+fracture or native destruction coupling and is not a speed result.
+
+Resident Metal at 102,410 chunks/200,046 bonds costs 303.34 ms per 0.512 ms
+physical transition in the initial implementation. Equivalent streamed polynomial
+fields and cached mass-normalized bond rows reduce it to 75.25 ms (4.03× faster).
+All interactions retained; this is algebraic optimization, not a physics change.
+CPU/Metal parity and repeated f64/f32 audits pass. Neither timing is a full-world
+or 10k active-body benchmark; the implementation still fails the performance goal.
+Next architecture choices need more than increasing polynomial degree or adding
+latent memory. Actual damping, nonlinear material/contact events, long-range
+propagation and a suitable fused runtime remain open.
+
+200 Python and 11 targeted Rust tests pass. No checkpoint promoted; V36 native
 destruction remains rejected. Artifacts: `runs/state-consistency-v37-2026-10-19/`.

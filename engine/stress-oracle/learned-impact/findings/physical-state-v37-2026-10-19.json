@@ -2,7 +2,7 @@
   "status": "capability_probes_pass_native_destruction_still_rejected",
   "artifact_root": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19",
   "production_checkpoint_promoted": false,
-  "python_tests_passed": 199,
+  "python_tests_passed": 200,
   "targeted_rust_tests_passed": 11,
   "results": {
     "history-intervention.json": {
@@ -886,6 +886,522 @@
           "status": "completed"
         }
       }
+    },
+    "contact-capability.json": {
+      "artifact_sha256": "1b7db8034d9f60450ea3f7ad27471b0d98d97dc909598f2ccb5e6b17de31f531",
+      "result": {
+        "status": "completed",
+        "scope": "Small 1-D impact capability probe: physical-state feedback versus frozen loads.\n\nA projectile starts just touching a supported elastic bar. Contact is a unilateral\nlinear spring, without friction, damping or fracture. The C/S coefficients are the\nsame independently fitted elastic operator. This is not the native destruction\ncontact law, a trained contact model, or a runtime-speed benchmark.\n",
+        "results": [
+          {
+            "projectile_mass": 0.25,
+            "contact_stiffness": 25.0,
+            "coupling": "evolving_contact_edge",
+            "intervals": 89,
+            "dt_s": 0.022500000000000003,
+            "duration_s": 2.0025000000000004,
+            "reference_convergence_max_abs": 4.617432569631319e-08,
+            "projectile_position_rmse_m": 5.755862551134934e-09,
+            "projectile_velocity_rmse_m_s": 5.807140053282602e-09,
+            "reference_final_projectile_velocity_m_s": -0.7019414212326631,
+            "model_final_projectile_velocity_m_s": -0.7019414149484615,
+            "max_relative_energy_drift": 2.549435107468412e-10,
+            "contact_events": [
+              {
+                "time": 0.2986748923274002,
+                "touching": false
+              }
+            ]
+          },
+          {
+            "projectile_mass": 0.25,
+            "contact_stiffness": 25.0,
+            "coupling": "frozen_current_force",
+            "intervals": 89,
+            "dt_s": 0.022500000000000003,
+            "duration_s": 2.0025000000000004,
+            "reference_convergence_max_abs": 4.617432569631319e-08,
+            "projectile_position_rmse_m": 0.15546282717453347,
+            "projectile_velocity_rmse_m_s": 0.16027854276218517,
+            "reference_final_projectile_velocity_m_s": -0.7019414212326631,
+            "model_final_projectile_velocity_m_s": -0.8722494135898452,
+            "max_relative_energy_drift": 0.3756060590448649,
+            "contact_events": []
+          },
+          {
+            "projectile_mass": 0.5,
+            "contact_stiffness": 50.0,
+            "coupling": "evolving_contact_edge",
+            "intervals": 89,
+            "dt_s": 0.022500000000000003,
+            "duration_s": 2.0025000000000004,
+            "reference_convergence_max_abs": 6.99516938817979e-08,
+            "projectile_position_rmse_m": 1.8340753651402988e-08,
+            "projectile_velocity_rmse_m_s": 1.8379888892040785e-08,
+            "reference_final_projectile_velocity_m_s": -0.4686103445610912,
+            "model_final_projectile_velocity_m_s": -0.46861036432134323,
+            "max_relative_energy_drift": 3.8392755641325493e-10,
+            "contact_events": [
+              {
+                "time": 0.28410761728584594,
+                "touching": false
+              }
+            ]
+          },
+          {
+            "projectile_mass": 0.5,
+            "contact_stiffness": 50.0,
+            "coupling": "frozen_current_force",
+            "intervals": 89,
+            "dt_s": 0.022500000000000003,
+            "duration_s": 2.0025000000000004,
+            "reference_convergence_max_abs": 6.99516938817979e-08,
+            "projectile_position_rmse_m": 0.14141753049921882,
+            "projectile_velocity_rmse_m_s": 0.144026017761713,
+            "reference_final_projectile_velocity_m_s": -0.4686103445610912,
+            "model_final_projectile_velocity_m_s": -0.6208978197297536,
+            "max_relative_energy_drift": 0.3405701262001659,
+            "contact_events": []
+          },
+          {
+            "projectile_mass": 2.0,
+            "contact_stiffness": 100.0,
+            "coupling": "evolving_contact_edge",
+            "intervals": 89,
+            "dt_s": 0.022500000000000003,
+            "duration_s": 2.0025000000000004,
+            "reference_convergence_max_abs": 7.214611802419668e-08,
+            "projectile_position_rmse_m": 2.5403306299316826e-11,
+            "projectile_velocity_rmse_m_s": 4.248878254392674e-10,
+            "reference_final_projectile_velocity_m_s": -0.9320997641987049,
+            "model_final_projectile_velocity_m_s": -0.9320997624214457,
+            "max_relative_energy_drift": 2.9388758093773504e-10,
+            "contact_events": [
+              {
+                "time": 0.6354250581637747,
+                "touching": false
+              },
+              {
+                "time": 0.7349695657141673,
+                "touching": true
+              },
+              {
+                "time": 0.913293110781184,
+                "touching": false
+              },
+              {
+                "time": 1.1357171203083034,
+                "touching": true
+              },
+              {
+                "time": 1.9052093391327924,
+                "touching": false
+              }
+            ]
+          },
+          {
+            "projectile_mass": 2.0,
+            "contact_stiffness": 100.0,
+            "coupling": "frozen_current_force",
+            "intervals": 89,
+            "dt_s": 0.022500000000000003,
+            "duration_s": 2.0025000000000004,
+            "reference_convergence_max_abs": 7.214611802419668e-08,
+            "projectile_position_rmse_m": 0.002481280136912505,
+            "projectile_velocity_rmse_m_s": 0.02739194956589613,
+            "reference_final_projectile_velocity_m_s": -0.9320997641987049,
+            "model_final_projectile_velocity_m_s": -1.0077133427589384,
+            "max_relative_energy_drift": 0.20292246542794135,
+            "contact_events": []
+          }
+        ]
+      }
+    },
+    "native-operator-benchmark.json": {
+      "artifact_sha256": "a5d4884bf37739d2b2620bd9e7919362bc9687fbc257e4ad104e851554b97795",
+      "result": {
+        "status": "completed",
+        "device": "Apple M3 Max / Metal",
+        "scope": "Resident float32 sparse Python/PyTorch physical operator including current input validation. Repeated intact house graphs, not a destruction world or 10k active rigid-body benchmark. Excludes rigid engine, contacts, damage, topology and host transfers. Unoptimized implementation; no extrapolation to a fused runtime.",
+        "parity": {
+          "max_displacement_difference": 8.185452315956354e-12,
+          "max_velocity_difference": 6.705522537231445e-08
+        },
+        "results": [
+          {
+            "copies": 1,
+            "physical_chunks": 665,
+            "bonds": 1299,
+            "active_rigid_bodies": null,
+            "dt_s": 0.0005123436471259048,
+            "median_ms": 13.761000009253621,
+            "samples_ms": [
+              14.744375017471611,
+              13.29220799379982,
+              13.812416000291705,
+              13.761000009253621,
+              13.527333998354152
+            ],
+            "setup_s": 0.003429791977396235
+          },
+          {
+            "copies": 16,
+            "physical_chunks": 10640,
+            "bonds": 20784,
+            "active_rigid_bodies": null,
+            "dt_s": 0.0005123436471259048,
+            "median_ms": 38.54912499082275,
+            "samples_ms": [
+              38.39775000233203,
+              38.84333299356513,
+              39.54129098565318,
+              38.54912499082275,
+              38.43716700794175
+            ],
+            "setup_s": 0.013724584016017616
+          },
+          {
+            "copies": 154,
+            "physical_chunks": 102410,
+            "bonds": 200046,
+            "active_rigid_bodies": null,
+            "dt_s": 0.0005123436471259048,
+            "median_ms": 303.3417090191506,
+            "samples_ms": [
+              303.38016600580886,
+              303.4875000012107,
+              301.3628750049975,
+              303.3417090191506,
+              303.0164999945555
+            ],
+            "setup_s": 0.09861395799089223
+          }
+        ]
+      }
+    },
+    "native-operator-benchmark-streamed.json": {
+      "artifact_sha256": "b4b2801ab01f34f215dc8ee91712bd28a5ee3ecd6394e88b13d42442f1958c49",
+      "result": {
+        "status": "completed",
+        "device": "Apple M3 Max / Metal",
+        "scope": "Resident float32 sparse Python/PyTorch physical operator including current input validation. Repeated intact house graphs, not a destruction world or 10k active rigid-body benchmark. Excludes rigid engine, contacts, damage, topology and host transfers. Unoptimized implementation; no extrapolation to a fused runtime.",
+        "parity": {
+          "max_displacement_difference": 9.094947017729282e-12,
+          "max_velocity_difference": 4.470348358154297e-08
+        },
+        "results": [
+          {
+            "copies": 1,
+            "physical_chunks": 665,
+            "bonds": 1299,
+            "active_rigid_bodies": null,
+            "dt_s": 0.0005123436471259048,
+            "median_ms": 4.998582997359335,
+            "samples_ms": [
+              4.492709005717188,
+              4.998582997359335,
+              4.496084002312273,
+              5.231458024354652,
+              5.4590830113738775
+            ],
+            "setup_s": 0.0032865829998627305
+          },
+          {
+            "copies": 16,
+            "physical_chunks": 10640,
+            "bonds": 20784,
+            "active_rigid_bodies": null,
+            "dt_s": 0.0005123436471259048,
+            "median_ms": 12.1301670151297,
+            "samples_ms": [
+              11.833041004138067,
+              11.653458001092076,
+              12.1301670151297,
+              12.321499991230667,
+              13.136458001099527
+            ],
+            "setup_s": 0.009809291019337252
+          },
+          {
+            "copies": 154,
+            "physical_chunks": 102410,
+            "bonds": 200046,
+            "active_rigid_bodies": null,
+            "dt_s": 0.0005123436471259048,
+            "median_ms": 75.24604198988527,
+            "samples_ms": [
+              75.705208000727,
+              75.04408300155774,
+              75.6166250212118,
+              75.08329098345712,
+              75.24604198988527
+            ],
+            "setup_s": 0.0890187920012977
+          }
+        ]
+      }
+    },
+    "native-elastic-audit-streamed.json": {
+      "artifact_sha256": "a079b59a78e6f42325342c32d089d58d1bcca102491bfb79d465a80dbbf12a2c",
+      "result": {
+        "status": "completed",
+        "scope": "Frozen native six-DOF linear mechanics and exact modal teacher. No damping, contact, fracture, corotation, native rollout or speed claim.",
+        "operator_sha256": "778c23beb65f997e30ea111f9055bf990885ea84d866a8eee2778538afeb75c3",
+        "results": [
+          {
+            "source": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19/native-elastic-free.json",
+            "source_sha256": "bceac8f9bc7ffeac9a46ea8c6d87a73c189a955ac12ce78d66ec177898bd8fd9",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "dof": 144,
+            "parity": {
+              "deformation": {
+                "max_abs_error": 2.117582368135751e-22,
+                "target_max_abs": 1.738632715499837e-06
+              },
+              "bond_force": {
+                "max_abs_error": 4.547473508864641e-13,
+                "target_max_abs": 5184.063253536976
+              },
+              "internal_nodal_force": {
+                "max_abs_error": 1.8189894035458565e-12,
+                "target_max_abs": 11419.561858868148
+              }
+            },
+            "spectral_bound": 17233311964.13162,
+            "degree": 16,
+            "steps": 32,
+            "dt_s": 0.00010969279869084692,
+            "spectral_domain_max_dt_s": 0.00012188088743427435,
+            "calls_to_cover_16_67ms_using_spectral_bound": 137,
+            "max_relative_work_balance_defect": 1.258224210133601e-07,
+            "max_relative_state_energy_error": 4.1015468479643725e-14,
+            "translation_rmse_m": 1.7781500260332472e-14,
+            "rotation_rmse_rad": 2.9468584830746736e-13,
+            "velocity_rmse_m_s": 7.171706459870322e-10,
+            "angular_velocity_rmse_rad_s": 1.6147078018146583e-08
+          },
+          {
+            "source": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19/native-elastic-fixed.json",
+            "source_sha256": "a92f17906d62f6c5bb88d96aeae46e14901b23686b7aa36d497615c75269faf9",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "dof": 108,
+            "parity": {
+              "deformation": {
+                "max_abs_error": 2.117582368135751e-22,
+                "target_max_abs": 1.7365417547346946e-06
+              },
+              "bond_force": {
+                "max_abs_error": 4.547473508864641e-13,
+                "target_max_abs": 5182.243174925987
+              },
+              "internal_nodal_force": {
+                "max_abs_error": 1.8189894035458565e-12,
+                "target_max_abs": 11419.561858868148
+              }
+            },
+            "spectral_bound": 17233311964.13161,
+            "degree": 16,
+            "steps": 32,
+            "dt_s": 0.00010969279869084693,
+            "spectral_domain_max_dt_s": 0.00012188088743427437,
+            "calls_to_cover_16_67ms_using_spectral_bound": 137,
+            "max_relative_work_balance_defect": 1.0612353603475776e-07,
+            "max_relative_state_energy_error": 3.9984304755607103e-14,
+            "translation_rmse_m": 1.278992470826616e-14,
+            "rotation_rmse_rad": 2.2822017728028543e-13,
+            "velocity_rmse_m_s": 6.913641038101525e-10,
+            "angular_velocity_rmse_rad_s": 1.3323026322071911e-08
+          },
+          {
+            "source": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19/native-elastic-pinned.json",
+            "source_sha256": "cf43314babf58ddb6ae1e44d740989d5114b116ef1d4dbd45c3fd451a0a3bd95",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "dof": 126,
+            "parity": {
+              "deformation": {
+                "max_abs_error": 2.117582368135751e-22,
+                "target_max_abs": 1.7365417547346946e-06
+              },
+              "bond_force": {
+                "max_abs_error": 4.547473508864641e-13,
+                "target_max_abs": 5182.243174925987
+              },
+              "internal_nodal_force": {
+                "max_abs_error": 1.8189894035458565e-12,
+                "target_max_abs": 11419.561858868148
+              }
+            },
+            "spectral_bound": 17233311964.13161,
+            "degree": 16,
+            "steps": 32,
+            "dt_s": 0.00010969279869084693,
+            "spectral_domain_max_dt_s": 0.00012188088743427437,
+            "calls_to_cover_16_67ms_using_spectral_bound": 137,
+            "max_relative_work_balance_defect": 1.2565820857681825e-07,
+            "max_relative_state_energy_error": 4.106308463192296e-14,
+            "translation_rmse_m": 1.556499535534768e-14,
+            "rotation_rmse_rad": 2.728753547871348e-13,
+            "velocity_rmse_m_s": 6.053772472248185e-10,
+            "angular_velocity_rmse_rad_s": 1.537816829626362e-08
+          },
+          {
+            "source": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19/native-elastic-rotated.json",
+            "source_sha256": "1c19f819981f8fe309b8ea524765485bcffef8115b496f1ae1ba44ea64561b55",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "dof": 108,
+            "parity": {
+              "deformation": {
+                "max_abs_error": 6.352747104407253e-22,
+                "target_max_abs": 2.342653714984749e-06
+              },
+              "bond_force": {
+                "max_abs_error": 9.094947017729282e-13,
+                "target_max_abs": 5182.243174925987
+              },
+              "internal_nodal_force": {
+                "max_abs_error": 1.8189894035458565e-12,
+                "target_max_abs": 11431.986162307243
+              }
+            },
+            "spectral_bound": 48723203820.619125,
+            "degree": 16,
+            "steps": 32,
+            "dt_s": 6.52370889105325e-05,
+            "spectral_domain_max_dt_s": 7.24856543450361e-05,
+            "calls_to_cover_16_67ms_using_spectral_bound": 230,
+            "max_relative_work_balance_defect": 1.2598214773978354e-07,
+            "max_relative_state_energy_error": 3.340308832811907e-14,
+            "translation_rmse_m": 1.3223221626857803e-14,
+            "rotation_rmse_rad": 2.1546215508114364e-13,
+            "velocity_rmse_m_s": 7.659509672839925e-10,
+            "angular_velocity_rmse_rad_s": 1.471810181627009e-08
+          }
+        ]
+      }
+    },
+    "native-float32-audit-streamed.json": {
+      "artifact_sha256": "ff26d58e178bbeda813d53cc5990ba45a2d4ccf1fdc0a23169f595a4a16b177b",
+      "result": {
+        "status": "completed",
+        "scope": "CPU float32 against f64 linear modal teacher, with the same rounded initial state and applied loads. No contact, fracture or runtime claim.",
+        "results": [
+          {
+            "case": "free",
+            "dtype": "float32",
+            "steps": 32,
+            "dt_s": 0.00010969279869084692,
+            "max_relative_work_balance_defect": 1.429634269932538e-05,
+            "max_relative_state_energy_error": 5.078273716207935e-09
+          },
+          {
+            "case": "fixed",
+            "dtype": "float32",
+            "steps": 32,
+            "dt_s": 0.00010969279869084695,
+            "max_relative_work_balance_defect": 2.1550384887883424e-06,
+            "max_relative_state_energy_error": 6.694703451887811e-11
+          },
+          {
+            "case": "pinned",
+            "dtype": "float32",
+            "steps": 32,
+            "dt_s": 0.00010969279869084695,
+            "max_relative_work_balance_defect": 4.235249209462167e-06,
+            "max_relative_state_energy_error": 6.930145301896383e-11
+          },
+          {
+            "case": "rotated",
+            "dtype": "float32",
+            "steps": 32,
+            "dt_s": 6.52370889105325e-05,
+            "max_relative_work_balance_defect": 3.315001626978096e-06,
+            "max_relative_state_energy_error": 5.192180602554074e-11
+          }
+        ]
+      }
+    },
+    "forced-cli-validation/review.json": {
+      "artifact_sha256": "2b6530a577592744483000e16a4220fa6d493f44799383f6f78b8e0c638ebd5f",
+      "result": {
+        "status": "completed",
+        "scope": "Coupled learned linear graph transition, with physical state as its only memory.\n\nControlled free-chain experiment, unit masses and stiffness 100. Two learned\nChebyshev polynomials C(L), S(L) advance both physical fields:\nu_next = C(L) u + S(L) v; v_next = -L S(L) u + C(L) v.\nThe coefficients are fitted from training transitions, never from test labels.\nNo eigenvectors, oracle calls, temporal hidden state or native substeps are used\nat inference. This is a linear-physics capability probe, not a nonlinear native\ndestruction solver, and polynomial degree remains sequential graph work.\n",
+        "selected_degree": 16,
+        "constant_force_consistent": true,
+        "selection": "Smallest validation degree with 32-step MSE <= 1e-6 and max relative energy error <= 1e-3; otherwise lowest 32-step validation MSE.",
+        "test": {
+          "32": {
+            "one_step": {
+              "steps": 1,
+              "normalized_mse": 6.174340017793375e-18,
+              "mean_step_normalized_mse": 6.174340017793375e-18,
+              "max_relative_energy_error": 5.518071741655302e-09,
+              "max_momentum_error": 5.10702591327572e-15
+            },
+            "rollout": {
+              "steps": 32,
+              "normalized_mse": 5.44982871872875e-15,
+              "mean_step_normalized_mse": 1.844554727557802e-15,
+              "max_relative_energy_error": 1.7657833265201628e-07,
+              "max_momentum_error": 7.638334409421077e-14
+            }
+          },
+          "64": {
+            "one_step": {
+              "steps": 1,
+              "normalized_mse": 6.589839452288476e-18,
+              "mean_step_normalized_mse": 6.589839452288476e-18,
+              "max_relative_energy_error": 6.016813776235704e-09,
+              "max_momentum_error": 8.43769498715119e-15
+            },
+            "rollout": {
+              "steps": 32,
+              "normalized_mse": 6.023976124989015e-15,
+              "mean_step_normalized_mse": 1.958121605266372e-15,
+              "max_relative_energy_error": 1.9253809714237208e-07,
+              "max_momentum_error": 9.903189379656396e-14
+            }
+          },
+          "128": {
+            "one_step": {
+              "steps": 1,
+              "normalized_mse": 7.577890223921352e-18,
+              "mean_step_normalized_mse": 7.577890223921352e-18,
+              "max_relative_energy_error": 5.126527821168851e-09,
+              "max_momentum_error": 1.0658141036401503e-14
+            },
+            "rollout": {
+              "steps": 32,
+              "normalized_mse": 6.86087446039771e-15,
+              "mean_step_normalized_mse": 2.2524773908492963e-15,
+              "max_relative_energy_error": 1.6404895026811456e-07,
+              "max_momentum_error": 1.3944401189291966e-13
+            }
+          }
+        },
+        "checkpoint_sha256": "b429fadd421d6dd4b1da254f3c3f3ac93d22052d91548251fd654b6fd8a545ad",
+        "native_validated": false,
+        "persistent_state": [
+          "displacement",
+          "velocity"
+        ],
+        "test_scope": "Unseen initial states and chain lengths; same unit masses, stiffness and dt."
+      }
     }
+  },
+  "performance_target": {
+    "whole_world_budget_ms": 5,
+    "test_cadence_hz": 120,
+    "simulated_update_s": 0.008333333333333333,
+    "physx_expected_hz": 60,
+    "target_gpu": null,
+    "provisional_gpu": "Apple M3 Max"
   }
 }
