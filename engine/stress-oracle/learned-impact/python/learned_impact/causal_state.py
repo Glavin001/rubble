@@ -117,12 +117,14 @@ def main():
                 features=torch.tensor((np.arcsinh(xx/xs)-xm)/xd,dtype=torch.float32)
                 pp=torch.cat([net(v) for v in features.split(8192)]).numpy()
                 physical=bb+pp[:,:NY]*ys
+                if args.absolute_state:physical[:,[0,1,4,5]]=(pp[:,:NY]*ys)[:,[0,1,4,5]]
                 truth=gg[:,21]>0;guess=pp[:,NY+21]>0
                 tp=int((truth&guess).sum());fp=int((~truth&guess).sum());fn=int((truth&~guess).sum())
                 results.append({"role":role,"root":str(root),"rows":len(xx),"raw_force_head_rmse_n_unused_by_energy_decoder":float(np.sqrt(np.mean((physical[:,27:30]-yy[:,27:30])**2))),
                     "complete_damage_tp":tp,"complete_damage_fp":fp,"complete_damage_fn":fn,
                     "complete_damage_f1":2*tp/max(2*tp+fp+fn,1)})
     report={"status":"trained","scope":"Live native-phase material-state model; full native motion/contact substeps retained.","parameters":sum(v.numel() for v in net.parameters()),
+        "configuration":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         "constant_training_feature_indices":np.flatnonzero(constant).tolist(),"training_roots":args.train,"validation_roots":args.validation,
         "rows":len(x),"changed_rows":len(changed),"nonlinear_rows":len(nonlinear),"seed":args.seed,"steps":args.steps,"width":args.width,
         "sha256":hashlib.sha256(weights_file.read_bytes()).hexdigest(),"log":log,"cases":results}

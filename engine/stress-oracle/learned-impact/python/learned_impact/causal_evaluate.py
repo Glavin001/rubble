@@ -28,7 +28,6 @@ def run(binary,scene,oracle,weights,out,frames):
     }
     # Clearance uses the ORIGINAL far wall plane. Rotated box rear face must
     # cross it; forward direction alone does not prove perforation.
-    initial=json.loads((Path(oracle)/"snapshots/000000.json").read_text())["world"]
     graph=json.loads((Path(oracle)/"graph.json").read_text())
     scene_data=graph["scene"]
     # This gate's fixture is explicitly the y-normal wall spanning [0, .1] m.
