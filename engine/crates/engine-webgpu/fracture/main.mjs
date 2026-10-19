@@ -102,9 +102,13 @@ async function loadLevel(level){
 async function loadStress(level){
  if(procedural||!assetBytes)throw new Error('The stress-solver mode runs a fracture GLB: pick a GLB scene.');
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
- $('view').hidden=true;$('stress-view').hidden=false;stressOn=true;viewOptions(true);
+ $('view').hidden=true;$('stress-view').hidden=false;viewOptions(true);
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
- if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}
+ // The mode is on only once its module loaded: a failed import (an old build, no JSPI)
+ // leaves the page in its own renderer with the error shown.
+ try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}}
+ catch(e){$('view').hidden=false;$('stress-view').hidden=true;viewOptions(false);throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
+ stressOn=true;
  stress.setBondStrengthScale(strengthScale());
  await stress.load(assetBytes,level);await stress.frame(0);applyBallMass();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
@@ -168,7 +172,7 @@ $('ball-mass').oninput=applyBallMass;
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
 $('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
-$('release').onclick=()=>{if(stressOn){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
+$('release').onclick=()=>{if(stressOn&&stress){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
 $('metadata').onclick=()=>{if(!asset)return;const url=URL.createObjectURL(new Blob([asset.metadataJson()],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='fracture-metadata.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();document.body.classList.add('drop')});
