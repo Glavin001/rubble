@@ -58,7 +58,35 @@ pub struct PhysicalHistory {
     pub format: &'static str,
     pub time: f64,
     pub chunks: Vec<PhysicalChunk>,
+    pub bonds: Vec<PhysicalBondMechanics>,
+    pub cluster_damping: Vec<PhysicalClusterDamping>,
     pub contacts: stress_ref::world::contact_history::ContactHistory,
+}
+
+/// Current reference geometry and nominal mechanical coefficients. Damage,
+/// crushing and plasticity modify the response through companion joint history;
+/// these are not a claim that every current bond remains linear elastic.
+#[derive(Serialize)]
+pub struct PhysicalBondMechanics {
+    pub key: (usize, usize),
+    pub endpoints: [(usize, usize); 2],
+    pub alive: bool,
+    pub axes: [[f64; 3]; 3],
+    pub ra: [f64; 3],
+    pub rb: [f64; 3],
+    pub stiffness: [f64; 6],
+    pub damping: [f64; 6],
+}
+
+/// The native mass dashpot acts on unsupported chunks' actual mass/inertia,
+/// before inertia scaling. Free corotational clusters additionally project its
+/// loads to zero resultant force/moment about the deformed configuration.
+#[derive(Serialize)]
+pub struct PhysicalClusterDamping {
+    pub id: u64,
+    pub structure: usize,
+    pub alpha_per_s: f64,
+    pub inertia_relief: bool,
 }
 
 #[derive(Serialize)]
@@ -101,8 +129,33 @@ impl RuntimeGraph {
                 active: chunk.active, removed: chunk.removed, state, inertia_scale: chunk.inertia_scale,
                 mass: data.mass, inertia: data.inertia.m, fixed });
         }
-        Ok((snapshot, PhysicalHistory { format: "native-physical-history/1", time: world.solver.time,
-            chunks, contacts: world.contact_history()? }))
+        let mut bonds = Vec::with_capacity(self.bond_keys.len());
+        for &(s, b) in &self.bond_keys {
+            let bond = &world.solver.bonds[s][b];
+            let g = &bond.geometry;
+            let axes = [g.t1.to_array(), g.t2.to_array(), g.normal.to_array()];
+            let (ra, rb) = (g.ra.to_array(), g.rb.to_array());
+            let (stiffness, damping) = (bond.stiffness.as_local().to_array(), bond.damping.to_array());
+            if axes.iter().flatten().chain(ra.iter()).chain(rb.iter()).chain(stiffness.iter()).chain(damping.iter()).any(|x| !x.is_finite())
+                || stiffness.iter().chain(damping.iter()).any(|&x| x < 0.) {
+                return Err("invalid exact physical bond mechanics".into());
+            }
+            bonds.push(PhysicalBondMechanics { key: (s, b), endpoints: [(s, g.a), (s, g.b)],
+                alive: bond.alive, axes, ra, rb, stiffness, damping });
+        }
+        let mut cluster_damping = Vec::with_capacity(world.solver.clusters.len());
+        for cl in &world.solver.clusters {
+            let alpha_per_s = if cl.anchored || world.solver.config.methods.corotational_bonds {
+                world.solver.mass_damping.get(cl.structure).copied().unwrap_or(0.)
+            } else { 0. };
+            if !alpha_per_s.is_finite() || alpha_per_s < 0. {
+                return Err("invalid exact physical cluster damping".into());
+            }
+            cluster_damping.push(PhysicalClusterDamping { id: cl.id, structure: cl.structure,
+                alpha_per_s, inertia_relief: alpha_per_s > 0. && !cl.anchored });
+        }
+        Ok((snapshot, PhysicalHistory { format: "native-physical-history/2", time: world.solver.time,
+            chunks, bonds, cluster_damping, contacts: world.contact_history()? }))
     }
 
     pub fn capture_with_kinematics(&self, world: &World) -> Result<(NativeStart, BoundaryKinematics), String> {

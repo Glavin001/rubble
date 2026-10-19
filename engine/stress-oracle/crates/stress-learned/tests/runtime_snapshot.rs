@@ -85,4 +85,25 @@ fn physical_history_preserves_raw_small_state_full_inertia_and_stable_identity()
     assert_eq!(physical.chunks[0].inertia, world.solver.structures[0].chunks[0].inertia.m);
     assert_eq!(physical.contacts.time, physical.time);
     assert_eq!(physical.chunks[0].key, graph.chunk_keys()[0]);
+    assert_eq!(physical.bonds[0].key, graph.bond_keys()[0]);
+    assert_eq!(physical.bonds[0].damping, world.solver.bonds[0][0].damping.to_array());
+}
+
+#[test]
+fn physical_history_distinguishes_runtime_damping_omitted_from_legacy_features() {
+    let mut world = World::new(&builders::bond_tension());
+    let graph = RuntimeGraph::new(&world).unwrap();
+    let before = graph.capture_with_physical_history(&world).unwrap();
+    world.solver.bonds[0][0].damping = world.solver.bonds[0][0].damping.scale(2.);
+    world.solver.mass_damping = vec![123.45678901234567];
+    let after = graph.capture_with_physical_history(&world).unwrap();
+    assert_eq!(serde_json::to_value(before.0).unwrap(), serde_json::to_value(&after.0).unwrap());
+    assert_ne!(before.1.bonds[0].damping, after.1.bonds[0].damping);
+    assert_eq!(after.1.bonds[0].damping, world.solver.bonds[0][0].damping.to_array());
+    assert_eq!(after.1.cluster_damping[0].alpha_per_s, 123.45678901234567);
+    assert!(!after.1.cluster_damping[0].inertia_relief);
+    assert_eq!(after.1.format, "native-physical-history/2");
+    assert_eq!(serde_json::to_value(after.0).unwrap(), serde_json::to_value(graph.capture(&world).unwrap()).unwrap());
+    world.solver.mass_damping[0] = f64::NAN;
+    assert!(graph.capture_with_physical_history(&world).err().unwrap().contains("cluster damping"));
 }
