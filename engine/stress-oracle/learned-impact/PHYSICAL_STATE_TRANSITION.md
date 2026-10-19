@@ -12,6 +12,8 @@ The output state becomes the next input state. Intermediate network activations 
 
 The stress transition owns the internal deformation and material response. The engine owns rigid motion, contacts, support constraints and topology application. Both sides must exchange compatible impulses and work while the interval evolves. Unknown future oracle contacts, fracture decisions or actor motion are never inference inputs. A frame-end state alone does not define the trajectory or the projectile impulse during the interval.
 
+There are two interface scopes to keep distinct. A stress-only transition can receive current engine-computed nodal forces/torques or impulses; the engine retains its contact memory. A predictor that advances the entire coupled impact through a longer interval also needs a causal way to obtain changing contacts and actor motion during that interval. One current contact-force sample cannot describe an unknown future loading history. The model need not duplicate the engine's contact law or own its history when the engine supplies those evolving interactions.
+
 ## Persisted physical state
 
 | Owner | State and units | Oracle source |
@@ -28,6 +30,8 @@ Static properties and evolving properties should be stored separately. Supports 
 
 The propagating wave state resides in the distribution of deformation and velocity. Stress alone does not identify it. Opposite velocities at the same displacement produce different future waves. Plastic slip and damage are additional physical history; they cannot be reconstructed from the current shape alone.
 
+The oracle's contact law provides a stronger witness: two layers with identical current displacement, stiffness, net force and stored energy can have different ordered material cohorts. When their area shrinks, removing the newest cohort produces opposite subsequent forces. `contact_history.rs` tests this directly. Explicit physical state therefore includes the required history, sometimes variable-length history, rather than only a list of current measured responses.
+
 ## Quantities to derive consistently
 
 Forces, stresses, stored energy, impulses and motion must describe one transition. In a linear elastic example, bond extension comes from chunk displacement, force is stiffness times extension, and stored energy is one half stiffness times squared extension. Predicting all three independently creates avoidable contradictions.
@@ -40,7 +44,9 @@ Fracture is a consequence of the material-state transition and its event timing.
 
 ## Current recording gaps
 
-The native phase corpus records f64 chunk deformation/rate and applied loads at every phase, full bond history/response and work, and frame snapshots for visualization. It does not yet provide a complete self-contained physical-state restart. The frame bridge contains legacy float32 chunk features, while contact layers/cohorts and other private world state are not exposed as model inputs.
+The native phase corpus records f64 chunk deformation/rate and applied loads at every phase, full bond history/response and work, and frame snapshots for visualization. It does not yet provide a complete self-contained physical-state restart. The frame bridge contains legacy float32 chunk features.
+
+The optional `learned_impact_phase_record ... --physical-history` path now adds `physical-history/000000.json` and a file at each subsequent boundary. It retains raw f64 chunk displacement/rotation/velocity, full inertia, mass, supports, identity and flags, plus ordered contact shear/twist cohorts, indentation/crushing and pair-overlap history. Joint history and rigid poses remain in the companion snapshot. Capture is read-only; the existing learned model does not consume these new files yet. Earlier datasets cannot recover this missing contact history from their old snapshots alone; deterministic replay can collect it. This addition is still not a complete World restart or a claim that all necessary coupling/scheduling state is exposed.
 
 Existing oracle branches reconstruct complete native state by deterministic replay of the scene and saved predictions, then verify another continuation. This is a valid reconstruction mechanism for those branches, but does not prove that the current graph input alone is a sufficient physical state.
 
@@ -53,5 +59,7 @@ The first explicit-state probes persist only displacement and velocity because t
 - A generic multiscale network with a per-island energy projection remains bounded over 32 transitions, but still loses wave phase. Conservation does not establish accuracy.
 - A shared pair of learned propagation operators advances displacement and velocity together. Coefficients are fitted on training transitions and used unchanged on unseen states. New chain lengths, heterogeneous elastic graphs and fixed supports test representation and generalization within the declared spectral/time domain.
 - Nonlinear material history, live contact, fracture, 3-D rotation, coordinate transfer and actual engine performance remain separate acceptance stages.
+
+The six-DOF extension now checks native initial geometry, translation/rotation coupling and full mass/inertia against the oracle's own bond calculations. Its trajectories use a frozen linear system and an independent dense modal teacher. This validates small-motion mechanics, not finite corotational rotation or nonlinear native destruction. See `findings/physical-state-v37-2026-10-19.md` for measured results and the unresolved computation cost.
 
 Selection should use independent sequences, not only one-step error. Measure physical state error, wave phase, momentum with external reactions, energy/work balance, first damage and fracture timing, fragment masses, and actor penetration/rebound/trajectory. The final native evaluation needs a fresh holdout, meaningful post-impact duration and the entire-world timing budget. No component result alone qualifies the model for deployment.

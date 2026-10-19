@@ -132,7 +132,7 @@ def run(args):
               (train[3]-train[1]).double().square().mean().sqrt())
     results, models = [], []
     for degree in (4, 8, 12, 16, 24):
-        model = fit(train, degree, dt, scales)
+        model = fit(train, degree, dt, scales, force_consistent=args.force_consistent)
         models.append(model)
         row = {'degree': degree, 'parameter_count': 2*degree,
                'train': metrics(model, train, scales), 'validation': metrics(model, validation, scales),
@@ -150,6 +150,7 @@ def run(args):
         data = wave_data(seed, 24, n)
         tests[str(n)] = {'one_step': metrics(model, data, scales), 'rollout': metrics(model, data, scales, 32)}
     report = {'status': 'completed', 'scope': __doc__, 'candidates': results, 'selected_degree': model.degree,
+              'constant_force_consistent': args.force_consistent,
               'selection': 'Smallest validation degree with 32-step MSE <= 1e-6 and max relative energy error <= 1e-3; otherwise lowest 32-step validation MSE.',
               'test': tests, 'checkpoint_sha256': PhaseHistory._hash(out/'operator.pt'),
               'native_validated': False, 'persistent_state': ['displacement', 'velocity'],
@@ -161,4 +162,5 @@ def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True)
+    parser.add_argument('--force-consistent', action='store_true', help='Constrain the force response of rigid modes as well as free motion.')
     run(parser.parse_args())
