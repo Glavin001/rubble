@@ -224,6 +224,9 @@ pub struct RtBond {
     pub elastic: Local6,
     pub measures: StressMeasures,
     pub stored: f64,
+    /// Running max of `joint.utilization` since the last
+    /// [`ReferenceSolver::reset_peak_utilizations`] (learned-impact labels).
+    pub peak_utilization: f64,
 }
 
 impl RtBond {
@@ -243,7 +246,13 @@ impl RtBond {
             elastic: Local6::ZERO,
             measures: StressMeasures::default(),
             stored: 0.0,
+            peak_utilization: 0.0,
         }
+    }
+
+    /// Update peak after a joint-state write.
+    pub fn observe_utilization(&mut self) {
+        self.peak_utilization = self.peak_utilization.max(self.joint.utilization);
     }
 
     pub fn model(&self) -> JointModel<'_> {
@@ -1733,6 +1742,7 @@ impl ReferenceSolver {
             self.max_utilization = self.max_utilization.max(resp.state.utilization);
             let bm = &mut self.bonds[s][bi];
             let previous = std::mem::replace(&mut bm.joint, resp.state);
+            bm.observe_utilization();
             bm.force = q;
             bm.elastic = resp.force;
             bm.measures = resp.measures;
@@ -2295,6 +2305,15 @@ impl ReferenceSolver {
     /// Number of bonds broken by fracture (bonds of removed chunks do not count).
     pub fn broken_bond_count(&self) -> usize {
         self.bonds.iter().flatten().filter(|b| !b.joint.connected(b.rebar.is_some())).count()
+    }
+
+    /// Clear per-bond peak utilization (call at the start of each recorded frame).
+    pub fn reset_peak_utilizations(&mut self) {
+        for bonds in &mut self.bonds {
+            for b in bonds {
+                b.peak_utilization = 0.0;
+            }
+        }
     }
 
     /// Support reaction of a chunk in world frame.

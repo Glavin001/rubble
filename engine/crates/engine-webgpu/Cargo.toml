@@ -7,6 +7,8 @@ description = "WebGPU / wgpu submission of the shared Slang phase graph (SPIR-V 
 
 [dependencies]
 engine-schema.workspace = true
+engine-gpu-wait.workspace = true
+web-time.workspace = true
 engine-exec.workspace = true
 engine-vehicle.workspace = true
 glam.workspace = true

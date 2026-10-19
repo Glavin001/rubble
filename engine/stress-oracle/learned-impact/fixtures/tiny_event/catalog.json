@@ -1,0 +1,132 @@
+{
+  "arrays": {
+    "bond_area": {
+      "dtype": "f32",
+      "shape": [
+        3
+      ],
+      "path": "static/bond_area.bin"
+    },
+    "bond_buckling_length": {
+      "dtype": "f32",
+      "shape": [
+        3
+      ],
+      "path": "static/bond_buckling_length.bin"
+    },
+    "bond_endpoints": {
+      "dtype": "i32",
+      "shape": [
+        3,
+        2
+      ],
+      "path": "static/bond_endpoints.bin"
+    },
+    "bond_fracture_energy": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        3
+      ],
+      "path": "static/bond_fracture_energy.bin"
+    },
+    "bond_offset": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        3
+      ],
+      "path": "static/bond_offset.bin"
+    },
+    "bond_rebar": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        5
+      ],
+      "path": "static/bond_rebar.bin"
+    },
+    "bond_stiffness": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        6
+      ],
+      "path": "static/bond_stiffness.bin"
+    },
+    "bond_strength": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        3
+      ],
+      "path": "static/bond_strength.bin"
+    },
+    "bond_weibull": {
+      "dtype": "f32",
+      "shape": [
+        3
+      ],
+      "path": "static/bond_weibull.bin"
+    },
+    "bond_width": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        2
+      ],
+      "path": "static/bond_width.bin"
+    },
+    "chunk_coarse_parent": {
+      "dtype": "i32",
+      "shape": [
+        4
+      ],
+      "path": "static/chunk_coarse_parent.bin"
+    },
+    "chunk_half_extents": {
+      "dtype": "f32",
+      "shape": [
+        4,
+        3
+      ],
+      "path": "static/chunk_half_extents.bin"
+    },
+    "chunk_inertia": {
+      "dtype": "f32",
+      "shape": [
+        4,
+        3
+      ],
+      "path": "static/chunk_inertia.bin"
+    },
+    "chunk_level": {
+      "dtype": "i32",
+      "shape": [
+        4
+      ],
+      "path": "static/chunk_level.bin"
+    },
+    "chunk_mass": {
+      "dtype": "f32",
+      "shape": [
+        4
+      ],
+      "path": "static/chunk_mass.bin"
+    },
+    "chunk_material_id": {
+      "dtype": "i32",
+      "shape": [
+        4
+      ],
+      "path": "static/chunk_material_id.bin"
+    },
+    "chunk_support": {
+      "dtype": "i32",
+      "shape": [
+        4
+      ],
+      "path": "static/chunk_support.bin"
+    }
+  }
+}

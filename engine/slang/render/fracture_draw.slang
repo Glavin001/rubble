@@ -1,7 +1,7 @@
 // Fracture lab draw, shared by the browser (WGSL) and the Metal viewer (MSL).
 // Render vertices are body-local and read the live AVBD pose buffer directly
 // (no CPU transform readback). Vertex = 10 floats: position.xyz, normal.xyz,
-// color.rgb, body id. Instanced house copies: copy k draws the same mesh on
+// color.rgb, body id (a bond line's normal: see `vs`). Instanced house copies: copy k draws the same mesh on
 // bodies id + k * instance stride (body 0, the static ground, is shared).
 struct BodyPose { float4 p; float4 q; float4 invI; float4 v; float4 w; float4 ip; float4 iq; };
 // Column-major view-projection; mode.x = instance stride, mode.y = colour mode
@@ -34,6 +34,21 @@ VsOut vs(uint vid : SV_VertexID, uint copy : SV_InstanceID)
     float3 world = body.p.xyz + rotate(body.q, p);
     VsOut r;
     r.pos = gView.c0 * world.x + gView.c1 * world.y + gView.c2 * world.z + gView.c3;
+    // A bond line (the bond graph): normal = (-(partner + 2), rest distance, rest height),
+    // below any unit normal. It is hidden once its pieces part (their centres more than
+    // BOND_SLACK past the rest distance), or, for an anchor (partner 0), once the piece
+    // leaves its rest height: a broken bond stops showing as a connection.
+    if (n.x < -1.5)
+    {
+        uint partner = uint(-n.x - 2.0 + 0.5);
+        float slack = 0.02 + 0.02 * n.y;
+        bool parted = partner == 0u
+            ? abs(body.p.y - n.z) > slack
+            : abs(length(gBodies[partner + copy * gView.mode.x].p.xyz - body.p.xyz) - n.y) > slack;
+        if (parted)
+            r.pos = float4(0.0, 0.0, 2.0, 1.0); // past the far plane: clipped
+        n = float3(0.0, 1.0, 0.0);
+    }
     r.n = rotate(body.q, n);
     r.color = float3(gVerts[o + 6u], gVerts[o + 7u], gVerts[o + 8u]);
     if (gView.mode.y == 1u && index != 0u)

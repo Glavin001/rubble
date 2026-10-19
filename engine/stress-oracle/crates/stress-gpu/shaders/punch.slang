@@ -100,17 +100,18 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         return;
     // No impactor near anything this frame (the routing check, just before): no punch; an
     // earlier pass's split bits are left to the split pass (its parents are laid out).
-    if (route[0] == 0)
+    // (Exits, loop bounds and stops as uniform values below: barriers follow.)
+    if (group_uniform(route[0], t) == 0)
     {
         if (t == 0)
             status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;
         return;
     }
     Island isl = islands[i];
-    uint n = isl.range.y - isl.range.x;
+    uint n = group_uniform(isl.range.y - isl.range.x, t);
     // No bonds (blank records too), or more chunks than the group's labels hold: nothing
     // to punch; the island's split bit cleared (any of an earlier pass's split is followed).
-    if (isl.range.z >= isl.range.w || n > MAX_CHUNKS || params.impactor_count == 0)
+    if (group_uniform(isl.range.z >= isl.range.w || n > MAX_CHUNKS || params.impactor_count == 0 ? 1u : 0u, t) != 0)
     {
         if (t == 0)
             status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;
@@ -137,7 +138,7 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         v = to_zup(b.vel_sleep.xyz);
     }
     // The island's bounds (chunk centres +- bounding radius).
-    float inf = asfloat(0x7f800000u);
+    float inf = float_bits(0x7f800000u);
     float3 lo = float3(inf);
     float3 hi = float3(-inf);
     for (uint c = t; c < n; c += G)
@@ -230,7 +231,7 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             e_imp = info.z;
         }
     }
-    if (hit_k == NONE)
+    if (group_uniform(hit_k == NONE ? 1u : 0u, t) != 0)
     {
         if (t == 0)
             status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;
@@ -297,7 +298,7 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             }
         }
         GroupMemoryBarrierWithGroupSync();
-        if (g_changed == 0)
+        if (group_uniform(g_changed, t) == 0)
             break;
         GroupMemoryBarrierWithGroupSync();
     }
@@ -359,7 +360,7 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         }
     }
     GroupMemoryBarrierWithGroupSync();
-    if (g_go == 0)
+    if (group_uniform(g_go, t) == 0)
         return;
     // The plug breaks out: its bonds broken (their records as a break leaves them).
     for (uint bi = isl.range.z + t; bi < isl.range.w; bi += G)

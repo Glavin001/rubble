@@ -2,6 +2,11 @@
 #include <metal_math>
 #include <metal_texture>
 using namespace metal;
+uint group_uniform_0(uint value_0, uint thread_0)
+{
+    return value_0;
+}
+
 struct Island_natural_0
 {
     packed_uint4 range_0;
@@ -171,7 +176,7 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     return _S1;
 }
 
-[[kernel]] void split_components(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], uint device* control_1 [[buffer(13)]], packed_uint4 device* parents_1 [[buffer(7)]], Island_natural_0 device* islands_1 [[buffer(5)]], uint device* work_1 [[buffer(8)]], uint device* index_1 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(4)]], BondStatic_natural_0 device* bonds_1 [[buffer(3)]], SplitParams_0 constant* params_1 [[buffer(0)]], packed_float4 device* out_1 [[buffer(9)]], packed_float4 device* frames_1 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(1)]], packed_float4 device* state_1 [[buffer(6)]], packed_float4 device* parent_bodies_1 [[buffer(12)]], packed_float4 device* engine_bodies_1 [[buffer(11)]])
+[[kernel]] void split_components(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], uint device* control_1 [[buffer(13)]], packed_uint4 device* parents_1 [[buffer(7)]], Island_natural_0 device* islands_1 [[buffer(5)]], uint device* work_1 [[buffer(8)]], uint device* index_1 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(4)]], BondStatic_natural_0 device* bonds_1 [[buffer(3)]], SplitParams_0 constant* params_1 [[buffer(0)]], packed_float4 device* out_1 [[buffer(9)]], packed_float4 device* frames_1 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(1)]], packed_float4 device* state_1 [[buffer(6)]], packed_float4 device* parent_bodies_1 [[buffer(12)]], packed_float4 device* engine_bodies_1 [[buffer(11)]])
 {
     uint children_0;
     uint k_0;
@@ -205,9 +210,18 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     (&kernelContext_1)->g_d_0 = &g_d_1;
     threadgroup array<float4, int(64)> g_e_1;
     (&kernelContext_1)->g_e_0 = &g_e_1;
-    uint tid_0 = thread_0.x;
+    uint tid_0 = thread_1.x;
     uint p_0 = group_0.x;
+    uint c_0;
     if(p_0 >= (*(control_1+1U)))
+    {
+        c_0 = 1U;
+    }
+    else
+    {
+        c_0 = 0U;
+    }
+    if((group_uniform_0(c_0, tid_0)) != 0U)
     {
         return;
     }
@@ -215,10 +229,10 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     uint _S3 = _S2.x;
     uint4 _S4 = uint4(((&kernelContext_1)->islands_0+_S3)->range_0) ;
     uint _S5 = _S4.x;
-    uint _S6 = _S4.y - _S5;
+    uint _S6 = group_uniform_0(_S4.y - _S5, tid_0);
     uint _S7 = _S2.y;
     uint _S8 = total_chunks_0(&kernelContext_1);
-    uint c_0 = tid_0;
+    c_0 = tid_0;
     for(;;)
     {
         if(c_0 < _S6)
@@ -315,7 +329,7 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
             c_0 = c_0 + 256U;
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-        bool done_1 = (*(&kernelContext_1)->g_changed_0) == 0U;
+        bool done_1 = (group_uniform_0(*(&kernelContext_1)->g_changed_0, tid_0)) == 0U;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if(done_1)
         {
@@ -887,7 +901,7 @@ void tree5_0(uint tid_1, KernelContext_0 thread* kernelContext_4)
     return;
 }
 
-[[kernel]] void split_children_group(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], uint device* control_4 [[buffer(13)]], packed_uint4 device* parents_4 [[buffer(7)]], Island_natural_0 device* islands_4 [[buffer(5)]], uint device* work_4 [[buffer(8)]], uint device* index_4 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_4 [[buffer(4)]], BondStatic_natural_0 device* bonds_4 [[buffer(3)]], SplitParams_0 constant* params_4 [[buffer(0)]], packed_float4 device* out_4 [[buffer(9)]], packed_float4 device* frames_4 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_4 [[buffer(1)]], packed_float4 device* state_4 [[buffer(6)]], packed_float4 device* parent_bodies_4 [[buffer(12)]], packed_float4 device* engine_bodies_4 [[buffer(11)]])
+[[kernel]] void split_children_group(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_2 [[thread_position_in_threadgroup]], uint device* control_4 [[buffer(13)]], packed_uint4 device* parents_4 [[buffer(7)]], Island_natural_0 device* islands_4 [[buffer(5)]], uint device* work_4 [[buffer(8)]], uint device* index_4 [[buffer(2)]], BondDyn_natural_0 device* bond_dyn_4 [[buffer(4)]], BondStatic_natural_0 device* bonds_4 [[buffer(3)]], SplitParams_0 constant* params_4 [[buffer(0)]], packed_float4 device* out_4 [[buffer(9)]], packed_float4 device* frames_4 [[buffer(10)]], ChunkStatic_natural_0 device* chunks_4 [[buffer(1)]], packed_float4 device* state_4 [[buffer(6)]], packed_float4 device* parent_bodies_4 [[buffer(12)]], packed_float4 device* engine_bodies_4 [[buffer(11)]])
 {
     thread KernelContext_0 kernelContext_5;
     (&kernelContext_5)->control_0 = control_4;
@@ -919,7 +933,7 @@ void tree5_0(uint tid_1, KernelContext_0 thread* kernelContext_4)
     threadgroup array<float4, int(64)> g_e_4;
     (&kernelContext_5)->g_e_0 = &g_e_4;
     uint slot_1 = group_1.x;
-    uint tid_2 = thread_1.x;
+    uint tid_2 = thread_2.x;
     uint _S99 = total_chunks_0(&kernelContext_5);
     bool _S100;
     if(slot_1 >= _S99)
@@ -930,12 +944,21 @@ void tree5_0(uint tid_1, KernelContext_0 thread* kernelContext_4)
     {
         _S100 = (*((&kernelContext_5)->control_0+1U)) == 0U;
     }
+    uint p_3;
     if(_S100)
+    {
+        p_3 = 1U;
+    }
+    else
+    {
+        p_3 = 0U;
+    }
+    if((group_uniform_0(p_3, tid_2)) != 0U)
     {
         return;
     }
     uint _S101 = *((&kernelContext_5)->control_0+1U) - 1U;
-    uint p_3 = 0U;
+    p_3 = 0U;
     uint hi_0 = _S101;
     for(;;)
     {
@@ -959,6 +982,14 @@ void tree5_0(uint tid_1, KernelContext_0 thread* kernelContext_4)
     uint4 _S102 = uint4(*((&kernelContext_5)->parents_0+p_3)) ;
     uint _S103 = _S102.y;
     if((slot_1 - _S103) >= (_S102.z))
+    {
+        hi_0 = 1U;
+    }
+    else
+    {
+        hi_0 = 0U;
+    }
+    if((group_uniform_0(hi_0, tid_2)) != 0U)
     {
         return;
     }

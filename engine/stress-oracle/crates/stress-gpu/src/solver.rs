@@ -889,7 +889,7 @@ impl GpuSolver {
             return Err("the implicit solve mode is not on the GPU yet".into());
         }
         let prof = std::env::var("STRESS_GPU_BUILD_PROFILE").is_ok();
-        let t_build = std::time::Instant::now();
+        let t_build = web_time::Instant::now();
         let mut t_last = 0.0f64;
         let mut mark = |what: &str| {
             if prof {
@@ -1454,7 +1454,7 @@ impl GpuSolver {
             // (synced after every step), keeping state and bond history resident. Plans
             // cover PLAN_STEPS steps; the GPU's travel check re-plans sooner when a chunk
             // outruns its budget.
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             let full = stride > self.buffers.params.probe_stride;
             let horizon = if self.contacts_possible() { horizon * plan_steps() } else { 0.0 };
             self.plan_until = start_time + horizon;
@@ -1549,7 +1549,7 @@ impl GpuSolver {
             if !any && rounds == 0 {
                 break;
             }
-            let t_encode = std::time::Instant::now();
+            let t_encode = web_time::Instant::now();
             let mut islands_gpu = self.layout.islands.clone();
             islands_gpu.push(Island { done: [0, seen, 0, 0], ..Default::default() });
             gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&islands_gpu));
@@ -1709,7 +1709,7 @@ impl GpuSolver {
             }
             let finished = encoder.finish();
             self.profile.encode += t_encode.elapsed().as_secs_f64();
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             gpu.queue.submit([finished]);
         self.state_current = false;
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
@@ -1736,7 +1736,7 @@ impl GpuSolver {
             }
             self.profile.batches += 1;
             self.dispatches += 1;
-            let t_read = std::time::Instant::now();
+            let t_read = web_time::Instant::now();
             // One round trip: the islands, the probe outputs, the impactors' records and
             // state.
             let p = self.buffers.params;
@@ -1830,7 +1830,7 @@ impl GpuSolver {
             }
             // Split the halted clusters on the host mirror, at the time they reached;
             // re-plan contacts from the state reached.
-            let t_split = std::time::Instant::now();
+            let t_split = web_time::Instant::now();
             self.download(gpu);
             self.mirror_check("before host split");
             let mut pending: Vec<usize> = halted;
@@ -1878,7 +1878,7 @@ impl GpuSolver {
                 break;
             }
         }
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         self.sync_motion(gpu);
         self.bonds_stale = true;
         self.profile.download += t.elapsed().as_secs_f64();
@@ -2496,7 +2496,7 @@ impl GpuSolver {
             islands.push(Island::default());
             gpu.queue.write_buffer(&self.buffers.islands, 0, bytemuck::cast_slice(&islands));
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -2963,7 +2963,7 @@ impl GpuSolver {
         // first; a diagnostic that serialises the frame).
         let wall = std::env::var("STRESS_CASCADE_WALL").is_ok().then(|| {
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-            std::time::Instant::now()
+            web_time::Instant::now()
         });
         // After the passes, in the same submission (the routed frame's check, and with
         // `STRESS_IMPACT_PUNCH=gpu` the punch, whose split this pass makes).
@@ -3189,7 +3189,7 @@ impl GpuSolver {
                     // statics.rs `equilibrate`: the secant left the cluster unconverged
                     // within SECANT_STEPS; the oracle solves it again from the same start
                     // (the mirror's: the GPU's iterate is discarded).
-                    let t = std::time::Instant::now();
+                    let t = web_time::Instant::now();
                     let host = self.mirror.equilibrate_or_keep(ci, loads, &StaticOptions::default());
                     self.profile.statics_delegated += 1;
                     self.profile.statics_delegated_seconds += t.elapsed().as_secs_f64();
@@ -4095,7 +4095,7 @@ impl GpuSolver {
         parents.sort_unstable();
         parents.dedup();
         let old_islands = self.layout.islands.clone();
-        let t_split = std::time::Instant::now();
+        let t_split = web_time::Instant::now();
         let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
         let mut stamps: Vec<(&str, f64)> = Vec::new();
         // The parents' chunk states and bond records, read back together.

@@ -415,7 +415,7 @@ pub fn destruction_case(base: &Scene, case: &str, remove: &str) -> Result<Scene,
 /// timings: `setup_s` (given), `first_frame_ms` (gravity prestress, first
 /// factorization), and the peak and mean of the others.
 pub fn run_timed(scene: &Scene, mut world: World, setup: f64, every: u64) -> Observation {
-    use std::time::Instant;
+    use web_time::Instant;
     let (chunks, bonds): (usize, usize) = scene.bodies.iter().fold((0, 0), |(c, b), body| (c + body.chunks.len(), b + body.bonds.len()));
     eprintln!("{}: {chunks} chunks, {bonds} bonds, mode {:?}, {} s, engine {}", scene.name, scene.sim.solve_mode, scene.sim.duration, world.engine_name().unwrap_or("standalone"));
     let frames = (scene.sim.duration / scene.sim.frame_dt).round() as u64;

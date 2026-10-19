@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::Instant;
+use web_time::Instant;
 
 /// Stages of a frame and a substep. Timed from the thread that runs the step (the
 /// parallel sections are timed as a whole), so the stages nest as listed.

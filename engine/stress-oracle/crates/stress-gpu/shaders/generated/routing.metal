@@ -53,6 +53,11 @@ float3 to_zup_0(float3 v_1)
     return float3(v_1.x, - v_1.z, v_1.y);
 }
 
+float float_bits_0(uint bits_0)
+{
+    return (as_type<float>((bits_0)));
+}
+
 struct RouteParams_0
 {
     uint island_count_0;
@@ -231,7 +236,7 @@ struct KernelContext_0
         v_2 = _S8;
         w_1 = _S9;
     }
-    float inf_0 = (as_type<float>((2139095040U)));
+    float inf_0 = float_bits_0(2139095040U);
     float3 _S23 = float3(- inf_0) ;
     uint _S24 = _S2.x + t_1;
     float3 lo_0 = float3(inf_0) ;

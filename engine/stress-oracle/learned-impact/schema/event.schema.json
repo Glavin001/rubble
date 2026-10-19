@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "learned-impact/1/manifest",
+  "title": "LearnedImpactManifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "structure_type",
+    "load_type",
+    "n_frames",
+    "n_chunks",
+    "n_bonds",
+    "K",
+    "dt",
+    "seed"
+  ],
+  "properties": {
+    "schema_version": { "const": "learned-impact/1" },
+    "event_id": { "type": "string", "minLength": 1 },
+    "structure_type": { "type": "string" },
+    "load_type": { "type": "string" },
+    "n_frames": { "type": "integer", "minimum": 1 },
+    "n_chunks": { "type": "integer", "minimum": 1 },
+    "n_bonds": { "type": "integer", "minimum": 0 },
+    "K": { "const": 4 },
+    "dt": { "type": "number", "exclusiveMinimum": 0 },
+    "seed": { "type": "integer", "minimum": 0 },
+    "notes": { "type": "string" }
+  },
+  "additionalProperties": true
+}

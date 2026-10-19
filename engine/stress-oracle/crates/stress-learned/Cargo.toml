@@ -1,0 +1,24 @@
+[package]
+name = "stress-learned"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Learned-impact event schema, recorder, and smoke generator (training data side track)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+stress-ref = { path = "../stress-ref" }
+
+[[bin]]
+name = "learned_impact_smoke"
+path = "src/bin/learned_impact_smoke.rs"
+
+[[bin]]
+name = "learned_impact_record"
+path = "src/bin/learned_impact_record.rs"
+
+[[bin]]
+name = "learned_impact_generate"
+path = "src/bin/learned_impact_generate.rs"

@@ -235,10 +235,10 @@ impl GpuCoupledSolver {
     /// One engine frame on the GPU; the fractures and events it produced.
     pub fn step_gpu(&mut self, gpu: &Gpu, input: &FrameInput) -> Result<FrameOutput, String> {
         // The mirror's motion and history must be current before it is changed.
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         self.solver.sync(gpu);
         self.profile.sync += t.elapsed().as_secs_f64();
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         let m = &mut self.solver.mirror;
         for motion in &input.motion {
             if let Some(c) = m.clusters.iter_mut().find(|c| c.id == motion.id) {
@@ -253,10 +253,10 @@ impl GpuCoupledSolver {
         self.filter.ingest(m, t0, input.dt, &input.contacts);
         self.solver.extra_terms = self.filter.terms(&self.solver.mirror);
         self.profile.filter += t.elapsed().as_secs_f64();
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         self.solver.refresh(gpu)?;
         self.profile.refresh += t.elapsed().as_secs_f64();
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         let n_events = self.solver.mirror.events.len();
         // Adaptive mode: a settled cluster wakes on the GPU when its loads change, in the
         // middle of the frame; the substep must already resolve it. Those that can wake
@@ -300,7 +300,7 @@ impl GpuCoupledSolver {
             self.solver.rebuild(gpu, 0.0)?;
         }
         self.profile.step += t.elapsed().as_secs_f64();
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         self.solver.sync(gpu);
         let out = self.output_since(n_events);
         self.profile.output += t.elapsed().as_secs_f64();

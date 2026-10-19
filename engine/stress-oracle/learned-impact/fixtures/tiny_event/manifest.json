@@ -1,0 +1,13 @@
+{
+  "schema_version": "learned-impact/1",
+  "event_id": "tiny_event",
+  "structure_type": "synthetic_chain",
+  "load_type": "synthetic_pulse",
+  "n_frames": 2,
+  "n_chunks": 4,
+  "n_bonds": 3,
+  "K": 4,
+  "dt": 0.016666666666666666,
+  "seed": 1,
+  "notes": "synthetic fixture; not oracle output"
+}

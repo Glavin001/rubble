@@ -266,14 +266,15 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
     uint p = group.x;
-    if (p >= control[CTL_PARENTS] || control[0] != 0)
+    // The exits and the loop bounds as uniform values: barriers follow.
+    if (group_uniform(p >= control[CTL_PARENTS] || control[0] != 0 ? 1u : 0u, tid) != 0)
         return;
     uint4 parent = parents[p];
-    if (parent.z < 2)
+    if (group_uniform(parent.z < 2 ? 1u : 0u, tid) != 0)
         return;
     uint ci = parent.x;
     float4 r = old_islands[island_word(ci, 0)];
-    uint c0 = asuint(r.x), c1 = asuint(r.y), b0 = asuint(r.z), b1 = asuint(r.w);
+    uint c0 = group_uniform(asuint(r.x), tid), c1 = group_uniform(asuint(r.y), tid), b0 = group_uniform(asuint(r.z), tid), b1 = group_uniform(asuint(r.w), tid);
     uint n = c1 - c0;
     uint base = parent.y;
     uint total = control[CTL_TOTAL];
@@ -537,7 +538,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         rec[16] = float4(anchored ? float3(0.0) : v, 0.0);
         rec[18] = float4(anchored ? float3(0.0) : w, 0.0);
         rec[19] = asfloat(uint4(0, 0, 0, plan[child_id_at(slot)])); // done_pad: the cluster id
-        rec[21] = float4(0.0, 0.0, 0.0, asfloat(0x7f800000u)); // settled: load norm 0, never wakes
+        rec[21] = float4(0.0, 0.0, 0.0, float_bits(0x7f800000u)); // settled: load norm 0, never wakes
         rec[23] = float4(anchored ? float3(0.0) : iw, 0.0);
         for (uint t = 0; t < 25; t++)
             islands[island_word(island, t)] = rec[t];
@@ -547,10 +548,10 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             float4 pr = spawn_extras[2 * slot + 1];
             uint at = params.engine_base + 3 * island;
             // y-w: its engine body (a fixed one too) and collider range (pass.slang retires it).
-            float3 body_range = sl.w != 0 ? asfloat(uint3(sl.x, sl.y, sl.y + sl.z)) : asfloat(uint3(NONE, 0, 0));
+            float3 body_range = sl.w != 0 ? asfloat(uint3(sl.x, sl.y, sl.y + sl.z)) : float3(float_bits(NONE), 0.0, 0.0);
             if (anchored || sl.w == 0)
             {
-                ctab[at] = float4(asfloat(NONE), body_range);
+                ctab[at] = float4(float_bits(NONE), body_range);
                 ctab[at + 1] = float4(0.0);
                 ctab[at + 2] = float4(0.0);
             }

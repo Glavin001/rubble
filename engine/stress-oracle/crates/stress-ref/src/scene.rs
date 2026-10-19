@@ -446,6 +446,10 @@ pub struct SimDesc {
     /// follows `STRESS_METHODS`.
     #[serde(default, skip_serializing_if = "Methods::is_proven")]
     pub methods: Methods,
+    /// Track per-bond peak utilization within each frame (`RtBond.peak_utilization`) for
+    /// the learned-impact recorder. Off by default; does not change solve results.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record_peak_utilization: bool,
 }
 
 /// Switches selecting a replacement for an established method. Each defaults to the
@@ -862,6 +866,7 @@ impl Default for SimDesc {
             mass_scaling_dt: None,
             features: Features::default(),
             methods: Methods::default(),
+            record_peak_utilization: false,
         }
     }
 }

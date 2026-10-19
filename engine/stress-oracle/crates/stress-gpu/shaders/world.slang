@@ -168,6 +168,13 @@ bool stopped()
     return (sentinel.info.z & STOP_NOW) != 0 || sentinel.info.y != 0;
 }
 
+// `stopped` as a uniform value of the group (`group_uniform`), for a kernel whose group
+// exits on it before barriers.
+bool stopped_uniform(uint tid)
+{
+    return group_uniform(stopped() ? 1u : 0u, tid) != 0;
+}
+
 // ------------------------------------------------------------------ path coverage
 //
 // Which code paths ran (COV_*, common.slang), for the test tiers; never read by the
@@ -230,6 +237,10 @@ void sentinel_mark(uint bits)
 groupshared float4 g_red_a[THREADS];
 groupshared float4 g_red_b[THREADS];
 static const uint SIMD_LANES = 32;
+// The tree reduction's sums, read back uniformly (WGSL).
+groupshared float4 g_sum_a;
+groupshared float4 g_sum_b;
+
 // Per-SIMD-group partials (at most 1024 threads of 32 lanes).
 groupshared float4 g_part_a[32];
 groupshared float4 g_part_b[32];
@@ -282,8 +293,15 @@ void group_sum2<let N : uint>(uint tid, inout float4 a, inout float4 b)
             }
             GroupMemoryBarrierWithGroupSync();
         }
-        a = g_red_a[0];
-        b = g_red_b[0];
+        // The sums as uniform values (`workgroupUniformLoad`, of variables of their own):
+        // on WGSL a reduction steers the group's barriers (convergence tests, exits).
+        if (tid == 0)
+        {
+            g_sum_a = g_red_a[0];
+            g_sum_b = g_red_b[0];
+        }
+        a = workgroupUniformLoad(g_sum_a);
+        b = workgroupUniformLoad(g_sum_b);
         GroupMemoryBarrierWithGroupSync();
     }
 }
@@ -691,7 +709,6 @@ uint impactor_contact_count(Impactor imp, float crush_depth, Box shrunk, Box b)
 
 // ------------------------------------------------------------------ contacts
 
-static const float NAN_OFFSET = asfloat(0x7fc00000u);
 
 // NaN by its bits: holds under fast math, which may assume no NaN.
 bool is_nan(float x)
@@ -814,7 +831,7 @@ void pair_contact(uint i, uint lane, uint lanes)
         // and write nothing when there is nothing to clear.
         if ((flags & 1) != 0)
             for (uint e = lane; e < entries; e += lanes)
-                contact_state[st + e] = float4(NAN_OFFSET, 0.0, 0.0, 0.0);
+                contact_state[st + e] = float4(float_bits(0x7fc00000u), 0.0, 0.0, 0.0);
         if (lane == 0)
         {
             if ((flags & 2) != 0)
@@ -852,7 +869,7 @@ void pair_contact(uint i, uint lane, uint lanes)
             if (!pair_point(ba, bb, na, e, p, n, d))
             {
                 if (!is_nan(contact_state[st + e].x))
-                    contact_state[st + e] = float4(NAN_OFFSET, 0.0, 0.0, 0.0);
+                    contact_state[st + e] = float4(float_bits(0x7fc00000u), 0.0, 0.0, 0.0);
                 continue;
             }
             count++;
@@ -910,7 +927,7 @@ void pair_contact(uint i, uint lane, uint lanes)
     }
     if (!has_state && (flags & 1) != 0)
         for (uint e = lane; e < entries; e += lanes)
-            contact_state[st + e] = float4(NAN_OFFSET, 0.0, 0.0, 0.0);
+            contact_state[st + e] = float4(float_bits(0x7fc00000u), 0.0, 0.0, 0.0);
     if (lane != 0)
         return;
     if (has_state)
@@ -1186,7 +1203,7 @@ void impactor_crush(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint ii = group.x;
     uint tid = thread.x;
-    if (ii >= params.impactor_count || stopped())
+    if (ii >= params.impactor_count || stopped_uniform(tid))
         return;
     Impactor imp = impactors[ii];
     float4 shares = float4(0.0);
@@ -1226,11 +1243,12 @@ void impactor_integrate_at(uint ii, uint tid, bool fused)
         if (tid == 0)
             stop_seen(sentinel, imp.cand.w + 1);
     }
-    if (stop)
+    // The exits as uniform values (`group_uniform`): a reduction with barriers follows.
+    if (group_uniform(stop ? 1u : 0u, tid) != 0)
         return;
     // A driven impactor (an engine moves it, world_coupling.rs) is not integrated; it
     // still counts the substep, which is how the host follows the pipeline's progress.
-    if (imp.cand.z != 0)
+    if (group_uniform(imp.cand.z, tid) != 0)
     {
         if (tid == 0)
             impactors[ii].cand.w = imp.cand.w + 1;
@@ -1984,11 +2002,15 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
     // results are those of a THREADS group, bit for bit). Island ranges are below 2^30.
     uint ct = tid < THREADS ? tid : 0x40000000u;
     Island isl = islands[gi];
-    bool anchored = (isl.info.x & ISLAND_ANCHORED) != 0;
-    bool driven = (isl.info.x & ISLAND_DRIVEN) != 0;
+    // The record's words that steer the group (and its barriers), as uniform values of
+    // their own (WGSL's uniformity is per variable: the record's other fields are not).
+    uint4 info = group_uniform4(isl.info, tid);
+    uint4 range = group_uniform4(isl.range, tid);
+    bool anchored = (info.x & ISLAND_ANCHORED) != 0;
+    bool driven = (info.x & ISLAND_DRIVEN) != 0;
     bool free_motion = !anchored && !driven;
-    bool contact_island = (isl.info.x & ISLAND_CONTACT) != 0;
-    bool settled = (isl.info.x & ISLAND_SETTLED) != 0;
+    bool contact_island = (info.x & ISLAND_CONTACT) != 0;
+    bool settled = (info.x & ISLAND_SETTLED) != 0;
     bool woke = false;
     bool resumed = false;
     seen_clear(tid);
@@ -1997,7 +2019,7 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
     if (tid == 0)
     {
         uint run = 1;
-        if (contact_island != (params.contact_mode == 1) || (isl.info.x & ISLAND_WIDE) != 0)
+        if (contact_island != (params.contact_mode == 1) || (info.x & ISLAND_WIDE) != 0)
             run = 0;
         if (contact_island && contact_stopped(isl))
             run = 0;
@@ -2006,15 +2028,15 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
         if (FOLD_SUMS != 0 && contact_island)
         {
             Island sentinel = islands[params.halt_index];
-            stop_seen(sentinel, isl.info.w + 1);
+            stop_seen(sentinel, info.w + 1);
             // The sums as the sums dispatch made them: unless a split in an earlier
             // substep stopped the batch (one in this substep, by another island of this
             // dispatch, records this substep).
-            g_sums = (sentinel.info.y != 0 && sentinel.info.y <= isl.info.w) ? 0 : 1;
+            g_sums = (sentinel.info.y != 0 && sentinel.info.y <= info.w) ? 0 : 1;
         }
     }
     GroupMemoryBarrierWithGroupSync();
-    uint steps = ((isl.info.z & ISLAND_HALTED) != 0 || g_run == 0) ? 0 : min(isl.info.y, params.max_steps);
+    uint steps = ((info.z & ISLAND_HALTED) != 0 || group_uniform(g_run, tid) == 0) ? 0 : min(info.y, params.max_steps);
     float dt = params.dt;
     bool fracture = params.fracture != 0;
     bool rml = params.rigid_motion_loads != 0;
@@ -2025,18 +2047,18 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
     float work_err = 0.0;
     for (uint s = 0; s < steps; s++)
     {
-        uint abs_step = isl.info.w + s + 1;
+        uint abs_step = info.w + s + 1;
         uint k = abs_step - 1 - params.step_start; // substeps since the host's step began
         // Each phase has one call site (quiet and settled substeps skip phases rather
         // than repeat the tail): the per-substep kernel carries its code once
         // (instruction-cache budget).
-        bool quiet = (isl.info.x & ISLAND_QUIET) != 0;
+        bool quiet = (info.x & ISLAND_QUIET) != 0;
         // The contact sums of the island's chunks (segments in chunk order, so the
         // island's are contiguous), when no earlier dispatch made them.
-        if (FOLD_SUMS != 0 && contact_island && g_sums != 0)
+        if (FOLD_SUMS != 0 && contact_island && group_uniform(g_sums, tid) != 0)
         {
-            uint g1 = chunks[isl.range.y - 1].cinfo.y;
-            for (uint g = chunks[isl.range.x].cinfo.x + ct; g < g1; g += THREADS)
+            uint g1 = chunks[range.y - 1].cinfo.y;
+            for (uint g = chunks[range.x].cinfo.x + ct; g < g1; g += THREADS)
                 contact_segment(g);
             device_group_barrier();
         }
@@ -2046,10 +2068,10 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
         {
             float3 norm = float3(0.0);
             float3 unused0 = float3(0.0);
-            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
+            for (uint c = range.x + ct; c < range.y; c += THREADS)
                 norm.x += settled_chunk_load(c, rg.rot, k, dt, contact_island);
             group_sum3<THREADS>(tid, norm, unused0);
-            if (params.solve_mode == MODE_ADAPTIVE && abs(norm.x - isl.energy.z) > isl.energy.w)
+            if (group_uniform(params.solve_mode == MODE_ADAPTIVE && abs(norm.x - isl.energy.z) > isl.energy.w ? 1u : 0u, tid) != 0)
             {
                 settled = false;
                 woke = true;
@@ -2060,7 +2082,7 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
         {
             float3 f = float3(0.0);
             float3 t = float3(0.0);
-            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
+            for (uint c = range.x + ct; c < range.y; c += THREADS)
                 net_load(c, isl, rg, k, dt, contact_island, f, t);
             group_sum3<THREADS>(tid, f, t);
             rigid_acceleration(isl, rg, f, t);
@@ -2074,7 +2096,7 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
             // takes its joint law here.
             if (INLINE_BONDS != 0 || (FOLD_SUMS == 2 && woke))
             {
-                for (uint i = isl.range.z + tid; i < isl.range.w; i += GROUP)
+                for (uint i = range.z + tid; i < range.w; i += GROUP)
                     if (bond_update(i, dt, fracture, abs_step, false))
                         g_halt = 1;
             }
@@ -2082,7 +2104,7 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
                 g_halt = 1;
             device_group_barrier();
             // 3. Chunks.
-            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
+            for (uint c = range.x + ct; c < range.y; c += THREADS)
                 chunk_update(c, isl, rg, dt, rml, k, contact_island, work, work_err);
             device_group_barrier();
         }
@@ -2095,19 +2117,19 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
             float3 wcom = isl.wcom.xyz;
             float3 tu = float3(0.0);
             float3 pv = float3(0.0);
-            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
+            for (uint c = range.x + ct; c < range.y; c += THREADS)
                 drift_moments(c, tu, pv);
             group_sum3<THREADS>(tid, tu, pv);
             float3 tr = tu / isl.wcom.w;
             float3 dv = pv / isl.wcom.w;
             float3 lu = float3(0.0);
             float3 lv = float3(0.0);
-            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
+            for (uint c = range.x + ct; c < range.y; c += THREADS)
                 drift_angular(c, wcom, tr, dv, lu, lv);
             group_sum3<THREADS>(tid, lu, lv);
             float3 phi = rows_mul(isl.winv0, isl.winv1, isl.winv2, lu);
             float3 dw = rows_mul(isl.winv0, isl.winv1, isl.winv2, lv);
-            for (uint c = isl.range.x + ct; c < isl.range.y; c += THREADS)
+            for (uint c = range.x + ct; c < range.y; c += THREADS)
                 drift_apply(c, wcom, tr, phi, dv, dw);
             if (!driven)
                 drift_rigid(isl, rg, tr, phi, dv, dw);
@@ -2119,14 +2141,14 @@ void island_frame_at<let INLINE_BONDS : uint, let FOLD_SUMS : uint, let GROUP : 
         done = s + 1;
         // A disconnection that leaves the island in one piece changes nothing (the host's
         // resumed halt, without the round trip).
-        if (g_halt != 0 && island_connected_narrow(tid, ct, isl))
+        if (group_uniform(g_halt, tid) != 0 && island_connected_narrow(tid, ct, isl))
         {
             resumed = true;
             if (tid == 0)
                 g_halt = 0;
             GroupMemoryBarrierWithGroupSync();
         }
-        if (g_halt != 0)
+        if (group_uniform(g_halt, tid) != 0)
             break;
     }
     // Island external work: per-thread compensated sums, reduced in a fixed order.
@@ -2219,6 +2241,18 @@ WideGroup wide_group(uint table, uint g)
     return w;
 }
 
+// `wide_group` as a uniform value of the group (`group_uniform4`).
+WideGroup wide_group_uniform(uint table, uint g, uint tid)
+{
+    WideGroup w = wide_group(table, g);
+    uint4 u = group_uniform4(uint4(w.island, w.begin, w.end, w.first), tid);
+    w.island = u.x;
+    w.begin = u.y;
+    w.end = u.z;
+    w.first = u.w;
+    return w;
+}
+
 // Whether the island runs this substep (uniform over the round: only `wide_end` changes
 // what this reads).
 bool wide_runs(Island isl)
@@ -2258,7 +2292,7 @@ bool wide_enter(uint tid, Island isl)
     if (tid == 0)
         g_wide_run = wide_runs(isl) ? 1 : 0;
     GroupMemoryBarrierWithGroupSync();
-    return g_wide_run != 0;
+    return group_uniform(g_wide_run, tid) != 0;
 }
 
 uint wide_step(Island isl)
@@ -2273,10 +2307,10 @@ uint wide_step(Island isl)
 void wide_wake(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    WideGroup wg = wide_group(params.wide_chunk_table, group.x);
+    WideGroup wg = wide_group_uniform(params.wide_chunk_table, group.x, tid);
     if (group.x != wg.first)
         return;
-    Island isl = islands[wg.island];
+    Island isl = group_uniform_island(islands[wg.island], tid);
     if ((isl.info.x & ISLAND_SETTLED) == 0 || !wide_enter(tid, isl))
         return;
     Quat rot = quat_of(isl.rotation);
@@ -2301,8 +2335,8 @@ void wide_wake(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 void wide_bonds_at(uint gx, uint tid)
 {
     bool bond_group = gx < params.wide_bond_groups;
-    WideGroup wg = bond_group ? wide_group(params.wide_bond_table, gx) : wide_group(params.wide_chunk_table, gx - params.wide_bond_groups);
-    Island isl = islands[wg.island];
+    WideGroup wg = bond_group ? wide_group_uniform(params.wide_bond_table, gx, tid) : wide_group_uniform(params.wide_chunk_table, gx - params.wide_bond_groups, tid);
+    Island isl = group_uniform_island(islands[wg.island], tid);
     if (!wide_enter(tid, isl))
         return;
     uint k = wide_step(isl);
@@ -2343,8 +2377,8 @@ Rigid wide_rigid_frame(uint tid, Island isl, WideGroup wg)
 
 void wide_chunks_at(uint gx, uint tid)
 {
-    WideGroup wg = wide_group(params.wide_chunk_table, gx);
-    Island isl = islands[wg.island];
+    WideGroup wg = wide_group_uniform(params.wide_chunk_table, gx, tid);
+    Island isl = group_uniform_island(islands[wg.island], tid);
     if (!wide_enter(tid, isl))
         return;
     bool anchored = (isl.info.x & ISLAND_ANCHORED) != 0;
@@ -2387,8 +2421,8 @@ void wide_chunks_at(uint gx, uint tid)
 void wide_drift(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    WideGroup wg = wide_group(params.wide_chunk_table, group.x);
-    Island isl = islands[wg.island];
+    WideGroup wg = wide_group_uniform(params.wide_chunk_table, group.x, tid);
+    Island isl = group_uniform_island(islands[wg.island], tid);
     if ((isl.info.x & (ISLAND_ANCHORED | ISLAND_SETTLED)) != 0 || !wide_enter(tid, isl))
         return;
     float3 tu;
@@ -2411,8 +2445,8 @@ void wide_drift(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 void wide_rigid(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    WideGroup wg = wide_group(params.wide_chunk_table, group.x);
-    Island isl = islands[wg.island];
+    WideGroup wg = wide_group_uniform(params.wide_chunk_table, group.x, tid);
+    Island isl = group_uniform_island(islands[wg.island], tid);
     if ((isl.info.x & ISLAND_ANCHORED) != 0 || !wide_enter(tid, isl))
         return;
     if ((isl.info.x & ISLAND_SETTLED) != 0)
@@ -2421,18 +2455,21 @@ void wide_rigid(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         if (group.x != wg.first)
             return;
         Rigid rs = wide_rigid_frame(tid, isl, wg);
-        if (tid != 0 || (isl.info.x & ISLAND_DRIVEN) != 0)
-            return;
-        integrate_rigid(isl, rs, params.dt);
-        islands[wg.island].rotation = quat_vec(rs.rot);
-        islands[wg.island].rotation_err = rs.rot_err;
-        islands[wg.island].position = float4(rs.pos, 0.0);
-        islands[wg.island].position_err = float4(rs.pos_err, 0.0);
-        islands[wg.island].velocity = float4(rs.vel, 0.0);
-        islands[wg.island].velocity_err = float4(rs.vel_err, 0.0);
-        islands[wg.island].angular_velocity = float4(rs.w, 0.0);
-        islands[wg.island].momentum = float4(rs.l, 0.0);
-        islands[wg.island].momentum_err = float4(rs.l_err, 0.0);
+        // Thread 0's write inside the branch, not a per-thread return before it (WGSL's
+        // uniformity analysis takes the code after such a return as non-uniform).
+        if (tid == 0 && (isl.info.x & ISLAND_DRIVEN) == 0)
+        {
+            integrate_rigid(isl, rs, params.dt);
+            islands[wg.island].rotation = quat_vec(rs.rot);
+            islands[wg.island].rotation_err = rs.rot_err;
+            islands[wg.island].position = float4(rs.pos, 0.0);
+            islands[wg.island].position_err = float4(rs.pos_err, 0.0);
+            islands[wg.island].velocity = float4(rs.vel, 0.0);
+            islands[wg.island].velocity_err = float4(rs.vel_err, 0.0);
+            islands[wg.island].angular_velocity = float4(rs.w, 0.0);
+            islands[wg.island].momentum = float4(rs.l, 0.0);
+            islands[wg.island].momentum_err = float4(rs.l_err, 0.0);
+        }
         return;
     }
     float3 tu;
@@ -2486,7 +2523,9 @@ groupshared uint g_changed;
 bool island_connected(uint tid, Island isl)
 {
     uint first = isl.range.x;
-    uint n = isl.range.y - isl.range.x;
+    // The loop bound, its stop and the answer as uniform values: barriers are in the loop
+    // and in the callers.
+    uint n = group_uniform(isl.range.y - isl.range.x, tid);
     if (n > CONNECT_MAX || params.device_connect == 0)
         return false;
     for (uint c = tid; c < n; c += THREADS)
@@ -2520,7 +2559,7 @@ bool island_connected(uint tid, Island isl)
             }
         }
         GroupMemoryBarrierWithGroupSync();
-        converged = g_changed == 0;
+        converged = group_uniform(g_changed, tid) == 0;
         GroupMemoryBarrierWithGroupSync();
         if (converged)
             break;
@@ -2534,7 +2573,7 @@ bool island_connected(uint tid, Island isl)
         if (g_label[c] != 0)
             g_changed = 1;
     GroupMemoryBarrierWithGroupSync();
-    return g_changed == 0;
+    return group_uniform(g_changed, tid) == 0;
 }
 
 // `island_connected` for a narrow island, with labels for at most CONNECT_NARROW chunks
@@ -2547,7 +2586,9 @@ groupshared uint g_changed_narrow;
 bool island_connected_narrow(uint tid, uint ct, Island isl)
 {
     uint first = isl.range.x;
-    uint n = isl.range.y - isl.range.x;
+    // The loop bound, its stop and the answer as uniform values: barriers are in the loop
+    // and in the callers.
+    uint n = group_uniform(isl.range.y - isl.range.x, tid);
     if (n > CONNECT_NARROW || params.device_connect == 0)
         return false;
     for (uint c = ct; c < n; c += THREADS)
@@ -2581,7 +2622,7 @@ bool island_connected_narrow(uint tid, uint ct, Island isl)
             }
         }
         GroupMemoryBarrierWithGroupSync();
-        converged = g_changed_narrow == 0;
+        converged = group_uniform(g_changed_narrow, tid) == 0;
         GroupMemoryBarrierWithGroupSync();
         if (converged)
             break;
@@ -2595,7 +2636,7 @@ bool island_connected_narrow(uint tid, uint ct, Island isl)
         if (g_label_narrow[c] != 0)
             g_changed_narrow = 1;
     GroupMemoryBarrierWithGroupSync();
-    return g_changed_narrow == 0;
+    return group_uniform(g_changed_narrow, tid) == 0;
 }
 
 [shader("compute")]
@@ -2603,10 +2644,10 @@ bool island_connected_narrow(uint tid, uint ct, Island isl)
 void wide_end(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    WideGroup wg = wide_group(params.wide_chunk_table, group.x);
+    WideGroup wg = wide_group_uniform(params.wide_chunk_table, group.x, tid);
     if (group.x != wg.first)
         return;
-    Island isl = islands[wg.island];
+    Island isl = group_uniform_island(islands[wg.island], tid);
     if (!wide_enter(tid, isl))
         return;
     float3 work;
@@ -2992,7 +3033,7 @@ void precondition(uint c)
 void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    Island isl = islands[group.x];
+    Island isl = group_uniform_island(islands[group.x], tid);
     if ((isl.info.z & ISLAND_SOLVE) == 0)
         return;
     bool free = (isl.info.x & ISLAND_ANCHORED) == 0;
@@ -3226,7 +3267,7 @@ void island_statics(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 void settled_fatigue(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    Island isl = islands[group.x];
+    Island isl = group_uniform_island(islands[group.x], tid);
     if ((isl.info.x & ISLAND_SETTLED) == 0 || isl.range.w == isl.range.z)
         return;
     // Group flags (every writer stores the same value): damage grew, a bond disconnected.
@@ -3413,8 +3454,8 @@ void sums_impactors_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadI
 // of this substep, a disconnection reported to the island (ISLAND_HALT_PENDING).
 void bond_group_at(uint table, uint gx, uint tid)
 {
-    WideGroup wg = wide_group(table, gx);
-    Island isl = islands[wg.island];
+    WideGroup wg = wide_group_uniform(table, gx, tid);
+    Island isl = group_uniform_island(islands[wg.island], tid);
     if (!wide_enter(tid, isl) || (isl.info.x & ISLAND_SETTLED) != 0)
         return;
     uint i = wg.begin + tid;

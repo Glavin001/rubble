@@ -7,6 +7,8 @@ publish.workspace = true
 description = "Single-precision GPU stress solver (Slang kernels, wgpu: Metal natively, WebGPU in the browser), diffed against stress-ref"
 
 [dependencies]
+engine-gpu-wait = { path = "../../../crates/engine-gpu-wait" }
+web-time = "1.1"
 stress-ref = { path = "../stress-ref" }
 stress-layout = { path = "../stress-layout" }
 wgpu = "30"

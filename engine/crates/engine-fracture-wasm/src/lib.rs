@@ -220,6 +220,11 @@ impl Scene {
             procedural,
         )))
     }
+    /// The scene with every bond's break capacities times `scale`.
+    #[wasm_bindgen(js_name = withBondStrength)]
+    pub fn with_bond_strength(&self, scale: f64) -> Scene {
+        Scene(self.0.clone().scale_bond_strength(scale))
+    }
     #[wasm_bindgen(js_name = withoutJoints)]
     pub fn without_joints(&self) -> Scene {
         Scene(self.0.clone().without_joints())
@@ -808,6 +813,11 @@ impl Plan {
     #[wasm_bindgen(js_name = setCollider)]
     pub fn set_collider(&mut self, index: u32, collider: JsValue) -> Result<Vec<u8>, JsError> {
         self.0.set_collider(index, from_js(collider)?).map_err(err)
+    }
+    /// The mass (kg) of the projectiles fired from now on.
+    #[wasm_bindgen(js_name = setProjectileMass)]
+    pub fn set_projectile_mass(&mut self, mass: f64) -> Result<(), JsError> {
+        self.0.set_projectile_mass(mass).map_err(err)
     }
     /// Fire the next projectile: `{id, bytes, offsets}` (write `bytes` at both offsets of buffer 0).
     pub fn launch(

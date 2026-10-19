@@ -203,6 +203,11 @@ uint key_of_0(uint4 info_0, KernelContext_0 thread* kernelContext_1)
     return;
 }
 
+float float_bits_0(uint bits_0)
+{
+    return (as_type<float>((bits_0)));
+}
+
 [[kernel]] void collider_refresh(uint3 id_2 [[thread_position_in_grid]], uint device* control_3 [[buffer(11)]], ColliderParams_0 constant* params_3 [[buffer(0)]], packed_uint4 device* parents_3 [[buffer(1)]], packed_uint4 device* islands_of_3 [[buffer(9)]], uint device* collider_key_3 [[buffer(14)]], uint device* work_3 [[buffer(2)]], packed_float4 device* old_chunks_3 [[buffer(6)]], uint device* structure_base_3 [[buffer(10)]], packed_uint4 device* part_ranges_3 [[buffer(5)]], uint device* member_offsets_3 [[buffer(16)]], packed_float4 device* chunks_3 [[buffer(7)]], uint device* chunk_slot_3 [[buffer(13)]], packed_uint4 device* collider_info_3 [[buffer(15)]], packed_float4 device* islands_3 [[buffer(8)]], packed_float4 device* chunk_props_3 [[buffer(12)]])
 {
     thread KernelContext_0 kernelContext_4;
@@ -249,7 +254,7 @@ uint key_of_0(uint4 info_0, KernelContext_0 thread* kernelContext_1)
     {
         return;
     }
-    float inf_0 = (as_type<float>((2139095040U)));
+    float inf_0 = float_bits_0(2139095040U);
     if(key_0 == 4294967294U)
     {
         uint _S14 = 2U * c_1;

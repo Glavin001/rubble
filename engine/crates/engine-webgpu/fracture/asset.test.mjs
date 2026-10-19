@@ -48,7 +48,7 @@ test('the house, its flat-hull skips and the layouts of the Scene menu',async()=
  assert.deepEqual(grid.capacity,{contactsPerCollider:8,candidatesPerCollider:8,maxColors:64,colorRounds:64});
  assert.equal(suburb.copies,48);assert.ok(suburb.roadVertices.length>0&&suburb.roadVertices.length%60===0);
  assert.equal(grid.hullData.length,fine.hullData.length,'copies share one hull arena');
- assert.deepEqual(SAMPLES.map(s=>s.key),['house','row','grid','suburb','cuboids','cuboidGrid','arch']);
+ assert.deepEqual(SAMPLES.map(s=>s.key),['house','cuboid','arch','row','grid','cuboidGrid','suburb','cuboids','cuboids2x']);
 });
 
 test('a 16-vertex bake enforces its hull limit with a clear error',async()=>{

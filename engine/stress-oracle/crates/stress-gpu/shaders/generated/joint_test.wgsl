@@ -213,9 +213,14 @@ fn fatigue_factor_0( mat_1 : ptr<function, JointMaterial_std430_0>,  life_1 : f3
     return fpow_0(clamp(life_1, 0.0f, 1.0f), fdiv_0(1.0f, (*mat_1).misc_0.y - 2.0f));
 }
 
+fn float_bits_0( bits_0 : u32) -> f32
+{
+    return (bitcast<f32>((bits_0)));
+}
+
 fn infinity_0() -> f32
 {
-    return (bitcast<f32>((u32(2139095040))));
+    return float_bits_0(u32(2139095040));
 }
 
 fn failure_indices_0( mat_2 : ptr<function, JointMaterial_std430_0>,  b_3 : ptr<function, JointBond_std430_0>,  m_1 : Measures_0,  multiplier_0 : f32) -> vec4<f32>

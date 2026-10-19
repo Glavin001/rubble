@@ -534,7 +534,7 @@ pub fn reference_set(scene: &Scene, compute: bool) -> Option<ReferenceSet> {
     let eps = perturbations();
     let (reference, half, spreads) = std::thread::scope(|sc| {
         let r = sc.spawn(|| {
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             let o = World::new(scene).run();
             (o, t.elapsed().as_secs_f64())
         });

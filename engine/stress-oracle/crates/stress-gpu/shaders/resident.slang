@@ -166,7 +166,7 @@ void resident_filter(uint3 id: SV_DispatchThreadID)
     Quat q = island_rotation(isl);
     float3 centre = isl.position.xyz + rotate(q, ch.center.xyz + state[4 * k].xyz);
     float4 props = ctab[params.props_base + k];
-    float m_body = anchored ? asfloat(0x7f800000u) : isl.com.w;
+    float m_body = anchored ? float_bits(0x7f800000u) : isl.com.w;
     float dt = params.dt;
     float3 f_total = float3(0.0);
     float3 t_total = float3(0.0);
@@ -291,7 +291,8 @@ void resident_static_loads(uint3 group: SV_GroupID, uint3 thread: SV_GroupThread
     if (i >= params.island_count)
         return;
     Island isl = islands[i];
-    if ((isl.info.z & ISLAND_SOLVE) == 0)
+    // The exit as a uniform value: barriers follow.
+    if (group_uniform((isl.info.z & ISLAND_SOLVE) == 0 ? 1u : 0u, tid) != 0)
         return;
     bool anchored = (isl.info.x & ISLAND_ANCHORED) != 0;
     Quat q = island_rotation(isl);

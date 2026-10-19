@@ -152,9 +152,14 @@ float fatigue_factor_0(const JointMaterial_natural_0 thread* mat_1, float life_1
     return _S23;
 }
 
+float float_bits_0(uint bits_0)
+{
+    return (as_type<float>((bits_0)));
+}
+
 float infinity_0()
 {
-    return (as_type<float>((2139095040U)));
+    return float_bits_0(2139095040U);
 }
 
 float4 failure_indices_0(const JointMaterial_natural_0 thread* mat_2, const JointBond_natural_0 thread* b_1, const Measures_0 thread* m_1, float multiplier_0)

@@ -72,12 +72,13 @@ void split_components(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
     uint p = group.x;
-    if (p >= control[CTL_PARENTS])
+    // The exit, the loop bound and the loop's stop as uniform values: barriers follow.
+    if (group_uniform(p >= control[CTL_PARENTS] ? 1u : 0u, tid) != 0)
         return;
     uint4 parent = parents[p];
     Island isl = islands[parent.x];
     uint first = isl.range.x;
-    uint n = isl.range.y - isl.range.x;
+    uint n = group_uniform(isl.range.y - isl.range.x, tid);
     uint base = parent.y;
     uint members = total_chunks();
     for (uint c = tid; c < n; c += THREADS)
@@ -114,7 +115,7 @@ void split_components(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             }
         }
         device_group_barrier();
-        bool done = g_changed == 0;
+        bool done = group_uniform(g_changed, tid) == 0;
         GroupMemoryBarrierWithGroupSync();
         if (done)
             break;
@@ -377,7 +378,8 @@ void split_children_group(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadI
     uint slot = group.x;
     uint tid = thread.x;
     uint total = total_chunks();
-    if (slot >= total || control[CTL_PARENTS] == 0)
+    // The exits as uniform values: barriers follow.
+    if (group_uniform(slot >= total || control[CTL_PARENTS] == 0 ? 1u : 0u, tid) != 0)
         return;
     uint p = 0, hi = control[CTL_PARENTS] - 1;
     while (p < hi)
@@ -390,7 +392,7 @@ void split_children_group(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadI
     }
     uint4 parent = parents[p];
     uint k = slot - parent.y;
-    if (k >= parent.z)
+    if (group_uniform(k >= parent.z ? 1u : 0u, tid) != 0)
         return;
     uint at = params.out_base + CHILD_WORDS * slot;
     float4 head = out[at];

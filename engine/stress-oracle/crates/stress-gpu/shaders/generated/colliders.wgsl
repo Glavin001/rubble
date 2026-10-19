@@ -180,6 +180,11 @@ fn collider_slots(@builtin(global_invocation_id) id_1 : vec3<u32>)
     return;
 }
 
+fn float_bits_0( bits_0 : u32) -> f32
+{
+    return (bitcast<f32>((bits_0)));
+}
+
 @compute
 @workgroup_size(64, 1, 1)
 fn collider_refresh(@builtin(global_invocation_id) id_2 : vec3<u32>)
@@ -211,7 +216,7 @@ fn collider_refresh(@builtin(global_invocation_id) id_2 : vec3<u32>)
     {
         return;
     }
-    var inf_0 : f32 = (bitcast<f32>((u32(2139095040))));
+    var inf_0 : f32 = float_bits_0(u32(2139095040));
     if(key_1 == u32(4294967294))
     {
         var _S9 : u32 = u32(2) * c_1;

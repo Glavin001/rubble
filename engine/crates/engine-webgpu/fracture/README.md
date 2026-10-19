@@ -97,7 +97,7 @@ finer levels increase collision work substantially. Assets load only on selectio
 Levels 2 and 3 bake 35 and 36 flat (zero-volume) sheets into compound fragments;
 the importer skips those hulls (every fragment keeps real ones) and says so.
 
-**20 houses · Level 3 in a row** places twenty level-3 houses along +z (131,840
+**Veneer houses · row of 20 (level 3)** places twenty level-3 houses along +z (131,840
 bodies, 133,280 hulls) from `assets/veneer-house-hull16.glb`. Copies share one
 hull arena and draw instanced. “Fire the wrecking ball” rolls a 1.6 m, 200 t ball
 at 40 m/s along the ground through the whole row (`__FRACTURE_DEMO__.fireRow()`;
@@ -105,14 +105,14 @@ at 40 m/s along the ground through the whole row (`__FRACTURE_DEMO__.fireRow()`;
 and 8 contacts per collider and 64 colours and colouring rounds, and runs with a
 16-vertex hull limit: a larger hull is a load error, never reduced.
 
-**49 houses · Level 2 in a 7×7 grid** uses the bundled `veneer-house.glb` (64-vertex
+**Veneer houses · 7×7 grid of 49 (level 2)** uses the bundled `veneer-house.glb` (64-vertex
 hull limit; 154,742 bodies, 245,882 hulls) and fires the ball down the middle
 column. On an M3 Max an all-asleep step costs 2.6 ms of GPU time and the peak after
 the shot ~38 ms (~114k awake, ~880k contacts). Unbonded pieces knock over
 neighbouring houses, so most of the grid ends up awake. The 16-vertex re-bake
 measured the same peak with 15% more pieces, so the grid keeps the original asset.
 
-**Suburb · 48 houses on lots with roads** (`build_suburb` in `engine-fracture`) spaces the same houses
+**Veneer houses · suburb of 48 (level 2)** (`build_suburb` in `engine-fracture`) spaces the same houses
 out: 4 × 3 blocks of 2 × 2 lots with 5-6 m yards, separated by 8 m roads with
 sidewalks and dashed centre lines (drawn on the ground; the physics ground is
 still the plane). The ball rolls down one column of lots and hits 6 houses. On an
@@ -120,8 +120,9 @@ M3 Max 24 of 48 houses collapse (debris still topples unbonded lot neighbours;
 43 of 49 on the grid), ~55k pieces stay awake, and the step settles at ~15 ms
 (~66 ticks/s) by 30 s. 10 m yards still lose 22 houses.
 
-**Cuboid suburb · 48 box-built houses** uses the same layout with a procedural
-house made only of box colliders (`engine-fracture` `cuboid.rs`, ~715 pieces): running-bond
+**Cuboid houses · suburb of 48** uses the same layout (**Cuboid houses · large
+suburb of 96**: twice the size, 6 × 4 blocks of 2 × 2 lots, about 69k pieces) with a
+procedural house made only of box colliders (`engine-fracture` `cuboid.rs`, ~715 pieces): running-bond
 brick walls with interlocking corners, door and windows with lintels, sills and
 glass, stepped brick gables, a ridge beam, rafters and roof boards, an exterior
 chimney, a porch on posts with a step, and a picket fence with a mailbox. Every
@@ -135,7 +136,7 @@ checks that no two pieces start interpenetrating.
   the GPU step is 3.5-4.2 ms (box-box contacts, no hull SAT), about 4x faster than
   the hull suburb. The remaining cost is mostly the primal's per-colour dispatches.
 
-**49 box-built houses in a 7×7 grid** puts the same cuboid house on the dense
+**Cuboid houses · 7×7 grid of 49** puts the same cuboid house on the dense
 grid layout. Measured live in the browser on an M3 Max after the row shot
 (wall-clock ticks including counter readback): 145-166 ticks/s for physics alone
 and 79-86 ticks/s with a frame rendered every tick; 19 of 49 houses collapse by
@@ -154,9 +155,83 @@ overlapped; the hull grid, GPU-bound at ~28 ms per tick, goes from 28.9 to
 engine's own run-to-run nondeterminism appears (two plain runs of the cuboid
 grid diverge at tick ~296).
 
-### Breakable bonds (experimental, opt-in)
+### Scene menu
 
-“Breakable bonds (experimental)” turns each baked bond of the selected level into
+The **Scene** menu groups the bundled scenes (`engine-fracture` `samples.rs`, `GROUPS`),
+each named for what it is, then how many:
+- **One structure:** veneer house, cuboid house, masonry arch.
+- **Rows and grids:** veneer houses in a row of 20 and a 7×7 grid; cuboid houses in a 7×7
+  grid.
+- **Suburbs (lots and roads):** veneer houses (48), cuboid houses (48, and a large
+  suburb of 96).
+- **Vibe City presets:** generated scene packs, when they are built.
+- **Your file:** a dropped or chosen GLB.
+
+The native viewer numbers the same scenes 1–9 in this order.
+
+### Bond modes
+
+The **Bonds** menu picks how the baked bonds hold the fragments, on the same asset,
+level, camera and shot rule, so the three can be compared:
+
+| Mode | What holds the fragments | Where it runs |
+|---|---|---|
+| **None** (default) | Nothing: pieces start asleep and wake when hit | rubble (this page's WGSL host) |
+| **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
+| **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
+| **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
+
+**Learned impact mode.**
+- Physics is the same as **None** (unbonded fragments). The network run is timed and discarded.
+- Pack: `engine/stress-oracle/packs/house-1story.json` (319 chunks / 877 bonds).
+- Rebuild WGSL after editing the Slang:
+  ```sh
+  slangc engine/slang/kernels/learned_impact.slang -I engine/slang -target wgsl \
+    -line-directive-mode none -o engine/crates/engine-webgpu/generated/wgsl/learned_impact.wgsl
+  ```
+- Bindings are packed to 8 storage buffers so Chrome's per-stage limit is met.
+
+**Stress solver mode.**
+- It runs the same Rust as the native reference (`stress-rubble` example
+  `fracture_glb`): the level's Shardwright stress export, stress-ref's import, the
+  resident GPU frame, and `stress_rubble::render`.
+- It uses the lab's orbit camera and shot rule (`engine-fracture` `view.rs`,
+  `plan::shot_velocity`).
+- It runs one copy of the structure; the samples' layouts of copies are the other modes'.
+- **JSPI.** The solver reads the GPU synchronously, so in the browser each read
+  suspends the wasm stack to the event loop through JavaScript Promise Integration
+  (`engine-gpu-wait`, `gpu-wait.mjs`, the page's import map). It needs Chrome 137 or later.
+- **Build:**
+  ```sh
+  CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build engine/stress-oracle/crates/stress-web --release --target web \
+    --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
+  ```
+  `engine/scripts/build-web.sh` includes this step.
+
+**Native reference** (house, level 0, one cannonball, 120 frames, M3 Max): 15 fragments,
+151 of 453 bonds broken, median frame 4.2 ms.
+
+**Status in Chrome (M3 Max):**
+- It loads, draws, aims and fires like the other modes, and it holds real time (60 physics
+  frames/s, 2.3 ms each) until a ball strikes.
+- **Nothing breaks yet.** Chrome allows 10 storage buffers per shader stage, and the
+  stress kernels for contact ingest and GPU splits bind up to 26 (`layout`), so WebGPU
+  rejects those pipelines. Packing them to 10 or fewer is the remaining work.
+- The same WGSL kernels run natively (`STRESS_GPU_SHADERS=wgsl`, where Metal allows 31)
+  with the Metal library's result: a lab shot (×64 ball) breaks 210 bonds into 17
+  fragments on both.
+- **WGSL rules the Slang source now meets:**
+  - no constant infinity or NaN (`common.slang` `float_bits`);
+  - barriers only under workgroup-uniform control flow (`group_uniform`,
+    `group_uniform4`, `group_uniform_island`, and uniform reductions in `group_sum2`);
+  - storage access read from the shader's declarations (`gpu.rs` `wgsl_access`).
+  Metal's values are unchanged (guard).
+- **View options.** "Inspect bond graph" and "Color by sleep state" are this page's
+  renderer's, so they are disabled in this mode.
+
+### Breakable D6 joints (experimental)
+
+“Breakable D6 joints” turns each baked bond of the selected level into
 a D6 bond joint (`JointDesc::bond`, `JOINT_FLAG_BOND`; rows in
 `slang/physics/joints.slang`, see `engine/docs/JOINTS.md`):
 

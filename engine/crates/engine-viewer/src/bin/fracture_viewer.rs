@@ -8,7 +8,7 @@
 //! cargo run -p engine-viewer --release --bin fracture_viewer -- path/to/model.fracture.glb
 //! ```
 //!
-//! 1-7 scenes (the lab's Scene menu) · [ ] level · drop a .glb onto the window ·
+//! 1-9 scenes (the lab's Scene menu, in its order) · [ ] level · drop a .glb onto the window ·
 //! click to shoot · F fire the wrecking ball (rows, grids, suburbs) · drag to
 //! orbit · scroll to zoom · Space start/pause · R reset · B bond graph ·
 //! K breakable bonds (experimental) · C colour by sleep state · Esc quit.

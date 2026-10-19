@@ -1125,7 +1125,7 @@ impl WgpuSim {
             let _ = tx.send(r);
         });
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv().unwrap().unwrap();
+        engine_gpu_wait::recv(&rx).unwrap();
         let data = slice.get_mapped_range().expect("mapped range");
         let bodies = bytemuck::cast_slice(&data).to_vec();
         drop(data);
@@ -1184,7 +1184,7 @@ impl WgpuSim {
     }
 
     fn step_core(&mut self, reuse_manifolds: bool, read: bool) -> Result<StepCounters, ExecError> {
-        let wall = std::time::Instant::now();
+        let wall = web_time::Instant::now();
         // Skip only when the counters describe the latest step: pipelined steps
         // leave them stale until `drain`.
         let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
@@ -1201,7 +1201,7 @@ impl WgpuSim {
             self.last_timings.total_gpu = 0.0;
             return Ok(self.last_counters);
         }
-        let host_t = std::env::var("RUBBLE_HOST_TIMING").is_ok().then(std::time::Instant::now);
+        let host_t = std::env::var("RUBBLE_HOST_TIMING").is_ok().then(web_time::Instant::now);
         self.refresh_cell();
         let t_cell = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
         self.write_host_uniforms_ex(!read);
@@ -1336,7 +1336,7 @@ impl WgpuSim {
     /// once. The step's host writes (its uniforms) take effect at that submission, before
     /// its commands, as they would at its own.
     pub fn step_encode(&mut self, enc: &mut wgpu::CommandEncoder) -> Result<(), ExecError> {
-        let wall = std::time::Instant::now();
+        let wall = web_time::Instant::now();
         let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
         if self.steps_done > 0
             && self.counted_steps == self.steps_done
@@ -1369,7 +1369,7 @@ impl WgpuSim {
     }
 
     /// The step's host bookkeeping after its submission (and its counters, `read`).
-    fn finish_step(&mut self, read: bool, wall: std::time::Instant) -> Result<StepCounters, ExecError> {
+    fn finish_step(&mut self, read: bool, wall: web_time::Instant) -> Result<StepCounters, ExecError> {
         if let Some(v) = self.vehicles.as_mut() {
             v.dirty = false;
         }
@@ -1633,7 +1633,7 @@ impl WgpuSim {
             let _ = tx.send(r);
         });
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv().unwrap().unwrap();
+        engine_gpu_wait::recv(&rx).unwrap();
         let data = slice.get_mapped_range().expect("mapped range");
         let c: StepCounters = *bytemuck::from_bytes(&data[..n as usize]);
         drop(data);

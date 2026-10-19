@@ -800,7 +800,7 @@ impl GpuSplitter {
             };
             refresh.encode(gpu, &mut encoder, &inputs, total, collider_info);
         }
-        let t_submit = std::time::Instant::now();
+        let t_submit = web_time::Instant::now();
         gpu.queue.submit([encoder.finish()]);
         // The one read.
         let body_words = 112u64;

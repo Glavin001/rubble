@@ -48,7 +48,7 @@
 //! contact outside the hot zone.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use web_time::Instant;
 
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};

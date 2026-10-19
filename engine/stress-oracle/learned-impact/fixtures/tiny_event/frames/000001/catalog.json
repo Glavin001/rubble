@@ -1,0 +1,105 @@
+{
+  "arrays": {
+    "bond_fail_class": {
+      "dtype": "i32",
+      "shape": [
+        3
+      ],
+      "path": "bond_fail_class.bin"
+    },
+    "bond_fail_mode": {
+      "dtype": "i32",
+      "shape": [
+        3
+      ],
+      "path": "bond_fail_mode.bin"
+    },
+    "bond_force_end": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        6
+      ],
+      "path": "bond_force_end.bin"
+    },
+    "bond_force_prev": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        6
+      ],
+      "path": "bond_force_prev.bin"
+    },
+    "bond_joint_state": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        22
+      ],
+      "path": "bond_joint_state.bin"
+    },
+    "bond_joint_state_end": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        22
+      ],
+      "path": "bond_joint_state_end.bin"
+    },
+    "bond_peak_util": {
+      "dtype": "f32",
+      "shape": [
+        3
+      ],
+      "path": "bond_peak_util.bin"
+    },
+    "bond_qs_force": {
+      "dtype": "f32",
+      "shape": [
+        3,
+        6
+      ],
+      "path": "bond_qs_force.bin"
+    },
+    "chunk_contact": {
+      "dtype": "i32",
+      "shape": [
+        4
+      ],
+      "path": "chunk_contact.bin"
+    },
+    "chunk_gravity_local": {
+      "dtype": "f32",
+      "shape": [
+        4,
+        3
+      ],
+      "path": "chunk_gravity_local.bin"
+    },
+    "chunk_load_bins": {
+      "dtype": "f32",
+      "shape": [
+        4,
+        4,
+        6
+      ],
+      "path": "chunk_load_bins.bin"
+    },
+    "chunk_state": {
+      "dtype": "f32",
+      "shape": [
+        4,
+        12
+      ],
+      "path": "chunk_state.bin"
+    },
+    "chunk_state_delta": {
+      "dtype": "f32",
+      "shape": [
+        4,
+        12
+      ],
+      "path": "chunk_state_delta.bin"
+    }
+  }
+}

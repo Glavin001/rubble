@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -21,7 +21,28 @@ let sliceRate=1,sliceCredit=0,frameEma=FRAME_BUDGET_MS;
 // GPU never idles between frames. Vsync-paced frame times jump between 16.7
 // and 33 ms, too coarse to steer by.
 let workDone=[{done:true},{done:true}];
-let currentRates=null,layout=null,maxHullVertices,procedural=null,packBytes=null;
+let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=null,packBytes=null;
+// Bond mode (the Bonds menu): 'none' (pieces sleep until hit), 'd6' (breakable D6
+// joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), or 'learned'
+// (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays unbonded).
+const bondMode=()=>$('bond-mode').value;
+let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
+let learned=null,learnedMs=0,learnedBusy=false;
+// The bond-graph and sleep-colour views are this page's renderer's; the stress mode draws
+// with its own (Rust), which has neither: the boxes are off there, saying so.
+const STRESS_VIEW_NOTE='Not in the stress-solver mode: it draws with its own renderer';
+function viewOptions(stressMode){for(const id of ['show-bonds','show-sleep']){const box=$(id),label=box.closest('label');box.disabled=stressMode;if(stressMode){label.dataset.title??=label.title;label.title=STRESS_VIEW_NOTE}else if(label.dataset.title!==undefined){label.title=label.dataset.title;delete label.dataset.title}}}
+// Ball mass: a power-of-two multiple of the scene's default ball, applied to the next shots.
+const massScale=()=>2**Number($('ball-mass').value);
+// Bond strength: a power-of-two multiple of every bond's break strength (D6 joints and
+// the stress solver), applied when the level loads.
+const strengthScale=()=>2**Number($('bond-strength').value);
+const scaleLabel=k=>`×${k>=1?k:`1/${1/k}`}`;
+function applyBallMass(){
+ const k=massScale(),kg=(stressOn?stress?.stats.ballMass:scene?.projectileMass)*k;
+ $('ball-mass-value').textContent=`×${k>=1?k:`1/${1/k}`}${kg?` · ${Math.round(kg).toLocaleString()} kg`:''}`;
+ if(stressOn)stress?.setShotMassScale(k);else if(sim&&scene?.projectileMass)sim.setProjectileMass(scene.projectileMass*k);
+}
 // Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
 const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
 const rates=createRates(value=>{
@@ -32,7 +53,8 @@ const rates=createRates(value=>{
  // GPU time from timestamps (sampled ticks and frames) and the rate it alone
  // would allow if nothing else used the GPU (physics and rendering share it).
  const tickMs=sim?.gpuTickMs,frameMs=renderer?.gpuFrameMs;
- $('step-ms').textContent=value&&!value.stepMs&&sim?.counters.awake===0?'all asleep · no GPU work':
+ $('step-ms').textContent=learned?`learned ${learnedMs.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`:
+  value&&!value.stepMs&&sim?.counters.awake===0?'all asleep · no GPU work':
   value&&tickMs?`${tickMs.toFixed(1)} ms GPU/tick · max ${Math.floor(1000/tickMs)} TPS`:
   value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:`target ${stepHz()} TPS`;
  $('frame-ms').textContent=value&&frameMs?`${frameMs.toFixed(1)} ms GPU/frame · max ${Math.floor(1000/frameMs)} FPS`:
@@ -47,7 +69,7 @@ const rates=createRates(value=>{
 document.addEventListener('visibilitychange',()=>{last=0;accumulator=0;rates.reset()});
 const setStatus=text=>{status.textContent=text;status.classList.remove('error')};
 const fail=e=>{console.error(e);running=false;status.textContent=e.message;status.classList.add('error');$('release').textContent=released?'Resume':'Start simulation'};
-const controls=enabled=>{for(const id of ['release','reset','level','metadata','fire'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
+const controls=enabled=>{enabled||=stressOn&&!loading;for(const id of ['release','reset','level','metadata','fire'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
 function serializeLoad(task){const result=loadTail.catch(()=>{}).then(async()=>{loading=true;running=false;controls(false);await frame;rates.reset();try{await task()}catch(e){fail(e)}finally{loading=false;last=0;rates.reset();controls(!!sim)}});loadTail=result;return result}
 let shotQueue=Promise.resolve();
 function shoot(ray){
@@ -60,23 +82,59 @@ async function loadLevel(level){
   // Settle one house under its own weight first, so every copy starts asleep in
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
+  if(bondMode()==='stress')return loadStress(level);
+  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;viewOptions(false);
+  learned?.dispose();learned=null;learnedMs=0;
   const built=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
-  if($('solve-bonds').checked)setStatus('Settling bonds under self-weight…');
-  const one=$('solve-bonds').checked?await preloadBonds(device,built):withoutJoints(built);
+  if(bondMode()==='d6')setStatus('Settling bonds under self-weight…');
+  // Learned mode: rubble stays unbonded (same as none); the MGN-T forward is timed separately.
+  const one=bondMode()==='d6'?await preloadBonds(device,strengthScale()===1?built:withBondStrength(built,strengthScale())):withoutJoints(built);
   // Copies laid out as the sample says (procedural houses get a larger contact budget).
   next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- renderer.colorMode=$('show-sleep').checked?1:0;
+ renderer.colorMode=$('show-sleep').checked?1:0;applyBallMass();
+ if(bondMode()==='learned'){
+  setStatus('Loading learned-impact kernels (Slang→WGSL)…');
+  const {createLearnedImpact}=await import('./learned-impact.mjs');
+  learned=await createLearnedImpact(device,{status:setStatus});
+  learnedMs=await learned.run();
+ }
  const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=procedural?scene.pieces*copies:scene.hullCount;$('bonds').textContent=scene.bondCount*copies;$('release').textContent='Start simulation';
  $('fire').hidden=!scene.rowShot;$('awake').textContent='0';$('contacts').textContent='0';
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
  const what=copies>1?`${copies} houses · ${scene.bodyCount-1-scene.projectileCount} bodies · `:'';
  const source=procedural==='pack'?`scene pack · ${scene.pieces} nodes`:procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials${skipped}`;
- setStatus(`${what}${source} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
+ const learnedNote=learned?` · learned-impact ${learnedMs.toFixed(2)} ms/fwd (${learned.graph.nNodes} chunks, ${learned.params} weights, compute only)`:'';
+ setStatus(`${what}${source}${learnedNote} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
+}
+// The stress-solver mode, built and run by stress-web: a GLB's level (one copy of the
+// structure; the sample's layout of copies is the other modes'), or the cuboid houses in
+// their sample's layout (every copy).
+async function loadStress(level){
+ // A fracture GLB's level (one copy of the structure), or the cuboid houses in their
+ // sample's layout (every copy). Scene packs are not in this mode yet.
+ const cuboid=procedural==='cuboid';
+ if(!cuboid&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB or the cuboid houses: pick one of those scenes.');
+ learned?.dispose();learned=null;learnedMs=0;
+ renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
+ $('view').hidden=true;$('stress-view').hidden=false;viewOptions(true);
+ setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
+ // The mode is on only once its module loaded: a failed import (an old build, no JSPI)
+ // leaves the page in its own renderer with the error shown.
+ try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}}
+ catch(e){$('view').hidden=false;$('stress-view').hidden=true;viewOptions(false);throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
+ stressOn=true;
+ stress.setBondStrengthScale(strengthScale());
+ if(cuboid)await stress.loadCuboid(layout);else await stress.load(assetBytes,level);
+ await stress.frame(0);applyBallMass();
+ const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
+ $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
+ $('release').textContent='Start simulation';$('fire').hidden=true;
+ setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · blast_parity, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid?'':' · one copy'} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
- layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;
+ assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;
  const start=performance.now(),next=parseFractureGlb(bytes);const ms=performance.now()-start;
  asset?.handle.free();asset=next;$('scene').value=sampleKey;
  $('level').replaceChildren(...asset.levels.map(l=>new Option(`Level ${l} · ${asset.levelFragments(l)} fragments`,l)));$('filename').textContent=name;
@@ -85,16 +143,19 @@ async function importBytes(bytes,name,sampleKey="",entry={}){
 }
 // The Scene menu is the shared catalogue (engine-fracture samples.rs), as in the Metal viewer.
 const samples=Object.fromEntries(SAMPLES.map(s=>[s.key,{...s,procedural:s.file?null:'cuboid'}]));
-$('scene').replaceChildren(...SAMPLES.map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house')),Object.assign(new Option('Custom GLB',''),{disabled:true}));
+// Grouped as the catalogue groups them (engine-fracture samples.rs GROUPS).
+const optgroup=(label,options)=>{const g=document.createElement('optgroup');g.label=label;g.append(...options);return g};
+const sceneGroups=[...new Set(SAMPLES.map(s=>s.group))].map(label=>optgroup(label,SAMPLES.filter(s=>s.group===label).map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house'))));
+$('scene').replaceChildren(...sceneGroups,optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
 // vibe-city /destructible-stress presets, generated into ../generated/vibe-city (optional).
 const VIBE_CITY='../generated/vibe-city/';
 try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
- const group=document.createElement('optgroup');group.label='vibe-city stress presets';
+ const group=document.createElement('optgroup');group.label='Vibe City presets (generated scene packs)';
  for(const p of index.presets.filter(p=>!p.failed&&!p.pending)){
   const key=`vc:${p.id}`;samples[key]={key,label:p.id,pack:`${VIBE_CITY}${p.id}.json`,nodes:p.nodes,bonds:p.bonds};
   group.append(new Option(`${p.id} · ${p.nodes} nodes`,key));
  }
- if(group.children.length)$('scene').append(group);
+ if(group.children.length)$('scene').insertBefore(group,$('scene').lastElementChild);
 }catch{}
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
@@ -103,13 +164,13 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
   setStatus(`Fetching ${entry.label}…`);
   const response=await fetch(entry.pack);
   if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
-  packBytes=await response.arrayBuffer();layout=null;procedural='pack';asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack.split('/').pop();
+  packBytes=await response.arrayBuffer();assetBytes=null;layout=null;procedural='pack';asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack.split('/').pop();
   $('level').replaceChildren(new Option(`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`,0));$('level').value='0';
   await loadLevel(0);return;
  }
  if(entry.procedural){
   // Built in code from box colliders: no GLB, one level, no baked bonds.
-  layout=entry.layout??null;procedural=entry.procedural;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent='Procedural cuboid house';
+  layout=entry.layout??null;procedural=entry.procedural;assetBytes=null;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent='Procedural cuboid house';
   $('level').replaceChildren(new Option('Cuboids · box colliders only',0));$('level').value='0';
   await loadLevel(0);return;
  }
@@ -124,9 +185,12 @@ $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').checked?1:0};
-$('solve-bonds').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
-$('release').onclick=()=>{released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
-$('reset').onclick=()=>serializeLoad(async()=>{sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
+$('ball-mass').oninput=applyBallMass;
+$('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
+$('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};
+$('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
+$('release').onclick=()=>{if(stressOn&&stress){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
+$('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
 $('metadata').onclick=()=>{if(!asset)return;const url=URL.createObjectURL(new Blob([asset.metadataJson()],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='fracture-metadata.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();document.body.classList.add('drop')});
 window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
@@ -150,7 +214,22 @@ window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},get ready(){return !
  },
  async stepFrames(count){running=false;await frame;for(let i=0;i<count;i++)await sim.step();renderer.draw($('show-bonds').checked);return sim.counters},
  async snapshot(){await frame;return sim.snapshot()},reset:()=>serializeLoad(async()=>sim.reset()),load:sample,selectLevel:level=>serializeLoad(async()=>{$("level").value=String(level);await loadLevel(level)})};
+// One stress-mode frame: the Rust steps what fell due and draws; the HUD counts physics
+// frames and rendered frames per second from its stats.
+function stressTick(now,elapsedMs){
+ frame=(async()=>{try{
+  const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;
+  stressHud.frames+=(st.frames??0)-before;stressHud.renders++;
+  if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0}}
+  $('step-ms').textContent=st.stepMs?`${st.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
+  $('frame-ms').textContent='frames / second';
+  $('awake').textContent=st.moving;
+  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots}/16 shots · ${st.frames} frames · ${st.fragments} fragments · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s`)}
+ }catch(e){fail(e)}})();
+ frame.finally(()=>requestAnimationFrame(tick));
+}
 function tick(now){
+ if(stressOn&&!loading&&stress){const ms=last?Math.min(40,now-last):0;last=now;return stressTick(now,ms)}
  const frameMs=last?now-last:FRAME_BUDGET_MS;
  const elapsed=last?Math.min(.04,(now-last)/1000):0;last=now;
  // Damped control on a smoothed frame time: cut quickly when over budget,
@@ -188,6 +267,8 @@ function tick(now){
     }
    }
   }
+  // Learned-impact: time one forward per frame when idle enough (discard output).
+  if(learned&&!learnedBusy){learnedBusy=true;learned.run().then(ms=>{learnedMs=ms;learnedBusy=false;$('step-ms').textContent=`learned ${ms.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`}).catch(e=>{learnedBusy=false;fail(e)})}
   // Queue the draw immediately behind physics; do not wait for CPU stats first.
   renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}

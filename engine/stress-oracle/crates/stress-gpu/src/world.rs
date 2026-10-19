@@ -159,6 +159,8 @@ pub struct GpuWorld {
     /// Impactors added that the solver's tables do not hold yet (`add_impactor` in a
     /// resident frame).
     impactors_stale: bool,
+    /// The scene has compound chunks (`has_compound`): frames with impact islands fail.
+    compound: bool,
     resident: Option<resident_frame::ResidentState>,
     /// The collider table's lookups of the current layout (resident_frame.rs).
     table_lookup: Option<resident_frame::TableLookup>,
@@ -198,6 +200,20 @@ const FRAME_SEGMENTS: usize = 4;
 
 /// Why a scene cannot run on the GPU yet.
 pub fn unsupported(scene: &Scene) -> Option<String> {
+    unsupported_with(scene, false)
+}
+
+/// A chunk made of several convex hulls (a non-convex fracture fragment).
+pub fn has_compound(scene: &Scene) -> bool {
+    scene.bodies.iter().any(|b| b.chunks.iter().any(|c| c.compound.is_some()))
+}
+
+/// [`unsupported`] for a world whose contact is all the engine's (`engine_contact`: the
+/// resident world without impact islands). There a compound chunk is one engine collider
+/// per hull, reported on the chunk (world_coupling.rs), and the GPU's splits make each
+/// child's colliders from the chunk's parts (`spawn.slang`): only the GPU's own chunk
+/// contact, in impact islands, samples one shape per chunk.
+pub fn unsupported_with(scene: &Scene, engine_contact: bool) -> Option<String> {
     if scene.sim.solve_mode == SolveMode::Implicit {
         return Some("implicit solve mode".into());
     }
@@ -216,7 +232,7 @@ pub fn unsupported(scene: &Scene) -> Option<String> {
     if scene.sim.refine_utilization.is_some() {
         return Some("refinement".into());
     }
-    if scene.bodies.iter().any(|b| b.chunks.iter().any(|c| c.compound.is_some())) {
+    if has_compound(scene) && !engine_contact {
         return Some("compound chunks (the GPU contact samples one box or hull per chunk)".into());
     }
     None
@@ -224,7 +240,11 @@ pub fn unsupported(scene: &Scene) -> Option<String> {
 
 impl GpuWorld {
     pub fn new(gpu: &Gpu, scene: &Scene) -> Result<GpuWorld, String> {
-        if let Some(why) = unsupported(scene) {
+        Self::new_with(gpu, scene, false)
+    }
+
+    fn new_with(gpu: &Gpu, scene: &Scene, engine_contact: bool) -> Result<GpuWorld, String> {
+        if let Some(why) = unsupported_with(scene, engine_contact) {
             return Err(why);
         }
         // The gravity prestress (world.rs `prestress`) runs on the GPU below, unless the
@@ -280,6 +300,7 @@ impl GpuWorld {
             resident_engine: None,
             part_table: None,
             impactors_stale: false,
+            compound: false,
             resident: None,
             table_lookup: None,
             pending_splits: Vec::new(),
@@ -311,10 +332,17 @@ impl GpuWorld {
     /// the engine owns rigid motion and contact except in impact islands, which the GPU
     /// simulates with its own chunk-level contact.
     pub fn with_engine(gpu: &Gpu, scene: &Scene, engine: Box<dyn RigidEngine>) -> Result<GpuWorld, String> {
+        Self::with_engine_contact(gpu, scene, engine, false)
+    }
+
+    /// `with_engine`; `engine_contact`: compound chunks allowed (`unsupported_with`), the
+    /// world then refusing frames with impact islands on.
+    pub(crate) fn with_engine_contact(gpu: &Gpu, scene: &Scene, engine: Box<dyn RigidEngine>, engine_contact: bool) -> Result<GpuWorld, String> {
         if !matches!(scene.sim.solve_mode, SolveMode::Explicit | SolveMode::Adaptive | SolveMode::QuasiStatic) {
             return Err("the engine-coupled world runs the explicit, adaptive or quasi-static solve".into());
         }
-        let mut w = GpuWorld::new(gpu, scene)?;
+        let mut w = GpuWorld::new_with(gpu, scene, engine_contact)?;
+        w.compound = has_compound(scene);
         w.solver.quiet_quasi_static = scene.sim.solve_mode == SolveMode::QuasiStatic;
         // `STRESS_RESIDENT_ISLANDS=1` (opt-in): island segments planned on the GPU, their
         // snapshots without the chunk state or bond download (`GpuSolver::resident_contacts`).
@@ -482,7 +510,7 @@ impl GpuWorld {
                 }
             } else {
                 self.coupled_frames += 1;
-                let t0 = std::time::Instant::now();
+                let t0 = web_time::Instant::now();
                 self.solver.download(gpu);
                 self.resident_sync_motion();
                 let t1 = t0.elapsed().as_secs_f64() * 1e3;
@@ -532,7 +560,7 @@ impl GpuWorld {
                 lead = first;
                 self.set_frame_dt(lead);
                 self.last_resident = true;
-                let t_lead = std::time::Instant::now();
+                let t_lead = web_time::Instant::now();
                 let r = self.resident_frame(gpu);
                 if std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
                     eprintln!("impact window frame {}: lead (resident) {:.1} ms", self.frame - 1, t_lead.elapsed().as_secs_f64() * 1e3);
@@ -563,7 +591,7 @@ impl GpuWorld {
                 window = false;
             }
         }
-        let t_window = std::time::Instant::now();
+        let t_window = web_time::Instant::now();
         let r = self.step_frame_tiered(gpu);
         if window && std::env::var("STRESS_GPU_COUPLED_TRACE").is_ok() {
             eprintln!("impact window frame {}: explicit part {:.1} ms", self.frame - 1, t_window.elapsed().as_secs_f64() * 1e3);
@@ -574,7 +602,7 @@ impl GpuWorld {
         if window {
             let w = self.scene.sim.frame_dt;
             self.set_frame_dt(fdt - lead - w);
-            let t_rest = std::time::Instant::now();
+            let t_rest = web_time::Instant::now();
             let rest = r.and_then(|_| {
                 self.last_resident = true;
                 self.resident_frame(gpu)
@@ -663,7 +691,7 @@ impl GpuWorld {
             }
             self.solver.mirror_check("frame start");
             self.solver.mirror.unchanged = self.unchanged_next.clone();
-            let t_prepare = std::time::Instant::now();
+            let t_prepare = web_time::Instant::now();
             let f = self.with_shell_mut(|w| w.coupled_prepare(&forced));
             self.prepare_seconds += t_prepare.elapsed().as_secs_f64();
             self.solver.mirror_check("after coupled_prepare (engine step)");
@@ -693,7 +721,7 @@ impl GpuWorld {
                     }
                 }
             }
-            let t_refresh = std::time::Instant::now();
+            let t_refresh = web_time::Instant::now();
             if !self.fast_now {
                 self.solver.refresh(gpu)?;
             }
@@ -730,7 +758,7 @@ impl GpuWorld {
                 while t_end - self.solver.mirror.time > 1e-3 * span {
                     let rest = t_end - self.solver.mirror.time;
                     let mut horizon = if rest < 1.5 * span { rest } else { span };
-                    let t_setup = std::time::Instant::now();
+                    let t_setup = web_time::Instant::now();
                     let snap = self.solver.snapshot_segment(gpu);
                     let host = (self.events_done.clone(), self.blasts_active.clone(), self.probes.clone(), self.next_sample, self.filter.clone());
                     let seg_taken = taken;
@@ -782,7 +810,7 @@ impl GpuWorld {
                         let len = (left / dt).ceil().max(1.0) as usize;
                         let step = left / len as f64;
                         self.solver.plan_log = Some(Vec::new());
-                        let t_run = std::time::Instant::now();
+                        let t_run = web_time::Instant::now();
                         let ran = self.advance_substeps(gpu, step, len)?;
                         if self.solver.mirror_check("after island substeps") {
                             eprintln!("    (segment: {ran} of {len} substeps of {step:.3e} s, stress {stress:.3e}, contact {contact:.3e}, horizon {horizon:.3e})");
@@ -894,7 +922,7 @@ impl GpuWorld {
             forced.extend(broke);
         };
         // Driven bodies at the engine's end of the frame; island bodies back to the engine.
-        let t_back = std::time::Instant::now();
+        let t_back = web_time::Instant::now();
         if !self.fast_now {
             self.solver.download(gpu);
         }
@@ -1042,6 +1070,9 @@ impl GpuWorld {
     }
 
     pub fn step_frame(&mut self, gpu: &Gpu) -> Result<(), String> {
+        if self.compound && self.shell.impact_islands {
+            return Err("compound chunks need the engine's contact: impact islands (the GPU's chunk contact samples one box or hull per chunk) cannot run on this scene".into());
+        }
         // A frame other than a resident one follows any GPU splits first.
         if !(self.coupled() && self.resident_now()) {
             self.flush_pending(gpu)?;
@@ -1123,7 +1154,7 @@ impl GpuWorld {
     /// The end of a frame of `n` substeps: the solve mode's tail (statics, settling).
     fn finish_frame(&mut self, gpu: &Gpu, n: usize) -> Result<(), String> {
         self.frame += 1;
-        let tail = std::time::Instant::now();
+        let tail = web_time::Instant::now();
         // The host's static work needs the mirror's bonds current: always in quasi-static
         // mode, in adaptive mode only when a cluster may settle or the host does the
         // settled fatigue.
@@ -1228,7 +1259,7 @@ impl GpuWorld {
     /// cascade until no damage grows; a split syncs the mirror, splits and rebuilds.
     fn fast_static_tail(&mut self, gpu: &Gpu) -> Result<(), String> {
         let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let loads = self.host_frame_loads();
         if trace {
             eprintln!("fast qs: loads {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
@@ -1240,7 +1271,7 @@ impl GpuWorld {
             let excluded = self.solver.excluded_ids().to_vec();
             let m = &self.solver.mirror;
             let clusters: Vec<usize> = (0..m.clusters.len()).filter(|&ci| !m.clusters[ci].bonds.is_empty() && excluded.binary_search(&m.clusters[ci].id).is_err()).collect();
-            let t_pass = std::time::Instant::now();
+            let t_pass = web_time::Instant::now();
             let converged = self.solver.equilibrate_resident(gpu, &clusters, &loads);
             let t_solve = t_pass.elapsed().as_secs_f64() * 1e3;
             unconverged |= converged.iter().any(|&c| !c);
@@ -1326,7 +1357,7 @@ impl GpuWorld {
             }
             // STRESS_GPU_QS_TRACE=1: each cascade pass's time and work on stderr.
             let trace = std::env::var("STRESS_GPU_QS_TRACE").is_ok();
-            let t_pass = std::time::Instant::now();
+            let t_pass = web_time::Instant::now();
             let results = if skip_repeats {
                 let m = &self.solver.mirror;
                 let inputs: Vec<StaticInputs> = clusters.iter().map(|&ci| StaticInputs::of(m, ci, loads)).collect();
@@ -1397,7 +1428,7 @@ impl GpuWorld {
             if let Some(l) = self.solver.loads.as_mut() {
                 l.topology_version += 1;
             }
-            let t_rebuild = std::time::Instant::now();
+            let t_rebuild = web_time::Instant::now();
             self.solver.rebuild(gpu, 0.0)?;
             if trace {
                 eprintln!("qs pass {pass}: rebuild {:.1} ms", t_rebuild.elapsed().as_secs_f64() * 1e3);
