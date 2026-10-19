@@ -1,4 +1,4 @@
-"""Train a tiny causal material-state residual MLP; exported native inference.
+"""Train a causal material-state residual MLP; exported native inference.
 
 This is deliberately an accuracy gate, not a claim to replace native time integration.
 Physical graph state is fed back. No latent memory, phase index, bond ID or future loads.
@@ -41,6 +41,9 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--steps", type=int, default=6000)
     p.add_argument("--width", type=int, default=64)
+    p.add_argument("--depth", type=int, default=2)
+    p.add_argument("--learning-rate", type=float, default=1e-3)
+    p.add_argument("--cosine-decay", action="store_true")
     p.add_argument("--batch", type=int, default=2048)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-rows-per-case", type=int, default=300000)
@@ -49,7 +52,8 @@ def main():
     p.add_argument("--absolute-state", action="store_true")
     p.add_argument("--event-targets", action="store_true")
     args = p.parse_args()
-    if min(args.steps,args.width,args.batch,args.max_rows_per_case)<=0:p.error("steps, width, batch, and row budget must be positive")
+    if min(args.steps,args.width,args.depth,args.batch,args.max_rows_per_case)<=0:p.error("steps, width, depth, batch, and row budget must be positive")
+    if not np.isfinite(args.learning_rate) or args.learning_rate<=0:p.error("learning rate must be finite and positive")
     if args.physical_features and not args.state_only:p.error("physical-features checkpoints require state-only energy decoding")
     if args.absolute_state and not args.physical_features: p.error("absolute-state requires physical-features")
     if args.event_targets and not args.absolute_state:p.error("event-targets requires absolute-state")
@@ -74,12 +78,15 @@ def main():
     yt = torch.tensor(delta/ys, dtype=torch.float32)
     gt = torch.tensor(gate, dtype=torch.float32)
     event_eligible=torch.tensor(base[:,0]<1,dtype=torch.float32)
-    net = nn.Sequential(nn.Linear(x.shape[1],args.width),nn.ReLU(),nn.Linear(args.width,args.width),nn.ReLU(),nn.Linear(args.width,NY+NG))
+    layers=[nn.Linear(x.shape[1],args.width),nn.ReLU()]
+    for _ in range(args.depth-1):layers.extend([nn.Linear(args.width,args.width),nn.ReLU()])
+    net = nn.Sequential(*layers,nn.Linear(args.width,NY+NG))
     # Constant training channels cannot learn a response. Do not export their
     # random initial weights as an invented dependence on unseen materials.
     constant=np.ptp(zx,axis=0)<1e-12
     with torch.no_grad():net[0].weight[:,torch.tensor(constant)]=0
-    opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-5)
+    opt = torch.optim.AdamW(net.parameters(), lr=args.learning_rate, weight_decay=1e-5)
+    schedule=torch.optim.lr_scheduler.CosineAnnealingLR(opt,args.steps,eta_min=args.learning_rate*.03) if args.cosine_decay else None
     weights = torch.ones(NY); weights[:2]=8; weights[7:13]=3; weights[27:34]=4
     weights[[17,18,19,21,22,23,24,25,26,34,35,36,37,38,41]]=0 # exact decoder channels
     weights *= torch.tensor(active)
@@ -105,6 +112,7 @@ def main():
         classification=(classification_rows*gw).sum(-1).mean()/gw.sum()
         loss=loss+classification
         opt.zero_grad();loss.backward();nn.utils.clip_grad_norm_(net.parameters(),10);opt.step()
+        if schedule is not None:schedule.step()
         if step%500==0 or step+1==args.steps:
             entry={"step":step+1,"loss":float(loss.detach()),"seconds":time.perf_counter()-start}
             log.append(entry);print(json.dumps(entry),flush=True)

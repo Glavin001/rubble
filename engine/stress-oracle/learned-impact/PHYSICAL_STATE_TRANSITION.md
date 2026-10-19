@@ -2,6 +2,8 @@
 
 The learned solver should advance the same physical state that the reference solver advances, using fewer computations. Its primary memory is the persisted physical graph. The baseline has no additional learned temporal memory. An optional latent state must demonstrate a benefit against this baseline and have an explicit initialization and restart contract.
 
+**Current priority (user steering, 2026-10-19): prove learned physical accuracy first.** Model size and runtime efficiency are deferred until independent destruction rollouts work. Larger networks and more computation are allowed for this proof; retain the performance requirements below as a later acceptance stage, not a constraint on the current accuracy experiments.
+
 The target is **at most 5 ms for the entire world at a 120 Hz test cadence (8.33 ms simulated time per update)**, with many simultaneous impacts across hundreds of structures, hundreds of thousands of bonds, and at least 10,000 active rigid bodies. The user expects PhysX likely to run at 60 Hz and requested the 120 Hz assumption to leave GPU headroom. Test that integration separately; this requirement does not change production timesteps. A structure, physical chunk, graph node and active rigid body are different counts. The final benchmark must report all of them. The user confirmed Apple M3 Max / Metal as the first required real-time acceptance device, with high-end NVIDIA hardware such as RTX 4090 and cross-platform WebGPU also intended targets. Keep the model/state contract and weights portable through the shared Slang path; specialize kernel scheduling and layouts where measurements justify it.
 
 ## Transition boundary
