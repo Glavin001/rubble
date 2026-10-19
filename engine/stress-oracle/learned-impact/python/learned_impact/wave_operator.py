@@ -68,7 +68,7 @@ class CoupledWaveOperator:
                           v-self.dt*stiffness_apply(u, self.stiffness)+xv@coefficients)
 
 
-def fit(dataset, degree, dt, scales):
+def fit(dataset, degree, dt, scales, *, force_consistent=False):
     u, v, tu, tv = [x.double() for x in dataset]
     model = CoupledWaveOperator(torch.zeros(2*degree, dtype=torch.float64), dt)
     xu, xv = model.design(ChainState(u, v))
@@ -76,10 +76,20 @@ def fit(dataset, degree, dt, scales):
     design = torch.cat((xu.reshape(-1, 2*degree)/scales[0], xv.reshape(-1, 2*degree)/scales[1]))
     target = torch.cat(((tu-baseline.displacement).reshape(-1)/scales[0],
                         (tv-baseline.velocity).reshape(-1)/scales[1]))
-    solution = torch.linalg.lstsq(design, target, driver='gelsd')
-    if int(solution.rank) != 2*degree:
+    # A constant force's rigid mode requires R(0)=dt^2/2, where
+    # R=(I-C)/L. Enforce C'(0)=-dt^2/2 by eliminating one coefficient.
+    origin = torch.zeros(2*degree, dtype=torch.float64)
+    nullspace = torch.eye(2*degree, dtype=torch.float64)
+    if force_consistent:
+        index = torch.arange(1, degree+1, dtype=torch.float64)
+        derivative = 2/(4*model.stiffness)*((-1.)**(index-1))*index.square()
+        origin[0] = (-.5*dt*dt)/derivative[0]
+        nullspace = nullspace[:, 1:]
+        nullspace[0, :degree-1] = -derivative[1:]/derivative[0]
+    solution = torch.linalg.lstsq(design@nullspace, target-design@origin, driver='gelsd')
+    if int(solution.rank) != nullspace.shape[1]:
         raise ValueError('training transitions do not identify the operator coefficients')
-    model.coefficients = solution.solution
+    model.coefficients = origin+nullspace@solution.solution
     return model
 
 

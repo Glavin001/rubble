@@ -43,3 +43,22 @@ def test_unsupported_spectrum_and_nonzero_fixed_motion_are_rejected():
     model = ElasticGraphTransition(fitted, graph)
     with pytest.raises(ValueError, match='fixed supports'):
         model.step(ChainState(torch.ones(1, 3), torch.zeros(1, 3)))
+
+
+def test_constant_force_rigid_motion_and_work_are_consistent():
+    dt = .8
+    coefficient = torch.tensor([-.5*dt*dt*200., 0.], dtype=torch.float64)
+    fitted = CoupledWaveOperator(coefficient, dt)
+    graph = ElasticGraph(torch.empty(0, 2, dtype=torch.long), torch.empty(0, dtype=torch.float64),
+                         torch.tensor([2., 3.], dtype=torch.float64), torch.zeros(2, dtype=torch.bool))
+    state = ChainState(torch.tensor([[1., -2.]], dtype=torch.float64), torch.tensor([[2., -1.]], dtype=torch.float64))
+    force = torch.tensor([[6., -9.]], dtype=torch.float64)
+    model = ElasticGraphTransition(fitted, graph)
+    actual = model.step(state, force)
+    expected = exact_graph_transition(graph, state, dt, force)
+    torch.testing.assert_close(actual.displacement, expected.displacement, atol=1e-12, rtol=1e-12)
+    torch.testing.assert_close(actual.velocity, expected.velocity, atol=1e-12, rtol=1e-12)
+    work = (force*(actual.displacement-state.displacement)).sum(-1)
+    torch.testing.assert_close(graph.energy(actual)-graph.energy(state), work, atol=1e-12, rtol=1e-12)
+    with pytest.raises(ValueError, match='constant force'):
+        model.step(state, torch.full_like(force, float('nan')))

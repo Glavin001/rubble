@@ -88,7 +88,19 @@ class ElasticGraphTransition:
             older, previous = previous, current
         return torch.stack(result, -2)
 
-    def step(self, state):
+    def force_displacement_basis(self, field):
+        """(T_j(2L/b-1)-(-1)^j I)/L without an inverse or zero-mode division."""
+        def scaled(x):
+            return 2*self.graph.apply(x)/self.spectral_max-x
+        older, previous = torch.zeros_like(field), 2/self.spectral_max*field
+        result = [previous]
+        for index in range(2, self.learned.degree+1):
+            current = 2*scaled(previous)-older+4*((-1)**(index-1))/self.spectral_max*field
+            result.append(current)
+            older, previous = previous, current
+        return torch.stack(result, -2)
+
+    def step(self, state, constant_force=None):
         if state.displacement.shape != state.velocity.shape or state.displacement.shape[-1] != len(self.graph.mass):
             raise ValueError('graph state shape mismatch')
         if not torch.isfinite(state.displacement).all() or not torch.isfinite(state.velocity).all():
@@ -102,11 +114,18 @@ class ElasticGraphTransition:
         a, b = a.to(u), b.to(u)
         cu, cv = (pu*a[:, None]).sum(-2), (pv*a[:, None]).sum(-2)
         su, sv = (pu*b[:, None]).sum(-2), (pv*b[:, None]).sum(-2)
-        return ChainState((u+self.learned.dt*v+cu+sv)/root,
-                          (v+cv-self.graph.apply(self.learned.dt*u+su))/root)
+        next_u = u+self.learned.dt*v+cu+sv
+        next_v = v+cv-self.graph.apply(self.learned.dt*u+su)
+        if constant_force is not None:
+            if constant_force.shape != state.displacement.shape or not torch.isfinite(constant_force).all():
+                raise ValueError('finite constant force must match physical state shape')
+            force = constant_force*(~self.graph.fixed)/root
+            next_u = next_u-(self.force_displacement_basis(force)*a[:, None]).sum(-2)
+            next_v = next_v+self.learned.dt*force+(self.basis(force)*b[:, None]).sum(-2)
+        return ChainState(next_u/root, next_v/root)
 
 
-def exact_graph_transition(graph, state, dt):
+def exact_graph_transition(graph, state, dt, constant_force=None):
     """Dense modal teacher for tests/data only; never called by learned inference."""
     n = len(graph.mass)
     matrix = graph.apply(torch.eye(n, dtype=graph.mass.dtype)).T
@@ -115,5 +134,9 @@ def exact_graph_transition(graph, state, dt):
     root = graph.mass.sqrt()
     u, v = (state.displacement*root)@vectors, (state.velocity*root)@vectors
     c, s = (omega*dt).cos(), dt*torch.sinc(omega*dt/torch.pi)
-    return ChainState(((u*c+v*s)@vectors.T)/root,
-                      ((v*c-u*omega*(omega*dt).sin())@vectors.T)/root)
+    next_u, next_v = u*c+v*s, v*c-u*omega*(omega*dt).sin()
+    if constant_force is not None:
+        force = (constant_force*(~graph.fixed)/root)@vectors
+        r = .5*dt*dt*torch.sinc(omega*dt/(2*torch.pi)).square()
+        next_u, next_v = next_u+r*force, next_v+s*force
+    return ChainState((next_u@vectors.T)/root, (next_v@vectors.T)/root)
