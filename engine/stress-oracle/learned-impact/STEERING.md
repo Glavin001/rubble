@@ -601,3 +601,37 @@ connectivity, the initial signed-work transient, recurrent corrective prefixes a
 complete-engine timing. The current hierarchy follows material connectivity;
 closed cracks still carrying contact must receive a separate contact path.
 Artifacts: `runs/recurrent-multiscale-v36-2026-10-19/`. All jobs are terminal.
+
+### V37: physical state is primary memory; linear mechanics pass, full solver still open
+
+User clarified the baseline: advance explicit physical graph state rather than
+depending on latent temporal memory. See `PHYSICAL_STATE_TRANSITION.md` and
+`findings/physical-state-v37-2026-10-19.md` for the contract and measured evidence.
+The whole-world target is ≤5 ms across hundreds of structures, hundreds of
+thousands of bonds and ≥10,000 active rigid bodies. Hardware and simulated
+duration per update remain requested, not answered.
+
+An oracle-assisted inactive-damage intervention is mixed and insufficient.
+Energy projection stabilizes generic explicit-state wave predictions but does
+not recover accurate phase. A shared fitted C/S graph propagator succeeds on
+linear elastic sequences without latent memory, including variable masses,
+supports, prescribed external work and native six-DOF bond mechanics. Degree 16
+uses 32 coefficients; float32 native linear state energy error is at most 5.66e-9
+over 32 transitions in these probes. These are small linear tests, not nonlinear
+native destruction, matched-budget neural training or a speed result.
+
+The cost limitation is explicit: the current spectral domain requires 137–230
+calls per illustrative 16.67 ms frame on the stiff small fixtures, and 30 calls
+on house00, before contact/fracture work. Do not promote the polynomial baseline
+as the final fast architecture. It establishes consistency and representation.
+
+The new optional `--physical-history` phase recorder retains raw f64 chunk state,
+full inertia/support identity and ordered contact histories. Native tests show
+equal present contact force/energy/stiffness can conceal different future
+responses after area change. Two recorded house frames retain all 13 legacy
+files byte-for-byte, across 298 phases and 365,379 response rows. These sidecars
+are not yet training inputs or complete World restart state. Do not manufacture
+missing history from old snapshots; collect it through verified native replay.
+
+199 Python and 11 targeted Rust tests pass. No checkpoint promoted; V36 native
+destruction remains rejected. Artifacts: `runs/state-consistency-v37-2026-10-19/`.

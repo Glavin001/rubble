@@ -1,0 +1,891 @@
+{
+  "status": "capability_probes_pass_native_destruction_still_rejected",
+  "artifact_root": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19",
+  "production_checkpoint_promoted": false,
+  "python_tests_passed": 199,
+  "targeted_rust_tests_passed": 11,
+  "results": {
+    "history-intervention.json": {
+      "artifact_sha256": "d2fa7b7bce8d51e7712ae524953f34c49ba59f609e4d9f006c68a1d9b74d9bf2",
+      "result": {
+        "status": "completed",
+        "scope": "Oracle-assisted first-frame intervention; never an inference candidate.",
+        "results": [
+          {
+            "case": "00",
+            "mode": "control",
+            "first_frame": {
+              "breaks": 63,
+              "extra_breaks": 12,
+              "missed_breaks": 34,
+              "partial_damage": 1236,
+              "false_damage_on_pristine": 1179,
+              "fragments": {
+                "count": 21,
+                "largest_mass_fraction": 0.9701603570838153
+              },
+              "mechanical_energy_j": 252503.95113059977
+            },
+            "after_oracle_tail": {
+              "breaks": 394,
+              "extra_breaks": 139,
+              "missed_breaks": 69,
+              "partial_damage": 905,
+              "false_damage_on_pristine": 766,
+              "fragments": {
+                "count": 129,
+                "largest_mass_fraction": 0.768970077698792
+              },
+              "mechanical_energy_j": 233173.78819548019
+            },
+            "oracle_inactive_damage_bonds": 1179,
+            "oracle_inactive_crush_bonds": 1285
+          },
+          {
+            "case": "00",
+            "mode": "oracle-inactive-damage",
+            "first_frame": {
+              "breaks": 59,
+              "extra_breaks": 8,
+              "missed_breaks": 34,
+              "partial_damage": 61,
+              "false_damage_on_pristine": 0,
+              "fragments": {
+                "count": 17,
+                "largest_mass_fraction": 0.9701603570838153
+              },
+              "mechanical_energy_j": 252724.2393493057
+            },
+            "after_oracle_tail": {
+              "breaks": 399,
+              "extra_breaks": 139,
+              "missed_breaks": 64,
+              "partial_damage": 572,
+              "false_damage_on_pristine": 457,
+              "fragments": {
+                "count": 130,
+                "largest_mass_fraction": 0.7509092411968907
+              },
+              "mechanical_energy_j": 233235.83334005377
+            },
+            "oracle_inactive_damage_bonds": 1179,
+            "oracle_inactive_crush_bonds": 1285
+          },
+          {
+            "case": "12",
+            "mode": "control",
+            "first_frame": {
+              "breaks": 89,
+              "extra_breaks": 58,
+              "missed_breaks": 7,
+              "partial_damage": 1210,
+              "false_damage_on_pristine": 1205,
+              "fragments": {
+                "count": 32,
+                "largest_mass_fraction": 0.9560257893866753
+              },
+              "mechanical_energy_j": 108085.7963475994
+            },
+            "after_oracle_tail": {
+              "breaks": 276,
+              "extra_breaks": 117,
+              "missed_breaks": 22,
+              "partial_damage": 1023,
+              "false_damage_on_pristine": 726,
+              "fragments": {
+                "count": 100,
+                "largest_mass_fraction": 0.8118697305339714
+              },
+              "mechanical_energy_j": 106242.47152892812
+            },
+            "oracle_inactive_damage_bonds": 1205,
+            "oracle_inactive_crush_bonds": 1286
+          },
+          {
+            "case": "12",
+            "mode": "oracle-inactive-damage",
+            "first_frame": {
+              "breaks": 70,
+              "extra_breaks": 39,
+              "missed_breaks": 7,
+              "partial_damage": 24,
+              "false_damage_on_pristine": 0,
+              "fragments": {
+                "count": 16,
+                "largest_mass_fraction": 0.9685898495619109
+              },
+              "mechanical_energy_j": 108789.51558316119
+            },
+            "after_oracle_tail": {
+              "breaks": 268,
+              "extra_breaks": 107,
+              "missed_breaks": 20,
+              "partial_damage": 967,
+              "false_damage_on_pristine": 663,
+              "fragments": {
+                "count": 92,
+                "largest_mass_fraction": 0.8398082327657455
+              },
+              "mechanical_energy_j": 106238.46805495712
+            },
+            "oracle_inactive_damage_bonds": 1205,
+            "oracle_inactive_crush_bonds": 1286
+          }
+        ],
+        "warning": "Future oracle masks and seven oracle continuation frames. Diagnostic only; not a trained model, causal inference, or speed result."
+      }
+    },
+    "physical-wave-seed0/review.json": {
+      "artifact_sha256": "3953d97fada01f05886421c4bff239647debf5a7c7bf8bb9ee179f5d1117ea21",
+      "result": {
+        "status": "completed",
+        "scope": "Explicit physical-state transition experiment on free linear spring chains.\n\nOnly displacement and velocity persist. Bond extension, force and stored energy\nare derived. The optional decoder projects each independent chain onto its known\nmomentum/energy surface. This is valid only for the undamped, unforced, fixed\ntopology probe; it is not a fracture/contact decoder or a native-engine change.\nEnergy projection alone does not guarantee correct phase, local energy transport,\ntime composition, or physical accuracy. Those are measured separately.\n",
+        "seed": 0,
+        "steps": 1000,
+        "width": 32,
+        "physical_dt": 0.8,
+        "nodes": 32,
+        "results": {
+          "unconstrained": {
+            "selected_step": 900,
+            "seconds": 3.6037411249999423,
+            "test": {
+              "status": "finite",
+              "steps": 1,
+              "normalized_mse": 0.1351754367351532,
+              "mean_step_normalized_mse": 0.1351754367351532,
+              "max_relative_energy_error": 2.1010559956411354,
+              "max_momentum_error": 1.5273690223693848e-07,
+              "max_center_of_mass_error": 4.9360096426864786e-09,
+              "step_errors": [
+                0.1351754367351532
+              ]
+            },
+            "test_rollout": {
+              "status": "finite",
+              "steps": 32,
+              "normalized_mse": 77749.12046270672,
+              "mean_step_normalized_mse": 6711.006684082531,
+              "max_relative_energy_error": 7135941.246859186,
+              "max_momentum_error": 0.00023193703964352608,
+              "max_center_of_mass_error": 1.6086362665701515e-05,
+              "step_errors": [
+                0.1351754367351532,
+                0.28167413781295975,
+                0.5756566361519405,
+                1.120488820239741,
+                2.0860215855447266,
+                3.2923941849086513,
+                4.768402952497816,
+                6.593394881326546,
+                9.169464870682742,
+                12.730684484385394,
+                16.931981623049776,
+                22.42458257839215,
+                30.322305671581866,
+                40.88007314013855,
+                55.01968514008507,
+                81.92727826669554,
+                122.28039558693564,
+                172.81914112473248,
+                258.9664527001032,
+                374.89012764317175,
+                573.1636135241658,
+                910.2720663652324,
+                1457.4818370278294,
+                2297.911970682397,
+                3444.8291438493416,
+                5485.590350086168,
+                8661.49834267697,
+                12896.777494257378,
+                18991.92543648013,
+                30803.248026808345,
+                50263.17976471115,
+                77749.12046270672
+              ]
+            },
+            "checkpoint_sha256": "4c7500459f7e9898a8d406dd5fa2796a6769cef4a3e2a770c683b3fa3365f2c5"
+          },
+          "energy_projected": {
+            "selected_step": 950,
+            "seconds": 3.843611541989958,
+            "test": {
+              "status": "finite",
+              "steps": 1,
+              "normalized_mse": 0.11623761057853699,
+              "mean_step_normalized_mse": 0.11623761057853699,
+              "max_relative_energy_error": 2.9134113745601115e-07,
+              "max_momentum_error": 6.002373993396759e-07,
+              "max_center_of_mass_error": 5.795482135861896e-09,
+              "step_errors": [
+                0.11623761057853699
+              ]
+            },
+            "test_rollout": {
+              "status": "finite",
+              "steps": 32,
+              "normalized_mse": 0.25330512505333297,
+              "mean_step_normalized_mse": 0.25986083988785813,
+              "max_relative_energy_error": 5.453801754306231e-06,
+              "max_momentum_error": 2.5996268959715962e-06,
+              "max_center_of_mass_error": 2.9791208362439647e-06,
+              "step_errors": [
+                0.11623761057853699,
+                0.21129747158732107,
+                0.21986415756734873,
+                0.2408279359141413,
+                0.26698154055022083,
+                0.2574297994644494,
+                0.28426967102011313,
+                0.2728479525721543,
+                0.2639245687389075,
+                0.28443463950276215,
+                0.26489158045330174,
+                0.26458164798735856,
+                0.2734199852791293,
+                0.2626853145850111,
+                0.2601388153560041,
+                0.24606875241178636,
+                0.2897843202121366,
+                0.2845499075294928,
+                0.2549898308708203,
+                0.2630429600686669,
+                0.2847585065917739,
+                0.2952701604157472,
+                0.27048161206384164,
+                0.26098767263559136,
+                0.27782138509053256,
+                0.2546993901446855,
+                0.26034247336310695,
+                0.25521757012437696,
+                0.26930281173730763,
+                0.29248180605490265,
+                0.2586099008865976,
+                0.25330512505333297
+              ]
+            },
+            "checkpoint_sha256": "66a8f410c1c871c673353eea9d59cf37f99f1a393a63953d011756b3d15f3a2d"
+          }
+        },
+        "selection": "Minimum one-transition validation MSE; test and 32-step rollout used only after selection.",
+        "persistent_state": [
+          "displacement",
+          "velocity"
+        ],
+        "native_validated": false
+      }
+    },
+    "physical-wave-seed1/review.json": {
+      "artifact_sha256": "ca2bad49397a84259702fb06fb2877ef90b022e3431d24ae9e615860803d424c",
+      "result": {
+        "status": "completed",
+        "scope": "Explicit physical-state transition experiment on free linear spring chains.\n\nOnly displacement and velocity persist. Bond extension, force and stored energy\nare derived. The optional decoder projects each independent chain onto its known\nmomentum/energy surface. This is valid only for the undamped, unforced, fixed\ntopology probe; it is not a fracture/contact decoder or a native-engine change.\nEnergy projection alone does not guarantee correct phase, local energy transport,\ntime composition, or physical accuracy. Those are measured separately.\n",
+        "seed": 1,
+        "steps": 1000,
+        "width": 32,
+        "physical_dt": 0.8,
+        "nodes": 32,
+        "results": {
+          "unconstrained": {
+            "selected_step": 1000,
+            "seconds": 3.444478999997955,
+            "test": {
+              "status": "finite",
+              "steps": 1,
+              "normalized_mse": 0.147691011428833,
+              "mean_step_normalized_mse": 0.147691011428833,
+              "max_relative_energy_error": 4.002545920841012,
+              "max_momentum_error": 2.7799978852272034e-07,
+              "max_center_of_mass_error": 6.787013270836972e-09,
+              "step_errors": [
+                0.147691011428833
+              ]
+            },
+            "test_rollout": {
+              "status": "finite",
+              "steps": 32,
+              "normalized_mse": 4302.701637285571,
+              "mean_step_normalized_mse": 869.910599091782,
+              "max_relative_energy_error": 440055.4454306534,
+              "max_momentum_error": 3.753975033760071e-05,
+              "max_center_of_mass_error": 5.078189860396876e-06,
+              "step_errors": [
+                0.147691011428833,
+                0.36153065068898715,
+                0.7829022982057678,
+                1.8548634280880594,
+                3.909549386208266,
+                7.191232529656258,
+                11.748794935840248,
+                18.411897974713742,
+                27.67576914969759,
+                40.824085167133795,
+                58.989392562574906,
+                81.9859524053938,
+                111.22939054380379,
+                148.9285038211919,
+                194.40001450664107,
+                248.37544711366408,
+                308.82443849329667,
+                384.67138247560564,
+                472.5771593393182,
+                573.5983993185226,
+                706.7880445486935,
+                843.4386075933568,
+                1011.0836799621175,
+                1221.6418220078435,
+                1452.3275257124194,
+                1675.981341865971,
+                2006.0666118597921,
+                2376.281700850745,
+                2736.0082407166515,
+                3154.692544327254,
+                3653.639017094937,
+                4302.701637285571
+              ]
+            },
+            "checkpoint_sha256": "06696108fff5c9200495458a21cb9b8440c8d902a1233d5b691d85d79db24cae"
+          },
+          "energy_projected": {
+            "selected_step": 850,
+            "seconds": 3.639629249984864,
+            "test": {
+              "status": "finite",
+              "steps": 1,
+              "normalized_mse": 0.11663258820772171,
+              "mean_step_normalized_mse": 0.11663258820772171,
+              "max_relative_energy_error": 2.510742840930632e-07,
+              "max_momentum_error": 4.895264282822609e-07,
+              "max_center_of_mass_error": 7.264316079225175e-09,
+              "step_errors": [
+                0.11663258820772171
+              ]
+            },
+            "test_rollout": {
+              "status": "finite",
+              "steps": 32,
+              "normalized_mse": 0.2716987502312006,
+              "mean_step_normalized_mse": 0.2613334537528266,
+              "max_relative_energy_error": 5.8475196990677736e-06,
+              "max_momentum_error": 4.066154360771179e-06,
+              "max_center_of_mass_error": 2.636413410250782e-06,
+              "step_errors": [
+                0.11663258820772171,
+                0.19215059997442419,
+                0.21014103669420664,
+                0.22865776427045226,
+                0.23578610385217086,
+                0.2151363058672348,
+                0.23839792038283042,
+                0.2431280437154192,
+                0.24728738288966162,
+                0.28955431654050257,
+                0.27286144731507866,
+                0.2852717579502762,
+                0.30593923024255126,
+                0.29776202416400194,
+                0.2910951211093393,
+                0.28627548444477136,
+                0.3300064182745753,
+                0.3099051744302398,
+                0.2722380283278434,
+                0.27068635650429024,
+                0.28288930124905687,
+                0.2906925295451298,
+                0.2654200087548109,
+                0.2595359972804512,
+                0.26366853700571785,
+                0.24603512883148793,
+                0.25987175879241525,
+                0.25161850171652067,
+                0.2716370054231056,
+                0.28994146405110616,
+                0.2707484320518574,
+                0.2716987502312006
+              ]
+            },
+            "checkpoint_sha256": "7d285304c1fc0f47e7109b0309db8b71ca75835c98600ccce8e3b80b4a52c400"
+          }
+        },
+        "selection": "Minimum one-transition validation MSE; test and 32-step rollout used only after selection.",
+        "persistent_state": [
+          "displacement",
+          "velocity"
+        ],
+        "native_validated": false
+      }
+    },
+    "coupled-wave-sequence-selection/review.json": {
+      "artifact_sha256": "7d79dca1b8f942cfd24be48fadecfdd8b45ffa5e098c6da838b67625e00dc05e",
+      "result": {
+        "status": "completed",
+        "scope": "Coupled learned linear graph transition, with physical state as its only memory.\n\nControlled free-chain experiment, unit masses and stiffness 100. Two learned\nChebyshev polynomials C(L), S(L) advance both physical fields:\nu_next = C(L) u + S(L) v; v_next = -L S(L) u + C(L) v.\nThe coefficients are fitted from training transitions, never from test labels.\nNo eigenvectors, oracle calls, temporal hidden state or native substeps are used\nat inference. This is a linear-physics capability probe, not a nonlinear native\ndestruction solver, and polynomial degree remains sequential graph work.\n",
+        "selected_degree": 16,
+        "selection": "Smallest validation degree with 32-step MSE <= 1e-6 and max relative energy error <= 1e-3; otherwise lowest 32-step validation MSE.",
+        "test": {
+          "32": {
+            "one_step": {
+              "steps": 1,
+              "normalized_mse": 4.83622769684922e-18,
+              "mean_step_normalized_mse": 4.83622769684922e-18,
+              "max_relative_energy_error": 5.646358186199175e-09,
+              "max_momentum_error": 5.773159728050814e-15
+            },
+            "rollout": {
+              "steps": 32,
+              "normalized_mse": 4.610658978173165e-15,
+              "mean_step_normalized_mse": 1.575414362772809e-15,
+              "max_relative_energy_error": 1.8068348421578928e-07,
+              "max_momentum_error": 8.137934770502397e-14
+            }
+          },
+          "64": {
+            "one_step": {
+              "steps": 1,
+              "normalized_mse": 5.33152653907919e-18,
+              "mean_step_normalized_mse": 5.33152653907919e-18,
+              "max_relative_energy_error": 5.89123347623955e-09,
+              "max_momentum_error": 5.773159728050814e-15
+            },
+            "rollout": {
+              "steps": 32,
+              "normalized_mse": 5.161504164679118e-15,
+              "mean_step_normalized_mse": 1.6816900352810056e-15,
+              "max_relative_energy_error": 1.8851949863836877e-07,
+              "max_momentum_error": 1.3677947663381929e-13
+            }
+          },
+          "128": {
+            "one_step": {
+              "steps": 1,
+              "normalized_mse": 6.168169394834482e-18,
+              "mean_step_normalized_mse": 6.168169394834482e-18,
+              "max_relative_energy_error": 4.926512441351543e-09,
+              "max_momentum_error": 7.993605777301127e-15
+            },
+            "rollout": {
+              "steps": 32,
+              "normalized_mse": 6.071492968113741e-15,
+              "mean_step_normalized_mse": 1.964861603749538e-15,
+              "max_relative_energy_error": 1.576484341494173e-07,
+              "max_momentum_error": 1.3367085216486885e-13
+            }
+          }
+        },
+        "checkpoint_sha256": "6a62fe47b9fd8a46a11161fbeb139d1603716c1b6059b1dc6678a9fd8d35bd16",
+        "native_validated": false,
+        "persistent_state": [
+          "displacement",
+          "velocity"
+        ],
+        "test_scope": "Unseen initial states and chain lengths; same unit masses, stiffness and dt."
+      }
+    },
+    "graph-sequence-audit.json": {
+      "artifact_sha256": "154237c74cdcab95f240726571598768f46be8584ac224f52561ae413c578322",
+      "result": {
+        "status": "completed",
+        "scope": "Unchanged chain-trained coefficients, new elastic graph topologies/material values/supports, 24 initial states each, 32 independent transitions. No latent memory, no contact/fracture, no speed claim.",
+        "results": [
+          {
+            "name": "grid",
+            "nodes": 64,
+            "bonds": 112,
+            "spectral_bound": 182.06074236721645,
+            "steps": 32,
+            "max_relative_energy_error": 1.041027519976963e-07,
+            "mean_relative_state_energy_error": 2.588001566400344e-14,
+            "max_relative_state_energy_error": 3.108844746825608e-14,
+            "position_rmse": 1.2651058637282267e-08,
+            "velocity_rmse": 6.358264749489636e-08
+          },
+          {
+            "name": "supported-grid",
+            "nodes": 64,
+            "bonds": 112,
+            "spectral_bound": 185.60029777336192,
+            "steps": 32,
+            "max_relative_energy_error": 9.665385196937791e-08,
+            "mean_relative_state_energy_error": 2.7217598017088415e-14,
+            "max_relative_state_energy_error": 3.356624361393973e-14,
+            "position_rmse": 1.3926180506385437e-08,
+            "velocity_rmse": 5.3194285756598424e-08
+          },
+          {
+            "name": "branched",
+            "nodes": 97,
+            "bonds": 122,
+            "spectral_bound": 262.9024171322565,
+            "steps": 32,
+            "max_relative_energy_error": 7.521190704836786e-08,
+            "mean_relative_state_energy_error": 2.1247075858058488e-14,
+            "max_relative_state_energy_error": 2.5758951730016717e-14,
+            "position_rmse": 1.6135484658843873e-08,
+            "velocity_rmse": 5.3515894356336167e-08
+          },
+          {
+            "name": "disconnected",
+            "nodes": 51,
+            "bonds": 49,
+            "spectral_bound": 96.56659258294786,
+            "steps": 32,
+            "max_relative_energy_error": 9.1918245591791e-08,
+            "mean_relative_state_energy_error": 1.9006876234662274e-14,
+            "max_relative_state_energy_error": 2.4216396913004636e-14,
+            "position_rmse": 2.0004968677205507e-08,
+            "velocity_rmse": 4.87360572798465e-08
+          }
+        ]
+      }
+    },
+    "forced-graph-audit.json": {
+      "artifact_sha256": "8338a1d052fd06641a30aec64e6e4673d90719e8acfede86c59163066f64e151",
+      "result": {
+        "status": "completed",
+        "scope": "Explicit physical graph transitions with constant external force within each interval. Independently prescribed loads change every interval. No contact/fracture/native-speed claim.",
+        "results": [
+          {
+            "case": 0,
+            "fixed_supports": false,
+            "steps": 32,
+            "max_relative_work_balance_defect": 9.413519714039604e-08,
+            "relative_state_energy_error_max": 3.2269406612136786e-14,
+            "position_rmse": 1.5389538910888232e-08,
+            "velocity_rmse": 7.037181944460772e-08,
+            "free_system_max_momentum_error": 4.796163466380676e-14
+          },
+          {
+            "case": 1,
+            "fixed_supports": true,
+            "steps": 32,
+            "max_relative_work_balance_defect": 6.383769260395176e-08,
+            "relative_state_energy_error_max": 3.254545778929347e-14,
+            "position_rmse": 1.2554917263220598e-08,
+            "velocity_rmse": 6.761946933353723e-08,
+            "free_system_max_momentum_error": null
+          },
+          {
+            "case": 2,
+            "fixed_supports": false,
+            "steps": 32,
+            "max_relative_work_balance_defect": 2.652400008576739e-08,
+            "relative_state_energy_error_max": 1.5380788520459502e-14,
+            "position_rmse": 6.575760762704518e-08,
+            "velocity_rmse": 2.1638402855730423e-07,
+            "free_system_max_momentum_error": 2.4158453015843406e-13
+          },
+          {
+            "case": 3,
+            "fixed_supports": true,
+            "steps": 32,
+            "max_relative_work_balance_defect": 2.9927258040193245e-08,
+            "relative_state_energy_error_max": 1.8835087376122663e-14,
+            "position_rmse": 6.170248977134462e-08,
+            "velocity_rmse": 1.9227128267871017e-07,
+            "free_system_max_momentum_error": null
+          }
+        ]
+      }
+    },
+    "native-elastic-audit-si.json": {
+      "artifact_sha256": "061cabd92d8d3a4921cca3074826d239ae5fb6f432cdc8ff3a2edf94627608fa",
+      "result": {
+        "status": "completed",
+        "scope": "Frozen native six-DOF linear mechanics and exact modal teacher. No damping, contact, fracture, corotation, native rollout or speed claim.",
+        "operator_sha256": "778c23beb65f997e30ea111f9055bf990885ea84d866a8eee2778538afeb75c3",
+        "results": [
+          {
+            "source": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19/native-elastic-free.json",
+            "source_sha256": "bceac8f9bc7ffeac9a46ea8c6d87a73c189a955ac12ce78d66ec177898bd8fd9",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "dof": 144,
+            "parity": {
+              "deformation": {
+                "max_abs_error": 2.117582368135751e-22,
+                "target_max_abs": 1.738632715499837e-06
+              },
+              "bond_force": {
+                "max_abs_error": 4.547473508864641e-13,
+                "target_max_abs": 5184.063253536976
+              },
+              "internal_nodal_force": {
+                "max_abs_error": 1.8189894035458565e-12,
+                "target_max_abs": 11419.561858868148
+              }
+            },
+            "spectral_bound": 17233311964.13162,
+            "degree": 16,
+            "steps": 32,
+            "dt_s": 0.00010969279869084692,
+            "spectral_domain_max_dt_s": 0.00012188088743427435,
+            "calls_to_cover_16_67ms_using_spectral_bound": 137,
+            "max_relative_work_balance_defect": 1.2582246628293023e-07,
+            "max_relative_state_energy_error": 4.101546734829656e-14,
+            "translation_rmse_m": 1.778152335007051e-14,
+            "rotation_rmse_rad": 2.9468480925681527e-13,
+            "velocity_rmse_m_s": 7.171706708742384e-10,
+            "angular_velocity_rmse_rad_s": 1.6147075972500407e-08
+          },
+          {
+            "source": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19/native-elastic-fixed.json",
+            "source_sha256": "a92f17906d62f6c5bb88d96aeae46e14901b23686b7aa36d497615c75269faf9",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "dof": 108,
+            "parity": {
+              "deformation": {
+                "max_abs_error": 2.117582368135751e-22,
+                "target_max_abs": 1.7365417547346946e-06
+              },
+              "bond_force": {
+                "max_abs_error": 4.547473508864641e-13,
+                "target_max_abs": 5182.243174925987
+              },
+              "internal_nodal_force": {
+                "max_abs_error": 1.8189894035458565e-12,
+                "target_max_abs": 11419.561858868148
+              }
+            },
+            "spectral_bound": 17233311964.13161,
+            "degree": 16,
+            "steps": 32,
+            "dt_s": 0.00010969279869084693,
+            "spectral_domain_max_dt_s": 0.00012188088743427437,
+            "calls_to_cover_16_67ms_using_spectral_bound": 137,
+            "max_relative_work_balance_defect": 1.0612353452219057e-07,
+            "max_relative_state_energy_error": 3.9984299943451004e-14,
+            "translation_rmse_m": 1.2789924756729106e-14,
+            "rotation_rmse_rad": 2.282201549606972e-13,
+            "velocity_rmse_m_s": 6.913640721548501e-10,
+            "angular_velocity_rmse_rad_s": 1.3323025818674642e-08
+          },
+          {
+            "source": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19/native-elastic-pinned.json",
+            "source_sha256": "cf43314babf58ddb6ae1e44d740989d5114b116ef1d4dbd45c3fd451a0a3bd95",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "dof": 126,
+            "parity": {
+              "deformation": {
+                "max_abs_error": 2.117582368135751e-22,
+                "target_max_abs": 1.7365417547346946e-06
+              },
+              "bond_force": {
+                "max_abs_error": 4.547473508864641e-13,
+                "target_max_abs": 5182.243174925987
+              },
+              "internal_nodal_force": {
+                "max_abs_error": 1.8189894035458565e-12,
+                "target_max_abs": 11419.561858868148
+              }
+            },
+            "spectral_bound": 17233311964.13161,
+            "degree": 16,
+            "steps": 32,
+            "dt_s": 0.00010969279869084693,
+            "spectral_domain_max_dt_s": 0.00012188088743427437,
+            "calls_to_cover_16_67ms_using_spectral_bound": 137,
+            "max_relative_work_balance_defect": 1.2565820273535657e-07,
+            "max_relative_state_energy_error": 4.106308830317285e-14,
+            "translation_rmse_m": 1.5564993898008687e-14,
+            "rotation_rmse_rad": 2.7287534233023554e-13,
+            "velocity_rmse_m_s": 6.053772908728977e-10,
+            "angular_velocity_rmse_rad_s": 1.537816815637782e-08
+          },
+          {
+            "source": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19/native-elastic-rotated.json",
+            "source_sha256": "1c19f819981f8fe309b8ea524765485bcffef8115b496f1ae1ba44ea64561b55",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "dof": 108,
+            "parity": {
+              "deformation": {
+                "max_abs_error": 6.352747104407253e-22,
+                "target_max_abs": 2.342653714984749e-06
+              },
+              "bond_force": {
+                "max_abs_error": 9.094947017729282e-13,
+                "target_max_abs": 5182.243174925987
+              },
+              "internal_nodal_force": {
+                "max_abs_error": 1.8189894035458565e-12,
+                "target_max_abs": 11431.986162307243
+              }
+            },
+            "spectral_bound": 48723203820.619125,
+            "degree": 16,
+            "steps": 32,
+            "dt_s": 6.52370889105325e-05,
+            "spectral_domain_max_dt_s": 7.24856543450361e-05,
+            "calls_to_cover_16_67ms_using_spectral_bound": 230,
+            "max_relative_work_balance_defect": 1.2598214397773242e-07,
+            "max_relative_state_energy_error": 3.340309006962841e-14,
+            "translation_rmse_m": 1.3223221450731314e-14,
+            "rotation_rmse_rad": 2.1546214670625336e-13,
+            "velocity_rmse_m_s": 7.659509670025485e-10,
+            "angular_velocity_rmse_rad_s": 1.4718102191082456e-08
+          }
+        ]
+      }
+    },
+    "native-float32-audit.json": {
+      "artifact_sha256": "b61640816eefd2d14a483549d4278e1b59ca82952fab9a0ad1324adc66bb1e57",
+      "result": {
+        "status": "completed",
+        "scope": "CPU float32 against f64 linear modal teacher, with the same rounded initial state and applied loads. No contact, fracture or runtime claim.",
+        "results": [
+          {
+            "case": "free",
+            "dtype": "float32",
+            "steps": 32,
+            "dt_s": 0.00010969279869084692,
+            "max_relative_work_balance_defect": 1.7824414408239553e-05,
+            "max_relative_state_energy_error": 5.656788892911281e-09
+          },
+          {
+            "case": "fixed",
+            "dtype": "float32",
+            "steps": 32,
+            "dt_s": 0.00010969279869084695,
+            "max_relative_work_balance_defect": 3.820213234884289e-06,
+            "max_relative_state_energy_error": 6.14643781237445e-11
+          },
+          {
+            "case": "pinned",
+            "dtype": "float32",
+            "steps": 32,
+            "dt_s": 0.00010969279869084695,
+            "max_relative_work_balance_defect": 2.663476169728758e-06,
+            "max_relative_state_energy_error": 6.699930742588882e-11
+          },
+          {
+            "case": "rotated",
+            "dtype": "float32",
+            "steps": 32,
+            "dt_s": 6.52370889105325e-05,
+            "max_relative_work_balance_defect": 2.7884272730918823e-06,
+            "max_relative_state_energy_error": 4.0046728067417396e-11
+          }
+        ]
+      }
+    },
+    "house00-spectrum.json": {
+      "artifact_sha256": "b57a18e855fe4b4e5cdb9a4aa2b2b95db8be8e564df9ed2e939c2c21ec4518c0",
+      "result": [
+        {
+          "chunks": 665,
+          "bonds": 1299,
+          "free_dof": 3762,
+          "spectral_bound": 789954856.1801302,
+          "spectral_domain_max_dt_s": 0.000569270719028783,
+          "calls_to_cover_16_67ms_using_spectral_bound": 30
+        }
+      ]
+    },
+    "physical-history-parity.json": {
+      "artifact_sha256": "13fcc48c9f1e0b88405170a28731e4cb550b1825812d7d4478c10a2aa5dd0677",
+      "result": {
+        "status": "completed",
+        "scope": "Identical two-frame native recordings with/without optional physical history. Byte comparisons include all legacy input/output arrays and snapshots. Not a complete World restart test.",
+        "identical_files": [
+          {
+            "path": "graph.json",
+            "sha256": "a927a7d19df0116e11f092b45d7c57ccadba18dc2a6c31aebb74750ef4835a8b"
+          },
+          {
+            "path": "snapshots/000000.json",
+            "sha256": "973916eabafa7bdff48446531bb51a24b6c86438900626a968f5cb438be1ac7b"
+          },
+          {
+            "path": "snapshots/000001.json",
+            "sha256": "72ccff79167c3c836c9c522031cee724611ff11bc9152aa93b218b3c991e01bb"
+          },
+          {
+            "path": "snapshots/000002.json",
+            "sha256": "158b6c74b6ff775009d7d156c99af7ef14c3e4cfbe65a685587942ec57e67d19"
+          },
+          {
+            "path": "source-scene.json",
+            "sha256": "f946241c028aafda72f44c162014b816e2ce71471caff85b8a21debad01e76f8"
+          },
+          {
+            "path": "stress_phases/bond_slots.u32",
+            "sha256": "dab27be842f0425c576dc6278bf325bb6cc179a1af56a51cc81430dee397a90f"
+          },
+          {
+            "path": "stress_phases/chunk_flags.u64",
+            "sha256": "5926d5841c4a487f2eca0c91bdd7a996a8ee849ec06854b930de7226979750bf"
+          },
+          {
+            "path": "stress_phases/chunks.f64",
+            "sha256": "abc5f10e9b5940404c0ae66b67d4ebc70d7f02dc069b0bb9c902e934246b4b5e"
+          },
+          {
+            "path": "stress_phases/input_flags.i32",
+            "sha256": "d5f96800813cfe2ba4880915b0c06206bee3393f73ab824e162b47276fd75d2b"
+          },
+          {
+            "path": "stress_phases/inputs.f64",
+            "sha256": "9ea770d32c501dd0ca8e3f4923cc45573af8f44a5b6f946a16d4c722bde7f836"
+          },
+          {
+            "path": "stress_phases/manifest.json",
+            "sha256": "2781f0ca73e3bf19ba18031f6a8520913b1451ab363f1820d2b0b53f9a6928b6"
+          },
+          {
+            "path": "stress_phases/target_flags.i32",
+            "sha256": "3a3a1e2885a4262d5b7ba4f07bd15d1fc8335f6d5f4f9897585d19d1fd3961ad"
+          },
+          {
+            "path": "stress_phases/targets.f64",
+            "sha256": "b5757c66dde414d727a0628e47ecf1f26ee6e1761f760067bf6e0c15d4120fdf"
+          }
+        ],
+        "new_history": [
+          {
+            "snapshot": "000000.json",
+            "time_s": 0.0,
+            "chunks": 665,
+            "layers": 0,
+            "shear_cohorts": 0,
+            "twist_cohorts": 0,
+            "pair_overlap_histories": 0
+          },
+          {
+            "snapshot": "000001.json",
+            "time_s": 0.0009999999999999983,
+            "chunks": 665,
+            "layers": 142,
+            "shear_cohorts": 313,
+            "twist_cohorts": 1126,
+            "pair_overlap_histories": 0
+          },
+          {
+            "snapshot": "000002.json",
+            "time_s": 0.0020000000000000113,
+            "chunks": 665,
+            "layers": 189,
+            "shear_cohorts": 1283,
+            "twist_cohorts": 2006,
+            "pair_overlap_histories": 0
+          }
+        ],
+        "native_report": {
+          "engine_fallback_evaluations": 0,
+          "frames": 2,
+          "oracle_response_rows": 365379,
+          "phases": 298,
+          "physical_history": true,
+          "scope": "Oracle-only full native stress-phase recording. All native steps retained; no trained model or speed claim. Frame inputs are snapshots; later phase observations are not causal frame inputs.",
+          "seconds": 0.651876542,
+          "status": "completed"
+        }
+      }
+    }
+  }
+}
