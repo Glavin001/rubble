@@ -19,12 +19,10 @@ pub fn energy_force(k:Local6,width:[f64;2],d:Local6,h:&[f64;21])->(Local6,f64){
     let intact=Local6{lin:Vec3::new(k.lin.x*d.lin.x,k.lin.y*d.lin.y,k.lin.z*d.lin.z*if d.lin.z<0.{1.-h[1]}else{1.}),ang:k.ang.mul_elem(d.ang)}.scale(1.-h[0]);
     let mut force=intact;let mut energy=0.5*d.dot(&intact);
     if h[0]>0.{
-        let n=stress_ref::joint::CONTACT_SPRINGS;let ki=k.lin.z*(1.-h[1])/(n*n) as f64;
-        let mut contact=Local6::ZERO;let mut patch=0.;
-        for i in 0..n{for j in 0..n{let x=((i as f64+0.5)/n as f64-0.5)*width[0];let y=((j as f64+0.5)/n as f64-0.5)*width[1];
-            let z=(d.lin.z+d.ang.x*y-d.ang.y*x).min(0.);let q=ki*z;
-            contact.lin.z+=q;contact.ang.x+=q*y;contact.ang.y-=q*x;patch+=0.5*ki*z*z;
-        }}
+        let [area,x,y,ixx,iyy,ixy]=stress_ref::joint::compressed_region(width,d.lin.z,d.ang.x,d.ang.y);
+        let ki=k.lin.z*(1.-h[1])/(width[0]*width[1]);let z=d.lin.z+d.ang.x*y-d.ang.y*x;
+        let mut contact=Local6{lin:Vec3::new(0.,0.,ki*area*z),ang:Vec3::new(ki*(area*z*y-d.ang.y*ixy+d.ang.x*iyy),-ki*(area*z*x-d.ang.y*ixx+d.ang.x*ixy),0.)};
+        let mut patch=0.5*ki*(area*z*z+d.ang.y*d.ang.y*ixx+d.ang.x*d.ang.x*iyy-2.*d.ang.x*d.ang.y*ixy);
         contact.lin.x=k.lin.x*(d.lin.x-h[7]);contact.lin.y=k.lin.y*(d.lin.y-h[8]);contact.ang.z=k.ang.z*(d.ang.z-h[12]);
         patch+=0.5*(contact.lin.x.powi(2)/k.lin.x+contact.lin.y.powi(2)/k.lin.y+contact.ang.z.powi(2)/k.ang.z);
         force=force.add(&contact.scale(h[0]));energy+=h[0]*patch;
@@ -40,8 +38,8 @@ pub fn features(s:&ReferenceSolver,job:BondJob,dt:f64,fracture:bool)->Result<(Ve
         else{(g.kinematics(a.u,a.th,c.u,c.th),g.kinematics(a.v,a.w,c.v,c.w))};
     let k=b.stiffness.as_local();let q=d.mul_elem(&k);let m=stress_measures(g,&q);
     let h=joint_history::pack(&b.joint);let st=&b.strength;
-    if st.dif.is_some()||st.static_fatigue.is_some()||st.buckling_load.is_some()||!st.softening||!st.crack_contact||st.exact_patch||st.kind!=stress_ref::material::BondKind::Brittle{
-        return Err("causal material experiment requires brittle softening with grid-patch contact, no DIF/fatigue/buckling/rebar".into())
+    if st.dif.is_some()||st.static_fatigue.is_some()||st.buckling_load.is_some()||!st.softening||!st.crack_contact||!st.exact_patch||st.kind!=stress_ref::material::BondKind::Brittle{
+        return Err("causal material experiment requires brittle softening with exact patch contact, no DIF/fatigue/buckling/rebar".into())
     }
     let mut x=Vec::new();x.extend(d.to_array());x.extend(rate.to_array());x.extend(h.map(finite));
     x.extend(k.to_array());x.extend(b.damping.to_array());
