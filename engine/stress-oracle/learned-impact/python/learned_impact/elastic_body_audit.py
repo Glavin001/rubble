@@ -20,7 +20,7 @@ def run(args):
     for case, source in enumerate(args.graph):
         path = Path(source)
         data = json.loads(path.read_text())
-        if data['schema'] != 'native-linear-elastic-graph/1':
+        if data['schema'] not in ('native-linear-elastic-graph/1', 'native-linear-elastic-graph/2'):
             raise ValueError('unsupported native elastic export')
         for index, cluster in enumerate(data['clusters']):
             graph = ElasticBodyGraph.from_native(cluster)

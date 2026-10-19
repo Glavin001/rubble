@@ -4,8 +4,8 @@ use std::{fs, path::PathBuf};
 use stress_ref::{builders::*, math::Vec3, scene::*, world::World};
 
 fn fixture(kind: &str) -> Result<Scene, String> {
-    if !["free", "fixed", "pinned", "rotated"].contains(&kind) {
-        return Err("fixture must be free, fixed, pinned or rotated".into());
+    if !["free", "fixed", "pinned", "rotated", "heterogeneous", "rayleigh"].contains(&kind) {
+        return Err("fixture must be free, fixed, pinned, rotated, heterogeneous or rayleigh".into());
     }
     let mut s = new_scene("elastic_graph_probe", "Frozen six-DOF linear mechanics probe");
     s.materials.insert("concrete".into(), oracle_concrete(None));
@@ -14,13 +14,21 @@ fn fixture(kind: &str) -> Result<Scene, String> {
     for i in 0..3 {
         for j in 0..2 {
             chunks[grid_index(counts, i, j, 0)].support = match kind {
-                "fixed" | "rotated" => Support::Fixed,
+                "fixed" | "rotated" | "heterogeneous" | "rayleigh" => Support::Fixed,
                 "pinned" => Support::Pinned,
                 _ => Support::None,
             };
         }
     }
     let mut bonds = auto_bonds(&chunks, |_, _| "concrete".into());
+    if kind == "heterogeneous" || kind == "rayleigh" {
+        let mut material = oracle_concrete(None);
+        material.damping_ratio *= 4.;
+        s.materials.insert("damped".into(), material);
+        for (i, bond) in bonds.iter_mut().enumerate() {
+            if i % 3 == 0 { bond.material = "damped".into(); }
+        }
+    }
     if kind == "rotated" {
         // Rotate the complete asset, including its bond frames and box inertias.
         let angle: f64 = 0.53;
@@ -41,6 +49,7 @@ fn fixture(kind: &str) -> Result<Scene, String> {
     s.bodies.push(body("probe", chunks, bonds));
     s.gravity = [0.; 3];
     s.sim.methods = Methods::established();
+    s.sim.methods.rayleigh_damping = kind == "rayleigh";
     Ok(s)
 }
 
@@ -66,6 +75,12 @@ fn run() -> Result<(), String> {
     let mut clusters = Vec::new();
     for cl in &sv.clusters {
         let st = &sv.structures[cl.structure];
+        let alpha = if cl.anchored || sv.config.methods.corotational_bonds {
+            sv.mass_damping.get(cl.structure).copied().unwrap_or(0.)
+        } else { 0. };
+        if alpha > 0. && !cl.anchored {
+            return Err("free-cluster mass damping requires deformed inertia relief, outside this frozen linear export".into());
+        }
         let mut mapping = vec![usize::MAX; st.chunks.len()];
         let mut chunks = Vec::new();
         for (slot, &c) in cl.chunks.iter().enumerate() {
@@ -78,8 +93,14 @@ fn run() -> Result<(), String> {
             let fixed: [bool; 6] = std::array::from_fn(|d| match ch.support {
                 Support::Fixed => true, Support::Pinned => d < 3, Support::None => false,
             });
+            // Match mass_damping_loads: actual mass/inertia, not mass-scaled
+            // inertia, and no dashpot on pinned rotational components.
+            let mut mass_damping = [[0.; 6]; 6];
+            if ch.support == Support::None {
+                for i in 0..6 { for j in 0..6 { mass_damping[i][j] = alpha*mass[i][j]/scale; } }
+            }
             chunks.push(serde_json::json!({"source": c, "center": ch.center.to_array(),
-                "mass_matrix": mass, "fixed": fixed}));
+                "mass_matrix": mass, "mass_damping_matrix": mass_damping, "fixed": fixed}));
         }
         let state: Vec<[f64; 6]> = (0..chunks.len()).map(|i| std::array::from_fn(|d| {
             let fixed = match st.chunks[cl.chunks[i]].support {
@@ -87,7 +108,22 @@ fn run() -> Result<(), String> {
             };
             if fixed { 0. } else { (((i*37+d*19+7) as f64).sin())*1e-6 }
         })).collect();
+        let velocity: Vec<[f64; 6]> = (0..chunks.len()).map(|i| std::array::from_fn(|d| {
+            let fixed = match st.chunks[cl.chunks[i]].support {
+                Support::Fixed => true, Support::Pinned => d < 3, Support::None => false,
+            };
+            if fixed { 0. } else { (((i*29+d*11+3) as f64).cos())*1e-3 }
+        })).collect();
         let mut loads = vec![[0.; 6]; chunks.len()];
+        let mut damping_loads = vec![[0.; 6]; chunks.len()];
+        for (i, &c) in cl.chunks.iter().enumerate() {
+            let ch = &st.chunks[c];
+            if ch.support == Support::None {
+                let f = Vec3::new(velocity[i][0], velocity[i][1], velocity[i][2])*(-alpha*ch.mass);
+                let m = (ch.inertia*Vec3::new(velocity[i][3], velocity[i][4], velocity[i][5]))*(-alpha);
+                for d in 0..3 { damping_loads[i][d] = f[d]; damping_loads[i][d+3] = m[d]; }
+            }
+        }
         let mut bonds = Vec::new();
         for &bi in &cl.bonds {
             let b = &sv.bonds[cl.structure][bi];
@@ -103,6 +139,15 @@ fn run() -> Result<(), String> {
             let ((ua, ta), (ub, tb)) = (at(a), at(c));
             let deformation = g.kinematics(ua, ta, ub, tb);
             let force = deformation.mul_elem(&b.stiffness.as_local());
+            let at_v = |i: usize| (Vec3::new(velocity[i][0], velocity[i][1], velocity[i][2]),
+                                     Vec3::new(velocity[i][3], velocity[i][4], velocity[i][5]));
+            let ((va, wa), (vb, wb)) = (at_v(a), at_v(c));
+            let rate = g.kinematics(va, wa, vb, wb);
+            let damping_force = rate.mul_elem(&b.damping);
+            let (fa, ma, fb, mb) = g.chunk_loads(&damping_force);
+            for (i, f, m) in [(a, fa, ma), (c, fb, mb)] {
+                for d in 0..3 { damping_loads[i][d] += f[d]; damping_loads[i][d+3] += m[d]; }
+            }
             let (fa, ma, fb, mb) = g.chunk_loads(&force);
             for (i, f, m) in [(a, fa, ma), (c, fb, mb)] {
                 for d in 0..3 { loads[i][d] += f[d]; loads[i][d+3] += m[d]; }
@@ -111,13 +156,16 @@ fn run() -> Result<(), String> {
                 "axes": [g.t1.to_array(),g.t2.to_array(),g.normal.to_array()],
                 "ra": g.ra.to_array(), "rb": g.rb.to_array(),
                 "stiffness": b.stiffness.as_local().to_array(), "damping": b.damping.to_array(),
-                "probe_deformation": deformation.to_array(), "probe_force": force.to_array()}));
+                "probe_deformation": deformation.to_array(), "probe_force": force.to_array(),
+                "probe_rate": rate.to_array(), "probe_damping_force": damping_force.to_array()}));
         }
         clusters.push(serde_json::json!({"structure": cl.structure, "chunks": chunks,
-            "bonds": bonds, "probe_displacement": state, "probe_nodal_force": loads}));
+            "bonds": bonds, "probe_displacement": state, "probe_nodal_force": loads,
+            "probe_velocity": velocity, "probe_damping_nodal_force": damping_loads,
+            "mass_damping_alpha_per_s": alpha}));
     }
-    let output = serde_json::json!({"schema": "native-linear-elastic-graph/1", "scene": scene,
-        "scope": "Initial frozen linear elastic kinematics, mass/inertia and bond mechanics. Damping is recorded but not applied in this probe. Not a nonlinear World trajectory or restart.",
+    let output = serde_json::json!({"schema": "native-linear-elastic-graph/2", "scene": scene,
+        "scope": "Initial frozen linear elastic/damping kinematics, mass/inertia and bond mechanics. Not a nonlinear World trajectory or restart. Free-cluster mass damping with inertia relief is rejected.",
         "clusters": clusters});
     let path = out.ok_or("missing --out")?;
     let file = fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| e.to_string())?;
