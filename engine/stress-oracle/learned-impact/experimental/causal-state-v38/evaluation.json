@@ -1,0 +1,874 @@
+{
+  "status": "experimental_not_promoted",
+  "goal_achieved": false,
+  "scope": "Trained causal material-state component in the native reference world. Not a learned graph propagator, not a production PhysX integration, and not an accelerated solver.",
+  "parameters": {
+    "f": 13895,
+    "g": 14023
+  },
+  "training_raw_rows": 4411271,
+  "training_sampled_rows": 1471809,
+  "training_updates": 60000,
+  "training_scenes": 5,
+  "corrective_trajectories": 1,
+  "comparisons": [
+    {
+      "checkpoint": "f",
+      "case": "12",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 85,
+        "model": 93,
+        "extra": 9,
+        "missed": 1
+      },
+      "eventual_break_f1": 0.9438202247191011,
+      "chunk_final_rmse_m": 0.04040628623638707,
+      "projectile_trajectory_rmse_m": 0.012387661777653337,
+      "projectile_velocity_rmse_mps": 0.29923052043177756,
+      "oracle_fragments": {
+        "count": 37,
+        "largest_mass_fraction": 0.125
+      },
+      "model_fragments": {
+        "count": 45,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.204774964783963,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.18067799069959653,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 22119,
+      "oracle_queries": 0,
+      "seconds_with_recording": 7.5825745,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f-eval-12/comparison.json"
+    },
+    {
+      "checkpoint": "f",
+      "case": "16",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 87,
+        "model": 92,
+        "extra": 6,
+        "missed": 1
+      },
+      "eventual_break_f1": 0.9608938547486033,
+      "chunk_final_rmse_m": 0.01992496369548295,
+      "projectile_trajectory_rmse_m": 0.0018541909377757211,
+      "projectile_velocity_rmse_mps": 0.034226419159977206,
+      "oracle_fragments": {
+        "count": 39,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "model_fragments": {
+        "count": 44,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.4144484380623829,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.40990381048935337,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": true,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": true,
+      "native_phase_calls": 22119,
+      "oracle_queries": 0,
+      "seconds_with_recording": 7.518253458,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f-eval-16/comparison.json"
+    },
+    {
+      "checkpoint": "f",
+      "case": "offset",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 65,
+        "model": 80,
+        "extra": 24,
+        "missed": 9
+      },
+      "eventual_break_f1": 0.7724137931034483,
+      "chunk_final_rmse_m": 0.034950043140255765,
+      "projectile_trajectory_rmse_m": 0.011772463106531057,
+      "projectile_velocity_rmse_mps": 0.22415181154393057,
+      "oracle_fragments": {
+        "count": 25,
+        "largest_mass_fraction": 0.21874999999999997
+      },
+      "model_fragments": {
+        "count": 33,
+        "largest_mass_fraction": 0.15624999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.03168037850762129,
+          "cleared_original_far_wall_plane": false
+        },
+        "model": {
+          "rear_y_m": 0.03941566287829515,
+          "cleared_original_far_wall_plane": false
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": false,
+        "break_count_within_10_percent": false,
+        "largest_fragment_within_5_percentage_points": false,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 23109,
+      "oracle_queries": 0,
+      "seconds_with_recording": 11.358442375,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f-eval-offset/comparison.json"
+    },
+    {
+      "checkpoint": "f",
+      "case": "light",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 0,
+        "model": 0,
+        "extra": 0,
+        "missed": 0
+      },
+      "eventual_break_f1": 1.0,
+      "chunk_final_rmse_m": 1.698397472725037e-05,
+      "projectile_trajectory_rmse_m": 0.0,
+      "projectile_velocity_rmse_mps": 0.0,
+      "oracle_fragments": {
+        "count": 1,
+        "largest_mass_fraction": 1.0
+      },
+      "model_fragments": {
+        "count": 1,
+        "largest_mass_fraction": 1.0
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": -0.2717084812633732,
+          "cleared_original_far_wall_plane": false
+        },
+        "model": {
+          "rear_y_m": -0.2717084812633732,
+          "cleared_original_far_wall_plane": false
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": true,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": true,
+      "native_phase_calls": 28500,
+      "oracle_queries": 0,
+      "seconds_with_recording": 20.375203584,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f-eval-light/comparison.json"
+    },
+    {
+      "checkpoint": "f",
+      "case": "test",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 74,
+        "model": 96,
+        "extra": 25,
+        "missed": 3
+      },
+      "eventual_break_f1": 0.8352941176470589,
+      "chunk_final_rmse_m": 0.06852249700631177,
+      "projectile_trajectory_rmse_m": 0.01844401212802664,
+      "projectile_velocity_rmse_mps": 0.3254539390505001,
+      "oracle_fragments": {
+        "count": 29,
+        "largest_mass_fraction": 0.140625
+      },
+      "model_fragments": {
+        "count": 48,
+        "largest_mass_fraction": 0.125
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.2502170610609292,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.19673684350642762,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": false,
+        "break_count_within_10_percent": false,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 22119,
+      "oracle_queries": 0,
+      "seconds_with_recording": 6.438793541,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f-eval-test/comparison.json"
+    },
+    {
+      "checkpoint": "f",
+      "case": "120hz",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 87,
+        "model": 93,
+        "extra": 9,
+        "missed": 3
+      },
+      "eventual_break_f1": 0.9333333333333333,
+      "chunk_final_rmse_m": 0.036416515337928855,
+      "projectile_trajectory_rmse_m": 0.00987996151030171,
+      "projectile_velocity_rmse_mps": 0.20291316097229908,
+      "oracle_fragments": {
+        "count": 39,
+        "largest_mass_fraction": 0.12500000000000003
+      },
+      "model_fragments": {
+        "count": 45,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.19286549141155712,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.20280209422575993,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 22249,
+      "oracle_queries": 0,
+      "seconds_with_recording": 6.502395416,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f-eval-120hz/comparison.json"
+    },
+    {
+      "checkpoint": "f32",
+      "case": "12",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 85,
+        "model": 93,
+        "extra": 9,
+        "missed": 1
+      },
+      "eventual_break_f1": 0.9438202247191011,
+      "chunk_final_rmse_m": 0.040406071547111504,
+      "projectile_trajectory_rmse_m": 0.012388347880920464,
+      "projectile_velocity_rmse_mps": 0.2992538136142948,
+      "oracle_fragments": {
+        "count": 37,
+        "largest_mass_fraction": 0.125
+      },
+      "model_fragments": {
+        "count": 45,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.204774964783963,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.18067957743567703,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 22119,
+      "oracle_queries": 0,
+      "seconds_with_recording": 8.456032208,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f32-eval-12/comparison.json"
+    },
+    {
+      "checkpoint": "f32",
+      "case": "16",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 87,
+        "model": 92,
+        "extra": 6,
+        "missed": 1
+      },
+      "eventual_break_f1": 0.9608938547486033,
+      "chunk_final_rmse_m": 0.019924820411759834,
+      "projectile_trajectory_rmse_m": 0.0018541517845835484,
+      "projectile_velocity_rmse_mps": 0.034225732402466465,
+      "oracle_fragments": {
+        "count": 39,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "model_fragments": {
+        "count": 44,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.4144484380623829,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.40990377851231247,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": true,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": true,
+      "native_phase_calls": 22119,
+      "oracle_queries": 0,
+      "seconds_with_recording": 8.365269708,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f32-eval-16/comparison.json"
+    },
+    {
+      "checkpoint": "f32",
+      "case": "offset",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 65,
+        "model": 80,
+        "extra": 24,
+        "missed": 9
+      },
+      "eventual_break_f1": 0.7724137931034483,
+      "chunk_final_rmse_m": 0.034948602482750495,
+      "projectile_trajectory_rmse_m": 0.011772463257959068,
+      "projectile_velocity_rmse_mps": 0.22415180930044049,
+      "oracle_fragments": {
+        "count": 25,
+        "largest_mass_fraction": 0.21874999999999997
+      },
+      "model_fragments": {
+        "count": 33,
+        "largest_mass_fraction": 0.15624999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.03168037850762129,
+          "cleared_original_far_wall_plane": false
+        },
+        "model": {
+          "rear_y_m": 0.03941565747518999,
+          "cleared_original_far_wall_plane": false
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": false,
+        "break_count_within_10_percent": false,
+        "largest_fragment_within_5_percentage_points": false,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 23109,
+      "oracle_queries": 0,
+      "seconds_with_recording": 12.618673625,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f32-eval-offset/comparison.json"
+    },
+    {
+      "checkpoint": "f32",
+      "case": "light",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 0,
+        "model": 0,
+        "extra": 0,
+        "missed": 0
+      },
+      "eventual_break_f1": 1.0,
+      "chunk_final_rmse_m": 1.6984293071176694e-05,
+      "projectile_trajectory_rmse_m": 0.0,
+      "projectile_velocity_rmse_mps": 0.0,
+      "oracle_fragments": {
+        "count": 1,
+        "largest_mass_fraction": 1.0
+      },
+      "model_fragments": {
+        "count": 1,
+        "largest_mass_fraction": 1.0
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": -0.2717084812633732,
+          "cleared_original_far_wall_plane": false
+        },
+        "model": {
+          "rear_y_m": -0.2717084812633732,
+          "cleared_original_far_wall_plane": false
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": true,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": true,
+      "native_phase_calls": 28500,
+      "oracle_queries": 0,
+      "seconds_with_recording": 21.656590667,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f32-eval-light/comparison.json"
+    },
+    {
+      "checkpoint": "f32",
+      "case": "test",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 74,
+        "model": 96,
+        "extra": 25,
+        "missed": 3
+      },
+      "eventual_break_f1": 0.8352941176470589,
+      "chunk_final_rmse_m": 0.06852244474303244,
+      "projectile_trajectory_rmse_m": 0.01844398064287741,
+      "projectile_velocity_rmse_mps": 0.3254530040840029,
+      "oracle_fragments": {
+        "count": 29,
+        "largest_mass_fraction": 0.140625
+      },
+      "model_fragments": {
+        "count": 48,
+        "largest_mass_fraction": 0.125
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.2502170610609292,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.19673754772571855,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": false,
+        "break_count_within_10_percent": false,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 22119,
+      "oracle_queries": 0,
+      "seconds_with_recording": 8.66901625,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f32-eval-test/comparison.json"
+    },
+    {
+      "checkpoint": "f32",
+      "case": "120hz",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 87,
+        "model": 93,
+        "extra": 9,
+        "missed": 3
+      },
+      "eventual_break_f1": 0.9333333333333333,
+      "chunk_final_rmse_m": 0.03641640979680419,
+      "projectile_trajectory_rmse_m": 0.009882414980471321,
+      "projectile_velocity_rmse_mps": 0.20301925548183553,
+      "oracle_fragments": {
+        "count": 39,
+        "largest_mass_fraction": 0.12500000000000003
+      },
+      "model_fragments": {
+        "count": 45,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.19286549141155712,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.20280551502424687,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 22249,
+      "oracle_queries": 0,
+      "seconds_with_recording": 8.579436125,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-f32-eval-120hz/comparison.json"
+    },
+    {
+      "checkpoint": "g",
+      "case": "12",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 85,
+        "model": 87,
+        "extra": 4,
+        "missed": 2
+      },
+      "eventual_break_f1": 0.9651162790697675,
+      "chunk_final_rmse_m": 0.03888171266875662,
+      "projectile_trajectory_rmse_m": 0.014196358531528308,
+      "projectile_velocity_rmse_mps": 0.3285083720886702,
+      "oracle_fragments": {
+        "count": 37,
+        "largest_mass_fraction": 0.125
+      },
+      "model_fragments": {
+        "count": 39,
+        "largest_mass_fraction": 0.12499999999999996
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.204774964783963,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.1790788352135378,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 22119,
+      "oracle_queries": 0,
+      "seconds_with_recording": 7.89935675,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-g-eval-12/comparison.json"
+    },
+    {
+      "checkpoint": "g",
+      "case": "16",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 87,
+        "model": 84,
+        "extra": 2,
+        "missed": 5
+      },
+      "eventual_break_f1": 0.9590643274853801,
+      "chunk_final_rmse_m": 0.02093023027104702,
+      "projectile_trajectory_rmse_m": 0.0011234082493806776,
+      "projectile_velocity_rmse_mps": 0.023468911775938833,
+      "oracle_fragments": {
+        "count": 39,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "model_fragments": {
+        "count": 36,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.4144484380623829,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.3976454040643933,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 22119,
+      "oracle_queries": 0,
+      "seconds_with_recording": 7.703586167,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-g-eval-16/comparison.json"
+    },
+    {
+      "checkpoint": "g",
+      "case": "offset",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 65,
+        "model": 72,
+        "extra": 13,
+        "missed": 6
+      },
+      "eventual_break_f1": 0.8613138686131386,
+      "chunk_final_rmse_m": 0.03318592373499248,
+      "projectile_trajectory_rmse_m": 0.01438790585479193,
+      "projectile_velocity_rmse_mps": 0.24773571877140546,
+      "oracle_fragments": {
+        "count": 25,
+        "largest_mass_fraction": 0.21874999999999997
+      },
+      "model_fragments": {
+        "count": 27,
+        "largest_mass_fraction": 0.12499999999999996
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.03168037850762129,
+          "cleared_original_far_wall_plane": false
+        },
+        "model": {
+          "rear_y_m": 0.004467690142148761,
+          "cleared_original_far_wall_plane": false
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": false,
+        "break_count_within_10_percent": false,
+        "largest_fragment_within_5_percentage_points": false,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 23109,
+      "oracle_queries": 0,
+      "seconds_with_recording": 11.496961041,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-g-eval-offset/comparison.json"
+    },
+    {
+      "checkpoint": "g",
+      "case": "light",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 0,
+        "model": 0,
+        "extra": 0,
+        "missed": 0
+      },
+      "eventual_break_f1": 1.0,
+      "chunk_final_rmse_m": 8.330486538662257e-06,
+      "projectile_trajectory_rmse_m": 0.0,
+      "projectile_velocity_rmse_mps": 0.0,
+      "oracle_fragments": {
+        "count": 1,
+        "largest_mass_fraction": 1.0
+      },
+      "model_fragments": {
+        "count": 1,
+        "largest_mass_fraction": 1.0
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": -0.2717084812633732,
+          "cleared_original_far_wall_plane": false
+        },
+        "model": {
+          "rear_y_m": -0.2717084812633732,
+          "cleared_original_far_wall_plane": false
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": true,
+        "break_count_within_10_percent": true,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": true,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": true,
+      "native_phase_calls": 28500,
+      "oracle_queries": 0,
+      "seconds_with_recording": 20.377741875,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-g-eval-light/comparison.json"
+    },
+    {
+      "checkpoint": "g",
+      "case": "test",
+      "duration_seconds": 0.1,
+      "breaks": {
+        "oracle": 74,
+        "model": 85,
+        "extra": 19,
+        "missed": 8
+      },
+      "eventual_break_f1": 0.8301886792452831,
+      "chunk_final_rmse_m": 0.06368613819472739,
+      "projectile_trajectory_rmse_m": 0.027614210910868263,
+      "projectile_velocity_rmse_mps": 0.47299293793966923,
+      "oracle_fragments": {
+        "count": 29,
+        "largest_mass_fraction": 0.140625
+      },
+      "model_fragments": {
+        "count": 37,
+        "largest_mass_fraction": 0.12499999999999997
+      },
+      "wall_clearance": {
+        "oracle": {
+          "rear_y_m": 0.2502170610609292,
+          "cleared_original_far_wall_plane": true
+        },
+        "model": {
+          "rear_y_m": 0.17741748958245726,
+          "cleared_original_far_wall_plane": true
+        }
+      },
+      "checks": {
+        "oracle_free": true,
+        "eventual_break_f1_at_least_0_9": false,
+        "break_count_within_10_percent": false,
+        "largest_fragment_within_5_percentage_points": true,
+        "chunk_final_rmse_below_2cm": false,
+        "no_mechanical_energy_above_initial_plus_1_percent": true,
+        "projectile_direction_matches": true,
+        "projectile_velocity_rmse_below_5_percent_of_initial": true,
+        "clearance_matches": true
+      },
+      "passed": false,
+      "native_phase_calls": 23109,
+      "oracle_queries": 0,
+      "seconds_with_recording": 8.626478292,
+      "source_comparison": "engine/stress-oracle/learned-impact/runs/causal-state-v38-2026-10-19/model-g-eval-test/comparison.json"
+    }
+  ],
+  "validation": {
+    "dense_export_max_abs_error": 9.947598300641403e-14,
+    "rows": 128,
+    "observational_teacher_labels_leave_all_31_snapshots_byte_identical": true,
+    "final_checkpoint_dense_export_max_abs_error": 8.704148513061227e-14,
+    "indexed_teacher_reference_byte_identical": true,
+    "unique_index_rows_verified": 14526,
+    "event_checkpoint_dense_export_max_abs_error": 2.2737367544323206e-13
+  },
+  "tests": {
+    "python": 205,
+    "rust_physical_decoder_test": 1
+  },
+  "split_notes": "12 and light are training scenarios (12 extended from 30 to100ms). 16 was validation. Offset was initially unseen for D then reused for model selection. Test was first evaluated only after F was frozen; its later G result is no longer an untouched test. No test snapshots were training inputs.",
+  "precision_notes": "F32 uses FP32 dense matrix accumulation with FP32-trained weights. Input preparation/normalization and native physical mechanics remain f64. This is not a Metal/CUDA/WebGPU accuracy test.",
+  "ablation": {
+    "case": "12",
+    "learned_updates": "disabled explicitly",
+    "oracle_breaks": 85,
+    "ablation_breaks": 0,
+    "oracle_direction": "forward",
+    "ablation_direction": "backward",
+    "projectile_trajectory_rmse_m": 0.48957365566898053
+  },
+  "runtime": "No speedup demonstrated. At120Hz the small wall still invokes the provider22249 times over100ms. The <=5ms entire-world gate at>=10000active rigid bodies/hundreds thousands bonds has not been run or achieved."
+}

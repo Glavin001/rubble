@@ -679,3 +679,15 @@ missing history or damping. Full World restart remains unproven.
 
 204 Python and 12 targeted Rust tests pass. No checkpoint promoted; V36 native
 destruction remains rejected. Artifacts: `runs/state-consistency-v37-2026-10-19/`.
+
+
+V38 now contains actual small trained physical-history MLPs and independent native
+rollouts: see `findings/causal-state-v38-2026-10-19.md` and
+`experimental/causal-state-v38/`. F/F32 passes 2/5 small-fixture gates; G 1/5.
+All five reproduce the coarse ram passage/rebound outcome, but fragmentation and
+combined-parameter generalization remain inadequate. Frozen learned history makes
+the heavy ram rebound without fractures, confirming that the learned updates affect
+the outcome. Native integration and graph propagation remain numerical; no speedup
+or whole-world performance gate is achieved. Do not present this local material
+component as a trained coarse graph solver. Next work must reduce propagation work
+and train/evaluate closed-loop physical-state transitions, not only local labels.

@@ -476,6 +476,9 @@ impl StressProvider for Provider {
         dt: f64,
         fracture: bool,
     ) -> Result<Vec<SuppliedStress>, String> {
+        if self.model.format != FORMAT && !self.energy_decoder {
+            return Err("physical-state checkpoints require energy or collect-energy mode; their unused raw-force heads are not trained".into());
+        }
         let mut out = Vec::new();
         for &job in jobs {
             if job.2 != 1. {

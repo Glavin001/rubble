@@ -49,6 +49,8 @@ def main():
     p.add_argument("--absolute-state", action="store_true")
     p.add_argument("--event-targets", action="store_true")
     args = p.parse_args()
+    if min(args.steps,args.width,args.batch,args.max_rows_per_case)<=0:p.error("steps, width, batch, and row budget must be positive")
+    if args.physical_features and not args.state_only:p.error("physical-features checkpoints require state-only energy decoding")
     if args.absolute_state and not args.physical_features: p.error("absolute-state requires physical-features")
     if args.event_targets and not args.absolute_state:p.error("event-targets requires absolute-state")
     args.out.mkdir(parents=True, exist_ok=False)
