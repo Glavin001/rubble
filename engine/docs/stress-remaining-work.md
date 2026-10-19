@@ -48,9 +48,28 @@ and 1 read per resident tick (digest c55cf1b5, unchanged).
   frame runs in frame mode too. This is lossless: guard 32/32, the same digest in the
   default mode.
 
+**W2, vibe-town standard tier (`suite_bombard`):** with `STRESS_FRAME_SUBMITS=one`,
+118 of 119 resident ticks make 1 submission and 1 read; the other is the exempt tick after
+a shot. Digest 11fc4bc8f25ecfe2 in both modes.
+
+**W3, measured on the standard tier (M3 Max, two runs each):**
+
+| Mode | Median | p95 | Worst |
+|---|---|---|---|
+| Default, separate submissions | 9.7–10.4 ms | 22.3–22.9 | 65.9–68.9 |
+| One submission | 10.7–11.0 ms | 24.5–25.4 | 82.3–82.6 |
+
+W3's bar (3%) is not met.
+
+- **Cause:** the host's follow of the last frame's GPU splits must happen before the frame
+  is recorded. In the default mode it overlaps rubble's step, which is already submitted;
+  in one submission nothing runs on the GPU meanwhile.
+- **To close it:** the follow's bookkeeping moves to the GPU, so the host need not wait on
+  it. That belongs with W4.
+
 Next:
-- the standard tier, the barrage and the CCD and fallback paths of the 5d plan's section 3;
-- the speed comparison (W3).
+- the barrage and the CCD and fallback paths of the 5d plan's section 3;
+- the follow on the GPU (W3 and W4).
 
 ## R2. The barrage's GPU race (determinism): met 2026-10-18
 
