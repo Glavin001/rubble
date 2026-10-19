@@ -119,7 +119,16 @@ pub const SAMPLES: &[Sample] = &[
     },
     Sample {
         key: "cuboids",
-        menu: "Cuboid suburb · 96 box-built houses",
+        menu: "Cuboid suburb · 48 box-built houses",
+        label: "48 cuboid houses",
+        file: None,
+        layout: Some(Layout::SUBURB),
+        level: None,
+        max_hull_vertices: None,
+    },
+    Sample {
+        key: "cuboids2x",
+        menu: "Large cuboid suburb · 96 box-built houses",
         label: "96 cuboid houses",
         file: None,
         layout: Some(Layout::suburb_blocks(6, 4)),
