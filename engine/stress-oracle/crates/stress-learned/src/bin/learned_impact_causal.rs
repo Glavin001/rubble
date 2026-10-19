@@ -81,7 +81,8 @@ fn run() -> Result<(), String> {
     let reference = args[0] == "reference";
     let training = args[0] == "teacher" || reference;
     let collecting = args[0] == "collect" || args[0] == "collect-energy";
-    let energy_decoder = args[0] == "energy" || args[0] == "collect-energy";
+    let frozen_history = args[0] == "frozen-control";
+    let energy_decoder = args[0] == "energy" || args[0] == "collect-energy" || frozen_history;
     if !training && !collecting && !energy_decoder && args[0] != "model" {
         return Err("unknown mode".into());
     }
@@ -135,6 +136,7 @@ fn run() -> Result<(), String> {
                 None
             },
             energy_decoder,
+            frozen_history,
         })
     };
     let start = Instant::now();
@@ -184,7 +186,7 @@ fn run() -> Result<(), String> {
         };
         (p.rows, p.calls, queries, 69)
     };
-    let report = json!({"status":"completed","format":FORMAT,"frames":frames,"rows":rows,"calls":calls,"oracle_queries":queries,"energy_decoder":energy_decoder,"decoder_revision":"energy-yield-v2","training_labels_saved":training&&!reference||collecting,
+    let report = json!({"status":"completed","format":FORMAT,"frames":frames,"rows":rows,"calls":calls,"oracle_queries":queries,"energy_decoder":energy_decoder,"frozen_history_ablation":frozen_history,"decoder_revision":"energy-yield-v2","training_labels_saved":training&&!reference||collecting,
         "row_index_file":if training&&!reference||collecting{Some("rows.index.u64")}else{None},"row_index_fields":["native_substep","structure","bond"],
         "analytic_fallback_evaluations":w.solver.bond_evaluations,"input_width":nx,"output_width":NY,"gate_width":NG,"seconds":start.elapsed().as_secs_f64(),
         "scope":"Causal material-state model. All native contact and mechanical substeps retained. No runtime speedup claim."});
@@ -195,7 +197,7 @@ fn run() -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     if !training && !collecting {
         fs::copy(&args[4], out.join("weights.json")).map_err(|e| e.to_string())?;
-        fs::write(out.join("plan.json"),serde_json::to_vec_pretty(&json!({"status":"completed","frames":frames,"checkpoint":{"path":args[4],"sha256":null},"oracle_queries":0})).unwrap()).map_err(|e|e.to_string())?;
+        fs::write(out.join("plan.json"),serde_json::to_vec_pretty(&json!({"status":"completed","frames":frames,"checkpoint":{"path":args[4],"sha256":null},"oracle_queries":0,"frozen_history_ablation":frozen_history})).unwrap()).map_err(|e|e.to_string())?;
     }
     println!("{report}");
     Ok(())

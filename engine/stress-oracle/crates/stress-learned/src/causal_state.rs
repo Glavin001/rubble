@@ -423,6 +423,8 @@ pub struct Provider {
     /// A run with this present is NOT an acceptance evaluation.
     pub labels: Option<Teacher>,
     pub energy_decoder: bool,
+    /// Explicit ablation: freeze learned history updates, retaining mechanics.
+    pub frozen_history: bool,
 }
 impl StressProvider for Provider {
     fn responses(
@@ -440,7 +442,11 @@ impl StressProvider for Provider {
             }
             let b = &s.bonds[job.0][job.1];
             let (x, base, d, rate) = features(s, job, dt, fracture)?;
-            let pred = self.model.predict(&x)?;
+            let pred = if self.frozen_history {
+                vec![0.; NY + NG]
+            } else {
+                self.model.predict(&x)?
+            };
             if let Some(labels) = &mut self.labels {
                 labels.record(s, job, dt, fracture)?;
             }
