@@ -25,6 +25,24 @@ def half_turn_rows(x, base, target):
     target[:,HALF_TURN_OUTPUT]*=-1
     return x,base,target
 
+def sample_case(row, budget, rng, preserve_transitions=False):
+    """Cap ordinary phase rows without losing rare damage/fracture examples."""
+    n=len(row[0])
+    if preserve_transitions:
+        base,gate=row[1],row[3]
+        rare=(gate[:,0]>0)|(gate[:,1]>0)|((gate[:,21]>0)&(base[:,0]<1))
+        keep=np.flatnonzero(rare)
+        if len(keep)>budget:
+            raise ValueError(f"row budget {budget} is smaller than {len(keep)} damage/fracture transition rows")
+        if n<=budget:return row
+        ordinary=np.flatnonzero(~rare)
+        ix=np.concatenate((keep,rng.choice(ordinary,budget-len(keep),replace=False)))
+    else:
+        # Preserve historical A-K sampling and random-number consumption.
+        ix=rng.choice(n,min(n,budget),replace=False)
+        if n<=budget:return row
+    return tuple(v[ix] for v in row)
+
 def augment(x, events=False):
     t=np.maximum(x[:,64]/(x[:,49]*x[:,59]),0)
     cap=np.where(x[:,53]>0,x[:,53]*x[:,59],np.inf)
@@ -60,6 +78,7 @@ def main():
     p.add_argument("--batch", type=int, default=2048)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-rows-per-case", type=int, default=300000)
+    p.add_argument("--preserve-transitions", action="store_true")
     p.add_argument("--physical-features", action="store_true")
     p.add_argument("--state-only", action="store_true")
     p.add_argument("--absolute-state", action="store_true")
@@ -74,8 +93,7 @@ def main():
     torch.manual_seed(args.seed); np.random.seed(args.seed); torch.set_num_threads(4)
     data = [read(root) for root in args.train]
     rng=np.random.default_rng(args.seed)
-    data=[tuple(v[ix] for v in row) if len(row[0])>args.max_rows_per_case else row
-          for row in data for ix in [rng.choice(len(row[0]),min(len(row[0]),args.max_rows_per_case),replace=False)]]
+    data=[sample_case(row,args.max_rows_per_case,rng,args.preserve_transitions) for row in data]
     x, base, y, gate = [np.concatenate([r[i] for r in data]) for i in range(4)]
     if args.physical_features: x=augment(x,args.event_targets)
     if args.event_targets:gate[:,21]*=base[:,0]<1
