@@ -13,6 +13,7 @@
 //! 2 mm deep, an 11-course wall sinks ~2 cm unevenly against the taller
 //! gables, and the roof shifts.
 
+use crate::bonds::{scale_bond_springs, BOND_TICK};
 use crate::math::*;
 use crate::scene::*;
 use anyhow::Result;
@@ -43,6 +44,28 @@ impl Material {
             Material::Concrete => 2300.0,
             Material::Wood => 550.0,
             Material::Glass => 2500.0,
+        }
+    }
+
+    /// Tensile strength (Pa) of a joint of this material (a bond takes its weaker
+    /// side's): mortar for brick, a cold joint for concrete, nailing for timber, glazing
+    /// for glass. Representative values, not a calibration.
+    pub fn joint_strength(self) -> f64 {
+        match self {
+            Material::Brick => 0.3e6,
+            Material::Concrete => 1.0e6,
+            Material::Wood => 0.8e6,
+            Material::Glass => 0.3e6,
+        }
+    }
+
+    /// Young's modulus (Pa).
+    pub fn youngs_modulus(self) -> f64 {
+        match self {
+            Material::Brick => 5e9,
+            Material::Concrete => 25e9,
+            Material::Wood => 10e9,
+            Material::Glass => 50e9,
         }
     }
 }
@@ -718,12 +741,16 @@ pub fn scene_from_pieces(pieces: &[Piece], hulls: bool) -> Result<Scene> {
         }
     }
     let span = sub(hi, lo);
+    let (joints, lines) = cuboid_bonds(pieces, shift, &bodies);
     let mut s = Scene::from_parts(
         bodies,
         colliders,
         &arena,
         SceneParams::lab(LAB_FLAGS | FLAG_CONTACT_GAP),
     );
+    s.bond_count = joints.len() as u32;
+    s.joints = joints;
+    s.lines = lines;
     add_projectiles(&mut s, 0.4, 2.0);
     s.projectile_mass = 500.0;
     s.vertices = vertices;
@@ -736,4 +763,114 @@ pub fn scene_from_pieces(pieces: &[Piece], hulls: bool) -> Result<Scene> {
     s.center = [0.0, span[1] / 2.0, 0.0];
     s.grid_cell_size = grid_config(&s.colliders).0;
     Ok(s)
+}
+
+
+/// Contacts closer than this (m) count as touching (pieces sit `GAP` apart or flush).
+const TOUCH: f64 = 0.003;
+/// The smallest contact area (m^2) that makes a bond.
+const MIN_BOND_AREA: f64 = 1e-4;
+
+/// The bond graph of a cuboid house, kept simple: a weld wherever two axis-aligned pieces
+/// touch face to face (the contact rectangle from their overlap), and an anchor wherever
+/// a piece rests on the ground. Capacities and springs follow the GLB bonds' formulas
+/// (`bonds.rs`) from the pieces' materials (`Material::joint_strength`,
+/// `youngs_modulus`; the weaker side). Rotated pieces (rafters, roof boards) stay loose,
+/// held by friction as before. Body i + 1 is piece i (body 0 the ground).
+pub fn cuboid_bonds(pieces: &[Piece], shift: [f64; 3], bodies: &[Body]) -> (Vec<Joint>, Vec<f32>) {
+    let mut joints = Vec::new();
+    let mut lines = Vec::new();
+    // A rectangle contact w0 x w1 with normal along `axis`: capacities and springs.
+    let bond = |ma: Material, mb: Option<Material>, da: f64, db: f64, w: [f64; 2]| {
+        let ft = mb.map_or(ma.joint_strength(), |b| ma.joint_strength().min(b.joint_strength()));
+        let fc = 15.0 * ft;
+        let area = w[0] * w[1];
+        let (iuu, ivv) = (w[0] * w[1].powi(3) / 12.0, w[1] * w[0].powi(3) / 12.0);
+        let c = 0.5 * w[0].max(w[1]);
+        let ea = ma.youngs_modulus();
+        let ce = da / ea + mb.map_or(0.0, |b| db / b.youngs_modulus());
+        let cg = da / (ea / 2.4) + mb.map_or(0.0, |b| db / (b.youngs_modulus() / 2.4));
+        let strength = [ft * area, fc * area, 1.5 * ft * area, ft * iuu.min(ivv) / c];
+        let k = [area / ce, area / cg, area / cg, iuu / ce, ivv / ce, (iuu + ivv) / cg];
+        (strength, k)
+    };
+    let axis_u = |axis: usize| -> [f64; 3] {
+        let mut u = [0.0; 3];
+        u[(axis + 1) % 3] = 1.0;
+        u
+    };
+    let line = |lines: &mut Vec<f32>, a: u32, b: u32, at: [f64; 3], anchor: bool| {
+        let color = if anchor { [0.95, 0.6, 0.2] } else { [0.25, 0.9, 0.8] };
+        vertex(lines, [0.0; 3], [0.0, 1.0, 0.0], color, a);
+        vertex(lines, if b == 0 { at } else { [0.0; 3] }, [0.0, 1.0, 0.0], color, b);
+    };
+    for (i, a) in pieces.iter().enumerate() {
+        if a.angle != 0.0 {
+            continue;
+        }
+        let ia = i as u32 + 1;
+        // Resting on the ground: an anchor over the footprint.
+        if a.center[1] - a.half[1] <= TOUCH {
+            let w = [2.0 * a.half[2], 2.0 * a.half[0]];
+            let (strength, k) = bond(a.material, None, a.half[1], 0.0, w);
+            let at = add([a.center[0], 0.0, a.center[2]], shift);
+            joints.push(Joint {
+                body_a: ia,
+                body_b: 0,
+                anchor_a: sub(at, bodies[ia as usize].p),
+                anchor_b: at,
+                rest: IDENTITY,
+                normal: [0.0, -1.0, 0.0],
+                frame_u: axis_u(1),
+                strength,
+                k,
+                world: true,
+            });
+            line(&mut lines, ia, 0, at, true);
+        }
+        for (j, b) in pieces.iter().enumerate().skip(i + 1) {
+            if b.angle != 0.0 {
+                continue;
+            }
+            // Separation per axis (negative: overlap).
+            let gap: [f64; 3] = std::array::from_fn(|k| (a.center[k] - b.center[k]).abs() - a.half[k] - b.half[k]);
+            let touching: Vec<usize> = (0..3).filter(|&k| gap[k].abs() <= TOUCH).collect();
+            let [axis] = touching[..] else { continue };
+            let others = [(axis + 1) % 3, (axis + 2) % 3];
+            if others.iter().any(|&k| gap[k] > -TOUCH) {
+                continue;
+            }
+            let w = others.map(|k| (-gap[k]).min(2.0 * a.half[k]).min(2.0 * b.half[k]));
+            if w[0] * w[1] < MIN_BOND_AREA {
+                continue;
+            }
+            let sign = if b.center[axis] > a.center[axis] { 1.0 } else { -1.0 };
+            let mut c = [0.0; 3];
+            c[axis] = a.center[axis] + sign * a.half[axis];
+            for k in others {
+                let lo = (a.center[k] - a.half[k]).max(b.center[k] - b.half[k]);
+                let hi = (a.center[k] + a.half[k]).min(b.center[k] + b.half[k]);
+                c[k] = 0.5 * (lo + hi);
+            }
+            let at = add(c, shift);
+            let mut normal = [0.0; 3];
+            normal[axis] = sign;
+            let ib = j as u32 + 1;
+            let (strength, k) = bond(a.material, Some(b.material), a.half[axis], b.half[axis], w);
+            joints.push(Joint {
+                body_a: ia,
+                body_b: ib,
+                anchor_a: sub(at, bodies[ia as usize].p),
+                anchor_b: sub(at, bodies[ib as usize].p),
+                rest: IDENTITY,
+                normal,
+                frame_u: axis_u(axis),
+                strength,
+                k,
+                world: false,
+            });
+            line(&mut lines, ia, ib, at, false);
+        }
+    }
+    (scale_bond_springs(&joints, bodies, BOND_TICK), lines)
 }

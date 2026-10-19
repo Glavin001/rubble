@@ -69,12 +69,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     var base = in.color.rgb;
     let dist = length(camera.eye.xyz - in.world);
+    // The ground grid's screen-space widths, outside the branch (WGSL takes derivatives
+    // only in uniform control flow).
+    let g = in.world.xy;
+    let w1 = fwidth(g);
+    let w5 = fwidth(g / 5.0);
     if (in.color.a > 1.5) {
         // Ground: a 1 m grid with 5 m major lines, faded with distance.
-        let g = in.world.xy;
-        let f1 = abs(fract(g + 0.5) - 0.5) / fwidth(g);
+        let f1 = abs(fract(g + 0.5) - 0.5) / w1;
         let l1 = 1.0 - clamp(min(f1.x, f1.y), 0.0, 1.0);
-        let f5 = abs(fract(g / 5.0 + 0.5) - 0.5) / fwidth(g / 5.0);
+        let f5 = abs(fract(g / 5.0 + 0.5) - 0.5) / w5;
         let l5 = 1.0 - clamp(min(f5.x, f5.y), 0.0, 1.0);
         let fade = clamp(1.0 - dist / camera.light.w, 0.0, 1.0);
         base = mix(base, base * 0.78, max(0.5 * l1, l5) * fade);

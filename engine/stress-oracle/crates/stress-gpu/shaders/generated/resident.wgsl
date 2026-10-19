@@ -331,6 +331,11 @@ fn resident_poses(@builtin(global_invocation_id) id_0 : vec3<u32>)
     return;
 }
 
+fn island_rotation_0( isl_1 : ptr<function, Island_std430_0>) -> Quat_0
+{
+    return quat_of_0((*isl_1).rotation_0);
+}
+
 fn float_bits_0( bits_0 : u32) -> f32
 {
     return (bitcast<f32>((bits_0)));
@@ -369,7 +374,7 @@ fn hertz_duration_0( m_0 : f32,  r_3 : f32,  e_0 : f32,  v_5 : f32) -> f32
     return 2.86999988555908203f * pow(m_0 * m_0 / (r_3 * e_0 * e_0 * max(abs(v_5), 0.00100000004749745f)), 0.20000000298023224f);
 }
 
-fn island_rotation_0( _S14 : u32) -> Quat_0
+fn island_rotation_1( _S14 : u32) -> Quat_0
 {
     return quat_of_0(islands_0[_S14].rotation_0);
 }
@@ -393,9 +398,9 @@ fn resident_filter(@builtin(global_invocation_id) id_1 : vec3<u32>)
         return;
     }
     var _S15 : u32 = chunks_0[k_0].info_1.y;
-    var isl_1 : Island_std430_0 = islands_0[_S15];
+    var isl_2 : Island_std430_0 = islands_0[_S15];
     var _S16 : vec4<f32> = chunks_0[k_0].center_0;
-    var _S17 : vec3<f32> = islands_0[_S15].position_0.xyz + rotate_0(island_rotation_0(_S15), chunks_0[k_0].center_0.xyz + state_0[u32(4) * k_0].xyz);
+    var _S17 : vec3<f32> = islands_0[_S15].position_0.xyz + rotate_0(island_rotation_1(_S15), chunks_0[k_0].center_0.xyz + state_0[u32(4) * k_0].xyz);
     var _S18 : vec4<f32> = ctab_0[params_0.props_base_0 + k_0];
     var _S19 : f32;
     if((((islands_0[_S15].info_0.x) & (u32(1)))) != u32(0))
@@ -404,7 +409,7 @@ fn resident_filter(@builtin(global_invocation_id) id_1 : vec3<u32>)
     }
     else
     {
-        _S19 = isl_1.com_0.w;
+        _S19 = isl_2.com_0.w;
     }
     var _S20 : f32 = params_0.dt_0;
     var _S21 : vec3<f32> = vec3<f32>(0.0f);
@@ -684,54 +689,79 @@ fn resident_filter(@builtin(global_invocation_id) id_1 : vec3<u32>)
     return;
 }
 
+var<workgroup> g_group_uniform_0 : u32;
+
+fn group_uniform_0( value_0 : u32,  thread_0 : u32) -> u32
+{
+    if(thread_0 == u32(0))
+    {
+        g_group_uniform_0 = value_0;
+    }
+    var _S40 : u32 = (workgroupUniformLoad(&((g_group_uniform_0))));
+    return _S40;
+}
+
 var<workgroup> g_f_0 : array<vec3<f32>, i32(256)>;
 
 var<workgroup> g_t_0 : array<vec3<f32>, i32(256)>;
 
 @compute
 @workgroup_size(256, 1, 1)
-fn resident_static_loads(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invocation_id) thread_0 : vec3<u32>)
+fn resident_static_loads(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invocation_id) thread_1 : vec3<u32>)
 {
     var i_1 : u32 = group_0.x;
-    var tid_0 : u32 = thread_0.x;
+    var tid_0 : u32 = thread_1.x;
     if(i_1 >= (params_0.island_count_0))
     {
         return;
     }
-    var isl_2 : Island_std430_0 = islands_0[i_1];
-    if((((islands_0[i_1].info_0.z) & (u32(8)))) == u32(0))
+    var _S41 : Island_std430_0 = islands_0[i_1];
+    var _S42 : vec4<u32> = _S41.info_0;
+    var s_0 : u32;
+    if((((_S41.info_0.z) & (u32(8)))) == u32(0))
+    {
+        s_0 = u32(1);
+    }
+    else
+    {
+        s_0 = u32(0);
+    }
+    var _S43 : u32 = group_uniform_0(s_0, tid_0);
+    if(_S43 != u32(0))
     {
         return;
     }
-    var _S40 : Quat_0 = island_rotation_0(i_1);
-    var w_3 : vec3<f32> = isl_2.angular_velocity_0.xyz;
-    var _S41 : vec3<f32> = params_0.gravity_0.xyz;
-    var _S42 : vec3<f32> = isl_2.position_0.xyz;
-    var _S43 : vec3<f32> = isl_2.com_0.xyz;
-    var _S44 : vec3<f32> = _S42 + rotate_0(_S40, _S43);
-    var _S45 : vec3<f32> = vec3<f32>(0.0f);
-    var _S46 : bool = !((((isl_2.info_0.x) & (u32(1)))) != u32(0));
-    var s_0 : u32;
+    var anchored_0 : bool = (((_S42.x) & (u32(1)))) != u32(0);
+    var _S44 : Quat_0 = island_rotation_0(&(_S41));
+    var w_3 : vec3<f32> = _S41.angular_velocity_0.xyz;
+    var _S45 : vec3<f32> = params_0.gravity_0.xyz;
+    var _S46 : vec3<f32> = _S41.position_0.xyz;
+    var _S47 : vec4<f32> = _S41.com_0;
+    var _S48 : vec3<f32> = _S41.com_0.xyz;
+    var _S49 : vec3<f32> = _S46 + rotate_0(_S44, _S48);
+    var _S50 : vec3<f32> = vec3<f32>(0.0f);
+    var _S51 : bool = !anchored_0;
     var f_3 : vec3<f32>;
     var t_1 : vec3<f32>;
-    if(_S46)
+    if(_S51)
     {
-        s_0 = isl_2.range_0.x + tid_0;
-        f_3 = _S45;
-        t_1 = _S45;
+        var _S52 : vec4<u32> = _S41.range_0;
+        s_0 = _S41.range_0.x + tid_0;
+        f_3 = _S50;
+        t_1 = _S50;
         loop
         {
-            if(s_0 < (isl_2.range_0.y))
+            if(s_0 < (_S52.y))
             {
             }
             else
             {
                 break;
             }
-            var _S47 : u32 = u32(2) * s_0;
-            var fc_0 : vec3<f32> = ctab_0[params_0.eload_base_0 + _S47].xyz + _S41 * vec3<f32>(chunks_0[s_0].center_0.w);
+            var _S53 : u32 = u32(2) * s_0;
+            var fc_0 : vec3<f32> = ctab_0[params_0.eload_base_0 + _S53].xyz + _S45 * vec3<f32>(chunks_0[s_0].center_0.w);
             var f_4 : vec3<f32> = f_3 + fc_0;
-            var t_2 : vec3<f32> = t_1 + (cross(_S42 + rotate_0(_S40, chunks_0[s_0].center_0.xyz + state_0[u32(4) * s_0].xyz) - _S44, fc_0) + ctab_0[params_0.eload_base_0 + _S47 + u32(1)].xyz);
+            var t_2 : vec3<f32> = t_1 + (cross(_S46 + rotate_0(_S44, chunks_0[s_0].center_0.xyz + state_0[u32(4) * s_0].xyz) - _S49, fc_0) + ctab_0[params_0.eload_base_0 + _S53 + u32(1)].xyz);
             s_0 = s_0 + u32(256);
             f_3 = f_4;
             t_1 = t_2;
@@ -739,8 +769,8 @@ fn resident_static_loads(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(lo
     }
     else
     {
-        f_3 = _S45;
-        t_1 = _S45;
+        f_3 = _S50;
+        t_1 = _S50;
     }
     g_f_0[tid_0] = f_3;
     g_t_0[tid_0] = t_1;
@@ -757,32 +787,33 @@ fn resident_static_loads(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(lo
         }
         if(tid_0 < s_0)
         {
-            var _S48 : u32 = tid_0 + s_0;
-            g_f_0[tid_0] = g_f_0[tid_0] + g_f_0[_S48];
-            g_t_0[tid_0] = g_t_0[tid_0] + g_t_0[_S48];
+            var _S54 : u32 = tid_0 + s_0;
+            g_f_0[tid_0] = g_f_0[tid_0] + g_f_0[_S54];
+            g_t_0[tid_0] = g_t_0[tid_0] + g_t_0[_S54];
         }
         workgroupBarrier();
         s_0 = (s_0 >> (u32(1)));
     }
     var a_2 : vec3<f32>;
     var alpha_0 : vec3<f32>;
-    if(_S46)
+    if(_S51)
     {
-        var _S49 : vec3<f32> = world_mul_0(_S40, isl_2.inv0_0, isl_2.inv1_0, isl_2.inv2_0, g_t_0[i32(0)] - cross(w_3, world_mul_0(_S40, isl_2.inertia0_0, isl_2.inertia1_0, isl_2.inertia2_0, w_3)));
-        a_2 = g_f_0[i32(0)] / vec3<f32>(isl_2.com_0.w);
-        alpha_0 = _S49;
+        var _S55 : vec3<f32> = world_mul_0(_S44, _S41.inv0_0, _S41.inv1_0, _S41.inv2_0, g_t_0[i32(0)] - cross(w_3, world_mul_0(_S44, _S41.inertia0_0, _S41.inertia1_0, _S41.inertia2_0, w_3)));
+        a_2 = g_f_0[i32(0)] / vec3<f32>(_S47.w);
+        alpha_0 = _S55;
     }
     else
     {
-        a_2 = _S45;
-        alpha_0 = _S45;
+        a_2 = _S50;
+        alpha_0 = _S50;
     }
-    var _S50 : bool = (params_0.rml_0) != u32(0);
-    var _S51 : vec3<f32> = inverse_rotate_0(_S40, w_3);
-    var c_2 : u32 = isl_2.range_0.x + tid_0;
+    var _S56 : bool = (params_0.rml_0) != u32(0);
+    var _S57 : vec3<f32> = inverse_rotate_0(_S44, w_3);
+    var _S58 : vec4<u32> = _S41.range_0;
+    var c_2 : u32 = _S41.range_0.x + tid_0;
     loop
     {
-        if(c_2 < (isl_2.range_0.y))
+        if(c_2 < (_S58.y))
         {
         }
         else
@@ -790,18 +821,18 @@ fn resident_static_loads(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(lo
             break;
         }
         var mass_0 : f32 = chunks_0[c_2].center_0.w;
-        var _S52 : u32 = u32(4) * c_2;
-        var r_world_0 : vec3<f32> = rotate_0(_S40, chunks_0[c_2].center_0.xyz + state_0[_S52].xyz - _S43);
-        var _S53 : u32 = u32(2) * c_2;
-        var _S54 : vec3<f32> = vec3<f32>(mass_0);
-        var f_world_0 : vec3<f32> = ctab_0[params_0.eload_base_0 + _S53].xyz + _S41 * _S54;
-        var t_world_0 : vec3<f32> = ctab_0[params_0.eload_base_0 + _S53 + u32(1)].xyz;
+        var _S59 : u32 = u32(4) * c_2;
+        var r_world_0 : vec3<f32> = rotate_0(_S44, chunks_0[c_2].center_0.xyz + state_0[_S59].xyz - _S48);
+        var _S60 : u32 = u32(2) * c_2;
+        var _S61 : vec3<f32> = vec3<f32>(mass_0);
+        var f_world_0 : vec3<f32> = ctab_0[params_0.eload_base_0 + _S60].xyz + _S45 * _S61;
+        var t_world_0 : vec3<f32> = ctab_0[params_0.eload_base_0 + _S60 + u32(1)].xyz;
         var f_world_1 : vec3<f32>;
         var t_world_1 : vec3<f32>;
-        if(_S50)
+        if(_S56)
         {
-            var t_world_2 : vec3<f32> = t_world_0 - (world_mul_0(_S40, chunks_0[c_2].inertia0_1, chunks_0[c_2].inertia1_1, chunks_0[c_2].inertia2_1, alpha_0) + cross(w_3, world_mul_0(_S40, chunks_0[c_2].inertia0_1, chunks_0[c_2].inertia1_1, chunks_0[c_2].inertia2_1, w_3)));
-            f_world_1 = f_world_0 - (a_2 + cross(alpha_0, r_world_0) + cross(w_3, cross(w_3, r_world_0))) * _S54;
+            var t_world_2 : vec3<f32> = t_world_0 - (world_mul_0(_S44, chunks_0[c_2].inertia0_1, chunks_0[c_2].inertia1_1, chunks_0[c_2].inertia2_1, alpha_0) + cross(w_3, world_mul_0(_S44, chunks_0[c_2].inertia0_1, chunks_0[c_2].inertia1_1, chunks_0[c_2].inertia2_1, w_3)));
+            f_world_1 = f_world_0 - (a_2 + cross(alpha_0, r_world_0) + cross(w_3, cross(w_3, r_world_0))) * _S61;
             t_world_1 = t_world_2;
         }
         else
@@ -809,16 +840,16 @@ fn resident_static_loads(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(lo
             f_world_1 = f_world_0;
             t_world_1 = t_world_0;
         }
-        var fb_0 : vec3<f32> = inverse_rotate_0(_S40, f_world_1);
-        var mo_0 : vec3<f32> = inverse_rotate_0(_S40, t_world_1);
+        var fb_0 : vec3<f32> = inverse_rotate_0(_S44, f_world_1);
+        var mo_0 : vec3<f32> = inverse_rotate_0(_S44, t_world_1);
         var fb_1 : vec3<f32>;
         var mo_1 : vec3<f32>;
-        if(_S50)
+        if(_S56)
         {
-            var sw_0 : vec3<f32> = state_0[_S52 + u32(3)].xyz;
-            var _S55 : vec3<f32> = mat_mul_0(chunks_0[c_2].inertia0_1, chunks_0[c_2].inertia1_1, chunks_0[c_2].inertia2_1, sw_0);
-            var mo_2 : vec3<f32> = mo_0 - (cross(_S51, _S55) + cross(sw_0, mat_mul_0(chunks_0[c_2].inertia0_1, chunks_0[c_2].inertia1_1, chunks_0[c_2].inertia2_1, _S51)) + cross(sw_0, _S55));
-            fb_1 = fb_0 - cross(_S51, state_0[_S52 + u32(2)].xyz) * vec3<f32>((2.0f * mass_0));
+            var sw_0 : vec3<f32> = state_0[_S59 + u32(3)].xyz;
+            var _S62 : vec3<f32> = mat_mul_0(chunks_0[c_2].inertia0_1, chunks_0[c_2].inertia1_1, chunks_0[c_2].inertia2_1, sw_0);
+            var mo_2 : vec3<f32> = mo_0 - (cross(_S57, _S62) + cross(sw_0, mat_mul_0(chunks_0[c_2].inertia0_1, chunks_0[c_2].inertia1_1, chunks_0[c_2].inertia2_1, _S57)) + cross(sw_0, _S62));
+            fb_1 = fb_0 - cross(_S57, state_0[_S59 + u32(2)].xyz) * vec3<f32>((2.0f * mass_0));
             mo_1 = mo_2;
         }
         else
@@ -826,8 +857,8 @@ fn resident_static_loads(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(lo
             fb_1 = fb_0;
             mo_1 = mo_0;
         }
-        scratch_0[params_0.sload_base_0 + _S53] = vec4<f32>(fb_1, 0.0f);
-        scratch_0[params_0.sload_base_0 + _S53 + u32(1)] = vec4<f32>(mo_1, 0.0f);
+        scratch_0[params_0.sload_base_0 + _S60] = vec4<f32>(fb_1, 0.0f);
+        scratch_0[params_0.sload_base_0 + _S60 + u32(1)] = vec4<f32>(mo_1, 0.0f);
         c_2 = c_2 + u32(256);
     }
     return;

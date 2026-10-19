@@ -164,6 +164,16 @@ impl Gpu {
     /// A compute pipeline for `entry` of `set`, with group 0 holding `bindings`.
     pub fn compute(&self, set: &ShaderSet, entry: &str, bindings: &[Binding]) -> Kernel {
         let module = self.module(set);
+        // WGSL checks each storage binding's access against the layout (Metal libraries do
+        // not): there the generated WGSL's declarations, the shader's own, say read or
+        // read-write.
+        let wgsl_bindings;
+        let bindings = if self.shader_path == ShaderPath::Wgsl {
+            wgsl_bindings = wgsl_access(set.wgsl, bindings);
+            &wgsl_bindings[..]
+        } else {
+            bindings
+        };
         let (group, layout) = self.layout(entry, bindings, wgpu::ShaderStages::COMPUTE);
         let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(entry),
@@ -338,4 +348,24 @@ impl Kernel {
 /// Workgroups covering `n` items at `size` per group.
 pub fn groups(n: usize, size: u32) -> u32 {
     (n as u32).div_ceil(size).max(1)
+}
+
+/// `bindings` with each storage binding read-only or read-write as the WGSL module declares
+/// it (`@binding(N) @group(0) var<storage, read_write>`); uniforms and bindings the module
+/// does not declare keep the table's kind.
+fn wgsl_access(wgsl: &str, bindings: &[Binding]) -> Vec<Binding> {
+    let mut out = bindings.to_vec();
+    for line in wgsl.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("@binding(") else { continue };
+        let Some((n, decl)) = rest.split_once(')') else { continue };
+        let (Ok(n), true) = (n.parse::<usize>(), decl.contains("@group(0)")) else { continue };
+        if let Some(b) = out.get_mut(n).filter(|b| **b != Binding::Uniform) {
+            if decl.contains("var<storage, read_write>") {
+                *b = Binding::StorageRw;
+            } else if decl.contains("var<storage, read>") || decl.contains("var<storage>") {
+                *b = Binding::Storage;
+            }
+        }
+    }
+    out
 }

@@ -109,6 +109,15 @@ pub const SAMPLES: &[Sample] = &[
         max_hull_vertices: None,
     },
     Sample {
+        key: "cuboid",
+        menu: "Cuboid house · 1 box-built house",
+        label: "cuboid house",
+        file: None,
+        layout: None,
+        level: None,
+        max_hull_vertices: None,
+    },
+    Sample {
         key: "cuboids",
         menu: "Cuboid suburb · 96 box-built houses",
         label: "96 cuboid houses",

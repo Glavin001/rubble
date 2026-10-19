@@ -147,7 +147,8 @@ void spawn_offsets(uint3 thread: SV_GroupThreadID)
     uint tid = thread.x;
     uint body0 = control[CTL_FIRST_BODY];
     uint collider0 = control[CTL_FIRST_COLLIDER];
-    if (control[CTL_PARENTS] == 0)
+    // The exits and loop bounds as uniform values: barriers follow.
+    if (group_uniform(control[CTL_PARENTS], tid) == 0)
     {
         if (tid == 0)
         {
@@ -157,7 +158,7 @@ void spawn_offsets(uint3 thread: SV_GroupThreadID)
         }
         return;
     }
-    uint total = total_slots();
+    uint total = group_uniform(total_slots(), tid);
     // Members' first colliders.
     uint carry = 0;
     for (uint block = 0; block < total; block += 1024)
@@ -200,7 +201,7 @@ void spawn_offsets(uint3 thread: SV_GroupThreadID)
         control[CTL_BODIES_AFTER] = fits ? body0 + bodies_needed : body0;
         control[CTL_COLLIDERS_AFTER] = fits ? collider0 + colliders_needed : collider0;
     }
-    if (!fits)
+    if (group_uniform(fits ? 1u : 0u, tid) == 0)
         return;
     // The slots: a valid child its body, first collider and collider count; every other
     // slot cleared (the slots are kept between split passes).
@@ -483,11 +484,12 @@ void spawn_bodies_group(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     uint slot = group.x;
     uint tid = thread.x;
     uint total = total_slots();
-    if (slot >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0)
+    // The exits as uniform values: barriers follow.
+    if (group_uniform(slot >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0 ? 1u : 0u, tid) != 0)
         return;
     uint p = parent_at(slot);
     uint4 parent = parents[p];
-    if (slot - parent.y >= parent.z || slots[slot].w == 0)
+    if (group_uniform(slot - parent.y >= parent.z || slots[slot].w == 0 ? 1u : 0u, tid) != 0)
         return;
     uint first = islands_of[p].x;
     uint2 m = child_members(slot);

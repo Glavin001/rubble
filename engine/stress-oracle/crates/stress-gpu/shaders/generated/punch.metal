@@ -2,6 +2,11 @@
 #include <metal_math>
 #include <metal_texture>
 using namespace metal;
+uint group_uniform_0(uint value_0, uint thread_0)
+{
+    return value_0;
+}
+
 struct Quat_0
 {
     float w_0;
@@ -262,7 +267,7 @@ struct BondDyn_0
     uint4 events_0;
 };
 
-[[kernel]] void punch_islands(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], PunchParams_0 constant* params_1 [[buffer(0)]], uint device* route_1 [[buffer(12)]], uint device* status_1 [[buffer(10)]], Island_natural_0 device* islands_1 [[buffer(1)]], packed_float4 device* ctab_1 [[buffer(4)]], EngineBody_natural_0 device* bodies_1 [[buffer(5)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(2)]], packed_float4 device* state_1 [[buffer(3)]], packed_float4 device* fast_1 [[buffer(11)]], packed_float4 device* impactors_1 [[buffer(6)]], BondStatic_natural_0 device* bond_static_1 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(8)]], MaterialTable_0 constant* materials_1 [[buffer(9)]])
+[[kernel]] void punch_islands(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], PunchParams_0 constant* params_1 [[buffer(0)]], uint device* route_1 [[buffer(12)]], uint device* status_1 [[buffer(10)]], Island_natural_0 device* islands_1 [[buffer(1)]], packed_float4 device* ctab_1 [[buffer(4)]], EngineBody_natural_0 device* bodies_1 [[buffer(5)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(2)]], packed_float4 device* state_1 [[buffer(3)]], packed_float4 device* fast_1 [[buffer(11)]], packed_float4 device* impactors_1 [[buffer(6)]], BondStatic_natural_0 device* bond_static_1 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(8)]], MaterialTable_0 constant* materials_1 [[buffer(9)]])
 {
     uint ax_0;
     uint hit_k_0;
@@ -305,12 +310,12 @@ struct BondDyn_0
     threadgroup array<uint, int(1024)> g_scan_1;
     (&kernelContext_0)->g_scan_0 = &g_scan_1;
     uint i_0 = group_0.x;
-    uint t_1 = thread_0.x;
+    uint t_1 = thread_1.x;
     if(i_0 >= (params_1->island_count_0))
     {
         return;
     }
-    if((&kernelContext_0)->route_0[int(0)] == 0U)
+    if((group_uniform_0((&kernelContext_0)->route_0[int(0)], t_1)) == 0U)
     {
         if(t_1 == 0U)
         {
@@ -322,7 +327,7 @@ struct BondDyn_0
     Island_natural_0 device* _S3 = (&kernelContext_0)->islands_0+i_0;
     uint4 _S4 = uint4(_S3->range_0) ;
     uint _S5 = _S4.x;
-    uint n_1 = _S4.y - _S5;
+    uint n_1 = group_uniform_0(_S4.y - _S5, t_1);
     uint _S6 = _S4.z;
     uint _S7 = _S4.w;
     bool out_0;
@@ -342,7 +347,16 @@ struct BondDyn_0
     {
         out_0 = ((&kernelContext_0)->params_0->impactor_count_0) == 0U;
     }
+    uint c_0;
     if(out_0)
+    {
+        c_0 = 1U;
+    }
+    else
+    {
+        c_0 = 0U;
+    }
+    if((group_uniform_0(c_0, t_1)) != 0U)
     {
         if(t_1 == 0U)
         {
@@ -396,7 +410,7 @@ struct BondDyn_0
     float3 _S26 = float3(- inf_0) ;
     float3 lo_0 = float3(inf_0) ;
     float3 hi_0 = _S26;
-    uint c_0 = t_1;
+    c_0 = t_1;
     for(;;)
     {
         if(c_0 < n_1)
@@ -598,6 +612,14 @@ struct BondDyn_0
     }
     if(hit_k_1 == 4294967295U)
     {
+        c_0 = 1U;
+    }
+    else
+    {
+        c_0 = 0U;
+    }
+    if((group_uniform_0(c_0, t_1)) != 0U)
+    {
         if(t_1 == 0U)
         {
             uint device* _S61 = (&kernelContext_0)->status_0+(16U + i_0);
@@ -778,7 +800,7 @@ struct BondDyn_0
             bi_0 = bi_0 + 256U;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if((*(&kernelContext_0)->g_changed_0) == 0U)
+        if((group_uniform_0(*(&kernelContext_0)->g_changed_0, t_1)) == 0U)
         {
             break;
         }
@@ -906,7 +928,7 @@ struct BondDyn_0
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if((*(&kernelContext_0)->g_go_0) == 0U)
+    if((group_uniform_0(*(&kernelContext_0)->g_go_0, t_1)) == 0U)
     {
         return;
     }
@@ -993,7 +1015,7 @@ struct Island_0
     float4 momentum_err_0;
 };
 
-[[kernel]] void punch_fast(uint3 thread_1 [[thread_position_in_threadgroup]], PunchParams_0 constant* params_2 [[buffer(0)]], uint device* route_2 [[buffer(12)]], uint device* status_2 [[buffer(10)]], Island_natural_0 device* islands_2 [[buffer(1)]], packed_float4 device* ctab_2 [[buffer(4)]], EngineBody_natural_0 device* bodies_2 [[buffer(5)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(2)]], packed_float4 device* state_2 [[buffer(3)]], packed_float4 device* fast_2 [[buffer(11)]], packed_float4 device* impactors_2 [[buffer(6)]], BondStatic_natural_0 device* bond_static_2 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(8)]], MaterialTable_0 constant* materials_2 [[buffer(9)]])
+[[kernel]] void punch_fast(uint3 thread_2 [[thread_position_in_threadgroup]], PunchParams_0 constant* params_2 [[buffer(0)]], uint device* route_2 [[buffer(12)]], uint device* status_2 [[buffer(10)]], Island_natural_0 device* islands_2 [[buffer(1)]], packed_float4 device* ctab_2 [[buffer(4)]], EngineBody_natural_0 device* bodies_2 [[buffer(5)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(2)]], packed_float4 device* state_2 [[buffer(3)]], packed_float4 device* fast_2 [[buffer(11)]], packed_float4 device* impactors_2 [[buffer(6)]], BondStatic_natural_0 device* bond_static_2 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(8)]], MaterialTable_0 constant* materials_2 [[buffer(9)]])
 {
     uint add_0;
     thread KernelContext_0 kernelContext_1;
@@ -1028,7 +1050,7 @@ struct Island_0
     (&kernelContext_1)->g_go_0 = &g_go_2;
     threadgroup array<uint, int(1024)> g_scan_2;
     (&kernelContext_1)->g_scan_0 = &g_scan_2;
-    uint t_2 = thread_1.x;
+    uint t_2 = thread_2.x;
     uint base_0 = 0U;
     uint carry_0 = 0U;
     for(;;)

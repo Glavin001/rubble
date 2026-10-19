@@ -11,6 +11,71 @@ public float float_bits(uint bits)
     return asfloat(bits);
 }
 
+groupshared uint g_group_uniform;
+
+// `value`, which every thread of the group reads alike (a per-group word of a read-write
+// buffer), as a workgroup-uniform value: WGSL's uniformity analysis takes such a read as
+// non-uniform and rejects a barrier under control flow that depends on it, so on WGSL thread
+// `thread` 0's value passes through `workgroupUniformLoad` (a barrier). Every other target
+// returns it as it is. Call it in uniform control flow, with every thread of the group.
+public uint group_uniform(uint value, uint thread)
+{
+    __target_switch
+    {
+    case wgsl:
+        if (thread == 0)
+            g_group_uniform = value;
+        return workgroupUniformLoad(g_group_uniform);
+    default:
+        return value;
+    }
+}
+
+groupshared uint4 g_group_uniform4;
+
+// `group_uniform` for four words at once (one barrier on WGSL).
+public uint4 group_uniform4(uint4 value, uint thread)
+{
+    __target_switch
+    {
+    case wgsl:
+        if (thread == 0)
+            g_group_uniform4 = value;
+        return workgroupUniformLoad(g_group_uniform4);
+    default:
+        return value;
+    }
+}
+
+groupshared Island g_group_island;
+
+// `group_uniform` for a whole island record (one barrier on WGSL): a kernel whose group
+// steers by its island takes the record as one uniform value.
+public Island group_uniform_island(Island value, uint thread)
+{
+    __target_switch
+    {
+    case wgsl:
+        if (thread == 0)
+            g_group_island = value;
+        return workgroupUniformLoad(g_group_island);
+    default:
+        return value;
+    }
+}
+
+// `group_uniform` for a float (its bits).
+public float group_uniform_float(float value, uint thread)
+{
+    __target_switch
+    {
+    case wgsl:
+        return asfloat(group_uniform(asuint(value), thread));
+    default:
+        return value;
+    }
+}
+
 public static const uint SUPPORT_NONE = 0;
 public static const uint SUPPORT_FIXED = 1;
 public static const uint SUPPORT_PINNED = 2;

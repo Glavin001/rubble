@@ -44,6 +44,15 @@ fn main() {
     let hi = all.iter().fold([f64::NEG_INFINITY; 3], |a, c| [a[0].max(c.center[0]), a[1].max(c.center[1]), a[2].max(c.center[2])]);
     let target = [lo[0], 0.5 * (lo[1] + hi[1]), lo[2] + 0.4 * (hi[2] - lo[2])];
     let shot = ImpactorDesc { name: "ball".into(), shape: ImpactorShape::Sphere { radius: 0.35 }, mass: 1400.0, position: [target[0] - 6.0, target[1], target[2]], orientation: [1.0, 0.0, 0.0, 0.0], velocity: [60.0, 0.0, 0.0], angular_velocity: [0.0; 3], material: "projectile".into(), crush: None };
+    // `STRESS_SHOT=px,py,pz,vx,vy,vz,mass,radius` (the stress frame, +Z up): another shot,
+    // e.g. one the browser's stress mode fired (its stats' `lastShot`).
+    let shot = match std::env::var("STRESS_SHOT") {
+        Ok(v) => {
+            let x: Vec<f64> = v.split(',').map(|x| x.parse().expect("STRESS_SHOT numbers")).collect();
+            ImpactorDesc { shape: ImpactorShape::Sphere { radius: x[7] }, mass: x[6], position: [x[0], x[1], x[2]], velocity: [x[3], x[4], x[5]], ..shot }
+        }
+        Err(_) => shot,
+    };
     let mut ms = Vec::new();
     for f in 0..frames {
         if f == 5 {
@@ -53,6 +62,9 @@ fn main() {
         let t = std::time::Instant::now();
         w.step_frame(&gpu).expect("frame");
         ms.push(t.elapsed().as_secs_f64() * 1e3);
+        if std::env::var("STRESS_FRAMES").is_ok() {
+            eprintln!("frame {f}: {:.1} ms, {} resident frames so far", ms[f], w.resident_frames);
+        }
     }
     w.sync(&gpu);
     let o = w.observation();

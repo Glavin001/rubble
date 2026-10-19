@@ -213,6 +213,11 @@ impl Scene {
             procedural,
         )))
     }
+    /// The scene with every bond's break capacities times `scale`.
+    #[wasm_bindgen(js_name = withBondStrength)]
+    pub fn with_bond_strength(&self, scale: f64) -> Scene {
+        Scene(self.0.clone().scale_bond_strength(scale))
+    }
     #[wasm_bindgen(js_name = withoutJoints)]
     pub fn without_joints(&self) -> Scene {
         Scene(self.0.clone().without_joints())

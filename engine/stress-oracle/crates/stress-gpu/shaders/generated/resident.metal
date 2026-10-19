@@ -764,7 +764,12 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
     return;
 }
 
-[[kernel]] void resident_static_loads(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], ResidentParams_0 constant* params_3 [[buffer(0)]], packed_float4 device* ctab_3 [[buffer(7)]], EngineBody_natural_0 device* start_bodies_3 [[buffer(8)]], Island_natural_0 device* islands_3 [[buffer(3)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(4)]], packed_float4 device* state_3 [[buffer(5)]], uint device* sort_3 [[buffer(2)]], Record_natural_0 device* manifolds_3 [[buffer(1)]], packed_float4 device* scratch_3 [[buffer(6)]])
+uint group_uniform_0(uint value_0, uint thread_0)
+{
+    return value_0;
+}
+
+[[kernel]] void resident_static_loads(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], ResidentParams_0 constant* params_3 [[buffer(0)]], packed_float4 device* ctab_3 [[buffer(7)]], EngineBody_natural_0 device* start_bodies_3 [[buffer(8)]], Island_natural_0 device* islands_3 [[buffer(3)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(4)]], packed_float4 device* state_3 [[buffer(5)]], uint device* sort_3 [[buffer(2)]], Record_natural_0 device* manifolds_3 [[buffer(1)]], packed_float4 device* scratch_3 [[buffer(6)]])
 {
     thread KernelContext_0 kernelContext_3;
     (&kernelContext_3)->params_0 = params_3;
@@ -781,7 +786,7 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
     threadgroup array<float3, int(256)> g_t_3;
     (&kernelContext_3)->g_t_0 = &g_t_3;
     uint i_1 = group_0.x;
-    uint tid_0 = thread_0.x;
+    uint tid_0 = thread_1.x;
     if(i_1 >= (params_3->island_count_0))
     {
         return;
@@ -789,7 +794,16 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
     Island_natural_0 device* _S92 = (&kernelContext_3)->islands_0+i_1;
     Island_natural_0 isl_2 = *_S92;
     uint4 _S93 = uint4((*_S92).info_0) ;
+    uint s_0;
     if(((_S93.z) & 8U) == 0U)
+    {
+        s_0 = 1U;
+    }
+    else
+    {
+        s_0 = 0U;
+    }
+    if((group_uniform_0(s_0, tid_0)) != 0U)
     {
         return;
     }
@@ -805,7 +819,6 @@ Quat_0 island_rotation_0(uint _S53, KernelContext_0 thread* kernelContext_1)
     float3 _S101 = _S96 + _S100;
     float3 _S102 = float3(0.0f) ;
     bool _S103 = !anchored_1;
-    uint s_0;
     float3 f_3;
     float3 t_2;
     if(_S103)

@@ -140,8 +140,8 @@ void cascade_fixed(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         return;
     uint s = status[ST_ISLANDS + i];
     // Only the first pass commits with the frame's duration: the fixed points a later
-    // frame's first pass can rely on.
-    if (status[ST_RUN] == 0 || (s & 3u) != 3u || params.pass_index != 0)
+    // frame's first pass can rely on. (The group's exit as a uniform value: barriers follow.)
+    if (group_uniform(status[ST_RUN] == 0 || (s & 3u) != 3u || params.pass_index != 0 ? 1u : 0u, thread.x) != 0)
         return;
     if (thread.x == 0)
         g_moved = 0;
@@ -178,7 +178,7 @@ void cascade_gate(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         return;
     uint s = status[ST_ISLANDS + i];
     float flag = gate[params.gate_flag_base + i].x;
-    if (status[ST_RUN] == 0 || (s & 1u) == 0 || flag == 0.0 || (flag == 2.0 && params.pass_index != 0))
+    if (group_uniform(status[ST_RUN] == 0 || (s & 1u) == 0 || flag == 0.0 || (flag == 2.0 && params.pass_index != 0) ? 1u : 0u, thread.x) != 0)
         return;
     if (thread.x == 0)
         g_differs = 0;
@@ -228,7 +228,7 @@ groupshared uint g_unconverged[256];
 void cascade_end(uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    if (status[ST_RUN] == 0)
+    if (group_uniform(status[ST_RUN], tid) == 0)
         return;
     uint damaged = 0;
     uint disconnected = 0;

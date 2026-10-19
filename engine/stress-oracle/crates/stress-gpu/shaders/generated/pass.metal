@@ -2,6 +2,11 @@
 #include <metal_math>
 #include <metal_texture>
 using namespace metal;
+uint group_uniform_0(uint value_0, uint thread_0)
+{
+    return value_0;
+}
+
 struct PassParams_0
 {
     uint chunk_words_0;
@@ -58,7 +63,7 @@ uint4 island_range_0(uint i_0, KernelContext_0 thread* kernelContext_0)
     return (as_type<uint4>((float4(*(kernelContext_0->islands_0+kernelContext_0->params_0->island_words_0 * i_0)) )));
 }
 
-[[kernel]] void pass_parents(uint3 thread_0 [[thread_position_in_threadgroup]], uint device* counters_1 [[buffer(9)]], uint device* status_1 [[buffer(1)]], PassParams_0 constant* params_1 [[buffer(0)]], packed_float4 device* islands_1 [[buffer(2)]], packed_uint4 device* parents_1 [[buffer(5)]], packed_float4 device* ctab_1 [[buffer(3)]], packed_uint4 device* islands_of_1 [[buffer(6)]], packed_float4 device* parent_bodies_1 [[buffer(7)]], uint device* control_1 [[buffer(4)]], packed_uint4 device* args_1 [[buffer(8)]], packed_float4 device* old_islands_1 [[buffer(22)]], uint device* old_index_1 [[buffer(21)]], uint device* index_1 [[buffer(20)]], packed_float4 device* old_ctab_1 [[buffer(18)]], packed_float4 device* old_copy_1 [[buffer(24)]], packed_float4 device* island_copy_1 [[buffer(23)]], packed_float4 device* old_chunks_1 [[buffer(11)]], packed_float4 device* chunks_1 [[buffer(10)]], packed_float4 device* old_state_1 [[buffer(13)]], packed_float4 device* state_1 [[buffer(12)]], packed_float4 device* old_bonds_1 [[buffer(15)]], packed_float4 device* bonds_1 [[buffer(14)]], packed_float4 device* old_dyn_1 [[buffer(17)]], packed_float4 device* bond_dyn_1 [[buffer(16)]], packed_uint4 device* island_args_1 [[buffer(19)]])
+[[kernel]] void pass_parents(uint3 thread_1 [[thread_position_in_threadgroup]], uint device* counters_1 [[buffer(9)]], uint device* status_1 [[buffer(1)]], PassParams_0 constant* params_1 [[buffer(0)]], packed_float4 device* islands_1 [[buffer(2)]], packed_uint4 device* parents_1 [[buffer(5)]], packed_float4 device* ctab_1 [[buffer(3)]], packed_uint4 device* islands_of_1 [[buffer(6)]], packed_float4 device* parent_bodies_1 [[buffer(7)]], uint device* control_1 [[buffer(4)]], packed_uint4 device* args_1 [[buffer(8)]], packed_float4 device* old_islands_1 [[buffer(22)]], uint device* old_index_1 [[buffer(21)]], uint device* index_1 [[buffer(20)]], packed_float4 device* old_ctab_1 [[buffer(18)]], packed_float4 device* old_copy_1 [[buffer(24)]], packed_float4 device* island_copy_1 [[buffer(23)]], packed_float4 device* old_chunks_1 [[buffer(11)]], packed_float4 device* chunks_1 [[buffer(10)]], packed_float4 device* old_state_1 [[buffer(13)]], packed_float4 device* state_1 [[buffer(12)]], packed_float4 device* old_bonds_1 [[buffer(15)]], packed_float4 device* bonds_1 [[buffer(14)]], packed_float4 device* old_dyn_1 [[buffer(17)]], packed_float4 device* bond_dyn_1 [[buffer(16)]], packed_uint4 device* island_args_1 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_1;
     (&kernelContext_1)->counters_0 = counters_1;
@@ -90,8 +95,8 @@ uint4 island_range_0(uint i_0, KernelContext_0 thread* kernelContext_0)
     (&kernelContext_1)->g_parents_0 = &g_parents_1;
     threadgroup array<uint, int(1024)> g_chunks_1;
     (&kernelContext_1)->g_chunks_0 = &g_chunks_1;
-    uint tid_0 = thread_0.x;
-    uint n_0 = *(counters_1+int(0));
+    uint tid_0 = thread_1.x;
+    uint n_0 = group_uniform_0(*(counters_1+int(0)), tid_0);
     bool _S1 = (*(status_1+1U)) != 0U;
     uint base_0 = 0U;
     uint carry_p_0 = 0U;
@@ -331,7 +336,7 @@ uint4 island_range_0(uint i_0, KernelContext_0 thread* kernelContext_0)
     return;
 }
 
-[[kernel]] void pass_snapshot(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], uint device* counters_3 [[buffer(9)]], uint device* status_3 [[buffer(1)]], PassParams_0 constant* params_3 [[buffer(0)]], packed_float4 device* islands_3 [[buffer(2)]], packed_uint4 device* parents_3 [[buffer(5)]], packed_float4 device* ctab_3 [[buffer(3)]], packed_uint4 device* islands_of_3 [[buffer(6)]], packed_float4 device* parent_bodies_3 [[buffer(7)]], uint device* control_3 [[buffer(4)]], packed_uint4 device* args_3 [[buffer(8)]], packed_float4 device* old_islands_3 [[buffer(22)]], uint device* old_index_3 [[buffer(21)]], uint device* index_3 [[buffer(20)]], packed_float4 device* old_ctab_3 [[buffer(18)]], packed_float4 device* old_copy_3 [[buffer(24)]], packed_float4 device* island_copy_3 [[buffer(23)]], packed_float4 device* old_chunks_3 [[buffer(11)]], packed_float4 device* chunks_3 [[buffer(10)]], packed_float4 device* old_state_3 [[buffer(13)]], packed_float4 device* state_3 [[buffer(12)]], packed_float4 device* old_bonds_3 [[buffer(15)]], packed_float4 device* bonds_3 [[buffer(14)]], packed_float4 device* old_dyn_3 [[buffer(17)]], packed_float4 device* bond_dyn_3 [[buffer(16)]], packed_uint4 device* island_args_3 [[buffer(19)]])
+[[kernel]] void pass_snapshot(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_2 [[thread_position_in_threadgroup]], uint device* counters_3 [[buffer(9)]], uint device* status_3 [[buffer(1)]], PassParams_0 constant* params_3 [[buffer(0)]], packed_float4 device* islands_3 [[buffer(2)]], packed_uint4 device* parents_3 [[buffer(5)]], packed_float4 device* ctab_3 [[buffer(3)]], packed_uint4 device* islands_of_3 [[buffer(6)]], packed_float4 device* parent_bodies_3 [[buffer(7)]], uint device* control_3 [[buffer(4)]], packed_uint4 device* args_3 [[buffer(8)]], packed_float4 device* old_islands_3 [[buffer(22)]], uint device* old_index_3 [[buffer(21)]], uint device* index_3 [[buffer(20)]], packed_float4 device* old_ctab_3 [[buffer(18)]], packed_float4 device* old_copy_3 [[buffer(24)]], packed_float4 device* island_copy_3 [[buffer(23)]], packed_float4 device* old_chunks_3 [[buffer(11)]], packed_float4 device* chunks_3 [[buffer(10)]], packed_float4 device* old_state_3 [[buffer(13)]], packed_float4 device* state_3 [[buffer(12)]], packed_float4 device* old_bonds_3 [[buffer(15)]], packed_float4 device* bonds_3 [[buffer(14)]], packed_float4 device* old_dyn_3 [[buffer(17)]], packed_float4 device* bond_dyn_3 [[buffer(16)]], packed_uint4 device* island_args_3 [[buffer(19)]])
 {
     uint _S12;
     uint _S13;
@@ -371,7 +376,7 @@ uint4 island_range_0(uint i_0, KernelContext_0 thread* kernelContext_0)
         return;
     }
     uint4 _S14 = island_range_0((uint4(*((&kernelContext_3)->parents_0+p_1)) ).x, &kernelContext_3);
-    uint t_0 = thread_1.x;
+    uint t_0 = thread_2.x;
     uint _S15 = _S14.x;
     uint k_1 = (&kernelContext_3)->params_0->chunk_words_0 * _S15 + t_0;
     for(;;)

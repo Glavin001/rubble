@@ -291,7 +291,8 @@ void resident_static_loads(uint3 group: SV_GroupID, uint3 thread: SV_GroupThread
     if (i >= params.island_count)
         return;
     Island isl = islands[i];
-    if ((isl.info.z & ISLAND_SOLVE) == 0)
+    // The exit as a uniform value: barriers follow.
+    if (group_uniform((isl.info.z & ISLAND_SOLVE) == 0 ? 1u : 0u, tid) != 0)
         return;
     bool anchored = (isl.info.x & ISLAND_ANCHORED) != 0;
     Quat q = island_rotation(isl);

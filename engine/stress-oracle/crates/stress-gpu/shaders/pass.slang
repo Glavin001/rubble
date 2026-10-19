@@ -87,7 +87,8 @@ groupshared uint g_chunks[1024];
 void pass_parents(uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    uint n = counters[0];
+    // The loop bound as a uniform value: its body has barriers.
+    uint n = group_uniform(counters[0], tid);
     bool split = status[ST_DISCONNECTED] != 0;
     uint carry_p = 0;
     uint carry_c = 0;

@@ -15,13 +15,21 @@ extern "C" {
     fn yield_to_browser();
 }
 
+/// Waits for maps and the suspensions they took (the browser's; zero natively).
+pub static WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static YIELDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Returns once `done()` is true (a map callback has run).
 #[inline]
 pub fn until(mut done: impl FnMut() -> bool) {
     #[cfg(target_arch = "wasm32")]
-    while !done() {
-        // SAFETY: an import without arguments or results; it only suspends this stack.
-        unsafe { yield_to_browser() }
+    {
+        WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        while !done() {
+            YIELDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // SAFETY: an import without arguments or results; it only suspends this stack.
+            unsafe { yield_to_browser() }
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     let _ = &mut done;
@@ -30,10 +38,13 @@ pub fn until(mut done: impl FnMut() -> bool) {
 /// The value a map callback sends on `rx`.
 pub fn recv<T>(rx: &std::sync::mpsc::Receiver<T>) -> T {
     #[cfg(target_arch = "wasm32")]
+    WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(target_arch = "wasm32")]
     loop {
         if let Ok(v) = rx.try_recv() {
             return v;
         }
+        YIELDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: as in `until`.
         unsafe { yield_to_browser() }
     }

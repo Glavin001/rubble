@@ -452,6 +452,10 @@ pub struct Scene {
     /// Shots compensate for gravity (aim near the scene depth).
     #[serde(default = "yes")]
     pub projectile_arc: bool,
+    /// The translation from the asset's frame into the scene's (`build_scene` centres the
+    /// level in x and z and stands it on y = 0); zero for scenes built in place.
+    #[serde(default)]
+    pub placement: [f64; 3],
     /// Selected hierarchy level (None for procedural scenes).
     #[serde(default)]
     pub level: Option<u8>,
@@ -538,6 +542,7 @@ impl Scene {
             projectile_mass: 0.0,
             projectile_speed: None,
             projectile_arc: true,
+            placement: [0.0; 3],
             level: None,
             selected: vec![],
             body_of: vec![],
@@ -577,6 +582,15 @@ impl Scene {
     /// Body of fragment `id` in copy 0.
     pub fn body_of_fragment(&self, id: u32) -> Option<u32> {
         self.body_of.iter().find(|(f, _)| *f == id).map(|(_, b)| *b)
+    }
+
+    /// Every bond's break capacities times `scale` (the lab's bond strength option; the
+    /// springs stay).
+    pub fn scale_bond_strength(mut self, scale: f64) -> Self {
+        for j in &mut self.joints {
+            j.strength = j.strength.map(|s| s * scale);
+        }
+        self
     }
 
     /// Drop the bonds (the lab's default: bonds are inspection lines only).
@@ -1071,6 +1085,7 @@ pub fn build_scene(
     s.extent_z = span[2];
     s.height = height;
     s.center = [0.0, height * 0.5 + placement[1] + lo[1], 0.0];
+    s.placement = placement;
     s.grid_cell_size = grid_config(&s.colliders).0;
     Ok(s)
 }

@@ -60,7 +60,8 @@ groupshared uint g_children;
 void pass_log(uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
-    uint n = control[CTL_PARENTS];
+    // Uniform values for the exits and loops: barriers follow.
+    uint n = group_uniform(control[CTL_PARENTS], tid);
     if (n == 0)
         return;
     uint total = control[CTL_TOTAL];
@@ -90,7 +91,7 @@ void pass_log(uint3 thread: SV_GroupThreadID)
     }
     GroupMemoryBarrierWithGroupSync();
     uint at = g_at;
-    uint size = g_size;
+    uint size = group_uniform(g_size, tid);
     uint c = g_children;
     if (size == 0)
         return;

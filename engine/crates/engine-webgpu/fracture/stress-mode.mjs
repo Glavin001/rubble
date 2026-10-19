@@ -2,7 +2,7 @@
 // WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
 // module, forwards input and drives one frame per animation frame; the physics, camera,
 // shot rule and drawing are the Rust's.
-import init,{stress_init,stress_set_glb,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_shot_mass_scale} from '../generated/stress-web/stress_web.js';
+import init,{stress_init,stress_set_glb,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_shot_mass_scale,stress_set_bond_strength_scale} from '../generated/stress-web/stress_web.js';
 if(!('Suspending' in WebAssembly))throw new Error('Stress-solver mode needs WebAssembly JavaScript Promise Integration (Chrome 137 or later).');
 let module=null;
 export async function createStressMode(canvas){
@@ -24,6 +24,7 @@ export async function createStressMode(canvas){
   async frame(elapsedMs){fit();if(!await frame(elapsedMs))throw new Error(stress_error())},
   get stats(){return JSON.parse(stress_stats())},
   setShotMassScale(scale){stress_set_shot_mass_scale(scale)},
+  setBondStrengthScale(scale){stress_set_bond_strength_scale(scale)},
   get running(){return stress_running()},set running(on){stress_set_running(on)},
   dispose(){canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
 }

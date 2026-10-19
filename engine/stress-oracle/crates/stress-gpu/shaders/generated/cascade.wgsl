@@ -290,11 +290,23 @@ fn cascade_restore(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_in
     return;
 }
 
+var<workgroup> g_group_uniform_0 : u32;
+
+fn group_uniform_0( value_0 : u32,  thread_1 : u32) -> u32
+{
+    if(thread_1 == u32(0))
+    {
+        g_group_uniform_0 = value_0;
+    }
+    var _S10 : u32 = (workgroupUniformLoad(&((g_group_uniform_0))));
+    return _S10;
+}
+
 var<workgroup> g_moved_0 : u32;
 
 @compute
 @workgroup_size(64, 1, 1)
-fn cascade_fixed(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invocation_id) thread_1 : vec3<u32>)
+fn cascade_fixed(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invocation_id) thread_2 : vec3<u32>)
 {
     var i_2 : u32 = group_1.x;
     if(i_2 >= (params_0.island_count_0))
@@ -302,41 +314,51 @@ fn cascade_fixed(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invo
         return;
     }
     var s_1 : u32 = status_0[u32(16) + i_2];
-    var _S10 : bool;
+    var _S11 : bool;
     if(status_0[u32(0)] == u32(0))
     {
-        _S10 = true;
+        _S11 = true;
     }
     else
     {
-        _S10 = ((s_1 & (u32(3)))) != u32(3);
+        _S11 = ((s_1 & (u32(3)))) != u32(3);
     }
-    if(_S10)
+    if(_S11)
     {
-        _S10 = true;
+        _S11 = true;
     }
     else
     {
-        _S10 = (params_0.pass_index_0) != u32(0);
+        _S11 = (params_0.pass_index_0) != u32(0);
     }
-    if(_S10)
+    var moved_0 : u32;
+    if(_S11)
+    {
+        moved_0 = u32(1);
+    }
+    else
+    {
+        moved_0 = u32(0);
+    }
+    var _S12 : u32 = thread_2.x;
+    var _S13 : u32 = group_uniform_0(moved_0, _S12);
+    if(_S13 != u32(0))
     {
         return;
     }
-    var _S11 : u32 = thread_1.x;
-    var _S12 : bool = _S11 == u32(0);
-    if(_S12)
+    var _S14 : bool = _S12 == u32(0);
+    if(_S14)
     {
         g_moved_0 = u32(0);
     }
     workgroupBarrier();
-    var _S13 : vec4<u32> = islands_0[i_2].range_0;
-    var _S14 : u32 = u32(4) * islands_0[i_2].range_0.x + _S11;
-    var moved_0 : u32 = u32(0);
-    var k_1 : u32 = _S14;
+    var _S15 : vec4<u32> = islands_0[i_2].range_0;
+    var _S16 : u32 = u32(4) * islands_0[i_2].range_0.x + _S12;
+    moved_0 = u32(0);
+    var k_1 : u32 = _S16;
     loop
     {
-        if(k_1 < (u32(4) * _S13.y))
+        if(k_1 < (u32(4) * _S15.y))
         {
         }
         else
@@ -349,10 +371,10 @@ fn cascade_fixed(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invo
         }
         k_1 = k_1 + u32(64);
     }
-    k_1 = params_0.bond_words_0 * _S13.z + _S11;
+    k_1 = params_0.bond_words_0 * _S15.z + _S12;
     loop
     {
-        if(k_1 < (params_0.bond_words_0 * _S13.w))
+        if(k_1 < (params_0.bond_words_0 * _S15.w))
         {
         }
         else
@@ -370,15 +392,15 @@ fn cascade_fixed(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invo
         g_moved_0 = u32(1);
     }
     workgroupBarrier();
-    if(_S12)
+    if(_S14)
     {
-        _S10 = g_moved_0 == u32(0);
+        _S11 = g_moved_0 == u32(0);
     }
     else
     {
-        _S10 = false;
+        _S11 = false;
     }
-    if(_S10)
+    if(_S11)
     {
         gate_0[params_0.gate_flag_base_0 + i_2] = vec4<f32>(2.0f, 0.0f, 0.0f, 0.0f);
     }
@@ -389,62 +411,72 @@ var<workgroup> g_differs_0 : u32;
 
 @compute
 @workgroup_size(64, 1, 1)
-fn cascade_gate(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invocation_id) thread_2 : vec3<u32>)
+fn cascade_gate(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invocation_id) thread_3 : vec3<u32>)
 {
     var i_3 : u32 = group_2.x;
     if(i_3 >= (params_0.island_count_0))
     {
         return;
     }
-    var _S15 : u32 = u32(16) + i_3;
-    var s_2 : u32 = status_0[_S15];
+    var _S17 : u32 = u32(16) + i_3;
+    var s_2 : u32 = status_0[_S17];
     var flag_0 : f32 = gate_0[params_0.gate_flag_base_0 + i_3].x;
-    var _S16 : bool;
+    var _S18 : bool;
     if(status_0[u32(0)] == u32(0))
     {
-        _S16 = true;
+        _S18 = true;
     }
     else
     {
-        _S16 = ((s_2 & (u32(1)))) == u32(0);
+        _S18 = ((s_2 & (u32(1)))) == u32(0);
     }
-    if(_S16)
+    if(_S18)
     {
-        _S16 = true;
+        _S18 = true;
     }
     else
     {
-        _S16 = flag_0 == 0.0f;
+        _S18 = flag_0 == 0.0f;
     }
-    if(_S16)
+    if(_S18)
     {
-        _S16 = true;
+        _S18 = true;
     }
     else
     {
         if(flag_0 == 2.0f)
         {
-            _S16 = (params_0.pass_index_0) != u32(0);
+            _S18 = (params_0.pass_index_0) != u32(0);
         }
         else
         {
-            _S16 = false;
+            _S18 = false;
         }
     }
-    if(_S16)
+    var differs_0 : u32;
+    if(_S18)
+    {
+        differs_0 = u32(1);
+    }
+    else
+    {
+        differs_0 = u32(0);
+    }
+    var _S19 : u32 = thread_3.x;
+    var _S20 : u32 = group_uniform_0(differs_0, _S19);
+    if(_S20 != u32(0))
     {
         return;
     }
-    var _S17 : u32 = thread_2.x;
-    if(_S17 == u32(0))
+    if(_S19 == u32(0))
     {
         g_differs_0 = u32(0);
     }
     workgroupBarrier();
     var isl_1 : Island_std430_0 = islands_0[i_3];
-    var _S18 : u32 = u32(2) * islands_0[i_3].range_0.x + _S17;
-    var differs_0 : u32 = u32(0);
-    var k_2 : u32 = _S18;
+    var _S21 : u32 = u32(2) * islands_0[i_3].range_0.x + _S19;
+    differs_0 = u32(0);
+    var k_2 : u32 = _S21;
     loop
     {
         if(k_2 < (u32(2) * isl_1.range_0.y))
@@ -465,15 +497,15 @@ fn cascade_gate(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invoc
         g_differs_0 = u32(1);
     }
     workgroupBarrier();
-    if(_S17 != u32(0))
+    if(_S19 != u32(0))
     {
-        _S16 = true;
+        _S18 = true;
     }
     else
     {
-        _S16 = g_differs_0 != u32(0);
+        _S18 = g_differs_0 != u32(0);
     }
-    if(_S16)
+    if(_S18)
     {
         return;
     }
@@ -493,7 +525,7 @@ fn cascade_gate(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invoc
             differs_0 = u32(16);
         }
     }
-    status_0[_S15] = differs_0;
+    status_0[_S17] = differs_0;
     return;
 }
 
@@ -538,30 +570,30 @@ fn cascade_settle(@builtin(global_invocation_id) id_1 : vec3<u32>)
     isl_2.momentum_err_0 = islands_0[i_4].momentum_err_0;
     isl_2.info_0[i32(0)] = ((isl_2.info_0[i32(0)]) & (u32(4294967279)));
     isl_2.info_0[i32(2)] = ((isl_2.info_0[i32(2)]) & (u32(4294967247)));
-    var _S19 : bool;
+    var _S22 : bool;
     if(status_0[u32(0)] != u32(0))
     {
         if(((s_3 & (u32(3)))) == u32(3))
         {
-            _S19 = true;
+            _S22 = true;
         }
         else
         {
             if((params_0.unconverged_0) == u32(2))
             {
-                _S19 = ((s_3 & (u32(1)))) != u32(0);
+                _S22 = ((s_3 & (u32(1)))) != u32(0);
             }
             else
             {
-                _S19 = false;
+                _S22 = false;
             }
         }
     }
     else
     {
-        _S19 = false;
+        _S22 = false;
     }
-    if(_S19)
+    if(_S22)
     {
         isl_2.info_0[i32(0)] = ((isl_2.info_0[i32(0)]) | (u32(16)));
     }
@@ -604,11 +636,12 @@ var<workgroup> g_unconverged_0 : array<u32, i32(256)>;
 
 @compute
 @workgroup_size(256, 1, 1)
-fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
+fn cascade_end(@builtin(local_invocation_id) thread_4 : vec3<u32>)
 {
     var unconverged_1 : u32;
-    var tid_0 : u32 = thread_3.x;
-    if(status_0[u32(0)] == u32(0))
+    var tid_0 : u32 = thread_4.x;
+    var _S23 : u32 = group_uniform_0(status_0[u32(0)], tid_0);
+    if(_S23 == u32(0))
     {
         return;
     }
@@ -625,9 +658,9 @@ fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
         {
             break;
         }
-        var _S20 : u32 = u32(16) + i_5;
-        var s_4 : u32 = status_0[_S20];
-        if(((status_0[_S20] & (u32(16)))) != u32(0))
+        var _S24 : u32 = u32(16) + i_5;
+        var s_4 : u32 = status_0[_S24];
+        if(((status_0[_S24] & (u32(16)))) != u32(0))
         {
             unconverged_2 = unconverged_2 + u32(1);
             i_5 = i_5 + u32(256);
@@ -640,14 +673,14 @@ fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
         }
         if(((s_4 & (u32(2)))) == u32(0))
         {
-            var _S21 : u32 = unconverged_2 + u32(1);
+            var _S25 : u32 = unconverged_2 + u32(1);
             if((params_0.unconverged_0) != u32(2))
             {
-                unconverged_2 = _S21;
+                unconverged_2 = _S25;
                 i_5 = i_5 + u32(256);
                 continue;
             }
-            unconverged_1 = _S21;
+            unconverged_1 = _S25;
         }
         else
         {
@@ -683,7 +716,7 @@ fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
         {
             gate_0[params_0.gate_flag_base_0 + i_5] = vec4<f32>(0.0f);
         }
-        status_0[_S20] = (s_4 | (add_1));
+        status_0[_S24] = (s_4 | (add_1));
         damaged_0 = damaged_1;
         disconnected_0 = disconnected_1;
         unconverged_2 = unconverged_1;
@@ -705,10 +738,10 @@ fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
         }
         if(tid_0 < unconverged_1)
         {
-            var _S22 : u32 = tid_0 + unconverged_1;
-            g_damaged_0[tid_0] = ((g_damaged_0[tid_0]) | ((g_damaged_0[_S22])));
-            g_disconnected_0[tid_0] = ((g_disconnected_0[tid_0]) | ((g_disconnected_0[_S22])));
-            g_unconverged_0[tid_0] = g_unconverged_0[tid_0] + g_unconverged_0[_S22];
+            var _S26 : u32 = tid_0 + unconverged_1;
+            g_damaged_0[tid_0] = ((g_damaged_0[tid_0]) | ((g_damaged_0[_S26])));
+            g_disconnected_0[tid_0] = ((g_disconnected_0[tid_0]) | ((g_disconnected_0[_S26])));
+            g_unconverged_0[tid_0] = g_unconverged_0[tid_0] + g_unconverged_0[_S26];
         }
         workgroupBarrier();
         unconverged_1 = (unconverged_1 >> (u32(1)));
@@ -724,16 +757,16 @@ fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
     {
         status_0[u32(1)] = params_0.pass_index_0 + u32(1);
     }
-    var _S23 : bool;
+    var _S27 : bool;
     if((g_damaged_0[i32(0)]) != u32(0))
     {
-        _S23 = (g_disconnected_0[i32(0)]) == u32(0);
+        _S27 = (g_disconnected_0[i32(0)]) == u32(0);
     }
     else
     {
-        _S23 = false;
+        _S27 = false;
     }
-    if(_S23)
+    if(_S27)
     {
         damaged_0 = u32(1);
     }
@@ -747,19 +780,19 @@ fn cascade_end(@builtin(local_invocation_id) thread_3 : vec3<u32>)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn cascade_backup(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_invocation_id) thread_4 : vec3<u32>)
+fn cascade_backup(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_invocation_id) thread_5 : vec3<u32>)
 {
     var i_6 : u32 = group_3.x;
-    var _S24 : bool;
+    var _S28 : bool;
     if(i_6 >= (params_0.island_count_0))
     {
-        _S24 = true;
+        _S28 = true;
     }
     else
     {
-        _S24 = status_0[u32(0)] == u32(0);
+        _S28 = status_0[u32(0)] == u32(0);
     }
-    if(_S24)
+    if(_S28)
     {
         return;
     }
@@ -767,12 +800,12 @@ fn cascade_backup(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_inv
     {
         return;
     }
-    var _S25 : vec4<u32> = islands_0[i_6].range_0;
-    var _S26 : u32 = thread_4.x;
-    var k_3 : u32 = u32(4) * islands_0[i_6].range_0.x + _S26;
+    var _S29 : vec4<u32> = islands_0[i_6].range_0;
+    var _S30 : u32 = thread_5.x;
+    var k_3 : u32 = u32(4) * islands_0[i_6].range_0.x + _S30;
     loop
     {
-        if(k_3 < (u32(4) * _S25.y))
+        if(k_3 < (u32(4) * _S29.y))
         {
         }
         else
@@ -782,10 +815,10 @@ fn cascade_backup(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_inv
         backup_0[k_3] = state_0[k_3];
         k_3 = k_3 + u32(64);
     }
-    k_3 = params_0.bond_words_0 * _S25.z + _S26;
+    k_3 = params_0.bond_words_0 * _S29.z + _S30;
     loop
     {
-        if(k_3 < (params_0.bond_words_0 * _S25.w))
+        if(k_3 < (params_0.bond_words_0 * _S29.w))
         {
         }
         else

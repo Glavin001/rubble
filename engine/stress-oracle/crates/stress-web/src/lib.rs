@@ -56,6 +56,9 @@ struct Shooting {
     mass: f64,
     speed: Option<f64>,
     arc: bool,
+    /// The lab's translation of the asset (`engine_fracture::Scene::placement`): a point of
+    /// the lab's frame is the asset's plus this.
+    placement: [f64; 3],
 }
 
 thread_local! {
@@ -68,9 +71,13 @@ thread_local! {
     static FIRED: Cell<usize> = const { Cell::new(0) };
     /// The shots' mass as a multiple of the lab's default ball (`stress_set_shot_mass_scale`).
     static MASS_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
+    static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
+    /// The last frame's step, state copy and draw (ms).
+    static PHASES: Cell<[f64; 3]> = const { Cell::new([0.0; 3]) };
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
@@ -128,6 +135,12 @@ pub fn stress_stats() -> String {
     STATS.with_borrow(|s| s.clone())
 }
 
+/// The last frame's step, state copy (`view_state`) and draw, in ms.
+#[wasm_bindgen]
+pub fn stress_phases() -> Vec<f64> {
+    PHASES.get().to_vec()
+}
+
 #[wasm_bindgen]
 pub fn stress_set_running(on: bool) {
     RUNNING.set(on);
@@ -150,6 +163,16 @@ pub fn stress_resize(width: u32, height: u32) {
 pub fn stress_set_shot_mass_scale(scale: f64) {
     if scale.is_finite() && scale > 0.0 {
         MASS_SCALE.set(scale);
+    }
+}
+
+/// The strength of every bond of the next `stress_load`, as a multiple of the asset's: the
+/// tensile, compressive and shear strengths of the bonds' materials (their fracture
+/// energies and stiffness stay).
+#[wasm_bindgen]
+pub fn stress_set_bond_strength_scale(scale: f64) {
+    if scale.is_finite() && scale > 0.0 {
+        STRENGTH_SCALE.set(scale);
     }
 }
 
@@ -192,7 +215,7 @@ pub fn stress_shoot(u: f64, v: f64) -> bool {
             name: format!("shot{k}"),
             shape: ImpactorShape::Sphere { radius: s.radius },
             mass: s.mass * MASS_SCALE.get(),
-            position: zup(ray.origin),
+            position: zup(std::array::from_fn(|k| ray.origin[k] - s.placement[k])),
             orientation: [1.0, 0.0, 0.0, 0.0],
             velocity: zup(vel),
             angular_velocity: [0.0; 3],
@@ -227,12 +250,24 @@ fn load(level: u8) -> Result<(), String> {
     // The lab's own scene of the level: its camera, centre, extent and projectile.
     let lab = engine_fracture::build_scene(&asset, level, None).map_err(|e| format!("level {level}: {e}"))?;
     CAMERA.set(Some(Orbit::new(&lab)));
-    SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius, mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc }));
+    SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius, mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
     FIRED.set(0);
     RUNNING.set(false);
     PENDING.with_borrow_mut(|p| p.clear());
     let json = engine_fracture::stress_export::shardwright_stress_json(&asset, level);
-    let scene = stress_ref::shardwright::import_value(&json, &asset.physics.name)?;
+    let mut scene = stress_ref::shardwright::import_value(&json, &asset.physics.name)?;
+    let k = STRENGTH_SCALE.get();
+    if k != 1.0 {
+        let used: std::collections::BTreeSet<String> = scene.bodies.iter().flat_map(|b| &b.bonds).map(|b| b.material.clone()).collect();
+        for name in used {
+            if let Some(m) = scene.materials.get_mut(&name) {
+                m.tensile_strength *= k;
+                m.compressive_strength *= k;
+                m.cohesion *= k;
+                m.shear_cap = m.shear_cap.map(|c| c * k);
+            }
+        }
+    }
     scene.validate()?;
     let mut scene = scene.with_derived();
     // The GPU's methods, as the native runs (`STRESS_METHODS=established`).
@@ -302,18 +337,24 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                     stepped += 1;
                 }
             }
+            let t_view = web_time::Instant::now();
             let (mirror, imps) = l.world.view_state(gpu);
+            let view_ms = t_view.elapsed().as_secs_f64() * 1e3;
+            let t_draw = web_time::Instant::now();
             let aspect = width as f64 / height as f64;
             let (vp, eye) = CAMERA.with_borrow(|c| {
                 let c = c.as_ref().expect("a camera with the world");
                 (c.view_proj(aspect), c.eye(aspect))
             });
-            // The lab's camera looks at the asset frame (+Y up); the renderer draws the
-            // stress scene's (+Z up): columns of view_proj * (Z up to Y up).
+            // The lab's camera looks at its own frame (the asset, +Y up, moved by
+            // `placement`); the renderer draws the stress scene's (+Z up): view_proj times
+            // the map from the stress frame into the lab's, column by column.
+            let p = SHOOTING.get().map_or([0.0; 3], |s| s.placement);
             let col = |k: usize| -> [f32; 4] { std::array::from_fn(|r| vp[4 * k + r]) };
-            let neg = |c: [f32; 4]| c.map(|x| -x);
-            let view_proj = [col(0), neg(col(2)), col(1), col(3)];
-            let eye = Vec3::new(eye[0], -eye[2], eye[1]);
+            let (c0, c1, c2, c3) = (col(0), col(1), col(2), col(3));
+            let moved: [f32; 4] = std::array::from_fn(|r| p[0] as f32 * c0[r] + p[1] as f32 * c1[r] + p[2] as f32 * c2[r] + c3[r]);
+            let view_proj = [c0, c2.map(|x| -x), c1, moved];
+            let eye = Vec3::from_array(zup(std::array::from_fn(|k| eye[k] - p[k])));
             let texture = match d.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
                 _ => return Ok(()),
@@ -323,6 +364,8 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             l.renderer.draw(gpu, &mut encoder, &view, &mirror, &imps, view_proj, eye);
             gpu.queue.submit([encoder.finish()]);
             gpu.queue.present(texture);
+            let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
+            PHASES.set([step_ms, view_ms, draw_ms]);
             if stepped > 0 || STATS.with_borrow(|s| s == "{}") {
                 let o = l.world.observation();
                 let moving = mirror.clusters.iter().filter(|c| !c.anchored).count();
@@ -338,7 +381,10 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "hulls": mirror.structures.iter().flat_map(|s| &s.chunks).map(|c| c.parts.as_ref().map_or(1, |p| p.len())).sum::<usize>(),
                         "bonds": mirror.structures.iter().map(|s| s.bonds.len()).sum::<usize>(),
                         "shots": FIRED.get(),
-                        "shotMass": SHOOTING.get().map_or(0.0, |s| s.mass * MASS_SCALE.get()),
+                        "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
+                        "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),
+                        "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),
+                        "lastShot": imps.last().map(|i| serde_json::json!({"position": i.pose.position.to_array(), "velocity": i.velocity.to_array()})),
                         "frameHz": 1.0 / dt,
                     })
                     .to_string(),

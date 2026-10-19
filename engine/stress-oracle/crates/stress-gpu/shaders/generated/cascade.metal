@@ -358,7 +358,12 @@ struct Island_0
     return;
 }
 
-[[kernel]] void cascade_fixed(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_3 [[buffer(0)]], uint device* status_3 [[buffer(5)]], Island_natural_0 device* islands_3 [[buffer(1)]], packed_float4 device* scratch_3 [[buffer(2)]], packed_float4 device* gate_3 [[buffer(6)]], packed_float4 device* state_3 [[buffer(3)]], packed_float4 device* backup_3 [[buffer(4)]], packed_float4 device* bond_dyn_3 [[buffer(7)]], packed_float4 device* bond_backup_3 [[buffer(8)]])
+uint group_uniform_0(uint value_0, uint thread_1)
+{
+    return value_0;
+}
+
+[[kernel]] void cascade_fixed(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_2 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_3 [[buffer(0)]], uint device* status_3 [[buffer(5)]], Island_natural_0 device* islands_3 [[buffer(1)]], packed_float4 device* scratch_3 [[buffer(2)]], packed_float4 device* gate_3 [[buffer(6)]], packed_float4 device* state_3 [[buffer(3)]], packed_float4 device* backup_3 [[buffer(4)]], packed_float4 device* bond_dyn_3 [[buffer(7)]], packed_float4 device* bond_backup_3 [[buffer(8)]])
 {
     thread KernelContext_0 kernelContext_2;
     (&kernelContext_2)->params_0 = params_3;
@@ -403,11 +408,20 @@ struct Island_0
     {
         _S37 = ((&kernelContext_2)->params_0->pass_index_0) != 0U;
     }
+    uint moved_0;
     if(_S37)
+    {
+        moved_0 = 1U;
+    }
+    else
+    {
+        moved_0 = 0U;
+    }
+    uint _S38 = thread_2.x;
+    if((group_uniform_0(moved_0, _S38)) != 0U)
     {
         return;
     }
-    uint _S38 = thread_1.x;
     bool _S39 = _S38 == 0U;
     if(_S39)
     {
@@ -416,7 +430,7 @@ struct Island_0
     threadgroup_barrier(mem_flags::mem_threadgroup);
     uint4 _S40 = uint4(((&kernelContext_2)->islands_0+i_2)->range_0) ;
     uint _S41 = 4U * _S40.x + _S38;
-    uint moved_0 = 0U;
+    moved_0 = 0U;
     uint k_1 = _S41;
     for(;;)
     {
@@ -469,7 +483,7 @@ struct Island_0
     return;
 }
 
-[[kernel]] void cascade_gate(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_2 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_4 [[buffer(0)]], uint device* status_4 [[buffer(5)]], Island_natural_0 device* islands_4 [[buffer(1)]], packed_float4 device* scratch_4 [[buffer(2)]], packed_float4 device* gate_4 [[buffer(6)]], packed_float4 device* state_4 [[buffer(3)]], packed_float4 device* backup_4 [[buffer(4)]], packed_float4 device* bond_dyn_4 [[buffer(7)]], packed_float4 device* bond_backup_4 [[buffer(8)]])
+[[kernel]] void cascade_gate(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_3 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_4 [[buffer(0)]], uint device* status_4 [[buffer(5)]], Island_natural_0 device* islands_4 [[buffer(1)]], packed_float4 device* scratch_4 [[buffer(2)]], packed_float4 device* gate_4 [[buffer(6)]], packed_float4 device* state_4 [[buffer(3)]], packed_float4 device* backup_4 [[buffer(4)]], packed_float4 device* bond_dyn_4 [[buffer(7)]], packed_float4 device* bond_backup_4 [[buffer(8)]])
 {
     thread KernelContext_0 kernelContext_3;
     (&kernelContext_3)->params_0 = params_4;
@@ -531,11 +545,20 @@ struct Island_0
             _S43 = false;
         }
     }
+    uint differs_0;
     if(_S43)
+    {
+        differs_0 = 1U;
+    }
+    else
+    {
+        differs_0 = 0U;
+    }
+    uint _S44 = thread_3.x;
+    if((group_uniform_0(differs_0, _S44)) != 0U)
     {
         return;
     }
-    uint _S44 = thread_2.x;
     if(_S44 == 0U)
     {
         *(&kernelContext_3)->g_differs_0 = 0U;
@@ -545,7 +568,7 @@ struct Island_0
     Island_natural_0 isl_1 = *_S45;
     uint4 _S46 = uint4((*_S45).range_0) ;
     uint _S47 = 2U * _S46.x + _S44;
-    uint differs_0 = 0U;
+    differs_0 = 0U;
     uint k_2 = _S47;
     for(;;)
     {
@@ -742,7 +765,7 @@ struct Island_0
     return;
 }
 
-[[kernel]] void cascade_end(uint3 thread_3 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_6 [[buffer(0)]], uint device* status_6 [[buffer(5)]], Island_natural_0 device* islands_6 [[buffer(1)]], packed_float4 device* scratch_6 [[buffer(2)]], packed_float4 device* gate_6 [[buffer(6)]], packed_float4 device* state_6 [[buffer(3)]], packed_float4 device* backup_6 [[buffer(4)]], packed_float4 device* bond_dyn_6 [[buffer(7)]], packed_float4 device* bond_backup_6 [[buffer(8)]])
+[[kernel]] void cascade_end(uint3 thread_4 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_6 [[buffer(0)]], uint device* status_6 [[buffer(5)]], Island_natural_0 device* islands_6 [[buffer(1)]], packed_float4 device* scratch_6 [[buffer(2)]], packed_float4 device* gate_6 [[buffer(6)]], packed_float4 device* state_6 [[buffer(3)]], packed_float4 device* backup_6 [[buffer(4)]], packed_float4 device* bond_dyn_6 [[buffer(7)]], packed_float4 device* bond_backup_6 [[buffer(8)]])
 {
     uint unconverged_1;
     thread KernelContext_0 kernelContext_5;
@@ -765,8 +788,8 @@ struct Island_0
     (&kernelContext_5)->g_disconnected_0 = &g_disconnected_6;
     threadgroup array<uint, int(256)> g_unconverged_6;
     (&kernelContext_5)->g_unconverged_0 = &g_unconverged_6;
-    uint tid_0 = thread_3.x;
-    if((*(status_6+0U)) == 0U)
+    uint tid_0 = thread_4.x;
+    if((group_uniform_0(*(status_6+0U), tid_0)) == 0U)
     {
         return;
     }
@@ -905,7 +928,7 @@ struct Island_0
     return;
 }
 
-[[kernel]] void cascade_backup(uint3 group_3 [[threadgroup_position_in_grid]], uint3 thread_4 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_7 [[buffer(0)]], uint device* status_7 [[buffer(5)]], Island_natural_0 device* islands_7 [[buffer(1)]], packed_float4 device* scratch_7 [[buffer(2)]], packed_float4 device* gate_7 [[buffer(6)]], packed_float4 device* state_7 [[buffer(3)]], packed_float4 device* backup_7 [[buffer(4)]], packed_float4 device* bond_dyn_7 [[buffer(7)]], packed_float4 device* bond_backup_7 [[buffer(8)]])
+[[kernel]] void cascade_backup(uint3 group_3 [[threadgroup_position_in_grid]], uint3 thread_5 [[thread_position_in_threadgroup]], CascadeParams_0 constant* params_7 [[buffer(0)]], uint device* status_7 [[buffer(5)]], Island_natural_0 device* islands_7 [[buffer(1)]], packed_float4 device* scratch_7 [[buffer(2)]], packed_float4 device* gate_7 [[buffer(6)]], packed_float4 device* state_7 [[buffer(3)]], packed_float4 device* backup_7 [[buffer(4)]], packed_float4 device* bond_dyn_7 [[buffer(7)]], packed_float4 device* bond_backup_7 [[buffer(8)]])
 {
     thread KernelContext_0 kernelContext_6;
     (&kernelContext_6)->params_0 = params_7;
@@ -947,7 +970,7 @@ struct Island_0
         return;
     }
     uint4 _S83 = uint4(_S82->range_0) ;
-    uint _S84 = thread_4.x;
+    uint _S84 = thread_5.x;
     uint k_3 = 4U * _S83.x + _S84;
     for(;;)
     {

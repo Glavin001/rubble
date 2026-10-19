@@ -186,6 +186,24 @@ level, camera and shot rule, so the three can be compared:
 **Native reference** (house, level 0, one cannonball, 120 frames, M3 Max): 15 fragments,
 151 of 453 bonds broken, median frame 4.2 ms.
 
+**Status in Chrome (M3 Max):**
+- It loads, draws, aims and fires like the other modes, and it holds real time (60 physics
+  frames/s, 2.3 ms each) until a ball strikes.
+- **Nothing breaks yet.** Chrome allows 10 storage buffers per shader stage, and the
+  stress kernels for contact ingest and GPU splits bind up to 26 (`layout`), so WebGPU
+  rejects those pipelines. Packing them to 10 or fewer is the remaining work.
+- The same WGSL kernels run natively (`STRESS_GPU_SHADERS=wgsl`, where Metal allows 31)
+  with the Metal library's result: a lab shot (×64 ball) breaks 210 bonds into 17
+  fragments on both.
+- **WGSL rules the Slang source now meets:**
+  - no constant infinity or NaN (`common.slang` `float_bits`);
+  - barriers only under workgroup-uniform control flow (`group_uniform`,
+    `group_uniform4`, `group_uniform_island`, and uniform reductions in `group_sum2`);
+  - storage access read from the shader's declarations (`gpu.rs` `wgsl_access`).
+  Metal's values are unchanged (guard).
+- **View options.** "Inspect bond graph" and "Color by sleep state" are this page's
+  renderer's, so they are disabled in this mode.
+
 ### Breakable D6 joints (experimental)
 
 “Breakable D6 joints” turns each baked bond of the selected level into

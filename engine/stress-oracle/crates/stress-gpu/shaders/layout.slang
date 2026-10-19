@@ -266,14 +266,15 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;
     uint p = group.x;
-    if (p >= control[CTL_PARENTS] || control[0] != 0)
+    // The exits and the loop bounds as uniform values: barriers follow.
+    if (group_uniform(p >= control[CTL_PARENTS] || control[0] != 0 ? 1u : 0u, tid) != 0)
         return;
     uint4 parent = parents[p];
-    if (parent.z < 2)
+    if (group_uniform(parent.z < 2 ? 1u : 0u, tid) != 0)
         return;
     uint ci = parent.x;
     float4 r = old_islands[island_word(ci, 0)];
-    uint c0 = asuint(r.x), c1 = asuint(r.y), b0 = asuint(r.z), b1 = asuint(r.w);
+    uint c0 = group_uniform(asuint(r.x), tid), c1 = group_uniform(asuint(r.y), tid), b0 = group_uniform(asuint(r.z), tid), b1 = group_uniform(asuint(r.w), tid);
     uint n = c1 - c0;
     uint base = parent.y;
     uint total = control[CTL_TOTAL];

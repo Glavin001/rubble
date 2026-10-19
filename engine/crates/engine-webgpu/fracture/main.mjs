@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,layoutScene,withoutJoints,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,layoutScene,withoutJoints,withBondStrength,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -27,10 +27,18 @@ let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=nul
 // stress-mode.mjs). The stress mode keeps its own frame loop state.
 const bondMode=()=>$('bond-mode').value;
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
+// The bond-graph and sleep-colour views are this page's renderer's; the stress mode draws
+// with its own (Rust), which has neither: the boxes are off there, saying so.
+const STRESS_VIEW_NOTE='Not in the stress-solver mode: it draws with its own renderer';
+function viewOptions(stressMode){for(const id of ['show-bonds','show-sleep']){const box=$(id),label=box.closest('label');box.disabled=stressMode;if(stressMode){label.dataset.title??=label.title;label.title=STRESS_VIEW_NOTE}else if(label.dataset.title!==undefined){label.title=label.dataset.title;delete label.dataset.title}}}
 // Ball mass: a power-of-two multiple of the scene's default ball, applied to the next shots.
 const massScale=()=>2**Number($('ball-mass').value);
+// Bond strength: a power-of-two multiple of every bond's break strength (D6 joints and
+// the stress solver), applied when the level loads.
+const strengthScale=()=>2**Number($('bond-strength').value);
+const scaleLabel=k=>`×${k>=1?k:`1/${1/k}`}`;
 function applyBallMass(){
- const k=massScale(),kg=stressOn?stress?.stats.shotMass:scene?.projectileMass*k;
+ const k=massScale(),kg=(stressOn?stress?.stats.ballMass:scene?.projectileMass)*k;
  $('ball-mass-value').textContent=`×${k>=1?k:`1/${1/k}`}${kg?` · ${Math.round(kg).toLocaleString()} kg`:''}`;
  if(stressOn)stress?.setShotMassScale(k);else if(sim&&scene?.projectileMass)sim.setProjectileMass(scene.projectileMass*k);
 }
@@ -73,10 +81,10 @@ async function loadLevel(level){
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(bondMode()==='stress')return loadStress(level);
-  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;
+  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;viewOptions(false);
   const built=procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   if(bondMode()==='d6')setStatus('Settling bonds under self-weight…');
-  const one=bondMode()==='d6'?await preloadBonds(device,built):withoutJoints(built);
+  const one=bondMode()==='d6'?await preloadBonds(device,strengthScale()===1?built:withBondStrength(built,strengthScale())):withoutJoints(built);
   // Copies laid out as the sample says (procedural houses get a larger contact budget).
   next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
@@ -94,10 +102,11 @@ async function loadLevel(level){
 async function loadStress(level){
  if(procedural||!assetBytes)throw new Error('The stress-solver mode runs a fracture GLB: pick a GLB scene.');
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
- $('view').hidden=true;$('stress-view').hidden=false;stressOn=true;
+ $('view').hidden=true;$('stress-view').hidden=false;stressOn=true;viewOptions(true);
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
  if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}
- await stress.load(assetBytes,level);applyBallMass();
+ stress.setBondStrengthScale(strengthScale());
+ await stress.load(assetBytes,level);await stress.frame(0);applyBallMass();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
@@ -134,6 +143,8 @@ $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>i
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').checked?1:0};
 $('ball-mass').oninput=applyBallMass;
+$('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
+$('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{if(stressOn){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});

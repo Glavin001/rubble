@@ -67,6 +67,18 @@ struct PassParams_std140_0
 
 @binding(19) @group(0) var<storage, read_write> island_args_0 : array<vec4<u32>>;
 
+var<workgroup> g_group_uniform_0 : u32;
+
+fn group_uniform_0( value_0 : u32,  thread_0 : u32) -> u32
+{
+    if(thread_0 == u32(0))
+    {
+        g_group_uniform_0 = value_0;
+    }
+    var _S1 : u32 = (workgroupUniformLoad(&((g_group_uniform_0))));
+    return _S1;
+}
+
 fn island_range_0( i_0 : u32) -> vec4<u32>
 {
     return (bitcast<vec4<u32>>((islands_0[params_0.island_words_0 * i_0])));
@@ -78,11 +90,11 @@ var<workgroup> g_chunks_0 : array<u32, i32(1024)>;
 
 @compute
 @workgroup_size(1024, 1, 1)
-fn pass_parents(@builtin(local_invocation_id) thread_0 : vec3<u32>)
+fn pass_parents(@builtin(local_invocation_id) thread_1 : vec3<u32>)
 {
-    var tid_0 : u32 = thread_0.x;
-    var n_0 : u32 = counters_0[i32(0)];
-    var _S1 : bool = status_0[u32(1)] != u32(0);
+    var tid_0 : u32 = thread_1.x;
+    var n_0 : u32 = group_uniform_0(counters_0[i32(0)], tid_0);
+    var _S2 : bool = status_0[u32(1)] != u32(0);
     var base_0 : u32 = u32(0);
     var carry_p_0 : u32 = u32(0);
     var carry_c_0 : u32 = u32(0);
@@ -96,17 +108,17 @@ fn pass_parents(@builtin(local_invocation_id) thread_0 : vec3<u32>)
             break;
         }
         var i_1 : u32 = base_0 + tid_0;
-        var _S2 : bool;
-        if(_S1)
+        var _S3 : bool;
+        if(_S2)
         {
-            _S2 = i_1 < n_0;
+            _S3 = i_1 < n_0;
         }
         else
         {
-            _S2 = false;
+            _S3 = false;
         }
         var parent_0 : bool;
-        if(_S2)
+        if(_S3)
         {
             parent_0 = ((status_0[u32(16) + i_1] & (u32(8)))) != u32(0);
         }
@@ -154,9 +166,9 @@ fn pass_parents(@builtin(local_invocation_id) thread_0 : vec3<u32>)
             {
                 break;
             }
-            var _S3 : bool = tid_0 >= step_0;
+            var _S4 : bool = tid_0 >= step_0;
             var ap_0 : u32;
-            if(_S3)
+            if(_S4)
             {
                 ap_0 = g_parents_0[tid_0 - step_0];
             }
@@ -165,7 +177,7 @@ fn pass_parents(@builtin(local_invocation_id) thread_0 : vec3<u32>)
                 ap_0 = u32(0);
             }
             var ac_0 : u32;
-            if(_S3)
+            if(_S4)
             {
                 ac_0 = g_chunks_0[tid_0 - step_0];
             }
@@ -183,15 +195,15 @@ fn pass_parents(@builtin(local_invocation_id) thread_0 : vec3<u32>)
         {
             var p_0 : u32 = carry_p_0 + g_parents_0[tid_0] - fp_0;
             parents_0[p_0] = vec4<u32>(i_1, carry_c_0 + g_chunks_0[tid_0] - fc_0, u32(0), u32(0));
-            var _S4 : u32 = u32(3) * i_1;
-            var e0_0 : vec4<f32> = ctab_0[params_0.engine_base_0 + _S4];
-            var e1_0 : vec4<f32> = ctab_0[params_0.engine_base_0 + _S4 + u32(1)];
-            var e2_0 : vec4<f32> = ctab_0[params_0.engine_base_0 + _S4 + u32(2)];
+            var _S5 : u32 = u32(3) * i_1;
+            var e0_0 : vec4<f32> = ctab_0[params_0.engine_base_0 + _S5];
+            var e1_0 : vec4<f32> = ctab_0[params_0.engine_base_0 + _S5 + u32(1)];
+            var e2_0 : vec4<f32> = ctab_0[params_0.engine_base_0 + _S5 + u32(2)];
             var body_0 : vec4<u32> = (bitcast<vec4<u32>>((e0_0)));
             islands_of_0[p_0] = vec4<u32>(r_0.x, body_0.y, body_0.z, body_0.w);
-            var _S5 : u32 = u32(2) * p_0;
-            parent_bodies_0[_S5] = vec4<f32>(e0_0.x, e2_0.xyz);
-            parent_bodies_0[_S5 + u32(1)] = vec4<f32>(- e1_0.x, - e1_0.y, - e1_0.z, e1_0.w);
+            var _S6 : u32 = u32(2) * p_0;
+            parent_bodies_0[_S6] = vec4<f32>(e0_0.x, e2_0.xyz);
+            parent_bodies_0[_S6 + u32(1)] = vec4<f32>(- e1_0.x, - e1_0.y, - e1_0.z, e1_0.w);
         }
         var tp_0 : u32 = g_parents_0[i32(1023)];
         var tc_0 : u32 = g_chunks_0[i32(1023)];
@@ -234,8 +246,8 @@ fn pass_parents(@builtin(local_invocation_id) thread_0 : vec3<u32>)
 @workgroup_size(256, 1, 1)
 fn pass_whole(@builtin(global_invocation_id) id_0 : vec3<u32>)
 {
-    var _S6 : u32 = id_0.x;
-    var k_0 : u32 = _S6;
+    var _S7 : u32 = id_0.x;
+    var k_0 : u32 = _S7;
     loop
     {
         if(k_0 < (params_0.island_float4s_0))
@@ -248,7 +260,7 @@ fn pass_whole(@builtin(global_invocation_id) id_0 : vec3<u32>)
         old_islands_0[k_0] = islands_0[k_0];
         k_0 = k_0 + u32(65536);
     }
-    k_0 = _S6;
+    k_0 = _S7;
     loop
     {
         if(k_0 < (params_0.index_words_0))
@@ -263,7 +275,7 @@ fn pass_whole(@builtin(global_invocation_id) id_0 : vec3<u32>)
     }
     if((params_0.resident_0) != u32(0))
     {
-        k_0 = _S6;
+        k_0 = _S7;
         loop
         {
             if(k_0 < (params_0.engine_float4s_0))
@@ -277,7 +289,7 @@ fn pass_whole(@builtin(global_invocation_id) id_0 : vec3<u32>)
             k_0 = k_0 + u32(65536);
         }
     }
-    k_0 = _S6;
+    k_0 = _S7;
     loop
     {
         if(k_0 < (params_0.copy_float4s_0))
@@ -295,24 +307,24 @@ fn pass_whole(@builtin(global_invocation_id) id_0 : vec3<u32>)
 
 @compute
 @workgroup_size(256, 1, 1)
-fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invocation_id) thread_1 : vec3<u32>)
+fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invocation_id) thread_2 : vec3<u32>)
 {
-    var _S7 : u32;
     var _S8 : u32;
+    var _S9 : u32;
     var p_1 : u32 = group_0.x;
     if(p_1 >= control_0[u32(1)])
     {
         return;
     }
     var r_1 : vec4<u32> = island_range_0(parents_0[p_1].x);
-    var t_0 : u32 = thread_1.x;
-    var _S9 : u32 = r_1.x;
-    var k_1 : u32 = params_0.chunk_words_0 * _S9 + t_0;
+    var t_0 : u32 = thread_2.x;
+    var _S10 : u32 = r_1.x;
+    var k_1 : u32 = params_0.chunk_words_0 * _S10 + t_0;
     loop
     {
-        var _S10 : u32 = r_1.y;
-        _S7 = _S10;
-        if(k_1 < (params_0.chunk_words_0 * _S10))
+        var _S11 : u32 = r_1.y;
+        _S8 = _S11;
+        if(k_1 < (params_0.chunk_words_0 * _S11))
         {
         }
         else
@@ -322,10 +334,10 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         old_chunks_0[k_1] = chunks_0[k_1];
         k_1 = k_1 + u32(256);
     }
-    k_1 = u32(4) * _S9 + t_0;
+    k_1 = u32(4) * _S10 + t_0;
     loop
     {
-        if(k_1 < (u32(4) * _S7))
+        if(k_1 < (u32(4) * _S8))
         {
         }
         else
@@ -335,13 +347,13 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         old_state_0[k_1] = state_0[k_1];
         k_1 = k_1 + u32(256);
     }
-    var _S11 : u32 = r_1.z;
-    k_1 = params_0.bond_words_0 * _S11 + t_0;
+    var _S12 : u32 = r_1.z;
+    k_1 = params_0.bond_words_0 * _S12 + t_0;
     loop
     {
-        var _S12 : u32 = r_1.w;
-        _S8 = _S12;
-        if(k_1 < (params_0.bond_words_0 * _S12))
+        var _S13 : u32 = r_1.w;
+        _S9 = _S13;
+        if(k_1 < (params_0.bond_words_0 * _S13))
         {
         }
         else
@@ -351,10 +363,10 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         old_bonds_0[k_1] = bonds_0[k_1];
         k_1 = k_1 + u32(256);
     }
-    k_1 = params_0.dyn_words_0 * _S11 + t_0;
+    k_1 = params_0.dyn_words_0 * _S12 + t_0;
     loop
     {
-        if(k_1 < (params_0.dyn_words_0 * _S8))
+        if(k_1 < (params_0.dyn_words_0 * _S9))
         {
         }
         else
@@ -368,10 +380,10 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     {
         return;
     }
-    var c_0 : u32 = _S9 + t_0;
+    var c_0 : u32 = _S10 + t_0;
     loop
     {
-        if(c_0 < _S7)
+        if(c_0 < _S8)
         {
         }
         else
@@ -379,16 +391,16 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
             break;
         }
         old_ctab_0[params_0.props_base_0 + c_0] = ctab_0[params_0.props_base_0 + c_0];
-        var _S13 : u32 = u32(2) * c_0;
-        old_ctab_0[params_0.eload_base_0 + _S13] = ctab_0[params_0.eload_base_0 + _S13];
-        old_ctab_0[params_0.eload_base_0 + _S13 + u32(1)] = ctab_0[params_0.eload_base_0 + _S13 + u32(1)];
+        var _S14 : u32 = u32(2) * c_0;
+        old_ctab_0[params_0.eload_base_0 + _S14] = ctab_0[params_0.eload_base_0 + _S14];
+        old_ctab_0[params_0.eload_base_0 + _S14 + u32(1)] = ctab_0[params_0.eload_base_0 + _S14 + u32(1)];
         old_ctab_0[params_0.pulse_count_base_0 + c_0] = ctab_0[params_0.pulse_count_base_0 + c_0];
         c_0 = c_0 + u32(256);
     }
-    k_1 = u32(3) * params_0.pulse_cap_0 * _S9 + t_0;
+    k_1 = u32(3) * params_0.pulse_cap_0 * _S10 + t_0;
     loop
     {
-        if(k_1 < (u32(3) * params_0.pulse_cap_0 * _S7))
+        if(k_1 < (u32(3) * params_0.pulse_cap_0 * _S8))
         {
         }
         else
@@ -405,16 +417,16 @@ fn pass_snapshot(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
 @workgroup_size(1, 1, 1)
 fn pass_finish(@builtin(global_invocation_id) id_1 : vec3<u32>)
 {
-    var _S14 : bool;
+    var _S15 : bool;
     if(control_0[u32(1)] == u32(0))
     {
-        _S14 = true;
+        _S15 = true;
     }
     else
     {
-        _S14 = control_0[u32(0)] != u32(0);
+        _S15 = control_0[u32(0)] != u32(0);
     }
-    if(_S14)
+    if(_S15)
     {
         return;
     }
@@ -423,9 +435,9 @@ fn pass_finish(@builtin(global_invocation_id) id_1 : vec3<u32>)
     counters_0[i32(1)] = control_0[u32(8)];
     counters_0[i32(2)] = control_0[u32(9)];
     counters_0[i32(3)] = control_0[u32(10)];
-    var _S15 : u32 = max(live_0, u32(1));
-    island_args_0[i32(0)] = vec4<u32>(_S15, u32(1), u32(1), u32(0));
-    island_args_0[i32(1)] = vec4<u32>((_S15 + u32(63)) / u32(64), u32(1), u32(1), u32(0));
+    var _S16 : u32 = max(live_0, u32(1));
+    island_args_0[i32(0)] = vec4<u32>(_S16, u32(1), u32(1), u32(0));
+    island_args_0[i32(1)] = vec4<u32>((_S16 + u32(63)) / u32(64), u32(1), u32(1), u32(0));
     if((params_0.resume_0) != u32(0))
     {
         status_0[u32(0)] = u32(1);
