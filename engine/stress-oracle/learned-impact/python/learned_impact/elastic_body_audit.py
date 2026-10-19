@@ -63,11 +63,13 @@ def run(args):
             row = {'source': str(path), 'source_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
                    'cluster': index, 'chunks': graph.n, 'bonds': len(graph.stiffness), 'dof': int(free.sum()),
                    'parity': parity, 'spectral_bound': bound, 'degree': learned.degree,
-                   'steps': 32, 'dt_s': dt, 'certified_max_dt_s': max_dt,
-                   'minimum_calls_for_60hz_frame_with_current_operator': math.ceil((1/60)/max_dt) if max_dt else 1,
+                   'steps': 32, 'dt_s': dt, 'spectral_domain_max_dt_s': max_dt,
+                   'calls_to_cover_16_67ms_using_spectral_bound': math.ceil((1/60)/max_dt) if max_dt else 1,
                    'max_relative_work_balance_defect': defect, 'max_relative_state_energy_error': state_error,
-                   'position_rotation_rmse': float((actual.displacement-expected.displacement).square().mean().sqrt()),
-                   'velocity_angular_velocity_rmse': float((actual.velocity-expected.velocity).square().mean().sqrt())}
+                   'translation_rmse_m': float((actual.displacement-expected.displacement).reshape(-1, graph.n, 6)[..., :3].square().mean().sqrt()),
+                   'rotation_rmse_rad': float((actual.displacement-expected.displacement).reshape(-1, graph.n, 6)[..., 3:].square().mean().sqrt()),
+                   'velocity_rmse_m_s': float((actual.velocity-expected.velocity).reshape(-1, graph.n, 6)[..., :3].square().mean().sqrt()),
+                   'angular_velocity_rmse_rad_s': float((actual.velocity-expected.velocity).reshape(-1, graph.n, 6)[..., 3:].square().mean().sqrt())}
             results.append(row)
             print(json.dumps(row), flush=True)
     report = {'status': 'completed', 'scope': 'Frozen native six-DOF linear mechanics and exact modal teacher. No damping, contact, fracture, corotation, native rollout or speed claim.',

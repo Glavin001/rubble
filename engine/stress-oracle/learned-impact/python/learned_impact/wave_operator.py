@@ -10,6 +10,7 @@ destruction solver, and polynomial degree remains sequential graph work.
 """
 import argparse
 import json
+import math
 from pathlib import Path
 import shutil
 
@@ -46,10 +47,19 @@ class CoupledWaveOperator:
     def __init__(self, coefficients, dt, stiffness=100.):
         if coefficients.ndim != 1 or len(coefficients) % 2 or len(coefficients) < 2:
             raise ValueError('two equally sized nonempty polynomial coefficient vectors required')
-        if not torch.isfinite(coefficients).all() or dt <= 0 or stiffness <= 0:
+        if not torch.isfinite(coefficients).all() or not math.isfinite(dt) or not math.isfinite(stiffness) or dt <= 0 or stiffness <= 0:
             raise ValueError('invalid physical operator')
         self.coefficients, self.dt, self.stiffness = coefficients, dt, stiffness
         self.degree = len(coefficients)//2
+
+    def require_constant_force_consistency(self):
+        """The forced rigid mode needs C'(0)=-dt²/2, beyond C(0)=1."""
+        a = self.coefficients[:self.degree].double()
+        index = torch.arange(1, self.degree+1, dtype=a.dtype, device=a.device)
+        derivative = ((2/(4*self.stiffness))*((-1.)**(index-1))*index.square()*a).sum()
+        target = -.5*self.dt*self.dt
+        if not math.isclose(float(derivative), target, rel_tol=1e-8, abs_tol=1e-14):
+            raise ValueError('operator was not fitted with constant-force consistency')
 
     def design(self, state):
         u, v = state.displacement, state.velocity

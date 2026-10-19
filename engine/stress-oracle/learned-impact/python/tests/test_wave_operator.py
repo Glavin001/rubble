@@ -31,3 +31,11 @@ def test_shared_propagators_couple_displacement_and_velocity():
     from_velocity = model.step(ChainState(zero, x))
     torch.testing.assert_close(from_displacement.displacement, from_velocity.velocity, atol=1e-12, rtol=1e-12)
     torch.testing.assert_close(from_displacement.velocity, -stiffness_apply(from_velocity.displacement), atol=1e-10, rtol=1e-12)
+
+
+def test_unconstrained_force_response_and_nonfinite_domains_are_rejected():
+    with pytest.raises(ValueError, match='constant-force consistency'):
+        CoupledWaveOperator(torch.zeros(8, dtype=torch.float64), .8).require_constant_force_consistency()
+    for dt, stiffness in [(float('nan'), 100.), (.8, float('inf'))]:
+        with pytest.raises(ValueError, match='invalid physical operator'):
+            CoupledWaveOperator(torch.zeros(8), dt, stiffness)

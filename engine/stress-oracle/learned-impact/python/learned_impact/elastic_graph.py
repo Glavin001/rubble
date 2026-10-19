@@ -117,6 +117,7 @@ class ElasticGraphTransition:
         next_u = u+self.learned.dt*v+cu+sv
         next_v = v+cv-self.graph.apply(self.learned.dt*u+su)
         if constant_force is not None:
+            self.learned.require_constant_force_consistency()
             if constant_force.shape != state.displacement.shape or not torch.isfinite(constant_force).all():
                 raise ValueError('finite constant force must match physical state shape')
             force = constant_force*(~self.graph.fixed)/root

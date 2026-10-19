@@ -135,6 +135,7 @@ class ElasticBodyTransition(ElasticGraphTransition):
         ny = y+self.learned.dt*w+(py*a[:, None]+pw*b[:, None]).sum(-2)
         nw = w+(pw*a[:, None]).sum(-2)-self.apply(self.learned.dt*y+(py*b[:, None]).sum(-2))
         if constant_force is not None:
+            self.learned.require_constant_force_consistency()
             if constant_force.shape != u.shape or not torch.isfinite(constant_force).all():
                 raise ValueError('finite constant force must match physical state shape')
             f = self.scale**2*self.body.weighted_force(constant_force)

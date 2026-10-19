@@ -41,6 +41,9 @@ def test_six_dof_rigid_modes_work_and_force_moment_balance():
 def test_physical_time_scaling_matches_equivalent_dimensionless_system():
     graph = beam()
     model = CoupledWaveOperator(torch.arange(8, dtype=torch.float64)*.0001, .8)
+    indices = torch.arange(1, 5, dtype=torch.float64)
+    derivative = 2/400*((-1.)**(indices-1))*indices.square()
+    model.coefficients[0] = (-.5*.8**2-(model.coefficients[1:4]*derivative[1:]).sum())/derivative[0]
     state = ChainState(torch.arange(12, dtype=torch.float64)*.001, torch.arange(12, dtype=torch.float64)*.01)
     force = torch.arange(12, dtype=torch.float64)*.1
     scale = .025
