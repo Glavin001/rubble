@@ -72,15 +72,28 @@ pub fn validate_event(root: &Path) -> Result<Manifest, ValidationError> {
         let cat = Catalog::load(&dir.join("catalog.json")).map_err(err)?;
         require_shape(&cat, "chunk_state", "f32", &[n, CHUNK_STATE_DIM])?;
         require_shape(&cat, "chunk_load_bins", "f32", &[n, K, LOCAL6_DIM])?;
+        require_shape(&cat, "chunk_contact", "i32", &[n])?;
+        require_shape(&cat, "chunk_gravity_local", "f32", &[n, 3])?;
         require_shape(&cat, "bond_joint_state", "f32", &[e, JOINT_STATE_DIM])?;
+        require_shape(&cat, "bond_force_prev", "f32", &[e, LOCAL6_DIM])?;
         require_shape(&cat, "bond_qs_force", "f32", &[e, LOCAL6_DIM])?;
         require_shape(&cat, "bond_fail_class", "i32", &[e])?;
         require_shape(&cat, "bond_peak_util", "f32", &[e])?;
+        require_shape(&cat, "bond_fail_mode", "i32", &[e])?;
+        require_shape(&cat, "bond_joint_state_end", "f32", &[e, JOINT_STATE_DIM])?;
+        require_shape(&cat, "bond_force_end", "f32", &[e, LOCAL6_DIM])?;
         require_shape(&cat, "chunk_state_delta", "f32", &[n, CHUNK_STATE_DIM])?;
         let classes = catalog::read_i32(&dir, cat.arrays.get("bond_fail_class").unwrap()).map_err(err)?;
         for (i, &c) in classes.iter().enumerate() {
             if c < 0 || c as usize > K {
                 return Err(err(format!("frame {fi} bond_fail_class[{i}]={c}")));
+            }
+        }
+        let modes = catalog::read_i32(&dir, cat.arrays.get("bond_fail_mode").unwrap()).map_err(err)?;
+        for (i, &m) in modes.iter().enumerate() {
+            // SCHEMA: 0 none, 1 tension, 2 shear, 3 compression, 4 buckling, 5 rebar
+            if m < 0 || m > 5 {
+                return Err(err(format!("frame {fi} bond_fail_mode[{i}]={m}")));
             }
         }
         // Ensure binaries exist and match byte length.

@@ -172,11 +172,15 @@ impl OracleSession {
         }
         let mut fail_class = vec![0i32; e];
         let mut fail_mode = vec![0i32; e];
+        // First break wins within the frame (ring-out / multi-event must not overwrite bin).
         for ev in &world.solver.events[pending.event_cursor..] {
             if let SolverEvent::Broken { time, structure, bond, mode, .. } = ev {
                 let Some(ei) = self.bond_keys.iter().position(|&k| k == (*structure, *bond)) else {
                     continue;
                 };
+                if fail_class[ei] != 0 {
+                    continue;
+                }
                 let frac = ((*time - pending.t0) / dt).clamp(0.0, 0.999999);
                 let bin = (frac * K as f64).floor() as i32 + 1;
                 fail_class[ei] = bin;

@@ -1,15 +1,19 @@
-// Lean-train MGN-T inference for the Fracture lab (Slang → WGSL → WebGPU).
-// H=48, P=64, FFN=4H. Packed to ≤10 storage buffers (Chrome WebGPU limit).
-// Compute-only bond mode: timings only; outputs are discarded.
+// Lean MGN-T inference for the Fracture lab (Slang → WGSL → WebGPU / Metal).
+// Matches train defaults: H=48, P=16, NODE_IN=46, EDGE_IN=28, 2+2 MP, 1 attn.
+// Weight blob layout: learned-impact-slang/1 (see learned_impact/export.py pack_slang).
+// Bond mode is compute + viz: predictions are read back for HUD; they do not drive breaks.
 
 static const uint H = 48;
-static const uint P = 64;
+static const uint P = 16;
 static const uint H2 = 192;
-static const uint FEAT_IN = 16;
+static const uint NODE_IN = 46;
+static const uint EDGE_IN = 28;
+static const uint FAIL_BINS = 5; // K+1
+static const uint OUT_PER_EDGE = 6; // FAIL_BINS logits + util
 static const uint N_HEADS = 4;
 static const uint HD = 12;
 static const uint WG = 256;
-static const uint WG_TOK = 64;
+static const uint WG_TOK = 16;
 
 struct Params
 {
@@ -63,23 +67,25 @@ uint csr_at(uint i) { return graph_u[params.off_csr + i]; }
 uint2 edge_ab(uint e) { uint b = params.off_edges + e * 2u; return uint2(graph_u[b], graph_u[b + 1u]); }
 uint node_isl(uint n) { return graph_u[params.off_node_island + n]; }
 
-float leaky(float x) { return x >= 0.0 ? x : 0.01 * x; }
+float silu(float x) { return x / (1.0 + exp(-clamp(x, -20.0, 20.0))); }
 float softplus(float x) { return x > 20.0 ? x : log(1.0 + exp(x)); }
 
-uint enc_bytes() { return H * FEAT_IN + H + H * H + H; }
+uint node_enc_bytes() { return H * NODE_IN + H + H * H + H; }
+uint edge_enc_bytes() { return H * EDGE_IN + H + H * H + H; }
 uint mp_edge_bytes() { return H * 3u * H + H + H * H + H; }
 uint mp_node_bytes() { return H * 2u * H + H + H * H + H; }
 uint mp_layer_bytes() { return mp_edge_bytes() + mp_node_bytes(); }
 uint mp_layers() { return params.mp_pre + params.mp_post; }
 uint off_node_enc() { return 0; }
-uint off_edge_enc() { return enc_bytes(); }
-uint off_mp_edge() { return 2u * enc_bytes() + params.block * mp_layer_bytes(); }
+uint off_edge_enc() { return node_enc_bytes(); }
+uint off_mp_edge() { return node_enc_bytes() + edge_enc_bytes() + params.block * mp_layer_bytes(); }
 uint off_mp_node() { return off_mp_edge() + mp_edge_bytes(); }
+// assign_w[P,H] + assign_b[P] + tau_w[H] + tau_b + qkv_w + qkv_b + out_w + out_b + ffn_up + ffn_down
 uint attn_stride()
 {
-    return P * H + H + 1u + 3u * H * H + 3u * H + H * H + H + H2 * H + H2 + H * H2 + H;
+    return P * H + P + H + 1u + 3u * H * H + 3u * H + H * H + H + H2 * H + H2 + H * H2 + H;
 }
-uint off_attn() { return 2u * enc_bytes() + mp_layers() * mp_layer_bytes(); }
+uint off_attn() { return node_enc_bytes() + edge_enc_bytes() + mp_layers() * mp_layer_bytes(); }
 uint off_decode() { return off_attn() + params.attn_blocks * attn_stride(); }
 
 float dot_h(uint row_base, in float x[H])
@@ -91,11 +97,20 @@ float dot_h(uint row_base, in float x[H])
     return s;
 }
 
-float dot_feat(uint row_base, in float x[FEAT_IN])
+float dot_node(uint row_base, in float x[NODE_IN])
 {
     float s = 0.0;
     [unroll]
-    for (uint i = 0; i < FEAT_IN; i++)
+    for (uint i = 0; i < NODE_IN; i++)
+        s += weights[row_base + i] * x[i];
+    return s;
+}
+
+float dot_edge(uint row_base, in float x[EDGE_IN])
+{
+    float s = 0.0;
+    [unroll]
+    for (uint i = 0; i < EDGE_IN; i++)
         s += weights[row_base + i] * x[i];
     return s;
 }
@@ -108,13 +123,13 @@ void encode_nodes_l1(uint3 id: SV_DispatchThreadID)
     if (n >= params.n_nodes)
         return;
     uint base = off_node_enc();
-    float xin[FEAT_IN];
+    float xin[NODE_IN];
     [unroll]
-    for (uint i = 0; i < FEAT_IN; i++)
-        xin[i] = node_in[n * FEAT_IN + i];
+    for (uint i = 0; i < NODE_IN; i++)
+        xin[i] = node_in[n * NODE_IN + i];
     [unroll]
     for (uint m = 0; m < H; m++)
-        out_set(n * H + m, leaky(weights[base + H * FEAT_IN + m] + dot_feat(base + m * FEAT_IN, xin)));
+        out_set(n * H + m, silu(weights[base + H * NODE_IN + m] + dot_node(base + m * NODE_IN, xin)));
 }
 
 [shader("compute")]
@@ -128,12 +143,12 @@ void encode_nodes_l2(uint3 id: SV_DispatchThreadID)
     uint n = idx / H;
     uint o = idx - n * H;
     uint base = off_node_enc();
-    uint b2 = base + H * FEAT_IN + H;
+    uint b2 = base + H * NODE_IN + H;
     float mid[H];
     [unroll]
     for (uint i = 0; i < H; i++)
         mid[i] = out_get(n * H + i);
-    node_x[n * H + o] = leaky(weights[b2 + H * H + o] + dot_h(b2 + o * H, mid));
+    node_x[n * H + o] = silu(weights[b2 + H * H + o] + dot_h(b2 + o * H, mid));
 }
 
 [shader("compute")]
@@ -144,13 +159,13 @@ void encode_edges_l1(uint3 id: SV_DispatchThreadID)
     if (e >= params.n_edges)
         return;
     uint base = off_edge_enc();
-    float xin[FEAT_IN];
+    float xin[EDGE_IN];
     [unroll]
-    for (uint i = 0; i < FEAT_IN; i++)
-        xin[i] = edge_in[e * FEAT_IN + i];
+    for (uint i = 0; i < EDGE_IN; i++)
+        xin[i] = edge_in[e * EDGE_IN + i];
     [unroll]
     for (uint m = 0; m < H; m++)
-        ffn_set(e * H + m, leaky(weights[base + H * FEAT_IN + m] + dot_feat(base + m * FEAT_IN, xin)));
+        ffn_set(e * H + m, silu(weights[base + H * EDGE_IN + m] + dot_edge(base + m * EDGE_IN, xin)));
 }
 
 [shader("compute")]
@@ -164,12 +179,12 @@ void encode_edges_l2(uint3 id: SV_DispatchThreadID)
     uint e = idx / H;
     uint o = idx - e * H;
     uint base = off_edge_enc();
-    uint b2 = base + H * FEAT_IN + H;
+    uint b2 = base + H * EDGE_IN + H;
     float mid[H];
     [unroll]
     for (uint i = 0; i < H; i++)
         mid[i] = ffn_get(e * H + i);
-    edge_x[e * H + o] = leaky(weights[b2 + H * H + o] + dot_h(b2 + o * H, mid));
+    edge_x[e * H + o] = silu(weights[b2 + H * H + o] + dot_h(b2 + o * H, mid));
 }
 
 [shader("compute")]
@@ -196,20 +211,21 @@ void mp_edges(uint3 id: SV_DispatchThreadID)
     [unroll]
     for (uint m = 0; m < H; m++)
     {
+        // PyTorch concat order: [node_a, node_b, edge]
         float s = weights[base + H * in_dim + m];
         [unroll]
         for (uint i = 0; i < H; i++)
         {
-            s += weights[base + m * in_dim + i] * ea[i];
-            s += weights[base + m * in_dim + H + i] * na[i];
-            s += weights[base + m * in_dim + 2u * H + i] * nb[i];
+            s += weights[base + m * in_dim + i] * na[i];
+            s += weights[base + m * in_dim + H + i] * nb[i];
+            s += weights[base + m * in_dim + 2u * H + i] * ea[i];
         }
-        mid[m] = leaky(s);
+        mid[m] = silu(s);
     }
     uint b2 = base + H * in_dim + H;
     [unroll]
     for (uint o = 0; o < H; o++)
-        edge_x[e * H + o] = ea[o] + leaky(weights[b2 + H * H + o] + dot_h(b2 + o * H, mid));
+        edge_x[e * H + o] = ea[o] + silu(weights[b2 + H * H + o] + dot_h(b2 + o * H, mid));
 }
 
 [shader("compute")]
@@ -249,13 +265,13 @@ void mp_nodes(uint3 id: SV_DispatchThreadID)
             s += weights[base + m * in_dim + i] * nx[i];
             s += weights[base + m * in_dim + H + i] * agg[i];
         }
-        mid[m] = leaky(s);
+        mid[m] = silu(s);
     }
     uint b2 = base + H * in_dim + H;
     float y[H];
     [unroll]
     for (uint o2 = 0; o2 < H; o2++)
-        y[o2] = nx[o2] + leaky(weights[b2 + H * H + o2] + dot_h(b2 + o2 * H, mid));
+        y[o2] = nx[o2] + silu(weights[b2 + H * H + o2] + dot_h(b2 + o2 * H, mid));
     float mean = 0.0;
     [unroll]
     for (uint m = 0; m < H; m++)
@@ -286,17 +302,18 @@ void attn_slice(uint3 id: SV_DispatchThreadID)
     [unroll]
     for (uint t = 0; t < H; t++)
         nx[t] = node_x[n * H + t];
-    float tau_logit = weights[base + P * H + H];
+    uint tau_base = base + P * H + P;
+    float tau_logit = weights[tau_base + H];
     [unroll]
     for (uint t = 0; t < H; t++)
-        tau_logit += weights[base + P * H + t] * nx[t];
+        tau_logit += weights[tau_base + t] * nx[t];
     float tau = 0.5 + softplus(tau_logit);
     float logits[P];
     float mmax = -1e30;
     [unroll]
     for (uint p = 0; p < P; p++)
     {
-        float s = 0.0;
+        float s = weights[base + P * H + p];
         [unroll]
         for (uint i = 0; i < H; i++)
             s += weights[base + p * H + i] * nx[i];
@@ -360,7 +377,7 @@ void attn_qkv(uint3 id: SV_DispatchThreadID)
     uint island = flat_tok / P;
     uint p = flat_tok - island * P;
     uint base = off_attn() + params.block * attn_stride();
-    uint qkv = base + P * H + H + 1u;
+    uint qkv = base + P * H + P + H + 1u;
     float tok[H];
     [unroll]
     for (uint i = 0; i < H; i++)
@@ -385,7 +402,7 @@ void attn_mha(uint3 id: SV_DispatchThreadID)
     float scale = rsqrt((float)HD);
     uint qbase = island * P * 3u * H;
     uint base = off_attn() + params.block * attn_stride();
-    uint out_w = base + P * H + H + 1u + 3u * H * H + 3u * H;
+    uint out_w = base + P * H + P + H + 1u + 3u * H * H + 3u * H;
     float out_row[H];
     [unroll]
     for (uint z = 0; z < H; z++)
@@ -470,12 +487,12 @@ void attn_ffn_up(uint3 id: SV_DispatchThreadID)
     for (uint i = 0; i < H; i++)
         y[i] = out_get(n * H + i);
     uint base = off_attn() + params.block * attn_stride();
-    uint ffn = base + P * H + H + 1u + 3u * H * H + 3u * H + H * H + H;
+    uint ffn = base + P * H + P + H + 1u + 3u * H * H + 3u * H + H * H + H;
     float s = weights[ffn + H2 * H + o];
     [unroll]
     for (uint i = 0; i < H; i++)
         s += weights[ffn + o * H + i] * y[i];
-    ffn_set(n * H2 + o, leaky(s));
+    ffn_set(n * H2 + o, silu(s));
 }
 
 [shader("compute")]
@@ -489,7 +506,7 @@ void attn_ffn_down(uint3 id: SV_DispatchThreadID)
     uint n = idx / H;
     uint o = idx - n * H;
     uint base = off_attn() + params.block * attn_stride();
-    uint ffn = base + P * H + H + 1u + 3u * H * H + 3u * H + H * H + H;
+    uint ffn = base + P * H + P + H + 1u + 3u * H * H + 3u * H + H * H + H;
     uint ffn2 = ffn + H2 * H + H2;
     float s2 = weights[ffn2 + H * H2 + o];
     [unroll]
@@ -500,22 +517,19 @@ void attn_ffn_down(uint3 id: SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(WG, 1, 1)]
-void decode(uint3 id: SV_DispatchThreadID)
+void decode_bonds(uint3 id: SV_DispatchThreadID)
 {
-    uint n = id.x;
-    if (n >= params.n_nodes)
+    uint e = id.x;
+    if (e >= params.n_edges)
         return;
     uint base = off_decode();
     float xin[H];
     [unroll]
     for (uint i = 0; i < H; i++)
-        xin[i] = node_x[n * H + i];
-    float mid[H];
+        xin[i] = edge_x[e * H + i];
     [unroll]
-    for (uint m = 0; m < H; m++)
-        mid[m] = leaky(weights[base + H * H + m] + dot_h(base + m * H, xin));
-    uint b2 = base + H * H + H;
-    [unroll]
-    for (uint o = 0; o < H; o++)
-        out_set(n * H + o, leaky(weights[b2 + H * H + o] + dot_h(b2 + o * H, mid)));
+    for (uint c = 0; c < FAIL_BINS; c++)
+        out_set(e * OUT_PER_EDGE + c, weights[base + FAIL_BINS * H + c] + dot_h(base + c * H, xin));
+    uint ub = base + FAIL_BINS * H + FAIL_BINS;
+    out_set(e * OUT_PER_EDGE + FAIL_BINS, weights[ub + H] + dot_h(ub, xin));
 }

@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 stress-ref = { path = "../stress-ref" }
 stress-gpu = { path = "../stress-gpu" }
+stress-learned = { path = "../stress-learned" }
 engine-gpu-wait = { path = "../../../crates/engine-gpu-wait" }
 stress-rubble = { path = "../stress-rubble", default-features = false, features = ["gpu"] }
 engine-fracture = { path = "../../../crates/engine-fracture" }

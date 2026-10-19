@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Learned-impact event schema, recorder, and smoke generator (training data side track)"
 
 [dependencies]
+rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 stress-ref = { path = "../stress-ref" }

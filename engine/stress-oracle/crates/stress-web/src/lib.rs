@@ -23,6 +23,8 @@ use std::cell::{Cell, RefCell};
 use engine_fracture::view::Orbit;
 use stress_gpu::gpu::Gpu;
 use stress_gpu::world::GpuWorld;
+use stress_learned::live::{pack_live_features, LiveFeatures};
+use stress_learned::{EDGE_IN, NODE_IN};
 use stress_ref::capability::Profile;
 use stress_ref::math::Vec3;
 use stress_ref::scene::{ImpactorDesc, ImpactorShape};
@@ -79,6 +81,11 @@ thread_local! {
     static MASS_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
     static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// Opt-in learned break gate: after load, analytic fracture is frozen; JS applies
+    /// fail-bin breaks via [`stress_break_edges`]. Does not alter `Profile::BlastParity`.
+    static LEARNED_GATE: Cell<bool> = const { Cell::new(false) };
+    static LEARNED_SNAP: RefCell<Option<LiveFeatures>> = const { RefCell::new(None) };
+    static PENDING_BREAKS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
@@ -190,6 +197,66 @@ pub fn stress_set_bond_strength_scale(scale: f64) {
     if scale.is_finite() && scale > 0.0 {
         STRENGTH_SCALE.set(scale);
     }
+}
+
+/// Enable the learned break gate for the next [`stress_load`]: QS/cascade still run, but
+/// `config.fracture` is cleared so only [`stress_break_edges`] disconnects bonds.
+#[wasm_bindgen]
+pub fn stress_set_learned_gate(on: bool) {
+    LEARNED_GATE.set(on);
+}
+
+#[wasm_bindgen]
+pub fn stress_learned_gate() -> bool {
+    LEARNED_GATE.get()
+}
+
+/// Pack MGN features from the last drawn mirror into the snapshot buffers. False if no world.
+#[wasm_bindgen]
+pub fn stress_learned_capture() -> bool {
+    WORLD.with_borrow(|w| {
+        let Some(l) = w.as_ref() else { return false };
+        let Some((mirror, _)) = l.view.as_ref() else { return false };
+        let live = pack_live_features(mirror);
+        LEARNED_SNAP.set(Some(live));
+        true
+    })
+}
+
+/// `[n_nodes, n_edges, NODE_IN, EDGE_IN]` from the last [`stress_learned_capture`].
+#[wasm_bindgen]
+pub fn stress_learned_dims() -> Vec<u32> {
+    LEARNED_SNAP.with_borrow(|s| match s {
+        Some(s) => vec![s.n_nodes as u32, s.n_edges as u32, NODE_IN as u32, EDGE_IN as u32],
+        None => vec![0, 0, NODE_IN as u32, EDGE_IN as u32],
+    })
+}
+
+#[wasm_bindgen]
+pub fn stress_learned_node_in() -> Vec<f32> {
+    LEARNED_SNAP.with_borrow(|s| s.as_ref().map(|s| s.node_in.clone()).unwrap_or_default())
+}
+
+#[wasm_bindgen]
+pub fn stress_learned_edge_in() -> Vec<f32> {
+    LEARNED_SNAP.with_borrow(|s| s.as_ref().map(|s| s.edge_in.clone()).unwrap_or_default())
+}
+
+#[wasm_bindgen]
+pub fn stress_learned_endpoints() -> Vec<i32> {
+    LEARNED_SNAP.with_borrow(|s| s.as_ref().map(|s| s.endpoints.clone()).unwrap_or_default())
+}
+
+/// Queue dense edge indices (into the last capture) to break on the next [`stress_break_edges`].
+#[wasm_bindgen]
+pub fn stress_set_pending_breaks(indices: Vec<u32>) {
+    PENDING_BREAKS.set(indices);
+}
+
+/// Documented feature gaps for the live pack (same string as `stress_learned::FEATURE_GAPS`).
+#[wasm_bindgen]
+pub fn stress_learned_feature_gaps() -> String {
+    stress_learned::FEATURE_GAPS.to_string()
 }
 
 /// Orbit the camera by a pointer drag (CSS pixels), as the lab's other modes.
@@ -311,6 +378,12 @@ fn load(level: u8) -> Result<(), String> {
         world.redo_fractured_frames = false;
         world.set_impact_islands(true);
         world.apply_profile(profile);
+        // Learned gate: keep QS/resting cascade, freeze analytic disconnects.
+        if LEARNED_GATE.get() {
+            world.solver.mirror.config.fracture = false;
+        }
+        LEARNED_SNAP.set(None);
+        PENDING_BREAKS.with_borrow_mut(|p| p.clear());
         let (mirror, _) = world.view_state(gpu);
         // Meshes for every chunk and for the shots to come.
         let renderer = Renderer::for_target(gpu, &mirror, &shot_meshes(&world), d.config.width, d.config.height, d.view_format);
@@ -420,6 +493,46 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                 );
             }
             Ok(())
+        })
+    })
+}
+
+/// Apply [`stress_set_pending_breaks`] against the last capture's bond keys, then rebuild.
+/// Called through `WebAssembly.promising` (downloads the GPU). Returns broken count + 1,
+/// or 0 with [`stress_error`].
+#[no_mangle]
+pub extern "C" fn stress_break_edges() -> u32 {
+    match break_pending_edges() {
+        Ok(n) => (n as u32).saturating_add(1),
+        Err(e) => fail(e),
+    }
+}
+
+fn break_pending_edges() -> Result<usize, String> {
+    let indices = PENDING_BREAKS.with_borrow_mut(std::mem::take);
+    if indices.is_empty() {
+        return Ok(0);
+    }
+    let bonds = LEARNED_SNAP.with_borrow(|s| -> Result<Vec<(usize, usize)>, String> {
+        let Some(snap) = s.as_ref() else {
+            return Err("stress_learned_capture first".to_string());
+        };
+        Ok(indices
+            .iter()
+            .filter_map(|&e| snap.bond_keys.get(e as usize).copied())
+            .collect())
+    })?;
+    if bonds.is_empty() {
+        return Ok(0);
+    }
+    DEVICE.with_borrow(|d| {
+        let d = d.as_ref().ok_or_else(|| "stress_init first".to_string())?;
+        WORLD.with_borrow_mut(|w| {
+            let l = w.as_mut().ok_or_else(|| "stress_load first".to_string())?;
+            let n = l.world.apply_external_breaks(&d.gpu, &bonds)?;
+            // Refresh the cached view so the next capture / draw sees splits.
+            l.view = Some(l.world.view_state(&d.gpu));
+            Ok(n)
         })
     })
 }

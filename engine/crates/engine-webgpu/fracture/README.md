@@ -83,12 +83,16 @@ and scroll to zoom. Impacts wake sleeping pieces. Reset reloads 16 shots.
 Sphere trajectories compensate for gravity to aim near the clicked scene depth.
 
 Live counters update approximately once per second: **TPS** counts completed
-physics ticks (target 120), **FPS** counts submitted render frames, and **Sim
-speed** is TPS / 120 (1× means real time). Pausing physics leaves rendering active,
-so TPS drops to zero while FPS continues. Measurements exclude loading and hidden
-tabs. Physics ms/tick includes CPU encoding/submission and the GPU/readback wait;
-these are wall-clock measurements, not GPU timestamps. Frame ms is the interval
-between rendered frames, including physics blocking, not isolated rendering cost.
+physics ticks, **FPS** counts submitted render frames, and **Sim speed** is
+TPS / physics Hz (1× means real time). **Physics rate** (sidebar) sets `dt = 1/Hz`
+and the real-time TPS target — default **120 Hz**; switch to **60 Hz** when the GPU
+tops out around 60–80 TPS so sim-speed can reach ~1×. The TPS subtitle always
+shows the target Hz next to sampled GPU time. Pausing physics leaves rendering
+active, so TPS drops to zero while FPS continues. Measurements exclude loading
+and hidden tabs. Physics ms/tick includes CPU encoding/submission and the
+GPU/readback wait; these are wall-clock measurements, not GPU timestamps. Frame
+ms is the interval between rendered frames, including physics blocking, not
+isolated rendering cost.
 
 The house includes four levels: **131 / 567 / 3,158 / 5,905 fragments**. The arch
 has **23 / 165 / 171 / 392**. Only one level is active at a time. The house defaults
@@ -179,17 +183,33 @@ level, camera and shot rule, so the three can be compared:
 | **None** (default) | Nothing: pieces start asleep and wake when hit | rubble (this page's WGSL host) |
 | **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
 | **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
-| **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
+| **Learned impact** | **Compute + HUD** — MGN-T forward (H=48, P=16, ~103k trained weights) on the house-1story pack graph. Loads `assets/learned-impact/weights.{bin,json}`; HUD shows **ms/forward**, peak-util stats, and fail-bin histogram. Does **not** break bonds (see Stress + learned) | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
+| **Stress + learned break gate** | Same stress-solver world (clusters + QS + GPU splits); analytic fracture frozen for the session; MGN-T fail-bin on the lab device drives `break_bonds` via stress-web. Prototype / CPU feature capture — see `stress-oracle/learned-impact/findings/stress-learned-gate-2026-10-19.md` | stress-web canvas + this page's WebGPU for MGN-T |
 
 **Learned impact mode.**
-- Physics is the same as **None** (unbonded fragments). The network run is timed and discarded.
-- Pack: `engine/stress-oracle/packs/house-1story.json` (319 chunks / 877 bonds).
+- Physics is the same as **None** (unbonded fragments). The network runs each frame for timing + prediction summary only.
+- Pack: `fracture/assets/house-1story.json` (symlink to `stress-oracle/packs/house-1story.json`, 319 chunks / 877 bonds). Feature vectors are schema-sized (`NODE_IN=46`, `EDGE_IN=28`) with pack fields filled and the rest zero — not a full oracle frame.
+- Serve this worktree’s `engine/crates/engine-webgpu` (e.g. `python3 -m http.server 8788 --bind 127.0.0.1`), not another checkout’s `web-dist`, or weights/WGSL/pack will 404.
+- **Weights:** `fracture/assets/learned-impact/` (`learned-impact-slang/1`). Export from a PyTorch checkpoint:
+  ```sh
+  cd engine/stress-oracle/learned-impact/python && source .venv/bin/activate
+  python -c "
+  from pathlib import Path
+  import torch
+  from learned_impact.export import export_slang_weights
+  sd = torch.load('/tmp/li-train-prove-house/state_dict.pt', map_location='cpu', weights_only=True)
+  export_slang_weights(sd, Path('../../../crates/engine-webgpu/fracture/assets/learned-impact'), h=48, p=16)
+  "
+  ```
+  `export_weights()` (used by train) writes the same Slang blob as `weights.bin` plus `state_dict.pt` / `weights_pytorch.*` for debugging.
+- Loader smoke: `weights.bin` byte length must match `weights.json` `n_bytes` / tensor shape product / Slang `weightCount(H,P)`.
 - Rebuild WGSL after editing the Slang:
   ```sh
   slangc engine/slang/kernels/learned_impact.slang -I engine/slang -target wgsl \
     -line-directive-mode none -o engine/crates/engine-webgpu/generated/wgsl/learned_impact.wgsl
   ```
 - Bindings are packed to 8 storage buffers so Chrome's per-stage limit is met.
+- **Native Metal later (plan M0):** load the same `weights.bin` into a Metal buffer and bind it to the Slang `weights` storage parameter; graph CSR / feature buffers match the WebGPU host layout in `learned-impact.mjs`. No separate weight format.
 
 **Stress solver mode.**
 - It runs the same Rust as the native reference (`stress-rubble` example

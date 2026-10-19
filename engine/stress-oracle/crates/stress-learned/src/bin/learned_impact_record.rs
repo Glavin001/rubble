@@ -13,6 +13,7 @@ use stress_learned::generate::resolve_pack;
 use stress_learned::{record_event, validate_event, RecordMeta};
 use stress_ref::builders;
 use stress_ref::scene::Scene;
+use stress_ref::showcases;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -67,10 +68,31 @@ fn load_scene(args: &[String]) -> (Scene, String, String) {
             let speed: f64 = flag_val(args, "--speed").and_then(|s| s.parse().ok()).unwrap_or(20.0);
             (builders::wall_impact(speed, "learned_wall"), "wall_b5".into(), format!("ram_{speed}mps"))
         }
-        "cantilever" => (builders::cantilever(8, "learned_cantilever"), "cantilever".into(), "tip_static".into()),
+        "cantilever" => {
+            let n: usize = flag_val(args, "--n").and_then(|s| s.parse().ok()).unwrap_or(8);
+            (builders::cantilever(n, "learned_cantilever"), "cantilever".into(), "tip_static".into())
+        }
         "tension" => (builders::bond_tension(), "bond_tension".into(), "axial_pull".into()),
+        "arch" => (
+            showcases::arch(Some(0.05), "learned_arch"),
+            "masonry_arch".into(),
+            "keystone_remove".into(),
+        ),
+        "frame" => (
+            builders::frame_column_removal(0.0, "learned_frame"),
+            "frame_column".into(),
+            "sudden_remove".into(),
+        ),
+        "house" => {
+            let speed: f64 = flag_val(args, "--speed").and_then(|s| s.parse().ok()).unwrap_or(10.0);
+            (
+                showcases::masonry_house(showcases::HouseEvent::Impact { speed }, "learned_house"),
+                "masonry_house".into(),
+                format!("car_{speed}mps"),
+            )
+        }
         other => {
-            eprintln!("unknown --scene {other} (wall|cantilever|tension) or use --pack");
+            eprintln!("unknown --scene {other} (wall|cantilever|tension|arch|frame|house) or --pack");
             std::process::exit(2);
         }
     }

@@ -1,0 +1,493 @@
+{
+  "format": "learned-impact-slang/1",
+  "h": 48,
+  "p": 16,
+  "node_in": 46,
+  "edge_in": 28,
+  "ffn_mult": 4,
+  "mp_layers": 4,
+  "attn_blocks": 1,
+  "fail_bins": 5,
+  "n_floats": 102839,
+  "n_bytes": 411356,
+  "tensors": [
+    {
+      "name": "encode_n.net.0.weight",
+      "shape": [
+        48,
+        46
+      ],
+      "dtype": "f32",
+      "offset": 0
+    },
+    {
+      "name": "encode_n.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 8832
+    },
+    {
+      "name": "encode_n.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 9024
+    },
+    {
+      "name": "encode_n.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 18240
+    },
+    {
+      "name": "encode_e.net.0.weight",
+      "shape": [
+        48,
+        28
+      ],
+      "dtype": "f32",
+      "offset": 18432
+    },
+    {
+      "name": "encode_e.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 23808
+    },
+    {
+      "name": "encode_e.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 24000
+    },
+    {
+      "name": "encode_e.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 33216
+    },
+    {
+      "name": "mp.0.edge.net.0.weight",
+      "shape": [
+        48,
+        144
+      ],
+      "dtype": "f32",
+      "offset": 33408
+    },
+    {
+      "name": "mp.0.edge.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 61056
+    },
+    {
+      "name": "mp.0.edge.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 61248
+    },
+    {
+      "name": "mp.0.edge.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 70464
+    },
+    {
+      "name": "mp.0.node.net.0.weight",
+      "shape": [
+        48,
+        96
+      ],
+      "dtype": "f32",
+      "offset": 70656
+    },
+    {
+      "name": "mp.0.node.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 89088
+    },
+    {
+      "name": "mp.0.node.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 89280
+    },
+    {
+      "name": "mp.0.node.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 98496
+    },
+    {
+      "name": "mp.1.edge.net.0.weight",
+      "shape": [
+        48,
+        144
+      ],
+      "dtype": "f32",
+      "offset": 98688
+    },
+    {
+      "name": "mp.1.edge.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 126336
+    },
+    {
+      "name": "mp.1.edge.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 126528
+    },
+    {
+      "name": "mp.1.edge.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 135744
+    },
+    {
+      "name": "mp.1.node.net.0.weight",
+      "shape": [
+        48,
+        96
+      ],
+      "dtype": "f32",
+      "offset": 135936
+    },
+    {
+      "name": "mp.1.node.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 154368
+    },
+    {
+      "name": "mp.1.node.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 154560
+    },
+    {
+      "name": "mp.1.node.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 163776
+    },
+    {
+      "name": "mp.2.edge.net.0.weight",
+      "shape": [
+        48,
+        144
+      ],
+      "dtype": "f32",
+      "offset": 163968
+    },
+    {
+      "name": "mp.2.edge.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 191616
+    },
+    {
+      "name": "mp.2.edge.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 191808
+    },
+    {
+      "name": "mp.2.edge.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 201024
+    },
+    {
+      "name": "mp.2.node.net.0.weight",
+      "shape": [
+        48,
+        96
+      ],
+      "dtype": "f32",
+      "offset": 201216
+    },
+    {
+      "name": "mp.2.node.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 219648
+    },
+    {
+      "name": "mp.2.node.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 219840
+    },
+    {
+      "name": "mp.2.node.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 229056
+    },
+    {
+      "name": "mp.3.edge.net.0.weight",
+      "shape": [
+        48,
+        144
+      ],
+      "dtype": "f32",
+      "offset": 229248
+    },
+    {
+      "name": "mp.3.edge.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 256896
+    },
+    {
+      "name": "mp.3.edge.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 257088
+    },
+    {
+      "name": "mp.3.edge.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 266304
+    },
+    {
+      "name": "mp.3.node.net.0.weight",
+      "shape": [
+        48,
+        96
+      ],
+      "dtype": "f32",
+      "offset": 266496
+    },
+    {
+      "name": "mp.3.node.net.0.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 284928
+    },
+    {
+      "name": "mp.3.node.net.2.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 285120
+    },
+    {
+      "name": "mp.3.node.net.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 294336
+    },
+    {
+      "name": "attn.0.assign.weight",
+      "shape": [
+        16,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 294528
+    },
+    {
+      "name": "attn.0.assign.bias",
+      "shape": [
+        16
+      ],
+      "dtype": "f32",
+      "offset": 297600
+    },
+    {
+      "name": "attn.0.tau.weight",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 297664
+    },
+    {
+      "name": "attn.0.tau.bias",
+      "shape": [
+        1
+      ],
+      "dtype": "f32",
+      "offset": 297856
+    },
+    {
+      "name": "attn.0.qkv.weight",
+      "shape": [
+        3,
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 297860
+    },
+    {
+      "name": "attn.0.qkv.bias",
+      "shape": [
+        3,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 325508
+    },
+    {
+      "name": "attn.0.out.weight",
+      "shape": [
+        48,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 326084
+    },
+    {
+      "name": "attn.0.out.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 335300
+    },
+    {
+      "name": "attn.0.ffn.0.weight",
+      "shape": [
+        192,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 335492
+    },
+    {
+      "name": "attn.0.ffn.0.bias",
+      "shape": [
+        192
+      ],
+      "dtype": "f32",
+      "offset": 372356
+    },
+    {
+      "name": "attn.0.ffn.2.weight",
+      "shape": [
+        48,
+        192
+      ],
+      "dtype": "f32",
+      "offset": 373124
+    },
+    {
+      "name": "attn.0.ffn.2.bias",
+      "shape": [
+        48
+      ],
+      "dtype": "f32",
+      "offset": 409988
+    },
+    {
+      "name": "bond_fail.weight",
+      "shape": [
+        5,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 410180
+    },
+    {
+      "name": "bond_fail.bias",
+      "shape": [
+        5
+      ],
+      "dtype": "f32",
+      "offset": 411140
+    },
+    {
+      "name": "bond_util.weight",
+      "shape": [
+        1,
+        48
+      ],
+      "dtype": "f32",
+      "offset": 411160
+    },
+    {
+      "name": "bond_util.bias",
+      "shape": [
+        1
+      ],
+      "dtype": "f32",
+      "offset": 411352
+    }
+  ],
+  "notes": "Flat f32 LE blob for learned_impact.slang. LayerNorm affine / chunk_delta omitted. Native Metal loads the same weights.bin via a storage buffer bind."
+}

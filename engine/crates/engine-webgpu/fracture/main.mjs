@@ -23,11 +23,19 @@ let sliceRate=1,sliceCredit=0,frameEma=FRAME_BUDGET_MS;
 let workDone=[{done:true},{done:true}];
 let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=null,packBytes=null;
 // Bond mode (the Bonds menu): 'none' (pieces sleep until hit), 'd6' (breakable D6
-// joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), or 'learned'
-// (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays unbonded).
+// joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), 'stress-learned'
+// (same stress world + MGN-T fail-bin → break_bonds gate), or 'learned'
+// (MGN-T forward + HUD preds on this page's WebGPU; rubble stays unbonded).
 const bondMode=()=>$('bond-mode').value;
+const isStressMode=()=>{const m=bondMode();return m==='stress'||m==='stress-learned'};
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
-let learned=null,learnedMs=0,learnedBusy=false;
+let learned=null,learnedMs=0,learnedBusy=false,learnedGateBroken=0;
+function learnedHudLine(ms=learnedMs){
+ if(!learned)return '';
+ const s=learned.lastSummary;
+ const pred=s?` · util μ=${s.utilMean.toFixed(2)} max=${s.utilMax.toFixed(2)} · fail-bin≠0 ${(100*s.failishFrac).toFixed(0)}% [${s.failHist.join(',')}]`:'';
+ return `learned ${ms.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n/${learned.graph.nEdges} e · ${learned.params} w (${learned.weightSource})${pred}`;
+}
 // The bond-graph and sleep-colour views are this page's renderer's; the stress mode draws
 // with its own (Rust), which has neither: the boxes are off there, saying so.
 const STRESS_VIEW_NOTE='Not in the stress-solver mode: it draws with its own renderer';
@@ -43,8 +51,26 @@ function applyBallMass(){
  $('ball-mass-value').textContent=`×${k>=1?k:`1/${1/k}`}${kg?` · ${Math.round(kg).toLocaleString()} kg`:''}`;
  if(stressOn)stress?.setShotMassScale(k);else if(sim&&scene?.projectileMass)sim.setProjectileMass(scene.projectileMass*k);
 }
-// Physics ticks per second follow the scene's dt (120 Hz unless the scene says otherwise).
-const stepHz=()=>Math.round(1/(scene?.params?.dt||1/120));
+// Physics Hz = 1/dt. Real-time sim-speed needs TPS ≈ this rate (not display FPS).
+// Default 120; switch to 60 when the GPU caps ~60–80 TPS so 1× wall-clock is reachable.
+const physicsHz=()=>Number($('physics-hz')?.value)||120;
+const stepHz=()=>Math.round(1/(scene?.params?.dt||1/physicsHz()));
+function applyPhysicsHz(){
+ const hz=physicsHz(),dt=1/hz;
+ if(scene?.params)scene.params={...scene.params,dt};
+ if(sim)sim.setParams({dt});
+ accumulator=0;last=0;rates.reset();
+ $('step-ms').textContent=stepMsHud(null);
+}
+function stepMsHud(value){
+ const hz=stepHz(),tgt=`target ${hz} TPS`;
+ if(learned)return `${learnedHudLine()} · ${tgt}`;
+ if(value&&!value.stepMs&&sim?.counters.awake===0)return `all asleep · no GPU work · ${tgt}`;
+ const tickMs=sim?.gpuTickMs;
+ if(value&&tickMs)return `${tickMs.toFixed(1)} ms GPU/tick · max ${Math.floor(1000/tickMs)} TPS · ${tgt}`;
+ if(value?.stepMs)return `${value.stepMs.toFixed(1)} ms/tick · ${tgt}`;
+ return tgt;
+}
 const rates=createRates(value=>{
  currentRates=value;
  $('tps').textContent=value?value.tps.toFixed(value.tps>0&&value.tps<10?1:0):'—';
@@ -52,21 +78,19 @@ const rates=createRates(value=>{
  $('sim-speed').textContent=value?`${value.speed.toFixed(2)}×`:'—';
  // GPU time from timestamps (sampled ticks and frames) and the rate it alone
  // would allow if nothing else used the GPU (physics and rendering share it).
- const tickMs=sim?.gpuTickMs,frameMs=renderer?.gpuFrameMs;
- $('step-ms').textContent=learned?`learned ${learnedMs.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`:
-  value&&!value.stepMs&&sim?.counters.awake===0?'all asleep · no GPU work':
-  value&&tickMs?`${tickMs.toFixed(1)} ms GPU/tick · max ${Math.floor(1000/tickMs)} TPS`:
-  value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:`target ${stepHz()} TPS`;
+ const frameMs=renderer?.gpuFrameMs;
+ $('step-ms').textContent=stepMsHud(value);
  $('frame-ms').textContent=value&&frameMs?`${frameMs.toFixed(1)} ms GPU/frame · max ${Math.floor(1000/frameMs)} FPS`:
   value?`${value.frameMs.toFixed(1)} ms/frame`:'frames / second';
  // Per tick: CPU time encoding and submitting the GPU work, then time spent
  // waiting on the GPU (the readback, or a full queue of overlapped ticks).
  // Sliced ticks run between frames, so no wait is measured for them.
- $('timing').textContent=!value?.stepMs?'TPS counts physics ticks; FPS counts rendered frames.':
+ $('timing').textContent=!value?.stepMs?`TPS counts physics ticks (need ~${stepHz()}/s for 1×); FPS counts rendered frames.`:
   value.sliced?`Physics per tick: ${value.encodeMs.toFixed(1)} ms CPU encode; GPU work spread across frames`:
   `Physics per tick: ${value.encodeMs.toFixed(1)} ms CPU encode + ${value.waitMs.toFixed(1)} ms waiting on the GPU`;
 },undefined,()=>stepHz());
 document.addEventListener('visibilitychange',()=>{last=0;accumulator=0;rates.reset()});
+$('physics-hz').onchange=()=>applyPhysicsHz();
 const setStatus=text=>{status.textContent=text;status.classList.remove('error')};
 const fail=e=>{console.error(e);running=false;status.textContent=e.message;status.classList.add('error');$('release').textContent=released?'Resume':'Start simulation'};
 const controls=enabled=>{enabled||=stressOn&&!loading;for(const id of ['release','reset','level','metadata','fire'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
@@ -82,7 +106,7 @@ async function loadLevel(level){
   // Settle one house under its own weight first, so every copy starts asleep in
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
-  if(bondMode()==='stress')return loadStress(level);
+  if(isStressMode())return loadStress(level);
   stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;viewOptions(false);
   learned?.dispose();learned=null;learnedMs=0;
   const built=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
@@ -93,19 +117,19 @@ async function loadLevel(level){
   next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- renderer.colorMode=$('show-sleep').checked?1:0;applyBallMass();
+ renderer.colorMode=$('show-sleep').checked?1:0;applyPhysicsHz();applyBallMass();
  if(bondMode()==='learned'){
-  setStatus('Loading learned-impact kernels (Slang→WGSL)…');
+  setStatus('Loading learned-impact kernels + trained weights…');
   const {createLearnedImpact}=await import('./learned-impact.mjs');
   learned=await createLearnedImpact(device,{status:setStatus});
-  learnedMs=await learned.run();
+  learnedMs=await learned.run({readback:true});
  }
  const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=procedural?scene.pieces*copies:scene.hullCount;$('bonds').textContent=scene.bondCount*copies;$('release').textContent='Start simulation';
  $('fire').hidden=!scene.rowShot;$('awake').textContent='0';$('contacts').textContent='0';
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
  const what=copies>1?`${copies} houses · ${scene.bodyCount-1-scene.projectileCount} bodies · `:'';
  const source=procedural==='pack'?`scene pack · ${scene.pieces} nodes`:procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials${skipped}`;
- const learnedNote=learned?` · learned-impact ${learnedMs.toFixed(2)} ms/fwd (${learned.graph.nNodes} chunks, ${learned.params} weights, compute only)`:'';
+ const learnedNote=learned?` · ${learnedHudLine()}`:'';
  setStatus(`${what}${source}${learnedNote} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
 // The stress-solver mode, built and run by stress-web: a GLB's level (one copy of the
@@ -115,23 +139,35 @@ async function loadStress(level){
  // A fracture GLB's level (one copy of the structure), or the cuboid houses in their
  // sample's layout (every copy). Scene packs are not in this mode yet.
  const cuboid=procedural==='cuboid';
+ const gate=bondMode()==='stress-learned';
  if(!cuboid&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB or the cuboid houses: pick one of those scenes.');
- learned?.dispose();learned=null;learnedMs=0;
+ learned?.dispose();learned=null;learnedMs=0;learnedGateBroken=0;
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
  $('view').hidden=true;$('stress-view').hidden=false;viewOptions(true);
- setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
+ setStatus(gate?'Loading stress solver + learned break gate…':'Loading the stress solver (Rust and Slang on WebGPU)…');
  // The mode is on only once its module loaded: a failed import (an old build, no JSPI)
  // leaves the page in its own renderer with the error shown.
  try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}}
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;viewOptions(false);throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  stress.setBondStrengthScale(strengthScale());
- if(cuboid)await stress.loadCuboid(layout);else await stress.load(assetBytes,level);
+ if(cuboid)await stress.loadCuboid(layout,{learnedGate:gate});else await stress.load(assetBytes,level,{learnedGate:gate});
  await stress.frame(0);applyBallMass();
+ if(gate){
+  // Lab WebGPU device runs MGN-T; stress-web owns its own device/canvas. CPU capture →
+  // normalize → forward → stress_break_edges (see learned-impact findings).
+  const snap=stress.captureLearned();
+  if(!snap||!snap.nEdges)throw new Error('Learned gate: empty stress bond graph after load');
+  const {createLearnedImpact,graphFromLive}=await import('./learned-impact.mjs');
+  learned=await createLearnedImpact(device,{graph:graphFromLive(snap),normalize:true,status:setStatus});
+  learnedMs=await learned.run({readback:true});
+  console.info('[learned-gate] feature gaps:',stress.featureGaps());
+ }
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
- setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · blast_parity, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid?'':' · one copy'} · click the model to shoot`);
+ const gateNote=gate?` · learned break gate (analytic fracture off; ${learnedHudLine()})`:'';
+ setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · blast_parity, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid?'':' · one copy'}${gateNote} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
  assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;
@@ -220,11 +256,31 @@ function stressTick(now,elapsedMs){
  frame=(async()=>{try{
   const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;
   stressHud.frames+=(st.frames??0)-before;stressHud.renders++;
+  // Learned gate: after a simulated frame, capture mirror features → MGN-T → break_bonds.
+  if(learned&&stress.learnedGate&&(st.frames??0)>before&&!learnedBusy){
+   learnedBusy=true;
+   try{
+    const snap=stress.captureLearned();
+    if(snap?.nEdges){
+     const {graphFromLive,failEdgeIndices}=await import('./learned-impact.mjs');
+     learned.resync(graphFromLive(snap),{normalize:true});
+     learnedMs=await learned.run({readback:true});
+     const edges=failEdgeIndices(learned.lastPred,snap.nEdges,{maxBreaks:32});
+     if(edges.length){
+      const n=await stress.breakLearnedEdges(edges);
+      learnedGateBroken+=n;
+     }
+    }
+   }finally{learnedBusy=false}
+  }
   if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0}}
-  $('step-ms').textContent=st.stepMs?`${st.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
+  const gateHud=learned&&stress.learnedGate?` · ${learnedHudLine()} · gate-broke ${learnedGateBroken}`:'';
+  $('step-ms').textContent=st.stepMs?`${st.stepMs.toFixed(1)} ms/frame (stress + rubble)${gateHud}`:`target ${Math.round(st.frameHz)} frames/s${gateHud}`;
   $('frame-ms').textContent='frames / second';
   $('awake').textContent=st.moving;
-  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots}/16 shots · ${st.frames} frames · ${st.fragments} fragments · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s`)}
+  $('bonds').textContent=st.bonds;
+  $('fragments').textContent=st.fragments??st.chunks;
+  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots}/16 shots · ${st.frames} frames · ${st.fragments} fragments · ${st.brokenBonds} bonds broken${learnedGateBroken?` (${learnedGateBroken} via learned)`:''} · ${st.simSeconds.toFixed(1)} s`)}
  }catch(e){fail(e)}})();
  frame.finally(()=>requestAnimationFrame(tick));
 }
@@ -268,7 +324,7 @@ function tick(now){
    }
   }
   // Learned-impact: time one forward per frame when idle enough (discard output).
-  if(learned&&!learnedBusy){learnedBusy=true;learned.run().then(ms=>{learnedMs=ms;learnedBusy=false;$('step-ms').textContent=`learned ${ms.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`}).catch(e=>{learnedBusy=false;fail(e)})}
+  if(learned&&!learnedBusy){learnedBusy=true;learned.run({readback:true}).then(ms=>{learnedMs=ms;learnedBusy=false;$('step-ms').textContent=stepMsHud(currentRates)}).catch(e=>{learnedBusy=false;fail(e)})}
   // Queue the draw immediately behind physics; do not wait for CPU stats first.
   renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}

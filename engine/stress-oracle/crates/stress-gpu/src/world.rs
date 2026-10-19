@@ -395,6 +395,30 @@ impl GpuWorld {
         self.shell.impact_islands = on;
     }
 
+    /// Break bonds decided outside the analytic cascade (e.g. learned fail-bin), then
+    /// rebuild GPU tables and sync engine bodies. Opt-in path for the fracture-lab
+    /// learned gate; does not change `blast_parity` defaults.
+    pub fn apply_external_breaks(&mut self, gpu: &Gpu, bonds: &[(usize, usize)]) -> Result<usize, String> {
+        if bonds.is_empty() {
+            return Ok(0);
+        }
+        self.solver.download(gpu);
+        if self.resident_engine.is_some() {
+            self.resident_sync_motion();
+        }
+        let before = self.solver.mirror.broken_bond_count();
+        self.solver.mirror.break_bonds(bonds);
+        let broken = self.solver.mirror.broken_bond_count().saturating_sub(before);
+        self.solver.rebuild(gpu, 0.0)?;
+        if self.resident_engine.is_some() {
+            for cl in &mut self.solver.mirror.clusters {
+                cl.driven = true;
+            }
+            self.with_shell_mut(|w| w.coupled_write_back(&[]));
+        }
+        Ok(broken)
+    }
+
     /// Strict mode: fail when a structure's certified explicit stress step is below
     /// `min_step` (s), naming the chunks that set it, so the asset is fixed at its source
     /// (for example its slivers re-exported) instead of the solver taking thousands of

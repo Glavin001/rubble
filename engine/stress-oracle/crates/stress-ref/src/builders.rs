@@ -365,6 +365,49 @@ pub fn cantilever(n: usize, name: &str) -> Scene {
     s
 }
 
+/// Tip-load scale that reaches the continuum root tensile stress ≈ σ_t for the
+/// standard 0.1×0.1 section and 2 m arm (`cantilever` geometry).
+pub fn cantilever_root_break_load(n: usize) -> f64 {
+    let cfg = Cantilever { n, h: 0.1 * 20.0 / n as f64, load: 0.0 };
+    let m = Material::analytic_test();
+    let i = 0.1f64.powi(4) / 12.0;
+    let c = 0.05;
+    m.tensile_strength * i / (cfg.arm() * c)
+}
+
+/// Crackling cantilever for learned-impact: tip load **held**, fracture **on**.
+///
+/// `tip_load_scale` multiplies [`cantilever_root_break_load`]. Typical scales:
+/// ~0.25 light (no break), ~1.5–2 root break, ~1.2 + gravity midspan-ish, ≥5 overload.
+/// Does **not** replace the analytic [`cantilever`] benchmark (`fracture=false`).
+pub fn cantilever_crackling(n: usize, tip_load_scale: f64, gravity: bool, name: &str) -> Scene {
+    let m = Material::analytic_test();
+    let cfg = Cantilever { n, h: 0.1 * 20.0 / n as f64, load: cantilever_root_break_load(n) * tip_load_scale };
+    let h = cfg.h;
+    let mut s = new_scene(
+        name,
+        "Chunked cantilever under sustained tip load with fracture (learned-impact crackling).",
+    );
+    s.gravity = if gravity { [0.0, 0.0, -9.81] } else { [0.0; 3] };
+    s.materials.insert("beam".into(), m);
+    let mut chunks = grid(Vec3::new(-0.5 * h, -0.05, -0.05), [n + 1, 1, 1], Vec3::new(h, 0.1, 0.1), "beam");
+    chunks[0].support = Support::Fixed;
+    let bonds = auto_bonds(&chunks, |_, _| "beam".into());
+    s.bodies.push(body("beam", chunks, bonds));
+    s.loads.push(LoadDesc::PointForce {
+        body: "beam".into(),
+        chunk: n,
+        direction: [0.0, 0.0, -1.0],
+        magnitude: TimeFunction::Constant { value: cfg.load },
+        point: None,
+    });
+    s.sim.fracture = true;
+    s.sim.duration = 1.0;
+    s.sim.sample_interval = Some(1e-3);
+    s.probes.push(probe("tip", ProbeKind::ChunkDisplacement { body: "beam".into(), chunk: n, axis: [0.0, 0.0, 1.0] }));
+    s
+}
+
 // ======================================================================== benchmark 3
 
 /// Benchmark 3: a free bar struck by a half-sine force pulse; the compressive wave

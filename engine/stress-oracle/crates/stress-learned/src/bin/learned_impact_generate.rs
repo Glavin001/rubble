@@ -1,53 +1,130 @@
-//! Generate a smoke or mini learned-impact event set.
+//! Generate smoke / mini / walls / prove / diversity learned-impact event sets (parallel).
 //!
 //! ```text
-//! # ~4 events, ~10–20 s wall (default)
 //! cargo run --release -p stress-learned --bin learned_impact_generate -- \
-//!   --smoke --out /tmp/li-smoke-set
+//!   --prove --confirm-prove --out /tmp/li-prove-set
 //!
-//! # Larger mini catalog (needs --confirm-mini; minutes of wall time)
 //! cargo run --release -p stress-learned --bin learned_impact_generate -- \
-//!   --mini --confirm-mini --out /tmp/li-mini-set
+//!   --diversity --confirm-diversity --out /tmp/li-diversity-v1
+//!
+//! # All logical CPUs (default). Cap with --jobs N or RAYON_NUM_THREADS.
+//! # Re-run skips valid event dirs. Force a real QS probe on every frame with --always-qs.
 //! ```
 
 use std::env;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use stress_learned::generate::{mini_jobs, run_jobs, smoke_jobs};
+use stress_learned::generate::{
+    diversity_jobs, mini_jobs, prove_jobs, run_jobs_with, smoke_jobs, wall_jobs, RunJobsOpts,
+};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    let smoke = has(&args, "--smoke") || !has(&args, "--mini");
+    let diversity = has(&args, "--diversity") || has(&args, "--diversity-v1");
+    let prove = has(&args, "--prove");
+    let walls = has(&args, "--walls");
     let mini = has(&args, "--mini");
+    let smoke = has(&args, "--smoke") || (!mini && !walls && !prove && !diversity);
+
     if mini && !has(&args, "--confirm-mini") {
-        eprintln!("refusing --mini without --confirm-mini (several wall impacts; minutes of CPU)");
+        eprintln!("refusing --mini without --confirm-mini (~1 min serial; less in parallel)");
         std::process::exit(2);
     }
-    let out = flag_val(&args, "--out")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(if mini { "/tmp/li-mini-set" } else { "/tmp/li-smoke-set" }));
+    if walls && !has(&args, "--confirm-walls") {
+        eprintln!("refusing --walls without --confirm-walls");
+        std::process::exit(2);
+    }
+    if prove && !has(&args, "--confirm-prove") {
+        eprintln!("refusing --prove without --confirm-prove");
+        std::process::exit(2);
+    }
+    if diversity && !has(&args, "--confirm-diversity") {
+        eprintln!(
+            "refusing --diversity without --confirm-diversity (~35 events / ~230 frames; ~25–35 min serial, less in parallel)"
+        );
+        std::process::exit(2);
+    }
+    let out = flag_val(&args, "--out").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(if diversity {
+            "/tmp/li-diversity-v1"
+        } else if prove {
+            "/tmp/li-prove-set"
+        } else if walls {
+            "/tmp/li-wall-set"
+        } else if mini {
+            "/tmp/li-mini-set"
+        } else {
+            "/tmp/li-smoke-set"
+        })
+    });
     if looks_bulk(&out) && !has(&args, "--confirm-bulk") {
         eprintln!("refusing {}: pass a temp dir or --confirm-bulk", out.display());
         std::process::exit(2);
     }
 
-    let (set_name, jobs) = if mini {
+    let (set_name, jobs) = if diversity {
+        ("diversity_v1", diversity_jobs())
+    } else if prove {
+        ("prove", prove_jobs())
+    } else if walls {
+        ("walls", wall_jobs())
+    } else if mini {
         ("mini", mini_jobs())
     } else {
         let _ = smoke;
         ("smoke", smoke_jobs())
     };
-    eprintln!("generating set={set_name} · {} events → {}", jobs.len(), out.display());
+
+    let threads = flag_val(&args, "--jobs").and_then(|s| s.parse().ok());
+    let opts = RunJobsOpts {
+        always_qs: has(&args, "--always-qs"),
+        resume: !has(&args, "--no-resume"),
+        threads,
+    };
+
+    let heavy_frames: u32 = jobs
+        .iter()
+        .filter(|j| {
+            j.structure_type.contains("wall")
+                || j.structure_type == "spall"
+                || j.structure_type == "masonry_wall"
+                || j.structure_type == "masonry_house"
+                || j.structure_type == "frame_column"
+        })
+        .map(|j| j.frames)
+        .sum();
+    let house_frames: u32 = jobs
+        .iter()
+        .filter(|j| j.structure_type == "masonry_house")
+        .map(|j| j.frames)
+        .sum();
+    let other_heavy = heavy_frames.saturating_sub(house_frames);
+    let total_frames: u32 = jobs.iter().map(|j| j.frames).sum();
+    // Serial ETA; parallel ≈ / min(events, cores) for wall-dominated sets.
+    let eta_serial = other_heavy as f64 * 6.0 + house_frames as f64 * 8.0;
+    let workers = threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8));
+    let eta_par = eta_serial / (workers.min(jobs.len()).max(1) as f64);
+    eprintln!(
+        "generating set={set_name} · {} events · {} frames · heavy_frames≈{} → {}  (ETA serial≈{:.0}s · parallel≈{:.0}s @ {} workers)",
+        jobs.len(),
+        total_frames,
+        heavy_frames,
+        out.display(),
+        eta_serial,
+        eta_par,
+        workers
+    );
     let t0 = Instant::now();
-    let man = run_jobs(&out, set_name, &jobs).unwrap_or_else(|e| {
+    let man = run_jobs_with(&out, set_name, &jobs, &opts).unwrap_or_else(|e| {
         eprintln!("generate failed: {e}");
         std::process::exit(1);
     });
     eprintln!(
-        "ok set={set_name} · {} events · {:.1}s wall · manifest {}",
+        "ok set={set_name} · {} events · {:.1}s wall ({:.1} min) · manifest {}",
         man.events.len(),
         t0.elapsed().as_secs_f64(),
+        t0.elapsed().as_secs_f64() / 60.0,
         out.join("manifest.json").display()
     );
 }
