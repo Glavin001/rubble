@@ -6,7 +6,7 @@ use stress_ref::{bond::Local6,math::Vec3,joint::{JointResponse,stress_measures},
     solver::{ReferenceSolver,ChunkLoads},stress_provider::{StressProvider,SuppliedStress,BondJob}};
 use crate::{joint_history,phase_history};
 
-pub const FORMAT:&str="causal-material-state/1";
+pub const FORMAT:&str="causal-material-state/2";
 pub const NY:usize=42;
 pub const NG:usize=29; // 21 changed histories, complete damage, two finite ductilities, five modes
 fn local(a:&[f64])->Local6{Local6{lin:Vec3::new(a[0],a[1],a[2]),ang:Vec3::new(a[3],a[4],a[5])}}
@@ -80,7 +80,7 @@ impl StressProvider for Provider{fn responses(&mut self,s:&ReferenceSolver,_:&Ch
     let mut out=Vec::new();for &job in jobs{if job.2!=1.{return Err("single-rate jobs required".into())}
         let b=&s.bonds[job.0][job.1];let (x,base,d,rate)=features(s,job,dt,fracture)?;let pred=self.model.predict(&x)?;
         if let Some(labels)=&mut self.labels{labels.record(s,job,dt,fracture)?;}
-        let y:[f64;NY]=std::array::from_fn(|j|base[j]+pred[j].sinh()*self.model.output_scale[j]);
+        let y:[f64;NY]=std::array::from_fn(|j|base[j]+pred[j]*self.model.output_scale[j]);
         let previous=joint_history::pack(&b.joint);let mut h=previous;
         for j in 0..21{if pred[NY+j]>0.{h[j]=y[j];}}
         for j in [0,1,6]{h[j]=h[j].clamp(0.,1.);}

@@ -31,10 +31,14 @@ def main():
     p.add_argument("--width", type=int, default=64)
     p.add_argument("--batch", type=int, default=2048)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--max-rows-per-case", type=int, default=300000)
     args = p.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     torch.manual_seed(args.seed); np.random.seed(args.seed); torch.set_num_threads(4)
     data = [read(root) for root in args.train]
+    rng=np.random.default_rng(args.seed)
+    data=[tuple(v[ix] for v in row) if len(row[0])>args.max_rows_per_case else row
+          for row in data for ix in [rng.choice(len(row[0]),min(len(row[0]),args.max_rows_per_case),replace=False)]]
     x, base, y, gate = [np.concatenate([r[i] for r in data]) for i in range(4)]
     # Fit normalizers ONLY to training cases. Constants remain well-conditioned.
     xs = np.maximum(np.sqrt(np.mean(x*x, axis=0)), 1e-12)
@@ -44,7 +48,7 @@ def main():
     # Zero target channels must stay exactly zero at export/runtime.
     active = np.max(np.abs(delta), axis=0) > 1e-14
     xt = torch.tensor((zx-xm)/xd, dtype=torch.float32)
-    yt = torch.tensor(np.arcsinh(delta/ys), dtype=torch.float32)
+    yt = torch.tensor(delta/ys, dtype=torch.float32)
     gt = torch.tensor(gate, dtype=torch.float32)
     net = nn.Sequential(nn.Linear(x.shape[1],args.width),nn.ReLU(),nn.Linear(args.width,args.width),nn.ReLU(),nn.Linear(args.width,NY+NG))
     opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-5)
@@ -75,16 +79,19 @@ def main():
     # Remove only channels whose target is identically zero in this training scope.
     for j in range(NY):
         if not active[j]: layers[-1]["weight"][j]=[0.]*args.width;layers[-1]["bias"][j]=0.
-    artifact={"format":"causal-material-state/1","trained_steps":args.steps,"input_scale":xs.tolist(),"input_mean":xm.tolist(),"input_std":xd.tolist(),"output_scale":ys.tolist(),"layers":layers}
+    artifact={"format":"causal-material-state/2","trained_steps":args.steps,"input_scale":xs.tolist(),"input_mean":xm.tolist(),"input_std":xd.tolist(),"output_scale":ys.tolist(),"layers":layers}
     weights_file=args.out/"weights.json";weights_file.write_text(json.dumps(artifact,allow_nan=False))
     torch.save({"state_dict":net.state_dict(),"args":vars(args)},args.out/"checkpoint.pt")
     results=[]
     with torch.no_grad():
         for role,roots in [("train",args.train),("validation",args.validation)]:
             for root in roots:
-                xx,bb,yy,gg=read(root);features=torch.tensor((np.arcsinh(xx/xs)-xm)/xd,dtype=torch.float32)
+                xx,bb,yy,gg=read(root)
+                if len(xx)>args.max_rows_per_case:
+                    ix=np.linspace(0,len(xx)-1,args.max_rows_per_case,dtype=int);xx,bb,yy,gg=[a[ix] for a in (xx,bb,yy,gg)]
+                features=torch.tensor((np.arcsinh(xx/xs)-xm)/xd,dtype=torch.float32)
                 pp=torch.cat([net(v) for v in features.split(8192)]).numpy()
-                physical=bb+np.sinh(pp[:,:NY])*ys
+                physical=bb+pp[:,:NY]*ys
                 truth=gg[:,21]>0;guess=pp[:,NY+21]>0
                 tp=int((truth&guess).sum());fp=int((~truth&guess).sum());fn=int((truth&~guess).sum())
                 results.append({"role":role,"root":str(root),"rows":len(xx),"teacher_forced_force_rmse_n":float(np.sqrt(np.mean((physical[:,27:30]-yy[:,27:30])**2))),
