@@ -13,17 +13,24 @@ fn main() {
     let file = args.next().unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../crates/engine-webgpu/fracture/assets/veneer-house.glb").to_string());
     let level: u8 = args.next().map_or(0, |l| l.parse().expect("LEVEL"));
     let frames: usize = args.next().map_or(120, |f| f.parse().expect("FRAMES"));
-    let bytes = std::fs::read(&file).expect("GLB");
-    let asset = engine_fracture::parse_fracture_glb(&bytes).expect("fracture GLB");
-    let json = engine_fracture::stress_export::shardwright_stress_json(&asset, level);
-    let scene = stress_ref::shardwright::import_value(&json, &asset.physics.name).expect("stress import");
+    // A procedural sample key (`cuboid`, `cuboidGrid`, `cuboids`, ...): the lab's cuboid
+    // houses in that layout (`engine_fracture::samples::cuboid_stress_scene`); else a GLB.
+    let (json, name) = match engine_fracture::samples::sample(&file).ok().filter(|s| s.procedural()) {
+        Some(s) => (engine_fracture::samples::cuboid_stress_scene(s.layout).expect("cuboid houses").1, s.key.to_string()),
+        None => {
+            let bytes = std::fs::read(&file).expect("GLB");
+            let asset = engine_fracture::parse_fracture_glb(&bytes).expect("fracture GLB");
+            (engine_fracture::stress_export::shardwright_stress_json(&asset, level), asset.physics.name.clone())
+        }
+    };
+    let scene = stress_ref::shardwright::import_value(&json, &name).expect("stress import");
     scene.validate().expect("valid");
     let mut scene = scene.with_derived();
     // The GPU's methods (the bench and the suites run `STRESS_METHODS=established`).
     scene.sim.methods = stress_ref::scene::Methods::established();
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
     let parts: usize = scene.bodies.iter().flat_map(|b| &b.chunks).map(|c| c.compound.as_ref().map_or(1, |p| p.len())).sum();
-    println!("{}: level {level}, {chunks} chunks, {parts} hulls, {} bonds, unsupported: {:?}", asset.physics.name, scene.bodies.iter().map(|b| b.bonds.len()).sum::<usize>(), stress_gpu::world::unsupported(&scene));
+    println!("{}: level {level}, {chunks} chunks, {parts} hulls, {} bonds, unsupported: {:?}", name, scene.bodies.iter().map(|b| b.bonds.len()).sum::<usize>(), stress_gpu::world::unsupported(&scene));
     let p = Profile::BlastParity;
     p.apply_scene(&mut scene);
     scene.sim.duration = frames as f64 * scene.sim.frame_dt;

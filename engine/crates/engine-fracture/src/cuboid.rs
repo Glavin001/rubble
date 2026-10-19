@@ -695,7 +695,7 @@ pub fn scene_from_pieces(pieces: &[Piece], hulls: bool) -> Result<Scene> {
             }
         }
     }
-    let shift = [-(lo[0] + hi[0]) / 2.0, 0.0, -(lo[2] + hi[2]) / 2.0];
+    let shift = cuboid_shift(pieces);
     let mut bodies = vec![Body::fixed([0.0; 3])];
     let mut colliders = vec![Collider::ground()];
     let mut vertices = Vec::new();
@@ -771,70 +771,31 @@ const TOUCH: f64 = 0.003;
 /// The smallest contact area (m^2) that makes a bond.
 const MIN_BOND_AREA: f64 = 1e-4;
 
-/// The bond graph of a cuboid house, kept simple: a weld wherever two axis-aligned pieces
-/// touch face to face (the contact rectangle from their overlap), and an anchor wherever
-/// a piece rests on the ground. Capacities and springs follow the GLB bonds' formulas
-/// (`bonds.rs`) from the pieces' materials (`Material::joint_strength`,
-/// `youngs_modulus`; the weaker side). Rotated pieces (rafters, roof boards) stay loose,
-/// held by friction as before. Body i + 1 is piece i (body 0 the ground).
-pub fn cuboid_bonds(pieces: &[Piece], shift: [f64; 3], bodies: &[Body]) -> (Vec<Joint>, Vec<f32>) {
-    let mut joints = Vec::new();
-    let mut lines = Vec::new();
-    // A rectangle contact w0 x w1 with normal along `axis`: capacities and springs.
-    let bond = |ma: Material, mb: Option<Material>, da: f64, db: f64, w: [f64; 2]| {
-        let ft = mb.map_or(ma.joint_strength(), |b| ma.joint_strength().min(b.joint_strength()));
-        let fc = 15.0 * ft;
-        let area = w[0] * w[1];
-        let (iuu, ivv) = (w[0] * w[1].powi(3) / 12.0, w[1] * w[0].powi(3) / 12.0);
-        let c = 0.5 * w[0].max(w[1]);
-        let ea = ma.youngs_modulus();
-        let ce = da / ea + mb.map_or(0.0, |b| db / b.youngs_modulus());
-        let cg = da / (ea / 2.4) + mb.map_or(0.0, |b| db / (b.youngs_modulus() / 2.4));
-        let strength = [ft * area, fc * area, 1.5 * ft * area, ft * iuu.min(ivv) / c];
-        let k = [area / ce, area / cg, area / cg, iuu / ce, ivv / ce, (iuu + ivv) / cg];
-        (strength, k)
-    };
-    let axis_u = |axis: usize| -> [f64; 3] {
-        let mut u = [0.0; 3];
-        u[(axis + 1) % 3] = 1.0;
-        u
-    };
-    // A bond's line between its bodies' centres; an anchor's from the piece to its anchor
-    // point in the piece's frame (`local`; copies share body 0, so a ground point would sit
-    // at the first copy).
-    let line = |lines: &mut Vec<f32>, a: u32, b: u32, local: [f64; 3], anchor: bool| {
-        let color = if anchor { [0.95, 0.6, 0.2] } else { [0.25, 0.9, 0.8] };
-        let (pa, pb) = (bodies[a as usize].p, (b != 0).then(|| bodies[b as usize].p));
-        vertex(lines, [0.0; 3], bond_line_normal(b, pa, pb), color, a);
-        if b == 0 {
-            vertex(lines, local, bond_line_normal(0, pa, None), color, a);
-        } else {
-            vertex(lines, [0.0; 3], bond_line_normal(a, pa, pb), color, b);
-        }
-    };
+/// A face contact between two axis-aligned pieces (`b`), or a piece resting on the ground
+/// (`b` None): the contact rectangle `w` across `axis`, its centre and the normal from `a`
+/// (pieces' frame, before `scene_from_pieces` centres the house).
+#[derive(Clone, Copy, Debug)]
+pub struct PieceContact {
+    pub a: usize,
+    pub b: Option<usize>,
+    pub axis: usize,
+    pub centroid: [f64; 3],
+    pub normal: [f64; 3],
+    pub w: [f64; 2],
+}
+
+/// Every bond of a cuboid house, kept simple: a weld wherever two axis-aligned pieces touch
+/// face to face (the rectangle of their overlap), and an anchor wherever a piece rests on
+/// the ground. Rotated pieces (rafters, roof boards) stay loose, held by friction. Each
+/// piece's anchor comes before its welds.
+pub fn piece_contacts(pieces: &[Piece]) -> Vec<PieceContact> {
+    let mut out = Vec::new();
     for (i, a) in pieces.iter().enumerate() {
         if a.angle != 0.0 {
             continue;
         }
-        let ia = i as u32 + 1;
-        // Resting on the ground: an anchor over the footprint.
         if a.center[1] - a.half[1] <= TOUCH {
-            let w = [2.0 * a.half[2], 2.0 * a.half[0]];
-            let (strength, k) = bond(a.material, None, a.half[1], 0.0, w);
-            let at = add([a.center[0], 0.0, a.center[2]], shift);
-            joints.push(Joint {
-                body_a: ia,
-                body_b: 0,
-                anchor_a: sub(at, bodies[ia as usize].p),
-                anchor_b: at,
-                rest: IDENTITY,
-                normal: [0.0, -1.0, 0.0],
-                frame_u: axis_u(1),
-                strength,
-                k,
-                world: true,
-            });
-            line(&mut lines, ia, 0, sub(at, bodies[ia as usize].p), true);
+            out.push(PieceContact { a: i, b: None, axis: 1, centroid: [a.center[0], 0.0, a.center[2]], normal: [0.0, -1.0, 0.0], w: [2.0 * a.half[2], 2.0 * a.half[0]] });
         }
         for (j, b) in pieces.iter().enumerate().skip(i + 1) {
             if b.angle != 0.0 {
@@ -860,25 +821,127 @@ pub fn cuboid_bonds(pieces: &[Piece], shift: [f64; 3], bodies: &[Body]) -> (Vec<
                 let hi = (a.center[k] + a.half[k]).min(b.center[k] + b.half[k]);
                 c[k] = 0.5 * (lo + hi);
             }
-            let at = add(c, shift);
             let mut normal = [0.0; 3];
             normal[axis] = sign;
-            let ib = j as u32 + 1;
-            let (strength, k) = bond(a.material, Some(b.material), a.half[axis], b.half[axis], w);
-            joints.push(Joint {
-                body_a: ia,
-                body_b: ib,
-                anchor_a: sub(at, bodies[ia as usize].p),
-                anchor_b: sub(at, bodies[ib as usize].p),
-                rest: IDENTITY,
-                normal,
-                frame_u: axis_u(axis),
-                strength,
-                k,
-                world: false,
-            });
-            line(&mut lines, ia, ib, [0.0; 3], false);
+            out.push(PieceContact { a: i, b: Some(j), axis, centroid: c, normal, w });
+        }
+    }
+    out
+}
+
+fn axis_u(axis: usize) -> [f64; 3] {
+    let mut u = [0.0; 3];
+    u[(axis + 1) % 3] = 1.0;
+    u
+}
+
+/// The cuboid house's bonds as breakable welds (`piece_contacts`). Capacities and springs
+/// follow the GLB bonds' formulas (`bonds.rs`) from the pieces' materials
+/// (`Material::joint_strength`, `youngs_modulus`; the weaker side). Body i + 1 is piece i
+/// (body 0 the ground).
+pub fn cuboid_bonds(pieces: &[Piece], shift: [f64; 3], bodies: &[Body]) -> (Vec<Joint>, Vec<f32>) {
+    let mut joints = Vec::new();
+    let mut lines = Vec::new();
+    // A rectangle contact w0 x w1: capacities and springs.
+    let bond = |ma: Material, mb: Option<Material>, da: f64, db: f64, w: [f64; 2]| {
+        let ft = mb.map_or(ma.joint_strength(), |b| ma.joint_strength().min(b.joint_strength()));
+        let fc = 15.0 * ft;
+        let area = w[0] * w[1];
+        let (iuu, ivv) = (w[0] * w[1].powi(3) / 12.0, w[1] * w[0].powi(3) / 12.0);
+        let c = 0.5 * w[0].max(w[1]);
+        let ea = ma.youngs_modulus();
+        let ce = da / ea + mb.map_or(0.0, |b| db / b.youngs_modulus());
+        let cg = da / (ea / 2.4) + mb.map_or(0.0, |b| db / (b.youngs_modulus() / 2.4));
+        let strength = [ft * area, fc * area, 1.5 * ft * area, ft * iuu.min(ivv) / c];
+        let k = [area / ce, area / cg, area / cg, iuu / ce, ivv / ce, (iuu + ivv) / cg];
+        (strength, k)
+    };
+    // A bond's line between its bodies' centres; an anchor's from the piece to its anchor
+    // point in the piece's frame (`local`; copies share body 0, so a ground point would sit
+    // at the first copy).
+    let line = |lines: &mut Vec<f32>, a: u32, b: u32, local: [f64; 3], anchor: bool| {
+        let color = if anchor { [0.95, 0.6, 0.2] } else { [0.25, 0.9, 0.8] };
+        let (pa, pb) = (bodies[a as usize].p, (b != 0).then(|| bodies[b as usize].p));
+        vertex(lines, [0.0; 3], bond_line_normal(b, pa, pb), color, a);
+        if b == 0 {
+            vertex(lines, local, bond_line_normal(0, pa, None), color, a);
+        } else {
+            vertex(lines, [0.0; 3], bond_line_normal(a, pa, pb), color, b);
+        }
+    };
+    for c in piece_contacts(pieces) {
+        let (pa, ia) = (&pieces[c.a], c.a as u32 + 1);
+        let at = add(c.centroid, shift);
+        match c.b {
+            None => {
+                let (strength, k) = bond(pa.material, None, pa.half[1], 0.0, c.w);
+                joints.push(Joint { body_a: ia, body_b: 0, anchor_a: sub(at, bodies[ia as usize].p), anchor_b: at, rest: IDENTITY, normal: c.normal, frame_u: axis_u(1), strength, k, world: true });
+                line(&mut lines, ia, 0, sub(at, bodies[ia as usize].p), true);
+            }
+            Some(j) => {
+                let (pb, ib) = (&pieces[j], j as u32 + 1);
+                let (strength, k) = bond(pa.material, Some(pb.material), pa.half[c.axis], pb.half[c.axis], c.w);
+                joints.push(Joint { body_a: ia, body_b: ib, anchor_a: sub(at, bodies[ia as usize].p), anchor_b: sub(at, bodies[ib as usize].p), rest: IDENTITY, normal: c.normal, frame_u: axis_u(c.axis), strength, k, world: false });
+                line(&mut lines, ia, ib, [0.0; 3], false);
+            }
         }
     }
     (scale_bond_springs(&joints, bodies, BOND_TICK), lines)
+}
+
+/// The cuboid house's centring shift (`scene_from_pieces`): its footprint centred on
+/// x = z = 0.
+pub fn cuboid_shift(pieces: &[Piece]) -> [f64; 3] {
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for p in pieces {
+        for c in p.corners() {
+            for k in 0..3 {
+                lo[k] = lo[k].min(c[k]);
+                hi[k] = hi[k].max(c[k]);
+            }
+        }
+    }
+    [-(lo[0] + hi[0]) / 2.0, 0.0, -(lo[2] + hi[2]) / 2.0]
+}
+
+/// Cuboid houses as the stress oracle's input (`shardwright-stress/1`, as
+/// `stress_export::shardwright_stress_json` writes a GLB's): one house per `offsets` entry
+/// (each a translation of the centred house, the lab's layout copies), every piece a
+/// fragment of its corners, and `piece_contacts` as bonds (a ground anchor as `b = -1`).
+/// Lab frame, +Y up, SI units. Brick joints are mortar; the materials are the oracle's
+/// names for brick, concrete, timber and glass.
+pub fn cuboid_stress_json(pieces: &[Piece], offsets: &[[f64; 3]]) -> serde_json::Value {
+    use serde_json::json;
+    let shift = cuboid_shift(pieces);
+    let name = |m: Material| match m {
+        Material::Brick => "brick_clay",
+        Material::Concrete => "concrete",
+        Material::Wood => "pine",
+        Material::Glass => "glass_annealed",
+    };
+    let materials = ["brick_clay", "concrete", "pine", "glass_annealed"];
+    let contacts = piece_contacts(pieces);
+    let n = pieces.len();
+    let mut fragments = Vec::new();
+    let mut bonds = Vec::new();
+    for (copy, off) in offsets.iter().enumerate() {
+        let at = |p: [f64; 3]| add(add(p, shift), *off);
+        for (i, p) in pieces.iter().enumerate() {
+            let points: Vec<[f64; 3]> = p.corners().iter().map(|&c| at(c)).collect();
+            fragments.push(json!({
+                "id": copy * n + i, "level": 0, "parent": -1, "component": copy, "role": 0,
+                "material": name(p.material), "hull_count": 1, "points": points, "hulls": [{ "points": points }],
+            }));
+        }
+        for c in &contacts {
+            let (a, b) = (copy * n + c.a, c.b.map_or(-1, |j| (copy * n + j) as i64));
+            let mortar = c.b.is_some_and(|j| pieces[c.a].material == Material::Brick && pieces[j].material == Material::Brick);
+            bonds.push(json!({
+                "id": bonds.len(), "a": a, "b": b, "area": c.w[0] * c.w[1], "centroid": at(c.centroid), "normal": c.normal,
+                "frame_u": axis_u(c.axis), "extent_half": [0.5 * c.w[0], 0.5 * c.w[1]],
+                "composition": if mortar { json!([[1, -1, 1.0]]) } else { json!([]) },
+            }));
+        }
+    }
+    json!({ "format": "shardwright-stress/1", "name": "cuboid_houses", "materials": materials, "bond_level": 0, "fragments": fragments, "bonds": bonds, "component_names": [] })
 }

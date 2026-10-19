@@ -3,7 +3,7 @@
 //! by the host, then laid out as a row, grid or suburb.
 
 use crate::asset::FractureAsset;
-use crate::cuboid::{build_cuboid_house, CuboidOptions};
+use crate::cuboid::{build_cuboid_house, cuboid_pieces, cuboid_stress_json, CuboidOptions};
 use crate::scene::*;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -226,4 +226,22 @@ pub fn layout_scene(one: Scene, layout: Option<Layout>, procedural: bool) -> Sce
         s.capacity.contacts_per_collider = 24;
     }
     s
+}
+
+/// Cuboid houses laid out as `layout` (`layout_scene`): the lab's scene (its camera,
+/// projectile and placement) and the same houses as the stress oracle's input
+/// (`cuboid_stress_json`), one per copy at its laid-out offset.
+pub fn cuboid_stress_scene(layout: Option<Layout>) -> Result<(Scene, serde_json::Value)> {
+    let o = CuboidOptions::default();
+    let one = build_cuboid_house(&o)?;
+    let lab = layout_scene(one.clone(), layout, true);
+    let stride = lab.instance_stride.max(1) as usize;
+    let first = one.bodies[1].p;
+    let offsets: Vec<[f64; 3]> = (0..lab.copies.max(1) as usize)
+        .map(|k| {
+            let p = lab.bodies[1 + k * stride].p;
+            [p[0] - first[0], p[1] - first[1], p[2] - first[2]]
+        })
+        .collect();
+    Ok((lab, cuboid_stress_json(&cuboid_pieces(&o), &offsets)))
 }

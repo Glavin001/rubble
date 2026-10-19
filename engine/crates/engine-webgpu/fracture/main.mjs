@@ -97,10 +97,14 @@ async function loadLevel(level){
  const source=procedural==='pack'?`scene pack · ${scene.pieces} nodes`:procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials${skipped}`;
  setStatus(`${what}${source} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
-// The stress-solver mode: the GLB's level built and run by stress-web (one copy of the
-// structure; the sample's layout of copies is the other modes').
+// The stress-solver mode, built and run by stress-web: a GLB's level (one copy of the
+// structure; the sample's layout of copies is the other modes'), or the cuboid houses in
+// their sample's layout (every copy).
 async function loadStress(level){
- if(procedural||!assetBytes)throw new Error('The stress-solver mode runs a fracture GLB: pick a GLB scene.');
+ // A fracture GLB's level (one copy of the structure), or the cuboid houses in their
+ // sample's layout (every copy). Scene packs are not in this mode yet.
+ const cuboid=procedural==='cuboid';
+ if(!cuboid&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB or the cuboid houses: pick one of those scenes.');
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
  $('view').hidden=true;$('stress-view').hidden=false;viewOptions(true);
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
@@ -110,11 +114,12 @@ async function loadStress(level){
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;viewOptions(false);throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  stress.setBondStrengthScale(strengthScale());
- await stress.load(assetBytes,level);await stress.frame(0);applyBallMass();
+ if(cuboid)await stress.loadCuboid(layout);else await stress.load(assetBytes,level);
+ await stress.frame(0);applyBallMass();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
- setStatus(`Stress solver · ${st.chunks} chunks · blast_parity, resident GPU frame at ${Math.round(st.frameHz)} Hz · one copy · click the model to shoot`);
+ setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · blast_parity, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid?'':' · one copy'} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
  assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;

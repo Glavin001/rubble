@@ -45,6 +45,9 @@ struct Loaded {
     renderer: Renderer,
     /// Real time not yet simulated (s).
     behind: f64,
+    /// The state last drawn (`GpuWorld::view_state`), kept while no frame steps: reading
+    /// and copying a large world every animation frame would hold the page back.
+    view: Option<(stress_ref::solver::ReferenceSolver, Vec<stress_ref::world::Impactor>)>,
 }
 
 /// What the lab's shot rule needs of the scene (asset frame, +Y up).
@@ -65,6 +68,9 @@ thread_local! {
     static DEVICE: RefCell<Option<Device>> = const { RefCell::new(None) };
     static WORLD: RefCell<Option<Loaded>> = const { RefCell::new(None) };
     static GLB: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// `Some(layout)`: the next load builds the lab's cuboid houses in that layout
+    /// (`stress_set_cuboid`) instead of the GLB.
+    static CUBOID: RefCell<Option<Option<engine_fracture::Layout>>> = const { RefCell::new(None) };
     static CAMERA: RefCell<Option<Orbit>> = const { RefCell::new(None) };
     static SHOOTING: Cell<Option<Shooting>> = const { Cell::new(None) };
     static PENDING: RefCell<Vec<ImpactorDesc>> = const { RefCell::new(Vec::new()) };
@@ -120,6 +126,16 @@ pub async fn stress_init(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVal
 #[wasm_bindgen]
 pub fn stress_set_glb(bytes: Vec<u8>) {
     GLB.set(bytes);
+    CUBOID.set(None);
+}
+
+/// The lab's procedural cuboid houses for the next [`stress_load`], laid out as the
+/// sample's `layout` (its JSON: `null`, `{columns, rows}` or `{suburb: true, ...}`).
+#[wasm_bindgen]
+pub fn stress_set_cuboid(layout: String) -> Result<(), JsValue> {
+    let layout: Option<engine_fracture::Layout> = serde_json::from_str(&layout).map_err(|e| JsValue::from_str(&format!("layout: {e}")))?;
+    CUBOID.set(Some(layout));
+    Ok(())
 }
 
 /// The message of the last failed [`stress_load`] or [`stress_frame`].
@@ -245,17 +261,27 @@ pub extern "C" fn stress_load(level: u32) -> u32 {
 
 fn load(level: u8) -> Result<(), String> {
     WORLD.with_borrow_mut(|w| *w = None);
-    let bytes = GLB.with_borrow(|b| b.clone());
-    let asset = engine_fracture::parse_fracture_glb(&bytes).map_err(|e| format!("fracture GLB: {e}"))?;
-    // The lab's own scene of the level: its camera, centre, extent and projectile.
-    let lab = engine_fracture::build_scene(&asset, level, None).map_err(|e| format!("level {level}: {e}"))?;
+    // The lab's own scene (its camera, centre, extent and projectile) and the stress
+    // oracle's input: the GLB's level, or the cuboid houses in their layout.
+    let (lab, json, name) = match CUBOID.with_borrow(|c| *c) {
+        Some(layout) => {
+            let (lab, json) = engine_fracture::samples::cuboid_stress_scene(layout).map_err(|e| format!("cuboid houses: {e}"))?;
+            (lab, json, "cuboid_houses".to_string())
+        }
+        None => {
+            let bytes = GLB.with_borrow(|b| b.clone());
+            let asset = engine_fracture::parse_fracture_glb(&bytes).map_err(|e| format!("fracture GLB: {e}"))?;
+            let lab = engine_fracture::build_scene(&asset, level, None).map_err(|e| format!("level {level}: {e}"))?;
+            (lab, engine_fracture::stress_export::shardwright_stress_json(&asset, level), asset.physics.name.clone())
+        }
+    };
     CAMERA.set(Some(Orbit::new(&lab)));
     SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius, mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
     FIRED.set(0);
     RUNNING.set(false);
+    STATS.set("{}".into());
     PENDING.with_borrow_mut(|p| p.clear());
-    let json = engine_fracture::stress_export::shardwright_stress_json(&asset, level);
-    let mut scene = stress_ref::shardwright::import_value(&json, &asset.physics.name)?;
+    let mut scene = stress_ref::shardwright::import_value(&json, &name)?;
     let k = STRENGTH_SCALE.get();
     if k != 1.0 {
         let used: std::collections::BTreeSet<String> = scene.bodies.iter().flat_map(|b| &b.bonds).map(|b| b.material.clone()).collect();
@@ -288,7 +314,7 @@ fn load(level: u8) -> Result<(), String> {
         let (mirror, _) = world.view_state(gpu);
         // Meshes for every chunk and for the shots to come.
         let renderer = Renderer::for_target(gpu, &mirror, &shot_meshes(&world), d.config.width, d.config.height, d.view_format);
-        WORLD.with_borrow_mut(|w| *w = Some(Loaded { world, renderer, behind: 0.0 }));
+        WORLD.with_borrow_mut(|w| *w = Some(Loaded { world, renderer, behind: 0.0, view: None }));
         Ok(())
     })
 }
@@ -338,8 +364,11 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                 }
             }
             let t_view = web_time::Instant::now();
-            let (mirror, imps) = l.world.view_state(gpu);
+            if stepped > 0 || l.view.is_none() {
+                l.view = Some(l.world.view_state(gpu));
+            }
             let view_ms = t_view.elapsed().as_secs_f64() * 1e3;
+            let (mirror, imps) = l.view.as_ref().expect("a view");
             let t_draw = web_time::Instant::now();
             let aspect = width as f64 / height as f64;
             let (vp, eye) = CAMERA.with_borrow(|c| {
@@ -361,7 +390,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             };
             let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(d.view_format), ..Default::default() });
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            l.renderer.draw(gpu, &mut encoder, &view, &mirror, &imps, view_proj, eye);
+            l.renderer.draw(gpu, &mut encoder, &view, mirror, imps, view_proj, eye);
             gpu.queue.submit([encoder.finish()]);
             gpu.queue.present(texture);
             let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
