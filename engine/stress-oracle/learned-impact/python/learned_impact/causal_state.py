@@ -68,6 +68,10 @@ def main():
     yt = torch.tensor(delta/ys, dtype=torch.float32)
     gt = torch.tensor(gate, dtype=torch.float32)
     net = nn.Sequential(nn.Linear(x.shape[1],args.width),nn.ReLU(),nn.Linear(args.width,args.width),nn.ReLU(),nn.Linear(args.width,NY+NG))
+    # Constant training channels cannot learn a response. Do not export their
+    # random initial weights as an invented dependence on unseen materials.
+    constant=np.ptp(zx,axis=0)<1e-12
+    with torch.no_grad():net[0].weight[:,torch.tensor(constant)]=0
     opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-5)
     weights = torch.ones(NY); weights[:2]=8; weights[7:13]=3; weights[27:34]=4
     weights[[17,18,19,21,22,23,24,25,26,34,35,36,37,38,41]]=0 # exact decoder channels
@@ -119,6 +123,7 @@ def main():
                     "complete_damage_tp":tp,"complete_damage_fp":fp,"complete_damage_fn":fn,
                     "complete_damage_f1":2*tp/max(2*tp+fp+fn,1)})
     report={"status":"trained","scope":"Live native-phase material-state model; full native motion/contact substeps retained.","parameters":sum(v.numel() for v in net.parameters()),
+        "constant_training_feature_indices":np.flatnonzero(constant).tolist(),"training_roots":args.train,"validation_roots":args.validation,
         "rows":len(x),"changed_rows":len(changed),"nonlinear_rows":len(nonlinear),"seed":args.seed,"steps":args.steps,"width":args.width,
         "sha256":hashlib.sha256(weights_file.read_bytes()).hexdigest(),"log":log,"cases":results}
     (args.out/"report.json").write_text(json.dumps(report,indent=2,allow_nan=False));print(json.dumps(report),flush=True)
