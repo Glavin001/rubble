@@ -46,12 +46,15 @@ fn gates(base:&[f64;NY],r:&SuppliedStress)->[f64;NG]{let y=target(r);let mut out
 
 pub struct Teacher {out:BufWriter<File>,pub rows:u64,pub input_width:usize,pub calls:u64}
 impl Teacher {pub fn new(p:&Path)->Result<Self,String>{Ok(Self{out:BufWriter::new(File::create(p).map_err(|e|e.to_string())?),rows:0,input_width:0,calls:0})}
-    pub fn flush(&mut self)->Result<(),String>{self.out.flush().map_err(|e|e.to_string())}}
-impl StressProvider for Teacher{fn responses(&mut self,s:&ReferenceSolver,_:&ChunkLoads,jobs:&[BondJob],dt:f64,fracture:bool)->Result<Vec<SuppliedStress>,String>{
-    let mut out=Vec::new();for &job in jobs{let (x,base,_,_)=features(s,job,dt,fracture)?;self.input_width=x.len();
+    pub fn record(&mut self,s:&ReferenceSolver,job:BondJob,dt:f64,fracture:bool)->Result<SuppliedStress,String>{
+        let (x,base,_,_)=features(s,job,dt,fracture)?;self.input_width=x.len();
         let r=s.oracle_stress_response(job,dt,fracture);let y=target(&r);let tags=gates(&base,&r);
         for v in x.iter().chain(&base).chain(&y).chain(&tags){self.out.write_all(&v.to_le_bytes()).map_err(|e|e.to_string())?;}
-        self.rows+=1;out.push(r);}self.calls+=1;Ok(out)}}
+        self.rows+=1;Ok(r)
+    }
+    pub fn flush(&mut self)->Result<(),String>{self.out.flush().map_err(|e|e.to_string())}}
+impl StressProvider for Teacher{fn responses(&mut self,s:&ReferenceSolver,_:&ChunkLoads,jobs:&[BondJob],dt:f64,fracture:bool)->Result<Vec<SuppliedStress>,String>{
+    let mut out=Vec::new();for &job in jobs{out.push(self.record(s,job,dt,fracture)?);}self.calls+=1;Ok(out)}}
 
 #[derive(Serialize,Deserialize)]
 pub struct Layer{pub weight:Vec<Vec<f64>>,pub bias:Vec<f64>}
@@ -69,10 +72,14 @@ impl Model{
         for (i,l) in self.layers.iter().enumerate(){v=l.weight.iter().zip(&l.bias).map(|(w,b)|{let z=w.iter().zip(&v).fold(*b,|sum,(w,x)|sum+w*x);if i+1<self.layers.len(){z.max(0.)}else{z}}).collect();}
         if v.iter().any(|x|!x.is_finite()){return Err("nonfinite inference".into())}Ok(v)}
 }
-pub struct Provider{pub model:Model,pub calls:u64,pub rows:u64}
+pub struct Provider{pub model:Model,pub calls:u64,pub rows:u64,
+    /// Training-only observational oracle labels; never applied to this world.
+    /// A run with this present is NOT an acceptance evaluation.
+    pub labels:Option<Teacher>}
 impl StressProvider for Provider{fn responses(&mut self,s:&ReferenceSolver,_:&ChunkLoads,jobs:&[BondJob],dt:f64,fracture:bool)->Result<Vec<SuppliedStress>,String>{
     let mut out=Vec::new();for &job in jobs{if job.2!=1.{return Err("single-rate jobs required".into())}
         let b=&s.bonds[job.0][job.1];let (x,base,d,rate)=features(s,job,dt,fracture)?;let pred=self.model.predict(&x)?;
+        if let Some(labels)=&mut self.labels{labels.record(s,job,dt,fracture)?;}
         let y:[f64;NY]=std::array::from_fn(|j|base[j]+pred[j].sinh()*self.model.output_scale[j]);
         let previous=joint_history::pack(&b.joint);let mut h=previous;
         for j in 0..21{if pred[NY+j]>0.{h[j]=y[j];}}
