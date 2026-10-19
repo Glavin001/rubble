@@ -1,0 +1,20 @@
+{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "rubble-vibe-city-scenes",
+      "dependencies": {
+        "@dgreenheck/three-pinata": "2.0.1",
+        "blast-stress-solver": "0.3.1",
+        "three": "0.181.1",
+      },
+    },
+  },
+  "packages": {
+    "@dgreenheck/three-pinata": ["@dgreenheck/three-pinata@2.0.1", "", { "peerDependencies": { "three": ">=0.158.0" } }, "sha512-1pQU68B5xguxvRryl6nxZBARDqOW+/lXf7Xpz8QZ87awadSpN85mDNChTEdA4fPfJYyrft+thHS6Ooe7E5rdFA=="],
+
+    "blast-stress-solver": ["blast-stress-solver@0.3.1", "", {}, "sha512-XsQtwXe3QVR5yE7UAIMNF5iz6r3PoHqLAiPAo9DXAnLAzMbp15hmfbozwGMeSBeMI0YJ/y1Uh+mTbO2Ol5/h4w=="],
+
+    "three": ["three@0.181.1", "", {}, "sha512-bz9xZUQMw3pJbjKy7roiwXWgAp+oVUa+4k5o0oBAQ+IFJuru1xzvtk63h6k72XZanXS/SgoEhV6927Vgazyq2w=="],
+  }
+}

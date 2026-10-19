@@ -515,11 +515,47 @@ pub struct TrackDesc {
     pub angular_damping: f32,
     pub max_brake_torque: f32,
     pub differential_ratio: f32,
+    /// Solid track run on the chassis: closes the gaps between road wheels and
+    /// drives what it touches at the track's speed (a conveyor belt).
+    pub pod: Option<TrackPodDesc>,
 }
 
 impl Default for TrackDesc {
     fn default() -> Self {
-        Self { wheels: Vec::new(), driven_wheel: 0, inertia: 10.0, angular_damping: 0.5, max_brake_torque: 15000.0, differential_ratio: 6.0 }
+        Self {
+            wheels: Vec::new(),
+            driven_wheel: 0,
+            inertia: 10.0,
+            angular_damping: 0.5,
+            max_brake_torque: 15000.0,
+            differential_ratio: 6.0,
+            pod: None,
+        }
+    }
+}
+
+/// Track pod: two belt boxes over a track's wheels (`pack::track_pod_colliders`).
+/// One spans every wheel from their highest bottomed-out tread line up to `top`;
+/// the other spans the road wheels at the lowest tread line, so a raised sprocket
+/// and idler give the run a stepped nose. Both float `clearance` above the
+/// bottomed-out wheels, so the ground probes carry the load on flat ground and
+/// the pod meets only debris, steps and hard landings.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrackPodDesc {
+    /// Track width (m); 0 = the widest wheel's width.
+    pub width: f32,
+    /// Gap above the bottomed-out wheels' tread line (m).
+    pub clearance: f32,
+    /// Height of the top run above the wheel hardpoints (chassis up, m).
+    pub top: f32,
+    /// Belt-to-world friction material.
+    pub material: u32,
+}
+
+impl Default for TrackPodDesc {
+    fn default() -> Self {
+        Self { width: 0.0, clearance: 0.05, top: 0.3, material: 0 }
     }
 }
 

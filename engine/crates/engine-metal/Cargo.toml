@@ -30,7 +30,6 @@ anyhow.workspace = true
 
 [dev-dependencies]
 engine-webgpu = { path = "../engine-webgpu" }
-engine-cuda = { path = "../engine-cuda" }
 env_logger.workspace = true
 
 [[bin]]
