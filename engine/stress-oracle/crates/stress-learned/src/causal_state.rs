@@ -74,15 +74,16 @@ fn gates(base:&[f64;NY],r:&SuppliedStress)->[f64;NG]{let y=target(r);let mut out
     out[22]=r.joint.state.ductility.is_finite() as u8 as f64;out[23]=r.joint.state.ductility_c.is_finite() as u8 as f64;
     out[24+joint_history::mode_code(r.joint.state.mode) as usize]=1.;out}
 
-pub struct Teacher {out:BufWriter<File>,pub rows:u64,pub input_width:usize,pub calls:u64}
-impl Teacher {pub fn new(p:&Path)->Result<Self,String>{Ok(Self{out:BufWriter::new(File::create(p).map_err(|e|e.to_string())?),rows:0,input_width:0,calls:0})}
+pub struct Teacher {out:Option<BufWriter<File>>,pub rows:u64,pub input_width:usize,pub calls:u64}
+impl Teacher {pub fn new(p:&Path)->Result<Self,String>{Ok(Self{out:Some(BufWriter::new(File::create(p).map_err(|e|e.to_string())?)),rows:0,input_width:0,calls:0})}
+    pub fn reference()->Self{Self{out:None,rows:0,input_width:69,calls:0}}
     pub fn record(&mut self,s:&ReferenceSolver,job:BondJob,dt:f64,fracture:bool)->Result<SuppliedStress,String>{
-        let (x,base,_,_)=features(s,job,dt,fracture)?;self.input_width=x.len();
-        let r=s.oracle_stress_response(job,dt,fracture);let y=target(&r);let tags=gates(&base,&r);
-        for v in x.iter().chain(&base).chain(&y).chain(&tags){self.out.write_all(&v.to_le_bytes()).map_err(|e|e.to_string())?;}
+        let r=s.oracle_stress_response(job,dt,fracture);
+        if let Some(out)=&mut self.out{let (x,base,_,_)=features(s,job,dt,fracture)?;self.input_width=x.len();let y=target(&r);let tags=gates(&base,&r);
+            for v in x.iter().chain(&base).chain(&y).chain(&tags){out.write_all(&v.to_le_bytes()).map_err(|e|e.to_string())?;}}
         self.rows+=1;Ok(r)
     }
-    pub fn flush(&mut self)->Result<(),String>{self.out.flush().map_err(|e|e.to_string())}}
+    pub fn flush(&mut self)->Result<(),String>{if let Some(out)=&mut self.out{out.flush().map_err(|e|e.to_string())?;}Ok(())}}
 impl StressProvider for Teacher{fn responses(&mut self,s:&ReferenceSolver,_:&ChunkLoads,jobs:&[BondJob],dt:f64,fracture:bool)->Result<Vec<SuppliedStress>,String>{
     let mut out=Vec::new();for &job in jobs{out.push(self.record(s,job,dt,fracture)?);}self.calls+=1;Ok(out)}}
 
