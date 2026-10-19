@@ -115,13 +115,14 @@ def run(args):
         model = fit(train, degree, dt, scales)
         models.append(model)
         row = {'degree': degree, 'parameter_count': 2*degree,
-               'train': metrics(model, train, scales), 'validation': metrics(model, validation, scales)}
+               'train': metrics(model, train, scales), 'validation': metrics(model, validation, scales),
+               'validation_rollout': metrics(model, validation, scales, 32)}
         results.append(row)
         print(json.dumps(row), flush=True)
     # Smallest validation model meeting the declared capability threshold.
-    eligible = [i for i, row in enumerate(results) if row['validation']['normalized_mse'] <= 1e-6
-                and row['validation']['max_relative_energy_error'] <= 1e-3]
-    selected = eligible[0] if eligible else min(range(len(results)), key=lambda i: results[i]['validation']['normalized_mse'])
+    eligible = [i for i, row in enumerate(results) if row['validation_rollout']['normalized_mse'] <= 1e-6
+                and row['validation_rollout']['max_relative_energy_error'] <= 1e-3]
+    selected = eligible[0] if eligible else min(range(len(results)), key=lambda i: results[i]['validation_rollout']['normalized_mse'])
     model = models[selected]
     torch.save({'coefficients': model.coefficients, 'dt': dt, 'stiffness': model.stiffness}, out/'operator.pt')
     tests = {}
@@ -129,7 +130,7 @@ def run(args):
         data = wave_data(seed, 24, n)
         tests[str(n)] = {'one_step': metrics(model, data, scales), 'rollout': metrics(model, data, scales, 32)}
     report = {'status': 'completed', 'scope': __doc__, 'candidates': results, 'selected_degree': model.degree,
-              'selection': 'Smallest validation degree with MSE <= 1e-6 and max relative energy error <= 1e-3; otherwise lowest validation MSE.',
+              'selection': 'Smallest validation degree with 32-step MSE <= 1e-6 and max relative energy error <= 1e-3; otherwise lowest 32-step validation MSE.',
               'test': tests, 'checkpoint_sha256': PhaseHistory._hash(out/'operator.pt'),
               'native_validated': False, 'persistent_state': ['displacement', 'velocity'],
               'test_scope': 'Unseen initial states and chain lengths; same unit masses, stiffness and dt.'}
