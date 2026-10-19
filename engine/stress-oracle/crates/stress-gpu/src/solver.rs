@@ -2733,9 +2733,7 @@ impl GpuSolver {
         let n_islands = if capacity_dispatch() { self.layout.island_cap.max(live) } else { live };
         let indirect = capacity_dispatch();
         if indirect {
-            let args = self.island_args.get_or_insert_with(|| {
-                gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("island dispatch args"), size: 32, usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
-            });
+            let args = self.island_args.get_or_insert_with(|| island_args_buffer(gpu));
             let n = live.max(1) as u32;
             gpu.queue.write_buffer(args, 0, bytemuck::cast_slice(&[n, 1, 1, 0, n.div_ceil(64), 1, 1, 0]));
         }
@@ -2798,9 +2796,7 @@ impl GpuSolver {
             }
         }
         if self.cascade_islands.as_ref().is_none_or(|(g, _)| *g != generation) {
-            let mut with_sentinel = self.layout.islands.clone();
-            with_sentinel.resize(n_islands + 1, Island::default());
-            self.cascade_islands = Some((generation, gpu.storage("cascade layout islands", &with_sentinel)));
+            self.cascade_islands = Some((generation, self.cascade_islands_buffer(gpu, n_islands)));
         }
         let words = crate::resident::CASCADE_ST_ISLANDS + n_islands + 1;
         if self.cascade_status.as_ref().is_none_or(|b| b.size() < 4 * words as u64) {
@@ -2821,7 +2817,7 @@ impl GpuSolver {
             // keeps its gate entry (its loads, chunk states and bond records are where they
             // were: the tables were rebuilt from the synced mirror).
             // Per island up to the capacity (a split laid out on the GPU adds islands).
-            let buffer = gpu.storage("cascade gate", &vec![[0f32; 4]; 2 * n_chunks + n_islands.max(self.layout.island_cap) + 1]);
+            let buffer = self.cascade_gate_buffer(gpu, n_islands);
             let ids: Vec<u64> = self.mirror.clusters.iter().map(|c| c.id).collect();
             let carry = std::env::var("STRESS_QS_GATE_CARRY").map_or(true, |v| v != "0");
             if let Some(old) = self.cascade_gate.take().filter(|_| carry) {
@@ -3803,6 +3799,41 @@ impl GpuSolver {
     /// buffers, the counters from the host as they stand (live islands, the engine's bodies
     /// and colliders, the next cluster id), the log emptied. False when they cannot run
     /// (no capacity dispatch, no cascade tables yet).
+    fn cascade_islands_buffer(&self, gpu: &Gpu, n_islands: usize) -> wgpu::Buffer {
+        let mut with_sentinel = self.layout.islands.clone();
+        with_sentinel.resize(n_islands + 1, Island::default());
+        gpu.storage("cascade layout islands", &with_sentinel)
+    }
+
+    fn cascade_gate_buffer(&self, gpu: &Gpu, n_islands: usize) -> wgpu::Buffer {
+        gpu.storage("cascade gate", &vec![[0f32; 4]; 2 * self.layout.chunks.len() + n_islands.max(self.layout.island_cap) + 1])
+    }
+
+    /// The cascade's island copy, status, gate and dispatch arguments before its first run,
+    /// as that run makes them (plan 5d): frame-mode splits need them, so the first
+    /// resident frame runs in frame mode, one submission and one read, instead of
+    /// windowed. Only creates what is missing; a new layout's buffers stay the cascade's.
+    pub fn ensure_cascade_buffers(&mut self, gpu: &Gpu) {
+        if !capacity_dispatch() {
+            return;
+        }
+        let n_islands = self.layout.island_cap.max(self.layout.islands.len());
+        if self.island_args.is_none() {
+            self.island_args = Some(island_args_buffer(gpu));
+        }
+        if self.cascade_islands.is_none() {
+            self.cascade_islands = Some((self.layout_generation, self.cascade_islands_buffer(gpu, n_islands)));
+        }
+        if self.cascade_status.is_none() {
+            let words = crate::resident::CASCADE_ST_ISLANDS + n_islands + 1;
+            self.cascade_status = Some(gpu.storage("cascade status", &vec![0u32; words]));
+        }
+        if self.cascade_gate.is_none() {
+            let buffer = self.cascade_gate_buffer(gpu, n_islands);
+            self.cascade_gate = Some(CascadeGate { generation: self.layout_generation, buffer, ids: self.mirror.clusters.iter().map(|c| c.id).collect(), ranges: self.layout.islands.iter().map(|i| i.range).collect(), chunks: self.layout.chunks.clone() });
+        }
+    }
+
     pub fn prepare_frame_splits(&mut self, gpu: &Gpu, ctab: &wgpu::Buffer, bodies: u32, colliders: u32) -> bool {
         if !capacity_dispatch() || self.cascade_islands.is_none() || self.cascade_status.is_none() || self.island_args.is_none() || self.cascade_gate.is_none() {
             return false;
@@ -4676,4 +4707,9 @@ pub struct FrameSplits<'a> {
     pub resident: ResidentLayout<'a>,
     pub colliders: Option<(&'a crate::colliders::ColliderRefresh, &'a wgpu::Buffer)>,
     pub layout_params: crate::gpu_split::LayoutParams,
+}
+
+/// The cascade's indirect dispatch arguments (two dispatches of 4 words).
+fn island_args_buffer(gpu: &Gpu) -> wgpu::Buffer {
+    gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("island dispatch args"), size: 32, usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
 }

@@ -938,6 +938,7 @@ impl GpuWorld {
         if !self.solver.can_split_in_place(0) {
             return false;
         }
+        self.solver.ensure_cascade_buffers(gpu);
         let e = engine.borrow();
         if e.spawn_buffers().is_none() {
             return false;

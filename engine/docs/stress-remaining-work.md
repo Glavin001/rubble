@@ -39,8 +39,17 @@ quick tier, slower: median 8.1 against 7.3 ms).
 frame's command buffer (`Gpu::read_ranges_in`). `wall_ram_late2` now makes 1 submission
 and 1 read per resident tick (digest c55cf1b5, unchanged).
 
+**W2, vibe-town quick tier:** `STRESS_STRICT_IO=1` passes with `STRESS_FRAME_SUBMITS=one`.
+- 88 of 89 resident ticks make 1 submission and 1 read; the other is the tick after a
+  shot is added, which the plan exempts. Digest dfc463839ed7df03 in both modes.
+- The first resident frame used to run windowed: 6 submissions and 4 reads, through
+  separate split passes. Frame-mode splits need the cascade's buffers, which only the
+  first cascade made. `GpuSolver::ensure_cascade_buffers` now makes them first, so that
+  frame runs in frame mode too. This is lossless: guard 32/32, the same digest in the
+  default mode.
+
 Next:
-- count the other frame kinds and the paths in the 5d plan's section 3;
+- the standard tier, the barrage and the CCD and fallback paths of the 5d plan's section 3;
 - the speed comparison (W3).
 
 ## R2. The barrage's GPU race (determinism): met 2026-10-18
