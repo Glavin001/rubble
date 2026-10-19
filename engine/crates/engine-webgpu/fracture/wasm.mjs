@@ -42,6 +42,7 @@ export function sceneHandle(scene){
 
 export const buildScene=(asset,level,{maxHullVertices}={})=>sceneObject(Scene.fromAsset(asset.handle,level,maxHullVertices));
 export const buildCuboidHouse=({colliders='box',pitchDeg}={})=>sceneObject(Scene.cuboidHouse(colliders==='hull',pitchDeg));
+export const buildPackScene=bytes=>sceneObject(Scene.fromPack(new Uint8Array(bytes)));
 export const buildPairScene=({a='box',b='box',count=4096}={})=>sceneObject(Scene.pairs(a,b,count));
 // Copies of one house: {columns, rows} grid/row, {suburb:true}, or null.
 export const layoutScene=(one,layout,procedural=false)=>sceneObject(sceneHandle(one).layout(layout??null,procedural));

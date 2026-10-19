@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/lib/stress/*": [
+        "src/*"
+      ],
+      "@dimforge/rapier3d-compat": [
+        "shims/rapier.ts"
+      ],
+      "blast-stress-solver": [
+        "node_modules/blast-stress-solver/dist/index.js"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "shims",
+    "export.ts"
+  ]
+}

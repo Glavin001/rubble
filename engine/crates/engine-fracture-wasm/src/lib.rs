@@ -176,6 +176,13 @@ impl Scene {
         }
         build_cuboid_house(&o).map(Scene).map_err(err)
     }
+    /// A scene pack (vibe-city / blast-stress-solver JSON; engine-fracture `pack.rs`).
+    #[wasm_bindgen(js_name = fromPack)]
+    pub fn from_pack(bytes: &[u8]) -> Result<Scene, JsError> {
+        engine_fracture::pack::build_pack_scene(bytes)
+            .map(|(s, _)| Scene(s))
+            .map_err(err)
+    }
     /// Collision-cost benchmark scene (`count` stacks of shape `a` under `b`).
     #[wasm_bindgen(js_name = pairs)]
     pub fn pairs(a: &str, b: &str, count: u32) -> Result<Scene, JsError> {
