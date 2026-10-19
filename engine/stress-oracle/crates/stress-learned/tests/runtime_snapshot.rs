@@ -92,6 +92,9 @@ fn physical_history_preserves_raw_small_state_full_inertia_and_stable_identity()
 #[test]
 fn physical_history_distinguishes_runtime_damping_omitted_from_legacy_features() {
     let mut world = World::new(&builders::bond_tension());
+    // This constitutive fixture deliberately starts undamped; set a physical
+    // dashpot before comparing two different runtime coefficient fields.
+    world.solver.bonds[0][0].damping = world.solver.bonds[0][0].stiffness.as_local().scale(1e-6);
     let graph = RuntimeGraph::new(&world).unwrap();
     let before = graph.capture_with_physical_history(&world).unwrap();
     world.solver.bonds[0][0].damping = world.solver.bonds[0][0].damping.scale(2.);
