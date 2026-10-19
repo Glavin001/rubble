@@ -610,8 +610,10 @@ depending on latent temporal memory. See `PHYSICAL_STATE_TRANSITION.md` and
 The whole-world target is ≤5 ms across hundreds of structures, hundreds of
 thousands of bonds and ≥10,000 active rigid bodies. User subsequently specified
 120 Hz to leave GPU headroom alongside likely 60 Hz PhysX: test 8.33 ms physical
-updates under the 5 ms ceiling. Final GPU remains unspecified; local M3 Max
-measurements are provisional. Do not change production timesteps implicitly.
+updates under the 5 ms ceiling. Apple M3 Max / Metal is now confirmed as the first
+required real-time device; high-end NVIDIA (e.g. RTX 4090) and WebGPU remain
+intended targets through shared Slang/model weights with measured kernel
+specializations. Do not change production timesteps implicitly.
 
 An oracle-assisted inactive-damage intervention is mixed and insufficient.
 Energy projection stabilizes generic explicit-state wave predictions but does
