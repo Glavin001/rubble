@@ -179,6 +179,17 @@ level, camera and shot rule, so the three can be compared:
 | **None** (default) | Nothing: pieces start asleep and wake when hit | rubble (this page's WGSL host) |
 | **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
 | **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
+| **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
+
+**Learned impact mode.**
+- Physics is the same as **None** (unbonded fragments). The network run is timed and discarded.
+- Pack: `engine/stress-oracle/packs/house-1story.json` (319 chunks / 877 bonds).
+- Rebuild WGSL after editing the Slang:
+  ```sh
+  slangc engine/slang/kernels/learned_impact.slang -I engine/slang -target wgsl \
+    -line-directive-mode none -o engine/crates/engine-webgpu/generated/wgsl/learned_impact.wgsl
+  ```
+- Bindings are packed to 8 storage buffers so Chrome's per-stage limit is met.
 
 **Stress solver mode.**
 - It runs the same Rust as the native reference (`stress-rubble` example

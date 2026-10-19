@@ -23,10 +23,11 @@ let sliceRate=1,sliceCredit=0,frameEma=FRAME_BUDGET_MS;
 let workDone=[{done:true},{done:true}];
 let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=null,packBytes=null;
 // Bond mode (the Bonds menu): 'none' (pieces sleep until hit), 'd6' (breakable D6
-// joints, AVBD welds) or 'stress' (the GPU stress solver, Rust on its own canvas:
-// stress-mode.mjs). The stress mode keeps its own frame loop state.
+// joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), or 'learned'
+// (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays unbonded).
 const bondMode=()=>$('bond-mode').value;
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
+let learned=null,learnedMs=0,learnedBusy=false;
 // The bond-graph and sleep-colour views are this page's renderer's; the stress mode draws
 // with its own (Rust), which has neither: the boxes are off there, saying so.
 const STRESS_VIEW_NOTE='Not in the stress-solver mode: it draws with its own renderer';
@@ -52,7 +53,8 @@ const rates=createRates(value=>{
  // GPU time from timestamps (sampled ticks and frames) and the rate it alone
  // would allow if nothing else used the GPU (physics and rendering share it).
  const tickMs=sim?.gpuTickMs,frameMs=renderer?.gpuFrameMs;
- $('step-ms').textContent=value&&!value.stepMs&&sim?.counters.awake===0?'all asleep · no GPU work':
+ $('step-ms').textContent=learned?`learned ${learnedMs.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`:
+  value&&!value.stepMs&&sim?.counters.awake===0?'all asleep · no GPU work':
   value&&tickMs?`${tickMs.toFixed(1)} ms GPU/tick · max ${Math.floor(1000/tickMs)} TPS`:
   value?.stepMs?`${value.stepMs.toFixed(1)} ms/tick`:`target ${stepHz()} TPS`;
  $('frame-ms').textContent=value&&frameMs?`${frameMs.toFixed(1)} ms GPU/frame · max ${Math.floor(1000/frameMs)} FPS`:
@@ -82,20 +84,29 @@ async function loadLevel(level){
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(bondMode()==='stress')return loadStress(level);
   stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;viewOptions(false);
+  learned?.dispose();learned=null;learnedMs=0;
   const built=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   if(bondMode()==='d6')setStatus('Settling bonds under self-weight…');
+  // Learned mode: rubble stays unbonded (same as none); the MGN-T forward is timed separately.
   const one=bondMode()==='d6'?await preloadBonds(device,strengthScale()===1?built:withBondStrength(built,strengthScale())):withoutJoints(built);
   // Copies laid out as the sample says (procedural houses get a larger contact budget).
   next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
  renderer.colorMode=$('show-sleep').checked?1:0;applyBallMass();
+ if(bondMode()==='learned'){
+  setStatus('Loading learned-impact kernels (Slang→WGSL)…');
+  const {createLearnedImpact}=await import('./learned-impact.mjs');
+  learned=await createLearnedImpact(device,{status:setStatus});
+  learnedMs=await learned.run();
+ }
  const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=procedural?scene.pieces*copies:scene.hullCount;$('bonds').textContent=scene.bondCount*copies;$('release').textContent='Start simulation';
  $('fire').hidden=!scene.rowShot;$('awake').textContent='0';$('contacts').textContent='0';
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
  const what=copies>1?`${copies} houses · ${scene.bodyCount-1-scene.projectileCount} bodies · `:'';
  const source=procedural==='pack'?`scene pack · ${scene.pieces} nodes`:procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials${skipped}`;
- setStatus(`${what}${source} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
+ const learnedNote=learned?` · learned-impact ${learnedMs.toFixed(2)} ms/fwd (${learned.graph.nNodes} chunks, ${learned.params} weights, compute only)`:'';
+ setStatus(`${what}${source}${learnedNote} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
 // The stress-solver mode, built and run by stress-web: a GLB's level (one copy of the
 // structure; the sample's layout of copies is the other modes'), or the cuboid houses in
@@ -105,6 +116,7 @@ async function loadStress(level){
  // sample's layout (every copy). Scene packs are not in this mode yet.
  const cuboid=procedural==='cuboid';
  if(!cuboid&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB or the cuboid houses: pick one of those scenes.');
+ learned?.dispose();learned=null;learnedMs=0;
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
  $('view').hidden=true;$('stress-view').hidden=false;viewOptions(true);
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
@@ -255,6 +267,8 @@ function tick(now){
     }
    }
   }
+  // Learned-impact: time one forward per frame when idle enough (discard output).
+  if(learned&&!learnedBusy){learnedBusy=true;learned.run().then(ms=>{learnedMs=ms;learnedBusy=false;$('step-ms').textContent=`learned ${ms.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`}).catch(e=>{learnedBusy=false;fail(e)})}
   // Queue the draw immediately behind physics; do not wait for CPU stats first.
   renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
