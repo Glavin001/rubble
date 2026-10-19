@@ -215,14 +215,14 @@ pub fn features(
     base[41] = damp.dot(&rate) * dt;
     Ok((x, base, d, rate))
 }
-fn target(r: &SuppliedStress) -> [f64; NY] {
+pub(crate) fn target(r: &SuppliedStress) -> [f64; NY] {
     let mut y = [0.; NY];
     y[..21].copy_from_slice(&joint_history::pack(&r.joint.state).map(finite));
     y[21..39].copy_from_slice(&phase_history::response_values(r));
     y[39..].copy_from_slice(&[r.joint.dissipated, r.joint.overshoot, r.damping_dissipated]);
     y
 }
-fn gates(base: &[f64; NY], r: &SuppliedStress) -> [f64; NG] {
+pub(crate) fn gates(base: &[f64; NY], r: &SuppliedStress) -> [f64; NG] {
     let y = target(r);
     let mut out = [0.; NG];
     for j in 0..21 {

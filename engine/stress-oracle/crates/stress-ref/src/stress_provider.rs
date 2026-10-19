@@ -1,10 +1,61 @@
 //! Supplied stress responses at the native pre-integration phase.
 //!
-//! The engine owns chunk force projection, integration, support reactions,
-//! rigid-frame transfer, splits, contacts and bookkeeping. A provider owns the
-//! constitutive response and its work/history increments. This interface is not
-//! itself a learned model or a speed improvement.
+//! The engine owns force projection, support reactions, rigid-frame transfer,
+//! splits, contacts and bookkeeping. A provider owns the constitutive response
+//! and may also replace the internal chunk-state transition. The default retains
+//! numerical internal integration. This interface is not itself a trained model.
 use crate::{bond::Local6, joint::JointResponse, solver::{ChunkLoads,ReferenceSolver}};
+
+/// Internal physical state after a transition, before the engine transfers
+/// rigid-frame drift or splits a cluster. Rotations use the native rotation
+/// vector convention; velocities have the native explicit half-step convention.
+/// This is the wave-carrying chunk state, not the rigid body's world pose.
+#[derive(Clone, Copy, Debug)]
+pub struct ChunkTransition {
+    pub key: (usize, usize),
+    pub u: crate::math::Vec3,
+    pub th: crate::math::Vec3,
+    pub v: crate::math::Vec3,
+    pub w: crate::math::Vec3,
+}
+
+/// Causal mechanical context for a graph transition. Known external/inertial
+/// forcing and the mass dashpot are separated from internal bond forces, which
+/// the learned graph must model. No target bond response is included here.
+#[derive(Clone, Copy, Debug)]
+pub struct ChunkTransitionInput {
+    pub state: ChunkTransition,
+    pub frame_force: crate::math::Vec3,
+    pub frame_torque: crate::math::Vec3,
+    pub mass_damping_force: crate::math::Vec3,
+    pub mass_damping_torque: crate::math::Vec3,
+    pub inverse_mass: f64,
+    pub inverse_inertia: crate::math::Mat3,
+    pub support: crate::scene::Support,
+}
+
+impl ChunkTransition {
+    pub fn capture(solver: &ReferenceSolver, key: (usize, usize)) -> Self {
+        let st = &solver.chunks[key.0][key.1];
+        Self { key, u: st.u, th: st.th, v: st.v, w: st.w }
+    }
+
+    pub(crate) fn validate(&self, solver: &ReferenceSolver, key: (usize, usize)) -> Result<(), String> {
+        if self.key != key { return Err("chunk transition key/order mismatch".into()); }
+        if [self.u, self.th, self.v, self.w].iter().flat_map(|v| v.to_array()).any(|v| !v.is_finite()) {
+            return Err("nonfinite chunk transition".into());
+        }
+        let old = &solver.chunks[key.0][key.1];
+        let zero = crate::math::Vec3::ZERO;
+        match solver.structures[key.0].chunks[key.1].support {
+            crate::scene::Support::Fixed if self.u != old.u || self.th != old.th || self.v != zero || self.w != zero =>
+                Err("chunk transition moves a fixed support".into()),
+            crate::scene::Support::Pinned if self.u != old.u || self.v != zero =>
+                Err("chunk transition translates a pinned support".into()),
+            _ => Ok(()),
+        }
+    }
+}
 
 /// (structure index, bond index, native multirate weight).
 pub type BondJob = (usize, usize, f64);
@@ -24,6 +75,20 @@ pub trait StressProvider {
     /// oracle frames. Empty jobs must return an empty vector.
     fn responses(&mut self,solver:&ReferenceSolver,loads:&ChunkLoads,jobs:&[BondJob],dt:f64,fracture:bool)
         ->Result<Vec<SuppliedStress>,String>;
+
+    /// Optional full-graph mechanical transition. Called on the SAME initial
+    /// state as `responses`, before any bond response is committed. Some means
+    /// exactly one state per job and replaces the numerical internal-state kick
+    /// and drift. None explicitly retains numerical internal integration.
+    /// Current contact loads are causal inputs; future oracle phases are not.
+    fn chunk_transitions(&mut self, _solver: &ReferenceSolver, _loads: &ChunkLoads,
+        _jobs: &[(usize, usize)], _dt: f64) -> Result<Option<Vec<ChunkTransition>>, String> {
+        Ok(None)
+    }
+
+    /// Training-only observation of pre-transfer targets. Disabled by default.
+    fn records_chunk_transitions(&self) -> bool { false }
+    fn observe_chunk_transitions(&mut self, _states: &[ChunkTransition], _dt: f64) -> Result<(), String> { Ok(()) }
 }
 
 impl SuppliedStress {

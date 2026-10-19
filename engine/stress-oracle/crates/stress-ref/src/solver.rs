@@ -444,6 +444,10 @@ pub struct ReferenceSolver {
     multirate: MultirateWindow,
     /// Bond evaluations so far (diagnostics: the work that `multirate` saves).
     pub bond_evaluations: u64,
+    /// Explicit chunk states advanced by the numerical vs supplied transition.
+    /// Includes constrained chunks; these are not rigid-body counts.
+    pub numerical_chunk_updates: u64,
+    pub supplied_chunk_updates: u64,
 }
 
 /// `stable_dt`'s per-cluster cache: (bonds, chunks, inertia-scale bits, bound) by cluster id.
@@ -520,6 +524,8 @@ impl ReferenceSolver {
             step_bounds: StepBounds::default(),
             multirate: MultirateWindow::default(),
             bond_evaluations: 0,
+            numerical_chunk_updates: 0,
+            supplied_chunk_updates: 0,
             structures,
         };
         for si in 0..solver.structures.len() {
@@ -1486,6 +1492,11 @@ impl ReferenceSolver {
                 list.iter().map(move |&(bi, w)| (s, bi, w))
             })
             .collect();
+        let transition_jobs: Vec<(usize,usize)> = explicit.iter().filter(|_| provider.is_some()).flat_map(|&ci| {
+            let cl = &self.clusters[ci];
+            cl.chunks.iter().map(move |&c| (cl.structure,c))
+        }).collect();
+        let mut supplied_chunks = None;
         if provider.is_none() {
             crate::profile::count(crate::profile::Counter::BondEvaluations, bond_jobs.len() as u64);
             self.bond_evaluations += bond_jobs.len() as u64;
@@ -1503,6 +1514,11 @@ impl ReferenceSolver {
             if supplied.len()!=bond_jobs.len() {return Err("supplied stress response count mismatch".into())}
             // Validate the complete batch before any history/force commit.
             for (response,&job) in supplied.iter().zip(&bond_jobs) {response.validate(self,job)?;}
+            supplied_chunks = provider.chunk_transitions(self,loads,&transition_jobs,dt)?;
+            if let Some(states) = &supplied_chunks {
+                if states.len() != transition_jobs.len() { return Err("chunk transition count mismatch".into()); }
+                for (state,&key) in states.iter().zip(&transition_jobs) { state.validate(self,key)?; }
+            }
             let responses=supplied.into_iter().map(|r| {
                 let loads=self.bond_chunk_loads(r.key.0,r.key.1,&r.total_force);
                 (r.joint,r.total_force,r.damping_dissipated,loads)
@@ -1541,12 +1557,14 @@ impl ReferenceSolver {
         .into_iter();
         drop(t_loads);
         let t_integrate = crate::profile::time(crate::profile::Stage::Integrate);
+        let mut supplied_chunks = supplied_chunks.map(Vec::into_iter);
+        let mut transition_targets = provider.as_deref().is_some_and(|p| p.records_chunk_transitions()).then(Vec::new);
         let mut next = explicit.iter().zip(&accel).peekable();
         for ci in 0..self.clusters.len() {
             match next.peek() {
                 Some(&(&e, &(a, alpha))) if e == ci => {
                     next.next();
-                    self.integrate_cluster(ci, dt, loads, a, alpha, &mut frame_loads);
+                    self.integrate_cluster(ci, dt, loads, a, alpha, &mut frame_loads, &mut supplied_chunks, &mut transition_targets);
                 }
                 _ => {
                     if self.config.mode == SolveMode::Implicit {
@@ -1557,6 +1575,9 @@ impl ReferenceSolver {
             }
         }
         drop(t_integrate);
+        if let (Some(provider),Some(targets)) = (provider.as_deref_mut(),transition_targets.as_ref()) {
+            provider.observe_chunk_transitions(targets,dt)?;
+        }
         self.time += dt;
         self.substeps += 1;
         if self.multirate.open() {
@@ -1577,6 +1598,38 @@ impl ReferenceSolver {
         let (s,b,w)=job;
         let (joint,total_force,damping_dissipated,_)=self.bond_response(s,b,dt*w,fracture);
         crate::stress_provider::SuppliedStress{key:(s,b),joint,total_force,damping_dissipated}
+    }
+
+    /// Current physical inputs for the optional learned graph transition.
+    /// This evaluates coordinate/inertia coupling and the known mass dashpot,
+    /// never a bond constitutive response or a future mechanical state.
+    pub fn chunk_transition_inputs(&self, loads:&ChunkLoads, jobs:&[(usize,usize)],dt:f64)
+        ->Result<Vec<crate::stress_provider::ChunkTransitionInput>,String> {
+        use crate::stress_provider::{ChunkTransition,ChunkTransitionInput};
+        if !dt.is_finite() || dt<=0. {return Err("positive finite transition interval required".into());}
+        let mut context=std::collections::HashMap::new();
+        let mut result=Vec::with_capacity(jobs.len());
+        for &(s,c) in jobs {
+            let st=self.chunks.get(s).and_then(|cs|cs.get(c)).ok_or("unknown transition chunk")?;
+            if !st.active {return Err("inactive transition chunk".into());}
+            let ci=st.cluster;
+            if !self.integrates_explicitly(ci) {return Err("transition chunk is not explicit".into());}
+            let cl=&self.clusters[ci];
+            let (accel,damping)=context.entry(ci).or_insert_with(|| {
+                let damping=((cl.anchored || self.config.methods.corotational_bonds)
+                    && self.mass_damping.get(s).copied().unwrap_or(0.)>0.).then(|| self.mass_damping_loads(ci));
+                (self.rigid_acceleration(ci,loads),damping)
+            });
+            let (frame_force,frame_torque)=self.frame_loads(ci,c,loads,accel.0,accel.1,self.time+dt);
+            let k=cl.chunks.iter().position(|&v|v==c).ok_or("chunk/cluster membership mismatch")?;
+            let (mass_damping_force,mass_damping_torque)=damping.as_ref().map_or((Vec3::ZERO,Vec3::ZERO),|v|v[k]);
+            let ch=&self.structures[s].chunks[c];
+            result.push(ChunkTransitionInput { state:ChunkTransition::capture(self,(s,c)),
+                frame_force,frame_torque,mass_damping_force,mass_damping_torque,
+                inverse_mass:1./(ch.mass*st.inertia_scale),
+                inverse_inertia:ch.inv_inertia*(1./st.inertia_scale),support:ch.support });
+        }
+        Ok(result)
     }
 
     /// Whether cluster `ci` takes explicit substeps (the others are quasi-static,
@@ -1802,7 +1855,9 @@ impl ReferenceSolver {
     /// Central-difference update of cluster `ci`'s chunk deformation (velocities at half
     /// steps) under the internal forces and its chunk loads (taken in chunk order from
     /// `frame_loads`), then its rigid motion.
-    fn integrate_cluster(&mut self, ci: usize, dt: f64, loads: &ChunkLoads, a: Vec3, alpha: Vec3, frame_loads: &mut impl Iterator<Item = (Vec3, Vec3)>) {
+    fn integrate_cluster(&mut self, ci: usize, dt: f64, loads: &ChunkLoads, a: Vec3, alpha: Vec3, frame_loads: &mut impl Iterator<Item = (Vec3, Vec3)>,
+        supplied: &mut Option<std::vec::IntoIter<crate::stress_provider::ChunkTransition>>,
+        targets: &mut Option<Vec<crate::stress_provider::ChunkTransition>>) {
         let s = self.clusters[ci].structure;
         let (pose, cv, cw, com) = {
             let cl = &self.clusters[ci];
@@ -1826,6 +1881,18 @@ impl ReferenceSolver {
             }
             let ch = &self.structures[s].chunks[c];
             let st = &mut self.chunks[s][c];
+            if let Some(states) = supplied {
+                let next = states.next().expect("validated chunk transition count");
+                debug_assert_eq!(next.key,(s,c));
+                match ch.support {
+                    Support::Fixed => st.reaction = (-(f_ext + fi), -(m_ext + mi)),
+                    Support::Pinned => st.reaction = (-(f_ext + fi), Vec3::ZERO),
+                    Support::None => {},
+                }
+                (st.u,st.th,st.v,st.w) = (next.u,next.th,next.v,next.w);
+                self.supplied_chunk_updates += 1;
+            } else {
+            self.numerical_chunk_updates += 1;
             match ch.support {
                 Support::Fixed => {
                     st.reaction = (-(f_ext + fi), -(m_ext + mi));
@@ -1851,6 +1918,10 @@ impl ReferenceSolver {
                         (st.a, st.alpha) = ((f_ext + fi) * (1.0 / (ch.mass * st.inertia_scale)), ch.inv_inertia * (m_ext + mi) * (1.0 / st.inertia_scale));
                     }
                 }
+            }
+            }
+            if let Some(targets) = targets {
+                targets.push(crate::stress_provider::ChunkTransition { key:(s,c), u:st.u, th:st.th, v:st.v, w:st.w });
             }
             // Work of the external (non-gravity) loads at the chunk's world velocity.
             let r = pose.transform_vector(ch.center + st.u - com);

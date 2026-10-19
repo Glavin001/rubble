@@ -42,3 +42,6 @@ pub mod phase_history;
 /// Complete learned forecasts applied at the native stress phase boundary.
 pub mod runtime_trajectory;
 pub mod causal_state;
+/// Causal full-graph physical-state transition pairs, before rigid-frame transfer.
+pub mod graph_transition;
+pub mod graph_live;
