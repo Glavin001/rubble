@@ -270,6 +270,81 @@ pub struct World {
     /// and those found failing in this attempt.
     window_forced: Vec<(usize, usize)>,
     implicit_failures: Vec<(usize, usize)>,
+    /// Learned-impact: when set, each substep's external loads (scripted + contact) are
+    /// accumulated into `K` time bins over the current frame. Off by default.
+    pub learned_bins: Option<LearnedFrameBins>,
+}
+
+/// Per-frame external load accumulator for learned-impact (`K` time bins).
+///
+/// Stores **impulse** (`force·dt`, `torque·dt`) per bin; [`LearnedFrameBins::mean_force`]
+/// converts to average force over the bin width `frame_dt / K`.
+#[derive(Clone, Debug)]
+pub struct LearnedFrameBins {
+    pub k: usize,
+    pub t0: f64,
+    pub frame_dt: f64,
+    /// `[bin][structure][chunk]`
+    pub impulse_force: Vec<Vec<Vec<Vec3>>>,
+    pub impulse_torque: Vec<Vec<Vec<Vec3>>>,
+    /// Chunk saw a non-zero contact contribution this frame.
+    pub contacted: Vec<Vec<bool>>,
+}
+
+impl LearnedFrameBins {
+    pub fn new(solver: &ReferenceSolver, k: usize, t0: f64, frame_dt: f64) -> Self {
+        let shape = |s: &ReferenceSolver| {
+            s.structures.iter().map(|st| vec![Vec3::ZERO; st.chunks.len()]).collect::<Vec<_>>()
+        };
+        let contacted = solver.structures.iter().map(|st| vec![false; st.chunks.len()]).collect();
+        Self {
+            k: k.max(1),
+            t0,
+            frame_dt: frame_dt.max(1e-12),
+            impulse_force: (0..k.max(1)).map(|_| shape(solver)).collect(),
+            impulse_torque: (0..k.max(1)).map(|_| shape(solver)).collect(),
+            contacted,
+        }
+    }
+
+    fn bin_index(&self, t_mid: f64) -> usize {
+        let frac = ((t_mid - self.t0) / self.frame_dt).clamp(0.0, 0.999999);
+        ((frac * self.k as f64).floor() as usize).min(self.k - 1)
+    }
+
+    /// Accumulate one substep's external loads (`ChunkLoads`) and contact mask.
+    pub fn add_substep(&mut self, t_mid: f64, dt: f64, loads: &ChunkLoads, contact: &[(usize, usize, Vec3, Vec3)]) {
+        let b = self.bin_index(t_mid);
+        for (s, forces) in loads.force.iter().enumerate() {
+            for (c, f) in forces.iter().enumerate() {
+                if *f != Vec3::ZERO {
+                    self.impulse_force[b][s][c] += *f * dt;
+                }
+            }
+        }
+        for (s, torques) in loads.torque.iter().enumerate() {
+            for (c, tq) in torques.iter().enumerate() {
+                if *tq != Vec3::ZERO {
+                    self.impulse_torque[b][s][c] += *tq * dt;
+                }
+            }
+        }
+        for &(s, c, f, tq) in contact {
+            if f != Vec3::ZERO || tq != Vec3::ZERO {
+                if s < self.contacted.len() && c < self.contacted[s].len() {
+                    self.contacted[s][c] = true;
+                }
+            }
+        }
+    }
+
+    pub fn mean_force(&self, bin: usize, s: usize, c: usize) -> Vec3 {
+        self.impulse_force[bin][s][c] * (self.k as f64 / self.frame_dt)
+    }
+
+    pub fn mean_torque(&self, bin: usize, s: usize, c: usize) -> Vec3 {
+        self.impulse_torque[bin][s][c] * (self.k as f64 / self.frame_dt)
+    }
 }
 
 /// The external engine. A clone of the world is detached from it (the cell clones
@@ -433,6 +508,7 @@ impl World {
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,
+            learned_bins: None,
             scene: scene.clone(),
             solver,
         };
@@ -2067,6 +2143,10 @@ impl World {
             .map(|(s, c)| (s, c, self.loads.force[s][c] - before.0[s][c], self.loads.torque[s][c] - before.1[s][c]))
             .filter(|l| l.2 != Vec3::ZERO || l.3 != Vec3::ZERO)
             .collect();
+        if let Some(bins) = &mut self.learned_bins {
+            // Mid-substep time: assign this substep's external loads (scripted + contact) to a bin.
+            bins.add_substep(self.solver.time + 0.5 * dt, dt, &self.loads, &contact_loads);
+        }
         drop(t_contacts);
         if self.scene.sim.solve_mode == SolveMode::Adaptive {
             let _t = crate::profile::time(crate::profile::Stage::Wake);

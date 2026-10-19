@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "learned-impact"
+version = "0.1.0"
+description = "PyTorch training scaffolding for learned-impact (does not ship in product)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+learned-impact-train = "learned_impact.train:main"
+
+[tool.setuptools.packages.find]
+include = ["learned_impact*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1194,6 +1194,7 @@ impl ReferenceSolver {
             self.energy.softening_overshoot += resp.overshoot;
             let bm = &mut self.bonds[s][bi];
             bm.joint = resp.state;
+            bm.observe_utilization();
             bm.force = resp.force;
             bm.elastic = resp.force;
             bm.measures = resp.measures;
