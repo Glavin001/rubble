@@ -1,0 +1,70 @@
+use stress_learned::runtime_snapshot::RuntimeGraph;
+use stress_ref::{builders, world::World};
+
+#[test]
+fn native_capture_retains_cracked_interfaces_retired_caches_and_unset_history() {
+    let mut world = World::new(&builders::bond_tension());
+    let graph = RuntimeGraph::new(&world).unwrap();
+    let before = serde_json::to_value(graph.capture(&world).unwrap()).unwrap();
+    assert!(before["joint_values"][0][4].is_null());
+    assert_eq!(before["joint_flags"][0][3], 1);
+    world.solver.bonds[0][0].joint.damage = 1.;
+    world.solver.bonds[0][0].stored = 12.34567890123456;
+    let cracked = graph.capture(&world).unwrap();
+    assert_eq!(cracked.joint_flags[0][2..], [1, 0]);
+    assert_eq!(cracked.response_values[0][12], 12.34567890123456);
+    world.solver.bonds[0][0].alive = false;
+    let retired = graph.capture(&world).unwrap();
+    assert_eq!(retired.joint_flags[0][2..], [0, 0]);
+    assert_eq!(retired.response_values[0], cracked.response_values[0]);
+    // Capturing twice has no solver side effects.
+    assert_eq!(
+        serde_json::to_value(retired).unwrap(),
+        serde_json::to_value(graph.capture(&world).unwrap()).unwrap()
+    );
+    world.solver.time += world.scene.sim.frame_dt / 2.;
+    assert!(graph
+        .capture(&world)
+        .err()
+        .unwrap()
+        .contains("frame boundary"));
+}
+
+#[test]
+fn native_graph_rejects_new_slots_and_changed_source() {
+    let mut world = World::new(&builders::bond_tension());
+    world.solver.bonds[0][0].alive = false;
+    let graph = RuntimeGraph::new(&world).unwrap();
+    world.solver.bonds[0][0].alive = true;
+    assert!(graph.capture(&world).err().unwrap().contains("newly alive"));
+    world.solver.bonds[0][0].alive = false;
+    world.scene.sim.stiffness_scale *= 2.;
+    assert!(graph
+        .capture(&world)
+        .err()
+        .unwrap()
+        .contains("source scene changed"));
+}
+
+#[test]
+fn boundary_kinematics_preserve_small_deformation_and_relative_rate_without_mutation() {
+    use stress_ref::math::Vec3;
+    for corotational in [false,true] {
+        let mut scene=builders::bond_tension();scene.sim.methods.corotational_bonds=corotational;
+        let mut world=World::new(&scene);let graph=RuntimeGraph::new(&world).unwrap();
+        let g=world.solver.bonds[0][0].geometry.clone();
+        world.solver.chunks[0][g.a].u=Vec3::new(0.001,0.002,0.003);
+        world.solver.chunks[0][g.b].u=world.solver.chunks[0][g.a].u+g.normal*1e-9;
+        world.solver.chunks[0][g.a].v=Vec3::new(1.,2.,3.);
+        world.solver.chunks[0][g.b].v=world.solver.chunks[0][g.a].v+g.normal*0.02;
+        let before=serde_json::to_value(graph.capture(&world).unwrap()).unwrap();
+        let (snapshot,kinematics)=graph.capture_with_kinematics(&world).unwrap();
+        assert_eq!(serde_json::to_value(snapshot).unwrap(),before);
+        assert_eq!(serde_json::to_value(graph.capture(&world).unwrap()).unwrap(),before);
+        let q=kinematics.values[0];
+        assert!((q[2]-1e-9).abs()<1e-18);assert!((q[8]-0.02).abs()<1e-14);
+        for i in [0,1,3,4,5,6,7,9,10,11]{assert!(q[i].abs()<1e-14);}
+        world.solver.bonds[0][0].alive=false;
+        assert_eq!(graph.capture_with_kinematics(&world).unwrap().1.values[0],[0.;12]);
+    }
+}

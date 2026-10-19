@@ -67,9 +67,44 @@ pub fn validate_event(root: &Path) -> Result<Manifest, ValidationError> {
         }
     }
 
+    let context_path = root.join("context.json");
+    let preview = if context_path.exists() {
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(context_path).map_err(|e| err(e.to_string()))?).map_err(|e| err(e.to_string()))?;
+        if let Some(history)=v.get("joint_history") {
+            if history["format"]!=crate::joint_history::FORMAT || history["path"]!="joint_history/manifest.json" {
+                return Err(err("unknown joint-history contract".into()));
+            }
+            let keys:Vec<(usize,usize)>=serde_json::from_value(v["bond_keys"].clone()).map_err(|e|err(e.to_string()))?;
+            if keys.len()!=e || keys.iter().collect::<std::collections::HashSet<_>>().len()!=e {return Err(err("joint-history bond key mismatch".into()));}
+            crate::joint_history::validate(root,&keys,man.n_frames as usize,man.dt).map_err(err)?;
+        }
+        if let Some(response)=v.get("bond_response") {
+            if response["format"]!=crate::response_history::FORMAT || response["path"]!="bond_response/manifest.json" || v.get("joint_history").is_none() {
+                return Err(err("unknown or incomplete bond-response contract".into()));
+            }
+            let keys:Vec<(usize,usize)>=serde_json::from_value(v["bond_keys"].clone()).map_err(|e|err(e.to_string()))?;
+            crate::response_history::validate(root,&keys,man.n_frames as usize,man.dt).map_err(err)?;
+        }
+        match v.get("load_preview").and_then(|p| p.get("format")).and_then(|f| f.as_str()) {
+            None => false,
+            Some("rigid-contact-preview/1") => true,
+            Some(f) => return Err(err(format!("unknown load preview format {f}"))),
+        }
+    } else { false };
     for fi in 0..man.n_frames {
         let dir = catalog::frame_dir(root, fi);
         let cat = Catalog::load(&dir.join("catalog.json")).map_err(err)?;
+        if preview {
+            require_shape(&cat, "chunk_preview_load_bins", "f32", &[n, K, LOCAL6_DIM])?;
+            require_shape(&cat, "chunk_preview_contact", "i32", &[n])?;
+            let loads = catalog::read_f32(&dir, &cat.arrays["chunk_preview_load_bins"]).map_err(err)?;
+            let contact = catalog::read_i32(&dir, &cat.arrays["chunk_preview_contact"]).map_err(err)?;
+            if loads.iter().any(|x| !x.is_finite()) || contact.iter().any(|&x| x != 0 && x != 1) {
+                return Err(err(format!("invalid rigid preview in frame {fi}")));
+            }
+        } else if cat.arrays.contains_key("chunk_preview_load_bins") || cat.arrays.contains_key("chunk_preview_contact") {
+            return Err(err("preview arrays without context contract".into()));
+        }
         require_shape(&cat, "chunk_state", "f32", &[n, CHUNK_STATE_DIM])?;
         require_shape(&cat, "chunk_load_bins", "f32", &[n, K, LOCAL6_DIM])?;
         require_shape(&cat, "chunk_contact", "i32", &[n])?;

@@ -28,7 +28,7 @@ pub struct Manifest {
 }
 
 /// Static graph features for one structure (schema § static arrays).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct StaticFeatures {
     pub chunk_mass: Vec<f32>,
     pub chunk_inertia: Vec<f32>,       // N*3
@@ -52,6 +52,8 @@ pub struct StaticFeatures {
 /// One frame of inputs + labels.
 #[derive(Clone, Debug, Default)]
 pub struct FrameRecord {
+    pub chunk_preview_load_bins: Option<Vec<f32>>,
+    pub chunk_preview_contact: Option<Vec<i32>>,
     pub chunk_state: Vec<f32>,
     pub chunk_load_bins: Vec<f32>,
     pub chunk_contact: Vec<i32>,
@@ -154,6 +156,17 @@ fn check_static(s: &StaticFeatures, n: usize, e: usize) -> Result<(), String> {
 }
 
 fn check_frame(f: &FrameRecord, n: usize, e: usize) -> Result<(), String> {
+    match (&f.chunk_preview_load_bins, &f.chunk_preview_contact) {
+        (Some(loads), Some(contact)) => {
+            req("chunk_preview_load_bins", loads.len(), n * K * LOCAL6_DIM)?;
+            req("chunk_preview_contact", contact.len(), n)?;
+            if loads.iter().any(|x| !x.is_finite()) || contact.iter().any(|&x| x != 0 && x != 1) {
+                return Err("invalid rigid preview loads/contact".into());
+            }
+        }
+        (None, None) => {}
+        _ => return Err("preview loads and contact must both be present".into()),
+    }
     req("chunk_state", f.chunk_state.len(), n * CHUNK_STATE_DIM)?;
     req("chunk_load_bins", f.chunk_load_bins.len(), n * K * LOCAL6_DIM)?;
     req("chunk_contact", f.chunk_contact.len(), n)?;
@@ -231,6 +244,10 @@ fn write_frame(dir: &Path, f: &FrameRecord, n: usize, e: usize) -> Result<(), St
         cat.insert(name, "i32", shape, &rel);
         Ok(())
     };
+    if let (Some(loads), Some(contact)) = (&f.chunk_preview_load_bins, &f.chunk_preview_contact) {
+        put_f(&mut cat, "chunk_preview_load_bins", &[n, K, LOCAL6_DIM], loads)?;
+        put_i(&mut cat, "chunk_preview_contact", &[n], contact)?;
+    }
     put_f(&mut cat, "chunk_state", &[n, CHUNK_STATE_DIM], &f.chunk_state)?;
     put_f(&mut cat, "chunk_load_bins", &[n, K, LOCAL6_DIM], &f.chunk_load_bins)?;
     put_i(&mut cat, "chunk_contact", &[n], &f.chunk_contact)?;
@@ -297,6 +314,8 @@ pub fn write_synthetic_tiny(root: impl AsRef<Path>) -> Result<PathBuf, String> {
     let mut rec = EventRecorder::begin(root, manifest, &statics)?;
     for frame_i in 0..2u32 {
         let mut fr = FrameRecord {
+            chunk_preview_load_bins: None,
+            chunk_preview_contact: None,
             chunk_state: vec![0.0; n * CHUNK_STATE_DIM],
             chunk_load_bins: vec![0.0; n * K * LOCAL6_DIM],
             chunk_contact: vec![0; n],

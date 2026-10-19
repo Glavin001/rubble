@@ -24,6 +24,8 @@ def binary_fail_f1(logits: torch.Tensor, target: torch.Tensor) -> float:
 
 @torch.no_grad()
 def util_mae(pred: torch.Tensor, target: torch.Tensor) -> float:
+    if not target.numel():
+        return 0.0
     return float((pred - target).abs().mean())
 
 
@@ -34,7 +36,12 @@ def delta_rmse(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 @torch.no_grad()
 def eval_batch(pred: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> dict[str, float]:
+    positive = pred["bond_fail_logits"].argmax(dim=-1) > 0
+    target = batch["bond_fail_class"] > 0
     return {
+        "tp": int((positive & target).sum()),
+        "fp": int((positive & ~target).sum()),
+        "fn": int((~positive & target).sum()),
         "fail_f1": binary_fail_f1(pred["bond_fail_logits"], batch["bond_fail_class"]),
         "util_mae": util_mae(pred["bond_peak_util"], batch["bond_peak_util"]),
         "delta_rmse": delta_rmse(pred["chunk_state_delta"], batch["chunk_state_delta"]),
@@ -47,5 +54,10 @@ def mean_metrics(rows: list[dict[str, float]]) -> dict[str, float]:
         return {"fail_f1": 0.0, "util_mae": 0.0, "delta_rmse": 0.0, "n": 0.0}
     keys = [k for k in rows[0] if k != "n"]
     out = {k: sum(r[k] for r in rows) / len(rows) for k in keys}
+    if "tp" in out:
+        for key in ("tp", "fp", "fn"):
+            out[key] = sum(r[key] for r in rows)
+        denom = 2 * out["tp"] + out["fp"] + out["fn"]
+        out["pooled_fail_f1"] = 2 * out["tp"] / denom if denom else 1.0
     out["n"] = float(len(rows))
     return out

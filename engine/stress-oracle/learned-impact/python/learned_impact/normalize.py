@@ -6,6 +6,8 @@ import torch
 
 
 def _rms(x: torch.Tensor, floor: float) -> float:
+    if not x.numel():
+        return floor
     v = float(x.detach().float().pow(2).mean().sqrt().item())
     return max(v, floor)
 

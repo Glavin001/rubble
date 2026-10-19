@@ -18,9 +18,14 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 learned-impact-train = "learned_impact.train:main"
+learned-impact-experiment = "learned_impact.experiment:main"
+learned-impact-view = "learned_impact.visualize:main"
 
 [tool.setuptools.packages.find]
 include = ["learned_impact*"]
+
+[tool.setuptools.package-data]
+learned_impact = ["viewer/*.html", "viewer/*.js", "viewer/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

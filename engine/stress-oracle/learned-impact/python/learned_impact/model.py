@@ -160,7 +160,8 @@ class BondMLPBaseline(nn.Module):
         edge_in = torch.cat([batch["bond_joint_state"], batch["bond_qs_force"]], dim=-1)
         edge = self.encode(edge_in)
         n = batch["chunk_state"].shape[0]
-        pooled = edge.mean(dim=0, keepdim=True).expand(n, -1)
+        pooled = (edge.mean(dim=0, keepdim=True) if edge.shape[0]
+                  else edge.new_zeros((1, self.h))).expand(n, -1)
         return {
             "bond_fail_logits": self.bond_fail(edge),
             "bond_peak_util": self.bond_util(edge).squeeze(-1),

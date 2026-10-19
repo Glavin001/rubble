@@ -365,30 +365,34 @@ impl Polytope {
     /// Volume, centroid and second moments (tetrahedra from one vertex).
     pub fn mass_properties(&self) -> Option<MassProperties> {
         let origin = *self.vertices.first()?;
-        let (mut vol, mut first, mut second) = (0.0, Vec3::ZERO, [[0.0f64; 3]; 3]);
+        // Accumulate unscaled determinants before dividing by six. Dividing each
+        // signed term first can turn an exactly zero sum into a tiny positive
+        // volume, amplifying a residual first moment into an unbounded centroid.
+        let (mut six_vol, mut first, mut second) = (0.0, Vec3::ZERO, [[0.0f64; 3]; 3]);
         for f in self.faces() {
             for i in 1..f.vertices.len().saturating_sub(1) {
                 let (a, b, c) = (f.vertices[0] - origin, f.vertices[i] - origin, f.vertices[i + 1] - origin);
-                let v = a.dot(b.cross(c)) / 6.0;
-                vol += v;
-                first += (a + b + c) * (v / 4.0);
+                let determinant = a.dot(b.cross(c));
+                six_vol += determinant;
+                first += (a + b + c) * determinant;
                 // int x x^T over the tetrahedron (0, a, b, c): v/20 (sum w w^T + s s^T).
                 let s = a + b + c;
                 for (p, q) in [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)] {
                     let w = a[p] * a[q] + b[p] * b[q] + c[p] * c[q] + s[p] * s[q];
-                    second[p][q] += v / 20.0 * w;
+                    second[p][q] += determinant * w;
                 }
             }
         }
-        if vol <= 0.0 {
+        if six_vol <= 0.0 {
             return None;
         }
-        let c = first / vol;
+        let vol = six_vol / 6.0;
+        let c = first / (4.0 * six_vol);
         let mut m = [[0.0; 3]; 3];
         for p in 0..3 {
             for q in p..3 {
                 // Parallel-axis shift from the origin vertex to the centroid.
-                m[p][q] = second[p][q] - vol * c[p] * c[q];
+                m[p][q] = second[p][q] / 120.0 - vol * c[p] * c[q];
                 m[q][p] = m[p][q];
             }
         }
@@ -1635,6 +1639,22 @@ mod tests {
             let prism = 0.5 * t * t * len;
             let got = v.min(full - v);
             assert!((got - prism).abs() < 1e-9 * prism, "{n:?}: {got:e} vs {prism:e}");
+        }
+    }
+
+    #[test]
+    fn tiny_positive_volumes_are_retained_without_a_cutoff() {
+        for scale in [1.0, 1e-3, 1e-6] {
+            let half = Vec3::new(1e-12, 1e-10, 1e-8) * scale;
+            let p = Polytope::cuboid(Vec3::ZERO, Mat3::IDENTITY, half, OWNER_A);
+            let mp = p.mass_properties().expect("a thin solid still has volume");
+            let expected = 8.0 * half.x * half.y * half.z;
+            assert!((mp.volume - expected).abs() <= expected * 1e-12);
+            assert!(mp.centroid.norm() <= half.norm() * 1e-12);
+            for i in 0..3 {
+                let expected_second = expected * half[i] * half[i] / 3.0;
+                assert!((mp.second_moment.m[i][i] - expected_second).abs() <= expected_second * 1e-12);
+            }
         }
     }
 

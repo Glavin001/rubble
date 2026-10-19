@@ -1,9 +1,9 @@
-//! Diversity v1 catalog shape (no bulk oracle generate).
+//! Diversity v1/v2 catalog shape (no bulk oracle generate).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use stress_learned::generate::{diversity_jobs, prove_jobs, Job};
+use stress_learned::generate::{diversity_jobs, diversity_v2_jobs, prove_jobs, Job};
 use stress_learned::{record_event, RecordMeta};
 use stress_ref::builders;
 
@@ -92,6 +92,45 @@ fn crackling_cantilever_can_break() {
 fn diversity_job_scenes_build() {
     // Cheap: construct every scene once (World::new is heavier; just Scene build).
     let jobs: Vec<Job> = diversity_jobs();
+    for j in &jobs {
+        assert!(!j.scene.bodies.is_empty(), "{} empty bodies", j.event_id);
+        assert!(j.frames >= 1);
+    }
+}
+
+#[test]
+fn diversity_v2_counts_and_new_ids() {
+    let jobs = diversity_v2_jobs();
+    assert!(jobs.len() >= 90, "v2 should be a large expand, got {}", jobs.len());
+    let frames: u32 = jobs.iter().map(|j| j.frames).sum();
+    assert!(frames >= 700, "v2 expects ~900+ frames, got {frames}");
+
+    let ids: HashSet<_> = jobs.iter().map(|j| j.event_id.as_str()).collect();
+    assert_eq!(ids.len(), jobs.len(), "duplicate event_id");
+    assert!(ids.iter().all(|id| id.starts_with("v2_")), "v2 ids must be new");
+
+    // No overlap with v1 event ids.
+    let v1: HashSet<_> = diversity_jobs().iter().map(|j| j.event_id.clone()).collect();
+    for j in &jobs {
+        assert!(!v1.contains(&j.event_id), "v2 id {} collides with v1", j.event_id);
+    }
+
+    assert!(jobs.iter().any(|j| j.event_id.contains("wall_ang_")), "angled walls");
+    assert!(jobs.iter().any(|j| j.frames >= 24), "24+ frame ring-outs");
+    assert!(jobs.iter().any(|j| j.frames == 32), "32-frame ring-outs");
+    assert!(jobs.iter().any(|j| j.event_id.starts_with("v2_wall_soft_")));
+    assert!(jobs.iter().filter(|j| j.structure_type == "masonry_house").count() >= 15);
+    assert!(jobs.iter().filter(|j| j.structure_type == "cantilever").count() >= 30);
+    assert!(jobs.iter().any(|j| j.structure_type == "masonry_wall"));
+    assert!(jobs.iter().any(|j| j.structure_type == "spall"));
+
+    let cants: Vec<_> = jobs.iter().filter(|j| j.structure_type == "cantilever").collect();
+    assert!(cants.iter().all(|j| j.scene.sim.fracture));
+}
+
+#[test]
+fn diversity_v2_job_scenes_build() {
+    let jobs: Vec<Job> = diversity_v2_jobs();
     for j in &jobs {
         assert!(!j.scene.bodies.is_empty(), "{} empty bodies", j.event_id);
         assert!(j.frames >= 1);

@@ -1,7 +1,11 @@
-# Learned impact — data + training scaffolding
+# Learned impact — data, training, and oracle comparison
 
 Side track: residual MGN-T on top of quasi-static (`engine/docs/learned-stress-solver-plan.md`).
-**Does not change `blast_parity`.** Bulk dataset generation and full training are separate steps.
+**Does not change `blast_parity`.** The combined-data checkpoint and recorded-frame
+visualizer are documented in [COMPARISON.md](COMPARISON.md). From the repository root,
+run `engine/stress-oracle/scripts/view_learned.sh` and open the printed localhost URL.
+The viewer uses exact PyTorch inference on recorded inputs; it is not a free-running
+simulation. Local data and checkpoints are under `runs/` (Git-ignored).
 
 | Piece | Path |
 |---|---|
@@ -67,6 +71,12 @@ python -m learned_impact.train --compare-baselines --dataset /tmp/li-smoke-set \
 Fixture: [`fixtures/tiny_event`](fixtures/tiny_event) (synthetic). Generated sets go under `--out` (not committed).
 
 ## GPU inference weights (Slang / WebGPU / Metal)
+
+This export section describes the original legacy network only. The newer
+physical-input V12/V15 checkpoints run through PyTorch, including Metal/MPS;
+they do not have matching Slang export, live World integration or validated
+closed-loop behavior. See [COMPARISON.md](COMPARISON.md) for current measured
+accuracy and the remaining integration work.
 
 Training exports a **Slang-packed** blob (`learned-impact-slang/1`) as `weights.bin` + `weights.json`
 via `learned_impact.export.export_weights` / `export_slang_weights`. That layout matches

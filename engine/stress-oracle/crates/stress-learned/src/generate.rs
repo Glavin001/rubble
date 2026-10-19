@@ -12,7 +12,7 @@ use stress_ref::builders;
 use stress_ref::scene::Scene;
 use stress_ref::showcases;
 
-use crate::oracle::{record_event, RecordMeta};
+use crate::oracle::RecordMeta;
 
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -382,6 +382,312 @@ pub fn diversity_jobs() -> Vec<Job> {
     jobs
 }
 
+/// Diversity v2 — expanded speeds/angles/houses/cantilevers/ring-outs (new event ids).
+///
+/// Complements [`diversity_jobs`] (v1). Labels unchanged (fail-bin, peak util, fail mode,
+/// joint_state_end, force_end, chunk_state_delta). Default out `/tmp/li-diversity-v2`.
+pub fn diversity_v2_jobs() -> Vec<Job> {
+    let mut jobs = Vec::new();
+
+    // A. Soft / no-break negatives (finer speeds than v1).
+    for speed in [0.5_f64, 1.5, 2.5, 3.5] {
+        jobs.push(job(
+            &format!("v2_wall_soft_{speed}mps"),
+            "wall_b5",
+            &format!("ram_{speed}mps"),
+            4,
+            false,
+            builders::wall_impact(speed, &format!("div2_wall_soft_{speed}")),
+        ));
+    }
+
+    // A2. Denser push / ram / punch (speeds not in v1).
+    for (speed, frames, band) in [
+        (6.0, 8u32, "push"),
+        (7.0, 8, "push"),
+        (9.0, 8, "push"),
+        (11.0, 8, "ram"),
+        (13.0, 8, "ram"),
+        (14.0, 8, "ram"),
+        (16.0, 8, "ram"),
+        (17.0, 8, "ram"),
+        (19.0, 8, "ram"),
+        (22.0, 8, "ram"),
+        (28.0, 8, "punch"),
+        (32.0, 8, "punch"),
+        (40.0, 8, "punch"),
+        (50.0, 8, "punch"),
+    ] {
+        jobs.push(job(
+            &format!("v2_wall_{band}_{speed}mps"),
+            "wall_b5",
+            &format!("ram_{speed}mps"),
+            frames,
+            false,
+            builders::wall_impact(speed, &format!("div2_wall_{speed}")),
+        ));
+    }
+
+    // A3. Long ring-outs (24–32 frames).
+    for (speed, frames) in [
+        (10.0, 24u32),
+        (15.0, 24),
+        (20.0, 24),
+        (25.0, 24),
+        (12.0, 32),
+        (18.0, 32),
+    ] {
+        jobs.push(job(
+            &format!("v2_wall_ring_{speed}mps_f{frames}"),
+            "wall_b5",
+            &format!("ram_{speed}mps"),
+            frames,
+            false,
+            builders::wall_impact(speed, &format!("div2_wall_ring_{speed}_{frames}")),
+        ));
+    }
+
+    // A4. Angled rams (yaw about vertical).
+    for speed in [12.0_f64, 25.0] {
+        for yaw in [-45.0_f64, -30.0, -15.0, 15.0, 30.0, 45.0] {
+            let tag = if yaw < 0.0 {
+                format!("m{}", yaw.abs() as i32)
+            } else {
+                format!("p{}", yaw as i32)
+            };
+            jobs.push(job(
+                &format!("v2_wall_ang_{speed}mps_y{tag}"),
+                "wall_b5",
+                &format!("ram_{speed}mps_yaw{tag}"),
+                8,
+                false,
+                builders::wall_impact_angled(speed, yaw, &format!("div2_wall_ang_{speed}_{tag}")),
+            ));
+        }
+    }
+
+    // B. Houses — soft / car denser / long ring / stand / small blast.
+    jobs.push(job(
+        "v2_house_stand",
+        "masonry_house",
+        "stand",
+        8,
+        true,
+        showcases::masonry_house(showcases::HouseEvent::None, "div2_house_stand"),
+    ));
+    jobs.push(job(
+        "v2_house_settle_16",
+        "masonry_house",
+        "settlement",
+        16,
+        true,
+        showcases::masonry_house(showcases::HouseEvent::Settlement, "div2_house_settle"),
+    ));
+    for (speed, frames, tag) in [
+        (3.0, 8u32, "soft"),
+        (4.0, 8, "soft"),
+        (5.0, 8, "soft"),
+        (6.0, 8, "soft"),
+        (10.0, 8, "car"),
+        (14.0, 8, "car"),
+        (16.0, 8, "car"),
+        (18.0, 8, "car"),
+        (22.0, 8, "car"),
+        (25.0, 8, "car"),
+        (35.0, 8, "punch"),
+        (12.0, 24, "ring"),
+        (20.0, 24, "ring"),
+        (15.0, 32, "ring"),
+        (25.0, 24, "ring"),
+    ] {
+        jobs.push(job(
+            &format!("v2_house_{tag}_{speed}mps_f{frames}"),
+            "masonry_house",
+            &format!("car_{speed}mps"),
+            frames,
+            false,
+            showcases::masonry_house(
+                showcases::HouseEvent::Impact { speed },
+                &format!("div2_house_{speed}_{frames}"),
+            ),
+        ));
+    }
+    for tnt in [0.5_f64, 1.0, 2.0] {
+        jobs.push(job(
+            &format!("v2_house_blast_{tnt}kg"),
+            "masonry_house",
+            &format!("blast_{tnt}kg"),
+            8,
+            false,
+            showcases::masonry_house(
+                showcases::HouseEvent::Blast { tnt },
+                &format!("div2_house_blast_{tnt}"),
+            ),
+        ));
+    }
+
+    // C. Crackling cantilevers — more lengths × loads (cheap; fills class coverage).
+    let arms = [
+        ("s6", 6usize),
+        ("s8", 8),
+        ("m10", 10),
+        ("m12", 12),
+        ("l14", 14),
+        ("l16", 16),
+        ("x18", 18),
+    ];
+    for &(tag, n) in &arms {
+        jobs.push(job(
+            &format!("v2_cant_{tag}_light"),
+            "cantilever",
+            "tip_light",
+            4,
+            true,
+            builders::cantilever_crackling(n, 0.15, false, &format!("div2_cant_{tag}_light")),
+        ));
+        jobs.push(job(
+            &format!("v2_cant_{tag}_soft"),
+            "cantilever",
+            "tip_soft",
+            4,
+            true,
+            builders::cantilever_crackling(n, 0.4, false, &format!("div2_cant_{tag}_soft")),
+        ));
+        jobs.push(job(
+            &format!("v2_cant_{tag}_root"),
+            "cantilever",
+            "tip_break_root",
+            8,
+            true,
+            builders::cantilever_crackling(n, 1.6, false, &format!("div2_cant_{tag}_root")),
+        ));
+        jobs.push(job(
+            &format!("v2_cant_{tag}_root_hi"),
+            "cantilever",
+            "tip_break_root",
+            8,
+            true,
+            builders::cantilever_crackling(n, 2.2, false, &format!("div2_cant_{tag}_root_hi")),
+        ));
+    }
+    for &(tag, n) in &[("m10", 10usize), ("m12", 12), ("l14", 14), ("l16", 16)] {
+        jobs.push(job(
+            &format!("v2_cant_{tag}_midspan"),
+            "cantilever",
+            "tip_break_midspan",
+            8,
+            true,
+            builders::cantilever_crackling(n, 1.1, true, &format!("div2_cant_{tag}_mid")),
+        ));
+        jobs.push(job(
+            &format!("v2_cant_{tag}_midspan_hi"),
+            "cantilever",
+            "tip_break_midspan",
+            12,
+            true,
+            builders::cantilever_crackling(n, 1.4, true, &format!("div2_cant_{tag}_mid_hi")),
+        ));
+    }
+    for &(tag, n, scale) in &[("m10", 10usize, 5.0), ("l14", 14, 6.0), ("x18", 18, 8.0)] {
+        jobs.push(job(
+            &format!("v2_cant_{tag}_overload"),
+            "cantilever",
+            "tip_overload",
+            8,
+            true,
+            builders::cantilever_crackling(n, scale, false, &format!("div2_cant_{tag}_ov")),
+        ));
+    }
+
+    // D. Loop / frame / masonry / spall / anchors (longer clips).
+    jobs.push(job(
+        "v2_arch_keystone_16",
+        "masonry_arch",
+        "keystone_remove",
+        16,
+        true,
+        showcases::arch(Some(0.05), "div2_arch_keystone"),
+    ));
+    jobs.push(job(
+        "v2_arch_stand_8",
+        "masonry_arch",
+        "stand",
+        8,
+        true,
+        showcases::arch(None, "div2_arch_stand"),
+    ));
+    jobs.push(job(
+        "v2_frame_sudden_16",
+        "frame_column",
+        "sudden_remove",
+        16,
+        true,
+        builders::frame_column_removal(0.0, "div2_frame_sudden"),
+    ));
+    jobs.push(job(
+        "v2_frame_gradual_16",
+        "frame_column",
+        "gradual_remove",
+        16,
+        true,
+        builders::frame_column_removal(0.25, "div2_frame_gradual"),
+    ));
+    jobs.push(job(
+        "v2_frame_slow_16",
+        "frame_column",
+        "gradual_remove",
+        16,
+        true,
+        builders::frame_column_removal(0.5, "div2_frame_slow"),
+    ));
+    for speed in [8.0_f64, 15.0, 25.0] {
+        jobs.push(job(
+            &format!("v2_masonry_wall_{speed}mps"),
+            "masonry_wall",
+            &format!("sphere_{speed}mps"),
+            8,
+            false,
+            builders::masonry_wall(speed, &format!("div2_mw_{speed}")),
+        ));
+    }
+    for speed in [3.0_f64, 5.0] {
+        jobs.push(job(
+            &format!("v2_spall_{speed}mps"),
+            "spall",
+            &format!("plate_{speed}mps"),
+            4,
+            false,
+            builders::spall(speed, &format!("div2_spall_{speed}")),
+        ));
+    }
+    jobs.push(job(
+        "v2_shear_fail",
+        "bond_shear",
+        "mohr_coulomb_ramp",
+        6,
+        true,
+        builders::bond_shear(),
+    ));
+    jobs.push(job(
+        "v2_tension_fail",
+        "bond_tension",
+        "axial_pull",
+        6,
+        true,
+        builders::bond_tension(),
+    ));
+    jobs.push(job(
+        "v2_support_loss",
+        "support_loss",
+        "sudden_remove",
+        8,
+        true,
+        builders::support_loss(0.0, "div2_support_loss"),
+    ));
+
+    jobs
+}
+
 /// Wall-heavy M2 set: denser speed sweep + multi-frame rollouts.
 /// ETA on Mac (measured ≈8 s/frame @ 840 chunks): ~12 short + 2×8-frame ≈ **4–6 min**.
 pub fn wall_jobs() -> Vec<Job> {
@@ -430,6 +736,8 @@ fn job(id: &str, structure: &str, load: &str, frames: u32, qs: bool, scene: Scen
 pub struct RunJobsOpts {
     /// Override every job's `qs_probe` to true (store a real QS solve on every frame).
     pub always_qs: bool,
+    /// Record experimental causal rigid-contact preview inputs in addition to oracle labels.
+    pub rigid_preview: bool,
     /// Skip event dirs that already validate (resume).
     pub resume: bool,
     /// Rayon thread count; `None` = all logical CPUs.
@@ -438,7 +746,7 @@ pub struct RunJobsOpts {
 
 impl Default for RunJobsOpts {
     fn default() -> Self {
-        Self { always_qs: false, resume: true, threads: None }
+        Self { always_qs: false, rigid_preview: false, resume: true, threads: None }
     }
 }
 
@@ -495,7 +803,27 @@ pub fn run_jobs_with(
             let qs = always_qs || job.qs_probe;
             let k = done.fetch_add(1, Ordering::Relaxed) + 1;
             if resume && dest.join("manifest.json").exists() {
-                if let Ok(man) = crate::validate::validate_event(&dest) {
+                let history_contract = fs::read(dest.join("context.json")).ok()
+                    .and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .is_some_and(|v|v["joint_history"]["format"]==crate::joint_history::FORMAT);
+                if !history_contract {
+                    return (i,Err("joint-history recording contract changed; use a fresh output directory or the original generator binary".into()));
+                }
+                let response_contract = fs::read(dest.join("context.json")).ok()
+                    .and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .is_some_and(|v|v["bond_response"]["format"]==crate::response_history::FORMAT);
+                if !response_contract {
+                    return (i,Err("bond-response recording contract changed; use a fresh output directory or the original generator binary".into()));
+                }
+                let has_preview = fs::read(dest.join("context.json")).ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .is_some_and(|v| v["load_preview"]["format"] == "rigid-contact-preview/1");
+                if has_preview != opts.rigid_preview {
+                    return (i, Err("recording input contract changed; choose a fresh output directory".into()));
+                }
+                // A valid prefix is not a completed job. Regenerate incomplete
+                // recordings instead of silently retaining a truncated trajectory.
+                if let Some(man) = crate::validate::validate_event(&dest).ok().filter(|m| m.n_frames == job.frames) {
                     frames_done.fetch_add(man.n_frames as usize, Ordering::Relaxed);
                     eprintln!(
                         "[{k}/{total}] {} · skip (resume) · {} frames · {} chunks · {} bonds · {}",
@@ -531,7 +859,8 @@ pub fn run_jobs_with(
             };
             let t_job = Instant::now();
             let result = (|| {
-                let path = record_event(job.scene.clone(), &dest, meta, job.frames, qs)?;
+                let path = crate::oracle::record_event_options(job.scene.clone(), &dest, meta, job.frames, qs,
+                    crate::oracle::LoadBasis::FrameStart, opts.rigid_preview)?;
                 let man = crate::validate::validate_event(&path).map_err(|e| e.to_string())?;
                 let secs = t_job.elapsed().as_secs_f64();
                 {

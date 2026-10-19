@@ -26,6 +26,8 @@ pub mod capability;
 pub mod cli;
 pub mod contact;
 pub mod engine;
+pub mod external_stress;
+pub mod stress_provider;
 pub mod hull;
 pub mod implicit;
 pub mod joint;

@@ -480,38 +480,105 @@ pub struct LayoutParams {
     pub gate_flag_base: u32,
     pub bond_count: u32,
     pub driven: u32,
-    pub pad: [u32; 2],
+    /// Bases into packed buffers (float4 or uint element indices); see `layout.slang`.
+    pub base_old_chunks: u32,
+    pub base_old_state: u32,
+    pub base_old_bonds: u32,
+    pub base_old_dyn: u32,
+    pub base_old_islands: u32,
+    pub base_old_ctab: u32,
+    pub base_old_copy: u32,
+    pub base_chunks: u32,
+    pub base_state: u32,
+    pub base_bonds: u32,
+    pub base_dyn: u32,
+    pub base_islands: u32,
+    pub base_scratch: u32,
+    pub base_ctab: u32,
+    pub base_gate: u32,
+    pub base_island_copy: u32,
+    pub base_plan: u32,
+    pub base_index: u32,
+    pub base_control: u32,
+    pub base_old_index: u32,
 }
 
-const LAYOUT_BINDINGS: [Binding; 27] = [
+/// layout.slang: 1 uniform + 9 storage (WebGPU ≤10 storage per stage).
+const LAYOUT_BINDINGS: [Binding; 10] = [
     Binding::Uniform,   // params
     Binding::Storage,   // parents
     Binding::Storage,   // work
     Binding::Storage,   // children
     Binding::Storage,   // frames
-    Binding::StorageRw, // plan
-    Binding::Storage,   // old chunks
-    Binding::StorageRw, // chunks
-    Binding::Storage,   // old state
-    Binding::StorageRw, // state
-    Binding::Storage,   // old bonds
-    Binding::StorageRw, // bonds
-    Binding::Storage,   // old bond records
-    Binding::StorageRw, // bond records
-    Binding::Storage,   // old index
-    Binding::StorageRw, // index
-    Binding::Storage,   // old islands
-    Binding::StorageRw, // islands
-    Binding::StorageRw, // scratch
-    Binding::Storage,   // old ctab
-    Binding::StorageRw, // ctab
-    Binding::StorageRw, // gate
+    Binding::Storage,   // old_f4 (packed old_* float4)
+    Binding::StorageRw, // live_f4 (packed live float4)
+    Binding::StorageRw, // uint_pack (plan, index, control, old_index)
     Binding::Storage,   // spawn slots
     Binding::Storage,   // spawn extras
-    Binding::Storage,   // control
-    Binding::Storage,   // the cascade's island copy as it was
-    Binding::StorageRw, // the cascade's island copy
 ];
+
+/// Element counts / byte sizes for packing layout tables into three buffers.
+struct LayoutPackPlan {
+    old_f4: u32,
+    live_f4: u32,
+    uints: u32,
+    plan_words: u32,
+    index_words: u32,
+}
+
+impl LayoutPackPlan {
+    fn from_tables(tables: &LayoutTables, plan_words: u32) -> Self {
+        let f4 = |b: &wgpu::Buffer| (b.size() / 16) as u32;
+        let u32s = |b: &wgpu::Buffer| (b.size() / 4) as u32;
+        let old_f4 = f4(tables.chunks.0) + f4(tables.state.0) + f4(tables.bonds.0) + f4(tables.bond_dyn.0) + f4(tables.islands.0) + f4(tables.ctab.0) + f4(tables.island_copy.0);
+        let live_f4 = f4(tables.chunks.1) + f4(tables.state.1) + f4(tables.bonds.1) + f4(tables.bond_dyn.1) + f4(tables.islands.1) + f4(tables.scratch) + f4(tables.ctab.1) + f4(tables.gate) + f4(tables.island_copy.1);
+        let index_words = u32s(tables.index.1);
+        let uints = plan_words + index_words + CTL_WORDS as u32 + u32s(tables.index.0);
+        Self { old_f4, live_f4, uints, plan_words, index_words }
+    }
+
+    fn fill_bases(&self, params: &mut LayoutParams, tables: &LayoutTables) {
+        let f4 = |b: &wgpu::Buffer| (b.size() / 16) as u32;
+        let mut o = 0u32;
+        params.base_old_chunks = o;
+        o += f4(tables.chunks.0);
+        params.base_old_state = o;
+        o += f4(tables.state.0);
+        params.base_old_bonds = o;
+        o += f4(tables.bonds.0);
+        params.base_old_dyn = o;
+        o += f4(tables.bond_dyn.0);
+        params.base_old_islands = o;
+        o += f4(tables.islands.0);
+        params.base_old_ctab = o;
+        o += f4(tables.ctab.0);
+        params.base_old_copy = o;
+
+        let mut l = 0u32;
+        params.base_chunks = l;
+        l += f4(tables.chunks.1);
+        params.base_state = l;
+        l += f4(tables.state.1);
+        params.base_bonds = l;
+        l += f4(tables.bonds.1);
+        params.base_dyn = l;
+        l += f4(tables.bond_dyn.1);
+        params.base_islands = l;
+        l += f4(tables.islands.1);
+        params.base_scratch = l;
+        l += f4(tables.scratch);
+        params.base_ctab = l;
+        l += f4(tables.ctab.1);
+        params.base_gate = l;
+        l += f4(tables.gate);
+        params.base_island_copy = l;
+
+        params.base_plan = 0;
+        params.base_index = self.plan_words;
+        params.base_control = self.plan_words + self.index_words;
+        params.base_old_index = self.plan_words + self.index_words + CTL_WORDS as u32;
+    }
+}
 
 /// The tables a split re-lays out (`layout.slang`): each as (as it was, to write).
 pub struct LayoutTables<'a> {
@@ -524,6 +591,8 @@ pub struct LayoutTables<'a> {
     pub scratch: &'a wgpu::Buffer,
     pub ctab: (&'a wgpu::Buffer, &'a wgpu::Buffer),
     pub gate: &'a wgpu::Buffer,
+    /// The cascade's island copy (as it was, to write); dummy 1×float4 when unused.
+    pub island_copy: (&'a wgpu::Buffer, &'a wgpu::Buffer),
     /// The spawn's child slots, extras and control (`spawn.slang`), for the resident
     /// tables and the abort.
     pub spawn: (&'a wgpu::Buffer, &'a wgpu::Buffer, &'a wgpu::Buffer),
@@ -548,34 +617,101 @@ impl GpuLayout {
     }
 
     /// `run`'s split re-laid out in `tables` (`params.total`, `parent_count` from the run);
-    /// `island_cap`: islands the tables hold. Returns the plan buffer (its island order).
+    /// `island_cap`: islands the tables hold. Returns the plan region of the uint pack
+    /// (island order at offset 0).
     pub fn layout(&self, gpu: &Gpu, run: &SplitRun, tables: &LayoutTables, mut params: LayoutParams, island_cap: usize) -> wgpu::Buffer {
         params.parent_count = run.parent_count as u32;
         params.total = run.total as u32;
         let cap = params.island_count as usize + run.total;
-        let words = 16 + cap + 8 * run.total + params.island_count as usize + params.bond_count as usize + 1;
-        let plan = gpu.storage("layout plan", &vec![0u32; words]);
-        let uniform = gpu.uniform("layout params", &params);
-        // The control words the layout reads (the spawn's buffer keeps its own).
+        let plan_words = (16 + cap + 8 * run.total + params.island_count as usize + params.bond_count as usize + 1) as u32;
+        let pack = LayoutPackPlan::from_tables(tables, plan_words);
+        pack.fill_bases(&mut params, tables);
+        // The control words the layout reads (copied into the uint pack; written back after).
         gpu.queue.write_buffer(tables.spawn.2, 4 * CTL_PARENTS, bytemuck::cast_slice(&[params.parent_count, params.island_count, params.next_id]));
         gpu.queue.write_buffer(tables.spawn.2, 4 * CTL_TOTAL, bytemuck::cast_slice(&[params.total]));
+        let old_f4 = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("layout old_f4"),
+            size: (16 * pack.old_f4 as u64).max(16),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let live_f4 = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("layout live_f4"),
+            size: (16 * pack.live_f4 as u64).max(16),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let uint_pack = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("layout uint_pack"),
+            size: (4 * pack.uints as u64).max(16),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        // Zero the plan region (rest filled by copies).
+        gpu.queue.write_buffer(&uint_pack, 0, bytemuck::cast_slice(&vec![0u32; plan_words as usize]));
+        let uniform = gpu.uniform("layout params", &params);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        let no_copy = gpu.storage("layout no island copy", &[[0f32; 4]; 1]);
-        let no_copy_out = gpu.storage("layout no island copy out", &[[0f32; 4]; 1]);
+        layout_pack_copy_in(&mut encoder, tables, &old_f4, &live_f4, &uint_pack, &params, pack.plan_words);
         for (k, size) in [(&*self.plan, 1u32), (&*self.moved, groups(island_cap + 1, 64)), (&*self.parent, run.parent_count.max(1) as u32)] {
-            let t = tables;
-            let bind = gpu.bind(
-                &k.group,
-                &[&uniform, &run.parents, &run.work, &run.out, &run.frames, &plan, t.chunks.0, t.chunks.1, t.state.0, t.state.1, t.bonds.0, t.bonds.1, t.bond_dyn.0, t.bond_dyn.1, t.index.0, t.index.1, t.islands.0, t.islands.1, t.scratch, t.ctab.0, t.ctab.1, t.gate, t.spawn.0, t.spawn.1, t.spawn.2, &no_copy, &no_copy_out],
-            );
+            let bind = gpu.bind(&k.group, &[&uniform, &run.parents, &run.work, &run.out, &run.frames, &old_f4, &live_f4, &uint_pack, tables.spawn.0, tables.spawn.1]);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(size.max(1), 1, 1);
         }
+        layout_pack_copy_out(&mut encoder, tables, &live_f4, &uint_pack, &params, pack.plan_words);
         gpu.queue.submit([encoder.finish()]);
-        plan
+        uint_pack
     }
+}
+
+fn copy_buf(encoder: &mut wgpu::CommandEncoder, src: &wgpu::Buffer, dst: &wgpu::Buffer, dst_bytes: u64) {
+    let n = src.size().min(dst.size().saturating_sub(dst_bytes));
+    if n > 0 {
+        encoder.copy_buffer_to_buffer(src, 0, dst, dst_bytes, n);
+    }
+}
+
+fn layout_pack_copy_in(encoder: &mut wgpu::CommandEncoder, t: &LayoutTables, old_f4: &wgpu::Buffer, live_f4: &wgpu::Buffer, uint_pack: &wgpu::Buffer, p: &LayoutParams, _plan_words: u32) {
+    copy_buf(encoder, t.chunks.0, old_f4, 16 * p.base_old_chunks as u64);
+    copy_buf(encoder, t.state.0, old_f4, 16 * p.base_old_state as u64);
+    copy_buf(encoder, t.bonds.0, old_f4, 16 * p.base_old_bonds as u64);
+    copy_buf(encoder, t.bond_dyn.0, old_f4, 16 * p.base_old_dyn as u64);
+    copy_buf(encoder, t.islands.0, old_f4, 16 * p.base_old_islands as u64);
+    copy_buf(encoder, t.ctab.0, old_f4, 16 * p.base_old_ctab as u64);
+    copy_buf(encoder, t.island_copy.0, old_f4, 16 * p.base_old_copy as u64);
+    copy_buf(encoder, t.chunks.1, live_f4, 16 * p.base_chunks as u64);
+    copy_buf(encoder, t.state.1, live_f4, 16 * p.base_state as u64);
+    copy_buf(encoder, t.bonds.1, live_f4, 16 * p.base_bonds as u64);
+    copy_buf(encoder, t.bond_dyn.1, live_f4, 16 * p.base_dyn as u64);
+    copy_buf(encoder, t.islands.1, live_f4, 16 * p.base_islands as u64);
+    copy_buf(encoder, t.scratch, live_f4, 16 * p.base_scratch as u64);
+    copy_buf(encoder, t.ctab.1, live_f4, 16 * p.base_ctab as u64);
+    copy_buf(encoder, t.gate, live_f4, 16 * p.base_gate as u64);
+    copy_buf(encoder, t.island_copy.1, live_f4, 16 * p.base_island_copy as u64);
+    copy_buf(encoder, t.index.1, uint_pack, 4 * p.base_index as u64);
+    copy_buf(encoder, t.spawn.2, uint_pack, 4 * p.base_control as u64);
+    copy_buf(encoder, t.index.0, uint_pack, 4 * p.base_old_index as u64);
+}
+
+fn layout_pack_copy_out(encoder: &mut wgpu::CommandEncoder, t: &LayoutTables, live_f4: &wgpu::Buffer, uint_pack: &wgpu::Buffer, p: &LayoutParams, _plan_words: u32) {
+    let out = |encoder: &mut wgpu::CommandEncoder, src: &wgpu::Buffer, src_bytes: u64, dst: &wgpu::Buffer| {
+        let n = dst.size().min(src.size().saturating_sub(src_bytes));
+        if n > 0 {
+            encoder.copy_buffer_to_buffer(src, src_bytes, dst, 0, n);
+        }
+    };
+    out(encoder, live_f4, 16 * p.base_chunks as u64, t.chunks.1);
+    out(encoder, live_f4, 16 * p.base_state as u64, t.state.1);
+    out(encoder, live_f4, 16 * p.base_bonds as u64, t.bonds.1);
+    out(encoder, live_f4, 16 * p.base_dyn as u64, t.bond_dyn.1);
+    out(encoder, live_f4, 16 * p.base_islands as u64, t.islands.1);
+    out(encoder, live_f4, 16 * p.base_scratch as u64, t.scratch);
+    out(encoder, live_f4, 16 * p.base_ctab as u64, t.ctab.1);
+    out(encoder, live_f4, 16 * p.base_gate as u64, t.gate);
+    out(encoder, live_f4, 16 * p.base_island_copy as u64, t.island_copy.1);
+    out(encoder, uint_pack, 4 * p.base_index as u64, t.index.1);
+    out(encoder, uint_pack, 4 * p.base_control as u64, t.spawn.2);
 }
 
 /// How a GPU layout compared with the host's in-place split (`STRESS_GPU_SPLIT_CHECK=1`

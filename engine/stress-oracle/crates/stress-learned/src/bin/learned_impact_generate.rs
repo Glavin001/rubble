@@ -7,6 +7,9 @@
 //! cargo run --release -p stress-learned --bin learned_impact_generate -- \
 //!   --diversity --confirm-diversity --out /tmp/li-diversity-v1
 //!
+//! cargo run --release -p stress-learned --bin learned_impact_generate -- \
+//!   --diversity-v2 --confirm-diversity --out /tmp/li-diversity-v2 --jobs 16
+//!
 //! # All logical CPUs (default). Cap with --jobs N or RAYON_NUM_THREADS.
 //! # Re-run skips valid event dirs. Force a real QS probe on every frame with --always-qs.
 //! ```
@@ -16,16 +19,19 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use stress_learned::generate::{
-    diversity_jobs, mini_jobs, prove_jobs, run_jobs_with, smoke_jobs, wall_jobs, RunJobsOpts,
+    diversity_jobs, diversity_v2_jobs, mini_jobs, prove_jobs, run_jobs_with, smoke_jobs, wall_jobs,
+    RunJobsOpts,
 };
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    let diversity_v2 = has(&args, "--diversity-v2");
     let diversity = has(&args, "--diversity") || has(&args, "--diversity-v1");
     let prove = has(&args, "--prove");
     let walls = has(&args, "--walls");
     let mini = has(&args, "--mini");
-    let smoke = has(&args, "--smoke") || (!mini && !walls && !prove && !diversity);
+    let smoke =
+        has(&args, "--smoke") || (!mini && !walls && !prove && !diversity && !diversity_v2);
 
     if mini && !has(&args, "--confirm-mini") {
         eprintln!("refusing --mini without --confirm-mini (~1 min serial; less in parallel)");
@@ -39,14 +45,17 @@ fn main() {
         eprintln!("refusing --prove without --confirm-prove");
         std::process::exit(2);
     }
-    if diversity && !has(&args, "--confirm-diversity") {
+    if (diversity || diversity_v2) && !has(&args, "--confirm-diversity") {
         eprintln!(
-            "refusing --diversity without --confirm-diversity (~35 events / ~230 frames; ~25–35 min serial, less in parallel)"
+            "refusing --diversity / --diversity-v2 without --confirm-diversity \
+             (v1 ~35 events / ~230 frames; v2 ~100+ events / ~900+ frames; parallel with --jobs)"
         );
         std::process::exit(2);
     }
     let out = flag_val(&args, "--out").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(if diversity {
+        PathBuf::from(if diversity_v2 {
+            "/tmp/li-diversity-v2"
+        } else if diversity {
             "/tmp/li-diversity-v1"
         } else if prove {
             "/tmp/li-prove-set"
@@ -63,7 +72,9 @@ fn main() {
         std::process::exit(2);
     }
 
-    let (set_name, jobs) = if diversity {
+    let (set_name, jobs) = if diversity_v2 {
+        ("diversity_v2", diversity_v2_jobs())
+    } else if diversity {
         ("diversity_v1", diversity_jobs())
     } else if prove {
         ("prove", prove_jobs())
@@ -78,6 +89,7 @@ fn main() {
 
     let threads = flag_val(&args, "--jobs").and_then(|s| s.parse().ok());
     let opts = RunJobsOpts {
+        rigid_preview: has(&args, "--rigid-preview"),
         always_qs: has(&args, "--always-qs"),
         resume: !has(&args, "--no-resume"),
         threads,
@@ -103,7 +115,11 @@ fn main() {
     let total_frames: u32 = jobs.iter().map(|j| j.frames).sum();
     // Serial ETA; parallel ≈ / min(events, cores) for wall-dominated sets.
     let eta_serial = other_heavy as f64 * 6.0 + house_frames as f64 * 8.0;
-    let workers = threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8));
+    let workers = threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+    });
     let eta_par = eta_serial / (workers.min(jobs.len()).max(1) as f64);
     eprintln!(
         "generating set={set_name} · {} events · {} frames · heavy_frames≈{} → {}  (ETA serial≈{:.0}s · parallel≈{:.0}s @ {} workers)",
@@ -134,7 +150,9 @@ fn has(args: &[String], flag: &str) -> bool {
 }
 
 fn flag_val<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).map(|s| s.as_str()))
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).map(|s| s.as_str()))
 }
 
 fn looks_bulk(p: &std::path::Path) -> bool {

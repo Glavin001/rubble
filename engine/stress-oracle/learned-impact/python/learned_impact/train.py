@@ -90,12 +90,12 @@ def _batches_for(dataset: Path, structure_type: str | None) -> list[dict[str, to
 
 
 @torch.no_grad()
-def eval_mean_loss(model: torch.nn.Module, batches: list[dict[str, torch.Tensor]]) -> dict[str, float]:
+def eval_mean_loss(model: torch.nn.Module, batches: list[dict[str, torch.Tensor]], *, normalized: bool = False) -> dict[str, float]:
     model.eval()
     tot = fail = util = delta = 0.0
     metric_rows: list[dict[str, float]] = []
     for raw in batches:
-        batch = normalize_batch(raw)
+        batch = raw if normalized else normalize_batch(raw)
         pred = model(batch)
         parts = total_loss(pred, batch)
         tot += float(parts["loss"])
@@ -119,15 +119,14 @@ def run_eval(
     structure_type: str | None,
     arch: str,
 ) -> dict[str, float]:
-    """Load exported weights.json+bin if present; else rebuild random (smoke). Prefer state_dict path."""
+    """Evaluate a real PyTorch checkpoint; never substitute random weights."""
     raw = _batches_for(dataset, structure_type)
     model = _make_model(arch, h, p)
     sd_path = weights / "state_dict.pt"
     if sd_path.exists():
         model.load_state_dict(torch.load(sd_path, map_location="cpu", weights_only=True))
-    elif (weights / "weights.bin").exists():
-        # Flat export only — eval still runs (untrained if only bin without pt).
-        pass
+    else:
+        raise FileNotFoundError(f"evaluation requires {sd_path}; refusing random weights")
     return eval_mean_loss(model, raw)
 
 
@@ -257,7 +256,7 @@ def run_train(
                 f"(fail={float(parts['fail']):.4f} util={float(parts['util']):.4f} delta={float(parts['delta']):.4f})"
             )
             if hold_norm and (step % max(1, steps // 5) == 0 or step == steps - 1):
-                hol = eval_mean_loss(model, hold_norm)
+                hol = eval_mean_loss(model, hold_norm, normalized=True)
                 model.train()
                 msg += f"  holdout={hol['loss']:.6f} f1={hol['fail_f1']:.3f}"
             print(msg)
@@ -266,11 +265,11 @@ def run_train(
     if hold_norm:
         # Re-eval on CPU after export move for stable metrics.
         hold_cpu = [_batch_to_device(b, torch.device("cpu")) for b in hold_norm]
-        hol = eval_mean_loss(model, hold_cpu)
+        hol = eval_mean_loss(model, hold_cpu, normalized=True)
         result.update({f"holdout_{k}": v for k, v in hol.items()})
         # Also report train-set metrics on a sample of train frames (all frames).
         train_cpu = [_batch_to_device(b, torch.device("cpu")) for b in train]
-        tr = eval_mean_loss(model, train_cpu)
+        tr = eval_mean_loss(model, train_cpu, normalized=True)
         result.update({f"train_{k}": v for k, v in tr.items()})
     return result
 

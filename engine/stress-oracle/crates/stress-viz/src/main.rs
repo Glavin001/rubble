@@ -29,6 +29,7 @@ mod font;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod layout;
+mod learned;
 mod plot;
 mod png;
 mod raster;
@@ -60,6 +61,11 @@ usage: stress-viz render  <scene> [options]
        stress-viz still   <scene> --time T [options]
        stress-viz view    <scene> [options]   (window: drag orbit, click fires, H help)
        stress-viz list
+       stress-viz learned --dataset DIR --weights DIR --geometry FILE [--port 8791]
+
+learned: recorded-frame oracle/checkpoint comparison in a local browser view.
+         Repeat --weights to switch checkpoints. Uses the learned-impact Python venv;
+         override its interpreter with STRESS_LEARNED_PYTHON. No GPU model approximation.
 
 scene: a scene JSON file or a catalogue name (also --name NAME / --scene PATH)
 variant item: dotted.path=json (scene override) | feature NAME=on|off | engine rubble
@@ -559,6 +565,9 @@ fn render_video(a: &Args, comp: &Composer, default_out: &str) -> Result<(), Stri
 }
 
 fn run(raw: Vec<String>) -> Result<(), String> {
+    if raw.first().is_some_and(|s| s == "learned") {
+        return learned::run(&raw[1..]);
+    }
     let a = parse_args(raw)?;
     match a.cmd.as_str() {
         "list" => {

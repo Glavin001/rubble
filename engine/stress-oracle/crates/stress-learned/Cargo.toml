@@ -9,7 +9,9 @@ description = "Learned-impact event schema, recorder, and smoke generator (train
 [dependencies]
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Saved oracle scenes must round-trip every f64; tiny parse errors can amplify
+# into different impact trajectories and invalidate history enrichment.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 stress-ref = { path = "../stress-ref" }
 
 [[bin]]

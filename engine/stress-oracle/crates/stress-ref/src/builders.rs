@@ -607,6 +607,23 @@ pub fn wall_impact(speed: f64, name: &str) -> Scene {
     s
 }
 
+/// Concrete wall struck by a ram with yaw about the vertical (degrees).
+///
+/// Velocity stays `|v| = speed`; lateral offset keeps the contact near mid-wall.
+/// Used by learned-impact diversity catalogs — does not change the face-on
+/// [`wall_impact`] benchmark.
+pub fn wall_impact_angled(speed: f64, yaw_deg: f64, name: &str) -> Scene {
+    let mut s = wall_impact(speed, name);
+    let yaw = yaw_deg.to_radians();
+    let (vx, vy) = (speed * yaw.sin(), speed * yaw.cos());
+    if let Some(imp) = s.impactors.first_mut() {
+        imp.velocity = [vx, vy, 0.0];
+        // Shift start so the trajectory still intersects the wall face near x=0.
+        imp.position[0] -= 0.8 * yaw.sin();
+    }
+    s
+}
+
 /// Benchmark 6: a 0.5 m thick, 1.2 m wide concrete slab hit face-on by a 0.1 m steel
 /// plate covering its whole face, so the stress wave is planar. The compressive pulse
 /// (`sigma = v Zs Zc / (Zs + Zc)`, about 21 MPa at 3 m/s: below the crushing strength)

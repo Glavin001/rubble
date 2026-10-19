@@ -1456,6 +1456,14 @@ impl ReferenceSolver {
 
     /// Advance every cluster by one explicit substep under the given external loads.
     pub fn substep(&mut self, dt: f64, loads: &ChunkLoads) {
+        self.substep_with_provider(dt,loads,&mut None).expect("reference substep has no external provider");
+    }
+
+    pub fn substep_with_provider(&mut self,dt:f64,loads:&ChunkLoads,
+        provider:&mut Option<&mut dyn crate::stress_provider::StressProvider>)->Result<(),String> {
+        if provider.is_some() && (self.config.mode!=SolveMode::Explicit || self.config.methods.multirate || !dt.is_finite() || dt<=0.) {
+            return Err("supplied stress requires a positive finite explicit single-rate substep".into());
+        }
         let t_mid = self.time + dt;
         // Clusters integrated explicitly this substep. Their bond responses and chunk
         // loads depend only on the state at the start of the substep, so all of them
@@ -1468,10 +1476,6 @@ impl ReferenceSolver {
         let accel = crate::par::map(&explicit, |&ci| self.rigid_acceleration(ci, loads));
         drop(t_accel);
         let fracture = self.config.fracture;
-        if self.config.methods.corotational_bonds {
-            let turns = self.chunks.iter().map(|cs| crate::par::map(cs, |c| ChunkTurn::new(c.th))).collect();
-            self.turns = turns;
-        }
         // The bonds evaluated this substep and their weights (`multirate`; else all, 1).
         let fired = self.firing_bonds(&explicit);
         let bond_jobs: Vec<(usize, usize, f64)> = explicit
@@ -1482,9 +1486,34 @@ impl ReferenceSolver {
                 list.iter().map(move |&(bi, w)| (s, bi, w))
             })
             .collect();
-        crate::profile::count(crate::profile::Counter::BondEvaluations, bond_jobs.len() as u64);
-        self.bond_evaluations += bond_jobs.len() as u64;
-        if crate::par::serial(bond_jobs.len()) {
+        if provider.is_none() {
+            crate::profile::count(crate::profile::Counter::BondEvaluations, bond_jobs.len() as u64);
+            self.bond_evaluations += bond_jobs.len() as u64;
+        }
+        // Only bond_response reads this cache. Rigid-only substeps, fully
+        // disconnected fragments, and multirate ticks with no firing bonds do
+        // not need it. Every tick that evaluates a bond refreshes current turns.
+        if self.config.methods.corotational_bonds && !bond_jobs.is_empty() {
+            let turns = self.chunks.iter().map(|cs| crate::par::map(cs, |c| ChunkTurn::new(c.th))).collect();
+            self.turns = turns;
+        }
+        if let Some(provider)=provider.as_deref_mut() {
+            let t_bonds=crate::profile::time(crate::profile::Stage::BondResponses);
+            let supplied=provider.responses(self,loads,&bond_jobs,dt,fracture)?;
+            if supplied.len()!=bond_jobs.len() {return Err("supplied stress response count mismatch".into())}
+            // Validate the complete batch before any history/force commit.
+            for (response,&job) in supplied.iter().zip(&bond_jobs) {response.validate(self,job)?;}
+            let responses=supplied.into_iter().map(|r| {
+                let loads=self.bond_chunk_loads(r.key.0,r.key.1,&r.total_force);
+                (r.joint,r.total_force,r.damping_dissipated,loads)
+            }).collect::<Vec<_>>().into_iter();
+            drop(t_bonds);
+            let _t=crate::profile::time(crate::profile::Stage::ApplyBonds);
+            let mut responses=Some(responses);
+            for (&ci,list) in explicit.iter().zip(&fired) {
+                self.apply_bond_responses(ci,list,&mut responses,(dt,fracture),t_mid);
+            }
+        } else if crate::par::serial(bond_jobs.len()) {
             // On one thread each response is applied as it is computed (no list of them):
             // a response reads only its bond and the chunks' motion, which applying the
             // others does not change, so this is the same sweep.
@@ -1537,6 +1566,17 @@ impl ReferenceSolver {
             let _t = crate::profile::time(crate::profile::Stage::Splits);
             self.process_splits();
         }
+        Ok(())
+    }
+
+    /// Explicit oracle control only: compute a native response at the current
+    /// pre-integration phase. Calling this is reference stress work, never learned
+    /// inference; diagnostic providers must count and label it separately.
+    pub fn oracle_stress_response(&self,job:crate::stress_provider::BondJob,dt:f64,fracture:bool)
+        ->crate::stress_provider::SuppliedStress {
+        let (s,b,w)=job;
+        let (joint,total_force,damping_dissipated,_)=self.bond_response(s,b,dt*w,fracture);
+        crate::stress_provider::SuppliedStress{key:(s,b),joint,total_force,damping_dissipated}
     }
 
     /// Whether cluster `ci` takes explicit substeps (the others are quasi-static,
@@ -2360,6 +2400,36 @@ pub fn turn_difference(phi: Vec3, v: Vec3) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_bond_force_after_rigid_only_steps_uses_current_rotations() {
+        let mut scene = crate::builders::bond_tension();
+        scene.sim.methods.corotational_bonds = true;
+        let mut solver = ReferenceSolver::new(&scene);
+        solver.config.fracture = false;
+        let loads = ChunkLoads::new(&solver);
+        let dt = solver.stable_dt() * 0.1;
+        // Exercise both an initially empty cache and a cache left by a prior
+        // explicit step. The independent bond law uses current rotations directly.
+        for angle in [0.01, -0.025] {
+            solver.config.mode = SolveMode::QuasiStatic;
+            solver.substep(dt, &loads);
+            for chunk in &mut solver.chunks[0] {
+                chunk.v = Vec3::ZERO;
+                chunk.w = Vec3::ZERO;
+            }
+            solver.chunks[0][1].th = Vec3::new(angle, angle * 0.5, -angle);
+            let bond = &solver.bonds[0][0];
+            let (a, b) = (solver.chunks[0][bond.geometry.a], solver.chunks[0][bond.geometry.b]);
+            let deformation = bond.geometry.corotation(a.u, a.th, b.u, b.th).deformation();
+            let expected = bond.model().evaluate(&bond.joint, &deformation, dt, false).force;
+            solver.config.mode = SolveMode::Explicit;
+            solver.substep(dt, &loads);
+            let actual = solver.bonds[0][0].force;
+            assert_eq!((actual.lin, actual.ang), (expected.lin, expected.ang));
+            assert!(actual.ang.norm() > 0.0);
+        }
+    }
 
     /// `true_step`'s frequency bound on the cantilever (21 chunks, 126 degrees of
     /// freedom) lies between the highest eigenvalue of `K x = lambda M x`, found

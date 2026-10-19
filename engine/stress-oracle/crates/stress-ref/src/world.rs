@@ -1777,6 +1777,83 @@ impl World {
         self.solver.clusters[ci].mass * self.solver.config.gravity.norm()
     }
 
+    /// Experimental causal load predictor. Advances a detached copy from this
+    /// frame's start using the existing contact solver and timestep. Local elastic
+    /// deformation is frozen, so this is an approximation, never an oracle label
+    /// or a replacement for the physical world's integration.
+    pub fn learned_rigid_preview(&self, k: usize) -> Result<LearnedFrameBins, String> {
+        if k == 0 || self.coupling.is_some()
+            || self.scene.sim.solve_mode != SolveMode::Explicit
+            || self.solver.config.mode != SolveMode::Explicit
+            || self.scene.sim.refine_utilization.is_some()
+        {
+            return Err("rigid preview requires K>0, uncoupled explicit dynamics, no refinement".into());
+        }
+        let mut preview = self.clone();
+        if preview.scene.sim.methods.frame_contact_step && preview.scene.sim.methods.layer_contact {
+            preview.contact_dt = preview.frame_contact_dt();
+        }
+        let dt = preview.substep_dt();
+        // QS at the solver level advances rigid clusters without evaluating bonds.
+        // The World remains Explicit: do NOT run a static solve at the frame tail.
+        preview.solver.config.mode = SolveMode::QuasiStatic;
+        for chunks in &mut preview.solver.chunks {
+            for chunk in chunks {
+                chunk.v = Vec3::ZERO;
+                chunk.w = Vec3::ZERO;
+            }
+        }
+        if preview.substep_dt() != dt {
+            return Err("rigid preview changed the oracle timestep".into());
+        }
+        let before = preview.solver.bond_evaluations;
+        let substeps = preview.solver.substeps;
+        preview.learned_bins = Some(LearnedFrameBins::new(
+            &preview.solver, k, preview.solver.time, preview.scene.sim.frame_dt));
+        preview.step_frame();
+        if preview.solver.bond_evaluations != before
+            || preview.solver.substeps - substeps != (self.scene.sim.frame_dt / dt).round().max(1.0) as u64
+        {
+            return Err("rigid preview unexpectedly evaluated stress or changed substep count".into());
+        }
+        preview.learned_bins.take().ok_or_else(|| "preview bins missing".into())
+    }
+
+    /// Experimental endpoint rollout: contacts use the unchanged substeps,
+    /// hidden deformation is interpolated, and all learned breaks commit at end.
+    /// This is an explicit opt-in; ordinary stepping is unchanged. Reject modes
+    /// whose static/event/refinement stages this endpoint contract cannot supply.
+    pub fn step_frame_external_endpoint(&mut self, endpoint:&crate::external_stress::StressEndpoint)
+        ->Result<crate::external_stress::EndpointReport,String> {
+        use crate::external_stress::EndpointReport;
+        if self.coupling.is_some()
+            || self.scene.sim.solve_mode!=SolveMode::Explicit || self.solver.config.mode!=SolveMode::Explicit
+            || self.scene.sim.refine_utilization.is_some() || !self.scene.events.is_empty()
+            || self.scene.sim.methods.multirate || !self.solver.config.integrate_rigid {
+            return Err("external endpoint requires standalone explicit dynamics, no scheduled topology events, refinement or multirate".into());
+        }
+        if endpoint.dt!=self.scene.sim.frame_dt {return Err("external endpoint horizon mismatch".into())}
+        endpoint.validate(&self.solver)?;
+        let projected=endpoint.projected_dofs(&self.solver);
+        if self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact {self.contact_dt=self.frame_contact_dt()}
+        let dt=self.substep_dt();let n=(self.scene.sim.frame_dt/dt).round().max(1.) as usize;
+        let evaluations=self.solver.bond_evaluations;let substeps=self.solver.substeps;
+        for _ in 0..n {self.substep_with_stress(dt,Some((endpoint,1./n as f64)),&mut None)?;}
+        let before=self.mechanical_energy()+self.dissipated_energy();
+        let new_breaks=self.solver.commit_external_stress(endpoint);
+        if self.scene.sim.methods.layer_contact {self.hand_over_split_joints()}
+        self.frame+=1;
+        if new_breaks>0 {self.topology_version+=1}
+        let energy_change=self.mechanical_energy()+self.dissipated_energy()-before;
+        if ![energy_change,self.mechanical_energy(),self.dissipated_energy(),self.solver.energy.external_work].iter().all(|v|v.is_finite()) {
+            return Err("nonfinite external endpoint trajectory; abort rollout".into());
+        }
+        Ok(EndpointReport {contact_substeps:self.solver.substeps-substeps,
+            analytic_bond_evaluations:self.solver.bond_evaluations-evaluations,new_breaks,
+            supported_dofs_projected:projected,energy_change_at_joint_commit_j:energy_change,
+            scope:"Experimental independent endpoint stepping: hidden deformation interpolated over unchanged contact substeps, fracture committed at interval end. No analytic stress/fallback or oracle reset. Damping/softening work and support reactions are not predicted; do not interpret ledger as a complete conservation proof."})
+    }
+
     /// Advance one frame (`sim.frame_dt`).
     pub fn step_frame(&mut self) {
         if self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact {
@@ -1814,7 +1891,35 @@ impl World {
         self.implicit_failures.clear();
     }
 
-    fn step_frame_once(&mut self) {
+    /// Read-only observation after each native explicit substep. The observer
+    /// cannot alter physics; timestep choice and frame-tail operations are shared
+    /// with ordinary stepping. Intended for trajectory-label diagnostics.
+    pub fn step_frame_observed(&mut self, mut observe:impl FnMut(&Self)) -> Result<(),String> {
+        if self.coupling.is_some() || self.scene.sim.solve_mode!=SolveMode::Explicit {
+            return Err("substep observation requires standalone explicit dynamics".into());
+        }
+        if self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact {
+            self.contact_dt=self.frame_contact_dt();
+        }
+        self.step_frame_once_observed(&mut observe,&mut None)
+    }
+
+    /// Advance with supplied stresses while retaining native integration and split
+    /// timing. A provider error aborts the run; discard the partly advanced world.
+    /// No reference-stress fallback is performed.
+    pub fn step_frame_with_stress_provider(&mut self,provider:&mut dyn crate::stress_provider::StressProvider)->Result<(),String> {
+        if self.coupling.is_some() || self.scene.sim.solve_mode!=SolveMode::Explicit
+            || self.solver.config.mode!=SolveMode::Explicit || self.scene.sim.refine_utilization.is_some()
+            || !self.scene.events.is_empty() || self.scene.sim.methods.multirate {
+            return Err("stress provider requires standalone explicit dynamics without refinement, scheduled events or multirate".into());
+        }
+        if self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact {self.contact_dt=self.frame_contact_dt();}
+        self.step_frame_once_observed(&mut |_| {},&mut Some(provider))
+    }
+
+    fn step_frame_once(&mut self) { self.step_frame_once_observed(&mut |_| {},&mut None).expect("reference frame has no external provider"); }
+
+    fn step_frame_once_observed(&mut self, observe:&mut impl FnMut(&Self),provider:&mut Option<&mut dyn crate::stress_provider::StressProvider>)->Result<(),String> {
         if self.scene.sim.solve_mode == SolveMode::Implicit && (self.scene.sim.methods.implicit_contact_windows || self.scene.sim.methods.implicit_failure_windows) {
             self.open_explicit_windows();
         }
@@ -1832,13 +1937,14 @@ impl World {
         self.frame_loads.resize(&self.solver);
         let splits_before = self.solver.events.len();
         for i in 0..n {
-            self.substep(dt);
+            self.substep_with_stress(dt,None,provider)?;
             let mut fl = std::mem::take(&mut self.frame_loads);
             fl.add_scaled(&self.loads, 1.0 / n as f64);
             self.frame_loads = fl;
             if self.scene.sim.solve_mode == SolveMode::Implicit {
                 self.accumulate_implicit(dt, i + 1 == n);
             }
+            observe(self);
         }
         self.frame += 1;
         if self.solver.events.len() != splits_before {
@@ -1882,6 +1988,7 @@ impl World {
             self.solver.energy.static_discard += before + work - (self.mechanical_energy() + self.dissipated_energy());
         }
         self.frame_loads.clear();
+        Ok(())
     }
 
     /// `sim.methods.multirate`: the frame's `n` substeps of `dt` as one window of the
@@ -2121,7 +2228,9 @@ impl World {
         }
     }
 
-    fn substep(&mut self, dt: f64) {
+    fn substep(&mut self, dt: f64) { self.substep_with_stress(dt,None,&mut None).expect("reference substep has no external provider"); }
+
+    fn substep_with_stress(&mut self, dt:f64, external:Option<(&crate::external_stress::StressEndpoint,f64)>,provider:&mut Option<&mut dyn crate::stress_provider::StressProvider>)->Result<(),String> {
         let t = self.solver.time + dt;
         crate::profile::count(crate::profile::Counter::Substeps, 1);
         let t_events = crate::profile::time(crate::profile::Stage::Events);
@@ -2154,7 +2263,9 @@ impl World {
         }
         let n_events = self.solver.events.len();
         let t_solver = crate::profile::time(crate::profile::Stage::SolverSubstep);
-        self.solver.substep(dt, &self.loads);
+        if let Some((endpoint,fraction))=external {
+            self.solver.external_stress_substep(dt,&self.loads,endpoint,fraction);
+        } else { self.solver.substep_with_provider(dt, &self.loads,provider)?; }
         drop(t_solver);
         if self.scene.sim.methods.layer_contact {
             let _t = crate::profile::time(crate::profile::Stage::Handover);
@@ -2208,6 +2319,7 @@ impl World {
         debug_assert!((self.solver.time - t).abs() < 1e-9);
         let _t = crate::profile::time(crate::profile::Stage::Probes);
         self.record_probes(false);
+        Ok(())
     }
 
     /// Multi-level pre-fracture: refine coarse chunks near failure or under impact.
@@ -3717,6 +3829,30 @@ mod tests {
     use super::*;
     use crate::math::Quat;
 
+    #[test]
+    fn crushed_contact_centroid_stays_inside_overlap() {
+        // Two 10 cm fragments from an oblique ram collision. Fully crushing the
+        // overlap leaves a near-degenerate cell; its centroid cannot leave the
+        // convex overlap, regardless of how small its volume becomes.
+        let a = cube(Vec3::new(0.6562812380598438, 0.1274326438102955, 1.0588324126791557), Mat3 { m: [
+            [0.9949276710714208, -0.10048560549579526, 0.004644612421120401],
+            [0.10046016005581306, 0.9949263117810079, 0.005421288352544443],
+            [-0.005165808548470307, -0.004927191287580689, 0.9999745182793691]] }, Vec3::splat(0.05));
+        let b = cube(Vec3::new(0.7282161057582649, 0.13143458225057533, 1.0590420099080244), Mat3 { m: [
+            [0.9943812633543965, -0.10578021409637445, 0.004055785428268871],
+            [0.1057303695582748, 0.9943340973415944, 0.010990533060223724],
+            [-0.005195386682972664, -0.01049996045718359, 0.9999313770392508]] }, Vec3::splat(0.05));
+        let pa=polytope_of(&a,OWNER_A);let pb=polytope_of(&b,OWNER_B);let overlap=pa.intersect(&pb);
+        let material=Material::concrete();let indent=0.02816227211983227;
+        let pe=pair_elastic_with(&overlap,(&a,&pa),(&b,&pb),&material,&material,1.,indent,true).unwrap();
+        let crushed_indent=pe.peaks.iter().map(|p|p.0).fold(indent,f64::max);
+        let after=pair_elastic_with(&overlap,(&a,&pa),(&b,&pb),&material,&material,1.,crushed_indent,true).unwrap();
+        if let Some(contact)=after.contact {
+            let (lo,hi)=overlap.all_vertices().iter().fold((Vec3::splat(f64::INFINITY),Vec3::splat(f64::NEG_INFINITY)),|(lo,hi),&v|(lo.component_min(v),hi.component_max(v)));
+            assert!((0..3).all(|i|contact.centroid[i]>=lo[i]-1e-12 && contact.centroid[i]<=hi[i]+1e-12),"contact centroid outside overlap: {contact:?}; bounds {lo:?} {hi:?}");
+        }
+    }
+
     fn cube(center: Vec3, rotation: Mat3, half: Vec3) -> OBox {
         OBox { center, rotation, half, hull: None, parts: None }
     }
@@ -4066,7 +4202,7 @@ mod tests {
                 match (trial + step) % 41 {
                     // Hidden motion: one chunk jumps and comes back two steps later.
                     5 => bounds[step % n].0 += Vec3::splat(0.3),
-                    7 => bounds[(step - 2) % n].0 -= Vec3::splat(0.3),
+                    7 if step >= 2 => bounds[(step - 2) % n].0 -= Vec3::splat(0.3),
                     // A split: a chunk moves to a new cluster.
                     11 => {
                         cluster[step % n] = n_clusters;
