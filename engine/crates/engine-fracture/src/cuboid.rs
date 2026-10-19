@@ -804,11 +804,12 @@ pub fn cuboid_bonds(pieces: &[Piece], shift: [f64; 3], bodies: &[Body]) -> (Vec<
     // at the first copy).
     let line = |lines: &mut Vec<f32>, a: u32, b: u32, local: [f64; 3], anchor: bool| {
         let color = if anchor { [0.95, 0.6, 0.2] } else { [0.25, 0.9, 0.8] };
-        vertex(lines, [0.0; 3], [0.0, 1.0, 0.0], color, a);
+        let (pa, pb) = (bodies[a as usize].p, (b != 0).then(|| bodies[b as usize].p));
+        vertex(lines, [0.0; 3], bond_line_normal(b, pa, pb), color, a);
         if b == 0 {
-            vertex(lines, local, [0.0, 1.0, 0.0], color, a);
+            vertex(lines, local, bond_line_normal(0, pa, None), color, a);
         } else {
-            vertex(lines, [0.0; 3], [0.0, 1.0, 0.0], color, b);
+            vertex(lines, [0.0; 3], bond_line_normal(a, pa, pb), color, b);
         }
     };
     for (i, a) in pieces.iter().enumerate() {

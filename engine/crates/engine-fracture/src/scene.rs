@@ -825,6 +825,14 @@ pub fn grid_config(colliders: &[Collider]) -> (f64, u32) {
 // ---- render streams ------------------------------------------------------------
 
 /// Push one 10-float render vertex.
+/// A bond line vertex's normal slot (`fracture_draw.slang` `vs`): `-(partner + 2)`, the
+/// rest distance between the bodies' centres `a` and `b`, and the rest height of `a`
+/// (for an anchor, partner 0), so the draw hides the line once the bond's pieces part.
+pub fn bond_line_normal(partner: u32, a: [f64; 3], b: Option<[f64; 3]>) -> [f64; 3] {
+    let rest = b.map_or(0.0, |b| length(sub(b, a)));
+    [-(partner as f64 + 2.0), rest, a[1]]
+}
+
 pub fn vertex(out: &mut Vec<f32>, p: [f64; 3], n: [f64; 3], color: [f64; 3], body: u32) {
     out.extend(p.iter().chain(&n).chain(&color).map(|x| *x as f32));
     out.push(body as f32);
@@ -1056,16 +1064,18 @@ pub fn build_scene(
         } else {
             [0.25, 0.9, 0.8]
         };
-        vertex(&mut lines, [0.0; 3], [0.0, 1.0, 0.0], color, a.1);
+        let (pa, pb) = (bodies[a.1 as usize].p, other.map(|o| bodies[o.1 as usize].p));
+        let n = |partner: u32| bond_line_normal(partner, pa, pb);
+        vertex(&mut lines, [0.0; 3], n(other.map_or(0, |o| o.1)), color, a.1);
         match other {
-            Some(o) => vertex(&mut lines, [0.0; 3], [0.0, 1.0, 0.0], color, o.1),
+            Some(o) => vertex(&mut lines, [0.0; 3], n(a.1), color, o.1),
             // An anchor: its point in the piece's own frame, not on body 0. Copies are drawn
             // instanced and share body 0, so a ground point would sit at the first copy's
             // anchor and every other copy's line would cross the layout to it.
             None => vertex(
                 &mut lines,
                 inverse_rotate(a.2, sub(add(f64x3(b.centroid), placement), bodies[a.1 as usize].p)),
-                [0.0, 1.0, 0.0],
+                n(0),
                 color,
                 a.1,
             ),
