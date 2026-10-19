@@ -1059,12 +1059,15 @@ pub fn build_scene(
         vertex(&mut lines, [0.0; 3], [0.0, 1.0, 0.0], color, a.1);
         match other {
             Some(o) => vertex(&mut lines, [0.0; 3], [0.0, 1.0, 0.0], color, o.1),
+            // An anchor: its point in the piece's own frame, not on body 0. Copies are drawn
+            // instanced and share body 0, so a ground point would sit at the first copy's
+            // anchor and every other copy's line would cross the layout to it.
             None => vertex(
                 &mut lines,
-                add(f64x3(b.centroid), placement),
+                inverse_rotate(a.2, sub(add(f64x3(b.centroid), placement), bodies[a.1 as usize].p)),
                 [0.0, 1.0, 0.0],
                 color,
-                0,
+                a.1,
             ),
         }
     }

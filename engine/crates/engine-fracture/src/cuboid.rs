@@ -799,10 +799,17 @@ pub fn cuboid_bonds(pieces: &[Piece], shift: [f64; 3], bodies: &[Body]) -> (Vec<
         u[(axis + 1) % 3] = 1.0;
         u
     };
-    let line = |lines: &mut Vec<f32>, a: u32, b: u32, at: [f64; 3], anchor: bool| {
+    // A bond's line between its bodies' centres; an anchor's from the piece to its anchor
+    // point in the piece's frame (`local`; copies share body 0, so a ground point would sit
+    // at the first copy).
+    let line = |lines: &mut Vec<f32>, a: u32, b: u32, local: [f64; 3], anchor: bool| {
         let color = if anchor { [0.95, 0.6, 0.2] } else { [0.25, 0.9, 0.8] };
         vertex(lines, [0.0; 3], [0.0, 1.0, 0.0], color, a);
-        vertex(lines, if b == 0 { at } else { [0.0; 3] }, [0.0, 1.0, 0.0], color, b);
+        if b == 0 {
+            vertex(lines, local, [0.0, 1.0, 0.0], color, a);
+        } else {
+            vertex(lines, [0.0; 3], [0.0, 1.0, 0.0], color, b);
+        }
     };
     for (i, a) in pieces.iter().enumerate() {
         if a.angle != 0.0 {
@@ -826,7 +833,7 @@ pub fn cuboid_bonds(pieces: &[Piece], shift: [f64; 3], bodies: &[Body]) -> (Vec<
                 k,
                 world: true,
             });
-            line(&mut lines, ia, 0, at, true);
+            line(&mut lines, ia, 0, sub(at, bodies[ia as usize].p), true);
         }
         for (j, b) in pieces.iter().enumerate().skip(i + 1) {
             if b.angle != 0.0 {
@@ -869,7 +876,7 @@ pub fn cuboid_bonds(pieces: &[Piece], shift: [f64; 3], bodies: &[Body]) -> (Vec<
                 k,
                 world: false,
             });
-            line(&mut lines, ia, ib, at, false);
+            line(&mut lines, ia, ib, [0.0; 3], false);
         }
     }
     (scale_bond_springs(&joints, bodies, BOND_TICK), lines)
