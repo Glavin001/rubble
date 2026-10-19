@@ -12,6 +12,25 @@ pub const NG:usize=29; // 21 changed histories, complete damage, two finite duct
 fn local(a:&[f64])->Local6{Local6{lin:Vec3::new(a[0],a[1],a[2]),ang:Vec3::new(a[3],a[4],a[5])}}
 fn finite(x:f64)->f64{if x.is_finite(){x}else{0.}}
 
+/// Fixed physical decoder: force is the deformation derivative of stored energy
+/// with the predicted material history held fixed. This does NOT evaluate the
+/// oracle's strength, damage, fatigue, or plastic return-map update.
+pub fn energy_force(k:Local6,width:[f64;2],d:Local6,h:&[f64;21])->(Local6,f64){
+    let intact=Local6{lin:Vec3::new(k.lin.x*d.lin.x,k.lin.y*d.lin.y,k.lin.z*d.lin.z*if d.lin.z<0.{1.-h[1]}else{1.}),ang:k.ang.mul_elem(d.ang)}.scale(1.-h[0]);
+    let mut force=intact;let mut energy=0.5*d.dot(&intact);
+    if h[0]>0.{
+        let n=stress_ref::joint::CONTACT_SPRINGS;let ki=k.lin.z*(1.-h[1])/(n*n) as f64;
+        let mut contact=Local6::ZERO;let mut patch=0.;
+        for i in 0..n{for j in 0..n{let x=((i as f64+0.5)/n as f64-0.5)*width[0];let y=((j as f64+0.5)/n as f64-0.5)*width[1];
+            let z=(d.lin.z+d.ang.x*y-d.ang.y*x).min(0.);let q=ki*z;
+            contact.lin.z+=q;contact.ang.x+=q*y;contact.ang.y-=q*x;patch+=0.5*ki*z*z;
+        }}
+        contact.lin.x=k.lin.x*(d.lin.x-h[7]);contact.lin.y=k.lin.y*(d.lin.y-h[8]);contact.ang.z=k.ang.z*(d.ang.z-h[12]);
+        patch+=0.5*(contact.lin.x.powi(2)/k.lin.x+contact.lin.y.powi(2)/k.lin.y+contact.ang.z.powi(2)/k.ang.z);
+        force=force.add(&contact.scale(h[0]));energy+=h[0]*patch;
+    }(force,energy)
+}
+
 /// Baseline is a cheap elastic prior, not an oracle constitutive evaluation.
 /// Infinity in unset ductility is represented by explicit presence bits.
 pub fn features(s:&ReferenceSolver,job:BondJob,dt:f64,fracture:bool)->Result<(Vec<f64>,[f64;NY],Local6,Local6),String>{
@@ -21,6 +40,9 @@ pub fn features(s:&ReferenceSolver,job:BondJob,dt:f64,fracture:bool)->Result<(Ve
         else{(g.kinematics(a.u,a.th,c.u,c.th),g.kinematics(a.v,a.w,c.v,c.w))};
     let k=b.stiffness.as_local();let q=d.mul_elem(&k);let m=stress_measures(g,&q);
     let h=joint_history::pack(&b.joint);let st=&b.strength;
+    if st.dif.is_some()||st.static_fatigue.is_some()||st.buckling_load.is_some()||!st.softening||!st.crack_contact||st.exact_patch||st.kind!=stress_ref::material::BondKind::Brittle{
+        return Err("causal material experiment requires brittle softening with grid-patch contact, no DIF/fatigue/buckling/rebar".into())
+    }
     let mut x=Vec::new();x.extend(d.to_array());x.extend(rate.to_array());x.extend(h.map(finite));
     x.extend(k.to_array());x.extend(b.damping.to_array());
     x.extend([dt,fracture as u8 as f64,h[4].is_finite() as u8 as f64,h[5].is_finite() as u8 as f64,
@@ -64,7 +86,7 @@ impl Model{
     pub fn load(path:&Path)->Result<Self,String>{let m:Self=serde_json::from_slice(&std::fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
         if m.format!=FORMAT||m.trained_steps==0||m.output_scale.len()!=NY||m.layers.is_empty(){return Err("invalid or untrained causal model".into())}
         let n=m.input_scale.len();if m.input_mean.len()!=n||m.input_std.len()!=n{return Err("normalizer shape".into())}
-        if m.input_scale.iter().chain(&m.input_std).chain(&m.output_scale).any(|x|!x.is_finite()||*x<=0.){return Err("invalid scales".into())}
+        if m.input_mean.iter().any(|x|!x.is_finite())||m.input_scale.iter().chain(&m.input_std).chain(&m.output_scale).any(|x|!x.is_finite()||*x<=0.){return Err("invalid scales".into())}
         let mut width=n;for layer in &m.layers{if layer.weight.len()!=layer.bias.len()||layer.weight.iter().any(|r|r.len()!=width||r.iter().any(|x|!x.is_finite()))||layer.bias.iter().any(|x|!x.is_finite()){return Err("invalid dense layer".into())}width=layer.bias.len();}
         if width!=NY+NG{return Err("output shape".into())}Ok(m)}
     pub fn predict(&self,x:&[f64])->Result<Vec<f64>,String>{if x.len()!=self.input_scale.len(){return Err("feature width mismatch".into())}
@@ -75,7 +97,7 @@ impl Model{
 pub struct Provider{pub model:Model,pub calls:u64,pub rows:u64,
     /// Training-only observational oracle labels; never applied to this world.
     /// A run with this present is NOT an acceptance evaluation.
-    pub labels:Option<Teacher>}
+    pub labels:Option<Teacher>,pub energy_decoder:bool}
 impl StressProvider for Provider{fn responses(&mut self,s:&ReferenceSolver,_:&ChunkLoads,jobs:&[BondJob],dt:f64,fracture:bool)->Result<Vec<SuppliedStress>,String>{
     let mut out=Vec::new();for &job in jobs{if job.2!=1.{return Err("single-rate jobs required".into())}
         let b=&s.bonds[job.0][job.1];let (x,base,d,rate)=features(s,job,dt,fracture)?;let pred=self.model.predict(&x)?;
@@ -87,6 +109,15 @@ impl StressProvider for Provider{fn responses(&mut self,s:&ReferenceSolver,_:&Ch
         for j in [0,1,2,3,6,16]{h[j]=h[j].max(previous[j]);}
         h[0]=if previous[0]>=1.||pred[NY+21]>0.{1.}else{h[0].min(1.-f64::EPSILON)};
         for j in 4..6{h[j]=if pred[NY+22+j-4]>0.{y[j].max(0.)}else{previous[j]};}
+        if self.energy_decoder{
+            // Isotropic plastic sliding must advance along the elastic trial
+            // traction and cannot overshoot zero elastic slip.
+            let trial=[d.lin.x-previous[7],d.lin.y-previous[8]];let norm=trial[0]*trial[0]+trial[1]*trial[1];
+            let fraction=if norm>0.{((h[7]-previous[7])*trial[0]+(h[8]-previous[8])*trial[1])/norm}else{0.}.clamp(0.,1.);
+            h[7]=previous[7]+fraction*trial[0];h[8]=previous[8]+fraction*trial[1];
+            let trial=d.ang.z-previous[12];let fraction=if trial!=0.{(h[12]-previous[12])/trial}else{0.}.clamp(0.,1.);
+            h[12]=previous[12]+fraction*trial;h[9..12].copy_from_slice(&previous[9..12]);
+        }
         if !fracture||!s.config.fracture{h[..7].copy_from_slice(&previous[..7]);}
         // Known stress-rate filter is physical state, not a learned latent vector.
         let m=stress_measures(&b.geometry,&d.mul_elem(&b.stiffness.as_local()));let governing=m.tension.max(m.shear).max(m.compression);
@@ -94,13 +125,41 @@ impl StressProvider for Provider{fn responses(&mut self,s:&ReferenceSolver,_:&Ch
         let a=if b.strength.exact_rate_filter{-(-dt/b.strength.rate_filter_time).exp_m1()}else{(dt/b.strength.rate_filter_time).min(1.)};
         h[17]=previous[17]+(raw-previous[17])*a;h[18]=governing;
         let changed=[0,1,7,8,9,10,11,12].iter().any(|&j|h[j]!=previous[j]);
-        let dissipated=if changed{y[39].max(0.)}else{0.};h[19]=previous[19]+dissipated;
+        let mut dissipated=if changed{y[39].max(0.)}else{0.};let mut overshoot=if changed{y[40]}else{0.};
+        let mut decoded=None;
+        if self.energy_decoder{let k=b.stiffness.as_local();let now=energy_force(k,b.geometry.width,d,&h);let frozen=energy_force(k,b.geometry.width,d,&previous).1;
+            let released=if changed{frozen-now.1}else{0.};dissipated=dissipated.min(released.max(0.));overshoot=released-dissipated;decoded=Some(now);}
+        h[19]=previous[19]+dissipated;
         let mode=(0..5).max_by(|&a,&c|pred[NY+24+a].total_cmp(&pred[NY+24+c])).unwrap() as i32;
         let state=joint_history::unpack(h,b.joint.rebar_broken,mode)?;
         // Exact elastic rest branch; nonlinear response is learned when damaged.
-        let nonlinear=h[0]>0.||h[1]>0.;let force=if nonlinear{local(&y[27..33])}else{d.mul_elem(&b.stiffness.as_local())};
-        let stored=if nonlinear{y[33].max(0.)}else{0.5*d.dot(&force)};
+        let nonlinear=h[0]>0.||h[1]>0.;let (force,stored)=decoded.unwrap_or_else(||{let force=if nonlinear{local(&y[27..33])}else{d.mul_elem(&b.stiffness.as_local())};
+            (force,if nonlinear{y[33].max(0.)}else{0.5*d.dot(&force)})});
         let damp=rate.mul_elem(&b.damping).mul_elem(&b.model().secant_factors(&state,&d));
         out.push(SuppliedStress{key:(job.0,job.1),total_force:force.add(&damp),damping_dissipated:damp.dot(&rate)*dt,joint:JointResponse{
-            disconnected:b.connected()&&!state.connected(false),state,force,stored,dissipated,overshoot:if changed{y[40]}else{0.},measures:m}});
+            disconnected:b.connected()&&!state.connected(false),state,force,stored,dissipated,overshoot,measures:m}});
     }self.calls+=1;self.rows+=out.len() as u64;Ok(out)}}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn decoded_force_is_energy_gradient_and_matches_frozen_oracle_state(){
+        let w=stress_ref::world::World::new(&stress_ref::builders::wall_impact(12.,"decoder-test"));
+        let b=&w.solver.bonds[0][0];let k=b.stiffness.as_local();
+        for case in 0..50{
+            let d=Local6::from_array(std::array::from_fn(|j|((case*7+j*13) as f64).sin()*if j<3{0.0001}else{0.003}));
+            let mut old=b.joint.clone();old.damage=(case%5) as f64*0.18;old.crush=(case%3) as f64*0.1;
+            let r=b.model().evaluate(&old,&d,1e-5,true);let h=joint_history::pack(&r.state);
+            let (force,energy)=energy_force(k,b.geometry.width,d,&h);
+            for (a,c) in force.to_array().iter().zip(r.force.to_array()){
+                assert!((a-c).abs()<1e-9*(1.+c.abs()),"force {a} != {c}");
+            }
+            assert!((energy-r.stored).abs()<1e-9*(1.+r.stored));
+            for j in 0..6{let mut hi=d.to_array();let mut lo=hi;let eps=1e-9;hi[j]+=eps;lo[j]-=eps;
+                let grad=(energy_force(k,b.geometry.width,Local6::from_array(hi),&h).1-energy_force(k,b.geometry.width,Local6::from_array(lo),&h).1)/(2.*eps);
+                assert!((grad-force.to_array()[j]).abs()<1e-4*(1.+force.to_array()[j].abs()));
+            }
+        }
+    }
+}
