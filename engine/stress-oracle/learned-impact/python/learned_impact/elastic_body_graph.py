@@ -42,6 +42,11 @@ class ElasticBodyGraph:
                          axes, torch.linalg.cross(rb[:, None, :].expand_as(axes), axes)), -1)
         rot = torch.cat((z, -axes, z, axes), -1)
         self.rows = torch.cat((lin, rot), -2)  # E x local6 x (a6,b6)
+        # Fixed geometry/mass/support factorization. Rebuild the graph when any
+        # of these inputs changes; this cache has no temporal learned state.
+        a, b = endpoints.T
+        inverse = self.inverse_root.mT*self.free[:, :, None]
+        self.normalized_rows = torch.cat((self.rows[..., :6]@inverse[a], self.rows[..., 6:]@inverse[b]), -1)
 
     @classmethod
     def from_native(cls, cluster):
@@ -80,14 +85,23 @@ class ElasticBodyGraph:
         return result.flatten(-2)
 
     def apply(self, value):
-        return self.weighted_force(self.stiffness_apply(self.from_weighted(value)))
+        # A = B M^(-1/2) on free DOFs. Apply A^T k A directly, removing two
+        # repeated per-node coordinate transforms from every polynomial pass.
+        x = value.reshape(*value.shape[:-1], self.n, 6)
+        a, b = self.endpoints.T
+        pair = torch.cat((x[..., a, :], x[..., b, :]), -1)
+        force = self.stiffness*torch.einsum('eij,...ej->...ei', self.normalized_rows, pair)
+        pair = torch.einsum('eij,...ei->...ej', self.normalized_rows, force)
+        result = torch.zeros_like(x)
+        result.index_add_(-2, a, pair[..., :6])
+        result.index_add_(-2, b, pair[..., 6:])
+        return result.flatten(-2)
 
     def spectral_bound(self):
         # Sum of absolute element contributions bounds the assembled row sums,
         # including full rotational inertia and all cross-component couplings.
         a, b = self.endpoints.T
-        inverse = self.inverse_root.mT*self.free[:, :, None]
-        rows = torch.cat((self.rows[..., :6]@inverse[a], self.rows[..., 6:]@inverse[b]), -1).abs()
+        rows = self.normalized_rows.abs()
         sums = (self.stiffness[..., None]*rows*rows.sum(-1, keepdim=True)).sum(-2)
         result = torch.zeros(self.n, 6, dtype=rows.dtype, device=rows.device)
         result.index_add_(0, a, sums[..., :6])
@@ -130,17 +144,44 @@ class ElasticBodyTransition(ElasticGraphTransition):
         if (u[..., fixed] != 0).any() or (v[..., fixed] != 0).any():
             raise ValueError('fixed supports must have zero displacement and velocity')
         y, w = self.body.to_weighted(u), self.scale*self.body.to_weighted(v)
-        py, pw = self.basis(y), self.basis(w)
         a, b = [c.to(y) for c in self.learned.coefficients.chunk(2)]
-        ny = y+self.learned.dt*w+(py*a[:, None]+pw*b[:, None]).sum(-2)
-        nw = w+(pw*a[:, None]).sum(-2)-self.apply(self.learned.dt*y+(py*b[:, None]).sum(-2))
+        f = None
         if constant_force is not None:
             self.learned.require_constant_force_consistency()
             if constant_force.shape != u.shape or not torch.isfinite(constant_force).all():
                 raise ValueError('finite constant force must match physical state shape')
             f = self.scale**2*self.body.weighted_force(constant_force)
-            ny -= (self.force_displacement_basis(f)*a[:, None]).sum(-2)
-            nw += self.learned.dt*f+(self.basis(f)*b[:, None]).sum(-2)
+        # Stream the same Chebyshev polynomials, batching physical fields in
+        # each graph pass. G_j=(T_j-(-1)^j)/L supplies the force response.
+        # Algebraically identical to the separate C/S/R basis evaluations.
+        fields = torch.stack((y, w), -2)
+        previous = 2*self.apply(fields)/self.spectral_max-fields
+        older = fields
+        if f is not None:
+            older = torch.cat((older, torch.zeros_like(f)[..., None, :]), -2)
+            previous = torch.cat((previous, (2/self.spectral_max*f)[..., None, :]), -2)
+        increment_u = torch.zeros_like(y)
+        increment_v = torch.zeros_like(y)
+        derivative_argument = torch.zeros_like(y)
+        for index in range(1, self.learned.degree+1):
+            sign = (-1)**index
+            py = previous[..., 0, :]-sign*y
+            pw = previous[..., 1, :]-sign*w
+            pg = previous[..., 2, :] if f is not None else 0.
+            increment_u = increment_u+a[index-1]*(py-pg)+b[index-1]*pw
+            increment_v = increment_v+a[index-1]*pw
+            derivative_argument = derivative_argument+b[index-1]*(py-pg)
+            if index < self.learned.degree:
+                current = 4*self.apply(previous)/self.spectral_max-2*previous-older
+                if f is not None:
+                    # Only the integrated force basis has this inhomogeneous term.
+                    correction = 4*sign/self.spectral_max*f
+                    current = torch.cat((current[..., :2, :], (current[..., 2, :]+correction)[..., None, :]), -2)
+                older, previous = previous, current
+        ny = y+self.learned.dt*w+increment_u
+        nw = w+increment_v-self.apply(self.learned.dt*y+derivative_argument)
+        if f is not None:
+            nw = nw+self.learned.dt*f
         return ChainState(self.body.from_weighted(ny), self.body.from_weighted(nw)/self.scale)
 
 

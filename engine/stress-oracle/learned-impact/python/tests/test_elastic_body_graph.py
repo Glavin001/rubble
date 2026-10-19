@@ -35,6 +35,8 @@ def test_six_dof_rigid_modes_work_and_force_moment_balance():
     torch.testing.assert_close(graph.from_weighted(graph.to_weighted(x)), x)
     matrix = graph.apply(torch.eye(12, dtype=torch.float64)).T
     torch.testing.assert_close(matrix, matrix.T)
+    expected = graph.weighted_force(graph.stiffness_apply(graph.from_weighted(torch.eye(12, dtype=torch.float64))))
+    torch.testing.assert_close(matrix.T, expected, atol=1e-12, rtol=1e-12)
     assert torch.linalg.eigvalsh(matrix).max() <= graph.spectral_bound()*(1+1e-12)
 
 

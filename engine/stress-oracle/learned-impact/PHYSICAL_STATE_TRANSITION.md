@@ -2,7 +2,7 @@
 
 The learned solver should advance the same physical state that the reference solver advances, using fewer computations. Its primary memory is the persisted physical graph. The baseline has no additional learned temporal memory. An optional latent state must demonstrate a benefit against this baseline and have an explicit initialization and restart contract.
 
-The target is **at most 5 ms for the entire world**, with many simultaneous impacts across hundreds of structures, hundreds of thousands of bonds, and at least 10,000 active rigid bodies. A structure, physical chunk, graph node and active rigid body are different counts. The final benchmark must report all of them. Target hardware and the physical duration advanced by each budgeted world update still need to be specified.
+The target is **at most 5 ms for the entire world at a 120 Hz test cadence (8.33 ms simulated time per update)**, with many simultaneous impacts across hundreds of structures, hundreds of thousands of bonds, and at least 10,000 active rigid bodies. The user expects PhysX likely to run at 60 Hz and requested the 120 Hz assumption to leave GPU headroom. Test that integration separately; this requirement does not change production timesteps. A structure, physical chunk, graph node and active rigid body are different counts. The final benchmark must report all of them. Final target hardware remains unspecified; local M3 Max measurements are provisional.
 
 ## Transition boundary
 
