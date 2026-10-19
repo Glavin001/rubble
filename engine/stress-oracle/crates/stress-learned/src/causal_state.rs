@@ -334,8 +334,13 @@ impl Model {
     pub fn load(path: &Path) -> Result<Self, String> {
         let m: Self = serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        if ![FORMAT, "causal-material-state/3", "causal-material-state/4"]
-            .contains(&m.format.as_str())
+        if ![
+            FORMAT,
+            "causal-material-state/3",
+            "causal-material-state/4",
+            "causal-material-state/5",
+        ]
+        .contains(&m.format.as_str())
             || m.trained_steps == 0
             || m.output_scale.len() != NY
             || m.layers.is_empty()
@@ -379,7 +384,15 @@ impl Model {
             return Err("raw feature shape".into());
         }
         let x = if self.format != FORMAT {
-            expanded = augment(x);
+            expanded = {
+                let mut v = augment(x);
+                if self.format == "causal-material-state/5" {
+                    let lambda = v[69].max(v[70]);
+                    let r = v[75].max(1.);
+                    v.extend([lambda - r, (lambda - r) / r]);
+                }
+                v
+            };
             expanded.as_slice()
         } else {
             x
@@ -450,7 +463,8 @@ impl StressProvider for Provider {
             if let Some(labels) = &mut self.labels {
                 labels.record(s, job, dt, fracture)?;
             }
-            let absolute = self.model.format == "causal-material-state/4";
+            let absolute = ["causal-material-state/4", "causal-material-state/5"]
+                .contains(&self.model.format.as_str());
             let y: [f64; NY] = std::array::from_fn(|j| {
                 if absolute && [0, 1, 4, 5].contains(&j) {
                     pred[j] * self.model.output_scale[j]
