@@ -21,6 +21,40 @@ def error_energy(body, actual, expected, initial_energy):
                                         actual.velocity-expected.velocity))/initial_energy).max())
 
 
+def energy_operator_audit(ref, values, modes, diagonal_c):
+    """Representation diagnostic; never truncate the simulated state.
+
+    In these coordinates, squared Euclidean norm is twice physical energy.
+    Singular values bound worst-case remaining state amplitude. This diagnostic
+    needs positive definite elastic energy; it explicitly skips free rigid modes.
+    It is per fixed graph and does not establish a shared learned representation.
+    """
+    if float(values.min()) <= float(values.max())*1e-12:
+        return {'status': 'skipped_rigid_or_near_zero_energy_modes'}
+    n = ref.dof
+    forward, inverse = ref.k.new_zeros(2*n, 2*n), ref.k.new_zeros(2*n, 2*n)
+    forward[:n, :n] = values.sqrt()[:, None]*modes.T/ref.omega
+    forward[n:, n:] = modes.T
+    inverse[:n, :n] = ref.omega*modes/values.sqrt()[None, :]
+    inverse[n:, n:] = modes
+    diagonal_generator = ref.make_generator(ref.k, diagonal_c)
+    output = []
+    for dt in (5e-6, 50e-6, 100e-6, 500e-6, 1e-3, 1/120):
+        transition, _ = ref.propagator(dt)
+        energy_transition = forward@transition@inverse
+        singular = torch.linalg.svdvals(energy_transition)
+        diagonal = forward@torch.linalg.matrix_exp(dt*diagonal_generator)@inverse
+        error = float(torch.linalg.svdvals(energy_transition-diagonal).max().square())
+        output.append({'time_s': dt, 'state_dimensions': 2*n,
+                       'max_energy_gain': float(singular[0].square()),
+                       'optimal_rank_for_worst_case_state_amplitude_error': {
+                           str(tolerance): int((singular > tolerance).sum()) for tolerance in (.001, .01, .05)},
+                       'diagonal_damping_worst_case_error_energy_over_initial': error})
+        if float(singular[0]) > 1+1e-10:
+            raise ValueError('damped exact reference produces energy')
+    return {'status': 'completed_no_modes_removed', 'samples': output}
+
+
 def run(args):
     torch.set_num_threads(1)
     rows = []
@@ -120,6 +154,7 @@ def run(args):
                    'highest_angular_frequency_per_s': ref.omega,
                    'normalized_stiffness_damping_commutator': commutator,
                    'damping_offdiagonal_fraction_in_undamped_basis': offdiag,
+                   'energy_operator_information': energy_operator_audit(ref, values, modes, diagonal_c),
                    'rk4_error_energy_over_initial_8_16_subdivisions': rk4,
                    'short_window_relative_work_balance_defect': balance,
                    'semigroup_error_energy_over_initial': semigroup, 'trajectory_120hz': trajectory,

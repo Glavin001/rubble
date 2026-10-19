@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from learned_impact.damped_body_graph import DampedBodyGraph, DenseDampedReference
+from learned_impact.damped_body_audit import energy_operator_audit
 from learned_impact.elastic_body_graph import ElasticBodyGraph, exact_body_transition
 from learned_impact.physical_transition import ChainState
 
@@ -82,3 +83,13 @@ def test_small_endpoint_response_does_not_erase_earlier_stress_peak():
     assert peak_force > 5.
     assert late_force < 1e-4
     assert graph.body.energy(late) < 1e-10*graph.body.energy(state)
+
+
+def test_energy_information_measure_retains_every_undamped_direction():
+    model = DenseDampedReference(oscillator(0.))
+    values, modes = torch.linalg.eigh(model.k)
+    audit = energy_operator_audit(model, values, modes, model.c)
+    for sample in audit['samples']:
+        assert sample['max_energy_gain'] == pytest.approx(1., abs=1e-12)
+        assert set(sample['optimal_rank_for_worst_case_state_amplitude_error'].values()) == {2}
+        assert sample['diagonal_damping_worst_case_error_energy_over_initial'] < 1e-25
