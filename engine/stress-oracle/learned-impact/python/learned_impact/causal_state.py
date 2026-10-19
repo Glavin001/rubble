@@ -13,6 +13,17 @@ import torch.nn.functional as F
 
 NY, NG = 42, 29
 
+def augment(x):
+    t=np.maximum(x[:,64]/(x[:,49]*x[:,59]),0)
+    cap=np.where(x[:,53]>0,x[:,53]*x[:,59],np.inf)
+    shear=x[:,65]/np.minimum(x[:,51]*x[:,59]+x[:,52]*x[:,66],cap)
+    c=np.maximum(np.divide(x[:,67],x[:,50]*x[:,59],out=np.zeros(len(x)),where=x[:,50]>0),0)
+    lam=np.maximum(t,shear)
+    contributions=x[:,:6]**2*x[:,33:39];contributions[:,2]*=x[:,2]>0
+    psi=.5*contributions.sum(1);budget=np.where(t>=shear,x[:,54],x[:,55])*x[:,60]
+    r=np.divide(budget*lam*lam,psi,out=np.zeros(len(x)),where=psi>0)
+    return np.column_stack((x,t,shear,c,lam-x[:,14],c-x[:,15],psi/budget,r,x[:,0]-x[:,19],x[:,1]-x[:,20],x[:,5]-x[:,24]))
+
 def read(root):
     root = Path(root)
     meta = json.loads((root / "report.json").read_text())
@@ -32,6 +43,8 @@ def main():
     p.add_argument("--batch", type=int, default=2048)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-rows-per-case", type=int, default=300000)
+    p.add_argument("--physical-features", action="store_true")
+    p.add_argument("--state-only", action="store_true")
     args = p.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     torch.manual_seed(args.seed); np.random.seed(args.seed); torch.set_num_threads(4)
@@ -40,6 +53,7 @@ def main():
     data=[tuple(v[ix] for v in row) if len(row[0])>args.max_rows_per_case else row
           for row in data for ix in [rng.choice(len(row[0]),min(len(row[0]),args.max_rows_per_case),replace=False)]]
     x, base, y, gate = [np.concatenate([r[i] for r in data]) for i in range(4)]
+    if args.physical_features: x=augment(x)
     # Fit normalizers ONLY to training cases. Constants remain well-conditioned.
     xs = np.maximum(np.sqrt(np.mean(x*x, axis=0)), 1e-12)
     zx = np.arcsinh(x / xs); xm = zx.mean(0); xd = np.maximum(zx.std(0), .05)
@@ -56,6 +70,9 @@ def main():
     weights[[17,18,19,21,22,23,24,25,26,34,35,36,37,38,41]]=0 # exact decoder channels
     weights *= torch.tensor(active)
     gw = torch.ones(NG); gw[[0,1,21,22,23]]=4; gw[[17,18,19]]=0
+    if args.state_only:
+        weights.zero_();weights[[0,1]]=10;weights[[4,5]]=.5;weights[[7,8,12]]=3;weights[39]=.5;weights*=torch.tensor(active)
+        gw.zero_();gw[[0,1,21]]=5;gw[[7,8,12,22,23]]=1;gw[24:]=.2
     changed = torch.where((gt[:,0]>0)|(gt[:,1]>0)|(gt[:,21]>0))[0]
     nonlinear = torch.where((torch.tensor(y[:,0])>0)|(torch.tensor(y[:,1])>0))[0]
     log=[]; start=time.perf_counter()
@@ -79,7 +96,7 @@ def main():
     # Remove only channels whose target is identically zero in this training scope.
     for j in range(NY):
         if not active[j]: layers[-1]["weight"][j]=[0.]*args.width;layers[-1]["bias"][j]=0.
-    artifact={"format":"causal-material-state/2","trained_steps":args.steps,"input_scale":xs.tolist(),"input_mean":xm.tolist(),"input_std":xd.tolist(),"output_scale":ys.tolist(),"layers":layers}
+    artifact={"format":"causal-material-state/3" if args.physical_features else "causal-material-state/2","trained_steps":args.steps,"input_scale":xs.tolist(),"input_mean":xm.tolist(),"input_std":xd.tolist(),"output_scale":ys.tolist(),"layers":layers}
     weights_file=args.out/"weights.json";weights_file.write_text(json.dumps(artifact,allow_nan=False))
     torch.save({"state_dict":net.state_dict(),"args":vars(args)},args.out/"checkpoint.pt")
     results=[]
@@ -89,12 +106,13 @@ def main():
                 xx,bb,yy,gg=read(root)
                 if len(xx)>args.max_rows_per_case:
                     ix=np.linspace(0,len(xx)-1,args.max_rows_per_case,dtype=int);xx,bb,yy,gg=[a[ix] for a in (xx,bb,yy,gg)]
+                if args.physical_features: xx=augment(xx)
                 features=torch.tensor((np.arcsinh(xx/xs)-xm)/xd,dtype=torch.float32)
                 pp=torch.cat([net(v) for v in features.split(8192)]).numpy()
                 physical=bb+pp[:,:NY]*ys
                 truth=gg[:,21]>0;guess=pp[:,NY+21]>0
                 tp=int((truth&guess).sum());fp=int((~truth&guess).sum());fn=int((truth&~guess).sum())
-                results.append({"role":role,"root":str(root),"rows":len(xx),"teacher_forced_force_rmse_n":float(np.sqrt(np.mean((physical[:,27:30]-yy[:,27:30])**2))),
+                results.append({"role":role,"root":str(root),"rows":len(xx),"raw_force_head_rmse_n_unused_by_energy_decoder":float(np.sqrt(np.mean((physical[:,27:30]-yy[:,27:30])**2))),
                     "complete_damage_tp":tp,"complete_damage_fp":fp,"complete_damage_fn":fn,
                     "complete_damage_f1":2*tp/max(2*tp+fp+fn,1)})
     report={"status":"trained","scope":"Live native-phase material-state model; full native motion/contact substeps retained.","parameters":sum(v.numel() for v in net.parameters()),

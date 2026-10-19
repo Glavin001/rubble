@@ -9,6 +9,16 @@ use crate::{joint_history,phase_history};
 pub const FORMAT:&str="causal-material-state/2";
 pub const NY:usize=42;
 pub const NG:usize=29; // 21 changed histories, complete damage, two finite ductilities, five modes
+pub fn augment(x:&[f64])->Vec<f64>{
+    let mut out=x.to_vec();let t=(x[64]/(x[49]*x[59])).max(0.);
+    let cap=if x[53]>0.{x[53]*x[59]}else{f64::INFINITY};
+    let shear=x[65]/(x[51]*x[59]+x[52]*x[66]).min(cap);
+    let c=if x[50]>0.{(x[67]/(x[50]*x[59])).max(0.)}else{0.};let lambda=t.max(shear);
+    let psi=0.5*(0..6).filter(|&j|j!=2||x[2]>0.).map(|j|x[33+j]*x[j]*x[j]).sum::<f64>();
+    let gf=if t>=shear{x[54]}else{x[55]};let budget=gf*x[60];
+    out.extend([t,shear,c,lambda-x[14],c-x[15],psi/budget,
+        if psi>0.{budget*lambda*lambda/psi}else{0.},x[0]-x[19],x[1]-x[20],x[5]-x[24]]);out
+}
 fn local(a:&[f64])->Local6{Local6{lin:Vec3::new(a[0],a[1],a[2]),ang:Vec3::new(a[3],a[4],a[5])}}
 fn finite(x:f64)->f64{if x.is_finite(){x}else{0.}}
 
@@ -82,12 +92,14 @@ pub struct Layer{pub weight:Vec<Vec<f64>>,pub bias:Vec<f64>}
 pub struct Model{pub format:String,pub trained_steps:u64,pub input_scale:Vec<f64>,pub input_mean:Vec<f64>,pub input_std:Vec<f64>,pub output_scale:Vec<f64>,pub layers:Vec<Layer>}
 impl Model{
     pub fn load(path:&Path)->Result<Self,String>{let m:Self=serde_json::from_slice(&std::fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-        if m.format!=FORMAT||m.trained_steps==0||m.output_scale.len()!=NY||m.layers.is_empty(){return Err("invalid or untrained causal model".into())}
+        if ![FORMAT,"causal-material-state/3"].contains(&m.format.as_str())||m.trained_steps==0||m.output_scale.len()!=NY||m.layers.is_empty(){return Err("invalid or untrained causal model".into())}
         let n=m.input_scale.len();if m.input_mean.len()!=n||m.input_std.len()!=n{return Err("normalizer shape".into())}
         if m.input_mean.iter().any(|x|!x.is_finite())||m.input_scale.iter().chain(&m.input_std).chain(&m.output_scale).any(|x|!x.is_finite()||*x<=0.){return Err("invalid scales".into())}
         let mut width=n;for layer in &m.layers{if layer.weight.len()!=layer.bias.len()||layer.weight.iter().any(|r|r.len()!=width||r.iter().any(|x|!x.is_finite()))||layer.bias.iter().any(|x|!x.is_finite()){return Err("invalid dense layer".into())}width=layer.bias.len();}
         if width!=NY+NG{return Err("output shape".into())}Ok(m)}
-    pub fn predict(&self,x:&[f64])->Result<Vec<f64>,String>{if x.len()!=self.input_scale.len(){return Err("feature width mismatch".into())}
+    pub fn predict(&self,x:&[f64])->Result<Vec<f64>,String>{let expanded;if self.format=="causal-material-state/3"&&x.len()!=69{return Err("raw feature shape".into())}
+        let x=if self.format=="causal-material-state/3"{expanded=augment(x);expanded.as_slice()}else{x};
+        if x.len()!=self.input_scale.len(){return Err("feature width mismatch".into())}
         let mut v:Vec<f64>=x.iter().enumerate().map(|(i,x)|((x/self.input_scale[i]).asinh()-self.input_mean[i])/self.input_std[i]).collect();
         for (i,l) in self.layers.iter().enumerate(){v=l.weight.iter().zip(&l.bias).map(|(w,b)|{let z=w.iter().zip(&v).fold(*b,|sum,(w,x)|sum+w*x);if i+1<self.layers.len(){z.max(0.)}else{z}}).collect();}
         if v.iter().any(|x|!x.is_finite()){return Err("nonfinite inference".into())}Ok(v)}

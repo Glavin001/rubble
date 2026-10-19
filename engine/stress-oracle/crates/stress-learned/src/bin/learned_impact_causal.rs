@@ -49,7 +49,7 @@ fn run()->Result<(),String>{
     }
     fs::write(native.join("reports.json"),serde_json::to_vec_pretty(&reports).unwrap()).map_err(|e|e.to_string())?;
     let (rows,calls,queries,nx)=if let Some(p)=&mut teacher{p.flush()?;(p.rows,p.calls,p.rows,p.input_width)}else{let mut p=provider.unwrap();
-        let queries=if let Some(l)=&mut p.labels{l.flush()?;l.rows}else{0};(p.rows,p.calls,queries,p.model.input_scale.len())};
+        let queries=if let Some(l)=&mut p.labels{l.flush()?;l.rows}else{0};(p.rows,p.calls,queries,69)};
     let report=json!({"status":"completed","format":FORMAT,"frames":frames,"rows":rows,"calls":calls,"oracle_queries":queries,"energy_decoder":energy_decoder,
         "analytic_fallback_evaluations":w.solver.bond_evaluations,"input_width":nx,"output_width":NY,"gate_width":NG,"seconds":start.elapsed().as_secs_f64(),
         "scope":"Causal material-state model. All native contact and mechanical substeps retained. No runtime speedup claim."});
