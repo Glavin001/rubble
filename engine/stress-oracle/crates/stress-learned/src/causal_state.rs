@@ -324,6 +324,9 @@ pub struct Layer {
 pub struct Model {
     pub format: String,
     pub trained_steps: u64,
+    /// Explicit numerical experiment; legacy artifacts use the f64 harness.
+    #[serde(default)]
+    pub float32_inference: bool,
     pub input_scale: Vec<f64>,
     pub input_mean: Vec<f64>,
     pub input_std: Vec<f64>,
@@ -407,6 +410,31 @@ impl Model {
                 ((x / self.input_scale[i]).asinh() - self.input_mean[i]) / self.input_std[i]
             })
             .collect();
+        if self.float32_inference {
+            let mut narrow: Vec<f32> = v.iter().map(|x| *x as f32).collect();
+            for (i, l) in self.layers.iter().enumerate() {
+                narrow = l
+                    .weight
+                    .iter()
+                    .zip(&l.bias)
+                    .map(|(w, b)| {
+                        let z = w
+                            .iter()
+                            .zip(&narrow)
+                            .fold(*b as f32, |sum, (w, x)| sum + (*w as f32) * x);
+                        if i + 1 < self.layers.len() {
+                            z.max(0.)
+                        } else {
+                            z
+                        }
+                    })
+                    .collect();
+            }
+            if narrow.iter().any(|x| !x.is_finite()) {
+                return Err("nonfinite float32 inference".into());
+            }
+            return Ok(narrow.into_iter().map(|x| x as f64).collect());
+        }
         for (i, l) in self.layers.iter().enumerate() {
             v = l
                 .weight

@@ -31,7 +31,7 @@ def run(binary,scene,oracle,weights,out,frames):
     graph=json.loads((Path(oracle)/"graph.json").read_text())
     scene_data=graph["scene"]
     # This gate's fixture is explicitly the y-normal wall spanning [0, .1] m.
-    if scene_data.get("name")=="causal-small-wall" and frames>=100:
+    if scene_data.get("name")=="causal-small-wall" and report["duration_seconds"]>=.1-1e-10:
         clearance={}
         for side,root in [("oracle",Path(oracle)),("model",out/"native")]:
             actor=json.loads((root/f"snapshots/{frames:06}.json").read_text())["world"]["impactors"][0]

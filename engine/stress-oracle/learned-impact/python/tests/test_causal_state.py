@@ -13,3 +13,7 @@ def test_physical_features_are_finite_at_rest_and_track_loading_and_plastic_hist
     assert b[1,69]==2 and b[1,70]==.5 and b[1,72]==.5
     assert np.isclose(b[1,76],.0016)
     np.testing.assert_array_equal(x,b[:,:69])
+    event=augment(x,events=True)
+    assert event.shape==(2,81) and np.isfinite(event).all()
+    np.testing.assert_allclose(event[:,79],np.maximum(b[:,69],b[:,70])-np.maximum(b[:,75],1))
+    np.testing.assert_allclose(event[:,80],event[:,79]/np.maximum(b[:,75],1))
