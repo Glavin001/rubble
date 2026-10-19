@@ -12,6 +12,18 @@ from torch import nn
 import torch.nn.functional as F
 
 NY, NG = 42, 29
+# A proper 180-degree change of the two tangent axes leaves the same bond
+# physics. Normal translation and torsion keep their signs. This is a change
+# of local coordinates, not a reflected world or an invented training label.
+HALF_TURN_INPUT = [0,1,3,4,6,7,9,10,19,20,22,23]
+HALF_TURN_OUTPUT = [7,8,10,11,21,22,24,25,27,28,30,31]
+
+def half_turn_rows(x, base, target):
+    x,base,target=x.copy(),base.copy(),target.copy()
+    x[:,HALF_TURN_INPUT]*=-1
+    base[:,HALF_TURN_OUTPUT]*=-1
+    target[:,HALF_TURN_OUTPUT]*=-1
+    return x,base,target
 
 def augment(x, events=False):
     t=np.maximum(x[:,64]/(x[:,49]*x[:,59]),0)
@@ -44,6 +56,7 @@ def main():
     p.add_argument("--depth", type=int, default=2)
     p.add_argument("--learning-rate", type=float, default=1e-3)
     p.add_argument("--cosine-decay", action="store_true")
+    p.add_argument("--half-turn-augmentation", action="store_true")
     p.add_argument("--batch", type=int, default=2048)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-rows-per-case", type=int, default=300000)
@@ -97,6 +110,8 @@ def main():
     changed = torch.where((gt[:,0]>0)|(gt[:,1]>0)|(gt[:,21]>0))[0]
     nonlinear = torch.where((torch.tensor(y[:,0])>0)|(torch.tensor(y[:,1])>0))[0]
     new_breaks=torch.where(gt[:,21]>0)[0]
+    flip_columns=HALF_TURN_INPUT+([76,77] if args.physical_features else [])
+    flip_shift=torch.tensor(2*xm[flip_columns]/xd[flip_columns],dtype=torch.float32)
     log=[]; start=time.perf_counter()
     for step in range(args.steps):
         n=args.batch
@@ -105,7 +120,12 @@ def main():
         if len(changed): ix[:n//3]=changed[torch.randint(len(changed),(n//3,))]
         if len(nonlinear): ix[n//3:2*(n//3)]=nonlinear[torch.randint(len(nonlinear),(n//3,))]
         if args.event_targets and len(new_breaks):ix[:n//6]=new_breaks[torch.randint(len(new_breaks),(n//6,))]
-        pred=net(xt[ix]); continuous=F.smooth_l1_loss(pred[:,:NY],yt[ix],reduction="none")
+        features,targets=xt[ix],yt[ix]
+        if args.half_turn_augmentation:
+            reflected=torch.where(torch.rand(n)<.5)[0]
+            features[reflected[:,None],flip_columns]=-features[reflected[:,None],flip_columns]-flip_shift
+            targets[reflected[:,None],HALF_TURN_OUTPUT]*=-1
+        pred=net(features); continuous=F.smooth_l1_loss(pred[:,:NY],targets,reduction="none")
         loss=(continuous*weights).sum(-1).mean()/weights.sum()
         classification_rows=F.binary_cross_entropy_with_logits(pred[:,NY:],gt[ix],reduction="none")
         if args.event_targets:classification_rows[:,21]*=event_eligible[ix]

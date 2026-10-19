@@ -668,6 +668,51 @@ impl StressProvider for Provider {
 mod tests {
     use super::*;
     #[test]
+    fn tangent_half_turn_preserves_the_constitutive_transition() {
+        let w = stress_ref::world::World::new(&stress_ref::builders::wall_impact(12., "half-turn"));
+        let b = &w.solver.bonds[0][0];
+        let turn = |v: Local6| {
+            let mut a = v.to_array();
+            for j in [0, 1, 3, 4] {
+                a[j] = -a[j];
+            }
+            Local6::from_array(a)
+        };
+        for case in 0..100 {
+            let d = Local6::from_array(std::array::from_fn(|j| {
+                ((case * 7 + j * 13) as f64).sin() * if j < 3 { 0.0002 } else { 0.006 }
+            }));
+            let mut old = b.joint.clone();
+            old.damage = (case % 5) as f64 * 0.18;
+            old.crush = (case % 3) as f64 * 0.1;
+            old.plastic = d.scale(0.17).into();
+            let mut rotated = old.clone();
+            rotated.plastic = turn(old.plastic.into()).into();
+            let a = b.model().evaluate(&old, &d, 1e-5, true);
+            let c = b.model().evaluate(&rotated, &turn(d), 1e-5, true);
+            let mut expected = joint_history::pack(&a.state);
+            for j in [7, 8, 10, 11] {
+                expected[j] = -expected[j];
+            }
+            for (a, c) in expected.into_iter().zip(joint_history::pack(&c.state)) {
+                assert!(
+                    a == c || (a - c).abs() < 1e-10 * (1. + a.abs()),
+                    "state {a} != {c}"
+                );
+            }
+            for (a, c) in turn(a.force).to_array().into_iter().zip(c.force.to_array()) {
+                assert!((a - c).abs() < 1e-10 * (1. + a.abs()));
+            }
+            for (a, c) in [
+                (a.stored, c.stored),
+                (a.dissipated, c.dissipated),
+                (a.overshoot, c.overshoot),
+            ] {
+                assert!((a - c).abs() < 1e-10 * (1. + a.abs()));
+            }
+        }
+    }
+    #[test]
     fn decoded_force_is_energy_gradient_and_matches_frozen_oracle_state() {
         let w =
             stress_ref::world::World::new(&stress_ref::builders::wall_impact(12., "decoder-test"));
