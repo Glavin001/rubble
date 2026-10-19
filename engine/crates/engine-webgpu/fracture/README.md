@@ -97,7 +97,7 @@ finer levels increase collision work substantially. Assets load only on selectio
 Levels 2 and 3 bake 35 and 36 flat (zero-volume) sheets into compound fragments;
 the importer skips those hulls (every fragment keeps real ones) and says so.
 
-**20 houses · Level 3 in a row** places twenty level-3 houses along +z (131,840
+**Veneer houses · row of 20 (level 3)** places twenty level-3 houses along +z (131,840
 bodies, 133,280 hulls) from `assets/veneer-house-hull16.glb`. Copies share one
 hull arena and draw instanced. “Fire the wrecking ball” rolls a 1.6 m, 200 t ball
 at 40 m/s along the ground through the whole row (`__FRACTURE_DEMO__.fireRow()`;
@@ -105,14 +105,14 @@ at 40 m/s along the ground through the whole row (`__FRACTURE_DEMO__.fireRow()`;
 and 8 contacts per collider and 64 colours and colouring rounds, and runs with a
 16-vertex hull limit: a larger hull is a load error, never reduced.
 
-**49 houses · Level 2 in a 7×7 grid** uses the bundled `veneer-house.glb` (64-vertex
+**Veneer houses · 7×7 grid of 49 (level 2)** uses the bundled `veneer-house.glb` (64-vertex
 hull limit; 154,742 bodies, 245,882 hulls) and fires the ball down the middle
 column. On an M3 Max an all-asleep step costs 2.6 ms of GPU time and the peak after
 the shot ~38 ms (~114k awake, ~880k contacts). Unbonded pieces knock over
 neighbouring houses, so most of the grid ends up awake. The 16-vertex re-bake
 measured the same peak with 15% more pieces, so the grid keeps the original asset.
 
-**Suburb · 48 houses on lots with roads** (`build_suburb` in `engine-fracture`) spaces the same houses
+**Veneer houses · suburb of 48 (level 2)** (`build_suburb` in `engine-fracture`) spaces the same houses
 out: 4 × 3 blocks of 2 × 2 lots with 5-6 m yards, separated by 8 m roads with
 sidewalks and dashed centre lines (drawn on the ground; the physics ground is
 still the plane). The ball rolls down one column of lots and hits 6 houses. On an
@@ -120,8 +120,8 @@ M3 Max 24 of 48 houses collapse (debris still topples unbonded lot neighbours;
 43 of 49 on the grid), ~55k pieces stay awake, and the step settles at ~15 ms
 (~66 ticks/s) by 30 s. 10 m yards still lose 22 houses.
 
-**Cuboid suburb · 48 box-built houses** uses the same layout (**Large cuboid
-suburb · 96**: twice the size, 6 × 4 blocks of 2 × 2 lots, about 69k pieces) with a
+**Cuboid houses · suburb of 48** uses the same layout (**Cuboid houses · large
+suburb of 96**: twice the size, 6 × 4 blocks of 2 × 2 lots, about 69k pieces) with a
 procedural house made only of box colliders (`engine-fracture` `cuboid.rs`, ~715 pieces): running-bond
 brick walls with interlocking corners, door and windows with lintels, sills and
 glass, stepped brick gables, a ridge beam, rafters and roof boards, an exterior
@@ -136,7 +136,7 @@ checks that no two pieces start interpenetrating.
   the GPU step is 3.5-4.2 ms (box-box contacts, no hull SAT), about 4x faster than
   the hull suburb. The remaining cost is mostly the primal's per-colour dispatches.
 
-**49 box-built houses in a 7×7 grid** puts the same cuboid house on the dense
+**Cuboid houses · 7×7 grid of 49** puts the same cuboid house on the dense
 grid layout. Measured live in the browser on an M3 Max after the row shot
 (wall-clock ticks including counter readback): 145-166 ticks/s for physics alone
 and 79-86 ticks/s with a frame rendered every tick; 19 of 49 houses collapse by
@@ -154,6 +154,20 @@ overlapped; the hull grid, GPU-bound at ~28 ms per tick, goes from 28.9 to
 30.2. In lockstep, overlapped and waiting runs stay bit-identical until the
 engine's own run-to-run nondeterminism appears (two plain runs of the cuboid
 grid diverge at tick ~296).
+
+### Scene menu
+
+The **Scene** menu groups the bundled scenes (`engine-fracture` `samples.rs`, `GROUPS`),
+each named for what it is, then how many:
+- **One structure:** veneer house, cuboid house, masonry arch.
+- **Rows and grids:** veneer houses in a row of 20 and a 7×7 grid; cuboid houses in a 7×7
+  grid.
+- **Suburbs (lots and roads):** veneer houses (48), cuboid houses (48, and a large
+  suburb of 96).
+- **Vibe City presets:** generated scene packs, when they are built.
+- **Your file:** a dropped or chosen GLB.
+
+The native viewer numbers the same scenes 1–9 in this order.
 
 ### Bond modes
 

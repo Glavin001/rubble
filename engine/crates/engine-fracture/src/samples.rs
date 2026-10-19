@@ -52,7 +52,9 @@ impl Layout {
 #[serde(rename_all = "camelCase")]
 pub struct Sample {
     pub key: &'static str,
-    /// Scene menu entry.
+    /// Scene menu group (`GROUPS`, in menu order).
+    pub group: &'static str,
+    /// Scene menu entry: what, then how many.
     pub menu: &'static str,
     /// Short name for status lines.
     pub label: &'static str,
@@ -71,10 +73,15 @@ impl Sample {
     }
 }
 
+/// The Scene menu's groups, in order.
+pub const GROUPS: &[&str] = &["One structure", "Rows and grids", "Suburbs (lots and roads)"];
+
+/// The Scene menu, grouped (`GROUPS`) and in menu order.
 pub const SAMPLES: &[Sample] = &[
     Sample {
         key: "house",
-        menu: "House · 131 building parts",
+        group: "One structure",
+        menu: "Veneer house · 131 parts",
         label: "house",
         file: Some("veneer-house.glb"),
         layout: None,
@@ -82,8 +89,29 @@ pub const SAMPLES: &[Sample] = &[
         max_hull_vertices: None,
     },
     Sample {
+        key: "cuboid",
+        group: "One structure",
+        menu: "Cuboid house · 715 boxes",
+        label: "cuboid house",
+        file: None,
+        layout: None,
+        level: None,
+        max_hull_vertices: None,
+    },
+    Sample {
+        key: "arch",
+        group: "One structure",
+        menu: "Masonry arch · 23 stones",
+        label: "arch",
+        file: Some("masonry-arch.glb"),
+        layout: None,
+        level: None,
+        max_hull_vertices: None,
+    },
+    Sample {
         key: "row",
-        menu: "20 houses · Level 3 in a row",
+        group: "Rows and grids",
+        menu: "Veneer houses · row of 20 (level 3)",
         label: "20 houses",
         file: Some("veneer-house-hull16.glb"),
         layout: Some(Layout::grid(1, 20)),
@@ -92,7 +120,8 @@ pub const SAMPLES: &[Sample] = &[
     },
     Sample {
         key: "grid",
-        menu: "49 houses · Level 2 in a 7×7 grid",
+        group: "Rows and grids",
+        menu: "Veneer houses · 7×7 grid of 49 (level 2)",
         label: "49 houses",
         file: Some("veneer-house.glb"),
         layout: Some(Layout::grid(7, 7)),
@@ -100,8 +129,19 @@ pub const SAMPLES: &[Sample] = &[
         max_hull_vertices: None,
     },
     Sample {
+        key: "cuboidGrid",
+        group: "Rows and grids",
+        menu: "Cuboid houses · 7×7 grid of 49",
+        label: "49 cuboid houses",
+        file: None,
+        layout: Some(Layout::grid(7, 7)),
+        level: None,
+        max_hull_vertices: None,
+    },
+    Sample {
         key: "suburb",
-        menu: "Suburb · 48 houses on lots with roads",
+        group: "Suburbs (lots and roads)",
+        menu: "Veneer houses · suburb of 48 (level 2)",
         label: "48 houses",
         file: Some("veneer-house.glb"),
         layout: Some(Layout::SUBURB),
@@ -109,17 +149,9 @@ pub const SAMPLES: &[Sample] = &[
         max_hull_vertices: None,
     },
     Sample {
-        key: "cuboid",
-        menu: "Cuboid house · 1 box-built house",
-        label: "cuboid house",
-        file: None,
-        layout: None,
-        level: None,
-        max_hull_vertices: None,
-    },
-    Sample {
         key: "cuboids",
-        menu: "Cuboid suburb · 48 box-built houses",
+        group: "Suburbs (lots and roads)",
+        menu: "Cuboid houses · suburb of 48",
         label: "48 cuboid houses",
         file: None,
         layout: Some(Layout::SUBURB),
@@ -128,28 +160,11 @@ pub const SAMPLES: &[Sample] = &[
     },
     Sample {
         key: "cuboids2x",
-        menu: "Large cuboid suburb · 96 box-built houses",
+        group: "Suburbs (lots and roads)",
+        menu: "Cuboid houses · large suburb of 96",
         label: "96 cuboid houses",
         file: None,
         layout: Some(Layout::suburb_blocks(6, 4)),
-        level: None,
-        max_hull_vertices: None,
-    },
-    Sample {
-        key: "cuboidGrid",
-        menu: "49 box-built houses in a 7×7 grid",
-        label: "49 cuboid houses",
-        file: None,
-        layout: Some(Layout::grid(7, 7)),
-        level: None,
-        max_hull_vertices: None,
-    },
-    Sample {
-        key: "arch",
-        menu: "Masonry arch · 23 pieces",
-        label: "arch",
-        file: Some("masonry-arch.glb"),
-        layout: None,
         level: None,
         max_hull_vertices: None,
     },

@@ -122,16 +122,19 @@ async function importBytes(bytes,name,sampleKey="",entry={}){
 }
 // The Scene menu is the shared catalogue (engine-fracture samples.rs), as in the Metal viewer.
 const samples=Object.fromEntries(SAMPLES.map(s=>[s.key,{...s,procedural:s.file?null:'cuboid'}]));
-$('scene').replaceChildren(...SAMPLES.map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house')),Object.assign(new Option('Custom GLB',''),{disabled:true}));
+// Grouped as the catalogue groups them (engine-fracture samples.rs GROUPS).
+const optgroup=(label,options)=>{const g=document.createElement('optgroup');g.label=label;g.append(...options);return g};
+const sceneGroups=[...new Set(SAMPLES.map(s=>s.group))].map(label=>optgroup(label,SAMPLES.filter(s=>s.group===label).map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house'))));
+$('scene').replaceChildren(...sceneGroups,optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
 // vibe-city /destructible-stress presets, generated into ../generated/vibe-city (optional).
 const VIBE_CITY='../generated/vibe-city/';
 try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
- const group=document.createElement('optgroup');group.label='vibe-city stress presets';
+ const group=document.createElement('optgroup');group.label='Vibe City presets (generated scene packs)';
  for(const p of index.presets.filter(p=>!p.failed&&!p.pending)){
   const key=`vc:${p.id}`;samples[key]={key,label:p.id,pack:`${VIBE_CITY}${p.id}.json`,nodes:p.nodes,bonds:p.bonds};
   group.append(new Option(`${p.id} · ${p.nodes} nodes`,key));
  }
- if(group.children.length)$('scene').append(group);
+ if(group.children.length)$('scene').insertBefore(group,$('scene').lastElementChild);
 }catch{}
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
