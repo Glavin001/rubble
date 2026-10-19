@@ -1,0 +1,1260 @@
+{
+  "status": "completed_not_promoted",
+  "checkpoint_commit_before_work": "6622e05a",
+  "native_training_seeds": [
+    0
+  ],
+  "native_corpus": "Existing ten houses, 6 train / 2 validation / 2 test, 8 frames each; no native scenario expansion.",
+  "native_epochs": 60,
+  "native_optimizer_updates_per_arm": 720,
+  "native_unroll": 4,
+  "native_parameters": 145824,
+  "scope": "Architecture capability and native forecasting experiments; no production accuracy or complete-engine realtime claim.",
+  "arms": {
+    "local-stateless": {
+      "selected_epoch": 54,
+      "checkpoint_sha256": "3174a4adcff9680a8ec4c2d7ca9e7f6e562f4eb7f613eefe059f10b80e1b97a8",
+      "component_metrics": {
+        "train": {
+          "objective": 0.5669184448197484,
+          "force_rmse_n": 3053.55240293203
+        },
+        "validation": {
+          "objective": 0.5297623849473894,
+          "force_rmse_n": 2015.9018462727045
+        },
+        "test": {
+          "objective": 0.310939269606024,
+          "force_rmse_n": 2523.333740585881
+        }
+      },
+      "independent_runs": [
+        {
+          "event": "v3_house_00_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 324,
+            "model": 1261,
+            "extra": 937,
+            "missed": 0
+          },
+          "oracle_fragments": {
+            "count": 100,
+            "largest_mass_fraction": 0.6617209456108435
+          },
+          "model_fragments": {
+            "count": 627,
+            "largest_mass_fraction": 0.042403703091420046
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 1500.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.0013676726098334735,
+            "velocity_vector_rmse_mps": 0.30831916851702607,
+            "final_position_error_m": 0.002363789988977322,
+            "final_velocity_error_mps": 0.29427613353492194,
+            "oracle": {
+              "translational_ke_j": [
+                168750.0,
+                117927.93854401424,
+                110766.18072033128,
+                107143.4876063041,
+                104766.54327502142,
+                103009.89123104462,
+                101483.66117501867,
+                100181.12946300147,
+                98760.23854774033
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.013254543098007776,
+                0.02557065811770798,
+                0.03761756250255788,
+                0.04949592691219751,
+                0.06125726189402414,
+                0.07293242031184244,
+                0.08452520169862154,
+                0.09604014889970047
+              ],
+              "forward_velocity_mps": [
+                15.0,
+                12.539425220554813,
+                12.152689747779363,
+                11.95228318729342,
+                11.818928389641401,
+                11.719385069630611,
+                11.632195979682981,
+                11.55725198229844,
+                11.474936430933464
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.09604014889970047,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -5287.595353599803
+            },
+            "model": {
+              "translational_ke_j": [
+                168750.0,
+                124840.90850683513,
+                117243.0954661952,
+                113195.1563005777,
+                110313.2482271013,
+                108383.833170887,
+                106614.43419987212,
+                105176.06672486707,
+                103886.28876836364
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.013433943260451553,
+                0.026094831046024503,
+                0.0384802340950392,
+                0.05068036289310518,
+                0.06274868600536632,
+                0.07471716063741729,
+                0.08659906070277712,
+                0.09840314135423256
+              ],
+              "forward_velocity_mps": [
+                15.0,
+                12.90172394967138,
+                12.502953439446864,
+                12.285203522798595,
+                12.127783765036753,
+                12.021226213879988,
+                11.922658195779249,
+                11.841912315636844,
+                11.769025135424044
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.09840314135423256,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -4846.462296863933
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0015348089841040263,
+          "oracle_final_mechanical_energy_j": 229673.34200594493,
+          "model_final_mechanical_energy_j": 235930.8801100149,
+          "analytic_bond_evaluations": 0
+        },
+        {
+          "event": "v3_house_12_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 181,
+            "model": 1253,
+            "extra": 1072,
+            "missed": 0
+          },
+          "oracle_fragments": {
+            "count": 49,
+            "largest_mass_fraction": 0.8814266820962136
+          },
+          "model_fragments": {
+            "count": 619,
+            "largest_mass_fraction": 0.042403703091420046
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 400.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.0024501391533358506,
+            "velocity_vector_rmse_mps": 0.5805056191132836,
+            "final_position_error_m": 0.004467689835944776,
+            "final_velocity_error_mps": 0.6339518307257297,
+            "oracle": {
+              "translational_ke_j": [
+                7200.0,
+                1838.9562806267718,
+                1002.9230770848823,
+                712.7464506346344,
+                614.9377150634597,
+                548.7218946762758,
+                534.2273850522965,
+                513.3247437494034,
+                505.08344339755604
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.0040803950205745565,
+                0.0067124085742849005,
+                0.008742703379734706,
+                0.010556129811736259,
+                0.012263231796524554,
+                0.013904130812735005,
+                0.015521655955923919,
+                0.017113610213499886
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                3.0322797624759907,
+                2.2392611147374675,
+                1.8875806398034576,
+                1.753078036331054,
+                1.6557392512332498,
+                1.633411466044917,
+                1.6007460973529801,
+                1.58739607396943
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.017113610213499886,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1765.041570412228
+            },
+            "model": {
+              "translational_ke_j": [
+                7200.0,
+                2654.061187206447,
+                1597.045991133912,
+                1157.9252651328745,
+                1060.4193073541617,
+                1041.684150118268,
+                1026.5215003907788,
+                1010.2388992025333,
+                987.996188744264
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.004329618212966846,
+                0.007540492093620621,
+                0.010193263686617549,
+                0.012526600040287938,
+                0.014817882526299453,
+                0.017090650437531885,
+                0.019346608903597406,
+                0.02158129302917411
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                3.6428343013563085,
+                2.825769042013154,
+                2.4060275413933927,
+                2.3023554046559322,
+                2.281747615163932,
+                2.264856362207274,
+                2.246547774311575,
+                2.2213478044354398
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.02158129302917411,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1511.460878225824
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0011214051379650016,
+          "oracle_final_mechanical_energy_j": 105920.4768772126,
+          "model_final_mechanical_energy_j": 106780.47914091474,
+          "analytic_bond_evaluations": 0
+        },
+        {
+          "event": "v3_house_16_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 176,
+            "model": 1258,
+            "extra": 1082,
+            "missed": 0
+          },
+          "oracle_fragments": {
+            "count": 49,
+            "largest_mass_fraction": 0.8188956852372283
+          },
+          "model_fragments": {
+            "count": 624,
+            "largest_mass_fraction": 0.05967928583236895
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 400.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.0006269620541076023,
+            "velocity_vector_rmse_mps": 0.1456683590066753,
+            "final_position_error_m": 0.0011244113152752652,
+            "final_velocity_error_mps": 0.15043355090316074,
+            "oracle": {
+              "translational_ke_j": [
+                7200.0,
+                3329.3992624566613,
+                2906.622003127491,
+                2670.935336269919,
+                2516.108213947078,
+                2400.1930154329534,
+                2309.7154452995605,
+                2246.060945275406,
+                2200.461598135006
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.0045671657904482466,
+                0.008511752994031951,
+                0.012237539691196009,
+                0.015834308102896433,
+                0.01933818013705846,
+                0.022767197307708376,
+                0.02614005741206915,
+                0.029472520236277777
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                4.080065021815921,
+                3.8121979230084477,
+                3.654323653258946,
+                3.546752980632457,
+                3.463993076685156,
+                3.397952571048548,
+                3.3506512621120517,
+                3.316285157327765
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.029472520236277777,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1073.485937068894
+            },
+            "model": {
+              "translational_ke_j": [
+                7200.0,
+                3581.9228681957284,
+                3163.287121995147,
+                2865.1746220182167,
+                2716.2597210828203,
+                2614.7159928936635,
+                2529.407925768095,
+                2458.9555364362213,
+                2404.512387287498
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.0046427421716894735,
+                0.008748995861153297,
+                0.012617846258915044,
+                0.01634831852193086,
+                0.01999700238487412,
+                0.023581884425114108,
+                0.027111588259003394,
+                0.030596920451191334
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                4.231966948372491,
+                3.9769573287955886,
+                3.7848802708622373,
+                3.6851415555368097,
+                3.615510494416458,
+                3.55592423012599,
+                3.505910095739591,
+                3.4667125801421204
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.030596920451191334,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1013.3149679431518
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0006791216829302198,
+          "oracle_final_mechanical_energy_j": 110226.22159912527,
+          "model_final_mechanical_energy_j": 110479.78664179916,
+          "analytic_bond_evaluations": 0
+        }
+      ]
+    },
+    "multiscale-stateless": {
+      "selected_epoch": 60,
+      "checkpoint_sha256": "d6bdebd891e834d6e7f45c6f219d9bb5a5c96dbc51d764cbe3069c65bb0ccd3b",
+      "component_metrics": {
+        "train": {
+          "objective": 0.5516810507203141,
+          "force_rmse_n": 2991.1349477910853
+        },
+        "validation": {
+          "objective": 0.5359282265417278,
+          "force_rmse_n": 2022.0271734414232
+        },
+        "test": {
+          "objective": 0.2845496800728142,
+          "force_rmse_n": 2336.187056296624
+        }
+      },
+      "independent_runs": [
+        {
+          "event": "v3_house_00_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 324,
+            "model": 1254,
+            "extra": 934,
+            "missed": 4
+          },
+          "oracle_fragments": {
+            "count": 100,
+            "largest_mass_fraction": 0.6617209456108435
+          },
+          "model_fragments": {
+            "count": 620,
+            "largest_mass_fraction": 0.05967928583236894
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 1500.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.0013495797536105985,
+            "velocity_vector_rmse_mps": 0.2965571750690874,
+            "final_position_error_m": 0.002270151847404758,
+            "final_velocity_error_mps": 0.2503979252632175,
+            "oracle": {
+              "translational_ke_j": [
+                168750.0,
+                117927.93854401424,
+                110766.18072033128,
+                107143.4876063041,
+                104766.54327502142,
+                103009.89123104462,
+                101483.66117501867,
+                100181.12946300147,
+                98760.23854774033
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.013254543098007776,
+                0.02557065811770798,
+                0.03761756250255788,
+                0.04949592691219751,
+                0.06125726189402414,
+                0.07293242031184244,
+                0.08452520169862154,
+                0.09604014889970047
+              ],
+              "forward_velocity_mps": [
+                15.0,
+                12.539425220554813,
+                12.152689747779363,
+                11.95228318729342,
+                11.818928389641401,
+                11.719385069630611,
+                11.632195979682981,
+                11.55725198229844,
+                11.474936430933464
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.09604014889970047,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -5287.595353599803
+            },
+            "model": {
+              "translational_ke_j": [
+                168750.0,
+                126120.84012532244,
+                117038.58717102603,
+                112401.77934459472,
+                109766.1566331038,
+                107918.89253511211,
+                106317.63597254462,
+                104452.858123603,
+                103107.0215098163
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.013447334583517545,
+                0.02616980569357663,
+                0.03852748257262739,
+                0.0506923837959552,
+                0.06273319958227219,
+                0.0746861586866836,
+                0.08654256229974866,
+                0.09830824943677641
+              ],
+              "forward_velocity_mps": [
+                15.0,
+                12.96769379811042,
+                12.492044678439559,
+                12.242075843857974,
+                12.097677033523187,
+                11.995424507782054,
+                11.90606777335095,
+                11.801150616871732,
+                11.72482806554127
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.09830824943677641,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -4912.757901688094
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0017059137732344301,
+          "oracle_final_mechanical_energy_j": 229673.34200594493,
+          "model_final_mechanical_energy_j": 234965.47467428652,
+          "analytic_bond_evaluations": 0
+        },
+        {
+          "event": "v3_house_12_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 181,
+            "model": 1254,
+            "extra": 1074,
+            "missed": 1
+          },
+          "oracle_fragments": {
+            "count": 49,
+            "largest_mass_fraction": 0.8814266820962136
+          },
+          "model_fragments": {
+            "count": 620,
+            "largest_mass_fraction": 0.031410150438088924
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 400.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.002684037289095873,
+            "velocity_vector_rmse_mps": 0.6498529135885334,
+            "final_position_error_m": 0.004924294088249709,
+            "final_velocity_error_mps": 0.7188792196368906,
+            "oracle": {
+              "translational_ke_j": [
+                7200.0,
+                1838.9562806267718,
+                1002.9230770848823,
+                712.7464506346344,
+                614.9377150634597,
+                548.7218946762758,
+                534.2273850522965,
+                513.3247437494034,
+                505.08344339755604
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.0040803950205745565,
+                0.0067124085742849005,
+                0.008742703379734706,
+                0.010556129811736259,
+                0.012263231796524554,
+                0.013904130812735005,
+                0.015521655955923919,
+                0.017113610213499886
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                3.0322797624759907,
+                2.2392611147374675,
+                1.8875806398034576,
+                1.753078036331054,
+                1.6557392512332498,
+                1.633411466044917,
+                1.6007460973529801,
+                1.58739607396943
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.017113610213499886,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1765.041570412228
+            },
+            "model": {
+              "translational_ke_j": [
+                7200.0,
+                2919.2002406379397,
+                1526.162839132057,
+                1198.882597825359,
+                1143.095045602737,
+                1111.664312227885,
+                1091.5515216034748,
+                1078.7095614967884,
+                1064.8583804520258
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.004355168258586062,
+                0.0077189118834386505,
+                0.010261201449857538,
+                0.012677630393596484,
+                0.015050053262456675,
+                0.017395454131371224,
+                0.019723639519897862,
+                0.02203787826564163
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                3.8204597560368625,
+                2.762351743839398,
+                2.4482283717851376,
+                2.39046145995005,
+                2.3571975369931555,
+                2.3355632703891973,
+                2.321528649151385,
+                2.306273907684773
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.02203787826564163,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1477.4904369260908
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0012029280548371886,
+          "oracle_final_mechanical_energy_j": 105920.4768772126,
+          "model_final_mechanical_energy_j": 106891.87254159185,
+          "analytic_bond_evaluations": 0
+        },
+        {
+          "event": "v3_house_16_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 176,
+            "model": 1260,
+            "extra": 1084,
+            "missed": 0
+          },
+          "oracle_fragments": {
+            "count": 49,
+            "largest_mass_fraction": 0.8188956852372283
+          },
+          "model_fragments": {
+            "count": 626,
+            "largest_mass_fraction": 0.0581087783104645
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 400.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.001154996532934268,
+            "velocity_vector_rmse_mps": 0.2815102685824585,
+            "final_position_error_m": 0.0021588727538998484,
+            "final_velocity_error_mps": 0.33480938095001006,
+            "oracle": {
+              "translational_ke_j": [
+                7200.0,
+                3329.3992624566613,
+                2906.622003127491,
+                2670.935336269919,
+                2516.108213947078,
+                2400.1930154329534,
+                2309.7154452995605,
+                2246.060945275406,
+                2200.461598135006
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.0045671657904482466,
+                0.008511752994031951,
+                0.012237539691196009,
+                0.015834308102896433,
+                0.01933818013705846,
+                0.022767197307708376,
+                0.02614005741206915,
+                0.029472520236277777
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                4.080065021815921,
+                3.8121979230084477,
+                3.654323653258946,
+                3.546752980632457,
+                3.463993076685156,
+                3.397952571048548,
+                3.3506512621120517,
+                3.316285157327765
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.029472520236277777,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1073.485937068894
+            },
+            "model": {
+              "translational_ke_j": [
+                7200.0,
+                3685.3105174457864,
+                3368.440095160095,
+                3079.245416611049,
+                2919.1743582656927,
+                2827.529330830531,
+                2765.0323838197733,
+                2713.473084989587,
+                2667.010965017933
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.004652718308232995,
+                0.00886351169568611,
+                0.012874177807968845,
+                0.01673925864567183,
+                0.020527251184164097,
+                0.024264697498866283,
+                0.027964901645754825,
+                0.03163138787774544
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                4.29260643782533,
+                4.103892387653759,
+                3.923728973120819,
+                3.820318446664723,
+                3.75978373499195,
+                3.717886411689316,
+                3.682921158165609,
+                3.6510907009938594
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.03163138787774544,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -939.5637196024562
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0007700175954681646,
+          "oracle_final_mechanical_energy_j": 110226.22159912527,
+          "model_final_mechanical_energy_j": 110570.34187866734,
+          "analytic_bond_evaluations": 0
+        }
+      ]
+    },
+    "multiscale-recurrent": {
+      "selected_epoch": 59,
+      "checkpoint_sha256": "67cf6c82a728fe61252d81094fa4534167fce9fbfe708e566720999140165ebc",
+      "component_metrics": {
+        "train": {
+          "objective": 0.5323018772372355,
+          "force_rmse_n": 2918.326043653683
+        },
+        "validation": {
+          "objective": 0.4974069017916918,
+          "force_rmse_n": 1867.389043612369
+        },
+        "test": {
+          "objective": 0.2780082996468991,
+          "force_rmse_n": 2280.320129724512
+        }
+      },
+      "independent_runs": [
+        {
+          "event": "v3_house_00_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 324,
+            "model": 1258,
+            "extra": 934,
+            "missed": 0
+          },
+          "oracle_fragments": {
+            "count": 100,
+            "largest_mass_fraction": 0.6617209456108435
+          },
+          "model_fragments": {
+            "count": 625,
+            "largest_mass_fraction": 0.05967928583236894
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 1500.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.0015632712768885411,
+            "velocity_vector_rmse_mps": 0.35539970582457725,
+            "final_position_error_m": 0.0027534362842910574,
+            "final_velocity_error_mps": 0.3625396081853239,
+            "oracle": {
+              "translational_ke_j": [
+                168750.0,
+                117927.93854401424,
+                110766.18072033128,
+                107143.4876063041,
+                104766.54327502142,
+                103009.89123104462,
+                101483.66117501867,
+                100181.12946300147,
+                98760.23854774033
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.013254543098007776,
+                0.02557065811770798,
+                0.03761756250255788,
+                0.04949592691219751,
+                0.06125726189402414,
+                0.07293242031184244,
+                0.08452520169862154,
+                0.09604014889970047
+              ],
+              "forward_velocity_mps": [
+                15.0,
+                12.539425220554813,
+                12.152689747779363,
+                11.95228318729342,
+                11.818928389641401,
+                11.719385069630611,
+                11.632195979682981,
+                11.55725198229844,
+                11.474936430933464
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.09604014889970047,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -5287.595353599803
+            },
+            "model": {
+              "translational_ke_j": [
+                168750.0,
+                125343.83176142159,
+                117131.15726074525,
+                114081.37906056788,
+                111774.91551976277,
+                109732.85210265312,
+                107707.81828540683,
+                106107.38513050332,
+                105096.45933472388
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.013439131235678747,
+                0.026121883223959586,
+                0.03853037189301167,
+                0.050804399838877856,
+                0.06295243650093507,
+                0.07498817076508235,
+                0.08692787544321945,
+                0.09879312583709643
+              ],
+              "forward_velocity_mps": [
+                15.0,
+                12.927685475072202,
+                12.496983332404692,
+                12.333199717518381,
+                12.20786618970457,
+                12.095807024103499,
+                11.983640315752393,
+                11.894229276389472,
+                11.837379917698529
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.09879312583709643,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -4743.930123452206
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0015914893178010274,
+          "oracle_final_mechanical_energy_j": 229673.34200594493,
+          "model_final_mechanical_energy_j": 236339.46012621,
+          "analytic_bond_evaluations": 0
+        },
+        {
+          "event": "v3_house_12_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 181,
+            "model": 1255,
+            "extra": 1074,
+            "missed": 0
+          },
+          "oracle_fragments": {
+            "count": 49,
+            "largest_mass_fraction": 0.8814266820962136
+          },
+          "model_fragments": {
+            "count": 622,
+            "largest_mass_fraction": 0.05967928583236895
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 400.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.0013543143660376415,
+            "velocity_vector_rmse_mps": 0.38282686488045187,
+            "final_position_error_m": 0.002702494221951722,
+            "final_velocity_error_mps": 0.4489069106193623,
+            "oracle": {
+              "translational_ke_j": [
+                7200.0,
+                1838.9562806267718,
+                1002.9230770848823,
+                712.7464506346344,
+                614.9377150634597,
+                548.7218946762758,
+                534.2273850522965,
+                513.3247437494034,
+                505.08344339755604
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.0040803950205745565,
+                0.0067124085742849005,
+                0.008742703379734706,
+                0.010556129811736259,
+                0.012263231796524554,
+                0.013904130812735005,
+                0.015521655955923919,
+                0.017113610213499886
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                3.0322797624759907,
+                2.2392611147374675,
+                1.8875806398034576,
+                1.753078036331054,
+                1.6557392512332498,
+                1.633411466044917,
+                1.6007460973529801,
+                1.58739607396943
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.017113610213499886,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1765.041570412228
+            },
+            "model": {
+              "translational_ke_j": [
+                7200.0,
+                1876.8968371408455,
+                1231.8796131438546,
+                1047.5058300125813,
+                975.1518940358172,
+                921.1903656322808,
+                864.106922189629,
+                846.1315970356328,
+                830.4890884888313
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.004110531447126142,
+                0.006806949403432849,
+                0.009175789442172011,
+                0.011417947877851553,
+                0.013599821802718015,
+                0.015703934805193054,
+                0.01777010346074448,
+                0.01981608088954845
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                3.0633986288208015,
+                2.481746322285457,
+                2.2883923558762556,
+                2.2077828404896267,
+                2.145613595446193,
+                2.0778033785430425,
+                2.0557592799552533,
+                2.0362970410965953
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.01981608088954845,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1585.4811835613618
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0007760567252082524,
+          "oracle_final_mechanical_energy_j": 105920.4768772126,
+          "model_final_mechanical_energy_j": 106434.9247871918,
+          "analytic_bond_evaluations": 0
+        },
+        {
+          "event": "v3_house_16_s101_f120",
+          "duration_seconds": 0.008,
+          "breaks": {
+            "oracle": 176,
+            "model": 1259,
+            "extra": 1083,
+            "missed": 0
+          },
+          "oracle_fragments": {
+            "count": 49,
+            "largest_mass_fraction": 0.8188956852372283
+          },
+          "model_fragments": {
+            "count": 626,
+            "largest_mass_fraction": 0.05967928583236894
+          },
+          "actor": {
+            "name": "car",
+            "mass_kg": 400.0,
+            "driven": false,
+            "axis": [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            "axis_definition": "initial oracle velocity; unavailable for initially stationary actors",
+            "position_vector_rmse_m": 0.0009535381831088418,
+            "velocity_vector_rmse_mps": 0.2373635605123536,
+            "final_position_error_m": 0.0018082084036144884,
+            "final_velocity_error_mps": 0.2784003495141474,
+            "oracle": {
+              "translational_ke_j": [
+                7200.0,
+                3329.3992624566613,
+                2906.622003127491,
+                2670.935336269919,
+                2516.108213947078,
+                2400.1930154329534,
+                2309.7154452995605,
+                2246.060945275406,
+                2200.461598135006
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.0045671657904482466,
+                0.008511752994031951,
+                0.012237539691196009,
+                0.015834308102896433,
+                0.01933818013705846,
+                0.022767197307708376,
+                0.02614005741206915,
+                0.029472520236277777
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                4.080065021815921,
+                3.8121979230084477,
+                3.654323653258946,
+                3.546752980632457,
+                3.463993076685156,
+                3.397952571048548,
+                3.3506512621120517,
+                3.316285157327765
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.029472520236277777,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -1073.485937068894
+            },
+            "model": {
+              "translational_ke_j": [
+                7200.0,
+                3577.6884016264803,
+                3260.3712125142742,
+                3015.093989713551,
+                2863.843212668735,
+                2784.3756132018852,
+                2708.394586575973,
+                2640.863639894015,
+                2585.2664304763916
+              ],
+              "forward_displacement_m": [
+                0.0,
+                0.00462989059977037,
+                0.008767557532753933,
+                0.012723455178419218,
+                0.01655085662479827,
+                0.020306561565567094,
+                0.024012039860033862,
+                0.027667386514711456,
+                0.03128072733799403
+              ],
+              "forward_velocity_mps": [
+                6.0,
+                4.22946463015202,
+                4.037524839341528,
+                3.8826422260035396,
+                3.783937868192437,
+                3.730977132885548,
+                3.6796028816308786,
+                3.6332995395124885,
+                3.5946854858231765
+              ],
+              "final_direction": "forward",
+              "maximum_sampled_forward_displacement_m": 0.03128072733799403,
+              "first_saved_reverse_time_s": null,
+              "net_forward_momentum_change_kg_mps": -962.1258056707294
+            },
+            "final_direction_disagreement": false
+          },
+          "final_position_rmse_m": 0.0006596023566746228,
+          "oracle_final_mechanical_energy_j": 110226.22159912527,
+          "model_final_mechanical_energy_j": 110581.33474006157,
+          "analytic_bond_evaluations": 0
+        }
+      ]
+    }
+  },
+  "wave_physical_audit": {
+    "scope": "Post-selection physical audit of unchanged wave checkpoints; energy was not a selection metric.",
+    "results": [
+      {
+        "seed": 0,
+        "model": "local",
+        "metrics": {
+          "normalized_mse": 0.2755119204521179,
+          "ballistic_normalized_mse": 0.9404811859130859,
+          "position_rmse": 0.14807763695716858,
+          "velocity_rmse": 0.4563078284263611,
+          "mean_absolute_relative_energy_change": 3.609530090572856,
+          "mean_signed_relative_energy_change": 3.609530090572856,
+          "max_momentum_error": 2.3469328880310059e-07,
+          "max_center_of_mass_error": 6.35882316246672e-09
+        }
+      },
+      {
+        "seed": 0,
+        "model": "multiscale",
+        "metrics": {
+          "normalized_mse": 0.1351754367351532,
+          "ballistic_normalized_mse": 0.9404811859130859,
+          "position_rmse": 0.07768864929676056,
+          "velocity_rmse": 0.3437066674232483,
+          "mean_absolute_relative_energy_change": 0.9199867380607437,
+          "mean_signed_relative_energy_change": 0.9111367372062519,
+          "max_momentum_error": 1.5273690223693848e-07,
+          "max_center_of_mass_error": 4.9360096426864786e-09
+        }
+      },
+      {
+        "seed": 1,
+        "model": "local",
+        "metrics": {
+          "normalized_mse": 0.27689677476882935,
+          "ballistic_normalized_mse": 0.9404811859130859,
+          "position_rmse": 0.14897072315216064,
+          "velocity_rmse": 0.45687949657440186,
+          "mean_absolute_relative_energy_change": 3.595110339249402,
+          "mean_signed_relative_energy_change": 3.595110339249402,
+          "max_momentum_error": 1.9976869225502014e-07,
+          "max_center_of_mass_error": 5.238598548007456e-09
+        }
+      },
+      {
+        "seed": 1,
+        "model": "multiscale",
+        "metrics": {
+          "normalized_mse": 0.147691011428833,
+          "ballistic_normalized_mse": 0.9404811859130859,
+          "position_rmse": 0.07989899069070816,
+          "velocity_rmse": 0.360255628824234,
+          "mean_absolute_relative_energy_change": 1.616328838131358,
+          "mean_signed_relative_energy_change": 1.616328838131358,
+          "max_momentum_error": 2.7799978852272034e-07,
+          "max_center_of_mass_error": 6.787013270836972e-09
+        }
+      }
+    ]
+  },
+  "metal_component_benchmark": {
+    "scope": "Synthetic graph COMPONENT benchmark; CPU hierarchy construction and synchronized device inference. Not active rigid bodies or full engine; no realtime claim.",
+    "device": "mps",
+    "cpu_threads": 1,
+    "width": 48,
+    "torch_version": "2.14.1",
+    "measurements": [
+      {
+        "nodes": 1000,
+        "edges": 1989,
+        "levels": 8,
+        "hierarchy_build_ms": 2.2761249856557697,
+        "cached_hierarchy_lookup_ms": 0.00618330086581409,
+        "initial_transfer_ms": 21.25020802486688,
+        "max_abs_cpu_difference": 9.5367431640625e-07,
+        "processor_median_ms": 4.3568959954427555,
+        "processor_max_ms": 5.018374999053776
+      },
+      {
+        "nodes": 10000,
+        "edges": 19989,
+        "levels": 8,
+        "hierarchy_build_ms": 24.152625002898276,
+        "cached_hierarchy_lookup_ms": 0.031999999191612005,
+        "initial_transfer_ms": 22.659250011201948,
+        "max_abs_cpu_difference": 9.5367431640625e-07,
+        "processor_median_ms": 4.352145493612625,
+        "processor_max_ms": 6.326792004983872
+      }
+    ]
+  },
+  "isolated_cpu_component_benchmark": {
+    "scope": "CPU single-thread synthetic graph COMPONENT benchmark. Not active rigid bodies or full engine; no realtime claim.",
+    "width": 48,
+    "torch_version": "2.14.1",
+    "measurements": [
+      {
+        "nodes": 1000,
+        "edges": 1989,
+        "levels": 8,
+        "hierarchy_build_ms": 2.551915997173637,
+        "processor_median_ms": 3.263833496021107,
+        "processor_max_ms": 3.7923329800833017
+      },
+      {
+        "nodes": 10000,
+        "edges": 19989,
+        "levels": 8,
+        "hierarchy_build_ms": 54.36133299372159,
+        "processor_median_ms": 32.6169170148205,
+        "processor_max_ms": 35.618708992842585
+      }
+    ]
+  },
+  "parity": {
+    "status": "completed_verified",
+    "frozen_source_parity": [
+      {
+        "arm": "local-stateless",
+        "oracle_input_frames": 8,
+        "wire_and_memory_bit_identical": true,
+        "cache_builds": 8
+      },
+      {
+        "arm": "multiscale-stateless",
+        "oracle_input_frames": 8,
+        "wire_and_memory_bit_identical": true,
+        "cache_builds": 8
+      },
+      {
+        "arm": "multiscale-recurrent",
+        "oracle_input_frames": 8,
+        "wire_and_memory_bit_identical": true,
+        "cache_builds": 8
+      }
+    ],
+    "cached_native_snapshots_byte_identical": 9,
+    "cached_native_predictions_byte_identical": 8,
+    "model_generated_input_replay_exact_frames": 8
+  }
+}

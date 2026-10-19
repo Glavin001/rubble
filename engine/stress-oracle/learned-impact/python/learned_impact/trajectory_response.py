@@ -223,6 +223,11 @@ def crossing(values):
 @torch.inference_mode()
 def forecast(model,graph,snapshot,kinematics):
     batch=current_batch(graph,snapshot,kinematics);pred=model(batch)
+    return decode_forecast(graph,snapshot,batch,pred)
+
+
+def decode_forecast(graph,snapshot,batch,pred):
+    """Shared physical wire decoder, independent of stateless/recurrent processing."""
     if any(not torch.isfinite(x).all() for x in pred.values()):raise ValueError('nonfinite complete prediction')
     values=(pred['values']+batch['trajectory_base'][:,None,:]).double().numpy()
     flag_base=torch.cat([(batch['trajectory_flags']*2-1)*4,F.one_hot(batch['trajectory_mode'],5)*4],-1)

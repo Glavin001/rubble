@@ -564,3 +564,40 @@ corrective-field-errors.json, residual-transients.json, native-diversity/review.
 167 Python tests pass. All training, rollout, collection and audit jobs are terminal.
 The complete solver replacement, diverse long-horizon accuracy and 10,000+ active
 rigid-body realtime speed requirements remain unmet.
+
+### V36 architecture stage: recurrence and multiscale communication work, native model rejected
+
+Existing work was checkpointed in `6622e05a` before building a new 145,824-parameter
+processor with explicit stable-ID edge memory, topology-aware latent hierarchy,
+chronological training and exact topology caching. It reuses audited causal
+features and the complete native response decoder. See
+`findings/recurrent-multiscale-v36-2026-10-19.md` for the full experiment and limits.
+
+Two seeded analytic wave experiments reduce held-out state MSE by 47–51% versus
+local communication. Paired outputs preserve momentum, but a separate energy
+audit finds large errors; this is a capability result, not physical acceptance.
+The actual joint oracle also demonstrates opposite friction forces at identical
+current geometry after opposite slip histories. Explicit physical history can
+supply this memory; the witness does not prove recurrence mandatory.
+
+Three native arms use the same existing ten-house corpus, seed 0, 60 epochs and
+720 updates: local stateless, multiscale stateless and multiscale recurrent.
+The loss/temporal decoder remain unchanged to isolate the processor. Recurrent
+validation/test force RMSE is 1867.39/2280.32 N versus local 2015.90/2523.33 N.
+All nine independent 8 ms native runs complete without oracle reset/fallback,
+but all over-fracture severely. The recurrent model leaves 5.97% largest mass
+on houses00/12/16 versus oracle 66.17/88.14/81.89%. No promotion.
+
+Metal processor timing is about 4.35 ms for a synthetic 10k-node/19,989-edge graph,
+excluding encoders, recurrent cell, heads, contacts, integration and topology.
+This is not 10k active bodies or proof of real time. Hierarchy construction costs
+about 24 ms in that run; unchanged-topology lookup is 0.032 ms. Cached native
+replay preserves nine snapshots and eight predictions byte-for-byte, and saved
+model-generated inference inputs reproduce all eight predictions exactly.
+
+187 Python and 13 targeted Rust tests pass. The main next gaps are coupled
+force/motion/work outputs, live within-interval feedback, separate material/contact
+connectivity, the initial signed-work transient, recurrent corrective prefixes and
+complete-engine timing. The current hierarchy follows material connectivity;
+closed cracks still carrying contact must receive a separate contact path.
+Artifacts: `runs/recurrent-multiscale-v36-2026-10-19/`. All jobs are terminal.

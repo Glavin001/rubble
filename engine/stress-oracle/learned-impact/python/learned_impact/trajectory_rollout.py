@@ -12,7 +12,16 @@ FORMAT='learned-native-trajectory/2'
 
 def run(args):
     args.out.mkdir(exist_ok=False);torch.set_num_threads(args.threads)
-    model,meta=load_checkpoint(args.checkpoint)
+    (args.out/'inference-inputs').mkdir()
+    config=json.loads((args.checkpoint/'config.json').read_text())
+    recurrent=config['architecture']=='physics-recurrent-multiscale-trajectory-v36'
+    if recurrent:
+        from .recurrent_trajectory import load_model,forecast as recurrent_forecast
+        from .multiscale import HierarchyCache
+        model,meta=load_model(args.checkpoint)
+        hierarchy_cache=HierarchyCache()
+    else:model,meta=load_checkpoint(args.checkpoint)
+    memory=None
     checkpoint_hash=meta['sha256'];start=time.monotonic();inference=[]
     plan={'status':'running','integration':'native-stress-phase-trajectory/1','checkpoint':meta,'scene':str(args.scene.resolve()),'scene_sha256':hashlib.sha256(args.scene.read_bytes()).hexdigest(),
           'binary_sha256':hashlib.sha256(args.binary.read_bytes()).hexdigest(),'frames':args.frames,
@@ -27,7 +36,13 @@ def run(args):
                 line=proc.stdout.readline()
                 if not line:raise RuntimeError(f'native world stopped before interval {i}; see native.log')
                 msg=json.loads(line);assert msg['kind']=='snapshot' and msg['index']==i
-                t=time.monotonic();response=forecast(model,graph,msg['snapshot'],msg['kinematics']);inference.append(time.monotonic()-t)
+                # Preserve the causal kinematic input alongside the native start
+                # snapshot, allowing exact prediction/memory replay after a run.
+                (args.out/'inference-inputs'/f'{i:06}.json').write_text(json.dumps(msg['kinematics'],allow_nan=False)+'\n')
+                t=time.monotonic()
+                if recurrent:response,memory=recurrent_forecast(model,graph,msg['snapshot'],msg['kinematics'],memory,hierarchy_cache=hierarchy_cache)
+                else:response=forecast(model,graph,msg['snapshot'],msg['kinematics'])
+                inference.append(time.monotonic()-t)
                 proc.stdin.write(json.dumps(response,allow_nan=False)+'\n');proc.stdin.flush()
             line=proc.stdout.readline()
             if not line:raise RuntimeError('native world stopped before final state; see native.log')
@@ -38,6 +53,7 @@ def run(args):
             assert hashlib.sha256((args.checkpoint/'state_dict.pt').read_bytes()).hexdigest()==checkpoint_hash
             (args.out/'result.json').write_text(json.dumps(result,indent=2,allow_nan=False)+'\n')
             plan.update(status='completed',inference_seconds=inference,seconds=time.monotonic()-start)
+            if recurrent:plan['hierarchy_builds']=hierarchy_cache.builds
     except Exception as e:
         plan.update(status='failed',error=repr(e),seconds=time.monotonic()-start,inference_seconds=inference)
         raise

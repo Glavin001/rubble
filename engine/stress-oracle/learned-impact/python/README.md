@@ -680,3 +680,50 @@ candidate checkpoints. This checks the pipeline, not training quality. Unit
 tests ensure a force improvement survives even when fracture F1 worsens, other
 criteria keep their original weights, and invalid validation data fails before
 saving. Source: `checkpoint_candidates.py`.
+
+## Recurrent multiscale architecture experiments
+
+`recurrent_trajectory` is a separate experimental processor with explicit
+caller-owned bond memory and a topology-aware latent hierarchy. It reuses the
+audited causal features and complete response wire decoder, removes unused
+legacy heads, and requires chronological episodes beginning at their first
+recorded frame. Physical inputs remain teacher-forced during this initial
+training comparison; independent evaluation uses the model world's own states.
+
+From the repository root, using the existing Python environment:
+
+```sh
+engine/stress-oracle/learned-impact/python/.venv/bin/python -m learned_impact.recurrent_trajectory \
+  --dataset engine/stress-oracle/learned-impact/runs/boundary-kinematics-v30-2026-10-19/combined \
+  --boundary-root engine/stress-oracle/learned-impact/runs/boundary-kinematics-v30-2026-10-19/combined/boundary-dataset \
+  --out /tmp/recurrent-stress-candidate --epochs 60 --unroll 4 --h 48 --memory 16 --levels 8
+```
+
+Use `--no-recurrent` for the multiscale stateless control and additionally
+`--levels 0` for the local control. All use identical initialization and update
+schedules for a given seed. The output directory must be new. Target scales
+use training parents only, and selection uses the common validation objective.
+
+`trajectory_rollout` automatically recognizes these checkpoints and retains
+memory across native frames. It stores causal boundary inputs under
+`inference-inputs/`. Its exact topology cache invalidates on every connectivity
+change. `native_comparison --oracle PHASE_EVENT --rollout RUN --out REPORT`
+compares a completed run with a separate native oracle recording and rejects
+different initial worlds or analytical stress fallback.
+
+Independent analytic probes need no recorded corpus:
+
+```sh
+python -m learned_impact.capability_probes wave --out /tmp/wave-capability --seed 0 --steps 1000
+python -m learned_impact.capability_probes benchmark --out /tmp/graph-timing.json --width 48 --device cpu
+```
+
+`--device mps` explicitly requires Metal, synchronizes timings and checks CPU
+parity; it never silently substitutes CPU. This is a processor benchmark, not
+an active-body or full-engine benchmark. The wave probe reports energy error
+separately from its momentum-preserving decoder.
+
+The first candidate improves component error but fails independent structural
+accuracy and is not promoted. It still lacks live within-interval contact
+feedback and a complete typed contact graph. Read the full evidence in
+`../findings/recurrent-multiscale-v36-2026-10-19.md` before interpreting its scores.

@@ -90,7 +90,7 @@ def phase_record(data,frame,event,partition,knots):
     if (times<0).any() or (times>1).any():raise ValueError('phase time outside frame')
     basis=hat_basis(times,np.linspace(0.,1.,knots)).astype(np.float32)
     weights=np.array([data.phases[i]['dt']/dt for i in indices],dtype=np.float32)
-    return {'event':event,'partition':partition,'frame':frame,'batch':batch,
+    return {'event':event,'partition':partition,'frame':frame,'start_time':start,'batch':batch,
         'target':torch.from_numpy(target),'mask':torch.from_numpy(mask),'basis':torch.from_numpy(basis),
         'weights':torch.from_numpy(weights),'dt':dt}
 
