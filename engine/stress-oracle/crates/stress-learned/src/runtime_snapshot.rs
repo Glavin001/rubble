@@ -50,9 +50,60 @@ pub struct BoundaryKinematics {
     pub values: Vec<[f64; 12]>,
 }
 
+/// Exact physical chunk/contact history accompanying the legacy NativeStart.
+/// Joint history and world poses remain in that companion snapshot. This still
+/// is not a self-contained World restart (scheduling/coupling state is separate).
+#[derive(Serialize)]
+pub struct PhysicalHistory {
+    pub format: &'static str,
+    pub time: f64,
+    pub chunks: Vec<PhysicalChunk>,
+    pub contacts: stress_ref::world::contact_history::ContactHistory,
+}
+
+#[derive(Serialize)]
+pub struct PhysicalChunk {
+    pub key: (usize, usize),
+    pub cluster_id: Option<u64>,
+    pub active: bool,
+    pub removed: bool,
+    /// Raw cluster-frame u, theta, v, omega; unlike the legacy float32 feature
+    /// these values contain neither an initial-state residual nor normalization.
+    pub state: [[f64; 3]; 4],
+    pub inertia_scale: f64,
+    pub mass: f64,
+    pub inertia: [[f64; 3]; 3],
+    /// Translation and rotation constraints in the structure/cluster coordinates.
+    pub fixed: [bool; 6],
+}
+
 impl RuntimeGraph {
     pub fn chunk_keys(&self)->&[(usize,usize)] { &self.chunk_keys }
     pub fn bond_keys(&self)->&[(usize,usize)] { &self.bond_keys }
+
+    pub fn capture_with_physical_history(&self, world: &World) -> Result<(NativeStart, PhysicalHistory), String> {
+        let snapshot = self.capture(world)?;
+        let mut chunks = Vec::with_capacity(self.chunk_keys.len());
+        for &(s, c) in &self.chunk_keys {
+            let chunk = world.solver.chunks[s][c];
+            let data = &world.solver.structures[s].chunks[c];
+            let state = [chunk.u.to_array(), chunk.th.to_array(), chunk.v.to_array(), chunk.w.to_array()];
+            if state.iter().flatten().chain([&chunk.inertia_scale, &data.mass]).chain(data.inertia.m.iter().flatten()).any(|x| !x.is_finite()) {
+                return Err("nonfinite exact physical chunk history".into());
+            }
+            let fixed = std::array::from_fn(|d| match data.support {
+                stress_ref::scene::Support::Fixed => true,
+                stress_ref::scene::Support::Pinned => d < 3,
+                stress_ref::scene::Support::None => false,
+            });
+            chunks.push(PhysicalChunk { key: (s, c),
+                cluster_id: if chunk.active { Some(world.solver.clusters[chunk.cluster].id) } else { None },
+                active: chunk.active, removed: chunk.removed, state, inertia_scale: chunk.inertia_scale,
+                mass: data.mass, inertia: data.inertia.m, fixed });
+        }
+        Ok((snapshot, PhysicalHistory { format: "native-physical-history/1", time: world.solver.time,
+            chunks, contacts: world.contact_history()? }))
+    }
 
     pub fn capture_with_kinematics(&self, world: &World) -> Result<(NativeStart, BoundaryKinematics), String> {
         let snapshot = self.capture(world)?;

@@ -68,3 +68,21 @@ fn boundary_kinematics_preserve_small_deformation_and_relative_rate_without_muta
         assert_eq!(graph.capture_with_kinematics(&world).unwrap().1.values[0],[0.;12]);
     }
 }
+
+#[test]
+fn physical_history_preserves_raw_small_state_full_inertia_and_stable_identity() {
+    use stress_ref::math::Vec3;
+    let mut world = World::new(&builders::bond_tension());
+    let graph = RuntimeGraph::new(&world).unwrap();
+    world.solver.chunks[0][0].u = Vec3::new(0.12345678901234567, 1e-14, -1e-17);
+    world.solver.chunks[0][0].w = Vec3::new(1.2345678901234567, 2., 3.);
+    let (legacy, physical) = graph.capture_with_physical_history(&world).unwrap();
+    assert_eq!(serde_json::to_value(legacy).unwrap(), serde_json::to_value(graph.capture(&world).unwrap()).unwrap());
+    assert_eq!(physical.chunks[0].state[0], world.solver.chunks[0][0].u.to_array());
+    assert_eq!(physical.chunks[0].state[3], world.solver.chunks[0][0].w.to_array());
+    let chunk = &world.solver.chunks[0][0];
+    assert_eq!(physical.chunks[0].cluster_id, Some(world.solver.clusters[chunk.cluster].id));
+    assert_eq!(physical.chunks[0].inertia, world.solver.structures[0].chunks[0].inertia.m);
+    assert_eq!(physical.contacts.time, physical.time);
+    assert_eq!(physical.chunks[0].key, graph.chunk_keys()[0]);
+}
