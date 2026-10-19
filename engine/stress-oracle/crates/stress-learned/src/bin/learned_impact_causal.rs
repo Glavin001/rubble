@@ -21,7 +21,7 @@ fn run()->Result<(),String>{
         fs::write(&args[1],serde_json::to_vec_pretty(&scene).unwrap()).map_err(|e|e.to_string())?;return Ok(())
     }
     if args.len()<4||args.len()>5{return Err("teacher SCENE NEW_OUTPUT FRAMES | model SCENE NEW_OUTPUT FRAMES WEIGHTS".into())}
-    let training=args[0]=="teacher";let collecting=args[0]=="collect";let energy_decoder=args[0]=="energy";
+    let training=args[0]=="teacher";let collecting=args[0]=="collect"||args[0]=="collect-energy";let energy_decoder=args[0]=="energy"||args[0]=="collect-energy";
     if !training&&!collecting&&!energy_decoder&&args[0]!="model"{return Err("unknown mode".into())}
     if training&&args.len()!=4||!training&&args.len()!=5{return Err("wrong mode arguments".into())}
     let frames:u32=args[3].parse().map_err(|_|"frames")?;if frames==0{return Err("positive frames".into())}

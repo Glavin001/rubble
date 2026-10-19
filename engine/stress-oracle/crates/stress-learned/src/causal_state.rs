@@ -108,6 +108,19 @@ impl StressProvider for Provider{fn responses(&mut self,s:&ReferenceSolver,_:&Ch
         h[0]=if previous[0]>=1.||pred[NY+21]>0.{1.}else{h[0].min(1.-f64::EPSILON)};
         for j in 4..6{h[j]=if pred[NY+22+j-4]>0.{y[j].max(0.)}else{previous[j]};}
         if self.energy_decoder{
+            // Yield admissibility and history maxima are known physical
+            // constraints. The network learns the inelastic state transition
+            // inside that domain; it cannot damage an unloaded elastic bond.
+            let effective=d.mul_elem(&b.stiffness.as_local());let measures=stress_measures(&b.geometry,&effective);
+            let idx=stress_ref::joint::failure_indices(&b.strength,&measures,b.weibull);
+            let lambda=idx.tension_shear().0;
+            let old_force=energy_force(b.stiffness.as_local(),b.geometry.width,d,&previous).0;
+            let compression=Local6{lin:Vec3::new(0.,0.,effective.lin.z.min(0.)),ang:old_force.ang};
+            let ci=stress_ref::joint::failure_indices(&b.strength,&stress_measures(&b.geometry,&compression),b.weibull).compression_family().0;
+            if lambda<=previous[2].max(1.){h[0]=previous[0];h[4]=previous[4];}
+            if ci<=previous[3].max(1.)||d.lin.z>=0.{h[1]=previous[1];h[5]=previous[5];}
+            if h[1]>=1.{h[0]=1.;}
+            h[2]=previous[2].max(lambda);h[3]=previous[3].max(ci);h[20]=idx.max();
             // Isotropic plastic sliding must advance along the elastic trial
             // traction and cannot overshoot zero elastic slip.
             let trial=[d.lin.x-previous[7],d.lin.y-previous[8]];let norm=trial[0]*trial[0]+trial[1]*trial[1];
