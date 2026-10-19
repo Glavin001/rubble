@@ -93,13 +93,13 @@ pub struct Layer{pub weight:Vec<Vec<f64>>,pub bias:Vec<f64>}
 pub struct Model{pub format:String,pub trained_steps:u64,pub input_scale:Vec<f64>,pub input_mean:Vec<f64>,pub input_std:Vec<f64>,pub output_scale:Vec<f64>,pub layers:Vec<Layer>}
 impl Model{
     pub fn load(path:&Path)->Result<Self,String>{let m:Self=serde_json::from_slice(&std::fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-        if ![FORMAT,"causal-material-state/3"].contains(&m.format.as_str())||m.trained_steps==0||m.output_scale.len()!=NY||m.layers.is_empty(){return Err("invalid or untrained causal model".into())}
+        if ![FORMAT,"causal-material-state/3","causal-material-state/4"].contains(&m.format.as_str())||m.trained_steps==0||m.output_scale.len()!=NY||m.layers.is_empty(){return Err("invalid or untrained causal model".into())}
         let n=m.input_scale.len();if m.input_mean.len()!=n||m.input_std.len()!=n{return Err("normalizer shape".into())}
         if m.input_mean.iter().any(|x|!x.is_finite())||m.input_scale.iter().chain(&m.input_std).chain(&m.output_scale).any(|x|!x.is_finite()||*x<=0.){return Err("invalid scales".into())}
         let mut width=n;for layer in &m.layers{if layer.weight.len()!=layer.bias.len()||layer.weight.iter().any(|r|r.len()!=width||r.iter().any(|x|!x.is_finite()))||layer.bias.iter().any(|x|!x.is_finite()){return Err("invalid dense layer".into())}width=layer.bias.len();}
         if width!=NY+NG{return Err("output shape".into())}Ok(m)}
-    pub fn predict(&self,x:&[f64])->Result<Vec<f64>,String>{let expanded;if self.format=="causal-material-state/3"&&x.len()!=69{return Err("raw feature shape".into())}
-        let x=if self.format=="causal-material-state/3"{expanded=augment(x);expanded.as_slice()}else{x};
+    pub fn predict(&self,x:&[f64])->Result<Vec<f64>,String>{let expanded;if self.format!=FORMAT&&x.len()!=69{return Err("raw feature shape".into())}
+        let x=if self.format!=FORMAT{expanded=augment(x);expanded.as_slice()}else{x};
         if x.len()!=self.input_scale.len(){return Err("feature width mismatch".into())}
         let mut v:Vec<f64>=x.iter().enumerate().map(|(i,x)|((x/self.input_scale[i]).asinh()-self.input_mean[i])/self.input_std[i]).collect();
         for (i,l) in self.layers.iter().enumerate(){v=l.weight.iter().zip(&l.bias).map(|(w,b)|{let z=w.iter().zip(&v).fold(*b,|sum,(w,x)|sum+w*x);if i+1<self.layers.len(){z.max(0.)}else{z}}).collect();}
@@ -113,7 +113,8 @@ impl StressProvider for Provider{fn responses(&mut self,s:&ReferenceSolver,_:&Ch
     let mut out=Vec::new();for &job in jobs{if job.2!=1.{return Err("single-rate jobs required".into())}
         let b=&s.bonds[job.0][job.1];let (x,base,d,rate)=features(s,job,dt,fracture)?;let pred=self.model.predict(&x)?;
         if let Some(labels)=&mut self.labels{labels.record(s,job,dt,fracture)?;}
-        let y:[f64;NY]=std::array::from_fn(|j|base[j]+pred[j]*self.model.output_scale[j]);
+        let absolute=self.model.format=="causal-material-state/4";
+        let y:[f64;NY]=std::array::from_fn(|j|if absolute&&[0,1,4,5].contains(&j){pred[j]*self.model.output_scale[j]}else{base[j]+pred[j]*self.model.output_scale[j]});
         let previous=joint_history::pack(&b.joint);let mut h=previous;
         for j in 0..21{if pred[NY+j]>0.{h[j]=y[j];}}
         for j in [0,1,6]{h[j]=h[j].clamp(0.,1.);}

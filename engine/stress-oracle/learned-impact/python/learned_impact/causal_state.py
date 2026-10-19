@@ -45,7 +45,9 @@ def main():
     p.add_argument("--max-rows-per-case", type=int, default=300000)
     p.add_argument("--physical-features", action="store_true")
     p.add_argument("--state-only", action="store_true")
+    p.add_argument("--absolute-state", action="store_true")
     args = p.parse_args()
+    if args.absolute_state and not args.physical_features: p.error("absolute-state requires physical-features")
     args.out.mkdir(parents=True, exist_ok=False)
     torch.manual_seed(args.seed); np.random.seed(args.seed); torch.set_num_threads(4)
     data = [read(root) for root in args.train]
@@ -58,6 +60,7 @@ def main():
     xs = np.maximum(np.sqrt(np.mean(x*x, axis=0)), 1e-12)
     zx = np.arcsinh(x / xs); xm = zx.mean(0); xd = np.maximum(zx.std(0), .05)
     delta = y-base
+    if args.absolute_state:delta[:,[0,1,4,5]]=y[:,[0,1,4,5]]
     ys = np.maximum(np.sqrt(np.mean(delta*delta, axis=0)), 1e-12)
     # Zero target channels must stay exactly zero at export/runtime.
     active = np.max(np.abs(delta), axis=0) > 1e-14
@@ -96,7 +99,7 @@ def main():
     # Remove only channels whose target is identically zero in this training scope.
     for j in range(NY):
         if not active[j]: layers[-1]["weight"][j]=[0.]*args.width;layers[-1]["bias"][j]=0.
-    artifact={"format":"causal-material-state/3" if args.physical_features else "causal-material-state/2","trained_steps":args.steps,"input_scale":xs.tolist(),"input_mean":xm.tolist(),"input_std":xd.tolist(),"output_scale":ys.tolist(),"layers":layers}
+    artifact={"format":"causal-material-state/4" if args.absolute_state else "causal-material-state/3" if args.physical_features else "causal-material-state/2","trained_steps":args.steps,"input_scale":xs.tolist(),"input_mean":xm.tolist(),"input_std":xd.tolist(),"output_scale":ys.tolist(),"layers":layers}
     weights_file=args.out/"weights.json";weights_file.write_text(json.dumps(artifact,allow_nan=False))
     torch.save({"state_dict":net.state_dict(),"args":vars(args)},args.out/"checkpoint.pt")
     results=[]
