@@ -2,8 +2,8 @@
   "status": "capability_probes_pass_native_destruction_still_rejected",
   "artifact_root": "engine/stress-oracle/learned-impact/runs/state-consistency-v37-2026-10-19",
   "production_checkpoint_promoted": false,
-  "python_tests_passed": 200,
-  "targeted_rust_tests_passed": 11,
+  "python_tests_passed": 204,
+  "targeted_rust_tests_passed": 12,
   "results": {
     "history-intervention.json": {
       "artifact_sha256": "d2fa7b7bce8d51e7712ae524953f34c49ba59f609e4d9f006c68a1d9b74d9bf2",
@@ -1393,6 +1393,1245 @@
           "velocity"
         ],
         "test_scope": "Unseen initial states and chain lengths; same unit masses, stiffness and dt."
+      }
+    },
+    "native-damped-audit.json": {
+      "artifact_sha256": "ca44dad92c99a6f6446fa8f9edc895a723a80b95c765814115648fd8af19baa5",
+      "result": {
+        "scope": "Frozen small-motion native linear damping audit. Dense reference only; no learned accuracy, fracture, contact, native rollout or speed claim.",
+        "results": [
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-free.json",
+            "source_sha256": "ab6cb68c80215ea1dca4436a7f86eae5119512f537a60e8aeadeb72d85830dd4",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 144,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 1.1102230246251565e-16,
+                "target_max_abs": 2.2433971557218646
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 8.881784197001252e-16,
+                "target_max_abs": 5.784322204928319
+              }
+            },
+            "highest_angular_frequency_per_s": 89046.95860020758,
+            "normalized_stiffness_damping_commutator": 9.313690636016215e-18,
+            "damping_offdiagonal_fraction_in_undamped_basis": 1.8773943804304454e-15,
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              6.976697666338478e-16,
+              2.7223941441256636e-18
+            ],
+            "short_window_relative_work_balance_defect": 4.162238025632885e-14,
+            "semigroup_error_energy_over_initial": 9.675704090034991e-27,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.062085040839453376,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9103696165916328,
+                  "diagonal_modal_damping": 3.755882636403579e-25
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.05516564896825998,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9585671759019119,
+                  "diagonal_modal_damping": 5.790775825775613e-24
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.054241446248791236,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9717640356688612,
+                  "diagonal_modal_damping": 2.896570821062535e-23
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.0540011507290717,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9774091469144026,
+                  "diagonal_modal_damping": 9.055374771522584e-23
+                }
+              }
+            ],
+            "high_frequency_mode_count": 66,
+            "high_frequency_max_energy_retained_after_8_33ms": 1.6799930364077978e-06
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-fixed.json",
+            "source_sha256": "35fcfea28a0cbeb4078f824c203b4fcfbd20ca233995f48f36ed7a98d01dd722",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 108,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 1.1102230246251565e-16,
+                "target_max_abs": 2.1845997470674456
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 8.881784197001252e-16,
+                "target_max_abs": 5.784322204928319
+              }
+            },
+            "highest_angular_frequency_per_s": 88316.8512356228,
+            "normalized_stiffness_damping_commutator": 0.0022470111506222206,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.04697177464386619,
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              7.266128281995361e-16,
+              2.8358838072270064e-18
+            ],
+            "short_window_relative_work_balance_defect": 4.879610126675236e-14,
+            "semigroup_error_energy_over_initial": 7.244202728464262e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.09113481762175493,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9444797280719076,
+                  "diagonal_modal_damping": 1.1846055408354074e-07
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.06714705139226632,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9776996625930913,
+                  "diagonal_modal_damping": 1.9084707983438843e-08
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.054970834939364235,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9860844895546894,
+                  "diagonal_modal_damping": 1.2693173350054508e-08
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.04673255941193868,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9903395534462781,
+                  "diagonal_modal_damping": 8.733531786824358e-09
+                }
+              }
+            ],
+            "high_frequency_mode_count": 52,
+            "high_frequency_max_energy_retained_after_8_33ms": 1.9565631555124794e-06
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-pinned.json",
+            "source_sha256": "29c66383ce455df50d99be7e7a7b8b1aaa51e1e8d34012d7866dcc6dcc54ebfd",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 126,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 1.1102230246251565e-16,
+                "target_max_abs": 2.1845997470674456
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 8.881784197001252e-16,
+                "target_max_abs": 5.784322204928319
+              }
+            },
+            "highest_angular_frequency_per_s": 88329.02297139003,
+            "normalized_stiffness_damping_commutator": 0.0027752167725509534,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.10088935801591323,
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              7.685137850592701e-16,
+              2.9996613644832108e-18
+            ],
+            "short_window_relative_work_balance_defect": 3.7274947048014455e-14,
+            "semigroup_error_energy_over_initial": 4.443125773984515e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.07053314674056246,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9359536967894944,
+                  "diagonal_modal_damping": 1.1587580250953564e-07
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.05330898354722372,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9750986168233284,
+                  "diagonal_modal_damping": 3.4444186337415535e-08
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.04566216431769539,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9853881760907198,
+                  "diagonal_modal_damping": 1.2968739348578545e-08
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.040067927029810844,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9903090499969587,
+                  "diagonal_modal_damping": 7.478481406854595e-09
+                }
+              }
+            ],
+            "high_frequency_mode_count": 58,
+            "high_frequency_max_energy_retained_after_8_33ms": 7.420969562472899e-07
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-rotated.json",
+            "source_sha256": "f85840c1c6fee2c5c0d0c75b6f263fb54c3b53df031c33772397aa0423ba0754",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 108,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 4.440892098500626e-16,
+                "target_max_abs": 1.8784353843827801
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 1.3322676295501878e-15,
+                "target_max_abs": 4.313674568438667
+              }
+            },
+            "highest_angular_frequency_per_s": 116163.65188378729,
+            "normalized_stiffness_damping_commutator": 0.002328228540468218,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.04727033381255303,
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              4.217558960506559e-16,
+              1.6454082079429994e-18
+            ],
+            "short_window_relative_work_balance_defect": 4.112849519650505e-14,
+            "semigroup_error_energy_over_initial": 6.0500346797182346e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.04285096003591825,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9485744613298672,
+                  "diagonal_modal_damping": 6.56210774443065e-08
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.03469153294317381,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9810962246517736,
+                  "diagonal_modal_damping": 1.89984304552315e-08
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.030161524861020743,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.991234660466237,
+                  "diagonal_modal_damping": 1.1860464516178448e-08
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.026542789670124134,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9948291499365638,
+                  "diagonal_modal_damping": 1.120875635633288e-08
+                }
+              }
+            ],
+            "high_frequency_mode_count": 47,
+            "high_frequency_max_energy_retained_after_8_33ms": 5.493179844468347e-09
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-heterogeneous.json",
+            "source_sha256": "bb1430c693af707de29c2767f5f7a0424b4bfddb8d64cd77e7781b2abae6159c",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 108,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 4.440892098500626e-16,
+                "target_max_abs": 8.005675898135431
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 3.552713678800501e-15,
+                "target_max_abs": 12.002728541348322
+              }
+            },
+            "highest_angular_frequency_per_s": 88316.8512356228,
+            "normalized_stiffness_damping_commutator": 0.02027652713556474,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.3700974989438885,
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              7.742548886423933e-16,
+              3.017682329865214e-18
+            ],
+            "short_window_relative_work_balance_defect": 1.3938602265548068e-13,
+            "semigroup_error_energy_over_initial": 9.508177302337719e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.038466673668859995,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9770013366954485,
+                  "diagonal_modal_damping": 4.300288274220272e-06
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.026814306204538604,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9872285109295148,
+                  "diagonal_modal_damping": 7.092125801645238e-07
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.019720708262789936,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9891544648959955,
+                  "diagonal_modal_damping": 2.2794704231788148e-07
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.01463759557894332,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9901071661484995,
+                  "diagonal_modal_damping": 2.1167047927272177e-07
+                }
+              }
+            ],
+            "high_frequency_mode_count": 52,
+            "high_frequency_max_energy_retained_after_8_33ms": 8.27114191703779e-08
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-rayleigh.json",
+            "source_sha256": "639259dfac2e9d898c1f2d3f79fb46a88e92e503f10179f1c3db1ec67e534ae1",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 108,
+            "mass_damping_alpha_per_s": 173.11261326071278,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 4.440892098500626e-16,
+                "target_max_abs": 7.322252835088978
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 1.7763568394002505e-15,
+                "target_max_abs": 11.390809118004075
+              }
+            },
+            "highest_angular_frequency_per_s": 88316.8512356228,
+            "normalized_stiffness_damping_commutator": 0.019453493836017605,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.3550499781786234,
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              7.342832740780408e-16,
+              2.863855579591591e-18
+            ],
+            "short_window_relative_work_balance_defect": 7.212593195806153e-14,
+            "semigroup_error_energy_over_initial": 1.0886858478370442e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.010999700297683051,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.978008911539651,
+                  "diagonal_modal_damping": 1.4647138541267866e-06
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.0018347016581369809,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.993671005010904,
+                  "diagonal_modal_damping": 4.33765214421369e-08
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.0003203080652651858,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9975861987573446,
+                  "diagonal_modal_damping": 4.618972282538553e-09
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 5.7815106767599015e-05,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9990619016600885,
+                  "diagonal_modal_damping": 7.66679856559118e-10
+                }
+              }
+            ],
+            "high_frequency_mode_count": 52,
+            "high_frequency_max_energy_retained_after_8_33ms": 2.1151748390630888e-08
+          }
+        ]
+      }
+    },
+    "native-damped-information-audit.json": {
+      "artifact_sha256": "907805228f3c4260f22f9921626f44d01527d04fc452966fba3f8e502fa69b79",
+      "result": {
+        "scope": "Frozen small-motion native linear damping audit. Dense reference only; no learned accuracy, fracture, contact, native rollout or speed claim.",
+        "results": [
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-free.json",
+            "source_sha256": "ab6cb68c80215ea1dca4436a7f86eae5119512f537a60e8aeadeb72d85830dd4",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 144,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 1.1102230246251565e-16,
+                "target_max_abs": 2.2433971557218646
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 8.881784197001252e-16,
+                "target_max_abs": 5.784322204928319
+              }
+            },
+            "highest_angular_frequency_per_s": 89046.95860020758,
+            "normalized_stiffness_damping_commutator": 9.313690636016215e-18,
+            "damping_offdiagonal_fraction_in_undamped_basis": 1.8773943804304454e-15,
+            "energy_operator_information": {
+              "status": "skipped_rigid_or_near_zero_energy_modes"
+            },
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              6.976697666338478e-16,
+              2.7223941441256636e-18
+            ],
+            "short_window_relative_work_balance_defect": 4.162238025632885e-14,
+            "semigroup_error_energy_over_initial": 9.675704090034991e-27,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.062085040839453376,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9103696165916328,
+                  "diagonal_modal_damping": 3.755882636403579e-25
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.05516564896825998,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9585671759019119,
+                  "diagonal_modal_damping": 5.790775825775613e-24
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.054241446248791236,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9717640356688612,
+                  "diagonal_modal_damping": 2.896570821062535e-23
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.0540011507290717,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9774091469144026,
+                  "diagonal_modal_damping": 9.055374771522584e-23
+                }
+              }
+            ],
+            "high_frequency_mode_count": 66,
+            "high_frequency_max_energy_retained_after_8_33ms": 1.6799930364077978e-06
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-fixed.json",
+            "source_sha256": "35fcfea28a0cbeb4078f824c203b4fcfbd20ca233995f48f36ed7a98d01dd722",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 108,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 1.1102230246251565e-16,
+                "target_max_abs": 2.1845997470674456
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 8.881784197001252e-16,
+                "target_max_abs": 5.784322204928319
+              }
+            },
+            "highest_angular_frequency_per_s": 88316.8512356228,
+            "normalized_stiffness_damping_commutator": 0.0022470111506222206,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.04697177464386619,
+            "energy_operator_information": {
+              "status": "completed_no_modes_removed",
+              "samples": [
+                {
+                  "time_s": 5e-06,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999999951586929,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 1.0498464126006009e-06
+                },
+                {
+                  "time_s": 5e-05,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999951711008648,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 3.153030100378903e-05
+                },
+                {
+                  "time_s": 0.0001,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.999961570200432,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 8.151400821154315e-05
+                },
+                {
+                  "time_s": 0.0005,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9962286230931191,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.00032700175549367646
+                },
+                {
+                  "time_s": 0.001,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9914271969095647,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.0002121947411942028
+                },
+                {
+                  "time_s": 0.008333333333333333,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9147366681906572,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 116,
+                    "0.01": 73,
+                    "0.05": 40
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 1.0835794143875472e-06
+                }
+              ]
+            },
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              7.266128281995361e-16,
+              2.8358838072270064e-18
+            ],
+            "short_window_relative_work_balance_defect": 4.879610126675236e-14,
+            "semigroup_error_energy_over_initial": 7.244202728464262e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.09113481762175493,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9444797280719076,
+                  "diagonal_modal_damping": 1.1846055408354074e-07
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.06714705139226632,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9776996625930913,
+                  "diagonal_modal_damping": 1.9084707983438843e-08
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.054970834939364235,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9860844895546894,
+                  "diagonal_modal_damping": 1.2693173350054508e-08
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.04673255941193868,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9903395534462781,
+                  "diagonal_modal_damping": 8.733531786824358e-09
+                }
+              }
+            ],
+            "high_frequency_mode_count": 52,
+            "high_frequency_max_energy_retained_after_8_33ms": 1.9565631555124794e-06
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-pinned.json",
+            "source_sha256": "29c66383ce455df50d99be7e7a7b8b1aaa51e1e8d34012d7866dcc6dcc54ebfd",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 126,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 1.1102230246251565e-16,
+                "target_max_abs": 2.1845997470674456
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 8.881784197001252e-16,
+                "target_max_abs": 5.784322204928319
+              }
+            },
+            "highest_angular_frequency_per_s": 88329.02297139003,
+            "normalized_stiffness_damping_commutator": 0.0027752167725509534,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.10088935801591323,
+            "energy_operator_information": {
+              "status": "completed_no_modes_removed",
+              "samples": [
+                {
+                  "time_s": 5e-06,
+                  "state_dimensions": 252,
+                  "max_energy_gain": 0.9999999966768327,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 252,
+                    "0.01": 252,
+                    "0.05": 252
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 6.958885155689745e-06
+                },
+                {
+                  "time_s": 5e-05,
+                  "state_dimensions": 252,
+                  "max_energy_gain": 0.9999966836607179,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 252,
+                    "0.01": 252,
+                    "0.05": 252
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.0001854668543636565
+                },
+                {
+                  "time_s": 0.0001,
+                  "state_dimensions": 252,
+                  "max_energy_gain": 0.9999735491698344,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 252,
+                    "0.01": 252,
+                    "0.05": 252
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.0006333270934367829
+                },
+                {
+                  "time_s": 0.0005,
+                  "state_dimensions": 252,
+                  "max_energy_gain": 0.9972865930385969,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 252,
+                    "0.01": 252,
+                    "0.05": 252
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.0037902073035553504
+                },
+                {
+                  "time_s": 0.001,
+                  "state_dimensions": 252,
+                  "max_energy_gain": 0.9928282236970235,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 252,
+                    "0.01": 252,
+                    "0.05": 252
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.003628496648733183
+                },
+                {
+                  "time_s": 0.008333333333333333,
+                  "state_dimensions": 252,
+                  "max_energy_gain": 0.9282536211774779,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 112,
+                    "0.01": 72,
+                    "0.05": 40
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 1.239897411686815e-06
+                }
+              ]
+            },
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              7.685137850592701e-16,
+              2.9996613644832108e-18
+            ],
+            "short_window_relative_work_balance_defect": 3.7274947048014455e-14,
+            "semigroup_error_energy_over_initial": 4.443125773984515e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.07053314674056246,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9359536967894944,
+                  "diagonal_modal_damping": 1.1587580250953564e-07
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.05330898354722372,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9750986168233284,
+                  "diagonal_modal_damping": 3.4444186337415535e-08
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.04566216431769539,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9853881760907198,
+                  "diagonal_modal_damping": 1.2968739348578545e-08
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.040067927029810844,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9903090499969587,
+                  "diagonal_modal_damping": 7.478481406854595e-09
+                }
+              }
+            ],
+            "high_frequency_mode_count": 58,
+            "high_frequency_max_energy_retained_after_8_33ms": 7.420969562472899e-07
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-rotated.json",
+            "source_sha256": "f85840c1c6fee2c5c0d0c75b6f263fb54c3b53df031c33772397aa0423ba0754",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 108,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 4.440892098500626e-16,
+                "target_max_abs": 1.8784353843827801
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 1.3322676295501878e-15,
+                "target_max_abs": 4.313674568438667
+              }
+            },
+            "highest_angular_frequency_per_s": 116163.65188378729,
+            "normalized_stiffness_damping_commutator": 0.002328228540468218,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.04727033381255303,
+            "energy_operator_information": {
+              "status": "completed_no_modes_removed",
+              "samples": [
+                {
+                  "time_s": 5e-06,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999999917337143,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 2.4059897654089195e-06
+                },
+                {
+                  "time_s": 5e-05,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999917630803739,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 6.69633447522648e-05
+                },
+                {
+                  "time_s": 0.0001,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999345108544117,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.00015339966061812143
+                },
+                {
+                  "time_s": 0.0005,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9942833566138857,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.0004957147247230544
+                },
+                {
+                  "time_s": 0.001,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9884950110049799,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.0001896593328358991
+                },
+                {
+                  "time_s": 0.008333333333333333,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.897881434738464,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 86,
+                    "0.01": 50,
+                    "0.05": 31
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 8.969352363696591e-07
+                }
+              ]
+            },
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              4.217558960506559e-16,
+              1.6454082079429994e-18
+            ],
+            "short_window_relative_work_balance_defect": 4.112849519650505e-14,
+            "semigroup_error_energy_over_initial": 6.0500346797182346e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.04285096003591825,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9485744613298672,
+                  "diagonal_modal_damping": 6.56210774443065e-08
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.03469153294317381,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9810962246517736,
+                  "diagonal_modal_damping": 1.89984304552315e-08
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.030161524861020743,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.991234660466237,
+                  "diagonal_modal_damping": 1.1860464516178448e-08
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.026542789670124134,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9948291499365638,
+                  "diagonal_modal_damping": 1.120875635633288e-08
+                }
+              }
+            ],
+            "high_frequency_mode_count": 47,
+            "high_frequency_max_energy_retained_after_8_33ms": 5.493179844468347e-09
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-heterogeneous.json",
+            "source_sha256": "bb1430c693af707de29c2767f5f7a0424b4bfddb8d64cd77e7781b2abae6159c",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 108,
+            "mass_damping_alpha_per_s": 0.0,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 4.440892098500626e-16,
+                "target_max_abs": 8.005675898135431
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 3.552713678800501e-15,
+                "target_max_abs": 12.002728541348322
+              }
+            },
+            "highest_angular_frequency_per_s": 88316.8512356228,
+            "normalized_stiffness_damping_commutator": 0.02027652713556474,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.3700974989438885,
+            "energy_operator_information": {
+              "status": "completed_no_modes_removed",
+              "samples": [
+                {
+                  "time_s": 5e-06,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999999921388283,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.0002793546850786498
+                },
+                {
+                  "time_s": 5e-05,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999921265763542,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.006039819101151975
+                },
+                {
+                  "time_s": 0.0001,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.999932135260648,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.015275574476923553
+                },
+                {
+                  "time_s": 0.0005,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9923235566922228,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.030154458896500553
+                },
+                {
+                  "time_s": 0.001,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9824541262539577,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 201
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.01520902867553727
+                },
+                {
+                  "time_s": 0.008333333333333333,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.8320301174185701,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 54,
+                    "0.01": 30,
+                    "0.05": 20
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 7.072259267061231e-05
+                }
+              ]
+            },
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              7.742548886423933e-16,
+              3.017682329865214e-18
+            ],
+            "short_window_relative_work_balance_defect": 1.3938602265548068e-13,
+            "semigroup_error_energy_over_initial": 9.508177302337719e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.038466673668859995,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9770013366954485,
+                  "diagonal_modal_damping": 4.300288274220272e-06
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.026814306204538604,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9872285109295148,
+                  "diagonal_modal_damping": 7.092125801645238e-07
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.019720708262789936,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9891544648959955,
+                  "diagonal_modal_damping": 2.2794704231788148e-07
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 0.01463759557894332,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9901071661484995,
+                  "diagonal_modal_damping": 2.1167047927272177e-07
+                }
+              }
+            ],
+            "high_frequency_mode_count": 52,
+            "high_frequency_max_energy_retained_after_8_33ms": 8.27114191703779e-08
+          },
+          {
+            "source": "learned-impact/runs/state-consistency-v37-2026-10-19/native-damped-rayleigh.json",
+            "source_sha256": "639259dfac2e9d898c1f2d3f79fb46a88e92e503f10179f1c3db1ec67e534ae1",
+            "cluster": 0,
+            "chunks": 24,
+            "bonds": 46,
+            "free_dof": 108,
+            "mass_damping_alpha_per_s": 173.11261326071278,
+            "native_parity": {
+              "bond_damping_force": {
+                "max_abs_error": 4.440892098500626e-16,
+                "target_max_abs": 7.322252835088978
+              },
+              "damping_nodal_force": {
+                "max_abs_error": 1.7763568394002505e-15,
+                "target_max_abs": 11.390809118004075
+              }
+            },
+            "highest_angular_frequency_per_s": 88316.8512356228,
+            "normalized_stiffness_damping_commutator": 0.019453493836017605,
+            "damping_offdiagonal_fraction_in_undamped_basis": 0.3550499781786234,
+            "energy_operator_information": {
+              "status": "completed_no_modes_removed",
+              "samples": [
+                {
+                  "time_s": 5e-06,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999999142225741,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.00022493919056240362
+                },
+                {
+                  "time_s": 5e-05,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9999144297688659,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.004993972543914268
+                },
+                {
+                  "time_s": 0.0001,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9993165325723913,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.012780885263945559
+                },
+                {
+                  "time_s": 0.0005,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.9355497725950674,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 216
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.02662596362431131
+                },
+                {
+                  "time_s": 0.001,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.8590836058299567,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 216,
+                    "0.01": 216,
+                    "0.05": 207
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 0.012430331743300053
+                },
+                {
+                  "time_s": 0.008333333333333333,
+                  "state_dimensions": 216,
+                  "max_energy_gain": 0.2075074378138933,
+                  "optimal_rank_for_worst_case_state_amplitude_error": {
+                    "0.001": 54,
+                    "0.01": 28,
+                    "0.05": 16
+                  },
+                  "diagonal_damping_worst_case_error_energy_over_initial": 1.724222033484331e-05
+                }
+              ]
+            },
+            "rk4_error_energy_over_initial_8_16_subdivisions": [
+              7.342832740780408e-16,
+              2.863855579591591e-18
+            ],
+            "short_window_relative_work_balance_defect": 7.212593195806153e-14,
+            "semigroup_error_energy_over_initial": 1.0886858478370442e-31,
+            "trajectory_120hz": [
+              {
+                "time_s": 0.008333333333333333,
+                "reference_energy_fraction_max": 0.010999700297683051,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.978008911539651,
+                  "diagonal_modal_damping": 1.4647138541267866e-06
+                }
+              },
+              {
+                "time_s": 0.016666666666666666,
+                "reference_energy_fraction_max": 0.0018347016581369809,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.993671005010904,
+                  "diagonal_modal_damping": 4.33765214421369e-08
+                }
+              },
+              {
+                "time_s": 0.025,
+                "reference_energy_fraction_max": 0.0003203080652651858,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9975861987573446,
+                  "diagonal_modal_damping": 4.618972282538553e-09
+                }
+              },
+              {
+                "time_s": 0.03333333333333333,
+                "reference_energy_fraction_max": 5.7815106767599015e-05,
+                "control_max_error_energy_over_initial": {
+                  "ignore_damping": 0.9990619016600885,
+                  "diagonal_modal_damping": 7.66679856559118e-10
+                }
+              }
+            ],
+            "high_frequency_mode_count": 52,
+            "high_frequency_max_energy_retained_after_8_33ms": 2.1151748390630888e-08
+          }
+        ]
+      }
+    },
+    "physical-history-v2-parity.json": {
+      "artifact_sha256": "5630b8801c7f97c7691a81a829b37be6a3da313637b6637a765dba7bc60055ac",
+      "result": {
+        "status": "completed",
+        "scope": "New v2 physical mechanics sidecars against the unchanged native control, all legacy files compared byte-for-byte. Not complete World restart.",
+        "identical_files": [
+          {
+            "path": "graph.json",
+            "sha256": "a927a7d19df0116e11f092b45d7c57ccadba18dc2a6c31aebb74750ef4835a8b"
+          },
+          {
+            "path": "snapshots/000000.json",
+            "sha256": "973916eabafa7bdff48446531bb51a24b6c86438900626a968f5cb438be1ac7b"
+          },
+          {
+            "path": "snapshots/000001.json",
+            "sha256": "72ccff79167c3c836c9c522031cee724611ff11bc9152aa93b218b3c991e01bb"
+          },
+          {
+            "path": "snapshots/000002.json",
+            "sha256": "158b6c74b6ff775009d7d156c99af7ef14c3e4cfbe65a685587942ec57e67d19"
+          },
+          {
+            "path": "source-scene.json",
+            "sha256": "f946241c028aafda72f44c162014b816e2ce71471caff85b8a21debad01e76f8"
+          },
+          {
+            "path": "stress_phases/bond_slots.u32",
+            "sha256": "dab27be842f0425c576dc6278bf325bb6cc179a1af56a51cc81430dee397a90f"
+          },
+          {
+            "path": "stress_phases/chunk_flags.u64",
+            "sha256": "5926d5841c4a487f2eca0c91bdd7a996a8ee849ec06854b930de7226979750bf"
+          },
+          {
+            "path": "stress_phases/chunks.f64",
+            "sha256": "abc5f10e9b5940404c0ae66b67d4ebc70d7f02dc069b0bb9c902e934246b4b5e"
+          },
+          {
+            "path": "stress_phases/input_flags.i32",
+            "sha256": "d5f96800813cfe2ba4880915b0c06206bee3393f73ab824e162b47276fd75d2b"
+          },
+          {
+            "path": "stress_phases/inputs.f64",
+            "sha256": "9ea770d32c501dd0ca8e3f4923cc45573af8f44a5b6f946a16d4c722bde7f836"
+          },
+          {
+            "path": "stress_phases/manifest.json",
+            "sha256": "2781f0ca73e3bf19ba18031f6a8520913b1451ab363f1820d2b0b53f9a6928b6"
+          },
+          {
+            "path": "stress_phases/target_flags.i32",
+            "sha256": "3a3a1e2885a4262d5b7ba4f07bd15d1fc8335f6d5f4f9897585d19d1fd3961ad"
+          },
+          {
+            "path": "stress_phases/targets.f64",
+            "sha256": "b5757c66dde414d727a0628e47ecf1f26ee6e1761f760067bf6e0c15d4120fdf"
+          }
+        ],
+        "physical_history": [
+          {
+            "file": "000000.json",
+            "time_s": 0.0,
+            "chunks": 665,
+            "bonds": 1299,
+            "clusters": 1,
+            "sha256": "ab164aceeca478fedf85fa6f3140ad90a8739f3487bd37ec8e21c4d4c3614ede"
+          },
+          {
+            "file": "000001.json",
+            "time_s": 0.0009999999999999983,
+            "chunks": 665,
+            "bonds": 1299,
+            "clusters": 25,
+            "sha256": "98e34bb0ef7e848674d510a8825c1406b24d2ea14cc8d1a4e00d3bd3d04b814e"
+          },
+          {
+            "file": "000002.json",
+            "time_s": 0.0020000000000000113,
+            "chunks": 665,
+            "bonds": 1299,
+            "clusters": 60,
+            "sha256": "02ee913a102d4346a20457df33244305ecc16d31e3e9498c003d9c54333b8a81"
+          }
+        ],
+        "native_report": {
+          "engine_fallback_evaluations": 0,
+          "frames": 2,
+          "oracle_response_rows": 365379,
+          "phases": 298,
+          "physical_history": true,
+          "scope": "Oracle-only full native stress-phase recording. All native steps retained; no trained model or speed claim. Frame inputs are snapshots; later phase observations are not causal frame inputs.",
+          "seconds": 0.587426959,
+          "status": "completed"
+        }
       }
     }
   },

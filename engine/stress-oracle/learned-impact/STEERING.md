@@ -652,5 +652,28 @@ Next architecture choices need more than increasing polynomial degree or adding
 latent memory. Actual damping, nonlinear material/contact events, long-range
 propagation and a suitable fused runtime remain open.
 
-200 Python and 11 targeted Rust tests pass. No checkpoint promoted; V36 native
+The frozen native damping capability now passes on six small fixtures, including
+heterogeneous bond dashpots and fitted mass damping. This is a dense small-graph
+validation teacher, not a damping-capable trained runtime. Native force parity
+is within 3.56e-15 absolute, RK4 refinement agrees, and short-window power balance
+defect is at most 1.40e-13. The actual stiffness and damping operators need not
+commute. Deleting their modal cross-coupling can look accurate at frame endpoints
+while losing appreciable early response.
+
+At 120 Hz the damped endpoint may be compact even while early response is not:
+one heterogeneous 216-state fixture needs all 216 directions at 0.5 ms for a 5%
+worst-case amplitude bound, versus 30 at 8.33 ms for a 1% bound in the best
+per-graph linear factorization. This is not a universal neural capacity bound.
+No modes are discarded. The next architecture must keep a detailed local
+transient path alongside faster long-range processing and supervise intermediate
+forces, work and history rather than just a quiet late endpoint.
+
+Physical-history v2 also records current bond frames/levers, nominal stiffness
+and damping and each cluster's mass-damping/inertia-relief rule. The legacy
+features could otherwise be identical for different runtime damping. All 13
+legacy outputs remain byte-identical in the same two-frame native check. These
+new fields still need to be consumed by the new trainer; no silent zero-fill of
+missing history or damping. Full World restart remains unproven.
+
+204 Python and 12 targeted Rust tests pass. No checkpoint promoted; V36 native
 destruction remains rejected. Artifacts: `runs/state-consistency-v37-2026-10-19/`.
