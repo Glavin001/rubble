@@ -31,7 +31,13 @@ The Goal's "resident" requirement and M5's first step. Plan, work items W1–W6 
 **Started:** the WIP single-encoder path, opt-in as `STRESS_FRAME_SUBMITS=one` (lossless on the
 quick tier, slower: median 8.1 against 7.3 ms).
 
-## R2. The barrage's GPU race (determinism)
+## R2. The barrage's GPU race (determinism): met 2026-10-18
+
+Six barrage runs gave one digest: ef1f0b43df5a519b, 19,784 fragments, 60,635 bonds.
+They ran with `STRESS_RESIDENT_PULSES=16`, an explicit limit; the default of 4 fails with
+a clear error. The charter log has the details. What follows is the original plan.
+
+### Original plan
 
 The 36-shot barrage (`vibe-town_barrage`, `blast_parity`) does not repeat run to run.
 - The recorded suites do repeat.
@@ -75,7 +81,16 @@ stage's correction-limit-1 pass, on ram speed and fragment count. References:
       For example, the stress solve of the struck region with the plug's contact force as a
       load, cascaded within the frame, in place of a single plug.
     - Measured against the reference, without fitting a parameter to the reference.
-  - **R3b. Collider leak in long barrages under the GPU punch.**
+  - **R3b. Collider growth on every GPU split** (not only the punch's).
+    - Measured 2026-10-18: every split gives every child new colliders, and the parent's
+      are only retired; nothing reuses them.
+    - The lossless fix writes each child's colliders into its parent's own range, which
+      holds exactly the sum of their parts.
+    - It touches `spawn.slang`, `colliders.slang`, `passlog.slang`, the log readers
+      (`apply_frame_log`, `gpu_split.rs`, `gpu_pass.rs`) and rubble's `adopt_spawned`.
+    - It renumbers collider slots on the default profile's split path. Results stay the
+      same, but digests change, so it needs your decision.
+  - **R3b (as first written). Collider leak in long barrages under the GPU punch.**
     - Every split re-adds every child's colliders, the large remainder's included, and
       rubble's collider arrays are append-only.
     - Plan: the largest child keeps its parent's engine body and colliders (only smaller
