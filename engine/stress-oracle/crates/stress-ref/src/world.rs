@@ -29,7 +29,11 @@ use crate::statics::StaticOptions;
 
 #[path = "world_coupling.rs"]
 mod coupling;
-pub use coupling::{cluster_signature, tiered_impact_speed};
+#[path = "world_handoff.rs"]
+mod handoff;
+#[path = "world_branch.rs"]
+mod branch;
+pub use coupling::{cluster_signature, tiered_impact_speed, PredictedContact, PunchPlug};
 #[path = "contact_history.rs"]
 pub mod contact_history;
 /// The modal pre-window for impacts (prototype, `modal` feature): a child module so it
@@ -1917,6 +1921,25 @@ impl World {
         }
         if self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact {self.contact_dt=self.frame_contact_dt();}
         self.step_frame_once_observed(&mut |_| {},&mut Some(provider))
+    }
+
+    /// `step_frame` with a read-only observer after each substep, for any standalone world
+    /// whose `step_frame` is one pass (not coupled, not `implicit_failure_windows`): the
+    /// same substeps and frame tail, so the result is bit-identical to `step_frame`.
+    /// For the learned-impact outcome recorder (break and contact timing within a frame).
+    pub fn step_frame_watched(&mut self, mut observe: impl FnMut(&Self)) -> Result<(), String> {
+        if self.coupling.is_some() || (self.scene.sim.solve_mode == SolveMode::Implicit && self.scene.sim.methods.implicit_failure_windows) {
+            return Err("a watched frame needs a standalone single-pass world".into());
+        }
+        if self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact {
+            self.contact_dt = self.frame_contact_dt();
+        }
+        self.step_frame_once_observed(&mut observe, &mut None)
+    }
+
+    /// Contact force magnitude each chunk received in the last substep (`[structure][chunk]`).
+    pub fn chunk_contact_hits(&self) -> &[Vec<f64>] {
+        &self.contact_hits
     }
 
     fn step_frame_once(&mut self) { self.step_frame_once_observed(&mut |_| {},&mut None).expect("reference frame has no external provider"); }
