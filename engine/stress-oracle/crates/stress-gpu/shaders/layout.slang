@@ -260,27 +260,29 @@ void bond_ranks(uint4 parent, uint base, uint c0, uint b0, uint b1, uint tid, bo
     }
 }
 
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+// A split parent's group (`layout_parent` and its phases): its parent record and its island's
+// chunk and bond ranges, as uniform values (barriers follow); false when there is nothing to
+// lay out (no such parent, an aborted split, a parent that does not split).
+bool layout_start(uint p, uint tid, out uint4 parent, out uint c0, out uint c1, out uint b0, out uint b1)
 {
-    uint tid = thread.x;
-    uint p = group.x;
+    parent = uint4(0);
+    c0 = 0; c1 = 0; b0 = 0; b1 = 0;
     // The exits and the loop bounds as uniform values: barriers follow.
     if (group_uniform(p >= control[CTL_PARENTS] || control[0] != 0 ? 1u : 0u, tid) != 0)
-        return;
-    uint4 parent = parents[p];
+        return false;
+    parent = parents[p];
     if (group_uniform(parent.z < 2 ? 1u : 0u, tid) != 0)
-        return;
-    uint ci = parent.x;
-    float4 r = old_islands[island_word(ci, 0)];
-    uint c0 = group_uniform(asuint(r.x), tid), c1 = group_uniform(asuint(r.y), tid), b0 = group_uniform(asuint(r.z), tid), b1 = group_uniform(asuint(r.w), tid);
-    uint n = c1 - c0;
-    uint base = parent.y;
-    uint total = control[CTL_TOTAL];
-    // 1. New chunk positions: each child's start in island order (thread 0, over the
-    // children), then every member in parallel: child k's members (`offset`, in child order)
-    // go to its start plus their place among them, as one pass in island order would.
+        return false;
+    float4 r = old_islands[island_word(parent.x, 0)];
+    c0 = group_uniform(asuint(r.x), tid); c1 = group_uniform(asuint(r.y), tid); b0 = group_uniform(asuint(r.z), tid); b1 = group_uniform(asuint(r.w), tid);
+    return true;
+}
+
+// 1. New chunk positions: each child's start in island order (thread 0, over the
+// children), then every member in parallel: child k's members (`offset`, in child order)
+// go to its start plus their place among them, as one pass in island order would.
+void lay_positions(uint4 parent, uint n, uint base, uint total, uint tid)
+{
     if (tid == 0)
     {
         sort_children(parent);
@@ -308,9 +310,12 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         uint j = i - asuint(children[CHILD_WORDS * (base + lo)].y);
         plan[new_chunk_at(base + work[total + base + i])] = plan[child_start_at(base + lo)] + j;
     }
-    device_group_barrier();
-    // Chunk statics, states, the resident tables' chunk entries; the static-solve slots
-    // cleared (a new island's solve starts from rest, as after the host's split).
+}
+
+// Chunk statics and states moved; the static-solve slots cleared (a new island's solve
+// starts from rest, as after the host's split).
+void lay_chunks(uint c0, uint n, uint base, uint tid)
+{
     for (uint m = tid; m < n; m += LT)
     {
         uint nk = plan[new_chunk_at(base + m)];
@@ -323,22 +328,31 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             state[4 * (c0 + nk) + w] = old_state[4 * (c0 + m) + w];
         for (uint w = 0; w < STATICS_PER_CHUNK; w++)
             scratch[params.statics_base + STATICS_PER_CHUNK * (c0 + nk) + w] = float4(0.0);
-        if (params.resident != 0)
-        {
-            uint o = c0 + m, d = c0 + nk;
-            ctab[params.props_base + d] = old_ctab[params.props_base + o];
-            ctab[params.eload_base + 2 * d] = old_ctab[params.eload_base + 2 * o];
-            ctab[params.eload_base + 2 * d + 1] = old_ctab[params.eload_base + 2 * o + 1];
-            ctab[params.pulse_count_base + d] = old_ctab[params.pulse_count_base + o];
-            for (uint w = 0; w < 3 * params.pulse_cap; w++)
-                ctab[params.pulse_base + 3 * params.pulse_cap * d + w] = old_ctab[params.pulse_base + 3 * params.pulse_cap * o + w];
-        }
     }
-    device_group_barrier();
-    // 2. Bonds: each child's, in the parent's order, then the cut ones. Counts per child
-    // (counted as they are ranked below), starts in island order
-    // (thread 0, over the children), then each bond's place among its child's in bond
-    // order, in blocks of the group's threads: as one pass in bond order would give.
+}
+
+// The resident tables' chunk entries, moved with their chunks.
+void lay_ctab_chunks(uint c0, uint n, uint base, uint tid)
+{
+    for (uint m = tid; m < n; m += LT)
+    {
+        uint nk = plan[new_chunk_at(base + m)];
+        uint o = c0 + m, d = c0 + nk;
+        ctab[params.props_base + d] = old_ctab[params.props_base + o];
+        ctab[params.eload_base + 2 * d] = old_ctab[params.eload_base + 2 * o];
+        ctab[params.eload_base + 2 * d + 1] = old_ctab[params.eload_base + 2 * o + 1];
+        ctab[params.pulse_count_base + d] = old_ctab[params.pulse_count_base + o];
+        for (uint w = 0; w < 3 * params.pulse_cap; w++)
+            ctab[params.pulse_base + 3 * params.pulse_cap * d + w] = old_ctab[params.pulse_base + 3 * params.pulse_cap * o + w];
+    }
+}
+
+// 2. Bonds: each child's, in the parent's order, then the cut ones. Counts per child
+// (counted as they are ranked below), starts in island order
+// (thread 0, over the children), then each bond's place among its child's in bond
+// order, in blocks of the group's threads: as one pass in bond order would give.
+void lay_bond_ranks(uint4 parent, uint c0, uint b0, uint b1, uint base, uint tid)
+{
     for (uint k = tid; k < parent.z; k += LT)
         plan[child_bonds_at(base + k)] = 0;
     device_group_barrier();
@@ -360,8 +374,12 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     }
     device_group_barrier();
     bond_ranks(parent, base, c0, b0, b1, tid, true);
-    // Copies: a child's bond with its chunks renamed and its island; a cut bond to its slot
-    // after the children's, in no island, its loads and static stiffness zeroed.
+}
+
+// Copies: a child's bond with its chunks renamed and its island; a cut bond to its slot
+// after the children's, in no island, its loads and static stiffness zeroed.
+void lay_bonds(uint c0, uint b0, uint b1, uint base, uint tid)
+{
     for (uint b = b0 + tid; b < b1; b += LT)
     {
         uint4 ids = asuint(old_bonds[bond_word(b, 14)]);
@@ -389,15 +407,17 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         for (uint w = 0; w < params.dyn_words; w++)
             dyn[params.dyn_words * nb + w] = old_dyn[params.dyn_words * b + w];
     }
-    // The children's bond ranges (first, end): `child_bonds_at` holds (first, next) after
-    // placing, so `next` is the end.
-    device_group_barrier();
-    // 3. Incidence: each chunk keeps its slots (its old degree), its entries its
-    // remaining bonds in the new order, padded with a cut bond of this split (or the
-    // padding an earlier split left: an entry outside the parent's bonds).
+}
+
+// 3. Incidence: each chunk keeps its slots (its old degree), its entries its
+// remaining bonds in the new order, padded with a cut bond of this split (or the
+// padding an earlier split left: an entry outside the parent's bonds). `cut_first`: the
+// first cut bond's new index (the end of the children's bonds).
+void lay_incidence(uint c0, uint c1, uint b0, uint b1, uint n, uint base, uint cut_first, uint tid)
+{
     uint pad = NONE;
-    if (g_cut_first < b1)
-        pad = 2 * g_cut_first;
+    if (cut_first < b1)
+        pad = 2 * cut_first;
     else
     {
         for (uint e = old_index[c0]; e < old_index[c1] && pad == NONE; e++)
@@ -447,7 +467,7 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             if (bond < b0 || bond >= b1)
                 continue;
             uint nb = plan[bond_new_at(bond)];
-            if (nb >= g_cut_first)
+            if (nb >= cut_first)
                 continue;
             index[at + q] = 2 * nb + (entry & 1);
             q++;
@@ -455,115 +475,250 @@ void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         for (; q < d; q++)
             index[at + q] = pad;
     }
-    device_group_barrier();
-    // 4. The children's island records (`island_record`, a resident quasi-static
-    // frame's clusters: driven and settled), with the parent's rigid frame.
-    for (uint k = tid; k < parent.z; k += LT)
+}
+
+// 4. The children's island records (`island_record`, a resident quasi-static
+// frame's clusters: driven and settled), with the parent's rigid frame.
+void lay_record(uint p, uint c0, uint base, uint total, uint slot)
+{
+    uint island = plan[child_island_at(slot)];
+    float4 head = children[CHILD_WORDS * slot];
+    uint offset = asuint(head.y), count = asuint(head.z);
+    bool anchored = asuint(head.w) != 0;
+    float4 com = children[CHILD_WORDS * slot + 1];
+    float3 i0 = children[CHILD_WORDS * slot + 2].xyz;
+    float3 i1 = children[CHILD_WORDS * slot + 3].xyz;
+    float3 i2 = children[CHILD_WORDS * slot + 4].xyz;
+    float3 v = children[CHILD_WORDS * slot + 5].xyz;
+    float3 w = children[CHILD_WORDS * slot + 6].xyz;
+    // The first new chunk of this child, and the drift-removal weights (inertia
+    // scales: `scale.x` of each chunk).
+    uint first_new = NONE;
+    float wmass = 0.0;
+    float3 wmoment = float3(0.0);
+    float su_mass = 0.0;
+    float3 su = float3(0.0);
+    bool scaled = false;
+    for (uint j = 0; j < count; j++)
     {
-        uint slot = base + k;
-        uint island = plan[child_island_at(slot)];
-        float4 head = children[CHILD_WORDS * slot];
-        uint offset = asuint(head.y), count = asuint(head.z);
-        bool anchored = asuint(head.w) != 0;
-        float4 com = children[CHILD_WORDS * slot + 1];
-        float3 i0 = children[CHILD_WORDS * slot + 2].xyz;
-        float3 i1 = children[CHILD_WORDS * slot + 3].xyz;
-        float3 i2 = children[CHILD_WORDS * slot + 4].xyz;
-        float3 v = children[CHILD_WORDS * slot + 5].xyz;
-        float3 w = children[CHILD_WORDS * slot + 6].xyz;
-        // The first new chunk of this child, and the drift-removal weights (inertia
-        // scales: `scale.x` of each chunk).
-        uint first_new = NONE;
-        float wmass = 0.0;
-        float3 wmoment = float3(0.0);
-        float su_mass = 0.0;
-        float3 su = float3(0.0);
-        bool scaled = false;
+        uint m = work[total + base + offset + j];
+        uint nk = plan[new_chunk_at(base + m)];
+        first_new = min(first_new, nk);
+        float4 ctr = old_chunks[chunk_word(c0 + m, 0)];
+        float mu = old_chunks[chunk_word(c0 + m, 7)].x;
+        scaled = scaled || mu != 1.0;
+        wmass += ctr.w * mu;
+        wmoment += ctr.xyz * ctr.w * mu;
+        su_mass += ctr.w;
+        su += old_state[4 * (c0 + m)].xyz * ctr.w;
+    }
+    float3 wcom = scaled ? wmoment / wmass : com.xyz;
+    float3 w0 = i0, w1 = i1, w2 = i2;
+    if (scaled)
+    {
+        w0 = float3(0.0); w1 = float3(0.0); w2 = float3(0.0);
         for (uint j = 0; j < count; j++)
         {
             uint m = work[total + base + offset + j];
-            uint nk = plan[new_chunk_at(base + m)];
-            first_new = min(first_new, nk);
             float4 ctr = old_chunks[chunk_word(c0 + m, 0)];
             float mu = old_chunks[chunk_word(c0 + m, 7)].x;
-            scaled = scaled || mu != 1.0;
-            wmass += ctr.w * mu;
-            wmoment += ctr.xyz * ctr.w * mu;
-            su_mass += ctr.w;
-            su += old_state[4 * (c0 + m)].xyz * ctr.w;
+            float3 rr = ctr.xyz - wcom;
+            float dd = dot(rr, rr);
+            w0 += (old_chunks[chunk_word(c0 + m, 1)].xyz + (float3(dd, 0, 0) - rr.x * rr) * ctr.w) * mu;
+            w1 += (old_chunks[chunk_word(c0 + m, 2)].xyz + (float3(0, dd, 0) - rr.y * rr) * ctr.w) * mu;
+            w2 += (old_chunks[chunk_word(c0 + m, 3)].xyz + (float3(0, 0, dd) - rr.z * rr) * ctr.w) * mu;
         }
-        float3 wcom = scaled ? wmoment / wmass : com.xyz;
-        float3 w0 = i0, w1 = i1, w2 = i2;
-        if (scaled)
-        {
-            w0 = float3(0.0); w1 = float3(0.0); w2 = float3(0.0);
-            for (uint j = 0; j < count; j++)
-            {
-                uint m = work[total + base + offset + j];
-                float4 ctr = old_chunks[chunk_word(c0 + m, 0)];
-                float mu = old_chunks[chunk_word(c0 + m, 7)].x;
-                float3 rr = ctr.xyz - wcom;
-                float dd = dot(rr, rr);
-                w0 += (old_chunks[chunk_word(c0 + m, 1)].xyz + (float3(dd, 0, 0) - rr.x * rr) * ctr.w) * mu;
-                w1 += (old_chunks[chunk_word(c0 + m, 2)].xyz + (float3(0, dd, 0) - rr.y * rr) * ctr.w) * mu;
-                w2 += (old_chunks[chunk_word(c0 + m, 3)].xyz + (float3(0, 0, dd) - rr.z * rr) * ctr.w) * mu;
-            }
-        }
-        float3 v0, v1, v2, x0, x1, x2;
-        inverse3(i0, i1, i2, v0, v1, v2);
-        inverse3(w0, w1, w2, x0, x1, x2);
-        Quat q = quat_of(frames[5 * p]);
-        float3 pos = frames[5 * p + 4].xyz;
-        if (!anchored)
-            pos += rotate(q, su / su_mass);
-        // World inertia times the angular velocity: R I R^T w.
-        float3 iw = rotate(q, float3(dot(i0, inverse_rotate(q, w)), dot(i1, inverse_rotate(q, w)), dot(i2, inverse_rotate(q, w))));
-        // `island_record`: a new cluster is driven only when no cluster integrates its own
-        // rigid motion (the resident frame drives them all from its next frame).
-        uint flags = (anchored ? ISLAND_FLAG_ANCHORED : 0u) | (params.driven != 0 ? ISLAND_FLAG_DRIVEN : 0u) | ISLAND_FLAG_SETTLED;
-        uint bfirst = plan[child_bonds_at(slot)];
-        uint bend = plan[child_bonds_at(slot) + 1];
-        float4 rec[25];
-        for (uint t = 0; t < 25; t++)
-            rec[t] = float4(0.0);
-        rec[0] = asfloat(uint4(c0 + first_new, c0 + first_new + count, bfirst, bend));
-        rec[1] = asfloat(uint4(flags, 0, 0, params.substeps));
-        rec[2] = com;
-        rec[3] = float4(i0, 0.0); rec[4] = float4(i1, 0.0); rec[5] = float4(i2, 0.0);
-        rec[6] = float4(v0, 0.0); rec[7] = float4(v1, 0.0); rec[8] = float4(v2, 0.0);
-        rec[9] = float4(wcom, scaled ? wmass : com.w);
-        rec[10] = float4(x0, 0.0); rec[11] = float4(x1, 0.0); rec[12] = float4(x2, 0.0);
-        rec[13] = quat_vec(q);
-        rec[14] = float4(pos, 0.0);
-        rec[16] = float4(anchored ? float3(0.0) : v, 0.0);
-        rec[18] = float4(anchored ? float3(0.0) : w, 0.0);
-        rec[19] = asfloat(uint4(0, 0, 0, plan[child_id_at(slot)])); // done_pad: the cluster id
-        rec[21] = float4(0.0, 0.0, 0.0, float_bits(0x7f800000u)); // settled: load norm 0, never wakes
-        rec[23] = float4(anchored ? float3(0.0) : iw, 0.0);
-        for (uint t = 0; t < 25; t++)
-            islands[island_word(island, t)] = rec[t];
-        if (params.resident != 0)
-        {
-            uint4 sl = spawn_slots[slot];
-            float4 pr = spawn_extras[2 * slot + 1];
-            uint at = params.engine_base + 3 * island;
-            // y-w: its engine body (a fixed one too) and collider range (pass.slang retires it).
-            float3 body_range = sl.w != 0 ? asfloat(uint3(sl.x, sl.y, sl.y + sl.z)) : float3(float_bits(NONE), 0.0, 0.0);
-            if (anchored || sl.w == 0)
-            {
-                ctab[at] = float4(float_bits(NONE), body_range);
-                ctab[at + 1] = float4(0.0);
-                ctab[at + 2] = float4(0.0);
-            }
-            else
-            {
-                ctab[at] = float4(asfloat(sl.x), body_range);
-                ctab[at + 1] = float4(-pr.x, -pr.y, -pr.z, pr.w);
-                ctab[at + 2] = float4(spawn_extras[2 * slot].xyz, 0.0);
-            }
-        }
-        gate[params.gate_flag_base + island] = float4(0.0);
     }
+    float3 v0, v1, v2, x0, x1, x2;
+    inverse3(i0, i1, i2, v0, v1, v2);
+    inverse3(w0, w1, w2, x0, x1, x2);
+    Quat q = quat_of(frames[5 * p]);
+    float3 pos = frames[5 * p + 4].xyz;
+    if (!anchored)
+        pos += rotate(q, su / su_mass);
+    // World inertia times the angular velocity: R I R^T w.
+    float3 iw = rotate(q, float3(dot(i0, inverse_rotate(q, w)), dot(i1, inverse_rotate(q, w)), dot(i2, inverse_rotate(q, w))));
+    // `island_record`: a new cluster is driven only when no cluster integrates its own
+    // rigid motion (the resident frame drives them all from its next frame).
+    uint flags = (anchored ? ISLAND_FLAG_ANCHORED : 0u) | (params.driven != 0 ? ISLAND_FLAG_DRIVEN : 0u) | ISLAND_FLAG_SETTLED;
+    uint bfirst = plan[child_bonds_at(slot)];
+    uint bend = plan[child_bonds_at(slot) + 1];
+    float4 rec[25];
+    for (uint t = 0; t < 25; t++)
+        rec[t] = float4(0.0);
+    rec[0] = asfloat(uint4(c0 + first_new, c0 + first_new + count, bfirst, bend));
+    rec[1] = asfloat(uint4(flags, 0, 0, params.substeps));
+    rec[2] = com;
+    rec[3] = float4(i0, 0.0); rec[4] = float4(i1, 0.0); rec[5] = float4(i2, 0.0);
+    rec[6] = float4(v0, 0.0); rec[7] = float4(v1, 0.0); rec[8] = float4(v2, 0.0);
+    rec[9] = float4(wcom, scaled ? wmass : com.w);
+    rec[10] = float4(x0, 0.0); rec[11] = float4(x1, 0.0); rec[12] = float4(x2, 0.0);
+    rec[13] = quat_vec(q);
+    rec[14] = float4(pos, 0.0);
+    rec[16] = float4(anchored ? float3(0.0) : v, 0.0);
+    rec[18] = float4(anchored ? float3(0.0) : w, 0.0);
+    rec[19] = asfloat(uint4(0, 0, 0, plan[child_id_at(slot)])); // done_pad: the cluster id
+    rec[21] = float4(0.0, 0.0, 0.0, float_bits(0x7f800000u)); // settled: load norm 0, never wakes
+    rec[23] = float4(anchored ? float3(0.0) : iw, 0.0);
+    for (uint t = 0; t < 25; t++)
+        islands[island_word(island, t)] = rec[t];
+}
+
+// A child's resident engine entry (its body, collider range and frame) and its gate flag.
+void lay_engine(uint slot)
+{
+    uint island = plan[child_island_at(slot)];
+    bool anchored = asuint(children[CHILD_WORDS * slot].w) != 0;
+    if (params.resident != 0)
+    {
+        uint4 sl = spawn_slots[slot];
+        float4 pr = spawn_extras[2 * slot + 1];
+        uint at = params.engine_base + 3 * island;
+        // y-w: its engine body (a fixed one too) and collider range (pass.slang retires it).
+        float3 body_range = sl.w != 0 ? asfloat(uint3(sl.x, sl.y, sl.y + sl.z)) : float3(float_bits(NONE), 0.0, 0.0);
+        if (anchored || sl.w == 0)
+        {
+            ctab[at] = float4(float_bits(NONE), body_range);
+            ctab[at + 1] = float4(0.0);
+            ctab[at + 2] = float4(0.0);
+        }
+        else
+        {
+            ctab[at] = float4(asfloat(sl.x), body_range);
+            ctab[at + 1] = float4(-pr.x, -pr.y, -pr.z, pr.w);
+            ctab[at + 2] = float4(spawn_extras[2 * slot].xyz, 0.0);
+        }
+    }
+    gate[params.gate_flag_base + island] = float4(0.0);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint tid = thread.x;
+    uint p = group.x;
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(p, tid, parent, c0, c1, b0, b1))
+        return;
+    uint n = c1 - c0;
+    uint base = parent.y;
+    uint total = control[CTL_TOTAL];
+    lay_positions(parent, n, base, total, tid);
+    device_group_barrier();
+    lay_chunks(c0, n, base, tid);
+    if (params.resident != 0)
+        lay_ctab_chunks(c0, n, base, tid);
+    device_group_barrier();
+    lay_bond_ranks(parent, c0, b0, b1, base, tid);
+    lay_bonds(c0, b0, b1, base, tid);
+    // The children's bond ranges (first, end): `child_bonds_at` holds (first, next) after
+    // placing, so `next` is the end.
+    device_group_barrier();
+    lay_incidence(c0, c1, b0, b1, n, base, g_cut_first, tid);
+    device_group_barrier();
+    for (uint k = tid; k < parent.z; k += LT)
+    {
+        lay_record(p, c0, base, total, base + k);
+        lay_engine(base + k);
+    }
+}
+
+// `layout_parent` in eight dispatches, for a device that binds fewer storage buffers per
+// stage than it uses (WebGPU's 10): each phase over every parent, in its order (the
+// tables a phase writes are only read by later ones).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent_positions(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(group.x, thread.x, parent, c0, c1, b0, b1))
+        return;
+    lay_positions(parent, c1 - c0, parent.y, control[CTL_TOTAL], thread.x);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(group.x, thread.x, parent, c0, c1, b0, b1))
+        return;
+    lay_chunks(c0, c1 - c0, parent.y, thread.x);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent_ctab(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(group.x, thread.x, parent, c0, c1, b0, b1) || params.resident == 0)
+        return;
+    lay_ctab_chunks(c0, c1 - c0, parent.y, thread.x);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent_bond_ranks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(group.x, thread.x, parent, c0, c1, b0, b1))
+        return;
+    lay_bond_ranks(parent, c0, b0, b1, parent.y, thread.x);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(group.x, thread.x, parent, c0, c1, b0, b1))
+        return;
+    lay_bonds(c0, b0, b1, parent.y, thread.x);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent_incidence(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(group.x, thread.x, parent, c0, c1, b0, b1))
+        return;
+    // The first cut bond's new index (`g_cut_first` of the ranks): the end of the last
+    // child's bonds in island order.
+    uint cut_first = plan[child_bonds_at(parent.y + child_by_island(parent, parent.z - 1)) + 1];
+    lay_incidence(c0, c1, b0, b1, c1 - c0, parent.y, cut_first, thread.x);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent_records(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(group.x, thread.x, parent, c0, c1, b0, b1))
+        return;
+    for (uint k = thread.x; k < parent.z; k += LT)
+        lay_record(group.x, c0, parent.y, control[CTL_TOTAL], parent.y + k);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void layout_parent_engine(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint4 parent;
+    uint c0, c1, b0, b1;
+    if (!layout_start(group.x, thread.x, parent, c0, c1, b0, b1))
+        return;
+    for (uint k = thread.x; k < parent.z; k += LT)
+        lay_engine(parent.y + k);
 }
 
 [shader("compute")]

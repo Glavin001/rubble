@@ -96,6 +96,12 @@ pub struct GpuWorld {
     pub redo_fractured_frames: bool,
     /// Frames in which a body the engine moved fractured and no redo was taken.
     pub unverified_fractures: u64,
+    /// `SolverConfig::contact_threshold` resident frames whose bonds broke and whose engine
+    /// step was solved again with the fragments installed (PhysX's correction limit 1,
+    /// `resident_frame`).
+    pub corrected_frames: u64,
+    /// In the engine step solved again (no further correction).
+    correcting: bool,
     /// Promoted structures (no redo) and the quiet frames they have left.
     promoted: std::collections::HashMap<usize, u32>,
     /// Whether a fracture under the engine's loads promotes its structure (no redo; on by
@@ -281,6 +287,8 @@ impl GpuWorld {
             cost_segment: (0.0, 0),
             redo_fractured_frames: true,
             unverified_fractures: 0,
+            corrected_frames: 0,
+            correcting: false,
             promoted: std::collections::HashMap::new(),
             promote_fractures: std::env::var("STRESS_PROMOTE").map_or(true, |v| v != "0"),
             routed_resident: std::env::var("STRESS_ROUTED_RESIDENT").map_or(true, |v| v != "0"),

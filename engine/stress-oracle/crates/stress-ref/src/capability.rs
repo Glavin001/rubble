@@ -32,6 +32,13 @@ pub enum Profile {
     /// fracture separates the piece that breaks free within the frame, forward, with no
     /// rewind (findings/rewind-scaling.md, design C). Everything else is `BlastParity`'s.
     BlastParityRouted,
+    /// The v0 stress mode: `BlastParity`'s frame with no static solve. A bond breaks when
+    /// the contact force on either of its chunks this frame (sustained contacts, and each
+    /// impact's Hertz peak force) exceeds its tensile capacity
+    /// (`SolverConfig::contact_threshold`); one pass, whose disconnections split as
+    /// `BlastParity`'s do. Deliberately simple and fast: it exercises the breaking, splitting
+    /// and re-parenting path, not the stress model.
+    Threshold,
 }
 
 /// The model features `BlastParity` turns off (`SimFeatures` names).
@@ -42,6 +49,7 @@ impl Profile {
         match name {
             "blast_parity" | "blast-parity" => Some(Profile::BlastParity),
             "blast_parity_routed" | "blast-parity-routed" => Some(Profile::BlastParityRouted),
+            "threshold" => Some(Profile::Threshold),
             _ => None,
         }
     }
@@ -50,20 +58,21 @@ impl Profile {
         match self {
             Profile::BlastParity => "blast_parity",
             Profile::BlastParityRouted => "blast_parity_routed",
+            Profile::Threshold => "threshold",
         }
     }
 
     /// How packs import under the profile.
     pub fn import_options(self) -> ImportOptions {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true },
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true },
         }
     }
 
     /// The scene's switches: solve mode, model features and methods.
     pub fn apply_scene(self, scene: &mut Scene) {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted => {
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold => {
                 scene.sim.solve_mode = SolveMode::QuasiStatic;
                 for f in BLAST_PARITY_FEATURES_OFF {
                     scene.sim.features.set(f, false).expect("a SimFeatures name");
@@ -78,7 +87,7 @@ impl Profile {
     /// Whether the profile runs impact islands (the coupling's routing).
     pub fn impact_islands(self) -> bool {
         match self {
-            Profile::BlastParity => false,
+            Profile::BlastParity | Profile::Threshold => false,
             Profile::BlastParityRouted => true,
         }
     }
@@ -90,7 +99,7 @@ impl Profile {
     /// islands for six frames of 65–121 s each.
     pub fn promote_fractures(self) -> bool {
         match self {
-            Profile::BlastParity => true,
+            Profile::BlastParity | Profile::Threshold => true,
             Profile::BlastParityRouted => false,
         }
     }
@@ -98,7 +107,7 @@ impl Profile {
     /// Whether the profile runs the GPU-resident frame.
     pub fn resident(self) -> bool {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted => true,
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold => true,
         }
     }
 
@@ -108,7 +117,7 @@ impl Profile {
     /// tunnel).
     pub fn engine_policy(self) -> (Option<u32>, Option<u32>) {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted => (Some(4), Some(1)),
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold => (Some(4), Some(1)),
         }
     }
 
@@ -119,6 +128,12 @@ impl Profile {
                 config.static_budget = Some((1, 16));
                 config.static_unconverged = UnconvergedSolve::CommitIterate;
                 config.static_passes = Some(2);
+            }
+            Profile::Threshold => {
+                config.static_budget = Some((1, 16));
+                config.static_unconverged = UnconvergedSolve::CommitIterate;
+                config.static_passes = Some(1);
+                config.contact_threshold = true;
             }
         }
     }

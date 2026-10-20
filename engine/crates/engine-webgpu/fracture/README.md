@@ -179,6 +179,7 @@ level, camera and shot rule, so the three can be compared:
 | **None** (default) | Nothing: pieces start asleep and wake when hit | rubble (this page's WGSL host) |
 | **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
 | **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
+| **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`): a bond breaks when the contact force on either of its chunks this frame exceeds its tensile strength × area. That is each impact's Hertz peak force plus sustained contacts, with no gravity. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
 **Learned impact mode.**
@@ -190,6 +191,33 @@ level, camera and shot rule, so the three can be compared:
     -line-directive-mode none -o engine/crates/engine-webgpu/generated/wgsl/learned_impact.wgsl
   ```
 - Bindings are packed to 8 storage buffers so Chrome's per-stage limit is met.
+
+**Simple threshold mode (v0).**
+- A deliberately trivial bond rule. It proves the path any stress model shares: contacts in,
+  bonds broken, structures split into child bodies with their colliders re-parented,
+  rubble continuing.
+- `Profile::Threshold` (`stress-ref` `capability.rs`), kernel
+  `stress-gpu/shaders/threshold.slang`. It stands in the resident cascade for the static
+  solve and its damage commit, and writes what they would (bond records broken, island
+  disconnected), so the split pass runs unchanged. A learned model would take the same slot.
+- **Correction limit 1, as PhysX's native stage runs it.** Without a correction, rubble
+  solves the hit against the intact structure, so the ball bounces, and the bonds break only
+  after the step.
+  - The resident frame saves rubble's state first.
+  - When the step's contacts break bonds, the step is undone. The broken structures split
+    at the frame's start: each child takes its parent's starting motion.
+  - The step is then solved once more against the pieces, and that second solve's breaks
+    stand (`GpuWorld::correct_frame`, `corrected_frames`).
+  - Lab ball (native `fracture_glb`): 60 → 58.4 m/s through the wall, against 18 m/s under
+    `blast_parity`.
+- The **Bond strength** slider scales the threshold. One identical shot on the veneer
+  house breaks 54 bonds into 4 bodies at ×1/16, and 24 into 2 at ×16.
+- **In Chrome (M3 Max):**
+  - veneer house: 3 shots break 72 bonds into 7 bodies, 3.9 ms per frame;
+  - cuboid house with a ×8 ball: 100 bonds, 108 bodies, 60 frames/s.
+- **Native:**
+  - `STRESS_PROFILE=threshold cargo run --release -p stress-rubble --features view --example fracture_glb`;
+  - test `stress-rubble/tests/threshold_split.rs`.
 
 **Stress solver mode.**
 - It runs the same Rust as the native reference (`stress-rubble` example
@@ -214,9 +242,20 @@ level, camera and shot rule, so the three can be compared:
 **Status in Chrome (M3 Max):**
 - It loads, draws, aims and fires like the other modes, and it holds real time (60 physics
   frames/s, 2.3 ms each) until a ball strikes.
-- **Nothing breaks yet.** Chrome allows 10 storage buffers per shader stage, and the
-  stress kernels for contact ingest and GPU splits bind up to 26 (`layout`), so WebGPU
-  rejects those pipelines. Packing them to 10 or fewer is the remaining work.
+- **Bonds break and split on the GPU.** A ×64 ball on the veneer house, level 0: 140
+  bonds broken, 64 fragments, 61 physics frames/s.
+- **Chrome allows 10 storage buffers per shader stage; the stress kernels fit it two ways:**
+  - Each pipeline's layout holds only the bindings its entry point uses, when its module
+    declares more than the device allows. `build.rs` reflects them from the generated WGSL
+    with Naga.
+  - The kernels that use more than 10 on their own run as phases: `pass_snapshot`,
+    `pass_log`, `layout_parent`, `spawn_bodies`, `spawn_bodies_group`,
+    `spawn_colliders`. They do the same work in order (`reflection::PHASED`,
+    `Gpu::staged`), and the fused kernel still runs where the device allows it (Metal: 31).
+  - `tests/binding_limits.rs` keeps every entry point within 10.
+  - Lossless: the guard's digests are unchanged. Forcing the phases and per-entry layouts
+    natively (`STRESS_GPU_STORAGE_LIMIT=10`) gives the fused kernels' digest on both Metal
+    and native WGSL.
 - The same WGSL kernels run natively (`STRESS_GPU_SHADERS=wgsl`, where Metal allows 31)
   with the Metal library's result: a lab shot (×64 ball) breaks 210 bonds into 17
   fragments on both.
@@ -226,8 +265,14 @@ level, camera and shot rule, so the three can be compared:
     `group_uniform4`, `group_uniform_island`, and uniform reductions in `group_sum2`);
   - storage access read from the shader's declarations (`gpu.rs` `wgsl_access`).
   Metal's values are unchanged (guard).
-- **View options.** "Inspect bond graph" and "Color by sleep state" are this page's
-  renderer's, so they are disabled in this mode.
+- **View options.** Both stress modes draw "Inspect bond graph" and "Color by sleep state"
+  with their own renderer (`stress-rubble` `render.rs`, set by `stress_set_view`):
+  - **Bond graph:** each intact bond is a line between its chunks' centres, drawn over the
+    geometry and gone once the bond breaks.
+  - **Sleep state:** the lab's colours. The coupled engine keeps every body awake, because
+    a sleeping body's support loads would leave the stress solve. So here "asleep" (blue)
+    means at rest, slower than 0.05 m/s and 0.05 rad/s; moving bodies are orange and
+    static ones grey.
 
 ### Breakable D6 joints (experimental)
 

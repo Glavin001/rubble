@@ -11,7 +11,7 @@ struct PunchParams_std140_0
 };
 
 @binding(0) @group(0) var<uniform> params_0 : PunchParams_std140_0;
-@binding(12) @group(0) var<storage, read> route_0 : array<u32>;
+@binding(11) @group(0) var<storage, read_write> fast_0 : array<vec4<f32>>;
 
 @binding(10) @group(0) var<storage, read_write> status_0 : array<u32>;
 
@@ -87,8 +87,6 @@ struct ChunkStatic_std430_0
 @binding(2) @group(0) var<storage, read> chunks_0 : array<ChunkStatic_std430_0>;
 
 @binding(3) @group(0) var<storage, read> state_0 : array<vec4<f32>>;
-
-@binding(11) @group(0) var<storage, read_write> fast_0 : array<vec4<f32>>;
 
 @binding(6) @group(0) var<storage, read> impactors_0 : array<vec4<f32>>;
 
@@ -174,6 +172,8 @@ struct MaterialTable_std140_0
 };
 
 @binding(9) @group(0) var<uniform> materials_0 : MaterialTable_std140_0;
+@binding(12) @group(0) var<storage, read> route_0 : array<u32>;
+
 var<workgroup> g_group_uniform_0 : u32;
 
 fn group_uniform_0( value_0 : u32,  thread_0 : u32) -> u32
@@ -356,7 +356,7 @@ fn punch_islands(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     {
         return;
     }
-    var _S8 : u32 = group_uniform_0(route_0[i32(0)], t_1);
+    var _S8 : u32 = group_uniform_0((bitcast<u32>((fast_0[i32(0)].y))), t_1);
     if(_S8 == u32(0))
     {
         if(t_1 == u32(0))
@@ -1266,7 +1266,7 @@ fn punch_fast(@builtin(local_invocation_id) thread_2 : vec3<u32>)
     }
     if(t_2 == u32(0))
     {
-        fast_0[i32(0)] = vec4<f32>((bitcast<f32>((min(carry_0, u32(128))))), 0.0f, 0.0f, 0.0f);
+        fast_0[i32(0)] = vec4<f32>((bitcast<f32>((min(carry_0, u32(128))))), (bitcast<f32>((route_0[i32(0)]))), 0.0f, 0.0f);
     }
     return;
 }

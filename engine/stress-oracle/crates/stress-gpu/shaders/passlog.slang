@@ -55,32 +55,47 @@ groupshared uint g_at;
 groupshared uint g_size;
 groupshared uint g_children;
 
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void pass_log(uint3 thread: SV_GroupThreadID)
+// The pass's entry as the control words give it.
+struct LogEntry
 {
-    uint tid = thread.x;
-    // Uniform values for the exits and loops: barriers follow.
-    uint n = group_uniform(control[CTL_PARENTS], tid);
-    if (n == 0)
-        return;
-    uint total = control[CTL_TOTAL];
-    bool aborted = control[CTL_ABORT] != 0;
-    uint first_body = control[CTL_FIRST_BODY];
-    uint first_collider = control[CTL_FIRST_COLLIDER];
-    uint nb = aborted ? 0u : control[CTL_BODIES_AFTER] - first_body;
-    uint nc = aborted ? 0u : control[CTL_COLLIDERS_AFTER] - first_collider;
+    uint n;
+    uint total;
+    bool aborted;
+    uint first_body;
+    uint first_collider;
+    uint nb;
+    uint nc;
+};
+
+LogEntry log_entry(uint n)
+{
+    LogEntry e;
+    e.n = n;
+    e.total = control[CTL_TOTAL];
+    e.aborted = control[CTL_ABORT] != 0;
+    e.first_body = control[CTL_FIRST_BODY];
+    e.first_collider = control[CTL_FIRST_COLLIDER];
+    e.nb = e.aborted ? 0u : control[CTL_BODIES_AFTER] - e.first_body;
+    e.nc = e.aborted ? 0u : control[CTL_COLLIDERS_AFTER] - e.first_collider;
+    return e;
+}
+
+// Thread 0: the entry's place and size (0: it does not fit, marked when `mark`), its
+// children, into the group's shared words; then every thread has them.
+void log_place(LogEntry e, uint tid, bool mark)
+{
     if (tid == 0)
     {
         uint c = 0;
-        for (uint p = 0; p < n; p++)
+        for (uint p = 0; p < e.n; p++)
             c += parents[p].z;
-        uint size = HEADER + PARENT * n + CHILD_HEAD * c + total + 28 * nb + 16 * nc;
+        uint size = HEADER + PARENT * e.n + CHILD_HEAD * c + e.total + 28 * e.nb + 16 * e.nc;
         uint at = max(log[0], HEADER);
         g_children = c;
         if (at + size > params.log_words)
         {
-            log[2] = 1;
+            if (mark)
+                log[2] = 1;
             g_size = 0;
         }
         else
@@ -90,11 +105,108 @@ void pass_log(uint3 thread: SV_GroupThreadID)
         g_at = at;
     }
     GroupMemoryBarrierWithGroupSync();
+}
+
+// The new bodies and colliders, contiguous in child order (spawn.slang), after the members;
+// then the log's next free word and entry count.
+void log_engine(LogEntry e, uint at, uint size, uint c, uint tid)
+{
+    uint b = at + HEADER + PARENT * e.n + CHILD_HEAD * c + e.total;
+    for (uint j = tid; j < 7 * e.nb; j += 256)
+    {
+        float4 v = bodies[7 * e.first_body + j];
+        log[b + 4 * j] = asuint(v.x);
+        log[b + 4 * j + 1] = asuint(v.y);
+        log[b + 4 * j + 2] = asuint(v.z);
+        log[b + 4 * j + 3] = asuint(v.w);
+    }
+    uint k0 = b + 28 * e.nb;
+    for (uint j = tid; j < 4 * e.nc; j += 256)
+    {
+        float4 v = colliders[4 * e.first_collider + j];
+        log[k0 + 4 * j] = asuint(v.x);
+        log[k0 + 4 * j + 1] = asuint(v.y);
+        log[k0 + 4 * j + 2] = asuint(v.z);
+        log[k0 + 4 * j + 3] = asuint(v.w);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (tid == 0)
+    {
+        log[0] = at + size;
+        log[1] = log[1] + 1;
+    }
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void pass_log(uint3 thread: SV_GroupThreadID)
+{
+    uint tid = thread.x;
+    // Uniform values for the exits and loops: barriers follow.
+    uint n = group_uniform(control[CTL_PARENTS], tid);
+    if (n == 0)
+        return;
+    LogEntry e = log_entry(n);
+    log_place(e, tid, true);
     uint at = g_at;
     uint size = group_uniform(g_size, tid);
     uint c = g_children;
     if (size == 0)
         return;
+    log_head(e, at, size, c, tid);
+    log_engine(e, at, size, c, tid);
+}
+
+// `pass_log` in two dispatches, for a device that binds fewer storage buffers per stage
+// than it uses (WebGPU's 10): the header, parents, children and members; then the bodies,
+// colliders and the log's counts (the entry placed again, the same way: the first leaves
+// the log's next free word as it found it).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void pass_log_head(uint3 thread: SV_GroupThreadID)
+{
+    uint tid = thread.x;
+    uint n = group_uniform(control[CTL_PARENTS], tid);
+    if (n == 0)
+        return;
+    LogEntry e = log_entry(n);
+    log_place(e, tid, true);
+    uint at = g_at;
+    uint size = group_uniform(g_size, tid);
+    uint c = g_children;
+    if (size == 0)
+        return;
+    log_head(e, at, size, c, tid);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void pass_log_tail(uint3 thread: SV_GroupThreadID)
+{
+    uint tid = thread.x;
+    uint n = group_uniform(control[CTL_PARENTS], tid);
+    if (n == 0)
+        return;
+    LogEntry e = log_entry(n);
+    log_place(e, tid, false);
+    uint at = g_at;
+    uint size = group_uniform(g_size, tid);
+    uint c = g_children;
+    if (size == 0)
+        return;
+    log_engine(e, at, size, c, tid);
+}
+
+// The header, the parents, the children's heads and the members.
+void log_head(LogEntry e, uint at, uint size, uint c, uint tid)
+{
+    uint n = e.n;
+    uint total = e.total;
+    bool aborted = e.aborted;
+    uint first_body = e.first_body;
+    uint first_collider = e.first_collider;
+    uint nb = e.nb;
+    uint nc = e.nc;
     // The header, the parents and the children's heads (one thread: a fixed order).
     if (tid == 0)
     {
@@ -147,8 +259,7 @@ void pass_log(uint3 thread: SV_GroupThreadID)
             }
         }
     }
-    // The members, already in parent then child order (split.slang), and the new bodies
-    // and colliders, contiguous in child order (spawn.slang).
+    // The members, already in parent then child order (split.slang).
     uint m = at + HEADER + PARENT * n + CHILD_HEAD * c;
     for (uint j = tid; j < total; j += 256)
     {
@@ -158,29 +269,5 @@ void pass_log(uint3 thread: SV_GroupThreadID)
             p++;
         uint first = asuint(old_islands[ISLAND_WORDS * parents[p].x]).x;
         log[m + j] = asuint(old_chunks[CHUNK_WORDS * (first + work[total + j]) + 8]).w;
-    }
-    uint b = m + total;
-    for (uint j = tid; j < 7 * nb; j += 256)
-    {
-        float4 v = bodies[7 * first_body + j];
-        log[b + 4 * j] = asuint(v.x);
-        log[b + 4 * j + 1] = asuint(v.y);
-        log[b + 4 * j + 2] = asuint(v.z);
-        log[b + 4 * j + 3] = asuint(v.w);
-    }
-    uint k0 = b + 28 * nb;
-    for (uint j = tid; j < 4 * nc; j += 256)
-    {
-        float4 v = colliders[4 * first_collider + j];
-        log[k0 + 4 * j] = asuint(v.x);
-        log[k0 + 4 * j + 1] = asuint(v.y);
-        log[k0 + 4 * j + 2] = asuint(v.z);
-        log[k0 + 4 * j + 3] = asuint(v.w);
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (tid == 0)
-    {
-        log[0] = at + size;
-        log[1] = log[1] + 1;
     }
 }

@@ -177,7 +177,9 @@ impl ResidentQs {
             pulse_count_base,
             pulse_cap: cap,
             status_base,
-            impact_peak: std::env::var("STRESS_QS_IMPACT_PEAK").is_ok_and(|v| v == "1") as u32,
+            // `STRESS_QS_IMPACT_PEAK=1`, and `Profile::Threshold` (its rule compares each
+            // impact's Hertz peak force with the bonds' capacity, not its frame mean).
+            impact_peak: (std::env::var("STRESS_QS_IMPACT_PEAK").is_ok_and(|v| v == "1") || m.config.contact_threshold) as u32,
             pad: [0; 2],
         };
         self.ctab = gpu.storage("resident ctab", &t);

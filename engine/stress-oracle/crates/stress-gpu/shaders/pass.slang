@@ -10,7 +10,8 @@
 //                  words (common.slang `CTL_*`) from the GPU's counters; the split kernels'
 //                  indirect dispatch arguments
 //   pass_snapshot  one group per parent: its chunk and bond ranges copied as they are (the
-//                  layout reads them while it rewrites the live tables)
+//                  layout reads them while it rewrites the live tables); as three
+//                  dispatches (`pass_snapshot_*`) where a stage binds at most 10 buffers
 //   pass_finish    one thread: after the layout, the counters follow (live islands, engine
 //                  bodies and colliders, the next cluster id) and the cascade's dispatch
 //                  arguments over the live islands
@@ -172,25 +173,26 @@ void pass_whole(uint3 id: SV_DispatchThreadID)
         old_copy[k] = island_copy[k];
 }
 
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void pass_snapshot(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+// `pass_snapshot`'s copies, by table: chunk statics and states, bond statics and records,
+// the resident tables' chunk entries.
+void snapshot_chunks(uint4 r, uint t)
 {
-    uint p = group.x;
-    if (p >= control[CTL_PARENTS])
-        return;
-    uint4 r = island_range(parents[p].x);
-    uint t = thread.x;
     for (uint k = params.chunk_words * r.x + t; k < params.chunk_words * r.y; k += 256)
         old_chunks[k] = chunks[k];
     for (uint k = 4 * r.x + t; k < 4 * r.y; k += 256)
         old_state[k] = state[k];
+}
+
+void snapshot_bonds(uint4 r, uint t)
+{
     for (uint k = params.bond_words * r.z + t; k < params.bond_words * r.w; k += 256)
         old_bonds[k] = bonds[k];
     for (uint k = params.dyn_words * r.z + t; k < params.dyn_words * r.w; k += 256)
         old_dyn[k] = bond_dyn[k];
-    if (params.resident == 0)
-        return;
+}
+
+void snapshot_ctab(uint4 r, uint t)
+{
     for (uint c = r.x + t; c < r.y; c += 256)
     {
         old_ctab[params.props_base + c] = ctab[params.props_base + c];
@@ -200,6 +202,51 @@ void pass_snapshot(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     }
     for (uint k = 3 * params.pulse_cap * r.x + t; k < 3 * params.pulse_cap * r.y; k += 256)
         old_ctab[params.pulse_base + k] = ctab[params.pulse_base + k];
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void pass_snapshot(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint p = group.x;
+    if (p >= control[CTL_PARENTS])
+        return;
+    uint4 r = island_range(parents[p].x);
+    uint t = thread.x;
+    snapshot_chunks(r, t);
+    snapshot_bonds(r, t);
+    if (params.resident == 0)
+        return;
+    snapshot_ctab(r, t);
+}
+
+// `pass_snapshot` in three dispatches, for a device that binds fewer storage buffers per
+// stage than it uses (WebGPU's 10): the same copies, a table group each.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void pass_snapshot_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    if (group.x >= control[CTL_PARENTS])
+        return;
+    snapshot_chunks(island_range(parents[group.x].x), thread.x);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void pass_snapshot_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    if (group.x >= control[CTL_PARENTS])
+        return;
+    snapshot_bonds(island_range(parents[group.x].x), thread.x);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void pass_snapshot_ctab(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    if (group.x >= control[CTL_PARENTS] || params.resident == 0)
+        return;
+    snapshot_ctab(island_range(parents[group.x].x), thread.x);
 }
 
 [shader("compute")]

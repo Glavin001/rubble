@@ -79,6 +79,10 @@ thread_local! {
     static MASS_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
     static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The view toggles (`stress_set_view`): bond graph, colour by body state.
+    static VIEW: Cell<(bool, bool)> = const { Cell::new((false, false)) };
+    /// The capability profile of the next `stress_load` (`stress_set_profile`).
+    static PROFILE: Cell<Profile> = const { Cell::new(Profile::BlastParity) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
@@ -192,6 +196,25 @@ pub fn stress_set_bond_strength_scale(scale: f64) {
     }
 }
 
+/// The capability profile of the next `stress_load`: `blast_parity` (the default) or
+/// `threshold` (the v0 stress mode: bonds break on contact force alone, no solve).
+#[wasm_bindgen]
+pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
+    let p = Profile::parse(&name).ok_or_else(|| JsValue::from_str(&format!("no profile {name}")))?;
+    PROFILE.set(p);
+    Ok(())
+}
+
+/// The lab's view toggles, from the next frame drawn: the bond graph (each intact bond a
+/// line between its chunks' centres) and colour by body state (moving orange, at rest
+/// blue, static grey: the coupled engine keeps bodies awake, so "at rest" means slow).
+#[wasm_bindgen]
+pub fn stress_set_view(bond_graph: bool, sleep_colors: bool) {
+    // Only noted: a frame may hold the world across a GPU wait (JSPI) while the page calls
+    // this; the frame applies it before it draws.
+    VIEW.set((bond_graph, sleep_colors));
+}
+
 /// Orbit the camera by a pointer drag (CSS pixels), as the lab's other modes.
 #[wasm_bindgen]
 pub fn stress_drag(dx: f64, dy: f64) {
@@ -298,7 +321,7 @@ fn load(level: u8) -> Result<(), String> {
     let mut scene = scene.with_derived();
     // The GPU's methods, as the native runs (`STRESS_METHODS=established`).
     scene.sim.methods = stress_ref::scene::Methods::established();
-    let profile = Profile::BlastParity;
+    let profile = PROFILE.get();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     DEVICE.with_borrow(|d| {
@@ -313,7 +336,8 @@ fn load(level: u8) -> Result<(), String> {
         world.apply_profile(profile);
         let (mirror, _) = world.view_state(gpu);
         // Meshes for every chunk and for the shots to come.
-        let renderer = Renderer::for_target(gpu, &mirror, &shot_meshes(&world), d.config.width, d.config.height, d.view_format);
+        let mut renderer = Renderer::for_target(gpu, &mirror, &shot_meshes(&world), d.config.width, d.config.height, d.view_format);
+        (renderer.bond_graph, renderer.sleep_colors) = VIEW.get();
         WORLD.with_borrow_mut(|w| *w = Some(Loaded { world, renderer, behind: 0.0, view: None }));
         Ok(())
     })
@@ -344,6 +368,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                 d.surface.configure(&gpu.device, &d.config);
                 let (mirror, _) = l.world.view_state(gpu);
                 l.renderer = Renderer::for_target(gpu, &mirror, &shot_meshes(&l.world), width, height, d.view_format);
+                (l.renderer.bond_graph, l.renderer.sleep_colors) = VIEW.get();
             }
             let dt = l.world.scene.sim.frame_dt;
             let mut stepped = 0;
@@ -390,6 +415,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             };
             let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(d.view_format), ..Default::default() });
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            (l.renderer.bond_graph, l.renderer.sleep_colors) = VIEW.get();
             l.renderer.draw(gpu, &mut encoder, &view, mirror, imps, view_proj, eye);
             gpu.queue.submit([encoder.finish()]);
             gpu.queue.present(texture);
@@ -415,6 +441,9 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),
                         "lastShot": imps.last().map(|i| serde_json::json!({"position": i.pose.position.to_array(), "velocity": i.velocity.to_array()})),
                         "frameHz": 1.0 / dt,
+                        "profile": PROFILE.get().name(),
+                        // Rigid bodies the structures are now (each split's children).
+                        "bodies": mirror.clusters.len(),
                     })
                     .to_string(),
                 );

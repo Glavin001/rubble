@@ -62,7 +62,8 @@ struct MaterialTable
 [[vk::binding(9, 0)]] ConstantBuffer<MaterialTable> materials;
 // cascade.slang status: [1] the pass that disconnected (0: none), [16 + i] island i's bits.
 [[vk::binding(10, 0)]] RWStructuredBuffer<uint> status;
-// The fast free islands (`punch_fast`): [0].x their count (bits); per island three float4:
+// The fast free islands (`punch_fast`): [0].x their count (bits), [0].y the routing flag
+// (bits, `route[0]`); per island three float4:
 // (centre, bounding radius), (velocity, island as bits), (face radius, mass, modulus, -).
 [[vk::binding(11, 0)]] RWStructuredBuffer<float4> fast;
 // routing.slang's flag of this frame: [0] 1 when an impactor may reach an island (a
@@ -101,7 +102,7 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     // No impactor near anything this frame (the routing check, just before): no punch; an
     // earlier pass's split bits are left to the split pass (its parents are laid out).
     // (Exits, loop bounds and stops as uniform values below: barriers follow.)
-    if (group_uniform(route[0], t) == 0)
+    if (group_uniform(asuint(fast[0].y), t) == 0)
     {
         if (t == 0)
             status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;
@@ -458,6 +459,7 @@ void punch_fast(uint3 thread: SV_GroupThreadID)
         GroupMemoryBarrierWithGroupSync();
         carry += total;
     }
+    // y: the routing check's flag, for `punch_islands` (so it binds one buffer fewer: 10).
     if (t == 0)
-        fast[0] = float4(asfloat(min(carry, MAX_FAST)), 0.0, 0.0, 0.0);
+        fast[0] = float4(asfloat(min(carry, MAX_FAST)), asfloat(route[0]), 0.0, 0.0);
 }

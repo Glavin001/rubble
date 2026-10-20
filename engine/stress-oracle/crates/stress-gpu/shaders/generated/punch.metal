@@ -234,18 +234,18 @@ struct MaterialTable_0
 struct KernelContext_0
 {
     PunchParams_0 constant* params_0;
-    uint device* route_0;
+    packed_float4 device* fast_0;
     uint device* status_0;
     Island_natural_0 device* islands_0;
     packed_float4 device* ctab_0;
     EngineBody_natural_0 device* bodies_0;
     ChunkStatic_natural_0 device* chunks_0;
     packed_float4 device* state_0;
-    packed_float4 device* fast_0;
     packed_float4 device* impactors_0;
     BondStatic_natural_0 device* bond_static_0;
     BondDyn_natural_0 device* bond_dyn_0;
     MaterialTable_0 constant* materials_0;
+    uint device* route_0;
     array<float3, int(256)> threadgroup* g_lo_0;
     array<float3, int(256)> threadgroup* g_hi_0;
     array<float, int(256)> threadgroup* g_a_0;
@@ -267,7 +267,7 @@ struct BondDyn_0
     uint4 events_0;
 };
 
-[[kernel]] void punch_islands(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], PunchParams_0 constant* params_1 [[buffer(0)]], uint device* route_1 [[buffer(12)]], uint device* status_1 [[buffer(10)]], Island_natural_0 device* islands_1 [[buffer(1)]], packed_float4 device* ctab_1 [[buffer(4)]], EngineBody_natural_0 device* bodies_1 [[buffer(5)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(2)]], packed_float4 device* state_1 [[buffer(3)]], packed_float4 device* fast_1 [[buffer(11)]], packed_float4 device* impactors_1 [[buffer(6)]], BondStatic_natural_0 device* bond_static_1 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(8)]], MaterialTable_0 constant* materials_1 [[buffer(9)]])
+[[kernel]] void punch_islands(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], PunchParams_0 constant* params_1 [[buffer(0)]], packed_float4 device* fast_1 [[buffer(11)]], uint device* status_1 [[buffer(10)]], Island_natural_0 device* islands_1 [[buffer(1)]], packed_float4 device* ctab_1 [[buffer(4)]], EngineBody_natural_0 device* bodies_1 [[buffer(5)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(2)]], packed_float4 device* state_1 [[buffer(3)]], packed_float4 device* impactors_1 [[buffer(6)]], BondStatic_natural_0 device* bond_static_1 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(8)]], MaterialTable_0 constant* materials_1 [[buffer(9)]], uint device* route_1 [[buffer(12)]])
 {
     uint ax_0;
     uint hit_k_0;
@@ -279,18 +279,18 @@ struct BondDyn_0
     uint bi_0;
     thread KernelContext_0 kernelContext_0;
     (&kernelContext_0)->params_0 = params_1;
-    (&kernelContext_0)->route_0 = route_1;
+    (&kernelContext_0)->fast_0 = fast_1;
     (&kernelContext_0)->status_0 = status_1;
     (&kernelContext_0)->islands_0 = islands_1;
     (&kernelContext_0)->ctab_0 = ctab_1;
     (&kernelContext_0)->bodies_0 = bodies_1;
     (&kernelContext_0)->chunks_0 = chunks_1;
     (&kernelContext_0)->state_0 = state_1;
-    (&kernelContext_0)->fast_0 = fast_1;
     (&kernelContext_0)->impactors_0 = impactors_1;
     (&kernelContext_0)->bond_static_0 = bond_static_1;
     (&kernelContext_0)->bond_dyn_0 = bond_dyn_1;
     (&kernelContext_0)->materials_0 = materials_1;
+    (&kernelContext_0)->route_0 = route_1;
     threadgroup array<float3, int(256)> g_lo_1;
     (&kernelContext_0)->g_lo_0 = &g_lo_1;
     threadgroup array<float3, int(256)> g_hi_1;
@@ -315,7 +315,7 @@ struct BondDyn_0
     {
         return;
     }
-    if((group_uniform_0((&kernelContext_0)->route_0[int(0)], t_1)) == 0U)
+    if((group_uniform_0((as_type<uint>(((float4(*((&kernelContext_0)->fast_0+int(0))) ).y))), t_1)) == 0U)
     {
         if(t_1 == 0U)
         {
@@ -1015,23 +1015,23 @@ struct Island_0
     float4 momentum_err_0;
 };
 
-[[kernel]] void punch_fast(uint3 thread_2 [[thread_position_in_threadgroup]], PunchParams_0 constant* params_2 [[buffer(0)]], uint device* route_2 [[buffer(12)]], uint device* status_2 [[buffer(10)]], Island_natural_0 device* islands_2 [[buffer(1)]], packed_float4 device* ctab_2 [[buffer(4)]], EngineBody_natural_0 device* bodies_2 [[buffer(5)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(2)]], packed_float4 device* state_2 [[buffer(3)]], packed_float4 device* fast_2 [[buffer(11)]], packed_float4 device* impactors_2 [[buffer(6)]], BondStatic_natural_0 device* bond_static_2 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(8)]], MaterialTable_0 constant* materials_2 [[buffer(9)]])
+[[kernel]] void punch_fast(uint3 thread_2 [[thread_position_in_threadgroup]], PunchParams_0 constant* params_2 [[buffer(0)]], packed_float4 device* fast_2 [[buffer(11)]], uint device* status_2 [[buffer(10)]], Island_natural_0 device* islands_2 [[buffer(1)]], packed_float4 device* ctab_2 [[buffer(4)]], EngineBody_natural_0 device* bodies_2 [[buffer(5)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(2)]], packed_float4 device* state_2 [[buffer(3)]], packed_float4 device* impactors_2 [[buffer(6)]], BondStatic_natural_0 device* bond_static_2 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(8)]], MaterialTable_0 constant* materials_2 [[buffer(9)]], uint device* route_2 [[buffer(12)]])
 {
     uint add_0;
     thread KernelContext_0 kernelContext_1;
     (&kernelContext_1)->params_0 = params_2;
-    (&kernelContext_1)->route_0 = route_2;
+    (&kernelContext_1)->fast_0 = fast_2;
     (&kernelContext_1)->status_0 = status_2;
     (&kernelContext_1)->islands_0 = islands_2;
     (&kernelContext_1)->ctab_0 = ctab_2;
     (&kernelContext_1)->bodies_0 = bodies_2;
     (&kernelContext_1)->chunks_0 = chunks_2;
     (&kernelContext_1)->state_0 = state_2;
-    (&kernelContext_1)->fast_0 = fast_2;
     (&kernelContext_1)->impactors_0 = impactors_2;
     (&kernelContext_1)->bond_static_0 = bond_static_2;
     (&kernelContext_1)->bond_dyn_0 = bond_dyn_2;
     (&kernelContext_1)->materials_0 = materials_2;
+    (&kernelContext_1)->route_0 = route_2;
     threadgroup array<float3, int(256)> g_lo_2;
     (&kernelContext_1)->g_lo_0 = &g_lo_2;
     threadgroup array<float3, int(256)> g_hi_2;
@@ -1311,7 +1311,7 @@ struct Island_0
     }
     if(t_2 == 0U)
     {
-        *((&kernelContext_1)->fast_0+int(0)) = packed_float4(float4((as_type<float>((min(carry_0, 128U)))), 0.0f, 0.0f, 0.0f)) ;
+        *((&kernelContext_1)->fast_0+int(0)) = packed_float4(float4((as_type<float>((min(carry_0, 128U)))), (as_type<float>(((&kernelContext_1)->route_0[int(0)]))), 0.0f, 0.0f)) ;
     }
     return;
 }
