@@ -27,6 +27,20 @@ let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=nul
 // same, with the v0 rule: a bond breaks on contact force alone, no solve), or 'learned'
 // (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays unbonded).
 const bondMode=()=>$('bond-mode').value;
+// The controls panel collapses for a full view (remembered per viewer; phones start
+// collapsed). Collapsed, a quick button mirrors Start / Pause.
+const PANEL_KEY='fracture-lab.panel';
+function setPanel(open){
+ document.body.classList.toggle('collapsed',!open);const t=$('panel-toggle');
+ t.setAttribute('aria-expanded',String(open));t.textContent=open?'✕':'☰ Controls';t.title=open?'Hide controls (full view)':'Show controls';
+ try{localStorage.setItem(PANEL_KEY,open?'1':'0')}catch{}
+}
+{let stored=null;try{stored=localStorage.getItem(PANEL_KEY)}catch{}
+ setPanel(stored===null?!matchMedia('(max-width: 720px)').matches:stored==='1')}
+$('panel-toggle').onclick=()=>setPanel(document.body.classList.contains('collapsed'));
+{const quick=$('quick-release'),release=$('release'),sync=()=>{quick.textContent=release.textContent;quick.disabled=release.disabled};
+ new MutationObserver(sync).observe(release,{childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:['disabled']});sync();quick.onclick=()=>release.click()}
+
 // The stress solver's modes, and the capability profile each runs (stress-web).
 const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;

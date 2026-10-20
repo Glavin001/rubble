@@ -1,11 +1,37 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Rubble · Fracture lab</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Rubble · Fracture lab</title>
 <style>
 :root{color-scheme:dark;font:14px/1.5 system-ui,sans-serif;color:#e6eef2;background:#091019}*{box-sizing:border-box}body{margin:0}canvas{position:absolute;left:360px;width:calc(100% - 360px);height:100dvh;display:block;touch-action:none;cursor:crosshair}aside{position:absolute;top:28px;left:28px;width:324px;max-height:calc(100dvh - 56px);overflow:auto;padding:24px;background:#111d29ed;border:1px solid #2b3c4a;border-radius:16px;box-shadow:0 12px 60px #0004;backdrop-filter:blur(16px)}.eyebrow{font:11px ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase;color:#83a1b5}.brand{display:flex;align-items:center;gap:9px}.mark{width:17px;height:17px;background:#8be0c3;clip-path:polygon(0 0,100% 10%,80% 100%,5% 80%)}h1{font-size:29px;letter-spacing:-1px;line-height:1.15;margin:18px 0 10px}p{color:#a5b8c7;margin:10px 0 18px}.badge{position:absolute;right:28px;top:28px;border:1px solid #294a48;border-radius:30px;padding:7px 13px;background:#132b29dd;color:#9aebce;font:11px ui-monospace,monospace}.file{background:#0c1620;border:1px dashed #425a6c;border-radius:9px;padding:14px;margin:20px 0 16px;display:block;cursor:pointer}.file strong{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file span{color:#819bab;font-size:12px}input[type=file]{position:absolute;width:1px;height:1px;opacity:0}select,button{font:inherit;border-radius:7px;border:1px solid #405463;padding:9px 12px;background:#20313f;color:#ecf4f8}select{width:100%;margin:6px 0 16px}button{cursor:pointer}button:hover{filter:brightness(1.15)}button:disabled{opacity:.45;cursor:wait}button.primary{background:#9be8cc;color:#10241f;border-color:#9be8cc;flex:1;font-weight:650}.actions{display:flex;gap:8px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:22px 0}.stats strong{display:block;font:22px ui-monospace,monospace;color:#f0f5f8}.stats span{font-size:11px;color:#8aa1b2}.check{display:flex;align-items:center;gap:8px;margin:14px 0}input{accent-color:#9be8cc}.note{font-size:11px;line-height:1.6;color:#8fa6b7;margin:16px 0 0;border-top:1px solid #2b3b48;padding-top:14px}.text-button{border:0;background:none;padding:4px 0;color:#9be8cc;font-size:12px;text-decoration:underline}#status{position:absolute;left:380px;bottom:24px;max-width:calc(100% - 420px);color:#a4b9c9;background:#101b27e6;border-radius:7px;padding:9px 13px;font:12px ui-monospace,monospace;white-space:pre-wrap}footer{position:absolute;right:28px;bottom:28px;color:#7991a3;font:11px ui-monospace,monospace}.error{color:#ffb4a3!important}body.drop canvas{outline:5px solid #9be8cc;outline-offset:-5px}@media(max-width:720px){canvas{left:0;width:100%}aside{left:12px;top:12px;width:270px;max-height:50dvh;padding:18px}.badge{display:none}h1{font-size:23px}.stats{margin:14px 0}#status{left:12px;bottom:12px;max-width:calc(100% - 24px)}footer{display:none}.note{font-size:10px}}
 .performance{border-block:1px solid #2b3b48;padding:14px 0;margin-top:18px}.performance .stats{margin:0}.performance small{display:block;color:#8aa1b2;font:10px/1.6 ui-monospace,monospace;margin-top:4px}.performance p{font-size:11px;margin:10px 0 0;color:#8fa6b7}.performance strong{font-variant-numeric:tabular-nums}
-canvas[hidden]{display:none}</style></head><body>
+canvas[hidden]{display:none}
+/* Controls panel: collapsible (#panel-toggle); collapsed, the view takes the whole window. */
+.panel-toggle{position:absolute;z-index:3;top:38px;left:304px;width:36px;height:36px;padding:0;border-radius:9px;font-size:16px;line-height:1;background:#20313fcc}
+body.collapsed aside{display:none}
+body.collapsed canvas{left:0;width:100%}
+body.collapsed .panel-toggle{top:max(16px,env(safe-area-inset-top));left:max(16px,env(safe-area-inset-left));right:auto;width:auto;height:40px;padding:0 14px;font-size:14px}
+body.collapsed #status{left:max(16px,env(safe-area-inset-left));max-width:calc(100% - 32px)}
+.quick{display:none;position:absolute;z-index:3;top:max(16px,env(safe-area-inset-top));right:max(16px,env(safe-area-inset-right));height:40px;padding:0 16px;flex:none}
+body.collapsed .badge{display:none}
+body.collapsed .quick{display:block}
+aside{overscroll-behavior:contain}
+@media(max-width:720px){
+aside{left:max(8px,env(safe-area-inset-left));right:max(8px,env(safe-area-inset-right));top:max(8px,env(safe-area-inset-top));width:auto;max-height:min(72dvh,calc(100dvh - 120px));padding:16px 16px 20px;border-radius:14px}
+aside>p{margin:6px 0 12px}
+h1{font-size:21px;margin:12px 0 6px}
+.panel-toggle{top:calc(max(8px,env(safe-area-inset-top)) + 10px);left:auto;right:calc(max(8px,env(safe-area-inset-right)) + 10px);width:40px;height:40px}
+select,button,input{font-size:16px}
+body.collapsed .panel-toggle{left:max(16px,env(safe-area-inset-left));right:auto;top:max(16px,env(safe-area-inset-top))}
+select{padding:10px 12px}
+.check{margin:12px 0;flex-wrap:wrap}
+.check select{margin:4px 0 0}
+.file{margin:12px 0}
+.stats strong{font-size:18px}
+#status{bottom:max(12px,env(safe-area-inset-bottom));font-size:11px;max-height:5.5em;overflow:auto}
+}
+</style></head><body>
 <canvas id="stress-view" hidden aria-label="The stress solver mode's view. Click to shoot a sphere, drag to orbit and scroll to zoom."></canvas><canvas id="view" aria-label="Interactive view of a pre-fractured building. Click to shoot a sphere, drag to orbit and scroll to zoom."></canvas>
-<aside><div class="brand"><span class="mark"></span><span class="eyebrow">Rubble / experiments</span></div><h1>Fracture lab</h1><p>Bake once in Shardwright.<br>Bring the pieces to life in WebGPU.</p>
+<button id="panel-toggle" class="panel-toggle" aria-controls="panel" aria-expanded="true" title="Hide controls (full view)">✕</button><button id="quick-release" class="quick primary" disabled>Start simulation</button>
+<aside id="panel"><div class="brand"><span class="mark"></span><span class="eyebrow">Rubble / experiments</span></div><h1>Fracture lab</h1><p>Bake once in Shardwright.<br>Bring the pieces to life in WebGPU.</p>
 <label class="eyebrow" for="scene">Scene</label><select id="scene"><option value="house" selected>Veneer house · 131 parts</option></select>
 <label class="file"><strong id="filename">Loading house…</strong><span>Choose or drop a fractured .glb</span><input id="file" type="file" accept=".glb" aria-label="Open fractured GLB"></label>
 <label class="eyebrow" for="level">Fracture level</label><select id="level" disabled></select>
