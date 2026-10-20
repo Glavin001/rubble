@@ -228,7 +228,7 @@ pub mod shaders {
     pub const PUNCH: ShaderSet = shader_set!("punch", [("punch_islands", (256, 1, 1)), ("punch_fast", (1024, 1, 1))]);
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
-    pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1))]);
+    pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1)), ("threshold_predict", (256, 1, 1))]);
 
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[

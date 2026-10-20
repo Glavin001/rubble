@@ -20,6 +20,17 @@
     the desired settings) rather than altering data at load time.
   Measuring a lossy option to report its effect is fine; adopting it needs the
   user's decision.
+- Destruction is forward-only. Fracture is decided before or within a step and
+  never by re-simulating one: no save-and-restore of the rigid engine and no
+  "internal correction" pass that undoes a step and solves it again (PhysX's
+  `internalCorrectionLimit`). A strike's breaks are predicted at the end of the
+  frame before it and split before the engine steps. This is the routing check
+  plus a predictor such as `threshold_predict` or the GPU punch
+  (`engine/stress-oracle/findings/rewind-scaling.md` design C, and the charter's
+  M5 routing design).
+  - The correction pass (`GpuWorld::correct_frame`) exists only as a measurement,
+    behind `STRESS_CORRECTION_LIMIT=1`, off by default.
+  - Do not enable it in a profile or in production code.
 
 ## Cursor Cloud specific instructions
 

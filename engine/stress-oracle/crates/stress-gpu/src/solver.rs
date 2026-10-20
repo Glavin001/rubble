@@ -339,7 +339,7 @@ struct Kernels {
 }
 
 /// The bindings of `threshold.slang` (`Profile::Threshold`).
-const THRESHOLD_BINDINGS: [Binding; 7] = [
+pub(crate) const THRESHOLD_BINDINGS: [Binding; 12] = [
     Binding::Uniform,   // params
     Binding::StorageRw, // islands
     Binding::Storage,   // bond statics
@@ -347,14 +347,24 @@ const THRESHOLD_BINDINGS: [Binding; 7] = [
     Binding::Storage,   // ctab (the frame's engine loads)
     Binding::Uniform,   // materials
     Binding::StorageRw, // cascade status
+    Binding::Storage,   // chunk statics (threshold_predict)
+    Binding::Storage,   // chunk states (threshold_predict)
+    Binding::Storage,   // engine bodies (threshold_predict)
+    Binding::Storage,   // impactors (threshold_predict)
+    Binding::Storage,   // punch.slang `punch_fast`'s list (threshold_predict)
 ];
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-struct ThresholdParams {
-    island_count: u32,
-    eload_base: u32,
-    pad: [u32; 2],
+pub(crate) struct ThresholdParams {
+    pub(crate) island_count: u32,
+    pub(crate) eload_base: u32,
+    pub(crate) pending: u32,
+    pub(crate) impactor_count: u32,
+    pub(crate) engine_base: u32,
+    pub(crate) pad: u32,
+    pub(crate) dt: f32,
+    pub(crate) speed: f32,
 }
 
 /// The bindings of every `world.slang` kernel.
@@ -633,6 +643,9 @@ pub struct GpuSolver {
     /// `SolverConfig::contact_threshold`: the frame's engine loads (the resident tables
     /// and their engine-load base), which the resident frame sets for `threshold_breaks`.
     pub threshold_load: Option<(wgpu::Buffer, u32)>,
+    /// `threshold.slang` `pending`: the next cascade only disconnects the islands whose
+    /// bonds broke and are not yet split (the correction's split at the frame's start).
+    pub threshold_pending: bool,
     threshold_kernel: Option<Kernel>,
     /// The frame's command encoder with the engine's work already in it (plan 5d): the next
     /// `resident_cascade_with` encodes after it and submits the frame once.
@@ -728,6 +741,7 @@ impl GpuSolver {
             island_args: None,
             punch_split: false,
             threshold_load: None,
+            threshold_pending: false,
             threshold_kernel: None,
             frame_encoder: None,
             tables_on_gpu: false,
@@ -2908,8 +2922,10 @@ impl GpuSolver {
         let threshold = match (&self.threshold_load, self.mirror.config.contact_threshold) {
             (Some((ctab, eload_base)), true) => {
                 let kernel = self.threshold_kernel.get_or_insert_with(|| gpu.compute(&shaders::THRESHOLD, "threshold_breaks", &THRESHOLD_BINDINGS));
-                let params = gpu.uniform("threshold params", &ThresholdParams { island_count: n_islands as u32, eload_base: *eload_base, pad: [0; 2] });
-                Some(gpu.bind(&kernel.group, &[&params, &self.buffers.islands, &self.buffers.bonds_static, &self.buffers.bond_dyn, ctab, &self.buffers.materials, &status]))
+                let params = gpu.uniform("threshold params", &ThresholdParams { island_count: n_islands as u32, eload_base: *eload_base, pending: self.threshold_pending as u32, ..Default::default() });
+                // threshold_predict's bindings, unused here (a whole-group layout binds them all).
+                let none = gpu.storage("threshold no predict input", &[[0f32; 4]; 8]);
+                Some(gpu.bind(&kernel.group, &[&params, &self.buffers.islands, &self.buffers.bonds_static, &self.buffers.bond_dyn, ctab, &self.buffers.materials, &status, &self.buffers.chunk_static, &self.buffers.state, &none, &none, &none]))
             }
             _ => None,
         };
@@ -3826,6 +3842,32 @@ impl GpuSolver {
     /// buffers, the counters from the host as they stand (live islands, the engine's bodies
     /// and colliders, the next cluster id), the log emptied. False when they cannot run
     /// (no capacity dispatch, no cascade tables yet).
+    /// The cascade's buffers (its island copy, status, gate, dispatch arguments), made now
+    /// when missing as `resident_cascade_with` makes them, so the first resident frame can
+    /// run its split passes (`prepare_frame_splits` needs them; a profile that predicts
+    /// strikes records its prediction from that frame on).
+    pub fn ensure_cascade_buffers(&mut self, gpu: &Gpu) {
+        let live = self.layout.islands.len();
+        let n_islands = if capacity_dispatch() { self.layout.island_cap.max(live) } else { live };
+        if capacity_dispatch() && self.island_args.is_none() {
+            self.island_args = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("island dispatch args"), size: 32, usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+        }
+        let generation = self.layout_generation;
+        if self.cascade_islands.is_none() {
+            let mut with_sentinel = self.layout.islands.clone();
+            with_sentinel.resize(n_islands + 1, Island::default());
+            self.cascade_islands = Some((generation, gpu.storage("cascade layout islands", &with_sentinel)));
+        }
+        if self.cascade_status.is_none() {
+            self.cascade_status = Some(gpu.storage("cascade status", &vec![0u32; crate::resident::CASCADE_ST_ISLANDS + n_islands + 1]));
+        }
+        if self.cascade_gate.is_none() {
+            let n_chunks = self.layout.chunks.len();
+            let buffer = gpu.storage("cascade gate", &vec![[0f32; 4]; 2 * n_chunks + n_islands.max(self.layout.island_cap) + 1]);
+            self.cascade_gate = Some(CascadeGate { generation, buffer, ids: self.mirror.clusters.iter().map(|c| c.id).collect(), ranges: self.layout.islands.iter().map(|i| i.range).collect(), chunks: self.layout.chunks.clone() });
+        }
+    }
+
     pub fn prepare_frame_splits(&mut self, gpu: &Gpu, ctab: &wgpu::Buffer, bodies: u32, colliders: u32) -> bool {
         if !capacity_dispatch() || self.cascade_islands.is_none() || self.cascade_status.is_none() || self.island_args.is_none() || self.cascade_gate.is_none() {
             return false;

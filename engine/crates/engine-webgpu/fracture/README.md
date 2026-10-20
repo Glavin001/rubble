@@ -179,7 +179,7 @@ level, camera and shot rule, so the three can be compared:
 | **None** (default) | Nothing: pieces start asleep and wake when hit | rubble (this page's WGSL host) |
 | **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
 | **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
-| **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`): a bond breaks when the contact force on either of its chunks this frame exceeds its tensile strength × area. That is each impact's Hertz peak force plus sustained contacts, with no gravity. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
+| **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
 **Learned impact mode.**
@@ -193,28 +193,43 @@ level, camera and shot rule, so the three can be compared:
 - Bindings are packed to 8 storage buffers so Chrome's per-stage limit is met.
 
 **Simple threshold mode (v0).**
-- A deliberately trivial bond rule. It proves the path any stress model shares: contacts in,
-  bonds broken, structures split into child bodies with their colliders re-parented,
-  rubble continuing.
-- `Profile::Threshold` (`stress-ref` `capability.rs`), kernel
-  `stress-gpu/shaders/threshold.slang`. It stands in the resident cascade for the static
-  solve and its damage commit, and writes what they would (bond records broken, island
-  disconnected), so the split pass runs unchanged. A learned model would take the same slot.
-- **Correction limit 1, as PhysX's native stage runs it.** Without a correction, rubble
-  solves the hit against the intact structure, so the ball bounces, and the bonds break only
-  after the step.
-  - The resident frame saves rubble's state first.
-  - When the step's contacts break bonds, the step is undone. The broken structures split
-    at the frame's start: each child takes its parent's starting motion.
-  - The step is then solved once more against the pieces, and that second solve's breaks
-    stand (`GpuWorld::correct_frame`, `corrected_frames`).
-  - Lab ball (native `fracture_glb`): 60 → 58.4 m/s through the wall, against 18 m/s under
-    `blast_parity`.
-- The **Bond strength** slider scales the threshold. One identical shot on the veneer
-  house breaks 54 bonds into 4 bodies at ×1/16, and 24 into 2 at ×16.
-- **In Chrome (M3 Max):**
-  - veneer house: 3 shots break 72 bonds into 7 bodies, 3.9 ms per frame;
-  - cuboid house with a ×8 ball: 100 bonds, 108 bodies, 60 frames/s.
+- A deliberately trivial bond rule, forward only. It proves the path any stress model
+  shares: contacts in, bonds broken, structures split into child bodies with their
+  colliders re-parented, rubble continuing. A learned model would take the same slot.
+- `Profile::Threshold` (`stress-ref` `capability.rs`); kernels in
+  `stress-gpu/shaders/threshold.slang`, with strike detection shared with the GPU punch
+  (`strike.slang`).
+- **Predicted strikes, before rubble steps (no correction pass, no re-simulation):**
+  - At the end of each resident frame, in its submission, `routing.slang`'s check flags a
+    projectile that reaches an island within the next frame.
+  - `threshold_predict` takes the strike's force: the impulse of an inelastic hit over the
+    Hertz contact time, from the closing speed, the masses and the moduli.
+  - It breaks every intact bond of the struck island whose tensile capacity
+    (strength × area × factor) is below the force reaching it. That force spreads from
+    where the projectile meets the island as a point load on a half-space does:
+    F·A / (2π d²).
+  - The GPU split pass then splits the island in the same submission, so rubble's next
+    step meets the pieces, not the intact wall.
+- **After each step:** a bond breaks when the contact force on either of its chunks exceeds
+  its tensile capacity (`threshold_breaks`, in place of the static solve). This covers
+  debris and settling.
+- Every frame after the first is resident: one submission and one read, no coupled or
+  host-orchestrated island frame. `GpuWorld::correct_frame` (PhysX's correction limit)
+  exists only behind `STRESS_CORRECTION_LIMIT=1`, a measurement, off by default; see
+  AGENTS.md.
+- **Exit speeds (native):**
+
+  | Shot | `blast_parity` | Threshold |
+  |---|---|---|
+  | Free-wall ram (reference 35.1 m/s) | 11.2 m/s | 33.3 m/s, 151 fragments |
+  | Cuboid house, lab ball 1400 kg at 60 m/s | 18 m/s | 56.4 m/s |
+
+  On the veneer house the lab ball meets a broken-off level-0 panel heavier than itself
+  and goes on at 18 m/s in both profiles, without bouncing.
+- **Frame time, native, cuboid house, frame 30:**
+  - threshold 4.2 ms: rubble 2.4, stress cascade 0.85, 408 bodies;
+  - `blast_parity` 5.8 ms: rubble 2.65, cascade 2.1, 219 bodies.
+- The **Bond strength** slider scales the capacities.
 - **Native:**
   - `STRESS_PROFILE=threshold cargo run --release -p stress-rubble --features view --example fracture_glb`;
   - test `stress-rubble/tests/threshold_split.rs`.

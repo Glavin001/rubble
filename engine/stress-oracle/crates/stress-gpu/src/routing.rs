@@ -158,6 +158,9 @@ const PUNCH_BINDINGS: [Binding; 13] = [
 pub struct Punch {
     kernel: Kernel,
     fast_kernel: Kernel,
+    /// threshold.slang `threshold_predict` (`Profile::Threshold`): every bond the strike's
+    /// force beats, in place of the plug.
+    predict_kernel: Kernel,
     fast: wgpu::Buffer,
     impactors: wgpu::Buffer,
     /// Per impactor: engine body, bounding radius, face radius, mass, plane-strain modulus.
@@ -169,6 +172,7 @@ impl Punch {
         Punch {
             kernel: gpu.compute(&shaders::PUNCH, "punch_islands", &PUNCH_BINDINGS),
             fast_kernel: gpu.compute(&shaders::PUNCH, "punch_fast", &PUNCH_BINDINGS),
+            predict_kernel: gpu.compute(&shaders::THRESHOLD, "threshold_predict", &crate::solver::THRESHOLD_BINDINGS),
             fast: gpu.storage("punch fast islands", &vec![[0f32; 4]; 1 + 3 * 128]),
             impactors: gpu.storage("punch impactors", &[[0f32; 4]; 2]), list: Vec::new() }
     }
@@ -184,7 +188,10 @@ impl Punch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, inputs: &RouteInputs, ctab: &wgpu::Buffer, engine_base: u32, bodies: &wgpu::Buffer, dt: f64, speed: f64, route: &Routing) {
+    /// `predict`: the threshold profile's predicted breaks (`threshold_predict`) instead of
+    /// the punch's plug.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, inputs: &RouteInputs, ctab: &wgpu::Buffer, engine_base: u32, bodies: &wgpu::Buffer, dt: f64, speed: f64, route: &Routing, predict: bool) {
         let Some(status) = inputs.status else { return };
         if self.list.is_empty() {
             return;
@@ -194,7 +201,16 @@ impl Punch {
             &PunchParams { island_count: inputs.island_count, impactor_count: self.list.len() as u32, engine_base, pad0: 0, dt: dt as f32, speed: speed as f32, pad1: 0.0, pad2: 0.0 },
         );
         let buffers: [&wgpu::Buffer; 13] = [&params, inputs.islands, inputs.chunks, inputs.state, ctab, bodies, &self.impactors, inputs.bonds, inputs.bond_dyn, inputs.materials, status, &self.fast, &route.route];
-        let group = gpu.bind(&self.kernel.group, &buffers);
+        let (kernel, group) = if predict {
+            let tparams = gpu.uniform(
+                "threshold predict params",
+                &crate::solver::ThresholdParams { island_count: inputs.island_count, impactor_count: self.list.len() as u32, engine_base, dt: dt as f32, speed: speed as f32, ..Default::default() },
+            );
+            let tbuffers: [&wgpu::Buffer; 12] = [&tparams, inputs.islands, inputs.bonds, inputs.bond_dyn, ctab, inputs.materials, status, inputs.chunks, inputs.state, bodies, &self.impactors, &self.fast];
+            (&self.predict_kernel, gpu.bind(&self.predict_kernel.group, &tbuffers))
+        } else {
+            (&self.kernel, gpu.bind(&self.kernel.group, &buffers))
+        };
         let fast_group = gpu.bind(&self.fast_kernel.group, &buffers);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         // The fast free islands first (one group), then the islands.
@@ -203,7 +219,7 @@ impl Punch {
         pass.dispatch_workgroups(1, 1, 1);
         drop(pass);
         let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&self.kernel.pipeline);
+        pass.set_pipeline(&kernel.pipeline);
         pass.set_bind_group(0, &group, &[]);
         match inputs.island_args {
             Some(a) => pass.dispatch_workgroups_indirect(a, 0),
