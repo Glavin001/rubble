@@ -66,10 +66,10 @@ struct Shooting {
 thread_local! {
     static DEVICE: RefCell<Option<Device>> = const { RefCell::new(None) };
     static WORLD: RefCell<Option<Loaded>> = const { RefCell::new(None) };
-    static GLB: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// `Some(layout)`: the next load builds the lab's cuboid houses in that layout
-    /// (`stress_set_cuboid`) instead of the GLB.
-    static CUBOID: RefCell<Option<Option<engine_fracture::Layout>>> = const { RefCell::new(None) };
+    /// What the next load builds (`stress_set_glb`, `stress_set_cuboid`, `stress_set_pack`).
+    static SOURCE: RefCell<Source> = const { RefCell::new(Source::Glb(Vec::new())) };
+    /// What the last load could not take from its input as given (`stress_stats`).
+    static WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static CAMERA: RefCell<Option<Orbit>> = const { RefCell::new(None) };
     static SHOOTING: Cell<Option<Shooting>> = const { Cell::new(None) };
     static PENDING: RefCell<Vec<ImpactorDesc>> = const { RefCell::new(Vec::new()) };
@@ -91,6 +91,16 @@ thread_local! {
     /// The last frame's step, state copy and draw (ms).
     static PHASES: Cell<[f64; 3]> = const { Cell::new([0.0; 3]) };
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// The input of the next [`stress_load`].
+enum Source {
+    /// A fracture GLB, at the load's level.
+    Glb(Vec<u8>),
+    /// The lab's cuboid houses in a sample's layout.
+    Cuboid(Option<engine_fracture::Layout>),
+    /// A scene pack's JSON (vibe-city / blast-stress-solver).
+    Pack(Vec<u8>),
 }
 
 /// Asset frame (+Y up) to the stress scene's (+Z up), as `stress_ref::shardwright` imports.
@@ -135,8 +145,17 @@ pub async fn stress_init(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVal
 /// The fracture GLB the next [`stress_load`] builds.
 #[wasm_bindgen]
 pub fn stress_set_glb(bytes: Vec<u8>) {
-    GLB.set(bytes);
-    CUBOID.set(None);
+    SOURCE.set(Source::Glb(bytes));
+}
+
+/// The scene pack (its JSON bytes) the next [`stress_load`] builds: the lab's scene of
+/// it (`engine_fracture::pack`) for the camera and shots, and stress-ref's import of it
+/// under the load's profile (`Profile::import_options`), as the native bench imports
+/// packs. The pack's supports (nodes of mass 0) are the fixed chunks, and the bonds to them
+/// break like any bond.
+#[wasm_bindgen]
+pub fn stress_set_pack(bytes: Vec<u8>) {
+    SOURCE.set(Source::Pack(bytes));
 }
 
 /// The lab's procedural cuboid houses for the next [`stress_load`], laid out as the
@@ -144,7 +163,7 @@ pub fn stress_set_glb(bytes: Vec<u8>) {
 #[wasm_bindgen]
 pub fn stress_set_cuboid(layout: String) -> Result<(), JsValue> {
     let layout: Option<engine_fracture::Layout> = serde_json::from_str(&layout).map_err(|e| JsValue::from_str(&format!("layout: {e}")))?;
-    CUBOID.set(Some(layout));
+    SOURCE.set(Source::Cuboid(layout));
     Ok(())
 }
 
@@ -286,8 +305,8 @@ fn fail(e: String) -> u32 {
     0
 }
 
-/// Build the world from the GLB ([`stress_set_glb`]) at `level`. Called through
-/// `WebAssembly.promising` (it reads the GPU). Returns 1, or 0 with [`stress_error`].
+/// Build the world from the input set last (the GLB at `level`, the cuboid houses or the
+/// pack). Called through `WebAssembly.promising` (it reads the GPU). Returns 1, or 0 with [`stress_error`].
 #[no_mangle]
 pub extern "C" fn stress_load(level: u32) -> u32 {
     match load(level as u8) {
@@ -299,27 +318,38 @@ pub extern "C" fn stress_load(level: u32) -> u32 {
 fn load(level: u8) -> Result<(), String> {
     WORLD.with_borrow_mut(|w| *w = None);
     // The lab's own scene (its camera, centre, extent and projectile) and the stress
-    // oracle's input: the GLB's level, or the cuboid houses in their layout.
-    let (lab, json, name) = match CUBOID.with_borrow(|c| *c) {
-        Some(layout) => {
-            let (lab, json) = engine_fracture::samples::cuboid_stress_scene(layout).map_err(|e| format!("cuboid houses: {e}"))?;
-            (lab, json, "cuboid_houses".to_string())
-        }
-        None => {
-            let bytes = GLB.with_borrow(|b| b.clone());
-            let asset = engine_fracture::parse_fracture_glb(&bytes).map_err(|e| format!("fracture GLB: {e}"))?;
-            let lab = engine_fracture::build_scene(&asset, level, None).map_err(|e| format!("level {level}: {e}"))?;
-            (lab, engine_fracture::stress_export::shardwright_stress_json(&asset, level), asset.physics.name.clone())
-        }
-    };
+    // oracle's input: the GLB's level, the cuboid houses in their layout, or the pack.
+    let profile = PROFILE.get();
+    let mut warnings = Vec::new();
+    let (lab, mut scene) = SOURCE.with_borrow(|source| -> Result<_, String> {
+        Ok(match source {
+            Source::Cuboid(layout) => {
+                let (lab, json) = engine_fracture::samples::cuboid_stress_scene(*layout).map_err(|e| format!("cuboid houses: {e}"))?;
+                // Bonds to the ground break like any bond (an anchored piece comes free when they do).
+                (lab, stress_ref::shardwright::import_value_with(&json, "cuboid_houses", true)?)
+            }
+            Source::Glb(bytes) => {
+                let asset = engine_fracture::parse_fracture_glb(bytes).map_err(|e| format!("fracture GLB: {e}"))?;
+                let lab = engine_fracture::build_scene(&asset, level, None).map_err(|e| format!("level {level}: {e}"))?;
+                let json = engine_fracture::stress_export::shardwright_stress_json(&asset, level);
+                (lab, stress_ref::shardwright::import_value_with(&json, &asset.physics.name, true)?)
+            }
+            Source::Pack(bytes) => {
+                let (lab, info) = engine_fracture::pack::build_pack_scene(bytes).map_err(|e| format!("scene pack: {e}"))?;
+                let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("scene pack: {e}"))?;
+                let (scene, notes) = stress_ref::scene_pack::import_value_with(&json, &info.key, "structure", &info.key, profile.import_options())?;
+                warnings = notes;
+                (lab, scene)
+            }
+        })
+    })?;
+    WARNINGS.set(warnings);
     CAMERA.set(Some(Orbit::new(&lab)));
     SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius, mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
     FIRED.set(0);
     RUNNING.set(false);
     STATS.set("{}".into());
     PENDING.with_borrow_mut(|p| p.clear());
-    // Bonds to the ground break like any bond (an anchored piece comes free when they do).
-    let mut scene = stress_ref::shardwright::import_value_with(&json, &name, true)?;
     let k = STRENGTH_SCALE.get();
     if k != 1.0 {
         let used: std::collections::BTreeSet<String> = scene.bodies.iter().flat_map(|b| &b.bonds).map(|b| b.material.clone()).collect();
@@ -340,7 +370,6 @@ fn load(level: u8) -> Result<(), String> {
     let mut scene = scene.with_derived();
     // The GPU's methods, as the native runs (`STRESS_METHODS=established`).
     scene.sim.methods = stress_ref::scene::Methods::established();
-    let profile = PROFILE.get();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     DEVICE.with_borrow(|d| {
@@ -463,6 +492,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "hulls": totals.1,
                         "bonds": totals.2,
                         "shots": FIRED.get(),
+                        "warnings": WARNINGS.with_borrow(|w| w.clone()),
                         "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
                         "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),
                         "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),
