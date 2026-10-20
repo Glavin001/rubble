@@ -16,8 +16,10 @@
 #   node) it was joined from. `live_edges` uses it to mask a coarse edge once no fine path
 #   beneath it is intact, so no level carries messages across a crack (ours; BSMS has no
 #   masking);
-# - the hierarchy is built once per pristine structure; `restrict` maps it onto the chunks
-#   present in a call.
+# - seeds can break centroid-distance ties by lowest index within a tolerance, so the
+#   hierarchy is independent of rounding under rotation (`tie_tol`; 0 = the original);
+# - the hierarchy is built once per pristine structure; `live_edges` maps it onto the chunks
+#   and bonds present in a call.
 """Bi-stride multi-level graph (BSMS-GNN pooling hierarchy) with crack masking."""
 
 from __future__ import annotations
@@ -72,12 +74,25 @@ def find_clusters(adj: list[list[int]]) -> list[list[int]]:
     return clusters
 
 
-def nearest_center_seed(pos: np.ndarray, clusters: list[list[int]]) -> list[int]:
+def nearest_center_seed(pos: np.ndarray, clusters: list[list[int]], tie_tol: float = 0.0
+                        ) -> list[int]:
+    """The node nearest each cluster's centroid. With `tie_tol` > 0, nodes within
+    `tie_tol × cluster radius` of the minimum count as tied and the lowest index wins, so the
+    choice does not depend on rounding (a rotated copy of a structure gets the same
+    hierarchy). `tie_tol = 0` is the original `argmin`."""
     seeds = []
     for c in clusters:
-        center = np.mean(pos[c], axis=0)
-        dist = np.linalg.norm(pos[c] - center[None, :], 2, axis=-1)
-        seeds.append(c[int(np.argmin(dist))])
+        p = np.asarray(pos[c], dtype=np.float64) if tie_tol > 0 else pos[c]
+        center = np.mean(p, axis=0)
+        dist = np.linalg.norm(p - center[None, :], 2, axis=-1)
+        if tie_tol > 0:
+            # positions arrive in f32: allow its rounding at the coordinates' magnitude too
+            slack = tie_tol * max(float(dist.max()), 1e-30) + 16 * np.finfo(np.float32).eps * \
+                float(np.abs(p).max())
+            tied = np.nonzero(dist <= dist.min() + slack)[0]
+            seeds.append(c[int(tied[0])])
+        else:
+            seeds.append(c[int(np.argmin(dist))])
     return seeds
 
 
@@ -95,10 +110,11 @@ class Level:
     sup_b: np.ndarray
 
 
-def bstride_selection(edges: np.ndarray, pos: np.ndarray, n: int) -> Level:
+def bstride_selection(edges: np.ndarray, pos: np.ndarray, n: int, tie_tol: float = 0.0
+                      ) -> Level:
     adj = adjacency(edges, n)
     clusters = find_clusters(adj)
-    seeds = nearest_center_seed(pos, clusters)
+    seeds = nearest_center_seed(pos, clusters, tie_tol)
     kept: set[int] = set()
     for seed, _c in zip(seeds, clusters):
         dist = bfs_dist(adj, seed)
@@ -143,16 +159,19 @@ class Hierarchy:
     levels: list[Level]
 
 
+TIE_TOL = 1e-5  # default: rotation-stable seeds (see nearest_center_seed)
+
+
 def build_hierarchy(n_nodes: int, bond_ends: np.ndarray, pos: np.ndarray,
-                    num_levels: int) -> Hierarchy:
+                    num_levels: int, tie_tol: float = TIE_TOL) -> Hierarchy:
     """`bond_ends` [B, 2] undirected pristine bonds (local chunk indices)."""
     b = np.asarray(bond_ends, dtype=np.int64)
     edges0 = np.stack([np.concatenate([b[:, 0], b[:, 1]]), np.concatenate([b[:, 1], b[:, 0]])])
     edge0_bond = np.concatenate([np.arange(len(b)), np.arange(len(b))])
     levels: list[Level] = []
-    g, p, n = edges0, np.asarray(pos, dtype=np.float64), n_nodes
+    g, p, n = edges0, np.asarray(pos), n_nodes
     for _ in range(num_levels):
-        lv = bstride_selection(g, p, n)
+        lv = bstride_selection(g, p, n, tie_tol)
         levels.append(lv)
         g, p, n = lv.edges, p[lv.ids], len(lv.ids)
     return Hierarchy(n_nodes=n_nodes, edges0=edges0, edge0_bond=edge0_bond, pos=pos,
