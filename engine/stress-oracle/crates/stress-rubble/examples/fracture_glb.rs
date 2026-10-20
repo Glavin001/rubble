@@ -25,7 +25,7 @@ fn main() {
             (engine_fracture::stress_export::shardwright_stress_json(&asset, level), asset.physics.name.clone())
         }
     };
-    let scene = stress_ref::shardwright::import_value(&json, &name).expect("stress import");
+    let scene = stress_ref::shardwright::import_value_with(&json, &name, true).expect("stress import");
     scene.validate().expect("valid");
     let mut scene = scene.with_derived();
     // The GPU's methods (the bench and the suites run `STRESS_METHODS=established`).
@@ -81,4 +81,9 @@ fn main() {
     let mut sorted = ms[1..].to_vec();
     sorted.sort_by(f64::total_cmp);
     println!("fragments {}, broken bonds {}, frame ms median {:.1}, worst {:.1}, resident frames {}", o.values["fragments"], o.values["broken_bonds"], sorted[sorted.len() / 2], sorted[sorted.len() - 1], w.resident_frames);
+    // Bonds to the ground (`import_value_with`'s ground bonds): how many broke.
+    let m = &w.solver.mirror;
+    let ground = |si: usize, b: &stress_ref::solver::RtBond| m.structures[si].bonds[b.source].groups.iter().any(|g| g == "ground");
+    let (gb, gt) = m.bonds.iter().enumerate().flat_map(|(si, bs)| bs.iter().map(move |b| (si, b))).filter(|(si, b)| ground(*si, b)).fold((0, 0), |(n, t), (_, b)| (n + !b.connected() as usize, t + 1));
+    println!("ground bonds broken {gb} of {gt}");
 }

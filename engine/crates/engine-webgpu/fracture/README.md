@@ -182,6 +182,24 @@ level, camera and shot rule, so the three can be compared:
 | **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
+**Physics rate.** The **Physics** menu sets the simulated frames per second and reloads
+the level:
+- **Auto** keeps each mode's own rate: 120 Hz for rubble's modes, 60 Hz for the stress
+  solver.
+- **60 Hz** and **120 Hz** force the rate (rubble's `params.dt`, or the stress scene's
+  `sim.frame_dt`).
+
+Breakable D6 joints are tuned for 120 Hz. In the stress modes, each animation frame catches
+up on up to 0.1 s of simulated time. Before, it caught up on at most two physics frames, so
+a 60 Hz display running a 120 Hz simulation dropped time even when a frame took 3 ms.
+
+**Ground bonds (stress modes).** A Shardwright piece bonded to the world (the door frame,
+the fence posts, the walls' bottom courses) is held by a breakable bond to a thin fixed
+ground chunk (`stress_ref::shardwright::import_value_with(.., true)`), using the bond's own
+area, material and strength. The piece comes free when that bond breaks. Before, the piece
+was fixed for good and could not be destroyed. Unhit, the cuboid house stands with no bond
+broken. The default import, which the benches and the guard use, is unchanged.
+
 **Learned impact mode.**
 - Physics is the same as **None** (unbonded fragments). The network run is timed and discarded.
 - Pack: `engine/stress-oracle/packs/house-1story.json` (319 chunks / 877 bonds).

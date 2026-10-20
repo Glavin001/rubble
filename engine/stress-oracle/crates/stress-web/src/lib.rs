@@ -83,6 +83,9 @@ thread_local! {
     static VIEW: Cell<(bool, bool)> = const { Cell::new((false, false)) };
     /// The capability profile of the next `stress_load` (`stress_set_profile`).
     static PROFILE: Cell<Profile> = const { Cell::new(Profile::BlastParity) };
+    /// The physics frame rate of the next `stress_load` (`stress_set_physics_hz`); 0 keeps
+    /// the scene's own.
+    static PHYSICS_HZ: Cell<f64> = const { Cell::new(0.0) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
@@ -99,7 +102,11 @@ fn zup(v: [f64; 3]) -> [f64; 3] {
 /// The GPU device on `canvas` (WebGPU), its surface configured at the canvas size.
 #[wasm_bindgen]
 pub async fn stress_init(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsValue> {
-    std::panic::set_hook(Box::new(|info| web_sys::console::error_1(&info.to_string().into())));
+    std::panic::set_hook(Box::new(|info| {
+        web_sys::console::error_1(&info.to_string().into());
+        // The JavaScript stack: which export reached the panic.
+        web_sys::console::trace_0();
+    }));
     let (width, height) = (canvas.width().max(1), canvas.height().max(1));
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::BROWSER_WEBGPU;
@@ -205,6 +212,13 @@ pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// The physics frame rate (Hz) of the next `stress_load`: one resident frame per
+/// `1/hz` s of simulated time. 0 keeps the scene's own (60 Hz).
+#[wasm_bindgen]
+pub fn stress_set_physics_hz(hz: f64) {
+    PHYSICS_HZ.set(if hz.is_finite() && hz > 0.0 { hz } else { 0.0 });
+}
+
 /// The lab's view toggles, from the next frame drawn: the bond graph (each intact bond a
 /// line between its chunks' centres) and colour by body state (moving orange, at rest
 /// blue, static grey: the coupled engine keeps bodies awake, so "at rest" means slow).
@@ -304,7 +318,8 @@ fn load(level: u8) -> Result<(), String> {
     RUNNING.set(false);
     STATS.set("{}".into());
     PENDING.with_borrow_mut(|p| p.clear());
-    let mut scene = stress_ref::shardwright::import_value(&json, &name)?;
+    // Bonds to the ground break like any bond (an anchored piece comes free when they do).
+    let mut scene = stress_ref::shardwright::import_value_with(&json, &name, true)?;
     let k = STRENGTH_SCALE.get();
     if k != 1.0 {
         let used: std::collections::BTreeSet<String> = scene.bodies.iter().flat_map(|b| &b.bonds).map(|b| b.material.clone()).collect();
@@ -316,6 +331,10 @@ fn load(level: u8) -> Result<(), String> {
                 m.shear_cap = m.shear_cap.map(|c| c * k);
             }
         }
+    }
+    let hz = PHYSICS_HZ.get();
+    if hz > 0.0 {
+        scene.sim.frame_dt = 1.0 / hz;
     }
     scene.validate()?;
     let mut scene = scene.with_derived();
@@ -344,9 +363,15 @@ fn load(level: u8) -> Result<(), String> {
 }
 
 /// One animation frame `elapsed_ms` after the last: the frames of simulated time that
-/// fall due while running (at most two, so a slow frame does not snowball), then the
-/// world drawn into the canvas. Called through `WebAssembly.promising`. Returns 1, or 0
+/// fall due while running (the backlog held to [`MAX_BEHIND_S`], so a slow frame does not
+/// snowball), then the world drawn into the canvas. Called through `WebAssembly.promising`. Returns 1, or 0
 /// with [`stress_error`].
+/// The most simulated time one animation frame catches up (s). A fixed time, not a count
+/// of physics frames: a browser frame longer than two physics frames (a 60 Hz display
+/// under a 120 Hz simulation, or a hitch) otherwise drops time and the run falls behind
+/// real time even when each physics frame is fast.
+const MAX_BEHIND_S: f64 = 0.1;
+
 #[no_mangle]
 pub extern "C" fn stress_frame(elapsed_ms: f64) -> u32 {
     match frame(elapsed_ms) {
@@ -374,7 +399,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             let mut stepped = 0;
             let mut step_ms = 0.0;
             if RUNNING.get() {
-                l.behind = (l.behind + elapsed_ms * 1e-3).min(2.0 * dt);
+                l.behind = (l.behind + elapsed_ms * 1e-3).min(MAX_BEHIND_S.max(2.0 * dt));
                 let shots = PENDING.with_borrow_mut(std::mem::take);
                 for desc in &shots {
                     let imp = stress_ref::world::Impactor::from_desc(desc, &l.world.scene);

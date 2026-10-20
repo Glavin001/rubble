@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withParams,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -40,6 +40,9 @@ const massScale=()=>2**Number($('ball-mass').value);
 // Bond strength: a power-of-two multiple of every bond's break strength (D6 joints and
 // the stress solver), applied when the level loads.
 const strengthScale=()=>2**Number($('bond-strength').value);
+// Physics rate: 0 (Auto) keeps the scene's dt, else 60 or 120 ticks per second of
+// simulated time, applied when the level loads.
+const physicsHz=()=>Number($('physics-hz').value);
 const scaleLabel=k=>`×${k>=1?k:`1/${1/k}`}`;
 function applyBallMass(){
  const k=massScale(),kg=(stressOn?stress?.stats.ballMass:scene?.projectileMass)*k;
@@ -88,7 +91,8 @@ async function loadLevel(level){
   if(stressMode())return loadStress(level);
   stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;
   learned?.dispose();learned=null;learnedMs=0;
-  const built=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
+  const raw=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
+  const built=physicsHz()?withParams(raw,{dt:1/physicsHz()}):raw;
   if(bondMode()==='d6')setStatus('Settling bonds under self-weight…');
   // Learned mode: rubble stays unbonded (same as none); the MGN-T forward is timed separately.
   const one=bondMode()==='d6'?await preloadBonds(device,strengthScale()===1?built:withBondStrength(built,strengthScale())):withoutJoints(built);
@@ -129,7 +133,7 @@ async function loadStress(level){
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  const profile=STRESS_PROFILES[bondMode()];
- stress.setProfile(profile);stress.setBondStrengthScale(strengthScale());applyView();
+ stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else await stress.load(assetBytes,level);
  await stress.frame(0);applyBallMass();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
@@ -194,6 +198,7 @@ $('ball-mass').oninput=applyBallMass;
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
 $('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
+$('physics-hz').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{if(stressOn&&stress){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
 $('metadata').onclick=()=>{if(!asset)return;const url=URL.createObjectURL(new Blob([asset.metadataJson()],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='fracture-metadata.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
@@ -234,7 +239,7 @@ function stressTick(now,elapsedMs){
  frame.finally(()=>requestAnimationFrame(tick));
 }
 function tick(now){
- if(stressOn&&!loading&&stress){const ms=last?Math.min(40,now-last):0;last=now;return stressTick(now,ms)}
+ if(stressOn&&!loading&&stress){const ms=last?Math.min(250,now-last):0;last=now;return stressTick(now,ms)}
  const frameMs=last?now-last:FRAME_BUDGET_MS;
  const elapsed=last?Math.min(.04,(now-last)/1000):0;last=now;
  // Damped control on a smoothed frame time: cut quickly when over budget,
