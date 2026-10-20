@@ -79,6 +79,8 @@ thread_local! {
     static MASS_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
     static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The capability profile of the next `stress_load` (`stress_set_profile`).
+    static PROFILE: Cell<Profile> = const { Cell::new(Profile::BlastParity) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
@@ -192,6 +194,15 @@ pub fn stress_set_bond_strength_scale(scale: f64) {
     }
 }
 
+/// The capability profile of the next `stress_load`: `blast_parity` (the default) or
+/// `threshold` (the v0 stress mode: bonds break on contact force alone, no solve).
+#[wasm_bindgen]
+pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
+    let p = Profile::parse(&name).ok_or_else(|| JsValue::from_str(&format!("no profile {name}")))?;
+    PROFILE.set(p);
+    Ok(())
+}
+
 /// Orbit the camera by a pointer drag (CSS pixels), as the lab's other modes.
 #[wasm_bindgen]
 pub fn stress_drag(dx: f64, dy: f64) {
@@ -298,7 +309,7 @@ fn load(level: u8) -> Result<(), String> {
     let mut scene = scene.with_derived();
     // The GPU's methods, as the native runs (`STRESS_METHODS=established`).
     scene.sim.methods = stress_ref::scene::Methods::established();
-    let profile = Profile::BlastParity;
+    let profile = PROFILE.get();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     DEVICE.with_borrow(|d| {
@@ -415,6 +426,9 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),
                         "lastShot": imps.last().map(|i| serde_json::json!({"position": i.pose.position.to_array(), "velocity": i.velocity.to_array()})),
                         "frameHz": 1.0 / dt,
+                        "profile": PROFILE.get().name(),
+                        // Rigid bodies the structures are now (each split's children).
+                        "bodies": mirror.clusters.len(),
                     })
                     .to_string(),
                 );

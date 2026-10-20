@@ -179,6 +179,7 @@ level, camera and shot rule, so the three can be compared:
 | **None** (default) | Nothing: pieces start asleep and wake when hit | rubble (this page's WGSL host) |
 | **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
 | **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
+| **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`): a bond breaks when the contact force on either of its chunks this frame exceeds its tensile strength × area. That is each impact's Hertz peak force plus sustained contacts, with no gravity. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
 **Learned impact mode.**
@@ -190,6 +191,23 @@ level, camera and shot rule, so the three can be compared:
     -line-directive-mode none -o engine/crates/engine-webgpu/generated/wgsl/learned_impact.wgsl
   ```
 - Bindings are packed to 8 storage buffers so Chrome's per-stage limit is met.
+
+**Simple threshold mode (v0).**
+- A deliberately trivial bond rule. It proves the path any stress model shares: contacts in,
+  bonds broken, structures split into child bodies with their colliders re-parented,
+  rubble continuing.
+- `Profile::Threshold` (`stress-ref` `capability.rs`), kernel
+  `stress-gpu/shaders/threshold.slang`. It stands in the resident cascade for the static
+  solve and its damage commit, and writes what they would (bond records broken, island
+  disconnected), so the split pass runs unchanged. A learned model would take the same slot.
+- The **Bond strength** slider scales the threshold. One identical shot on the veneer
+  house breaks 54 bonds into 4 bodies at ×1/16, and 24 into 2 at ×16.
+- **In Chrome (M3 Max):**
+  - veneer house: 3 shots break 72 bonds into 7 bodies, 3.9 ms per frame;
+  - cuboid house with a ×8 ball: 100 bonds, 108 bodies, 60 frames/s.
+- **Native:**
+  - `STRESS_PROFILE=threshold cargo run --release -p stress-rubble --features view --example fracture_glb`;
+  - test `stress-rubble/tests/threshold_split.rs`.
 
 **Stress solver mode.**
 - It runs the same Rust as the native reference (`stress-rubble` example

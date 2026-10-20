@@ -338,6 +338,25 @@ struct Kernels {
     fatigue: Kernel,
 }
 
+/// The bindings of `threshold.slang` (`Profile::Threshold`).
+const THRESHOLD_BINDINGS: [Binding; 7] = [
+    Binding::Uniform,   // params
+    Binding::StorageRw, // islands
+    Binding::Storage,   // bond statics
+    Binding::StorageRw, // bond records
+    Binding::Storage,   // ctab (the frame's engine loads)
+    Binding::Uniform,   // materials
+    Binding::StorageRw, // cascade status
+];
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct ThresholdParams {
+    island_count: u32,
+    eload_base: u32,
+    pad: [u32; 2],
+}
+
 /// The bindings of every `world.slang` kernel.
 const WORLD_BINDINGS: [Binding; 12] = [
     Binding::Uniform,   // params
@@ -611,6 +630,10 @@ pub struct GpuSolver {
     island_args: Option<wgpu::Buffer>,
     /// The world's punch this frame (`routing::Punch`): a split pass after the `post` encoder.
     pub punch_split: bool,
+    /// `SolverConfig::contact_threshold`: the frame's engine loads (the resident tables
+    /// and their engine-load base), which the resident frame sets for `threshold_breaks`.
+    pub threshold_load: Option<(wgpu::Buffer, u32)>,
+    threshold_kernel: Option<Kernel>,
     /// The frame's command encoder with the engine's work already in it (plan 5d): the next
     /// `resident_cascade_with` encodes after it and submits the frame once.
     pub frame_encoder: Option<wgpu::CommandEncoder>,
@@ -704,6 +727,8 @@ impl GpuSolver {
             cascade_gate: None,
             island_args: None,
             punch_split: false,
+            threshold_load: None,
+            threshold_kernel: None,
             frame_encoder: None,
             tables_on_gpu: false,
             bond_backup: None,
@@ -2878,6 +2903,17 @@ impl GpuSolver {
             }
             _ => None,
         };
+        // `Profile::Threshold`: the bonds decided by contact force alone, in place of the
+        // static solve and its commit (threshold.slang).
+        let threshold = match (&self.threshold_load, self.mirror.config.contact_threshold) {
+            (Some((ctab, eload_base)), true) => {
+                let kernel = self.threshold_kernel.get_or_insert_with(|| gpu.compute(&shaders::THRESHOLD, "threshold_breaks", &THRESHOLD_BINDINGS));
+                let params = gpu.uniform("threshold params", &ThresholdParams { island_count: n_islands as u32, eload_base: *eload_base, pad: [0; 2] });
+                Some(gpu.bind(&kernel.group, &[&params, &self.buffers.islands, &self.buffers.bonds_static, &self.buffers.bond_dyn, ctab, &self.buffers.materials, &status]))
+            }
+            _ => None,
+        };
+        let threshold_kernel = self.threshold_kernel.as_ref();
         for pass in first..first + passes {
             let cp = gpu.uniform(
                 "cascade pass",
@@ -2925,7 +2961,9 @@ impl GpuSolver {
             // The states and bond records backed up: the whole tables (a copy at full
             // bandwidth; `STRESS_QS_ISLAND_BACKUP=1`: only the solved islands', by
             // `cascade_backup`, measured 0.8 ms slower on the standard tier).
-            if !std::env::var("STRESS_QS_ISLAND_BACKUP").is_ok_and(|v| v == "1") {
+            if threshold.is_some() {
+                // No solve: nothing to restore.
+            } else if !std::env::var("STRESS_QS_ISLAND_BACKUP").is_ok_and(|v| v == "1") {
                 encoder.copy_buffer_to_buffer(&self.buffers.state, 0, &backup, 0, size);
                 if gate_on {
                     encoder.copy_buffer_to_buffer(&self.buffers.bond_dyn, 0, &bond_backup, 0, bond_bytes);
@@ -2934,20 +2972,35 @@ impl GpuSolver {
                 run(&mut encoder, &kernels.backup, n_islands.max(1) as u32);
             }
             pre(self, &mut encoder, pass);
-            if gate_on {
-                run(&mut encoder, &kernels.gate, n_islands.max(1) as u32);
+            if threshold.is_none() {
+                if gate_on {
+                    run(&mut encoder, &kernels.gate, n_islands.max(1) as u32);
+                }
+                world(&mut encoder, &self.kernels.statics, 2 * (pass - first) as u32);
+                run(&mut encoder, &kernels.restore, n_islands.max(1) as u32);
             }
-            world(&mut encoder, &self.kernels.statics, 2 * (pass - first) as u32);
-            run(&mut encoder, &kernels.restore, n_islands.max(1) as u32);
             // commit_resident: the converged islands flagged, their damage committed with
             // the frame's duration (the first pass) or none.
             encoder.copy_buffer_to_buffer(&layout_islands, 0, &self.buffers.islands, 0, islands_bytes);
             run(&mut encoder, &kernels.settle, crate::gpu::groups(n_islands, 64));
-            encoder.copy_buffer_to_buffer(if pass == 0 { &commit_first } else { &commit_later }, 0, &self.buffers.params_segment, 0, params_bytes);
-            world(&mut encoder, &self.kernels.fatigue, 2 * (pass - first) as u32 + 1);
-            encoder.copy_buffer_to_buffer(&orig, 0, &self.buffers.params_segment, 0, params_bytes);
-            if gate_on {
-                run(&mut encoder, &kernels.fixed, n_islands.max(1) as u32);
+            match (&threshold, threshold_kernel) {
+                (Some(bind), Some(k)) => {
+                    let mut c = encoder.begin_compute_pass(&Default::default());
+                    c.set_pipeline(&k.pipeline);
+                    c.set_bind_group(0, bind, &[]);
+                    match &args {
+                        Some(a) => c.dispatch_workgroups_indirect(a, 0),
+                        None => c.dispatch_workgroups(n_islands.max(1) as u32, 1, 1),
+                    }
+                }
+                _ => {
+                    encoder.copy_buffer_to_buffer(if pass == 0 { &commit_first } else { &commit_later }, 0, &self.buffers.params_segment, 0, params_bytes);
+                    world(&mut encoder, &self.kernels.fatigue, 2 * (pass - first) as u32 + 1);
+                    encoder.copy_buffer_to_buffer(&orig, 0, &self.buffers.params_segment, 0, params_bytes);
+                    if gate_on {
+                        run(&mut encoder, &kernels.fixed, n_islands.max(1) as u32);
+                    }
+                }
             }
             run(&mut encoder, &kernels.end, 1);
             if let Some(p) = &prepared {

@@ -93,6 +93,11 @@ pub struct SolverConfig {
     pub static_tolerance: Option<f32>,
     /// Adaptive mode: relative load change that wakes a settled cluster.
     pub wake_threshold: f64,
+    /// The GPU's resident cascade decides bonds by contact force alone
+    /// (`capability::Profile::Threshold`, stress-gpu `threshold.slang`): no static solve, a
+    /// bond breaks when the contact force on either of its chunks exceeds its tensile
+    /// capacity. Off: the static solve and its damage commit (the default).
+    pub contact_threshold: bool,
     pub features: Features,
     pub methods: crate::scene::Methods,
 }
@@ -115,6 +120,7 @@ impl SolverConfig {
             static_passes: None,
             static_tolerance: scene.sim.static_tolerance,
             wake_threshold: 0.02,
+            contact_threshold: false,
             features: scene.sim.features,
             methods: scene.sim.methods,
         }

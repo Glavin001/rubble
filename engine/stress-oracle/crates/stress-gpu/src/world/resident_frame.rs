@@ -560,6 +560,8 @@ impl GpuWorld {
             let routing = if self.tiered { self.routing.as_ref() } else { None };
             let engine_base = r.qs.layout().engine_base;
             let ctab = r.qs.layout().ctab.clone();
+            // `Profile::Threshold`: the cascade decides bonds from these engine loads.
+            self.solver.threshold_load = self.solver.mirror.config.contact_threshold.then(|| (ctab.clone(), r.qs.layout().eload_base));
             // The punch and its split pass only when the last frame's check (two frames
             // ahead in punch mode) saw an impactor near an island: otherwise neither is
             // recorded (the split pass's dispatches cost even when they exit early).

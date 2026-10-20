@@ -2,6 +2,8 @@
 //! natively: the reference the browser's stress mode is compared with.
 //!
 //!   cargo run --release -p stress-rubble --example fracture_glb -- [GLB] [LEVEL] [FRAMES]
+//!
+//! `STRESS_PROFILE=threshold`: the v0 stress mode (`Profile::Threshold`) instead of `blast_parity`.
 use stress_gpu::gpu::Gpu;
 use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
@@ -31,7 +33,8 @@ fn main() {
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
     let parts: usize = scene.bodies.iter().flat_map(|b| &b.chunks).map(|c| c.compound.as_ref().map_or(1, |p| p.len())).sum();
     println!("{}: level {level}, {chunks} chunks, {parts} hulls, {} bonds, unsupported: {:?}", name, scene.bodies.iter().map(|b| b.bonds.len()).sum::<usize>(), stress_gpu::world::unsupported(&scene));
-    let p = Profile::BlastParity;
+    // `STRESS_PROFILE=threshold`: another capability profile (default `blast_parity`).
+    let p = std::env::var("STRESS_PROFILE").ok().map(|v| Profile::parse(&v).unwrap_or_else(|| panic!("STRESS_PROFILE={v}: no such profile"))).unwrap_or(Profile::BlastParity);
     p.apply_scene(&mut scene);
     scene.sim.duration = frames as f64 * scene.sim.frame_dt;
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
