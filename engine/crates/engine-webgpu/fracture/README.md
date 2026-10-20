@@ -200,6 +200,16 @@ level, camera and shot rule, so the three can be compared:
   `stress-gpu/shaders/threshold.slang`. It stands in the resident cascade for the static
   solve and its damage commit, and writes what they would (bond records broken, island
   disconnected), so the split pass runs unchanged. A learned model would take the same slot.
+- **Correction limit 1, as PhysX's native stage runs it.** Without a correction, rubble
+  solves the hit against the intact structure, so the ball bounces, and the bonds break only
+  after the step.
+  - The resident frame saves rubble's state first.
+  - When the step's contacts break bonds, the step is undone. The broken structures split
+    at the frame's start: each child takes its parent's starting motion.
+  - The step is then solved once more against the pieces, and that second solve's breaks
+    stand (`GpuWorld::correct_frame`, `corrected_frames`).
+  - Lab ball (native `fracture_glb`): 60 → 58.4 m/s through the wall, against 18 m/s under
+    `blast_parity`.
 - The **Bond strength** slider scales the threshold. One identical shot on the veneer
   house breaks 54 bonds into 4 bodies at ×1/16, and 24 into 2 at ×16.
 - **In Chrome (M3 Max):**

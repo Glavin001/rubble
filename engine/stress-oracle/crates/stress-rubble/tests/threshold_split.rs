@@ -1,6 +1,7 @@
 //! The v0 stress mode (`Profile::Threshold`, stress-gpu `threshold.slang`): with no static
 //! solve, a ram's contact breaks the wall's bonds, the wall splits into child bodies in the
-//! resident frame (the GPU's split path), and the run repeats bit for bit.
+//! resident frame (the GPU's split path), the step that broke them is solved again with
+//! the fragments installed (PhysX's correction limit 1), and the run repeats bit for bit.
 //!
 //!   cargo test --release -p stress-rubble --features gpu --test threshold_split
 #![cfg(feature = "gpu")]
@@ -17,6 +18,7 @@ struct Outcome {
     fragments: f64,
     clusters: usize,
     resident_frames: usize,
+    corrected: u64,
     digest: u64,
 }
 
@@ -44,7 +46,7 @@ fn run(gpu: &Gpu) -> Outcome {
             h = (h ^ b as u64).wrapping_mul(0x100000001b3);
         }
     }
-    Outcome { broken: o.values["broken_bonds"], fragments: o.values["fragments"], clusters: w.solver.mirror.clusters.len(), resident_frames: w.resident_frames as usize, digest: h }
+    Outcome { broken: o.values["broken_bonds"], fragments: o.values["fragments"], clusters: w.solver.mirror.clusters.len(), resident_frames: w.resident_frames as usize, corrected: w.corrected_frames, digest: h }
 }
 
 #[test]
@@ -52,10 +54,13 @@ fn contact_threshold_breaks_and_splits_in_resident_frames() {
     std::env::set_var("STRESS_GPU_FIXED_HORIZON", "1");
     let gpu = Gpu::new().expect("GPU");
     let a = run(&gpu);
-    eprintln!("threshold: {} bonds broken, {} fragments, {} clusters, {} resident frames", a.broken, a.fragments, a.clusters, a.resident_frames);
+    eprintln!("threshold: {} bonds broken, {} fragments, {} clusters, {} resident frames, {} corrected", a.broken, a.fragments, a.clusters, a.resident_frames, a.corrected);
     assert!(a.broken > 0.0, "the ram breaks bonds");
     assert!(a.fragments >= 2.0 && a.clusters >= 2, "the wall splits into child bodies");
     assert!(a.resident_frames > 0, "the frames run resident (the GPU's split path)");
+    // PhysX's correction limit 1: the step whose contacts broke bonds is solved again with
+    // the fragments installed, once (the hit then meets the pieces, not the intact wall).
+    assert!(a.corrected > 0, "the breaking step is solved again");
     let b = run(&gpu);
     assert_eq!((a.broken, a.fragments, a.clusters, a.digest), (b.broken, b.fragments, b.clusters, b.digest), "the run repeats bit for bit");
 }

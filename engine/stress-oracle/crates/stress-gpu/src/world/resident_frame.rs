@@ -407,8 +407,21 @@ impl GpuWorld {
         for cl in &mut self.solver.mirror.clusters {
             cl.driven = true;
         }
+        // `Profile::Threshold` (`contact_threshold`): PhysX's correction limit 1. The engine's
+        // step is saved; when its contacts break bonds, the step is undone, the broken
+        // structures split at the frame's start (the fragments installed) and the step solved
+        // once more, whose breaks then stand at its end (`correcting`: no further redo).
+        // Otherwise the engine meets the intact structure and its hit bounces off it.
+        let correct = self.solver.mirror.config.contact_threshold && !self.correcting && !self.tiered;
+        if correct {
+            // The last frame's GPU splits followed first: the saved engine includes them.
+            self.flush_pending(gpu)?;
+        }
         let t_substeps = web_time::Instant::now();
         let n = engine.borrow_mut().resident_substeps(fdt);
+        if correct {
+            engine.borrow_mut().save();
+        }
         let phases = std::env::var("STRESS_RESIDENT_PHASES").is_ok();
         if phases {
             eprintln!("resident phases: substep count {n}: {:.2} ms", t_substeps.elapsed().as_secs_f64() * 1e3);
@@ -551,7 +564,9 @@ impl GpuWorld {
             }
             // `STRESS_GPU_FRAME=1` (M4): the frame's passes, and the splits between them, in
             // one submission; the host follows the splits from the frame's one read.
-            let frame_mode = first == 0 && !frame_fallback && crate::gpu_frame() && self.frame_splits_ready(gpu, &engine);
+            // The correction's first solve only decides (its splits, if any, are made at the
+            // frame's start below): no split passes.
+            let frame_mode = first == 0 && !frame_fallback && !correct && crate::gpu_frame() && self.frame_splits_ready(gpu, &engine);
             let part_table = if frame_mode { self.part_table(gpu, &engine) } else { None };
             let frame_mode = frame_mode && part_table.is_some();
             let r = self.resident.take().expect("resident tables");
@@ -762,6 +777,9 @@ impl GpuWorld {
                     h.finish()
                 });
             }
+            if correct && !out.disconnected.is_empty() {
+                return self.correct_frame(gpu, &engine, &out.disconnected);
+            }
             let Some(at) = out.disconnected_at else {
                 // The window ran out with damage still growing: the next window.
                 if out.passes == window && out.damaged && first + window < max {
@@ -905,6 +923,9 @@ impl GpuWorld {
             }
             eprintln!("resident frame {}: {n} engine substeps, impactor speeds {speeds:?}", self.frame);
         }
+        if correct {
+            engine.borrow_mut().discard();
+        }
         self.solver.mirror.time += fdt;
         self.solver.time_moved();
         if std::env::var("STRESS_FRAME_HOST_TRACE").is_ok() {
@@ -917,6 +938,37 @@ impl GpuWorld {
 }
 
 impl GpuWorld {
+    /// The correction (`contact_threshold`, PhysX's correction limit 1): the engine's step
+    /// undone, the islands whose bonds broke in it split at the frame's start (the host's
+    /// split: the children take the parents' motion at the start, each chunk's velocity
+    /// v + w x r), their engine bodies made, and the frame run again from its start, whose
+    /// breaks then stand at its end.
+    fn correct_frame(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>, disconnected: &[usize]) -> Result<(), String> {
+        engine.borrow_mut().restore();
+        self.resident_sync_motion();
+        self.solver.sync(gpu);
+        self.solver.sync_chunk_state(gpu, disconnected);
+        for &ci in disconnected.iter().rev() {
+            self.solver.mirror.split_cluster(ci);
+        }
+        if let Some(l) = self.solver.loads.as_mut() {
+            l.topology_version += 1;
+        }
+        self.solver.rebuild(gpu, 0.0)?;
+        for cl in &mut self.solver.mirror.clusters {
+            cl.driven = true;
+        }
+        self.with_shell_mut(|w| w.coupled_write_back(&[]));
+        if std::env::var("STRESS_GPU_QS_TRACE").is_ok() {
+            eprintln!("resident frame {}: {} islands broke; the engine's step solved again with the fragments installed", self.frame, disconnected.len());
+        }
+        self.corrected_frames += 1;
+        self.correcting = true;
+        let r = self.resident_frame(gpu);
+        self.correcting = false;
+        r
+    }
+
     /// Whether a frame's GPU split passes can run (`STRESS_GPU_FRAME=1`): made ready, with
     /// the counters as the host has them.
     fn frame_splits_ready(&mut self, gpu: &Gpu, engine: &std::rc::Rc<std::cell::RefCell<dyn crate::resident::ResidentEngine>>) -> bool {
