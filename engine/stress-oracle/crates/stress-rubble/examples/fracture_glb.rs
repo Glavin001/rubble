@@ -7,6 +7,8 @@
 //! `STRESS_SHOTS=N`: N shots of the lab's ball (its mass, radius and speed for a cuboid
 //! sample), one every 30 frames from frame 5, each at another chunk from the -x side; the
 //! frame times' median, p95 and worst over the frames after the first shot.
+//! `STRESS_VIEW=1`: also take the browser's view (`GpuWorld::view_with`) after every frame,
+//! timed apart.
 use stress_gpu::gpu::Gpu;
 use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
@@ -78,6 +80,8 @@ fn main() {
         ImpactorDesc { name: format!("shot{k}"), shape: ImpactorShape::Sphere { radius }, mass, position: [c[0] - 6.0, c[1], c[2].max(lo[2] + radius)], velocity: [speed, 0.0, 0.0], ..shot.clone() }
     };
     let mut ms = Vec::new();
+    let view = std::env::var("STRESS_VIEW").is_ok_and(|v| v == "1");
+    let mut view_ms: Vec<f64> = Vec::new();
     for f in 0..frames {
         let fired = if shots > 0 { (f >= 5 && (f - 5) % 30 == 0 && (f - 5) / 30 < shots).then(|| shot_at((f - 5) / 30)) } else { (f == 5).then(|| shot.clone()) };
         if let Some(desc) = fired {
@@ -87,6 +91,14 @@ fn main() {
         let t = std::time::Instant::now();
         w.step_frame(&gpu).expect("frame");
         ms.push(t.elapsed().as_secs_f64() * 1e3);
+        if view {
+            let t = std::time::Instant::now();
+            // As the browser draws: the view's reads first, then the drawing's look.
+            w.view_prepare(&gpu);
+            let n = w.view_with(&gpu, |m, imps| m.clusters.len() + imps.len());
+            std::hint::black_box(n);
+            view_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
         if std::env::var("STRESS_FRAMES").is_ok() {
             eprintln!("frame {f}: {:.1} ms, {} resident frames so far", ms[f], w.resident_frames);
         }
@@ -104,6 +116,10 @@ fn main() {
     let after = &mut ms[5.min(ms.len())..].to_vec();
     after.sort_by(f64::total_cmp);
     if !after.is_empty() {
+        if !view_ms.is_empty() {
+            view_ms.sort_by(f64::total_cmp);
+            println!("view_state ms median {:.1}, p95 {:.1}, worst {:.1}", view_ms[view_ms.len() / 2], view_ms[view_ms.len() * 95 / 100], view_ms[view_ms.len() - 1]);
+        }
         println!("after the first shot: frame ms median {:.1}, p95 {:.1}, worst {:.1}; {} bodies, {} compactions", after[after.len() / 2], after[after.len() * 95 / 100], after[after.len() - 1], m.clusters.len(), w.compactions);
     }
 }

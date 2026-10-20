@@ -45,9 +45,8 @@ struct Loaded {
     renderer: Renderer,
     /// Real time not yet simulated (s).
     behind: f64,
-    /// The state last drawn (`GpuWorld::view_state`), kept while no frame steps: reading
-    /// and copying a large world every animation frame would hold the page back.
-    view: Option<(stress_ref::solver::ReferenceSolver, Vec<stress_ref::world::Impactor>)>,
+    /// The scene's chunks, hulls and bonds (fixed for a load: counted once).
+    totals: (usize, usize, usize),
 }
 
 /// What the lab's shot rule needs of the scene (asset frame, +Y up).
@@ -162,7 +161,8 @@ pub fn stress_stats() -> String {
     STATS.with_borrow(|s| s.clone())
 }
 
-/// The last frame's step, state copy (`view_state`) and draw, in ms.
+/// The last frame's step, view (`GpuWorld::view_with`: the frame's splits followed, the
+/// engine's poses read) and draw, in ms.
 #[wasm_bindgen]
 pub fn stress_phases() -> Vec<f64> {
     PHASES.get().to_vec()
@@ -353,11 +353,18 @@ fn load(level: u8) -> Result<(), String> {
         world.redo_fractured_frames = false;
         world.set_impact_islands(true);
         world.apply_profile(profile);
-        let (mirror, _) = world.view_state(gpu);
+        let shots = shot_meshes(&world);
         // Meshes for every chunk and for the shots to come.
-        let mut renderer = Renderer::for_target(gpu, &mirror, &shot_meshes(&world), d.config.width, d.config.height, d.view_format);
+        let (mut renderer, totals) = world.view_with(gpu, |mirror, _| {
+            let totals = (
+                mirror.structures.iter().map(|s| s.chunks.len()).sum::<usize>(),
+                mirror.structures.iter().flat_map(|s| &s.chunks).map(|c| c.parts.as_ref().map_or(1, |p| p.len())).sum::<usize>(),
+                mirror.structures.iter().map(|s| s.bonds.len()).sum::<usize>(),
+            );
+            (Renderer::for_target(gpu, mirror, &shots, d.config.width, d.config.height, d.view_format), totals)
+        });
         (renderer.bond_graph, renderer.sleep_colors) = VIEW.get();
-        WORLD.with_borrow_mut(|w| *w = Some(Loaded { world, renderer, behind: 0.0, view: None }));
+        WORLD.with_borrow_mut(|w| *w = Some(Loaded { world, renderer, behind: 0.0, totals }));
         Ok(())
     })
 }
@@ -391,8 +398,8 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                 d.config.width = width;
                 d.config.height = height;
                 d.surface.configure(&gpu.device, &d.config);
-                let (mirror, _) = l.world.view_state(gpu);
-                l.renderer = Renderer::for_target(gpu, &mirror, &shot_meshes(&l.world), width, height, d.view_format);
+                let shots = shot_meshes(&l.world);
+                l.renderer = l.world.view_with(gpu, |mirror, _| Renderer::for_target(gpu, mirror, &shots, width, height, d.view_format));
                 (l.renderer.bond_graph, l.renderer.sleep_colors) = VIEW.get();
             }
             let dt = l.world.scene.sim.frame_dt;
@@ -413,13 +420,6 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                     stepped += 1;
                 }
             }
-            let t_view = web_time::Instant::now();
-            if stepped > 0 || l.view.is_none() {
-                l.view = Some(l.world.view_state(gpu));
-            }
-            let view_ms = t_view.elapsed().as_secs_f64() * 1e3;
-            let (mirror, imps) = l.view.as_ref().expect("a view");
-            let t_draw = web_time::Instant::now();
             let aspect = width as f64 / height as f64;
             let (vp, eye) = CAMERA.with_borrow(|c| {
                 let c = c.as_ref().expect("a camera with the world");
@@ -434,6 +434,10 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             let moved: [f32; 4] = std::array::from_fn(|r| p[0] as f32 * c0[r] + p[1] as f32 * c1[r] + p[2] as f32 * c2[r] + c3[r]);
             let view_proj = [c0, c2.map(|x| -x), c1, moved];
             let eye = Vec3::from_array(zup(std::array::from_fn(|k| eye[k] - p[k])));
+            // Every GPU read of the view (splits, bonds, the engine's motion) before the
+            // canvas texture is taken: none waits while the frame holds it.
+            let t_view = web_time::Instant::now();
+            l.world.view_prepare(gpu);
             let texture = match d.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
                 _ => return Ok(()),
@@ -441,25 +445,23 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(d.view_format), ..Default::default() });
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             (l.renderer.bond_graph, l.renderer.sleep_colors) = VIEW.get();
-            l.renderer.draw(gpu, &mut encoder, &view, mirror, imps, view_proj, eye);
-            gpu.queue.submit([encoder.finish()]);
-            gpu.queue.present(texture);
-            let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
-            PHASES.set([step_ms, view_ms, draw_ms]);
-            if stepped > 0 || STATS.with_borrow(|s| s == "{}") {
-                let o = l.world.observation();
-                let moving = mirror.clusters.iter().filter(|c| !c.anchored).count();
-                STATS.set(
+            let want_stats = stepped > 0 || STATS.with_borrow(|s| s == "{}");
+            let renderer = &l.renderer;
+            let totals = l.totals;
+            let (view_ms, draw_ms, stats) = l.world.view_with(gpu, |mirror, imps| {
+                let view_ms = t_view.elapsed().as_secs_f64() * 1e3;
+                let t_draw = web_time::Instant::now();
+                renderer.draw(gpu, &mut encoder, &view, mirror, imps, view_proj, eye);
+                let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
+                let stats = want_stats.then(|| {
+                    let moving = mirror.clusters.iter().filter(|c| !c.anchored).count();
                     serde_json::json!({
-                        "frames": l.world.frame,
                         "simSeconds": mirror.time,
                         "stepMs": if stepped > 0 { step_ms / stepped as f64 } else { 0.0 },
-                        "fragments": o.values.get("fragments").copied().unwrap_or(0.0),
-                        "brokenBonds": o.values.get("broken_bonds").copied().unwrap_or(0.0),
                         "moving": moving,
-                        "chunks": mirror.structures.iter().map(|s| s.chunks.len()).sum::<usize>(),
-                        "hulls": mirror.structures.iter().flat_map(|s| &s.chunks).map(|c| c.parts.as_ref().map_or(1, |p| p.len())).sum::<usize>(),
-                        "bonds": mirror.structures.iter().map(|s| s.bonds.len()).sum::<usize>(),
+                        "chunks": totals.0,
+                        "hulls": totals.1,
+                        "bonds": totals.2,
                         "shots": FIRED.get(),
                         "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
                         "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),
@@ -469,11 +471,22 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "profile": PROFILE.get().name(),
                         // Rigid bodies the structures are now (each split's children).
                         "bodies": mirror.clusters.len(),
-                        // Times the engine's split-retired slots were reclaimed.
-                        "compactions": l.world.compactions,
                     })
-                    .to_string(),
-                );
+                });
+                (view_ms, draw_ms, stats)
+            });
+            gpu.queue.submit([encoder.finish()]);
+            gpu.queue.present(texture);
+            PHASES.set([step_ms, view_ms, draw_ms]);
+            if let Some(mut st) = stats {
+                // After the view followed the frame's splits.
+                let o = l.world.observation();
+                st["frames"] = serde_json::json!(l.world.frame);
+                st["fragments"] = serde_json::json!(o.values.get("fragments").copied().unwrap_or(0.0));
+                st["brokenBonds"] = serde_json::json!(o.values.get("broken_bonds").copied().unwrap_or(0.0));
+                // Times the engine's split-retired slots were reclaimed.
+                st["compactions"] = serde_json::json!(l.world.compactions);
+                STATS.set(st.to_string());
             }
             Ok(())
         })

@@ -390,6 +390,53 @@ impl GpuWorld {
         (m, imps)
     }
 
+    /// What a view reads from the GPU, all of it ahead of the drawing (a browser frame
+    /// should hold no canvas texture across a GPU wait): the frame's splits followed, the
+    /// bonds synced, the engine's motion. [`Self::view_with`] calls it; calling it first
+    /// leaves `view_with` only its waits' repeats, which find nothing to wait for.
+    pub fn view_prepare(&mut self, gpu: &Gpu) -> Option<HashMap<BodyKey, stress_ref::engine::BodyMotion>> {
+        self.flush_pending(gpu).expect("the frame's GPU splits followed");
+        self.solver.sync(gpu);
+        let engine = self.resident_engine.clone()?;
+        let motion = engine.borrow().motion().into_iter().map(|m| (m.key, m)).collect();
+        Some(motion)
+    }
+
+    /// [`Self::view_state`] without the copy: `f` sees the world's own mirror and impactors
+    /// with every body at the engine's pose now, and their poses and velocities are put
+    /// back after it, so a viewed run steps as an unviewed one does. O(bodies) where the
+    /// copy is O(chunks + bonds) (a 79k-chunk suburb's view took 30–40 ms in the browser).
+    pub fn view_with<R>(&mut self, gpu: &Gpu, f: impl FnOnce(&stress_ref::solver::ReferenceSolver, &[stress_ref::world::Impactor]) -> R) -> R {
+        let motion = self.view_prepare(gpu);
+        let Some(motion) = motion else {
+            return f(&self.solver.mirror, &self.solver.impactors);
+        };
+        let mut kept = Vec::new();
+        for (ci, cl) in self.solver.mirror.clusters.iter_mut().enumerate().filter(|(_, c)| !c.anchored) {
+            if let Some(mm) = motion.get(&BodyKey::Cluster(cl.id)) {
+                kept.push((ci, cl.pose, cl.velocity, cl.angular_velocity));
+                (cl.pose, cl.velocity, cl.angular_velocity) = (mm.pose, mm.velocity, mm.angular_velocity);
+            }
+        }
+        let mut kept_imps = Vec::new();
+        for (i, imp) in self.solver.impactors.iter_mut().enumerate() {
+            if let Some(mm) = motion.get(&BodyKey::Impactor(i)) {
+                kept_imps.push((i, imp.pose, imp.velocity, imp.angular_velocity));
+                (imp.pose, imp.velocity, imp.angular_velocity) = (mm.pose, mm.velocity, mm.angular_velocity);
+            }
+        }
+        let r = f(&self.solver.mirror, &self.solver.impactors);
+        for (ci, pose, v, w) in kept {
+            let cl = &mut self.solver.mirror.clusters[ci];
+            (cl.pose, cl.velocity, cl.angular_velocity) = (pose, v, w);
+        }
+        for (i, pose, v, w) in kept_imps {
+            let imp = &mut self.solver.impactors[i];
+            (imp.pose, imp.velocity, imp.angular_velocity) = (pose, v, w);
+        }
+        r
+    }
+
     /// The engine's motion of the driven bodies into the mirror (before a split, and
     /// whenever the mirror is wanted current).
     pub(super) fn resident_sync_motion(&mut self) {
