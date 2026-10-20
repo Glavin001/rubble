@@ -3,7 +3,7 @@
 //! the GPU's tables and state. `STRESS_GPU_SPLIT_CHECK=1` compares every split of the
 //! resident frame with the host's (`SplitCheck`).
 
-use crate::gpu::{groups, Binding, Gpu, Kernel};
+use crate::gpu::{groups, Binding, Gpu, Kernel, Staged};
 use crate::shaders;
 
 #[repr(C)]
@@ -74,10 +74,10 @@ pub struct GpuSplitter {
     pub(crate) children_group: Kernel,
     pub(crate) frames: Kernel,
     pub(crate) offsets: Kernel,
-    pub(crate) spawn: Kernel,
+    pub(crate) spawn: Staged,
     pub(crate) retire: Kernel,
-    pub(crate) spawn_colliders: Kernel,
-    pub(crate) spawn_group: Kernel,
+    pub(crate) spawn_colliders: Staged,
+    pub(crate) spawn_group: Staged,
     /// The split pass's copies of the tables as they were (`pass`), kept between splits:
     /// a new buffer per split costs its allocation and zero fill.
     old: std::cell::RefCell<Vec<Option<wgpu::Buffer>>>,
@@ -105,7 +105,21 @@ pub(crate) struct SpawnParams {
     pub(crate) max_bodies: u32,
     pub(crate) max_colliders: u32,
     pub(crate) island_cap: u32,
-    pub(crate) pad: u32,
+    /// The phased kernels' regions (spawn.slang): `extras` from this float4 (2 per child
+    /// slot), `member_offsets` from this word (4 per member).
+    pub(crate) moments_base: u32,
+    pub(crate) info_base: u32,
+    pub(crate) pad: [u32; 3],
+}
+
+/// Float4s of `extras` and words of `member_offsets` for `slots` child slots (and as many
+/// members), with the phased kernels' regions after the shared ones.
+pub(crate) fn extras_len(slots: usize) -> usize {
+    4 * slots
+}
+
+pub(crate) fn member_offsets_len(slots: usize) -> usize {
+    5 * slots
 }
 
 /// The engine's own body and collider buffers, for a live spawn (bodies in two regions,
@@ -198,7 +212,19 @@ impl GpuSplitter {
     pub fn new(gpu: &Gpu) -> GpuSplitter {
         let k = |e: &str| gpu.compute(&shaders::SPLIT, e, &BINDINGS);
         let s = |e: &str| gpu.compute(&shaders::SPAWN, e, &SPAWN_BINDINGS);
-        GpuSplitter { components: k("split_components"), children: k("split_children"), children_group: k("split_children_group"), frames: k("split_frames"), offsets: s("spawn_offsets"), spawn: s("spawn_bodies"), retire: s("spawn_retire"), spawn_colliders: s("spawn_colliders"), spawn_group: s("spawn_bodies_group"), old: std::cell::RefCell::new(vec![None; 8]) }
+        let staged = |e: &str| gpu.staged(&shaders::SPAWN, e, &SPAWN_BINDINGS);
+        GpuSplitter {
+            components: k("split_components"),
+            children: k("split_children"),
+            children_group: k("split_children_group"),
+            frames: k("split_frames"),
+            offsets: s("spawn_offsets"),
+            spawn: staged("spawn_bodies"),
+            retire: s("spawn_retire"),
+            spawn_colliders: staged("spawn_colliders"),
+            spawn_group: staged("spawn_bodies_group"),
+            old: std::cell::RefCell::new(vec![None; 8]),
+        }
     }
 
     /// The children of the islands `parents` (island, chunk range, rigid frame: rotation
@@ -286,7 +312,7 @@ impl GpuSplitter {
         // At most every part of the children's chunks once.
         let n_parts: usize = (table.parts.size() as usize / 128).max(1);
         let slots_buf = gpu.storage("spawn slots", &vec![[0u32; 4]; total]);
-        let extras_buf = gpu.storage("spawn extras", &vec![[0f32; 4]; 2 * total]);
+        let extras_buf = gpu.storage("spawn extras", &vec![[0f32; 4]; extras_len(total)]);
         let live = target.is_some();
         let (own_bodies, own_colliders);
         let (bodies, colliders, max_bodies) = match &target {
@@ -307,12 +333,16 @@ impl GpuSplitter {
             })
             .collect();
         let islands_of = gpu.storage("spawn parents", if islands_of.is_empty() { &[[0u32; 4]][..] } else { &islands_of });
-        let params = gpu.uniform("spawn params", &SpawnParams { parent_count: run.parent_count as u32, first_body, first_collider, live: live as u32, max_bodies, max_colliders: u32::MAX, island_cap: u32::MAX, pad: 0 });
+        let params = gpu.uniform("spawn params", &SpawnParams { parent_count: run.parent_count as u32, first_body, first_collider, live: live as u32, max_bodies, max_colliders: u32::MAX, island_cap: u32::MAX, moments_base: 2 * total as u32, info_base: total as u32, pad: [0; 3] });
         let control = gpu.storage("spawn control", &control_words(run.parent_count as u32, 0, 0, first_body, first_collider, total as u32));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        let member_offsets = gpu.storage("spawn member offsets", &vec![0u32; total.max(1)]);
+        let member_offsets = gpu.storage("spawn member offsets", &vec![0u32; member_offsets_len(total)]);
         let bodies_step = if split_tree() { (&self.spawn_group, total.max(1) as u32) } else { (&self.spawn, groups(total, 64)) };
-        for (k, size) in [(&self.offsets, 1u32), bodies_step, (&self.spawn_colliders, groups(total, 64)), (&self.retire, run.parent_count.max(1) as u32)] {
+        let mut steps: Vec<(&Kernel, u32)> = vec![(&self.offsets, 1u32)];
+        steps.extend(bodies_step.0.iter().map(|k| (k, bodies_step.1)));
+        steps.extend(self.spawn_colliders.iter().map(|k| (k, groups(total, 64))));
+        steps.push((&self.retire, run.parent_count.max(1) as u32));
+        for (k, size) in steps {
             let bind = gpu.bind(&k.group, &[&params, &run.parents, &run.work, &run.out, &run.frames, &table.ranges, &table.parts, chunks, state, &slots_buf, bodies, colliders, &islands_of, &extras_buf, &table.structure_base, &control, &member_offsets]);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
@@ -533,14 +563,15 @@ pub struct LayoutTables<'a> {
 pub struct GpuLayout {
     pub(crate) plan: std::rc::Rc<Kernel>,
     pub(crate) moved: std::rc::Rc<Kernel>,
-    pub(crate) parent: std::rc::Rc<Kernel>,
+    pub(crate) parent: std::rc::Rc<Staged>,
     pub(crate) copy: std::rc::Rc<Kernel>,
 }
 
 impl GpuLayout {
     pub fn new(gpu: &Gpu) -> GpuLayout {
         let k = |e: &str| std::rc::Rc::new(gpu.compute(&shaders::LAYOUT, e, &LAYOUT_BINDINGS));
-        GpuLayout { plan: k("layout_plan"), moved: k("layout_moved"), parent: k("layout_parent"), copy: k("layout_copy") }
+        let parent = gpu.staged(&shaders::LAYOUT, "layout_parent", &LAYOUT_BINDINGS);
+        GpuLayout { plan: k("layout_plan"), moved: k("layout_moved"), parent: std::rc::Rc::new(parent), copy: k("layout_copy") }
     }
 
     pub fn clone_kernels(&self) -> GpuLayout {
@@ -562,7 +593,9 @@ impl GpuLayout {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let no_copy = gpu.storage("layout no island copy", &[[0f32; 4]; 1]);
         let no_copy_out = gpu.storage("layout no island copy out", &[[0f32; 4]; 1]);
-        for (k, size) in [(&*self.plan, 1u32), (&*self.moved, groups(island_cap + 1, 64)), (&*self.parent, run.parent_count.max(1) as u32)] {
+        let mut steps: Vec<(&Kernel, u32)> = vec![(&*self.plan, 1u32), (&*self.moved, groups(island_cap + 1, 64))];
+        steps.extend(self.parent.iter().map(|k| (k, run.parent_count.max(1) as u32)));
+        for (k, size) in steps {
             let t = tables;
             let bind = gpu.bind(
                 &k.group,
@@ -655,14 +688,14 @@ impl GpuSplitter {
         let split_params = gpu.uniform("pass split params", &SplitParams { parent_count: parents.len() as u32, out_base: 0, anchored_pose: anchored_pose(), pad: 0 });
         // The spawn's.
         let slots = gpu.storage("pass slots", &vec![[0u32; 4]; total.max(1)]);
-        let extras = gpu.storage("pass extras", &vec![[0f32; 4]; 2 * total.max(1)]);
+        let extras = gpu.storage("pass extras", &vec![[0f32; 4]; extras_len(total.max(1))]);
         let control = gpu.storage("pass control", &control_words(parents.len() as u32, layout_params.island_count, layout_params.next_id, engine.first_body, engine.first_collider, total as u32));
         let firsts: Vec<[u32; 4]> = parents.iter().zip(&engine.retire).map(|(p, r)| [p.1[0], r[0], r[1], r[2]]).collect();
         let firsts = gpu.storage("pass parents' records", if firsts.is_empty() { &[[0u32; 4]][..] } else { &firsts });
 
         let spawn_params = gpu.uniform(
             "pass spawn params",
-            &SpawnParams { parent_count: parents.len() as u32, first_body: engine.first_body, first_collider: engine.first_collider, live: 1, max_bodies: engine.target.max_bodies, max_colliders: engine.max_colliders, island_cap: island_cap as u32, pad: 0 },
+            &SpawnParams { parent_count: parents.len() as u32, first_body: engine.first_body, first_collider: engine.first_collider, live: 1, max_bodies: engine.target.max_bodies, max_colliders: engine.max_colliders, island_cap: island_cap as u32, moments_base: 2 * total.max(1) as u32, info_base: total.max(1) as u32, pad: [0; 3] },
         );
         // The layout's: copies of the tables as they are, its plan.
         let mut params = layout_params;
@@ -739,7 +772,7 @@ impl GpuSplitter {
             _ => (&dummy, &dummy_out),
         };
         let split_bind = |k: &Kernel| gpu.bind(&k.group, &[&split_params, chunks, index, bonds, bond_dyn, islands, state, &parents_buf, &work, &out, &frames, engine.target.bodies, &parent_bodies, &control]);
-        let member_offsets = gpu.storage("pass member offsets", &vec![0u32; total.max(1)]);
+        let member_offsets = gpu.storage("pass member offsets", &vec![0u32; member_offsets_len(total.max(1))]);
         let spawn_bind = |k: &Kernel| {
             gpu.bind(&k.group, &[&spawn_params, &parents_buf, &work, &out, &frames, &table.ranges, &table.parts, chunks, state, &slots, engine.target.bodies, engine.target.colliders, &firsts, &extras, &table.structure_base, &control, &member_offsets])
         };
@@ -755,13 +788,13 @@ impl GpuSplitter {
             (&self.components, split_bind(&self.components), n),
             (&self.children, split_bind(&self.children), groups(total, 64)),
             (&self.offsets, spawn_bind(&self.offsets), 1),
-            (&self.spawn, spawn_bind(&self.spawn), groups(total, 64)),
-            (&self.spawn_colliders, spawn_bind(&self.spawn_colliders), groups(total, 64)),
-            (&self.retire, spawn_bind(&self.retire), n),
-            (&layout.plan, layout_bind(&layout.plan), 1),
-            (&layout.moved, layout_bind(&layout.moved), groups(island_cap + 1, 64)),
-            (&layout.parent, layout_bind(&layout.parent), n),
         ];
+        steps.extend(self.spawn.iter().map(|k| (k, spawn_bind(k), groups(total, 64))));
+        steps.extend(self.spawn_colliders.iter().map(|k| (k, spawn_bind(k), groups(total, 64))));
+        steps.push((&self.retire, spawn_bind(&self.retire), n));
+        steps.push((&layout.plan, layout_bind(&layout.plan), 1));
+        steps.push((&layout.moved, layout_bind(&layout.moved), groups(island_cap + 1, 64)));
+        steps.extend(layout.parent.iter().map(|k| (k, layout_bind(k), n)));
         if island_copy.is_some() {
             steps.push((&layout.copy, layout_bind(&layout.copy), groups(island_cap + 1, 64)));
         }

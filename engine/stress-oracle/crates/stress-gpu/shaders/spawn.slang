@@ -24,6 +24,14 @@ struct SpawnParams
     uint max_bodies;
     uint max_colliders;  // the engine's collider capacity
     uint island_cap;     // islands the stress tables can take (`CTL_ISLANDS` of them live)
+    // Where the phased kernels (`spawn_*_mass`, `_pose`, `_record`, `spawn_collider_members`)
+    // keep what the fused ones hold in registers: `extras` from this float4, 2 per child
+    // slot (principal moments, pose position); `member_offsets` from this word, 4 per
+    // member (child slot, body, first part, parts).
+    uint moments_base;
+    uint info_base;
+    uint pad0;
+    uint pad1;
     uint pad2;
 };
 
@@ -41,6 +49,7 @@ struct SpawnParams
 [[vk::binding(11, 0)]] RWStructuredBuffer<float4> colliders; // 4 float4 per collider (`Collider`)
 [[vk::binding(12, 0)]] StructuredBuffer<uint4> islands_of; // per parent: its island's first chunk (x); its engine body (y), first collider (z), collider end (w)
 // Per child slot: centre of mass (the structure's frame), mass; principal rotation (x, y, z, w).
+// From `params.moments_base`, the phased kernels' per child slot: principal moments; pose position.
 [[vk::binding(13, 0)]] RWStructuredBuffer<float4> extras;
 
 static const uint CHILD_WORDS = 8;
@@ -55,6 +64,8 @@ static const uint FLAG_AWAKE = 8;
 // nothing is made, retired or laid out, and the host splits instead.
 [[vk::binding(15, 0)]] RWStructuredBuffer<uint> control;
 // Per member (split.slang's member order: parent, then child): its first collider slot.
+// From `params.info_base`, `spawn_collider_members`'s per member: (child slot or NONE, body,
+// first part, parts).
 [[vk::binding(16, 0)]] RWStructuredBuffer<uint> member_offsets;
 
 // A layout chunk's part range: by its structure and chunk, so the table does not change
@@ -356,28 +367,29 @@ Quat conj(Quat q)
     return c;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void spawn_bodies(uint3 id: SV_DispatchThreadID)
+// A child slot whose body `spawn_bodies` makes: its parent's, when that parent splits, the
+// slot is one of its children and the split fits (`spawn_offsets` gives exactly these slots
+// a body: `slots[slot].w`, which the phases before the body's record do not read).
+bool child_spawns(uint slot, uint total, out uint p, out uint4 parent)
 {
-    uint slot = id.x;
-    uint total = total_slots();
-    if (slot >= total)
-        return;
-    uint p = parent_of(slot);
-    uint4 parent = parents[p];
-    if (slot - parent.y >= parent.z || slots[slot].w == 0 || control[CTL_ABORT] != 0)
-        return;
-    uint first = islands_of[p].x;
-    uint2 m = child_members(slot);
-    float4 rec0 = children[CHILD_WORDS * slot];
-    bool anchored = asuint(rec0.w) != 0;
-    // Mass, centre and inertia of the child's parts (`cook_with`), in member order.
-    float mass = 0.0;
+    p = 0;
+    parent = uint4(0);
+    if (slot >= total || control[CTL_ABORT] != 0)
+        return false;
+    p = parent_of(slot);
+    parent = parents[p];
+    return parent.z >= 2 && slot - parent.y < parent.z;
+}
+
+// Mass, centre and inertia of a child's parts (`cook_with`), in member order (`members`:
+// its first member's index in `work`).
+void child_mass(uint first, uint2 m, uint members, out float mass, out float3 com, out float3 i0, out float3 i1, out float3 i2)
+{
+    mass = 0.0;
     float3 moment = float3(0.0);
     for (uint j = 0; j < m.y; j++)
     {
-        uint4 r = part_range(first + work[total + parent.y + m.x + j]);
+        uint4 r = part_range(first + work[members + j]);
         for (uint k = r.x; k < r.x + r.y; k++)
         {
             float4 c = parts[PART_WORDS * k];
@@ -385,11 +397,11 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
             moment += c.xyz * c.w;
         }
     }
-    float3 com = moment / max(mass, 1e-30);
-    float3 i0 = float3(0.0), i1 = float3(0.0), i2 = float3(0.0);
+    com = moment / max(mass, 1e-30);
+    i0 = float3(0.0); i1 = float3(0.0); i2 = float3(0.0);
     for (uint j = 0; j < m.y; j++)
     {
-        uint4 r = part_range(first + work[total + parent.y + m.x + j]);
+        uint4 r = part_range(first + work[members + j]);
         for (uint k = r.x; k < r.x + r.y; k++)
         {
             float4 c = parts[PART_WORDS * k];
@@ -400,28 +412,35 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
             i2 += parts[PART_WORDS * k + 3].xyz + (float3(0, 0, dd) - d.z * d) * c.w;
         }
     }
-    Quat principal;
-    float3 moments;
-    principal_axes(i0, i1, i2, principal, moments);
-    Quat to_body = conj(principal);
-    // The child's pose (`split_cluster`): the parent's, a free child's moved by its
-    // chunks' mean hidden displacement (stress masses).
-    Quat pose_rot = quat_of(frames[5 * p]);
+}
+
+// The child's pose position (`split_cluster`): the parent's, a free child's moved by its
+// chunks' mean hidden displacement (stress masses).
+float3 child_pose(uint p, uint first, uint2 m, uint members, bool anchored)
+{
     float3 pose_pos = frames[5 * p + 4].xyz;
     if (!anchored)
     {
+        Quat pose_rot = quat_of(frames[5 * p]);
         float sm = 0.0;
         float3 su = float3(0.0);
         for (uint j = 0; j < m.y; j++)
         {
-            uint c = first + work[total + parent.y + m.x + j];
+            uint c = first + work[members + j];
             float cm = chunks[c].center.w;
             sm += cm;
             su += state[4 * c].xyz * cm;
         }
         pose_pos += rotate(pose_rot, su / sm);
     }
-    // The body (`create_body`).
+    return pose_pos;
+}
+
+// The child's body (`create_body`) at its slot, and its extras (centre of mass, mass,
+// principal rotation).
+void child_record(uint slot, uint p, bool anchored, float mass, float3 com, Quat principal, float3 moments, float3 pose_pos)
+{
+    Quat pose_rot = quat_of(frames[5 * p]);
     uint4 at = slots[slot];
     Quat orientation = rot_to_rubble(normalized(quat_mul(pose_rot, principal)));
     float inv_mass = anchored || !(mass > 0.0) ? 0.0 : 1.0 / mass;
@@ -449,6 +468,90 @@ void spawn_bodies(uint3 id: SV_DispatchThreadID)
             bodies[BODY_WORDS * (params.max_bodies + at.x) + w] = record[w];
     extras[2 * slot] = float4(com, mass);
     extras[2 * slot + 1] = quat_vec(principal);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_bodies(uint3 id: SV_DispatchThreadID)
+{
+    uint slot = id.x;
+    uint total = total_slots();
+    if (slot >= total)
+        return;
+    uint p = parent_of(slot);
+    uint4 parent = parents[p];
+    if (slot - parent.y >= parent.z || slots[slot].w == 0 || control[CTL_ABORT] != 0)
+        return;
+    uint first = islands_of[p].x;
+    uint2 m = child_members(slot);
+    float4 rec0 = children[CHILD_WORDS * slot];
+    bool anchored = asuint(rec0.w) != 0;
+    uint members = total + parent.y + m.x;
+    float mass;
+    float3 com, i0, i1, i2;
+    child_mass(first, m, members, mass, com, i0, i1, i2);
+    Quat principal;
+    float3 moments;
+    principal_axes(i0, i1, i2, principal, moments);
+    child_record(slot, p, anchored, mass, com, principal, moments, child_pose(p, first, m, members, anchored));
+}
+
+// `spawn_bodies` in three dispatches, for a device that binds fewer storage buffers per
+// stage than it uses (WebGPU's 10): the parts' mass properties and principal axes (into
+// `extras`), the pose, then the body.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_bodies_mass(uint3 id: SV_DispatchThreadID)
+{
+    uint slot = id.x;
+    uint p;
+    uint4 parent;
+    if (!child_spawns(slot, total_slots(), p, parent))
+        return;
+    uint2 m = child_members(slot);
+    float mass;
+    float3 com, i0, i1, i2;
+    child_mass(islands_of[p].x, m, total_slots() + parent.y + m.x, mass, com, i0, i1, i2);
+    Quat principal;
+    float3 moments;
+    principal_axes(i0, i1, i2, principal, moments);
+    extras[2 * slot] = float4(com, mass);
+    extras[2 * slot + 1] = quat_vec(principal);
+    extras[params.moments_base + 2 * slot] = float4(moments, 0.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_bodies_pose(uint3 id: SV_DispatchThreadID)
+{
+    uint slot = id.x;
+    uint p;
+    uint4 parent;
+    if (!child_spawns(slot, total_slots(), p, parent))
+        return;
+    uint2 m = child_members(slot);
+    bool anchored = asuint(children[CHILD_WORDS * slot].w) != 0;
+    extras[params.moments_base + 2 * slot + 1] = float4(child_pose(p, islands_of[p].x, m, total_slots() + parent.y + m.x, anchored), 0.0);
+}
+
+// The body from the phases' extras (with `slots[slot].w`, as `spawn_bodies` checks it).
+void phased_record(uint slot, uint p)
+{
+    float4 cm = extras[2 * slot];
+    bool anchored = asuint(children[CHILD_WORDS * slot].w) != 0;
+    child_record(slot, p, anchored, cm.w, cm.xyz, quat_of(extras[2 * slot + 1]), extras[params.moments_base + 2 * slot].xyz, extras[params.moments_base + 2 * slot + 1].xyz);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_bodies_record(uint3 id: SV_DispatchThreadID)
+{
+    uint slot = id.x;
+    uint p;
+    uint4 parent;
+    if (!child_spawns(slot, total_slots(), p, parent) || slots[slot].w == 0)
+        return;
+    phased_record(slot, p);
 }
 
 
@@ -477,6 +580,107 @@ void spawn_tree(uint tid)
     }
 }
 
+// The group's slot, as uniform values (barriers follow); false: no body to make.
+bool group_child(uint slot, uint tid, out uint p, out uint4 parent)
+{
+    p = 0;
+    parent = uint4(0);
+    uint total = total_slots();
+    if (group_uniform(slot >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0 ? 1u : 0u, tid) != 0)
+        return false;
+    p = parent_at(slot);
+    parent = parents[p];
+    return group_uniform(slot - parent.y >= parent.z || parent.z < 2 ? 1u : 0u, tid) == 0;
+}
+
+// The group's first tree (`spawn_bodies_group`): sums of the child's parts' mass moments
+// (`mm`, g_s0) and of its chunks' hidden displacements by stress mass (`su`, g_s4).
+void group_first_tree(uint first, uint2 m, uint members, uint tid)
+{
+    float4 mm = float4(0.0);
+    float4 su = float4(0.0);
+    for (uint j = tid; j < m.y; j += 64)
+    {
+        uint c = first + work[members + j];
+        uint4 r = part_range(c);
+        for (uint k = r.x; k < r.x + r.y; k++)
+        {
+            float4 pc = parts[PART_WORDS * k];
+            mm += float4(pc.xyz * pc.w, pc.w);
+        }
+        float cm = chunks[c].center.w;
+        su += float4(state[4 * c].xyz * cm, cm);
+    }
+    tree_of(tid, mm, float4(0.0), float4(0.0), float4(0.0), su);
+}
+
+// The first tree's mass moments alone, and its displacement sums alone (each lane's sums
+// as there: the tree adds each array on its own).
+void group_mass_tree(uint first, uint2 m, uint members, uint tid)
+{
+    float4 mm = float4(0.0);
+    for (uint j = tid; j < m.y; j += 64)
+    {
+        uint4 r = part_range(first + work[members + j]);
+        for (uint k = r.x; k < r.x + r.y; k++)
+        {
+            float4 pc = parts[PART_WORDS * k];
+            mm += float4(pc.xyz * pc.w, pc.w);
+        }
+    }
+    tree_of(tid, mm, float4(0.0), float4(0.0), float4(0.0), float4(0.0));
+}
+
+void group_su_tree(uint first, uint2 m, uint members, uint tid)
+{
+    float4 su = float4(0.0);
+    for (uint j = tid; j < m.y; j += 64)
+    {
+        uint c = first + work[members + j];
+        float cm = chunks[c].center.w;
+        su += float4(state[4 * c].xyz * cm, cm);
+    }
+    tree_of(tid, float4(0.0), float4(0.0), float4(0.0), float4(0.0), su);
+}
+
+// The group's second tree: the inertia about `com` (g_s1..g_s3), `su_total` carried in
+// lane 0 of g_s4.
+void group_inertia_tree(uint first, uint2 m, uint members, uint tid, float3 com, float4 su_total)
+{
+    float3 i0 = float3(0.0), i1 = float3(0.0), i2 = float3(0.0);
+    for (uint j = tid; j < m.y; j += 64)
+    {
+        uint4 r = part_range(first + work[members + j]);
+        for (uint k = r.x; k < r.x + r.y; k++)
+        {
+            float4 c = parts[PART_WORDS * k];
+            float3 d = c.xyz - com;
+            float dd = dot(d, d);
+            i0 += parts[PART_WORDS * k + 1].xyz + (float3(dd, 0, 0) - d.x * d) * c.w;
+            i1 += parts[PART_WORDS * k + 2].xyz + (float3(0, dd, 0) - d.y * d) * c.w;
+            i2 += parts[PART_WORDS * k + 3].xyz + (float3(0, 0, dd) - d.z * d) * c.w;
+        }
+    }
+    tree_of(tid, float4(0.0), float4(i0, 0.0), float4(i1, 0.0), float4(i2, 0.0), tid == 0 ? su_total : float4(0.0));
+}
+
+// The second tree with only `su_total` carried (its value after that tree's additions).
+void group_carry_tree(uint tid, float4 su_total)
+{
+    tree_of(tid, float4(0.0), float4(0.0), float4(0.0), float4(0.0), tid == 0 ? su_total : float4(0.0));
+}
+
+// Each lane's five sums into the shared arrays, then the fixed tree.
+void tree_of(uint tid, float4 a, float4 b, float4 c, float4 d, float4 e)
+{
+    g_s0[tid] = a;
+    g_s1[tid] = b;
+    g_s2[tid] = c;
+    g_s3[tid] = d;
+    g_s4[tid] = e;
+    spawn_tree(tid);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void spawn_bodies_group(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
@@ -495,108 +699,108 @@ void spawn_bodies_group(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     uint2 m = child_members(slot);
     float4 rec0 = children[CHILD_WORDS * slot];
     bool anchored = asuint(rec0.w) != 0;
-    float4 mm = float4(0.0);
-    float4 su = float4(0.0);
-    for (uint j = tid; j < m.y; j += 64)
-    {
-        uint c = first + work[total + parent.y + m.x + j];
-        uint4 r = part_range(c);
-        for (uint k = r.x; k < r.x + r.y; k++)
-        {
-            float4 pc = parts[PART_WORDS * k];
-            mm += float4(pc.xyz * pc.w, pc.w);
-        }
-        float cm = chunks[c].center.w;
-        su += float4(state[4 * c].xyz * cm, cm);
-    }
-    g_s0[tid] = mm;
-    g_s1[tid] = float4(0.0);
-    g_s2[tid] = float4(0.0);
-    g_s3[tid] = float4(0.0);
-    g_s4[tid] = su;
-    spawn_tree(tid);
+    uint members = total + parent.y + m.x;
+    group_first_tree(first, m, members, tid);
     float mass = g_s0[0].w;
     float3 com = g_s0[0].xyz / max(mass, 1e-30);
     float4 su_total = g_s4[0];
     GroupMemoryBarrierWithGroupSync();
-    float3 i0 = float3(0.0), i1 = float3(0.0), i2 = float3(0.0);
-    for (uint j = tid; j < m.y; j += 64)
-    {
-        uint4 r = part_range(first + work[total + parent.y + m.x + j]);
-        for (uint k = r.x; k < r.x + r.y; k++)
-        {
-            float4 c = parts[PART_WORDS * k];
-            float3 d = c.xyz - com;
-            float dd = dot(d, d);
-            i0 += parts[PART_WORDS * k + 1].xyz + (float3(dd, 0, 0) - d.x * d) * c.w;
-            i1 += parts[PART_WORDS * k + 2].xyz + (float3(0, dd, 0) - d.y * d) * c.w;
-            i2 += parts[PART_WORDS * k + 3].xyz + (float3(0, 0, dd) - d.z * d) * c.w;
-        }
-    }
-    g_s0[tid] = float4(0.0);
-    g_s1[tid] = float4(i0, 0.0);
-    g_s2[tid] = float4(i1, 0.0);
-    g_s3[tid] = float4(i2, 0.0);
-    g_s4[tid] = tid == 0 ? su_total : float4(0.0);
-    spawn_tree(tid);
+    group_inertia_tree(first, m, members, tid, com, su_total);
     if (tid != 0)
         return;
-    i0 = g_s1[0].xyz; i1 = g_s2[0].xyz; i2 = g_s3[0].xyz;
+    float3 i0 = g_s1[0].xyz, i1 = g_s2[0].xyz, i2 = g_s3[0].xyz;
     Quat principal;
     float3 moments;
     principal_axes(i0, i1, i2, principal, moments);
-    Quat to_body = conj(principal);
     // The child's pose (`split_cluster`): the parent's, a free child's moved by its
     // chunks' mean hidden displacement (stress masses).
     Quat pose_rot = quat_of(frames[5 * p]);
     float3 pose_pos = frames[5 * p + 4].xyz;
     if (!anchored)
         pose_pos += rotate(pose_rot, g_s4[0].xyz / g_s4[0].w);
-    // The body (`create_body`).
-    uint4 at = slots[slot];
-    Quat orientation = rot_to_rubble(normalized(quat_mul(pose_rot, principal)));
-    float inv_mass = anchored || !(mass > 0.0) ? 0.0 : 1.0 / mass;
-    float3 inv_inertia = float3(0.0);
-    if (!anchored)
-        inv_inertia = float3(moments.x > 0.0 ? 1.0 / moments.x : 0.0, moments.y > 0.0 ? 1.0 / moments.y : 0.0, moments.z > 0.0 ? 1.0 / moments.z : 0.0);
-    float3 velocity = anchored ? float3(0.0) : to_rubble(children[CHILD_WORDS * slot + 5].xyz);
-    float3 spin = anchored ? float3(0.0) : to_rubble(children[CHILD_WORDS * slot + 6].xyz);
-    uint flags = anchored ? 0u : (FLAG_DYNAMIC | FLAG_AWAKE);
-    float4 record[BODY_WORDS] = {
-        float4(to_rubble(pose_pos + rotate(pose_rot, com)), inv_mass),
-        quat_vec(orientation),
-        float4(inv_inertia, asfloat(flags)),
-        float4(velocity, 0.0),
-        float4(spin, 0.0),
-        float4(0.0),
-        float4(0.0, 0.0, 0.0, 1.0),
-    };
-    uint b = BODY_WORDS * (params.live != 0 ? at.x : at.x - control[CTL_FIRST_BODY]);
-    for (uint w = 0; w < BODY_WORDS; w++)
-        bodies[b + w] = record[w];
-    // The previous-pose region (`add_bodies` writes both).
-    if (params.live != 0)
-        for (uint w = 0; w < BODY_WORDS; w++)
-            bodies[BODY_WORDS * (params.max_bodies + at.x) + w] = record[w];
-    extras[2 * slot] = float4(com, mass);
-    extras[2 * slot + 1] = quat_vec(principal);
+    child_record(slot, p, anchored, mass, com, principal, moments, pose_pos);
 }
 
-// Per member: its chunk's colliders for its child's body (`create_body`), in part order:
-// at `to_body (origin - com)`, turned `to_body rotation` (the child's centre of mass and
-// principal rotation from `spawn_bodies`), at the member's slots (`spawn_offsets`).
+// `spawn_bodies_group` in three dispatches (a group per child slot), for a device that
+// binds fewer storage buffers per stage than it uses (WebGPU's 10): the same trees, the
+// mass properties first, the hidden displacements next (carried through the second tree
+// as there), then the body.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void spawn_colliders(uint3 id: SV_DispatchThreadID)
+void spawn_bodies_group_mass(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
-    uint i = id.x;
-    uint total = total_slots();
-    if (i >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0)
+    uint slot = group.x;
+    uint tid = thread.x;
+    uint p;
+    uint4 parent;
+    if (!group_child(slot, tid, p, parent))
         return;
+    uint first = islands_of[p].x;
+    uint2 m = child_members(slot);
+    uint members = total_slots() + parent.y + m.x;
+    group_mass_tree(first, m, members, tid);
+    float mass = g_s0[0].w;
+    float3 com = g_s0[0].xyz / max(mass, 1e-30);
+    GroupMemoryBarrierWithGroupSync();
+    group_inertia_tree(first, m, members, tid, com, float4(0.0));
+    if (tid != 0)
+        return;
+    Quat principal;
+    float3 moments;
+    principal_axes(g_s1[0].xyz, g_s2[0].xyz, g_s3[0].xyz, principal, moments);
+    extras[2 * slot] = float4(com, mass);
+    extras[2 * slot + 1] = quat_vec(principal);
+    extras[params.moments_base + 2 * slot] = float4(moments, 0.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_bodies_group_pose(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint slot = group.x;
+    uint tid = thread.x;
+    uint p;
+    uint4 parent;
+    if (!group_child(slot, tid, p, parent))
+        return;
+    uint first = islands_of[p].x;
+    uint2 m = child_members(slot);
+    uint members = total_slots() + parent.y + m.x;
+    group_su_tree(first, m, members, tid);
+    float4 su_total = g_s4[0];
+    GroupMemoryBarrierWithGroupSync();
+    group_carry_tree(tid, su_total);
+    if (tid != 0)
+        return;
+    bool anchored = asuint(children[CHILD_WORDS * slot].w) != 0;
+    Quat pose_rot = quat_of(frames[5 * p]);
+    float3 pose_pos = frames[5 * p + 4].xyz;
+    if (!anchored)
+        pose_pos += rotate(pose_rot, g_s4[0].xyz / g_s4[0].w);
+    extras[params.moments_base + 2 * slot + 1] = float4(pose_pos, 0.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_bodies_group_record(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint slot = group.x;
+    uint p;
+    uint4 parent;
+    if (thread.x != 0 || !child_spawns(slot, total_slots(), p, parent) || slots[slot].w == 0)
+        return;
+    phased_record(slot, p);
+}
+
+// A member's child slot (NONE: no body) and part range: the last child whose members
+// start at or before it, and its chunk's parts.
+uint4 member_info(uint i, uint total, out uint col)
+{
+    col = 0;
     uint p = parent_at(i);
     uint4 parent = parents[p];
     if (parent.z < 2)
-        return;
+        return uint4(NONE_SLOT, 0, 0, 0);
     // Its child: the last whose members start at or before it.
     uint local = i - parent.y;
     uint lo = 0, hi = parent.z - 1;
@@ -611,24 +815,81 @@ void spawn_colliders(uint3 id: SV_DispatchThreadID)
     uint slot = parent.y + lo;
     uint4 at = slots[slot];
     if (at.w == 0)
-        return;
+        return uint4(NONE_SLOT, 0, 0, 0);
+    uint4 r = part_range(islands_of[p].x + work[total + i]);
+    col = member_offsets[i];
+    return uint4(slot, at.x, r.x, r.y);
+}
+
+// A member's colliders (`info`: its child slot, body, first part, parts) from collider
+// slot `col`.
+void member_colliders(uint4 info, uint col)
+{
+    uint slot = info.x;
     float3 com = extras[2 * slot].xyz;
     Quat to_body = conj(quat_of(extras[2 * slot + 1]));
-    uint4 r = part_range(islands_of[p].x + work[total + i]);
-    uint col = member_offsets[i];
-    for (uint k = r.x; k < r.x + r.y; k++)
+    for (uint k = info.z; k < info.z + info.w; k++)
     {
         float4 o = parts[PART_WORDS * k + 4];
         Quat rot = quat_of(parts[PART_WORDS * k + 5]);
         float4 ids = parts[PART_WORDS * k + 6];
         float4 shape_params = parts[PART_WORDS * k + 7];
         uint cw = 4 * (params.live != 0 ? col : col - control[CTL_FIRST_COLLIDER]);
-        colliders[cw] = float4(asfloat(at.x), ids.x, ids.y, ids.z);
+        colliders[cw] = float4(asfloat(info.y), ids.x, ids.y, ids.z);
         colliders[cw + 1] = float4(rotate(to_body, o.xyz - com), o.w);
         colliders[cw + 2] = quat_vec(normalized(quat_mul(to_body, rot)));
         colliders[cw + 3] = shape_params;
         col++;
     }
+}
+
+static const uint NONE_SLOT = 0xffffffffu;
+
+// Per member: its chunk's colliders for its child's body (`create_body`), in part order:
+// at `to_body (origin - com)`, turned `to_body rotation` (the child's centre of mass and
+// principal rotation from `spawn_bodies`), at the member's slots (`spawn_offsets`).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_colliders(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    uint total = total_slots();
+    if (i >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0)
+        return;
+    uint col;
+    uint4 info = member_info(i, total, col);
+    if (info.x != NONE_SLOT)
+        member_colliders(info, col);
+}
+
+// `spawn_colliders` in two dispatches, for a device that binds fewer storage buffers per
+// stage than it uses (WebGPU's 10): each member's child slot and parts (into
+// `member_offsets` from `params.info_base`), then its colliders.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_collider_members(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    uint total = total_slots();
+    if (i >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0)
+        return;
+    uint col;
+    uint4 info = member_info(i, total, col);
+    for (uint w = 0; w < 4; w++)
+        member_offsets[params.info_base + 4 * i + w] = info[w];
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void spawn_colliders_phased(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    uint total = total_slots();
+    if (i >= total || control[CTL_PARENTS] == 0 || control[CTL_ABORT] != 0)
+        return;
+    uint4 info = uint4(member_offsets[params.info_base + 4 * i], member_offsets[params.info_base + 4 * i + 1], member_offsets[params.info_base + 4 * i + 2], member_offsets[params.info_base + 4 * i + 3]);
+    if (info.x != NONE_SLOT)
+        member_colliders(info, member_offsets[i]);
 }
 
 // A split parent's engine body retired where it stands (stress-rubble `remove_body`):

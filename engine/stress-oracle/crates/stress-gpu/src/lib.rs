@@ -52,6 +52,48 @@ pub mod loads;
 pub mod methods;
 pub mod micro;
 
+/// What `build.rs` reflects from the generated WGSL: how many storage buffers each module's
+/// group 0 declares, and which group-0 bindings each entry point uses.
+pub mod reflection {
+    include!(concat!(env!("OUT_DIR"), "/entry_bindings.rs"));
+
+    /// Storage buffers `module` declares in group 0.
+    pub fn module_storage(module: &str) -> Option<u32> {
+        MODULE_STORAGE.iter().find(|m| m.0 == module).map(|m| m.1)
+    }
+
+    /// The group-0 bindings `entry` of `module` uses, ascending.
+    pub fn entry_bindings(module: &str, entry: &str) -> Option<&'static [u32]> {
+        ENTRY_BINDINGS.iter().find(|e| e.0 == module && e.1 == entry).map(|e| e.2)
+    }
+
+    /// The storage buffers `entry` of `module` uses.
+    pub fn entry_storage(module: &str, entry: &str) -> Option<u32> {
+        ENTRY_BINDINGS.iter().find(|e| e.0 == module && e.1 == entry).map(|e| e.3)
+    }
+
+    /// Entry points that bind more storage buffers than WebGPU allows per stage (10), and
+    /// the entry points that do their work in order where a device allows fewer than they
+    /// use (`Gpu::staged`): (module, entry, phases).
+    pub const PHASED: &[(&str, &str, &[&str])] = &[
+        ("pass", "pass_snapshot", &["pass_snapshot_chunks", "pass_snapshot_bonds", "pass_snapshot_ctab"]),
+        ("passlog", "pass_log", &["pass_log_head", "pass_log_tail"]),
+        (
+            "layout",
+            "layout_parent",
+            &["layout_parent_positions", "layout_parent_chunks", "layout_parent_ctab", "layout_parent_bond_ranks", "layout_parent_bonds", "layout_parent_incidence", "layout_parent_records", "layout_parent_engine"],
+        ),
+        ("spawn", "spawn_bodies", &["spawn_bodies_mass", "spawn_bodies_pose", "spawn_bodies_record"]),
+        ("spawn", "spawn_bodies_group", &["spawn_bodies_group_mass", "spawn_bodies_group_pose", "spawn_bodies_group_record"]),
+        ("spawn", "spawn_colliders", &["spawn_collider_members", "spawn_colliders_phased"]),
+    ];
+
+    /// `entry`'s phases (`PHASED`).
+    pub fn phases(module: &str, entry: &str) -> Option<&'static [&'static str]> {
+        PHASED.iter().find(|p| p.0 == module && p.1 == entry).map(|p| p.2)
+    }
+}
+
 /// The generated shaders of one Slang file, in every form the runtime can load.
 #[derive(Clone, Copy, Debug)]
 pub struct ShaderSet {
@@ -133,15 +175,65 @@ pub mod shaders {
     pub const RESIDENT: ShaderSet = shader_set!("resident", [("resident_poses", (64, 1, 1)), ("resident_filter", (64, 1, 1)), ("resident_static_loads", (256, 1, 1))]);
     pub const CASCADE: ShaderSet = shader_set!("cascade", [("cascade_begin", (64, 1, 1)), ("cascade_gate", (64, 1, 1)), ("cascade_fixed", (64, 1, 1)), ("cascade_restore", (64, 1, 1)), ("cascade_settle", (64, 1, 1)), ("cascade_end", (256, 1, 1)), ("cascade_backup", (64, 1, 1))]);
     pub const PLAN: ShaderSet = shader_set!("plan", [("plan_motion", (64, 1, 1)), ("plan_reach", (64, 1, 1)), ("plan_pair_count", (64, 1, 1)), ("plan_scan", (1024, 1, 1)), ("plan_pair_write", (64, 1, 1)), ("plan_side", (64, 1, 1))]);
-    pub const LAYOUT: ShaderSet = shader_set!("layout", [("layout_plan", (1, 1, 1)), ("layout_moved", (64, 1, 1)), ("layout_parent", (256, 1, 1)), ("layout_copy", (64, 1, 1))]);
-    pub const SPAWN: ShaderSet = shader_set!("spawn", [("spawn_offsets", (1024, 1, 1)), ("spawn_bodies", (64, 1, 1)), ("spawn_colliders", (64, 1, 1)), ("spawn_bodies_group", (64, 1, 1)), ("spawn_retire", (64, 1, 1))]);
+    pub const LAYOUT: ShaderSet = shader_set!(
+        "layout",
+        [
+            ("layout_plan", (1, 1, 1)),
+            ("layout_moved", (64, 1, 1)),
+            ("layout_parent", (256, 1, 1)),
+            ("layout_copy", (64, 1, 1)),
+            ("layout_parent_positions", (256, 1, 1)),
+            ("layout_parent_chunks", (256, 1, 1)),
+            ("layout_parent_ctab", (256, 1, 1)),
+            ("layout_parent_bond_ranks", (256, 1, 1)),
+            ("layout_parent_bonds", (256, 1, 1)),
+            ("layout_parent_incidence", (256, 1, 1)),
+            ("layout_parent_records", (256, 1, 1)),
+            ("layout_parent_engine", (256, 1, 1)),
+        ]
+    );
+    pub const SPAWN: ShaderSet = shader_set!(
+        "spawn",
+        [
+            ("spawn_offsets", (1024, 1, 1)),
+            ("spawn_bodies", (64, 1, 1)),
+            ("spawn_colliders", (64, 1, 1)),
+            ("spawn_bodies_group", (64, 1, 1)),
+            ("spawn_retire", (64, 1, 1)),
+            ("spawn_bodies_mass", (64, 1, 1)),
+            ("spawn_bodies_pose", (64, 1, 1)),
+            ("spawn_bodies_record", (64, 1, 1)),
+            ("spawn_bodies_group_mass", (64, 1, 1)),
+            ("spawn_bodies_group_pose", (64, 1, 1)),
+            ("spawn_bodies_group_record", (64, 1, 1)),
+            ("spawn_collider_members", (64, 1, 1)),
+            ("spawn_colliders_phased", (64, 1, 1)),
+        ]
+    );
     pub const COLLIDERS: ShaderSet = shader_set!("colliders", [("collider_keys", (64, 1, 1)), ("collider_slots", (64, 1, 1)), ("collider_refresh", (64, 1, 1))]);
-    pub const PASS: ShaderSet = shader_set!("pass", [("pass_parents", (1024, 1, 1)), ("pass_snapshot", (256, 1, 1)), ("pass_whole", (256, 1, 1)), ("pass_finish", (1, 1, 1))]);
-    pub const PASSLOG: ShaderSet = shader_set!("passlog", [("pass_log", (256, 1, 1))]);
+    pub const PASS: ShaderSet = shader_set!(
+        "pass",
+        [
+            ("pass_parents", (1024, 1, 1)),
+            ("pass_snapshot", (256, 1, 1)),
+            ("pass_whole", (256, 1, 1)),
+            ("pass_finish", (1, 1, 1)),
+            ("pass_snapshot_chunks", (256, 1, 1)),
+            ("pass_snapshot_bonds", (256, 1, 1)),
+            ("pass_snapshot_ctab", (256, 1, 1)),
+        ]
+    );
+    pub const PASSLOG: ShaderSet = shader_set!("passlog", [("pass_log", (256, 1, 1)), ("pass_log_head", (256, 1, 1)), ("pass_log_tail", (256, 1, 1))]);
     pub const ROUTING: ShaderSet = shader_set!("routing", [("route_islands", (64, 1, 1))]);
     pub const PUNCH: ShaderSet = shader_set!("punch", [("punch_islands", (256, 1, 1)), ("punch_fast", (1024, 1, 1))]);
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
+
+    /// Every set (each Slang file with entry points).
+    pub const ALL: &[ShaderSet] = &[
+        WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
+        HUD_OVERLAY,
+    ];
 }
 
 pub use stress_ref::scenes;

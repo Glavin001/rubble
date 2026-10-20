@@ -214,9 +214,20 @@ level, camera and shot rule, so the three can be compared:
 **Status in Chrome (M3 Max):**
 - It loads, draws, aims and fires like the other modes, and it holds real time (60 physics
   frames/s, 2.3 ms each) until a ball strikes.
-- **Nothing breaks yet.** Chrome allows 10 storage buffers per shader stage, and the
-  stress kernels for contact ingest and GPU splits bind up to 26 (`layout`), so WebGPU
-  rejects those pipelines. Packing them to 10 or fewer is the remaining work.
+- **Bonds break and split on the GPU.** A ×64 ball on the veneer house, level 0: 140
+  bonds broken, 64 fragments, 61 physics frames/s.
+- **Chrome allows 10 storage buffers per shader stage; the stress kernels fit it two ways:**
+  - Each pipeline's layout holds only the bindings its entry point uses, when its module
+    declares more than the device allows. `build.rs` reflects them from the generated WGSL
+    with Naga.
+  - The kernels that use more than 10 on their own run as phases: `pass_snapshot`,
+    `pass_log`, `layout_parent`, `spawn_bodies`, `spawn_bodies_group`,
+    `spawn_colliders`. They do the same work in order (`reflection::PHASED`,
+    `Gpu::staged`), and the fused kernel still runs where the device allows it (Metal: 31).
+  - `tests/binding_limits.rs` keeps every entry point within 10.
+  - Lossless: the guard's digests are unchanged. Forcing the phases and per-entry layouts
+    natively (`STRESS_GPU_STORAGE_LIMIT=10`) gives the fused kernels' digest on both Metal
+    and native WGSL.
 - The same WGSL kernels run natively (`STRESS_GPU_SHADERS=wgsl`, where Metal allows 31)
   with the Metal library's result: a lab shot (×64 ball) breaks 210 bonds into 17
   fragments on both.

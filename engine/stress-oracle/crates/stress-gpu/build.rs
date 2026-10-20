@@ -26,6 +26,7 @@ fn main() {
     let macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     let mut entries: Vec<_> = std::fs::read_dir(generated).expect("shaders/generated").flatten().map(|e| e.path()).collect();
     entries.sort();
+    reflect_bindings(&entries, &out.join("entry_bindings.rs"));
     for metal in entries.iter().filter(|p| p.extension().is_some_and(|e| e == "metal")) {
         let name = metal.file_stem().unwrap().to_string_lossy().to_string();
         println!("cargo:rerun-if-changed={}", metal.display());
@@ -37,6 +38,42 @@ fn main() {
             }
         }
     }
+}
+
+/// Writes `entry_bindings.rs`: for every generated WGSL module, how many storage buffers its
+/// group 0 declares, and the group-0 bindings each entry point uses (Naga's validation
+/// reports every global an entry point reaches, through the functions it calls). A device
+/// that allows fewer storage buffers per stage than a module declares builds each entry's
+/// layout from its own bindings (`Gpu::compute`).
+fn reflect_bindings(paths: &[PathBuf], out: &Path) {
+    use naga::valid::{Capabilities, ValidationFlags, Validator};
+    let mut modules = String::new();
+    let mut entries = String::new();
+    for wgsl in paths.iter().filter(|p| p.extension().is_some_and(|e| e == "wgsl")) {
+        let name = wgsl.file_stem().unwrap().to_string_lossy().to_string();
+        let source = std::fs::read_to_string(wgsl).expect("read generated WGSL");
+        let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("{}: {}", wgsl.display(), e.emit_to_string(&source)));
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}: {}", wgsl.display(), e.emit_to_string(&source)));
+        let group0 = |g: &naga::GlobalVariable| g.binding.as_ref().filter(|b| b.group == 0).map(|b| b.binding);
+        let storage = module.global_variables.iter().filter(|(_, g)| group0(g).is_some() && matches!(g.space, naga::AddressSpace::Storage { .. })).count();
+        modules.push_str(&format!("    (\"{name}\", {storage}),\n"));
+        for (i, ep) in module.entry_points.iter().enumerate() {
+            let uses = info.get_entry_point(i);
+            let reached: Vec<&naga::GlobalVariable> = module.global_variables.iter().filter(|(h, _)| !uses[*h].is_empty()).map(|(_, g)| g).collect();
+            let mut used: Vec<u32> = reached.iter().filter_map(|g| group0(g)).collect();
+            used.sort_unstable();
+            let storage = reached.iter().filter(|g| group0(g).is_some() && matches!(g.space, naga::AddressSpace::Storage { .. })).count();
+            let size = ep.workgroup_size;
+            entries.push_str(&format!("    (\"{name}\", \"{}\", &{used:?}, {storage}, ({}, {}, {})),\n", ep.name, size[0], size[1], size[2]));
+        }
+    }
+    let text = format!(
+        "/// (module, storage buffers its group 0 declares)\npub static MODULE_STORAGE: &[(&str, u32)] = &[\n{modules}];\n\
+         /// (module, entry point, group-0 bindings the entry point uses, storage buffers among them, workgroup size)\npub static ENTRY_BINDINGS: &[(&str, &str, &[u32], u32, (u32, u32, u32))] = &[\n{entries}];\n"
+    );
+    std::fs::write(out, text).expect("write entry_bindings.rs");
 }
 
 fn compile(metal: &Path, air: &Path, lib: &Path, fast: bool) -> bool {

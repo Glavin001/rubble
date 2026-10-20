@@ -42,6 +42,10 @@ pub struct Gpu {
     /// Metal libraries built with fast math (`STRESS_GPU_MATH=fast`); the default is the
     /// parity build without it.
     pub fast_math: bool,
+    /// Storage buffers a shader stage may bind: the device's limit (10 in Chrome, 31 on
+    /// Metal), or a lower `STRESS_GPU_STORAGE_LIMIT` to run the browser's per-entry
+    /// layouts natively.
+    pub storage_limit: u32,
 }
 
 /// What a binding of a kernel's group 0 holds (bindings are numbered in order).
@@ -98,7 +102,15 @@ impl Gpu {
             Ok("precise") | Err(_) => false,
             Ok(other) => return Err(format!("STRESS_GPU_MATH={other}: expected fast or precise")),
         };
-        Ok(Gpu { adapter, device, queue, adapter_info, shader_path, passthrough, fast_math })
+        let device_limit = device.limits().max_storage_buffers_per_shader_stage;
+        let storage_limit = match std::env::var("STRESS_GPU_STORAGE_LIMIT") {
+            Err(_) => device_limit,
+            Ok(v) => match v.parse::<u32>() {
+                Ok(n) if n <= device_limit => n,
+                _ => return Err(format!("STRESS_GPU_STORAGE_LIMIT={v}: expected a count up to the device's {device_limit}")),
+            },
+        };
+        Ok(Gpu { adapter, device, queue, adapter_info, shader_path, passthrough, fast_math, storage_limit })
     }
 
     /// Run later-built pipelines from another shader form; false (unchanged) when the
@@ -138,11 +150,17 @@ impl Gpu {
     /// The pipeline layout of a shader whose group 0 holds `bindings` (in order), seen
     /// by `stages`. Explicit, because a passed-through Metal library has no reflection.
     pub fn layout(&self, label: &str, bindings: &[Binding], stages: wgpu::ShaderStages) -> (wgpu::BindGroupLayout, wgpu::PipelineLayout) {
+        let numbered: Vec<(u32, Binding)> = bindings.iter().enumerate().map(|(i, &b)| (i as u32, b)).collect();
+        self.layout_numbered(label, &numbered, stages)
+    }
+
+    /// `layout` with each binding's number given: a layout may skip bindings the
+    /// pipeline's entry point does not use.
+    fn layout_numbered(&self, label: &str, bindings: &[(u32, Binding)], stages: wgpu::ShaderStages) -> (wgpu::BindGroupLayout, wgpu::PipelineLayout) {
         let entries: Vec<wgpu::BindGroupLayoutEntry> = bindings
             .iter()
-            .enumerate()
-            .map(|(i, b)| wgpu::BindGroupLayoutEntry {
-                binding: i as u32,
+            .map(|&(i, b)| wgpu::BindGroupLayoutEntry {
+                binding: i,
                 visibility: stages,
                 ty: wgpu::BindingType::Buffer {
                     ty: match b {
@@ -174,7 +192,21 @@ impl Gpu {
         } else {
             bindings
         };
-        let (group, layout) = self.layout(entry, bindings, wgpu::ShaderStages::COMPUTE);
+        let used = self.entry_subset(set, entry);
+        let (group, layout) = match used {
+            Some(used) => {
+                let numbered: Vec<(u32, Binding)> = used.iter().map(|&n| (n, bindings[n as usize])).collect();
+                let storage = numbered.iter().filter(|b| b.1 != Binding::Uniform).count() as u32;
+                assert!(
+                    storage <= self.storage_limit,
+                    "{}::{entry} uses {storage} storage buffers; this device allows {} per shader stage",
+                    set.name,
+                    self.storage_limit
+                );
+                self.layout_numbered(entry, &numbered, wgpu::ShaderStages::COMPUTE)
+            }
+            None => self.layout(entry, bindings, wgpu::ShaderStages::COMPUTE),
+        };
         let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(entry),
             layout: Some(&layout),
@@ -184,14 +216,49 @@ impl Gpu {
             cache: None,
         });
         let size = set.entries.iter().find(|e| e.0 == entry).map(|e| e.1 .0).unwrap_or(64);
-        Kernel { pipeline, group, workgroup: size }
+        Kernel { pipeline, group: GroupLayout { layout: group, used: used.map(|u| u.to_vec()) }, workgroup: size }
     }
 
-    /// A bind group for `layout`, binding `buffers[i]` at binding `i`.
-    pub fn bind(&self, layout: &wgpu::BindGroupLayout, buffers: &[&wgpu::Buffer]) -> wgpu::BindGroup {
-        let entries: Vec<wgpu::BindGroupEntry> =
-            buffers.iter().enumerate().map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() }).collect();
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout, entries: &entries })
+    /// Whether `entry` of `set` binds no more storage buffers than this device allows per
+    /// stage (on the Metal path a pipeline binds its module's whole group 0).
+    pub fn entry_fits(&self, set: &ShaderSet, entry: &str) -> bool {
+        let storage = if self.shader_path == ShaderPath::Wgsl { crate::reflection::entry_storage(set.name, entry) } else { crate::reflection::module_storage(set.name) };
+        storage.unwrap_or(0) <= self.storage_limit
+    }
+
+    /// `fused`, or where it binds more storage buffers than this device allows (WebGPU's
+    /// 10), its phases (`reflection::PHASED`): entry points that do the same work in order,
+    /// each binding fewer (dispatched as `fused` would be, one after another).
+    pub fn staged(&self, set: &ShaderSet, fused: &str, bindings: &[Binding]) -> Staged {
+        let entries: Vec<&str> = if self.entry_fits(set, fused) {
+            vec![fused]
+        } else {
+            crate::reflection::phases(set.name, fused).unwrap_or_else(|| panic!("{}::{fused} binds more storage buffers than this device allows, and has no phases", set.name)).to_vec()
+        };
+        Staged { kernels: entries.iter().map(|e| self.compute(set, e, bindings)).collect() }
+    }
+
+    /// The bindings `entry`'s own layout holds, when its module declares more storage
+    /// buffers than this device allows per stage (`None`: the module's whole group 0, as
+    /// always on the Metal path, whose buffer slots follow the layout's order).
+    fn entry_subset(&self, set: &ShaderSet, entry: &str) -> Option<&'static [u32]> {
+        if self.shader_path != ShaderPath::Wgsl || crate::reflection::module_storage(set.name).unwrap_or(0) <= self.storage_limit {
+            return None;
+        }
+        Some(crate::reflection::entry_bindings(set.name, entry).unwrap_or_else(|| panic!("no binding reflection for {}::{entry}", set.name)))
+    }
+
+    /// A bind group for `layout`, binding `buffers[i]` at binding `i` (only the bindings
+    /// the layout holds).
+    pub fn bind<L: BindLayout + ?Sized>(&self, layout: &L, buffers: &[&wgpu::Buffer]) -> wgpu::BindGroup {
+        let keep = |i: usize| layout.used().is_none_or(|u| u.contains(&(i as u32)));
+        let entries: Vec<wgpu::BindGroupEntry> = buffers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep(*i))
+            .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() })
+            .collect();
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: layout.raw(), entries: &entries })
     }
 
     /// A storage buffer initialised with `data` (copyable both ways).
@@ -328,10 +395,49 @@ impl Gpu {
     }
 }
 
+/// A kernel's group-0 layout, and which bindings it holds when that is fewer than its
+/// module declares (`Gpu::compute`).
+pub struct GroupLayout {
+    pub layout: wgpu::BindGroupLayout,
+    pub used: Option<Vec<u32>>,
+}
+
+impl std::ops::Deref for GroupLayout {
+    type Target = wgpu::BindGroupLayout;
+    fn deref(&self) -> &wgpu::BindGroupLayout {
+        &self.layout
+    }
+}
+
+/// A layout `Gpu::bind` can build a group for.
+pub trait BindLayout {
+    fn raw(&self) -> &wgpu::BindGroupLayout;
+    /// The bindings it holds (`None`: every binding).
+    fn used(&self) -> Option<&[u32]>;
+}
+
+impl BindLayout for wgpu::BindGroupLayout {
+    fn raw(&self) -> &wgpu::BindGroupLayout {
+        self
+    }
+    fn used(&self) -> Option<&[u32]> {
+        None
+    }
+}
+
+impl BindLayout for GroupLayout {
+    fn raw(&self) -> &wgpu::BindGroupLayout {
+        &self.layout
+    }
+    fn used(&self) -> Option<&[u32]> {
+        self.used.as_deref()
+    }
+}
+
 /// A compute pipeline and its group-0 layout.
 pub struct Kernel {
     pub pipeline: wgpu::ComputePipeline,
-    pub group: wgpu::BindGroupLayout,
+    pub group: GroupLayout,
     /// Threads per workgroup (x).
     pub workgroup: u32,
 }
@@ -342,6 +448,17 @@ impl Kernel {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.dispatch_workgroups(groups(n, self.workgroup), 1, 1);
+    }
+}
+
+/// A kernel, or its phases in order (`Gpu::staged`): every one dispatched the same way.
+pub struct Staged {
+    pub kernels: Vec<Kernel>,
+}
+
+impl Staged {
+    pub fn iter(&self) -> std::slice::Iter<'_, Kernel> {
+        self.kernels.iter()
     }
 }
 
