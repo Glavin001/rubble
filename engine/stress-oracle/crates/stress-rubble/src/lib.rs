@@ -430,21 +430,24 @@ pub struct RubbleEngine {
     pub speculative_ccd: bool,
 }
 
-/// The default capacity: room for a few thousand bodies (every rebuilt cluster takes
-/// a new body; rubble cannot reuse a retired one's slot).
-/// Room for a scene: the default, or more when the scene is larger. Every chunk is a
-/// collider, and every rebuilt cluster takes new colliders (rubble does not reuse a
-/// retired body's), so bodies and colliders get four times the scene's count.
+/// Room for a scene: the default, or more when the scene is larger. A split's children
+/// take new slots and its parent's are retired until `RubbleEngine::compact_slots`
+/// reclaims them, which it does once half are retired (`compact_due`). So at a frame's
+/// start fewer than twice the live slots are in use, and a frame adds at most one body
+/// per chunk and one collider per part. Live bodies are at most one per chunk (plus the
+/// impactors, the shots and the ground), so bodies and colliders get three times that.
 pub fn capacity_for(scene: &stress_ref::scene::Scene) -> WorldCapacity {
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
+    let parts: usize = scene.bodies.iter().flat_map(|b| &b.chunks).map(|c| c.compound.as_ref().map_or(1, |p| p.len().max(1))).sum();
+    // The impactors, the lab's shots (16), the ground.
+    let extra = scene.impactors.len() + 16 + 2;
     let mut c = default_capacity();
-    c.max_colliders = c.max_colliders.max((4 * chunks).next_power_of_two() as u32);
-    c.max_bodies = c.max_bodies.max((4 * (scene.bodies.len() + scene.impactors.len()) + 1).next_power_of_two() as u32);
+    c.max_colliders = c.max_colliders.max((3 * (parts + extra)).next_power_of_two() as u32);
+    c.max_bodies = c.max_bodies.max((3 * (chunks + extra)).next_power_of_two() as u32);
     c.max_contacts = c.max_contacts.max(c.max_colliders);
     c.max_candidates = c.max_candidates.max(4 * c.max_colliders);
     c.max_hull_vertices = c.max_hull_vertices.max((32 * chunks).next_power_of_two() as u32);
-    // Bodies and colliders are append-only (retired ones keep their slots): a long run with
-    // much fracture sets its own room (`STRESS_RUBBLE_MAX_BODIES`, `STRESS_RUBBLE_MAX_COLLIDERS`);
+    // More room on request (`STRESS_RUBBLE_MAX_BODIES`, `STRESS_RUBBLE_MAX_COLLIDERS`);
     // past it an upload fails, naming the capacity.
     let env = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u32>().ok());
     if let Some(n) = env("STRESS_RUBBLE_MAX_BODIES") {
@@ -585,6 +588,77 @@ impl RubbleEngine {
     /// Rubble bodies created so far (retired ones included).
     pub fn rubble_bodies(&self) -> u32 {
         self.sim.body_count()
+    }
+
+    /// Live (not retired) bodies and colliders, by old id, ascending.
+    fn live_slots(&self) -> (Vec<u32>, Vec<u32>) {
+        let cols: Vec<u32> = (0..self.owners.len() as u32).filter(|&c| !matches!(self.owners[c as usize], Owner::Retired)).collect();
+        let mut live = vec![false; self.sim.body_count() as usize];
+        for e in self.bodies.values() {
+            live[e.id as usize] = true;
+        }
+        for &c in &cols {
+            live[self.cols[c as usize].body as usize] = true;
+        }
+        ((0..live.len() as u32).filter(|&b| live[b as usize]).collect(), cols)
+    }
+
+    /// Whether the slots split-retired bodies left are worth reclaiming ([`Self::compact_slots`]):
+    /// half or more of the bodies or of the colliders retired, or the colliders past
+    /// three quarters of the capacity with any retired. Rubble appends a split's children
+    /// and keeps the parent's slots, so without this a long fracture run fills the
+    /// capacity, and every step walks the dead slots.
+    pub fn compact_due(&self) -> bool {
+        if self.saved.is_some() {
+            return false;
+        }
+        // `STRESS_RUBBLE_COMPACT=always` (whenever anything is retired: a test of the
+        // renumbering) or `never` (the capacity then bounds a run); default by the rule above.
+        match std::env::var("STRESS_RUBBLE_COMPACT").as_deref() {
+            Ok("never") => return false,
+            Ok("always") => return self.owners.iter().any(|o| matches!(o, Owner::Retired)),
+            _ => {}
+        }
+        let (bodies, cols) = (self.sim.body_count() as usize, self.sim.collider_count() as usize);
+        let retired_cols = self.owners.iter().filter(|o| matches!(o, Owner::Retired)).count();
+        let live_bodies = self.bodies.len() + 1;
+        let cap = self.sim.capacity().max_colliders as usize;
+        2 * retired_cols >= cols.max(1) || 2 * bodies.saturating_sub(live_bodies) >= bodies.max(1) || (4 * cols >= 3 * cap && retired_cols > 0) || (4 * bodies >= 3 * self.sim.capacity().max_bodies as usize && bodies > live_bodies)
+    }
+
+    /// Reclaim retired slots (`WgpuSim::compact`): every live body and collider moves down
+    /// in order, its state and last step's contacts with it. Every id the engine handed
+    /// out changes (`layout_version` bumped with no known changes): the caller rebuilds
+    /// any table built from them. False when nothing was retired or a frame is saved.
+    pub fn compact_slots(&mut self) -> bool {
+        if self.saved.is_some() {
+            return false;
+        }
+        let (bodies, cols) = self.live_slots();
+        if bodies.len() == self.sim.body_count() as usize && cols.len() == self.sim.collider_count() as usize {
+            return false;
+        }
+        let (body_map, col_map) = self.sim.compact(&bodies, &cols);
+        for e in self.bodies.values_mut() {
+            e.id = body_map[e.id as usize];
+            let start = col_map[e.colliders.start as usize];
+            debug_assert!(e.colliders.clone().all(|c| col_map[c as usize] == start + (c - e.colliders.start)));
+            e.colliders = start..start + e.colliders.len() as u32;
+        }
+        self.owners = cols.iter().map(|&c| self.owners[c as usize]).collect();
+        self.cols = cols
+            .iter()
+            .map(|&c| {
+                let mut col = self.cols[c as usize];
+                col.body = body_map[col.body as usize];
+                col
+            })
+            .collect();
+        *self.bodies_read.borrow_mut() = None;
+        self.layout_version += 1;
+        self.collider_log.clear();
+        self.collider_log_floor = self.layout_version;
+        true
     }
 
     /// A bump of `layout_version` for the colliders `range` (`collider_log`).

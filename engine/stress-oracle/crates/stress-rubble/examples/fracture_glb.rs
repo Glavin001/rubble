@@ -4,6 +4,9 @@
 //!   cargo run --release -p stress-rubble --example fracture_glb -- [GLB] [LEVEL] [FRAMES]
 //!
 //! `STRESS_PROFILE=threshold`: the v0 stress mode (`Profile::Threshold`) instead of `blast_parity`.
+//! `STRESS_SHOTS=N`: N shots of the lab's ball (its mass, radius and speed for a cuboid
+//! sample), one every 30 frames from frame 5, each at another chunk from the -x side; the
+//! frame times' median, p95 and worst over the frames after the first shot.
 use stress_gpu::gpu::Gpu;
 use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
@@ -17,8 +20,13 @@ fn main() {
     let frames: usize = args.next().map_or(120, |f| f.parse().expect("FRAMES"));
     // A procedural sample key (`cuboid`, `cuboidGrid`, `cuboids`, ...): the lab's cuboid
     // houses in that layout (`engine_fracture::samples::cuboid_stress_scene`); else a GLB.
+    let mut ball = (1400.0, 0.35, 60.0);
     let (json, name) = match engine_fracture::samples::sample(&file).ok().filter(|s| s.procedural()) {
-        Some(s) => (engine_fracture::samples::cuboid_stress_scene(s.layout).expect("cuboid houses").1, s.key.to_string()),
+        Some(s) => {
+            let (lab, json) = engine_fracture::samples::cuboid_stress_scene(s.layout).expect("cuboid houses");
+            ball = (lab.projectile_mass, lab.projectile_radius, lab.projectile_speed.unwrap_or(60.0));
+            (json, s.key.to_string())
+        }
         None => {
             let bytes = std::fs::read(&file).expect("GLB");
             let asset = engine_fracture::parse_fracture_glb(&bytes).expect("fracture GLB");
@@ -63,10 +71,17 @@ fn main() {
         }
         Err(_) => shot,
     };
+    let shots: usize = std::env::var("STRESS_SHOTS").ok().map_or(0, |v| v.parse().expect("STRESS_SHOTS"));
+    let shot_at = |k: usize| {
+        let c = all[(k * 7919 + 13) % all.len()].center;
+        let (mass, radius, speed) = ball;
+        ImpactorDesc { name: format!("shot{k}"), shape: ImpactorShape::Sphere { radius }, mass, position: [c[0] - 6.0, c[1], c[2].max(lo[2] + radius)], velocity: [speed, 0.0, 0.0], ..shot.clone() }
+    };
     let mut ms = Vec::new();
     for f in 0..frames {
-        if f == 5 {
-            let imp = stress_ref::world::Impactor::from_desc(&shot, &w.scene);
+        let fired = if shots > 0 { (f >= 5 && (f - 5) % 30 == 0 && (f - 5) / 30 < shots).then(|| shot_at((f - 5) / 30)) } else { (f == 5).then(|| shot.clone()) };
+        if let Some(desc) = fired {
+            let imp = stress_ref::world::Impactor::from_desc(&desc, &w.scene);
             w.add_impactor(&gpu, imp).expect("shot");
         }
         let t = std::time::Instant::now();
@@ -86,4 +101,9 @@ fn main() {
     let ground = |si: usize, b: &stress_ref::solver::RtBond| m.structures[si].bonds[b.source].groups.iter().any(|g| g == "ground");
     let (gb, gt) = m.bonds.iter().enumerate().flat_map(|(si, bs)| bs.iter().map(move |b| (si, b))).filter(|(si, b)| ground(*si, b)).fold((0, 0), |(n, t), (_, b)| (n + !b.connected() as usize, t + 1));
     println!("ground bonds broken {gb} of {gt}");
+    let after = &mut ms[5.min(ms.len())..].to_vec();
+    after.sort_by(f64::total_cmp);
+    if !after.is_empty() {
+        println!("after the first shot: frame ms median {:.1}, p95 {:.1}, worst {:.1}; {} bodies, {} compactions", after[after.len() / 2], after[after.len() * 95 / 100], after[after.len() - 1], m.clusters.len(), w.compactions);
+    }
 }

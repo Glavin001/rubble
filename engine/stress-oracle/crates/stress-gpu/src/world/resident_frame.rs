@@ -426,6 +426,20 @@ impl GpuWorld {
             // The last frame's GPU splits followed first: the saved engine includes them.
             self.flush_pending(gpu)?;
         }
+        // Split-retired engine slots reclaimed between frames, once the last frame's GPU
+        // splits are followed (the mirror names every body): every engine id moves, so the
+        // tables built from them are rebuilt below (`resident_tables`, as after a layout
+        // change; the carried pulses follow their chunks).
+        if !correct && engine.borrow().compact_due() {
+            self.flush_pending(gpu)?;
+            if engine.borrow_mut().compact_slots() {
+                self.compactions += 1;
+                if let Some(r) = self.resident.as_mut() {
+                    r.layout_generation = u64::MAX;
+                    r.gpu_laid_out = false;
+                }
+            }
+        }
         let t_substeps = web_time::Instant::now();
         let n = engine.borrow_mut().resident_substeps(fdt);
         if correct {

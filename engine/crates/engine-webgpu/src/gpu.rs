@@ -861,6 +861,95 @@ impl WgpuSim {
         self.manifolds_valid = false;
     }
 
+    /// Renumber the bodies and colliders, keeping `keep_bodies` and `keep_colliders` (old
+    /// ids, each ascending; every kept collider's body kept) at `0..` in the same order.
+    /// Between steps only. Lossless for what the next step reads: the bodies (both pose
+    /// regions) and colliders move, and last step's contacts and manifolds keep their
+    /// warm-start data under the new ids (the order is kept, so every pair keeps its A/B
+    /// order); rows that name a dropped collider are left dead. The colour history and
+    /// the separating-axis cache, hints keyed by id, are cleared. Returns the old → new
+    /// maps (`u32::MAX`: dropped). For appenders that retire slots instead of reusing
+    /// them (stress-rubble's fracture splits).
+    pub fn compact(&mut self, keep_bodies: &[u32], keep_colliders: &[u32]) -> (Vec<u32>, Vec<u32>) {
+        assert!(self.joint_count == 0 && self.vehicle_count() == 0, "compact: joints and vehicles name bodies and are not renumbered");
+        let mut body_map = vec![u32::MAX; self.body_count as usize];
+        for (new, &old) in keep_bodies.iter().enumerate() {
+            assert!((old as usize) < body_map.len() && (new == 0 || keep_bodies[new - 1] < old), "compact: kept bodies ascending and in range");
+            body_map[old as usize] = new as u32;
+        }
+        let mut col_map = vec![u32::MAX; self.collider_count as usize];
+        for (new, &old) in keep_colliders.iter().enumerate() {
+            assert!((old as usize) < col_map.len() && (new == 0 || keep_colliders[new - 1] < old), "compact: kept colliders ascending and in range");
+            col_map[old as usize] = new as u32;
+        }
+        let stride = std::mem::size_of::<BodyState>() as u64;
+        let max_bodies = u64::from(self.capacity.max_bodies);
+        let now: Vec<BodyState> = self.read_buffer_range(0, 0, self.body_count as usize);
+        let prev: Vec<BodyState> = self.read_buffer_range(0, max_bodies * stride, self.body_count as usize);
+        let bodies: Vec<BodyState> = keep_bodies.iter().map(|&b| now[b as usize]).collect();
+        let prev: Vec<BodyState> = keep_bodies.iter().map(|&b| prev[b as usize]).collect();
+        let cols: Vec<Collider> = keep_colliders
+            .iter()
+            .map(|&c| {
+                let mut col = self.host_cols[c as usize];
+                col.body = body_map[col.body as usize];
+                assert!(col.body != u32::MAX, "compact: collider {c} kept but its body dropped");
+                col
+            })
+            .collect();
+        // Last step's contacts (the half the next step reads as its previous one) and
+        // manifolds: ids remapped; a row naming a dropped collider is dead.
+        let remap = |a: &mut u32, b: &mut u32| -> bool {
+            let (na, nb) = (col_map.get(*a as usize).copied().unwrap_or(u32::MAX), col_map.get(*b as usize).copied().unwrap_or(u32::MAX));
+            let live = na != u32::MAX && nb != u32::MAX;
+            (*a, *b) = if live { (na, nb) } else { (0, 0) };
+            live
+        };
+        let prev_off = if self.contacts_parity == 0 { 0 } else { u64::from(self.capacity.max_contacts) };
+        let contact_size = std::mem::size_of::<Contact>() as u64;
+        let n_contacts = self.last_counters.contact_count.min(self.capacity.max_contacts) as usize;
+        let mut contacts: Vec<Contact> = self.read_buffer_range(4, prev_off * contact_size, n_contacts);
+        for c in &mut contacts {
+            if !remap(&mut c.collider_a, &mut c.collider_b) {
+                c.alive = 0;
+            }
+        }
+        let n_manifolds = self.last_counters.manifold_count.min(self.capacity.max_contacts) as usize;
+        let mut manifolds: Vec<Manifold> = self.read_buffer_range(25, 0, n_manifolds);
+        for m in &mut manifolds {
+            if !remap(&mut m.collider_a, &mut m.collider_b) {
+                m.contact_count = 0;
+            }
+        }
+        let q = &self.queue;
+        q.write_buffer(&self.bufs[0], 0, bytemuck::cast_slice(&bodies));
+        q.write_buffer(&self.bufs[0], max_bodies * stride, bytemuck::cast_slice(&prev));
+        q.write_buffer(&self.bufs[2], 0, bytemuck::cast_slice(&cols));
+        q.write_buffer(&self.bufs[4], prev_off * contact_size, bytemuck::cast_slice(&contacts));
+        q.write_buffer(&self.bufs[25], 0, bytemuck::cast_slice(&manifolds));
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("compact") });
+        enc.clear_buffer(&self.bufs[15], 0, None);
+        enc.clear_buffer(&self.bufs[30], 0, None);
+        q.submit([enc.finish()]);
+        self.body_count = bodies.len() as u32;
+        self.collider_count = cols.len() as u32;
+        self.host_bodies = bodies;
+        self.body_reach = vec![0.0; self.host_bodies.len()];
+        for col in &cols {
+            if let Some(r) = engine_schema::collider_reach(col) {
+                let b = col.body as usize;
+                self.body_reach[b] = self.body_reach[b].max(r);
+            }
+        }
+        self.has_convex = cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        self.has_filters = cols.iter().any(engine_schema::convex::CollisionFilter::is_set);
+        self.host_cols = cols;
+        self.grid_cache = None;
+        self.manifolds_valid = false;
+        self.wake_pending = true;
+        (body_map, col_map)
+    }
+
     /// Replace the contiguous colliders `first..first + cols.len()` in one upload.
     pub fn set_colliders(&mut self, first: u32, cols: &[Collider]) {
         let end = first as usize + cols.len();

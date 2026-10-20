@@ -260,6 +260,14 @@ impl ResidentEngine for RubbleEngine {
         (self.sim.body_count(), self.sim.collider_count())
     }
 
+    fn compact_due(&self) -> bool {
+        RubbleEngine::compact_due(self)
+    }
+
+    fn compact_slots(&mut self) -> bool {
+        RubbleEngine::compact_slots(self)
+    }
+
     fn resident_finish(&mut self, status: &[Vec<u8>]) -> Result<(), String> {
         let counters: engine_schema::StepCounters = bytemuck::pod_read_unaligned(&status[0][..std::mem::size_of::<engine_schema::StepCounters>()]);
         if std::env::var("STRESS_RESIDENT_PHASES").is_ok() {

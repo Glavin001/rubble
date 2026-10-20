@@ -100,6 +100,8 @@ pub struct GpuWorld {
     /// step was solved again with the fragments installed (PhysX's correction limit 1,
     /// `resident_frame`).
     pub corrected_frames: u64,
+    /// Times the engine's split-retired slots were reclaimed (`ResidentEngine::compact_slots`).
+    pub compactions: u64,
     /// In the engine step solved again (no further correction).
     correcting: bool,
     /// `Profile::Threshold`: a strike's breaks predicted at the end of the frame before it
@@ -292,6 +294,7 @@ impl GpuWorld {
             redo_fractured_frames: true,
             unverified_fractures: 0,
             corrected_frames: 0,
+            compactions: 0,
             correcting: false,
             predict_strikes: false,
             promoted: std::collections::HashMap::new(),

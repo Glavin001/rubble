@@ -469,6 +469,8 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "profile": PROFILE.get().name(),
                         // Rigid bodies the structures are now (each split's children).
                         "bodies": mirror.clusters.len(),
+                        // Times the engine's split-retired slots were reclaimed.
+                        "compactions": l.world.compactions,
                     })
                     .to_string(),
                 );
