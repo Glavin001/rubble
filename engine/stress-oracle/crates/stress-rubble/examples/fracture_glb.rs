@@ -4,6 +4,11 @@
 //!   cargo run --release -p stress-rubble --example fracture_glb -- [GLB] [LEVEL] [FRAMES]
 //!
 //! `STRESS_PROFILE=threshold`: the v0 stress mode (`Profile::Threshold`) instead of `blast_parity`.
+//! `STRESS_SHOTS=N`: N shots of the lab's ball (its mass, radius and speed for a cuboid
+//! sample), one every 30 frames from frame 5, each at another chunk from the -x side; the
+//! frame times' median, p95 and worst over the frames after the first shot.
+//! `STRESS_VIEW=1`: also take the browser's view (`GpuWorld::view_with`) after every frame,
+//! timed apart.
 use stress_gpu::gpu::Gpu;
 use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
@@ -17,15 +22,20 @@ fn main() {
     let frames: usize = args.next().map_or(120, |f| f.parse().expect("FRAMES"));
     // A procedural sample key (`cuboid`, `cuboidGrid`, `cuboids`, ...): the lab's cuboid
     // houses in that layout (`engine_fracture::samples::cuboid_stress_scene`); else a GLB.
+    let mut ball = (1400.0, 0.35, 60.0);
     let (json, name) = match engine_fracture::samples::sample(&file).ok().filter(|s| s.procedural()) {
-        Some(s) => (engine_fracture::samples::cuboid_stress_scene(s.layout).expect("cuboid houses").1, s.key.to_string()),
+        Some(s) => {
+            let (lab, json) = engine_fracture::samples::cuboid_stress_scene(s.layout).expect("cuboid houses");
+            ball = (lab.projectile_mass, lab.projectile_radius, lab.projectile_speed.unwrap_or(60.0));
+            (json, s.key.to_string())
+        }
         None => {
             let bytes = std::fs::read(&file).expect("GLB");
             let asset = engine_fracture::parse_fracture_glb(&bytes).expect("fracture GLB");
             (engine_fracture::stress_export::shardwright_stress_json(&asset, level), asset.physics.name.clone())
         }
     };
-    let scene = stress_ref::shardwright::import_value(&json, &name).expect("stress import");
+    let scene = stress_ref::shardwright::import_value_with(&json, &name, true).expect("stress import");
     scene.validate().expect("valid");
     let mut scene = scene.with_derived();
     // The GPU's methods (the bench and the suites run `STRESS_METHODS=established`).
@@ -63,15 +73,32 @@ fn main() {
         }
         Err(_) => shot,
     };
+    let shots: usize = std::env::var("STRESS_SHOTS").ok().map_or(0, |v| v.parse().expect("STRESS_SHOTS"));
+    let shot_at = |k: usize| {
+        let c = all[(k * 7919 + 13) % all.len()].center;
+        let (mass, radius, speed) = ball;
+        ImpactorDesc { name: format!("shot{k}"), shape: ImpactorShape::Sphere { radius }, mass, position: [c[0] - 6.0, c[1], c[2].max(lo[2] + radius)], velocity: [speed, 0.0, 0.0], ..shot.clone() }
+    };
     let mut ms = Vec::new();
+    let view = std::env::var("STRESS_VIEW").is_ok_and(|v| v == "1");
+    let mut view_ms: Vec<f64> = Vec::new();
     for f in 0..frames {
-        if f == 5 {
-            let imp = stress_ref::world::Impactor::from_desc(&shot, &w.scene);
+        let fired = if shots > 0 { (f >= 5 && (f - 5) % 30 == 0 && (f - 5) / 30 < shots).then(|| shot_at((f - 5) / 30)) } else { (f == 5).then(|| shot.clone()) };
+        if let Some(desc) = fired {
+            let imp = stress_ref::world::Impactor::from_desc(&desc, &w.scene);
             w.add_impactor(&gpu, imp).expect("shot");
         }
         let t = std::time::Instant::now();
         w.step_frame(&gpu).expect("frame");
         ms.push(t.elapsed().as_secs_f64() * 1e3);
+        if view {
+            let t = std::time::Instant::now();
+            // As the browser draws: the view's reads first, then the drawing's look.
+            w.view_prepare(&gpu);
+            let n = w.view_with(&gpu, |m, imps| m.clusters.len() + imps.len());
+            std::hint::black_box(n);
+            view_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
         if std::env::var("STRESS_FRAMES").is_ok() {
             eprintln!("frame {f}: {:.1} ms, {} resident frames so far", ms[f], w.resident_frames);
         }
@@ -81,4 +108,18 @@ fn main() {
     let mut sorted = ms[1..].to_vec();
     sorted.sort_by(f64::total_cmp);
     println!("fragments {}, broken bonds {}, frame ms median {:.1}, worst {:.1}, resident frames {}", o.values["fragments"], o.values["broken_bonds"], sorted[sorted.len() / 2], sorted[sorted.len() - 1], w.resident_frames);
+    // Bonds to the ground (`import_value_with`'s ground bonds): how many broke.
+    let m = &w.solver.mirror;
+    let ground = |si: usize, b: &stress_ref::solver::RtBond| m.structures[si].bonds[b.source].groups.iter().any(|g| g == "ground");
+    let (gb, gt) = m.bonds.iter().enumerate().flat_map(|(si, bs)| bs.iter().map(move |b| (si, b))).filter(|(si, b)| ground(*si, b)).fold((0, 0), |(n, t), (_, b)| (n + !b.connected() as usize, t + 1));
+    println!("ground bonds broken {gb} of {gt}");
+    let after = &mut ms[5.min(ms.len())..].to_vec();
+    after.sort_by(f64::total_cmp);
+    if !after.is_empty() {
+        if !view_ms.is_empty() {
+            view_ms.sort_by(f64::total_cmp);
+            println!("view_state ms median {:.1}, p95 {:.1}, worst {:.1}", view_ms[view_ms.len() / 2], view_ms[view_ms.len() * 95 / 100], view_ms[view_ms.len() - 1]);
+        }
+        println!("after the first shot: frame ms median {:.1}, p95 {:.1}, worst {:.1}; {} bodies, {} compactions", after[after.len() / 2], after[after.len() * 95 / 100], after[after.len() - 1], m.clusters.len(), w.compactions);
+    }
 }

@@ -225,6 +225,19 @@ pub fn import(path: &std::path::Path, name: &str) -> Result<Scene, String> {
 /// [`import`] from an already parsed `shardwright-stress/1` document (e.g. one written
 /// in memory from a fracture GLB by rubble's `engine-fracture`).
 pub fn import_value(json: &Value, name: &str) -> Result<Scene, String> {
+    import_value_with(json, name, false)
+}
+
+/// Half thickness (m) of the ground chunk under an anchor (`import_value_with`).
+pub const GROUND_HALF_THICKNESS: f64 = 0.05;
+
+/// [`import_value`]; with `ground_bonds`, a bond to the world (`b = -1`) is a bond that can
+/// break, as Blast's bonds to the world are: the anchor's area, centroid and normal bond
+/// its chunk to a fixed ground chunk just past the anchor face (a box of the bond's extent,
+/// `GROUND_HALF_THICKNESS` thick, in the bond's frame; group `ground`), so the chunk stays
+/// on its support only while that bond holds. Without, the chunk itself is the support
+/// (fixed for good), as before.
+pub fn import_value_with(json: &Value, name: &str, ground_bonds: bool) -> Result<Scene, String> {
     if json["format"] != "shardwright-stress/1" {
         return Err("not a shardwright-stress/1 export".into());
     }
@@ -279,8 +292,54 @@ pub fn import_value(json: &Value, name: &str) -> Result<Scene, String> {
         let a = local[&b["a"].as_u64().ok_or("bond a")?];
         let area = b["area"].as_f64().unwrap_or(0.0);
         if b["b"].as_i64() == Some(-1) {
-            chunks[a].support = Support::Fixed;
             anchors += 1;
+            let eh = [b["extent_half"][0].as_f64().unwrap_or(0.0), b["extent_half"][1].as_f64().unwrap_or(0.0)];
+            if !(ground_bonds && area > 0.0 && eh[0] > 0.0 && eh[1] > 0.0) {
+                chunks[a].support = Support::Fixed;
+                continue;
+            }
+            // The ground past the anchor face, and the bond to it (normal from the ground
+            // to the chunk).
+            let centroid = zup(&b["centroid"]);
+            let mut n = zup(&b["normal"]).normalized();
+            if n.dot(Vec3::from_array(chunks[a].center) - centroid) < 0.0 {
+                n = -n;
+            }
+            let mut u = zup(&b["frame_u"]);
+            u = u - n * u.dot(n);
+            if u.norm() < 1e-9 {
+                u = if n.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) };
+                u = u - n * u.dot(n);
+            }
+            let u = u.normalized();
+            let v = n.cross(u);
+            let s = (area / (4.0 * eh[0] * eh[1])).sqrt();
+            let width = [2.0 * eh[0] * s, 2.0 * eh[1] * s];
+            let mat = chunks[a].material.clone();
+            let mut g = chunk(centroid - n * GROUND_HALF_THICKNESS, Vec3::new(0.5 * width[0], 0.5 * width[1], GROUND_HALF_THICKNESS), &mat);
+            g.orientation = quat_wxyz([[u.x, v.x, n.x], [u.y, v.y, n.y], [u.z, v.z, n.z]]);
+            g.support = Support::Fixed;
+            g.groups.push("ground".into());
+            let gi = chunks.len();
+            chunks.push(g);
+            let mortar = b["composition"].as_array().is_some_and(|c| c.iter().any(|k| k[0].as_u64() == Some(1)));
+            let joint = if mortar { "mortar" } else { map_material(by_id[&b["a"].as_u64().unwrap()]["material"].as_str().unwrap_or("")).1 };
+            scene.materials.entry(joint.to_string()).or_insert_with(|| material_preset(joint));
+            bonds.push(BondDesc {
+                a: gi,
+                b: a,
+                centroid: centroid.to_array(),
+                normal: n.to_array(),
+                tangent: u.to_array(),
+                area,
+                width,
+                material: joint.to_string(),
+                rebar: None,
+                buckling_length: None,
+                level: 0,
+                groups: vec!["ground".into()],
+                derived: None,
+            });
             continue;
         }
         let bb = local[&(b["b"].as_i64().ok_or("bond b")? as u64)];

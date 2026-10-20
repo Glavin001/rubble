@@ -100,8 +100,14 @@ pub struct GpuWorld {
     /// step was solved again with the fragments installed (PhysX's correction limit 1,
     /// `resident_frame`).
     pub corrected_frames: u64,
+    /// Times the engine's split-retired slots were reclaimed (`ResidentEngine::compact_slots`).
+    pub compactions: u64,
     /// In the engine step solved again (no further correction).
     correcting: bool,
+    /// `Profile::Threshold`: a strike's breaks predicted at the end of the frame before it
+    /// (routing.slang's check, punch.slang `threshold_predict`), split before the engine
+    /// steps; every frame resident (forward only, no re-simulation).
+    pub predict_strikes: bool,
     /// Promoted structures (no redo) and the quiet frames they have left.
     promoted: std::collections::HashMap<usize, u32>,
     /// Whether a fracture under the engine's loads promotes its structure (no redo; on by
@@ -288,7 +294,9 @@ impl GpuWorld {
             redo_fractured_frames: true,
             unverified_fractures: 0,
             corrected_frames: 0,
+            compactions: 0,
             correcting: false,
+            predict_strikes: false,
             promoted: std::collections::HashMap::new(),
             promote_fractures: std::env::var("STRESS_PROMOTE").map_or(true, |v| v != "0"),
             routed_resident: std::env::var("STRESS_ROUTED_RESIDENT").map_or(true, |v| v != "0"),
@@ -392,6 +400,15 @@ impl GpuWorld {
         self.set_impact_islands(profile.impact_islands());
         if std::env::var("STRESS_PROMOTE").is_err() {
             self.promote_fractures = profile.promote_fractures();
+        }
+        // The threshold profile predicts strikes before the engine steps: the routing check
+        // (the tiered coupling's) at the end of every resident frame, no impact islands.
+        if profile.predicts_strikes() {
+            self.predict_strikes = true;
+            self.set_tiered(true).expect("the threshold profile is quasi-static");
+            // No check has run before the first resident frame: it predicts (a strike may
+            // come in the frame after it).
+            self.route_next = true;
         }
         // The profile's resident frame runs the GPU's split path.
         if profile.resident() {
@@ -629,7 +646,10 @@ impl GpuWorld {
         if self.tiered && self.routed_resident && self.resident_engine.is_some() {
             let fdt = self.scene.sim.frame_dt;
             let none = std::collections::HashSet::new();
-            self.route_next = !self.promoted.is_empty() || self.with_shell_mut(|w| w.predict_islands(fdt, &none)) > 0;
+            // A predicted strike is recorded at the end of the frame before it: the check
+            // looks two frames ahead (as the GPU's does in that mode, `resident_frame`).
+            let horizon = if self.predicts() { 2.0 * fdt } else { fdt };
+            self.route_next = !self.promoted.is_empty() || self.with_shell_mut(|w| w.predict_islands(horizon, &none)) > 0;
         }
         Ok(())
     }

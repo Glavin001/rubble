@@ -32,12 +32,18 @@ pub enum Profile {
     /// fracture separates the piece that breaks free within the frame, forward, with no
     /// rewind (findings/rewind-scaling.md, design C). Everything else is `BlastParity`'s.
     BlastParityRouted,
-    /// The v0 stress mode: `BlastParity`'s frame with no static solve. A bond breaks when
-    /// the contact force on either of its chunks this frame (sustained contacts, and each
-    /// impact's Hertz peak force) exceeds its tensile capacity
-    /// (`SolverConfig::contact_threshold`); one pass, whose disconnections split as
-    /// `BlastParity`'s do. Deliberately simple and fast: it exercises the breaking, splitting
-    /// and re-parenting path, not the stress model.
+    /// The v0 stress mode, forward only (no re-simulation): `BlastParity`'s resident frame
+    /// with no static solve.
+    /// - A strike is predicted at the end of the frame before it (the routing check, and
+    ///   stress-gpu punch.slang `threshold_predict`): every bond of the struck island whose
+    ///   tensile capacity is below the force reaching it breaks, and the island splits
+    ///   before the engine steps, so the engine meets the pieces (`predicts_strikes`).
+    /// - After each step, a bond breaks when the contact force on either of its chunks
+    ///   (sustained contacts, and each impact's Hertz peak force) exceeds its tensile
+    ///   capacity (`SolverConfig::contact_threshold`): debris, settling.
+    ///
+    /// Deliberately simple and fast: it exercises the breaking, splitting and re-parenting
+    /// path, not the stress model.
     Threshold,
 }
 
@@ -99,9 +105,17 @@ impl Profile {
     /// islands for six frames of 65–121 s each.
     pub fn promote_fractures(self) -> bool {
         match self {
-            Profile::BlastParity | Profile::Threshold => true,
-            Profile::BlastParityRouted => false,
+            Profile::BlastParity => true,
+            // Threshold: a promoted structure's frames would leave the resident path.
+            Profile::BlastParityRouted | Profile::Threshold => false,
         }
+    }
+
+    /// Whether a strike's breaks are predicted at the end of the frame before it, in its
+    /// submission, and split before the engine steps (the GPU world's `predict_strikes`:
+    /// the routing check and punch.slang `threshold_predict`, every frame resident).
+    pub fn predicts_strikes(self) -> bool {
+        matches!(self, Profile::Threshold)
     }
 
     /// Whether the profile runs the GPU-resident frame.

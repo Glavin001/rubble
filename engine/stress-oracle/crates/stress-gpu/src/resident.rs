@@ -355,6 +355,15 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     fn body_counts(&self) -> (u32, u32) {
         (0, 0)
     }
+    /// Whether retired slots are worth reclaiming ([`Self::compact_slots`]).
+    fn compact_due(&self) -> bool {
+        false
+    }
+    /// Reclaim retired body and collider slots between frames: every engine id may change
+    /// (the caller rebuilds its tables). False when nothing moved.
+    fn compact_slots(&mut self) -> bool {
+        false
+    }
 }
 
 /// A body the GPU made for an engine (`spawn.slang`), for the engine's bookkeeping.
