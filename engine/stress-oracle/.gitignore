@@ -22,3 +22,4 @@ __pycache__/
 /packs/veneer-house-l[1-9].json
 # Reference runs keep their exact input locally; it is rebuilt by examples/rubble_references.
 /reference/**/scene.json
+/target-p0/

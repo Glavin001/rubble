@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GNN cost probe</title>
+<!-- P0 step 4 of the learned impact-outcome plan, in the browser: stress-web's gnn_probe_*
+     exports (the same Rust and Slang as the native stress_gpu_gnn_probe) on WebGPU. Serve
+     engine/ over HTTP and open /stress-oracle/learned-impact/web-probe/?sweep=size&kernel=tiled.
+     Results: window.__probe.lines (JSON lines) once window.__probe.done. -->
+<script type="importmap">{"imports":{"rubble-gpu-wait":"/crates/engine-webgpu/fracture/gpu-wait.mjs"}}</script>
+<style>body{background:#111;color:#ddd;font:12px ui-monospace,monospace;margin:16px}pre{white-space:pre-wrap}</style>
+</head><body><pre id="log">loading…</pre>
+<script type="module">
+import init,{gnn_probe_init,gnn_probe_configure,gnn_probe_line} from '../runs/web-probe-pkg/stress_web.js';
+const q=new URLSearchParams(location.search),log=document.getElementById('log'),say=t=>{log.textContent+='\n'+t;console.log(t)};
+window.__probe={done:false,lines:[],error:null};
+try{
+ const m=await init({module_or_path:new URL('../runs/web-probe-pkg/stress_web_bg.wasm',import.meta.url)});
+ say('device '+await gnn_probe_init());
+ const n=gnn_probe_configure(q.get('sweep')||'size',q.get('kernel')||'tiled',+(q.get('warmup')||5),+(q.get('repeats')||30));
+ const run=WebAssembly.promising(m.gnn_probe_run);
+ for(let i=0;i<n;i++){const ok=await run(i);const l=gnn_probe_line();if(!ok)throw new Error('WebGPU error: '+JSON.parse(l).error);window.__probe.lines.push(l);const d=JSON.parse(l);
+  say(`${i+1}/${n} ${d.islands}x${d.chunks_per_island} W${d.width} ${d.precision} ${d.schedule} ${d.kernel}: wall ${d.wall_ms.median.toFixed(3)} ms gpu ${d.gpu_ms?d.gpu_ms.median.toFixed(3):'-'} ms`)}
+ window.__probe.done=true;say('done');
+}catch(e){window.__probe.error=String(e);say('error: '+e)}
+</script></body></html>

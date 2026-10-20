@@ -1192,6 +1192,7 @@ impl ReferenceSolver {
             }
             self.energy.bond_dissipation += resp.dissipated;
             self.energy.softening_overshoot += resp.overshoot;
+            self.energy.softening_overshoot_negative += resp.overshoot.min(0.0);
             let bm = &mut self.bonds[s][bi];
             bm.joint = resp.state;
             bm.observe_utilization();

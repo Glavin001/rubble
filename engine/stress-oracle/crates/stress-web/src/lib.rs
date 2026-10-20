@@ -463,3 +463,94 @@ fn shot_meshes(world: &GpuWorld) -> Vec<stress_ref::world::Impactor> {
         })
         .collect()
 }
+
+// ------------------------------------------------------------------ P0 cost probe
+
+// The learned impact-outcome plan's P0 GPU cost envelope (`stress_gpu::gnn_probe`) on this
+// page's WebGPU device: the same sweep and kernels as the native `stress_gpu_gnn_probe`.
+// `gnn_probe_init` makes the device, `gnn_probe_configure` picks the sweep and returns its
+// length, `gnn_probe_run(i)` (through `WebAssembly.promising`: it waits on the GPU) times
+// configuration `i`, and `gnn_probe_line` returns its JSON line.
+thread_local! {
+    static PROBE_GPU: RefCell<Option<Gpu>> = const { RefCell::new(None) };
+    static PROBE_SWEEP: RefCell<(Vec<stress_gpu::gnn_probe::Config>, usize, usize)> = const { RefCell::new((Vec::new(), 5, 30)) };
+    static PROBE_LINE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// The first uncaptured WebGPU error on the probe's device (a probe that silently dropped its
+/// work would time nothing).
+static PROBE_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The probe's device: WebGPU, with `shader-f16` and `timestamp-query` where the adapter
+/// has them. Returns the adapter's name and the features taken.
+#[wasm_bindgen]
+pub async fn gnn_probe_init() -> Result<String, JsValue> {
+    std::panic::set_hook(Box::new(|info| web_sys::console::error_1(&info.to_string().into())));
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = wgpu::Backends::BROWSER_WEBGPU;
+    let instance = wgpu::Instance::new(desc);
+    // A WebGPU adapter makes one device, so the probe's (with its features) is the only one.
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })
+        .await
+        .map_err(|e| JsValue::from_str(&format!("adapter: {e}")))?;
+    let features = adapter.features() & (wgpu::Features::SHADER_F16 | wgpu::Features::TIMESTAMP_QUERY);
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor { label: Some("gnn probe"), required_features: features, required_limits: adapter.limits(), ..Default::default() })
+        .await
+        .map_err(|e| JsValue::from_str(&format!("device: {e}")))?;
+    let storage_limit = device.limits().max_storage_buffers_per_shader_stage;
+    let adapter_info = adapter.get_info();
+    device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+        let mut slot = PROBE_ERROR.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(e.to_string());
+        }
+    }));
+    let gpu = Gpu { adapter, device, queue, adapter_info, shader_path: stress_gpu::gpu::ShaderPath::Wgsl, passthrough: false, fast_math: false, storage_limit };
+    let info = serde_json::json!({"adapter": gpu.adapter_info.name, "f16": features.contains(wgpu::Features::SHADER_F16), "timestamps": features.contains(wgpu::Features::TIMESTAMP_QUERY), "storage_limit": gpu.storage_limit});
+    PROBE_GPU.set(Some(gpu));
+    Ok(info.to_string())
+}
+
+/// Pick the sweep (`size`, `batch`, `all`) and kernels (`fused`, `split`, `tiled`, `all`);
+/// returns the number of configurations.
+#[wasm_bindgen]
+pub fn gnn_probe_configure(sweep: String, kernels: String, warmup: u32, repeats: u32) -> u32 {
+    use stress_gpu::gnn_probe::{Precision, RoundKernel};
+    let f16 = PROBE_GPU.with_borrow(|g| g.as_ref().is_some_and(|g| g.device.features().contains(wgpu::Features::SHADER_F16)));
+    let precisions = if f16 { vec![Precision::F32, Precision::F16] } else { vec![Precision::F32] };
+    let kernels = match kernels.as_str() {
+        "fused" => vec![RoundKernel::Fused],
+        "split" => vec![RoundKernel::Split],
+        "tiled" => vec![RoundKernel::Tiled],
+        _ => vec![RoundKernel::Fused, RoundKernel::Split, RoundKernel::Tiled],
+    };
+    let configs = stress_gpu::gnn_probe::sweep(&sweep, &precisions, &kernels);
+    let n = configs.len() as u32;
+    PROBE_SWEEP.set((configs, warmup as usize, repeats as usize));
+    n
+}
+
+/// Time configuration `index` (call through `WebAssembly.promising`); 1 when it ran.
+#[no_mangle]
+pub extern "C" fn gnn_probe_run(index: u32) -> u32 {
+    let gpu = PROBE_GPU.with_borrow(|g| g.clone());
+    let Some(gpu) = gpu else { return 0 };
+    let Some((config, warmup, repeats)) = PROBE_SWEEP.with_borrow(|s| s.0.get(index as usize).cloned().map(|c| (c, s.1, s.2))) else { return 0 };
+    let mut line = stress_gpu::gnn_probe::run(&gpu, &config, warmup, repeats, "wgsl-webgpu");
+    let error = PROBE_ERROR.lock().unwrap().clone();
+    line.as_object_mut().unwrap().insert("error".into(), serde_json::json!(error));
+    PROBE_LINE.set(line.to_string());
+    if error.is_some() {
+        0
+    } else {
+        1
+    }
+}
+
+/// The last `gnn_probe_run`'s JSON line.
+#[wasm_bindgen]
+pub fn gnn_probe_line() -> String {
+    PROBE_LINE.with_borrow(|l| l.clone())
+}

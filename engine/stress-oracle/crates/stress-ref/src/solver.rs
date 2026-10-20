@@ -320,6 +320,10 @@ pub struct EnergyLedger {
     /// Stored energy released beyond the softening law by bonds snapping within one
     /// substep (time-discretisation; shrinks with the substep).
     pub softening_overshoot: f64,
+    /// The negative part of `softening_overshoot` (a bond whose update stored more than it
+    /// held before: `frozen - stored < 0`), kept separately so the ledger check can tell
+    /// round-off from a real negative residual. Diagnostic only; nothing reads it.
+    pub softening_overshoot_negative: f64,
     /// Energy stored in bonds between chunks that a split separates; the pieces keep
     /// their overlap instead of being pushed apart (see `contact.rs`).
     pub split_release: f64,
@@ -1745,6 +1749,7 @@ impl ReferenceSolver {
             damped += bond_damped;
             dissipated += resp.dissipated;
             self.energy.softening_overshoot += resp.overshoot;
+            self.energy.softening_overshoot_negative += resp.overshoot.min(0.0);
             self.max_utilization = self.max_utilization.max(resp.state.utilization);
             let bm = &mut self.bonds[s][bi];
             let previous = std::mem::replace(&mut bm.joint, resp.state);

@@ -51,6 +51,7 @@ pub use stress_layout::joint;
 pub mod loads;
 pub mod methods;
 pub mod micro;
+pub mod gnn_probe;
 
 /// What `build.rs` reflects from the generated WGSL: how many storage buffers each module's
 /// group 0 declares, and which group-0 bindings each entry point uses.
@@ -229,11 +230,14 @@ pub mod shaders {
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
     pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1))]);
+    /// The learned impact-outcome plan's P0 cost probe (`gnn_probe`), f32 and f16.
+    pub const GNN_PROBE: ShaderSet = shader_set!("gnn_probe", [("gnn_round", (128, 1, 1)), ("gnn_mlp_tiled", (128, 1, 1)), ("gnn_csr_sum", (128, 1, 1))]);
+    pub const GNN_PROBE_F16: ShaderSet = shader_set!("gnn_probe_f16", [("gnn_round", (128, 1, 1)), ("gnn_mlp_tiled", (128, 1, 1)), ("gnn_csr_sum", (128, 1, 1))]);
 
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD,
+        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16,
     ];
 }
 

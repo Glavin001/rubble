@@ -3,3 +3,4 @@ python/**/__pycache__/
 python/*.egg-info/
 python/learned_impact.egg-info/
 python/.pytest_cache/
+/runs/
