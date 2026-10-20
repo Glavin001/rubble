@@ -96,12 +96,11 @@ FEATURE_COLUMNS: dict[str, tuple[str, ...]] = {
 # Columns rewritten from the model's own decoded output in pushforward and noised in
 # training (GNS recipe). Names, resolved to indices by `carried_indices`.
 CARRIED_COLUMNS: dict[str, tuple[str, ...]] = {
-    "chunk_feat": ("bond_damage_mean", "bond_damage_max", "n_live_bonds", "n_broken_bonds",
-                   *_v("v_rel_body"), *_v("w_body")),
+    "chunk_feat": (*_v("v_rel_body"), *_v("w_body")),
     "impactor_feat": (*_v("v_rel_body"), "speed_over_c"),
-    "bond_feat": ("damage", "crush", "utilization", "peak_util_prev", *_v("v_rel_edge")),
+    "bond_feat": ("damage", "peak_util_prev", *_v("v_rel_edge")),
     "cracked_feat": tuple(_v("v_rel_edge")),
-    "impactor_contact_feat": ("v_n", "v_t_0", "v_t_1", "v_n_over_c", *_v("spin"), "overlap"),
+    "impactor_contact_feat": ("v_n", "v_t_0", "v_t_1", "v_n_over_c", *_v("spin")),
     "structure_contact_feat": ("v_n", "v_t_0", "v_t_1", "v_n_over_c"),
 }
 
@@ -113,6 +112,8 @@ def col(array: str, name: str) -> int:
 def carried_indices(array: str) -> list[int]:
     return [col(array, n) for n in CARRIED_COLUMNS.get(array, ())]
 
+
+STRUCTURE_ARRAYS = ("chunk_key", "bond_key", "bond_ends", "chunk_rest_pos")
 
 SCALE_KEYS = ("L", "m", "v", "c", "f_t", "E", "GA", "dt", "E_in")
 ENERGY_TARGET_KEYS = ("KE_in", "KE_out", "W_gravity", "W_external", "E_elastic_start",
@@ -229,6 +230,7 @@ class Call:
     split_group: str = ""
     ensemble_id: str | None = None
     ensemble_member: int | None = None
+    gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def has(self, name: str) -> bool:
         return name in self.arrays
@@ -347,7 +349,7 @@ def load_event(path: Path | str, validate: bool = True) -> Event:
         sid = int(s["structure_id"])
         cat = s["arrays"]
         structures[sid] = {k: _read(blob, cat[k], f"structure/{sid}/{k}")
-                           for k in ("chunk_key", "bond_key", "bond_ends")}
+                           for k in STRUCTURE_ARRAYS}
     calls = []
     for e in entries:
         arrays = {k: _read(blob, v, f"call {e['call_index']}/{k}") for k, v in e["arrays"].items()}
@@ -361,6 +363,7 @@ def load_event(path: Path | str, validate: bool = True) -> Event:
             family=manifest["family"], split=manifest["split"],
             split_group=manifest["split_group"], ensemble_id=manifest.get("ensemble_id"),
             ensemble_member=manifest.get("ensemble_member"),
+            gravity=tuple(float(x) for x in manifest.get("gravity", (0.0, 0.0, 0.0))),
         )
         if validate:
             validate_call(c)
@@ -400,7 +403,7 @@ def write_event(root: Path | str, manifest: dict[str, Any], calls: list[Call],
     m["structures"] = [
         {"structure_id": sid, "n_chunks": int(s["chunk_key"].shape[0]),
          "n_bonds": int(s["bond_key"].shape[0]),
-         "arrays": {k: w.add(s[k]) for k in ("chunk_key", "bond_key", "bond_ends")}}
+         "arrays": {k: w.add(s[k]) for k in STRUCTURE_ARRAYS}}
         for sid, s in structures.items()
     ]
     entries = []

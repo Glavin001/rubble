@@ -21,7 +21,10 @@ one of them; the version string changes whenever either changes meaning.**
 1. **Every model input is written by the recorder.** Python never derives an input feature
    (single source: the Rust feature builder the recorder uses is the one P3 ports to the
    engine). The only things Python builds are the BSMS hierarchy (from the pristine bond
-   graph, at load time, as the plan says) and batching.
+   graph, at load time, as the plan says), its coarse-edge fibre features (the pooled
+   centre-of-mass offset in the source node's body frame ÷ L, and its length ÷ L, computed
+   inside the model from the raw `chunk_pos` / `chunk_q_world`; P3 ports these with the
+   hierarchy) and batching.
 2. **Inputs are invariant**: no absolute position, no world-frame vector, no per-bond or
    per-chunk identity. Vectors are in a local frame (a body frame for nodes, the edge frame
    for edges). Every feature is a ratio to a physical scale of the call (`scales` below),
@@ -91,6 +94,7 @@ Used to build the BSMS hierarchy once per intact structure and to align keys acr
 | `chunk_key` | i64 | `[Ns]` | stable chunk key, `(structure_id << 32) | chunk_index` |
 | `bond_key` | i64 | `[Bs]` | stable bond key, `(structure_id << 32) | bond_index` |
 | `bond_ends` | i32 | `[Bs,2]` | local chunk indices into `chunk_key` |
+| `chunk_rest_pos` | f32 | `[Ns,3]` | rest COM positions in any fixed frame; used only to choose BSMS seeds (nearest to each cluster's centroid, a rotation-invariant choice) |
 
 ## `calls.json`: one entry per call
 
@@ -170,7 +174,8 @@ whole scene leaves every feature unchanged and rotates every decoded world vecto
 | 32 | `in_contact_any` | 0/1: any contact edge touches it |
 
 **Carried columns** (rewritten from the model's own decoded output in pushforward, noised in
-training): 9, 10, 11, 12, 19–24.
+training; `CARRIED_COLUMNS` in `schema.py`): 19–24. Everything else in a successor call
+(topology, damage summaries, geometry) stays the oracle's; DAgger covers those.
 
 ### Impactor arrays
 
@@ -223,6 +228,19 @@ rows `2k` and `2k+1` are the same physical edge, with endpoints swapped and ever
 direction-dependent feature recomputed from the swapped side (the MeshGraphNets
 convention). Per-edge targets are indexed by the undirected edge `k`.
 
+**Direction convention** (normative; pushforward re-derives the carried columns with it,
+and `tests/test_outcome_pushforward.py` checks it against recorded calls):
+
+- `T_frame[k]` = rows `(t1, t2, n)` in world axes for row `2k`, `n` pointing from its src
+  to its dst; row `2k+1` uses the reversed right-handed frame `(−t1, t2, −n)`.
+- Bond and cracked rows: `offset` = (bond point − src COM) in the row's frame ÷ L;
+  `v_rel_edge` = row frame · (v_dst(p) − v_src(p)) ÷ v, where v_x(p) = v_x + ω_x × (p − x_x)
+  is the velocity of body x at the bond point p.
+- Contact rows: `rel` = v_src − v_dst (COM velocities); `v_n` = rel·n ÷ v (positive
+  closing), `v_t_i` = rel·t_i ÷ v, `v_n_over_c` = rel·n ÷ c, all in the row's frame; `spin` =
+  the impactor's ω in the row's frame × R ÷ v (the same body on both twins).
+- `rot_src`, `rot_dst` use the row's frame.
+
 Each type `T ∈ {bond, cracked, impactor_contact, structure_contact}` has:
 
 | name | dtype | shape | notes |
@@ -258,7 +276,7 @@ without seeing a world frame.
 | 25–27 | `v_rel_edge_0..2` | (v_dst − v_src at the bond point) in edge frame ÷ v |
 | 28–39 | `rot_src_0..5`, `rot_dst_0..5` | |
 
-Carried: 17, 18, 19, 20, 25–27. **Variant B group** `bond_qs_feat` `[2E, 3]`:
+Carried: 17, 20, 25–27. **Variant B group** `bond_qs_feat` `[2E, 3]`:
 `log_qs_frame_peak_util`, `qs_frame_broke` (0/1), `qs_frame_break_time` (bin ÷ 8, 0 if none).
 
 ### `cracked_feat` (`[2Ec, 22]`): broken bonds whose faces are still unilateral contacts
@@ -290,7 +308,7 @@ Row `2k` is the twin whose src is the impactor.
 | 17 | `restitution` | coefficient |
 | 18–29 | `rot_src_0..5`, `rot_dst_0..5` | |
 
-Carried: 0–3, 7–9, 15.
+Carried: 0–3, 7–9.
 
 ### `structure_contact_feat` (`[2Es, 22]`): contacts between chunks of different structures or fragments inside the island
 
