@@ -30,6 +30,11 @@ const bondMode=()=>$('bond-mode').value;
 // The stress solver's modes, and the capability profile each runs (stress-web).
 const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
+// The stress-solver modes wait on the GPU from Rust through WebAssembly JavaScript Promise
+// Integration (gpu-wait.mjs). A browser without it (Safari) gets the reason, not a crash.
+const JSPI='Suspending' in WebAssembly;
+const NO_JSPI='The stress-solver modes need WebAssembly JavaScript Promise Integration (JSPI), which this browser does not support. Use Chrome or Edge 137 or later, or pick another Bonds mode.';
+if(!JSPI)for(const o of $('bond-mode').options)if(o.value in STRESS_PROFILES){o.text+=' · needs Chrome 137+';o.title=NO_JSPI}
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
 let learned=null,learnedMs=0,learnedBusy=false;
 // The bond-graph and sleep-colour views: this page's renderer reads the boxes as it draws;
@@ -122,6 +127,7 @@ async function loadStress(level){
  // A fracture GLB's level (one copy of the structure), or the cuboid houses in their
  // sample's layout (every copy). Scene packs are not in this mode yet.
  const cuboid=procedural==='cuboid';
+ if(!JSPI)throw new Error(NO_JSPI);
  if(!cuboid&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB or the cuboid houses: pick one of those scenes.');
  learned?.dispose();learned=null;learnedMs=0;
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;

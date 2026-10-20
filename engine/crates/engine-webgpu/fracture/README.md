@@ -182,6 +182,11 @@ level, camera and shot rule, so the three can be compared:
 | **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
+**Browser support (stress modes).** The two stress-solver modes wait on the GPU from Rust
+through WebAssembly JavaScript Promise Integration (JSPI, `gpu-wait.mjs`): Chrome or Edge
+137 or later. In a browser without it (Safari) the Bonds menu marks them, and choosing one
+says why instead of failing; the other modes are unaffected.
+
 **Physics rate.** The **Physics** menu sets the simulated frames per second and reloads
 the level:
 - **Auto** keeps each mode's own rate: 120 Hz for rubble's modes, 60 Hz for the stress

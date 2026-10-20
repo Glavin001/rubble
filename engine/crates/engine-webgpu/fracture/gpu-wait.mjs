@@ -7,5 +7,8 @@
 const channel=new MessageChannel();let waiting=[];
 export const waitStats={yields:0,ms:0};
 channel.port1.onmessage=()=>{const ready=waiting;waiting=[];for(const resolve of ready)resolve()};
-export const yield_to_browser=new WebAssembly.Suspending(()=>{const t=performance.now();waitStats.yields++;return new Promise(resolve=>{waiting.push(()=>{waitStats.ms+=performance.now()-t;resolve()});if(waiting.length===1)channel.port2.postMessage(0)})});
+// A browser without JSPI (Safari) still loads this module: the stress mode refuses to
+// start there (main.mjs, stress-mode.mjs) before the import could be called.
+const suspend=fn=>'Suspending' in WebAssembly?new WebAssembly.Suspending(fn):()=>{throw new Error('WebAssembly JavaScript Promise Integration is unavailable')};
+export const yield_to_browser=suspend(()=>{const t=performance.now();waitStats.yields++;return new Promise(resolve=>{waiting.push(()=>{waitStats.ms+=performance.now()-t;resolve()});if(waiting.length===1)channel.port2.postMessage(0)})});
 globalThis.__gpuWaitStats=waitStats;
