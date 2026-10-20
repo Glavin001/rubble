@@ -245,7 +245,7 @@ is set by the ceiling, not by the tree.
 "QS with Hertz peak loads" (the plan's prior feature) does not exist in the engine. The QS
 baseline here uses the engine's contact loads. **Not done**: a converged Hertz-peak QS solve.
 
-## Decisions this needs (not taken here)
+## Decisions this needed (taken 2026-10-20; see below)
 
 1. **Acceptance target**: the ensemble, not the symmetric single run (and possibly
    re-stating M5's 35.0/6 and 23.6/133 as their ensembles).
@@ -257,6 +257,21 @@ baseline here uses the engine's contact loads. **Not done**: a converged Hertz-p
    the layer contact for labels (a method change).
 5. **Routing**: extend the island by the launched debris' reach (closes step 1's miss for
    every path, learned or not).
+
+## Decisions (2026-10-20, the user's, after this note)
+
+1. **Acceptance is against the oracle ensemble.** M5's truths are restated as ensembles: free
+   wall 31.98 m/s [30.97, 33.12], 78 fragments [67, 95]; wall row 22.95 [21.81, 24.25], 200
+   [178, 220].
+2. **The skill rule is calibrated:** a candidate passes a metric when its skill ratio is within
+   the range a held-out oracle member reaches (1.0–1.42 here). The tables' "calibrated" column
+   is this rule.
+3. **The 2 ms cost gate is relaxed for now:** cost is measured and reported, accuracy first;
+   revisited after P2.
+4. **Energy cap:** `KE_out ≤ E_in + W_gravity` with about 5% E0 tolerance; the oracle keeps the
+   penalty contact; `L_energy` uses kinetic-energy changes and per-bond dissipation.
+5. **Routing extended by launched-debris reach**, behind a flag off by default (measured in
+   [`debris-reach-routing-2026-10-20.md`](debris-reach-routing-2026-10-20.md)).
 
 ## Reproduce
 

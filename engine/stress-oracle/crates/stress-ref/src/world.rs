@@ -267,6 +267,12 @@ pub struct World {
     /// faster than the tiered impact speed does (resting contacts stay the engine's).
     /// `STRESS_TIERED_JOIN=fast` turns it on (a measurement until you decide).
     pub tiered_fast_joins: bool,
+    /// Routing extended by the reach of debris launched within the frame
+    /// (`STRESS_DEBRIS_ROUTING=1`, off by default; `select_islands`): a bonded cluster an
+    /// impactor reaches closing at `u` may launch pieces at up to `2u` (an elastic hit by a
+    /// heavier body), so its swept bounds grow by `2u dt` along the closing direction and
+    /// whatever those pieces can reach within the frame joins its island.
+    pub debris_reach_routing: bool,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -507,6 +513,7 @@ impl World {
             impact_islands: true,
             qs_islands: false,
             tiered_fast_joins: std::env::var("STRESS_TIERED_JOIN").is_ok_and(|v| v == "fast"),
+            debris_reach_routing: std::env::var("STRESS_DEBRIS_ROUTING").is_ok_and(|v| v == "1"),
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,

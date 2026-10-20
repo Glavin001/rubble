@@ -30,6 +30,9 @@ struct Part {
     contact_radius: f64,
     /// Present for clusters with bonds: what makes the rigid assumption fail on them.
     struck: Option<Struck>,
+    /// Its bounds were grown by the reach of debris an impactor may launch from it this
+    /// frame (`World::debris_reach_routing`).
+    debris: bool,
 }
 
 /// Properties of a breakable body that decide whether a contact on it may be rigid.
@@ -380,6 +383,7 @@ impl World {
                 modulus,
                 contact_radius: radius,
                 struck,
+                debris: false,
             });
         }
         let live: std::collections::HashSet<u64> = self.solver.clusters.iter().map(|cl| cl.id).collect();
@@ -403,6 +407,7 @@ impl World {
                 modulus: plane_strain(&imp.material),
                 contact_radius: Self::impactor_radius(imp),
                 struck: None,
+                debris: false,
             });
         }
         if let Some(g) = &self.scene.ground {
@@ -421,7 +426,37 @@ impl World {
                 modulus: plane_strain(self.scene.material(&g.material)),
                 contact_radius: f64::INFINITY,
                 struck: None,
+                debris: false,
             });
+        }
+
+        // `debris_reach_routing`: a bonded cluster an impactor reaches this frame, closing
+        // faster than the tiered impact speed, may launch pieces at up to twice the closing
+        // velocity (relative to the cluster: an elastic hit by a heavier body bounds it); its
+        // swept bounds grow by that velocity times `dt` along it, so a structure the pieces
+        // can reach within the frame overlaps it and joins its island.
+        if self.debris_reach_routing {
+            let clusters = self.solver.clusters.len();
+            let impactors: Vec<usize> = (clusters..clusters + self.impactors.len()).collect();
+            for c in 0..clusters {
+                if parts[c].struck.is_none() {
+                    continue;
+                }
+                let mut grow = (Vec3::ZERO, Vec3::ZERO);
+                for &k in &impactors {
+                    if !overlaps(&parts[k], &parts[c]) || closing_speed(&parts[k], &parts[c]) <= tiered_impact_speed() {
+                        continue;
+                    }
+                    let d = (parts[k].velocity - parts[c].velocity) * (2.0 * dt);
+                    grow.0 = grow.0.component_min(d);
+                    grow.1 = grow.1.component_max(d);
+                }
+                if grow != (Vec3::ZERO, Vec3::ZERO) {
+                    parts[c].lo += grow.0;
+                    parts[c].hi += grow.1;
+                    parts[c].debris = true;
+                }
+            }
         }
 
         // Owned pairs seed islands; any overlap of swept bounds joins bodies (the ground
@@ -466,7 +501,7 @@ impl World {
                     continue;
                 }
                 // `tiered_fast_joins`: a slow contact between clusters joins nothing.
-                if tiered && self.tiered_fast_joins && !impactor && !fast {
+                if tiered && self.tiered_fast_joins && !impactor && !fast && !(parts[i].debris || parts[j].debris) {
                     continue;
                 }
                 let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
