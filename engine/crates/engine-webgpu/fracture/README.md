@@ -205,6 +205,22 @@ area, material and strength. The piece comes free when that bond breaks. Before,
 was fixed for good and could not be destroyed. Unhit, the cuboid house stands with no bond
 broken. The default import, which the benches and the guard use, is unchanged.
 
+**Scene packs (stress modes).** A Vibe City pack runs in both stress modes
+(`stress_set_pack`): the lab's own scene of it gives the camera and shots, and stress-ref
+imports it under the mode's profile (`Profile::import_options`), as `stress_bench --pack
+--config` does. The pack's node masses and supports (nodes of mass 0) are used; the bonds
+to a support break like any bond. Packs without a per-material list (all of
+`generated/vibe-city`) take stress-ref's calibrated strengths, since their scene-wide
+Blast limits are not stresses. The status line shows (⚠) what the import could not take
+from the pack as given:
+- bond patches from the pack's own area and normal where no shared face is found (bonds
+  between diagonal neighbours, which touch along an edge);
+- bonds with no normal in the pack (7 in `fracturedTower`), taken from the face the two
+  chunks share, else along the line between their centres.
+
+Unlike Breakable D6, which uses the pack limits, `townhouse` sheds about 350 bonds under
+its own weight before it settles in the stress modes.
+
 **Learned impact mode.**
 - Physics is the same as **None** (unbonded fragments). The network run is timed and discarded.
 - Pack: `engine/stress-oracle/packs/house-1story.json` (319 chunks / 877 bonds).

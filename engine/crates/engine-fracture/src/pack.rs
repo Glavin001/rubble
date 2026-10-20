@@ -536,6 +536,7 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
     s.extent_z = span[2];
     s.height = span[1];
     s.center = [0.0, (lo[1] + shift[1]) + span[1] / 2.0, 0.0];
+    s.placement = shift;
     s.grid_cell_size = grid_config(&s.colliders).0;
     Ok((s, info))
 }
