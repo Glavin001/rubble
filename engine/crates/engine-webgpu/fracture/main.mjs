@@ -32,10 +32,9 @@ const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
 let learned=null,learnedMs=0,learnedBusy=false;
-// The bond-graph and sleep-colour views are this page's renderer's; the stress mode draws
-// with its own (Rust), which has neither: the boxes are off there, saying so.
-const STRESS_VIEW_NOTE='Not in the stress-solver mode: it draws with its own renderer';
-function viewOptions(stressMode){for(const id of ['show-bonds','show-sleep']){const box=$(id),label=box.closest('label');box.disabled=stressMode;if(stressMode){label.dataset.title??=label.title;label.title=STRESS_VIEW_NOTE}else if(label.dataset.title!==undefined){label.title=label.dataset.title;delete label.dataset.title}}}
+// The bond-graph and sleep-colour views: this page's renderer reads the boxes as it draws;
+// the stress modes draw with their own (Rust, stress-web), told here.
+function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,$('show-sleep').checked)}
 // Ball mass: a power-of-two multiple of the scene's default ball, applied to the next shots.
 const massScale=()=>2**Number($('ball-mass').value);
 // Bond strength: a power-of-two multiple of every bond's break strength (D6 joints and
@@ -87,7 +86,7 @@ async function loadLevel(level){
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(stressMode())return loadStress(level);
-  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;viewOptions(false);
+  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;
   learned?.dispose();learned=null;learnedMs=0;
   const built=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   if(bondMode()==='d6')setStatus('Settling bonds under self-weight…');
@@ -122,15 +121,15 @@ async function loadStress(level){
  if(!cuboid&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB or the cuboid houses: pick one of those scenes.');
  learned?.dispose();learned=null;learnedMs=0;
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
- $('view').hidden=true;$('stress-view').hidden=false;viewOptions(true);
+ $('view').hidden=true;$('stress-view').hidden=false;
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
  // The mode is on only once its module loaded: a failed import (an old build, no JSPI)
  // leaves the page in its own renderer with the error shown.
  try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}}
- catch(e){$('view').hidden=false;$('stress-view').hidden=true;viewOptions(false);throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
+ catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  const profile=STRESS_PROFILES[bondMode()];
- stress.setProfile(profile);stress.setBondStrengthScale(strengthScale());
+ stress.setProfile(profile);stress.setBondStrengthScale(strengthScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else await stress.load(assetBytes,level);
  await stress.frame(0);applyBallMass();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
@@ -189,7 +188,8 @@ $('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
-$('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').checked?1:0};
+$('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').checked?1:0;applyView()};
+$('show-bonds').onchange=applyView;
 $('ball-mass').oninput=applyBallMass;
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
 $('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};

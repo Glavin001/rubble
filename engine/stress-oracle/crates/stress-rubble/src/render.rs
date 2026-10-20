@@ -11,6 +11,12 @@
 //! support; once its cluster is free (debris, a toppled piece) the colour is mixed with a
 //! palette colour hashed from the cluster id, so each fragment reads as one piece.
 //!
+//! Views (the fracture lab's toggles): `sleep_colors` colours each chunk by its body's
+//! state instead, as the lab's own renderer does (moving orange, at rest blue, static grey;
+//! the coupled engine keeps every body awake, so "at rest" is a body slower than
+//! `REST_SPEED`); `bond_graph` draws each intact bond as a line between its chunks' centres,
+//! over the geometry, gone once the bond breaks.
+//!
 //! Nothing here touches the simulation: it reads the host mirror after a frame.
 
 use std::io::Write as _;
@@ -93,6 +99,50 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(c, 1.0);
 }
 "#;
+
+/// The bond graph's lines (`Renderer::bond_graph`): drawn over the geometry.
+const LINE_SHADER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    eye: vec4<f32>,
+    light: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct LineOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn line_vs(@location(0) pos: vec3<f32>, @location(1) color: vec4<f32>) -> LineOut {
+    var out: LineOut;
+    out.clip = camera.view_proj * vec4<f32>(pos, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn line_fs(in: LineOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
+/// The colours of `Renderer::sleep_colors` (the fracture lab's: `fracture_draw.slang`).
+const MOVING: [f32; 3] = [1.0, 0.45, 0.12];
+const AT_REST: [f32; 3] = [0.25, 0.45, 0.85];
+const STATIC: [f32; 3] = [0.45, 0.45, 0.48];
+/// A body slower than this (m/s, and rad/s) shows as at rest in `sleep_colors`.
+pub const REST_SPEED: f64 = 0.05;
+/// A bond's line in `bond_graph`.
+const BOND_LINE: [f32; 4] = [1.0, 0.86, 0.25, 1.0];
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LineVertex {
+    pos: [f32; 3],
+    color: [f32; 4],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -308,6 +358,15 @@ pub struct Renderer {
     pub background: [f64; 3],
     /// Draw the ground plane (off for a scene without ground).
     pub ground: bool,
+    /// Colour chunks by their body's state (moving, at rest, static) instead of material.
+    pub sleep_colors: bool,
+    /// Draw the intact bonds as lines between their chunks' centres.
+    pub bond_graph: bool,
+    line_pipeline: wgpu::RenderPipeline,
+    line_bind: wgpu::BindGroup,
+    lines: wgpu::Buffer,
+    /// Line vertices `lines` holds (two per bond).
+    line_capacity: usize,
 }
 
 const SAMPLES: u32 = 4;
@@ -421,6 +480,49 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        // The bond graph's lines: the camera only, over the geometry (no depth test).
+        let line_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("render lines"), source: wgpu::ShaderSource::Wgsl(LINE_SHADER.into()) });
+        let line_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("render lines"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        let line_bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("render lines"), layout: &line_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera.as_entire_binding() }] });
+        let line_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("render lines"), bind_group_layouts: &[Some(&line_layout)], immediate_size: 0 });
+        let line_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
+        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("render lines"),
+            layout: Some(&line_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &line_module,
+                entry_point: Some("line_vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<LineVertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &line_attributes })],
+            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::LineList, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: SAMPLES, ..Default::default() },
+            fragment: Some(wgpu::FragmentState { module: &line_module, entry_point: Some("line_fs"), compilation_options: Default::default(), targets: &[Some(format.into())] }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let line_capacity = (2 * solver.bonds.iter().map(|b| b.len()).sum::<usize>()).max(2);
+        let lines = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render lines"),
+            size: (line_capacity * std::mem::size_of::<LineVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let texture = |label: &str, format: wgpu::TextureFormat, samples: u32, usage: wgpu::TextureUsages| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -465,6 +567,12 @@ impl Renderer {
             fade: 120.0,
             background: [0.70, 0.76, 0.84],
             ground: true,
+            sleep_colors: false,
+            bond_graph: false,
+            line_pipeline,
+            line_bind,
+            lines,
+            line_capacity,
         }
     }
 
@@ -519,7 +627,15 @@ impl Renderer {
                 let hidden = Quat::from_axis_angle(state.th, state.th.norm()).to_mat3();
                 let r = cl.rotation() * hidden * ch.rotation;
                 let base = material_color(&ch.material);
-                let color = if cl.anchored {
+                let color = if self.sleep_colors {
+                    if cl.anchored {
+                        STATIC
+                    } else if cl.velocity.norm() > REST_SPEED || cl.angular_velocity.norm() > REST_SPEED {
+                        MOVING
+                    } else {
+                        AT_REST
+                    }
+                } else if cl.anchored {
                     base
                 } else {
                     let f = fragment_color(cl.id);
@@ -535,6 +651,25 @@ impl Renderer {
             }
         }
         gpu.queue.write_buffer(&self.objects, 0, bytemuck::cast_slice(&objs));
+        // The intact bonds, chunk centre to chunk centre (as the chunks are drawn).
+        let mut line_verts: Vec<LineVertex> = Vec::new();
+        if self.bond_graph {
+            for (s, bonds) in solver.bonds.iter().enumerate() {
+                for b in bonds.iter().filter(|b| b.connected()) {
+                    let (a, b2) = (b.geometry.a, b.geometry.b);
+                    let (ca, cb) = (&solver.chunks[s][a], &solver.chunks[s][b2]);
+                    if !ca.active || ca.removed || !cb.active || cb.removed {
+                        continue;
+                    }
+                    for c in [a, b2] {
+                        let p = solver.chunk_position(s, c);
+                        line_verts.push(LineVertex { pos: [p.x as f32, p.y as f32, p.z as f32], color: BOND_LINE });
+                    }
+                }
+            }
+            line_verts.truncate(self.line_capacity);
+            gpu.queue.write_buffer(&self.lines, 0, bytemuck::cast_slice(&line_verts));
+        }
         let light = Vec3::new(-0.45, -0.55, 0.70).normalized();
         let uniform = CameraUniform {
             view_proj,
@@ -567,6 +702,12 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.draw(0..self.vertex_count, 0..1);
+            if !line_verts.is_empty() {
+                pass.set_pipeline(&self.line_pipeline);
+                pass.set_bind_group(0, &self.line_bind, &[]);
+                pass.set_vertex_buffer(0, self.lines.slice(..));
+                pass.draw(0..line_verts.len() as u32, 0..1);
+            }
         }
     }
 }

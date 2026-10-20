@@ -265,8 +265,14 @@ level, camera and shot rule, so the three can be compared:
     `group_uniform4`, `group_uniform_island`, and uniform reductions in `group_sum2`);
   - storage access read from the shader's declarations (`gpu.rs` `wgsl_access`).
   Metal's values are unchanged (guard).
-- **View options.** "Inspect bond graph" and "Color by sleep state" are this page's
-  renderer's, so they are disabled in this mode.
+- **View options.** Both stress modes draw "Inspect bond graph" and "Color by sleep state"
+  with their own renderer (`stress-rubble` `render.rs`, set by `stress_set_view`):
+  - **Bond graph:** each intact bond is a line between its chunks' centres, drawn over the
+    geometry and gone once the bond breaks.
+  - **Sleep state:** the lab's colours. The coupled engine keeps every body awake, because
+    a sleeping body's support loads would leave the stress solve. So here "asleep" (blue)
+    means at rest, slower than 0.05 m/s and 0.05 rad/s; moving bodies are orange and
+    static ones grey.
 
 ### Breakable D6 joints (experimental)
 
