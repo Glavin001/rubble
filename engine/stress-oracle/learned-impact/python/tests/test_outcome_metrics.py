@@ -99,3 +99,23 @@ def test_evaluate_scores_against_the_ensemble(tmp_path):
               "fragments_in_range"):
         assert k in res.metrics, k
     assert np.isfinite(res.score)
+
+
+def test_three_way_report(tmp_path):
+    import torch
+
+    from learned_impact.outcome import schema as S
+    from learned_impact.outcome.batch import HierarchyCache, collate_events
+    from learned_impact.outcome.model import ImpactOutcomeModel
+    from learned_impact.outcome.synthetic import write_dataset
+
+    write_dataset(tmp_path, 6)
+    evs = [S.load_event(p) for p in S.find_events(tmp_path)]
+    calls = [e.calls[0] for e in evs]  # strike calls carry the QS baseline
+    b = collate_events(evs, HierarchyCache(2), calls)
+    torch.manual_seed(0)
+    rep = M.three_way(ImpactOutcomeModel(), [b])
+    assert rep["available"] == ["model", "qs"]
+    fam = rep["families"]["synthetic_wall"]
+    assert set(fam["model"]) == set(M.PRIMARY_SINGLE) and "qs" in fam
+    assert isinstance(fam["superiority"], bool)

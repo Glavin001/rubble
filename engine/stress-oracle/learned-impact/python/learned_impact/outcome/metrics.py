@@ -252,6 +252,12 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
         imp_p.append(torch.sigmoid(out["imp_perf_logit"]).cpu().numpy()[valid])
         imp_y.append(np.where(bc.t["y_imp_has_freq"].numpy(), bc.t["y_imp_perf_freq"].numpy(),
                               (reg == S.REGIMES["perforate"]).astype(float))[valid])
+    res = _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total)
+    model.train()
+    return res
+
+
+def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) -> EvalResult:
     res = EvalResult()
     bp, by = np.concatenate(bond_p), np.concatenate(bond_y)
     ip, iy = np.concatenate(imp_p), np.concatenate(imp_y)
@@ -328,5 +334,118 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
                         for d in res.per_family.values()), default=0.0)
     res.score = float(np.nanmean([x for x in parts if x is not None]) + 0.25 * worst_family)
     m["score"] = res.score
-    model.train()
     return res
+
+
+
+# ---- three-way report: model vs blast_parity QS vs punch, same calls, same metrics -----
+BASELINES = ("qs", "punch")
+PRIMARY_ENSEMBLE = ("skill_over_bar_ram", "skill_over_bar_partition", "skill_over_bar_sizes")
+PRIMARY_SINGLE = ("ram_err_rel", "one_minus_ari", "w1_log_mass")
+
+
+def _baseline_rows(b: Batch, name: str) -> list[dict] | None:
+    t = b.t
+    kb, ki = f"base_{name}_bond_broke", f"base_{name}_impactor_v_end"
+    if kb not in t or ki not in t:
+        return None
+    dec = {"bond_broke": t[kb].cpu() > 0, "imp_v_end": t[ki].cpu()}
+    return _per_call_outcomes(b, dec)
+
+
+def _qs_right(r: dict, tol_ram: float = 0.05, tol_ari: float = 0.05) -> bool:
+    """A call QS already gets right (the non-inferiority subset), against its own run."""
+    ram_ok = (not len(r["imp_speed"])) or float(np.mean(np.abs(r["imp_speed_hat"] - r["imp_speed"]))
+                                             ) <= tol_ram * r["v_ref"]
+    return ram_ok and 1 - weighted_ari(r["pred"], r["true"], r["mass"]) <= tol_ari
+
+
+@torch.no_grad()
+def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
+              priors: dict[str, float] | None = None, margin: float = 0.0) -> dict:
+    """The plan's three-way report on identical calls and metrics, per family:
+    `superiority` (the model beats QS and the punch on every primary metric), and
+    `non_inferiority` (on calls QS already gets right, the model is not worse than QS by
+    more than `margin`). Lower is better for every primary metric. Cases where the model is
+    worse than QS are listed by event and call, never averaged away."""
+    from .losses import prior_logit_shift
+
+    dcfg = decode_cfg or D.DecodeConfig()
+    model.eval()
+    dev = next(model.parameters()).device
+    rows = {"model": [], **{n: [] for n in BASELINES}}
+    probs = {k: ([], [], [], []) for k in rows}
+    bounds = [0, 0]
+    for b in batches:
+        bd = b.to(dev)
+        out = model(bd)
+        bc = bd if dev.type != "mps" else bd.to("cpu")
+        out = {k: v.cpu() for k, v in out.items()}
+        dec = D.decode(out, bc, dcfg)
+        bounds[0] += int(dec["energy_bound_active"].sum())
+        bounds[1] += bc.n_calls
+        m_rows = _per_call_outcomes(bc, dec)
+        rows["model"].extend(m_rows)
+        y = np.where(bc.t["y_bond_has_freq"].numpy(), bc.t["y_bond_freq"].numpy(),
+                     (bc.t["y_bond_broke"].numpy() > 0).astype(float))
+        sh = prior_logit_shift(bc, priors)
+        lg = out["bond_break_logit"] + (sh if sh is not None else 0)
+        probs["model"][0].append(torch.sigmoid(lg / dcfg.temperature).numpy())
+        probs["model"][1].append(y)
+        for n in BASELINES:
+            br = _baseline_rows(bc, n)
+            if br is None:
+                continue
+            rows[n].extend(br)
+            probs[n][0].append(bc.t[f"base_{n}_bond_broke"].numpy().astype(float))
+            probs[n][1].append(y)
+    report: dict = {"families": {}, "worse_than_qs": [], "available": []}
+    summaries = {}
+    for k, rs in rows.items():
+        if not rs:
+            continue
+        report["available"].append(k)
+        pp = probs[k]
+        summaries[k] = _summarise(rs, pp[0], pp[1], [np.zeros(0)], [np.zeros(0)],
+                                  *(bounds if k == "model" else (0, 1)))
+    if "model" not in summaries:
+        return report
+    ens = any(k in summaries["model"].metrics for k in PRIMARY_ENSEMBLE)
+    primary = PRIMARY_ENSEMBLE if ens else PRIMARY_SINGLE
+    for fam, mm in summaries["model"].per_family.items():
+        entry = {"model": {k: mm.get(k) for k in primary}}
+        for n in BASELINES:
+            if n in summaries and fam in summaries[n].per_family:
+                entry[n] = {k: summaries[n].per_family[fam].get(k) for k in primary}
+        beats = [all(entry["model"][k] is not None and entry[n][k] is not None
+                     and entry["model"][k] < entry[n][k] for k in primary)
+                 for n in BASELINES if n in entry]
+        entry["superiority"] = bool(beats) and all(beats)
+        report["families"][fam] = entry
+    if "qs" in rows and rows["qs"]:
+        by_key = {(r["call"].event_id, r["call"].call_index): r for r in rows["qs"]}
+        per_fam = {}
+        for r in rows["model"]:
+            key = (r["call"].event_id, r["call"].call_index)
+            q = by_key.get(key)
+            if q is None or not _qs_right(q):
+                continue
+            m_err = (1 - weighted_ari(r["pred"], r["true"], r["mass"]),
+                     float(np.mean(np.abs(r["imp_speed_hat"] - r["imp_speed"]))) / r["v_ref"]
+                     if len(r["imp_speed"]) else 0.0)
+            q_err = (1 - weighted_ari(q["pred"], q["true"], q["mass"]),
+                     float(np.mean(np.abs(q["imp_speed_hat"] - q["imp_speed"]))) / q["v_ref"]
+                     if len(q["imp_speed"]) else 0.0)
+            worse = any(a > b_ + margin for a, b_ in zip(m_err, q_err))
+            fam = r["call"].family
+            per_fam.setdefault(fam, []).append(not worse)
+            if worse:
+                report["worse_than_qs"].append({"event": key[0], "call": key[1], "family": fam,
+                                                "model_1mARI_ram": m_err, "qs_1mARI_ram": q_err})
+        for fam, ok in per_fam.items():
+            report["families"].setdefault(fam, {})["non_inferiority"] = {
+                "qs_right_calls": len(ok), "model_not_worse": float(np.mean(ok)),
+                "pass": bool(all(ok))}
+    report["metrics"] = {k: s_.metrics for k, s_ in summaries.items()}
+    model.train()
+    return report

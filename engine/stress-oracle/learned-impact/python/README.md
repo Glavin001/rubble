@@ -37,6 +37,12 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' scipy
 #   --noise 0.01 --pushforward 0.5   GNS noise on carried columns, carried-state pushforward
 #   --energy-tolerance 0.05          KE bound tolerance (P0: ledger residual up to 4.7% E0)
 #   --break-mode sample              hash-seeded sampling ablation (default: threshold τ = 1)
+#   --pushforward-steps 3            frames chained per pushforward (model's own breaks)
+#   --balance uncertainty            learned loss weighting (ablation; default fixed)
+#   --batch-budget 20000             nodes + edges per batch (fused AdamW; ~1000 calls/s on MPS)
+# offline report: calibrated skill + three-way vs QS / punch (EVALUATION.md for the rest)
+.venv/bin/python -m learned_impact.outcome.report --checkpoint ../runs/<job>/best.pt \
+    --dataset <dataset> --split val --out ../runs/<job>/report-val.json
 # smoke on synthetic data
 .venv/bin/python -m learned_impact.outcome.train --synthetic 64 --out ../runs/syn-smoke --steps 300
 
