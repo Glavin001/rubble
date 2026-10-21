@@ -8,7 +8,7 @@ from learned_impact.outcome import ensemble
 from learned_impact.outcome import schema as S
 from learned_impact.outcome.synthetic import make_event, write_dataset
 
-DOC = Path(__file__).resolve().parents[2] / "OUTCOME_SCHEMA.md"
+DOC = Path(__file__).resolve().parents[2] / "OUTCOME_CALLS_SCHEMA.md"
 
 
 def test_roundtrip_validates(tmp_path):

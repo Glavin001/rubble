@@ -1,4 +1,4 @@
-"""`learned-impact-outcome/1`: the recorder ↔ trainer contract (mirror of OUTCOME_SCHEMA.md).
+"""`learned-impact-outcome-calls/1`: the recorder ↔ trainer contract (mirror of OUTCOME_CALLS_SCHEMA.md).
 
 One record is one routed impact island at one engine frame (a *call*). The recorder writes
 every model input; this module only names, loads, validates and (for synthetic data and the
@@ -14,10 +14,10 @@ from typing import Any
 
 import numpy as np
 
-SCHEMA_VERSION = "learned-impact-outcome/1"
+SCHEMA_VERSION = "learned-impact-outcome-calls/1"
 N_TIME_BINS = 8
 PHASES = ("pre_contact", "contact", "blast", "separation", "secondary", "settling", "quiet")
-REGIMES = {"arrest": 0, "perforate": 1, "rebound": 2, "embedded": 3}
+REGIMES = {"arrest": 0, "perforate": 1, "rebound": 2, "embedded": 3, "deflect": 4}
 REGIME_UNDECIDED = -1
 EDGE_TYPES = ("bond", "cracked", "impactor_contact", "structure_contact")
 DTYPES = {"f32": np.float32, "i32": np.int32, "i64": np.int64}

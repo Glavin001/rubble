@@ -1,5 +1,5 @@
 """Ensemble aggregation: writes `y_bond_break_freq`, `y_impactor_perforate_freq` and
-`ens_impactor_v_end` into every member's ensemble-aligned calls (OUTCOME_SCHEMA.md,
+`ens_impactor_v_end` into every member's ensemble-aligned calls (OUTCOME_CALLS_SCHEMA.md,
 "Ensembles"). The recorder may do the same; the arrays are identical either way.
 
 Usage: python -m learned_impact.outcome.ensemble <dataset>

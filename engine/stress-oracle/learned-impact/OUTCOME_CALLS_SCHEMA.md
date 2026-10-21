@@ -1,20 +1,48 @@
-# Learned impact-outcome record (`learned-impact-outcome/1`)
+# Learned impact-outcome calls (`learned-impact-outcome-calls/1`)
 
-The on-disk contract between the P1 recorder (`learned_impact_outcome_record`, Rust) and the
-P2 trainer (`learned_impact.outcome`, PyTorch), for the plan in
-`docs/learned-stress-solver/learned-stress-solver-plan.md` and the boundary P0 validated
-(`findings/p0-feasibility-2026-10-20.md`, step 3):
+**Two layers, two owners** (proposed to P1 on 2026-10-21; status: *awaiting P1's
+confirmation*):
+
+| Layer | Version | What | Owner |
+|---|---|---|---|
+| event recording | `learned-impact-outcome/1` (`OUTCOME_SCHEMA.md`, `stress-learned/src/outcome.rs`, P1 branch) | one scenario's whole life cycle, frame by frame: raw state at every frame boundary, the routing's causal inputs, the oracle's outcome, the energy ledger, QS and punch baselines | P1 recorder |
+| **calls** (this document) | `learned-impact-outcome-calls/1` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets, derived from the event recording | a Rust call builder over the event recording (single source: P3 ports the same feature code) |
+
+The trainer reads only this layer; the event layer stays the archival truth, so a feature
+change regenerates calls without re-running the oracle.
+
+For the plan in `docs/learned-stress-solver/learned-stress-solver-plan.md` and the boundary
+P0 validated (`findings/p0-feasibility-2026-10-20.md`, step 3):
 
 > one call per routed impact island per engine frame; inputs are the frame-start state;
 > outputs are breaks, carried damage, each piece's frame-end pose, linear and angular
 > velocity, and the impactor's; applied at window end with the island's contacts filtered.
 
-One **call record** is one routed island at one frame. It is unrelated to the older
-`learned-impact/1` (`SCHEMA.md`), which stays as it is.
+It is unrelated to the older `learned-impact/1` (`SCHEMA.md`), which stays as it is.
 
 The Python mirror of this document is `python/learned_impact/outcome/schema.py`
 (dataclasses, column names, loader and validator). **If the two disagree, that is a bug in
 one of them; the version string changes whenever either changes meaning.**
+
+### Where each part comes from in the event recording
+
+| Calls field | Event-recording source |
+|---|---|
+| island membership (one call per routed island) | `frame_chunk_routed`, `frame_impactor_routed` (debris-reach routing, behind its flag, adds structures) |
+| raw node state, `y_*_v_end`, `y_*_dx`, `y_*_drot` | `state_*` rows `f` and `f + 1` (Δx = Δpos; Δθ from the quaternions) |
+| `y_chunk_fragment` | connected components of `state_bond_connected` row `f + 1` |
+| bond, cracked edges, frames, offsets | `static_bond_endpoints`, `static_bond_geometry`, `state_bond_connected` |
+| bond joint columns | `state_bond_joint` (damage, crush, utilization) |
+| `y_bond_peak_util`, `y_bond_broke`, `y_bond_break_bin` | `frame_bond_peak_util`, `frame_bond_break_bin` (bin + 1; −1 → 0) |
+| impactor contact edges | `contact_i32`, `contact_f32` |
+| `log_qs_hertz_util`, punch columns | `frame_bond_qs_prior_util`, `frame_chunk_punch_plug`, `frame_bond_punch` |
+| variant-B groups, `base_qs_*`, `base_punch_*` | `qs_*`, `punch_*` |
+| energy | `frames.json` ledger (`KE_in/out` exact; booked contact terms diagnostic only) |
+| `y_bond_dissipated` | **requested**: `frame_bond_dissipated [F,E]` (Δ`JointState.dissipated`), needed by `L_energy` |
+| `phase` | `frame_phase` (the calls phase set is a superset) |
+| `y_impactor_regime` | `outcome.json` per impactor (perforate / arrest / rebound / deflect) |
+| `split`, `split_group`, `layout_family` | `context.json` + `outcome_sampling.partition` |
+| `ensemble_id`, `ensemble_member` | **requested** in `context.json` |
 
 ## Rules that hold everywhere
 
@@ -55,7 +83,7 @@ manageable (one `.bin` per array would be ~10⁷ files).
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | exactly `"learned-impact-outcome/1"` |
+| `schema_version` | string | exactly `"learned-impact-outcome-calls/1"` |
 | `event_id` | string | directory basename |
 | `recipe_id` | string | generator recipe (replayable) |
 | `family` | string | e.g. `free_wall`, `wall_row`, `wall_opening` |
@@ -383,6 +411,6 @@ the arrays are identical either way.
 
 ## Versioning
 
-`learned-impact-outcome/1`. Any change of meaning, order or shape bumps the version; the
+`learned-impact-outcome-calls/1`. Any change of meaning, order or shape bumps the version; the
 loader accepts exactly one version. Additive optional arrays may be added within a version
 only if old readers ignore them and they appear in this document.

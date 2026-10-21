@@ -2,7 +2,7 @@
 
 `rewrite_carried` replaces a successor call's carried columns (`schema.CARRIED_COLUMNS`)
 with values derived from a predicted frame outcome, by the direction convention in
-OUTCOME_SCHEMA.md. Topology, damage summaries and geometry stay the oracle's; DAgger covers
+OUTCOME_CALLS_SCHEMA.md. Topology, damage summaries and geometry stay the oracle's; DAgger covers
 those. This is the one place Python re-derives recorder columns, and only for training:
 `tests/test_outcome_pushforward.py` checks that feeding the oracle's own outcome reproduces
 the recorded successor exactly.
