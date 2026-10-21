@@ -81,6 +81,33 @@ def skill(pred, members: list, dist) -> float:
     return float(d_model / max(d_member, 1e-12))
 
 
+LITERAL_BAR = 1.25
+
+
+def heldout_member_skills(members: list, dist) -> np.ndarray:
+    """Each oracle member scored against the other members exactly as a candidate is."""
+    m = len(members)
+    if m < 3:
+        return np.array([])
+    return np.array([skill(members[i], members[:i] + members[i + 1:], dist) for i in range(m)])
+
+
+def calibrated_gate(pred, members: list, dist, literal: float = LITERAL_BAR) -> dict:
+    """The user's post-P0 skill rule: a candidate passes a metric when its skill is within
+    what a held-out oracle member reaches against the other members, i.e.
+    `skill ≤ max(literal, mean held-out member skill)` (P0's "calibrated" verdict; the oracle
+    itself fails the literal 1.25 on some scenes, with means of 1.0–1.42). The literal
+    verdict and the held-out range are reported alongside."""
+    s = skill(pred, members, dist)
+    h = heldout_member_skills(members, dist)
+    mean = float(np.mean(h)) if len(h) else float("nan")
+    bar = max(literal, mean) if len(h) else literal
+    return {"skill": s, "heldout_mean": mean,
+            "heldout_min": float(np.min(h)) if len(h) else float("nan"),
+            "heldout_max": float(np.max(h)) if len(h) else float("nan"),
+            "bar": bar, "pass": bool(s <= bar), "pass_literal": bool(s <= literal)}
+
+
 def crps_ensemble(x: float, members: np.ndarray) -> float:
     y = np.asarray(members, dtype=np.float64)
     return float(np.mean(np.abs(x - y)) - 0.5 * np.mean(np.abs(y[:, None] - y[None, :])))
@@ -248,21 +275,31 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
     for _key, rs in groups.items():
         fam = rs[0]["call"].family
         x = rs[0]
-        if len(rs) >= 2:  # ensemble: the model's prediction is scored against the members
+        if len(rs) >= 3:  # ensemble: the model's prediction is scored against the members
             pm = x["pred"]
-            members = [r["true"] for r in rs]
-            per[fam]["skill_partition"].append(skill(pm, members, lambda a, b_: 1 - weighted_ari(
-                a, b_, x["mass"])))
-            ms = [fragment_masses(r["true"], r["mass"]) for r in rs]
-            per[fam]["skill_sizes"].append(skill(fragment_masses(pm, x["mass"]), ms,
-                                                 wasserstein_log_mass))
+            mass = x["mass"]
+            gates = {
+                "partition": calibrated_gate(pm, [r["true"] for r in rs],
+                                             lambda a, b_: 1 - weighted_ari(a, b_, mass)),
+                "sizes": calibrated_gate(fragment_masses(pm, mass),
+                                         [fragment_masses(r["true"], r["mass"]) for r in rs],
+                                         wasserstein_log_mass),
+            }
             if len(x["imp_speed"]):
-                per[fam]["skill_ram"].append(skill(float(x["imp_speed_hat"][0]),
-                                                   [float(r["imp_speed"][0]) for r in rs],
-                                                   lambda a, b_: abs(a - b_)))
-                per[fam]["crps_ram"].append(crps_ensemble(float(x["imp_speed_hat"][0]),
-                                                          [float(r["imp_speed"][0]) for r in rs])
+                speeds = [float(r["imp_speed"][0]) for r in rs]
+                gates["ram"] = calibrated_gate(float(x["imp_speed_hat"][0]), speeds,
+                                               lambda a, b_: abs(a - b_))
+                per[fam]["crps_ram"].append(crps_ensemble(float(x["imp_speed_hat"][0]), speeds)
                                             / x["v_ref"])
+            for name, gt in gates.items():
+                per[fam][f"skill_{name}"].append(gt["skill"])
+                per[fam][f"skill_bar_{name}"].append(gt["bar"])
+                per[fam][f"skill_over_bar_{name}"].append(gt["skill"] / gt["bar"])
+                per[fam][f"pass_{name}"].append(float(gt["pass"]))
+                per[fam][f"pass_literal_{name}"].append(float(gt["pass_literal"]))
+            n_frag = [len(np.unique(r["true"])) for r in rs]
+            nf_hat = len(np.unique(pm))
+            per[fam]["fragments_in_range"].append(float(min(n_frag) <= nf_hat <= max(n_frag)))
         for r in rs:
             per[fam]["one_minus_ari"].append(1 - weighted_ari(r["pred"], r["true"], r["mass"]))
             per[fam]["w1_log_mass"].append(wasserstein_log_mass(
@@ -279,10 +316,10 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
     keys = sorted({k for d in res.per_family.values() for k in d})
     for k in keys:
         m[k] = float(np.nanmean([d[k] for d in res.per_family.values() if k in d]))
-    # selection score: ensemble skills when present (≤ 1.25 is the bar), else single-run
-    # errors scaled to the plan's tolerances (ram 5% of v0)
-    if "skill_ram" in m:
-        parts = [m.get("skill_ram"), m.get("skill_partition"), m.get("skill_sizes")]
+    # selection score: against the ensemble when present — each skill ÷ its oracle-calibrated
+    # bar (≤ 1 passes); else single-run errors scaled to the plan's tolerances (ram 5% of v0)
+    if any(k.startswith("skill_over_bar_") for k in m):
+        parts = [m.get(f"skill_over_bar_{k}") for k in ("ram", "partition", "sizes")]
     else:
         parts = [m.get("ram_err_rel", 0.0) / 0.05, m.get("one_minus_ari", 0.0) * 4,
                  m.get("w1_log_mass", 0.0), (1 - f) * 4]

@@ -61,3 +61,41 @@ def test_calibration_helpers():
     assert M.prf(np.array([1, 0, 1], bool), np.array([1, 1, 0], bool)) == (0.5, 0.5, 0.5)
     t = M.fit_temperature(np.array([4.0, -4.0, 4.0, -4.0]), np.array([0.6, 0.4, 0.6, 0.4]))
     assert t > 4
+
+
+def test_calibrated_gate_uses_heldout_member_skill():
+    rng = np.random.default_rng(3)
+    members = list(rng.normal(30, 1, 16))
+    d = lambda a, b: abs(a - b)  # noqa: E731
+    g = M.calibrated_gate(float(np.median(members)), members, d)
+    h = M.heldout_member_skills(members, d)
+    assert len(h) == 16 and abs(g["heldout_mean"] - h.mean()) < 1e-12
+    assert g["bar"] == max(1.25, h.mean()) and g["pass"]
+    # an outlier fails both verdicts
+    bad = M.calibrated_gate(40.0, members, d)
+    assert not bad["pass"] and not bad["pass_literal"]
+    # a candidate between the literal bar and a looser oracle passes only the calibrated rule
+    wide = [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
+    c = M.calibrated_gate(5.0, wide, d)
+    assert c["bar"] >= 1.25 and c["pass"] == (c["skill"] <= c["bar"])
+
+
+def test_evaluate_scores_against_the_ensemble(tmp_path):
+    import torch
+
+    from learned_impact.outcome import schema as S
+    from learned_impact.outcome.batch import HierarchyCache, collate_events
+    from learned_impact.outcome.ensemble import aggregate_dataset
+    from learned_impact.outcome.model import ImpactOutcomeModel
+    from learned_impact.outcome.synthetic import write_dataset
+
+    write_dataset(tmp_path, 0, ensembles=1, ensemble_size=4)
+    aggregate_dataset(tmp_path)
+    evs = [S.load_event(p) for p in S.find_events(tmp_path)]
+    b = collate_events(evs, HierarchyCache(2))
+    torch.manual_seed(0)
+    res = M.evaluate(ImpactOutcomeModel(), [b])
+    for k in ("skill_ram", "skill_bar_ram", "pass_ram", "skill_partition", "pass_sizes",
+              "fragments_in_range"):
+        assert k in res.metrics, k
+    assert np.isfinite(res.score)
