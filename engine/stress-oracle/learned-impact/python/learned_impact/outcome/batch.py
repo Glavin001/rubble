@@ -141,8 +141,8 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
         en = c.energy
         add("energy", np.array([[en["KE_in"], en["KE_out"], en["W_gravity"], en["W_external"],
                                  en["E_elastic_end"], en["D_bond"],
-                                 en.get("D_bond_fracture", 0.0), en.get("D_bond_damping", 0.0)]]))
-        add("energy_has_split", np.array([("D_bond_fracture" in en) and ("D_bond_damping" in en)]))
+                                 en.get("D_bond_joint", 0.0), en.get("D_bond_damping", 0.0)]]))
+        add("energy_has_split", np.array([("D_bond_joint" in en) and ("D_bond_damping" in en)]))
         add("call_anchored", np.array([c.anchored]))
         add("gravity", np.array([c.gravity], dtype=np.float64))
         for t in S.EDGE_TYPES:

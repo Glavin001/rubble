@@ -1,14 +1,14 @@
-# Learned impact-outcome calls (`learned-impact-outcome-calls/1`)
+# Learned impact-outcome calls (`learned-impact-outcome/1`)
 
-**Two layers, two owners** (proposed to P1 on 2026-10-21; status: *awaiting P1's
-confirmation*):
+**Two layers, two owners** (agreed with P1 on 2026-10-21; P1's reply is in the shared notes,
+`p1-data-contract-reply.md`):
 
 | Layer | Version | What | Owner |
 |---|---|---|---|
-| event recording | `learned-impact-outcome/1` (`OUTCOME_SCHEMA.md`, `stress-learned/src/outcome.rs`, P1 branch) | one scenario's whole life cycle, frame by frame: raw state at every frame boundary, the routing's causal inputs, the oracle's outcome, the energy ledger, QS and punch baselines | P1 recorder |
-| **calls** (this document) | `learned-impact-outcome-calls/1` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets, derived from the event recording | a Rust call builder over the event recording (single source: P3 ports the same feature code) |
+| frame record | `learned-impact-frames/1` (`FRAMES_SCHEMA.md`, P1 branch `claude/learned-impact-p1-data-aa822c`) | one scenario's whole life cycle, lossless, frame by frame: state at every frame boundary, the routing's causal inputs, the oracle's outcome, per-bond energies, the energy ledger, QS and punch baselines, keys, splits, ensemble id/member | P1 recorder / generator |
+| **calls** (this document) | `learned-impact-outcome/1` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | P1's Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports); its output must pass `schema.py`'s validator |
 
-The trainer reads only this layer; the event layer stays the archival truth, so a feature
+The trainer reads only this layer; the frame record stays the archival truth, so a feature
 change regenerates calls without re-running the oracle.
 
 For the plan in `docs/learned-stress-solver/learned-stress-solver-plan.md` and the boundary
@@ -24,7 +24,7 @@ The Python mirror of this document is `python/learned_impact/outcome/schema.py`
 (dataclasses, column names, loader and validator). **If the two disagree, that is a bug in
 one of them; the version string changes whenever either changes meaning.**
 
-### Where each part comes from in the event recording
+### Where each part comes from in the frame record
 
 | Calls field | Event-recording source |
 |---|---|
@@ -38,11 +38,11 @@ one of them; the version string changes whenever either changes meaning.**
 | `log_qs_hertz_util`, punch columns | `frame_bond_qs_prior_util`, `frame_chunk_punch_plug`, `frame_bond_punch` |
 | variant-B groups, `base_qs_*`, `base_punch_*` | `qs_*`, `punch_*` |
 | energy | `frames.json` ledger (`KE_in/out` exact; booked contact terms diagnostic only) |
-| `y_bond_dissipated` | **requested**: `frame_bond_dissipated [F,E]` (Δ`JointState.dissipated`), needed by `L_energy` |
-| `phase` | `frame_phase` (the calls phase set is a superset) |
-| `y_impactor_regime` | `outcome.json` per impactor (perforate / arrest / rebound / deflect) |
+| `y_bond_dissipated`, `D_bond_joint`, `D_bond_damping` | per-bond cumulative joint dissipation (`JointState.dissipated`: fracture + cracked-face friction + rebar, **not pure fracture**) and dashpot dissipation (`RtBond::damped`), differenced over the frame |
+| `phase` | `frame_phase`: P1 writes pre_contact / contact / secondary / separation / settling; `blast` arrives in P5, and quiet non-impact frames are `pre_contact` or `settling` |
+| `y_impactor_regime` | full-run label per impactor, relative to the remnant (largest fragment): perforate / arrest / rebound / deflect |
 | `split`, `split_group`, `layout_family` | `context.json` + `outcome_sampling.partition` |
-| `ensemble_id`, `ensemble_member` | **requested** in `context.json` |
+| `ensemble_id`, `ensemble_member`, `perturbation` | context (8 members on val/test/sealed and 15% of train); aggregation is `learned_impact.outcome.ensemble` only |
 
 ## Rules that hold everywhere
 
@@ -83,7 +83,7 @@ manageable (one `.bin` per array would be ~10⁷ files).
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | exactly `"learned-impact-outcome-calls/1"` |
+| `schema_version` | string | exactly `"learned-impact-outcome/1"` |
 | `event_id` | string | directory basename |
 | `recipe_id` | string | generator recipe (replayable) |
 | `family` | string | e.g. `free_wall`, `wall_row`, `wall_opening` |
@@ -109,7 +109,7 @@ manageable (one `.bin` per array would be ~10⁷ files).
 | `structures` | array | per structure `{structure_id, n_chunks, n_bonds}`; the pristine graph is in `arrays.bin` as `structure/<id>/…` |
 
 **Full-run outcome** (`manifest.outcome`), from the whole recorded life cycle: per impactor
-`{key, v_exit: [3], speed_exit, regime: "arrest"|"perforate"|"rebound"|"embedded"}`
+`{key, v_exit: [3], speed_exit, regime: "arrest"|"perforate"|"rebound"|"deflect"}`
 (regime labelled geometrically); `n_fragments`, `largest_fraction`, `fragment_masses`
 (sorted, kg), `retained_anchored_fraction`, `collapsed`, `sim_time`, `frames`.
 
@@ -371,7 +371,7 @@ structure), `rot_src_0..5`, `rot_dst_0..5`. Carried: 0–3.
 ### Per impactor (`[Ni]`)
 
 `y_impactor_v_end`, `y_impactor_w_end`, `y_impactor_dx`, `y_impactor_drot` (f32 `[Ni,3]`,
-world), `y_impactor_regime` (i32: 0 arrest, 1 perforate, 2 rebound, 3 embedded, −1 undecided;
+world), `y_impactor_regime` (i32: 0 arrest, 1 perforate, 2 rebound, 3 deflect, −1 undecided;
 the **full-run** geometric label of that impactor), optional `y_impactor_perforate_freq`
 (f32, ensemble).
 
@@ -383,7 +383,7 @@ the **full-run** geometric label of that impactor), optional `y_impactor_perfora
 | `W_gravity`, `W_external` | input to the bound | work over the frame; `W_external` is the blast work, 0 for impacts |
 | `E_elastic_start`, `E_elastic_end` | yes | stored bond energy |
 | `D_bond` | yes | Σ `y_bond_dissipated` (must match it within 1e-6 relative) |
-| `D_bond_fracture`, `D_bond_damping` | yes if `available.bond_energy_split` | split of `D_bond` |
+| `D_bond_joint`, `D_bond_damping` | yes if `available.bond_energy_split` | split of `D_bond`: joint (fracture + cracked-face friction + rebar) and bond dashpot |
 | `D_fracture_floor` | diagnostic | Σ_broken G_f·A |
 | `D_contact_booked`, `D_friction_booked` | **diagnostic only, never a target**: P0 found the penalty contact books its dashpot quadrature, not its work (ledger residual +0.3–4.7% E0) |
 | `ledger_residual` | diagnostic | (KE_out + E_el_end + D_total − KE_in − E_el_start − W) ÷ E_in |
@@ -393,7 +393,9 @@ The trainer's energy targets are therefore `KE_loss = KE_in + W_gravity + W_exte
 
 ### Baseline outcomes on the same state (three-way report, variant B base)
 
-`base_qs_*` (`blast_parity` QS frame) and `base_punch_*` (GPU punch), each when available:
+`base_qs_*` (`blast_parity` QS frame) and `base_punch_*` (the **CPU** punch: `World::predict_punch`'s
+decision rule, then the `blast_parity` QS frame, under the oracle's contact, not rubble's GPU
+rigid engine), each when available:
 `_bond_broke` (i32 `[E]`), `_bond_peak_util` (f32 `[E]`), `_chunk_v_end`, `_chunk_w_end`
 (f32 `[Nc,3]`), `_impactor_v_end` (f32 `[Ni,3]`). Raw, for metrics; variant B's *inputs*
 come only from the `*_qs_feat` groups.
@@ -411,6 +413,6 @@ the arrays are identical either way.
 
 ## Versioning
 
-`learned-impact-outcome-calls/1`. Any change of meaning, order or shape bumps the version; the
+`learned-impact-outcome/1`. Any change of meaning, order or shape bumps the version; the
 loader accepts exactly one version. Additive optional arrays may be added within a version
 only if old readers ignore them and they appear in this document.

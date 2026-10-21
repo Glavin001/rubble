@@ -242,9 +242,9 @@ class ImpactOutcomeModel(nn.Module):
             "chunk_out": c_out,
             "imp_out": i_out,
             "imp_perf_logit": i_raw[:, NODE_OUT],
-            # ÷ E_in: D_bond ≥ 0, its fracture fraction, E_elastic_end ≥ 0, KE_loss (signed)
+            # ÷ E_in: D_bond ≥ 0, its joint (vs dashpot) fraction, E_elastic_end ≥ 0, KE_loss (signed)
             "energy_d_bond": F.softplus(en[:, 0]),
-            "energy_frac_fracture": torch.sigmoid(en[:, 1]),
+            "energy_frac_joint": torch.sigmoid(en[:, 1]),
             "energy_e_elastic": F.softplus(en[:, 2]),
             "energy_ke_loss": en[:, 3],
             "latent_global": g,

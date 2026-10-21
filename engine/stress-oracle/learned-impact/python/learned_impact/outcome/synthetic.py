@@ -1,4 +1,4 @@
-"""Synthetic `learned-impact-outcome-calls/1` events for tests and trainer development.
+"""Synthetic `learned-impact-outcome/1` events for tests and trainer development.
 
 A toy, *not* the oracle: a free (or bottom-anchored) one-chunk-thick wall struck by one ram.
 Bond demand falls off with hops from the struck chunk and scales with the energy ratio;
@@ -222,7 +222,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
     d_bond = float(d_bond_each.astype(np.float64).sum())
     energy = {"KE_in": ke_in, "KE_out": ke_out, "W_gravity": w_grav, "W_external": 0.0,
               "E_elastic_start": 0.0, "E_elastic_end": e_el_end, "D_bond": d_bond,
-              "D_bond_fracture": float(ga[broke].sum()), "D_bond_damping":
+              "D_bond_joint": float(ga[broke].sum()), "D_bond_damping":
               d_bond - float(ga[broke].sum()), "D_fracture_floor": float(ga[broke].sum()),
               "D_contact_booked": max(ke_loss - d_bond - e_el_end, 0.0),
               "D_friction_booked": 0.0, "ledger_residual": 0.0}
@@ -494,7 +494,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
     d1 = np.zeros(nb1, np.float32)
     energy1 = {"KE_in": ke1, "KE_out": ke1o, "W_gravity": wg1, "W_external": 0.0,
                "E_elastic_start": e_el_end, "E_elastic_end": e_el_end * 0.5, "D_bond": 0.0,
-               "D_bond_fracture": 0.0, "D_bond_damping": 0.0, "D_fracture_floor": 0.0,
+               "D_bond_joint": 0.0, "D_bond_damping": 0.0, "D_fracture_floor": 0.0,
                "D_contact_booked": 0.0, "D_friction_booked": 0.0, "ledger_residual": 0.0}
     scales1 = dict(scales)
     scales1["E_in"] = max(ke1 + wg1, 0.5 * m_c * v_ref ** 2)

@@ -93,7 +93,7 @@ def zero_outputs(b: Batch, n_time_bins: int = S.N_TIME_BINS) -> dict[str, Tensor
     return {"bond_log_r": z(nb), "bond_break_logit": z(nb), "bond_time_logits": z(nb, n_time_bins),
             "bond_ddamage": z(nb), "chunk_out": z(t["chunk_x"].shape[0], 12),
             "imp_out": z(t["imp_x"].shape[0], 12), "imp_perf_logit": z(t["imp_x"].shape[0]),
-            "energy_d_bond": z(G), "energy_frac_fracture": z(G) + 0.5, "energy_e_elastic": z(G),
+            "energy_d_bond": z(G), "energy_frac_joint": z(G) + 0.5, "energy_e_elastic": z(G),
             "energy_ke_loss": z(G)}
 
 
@@ -225,7 +225,7 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     split = t["energy_has_split"].to(dev)
     frac = (en[:, 6] / d_bond.clamp(min=1e-12)).clamp(0, 1)
     e = e + torch.where(split & (d_bond > 0),
-                        _huber(out["energy_frac_fracture"].to(dtype) - frac, hd), 0.0)
+                        _huber(out["energy_frac_joint"].to(dtype) - frac, hd), 0.0)
     rd = D.rotvec_to_matrix(ph["drot"])
     i1 = rd @ i0 @ rd.transpose(-1, -2)
     ke_hat = D.kinetic(ph, ph["v_end"], ph["w_end"], i1, G)

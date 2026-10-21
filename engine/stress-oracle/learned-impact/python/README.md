@@ -15,7 +15,7 @@ Default smoke uses `H=8`, `P=4`. Lean production shape is `H=48`, `P=64`.
 ## Impact-outcome model (P2, `learned_impact.outcome`)
 
 One call per routed impact island per frame. Plan: `docs/learned-stress-solver/learned-stress-solver-plan.md`.
-Data contract: [`../OUTCOME_CALLS_SCHEMA.md`](../OUTCOME_CALLS_SCHEMA.md) (`learned-impact-outcome-calls/1`, mirrored by
+Data contract: [`../OUTCOME_CALLS_SCHEMA.md`](../OUTCOME_CALLS_SCHEMA.md) (`learned-impact-outcome/1`, mirrored by
 `learned_impact/outcome/schema.py`). **Until P1 data exists, everything trains only on the synthetic
 toy (`outcome/synthetic.py`): no accuracy claims.**
 
