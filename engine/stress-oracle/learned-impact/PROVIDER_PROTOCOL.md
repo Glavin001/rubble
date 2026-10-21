@@ -19,7 +19,7 @@ learned_p0 ceiling --scene wall_row --variant provider --provider oracle        
 learned_p0 ceiling --scene wall_row --variant provider --provider files --dir D [--timeout 60] [--echo-oracle]
 learned_p0 ceiling --scene wall_row --variant provider --provider punch                  # the host punch (must fail)
 learned_p0 ceiling --scene wall_row --variant provider --provider model --checkpoint best.pt --dir D \
-    [--python-dir P2/learned-impact/python --device cpu|mps]                            # P2's model, spawned and owned
+    [--python-dir P2/learned-impact/python --device cpu|mps --qs|--no-qs]                # P2's model; QS features as its model.json asks unless forced
 ```
 
 Set `STRESS_DEBRIS_ROUTING=1` for scenes where debris reaches a second structure within a

@@ -412,9 +412,10 @@ struct ProviderOpts {
     /// `model`: the Python package directory with its `.venv` (default: this checkout's
     /// `learned-impact/python`).
     python_dir: Option<std::path::PathBuf>,
-    /// `files`: the call record's variant-B (QS frame) features (`live_call`'s `qs`; on by
-    /// default, as P1 records them; `--no-qs` leaves them zero).
-    qs: bool,
+    /// The call record's variant-B (QS frame) features (`live_call`'s `qs`): `--qs` / `--no-qs`
+    /// force them. Unset, `files` builds them (as P1 records them) and `model` asks the
+    /// provider (`model.json`'s `needs_qs`).
+    qs: Option<bool>,
 }
 
 fn oracle_outcome(view: &World, keys: &stress_ref::world::IslandKeys, frame: i64) -> stress_ref::world::DecodedState {
@@ -458,7 +459,7 @@ fn file_outcome(o: &ProviderOpts, view: &World, keys: &stress_ref::world::Island
     // captured exactly as the recorder captures them, from a standalone copy of the
     // frame-start state.
     let mut standalone = view.standalone_copy();
-    let ev = stress_learned::outcome_calls::live_call(&mut standalone, scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, o.qs)?;
+    let ev = stress_learned::outcome_calls::live_call(&mut standalone, scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, o.qs.unwrap_or(true))?;
     stress_learned::outcome_calls::write_event(&req.join("call"), &ev, true)?;
     let request = json!({"schema_version": "learned-impact-provider-request/0", "event_id": scene, "frame": frame, "island": 0, "time": view.solver.time,
         "frame_dt": view.scene.sim.frame_dt, "keys": keys, "state": request_state(view, keys), "call_record": "call"});
@@ -640,7 +641,7 @@ fn main() {
     let cmd = args.next().expect("oracle|ceiling|hash");
     let (mut name, mut member, mut mode, mut seconds, mut fdt, mut variant) = (String::from("free_wall"), None::<u64>, String::from("kin"), SECONDS, None::<f64>, String::from("coupled"));
     let mut poses: Option<String> = None;
-    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: true, checkpoint: None, device: "cpu".into(), python_dir: None };
+    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: None, checkpoint: None, device: "cpu".into(), python_dir: None };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--scene" => name = args.next().expect("--scene NAME"),
@@ -653,7 +654,8 @@ fn main() {
             "--dir" => provider.dir = args.next().expect("--dir DIR").into(),
             "--timeout" => provider.timeout = args.next().and_then(|v| v.parse().ok()).expect("--timeout S"),
             "--echo-oracle" => provider.echo_oracle = true,
-            "--no-qs" => provider.qs = false,
+            "--no-qs" => provider.qs = Some(false),
+            "--qs" => provider.qs = Some(true),
             "--checkpoint" => provider.checkpoint = Some(args.next().expect("--checkpoint PT").into()),
             "--device" => provider.device = args.next().expect("--device cpu|mps"),
             "--python-dir" => provider.python_dir = Some(args.next().expect("--python-dir DIR").into()),
