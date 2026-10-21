@@ -1,0 +1,338 @@
+{
+ "events": 640,
+ "oracle_configs": [
+  {
+   "courant_safety": 0.35,
+   "frame_dt": 0.016666666666666666,
+   "methods": {
+    "blast_model": false,
+    "contact_crushing": false,
+    "corotational_bonds": false,
+    "exact_frame_transfer": false,
+    "exact_joint_patch": false,
+    "exact_rate_filter": false,
+    "frame_contact_step": false,
+    "implicit_contact_steps": false,
+    "implicit_contact_windows": false,
+    "implicit_failure_windows": false,
+    "lattice_contact_step": false,
+    "layer_contact": false,
+    "multirate": false,
+    "patch_after_damage": false,
+    "rayleigh_damping": false,
+    "scaled_step_bound": false,
+    "tangent_statics": false,
+    "true_step": true
+   },
+   "name": "a12_realtime",
+   "provisional": true,
+   "solve_mode": "adaptive",
+   "source": "stress_rubble::scenes::realtime (A12); P0 step 1 (p0-feasibility-2026-10-20.md)",
+   "stress_courant_safety": 0.5
+  }
+ ],
+ "integrity_problems": {},
+ "failures": [],
+ "duration_histogram_s": [
+  {
+   "lo": 0.0,
+   "hi": 0.25,
+   "count": 0
+  },
+  {
+   "lo": 0.25,
+   "hi": 0.5,
+   "count": 9
+  },
+  {
+   "lo": 0.5,
+   "hi": 0.75,
+   "count": 367
+  },
+  {
+   "lo": 0.75,
+   "hi": 1.0,
+   "count": 49
+  },
+  {
+   "lo": 1.0,
+   "hi": 1.5,
+   "count": 93
+  },
+  {
+   "lo": 1.5,
+   "hi": 2.0,
+   "count": 57
+  },
+  {
+   "lo": 2.0,
+   "hi": 3.0,
+   "count": 31
+  },
+  {
+   "lo": 3.0,
+   "hi": 5.0,
+   "count": 16
+  },
+  {
+   "lo": 5.0,
+   "hi": 10.0,
+   "count": 9
+  },
+  {
+   "lo": 10.0,
+   "hi": Infinity,
+   "count": 9
+  }
+ ],
+ "frames_per_phase": {
+  "pre_contact": 657,
+  "contact": 1753,
+  "secondary": 9042,
+  "separation": 6438,
+  "settling": 26374
+ },
+ "still_breaking_last_half_second": [],
+ "still_breaking_share": 0.0,
+ "truncated": [
+  "p1_free_wall_t1_00037_s303_e0",
+  "p1_free_wall_t1_00037_s303_e1",
+  "p1_free_wall_t1_00037_s303_e2",
+  "p1_free_wall_t1_00037_s303_e3",
+  "p1_free_wall_t1_00037_s303_e4",
+  "p1_free_wall_t1_00037_s303_e5",
+  "p1_free_wall_t1_00037_s303_e6",
+  "p1_free_wall_t1_00037_s303_e7",
+  "p1_free_wall_t1_00017_s606"
+ ],
+ "truncated_share": 0.0140625,
+ "families": {
+  "anchored_wall/t1": {
+   "events": 176,
+   "cost_s": {
+    "mean": 47.880621776,
+    "median": 13.127852521000001,
+    "p90": 66.29760118749999,
+    "max": 1738.016586667,
+    "parts_mean": {
+     "oracle": 16.864461768727274,
+     "qs_branch": 27.0077746162159,
+     "punch_branch": 0.3382042464261364,
+     "qs_prior": 3.6299942050170455,
+     "overhead": 0.015100811045454547
+    }
+   },
+   "cost_per_chunk_sim_s": 0.11442640944775942,
+   "sim_s": {
+    "mean": 1.3214962121214573,
+    "median": 1.2583333333313136,
+    "max": 5.06666666677832
+   },
+   "chunks": {
+    "min": 36,
+    "median": 132.0,
+    "max": 1725
+   },
+   "no_break_share": 0.1590909090909091,
+   "breaks_median": 72.0,
+   "regimes": {
+    "rebound": 50,
+    "perforate": 103,
+    "arrest": 22,
+    "deflect": 1
+   },
+   "truncated": 0,
+   "bytes_per_event": 5009817.431818182,
+   "frames_per_phase": {
+    "contact": 419,
+    "separation": 3228,
+    "settling": 3525,
+    "secondary": 6519,
+    "pre_contact": 264
+   }
+  },
+  "anchored_wall/t2": {
+   "events": 40,
+   "cost_s": {
+    "mean": 21.270812988525,
+    "median": 18.557576208500002,
+    "p90": 45.41726944100001,
+    "max": 64.221941125,
+    "parts_mean": {
+     "oracle": 11.71630343805,
+     "qs_branch": 8.451795709999999,
+     "punch_branch": 0.62190452605,
+     "qs_prior": 0.45407233614999987,
+     "overhead": 0.0059048733
+    }
+   },
+   "cost_per_chunk_sim_s": 0.1120959757310975,
+   "sim_s": {
+    "mean": 1.3179166666671676,
+    "median": 1.4249999999951484,
+    "max": 2.1833333333374556
+   },
+   "chunks": {
+    "min": 49,
+    "median": 118.0,
+    "max": 276
+   },
+   "no_break_share": 0.0,
+   "breaks_median": 191.0,
+   "regimes": {
+    "perforate": 76,
+    "rebound": 30,
+    "arrest": 15,
+    "deflect": 1
+   },
+   "truncated": 0,
+   "bytes_per_event": 3124177.4,
+   "frames_per_phase": {
+    "pre_contact": 17,
+    "contact": 202,
+    "separation": 640,
+    "secondary": 1974,
+    "settling": 330
+   }
+  },
+  "free_wall/t1": {
+   "events": 380,
+   "cost_s": {
+    "mean": 25.15636059437895,
+    "median": 6.2086897285,
+    "p90": 49.14612082090001,
+    "max": 529.593365334,
+    "parts_mean": {
+     "oracle": 10.144909278097368,
+     "qs_branch": 7.619673025444737,
+     "punch_branch": 0.3771297722842105,
+     "qs_prior": 6.982069986849999,
+     "overhead": 0.014384108739473682
+    }
+   },
+   "cost_per_chunk_sim_s": 0.08910657269463285,
+   "sim_s": {
+    "mean": 1.0961842105267892,
+    "median": 0.5499999999997967,
+    "max": 10.000000000068972
+   },
+   "chunks": {
+    "min": 42,
+    "median": 112.0,
+    "max": 1296
+   },
+   "no_break_share": 0.031578947368421054,
+   "breaks_median": 64.0,
+   "regimes": {
+    "perforate": 326,
+    "arrest": 13,
+    "deflect": 22,
+    "rebound": 19
+   },
+   "truncated": 9,
+   "bytes_per_event": 4293275.631578947,
+   "frames_per_phase": {
+    "pre_contact": 356,
+    "contact": 916,
+    "separation": 2290,
+    "settling": 20958,
+    "secondary": 473
+   }
+  },
+  "free_wall/t2": {
+   "events": 40,
+   "cost_s": {
+    "mean": 8.821527650075002,
+    "median": 7.004488542,
+    "p90": 15.2114457464,
+    "max": 42.420263959,
+    "parts_mean": {
+     "oracle": 5.416297711524999,
+     "qs_branch": 2.6302781634750003,
+     "punch_branch": 0.476908202225,
+     "qs_prior": 0.279120075925,
+     "overhead": 0.0032934414749999997
+    }
+   },
+   "cost_per_chunk_sim_s": 0.08776023263169805,
+   "sim_s": {
+    "mean": 0.8454166666693702,
+    "median": 0.599999999999242,
+    "max": 7.116666666767021
+   },
+   "chunks": {
+    "min": 48,
+    "median": 119.5,
+    "max": 276
+   },
+   "no_break_share": 0.0,
+   "breaks_median": 152.0,
+   "regimes": {
+    "perforate": 100,
+    "deflect": 7,
+    "rebound": 7,
+    "arrest": 3
+   },
+   "truncated": 0,
+   "bytes_per_event": 2212681.75,
+   "frames_per_phase": {
+    "contact": 212,
+    "separation": 260,
+    "secondary": 76,
+    "settling": 1461,
+    "pre_contact": 20
+   }
+  },
+  "m5_reference/t1": {
+   "events": 4,
+   "cost_s": {
+    "mean": 23.717658479249998,
+    "median": 23.607106875,
+    "p90": 29.711146225,
+    "max": 29.997159625,
+    "parts_mean": {
+     "oracle": 12.4299279895,
+     "qs_branch": 10.14006935475,
+     "punch_branch": 0.7164602915,
+     "qs_prior": 0.413692094,
+     "overhead": 0.007601936749999999
+    }
+   },
+   "cost_per_chunk_sim_s": 0.14365618924282814,
+   "sim_s": {
+    "mean": 0.516666666666093,
+    "median": 0.516666666666093,
+    "max": 0.516666666666093
+   },
+   "chunks": {
+    "min": 220,
+    "median": 330.0,
+    "max": 440
+   },
+   "no_break_share": 0.0,
+   "breaks_median": 216.0,
+   "regimes": {
+    "perforate": 4
+   },
+   "truncated": 0,
+   "bytes_per_event": 4337732.5,
+   "frames_per_phase": {
+    "contact": 4,
+    "separation": 20,
+    "settling": 100
+   }
+  }
+ },
+ "splits": {
+  "None": 242,
+  "train": 292,
+  "test": 50,
+  "val": 54,
+  "sealed": 2
+ },
+ "ensembles": {
+  "groups": 12,
+  "complete": 12,
+  "members": 96
+ }
+}

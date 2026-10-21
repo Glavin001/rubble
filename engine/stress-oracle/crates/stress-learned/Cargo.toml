@@ -8,7 +8,11 @@ description = "Learned-impact event schema, recorder, and smoke generator (train
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+rayon = "1"
+# Saved oracle scenes must round-trip every f64.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# Lossless compression of call records (`arrays.bin.zst`, P2's loader reads it).
+zstd = "0.13"
 stress-ref = { path = "../stress-ref" }
 
 [[bin]]
@@ -22,3 +26,15 @@ path = "src/bin/learned_impact_record.rs"
 [[bin]]
 name = "learned_impact_generate"
 path = "src/bin/learned_impact_generate.rs"
+
+[[bin]]
+name = "learned_impact_outcome_record"
+path = "src/bin/learned_impact_outcome_record.rs"
+
+[[bin]]
+name = "learned_impact_outcome_generate"
+path = "src/bin/learned_impact_outcome_generate.rs"
+
+[[bin]]
+name = "learned_impact_outcome_calls"
+path = "src/bin/learned_impact_outcome_calls.rs"

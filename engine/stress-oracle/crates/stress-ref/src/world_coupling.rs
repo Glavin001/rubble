@@ -35,6 +35,55 @@ struct Part {
     debris: bool,
 }
 
+/// An impactor contact the routing sweep predicts for the coming frame
+/// (`World::predict_contacts`).
+#[derive(Clone, Debug)]
+pub struct PredictedContact {
+    pub impactor: usize,
+    pub cluster: u64,
+    pub cluster_chunks: usize,
+    pub structure: usize,
+    /// The struck chunk (the cluster's nearest to the impactor's path).
+    pub entry: usize,
+    /// Time within the frame at which the bounds first meet, and the impactor's centre then.
+    pub time: f64,
+    pub point: Vec3,
+    /// Unit closing direction (impactor relative to the cluster) and closing speed.
+    pub direction: Vec3,
+    pub speed: f64,
+    /// Reduced mass of the impactor and the whole cluster (the impactor's for an anchored
+    /// one), the contact's plane-strain modulus and the impactor's face radius.
+    pub reduced_mass: f64,
+    pub modulus: f64,
+    pub face_radius: f64,
+    /// Hertz contact time and the half-sine peak force of an elastic impulse over it.
+    pub hertz_duration: f64,
+    pub peak_force: f64,
+    /// The punch's plug (`None`: the cone takes the whole cluster).
+    pub plug: Option<PunchPlug>,
+}
+
+/// The plug the punch would push out of a struck cluster.
+#[derive(Clone, Debug)]
+pub struct PunchPlug {
+    /// Plug chunks (sorted) and the connected bonds holding it in (cluster order).
+    pub chunks: Vec<usize>,
+    pub interface: Vec<usize>,
+    /// Summed tensile capacity of `interface` (N), plug mass, the inelastic impulse on it,
+    /// its Hertz time and the mean force over it.
+    pub capacity: f64,
+    pub mass: f64,
+    pub impulse: f64,
+    pub duration: f64,
+    pub force: f64,
+}
+
+impl PunchPlug {
+    pub fn breaks(&self) -> bool {
+        self.force > self.capacity
+    }
+}
+
 /// Properties of a breakable body that decide whether a contact on it may be rigid.
 #[derive(Clone, Copy)]
 struct Struck {
@@ -327,7 +376,9 @@ impl World {
         let scale = self.scene.sim.stiffness_scale;
         let plane_strain = |m: &Material| m.youngs_modulus * scale / (1.0 - m.poisson_ratio * m.poisson_ratio);
         let mut parts: Vec<Part> = Vec::new();
-        let mut routing = std::mem::take(&mut self.coupling.as_mut().expect("coupled").routing);
+        // Standalone (no engine: the learned-impact recorder's routing prediction), the
+        // per-cluster cache is this call's own.
+        let mut routing = self.coupling.as_mut().map(|c| std::mem::take(&mut c.routing)).unwrap_or_default();
         for ci in 0..self.solver.clusters.len() {
             let cl = &self.solver.clusters[ci];
             let s = cl.structure;
@@ -388,7 +439,9 @@ impl World {
         }
         let live: std::collections::HashSet<u64> = self.solver.clusters.iter().map(|cl| cl.id).collect();
         routing.retain(|id, _| live.contains(id));
-        self.coupling.as_mut().expect("coupled").routing = routing;
+        if let Some(c) = self.coupling.as_mut() {
+            c.routing = routing;
+        }
         for (i, imp) in self.impactors.iter().enumerate() {
             let b = imp.obox();
             let r = b.bounding_radius();
@@ -556,6 +609,25 @@ impl World {
         n
     }
 
+    /// The bodies the next frame's routing would put in impact islands (`select_islands`
+    /// over `dt` with `forced`), as (cluster ids, impactor indices), every body's `driven`
+    /// flag left as it was. Coupled or standalone (a standalone world simulates every body
+    /// itself; this is then a prediction only, for the learned-impact recorder).
+    pub fn predict_island_members(&mut self, dt: f64, forced: &HashSet<BodyKey>) -> (Vec<u64>, Vec<usize>) {
+        let saved: (Vec<bool>, Vec<bool>) =
+            (self.solver.clusters.iter().map(|c| c.driven).collect(), self.impactors.iter().map(|i| i.driven).collect());
+        self.select_islands(dt, forced);
+        let clusters = self.solver.clusters.iter().filter(|c| !c.driven).map(|c| c.id).collect();
+        let impactors = (0..self.impactors.len()).filter(|&k| !self.impactors[k].driven).collect();
+        for (cl, d) in self.solver.clusters.iter_mut().zip(saved.0) {
+            cl.driven = d;
+        }
+        for (imp, d) in self.impactors.iter_mut().zip(saved.1) {
+            imp.driven = d;
+        }
+        (clusters, impactors)
+    }
+
     /// The earliest time within `dt` at which an impactor (its bounding sphere) reaches the
     /// bounds of a bonded cluster, moving at their relative velocity (0: already inside;
     /// `dt`: none). Bounds as `select_islands` takes them, so the estimate is early, never
@@ -610,17 +682,41 @@ impl World {
     /// those bonds' summed tensile capacity: then they are returned, to be broken before
     /// the engine steps, so the engine's rigid contact meets the free plug.
     pub fn predict_punch(&self, dt: f64) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for c in self.predict_contacts(dt, tiered_impact_speed()) {
+            let Some(plug) = c.plug else { continue };
+            if std::env::var("STRESS_IMPACT_PUNCH_TRACE").is_ok() {
+                eprintln!(
+                    "punch: cluster {} ({} chunks): plug {} chunks {:.1} kg, {} bonds holding {:.3e} N; hit {:.1} m/s, impulse {:.0} N s over {:.2e} s = {:.3e} N: {}",
+                    c.cluster, c.cluster_chunks, plug.chunks.len(), plug.mass, plug.interface.len(), plug.capacity, c.speed, plug.impulse, plug.duration, plug.force,
+                    if plug.breaks() { "breaks out" } else { "holds" }
+                );
+            }
+            if plug.breaks() {
+                out.extend(plug.interface.into_iter().map(|bi| (c.structure, bi)));
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Every impactor contact with a bonded cluster the routing sweep predicts within `dt`
+    /// (closing faster than `min_speed`, strictly), in impactor then cluster order, with
+    /// what the punch would make of it (`predict_punch` takes those with the tiered impact
+    /// speed). Read-only: the learned-impact recorder's causal contact inputs.
+    pub fn predict_contacts(&self, dt: f64, min_speed: f64) -> Vec<PredictedContact> {
         let scale = self.scene.sim.stiffness_scale;
         let plane_strain = |m: &Material| m.youngs_modulus * scale / (1.0 - m.poisson_ratio * m.poisson_ratio);
         let mut out = Vec::new();
-        for imp in &self.impactors {
+        for (ii, imp) in self.impactors.iter().enumerate() {
             let r = imp.obox().bounding_radius();
             let face = Self::impactor_radius(imp);
             let c = imp.pose.position;
             for cl in self.solver.clusters.iter().filter(|cl| !cl.bonds.is_empty()) {
                 let v = imp.velocity - cl.velocity;
                 let speed = v.norm();
-                if speed <= tiered_impact_speed() {
+                if speed <= min_speed {
                     continue;
                 }
                 let s = cl.structure;
@@ -689,42 +785,53 @@ impl World {
                         }
                     }
                 }
-                if plug.len() == cl.chunks.len() {
-                    continue;
-                }
-                let interface: Vec<usize> = cl
-                    .bonds
-                    .iter()
-                    .copied()
-                    .filter(|&bi| {
-                        let g = &self.solver.bonds[s][bi].geometry;
-                        self.solver.bonds[s][bi].connected() && (plug.contains(&g.a) != plug.contains(&g.b))
-                    })
-                    .collect();
-                let capacity: f64 = interface.iter().map(|&bi| {
-                    let b = &self.solver.bonds[s][bi];
-                    b.strength.tensile * b.geometry.area * b.weibull
-                }).sum();
-                let m_plug: f64 = plug.iter().map(|&k| self.solver.structures[s].chunks[k].mass).sum();
-                let m_eff = m_plug * imp.mass / (m_plug + imp.mass);
-                let impulse = m_eff * speed;
                 let modulus = 1.0 / (1.0 / plane_strain(&imp.material) + 1.0 / plane_strain(self.chunk_material(s, entry)));
-                let tau = crate::api::hertz_duration(m_eff, face, modulus, speed);
-                let force = impulse / tau;
-                if std::env::var("STRESS_IMPACT_PUNCH_TRACE").is_ok() {
-                    eprintln!(
-                        "punch: cluster {} ({} chunks): plug {} chunks {:.1} kg, {} bonds holding {:.3e} N; hit {:.1} m/s, impulse {:.0} N s over {:.2e} s = {:.3e} N: {}",
-                        cl.id, cl.chunks.len(), plug.len(), m_plug, interface.len(), capacity, speed, impulse, tau, force,
-                        if force > capacity { "breaks out" } else { "holds" }
-                    );
-                }
-                if force > capacity {
-                    out.extend(interface.into_iter().map(|bi| (s, bi)));
-                }
+                // The routing's view of the contact: the whole cluster's reduced mass, an
+                // elastic impulse over a half-sine of the Hertz time (`rigid_assumption_fails`).
+                let m_red = if cl.anchored { imp.mass } else { cl.mass * imp.mass / (cl.mass + imp.mass) };
+                let hertz = crate::api::hertz_duration(m_red, face, modulus, speed);
+                let peak_force = std::f64::consts::PI * (2.0 * m_red * speed) / (2.0 * hertz);
+                let plug = (plug.len() != cl.chunks.len()).then(|| {
+                    let interface: Vec<usize> = cl
+                        .bonds
+                        .iter()
+                        .copied()
+                        .filter(|&bi| {
+                            let g = &self.solver.bonds[s][bi].geometry;
+                            self.solver.bonds[s][bi].connected() && (plug.contains(&g.a) != plug.contains(&g.b))
+                        })
+                        .collect();
+                    let capacity: f64 = interface.iter().map(|&bi| {
+                        let b = &self.solver.bonds[s][bi];
+                        b.strength.tensile * b.geometry.area * b.weibull
+                    }).sum();
+                    let m_plug: f64 = plug.iter().map(|&k| self.solver.structures[s].chunks[k].mass).sum();
+                    let m_eff = m_plug * imp.mass / (m_plug + imp.mass);
+                    let impulse = m_eff * speed;
+                    let tau = crate::api::hertz_duration(m_eff, face, modulus, speed);
+                    let mut chunks: Vec<usize> = plug.iter().copied().collect();
+                    chunks.sort_unstable();
+                    PunchPlug { chunks, interface, capacity, mass: m_plug, impulse, duration: tau, force: impulse / tau }
+                });
+                out.push(PredictedContact {
+                    impactor: ii,
+                    cluster: cl.id,
+                    cluster_chunks: cl.chunks.len(),
+                    structure: s,
+                    entry,
+                    time: t0,
+                    point: hit,
+                    direction: d,
+                    speed,
+                    reduced_mass: m_red,
+                    modulus,
+                    face_radius: face,
+                    hertz_duration: hertz,
+                    peak_force,
+                    plug,
+                });
             }
         }
-        out.sort_unstable();
-        out.dedup();
         out
     }
 

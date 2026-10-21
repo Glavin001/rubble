@@ -35,10 +35,12 @@ For each call (frame `f`, island `i`; today one call per frame holds every route
      impactor keys;
    - `state`: each key's frame-start world position, velocity and spin, its cluster id,
      anchored flag and mass;
-   - `call_record`: the path, relative to the request directory (for example `"call"`), of
-     a single-call `learned-impact-outcome/1` event directory. The Rust call builder
-     (`stress-learned/src/outcome_calls.rs`) will write it. Until the builder lands this is
-     null: P2's model mode refuses a null record, while its echo and targets modes work.
+   - `call_record`: `"call"`, the path relative to the request directory of a single-call
+     `learned-impact-outcome/2` event directory (`manifest.json`, `calls.json`,
+     `arrays.bin.zst`). P1's call builder (`stress_learned::outcome_calls::live_call`)
+     writes it from a standalone copy of the frame-start state, its inputs captured exactly
+     as the recorder captures them. QS-frame (variant B) features are on; `--no-qs` leaves
+     them zero.
    - With `--echo-oracle` the directory also holds `oracle.json`, the oracle's own decoded
      state of the call.
 2. Then it writes an empty `D/req/<f:06>_<i>/ready`.

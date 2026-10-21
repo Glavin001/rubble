@@ -32,7 +32,9 @@ mod coupling;
 #[path = "world_handoff.rs"]
 mod handoff;
 pub use handoff::{stable_key, DecodedBody, DecodedBreak, DecodedDamage, DecodedState, IslandKeys, DECODED_STATE_VERSION};
-pub use coupling::{cluster_signature, tiered_impact_speed};
+#[path = "world_branch.rs"]
+mod branch;
+pub use coupling::{cluster_signature, tiered_impact_speed, PredictedContact, PunchPlug};
 /// The modal pre-window for impacts (prototype, `modal` feature): a child module so it
 /// drives the world's own contact and substep without widening their visibility.
 #[cfg(feature = "modal")]
@@ -1654,6 +1656,8 @@ impl World {
     /// contact is evaluated again. For tests and scripted breaks.
     pub fn break_bond(&mut self, s: usize, b: usize) {
         self.solver.bonds[s][b].joint.damage = 1.0;
+        // Broken from outside the law: its failure margin is reached too.
+        self.solver.bonds[s][b].fail_ts = self.solver.bonds[s][b].fail_ts.max(1.0);
         let ci = self.solver.chunks[s][self.solver.bonds[s][b].geometry.a].cluster;
         self.solver.split_cluster(ci);
         if self.scene.sim.methods.layer_contact {
@@ -1824,7 +1828,31 @@ impl World {
         self.implicit_failures.clear();
     }
 
+    /// `step_frame` with a read-only observer after each substep, for any standalone world
+    /// whose `step_frame` is one pass (not coupled, not `implicit_failure_windows`): the
+    /// same substeps and frame tail, so the result is bit-identical to `step_frame`.
+    /// For the learned-impact outcome recorder (break and contact timing within a frame).
+    pub fn step_frame_watched(&mut self, mut observe: impl FnMut(&Self)) -> Result<(), String> {
+        if self.coupling.is_some() || (self.scene.sim.solve_mode == SolveMode::Implicit && self.scene.sim.methods.implicit_failure_windows) {
+            return Err("a watched frame needs a standalone single-pass world".into());
+        }
+        if self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact {
+            self.contact_dt = self.frame_contact_dt();
+        }
+        self.step_frame_once_observed(&mut observe);
+        Ok(())
+    }
+
+    /// Contact force magnitude each chunk received in the last substep (`[structure][chunk]`).
+    pub fn chunk_contact_hits(&self) -> &[Vec<f64>] {
+        &self.contact_hits
+    }
+
     fn step_frame_once(&mut self) {
+        self.step_frame_once_observed(&mut |_| {})
+    }
+
+    fn step_frame_once_observed(&mut self, observe: &mut impl FnMut(&Self)) {
         if self.scene.sim.solve_mode == SolveMode::Implicit && (self.scene.sim.methods.implicit_contact_windows || self.scene.sim.methods.implicit_failure_windows) {
             self.open_explicit_windows();
         }
@@ -1849,6 +1877,7 @@ impl World {
             if self.scene.sim.solve_mode == SolveMode::Implicit {
                 self.accumulate_implicit(dt, i + 1 == n);
             }
+            observe(self);
         }
         self.frame += 1;
         if self.solver.events.len() != splits_before {

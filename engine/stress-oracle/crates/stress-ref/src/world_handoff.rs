@@ -362,6 +362,11 @@ impl World {
         for b in breaks {
             let (s, bi) = self.bond_of_key(b.key).ok_or_else(|| format!("bond key {} names no bond", b.key))?;
             self.solver.break_bonds(&[(s, bi)]);
+            // Broken from outside the law: its failure margin is reached too (as
+            // `World::break_bond`), so margin >= 1 still means disconnected.
+            let bond = &mut self.solver.bonds[s][bi];
+            bond.fail_ts = bond.fail_ts.max(1.0);
+            bond.peak_fail_margin = bond.peak_fail_margin.max(bond.fail_margin());
         }
         for x in &d.bond_damage {
             let (s, bi) = self.bond_of_key(x.key).ok_or_else(|| format!("bond key {} names no bond", x.key))?;
@@ -442,6 +447,10 @@ impl World {
     pub fn step_frame_with_provider(&mut self, provider: &mut dyn FnMut(&World, &IslandKeys) -> Result<DecodedState, String>) -> Result<IslandKeys, String> {
         let fdt = self.scene.sim.frame_dt;
         let start = self.clone();
+        // Each frame's peak utilisation starts afresh, after the frame-start state the call
+        // is built from (whose `peak_utilization` is the previous frame's: the recorder's
+        // order, which the call builder's `log1p_peak_util_prev` reads).
+        self.solver.reset_peak_utilizations();
         if self.predict_islands(fdt, &std::collections::HashSet::new()) == 0 {
             self.step_frame();
             return Ok(IslandKeys::default());

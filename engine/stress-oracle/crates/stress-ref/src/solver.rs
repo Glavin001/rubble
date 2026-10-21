@@ -233,6 +233,16 @@ pub struct RtBond {
     /// Running max of `joint.utilization` since the last
     /// [`ReferenceSolver::reset_peak_utilizations`] (learned-impact labels).
     pub peak_utilization: f64,
+    /// Energy this bond's dashpots have dissipated so far (J), in the explicit dynamic
+    /// update (the per-bond share of `EnergyLedger::damping_dissipation`). Diagnostic for
+    /// the learned-impact recorder; nothing reads it.
+    pub damped: f64,
+    /// Running maxima of the joint law's failure margins (`JointResponse::fail_ts`,
+    /// `fail_c`) since the start, and the bond's margin's peak since the last
+    /// `reset_peak_utilizations`. Diagnostic for the learned-impact labels.
+    pub fail_ts: f64,
+    pub fail_c: f64,
+    pub peak_fail_margin: f64,
 }
 
 impl RtBond {
@@ -253,12 +263,35 @@ impl RtBond {
             measures: StressMeasures::default(),
             stored: 0.0,
             peak_utilization: 0.0,
+            damped: 0.0,
+            fail_ts: 0.0,
+            fail_c: 0.0,
+            peak_fail_margin: 0.0,
         }
     }
 
     /// Update peak after a joint-state write.
     pub fn observe_utilization(&mut self) {
         self.peak_utilization = self.peak_utilization.max(self.joint.utilization);
+    }
+
+    /// Fold one evaluation's failure margins in (after its state is committed).
+    pub fn observe_fail_margin(&mut self, fail_ts: f64, fail_c: f64) {
+        self.fail_ts = self.fail_ts.max(fail_ts);
+        self.fail_c = self.fail_c.max(fail_c);
+        self.peak_fail_margin = self.peak_fail_margin.max(self.fail_margin());
+    }
+
+    /// The bond's failure margin: the larger family's running maximum, and with rebar the
+    /// smaller of that and the rebar's consumed rupture work. It reaches 1 exactly when
+    /// the bond disconnects (`connected`), when only the joint law (no external break)
+    /// changed it.
+    pub fn fail_margin(&self) -> f64 {
+        let q = self.fail_ts.max(self.fail_c);
+        match &self.rebar {
+            Some(rb) if rb.rupture_work > 0.0 => q.min(self.joint.rebar_work / rb.rupture_work),
+            _ => q,
+        }
     }
 
     pub fn model(&self) -> JointModel<'_> {
@@ -1754,6 +1787,8 @@ impl ReferenceSolver {
             let bm = &mut self.bonds[s][bi];
             let previous = std::mem::replace(&mut bm.joint, resp.state);
             bm.observe_utilization();
+            bm.observe_fail_margin(resp.fail_ts, resp.fail_c);
+            bm.damped += bond_damped;
             bm.force = q;
             bm.elastic = resp.force;
             bm.measures = resp.measures;
@@ -2323,6 +2358,8 @@ impl ReferenceSolver {
         for bonds in &mut self.bonds {
             for b in bonds {
                 b.peak_utilization = 0.0;
+                // The margin is a running maximum: its peak over a frame starts where it is.
+                b.peak_fail_margin = b.fail_margin();
             }
         }
     }

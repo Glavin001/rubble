@@ -4,7 +4,7 @@
 //!   cargo run --release -p stress-rubble --features gpu --example learned_p0 -- \
 //!       oracle  --scene free_wall [--member K --perturb kin|kin_weibull] [--seconds S] [--frame-dt DT]
 //!       ceiling --scene free_wall --variant coupled|window_full|window_reduced|pre_filtered|pre_engine [--frame-dt DT]
-//!       ceiling --scene free_wall --variant provider --provider oracle|files|punch [--dir D --timeout S --echo-oracle]
+//!       ceiling --scene free_wall --variant provider --provider oracle|files|punch [--dir D --timeout S --echo-oracle --no-qs]
 //!       hash    (every scene's canonical hash)
 //!
 //! `oracle`: the standalone stress-ref world (CPU f64), the truth of `findings/rewind-scaling.md`.
@@ -329,6 +329,9 @@ struct ProviderOpts {
     /// `files`: also write the oracle's own decoded state into each request (`oracle.json`),
     /// so a trivial provider (`scripts/echo_provider.py`) can check the loop end to end.
     echo_oracle: bool,
+    /// `files`: the call record's variant-B (QS frame) features (`live_call`'s `qs`; on by
+    /// default, as P1 records them; `--no-qs` leaves them zero).
+    qs: bool,
 }
 
 fn oracle_outcome(view: &World, keys: &stress_ref::world::IslandKeys, frame: i64) -> stress_ref::world::DecodedState {
@@ -368,8 +371,14 @@ fn file_outcome(o: &ProviderOpts, view: &World, keys: &stress_ref::world::Island
     let name = format!("{frame:06}_0");
     let req = o.dir.join("req").join(&name);
     std::fs::create_dir_all(&req).map_err(|e| e.to_string())?;
+    // The call record (`learned-impact-outcome/2`, P1's call builder): the island's inputs
+    // captured exactly as the recorder captures them, from a standalone copy of the
+    // frame-start state.
+    let mut standalone = view.standalone_copy();
+    let ev = stress_learned::outcome_calls::live_call(&mut standalone, scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, o.qs)?;
+    stress_learned::outcome_calls::write_event(&req.join("call"), &ev, true)?;
     let request = json!({"schema_version": "learned-impact-provider-request/0", "event_id": scene, "frame": frame, "island": 0, "time": view.solver.time,
-        "frame_dt": view.scene.sim.frame_dt, "keys": keys, "state": request_state(view, keys), "call_record": null});
+        "frame_dt": view.scene.sim.frame_dt, "keys": keys, "state": request_state(view, keys), "call_record": "call"});
     std::fs::write(req.join("request.json"), serde_json::to_string(&request).unwrap()).map_err(|e| e.to_string())?;
     if o.echo_oracle {
         std::fs::write(req.join("oracle.json"), serde_json::to_string(&oracle_outcome(view, keys, frame)).unwrap()).map_err(|e| e.to_string())?;
@@ -404,9 +413,11 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
     }
     for f in 0..n {
         let t = Instant::now();
-        // As the recorder does: each frame's peak utilisation starts afresh (the call
-        // builder's `log1p_peak_util_prev` reads the previous frame's).
-        w.solver.reset_peak_utilizations();
+        // (`step_frame_with_provider` resets each frame's peak utilisation after the
+        // frame-start state the call reads; the punch path resets it here.)
+        if o.kind == "punch" {
+            w.solver.reset_peak_utilizations();
+        }
         let mut islands = 0;
         if o.kind == "punch" {
             islands = w.predict_islands(fdt, &HashSet::new());
@@ -521,7 +532,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().expect("oracle|ceiling|hash");
     let (mut name, mut member, mut mode, mut seconds, mut fdt, mut variant) = (String::from("free_wall"), None::<u64>, String::from("kin"), SECONDS, None::<f64>, String::from("coupled"));
-    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false };
+    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: true };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--scene" => name = args.next().expect("--scene NAME"),
@@ -534,6 +545,7 @@ fn main() {
             "--dir" => provider.dir = args.next().expect("--dir DIR").into(),
             "--timeout" => provider.timeout = args.next().and_then(|v| v.parse().ok()).expect("--timeout S"),
             "--echo-oracle" => provider.echo_oracle = true,
+            "--no-qs" => provider.qs = false,
             other => panic!("unknown argument {other}"),
         }
     }
