@@ -79,7 +79,10 @@ def project(fit: dict | None, bar: float) -> dict:
                 "reason": f"asymptote {fit['c']:.3g} ≥ bar {bar}: more data alone will not pass"}
     reason = "fit" if fit.get("n_sizes", 3) >= 3 else \
         "2 sizes: asymptote assumed 0, so this is optimistic"
-    return {"n_needed": float((fit["a"] / (bar - fit["c"])) ** (1 / fit["b"])), "reason": reason}
+    log_n = np.log(fit["a"] / (bar - fit["c"])) / fit["b"]  # log space: no overflow when flat
+    if log_n > np.log(1e12):
+        return {"n_needed": float("inf"), "reason": "effectively flat (> 10¹² events)"}
+    return {"n_needed": float(np.exp(log_n)), "reason": reason}
 
 
 def _val_report(ckpt: Path, data: Data, cfg: TrainConfig) -> dict:
