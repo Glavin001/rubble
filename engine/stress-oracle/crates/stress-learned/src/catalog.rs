@@ -91,7 +91,7 @@ pub fn write_zstd(root: &Path, rel: &str, bytes: &[u8]) -> Result<(), String> {
     if let Some(p) = path.parent() {
         fs::create_dir_all(p).map_err(|e| e.to_string())?;
     }
-    let z = zstd::bulk::compress(bytes, 9).map_err(|e| format!("{rel}: zstd {e}"))?;
+    let z = zstd::bulk::compress(bytes, 19).map_err(|e| format!("{rel}: zstd {e}"))?;
     fs::write(&path, z).map_err(|e| format!("{rel}: {e}"))
 }
 

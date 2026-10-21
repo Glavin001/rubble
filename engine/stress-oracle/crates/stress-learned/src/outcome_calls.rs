@@ -1387,7 +1387,7 @@ pub fn write_event(dir: &Path, ev: &CallEvent, compress: bool) -> Result<PathBuf
     write("calls.json", &serde_json::to_vec(&entries).unwrap())?;
     let (plain, zst) = (dir.join("arrays.bin"), dir.join("arrays.bin.zst"));
     if compress {
-        let z = zstd::bulk::compress(&blob, 9).map_err(|e| format!("zstd: {e}"))?;
+        let z = zstd::bulk::compress(&blob, 19).map_err(|e| format!("zstd: {e}"))?;
         write("arrays.bin.zst", &z)?;
         if plain.exists() {
             fs::remove_file(&plain).map_err(|e| e.to_string())?;
