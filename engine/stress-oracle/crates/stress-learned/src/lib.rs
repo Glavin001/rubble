@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! Learned-impact dataset schema, on-disk IO, and a smoke recorder.
 //!
 //! See `engine/stress-oracle/learned-impact/SCHEMA.md`. Bulk generation and
@@ -9,6 +10,11 @@ pub mod constants;
 pub mod generate;
 pub mod joint_pack;
 pub mod oracle;
+pub mod progress;
+pub mod procedural;
+pub mod outcome_calls;
+pub mod outcome;
+pub mod oracle_config;
 pub mod peak;
 pub mod recorder;
 pub mod validate;

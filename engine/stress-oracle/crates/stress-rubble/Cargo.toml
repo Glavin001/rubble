@@ -27,6 +27,10 @@ bytemuck = { version = "1", features = ["derive"], optional = true }
 # The veneer house: a fracture GLB through the stress cooker's import (`engine-fracture`).
 engine-fracture = { path = "../../../crates/engine-fracture", optional = true }
 
+[dev-dependencies]
+# The closed-loop harness (`examples/learned_p0.rs`) writes P2's call records (`live_call`).
+stress-learned = { path = "../stress-learned" }
+
 [features]
 default = ["view"]
 gpu = ["dep:stress-gpu", "dep:bytemuck"]

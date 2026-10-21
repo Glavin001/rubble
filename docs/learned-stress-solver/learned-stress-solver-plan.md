@@ -15,6 +15,16 @@
 - compute is the **M3 Max only**;
 - the first acceptance is on **rams and walls** (free wall, wall row, procedural walls), then houses. Vibe-town comes last, because it waits on the Shardwright re-export.
 
+## Decisions (2026-10-20, after P0)
+
+Your decisions on P0's five open questions (`engine/stress-oracle/learned-impact/findings/p0-feasibility-2026-10-20.md`):
+
+1. **Acceptance is against the oracle ensemble**, not the single symmetric runs. M5's 35.0/6 and 23.6/133 are restated as their ensembles: free wall 31.98 m/s [30.97, 33.12], 78 fragments [67, 95]; wall row 22.95 [21.81, 24.25], 200 [178, 220].
+2. **The skill rule is calibrated by the oracle itself:** a candidate passes a metric when its skill ratio is within the range a held-out oracle member reaches against the other 15, which is 1.0–1.42 in P0. The literal 1.25 bar would fail the oracle's own members.
+3. **The 2 ms cost gate is relaxed for now.** Measure and report the cost; accuracy comes first. The P0 operating points (Metal 3.0 ms at 10k chunks, W32 f16, 8 rounds; about 1–1.3 ms for M5-sized islands) are the reference. Revisit the gate after P2.
+4. **The energy cap is `KE_out ≤ E_in + W_gravity` with a tolerance of about 5% of E0**, matching the penalty contact's measured ledger residual. The oracle keeps the penalty contact, and `L_energy` uses kinetic-energy changes and per-bond dissipation, not booked contact dissipation.
+5. **Routing is extended by the reach of debris launched within the frame**, so a plug punched mid-frame is routed together with the structure it reaches. This sits behind a flag, off by default, measured on the wall row; it closes P0's miss for every path, learned or not.
+
 ## What I verified, and what was wrong
 
 ### Code facts (audited on main and on 5a2f5e4f)
