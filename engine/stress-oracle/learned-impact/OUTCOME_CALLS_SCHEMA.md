@@ -6,7 +6,8 @@
 | Layer | Version | What | Owner |
 |---|---|---|---|
 | frame record | `learned-impact-frames/1` (`FRAMES_SCHEMA.md`, P1 branch `claude/learned-impact-p1-data-aa822c`) | one scenario's whole life cycle, lossless, frame by frame: state at every frame boundary, the routing's causal inputs, the oracle's outcome, per-bond energies, the energy ledger, QS and punch baselines, keys, splits, ensemble id/member | P1 recorder / generator |
-| **calls** (this document) | `learned-impact-outcome/1` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | P1's Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports); its output must pass `schema.py`'s validator |
+| **calls** (this document) | `learned-impact-outcome/1` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | the Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports; proposed as its own session, not yet started); its output must pass `schema.py`'s validator. Its feature code takes a *frame-start state* (keys → pose, v, ω, joint state, live bonds): a recorded frame is one source, a model-decoded state (pushforward, DAgger, closed loop) another |
+| decoded state | `learned-impact-decoded-state/1` (`DECODED_STATE.md`) | the model's decoded outcome of one call, keyed by stable keys: what DAgger restarts and the closed-loop harness apply | P2 writes (`outcome/state_io.py`), P1 (DAgger) and the rollout harness read |
 
 The trainer reads only this layer; the frame record stays the archival truth, so a feature
 change regenerates calls without re-running the oracle.
@@ -38,11 +39,12 @@ one of them; the version string changes whenever either changes meaning.**
 | `log_qs_hertz_util`, punch columns | `frame_bond_qs_prior_util`, `frame_chunk_punch_plug`, `frame_bond_punch` |
 | variant-B groups, `base_qs_*`, `base_punch_*` | `qs_*`, `punch_*` |
 | energy | `frames.json` ledger (`KE_in/out` exact; booked contact terms diagnostic only) |
-| `y_bond_dissipated`, `D_bond_joint`, `D_bond_damping` | per-bond cumulative joint dissipation (`JointState.dissipated`: fracture + cracked-face friction + rebar, **not pure fracture**) and dashpot dissipation (`RtBond::damped`), differenced over the frame |
+| `y_bond_dissipated`, `D_bond_joint`, `D_bond_damping` | `frame_bond_dissipated [F,E,2]` (recorder revision ≥ 5): (joint = fracture + cracked-face friction + rebar, **not pure fracture**; dashpot), per frame, differenced in f64. Records before revision 5: difference `state_bond_energy [F+1,E,3]` instead (agrees to 1e-5 on M5) |
 | `phase` | `frame_phase`: P1 writes pre_contact / contact / secondary / separation / settling; `blast` arrives in P5, and quiet non-impact frames are `pre_contact` or `settling` |
 | `y_impactor_regime` | full-run label per impactor, relative to the remnant (largest fragment): perforate / arrest / rebound / deflect |
 | `split`, `split_group`, `layout_family` | `context.json` + `outcome_sampling.partition` |
-| `ensemble_id`, `ensemble_member`, `perturbation` | context (8 members on val/test/sealed and 15% of train); aggregation is `learned_impact.outcome.ensemble` only |
+| `ensemble_id`, `ensemble_member`, `perturbation` | `context.json` → `ensemble = {id, member, size, perturbation: {impactors: [{offset_m, speed_scale}], weibull_seed}}` (8 members on val/test/sealed and 15% of train); aggregation is `learned_impact.outcome.ensemble` only |
+| `split`, `split_group` | `context.json` |
 
 ## Rules that hold everywhere
 
