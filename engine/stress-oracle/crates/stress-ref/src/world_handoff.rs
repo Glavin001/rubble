@@ -162,8 +162,9 @@ impl World {
 /// `learned-impact/DECODED_STATE.md` on the P2 branch): frame-end motion of every chunk and
 /// impactor of the routed island, the bonds that break in the frame and the damage of the
 /// rest, keyed by stable keys. Chunk and bond keys are `(structure << 32) | index` (the
-/// structure's index in the scene; a bond's index in `ReferenceSolver::bonds[structure]`);
-/// an impactor's key is its index in `World::impactors`.
+/// structure's index in the scene; a bond's `index` is its `source`, the scene's own bond
+/// index, which survives filtering and refinement and is what the recorder and the call
+/// builder key by); an impactor's key is its index in `World::impactors`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DecodedState {
     pub schema_version: String,
@@ -223,6 +224,20 @@ fn unkey(k: i64) -> (usize, usize) {
     ((k >> 32) as usize, (k & 0xffff_ffff) as usize)
 }
 
+impl World {
+    /// The stable key of runtime bond `bi` of structure `s` (its scene bond, `source`).
+    pub fn bond_key(&self, s: usize, bi: usize) -> i64 {
+        stable_key(s, self.solver.bonds[s][bi].source)
+    }
+
+    /// The live runtime bond a stable bond key names (the alive one with that source).
+    fn bond_of_key(&self, k: i64) -> Option<(usize, usize)> {
+        let (s, src) = unkey(k);
+        let bonds = self.solver.bonds.get(s)?;
+        bonds.iter().position(|b| b.alive && b.source == src).or_else(|| bonds.iter().position(|b| b.source == src)).map(|bi| (s, bi))
+    }
+}
+
 /// What one call covers: the routed island's chunks, live bonds and impactors (keys).
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct IslandKeys {
@@ -239,7 +254,7 @@ impl World {
         for cl in self.solver.clusters.iter().filter(|c| !c.driven) {
             let s = cl.structure;
             k.chunks.extend(cl.chunks.iter().map(|&c| stable_key(s, c)));
-            k.bonds.extend(cl.bonds.iter().filter(|&&b| self.solver.bonds[s][b].connected()).map(|&b| stable_key(s, b)));
+            k.bonds.extend(cl.bonds.iter().filter(|&&b| self.solver.bonds[s][b].connected()).map(|&b| self.bond_key(s, b)));
         }
         k.impactors.extend(self.impactors.iter().enumerate().filter(|(_, i)| !i.driven).map(|(i, _)| i as i64));
         k.chunks.sort_unstable();
@@ -289,12 +304,12 @@ impl World {
         let mut when = std::collections::HashMap::new();
         for e in &model.solver.events[self.solver.events.len().min(model.solver.events.len())..] {
             if let crate::solver::SolverEvent::Broken { time, structure, bond, .. } = e {
-                when.entry(stable_key(*structure, *bond)).or_insert(*time);
+                when.entry(model.bond_key(*structure, *bond)).or_insert(*time);
             }
         }
         let (mut bonds_broken, mut bond_damage) = (Vec::new(), Vec::new());
         for &k in &keys.bonds {
-            let (s, b) = unkey(k);
+            let (s, b) = self.bond_of_key(k).expect("an island bond");
             let mb = &model.solver.bonds[s][b];
             if mb.connected() {
                 bond_damage.push(DecodedDamage { key: k, damage: mb.joint.damage });
@@ -344,15 +359,12 @@ impl World {
         let mut breaks: Vec<&DecodedBreak> = d.bonds_broken.iter().collect();
         breaks.sort_by_key(|b| (b.bin, b.key));
         for b in breaks {
-            let (s, bi) = unkey(b.key);
-            if s >= self.solver.bonds.len() || bi >= self.solver.bonds[s].len() {
-                return Err(format!("bond key {} out of range", b.key));
-            }
+            let (s, bi) = self.bond_of_key(b.key).ok_or_else(|| format!("bond key {} names no bond", b.key))?;
             self.solver.break_bonds(&[(s, bi)]);
         }
         for x in &d.bond_damage {
-            let (s, bi) = unkey(x.key);
-            let b = self.solver.bonds.get_mut(s).and_then(|v| v.get_mut(bi)).ok_or_else(|| format!("bond key {} out of range", x.key))?;
+            let (s, bi) = self.bond_of_key(x.key).ok_or_else(|| format!("bond key {} names no bond", x.key))?;
+            let b = &mut self.solver.bonds[s][bi];
             b.joint.damage = b.joint.damage.max(x.damage);
         }
         // Every cluster holding a decoded chunk.

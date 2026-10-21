@@ -35,9 +35,10 @@ For each call (frame `f`, island `i`; today one call per frame holds every route
      impactor keys;
    - `state`: each key's frame-start world position, velocity and spin, its cluster id,
      anchored flag and mass;
-   - `call_record`: null until the Rust call builder (`stress-learned/src/outcome_calls.rs`)
-     writes the `learned-impact-outcome/1` record into the same directory. The provider
-     should then read that record instead of `state`.
+   - `call_record`: the path, relative to the request directory (for example `"call"`), of
+     a single-call `learned-impact-outcome/1` event directory. The Rust call builder
+     (`stress-learned/src/outcome_calls.rs`) will write it. Until the builder lands this is
+     null: P2's model mode refuses a null record, while its echo and targets modes work.
    - With `--echo-oracle` the directory also holds `oracle.json`, the oracle's own decoded
      state of the call.
 2. Then it writes an empty `D/req/<f:06>_<i>/ready`.
@@ -49,8 +50,9 @@ For each call (frame `f`, island `i`; today one call per frame holds every route
 
 **Keys**, as the calls schema defines them:
 - chunk: `(structure << 32) | chunk_index`, where `structure` is its index in the scene;
-- bond: `(structure << 32) | bond_index` (the index in the solver's bonds of that structure,
-  which is the pristine bond index);
+- bond: `(structure << 32) | source`, where `source` is the scene's own bond index
+  (`RtBond::source`; `bond_keys[i][1]` in P1's `context.json`). It survives filtering and
+  refinement (`World::bond_key`);
 - impactor: its index in the scene's impactors.
 
 The response must list exactly the request's chunk and impactor keys. `bonds_broken` and
