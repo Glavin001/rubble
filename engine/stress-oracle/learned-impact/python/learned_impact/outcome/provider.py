@@ -9,6 +9,9 @@ request's call record, decodes, and writes `D/resp/<id>.json`
     python -m learned_impact.outcome.provider --dir D --mode echo      # answer oracle.json
     python -m learned_impact.outcome.provider --dir D --mode targets   # answer the record's
                                                                        # own targets
+    python -m learned_impact.outcome.provider --dir D --mode ceiling   # oracle.json pushed
+                                    # through the heads and the deployed decode (the
+                                    # output-side ceiling in closed loop; needs --echo-oracle)
 
 `model` needs `call_record` (the Rust call builder); with `call_record: null` it fails loudly
 rather than guess features. `echo` needs the harness's `--echo-oracle`. `targets` needs a
@@ -37,7 +40,7 @@ class ProviderError(RuntimeError):
 
 class Provider:
     def __init__(self, root: Path | str, mode: str = "model", checkpoint: str | None = None,
-                 device: str = "cpu", log=print):
+                 device: str = "cpu", log=print, energy_tolerance: float = 0.05):
         self.root = Path(root)
         self.mode = mode
         self.log = log
@@ -63,6 +66,9 @@ class Provider:
                          "decode": {"tau": self.dcfg.tau, "break_mode": self.dcfg.break_mode,
                                     "energy_tolerance": self.dcfg.energy_tolerance,
                                     "temperature": self.dcfg.temperature}}
+        elif mode == "ceiling":
+            self.dcfg = D.DecodeConfig(energy_tolerance=energy_tolerance)
+            self.cache = HierarchyCache(2)
         elif mode not in ("echo", "targets"):
             raise ProviderError(f"mode {mode!r}")
 
@@ -91,6 +97,16 @@ class Provider:
                 raise ProviderError(f"{req_dir.name}: no oracle.json (run the harness with "
                                     "--echo-oracle)")
             return json.loads(p.read_text())
+        if self.mode == "ceiling":
+            from .ceiling import decode_ceiling
+
+            p = req_dir / "oracle.json"
+            if not p.exists():
+                raise ProviderError(f"{req_dir.name}: ceiling mode needs --echo-oracle")
+            c, st = self._load_call(req_dir, req, targets=False)
+            doc = decode_ceiling(c, st, json.loads(p.read_text()), self.dcfg, self.cache)
+            IO.validate(doc, c)
+            return doc
         if self.mode == "targets":
             c, _ = self._load_call(req_dir, req, targets=True)
             return IO.from_targets(c)
@@ -135,12 +151,14 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--dir", required=True)
-    ap.add_argument("--mode", default="model", choices=["model", "echo", "targets"])
+    ap.add_argument("--mode", default="model", choices=["model", "echo", "targets", "ceiling"])
+    ap.add_argument("--energy-tolerance", type=float, default=0.05)
     ap.add_argument("--checkpoint")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--idle-timeout", type=float, default=None)
     a = ap.parse_args(argv)
-    Provider(a.dir, a.mode, a.checkpoint, a.device).run(idle_timeout_s=a.idle_timeout)
+    Provider(a.dir, a.mode, a.checkpoint, a.device,
+             energy_tolerance=a.energy_tolerance).run(idle_timeout_s=a.idle_timeout)
 
 
 if __name__ == "__main__":

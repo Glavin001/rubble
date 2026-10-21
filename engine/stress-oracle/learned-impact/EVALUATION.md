@@ -36,6 +36,21 @@ trusted, whether a checkpoint is good. That needs four things:
 | decode invariants (tests) | momentum exact, KE bound, monotone damage, invariance, masking across cracks |
 | training monitors | per-term gradient shares with a dominance warning (V34), and `status.json` |
 
+**Output-side ceiling (`ceiling.py`, provider `--mode ceiling`).** This is the first test on real
+calls, run before any training. The oracle's outcome is converted into raw head outputs, pushed
+through the deployed decode (projection, KE bound at the configured tolerance, τ, bins,
+damage clamp), and scored with the real metrics. It also attributes the error to each stage:
+- the encoding round trip;
+- the projection (non-zero when the oracle's "free" island does not conserve momentum as
+  assumed);
+- the bound, with its activation rate at tolerances 0–0.1 (P0: ledger gains up to 4.7%);
+- τ on the oracle's own peak demand.
+
+In closed loop the same decode answers every call from the harness's `oracle.json`, so the
+full-event metrics show what the output side alone costs. Synthetic toy: exact. (It found
+that the toy itself conserved angular momentum with frame-start instead of frame-end
+geometry; fixed.) Real data: pending the call builder.
+
 These are necessary but **not sufficient**. P0 and the V31 lesson show that one-frame
 accuracy can hide a catastrophic full run: 1,258 breaks against 324, with the projectile
 only 0.5 mm off.

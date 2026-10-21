@@ -16,7 +16,9 @@ from pathlib import Path
 import numpy as np
 
 from . import schema as S
-from .geometry import quat_mul_np, quat_to_matrix_np, random_quat
+import torch
+
+from .geometry import quat_mul_np, quat_to_matrix_np, random_quat, rotvec_to_matrix
 
 G = 9.81
 
@@ -198,23 +200,41 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
     inert_w = np.array(inert_w)
     dt = 1.0 / 60.0
     g_vec = rs @ np.array([0.0, 0.0, -G]) if gravity else np.zeros(3)
+    def end_geometry(v1, w1):
+        """Frame-end displacement, rotation, COM-relative positions and world inertia."""
+        dx_ = 0.5 * (v_start + v1) * dt + 0.5 * g_vec * dt ** 2
+        dr_ = 0.5 * (w_start + w1) * dt
+        p1 = pos_w + dx_
+        p1 = p1 - (mass_all[:, None] * p1).sum(0) / mass_all.sum()
+        rd = rotvec_to_matrix(torch.from_numpy(dr_)).numpy()
+        return dx_, dr_, p1, rd @ inert_w @ np.transpose(rd, (0, 2, 1))
+
     if not anchored:
+        # Angular momentum is conserved with each instant's own geometry: L(t1) is taken
+        # with the frame-end positions and inertia (as the decode does), so iterate the
+        # projection with the geometry its own velocities imply (converges in a few steps).
         p0 = (mass_all[:, None] * v_start).sum(0)
         l0 = (np.cross(pos_w, mass_all[:, None] * v_start)).sum(0) + np.einsum(
             "nij,nj->ni", inert_w, w_start).sum(0)
-        v_end, w_end = _project_momentum_np(mass_all, inert_w, pos_w, v_end, w_end,
-                                            p0 + mass_all.sum() * g_vec * dt, l0)
+        for _ in range(30):
+            _, _, p1, i1 = end_geometry(v_end, w_end)
+            v_new, w_new = _project_momentum_np(mass_all, i1, p1, v_end, w_end,
+                                                p0 + mass_all.sum() * g_vec * dt, l0)
+            done = max(np.abs(v_new - v_end).max(), np.abs(w_new - w_end).max()) < 1e-13
+            v_end, w_end = v_new, w_new
+            if done:
+                break
     else:
         v_end[:nc][is_anchor] = 0.0
         w_end[:nc][is_anchor] = 0.0
-    dx = 0.5 * (v_start + v_end) * dt + 0.5 * g_vec * dt ** 2
-    drot = 0.5 * (w_start + w_end) * dt
+    dx, drot, _, inert_end = end_geometry(v_end, w_end)
 
-    def ke(v, w):
+    def ke(v, w, inertia=None):
+        inertia = inert_w if inertia is None else inertia
         return 0.5 * float((mass_all * (v ** 2).sum(1)).sum() + np.einsum(
-            "ni,nij,nj->", w, inert_w, w))
+            "ni,nij,nj->", w, inertia, w))
 
-    ke_in, ke_out = ke(v_start, w_start), ke(v_end, w_end)
+    ke_in, ke_out = ke(v_start, w_start), ke(v_end, w_end, inert_end)
     w_grav = float((mass_all[:, None] * g_vec[None] * dx).sum())
     d_bond_each = np.where(broke, ga, 0.02 * ga * np.minimum(r, 1.0)).astype(np.float32)
     ddamage = np.where(broke, 0.0, np.clip(0.5 * (r - 0.6), 0, 0.4)).astype(np.float32)
