@@ -116,7 +116,7 @@ fn recipes_are_deterministic_independent_draws() {
     for x in &a {
         assert_eq!(x.scene.impactors.len(), 1);
         let v = x.parameters["impactors"][0]["speed"].as_f64().unwrap();
-        assert!((r.speed.0..=r.speed.1).contains(&v), "speed {v}");
+        assert!((r.low_speed.0..=r.speed.1).contains(&v), "speed {v}");
         assert_eq!(x.scene.gravity, [0.0; 3]);
     }
     let t2 = wall_recipes("anchored_wall", 2, 12, 7, &r).unwrap();
@@ -199,4 +199,18 @@ fn ensembles_cover_evaluation_splits_and_keep_the_parent_split_group() {
         }
     }
     assert!(train_ens > 0, "some training configurations are ensembles");
+}
+
+#[test]
+fn a_fifth_of_first_impactors_are_sub_threshold() {
+    let r = Ranges::pilot();
+    let x = wall_recipes("free_wall", 1, 50, 9, &r).unwrap();
+    let low = x.iter().filter(|x| x.parameters["impactors"][0]["speed_band"] == "sub_threshold").count();
+    assert_eq!(low, 10, "the hypercube makes the share exact");
+    for x in &x {
+        let v = x.parameters["impactors"][0]["speed"].as_f64().unwrap();
+        if x.parameters["impactors"][0]["speed_band"] == "sub_threshold" {
+            assert!((r.low_speed.0..=r.low_speed.1).contains(&v));
+        }
+    }
 }

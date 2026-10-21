@@ -43,7 +43,8 @@ JSON alone is not enough, because it omits methods equal to the built-in default
 
 A recording stops when **all** hold (`StopRule`, written to `context.json`):
 
-1. every impactor has stopped (< 0.05 m/s) or left the scene's bounds (the structures'
+1. every impactor has stopped (< 0.05 m/s, absolutely or relative to the remnant, the largest
+   piece: without gravity a pushed free wall never comes to absolute rest) or left the scene's bounds (the structures'
    initial box plus a margin of max(0.3 m, 25% of its largest extent), and not moving back
    in; under gravity only the horizontal extent counts);
 2. no bond has broken for 30 frames (0.5 s);

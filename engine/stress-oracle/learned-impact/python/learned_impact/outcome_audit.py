@@ -21,6 +21,8 @@ from pathlib import Path
 import numpy as np
 
 SCHEMA = "learned-impact-frames/1"
+# Recorder revision 1 wrote the same layout under the name P2 now uses for its call records.
+LEGACY_SCHEMAS = {"learned-impact-outcome/1"}
 PHASES = ["pre_contact", "contact", "secondary", "separation", "settling"]
 DURATION_BINS = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, float("inf")]
 
@@ -54,7 +56,7 @@ def load_event(path: Path) -> OutcomeEvent:
     path = Path(path)
     read = lambda n: json.loads((path / n).read_text())
     ctx = read("context.json")
-    if ctx.get("schema") != SCHEMA:
+    if ctx.get("schema") != SCHEMA and not (ctx.get("schema") in LEGACY_SCHEMAS and ctx.get("recorder_revision") == 1):
         raise ValueError(f"{path.name}: schema {ctx.get('schema')!r} != {SCHEMA}")
     return OutcomeEvent(path, ctx, read("outcome.json"), read("frames.json"), read("catalog.json")["arrays"])
 

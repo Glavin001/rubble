@@ -13,7 +13,7 @@ use serde_json::json;
 use stress_ref::builders;
 use stress_ref::math::Vec3;
 use stress_ref::scene::{GroundDesc, ImpactorDesc, ImpactorShape, Scene, Support};
-use stress_ref::world::{tiered_impact_speed, World};
+use stress_ref::world::World;
 
 use crate::outcome::OutcomeRecipe;
 
@@ -81,6 +81,10 @@ pub struct Ranges {
     pub spin_probability: f64,
     pub max_spin: f64,
     pub weibull_probability: f64,
+    /// Share of first impactors drawn from the sub-threshold band `low_speed` (log-uniform),
+    /// for the plan's ~20% of events that break nothing (the punch-ratio draw alone gave 1-15%).
+    pub low_speed_share: f64,
+    pub low_speed: (f64, f64),
 }
 
 impl Ranges {
@@ -94,12 +98,16 @@ impl Ranges {
             opening_probability: 0.25,
             mass: (50.0, 1500.0),
             impactor_size: (0.05, 0.2),
+            // Centred on the punch's threshold; the oracle breaks bonds well below it (pilots
+            // v1-v3: at 1-2 m/s 88% of hits broke something), hence `low_speed_share`.
             punch_ratio: (0.03, 20.0),
-            speed: (1.0, 60.0),
+            speed: (0.5, 60.0),
             max_angle_degrees: 35.0,
             spin_probability: 0.3,
             max_spin: 20.0,
             weibull_probability: 0.3,
+            low_speed_share: 0.2,
+            low_speed: (0.1, 1.0),
         }
     }
 
@@ -215,6 +223,8 @@ pub struct ImpactorDraw {
     pub punch_ratio: f64,
     /// Time after the start at which it reaches the face (s).
     pub arrival: f64,
+    /// Drawn from the sub-threshold speed band instead of the punch-ratio draw.
+    pub low: bool,
 }
 
 impl ImpactorDraw {
@@ -298,7 +308,7 @@ fn solve_speed(scene: &Scene, layout: &Layout, y_back: f64, d: &ImpactorDraw, r:
     let p = c.plug.as_ref()?;
     let ratio = p.force / p.capacity;
     let speed = v_ref * (d.punch_ratio / ratio).powf(1.0 / 1.2);
-    Some(speed.clamp(r.speed.0.max(tiered_impact_speed() * 0.2), r.speed.1))
+    Some(speed.clamp(r.speed.0, r.speed.1))
 }
 
 /// A family of wall recipes (`p1-walls`): `family` is "free_wall" (no supports, no gravity:
@@ -340,7 +350,11 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
             let mut attempt = 0usize;
             loop {
                 // The first impactor takes the hypercube's draws; the others independent ones.
-                let v: Vec<f64> = if k == 0 && attempt == 0 { u[8..].to_vec() } else { (0..7).map(|_| rng.unit()).collect() };
+                let mut v: Vec<f64> = if k == 0 && attempt == 0 { u[8..].to_vec() } else { (0..7).map(|_| rng.unit()).collect() };
+                if k == 0 {
+                    // A redraw keeps the hypercube's speed draw: the band shares stay exact.
+                    v[5] = u[13];
+                }
                 let angle = (v[4] * 2.0 - 1.0) * r.max_angle_degrees;
                 let along_x = rng.unit() < 0.5;
                 let spin = if rng.unit() < r.spin_probability {
@@ -363,13 +377,21 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
                     yaw_degrees: if along_x { angle } else { 0.0 },
                     pitch_degrees: if along_x { 0.0 } else { angle },
                     spin,
-                    punch_ratio: log_uniform(v[5], r.punch_ratio.0, r.punch_ratio.1),
+                    punch_ratio: log_uniform(if k == 0 { ((v[5] - r.low_speed_share) / (1.0 - r.low_speed_share)).max(0.0) } else { v[5] }, r.punch_ratio.0, r.punch_ratio.1),
                     arrival: if k == 0 { 0.002 + v[6] * 0.03 } else { rng.range(0.002, 0.08) },
+                    low: false,
                 };
-                let speed = match solve_speed(&scene, &layout, y_back, &d, r) {
-                    Some(v) => v,
-                    None => log_uniform(v[5], r.speed.0, r.speed.1),
+                // The hypercube's ratio dimension decides the band, so the share is exact.
+                let low = k == 0 && v[5] < r.low_speed_share;
+                let speed = if low {
+                    log_uniform(v[5] / r.low_speed_share, r.low_speed.0, r.low_speed.1)
+                } else {
+                    match solve_speed(&scene, &layout, y_back, &d, r) {
+                        Some(v) => v,
+                        None => log_uniform(v[5], r.speed.0, r.speed.1),
+                    }
                 };
+                let d = ImpactorDraw { low, ..d };
                 let desc = place(&d, &layout, y_back, speed, k);
                 if !starts_clear(&desc, &impactors, &layout, scene.ground.is_some()) {
                     attempt += 1;
@@ -396,6 +418,7 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
                 "x_fraction": d.x_fraction, "z_fraction": d.z_fraction, "face": if d.back { "back" } else { "front" },
                 "location": d.location_tag(), "yaw_degrees": d.yaw_degrees, "pitch_degrees": d.pitch_degrees,
                 "spin": d.spin, "target_punch_ratio": d.punch_ratio, "arrival": d.arrival,
+                "speed_band": if d.low { "sub_threshold" } else { "punch_ratio" },
             })).collect::<Vec<_>>(),
             "seed": seed, "index": i, "catalog": "p1-walls", "redraws": redraws,
         });

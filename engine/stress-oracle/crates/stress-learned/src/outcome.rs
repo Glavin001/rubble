@@ -41,7 +41,7 @@ use crate::oracle_config::{qs_template, OracleConfig, QS_BASELINE};
 
 pub const OUTCOME_SCHEMA: &str = "learned-impact-frames/1";
 /// Bumped whenever what the recorder writes, or how, changes.
-pub const RECORDER_REVISION: u32 = 2;
+pub const RECORDER_REVISION: u32 = 4;
 /// Break-time bins within a frame.
 pub const TIME_BINS: usize = 8;
 /// Floats per predicted contact (`contact_f32`).
@@ -330,10 +330,13 @@ fn energy_in_bounds(w: &World, b: &Bounds, rule: &StopRule) -> (f64, bool) {
 }
 
 /// Without gravity: whether no two bodies that have not left can still meet. Each cluster
-/// and impactor is a bounding sphere about its centre of mass moving at its velocity; a
+/// and impactor is a bounding sphere about its centre of mass (it bounds the body in every
+/// orientation) moving at its velocity, which no force changes while nothing touches; a
 /// pair may interact when the spheres come within reach of each other in the next
-/// `horizon` seconds while moving relative to each other at the stop speed or faster.
-/// Pieces coasting apart in free space are the zero-gravity counterpart of sleeping.
+/// `horizon` seconds (the rest of the recording) while moving relative to each other at the
+/// stop speed or faster. Pieces coasting apart in free space are the zero-gravity
+/// counterpart of sleeping, and an impactor coasting where it can meet nothing has left the
+/// interaction.
 fn interactions_over(w: &World, b: &Bounds, rule: &StopRule, horizon: f64) -> bool {
     let g = w.solver.config.gravity;
     if g.norm() > 0.0 {
@@ -346,8 +349,8 @@ fn interactions_over(w: &World, b: &Bounds, rule: &StopRule, horizon: f64) -> bo
             continue;
         }
         let r = cl.chunks.iter().map(|&c| (w.solver.chunk_position(s, c) - com).norm() + w.solver.structures[s].chunks[c].half_extents.norm()).fold(0.0, f64::max);
-        let rim = cl.angular_velocity.norm() * r;
-        bodies.push((com, r + rim * horizon, cl.velocity));
+        // A sphere about the centre of mass bounds the body in every orientation.
+        bodies.push((com, r, cl.velocity));
     }
     for imp in &w.impactors {
         if !b.left(imp.pose.position, imp.velocity, g) {
@@ -355,7 +358,7 @@ fn interactions_over(w: &World, b: &Bounds, rule: &StopRule, horizon: f64) -> bo
                 stress_ref::scene::ImpactorShape::Sphere { radius } => radius,
                 stress_ref::scene::ImpactorShape::Box { half_extents } => Vec3::from_array(half_extents).norm(),
             };
-            bodies.push((imp.pose.position, r + imp.angular_velocity.norm() * r * horizon, imp.velocity));
+            bodies.push((imp.pose.position, r, imp.velocity));
         }
     }
     for i in 0..bodies.len() {
@@ -936,11 +939,16 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         if !(ke_struct + ke_imp).is_finite() || ke_struct + ke_imp > opts.energy_blowup * (input_energy + gravity_work_bound) {
             return Err(format!("nonphysical kinetic energy {:.3e} J against input {:.3e} J at frame {f}", ke_struct + ke_imp, input_energy));
         }
-        let impactors_done = world.impactors.iter().all(|i| i.velocity.norm() < opts.stop.stop_speed || bounds.left(i.pose.position, i.velocity, gravity));
+        // Stopped: at rest, or at rest against the remnant (the largest piece; without gravity
+        // a pushed free wall never comes to absolute rest), or gone.
+        let remnant_v = world.solver.clusters.iter().max_by(|a, b| a.mass.total_cmp(&b.mass)).map_or(Vec3::ZERO, |c| c.velocity);
+        let impactors_done = world.impactors.iter().all(|i| {
+            i.velocity.norm() < opts.stop.stop_speed || (i.velocity - remnant_v).norm() < opts.stop.stop_speed || bounds.left(i.pose.position, i.velocity, gravity)
+        });
         let quiet = f + 1 >= opts.stop.quiet_frames as usize && last_break_frame.map_or(true, |l| f - l >= opts.stop.quiet_frames as usize);
         // Checked only when it can end the event (the pair test is quadratic in bodies).
-        let coasting = impactors_done && quiet && ke_bounds >= opts.stop.ke_fraction * input_energy && !asleep
-            && interactions_over(&world, &bounds, &opts.stop, opts.stop.quiet_frames as f64 * frame_dt);
+        let coasting = quiet && !(impactors_done && (ke_bounds < opts.stop.ke_fraction * input_energy || asleep))
+            && interactions_over(&world, &bounds, &opts.stop, (max_frames - f - 1) as f64 * frame_dt);
         frames.push(json!({
             "frame": f, "time": t0, "phase": phase, "breaks": n_breaks, "substeps": substeps,
             "routed_chunks": chunk_routed.iter().filter(|&&r| r == 1).count(), "routed_impactors": imp_routed.iter().filter(|&&r| r == 1).count(),
@@ -956,13 +964,24 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         }));
         let calm = ke_bounds < opts.stop.ke_fraction * input_energy || asleep || coasting;
         *cost.get_mut("overhead").unwrap() += t_over.elapsed().as_secs_f64();
-        if impactors_done && quiet && calm {
-            stop_reason = format!(
-                "impactors {}; no break for {} frames; {}",
-                if world.impactors.iter().all(|i| i.velocity.norm() < opts.stop.stop_speed) { "stopped" } else { "stopped or left" },
-                opts.stop.quiet_frames,
-                if ke_bounds < opts.stop.ke_fraction * input_energy { format!("KE in bounds {:.2}% of input", 100.0 * ke_bounds / input_energy) } else if asleep { "asleep".into() } else { "no bodies left to meet (no gravity)".into() }
-            );
+        if quiet && ((impactors_done && calm) || coasting) {
+            let impactors = if world.impactors.iter().all(|i| i.velocity.norm() < opts.stop.stop_speed || (i.velocity - remnant_v).norm() < opts.stop.stop_speed) {
+                "stopped"
+            } else if impactors_done {
+                "stopped or left"
+            } else {
+                "coasting"
+            };
+            let why = if !impactors_done || !calm {
+                "no two bodies can meet before the cap (no gravity)".to_string()
+            } else if ke_bounds < opts.stop.ke_fraction * input_energy {
+                format!("KE in bounds {:.2}% of input", 100.0 * ke_bounds / input_energy)
+            } else if asleep {
+                "asleep".into()
+            } else {
+                "no two bodies can meet before the cap (no gravity)".into()
+            };
+            stop_reason = format!("impactors {impactors}; no break for {} frames; {why}", opts.stop.quiet_frames);
             break;
         }
         if f + 1 == max_frames {
