@@ -70,36 +70,50 @@ def wasserstein_log_mass(ma: np.ndarray, mb: np.ndarray) -> float:
 
 
 # ---- ensemble-relative skill -----------------------------------------------------------
-def skill(pred, members: list, dist) -> float:
-    """d(model, members) ÷ mean over members of d(member, other members)."""
+def skill(pred, members: list, dist, floor: float = 1e-12) -> float:
+    """d(model, members) ÷ max(mean over members of d(member, other members), floor).
+
+    `floor` is the metric's physical tolerance ÷ the literal bar, so where the ensemble
+    agrees exactly the rule collapses to "within tolerance of the members" (the plan:
+    "on scenes where the ensemble agrees exactly, that collapses to exact agreement")
+    instead of dividing by zero."""
     m = len(members)
     if m < 2:
         return float("nan")
     d_model = np.mean([dist(pred, y) for y in members])
     d_member = np.mean([np.mean([dist(members[i], members[k]) for k in range(m) if k != i])
                         for i in range(m)])
-    return float(d_model / max(d_member, 1e-12))
+    return float(d_model / max(d_member, floor, 1e-12))
 
 
 LITERAL_BAR = 1.25
 
 
-def heldout_member_skills(members: list, dist) -> np.ndarray:
+# Physical tolerances per metric (the floor of the member spread is tolerance ÷ literal bar):
+# ram = the plan's max(IQR, 0.05·v0) (as a fraction of v_ref); partition 1 − ARI 0.05;
+# fragment sizes W1 on ln(mass) 0.1. Pre-registered with the gates (EVALUATION.md §1).
+TOLERANCE = {"ram": 0.05, "partition": 0.05, "sizes": 0.1}
+
+
+def heldout_member_skills(members: list, dist, floor: float = 1e-12) -> np.ndarray:
     """Each oracle member scored against the other members exactly as a candidate is."""
     m = len(members)
     if m < 3:
         return np.array([])
-    return np.array([skill(members[i], members[:i] + members[i + 1:], dist) for i in range(m)])
+    return np.array([skill(members[i], members[:i] + members[i + 1:], dist, floor)
+                     for i in range(m)])
 
 
-def calibrated_gate(pred, members: list, dist, literal: float = LITERAL_BAR) -> dict:
+def calibrated_gate(pred, members: list, dist, literal: float = LITERAL_BAR,
+                    tolerance: float = 0.0) -> dict:
     """The user's post-P0 skill rule: a candidate passes a metric when its skill is within
     what a held-out oracle member reaches against the other members, i.e.
     `skill ≤ max(literal, mean held-out member skill)` (P0's "calibrated" verdict; the oracle
     itself fails the literal 1.25 on some scenes, with means of 1.0–1.42). The literal
     verdict and the held-out range are reported alongside."""
-    s = skill(pred, members, dist)
-    h = heldout_member_skills(members, dist)
+    floor = tolerance / literal
+    s = skill(pred, members, dist, floor)
+    h = heldout_member_skills(members, dist, floor)
     mean = float(np.mean(h)) if len(h) else float("nan")
     bar = max(literal, mean) if len(h) else literal
     return {"skill": s, "heldout_mean": mean,
@@ -286,15 +300,17 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
             mass = x["mass"]
             gates = {
                 "partition": calibrated_gate(pm, [r["true"] for r in rs],
-                                             lambda a, b_: 1 - weighted_ari(a, b_, mass)),
+                                             lambda a, b_: 1 - weighted_ari(a, b_, mass),
+                                             tolerance=TOLERANCE["partition"]),
                 "sizes": calibrated_gate(fragment_masses(pm, mass),
                                          [fragment_masses(r["true"], r["mass"]) for r in rs],
-                                         wasserstein_log_mass),
+                                         wasserstein_log_mass, tolerance=TOLERANCE["sizes"]),
             }
             if len(x["imp_speed"]):
                 speeds = [float(r["imp_speed"][0]) for r in rs]
                 gates["ram"] = calibrated_gate(float(x["imp_speed_hat"][0]), speeds,
-                                               lambda a, b_: abs(a - b_))
+                                               lambda a, b_: abs(a - b_),
+                                               tolerance=TOLERANCE["ram"] * x["v_ref"])
                 per[fam]["crps_ram"].append(crps_ensemble(float(x["imp_speed_hat"][0]), speeds)
                                             / x["v_ref"])
             for name, gt in gates.items():
