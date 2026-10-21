@@ -23,3 +23,5 @@ __pycache__/
 # Reference runs keep their exact input locally; it is rebuilt by examples/rubble_references.
 /reference/**/scene.json
 /target-p0/
+# Per-session cargo target dirs (CARGO_TARGET_DIR=target-p0, target-p2, ...).
+/target-*/

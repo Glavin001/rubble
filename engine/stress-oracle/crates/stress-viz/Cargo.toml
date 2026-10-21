@@ -14,6 +14,11 @@ path = "src/main.rs"
 # rubble's AVBD GPU engine as the rigid-body engine (`--engine rubble`, variant item
 # `engine rubble`, E in the viewer); needs a wgpu adapter at run time.
 rubble = ["dep:stress-rubble"]
+# The learned impact-outcome model in closed loop (`--engine learned`, variant item
+# `engine learned`; `engine ceiling` is the oracle through the same handoff): rubble's
+# engine for the rigid bodies, each routed island's frame from the model
+# (`stress_learned::provider_client`, which spawns `learned-impact/python`'s provider).
+learned = ["rubble", "dep:stress-learned"]
 # GPU rasterizer through wgpu (Metal, Vulkan, DX12); without an adapter at run time,
 # or with `--renderer cpu`, the software rasterizer is used.
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
@@ -24,6 +29,7 @@ default = ["gpu", "viewer"]
 [dependencies]
 stress-ref = { path = "../stress-ref" }
 stress-rubble = { path = "../stress-rubble", optional = true }
+stress-learned = { path = "../stress-learned", optional = true }
 wgpu = { version = "30.0.1", optional = true }
 pollster = { version = "1.0.1", optional = true }
 bytemuck = { version = "1.25.2", features = ["derive"], optional = true }

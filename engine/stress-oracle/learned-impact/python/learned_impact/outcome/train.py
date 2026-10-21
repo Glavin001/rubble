@@ -422,11 +422,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             if pf_losses:
                 ls = sum(pf_losses) / len(pf_losses)
                 loss = loss + ls
-                acc["pushforward"].append(float(ls.detach()))
+                acc["pushforward"].append(ls.detach())
                 acc["pushforward_depth"].append(float(len(pf_losses)))
-        if not torch.isfinite(loss):
-            raise FloatingPointError(f"non-finite loss at step {step}: "
-                                     f"{ {k: float(v) for k, v in terms.items()} }")
         opt.zero_grad(set_to_none=True)
         if cfg.grad_norm_every and step % cfg.grad_norm_every == 0:
             eff = balancer.effective(cfg.loss.weights) if balancer else cfg.loss.weights
@@ -438,15 +435,23 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
                           f"per-term gradient norm (V34 failure mode); check the targets and λ")
                 prog.update(force=True, dominance_warning={k: shares[k] for k in flagged})
         loss.backward()
-        total_norm = float(torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip))
+        total_norm = torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
         opt.step()
+        # Logged values stay on the device until a log line: a float() per term per step
+        # would sync MPS every step and stop the CPU preparing the next batch meanwhile.
         for k, v in normed.items():
-            acc[k].append(float(v.detach()))
-        acc["loss"].append(float(loss.detach()))
-        acc["grad_norm"].append(total_norm)
+            acc[k].append(v.detach())
+        acc["loss"].append(loss.detach())
+        acc["grad_norm"].append(total_norm.detach())
         now = time.time()
         if (now - last_log >= cfg.log_every_s or step % cfg.log_every_steps == 0
                 or step == cfg.steps - 1):
+            acc = {k: [float(x) for x in (torch.stack([torch.as_tensor(y, dtype=torch.float32)
+                                                       .to(dev) for y in v]).cpu().tolist())]
+                   for k, v in acc.items()}
+            if not np.isfinite(acc["loss"]).all():
+                raise FloatingPointError(f"non-finite loss by step {step + 1}: "
+                                         f"{ {k: v[-1] for k, v in acc.items()} }")
             rate = (step + 1) / max(now - prog.t0, 1e-9)
             eta = (cfg.steps - step - 1) / max(rate, 1e-9)
             terms_s = " ".join(f"{k}={np.mean(v):.3f}" for k, v in acc.items()
@@ -459,7 +464,7 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             prog.line(f"step {step + 1}/{cfg.steps} ep {epoch} loss={np.mean(acc['loss']):.4f} "
                       f"[{terms_s}] |g|={np.mean(acc['grad_norm']):.3g} gshare[{gn}] "
                       f"lr={_lr(step, cfg):.2e} {rate:.2f} steps/s ETA {eta / 60:.1f} min")
-            acc.clear()
+            acc = defaultdict(list)
             last_log = now
         prog.update(step=step + 1, epoch=epoch)
         if val_batches and ((step + 1) % cfg.eval_every == 0 or step == cfg.steps - 1):

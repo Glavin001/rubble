@@ -73,7 +73,12 @@ options:
   --set PATH=JSON         scene override, repeatable (e.g. sim.stiffness_scale=0.01)
   --feature NAME=on|off   model switch, repeatable
   --engine NAME           rigid-body engine: standalone (default, the oracle's own) |
-                          rubble (rubble's AVBD GPU engine; cargo feature `rubble`)
+                          rubble (rubble's AVBD GPU engine; cargo feature `rubble`) |
+                          learned (rubble's engine, each routed island's 1/60 s frame from
+                          the learned model, closed loop; cargo feature `learned`) |
+                          ceiling (the same handoff with the oracle as the model)
+  --checkpoint PATH       (engine learned) the model checkpoint (runs/<job>/best.pt)
+  --model-device NAME     (engine learned) cpu (default) | mps
   --duration S            simulated time (default: the scene's sim.duration)
   --frame-dt S            simulation frame (default: the scene's, refined to --min-frames)
   --every K               render every K-th simulated frame (default: fit --max-frames)
@@ -115,6 +120,9 @@ struct Args {
     variants: Vec<String>,
     /// Rigid-body engine of a single run (`render`, `still`).
     engine: record::Engine,
+    /// `engine learned`: the model checkpoint and its device.
+    checkpoint: Option<PathBuf>,
+    model_device: String,
     duration: Option<f64>,
     frame_dt: Option<f64>,
     every: Option<usize>,
@@ -205,6 +213,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         features: Vec::new(),
         variants: Vec::new(),
         engine: record::Engine::Standalone,
+        checkpoint: None,
+        model_device: "cpu".into(),
         duration: None,
         frame_dt: None,
         every: None,
@@ -242,6 +252,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--feature" => a.features.push(value()?),
             "--variant" => a.variants.push(value()?),
             "--engine" => a.engine = value()?.parse()?,
+            "--checkpoint" => a.checkpoint = Some(PathBuf::from(value()?)),
+            "--model-device" => a.model_device = value()?,
             "--duration" => a.duration = Some(parse_num(&flag, &value()?)?),
             "--frame-dt" => a.frame_dt = Some(parse_num(&flag, &value()?)?),
             "--every" => a.every = Some(parse_num::<usize>(&flag, &value()?)?.max(1)),
@@ -327,6 +339,17 @@ fn load_scene(spec: &str) -> Result<Scene, String> {
     let path = std::path::Path::new(spec);
     if path.is_file() {
         return Scene::load(path);
+    }
+    // The M5 acceptance scenes in P0's pinned real-time configuration (stress_rubble::scenes),
+    // as `learned_p0` and the GPU benchmarks run them (the ram strikes in frame 2).
+    #[cfg(feature = "rubble")]
+    {
+        use stress_rubble::scenes as rs;
+        match spec {
+            "m5_free_wall" => return Ok(rs::realtime(rs::wall_ram_late(), 1.0)),
+            "m5_wall_row" => return Ok(rs::realtime(rs::wall_row_late(2), 1.0)),
+            _ => {}
+        }
     }
     builders::catalog()
         .into_iter()
@@ -430,7 +453,19 @@ fn variant_engines(a: &Args) -> Result<Vec<record::Engine>, String> {
 fn record_all(scenes: &[(String, Scene)], a: &Args, until: Option<f64>) -> Result<Vec<Recording>, String> {
     let engines = variant_engines(a)?;
     let base = &scenes[0].1;
-    let timing = plan_timing(base, a, until.or(a.duration).unwrap_or(base.sim.duration));
+    let mut timing = plan_timing(base, a, until.or(a.duration).unwrap_or(base.sim.duration));
+    if engines.iter().any(|e| e.model_coupled()) {
+        // The model is called once per engine frame at the frame it was trained on: keep the
+        // scene's frame (1/60 s) for every variant, so the panels stay in step.
+        if a.frame_dt.is_some_and(|d| (d - base.sim.frame_dt).abs() > 1e-12) {
+            return Err(format!("engine learned/ceiling run at the scene's frame_dt ({} s); drop --frame-dt", base.sim.frame_dt));
+        }
+        timing.frame_dt = base.sim.frame_dt;
+        timing.every = a.every.unwrap_or(1);
+        if engines.contains(&record::Engine::Learned) && a.checkpoint.is_none() {
+            return Err("engine learned needs --checkpoint PATH".into());
+        }
+    }
     let mut out: Vec<Option<Recording>> = (0..scenes.len()).map(|_| None).collect();
     for ((batch_scenes, batch_out), batch_engines) in scenes.chunks(a.jobs).zip(out.chunks_mut(a.jobs)).zip(engines.chunks(a.jobs)) {
         std::thread::scope(|s| {
@@ -439,7 +474,8 @@ fn record_all(scenes: &[(String, Scene)], a: &Args, until: Option<f64>) -> Resul
                 s.spawn(move || {
                     let mut scene = scene.clone();
                     scene.sim.frame_dt = timing.frame_dt;
-                    let opts = RecordOptions { every: timing.every, duration: timing.duration, label: label.clone(), engine };
+                    let opts = RecordOptions { every: timing.every, duration: timing.duration, label: label.clone(), engine,
+                                               checkpoint: a.checkpoint.clone(), model_device: a.model_device.clone() };
                     *slot = Some(record::record(&scene, &opts));
                 });
             }
@@ -593,6 +629,9 @@ fn run(raw: Vec<String>) -> Result<(), String> {
         }
         #[cfg(feature = "viewer")]
         "view" => {
+            if a.engine.model_coupled() {
+                return Err("view: engine learned/ceiling is offline only for now; use render or compare".into());
+            }
             let scenes = build_scenes(&a)?;
             let mut scene = scenes.into_iter().next().map(|(_, s)| s).ok_or("missing scene")?;
             // A finer frame gives smoother live updates of slow scenes (it is also the

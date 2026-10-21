@@ -160,20 +160,17 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
             per = per * (target * wp + (1 - target) * wn)
     terms["break"] = (w_b * per).sum() / w_b.sum().clamp(min=1)
 
-    # time: cross-entropy on the break-time bin, broken bonds only
-    if broke.any():
-        terms["time"] = F.cross_entropy(out["bond_time_logits"][broke],
-                                        (t["y_bond_break_bin"][broke] - 1).clamp(min=0))
-    else:
-        terms["time"] = out["bond_time_logits"].sum() * 0.0
+    # time: cross-entropy on the break-time bin, broken bonds only. Every term below is a
+    # masked mean, never a host-side branch: `if mask.any()` would sync MPS every step.
+    bk = broke.to(out["bond_time_logits"].dtype)
+    ce = F.cross_entropy(out["bond_time_logits"], (t["y_bond_break_bin"] - 1).clamp(min=0),
+                         reduction="none")
+    terms["time"] = (ce * bk).sum() / bk.sum().clamp(min=1)
 
     # damage: Huber on Δdamage for unbroken bonds
-    keep = (~broke) & t["bond_valid"].to(dev)
-    if keep.any():
-        terms["damage"] = _huber(out["bond_ddamage"][keep] - t["y_bond_ddamage"][keep],
-                                 cfg.huber_delta * 0.1).mean() / (0.1 ** 2)
-    else:
-        terms["damage"] = out["bond_ddamage"].sum() * 0.0
+    keep = ((~broke) & t["bond_valid"].to(dev)).to(out["bond_ddamage"].dtype)
+    hub = _huber(out["bond_ddamage"] - t["y_bond_ddamage"], cfg.huber_delta * 0.1)
+    terms["damage"] = (hub * keep).sum() / keep.sum().clamp(min=1) / (0.1 ** 2)
 
     # motion and pose in the kinetic-energy norm, ÷ E_in (and ÷ dt² for poses)
     dcfg = decode_cfg or D.DecodeConfig()
@@ -201,7 +198,7 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     motion = scatter_sum(node_err, call, G) / e_in
     # per fragment under the target partition (stays differentiable)
     frag = t["y_chunk_fragment"]
-    nf = int(frag.max().item()) + 1 if frag.numel() else 0
+    nf = b.n_fragments  # counted on the host at collation (no device sync)
     mc = m[:nc].unsqueeze(-1)
     mf = scatter_sum(mc, frag, nf).clamp(min=1e-12)
     vf_hat = scatter_sum(mc * ph["v_end"][:nc], frag, nf) / mf
@@ -221,7 +218,7 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
         iv = ph["v_end"][nc:]
         imp = (((iv - yv[nc:]) / v0) ** 2).sum(-1)
         mask = t["ens_imp_mask"].to(dev)
-        if mask.any():
+        if mask.shape[1]:  # (a shape, not a value: no sync)
             ens = t["ens_imp_v_end"].to(dev, dtype)
             d1 = torch.linalg.norm(iv.unsqueeze(1) - ens, dim=-1) / v0
             mk = mask.to(dtype)

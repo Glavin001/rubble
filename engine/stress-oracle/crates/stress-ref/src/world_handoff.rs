@@ -158,6 +158,10 @@ impl World {
 
 // ------------------------------------------------------------------ decoded state
 
+/// The largest damage a surviving bond takes from a decoded state (strictly below 1, which
+/// would disconnect it).
+pub const SURVIVOR_DAMAGE_MAX: f64 = 1.0 - 1e-9;
+
 /// One call's decoded outcome (`learned-impact-decoded-state/1`,
 /// `learned-impact/DECODED_STATE.md` on the P2 branch): frame-end motion of every chunk and
 /// impactor of the routed island, the bonds that break in the frame and the damage of the
@@ -371,7 +375,10 @@ impl World {
         for x in &d.bond_damage {
             let (s, bi) = self.bond_of_key(x.key).ok_or_else(|| format!("bond key {} names no bond", x.key))?;
             let b = &mut self.solver.bonds[s][bi];
-            b.joint.damage = b.joint.damage.max(x.damage);
+            // Only `bonds_broken` disconnects a bond (with its failure margin raised above):
+            // a survivor's damage stays below 1, or the bond would disconnect with a margin
+            // below 1 and break the joint law's rule (margin >= 1 <=> disconnected).
+            b.joint.damage = b.joint.damage.max(x.damage.min(SURVIVOR_DAMAGE_MAX));
         }
         // Every cluster holding a decoded chunk.
         let mut clusters: Vec<usize> = target.keys().map(|&(s, c)| self.solver.chunks[s][c].cluster).collect();

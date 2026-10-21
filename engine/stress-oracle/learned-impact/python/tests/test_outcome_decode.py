@@ -90,7 +90,7 @@ def test_damage_is_monotone():
     d0 = b.edges["bond"]["x"][0::2, D.S.col("bond_feat", "damage")].double()
     assert torch.all(o["bond_ddamage"] >= 0)
     assert torch.all(dec["bond_damage_end"].double() >= d0 - 1e-7)
-    assert torch.all(dec["bond_damage_end"] <= 1.0)
+    assert torch.all(dec["bond_damage_end"] < 1.0)  # survivors never reach 1 (only q̂ ≥ τ breaks)
 
 
 def test_threshold_and_hash_sampling():

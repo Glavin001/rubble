@@ -278,7 +278,10 @@ def decode(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig | None = None) ->
         ph, active, infeasible = energy_bound(ph, b, free, cfg.energy_tolerance)
     broke = breaks(out, b, cfg)
     d0 = b.edges["bond"]["x"][0::2, S.col("bond_feat", "damage")].to(out["bond_ddamage"].dtype)
-    damage_end = torch.clamp(d0 + out["bond_ddamage"], max=1.0)
+    # A survivor's damage stays strictly below 1: only the break decision (q̂ ≥ τ) breaks a
+    # bond, and damage 1 would disconnect it without its failure margin (the host enforces
+    # the same bound, `SURVIVOR_DAMAGE_MAX`).
+    damage_end = torch.clamp(d0 + out["bond_ddamage"], max=1.0 - 1e-6)
     nc = b.t["chunk_node"].shape[0]
     return {
         "chunk_v_end": ph["v_end"][:nc], "chunk_w_end": ph["w_end"][:nc],

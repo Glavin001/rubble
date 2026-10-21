@@ -43,6 +43,7 @@ class Batch:
     h_ids: list[Tensor] = field(default_factory=list)
     h_chunk: list[Tensor] = field(default_factory=list)
     calls: list[S.Call] = field(default_factory=list)
+    n_fragments: int = 0  # distinct y_chunk_fragment ids (host-side, so losses need no sync)
 
     def to(self, device: torch.device | str) -> "Batch":
         dev = torch.device(device)
@@ -57,11 +58,11 @@ class Batch:
         return Batch(self.n_calls, {k: mv(v) for k, v in self.t.items()},
                      {k: {n: mv(a) for n, a in d.items()} for k, d in self.edges.items()},
                      [mv(x) for x in self.h_edges], [mv(x) for x in self.h_ids],
-                     [mv(x) for x in self.h_chunk], self.calls)
+                     [mv(x) for x in self.h_chunk], self.calls, self.n_fragments)
 
     def clone_inputs(self) -> "Batch":
         b = Batch(self.n_calls, dict(self.t), {k: dict(d) for k, d in self.edges.items()},
-                  self.h_edges, self.h_ids, self.h_chunk, self.calls)
+                  self.h_edges, self.h_ids, self.h_chunk, self.calls, self.n_fragments)
         for k in ("chunk_x", "imp_x"):
             b.t[k] = self.t[k].clone()
         for d in b.edges.values():
@@ -223,6 +224,7 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
         _i(np.concatenate(x)) if x else torch.zeros(0, dtype=torch.long) for x in h_ids[1:]]
     b.h_chunk = [torch.arange(chunk_off)] + [
         _i(np.concatenate(x)) if x else torch.zeros(0, dtype=torch.long) for x in h_chunk[1:]]
+    b.n_fragments = frag_off
     return add_valid_masks(b)
 
 
@@ -310,8 +312,9 @@ def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
         for k in ("v_end", "w_end", "dx", "drot"):
             t[f"y_{pre}_{k}"] = _pad_rows(t[f"y_{pre}_{k}"], n)
     t["chunk_anchored"] = _pad_rows(t["chunk_anchored"], pc, True)
-    f0 = int(t["y_chunk_fragment"].max().item()) + 1 if Nc else 0
+    f0 = b.n_fragments
     t["y_chunk_fragment"] = torch.cat([t["y_chunk_fragment"], torch.arange(f0, f0 + pc)])
+    b.n_fragments = f0 + pc
     t["y_imp_regime"] = _pad_rows(t["y_imp_regime"], pi, S.REGIME_UNDECIDED)
     t["y_imp_perf_freq"] = _pad_rows(t["y_imp_perf_freq"], pi)
     t["y_imp_has_freq"] = _pad_rows(t["y_imp_has_freq"], pi, False)
