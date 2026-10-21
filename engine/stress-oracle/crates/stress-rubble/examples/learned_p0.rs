@@ -6,6 +6,7 @@
 //!       ceiling --scene free_wall --variant coupled|window_full|window_reduced|pre_filtered|pre_engine [--frame-dt DT]
 //!       ceiling --scene free_wall --variant provider --provider oracle|files|punch [--dir D --timeout S --echo-oracle --no-qs]
 //!       hash    (every scene's canonical hash)
+//!   Any run: --poses FILE writes every body's pose at every frame boundary (JSONL, `poses_open`).
 //!
 //! `oracle`: the standalone stress-ref world (CPU f64), the truth of `findings/rewind-scaling.md`.
 //! `ceiling`: the stress-ref world coupled to rubble's engine; at every frame the routing puts
@@ -216,6 +217,76 @@ fn frame_line(w: &World, ms: f64, islands: usize) -> Value {
         "softening_overshoot_negative": e.softening_overshoot_negative, "substeps": w.solver.substeps})
 }
 
+/// `--poses FILE`: every body's pose at every frame boundary, for offline rendering (one
+/// JSON line per frame, after a header line with the static shapes). A chunk's orientation is
+/// its own (the cluster's rotation and the chunk's hidden rotation); `routed` lists the chunk
+/// keys a provider's call covered in the frame that ended there (provider runs only; the
+/// header's `routed_known` says whether it is filled).
+struct Poses {
+    out: std::io::BufWriter<std::fs::File>,
+}
+
+static POSES: std::sync::Mutex<Option<Poses>> = std::sync::Mutex::new(None);
+
+fn poses_open(path: &str, s: &Scene, cmd: &str, variant: &str, routed_known: bool) {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("--poses file"));
+    let w = World::new(s);
+    let sv = &w.solver;
+    let chunks: Vec<Value> = sv
+        .structures
+        .iter()
+        .enumerate()
+        .flat_map(|(si, st)| st.chunks.iter().enumerate().map(move |(c, ch)| json!({"key": stress_ref::keys::chunk_key(si, c), "half_extents": ch.half_extents.to_array(), "mass": ch.mass})))
+        .collect();
+    let impactors: Vec<Value> = s
+        .impactors
+        .iter()
+        .enumerate()
+        .map(|(i, d)| json!({"key": stress_ref::keys::impactor_key(i), "name": d.name, "shape": match d.shape { stress_ref::scene::ImpactorShape::Sphere { radius } => json!({"sphere": {"radius": radius}}), stress_ref::scene::ImpactorShape::Box { half_extents } => json!({"box": {"half_extents": half_extents}}) }, "mass": d.mass}))
+        .collect();
+    let header = json!({"schema_version": "learned-p0-poses/1", "scene": s.name, "scene_hash": scene_hash(s), "cmd": cmd, "variant": variant, "frame_dt": s.sim.frame_dt,
+        "routed_known": routed_known, "chunks": chunks, "impactors": impactors});
+    writeln!(out, "{header}").unwrap();
+    *POSES.lock().unwrap() = Some(Poses { out });
+}
+
+/// One frame boundary's poses (no-op without `--poses`).
+fn poses_frame(frame: usize, sv: &stress_ref::solver::ReferenceSolver, impactors: &[stress_ref::world::Impactor], routed: &[i64]) {
+    use std::io::Write;
+    let mut g = POSES.lock().unwrap();
+    let Some(p) = g.as_mut() else { return };
+    let mut chunks = Vec::new();
+    for (si, st) in sv.chunks.iter().enumerate() {
+        for (c, cs) in st.iter().enumerate() {
+            if !cs.active {
+                continue;
+            }
+            let cl = &sv.clusters[cs.cluster];
+            let q = (cl.pose.rotation * stress_ref::math::Quat::from_rotation_vector(cs.th)).normalized();
+            let x = sv.chunk_position(si, c);
+            chunks.push(json!([stress_ref::keys::chunk_key(si, c), [x.x, x.y, x.z], [q.w, q.x, q.y, q.z], cl.id]));
+        }
+    }
+    let imps: Vec<Value> = impactors
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let (x, q, v) = (m.pose.position, m.pose.rotation, m.velocity);
+            json!({"key": stress_ref::keys::impactor_key(i), "position": [x.x, x.y, x.z], "orientation": [q.w, q.x, q.y, q.z], "velocity": [v.x, v.y, v.z]})
+        })
+        .collect();
+    let line = json!({"frame": frame, "t": sv.time, "chunks_columns": ["key", "position", "orientation_wxyz", "cluster"], "chunks": chunks, "impactors": imps, "routed": routed});
+    writeln!(p.out, "{line}").unwrap();
+}
+
+fn poses_close() {
+    use std::io::Write;
+    if let Some(mut p) = POSES.lock().unwrap().take() {
+        p.out.flush().unwrap();
+    }
+}
+
 fn frames(s: &Scene) -> usize {
     (s.sim.duration / s.sim.frame_dt).round() as usize
 }
@@ -226,10 +297,12 @@ fn run_oracle(s: &Scene, tag: &str) -> Value {
     let e0 = w.mechanical_energy();
     let mut series = Vec::with_capacity(n);
     let t_all = Instant::now();
+    poses_frame(0, &w.solver, &w.impactors, &[]);
     for f in 0..n {
         let t = Instant::now();
         w.step_frame();
         let ms = t.elapsed().as_secs_f64() * 1e3;
+        poses_frame(f + 1, &w.solver, &w.impactors, &[]);
         series.push(frame_line(&w, ms, 0));
         eprintln!("[oracle {tag}] frame {}/{n} t {:.4} ram vy {:.3} fragments {} broken {} ({ms:.0} ms)", f + 1, w.solver.time, w.impactors[0].velocity.y, w.solver.clusters.len(), w.solver.broken_bond_count());
     }
@@ -301,6 +374,7 @@ fn run_ceiling(s: &Scene, variant: &str, tag: &str) -> Value {
     let mut series = Vec::with_capacity(n);
     let mut calls = 0;
     let t_all = Instant::now();
+    poses_frame(0, &w.solver, &w.impactors, &[]);
     for f in 0..n {
         let t = Instant::now();
         let islands = if variant == "coupled" { 0 } else { w.predict_islands(fdt, &HashSet::new()) };
@@ -311,6 +385,7 @@ fn run_ceiling(s: &Scene, variant: &str, tag: &str) -> Value {
             w.step_frame();
         }
         let ms = t.elapsed().as_secs_f64() * 1e3;
+        poses_frame(f + 1, &w.solver, &w.impactors, &[]);
         series.push(frame_line(&w, ms, islands));
         eprintln!("[ceiling {tag}] frame {}/{n} islands {islands} ram vy {:.3} fragments {} broken {} ({ms:.0} ms)", f + 1, w.impactors[0].velocity.y, w.solver.clusters.len(), w.solver.broken_bond_count());
     }
@@ -411,6 +486,7 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
         let _ = std::fs::remove_file(o.dir.join("done"));
         std::fs::create_dir_all(o.dir.join("resp")).expect("provider resp dir");
     }
+    poses_frame(0, &w.solver, &w.impactors, &[]);
     for f in 0..n {
         let t = Instant::now();
         // (`step_frame_with_provider` resets each frame's peak utilisation after the
@@ -419,6 +495,7 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
             w.solver.reset_peak_utilizations();
         }
         let mut islands = 0;
+        let mut routed: Vec<i64> = Vec::new();
         if o.kind == "punch" {
             islands = w.predict_islands(fdt, &HashSet::new());
             let bonds = if islands > 0 { w.predict_punch(fdt) } else { Vec::new() };
@@ -446,6 +523,7 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
             match w.step_frame_with_provider(&mut provider) {
                 Ok(keys) => {
                     islands = keys.chunks.len() + keys.impactors.len();
+                    routed = keys.chunks.clone();
                     if islands > 0 {
                         log.push(json!({"frame": f, "chunks": keys.chunks.len(), "bonds": keys.bonds.len(), "impactors": keys.impactors.len(), "call_ms": call_ms, "flags": flags}));
                     }
@@ -454,6 +532,7 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
             }
         }
         let ms = t.elapsed().as_secs_f64() * 1e3;
+        poses_frame(f + 1, &w.solver, &w.impactors, &routed);
         series.push(frame_line(&w, ms, islands));
         eprintln!("[provider {tag}] frame {}/{n} islands {islands} ram vy {:.3} fragments {} broken {} ({ms:.0} ms)", f + 1, w.impactors[0].velocity.y, w.solver.clusters.len(), w.solver.broken_bond_count());
     }
@@ -509,9 +588,18 @@ fn run_gpu(s: &Scene, profile: &str, tag: &str) -> Value {
     let n = frames(&scene);
     let mut series = Vec::with_capacity(n);
     let t_all = Instant::now();
+    let posing = POSES.lock().unwrap().is_some();
+    if posing {
+        w.sync(&gpu);
+        poses_frame(0, &w.solver.mirror, &w.solver.impactors, &[]);
+    }
     for f in 0..n {
         let t = Instant::now();
         w.step_frame(&gpu).expect("frame");
+        if posing {
+            w.sync(&gpu);
+            poses_frame(f + 1, &w.solver.mirror, &w.solver.impactors, &[]);
+        }
         let ms = t.elapsed().as_secs_f64() * 1e3;
         let vy = w.solver.impactors[0].velocity.y;
         series.push(json!({"ms": ms, "ram_vy": vy}));
@@ -532,6 +620,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().expect("oracle|ceiling|hash");
     let (mut name, mut member, mut mode, mut seconds, mut fdt, mut variant) = (String::from("free_wall"), None::<u64>, String::from("kin"), SECONDS, None::<f64>, String::from("coupled"));
+    let mut poses: Option<String> = None;
     let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: true };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -546,6 +635,7 @@ fn main() {
             "--timeout" => provider.timeout = args.next().and_then(|v| v.parse().ok()).expect("--timeout S"),
             "--echo-oracle" => provider.echo_oracle = true,
             "--no-qs" => provider.qs = false,
+            "--poses" => poses = Some(args.next().expect("--poses FILE")),
             other => panic!("unknown argument {other}"),
         }
     }
@@ -591,6 +681,14 @@ fn main() {
     }
     let pert = member.map(|k| perturb(&mut s, k, &mode));
     let tag = format!("{name}{}", member.map(|k| format!(" m{k}")).unwrap_or_default());
+    if let Some(p) = &poses {
+        let v = match cmd.as_str() {
+            "ceiling" if variant == "provider" => format!("provider_{}", provider.kind),
+            "oracle" | "zero_break" => cmd.clone(),
+            _ => variant.clone(),
+        };
+        poses_open(p, &s, &cmd, &v, cmd == "ceiling" && variant == "provider" && provider.kind != "punch");
+    }
     let mut out = match cmd.as_str() {
         "oracle" => run_oracle(&s, &tag),
         "ceiling" if variant == "provider" => run_provider(&s, &provider, &format!("{tag} {}", provider.kind)),
@@ -613,5 +711,6 @@ fn main() {
     if cmd == "ceiling" || cmd == "gpu" {
         o.insert("variant".into(), json!(if variant == "provider" { format!("provider_{}", provider.kind) } else { variant.clone() }));
     }
+    poses_close();
     println!("{}", serde_json::to_string(&out).unwrap());
 }

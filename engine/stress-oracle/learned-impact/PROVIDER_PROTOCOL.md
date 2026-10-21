@@ -79,3 +79,25 @@ include the provider's dissipation, so its balance residual is not meaningful in
 - the in-process oracle provider reproduces `window_reduced` on both M5 scenes;
 - the file path with `echo_provider.py` reproduces the in-process oracle provider exactly;
 - the punch provider fails, as measured in P0.
+
+## Pose dumps for rendering (`--poses FILE`)
+
+Any `learned_p0` run (`oracle`, every `ceiling` variant and provider, `gpu` profiles) takes
+`--poses FILE`, and writes JSONL:
+
+- **Header line** (`learned-p0-poses/1`):
+  - `scene`, `scene_hash`, `cmd`, `variant`, `frame_dt`, and `routed_known` (true for
+    model, oracle and file providers);
+  - `chunks`: every chunk's `key`, `half_extents` and `mass`;
+  - `impactors`: every impactor's `key`, `name`, `shape` (`{"box": {"half_extents"}}` or
+    `{"sphere": {"radius"}}`) and `mass`.
+- **One line per frame boundary**, `frame` = 0 (the start) up to F:
+  - `t`;
+  - `chunks`: an array of `[key, [x, y, z], [w, x, y, z], cluster_id]` for every active
+    chunk. Positions and orientations are world. The orientation is the chunk's own (its
+    cluster's rotation and its hidden rotation), and `cluster_id` is its fragment;
+  - `impactors`: `key`, `position`, `orientation` (wxyz), `velocity`;
+  - `routed`: the chunk keys the provider's call covered in the frame that just ended.
+
+The standalone oracle (`learned_p0 oracle --scene S`) is the reference. `ceiling --variant
+provider --provider oracle` is the boundary ceiling, which equals the oracle on these scenes.
