@@ -4,7 +4,7 @@
 //!   cargo run --release -p stress-rubble --features gpu --example learned_p0 -- \
 //!       oracle  --scene free_wall [--member K --perturb kin|kin_weibull] [--seconds S] [--frame-dt DT]
 //!       ceiling --scene free_wall --variant coupled|window_full|window_reduced|pre_filtered|pre_engine [--frame-dt DT]
-//!       ceiling --scene free_wall --variant provider --provider oracle|files|punch [--dir D --timeout S --echo-oracle --no-qs]
+//!       ceiling --scene free_wall --variant provider --provider oracle|files|model|punch [--dir D --timeout S --echo-oracle --no-qs --checkpoint PT --device cpu|mps]
 //!       hash    (every scene's canonical hash)
 //!   Any run: --poses FILE writes every body's pose at every frame boundary (JSONL, `poses_open`).
 //!
@@ -395,7 +395,8 @@ fn run_ceiling(s: &Scene, variant: &str, tag: &str) -> Value {
 /// Where the closed loop's outcomes come from (`ceiling --variant provider`).
 struct ProviderOpts {
     /// `oracle` (in-process: the standalone oracle's frame, through the decoded-state path),
-    /// `files` (an external process, `learned-impact/PROVIDER_PROTOCOL.md`), or `punch` (the
+    /// `files` (an external process, `learned-impact/PROVIDER_PROTOCOL.md`), `model` (P2's
+    /// checkpoint, through `stress_learned::provider_client`, the same protocol), or `punch` (the
     /// host's predictive punch: its plug's bonds broken, then the engine takes the frame with
     /// its contacts, as the GPU punch does).
     kind: String,
@@ -404,6 +405,13 @@ struct ProviderOpts {
     /// `files`: also write the oracle's own decoded state into each request (`oracle.json`),
     /// so a trivial provider (`scripts/echo_provider.py`) can check the loop end to end.
     echo_oracle: bool,
+    /// `model`: the trained checkpoint, run by `stress_learned::provider_client` (it spawns
+    /// `python -m learned_impact.outcome.provider` on `dir` and owns it).
+    checkpoint: Option<std::path::PathBuf>,
+    device: String,
+    /// `model`: the Python package directory with its `.venv` (default: this checkout's
+    /// `learned-impact/python`).
+    python_dir: Option<std::path::PathBuf>,
     /// `files`: the call record's variant-B (QS frame) features (`live_call`'s `qs`; on by
     /// default, as P1 records them; `--no-qs` leaves them zero).
     qs: bool,
@@ -482,6 +490,16 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
     let mut series = Vec::with_capacity(n);
     let mut log = Vec::new();
     let t_all = Instant::now();
+    let mut model = (o.kind == "model").then(|| {
+        let mut spec = stress_learned::provider_client::ModelSpec::new(o.checkpoint.clone().expect("--provider model needs --checkpoint"));
+        spec.device = o.device.clone();
+        spec.timeout = o.timeout;
+        spec.qs = o.qs;
+        if let Some(d) = &o.python_dir {
+            spec.python_dir = d.clone();
+        }
+        stress_learned::provider_client::ModelProvider::spawn(&spec, &o.dir, &s.name).expect("model provider")
+    });
     if o.kind == "files" {
         let _ = std::fs::remove_file(o.dir.join("done"));
         std::fs::create_dir_all(o.dir.join("resp")).expect("provider resp dir");
@@ -514,6 +532,7 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
                 let d = match o.kind.as_str() {
                     "oracle" => Ok(oracle_outcome(view, keys, frame)),
                     "files" => file_outcome(o, view, keys, frame, &s.name),
+                    "model" => model.as_mut().expect("model provider").outcome(view, keys, frame),
                     other => Err(format!("unknown --provider {other}")),
                 }?;
                 call_ms = tc.elapsed().as_secs_f64() * 1e3;
@@ -621,7 +640,7 @@ fn main() {
     let cmd = args.next().expect("oracle|ceiling|hash");
     let (mut name, mut member, mut mode, mut seconds, mut fdt, mut variant) = (String::from("free_wall"), None::<u64>, String::from("kin"), SECONDS, None::<f64>, String::from("coupled"));
     let mut poses: Option<String> = None;
-    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: true };
+    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: true, checkpoint: None, device: "cpu".into(), python_dir: None };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--scene" => name = args.next().expect("--scene NAME"),
@@ -635,6 +654,9 @@ fn main() {
             "--timeout" => provider.timeout = args.next().and_then(|v| v.parse().ok()).expect("--timeout S"),
             "--echo-oracle" => provider.echo_oracle = true,
             "--no-qs" => provider.qs = false,
+            "--checkpoint" => provider.checkpoint = Some(args.next().expect("--checkpoint PT").into()),
+            "--device" => provider.device = args.next().expect("--device cpu|mps"),
+            "--python-dir" => provider.python_dir = Some(args.next().expect("--python-dir DIR").into()),
             "--poses" => poses = Some(args.next().expect("--poses FILE")),
             other => panic!("unknown argument {other}"),
         }

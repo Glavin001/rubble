@@ -12,6 +12,7 @@ pub mod joint_pack;
 pub mod oracle;
 pub mod progress;
 pub mod procedural;
+pub mod provider_client;
 pub mod outcome_calls;
 pub mod outcome;
 pub mod oracle_config;

@@ -18,11 +18,18 @@ The run continues to its end and writes the same outcome as every other `learned
 learned_p0 ceiling --scene wall_row --variant provider --provider oracle                 # in-process oracle (self-check)
 learned_p0 ceiling --scene wall_row --variant provider --provider files --dir D [--timeout 60] [--echo-oracle]
 learned_p0 ceiling --scene wall_row --variant provider --provider punch                  # the host punch (must fail)
+learned_p0 ceiling --scene wall_row --variant provider --provider model --checkpoint best.pt --dir D \
+    [--python-dir P2/learned-impact/python --device cpu|mps]                            # P2's model, spawned and owned
 ```
 
 Set `STRESS_DEBRIS_ROUTING=1` for scenes where debris reaches a second structure within a
 frame (the late wall rows). Without it the island misses the second wall, and the provider
 never sees it.
+
+`--provider model` runs P2's checkpoint through `stress_learned::provider_client`, the
+client that stress-viz's `engine learned` uses. It spawns `python -m
+learned_impact.outcome.provider` on `D` and owns it, speaking the files protocol below.
+`--python-dir` points it at a checkout with P2's package and venv.
 
 ## Files (`--provider files --dir D`)
 
@@ -62,7 +69,9 @@ The response must list exactly the request's chunk and impactor keys. `bonds_bro
 
 **How a response is applied**:
 - the breaks, sorted by `bin`;
-- each surviving bond's damage, raised to the given value (monotone);
+- each surviving bond's damage, raised to the given value (monotone) but kept below 1
+  (`SURVIVOR_DAMAGE_MAX`). Only `bonds_broken` disconnects a bond, so a failure margin
+  ≥ 1 still means disconnected;
 - per island cluster after the splits: its centre moves to the mass-weighted mean of its
   chunks' `start + dx`, it turns by the mass-weighted mean `drot`, and its velocity and spin
   are the momentum-exact fit to its chunks' `v` and `w`;

@@ -31,7 +31,7 @@ use crate::statics::StaticOptions;
 mod coupling;
 #[path = "world_handoff.rs"]
 mod handoff;
-pub use handoff::{stable_key, DecodedBody, DecodedBreak, DecodedDamage, DecodedState, IslandKeys, DECODED_STATE_VERSION};
+pub use handoff::{stable_key, DecodedBody, DecodedBreak, DecodedDamage, DecodedState, IslandKeys, DECODED_STATE_VERSION, SURVIVOR_DAMAGE_MAX};
 #[path = "world_branch.rs"]
 mod branch;
 pub use coupling::{cluster_signature, tiered_impact_speed, PredictedContact, PunchPlug};
