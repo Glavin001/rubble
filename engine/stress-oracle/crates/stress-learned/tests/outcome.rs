@@ -162,3 +162,41 @@ fn impactors_start_clear_of_ground_wall_and_each_other() {
         }
     }
 }
+
+#[test]
+fn ensembles_cover_evaluation_splits_and_keep_the_parent_split_group() {
+    use stress_learned::procedural::{split_of, with_splits_and_ensembles, EnsemblePlan};
+    let plan = EnsemblePlan { seed: 5, ..EnsemblePlan::default() };
+    let base = wall_recipes("free_wall", 1, 60, 5, &Ranges::pilot()).unwrap();
+    let out = with_splits_and_ensembles(base.clone(), &plan);
+    let mut by_parent: std::collections::BTreeMap<String, Vec<&OutcomeRecipe>> = Default::default();
+    for r in &out {
+        by_parent.entry(r.split_group.clone()).or_default().push(r);
+    }
+    assert_eq!(by_parent.len(), base.len(), "members keep their parent's split group");
+    let mut train_ens = 0;
+    for b in &base {
+        let members = &by_parent[&b.split_group];
+        let split = split_of(&b.layout_group, &b.family, &plan);
+        assert!(members.iter().all(|m| m.parameters["split"] == split));
+        if split != "train" {
+            assert_eq!(members.len(), 8, "every evaluation configuration is an ensemble");
+        }
+        if members.len() > 1 {
+            train_ens += usize::from(split == "train");
+            for (k, m) in members.iter().enumerate() {
+                assert_eq!(m.parameters["ensemble"]["member"], k);
+                assert_eq!(m.parameters["ensemble"]["id"], b.event_id.as_str());
+                let (p0, p1) = (b.scene.impactors[0].position, m.scene.impactors[0].position);
+                let off: f64 = (0..3).map(|i| (p0[i] - p1[i]).powi(2)).sum::<f64>().sqrt();
+                assert!(off > 0.0 && off <= 1.5e-3, "offset {off}");
+                let (v0, v1) = (b.scene.impactors[0].velocity, m.scene.impactors[0].velocity);
+                let along: f64 = (0..3).map(|i| (p1[i] - p0[i]) * v0[i]).sum();
+                assert!(along.abs() < 1e-9, "the offset is across the approach");
+                let s = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                assert!((s(v1) / s(v0) - 1.0).abs() <= 1e-3);
+            }
+        }
+    }
+    assert!(train_ens > 0, "some training configurations are ensembles");
+}

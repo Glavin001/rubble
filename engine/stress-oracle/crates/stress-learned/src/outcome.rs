@@ -2,7 +2,8 @@
 //! life cycle, frame by frame, with on every frame the model's causal inputs, the oracle's
 //! outcome and the baselines' outcomes of the same frame-start state.
 //!
-//! Per frame `f` (schema `learned-impact-outcome/1`, `learned-impact/OUTCOME_SCHEMA.md`):
+//! Per frame `f` (schema `learned-impact-frames/1`, `learned-impact/FRAMES_SCHEMA.md`; P2's per-call
+//! `learned-impact-outcome/1` records are derived from it):
 //! - **inputs, taken before the step**: the full state (`state_*`, index `f`), the routing's
 //!   predicted islands, every impactor contact the routing sweep predicts (time within the
 //!   frame, closing speed and direction, reduced mass, Hertz time and peak force), the
@@ -29,7 +30,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use stress_ref::math::Vec3;
+use stress_ref::math::{Quat, Vec3};
 use stress_ref::scene::Scene;
 use stress_ref::solver::{Activity, ChunkLoads, SolverEvent};
 use stress_ref::statics::StaticOptions;
@@ -38,9 +39,9 @@ use stress_ref::world::{tiered_impact_speed, World};
 use crate::catalog::{self, Catalog};
 use crate::oracle_config::{qs_template, OracleConfig, QS_BASELINE};
 
-pub const OUTCOME_SCHEMA: &str = "learned-impact-outcome/1";
+pub const OUTCOME_SCHEMA: &str = "learned-impact-frames/1";
 /// Bumped whenever what the recorder writes, or how, changes.
-pub const RECORDER_REVISION: u32 = 1;
+pub const RECORDER_REVISION: u32 = 2;
 /// Break-time bins within a frame.
 pub const TIME_BINS: usize = 8;
 /// Floats per predicted contact (`contact_f32`).
@@ -405,6 +406,66 @@ fn bond_connected(w: &World) -> Vec<i32> {
     w.solver.bonds.iter().flatten().map(|b| i32::from(b.connected())).collect()
 }
 
+/// Chunk pairs of different clusters whose bounding spheres overlap (in or near contact),
+/// as flat chunk indices `a < b`: the candidates for structure-contact and cracked-face
+/// edges, which a call builder refines with the recorded poses. A uniform grid of the
+/// largest sphere's diameter keeps it linear in chunks.
+fn near_pairs(w: &World, ix: &Index) -> Vec<(usize, usize)> {
+    let mut items: Vec<(usize, Vec3, f64, usize)> = Vec::new();
+    for s in 0..w.solver.structures.len() {
+        for c in 0..w.solver.structures[s].chunks.len() {
+            let st = &w.solver.chunks[s][c];
+            if st.active {
+                items.push((ix.chunk0[s] + c, w.solver.chunk_position(s, c), w.solver.structures[s].chunks[c].half_extents.norm(), st.cluster));
+            }
+        }
+    }
+    let cell = 2.0 * items.iter().map(|i| i.2).fold(1e-6, f64::max);
+    let key = |p: Vec3| [(p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64];
+    let mut grid: std::collections::HashMap<[i64; 3], Vec<usize>> = std::collections::HashMap::new();
+    for (k, it) in items.iter().enumerate() {
+        grid.entry(key(it.1)).or_default().push(k);
+    }
+    let mut out = Vec::new();
+    for (k, a) in items.iter().enumerate() {
+        let [x, y, z] = key(a.1);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    for &j in grid.get(&[x + dx, y + dy, z + dz]).into_iter().flatten() {
+                        let b = &items[j];
+                        if b.0 > a.0 && b.3 != a.3 && (b.1 - a.1).norm() < a.2 + b.2 {
+                            out.push((a.0, b.0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The unit quaternion of a rotation matrix (Shepperd's method).
+fn quat_of(r: &stress_ref::math::Mat3) -> Quat {
+    let m = &r.m;
+    let t = m[0][0] + m[1][1] + m[2][2];
+    let q = if t > 0.0 {
+        let s = (t + 1.0).sqrt() * 2.0;
+        [0.25 * s, (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s]
+    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
+        let s = (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt() * 2.0;
+        [(m[2][1] - m[1][2]) / s, 0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s]
+    } else if m[1][1] > m[2][2] {
+        let s = (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt() * 2.0;
+        [(m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s]
+    } else {
+        let s = (1.0 + m[2][2] - m[0][0] - m[1][1]).sqrt() * 2.0;
+        [(m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s]
+    };
+    Quat::from_wxyz(q).normalized()
+}
+
 /// The whole state at a frame boundary (`state_*`, one row per boundary).
 fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
     let (n, e, ni) = (ix.n, ix.e, w.impactors.len());
@@ -427,6 +488,18 @@ fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
         }
     }
     a.f("state_chunk_cluster_quat", &[n, 4], &quat)?;
+    // Each chunk's own world orientation: cluster, hidden rotation, chunk's rest rotation.
+    let mut qw = Vec::with_capacity(n * 4);
+    for s in 0..w.solver.structures.len() {
+        for c in 0..w.solver.structures[s].chunks.len() {
+            let st = &w.solver.chunks[s][c];
+            let cl = &w.solver.clusters[st.cluster];
+            let hidden = Quat::from_rotation_vector(st.th);
+            let rest = quat_of(&w.solver.structures[s].chunks[c].rotation);
+            qw.extend((cl.pose.rotation * hidden * rest).normalized().to_wxyz().map(|x| x as f32));
+        }
+    }
+    a.f("state_chunk_q_world", &[n, 4], &qw)?;
     a.f("state_chunk_hidden", &[n, 6], &hidden)?;
     a.i("state_chunk_cluster", &[n], &cluster)?;
     a.i("state_chunk_active", &[n], &active)?;
@@ -436,6 +509,23 @@ fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
         joint.extend([b.joint.damage as f32, b.joint.crush as f32, b.joint.fatigue as f32, b.joint.utilization as f32]);
     }
     a.f("state_bond_joint", &[e, 4], &joint)?;
+    // Cumulative per-bond energy (J): joint dissipation (fracture, friction, rebar), dashpot
+    // dissipation, stored elastic energy; and the failure mode (0 none, 1 tension, 2 shear,
+    // 3 compression, 4 buckling).
+    let mut energy = Vec::with_capacity(e * 3);
+    let mut mode = Vec::with_capacity(e);
+    for b in w.solver.bonds.iter().flatten() {
+        energy.extend([b.joint.dissipated as f32, b.damped as f32, b.stored as f32]);
+        mode.push(match b.joint.mode {
+            None => 0,
+            Some(stress_ref::joint::FailureMode::Tension) => 1,
+            Some(stress_ref::joint::FailureMode::Shear) => 2,
+            Some(stress_ref::joint::FailureMode::Compression) => 3,
+            Some(stress_ref::joint::FailureMode::Buckling) => 4,
+        });
+    }
+    a.f("state_bond_energy", &[e, 3], &energy)?;
+    a.i("state_bond_mode", &[e], &mode)?;
     a.i("state_bond_connected", &[e], &bond_connected(w))?;
     a.f("state_impactor", &[ni, IMPACTOR_STATE], &impactor_state(w))?;
     Ok(())
@@ -679,6 +769,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
     a.declare_i("contact_i32", &[5]);
     a.declare_f("contact_f32", &[CONTACT_F32]);
     a.declare_i("punch_frame", &[]);
+    a.declare_i("pair_i32", &[3]);
     capture_state(&world, &ix, &mut a)?;
 
     let mut frames: Vec<Value> = Vec::new();
@@ -709,6 +800,10 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         let imp_routed: Vec<i32> = (0..world.impactors.len()).map(|k| i32::from(routed_impactors.contains(&k))).collect();
         a.i("frame_impactor_routed", &[world.impactors.len()], &imp_routed)?;
 
+        let pairs = near_pairs(&world, &ix);
+        for &(pa, pb) in &pairs {
+            a.i("pair_i32", &[3], &[f as i32, pa as i32, pb as i32])?;
+        }
         let contacts = world.predict_contacts(frame_dt, 0.0);
         let tiered = tiered_impact_speed();
         let mut punch_breaks: Vec<(usize, usize)> = Vec::new();
@@ -849,7 +944,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         frames.push(json!({
             "frame": f, "time": t0, "phase": phase, "breaks": n_breaks, "substeps": substeps,
             "routed_chunks": chunk_routed.iter().filter(|&&r| r == 1).count(), "routed_impactors": imp_routed.iter().filter(|&&r| r == 1).count(),
-            "predicted_contacts": contacts.len(), "punch_bonds": punch_breaks.len(), "qs_prior_converged": prior_converged,
+            "predicted_contacts": contacts.len(), "near_pairs": pairs.len(), "punch_bonds": punch_breaks.len(), "qs_prior_converged": prior_converged,
             "impactor_contact": contact_now, "struck_structures": touched.iter().copied().collect::<std::collections::BTreeSet<_>>(),
             "energy": {"kinetic_structure": ke_struct, "kinetic_impactors": ke_imp, "kinetic_in_bounds": ke_bounds,
                 "mechanical": world.mechanical_energy(), "dissipated": world.dissipated_energy(),
@@ -958,8 +1053,14 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         "n_chunks": ix.n, "n_bonds": ix.e, "n_impactors": world.impactors.len(),
         "contact_f32_columns": ["time","point_x","point_y","point_z","dir_x","dir_y","dir_z","speed","reduced_mass","modulus","face_radius","hertz_duration","peak_force","punch_ratio","plug_mass","punch_breaks","cluster_chunks"],
         "contact_i32_columns": ["frame","impactor","structure","entry_chunk","cluster_index"],
+        "pair_i32_columns": ["frame","chunk_a","chunk_b"],
         "impactor_contact_columns": ["contact_substep_fraction","first_bin","last_bin","structure_mask"],
         "bond_joint_columns": ["damage","crush","fatigue","utilization"],
+        "bond_energy_columns": ["dissipated_joint","dissipated_damping","stored"],
+        "bond_mode_values": ["none","tension","shear","compression","buckling"],
+        "ensemble": recipe.parameters.get("ensemble").cloned().unwrap_or(Value::Null),
+        "split": recipe.parameters.get("split").cloned().unwrap_or(Value::Null),
+        "energy_notes": "Under the penalty contact (layer_contact off) the booked contact dissipation (contact_dissipated) is the dashpot quadrature, not its work: the ledger does not close (+0.3% to +4.7% of E0, P0). Use kinetic energies (exact) and per-bond energies as labels; contact_dissipated is a diagnostic only.",
         "bond_geometry_columns": ["centroid_x","centroid_y","centroid_z","normal_x","normal_y","normal_z","t1_x","t1_y","t1_z","area","width_0","width_1","length"],
         "bond_stiffness_columns": ["kn","ks","kb_t1","kb_t2","kt"],
         "bond_strength_columns": ["tensile","compressive","cohesion","friction","shear_cap","g_tension","g_shear","g_compression"],

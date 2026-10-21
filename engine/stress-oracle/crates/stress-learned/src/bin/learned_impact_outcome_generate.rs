@@ -4,6 +4,13 @@
 //!       [--family free_wall|anchored_wall] [--tier 1|2] [--n N] [--seed S] [--ranges pilot|bulk]
 //!       [--oracle a12_realtime] [--jobs N] [--limit N] [--plan-only] [--no-baselines]
 //!       [--max-seconds S] [--max-failure-fraction F] [--pause-file PATH]
+//!       [--members M] [--ensemble-train-share F] [--no-ensembles]
+//!
+//! Every recipe gets a split (train/val/test by a seeded hash of its layout group; the
+//! `m5_reference` family is sealed). Every val/test/sealed configuration, and a share of the
+//! training ones (default 15%), is recorded as an ensemble of `--members` (default 8)
+//! perturbed members (impact point ±1 mm across the approach, speed ±0.1%, a Weibull seed
+//! each), which share the parent's split group and record their ensemble id.
 //!
 //! Writes `<runs>/<job>/recipes.json` before anything runs (an existing one must match
 //! byte for byte: a changed plan needs a new job), then records every recipe into
@@ -22,7 +29,7 @@ use rayon::prelude::*;
 use serde_json::json;
 use stress_learned::oracle_config::OracleConfig;
 use stress_learned::outcome::{record_outcome_event, OutcomeRecipe, RecordOptions};
-use stress_learned::procedural::{m5_recipes, wall_recipes, Ranges};
+use stress_learned::procedural::{m5_recipes, wall_recipes, with_splits_and_ensembles, EnsemblePlan, Ranges};
 use stress_learned::progress::{duration_str, Progress};
 
 fn main() {
@@ -35,7 +42,7 @@ fn main() {
     let catalog = val("--catalog").unwrap_or_else(|| "p1-walls".into());
     let seed: u64 = val("--seed").map_or(1, |x| x.parse().expect("--seed"));
     let oracle = OracleConfig::named(&val("--oracle").unwrap_or_else(|| "a12_realtime".into())).expect("--oracle");
-    let mut recipes: Vec<OutcomeRecipe> = match catalog.as_str() {
+    let recipes: Vec<OutcomeRecipe> = match catalog.as_str() {
         "p1-walls" => {
             let family = val("--family").unwrap_or_else(|| "free_wall".into());
             let tier: u32 = val("--tier").map_or(1, |x| x.parse().expect("--tier"));
@@ -50,6 +57,19 @@ fn main() {
         "m5" => m5_recipes(),
         c => panic!("unknown catalog {c}"),
     };
+    // Splits by layout group, and ensembles on every validation/test/sealed configuration
+    // and on a share of the training ones (`--members 1` or `--no-ensembles`: none).
+    let mut plan = EnsemblePlan { seed, ..EnsemblePlan::default() };
+    if let Some(m) = val("--members") {
+        plan.members = m.parse().expect("--members");
+    }
+    if let Some(x) = val("--ensemble-train-share") {
+        plan.train_share = x.parse().expect("--ensemble-train-share");
+    }
+    if flag("--no-ensembles") {
+        plan.members = 1;
+    }
+    let mut recipes = with_splits_and_ensembles(recipes, &plan);
     if let Some(n) = val("--limit") {
         recipes.truncate(n.parse().expect("--limit"));
     }
@@ -60,8 +80,8 @@ fn main() {
         opts.stop.max_seconds = s.parse().expect("--max-seconds");
     }
     fs::create_dir_all(&dir).unwrap();
-    let plan = json!({"job": job, "catalog": catalog, "seed": seed, "oracle_config": oracle, "baselines": opts.baselines, "stop_rule": opts.stop, "recipes": recipes});
-    let bytes = serde_json::to_vec_pretty(&plan).unwrap();
+    let plan_json = json!({"job": job, "catalog": catalog, "seed": seed, "oracle_config": oracle, "baselines": opts.baselines, "stop_rule": opts.stop, "recipes": recipes});
+    let bytes = serde_json::to_vec_pretty(&plan_json).unwrap();
     let path = dir.join("recipes.json");
     if path.exists() {
         assert!(fs::read(&path).unwrap() == bytes, "recipes.json differs from this plan: choose a new --job");

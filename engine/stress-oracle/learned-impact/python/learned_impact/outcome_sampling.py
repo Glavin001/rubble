@@ -1,4 +1,4 @@
-"""Frame sampling and partitions for `learned-impact-outcome/1` datasets (plan P1).
+"""Frame sampling and partitions for `learned-impact-frames/1` datasets (plan P1).
 
 - `partition`: train / validation / test by **layout group** (whole layouts held out) and
   never splitting a `split_group` (every descendant of one physical recipe stays with its
@@ -39,6 +39,10 @@ def partition(events, fractions=(0.8, 0.1, 0.1), seed=0, sealed=("m5_reference",
     for ev in events:
         if ev.context["family"] in sealed:
             out["sealed"].append(ev)
+            continue
+        # The generator's own split (procedural.rs `split_of`) when the event records one.
+        if ev.context.get("split"):
+            out[ev.context["split"]].append(ev)
             continue
         u = _unit(ev.context["layout_group"], seed)
         out[["train", "val", "test"][int(np.searchsorted(cut, u, side="right"))]].append(ev)

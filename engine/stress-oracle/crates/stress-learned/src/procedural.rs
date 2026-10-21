@@ -458,3 +458,97 @@ pub fn m5_recipes() -> Vec<OutcomeRecipe> {
         })
         .collect()
 }
+
+fn fnv_str(text: &str, seed: u64) -> u64 {
+    let mut h = 0xcbf29ce484222325u64 ^ seed;
+    for b in text.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// How a catalog is partitioned and which configurations get ensembles (the user's decision
+/// after P0: acceptance is against oracle ensembles).
+#[derive(Clone, Debug)]
+pub struct EnsemblePlan {
+    /// Train / validation / test shares, by layout group (whole layouts held out).
+    pub fractions: [f64; 3],
+    /// Families sent to the sealed set whole.
+    pub sealed: Vec<String>,
+    /// Share of training configurations recorded as ensembles; every validation, test and
+    /// sealed configuration is.
+    pub train_share: f64,
+    pub members: usize,
+    /// Perturbation of a member: impact point across the approach (uniform per axis, m) and
+    /// speed (relative, uniform); each member also gets its own Weibull seed.
+    pub offset: f64,
+    pub speed: f64,
+    pub seed: u64,
+}
+
+impl Default for EnsemblePlan {
+    fn default() -> Self {
+        EnsemblePlan { fractions: [0.8, 0.1, 0.1], sealed: vec!["m5_reference".into()], train_share: 0.15, members: 8, offset: 1e-3, speed: 1e-3, seed: 0 }
+    }
+}
+
+/// The partition of a layout group: a seeded hash, so it never depends on recipe order.
+pub fn split_of(layout_group: &str, family: &str, plan: &EnsemblePlan) -> &'static str {
+    if plan.sealed.iter().any(|f| f == family) {
+        return "sealed";
+    }
+    let u = (fnv_str(layout_group, plan.seed) >> 11) as f64 / (1u64 << 53) as f64;
+    let t = plan.fractions.iter().sum::<f64>();
+    if u < plan.fractions[0] / t {
+        "train"
+    } else if u < (plan.fractions[0] + plan.fractions[1]) / t {
+        "val"
+    } else {
+        "test"
+    }
+}
+
+/// Assign every recipe its split and expand the configurations chosen for ensembles into
+/// `members` perturbed members (event `<id>_e<k>`, the parent's split group, an
+/// `ensemble` record in `parameters`). Members replace the unperturbed recipe: P0 found the
+/// unperturbed runs of aligned hits are knife-edge cases outside their own ensemble.
+pub fn with_splits_and_ensembles(recipes: Vec<OutcomeRecipe>, plan: &EnsemblePlan) -> Vec<OutcomeRecipe> {
+    let mut out = Vec::new();
+    for mut r in recipes {
+        let split = split_of(&r.layout_group, &r.family, plan);
+        r.parameters["split"] = json!(split);
+        let u = (fnv_str(&r.split_group, plan.seed ^ 0xe5e5) >> 11) as f64 / (1u64 << 53) as f64;
+        let ensemble = plan.members > 1 && (split != "train" || u < plan.train_share);
+        if !ensemble {
+            r.parameters["ensemble"] = json!({"id": null, "member": null, "size": 1});
+            out.push(r);
+            continue;
+        }
+        let mut rng = Rng::new(fnv_str(&r.event_id, plan.seed ^ 0x0e0e));
+        for k in 0..plan.members {
+            let mut m = r.clone();
+            m.event_id = format!("{}_e{k}", r.event_id);
+            m.scene.name = m.event_id.clone();
+            let weibull_seed = rng.next_u64();
+            m.scene.sim.seed = weibull_seed;
+            let mut perturbation = Vec::new();
+            for imp in &mut m.scene.impactors {
+                let v = Vec3::from_array(imp.velocity);
+                let d = v.normalized();
+                let a = if d.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) };
+                let t1 = (a - d * a.dot(d)).normalized();
+                let t2 = d.cross(t1);
+                let off = t1 * rng.range(-plan.offset, plan.offset) + t2 * rng.range(-plan.offset, plan.offset);
+                let scale = 1.0 + rng.range(-plan.speed, plan.speed);
+                imp.position = (Vec3::from_array(imp.position) + off).to_array();
+                imp.velocity = (v * scale).to_array();
+                perturbation.push(json!({"offset_m": off.to_array(), "speed_scale": scale}));
+            }
+            m.parameters["ensemble"] = json!({"id": r.event_id, "member": k, "size": plan.members,
+                "perturbation": {"impactors": perturbation, "weibull_seed": weibull_seed}});
+            out.push(m);
+        }
+    }
+    out
+}

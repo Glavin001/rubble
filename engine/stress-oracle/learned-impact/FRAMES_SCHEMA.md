@@ -1,4 +1,4 @@
-# `learned-impact-outcome/1`: the impact-outcome dataset
+# `learned-impact-frames/1`: the impact-outcome frame record
 
 The P1 dataset of `docs/learned-stress-solver/learned-stress-solver-plan.md`. One event is
 one scenario's **whole life cycle**, recorded frame by frame (1/60 s) by
@@ -69,7 +69,12 @@ possible work) fails the event loudly.
 ## Arrays
 
 `F` frames, `N` chunks and `E` bonds over all structures (flat, structure order), `I`
-impactors, `C` predicted contacts in all frames, `P` frames with a punch.
+impactors, `C` predicted contacts in all frames, `P` frames with a punch, `Q` near pairs in
+all frames.
+
+P2's per-call `learned-impact-outcome/1` records (its `OUTCOME_SCHEMA.md`) are derived from
+this record by a Rust call builder; nothing here is a model feature yet, everything is raw
+and in SI units.
 
 **Static** (one row): `static_chunk_mass [1,N]`, `static_chunk_inertia_diag [1,N,3]`,
 `static_chunk_half_extents`, `static_chunk_center_local`, `static_chunk_support`,
@@ -79,9 +84,13 @@ impactors, `C` predicted contacts in all frames, `P` frames with a punch.
 
 **State at each frame boundary** (`F + 1` rows; row `f` is frame `f`'s start, row `f + 1`
 its end): `state_chunk_pos`, `state_chunk_vel`, `state_chunk_angvel` `[.,N,3]` (world,
-hidden motion included), `state_chunk_cluster_quat [.,N,4]`, `state_chunk_hidden [.,N,6]`
+hidden motion included), `state_chunk_cluster_quat [.,N,4]`, `state_chunk_q_world [.,N,4]` (the chunk's own world
+orientation: cluster x hidden rotation x rest rotation, wxyz), `state_chunk_hidden [.,N,6]`
 (hidden u, theta), `state_chunk_cluster`, `state_chunk_active`, `state_chunk_anchored`,
-`state_bond_joint [.,E,4]` (damage, crush, fatigue, utilization), `state_bond_connected`,
+`state_bond_joint [.,E,4]` (damage, crush, fatigue, utilization), `state_bond_energy
+[.,E,3]` (cumulative J: joint dissipation (fracture, friction, rebar), dashpot dissipation,
+stored elastic energy; frame differences are the per-bond labels), `state_bond_mode [.,E]`
+(0 none, 1 tension, 2 shear, 3 compression, 4 buckling), `state_bond_connected`,
 `state_impactor [.,I,13]` (position, orientation wxyz, velocity, angular velocity).
 
 **Causal inputs of frame `f`** (known before the step):
@@ -92,6 +101,9 @@ hidden motion included), `state_chunk_cluster_quat [.,N,4]`, `state_chunk_hidden
   (`World::predict_contacts`): time within the frame, point, direction, closing speed,
   reduced mass, modulus, face radius, Hertz time, Hertz peak force, the punch's
   force/capacity ratio, plug mass, whether the punch breaks it, cluster size;
+- `pair_i32 [Q,3]` (frame, chunk a, chunk b; a < b): chunk pairs of different clusters
+  whose bounding spheres overlap at the frame start, the candidates for structure-contact
+  and cracked-face edges;
 - `frame_chunk_punch_plug [F,N]` (contact index + 1 of the plug holding the chunk, 0: none),
   `frame_bond_punch [F,E]` (the bonds the punch breaks);
 - `frame_bond_qs_prior_util [F,E]`: **the QS prior**, a converged static solve of the
@@ -119,6 +131,24 @@ exact, then one frame):
 These are CPU mirrors of the baselines' *stress models* under the oracle's own contact; the
 GPU baselines additionally run rubble's rigid engine for contact (4 iterations, 1 step a
 frame). See the findings note for how the two compare.
+
+## Splits and ensembles
+
+Every recipe has a `split` (train / val / test by a seeded hash of its layout group; the
+`m5_reference` family is sealed) in `context.json`. Every val, test and sealed
+configuration, and 15% of the training ones, is recorded as an ensemble of 8 members:
+events `<id>_e<k>` sharing the parent's `split_group`, with `context.ensemble =
+{id, member, size, perturbation: {impactors: [{offset_m, speed_scale}], weibull_seed}}`.
+A member moves each impactor by up to ±1 mm per axis across its approach and scales its
+speed by up to ±0.1% (P0's `kin` perturbation) and has its own Weibull seed (which matters
+only for materials with a Weibull modulus). Members replace the unperturbed recipe.
+
+## Energy labels
+
+Under the pinned penalty contact the booked contact dissipation is the dashpot quadrature,
+not its work, so the ledger does not close (+0.3% to +4.7% of E0, P0). Labels are kinetic
+energies (exact, from the state) and the per-bond energies above; `contact_dissipated` in
+`frames.json` is a diagnostic only (`context.energy_notes` says so).
 
 ## Phases
 

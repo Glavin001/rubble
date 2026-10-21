@@ -1,4 +1,4 @@
-"""Read and audit `learned-impact-outcome/1` datasets (plan P1).
+"""Read and audit `learned-impact-frames/1` datasets (plan P1).
 
     python -m learned_impact.outcome_audit RUN_DIR [RUN_DIR ...] --out REPORT.md [--json REPORT.json]
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-SCHEMA = "learned-impact-outcome/1"
+SCHEMA = "learned-impact-frames/1"
 PHASES = ["pre_contact", "contact", "secondary", "separation", "settling"]
 DURATION_BINS = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, float("inf")]
 
@@ -76,6 +76,8 @@ def check_event(ev: OutcomeEvent) -> list[str]:
         "frame_chunk_routed": (F, N), "frame_phase": (F,), "frame_impactor_contact": (F, I, 4),
         "static_chunk_mass": (1, N), "static_bond_endpoints": (1, E, 2),
     }
+    if "state_bond_energy" in ev.catalog:
+        want.update({"state_bond_energy": (F + 1, E, 3), "state_bond_mode": (F + 1, E), "state_chunk_q_world": (F + 1, N, 4)})
     if "qs_bond_broken" in ev.catalog:
         want.update({"qs_bond_broken": (F, E), "qs_chunk_vel": (F, N, 3), "qs_impactor": (F, I, 13)})
     for name, shape in want.items():
@@ -111,6 +113,11 @@ def check_event(ev: OutcomeEvent) -> list[str]:
         quiet = ev.context["stop_rule"]["quiet_frames"]
         if broke[-quiet:].any():
             bad.append(f"breaks within the last {quiet} frames of a finished event")
+    if "state_bond_energy" in ev.catalog:
+        en = ev.array("state_bond_energy")
+        # Dissipation only accumulates (f32 round-off allowed).
+        if np.any(np.diff(en[:, :, :2], axis=0) < -1e-6 * np.maximum(1.0, np.abs(en[1:, :, :2]))):
+            bad.append("per-bond dissipation decreased")
     for name, e in ev.catalog.items():
         if e["dtype"] == "f32" and not np.all(np.isfinite(ev.array(name))):
             bad.append(f"{name}: nonfinite")
@@ -169,6 +176,13 @@ def audit(runs: list[Path]) -> dict:
             "bytes_per_event": size / len(evs),
             "frames_per_phase": dict(Counter(f["phase"] for ev in evs for f in ev.frames)),
         }
+    splits = Counter(str(ev.context.get("split")) for ev in events)
+    ens = defaultdict(list)
+    for ev in events:
+        e = ev.context.get("ensemble") or {}
+        if e.get("id"):
+            ens[e["id"]].append(e)
+    complete = sum(1 for v in ens.values() if len(v) == v[0]["size"])
     oracle = sorted({json.dumps(ev.context["oracle_config"], sort_keys=True) for ev in events})
     return {
         "events": len(events),
@@ -182,6 +196,8 @@ def audit(runs: list[Path]) -> dict:
         "truncated": truncated,
         "truncated_share": len(truncated) / max(len(events), 1),
         "families": fam,
+        "splits": dict(splits),
+        "ensembles": {"groups": len(ens), "complete": complete, "members": sum(len(v) for v in ens.values())},
     }
 
 
@@ -191,7 +207,9 @@ def markdown(r: dict) -> str:
         L.append(f"Oracle configuration: `{o['name']}` (provisional: {o['provisional']}; {o['source']}).")
     L += ["", "| Check | Value | Rule |", "|---|---|---|",
           f"| Events still breaking in their last 0.5 s | {len(r['still_breaking_last_half_second'])} ({100 * r['still_breaking_share']:.1f}%) | must be 0 |",
-          f"| Truncated at the cap | {len(r['truncated'])} ({100 * r['truncated_share']:.1f}%) | excluded from outcome metrics |", "",
+          f"| Truncated at the cap | {len(r['truncated'])} ({100 * r['truncated_share']:.1f}%) | excluded from outcome metrics |",
+          f"| Ensembles (complete / groups, members) | {r['ensembles']['complete']} / {r['ensembles']['groups']}, {r['ensembles']['members']} | all members recorded |",
+          f"| Events per split | {', '.join(f'{k} {v}' for k, v in sorted(r['splits'].items()))} | layout groups held out whole |", "",
           "## Event durations (simulated s)", "", "| Range | Events |", "|---|---|"]
     for b in r["duration_histogram_s"]:
         if b["count"]:

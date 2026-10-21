@@ -227,6 +227,10 @@ pub struct RtBond {
     /// Running max of `joint.utilization` since the last
     /// [`ReferenceSolver::reset_peak_utilizations`] (learned-impact labels).
     pub peak_utilization: f64,
+    /// Energy this bond's dashpots have dissipated so far (J), in the explicit dynamic
+    /// update (the per-bond share of `EnergyLedger::damping_dissipation`). Diagnostic for
+    /// the learned-impact recorder; nothing reads it.
+    pub damped: f64,
 }
 
 impl RtBond {
@@ -247,6 +251,7 @@ impl RtBond {
             measures: StressMeasures::default(),
             stored: 0.0,
             peak_utilization: 0.0,
+            damped: 0.0,
         }
     }
 
@@ -1836,6 +1841,7 @@ impl ReferenceSolver {
             let bm = &mut self.bonds[s][bi];
             let previous = std::mem::replace(&mut bm.joint, resp.state);
             bm.observe_utilization();
+            bm.damped += bond_damped;
             bm.force = q;
             bm.elastic = resp.force;
             bm.measures = resp.measures;
