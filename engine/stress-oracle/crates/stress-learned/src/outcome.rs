@@ -41,7 +41,7 @@ use crate::oracle_config::{qs_template, OracleConfig, QS_BASELINE};
 
 pub const OUTCOME_SCHEMA: &str = "learned-impact-frames/1";
 /// Bumped whenever what the recorder writes, or how, changes.
-pub const RECORDER_REVISION: u32 = 4;
+pub const RECORDER_REVISION: u32 = 5;
 /// Break-time bins within a frame.
 pub const TIME_BINS: usize = 8;
 /// Floats per predicted contact (`contact_f32`).
@@ -843,6 +843,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         a.i("frame_chunk_punch_plug", &[ix.n], &plug_of)?;
         a.i("frame_bond_punch", &[ix.e], &bond_punch)?;
         let start_connected = bond_connected(&world);
+        let start_energy: Vec<(f64, f64)> = world.solver.bonds.iter().flatten().map(|b| (b.joint.dissipated, b.damped)).collect();
         *cost.get_mut("overhead").unwrap() += t_over.elapsed().as_secs_f64();
 
         let t_prior = Instant::now();
@@ -894,6 +895,10 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         a.i("frame_bond_break_bin", &[ix.e], &break_bin)?;
         let peak: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
         a.f("frame_bond_peak_util", &[ix.e], &peak)?;
+        // Per-bond dissipation over the frame (J): joint (fracture, friction, rebar) and
+        // dashpot, differenced in f64 (the f32 running totals lose digits).
+        let dissipated: Vec<f32> = world.solver.bonds.iter().flatten().zip(&start_energy).flat_map(|(b, &(j, d))| [(b.joint.dissipated - j) as f32, (b.damped - d) as f32]).collect();
+        a.f("frame_bond_dissipated", &[ix.e, 2], &dissipated)?;
         let mut contact_summary = Vec::with_capacity(world.impactors.len() * IMPACTOR_CONTACT);
         let n_sub = watch.substeps.max(1) as f64;
         for k in 0..world.impactors.len() {
@@ -1076,6 +1081,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         "impactor_contact_columns": ["contact_substep_fraction","first_bin","last_bin","structure_mask"],
         "bond_joint_columns": ["damage","crush","fatigue","utilization"],
         "bond_energy_columns": ["dissipated_joint","dissipated_damping","stored"],
+        "bond_dissipated_columns": ["joint","damping"],
         "bond_mode_values": ["none","tension","shear","compression","buckling"],
         "ensemble": recipe.parameters.get("ensemble").cloned().unwrap_or(Value::Null),
         "split": recipe.parameters.get("split").cloned().unwrap_or(Value::Null),

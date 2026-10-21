@@ -120,6 +120,12 @@ def check_event(ev: OutcomeEvent) -> list[str]:
         # Dissipation only accumulates (f32 round-off allowed).
         if np.any(np.diff(en[:, :, :2], axis=0) < -1e-6 * np.maximum(1.0, np.abs(en[1:, :, :2]))):
             bad.append("per-bond dissipation decreased")
+    if "frame_bond_dissipated" in ev.catalog:
+        fd = ev.array("frame_bond_dissipated")
+        if fd.shape != (F, E, 2):
+            bad.append(f"frame_bond_dissipated shape {list(fd.shape)}")
+        elif np.any(fd < -1e-6 * max(1.0, float(np.abs(fd).max()))):
+            bad.append("negative per-bond frame dissipation")
     for name, e in ev.catalog.items():
         if e["dtype"] == "f32" and not np.all(np.isfinite(ev.array(name))):
             bad.append(f"{name}: nonfinite")

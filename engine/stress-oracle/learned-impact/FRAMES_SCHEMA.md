@@ -114,7 +114,9 @@ stored elastic energy; frame differences are the per-bond labels), `state_bond_m
 
 **The oracle's outcome of frame `f`**: `frame_bond_break_bin [F,E]` (-1, or the bin 0..7 of
 the frame's eight in which the bond broke), `frame_bond_peak_util [F,E]` (each bond's peak
-failure index over the frame), `frame_impactor_contact [F,I,4]` (share of substeps with a
+failure index over the frame), `frame_bond_dissipated [F,E,2]` (J dissipated over the frame
+by the bond's joint law (fracture, friction, rebar) and by its dashpots; recorder revision
+5 on, earlier records difference `state_bond_energy`), `frame_impactor_contact [F,I,4]` (share of substeps with a
 contact impulse on the impactor, first and last contact bin, bit mask of the structures it
 touched), `frame_phase [F]` (index into `pre_contact, contact, secondary, separation,
 settling`), and the frame-end state (row `f + 1`).
