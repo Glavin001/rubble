@@ -1195,6 +1195,7 @@ impl ReferenceSolver {
             let bm = &mut self.bonds[s][bi];
             bm.joint = resp.state;
             bm.observe_utilization();
+            bm.observe_fail_margin(resp.fail_ts, resp.fail_c);
             bm.force = resp.force;
             bm.elastic = resp.force;
             bm.measures = resp.measures;

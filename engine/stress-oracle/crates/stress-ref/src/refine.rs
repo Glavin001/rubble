@@ -141,6 +141,9 @@ impl ReferenceSolver {
                 stored: 0.0,
                 peak_utilization: 0.0,
                 damped: 0.0,
+                fail_ts: 0.0,
+                fail_c: 0.0,
+                peak_fail_margin: 0.0,
             });
         }
         self.rebuild_adjacency(s);

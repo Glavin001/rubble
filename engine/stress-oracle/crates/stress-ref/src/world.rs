@@ -1650,6 +1650,8 @@ impl World {
     /// contact is evaluated again. For tests and scripted breaks.
     pub fn break_bond(&mut self, s: usize, b: usize) {
         self.solver.bonds[s][b].joint.damage = 1.0;
+        // Broken from outside the law: its failure margin is reached too.
+        self.solver.bonds[s][b].fail_ts = self.solver.bonds[s][b].fail_ts.max(1.0);
         let ci = self.solver.chunks[s][self.solver.bonds[s][b].geometry.a].cluster;
         self.solver.split_cluster(ci);
         if self.scene.sim.methods.layer_contact {

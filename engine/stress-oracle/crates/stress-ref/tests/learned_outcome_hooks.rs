@@ -96,3 +96,40 @@ fn adopting_blast_parity_steps_like_a_blast_parity_world() {
     }
 }
 
+
+/// Every bond's failure margin (`RtBond::fail_margin`) reaches 1 exactly when the joint
+/// law disconnects it: brittle and ductile softening, no softening, impact and crushing.
+#[test]
+fn the_failure_margin_reaches_one_exactly_when_a_bond_disconnects() {
+    let mut cases: Vec<(&str, Scene)> = vec![("softening", scene())];
+    let mut brittle = scene();
+    brittle.sim.features.set("softening", false).unwrap();
+    cases.push(("no softening", brittle));
+    let mut ductile = scene();
+    for m in ductile.materials.values_mut() {
+        m.kind = stress_ref::material::BondKind::Ductile;
+    }
+    cases.push(("ductile", ductile));
+    let mut slow_heavy = scene();
+    slow_heavy.impactors[0].velocity = [0.0, 8.0, 0.0];
+    slow_heavy.impactors[0].mass = 8000.0;
+    cases.push(("slow heavy", slow_heavy));
+    for (name, s) in cases {
+        let mut w = World::new(&s);
+        let (mut broke, mut live_near) = (0usize, 0.0f64);
+        for _ in 0..3 {
+            w.step_frame();
+            for b in w.solver.bonds.iter().flatten() {
+                let q = b.fail_margin();
+                assert_eq!(q >= 1.0, !b.connected(), "{name}: margin {q} with connected {}", b.connected());
+                if !b.connected() {
+                    broke += 1;
+                } else {
+                    live_near = live_near.max(q);
+                }
+            }
+        }
+        assert!(broke > 0, "{name}: the strike breaks bonds");
+        assert!(live_near > 0.0, "{name}: live bonds carry a margin");
+    }
+}

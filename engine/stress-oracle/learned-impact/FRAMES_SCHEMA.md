@@ -91,7 +91,11 @@ orientation: cluster x hidden rotation x rest rotation, wxyz), `state_chunk_hidd
 `state_bond_joint [.,E,4]` (damage, crush, fatigue, utilization), `state_bond_energy
 [.,E,3]` (cumulative J: joint dissipation (fracture, friction, rebar), dashpot dissipation,
 stored elastic energy; frame differences are the per-bond labels), `state_bond_mode [.,E]`
-(0 none, 1 tension, 2 shear, 3 compression, 4 buckling), `state_bond_connected`,
+(0 none, 1 tension, 2 shear, 3 compression, 4 buckling), `state_bond_fail_margin [.,E]`
+(recorder revision 6 on: the joint law's failure margin, a running maximum of
+λ/κ_fail(r) per family; >= 1 exactly when the bond disconnected, checked on every row, and
+never rounded up to 1 for a connected bond; the per-frame label is row f + 1),
+`state_bond_connected`,
 `state_impactor [.,I,13]` (position, orientation wxyz, velocity, angular velocity).
 
 **Causal inputs of frame `f`** (known before the step):

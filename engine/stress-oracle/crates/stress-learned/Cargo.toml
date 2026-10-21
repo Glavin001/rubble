@@ -13,6 +13,8 @@ serde = { version = "1", features = ["derive"] }
 # into different impact trajectories and invalidate history enrichment.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 stress-ref = { path = "../stress-ref" }
+# Lossless compression of call records (`arrays.bin.zst`, P2's loader reads it).
+zstd = "0.13"
 
 [[bin]]
 name = "learned_impact_smoke"

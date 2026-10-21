@@ -144,6 +144,8 @@ impl StressProvider for TrajectoryProvider {
                 state,force:local(6),stored:r[12],dissipated:work[0],overshoot:work[1],
                 disconnected:old.connected()&&!connected,
                 measures:StressMeasures{tension:r[13],shear:r[14],normal_compression:r[15],compression:r[16],compressive_force:r[17]},
+                // Supplied responses carry no failure margins.
+                fail_ts:0.0,fail_c:0.0,
             }});
         }
         for index in applied {self.initial_work_applied[index]=true;}

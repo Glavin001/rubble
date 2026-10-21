@@ -41,7 +41,7 @@ use crate::oracle_config::{qs_template, OracleConfig, QS_BASELINE};
 
 pub const OUTCOME_SCHEMA: &str = "learned-impact-frames/1";
 /// Bumped whenever what the recorder writes, or how, changes.
-pub const RECORDER_REVISION: u32 = 5;
+pub const RECORDER_REVISION: u32 = 6;
 /// Break-time bins within a frame.
 pub const TIME_BINS: usize = 8;
 /// Floats per predicted contact (`contact_f32`).
@@ -145,13 +145,13 @@ pub struct OutcomeSummary {
 
 /// Growable per-frame arrays, written through `catalog`.
 #[derive(Default)]
-struct Arrays {
-    f32s: BTreeMap<String, (Vec<usize>, Vec<f32>, usize)>,
-    i32s: BTreeMap<String, (Vec<usize>, Vec<i32>, usize)>,
+pub(crate) struct Arrays {
+    pub(crate) f32s: BTreeMap<String, (Vec<usize>, Vec<f32>, usize)>,
+    pub(crate) i32s: BTreeMap<String, (Vec<usize>, Vec<i32>, usize)>,
 }
 
 impl Arrays {
-    fn f(&mut self, name: &str, tail: &[usize], data: &[f32]) -> Result<(), String> {
+    pub(crate) fn f(&mut self, name: &str, tail: &[usize], data: &[f32]) -> Result<(), String> {
         let n: usize = tail.iter().product();
         if data.len() != n {
             return Err(format!("{name}: {} values, want {n}", data.len()));
@@ -168,7 +168,7 @@ impl Arrays {
         Ok(())
     }
 
-    fn i(&mut self, name: &str, tail: &[usize], data: &[i32]) -> Result<(), String> {
+    pub(crate) fn i(&mut self, name: &str, tail: &[usize], data: &[i32]) -> Result<(), String> {
         let n: usize = tail.iter().product();
         if data.len() != n {
             return Err(format!("{name}: {} values, want {n}", data.len()));
@@ -183,11 +183,11 @@ impl Arrays {
     }
 
     /// Declare an array that may get no rows (a table that can be empty).
-    fn declare_f(&mut self, name: &str, tail: &[usize]) {
+    pub(crate) fn declare_f(&mut self, name: &str, tail: &[usize]) {
         self.f32s.entry(name.into()).or_insert_with(|| (tail.to_vec(), Vec::new(), 0));
     }
 
-    fn declare_i(&mut self, name: &str, tail: &[usize]) {
+    pub(crate) fn declare_i(&mut self, name: &str, tail: &[usize]) {
         self.i32s.entry(name.into()).or_insert_with(|| (tail.to_vec(), Vec::new(), 0));
     }
 
@@ -210,15 +210,15 @@ impl Arrays {
 }
 
 /// Flat chunk and bond numbering over the structures.
-struct Index {
-    chunk0: Vec<usize>,
-    bond0: Vec<usize>,
-    n: usize,
-    e: usize,
+pub(crate) struct Index {
+    pub(crate) chunk0: Vec<usize>,
+    pub(crate) bond0: Vec<usize>,
+    pub(crate) n: usize,
+    pub(crate) e: usize,
 }
 
 impl Index {
-    fn new(w: &World) -> Index {
+    pub(crate) fn new(w: &World) -> Index {
         let (mut chunk0, mut bond0, mut n, mut e) = (Vec::new(), Vec::new(), 0, 0);
         for s in 0..w.solver.structures.len() {
             chunk0.push(n);
@@ -413,7 +413,7 @@ fn bond_connected(w: &World) -> Vec<i32> {
 /// as flat chunk indices `a < b`: the candidates for structure-contact and cracked-face
 /// edges, which a call builder refines with the recorded poses. A uniform grid of the
 /// largest sphere's diameter keeps it linear in chunks.
-fn near_pairs(w: &World, ix: &Index) -> Vec<(usize, usize)> {
+pub(crate) fn near_pairs(w: &World, ix: &Index) -> Vec<(usize, usize)> {
     let mut items: Vec<(usize, Vec3, f64, usize)> = Vec::new();
     for s in 0..w.solver.structures.len() {
         for c in 0..w.solver.structures[s].chunks.len() {
@@ -430,7 +430,7 @@ fn near_pairs(w: &World, ix: &Index) -> Vec<(usize, usize)> {
         grid.entry(key(it.1)).or_default().push(k);
     }
     let mut out = Vec::new();
-    for (k, a) in items.iter().enumerate() {
+    for a in items.iter() {
         let [x, y, z] = key(a.1);
         for dx in -1..=1 {
             for dy in -1..=1 {
@@ -470,7 +470,7 @@ fn quat_of(r: &stress_ref::math::Mat3) -> Quat {
 }
 
 /// The whole state at a frame boundary (`state_*`, one row per boundary).
-fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
+pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
     let (n, e, ni) = (ix.n, ix.e, w.impactors.len());
     let (p, v, om) = chunk_motion(w, ix);
     a.f("state_chunk_pos", &[n, 3], &p)?;
@@ -528,6 +528,25 @@ fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
         });
     }
     a.f("state_bond_energy", &[e, 3], &energy)?;
+    // Failure margin (`RtBond::fail_margin`, a running maximum: >= 1 exactly when the
+    // bond disconnected). Written so that the f32 value keeps that rule: a connected
+    // bond's margin is never rounded up to 1.
+    let margin: Vec<f32> = w
+        .solver
+        .bonds
+        .iter()
+        .flatten()
+        .map(|b| {
+            let q = b.fail_margin() as f32;
+            if b.connected() && q >= 1.0 { 1.0f32 - f32::EPSILON / 2.0 } else { q }
+        })
+        .collect();
+    for (b, &q) in w.solver.bonds.iter().flatten().zip(&margin) {
+        if (q >= 1.0) == b.connected() {
+            return Err(format!("failure margin {q} disagrees with connected {} (the joint law's rule)", b.connected()));
+        }
+    }
+    a.f("state_bond_fail_margin", &[e], &margin)?;
     a.i("state_bond_mode", &[e], &mode)?;
     a.i("state_bond_connected", &[e], &bond_connected(w))?;
     a.f("state_impactor", &[ni, IMPACTOR_STATE], &impactor_state(w))?;
@@ -535,7 +554,7 @@ fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
 }
 
 /// The static arrays of the event (`static_*`, one row).
-fn capture_static(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
+pub(crate) fn capture_static(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
     let (n, e) = (ix.n, ix.e);
     let (mut mass, mut inertia, mut half, mut center, mut support, mut structure) = (vec![], vec![], vec![], vec![], vec![], vec![]);
     for (s, st) in w.solver.structures.iter().enumerate() {
@@ -580,7 +599,7 @@ fn capture_static(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
 }
 
 /// Frame outcome arrays of a branch world stepped one frame from the frame-start state.
-fn capture_branch(prefix: &str, start_connected: &[i32], w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
+pub(crate) fn capture_branch(prefix: &str, start_connected: &[i32], w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
     ix.check(w)?;
     let (n, e, ni) = (ix.n, ix.e, w.impactors.len());
     let now = bond_connected(w);
@@ -598,7 +617,7 @@ fn capture_branch(prefix: &str, start_connected: &[i32], w: &World, ix: &Index, 
 
 /// A frame of `w` under `template`'s model, from `w`'s state folded to rigid bodies, with
 /// `breaks` broken first.
-fn branch_frame(w: &World, template: &World, breaks: &[(usize, usize)]) -> Result<World, String> {
+pub(crate) fn branch_frame(w: &World, template: &World, breaks: &[(usize, usize)]) -> Result<World, String> {
     let mut b = w.clone();
     b.reduce_to_rigid();
     b.adopt_model(template)?;
@@ -730,6 +749,90 @@ impl ContactWatch {
     }
 }
 
+/// The causal inputs of the coming frame, captured before it is stepped: the routing's
+/// predicted islands (or the caller's, `routing`: chunk and impactor flags), cross-cluster
+/// near pairs, every predicted impactor contact with the punch's plug, and the QS prior.
+/// Written into `a` as frame `f`'s rows. The recorder and the call builder's live entry
+/// (closed loop) both use this, so their inputs are one computation.
+pub(crate) struct FrameInputs {
+    pub chunk_routed: Vec<i32>,
+    pub impactor_routed: Vec<i32>,
+    pub pairs: usize,
+    pub contacts: Vec<stress_ref::world::PredictedContact>,
+    pub punch_breaks: Vec<(usize, usize)>,
+    pub prior_converged: bool,
+    pub prior_seconds: f64,
+}
+
+pub(crate) fn capture_inputs(world: &mut World, ix: &Index, f: usize, routing: Option<(Vec<i32>, Vec<i32>)>, a: &mut Arrays) -> Result<FrameInputs, String> {
+    let frame_dt = world.scene.sim.frame_dt;
+    let (chunk_routed, imp_routed) = match routing {
+        Some(r) => r,
+        None => {
+            let (routed_clusters, routed_impactors) = world.predict_island_members(frame_dt, &HashSet::new());
+            let routed: HashSet<u64> = routed_clusters.into_iter().collect();
+            let mut chunk_routed = vec![0i32; ix.n];
+            for s in 0..world.solver.structures.len() {
+                for c in 0..world.solver.structures[s].chunks.len() {
+                    let st = &world.solver.chunks[s][c];
+                    chunk_routed[ix.chunk0[s] + c] = i32::from(st.active && routed.contains(&world.solver.clusters[st.cluster].id));
+                }
+            }
+            let imp_routed: Vec<i32> = (0..world.impactors.len()).map(|k| i32::from(routed_impactors.contains(&k))).collect();
+            (chunk_routed, imp_routed)
+        }
+    };
+    if chunk_routed.len() != ix.n || imp_routed.len() != world.impactors.len() {
+        return Err("routing flags do not match the world's chunks and impactors".into());
+    }
+    a.i("frame_chunk_routed", &[ix.n], &chunk_routed)?;
+    a.i("frame_impactor_routed", &[world.impactors.len()], &imp_routed)?;
+    let pairs = near_pairs(world, &ix);
+    for &(pa, pb) in &pairs {
+        a.i("pair_i32", &[3], &[f as i32, pa as i32, pb as i32])?;
+    }
+    let contacts = world.predict_contacts(frame_dt, 0.0);
+    let tiered = tiered_impact_speed();
+    let mut punch_breaks: Vec<(usize, usize)> = Vec::new();
+    let mut plug_of = vec![0i32; ix.n];
+    let mut bond_punch = vec![0i32; ix.e];
+    for (k, c) in contacts.iter().enumerate() {
+        let cluster_index = world.solver.clusters.iter().position(|cl| cl.id == c.cluster).expect("predicted cluster exists") as i32;
+        a.i("contact_i32", &[5], &[f as i32, c.impactor as i32, c.structure as i32, (ix.chunk0[c.structure] + c.entry) as i32, cluster_index])?;
+        let (ratio, mass, breaks) = match (&c.plug, c.speed > tiered) {
+            (Some(p), true) => (p.force / p.capacity.max(1e-300), p.mass, p.breaks()),
+            (Some(p), false) => (p.force / p.capacity.max(1e-300), p.mass, false),
+            _ => (0.0, 0.0, false),
+        };
+        let mut row = vec![c.time as f32];
+        row.extend(v3(c.point));
+        row.extend(v3(c.direction));
+        row.extend([c.speed, c.reduced_mass, c.modulus, c.face_radius, c.hertz_duration, c.peak_force, ratio, mass, f64::from(u8::from(breaks)), c.cluster_chunks as f64].map(|x| x as f32));
+        a.f("contact_f32", &[CONTACT_F32], &row)?;
+        if let (Some(p), true) = (&c.plug, c.speed > tiered) {
+            for &ch in &p.chunks {
+                plug_of[ix.chunk0[c.structure] + ch] = k as i32 + 1;
+            }
+            if breaks {
+                for &bi in &p.interface {
+                    bond_punch[ix.bond0[c.structure] + bi] = 1;
+                    punch_breaks.push((c.structure, bi));
+                }
+            }
+        }
+    }
+    punch_breaks.sort_unstable();
+    punch_breaks.dedup();
+    debug_assert_eq!(punch_breaks, world.predict_punch(frame_dt));
+    a.i("frame_chunk_punch_plug", &[ix.n], &plug_of)?;
+    a.i("frame_bond_punch", &[ix.e], &bond_punch)?;
+    let t_prior = Instant::now();
+    let (prior, prior_converged) = if contacts.is_empty() { (vec![-1.0f32; ix.e], true) } else { qs_prior(world, &contacts) };
+    a.f("frame_bond_qs_prior_util", &[ix.e], &prior)?;
+
+    Ok(FrameInputs { chunk_routed, impactor_routed: imp_routed, pairs: pairs.len(), contacts, punch_breaks, prior_converged, prior_seconds: t_prior.elapsed().as_secs_f64() })
+}
+
 /// Record one event into `out/<event_id>` (written to `<event_id>.partial` and renamed
 /// when complete).
 pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOptions, beat: &dyn Fn(&Beat)) -> Result<OutcomeSummary, String> {
@@ -790,66 +893,13 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         let t_over = Instant::now();
         let t0 = world.solver.time;
         // Inputs, before the step.
-        let (routed_clusters, routed_impactors) = world.predict_island_members(frame_dt, &HashSet::new());
-        let routed: HashSet<u64> = routed_clusters.into_iter().collect();
-        let mut chunk_routed = vec![0i32; ix.n];
-        for s in 0..world.solver.structures.len() {
-            for c in 0..world.solver.structures[s].chunks.len() {
-                let st = &world.solver.chunks[s][c];
-                chunk_routed[ix.chunk0[s] + c] = i32::from(st.active && routed.contains(&world.solver.clusters[st.cluster].id));
-            }
-        }
-        a.i("frame_chunk_routed", &[ix.n], &chunk_routed)?;
-        let imp_routed: Vec<i32> = (0..world.impactors.len()).map(|k| i32::from(routed_impactors.contains(&k))).collect();
-        a.i("frame_impactor_routed", &[world.impactors.len()], &imp_routed)?;
-
-        let pairs = near_pairs(&world, &ix);
-        for &(pa, pb) in &pairs {
-            a.i("pair_i32", &[3], &[f as i32, pa as i32, pb as i32])?;
-        }
-        let contacts = world.predict_contacts(frame_dt, 0.0);
-        let tiered = tiered_impact_speed();
-        let mut punch_breaks: Vec<(usize, usize)> = Vec::new();
-        let mut plug_of = vec![0i32; ix.n];
-        let mut bond_punch = vec![0i32; ix.e];
-        for (k, c) in contacts.iter().enumerate() {
-            let cluster_index = world.solver.clusters.iter().position(|cl| cl.id == c.cluster).expect("predicted cluster exists") as i32;
-            a.i("contact_i32", &[5], &[f as i32, c.impactor as i32, c.structure as i32, (ix.chunk0[c.structure] + c.entry) as i32, cluster_index])?;
-            let (ratio, mass, breaks) = match (&c.plug, c.speed > tiered) {
-                (Some(p), true) => (p.force / p.capacity.max(1e-300), p.mass, p.breaks()),
-                (Some(p), false) => (p.force / p.capacity.max(1e-300), p.mass, false),
-                _ => (0.0, 0.0, false),
-            };
-            let mut row = vec![c.time as f32];
-            row.extend(v3(c.point));
-            row.extend(v3(c.direction));
-            row.extend([c.speed, c.reduced_mass, c.modulus, c.face_radius, c.hertz_duration, c.peak_force, ratio, mass, f64::from(u8::from(breaks)), c.cluster_chunks as f64].map(|x| x as f32));
-            a.f("contact_f32", &[CONTACT_F32], &row)?;
-            if let (Some(p), true) = (&c.plug, c.speed > tiered) {
-                for &ch in &p.chunks {
-                    plug_of[ix.chunk0[c.structure] + ch] = k as i32 + 1;
-                }
-                if breaks {
-                    for &bi in &p.interface {
-                        bond_punch[ix.bond0[c.structure] + bi] = 1;
-                        punch_breaks.push((c.structure, bi));
-                    }
-                }
-            }
-        }
-        punch_breaks.sort_unstable();
-        punch_breaks.dedup();
-        debug_assert_eq!(punch_breaks, world.predict_punch(frame_dt));
-        a.i("frame_chunk_punch_plug", &[ix.n], &plug_of)?;
-        a.i("frame_bond_punch", &[ix.e], &bond_punch)?;
+        let inputs = capture_inputs(&mut world, &ix, f, None, &mut a)?;
+        let (chunk_routed, imp_routed, pairs_n, contacts, punch_breaks, prior_converged) =
+            (inputs.chunk_routed, inputs.impactor_routed, inputs.pairs, inputs.contacts, inputs.punch_breaks, inputs.prior_converged);
+        *cost.get_mut("qs_prior").unwrap() += inputs.prior_seconds;
         let start_connected = bond_connected(&world);
         let start_energy: Vec<(f64, f64)> = world.solver.bonds.iter().flatten().map(|b| (b.joint.dissipated, b.damped)).collect();
-        *cost.get_mut("overhead").unwrap() += t_over.elapsed().as_secs_f64();
-
-        let t_prior = Instant::now();
-        let (prior, prior_converged) = if contacts.is_empty() { (vec![-1.0f32; ix.e], true) } else { qs_prior(&world, &contacts) };
-        a.f("frame_bond_qs_prior_util", &[ix.e], &prior)?;
-        *cost.get_mut("qs_prior").unwrap() += t_prior.elapsed().as_secs_f64();
+        *cost.get_mut("overhead").unwrap() += t_over.elapsed().as_secs_f64() - inputs.prior_seconds;
 
         if let Some(t) = &template {
             let t_qs = Instant::now();
@@ -957,7 +1007,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         frames.push(json!({
             "frame": f, "time": t0, "phase": phase, "breaks": n_breaks, "substeps": substeps,
             "routed_chunks": chunk_routed.iter().filter(|&&r| r == 1).count(), "routed_impactors": imp_routed.iter().filter(|&&r| r == 1).count(),
-            "predicted_contacts": contacts.len(), "near_pairs": pairs.len(), "punch_bonds": punch_breaks.len(), "qs_prior_converged": prior_converged,
+            "predicted_contacts": contacts.len(), "near_pairs": pairs_n, "punch_bonds": punch_breaks.len(), "qs_prior_converged": prior_converged,
             "impactor_contact": contact_now, "struck_structures": touched.iter().copied().collect::<std::collections::BTreeSet<_>>(),
             "energy": {"kinetic_structure": ke_struct, "kinetic_impactors": ke_imp, "kinetic_in_bounds": ke_bounds,
                 "mechanical": world.mechanical_energy(), "dissipated": world.dissipated_energy(),

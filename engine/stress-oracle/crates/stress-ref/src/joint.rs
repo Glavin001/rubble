@@ -359,6 +359,23 @@ pub struct JointResponse {
     pub disconnected: bool,
     /// Effective stress measures (for exposure).
     pub measures: StressMeasures,
+    /// Failure margins of this evaluation, tension/shear and compression families:
+    /// `lambda / kappa_fail(r)` with the ductility `r` the softening law takes at this
+    /// evaluation (`kappa_fail` = max(r, 1) brittle, (r + 1) / 2 ductile, 1 without
+    /// softening), on the evaluations that can advance that family's damage (`lambda` past
+    /// its history and past 1), and below 1 for `lambda <= 1`; 0 otherwise. Their running
+    /// maximum reaches 1 exactly when the family's damage does (`RtBond::fail_margin`).
+    /// Diagnostic for the learned-impact labels; nothing reads it.
+    pub fail_ts: f64,
+    pub fail_c: f64,
+}
+
+/// The failure index at which a law's damage reaches 1 (`damage_law`).
+pub fn kappa_fail(kind: BondKind, r: f64) -> f64 {
+    match kind {
+        BondKind::Brittle => r.max(1.0),
+        BondKind::Ductile => 0.5 * (r + 1.0),
+    }
 }
 
 /// Springs per side of the cracked joint's no-tension patch.
@@ -602,8 +619,20 @@ impl<'a> JointModel<'a> {
         };
 
         // Damage evolution.
+        let (mut fail_ts, mut fail_c) = (0.0f64, 0.0f64);
+        let below_one = 1.0 - f64::EPSILON;
         if fracture {
             let (lambda_ts, mode_ts) = idx.tension_shear();
+            if psi_ts > 0.0 {
+                let g_f = if mode_ts == FailureMode::Tension { s.g_tension } else { s.g_shear };
+                let r = if s.softening { g_f * g.area * lambda_ts * lambda_ts / psi_ts } else { 0.0 };
+                let kind = if s.softening { s.kind } else { BondKind::Brittle };
+                if lambda_ts > st.kappa && lambda_ts > 1.0 {
+                    fail_ts = lambda_ts / kappa_fail(kind, r);
+                } else if lambda_ts <= 1.0 {
+                    fail_ts = (lambda_ts / kappa_fail(kind, r)).min(below_one);
+                }
+            }
             if lambda_ts > st.kappa && lambda_ts > 1.0 && psi_ts > 0.0 {
                 let g_f = if mode_ts == FailureMode::Tension { s.g_tension } else { s.g_shear };
                 let r = if s.softening { g_f * g.area * lambda_ts * lambda_ts / psi_ts } else { 0.0 };
@@ -642,6 +671,21 @@ impl<'a> JointModel<'a> {
                 failure_indices(s, &stress_measures(g, &q), multiplier)
             };
             let (lambda_c, mode_c) = comp_idx.compression_family();
+            if psi_c > 0.0 {
+                let r = if s.softening { s.g_compression * g.area * lambda_c * lambda_c / psi_c } else { 0.0 };
+                let kind = if !s.softening {
+                    BondKind::Brittle
+                } else if mode_c == FailureMode::Buckling {
+                    BondKind::Ductile
+                } else {
+                    s.kind
+                };
+                if lambda_c > st.kappa_c && lambda_c > 1.0 {
+                    fail_c = lambda_c / kappa_fail(kind, r);
+                } else if lambda_c <= 1.0 {
+                    fail_c = (lambda_c / kappa_fail(kind, r)).min(below_one);
+                }
+            }
             if lambda_c > st.kappa_c && lambda_c > 1.0 && psi_c > 0.0 {
                 let r = if s.softening { s.g_compression * g.area * lambda_c * lambda_c / psi_c } else { 0.0 };
                 st.ductility_c = r;
@@ -736,7 +780,7 @@ impl<'a> JointModel<'a> {
         let dissipated = law;
         st.dissipated += dissipated;
         let disconnected = was_connected && !st.connected(self.rebar.is_some());
-        JointResponse { force, state: st, dissipated, overshoot, stored, disconnected, measures }
+        JointResponse { force, state: st, dissipated, overshoot, stored, disconnected, measures, fail_ts, fail_c }
     }
 
     /// Tangent stiffness at displacement `d` (history frozen), for the Newton

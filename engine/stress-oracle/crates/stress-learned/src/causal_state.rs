@@ -655,6 +655,9 @@ impl StressProvider for Provider {
                     dissipated,
                     overshoot,
                     measures: m,
+                    // Supplied responses carry no failure margins.
+                    fail_ts: 0.0,
+                    fail_c: 0.0,
                 },
             });
         }
