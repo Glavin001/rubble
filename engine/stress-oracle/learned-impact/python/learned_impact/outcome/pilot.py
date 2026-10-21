@@ -98,7 +98,8 @@ def _val_report(ckpt: Path, data: Data, cfg: TrainConfig) -> dict:
 
 def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: list[str],
         family: str | None, steps_per_event: float, min_steps: int, max_steps: int,
-        device: str, model_cfg: ModelConfig, pushforward: float = 0.0) -> dict:
+        device: str, model_cfg: ModelConfig, pushforward: float = 0.0,
+        rereport: bool = False) -> dict:
     root = Path(out)
     prog = Progress(root, total=len(sizes) * len(seeds) * len(variants))
     full = Data(dataset)
@@ -121,8 +122,17 @@ def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: li
                 rdir = root / tag
                 res_path = rdir / "result.json"
                 if res_path.exists():
-                    results.append(json.loads(res_path.read_text()))
-                    prog.line(f"[{k}/{prog.total}] {tag}: cached")
+                    r = json.loads(res_path.read_text())
+                    if rereport:  # re-score the saved best checkpoint with the current code
+                        d = Data.__new__(Data)
+                        d.__dict__ = dict(full.__dict__)
+                        d.val = val_calls
+                        r["three_way"] = _val_report(rdir / "best.pt", d, TrainConfig())
+                        # keep training-time metrics the per-call report does not compute
+                        r["val"] = {**r.get("val", {}), **r["three_way"]["metrics"]["model"]}
+                        res_path.write_text(json.dumps(r, indent=1, default=float))
+                    results.append(r)
+                    prog.line(f"[{k}/{prog.total}] {tag}: cached" + (" (re-scored)" if rereport else ""))
                     continue
                 groups = subsets[n]
                 d = Data.__new__(Data)
@@ -165,11 +175,18 @@ def summarise(results: list[dict], ensembles: bool) -> dict:
     out = {"gates": gates, "ensembles": ensembles, "variants": {}}
     for variant in sorted({r["variant"] for r in results}):
         rs = [r for r in results if r["variant"] == variant]
-        sizes = sorted({r["n_events"] for r in rs})
+        # one column per requested size (nested subsets of recipe groups); the x of the fit is
+        # the mean number of events at that size over the seeds
+        group_sizes = sorted({r["n_groups"] for r in rs})
+        ev = {g: float(np.mean([r["n_events"] for r in rs if r["n_groups"] == g]))
+              for g in group_sizes}
+        sizes = [int(round(ev[g])) for g in group_sizes]
         table = {}
-        for metric in [*gates, "score", "bond_f1", "false_break_rate", "regime_brier"]:
-            per = {n: [r["val"].get(metric) for r in rs if r["n_events"] == n
-                       and r["val"] and r["val"].get(metric) is not None] for n in sizes}
+        for metric in [*gates, "score", "bond_f1", "bond_recall", "false_break_rate",
+                       "regime_brier"]:
+            per = {int(round(ev[g])): [r["val"].get(metric) for r in rs if r["n_groups"] == g
+                                       and r["val"] and r["val"].get(metric) is not None]
+                   for g in group_sizes}
             table[metric] = {str(n): {"mean": float(np.mean(v)) if v else None,
                                       "min": float(np.min(v)) if v else None,
                                       "max": float(np.max(v)) if v else None, "seeds": len(v)}
@@ -183,7 +200,10 @@ def summarise(results: list[dict], ensembles: bool) -> dict:
             fits[metric] = {"fit": f, "bar": bar, **project(f, bar)}
         three = {str(r["n_events"]) + f"/s{r['seed']}": {
             fam: {"superiority": e.get("superiority"),
-                  "non_inferiority": e.get("non_inferiority", {}).get("pass")}
+                  "non_inferiority": (lambda n: None if not n else
+                                      f"{n.get('pass')} ({n.get('model_not_worse', 0):.1%} of "
+                                      f"{n.get('qs_right_calls')} calls not worse)")(
+                                          e.get("non_inferiority"))}
             for fam, e in r["three_way"].get("families", {}).items()} for r in rs}
         out["variants"][variant] = {"sizes": sizes, "table": table, "fits": fits,
                                     "three_way": three}
@@ -217,7 +237,8 @@ def markdown(s: dict) -> str:
         lines += ["", "Three-way (per run: family → superiority / non-inferiority):", ""]
         for k, fams in d["three_way"].items():
             lines.append(f"- N/seed {k}: " + "; ".join(
-                f"{fam}: sup={e['superiority']}, non-inf={e['non_inferiority']}"
+                f"{fam}: superior to QS and punch={e['superiority']}, "
+                f"non-inferior on QS-correct calls={e['non_inferiority']}"
                 for fam, e in fams.items()))
         lines.append("")
     return "\n".join(lines)
@@ -238,11 +259,13 @@ def main(argv=None) -> None:
     ap.add_argument("--device", default="auto")
     ap.add_argument("--reference", action="store_true", help="W64 / 12 rounds")
     ap.add_argument("--pushforward", type=float, default=0.0)
+    ap.add_argument("--rereport", action="store_true",
+                    help="re-score every finished run's best.pt with the current metrics")
     a = ap.parse_args(argv)
     mc = ModelConfig.reference() if a.reference else ModelConfig()
     run(a.dataset, a.out, [int(x) for x in a.sizes.split(",")],
         [int(x) for x in a.seeds.split(",")], a.variants.split(","), a.family,
-        a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward)
+        a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward, a.rereport)
 
 
 if __name__ == "__main__":

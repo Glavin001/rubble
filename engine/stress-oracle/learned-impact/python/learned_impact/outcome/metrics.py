@@ -399,7 +399,8 @@ def _qs_right(r: dict, tol_ram: float = 0.05, tol_ari: float = 0.05) -> bool:
 
 @torch.no_grad()
 def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
-              priors: dict[str, float] | None = None, margin: float = 0.0) -> dict:
+              priors: dict[str, float] | None = None,
+              margin: tuple[float, float] | None = None) -> dict:
     """The plan's three-way report on identical calls and metrics, per family:
     `superiority` (the model beats QS and the punch on every primary metric), and
     `non_inferiority` (on calls QS already gets right, the model is not worse than QS by
@@ -462,7 +463,7 @@ def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
         report["families"][fam] = entry
     if "qs" in rows and rows["qs"]:
         by_key = {(r["call"].event_id, r["call"].call_index): r for r in rows["qs"]}
-        per_fam = {}
+        per_fam, agg = {}, {}
         for r in rows["model"]:
             key = (r["call"].event_id, r["call"].call_index)
             q = by_key.get(key)
@@ -474,16 +475,26 @@ def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
             q_err = (1 - weighted_ari(q["pred"], q["true"], q["mass"]),
                      float(np.mean(np.abs(q["imp_speed_hat"] - q["imp_speed"]))) / q["v_ref"]
                      if len(q["imp_speed"]) else 0.0)
-            worse = any(a > b_ + margin for a, b_ in zip(m_err, q_err))
+            # "Not worse than QS within the spread": the gates' tolerances (1 − ARI, ram ÷ v)
+            tol = margin if margin is not None else (TOLERANCE["partition"], TOLERANCE["ram"])
+            worse = any(a > b_ + t_ for a, b_, t_ in zip(m_err, q_err, tol))
             fam = r["call"].family
             per_fam.setdefault(fam, []).append(not worse)
+            agg.setdefault(fam, []).append((m_err, q_err))
             if worse:
                 report["worse_than_qs"].append({"event": key[0], "call": key[1], "family": fam,
                                                 "model_1mARI_ram": m_err, "qs_1mARI_ram": q_err})
         for fam, ok in per_fam.items():
+            # Per family, on the calls QS gets right: the model's mean error is within the
+            # tolerance of QS's (the plan: "not worse than QS within the spread"); the share
+            # of calls not worse and the list of worse ones are reported beside it.
+            me = np.mean([x[0] for x in agg[fam]], axis=0)
+            qe = np.mean([x[1] for x in agg[fam]], axis=0)
+            tol = margin if margin is not None else (TOLERANCE["partition"], TOLERANCE["ram"])
             report["families"].setdefault(fam, {})["non_inferiority"] = {
                 "qs_right_calls": len(ok), "model_not_worse": float(np.mean(ok)),
-                "pass": bool(all(ok))}
+                "model_mean_1mARI_ram": me.tolist(), "qs_mean_1mARI_ram": qe.tolist(),
+                "pass": bool(np.all(me <= qe + np.array(tol)))}
     report["metrics"] = {k: s_.metrics for k, s_ in summaries.items()}
     model.train()
     return report
