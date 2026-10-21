@@ -123,6 +123,13 @@ Used to build the BSMS hierarchy once per intact structure and to align keys acr
 |---|---|---|---|
 | `chunk_key` | i64 | `[Ns]` | stable chunk key, `(structure_id << 32) | chunk_index` |
 | `bond_key` | i64 | `[Bs]` | stable bond key, `(structure_id << 32) | bond_index` |
+
+`chunk_index` and `bond_index` are positions *within the structure*: the k-th chunk (bond)
+of structure `s` in the frame record's flat order (`context.json` `chunk_keys [s, c]` and
+`bond_keys [s, source, a, b]`), so `chunk_index = c`, and `bond_index` = the bond's rank
+among structure `s`'s bonds in flat order (not the scene's `source` id). Keys are identical
+across ensemble members, branches and restarts of one scene. The call builder and the
+recorder's `--restart` must share one key function, so the two cannot diverge.
 | `bond_ends` | i32 | `[Bs,2]` | local chunk indices into `chunk_key` |
 | `chunk_rest_pos` | f32 | `[Ns,3]` | rest COM positions in any fixed frame; used only to choose BSMS seeds (nearest to each cluster's centroid, a rotation-invariant choice) |
 
