@@ -96,3 +96,26 @@ All flags at their defaults:
   - stress-rubble: 26 passed (`--features gpu`, one thread; including `debris_routing` and
     `closed_loop_provider`).
 - **Python**: P1's `test_outcome_audit.py` and `test_outcome_sampling.py`, 8 passed.
+
+## Update: P1's storage commits (recorder revision 7)
+
+Taken in full: `5d0a05b2` (the storage decision for the 20 GB budget) and `ef1eac02`
+(zstd level 19 in both writers).
+- `5d0a05b2` brings zstd per array file, thinned training events, the `traj_*` sidecar and
+  `frame_bond_peak_util_prev`, `outcome::regenerate` with the record bin's `--regenerate`,
+  the reader's row mapping, the generator's `--budget-gb` / `--min-free-gb` guard and
+  `--no-thinning`, and the audit's `.zst` and thinned-event checks.
+- Both touch only stress-learned and the Python audit. Every touched file is
+  byte-identical to P1's `ef1eac02`, apart from `lib.rs` (main's module list, plus P1's
+  `recursion_limit`) and `catalog.rs`.
+- Tests: stress-learned 17 pass, including
+  `a_thinned_training_event_regenerates_byte_identically_and_builds_the_same_calls`.
+  P1's Python audit and sampling tests pass (8).
+- Cross-branch check on P1's bulk recipe `p1_free_wall_t1_00000_s1001` (the first recipe
+  of `--n 900 --seed 1001`, a thinned training event with 15 of 32 frames kept):
+  - recorded here, the event directory is byte-identical to P1's `p1-bulk-v1-free-t1`
+    event, apart from the wall-clock `cost` fields in `outcome.json`;
+  - `--regenerate` gives byte-identical full events from my thinned event and from P1's;
+  - the calls built from them are identical (`calls.json`, `manifest.json`,
+    `arrays.bin.zst`);
+  - the thinned event's 15 calls match the regenerated event's calls of the same frames.

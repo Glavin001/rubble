@@ -48,7 +48,8 @@ def write_event(root, name, *, frames=40, family="free_wall", tier=1, breaks=((0
         "cost": {"event": cost, "oracle": cost / 2, "qs_branch": cost / 2}, "impactors": [{"regime": "perforate"}],
         "last_break_time": None if last is None else last / 60,
     }))
-    (d / "frames.json").write_text(json.dumps([{"phase": oa.PHASES[p]} for p in phases]))
+    per_frame = [sum(1 for f, _, _ in breaks if f == k) for k in range(F)]
+    (d / "frames.json").write_text(json.dumps([{"phase": oa.PHASES[p], "breaks": b} for p, b in zip(phases, per_frame)]))
     return d
 
 

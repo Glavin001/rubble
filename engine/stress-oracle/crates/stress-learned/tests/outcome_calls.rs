@@ -145,3 +145,31 @@ fn features_do_not_see_a_rotation_of_the_whole_scene() {
         }
     }
 }
+
+#[test]
+fn a_thinned_training_event_regenerates_byte_identically_and_builds_the_same_calls() {
+    let mut recipe = OutcomeRecipe { event_id: "thin".into(), family: "test".into(), tier: 1, split_group: "thin".into(), layout_group: "L".into(), parameters: json!({"split": "train"}), scene: scene() };
+    recipe.scene.name = "thin".into();
+    let out = tmp("thin");
+    let opts = RecordOptions::new(OracleConfig::named("a12_realtime").unwrap());
+    let sum = record_outcome_event(&recipe, &out, &opts, &|_| {}).unwrap();
+    let ev = out.join("thin");
+    let ctx: serde_json::Value = serde_json::from_slice(&std::fs::read(ev.join("context.json")).unwrap()).unwrap();
+    let dropped = ctx["storage"]["dropped_frames"].as_u64().unwrap();
+    assert!(dropped > 0, "a training event drops settling frames ({} frames)", sum.frames);
+    assert!(std::fs::read_dir(ev.join("arrays")).unwrap().all(|e| e.unwrap().path().to_string_lossy().ends_with(".zst")), "arrays are compressed");
+    // Regenerate every frame and check each stored row.
+    let regen = stress_learned::outcome::regenerate(&ev, &tmp("thin-full")).unwrap();
+    assert_eq!(regen.frames, sum.frames);
+    assert!(regen.arrays_checked > 40 && regen.kept_frames < regen.frames);
+    // The calls of the kept frames are the same whether built from the thinned or the full record.
+    let (thin, full) = (build_event(&ev).unwrap(), build_event(&regen.event).unwrap());
+    assert!(full.calls.len() >= thin.calls.len() && !thin.calls.is_empty());
+    for c in &thin.calls {
+        let f = full.calls.iter().find(|x| x.frame == c.frame).expect("a full call for each kept frame");
+        for (name, a) in &c.arrays {
+            assert_eq!(Some(a), f.array(name), "frame {}: {name}", c.frame);
+        }
+        assert_eq!(c.energy, f.energy, "frame {}", c.frame);
+    }
+}
